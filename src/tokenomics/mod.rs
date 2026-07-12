@@ -204,6 +204,19 @@ impl TokenomicsParams {
     }
 
     /// The per-year burn amount (of the original reserve), in base units.
+        pub fn calculate_epoch_reward(&self, validator_stake: u64) -> u64 {
+        use crate::core::chain_config::FIXED_POINT_SCALE;
+        let seconds_per_year: u128 = 365 * 24 * 60 * 60;
+        let slot_duration = self.slot_duration_secs.max(1) as u128;
+        let slots_per_year = seconds_per_year / slot_duration;
+        if slots_per_year == 0 { return 1; }
+
+        let annual_yield = (validator_stake as u128 * self.validator_annual_yield_ratio_fixed as u128)
+            / FIXED_POINT_SCALE as u128;
+        let epoch_yield = (annual_yield * self.epoch_length_slots as u128) / slots_per_year;
+        epoch_yield.max(1) as u64
+    }
+
     pub fn annual_burn_amount(&self) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
         ((self.burn_reserve as u128 * self.annual_burn_ratio_fixed as u128)
@@ -216,21 +229,7 @@ impl TokenomicsParams {
         ((fee as u128 * self.tx_fee_burn_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64
     }
 
-    /// Calculate epoch-based stake yield for a given stake (Tur 25).
-    /// Moved from dead_code `pos.rs::calculate_reward` to single source of truth.
-    /// Preserves mathematical order to prevent 0-truncation for valid stakes.
-    pub fn calculate_epoch_reward(&self, validator_stake: u64) -> u64 {
-        use crate::core::chain_config::FIXED_POINT_SCALE;
-        let seconds_per_year: u128 = 365 * 24 * 60 * 60;
-        let slot_duration = self.slot_duration_secs.max(1) as u128;
-        let slots_per_year = seconds_per_year / slot_duration;
-        if slots_per_year == 0 { return 1; }
 
-        let annual_yield = (validator_stake as u128 * self.validator_annual_yield_ratio_fixed as u128)
-            / FIXED_POINT_SCALE as u128;
-        let epoch_yield = (annual_yield * self.epoch_length_slots as u128) / slots_per_year;
-        epoch_yield.max(1) as u64
-    }
 }
 
 /// Genesis addresses for the tokenomics allocation accounts. In a real

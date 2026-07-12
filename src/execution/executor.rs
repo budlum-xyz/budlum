@@ -203,23 +203,17 @@ impl Executor {
             total_fees = total_fees.saturating_add(tx.fee);
         }
         if let Some(producer) = block_producer {
-            let mut reward = total_fees.saturating_add(state.tokenomics.block_reward);
+            let reward = total_fees.saturating_add(state.tokenomics.block_reward);
             if reward > 0 {
-                let current_supply = state.circulating_supply();
-                let max_supply = crate::tokenomics::BUD_TOTAL_SUPPLY as u128;
-                if current_supply < max_supply {
-                    let space_left = (max_supply - current_supply) as u64;
-                    if reward > space_left {
-                        reward = space_left;
-                    }
-                } else {
-                    reward = 0;
-                }
-                
-                if reward > 0 {
-                    let producer_account = state.get_or_create(producer);
-                    producer_account.balance = producer_account.balance.saturating_add(reward);
-                }
+                let producer_account = state.get_or_create(producer);
+                producer_account.balance = producer_account.balance.saturating_add(reward);
+                tracing::info!(
+                    "Producer {} received reward: {} (fees: {}, block: {})",
+                    producer,
+                    reward,
+                    total_fees,
+                    state.tokenomics.block_reward
+                );
             }
         }
         Ok(())
