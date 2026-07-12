@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout self
+        uses: actions/checkout@v4
+
+      - name: Checkout BudZero (as sibling ../BudZKVM)
+        uses: actions/checkout@v4
+        with:
+          repository: budlum-xyz/BudZero
+          path: ../BudZKVM
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+          components: clippy
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --release --verbose
+
+      - name: cargo test
+        run: cargo test --lib --verbose
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+        continue-on-error: true
