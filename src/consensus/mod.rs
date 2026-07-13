@@ -2,7 +2,6 @@ pub mod poa;
 pub mod pos;
 pub mod pow;
 pub mod qc;
-pub mod slashing;
 use crate::core::block::Block;
 pub use poa::PoAEngine;
 pub use pos::PoSEngine;
