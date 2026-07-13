@@ -2053,6 +2053,23 @@ impl Blockchain {
         Ok(next_state)
     }
 
+    /// TUR 6 (security audit §3): run the bridge-locks sweep at the
+    /// canonical "this block just became final" point. Idempotent and
+    /// cheap when no transfers are locked. Releases expired `Locked`
+    /// transfers back to `Active` so an abandoned lock cannot
+    /// permanently DoS the bridge.
+    pub fn apply_bridge_sweep(&mut self, current_height: u64) -> Vec<(crate::cross_domain::AssetId, u128)> {
+        let released = self.bridge_state.sweep_expired_locks(current_height);
+        if !released.is_empty() {
+            tracing::info!(
+                "Bridge sweep at height {} released {} expired lock(s)",
+                current_height,
+                released.len()
+            );
+        }
+        released
+    }
+
     pub fn produce_block(&mut self, producer_address: Address) -> Option<Block> {
         let index = self.chain.len() as u64;
         let previous_hash = self
@@ -2132,6 +2149,11 @@ impl Blockchain {
                 &participated,
             );
         }
+
+        // Tur 6: bridge-locks sweep at block finalization. Cheap when
+        // there are no expired locks; an abandoned lock can no longer
+        // permanently DoS the bridge.
+        let _ = self.apply_bridge_sweep(block.index);
 
         self.chain.push(block.clone());
         if block.slashing_evidence.is_some() {
@@ -2304,6 +2326,9 @@ impl Blockchain {
                 &participated,
             );
         }
+
+        // Tur 6: bridge-locks sweep at block acceptance.
+        let _ = self.apply_bridge_sweep(block.index);
 
         self.chain.push(block);
 

@@ -224,12 +224,28 @@ impl ValidatorKeys {
         if let Some(bls_key) = &self.bls_key {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
-        std::fs::write(path.as_ref(), bytes).map_err(|e| CryptoError::Io(e.to_string()))?;
+        // Tur 6 (security audit §6): create with strict 0o600 from the
+        // start. The previous `let _ = set_permissions` swallowed
+        // permission-set errors on the most sensitive key on the node;
+        // any failure is now propagated via `?` and surfaces to the
+        // operator at save time.
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(path.as_ref(), perms);
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path.as_ref())
+                .map_err(|e| CryptoError::Io(e.to_string()))?;
+            use std::io::Write;
+            file.write_all(&bytes)
+                .map_err(|e| CryptoError::Io(e.to_string()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path.as_ref(), bytes).map_err(|e| CryptoError::Io(e.to_string()))?;
         }
         Ok(())
     }
@@ -310,15 +326,28 @@ impl KeyPair {
         Self::from_bytes(&bytes)
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
-        let mut file =
-            std::fs::File::create(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
-        file.write_all(self.signing_key.as_bytes())
-            .map_err(|e| CryptoError::Io(e.to_string()))?;
+        // Tur 6 (security audit §6): create the file with strict 0o600
+        // permissions from the start (no create-then-chmod window).
+        // On non-unix, the second branch falls back to a plain create
+        // (no umask to manipulate on those platforms).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path.as_ref(), perms)
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path.as_ref())
+                .map_err(|e| CryptoError::Io(e.to_string()))?;
+            file.write_all(self.signing_key.as_bytes())
+                .map_err(|e| CryptoError::Io(e.to_string()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            let mut file = std::fs::File::create(path.as_ref())
+                .map_err(|e| CryptoError::Io(e.to_string()))?;
+            file.write_all(self.signing_key.as_bytes())
                 .map_err(|e| CryptoError::Io(e.to_string()))?;
         }
         println!("Keypair saved to {:?}", path.as_ref());

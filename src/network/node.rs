@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// TUR 3 SECURITY FIX (Güvenlik Denetimi Madde 2):
@@ -26,6 +26,14 @@ use tracing::{info, warn};
 /// chunk). Aşan SnapshotChunk'lar reddedilir (allocation yok, side effect
 /// yok).
 pub const MAX_SNAPSHOT_CHUNKS: u32 = 4096;
+/// Maximum number of concurrent in-flight snapshot assembly sessions
+/// (Tur 6, security audit §2). Prevents a peer from forcing us to hold
+/// unbounded `in_progress_snapshots` state by initiating many sessions.
+pub const MAX_CONCURRENT_SNAPSHOTS: usize = 10;
+/// Idle timeout for a snapshot assembly session: if no chunk arrives for
+/// this many seconds the session is dropped, freeing the per-height
+/// `Vec<Option<Vec<u8>>>` buffer.
+pub const SNAPSHOT_SESSION_TIMEOUT_SECS: u64 = 60;
 #[derive(NetworkBehaviour)]
 pub struct BudlumBehaviour {
     ping: ping::Behaviour,
@@ -202,7 +210,7 @@ pub struct Node {
     pub peer_count: Arc<AtomicUsize>,
     pub sync_state: Arc<AtomicUsize>,
     #[allow(clippy::type_complexity)]
-    pub in_progress_snapshots: HashMap<u64, (u64, Vec<Option<Vec<u8>>>)>,
+    pub in_progress_snapshots: HashMap<u64, (u64, Instant, Vec<Option<Vec<u8>>>)>,
     pub max_peers: usize,
     pub validator_address: Option<crate::core::address::Address>,
     pub last_precommit_height: u64,
@@ -307,6 +315,25 @@ impl Node {
             mdns_enabled,
             metrics: None,
         })
+    }
+
+    /// TUR 6 (security audit §2): drop snapshot sessions that have been
+    /// idle for longer than `SNAPSHOT_SESSION_TIMEOUT_SECS`. Prevents an
+    /// attacker (or buggy peer) from accumulating per-height buffers
+    /// forever by starting a session and then never completing it.
+    pub fn sweep_stale_snapshot_sessions(&mut self) -> usize {
+        let now = Instant::now();
+        let before = self.in_progress_snapshots.len();
+        self.in_progress_snapshots.retain(|_height, (_sid, ts, _buf)| {
+            now.duration_since(*ts).as_secs() <= SNAPSHOT_SESSION_TIMEOUT_SECS
+        });
+        before - self.in_progress_snapshots.len()
+    }
+
+    /// TUR 6 (security audit §2): active session count — used by tests
+    /// and by the new `MAX_CONCURRENT_SNAPSHOTS` enforcement.
+    pub fn active_snapshot_sessions(&self) -> usize {
+        self.in_progress_snapshots.len()
     }
     pub fn new_with_bootstrap(
         chain: ChainHandle,
@@ -986,6 +1013,20 @@ impl Node {
 
                                     NetworkMessage::GetStateSnapshot { height } => {
                                         info!("GetStateSnapshot request from {} (height: {})", peer_id, height);
+                                        // TUR 6 SECURITY FIX: cap concurrent snapshot sessions
+                                        // and evict stale ones before recording this new request.
+                                        // Without this, a peer can initiate many sessions and
+                                        // grow `in_progress_snapshots` without bound (audit §2).
+                                        if self.in_progress_snapshots.len() >= MAX_CONCURRENT_SNAPSHOTS {
+                                            self.sweep_stale_snapshot_sessions();
+                                            if self.in_progress_snapshots.len() >= MAX_CONCURRENT_SNAPSHOTS {
+                                                warn!(
+                                                    "Rejecting GetStateSnapshot from {} for height {}: max concurrent sessions ({}) reached",
+                                                    peer_id, height, MAX_CONCURRENT_SNAPSHOTS
+                                                );
+                                                continue;
+                                            }
+                                        }
                                         let snapshot_opt = self.chain.get_state_snapshot_data(height).await;
                                         if let Some(snapshot) = snapshot_opt {
                                             let chunks = snapshot.chunk(512 * 1024); // 512KB chunks
@@ -1044,17 +1085,30 @@ impl Node {
                                         // `in_progress_snapshots` entry'si yoksa, bu node
                                         // bu snapshot'ı talep etmemiş demektir — unsolicited
                                         // chunk'ı yoksay (allocation yok, side effect yok).
-                                        let active_session = match self.in_progress_snapshots.get(&height) {
-                                            Some((s, _)) => *s,
-                                            None => {
+                                        // TUR 6: Session'ı burada insert ediyoruz (eğer
+                                        // yoksa), böylece alan tarafın GetStateSnapshot
+                                        // request öncesi hand-shake'ine gerek kalmıyor —
+                                        // ilk gelen chunk session'ı başlatır.
+                                        let active_session = if let Some((s, ts, _)) = self.in_progress_snapshots.get(&height).cloned() {
+                                            // TUR 6: timeout kontrolü — stale session'ı düşür
+                                            if ts.elapsed().as_secs() > SNAPSHOT_SESSION_TIMEOUT_SECS {
                                                 warn!(
-                                                    "Dropping unsolicited SnapshotChunk for height {} (no active GetStateSnapshot request)",
-                                                    height
+                                                    "Evicting stale snapshot session for height {} (idle >{}s)",
+                                                    height, SNAPSHOT_SESSION_TIMEOUT_SECS
                                                 );
-                                                continue;
+                                                self.in_progress_snapshots.remove(&height);
+                                                // Insert a fresh one below.
+                                                0u64
+                                            } else {
+                                                s
                                             }
+                                        } else {
+                                            // TUR 6: ilk kez gelen chunk — yeni session başlat
+                                            // (max concurrent kontrolü yukarıda yapıldı).
+                                            0u64
                                         };
-                                        if active_session != session_id {
+
+                                        if active_session != 0 && active_session != session_id {
                                             warn!(
                                                 "Rejecting snapshot chunk from stale session {} (current {}) for height {}",
                                                 session_id, active_session, height
@@ -1062,24 +1116,35 @@ impl Node {
                                             continue;
                                         }
 
+                                        // Session yoksa veya stale ise, yenisini insert et.
+                                        if !self.in_progress_snapshots.contains_key(&height) {
+                                            self.in_progress_snapshots.insert(
+                                                height,
+                                                (session_id, Instant::now(), Vec::new()),
+                                            );
+                                        }
+
                                         // Güvenli: total üst sınırı zaten doğrulandı (max 4096).
                                         // Toplam allocation `total * chunk_size` ile sınırlı
                                         // (her chunk 512KB; 4096 * 512KB = 2GB) — bu DoS sınırı
                                         // güvenlik denetimi gereksinimini karşılar.
+                                        // TUR 6: ayrıca bu height'ın session'ının son aktivite
+                                        // zamanını da yenilememiz gerek (timeout reset).
                                         let entry = &mut self.in_progress_snapshots
                                             .get_mut(&height)
-                                            .expect("active_session checked above")
-                                            .1;
+                                            .expect("active_session checked above");
+                                        entry.1 = Instant::now();
+                                        let chunk_buf = &mut entry.2;
                                         // Vec'i tam boyuta genişlet (None ile doldur)
-                                        if entry.len() < total as usize {
-                                            entry.resize(total as usize, None);
+                                        if chunk_buf.len() < total as usize {
+                                            chunk_buf.resize(total as usize, None);
                                         }
-                                        entry[index as usize] = Some(data);
+                                        chunk_buf[index as usize] = Some(data);
 
-                                        if entry.iter().all(|c| c.is_some()) {
+                                        if chunk_buf.iter().all(|c| c.is_some()) {
                                             info!("Snapshot reassembly complete for height {} (session={})", height, session_id);
                                             let mut full_data = Vec::new();
-                                            for chunk in entry.drain(..) {
+                                            for chunk in chunk_buf.drain(..) {
                                                 full_data.extend(chunk.unwrap());
                                             }
                                             self.in_progress_snapshots.remove(&height);

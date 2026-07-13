@@ -17,7 +17,11 @@ use std::time::{Duration, Instant};
 use tower::{Layer, Service, ServiceBuilder};
 use tracing::info;
 
-#[derive(Clone, Debug, Default)]
+// Tur 6 (security audit §5): `auth_required` defaults to `true` (secure
+// by default). Operators that explicitly want an unauthenticated RPC
+// must call [`RpcSecurityConfig::operator_default`], which logs a
+// prominent warning at server startup.
+#[derive(Clone, Debug)]
 pub struct RpcSecurityConfig {
     pub auth_required: bool,
     pub api_key: Option<String>,
@@ -29,8 +33,42 @@ pub struct RpcSecurityConfig {
     pub max_connections: Option<u32>,
 }
 
+impl Default for RpcSecurityConfig {
+    fn default() -> Self {
+        // Tur 6 (security audit §5): secure default — auth ON, no API key
+        // (caller must configure `api_key` before serving). This is what
+        // [`Self::operator_default`] used to be (auth OFF); the prior
+        // behaviour is preserved under that explicit name for trusted
+        // local deployments.
+        Self {
+            auth_required: true,
+            api_key: None,
+            allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
+            cors_origins: Vec::new(),
+            rate_limit_per_minute: None,
+            trusted_proxies: Vec::new(),
+            max_request_body_size: Some(50 * 1024 * 1024),
+            max_connections: Some(10),
+        }
+    }
+}
+
 impl RpcSecurityConfig {
     pub fn operator_default() -> Self {
+        // TUR 6 SECURITY WARNING: this constructor explicitly disables
+        // authentication. It is intended for trusted local / private
+        // network deployments only. A loud, multi-line `warn!` is logged
+        // at every server start so an operator cannot accidentally ship
+        // an unauthenticated RPC to the public internet.
+        tracing::warn!(
+            "[GUVENLIK] RPC auth_required=false — tum state-degistiren metodlar aga acik!"
+        );
+        tracing::warn!(
+            "[GUVENLIK] bud_lockBridgeTransfer, bud_sealGlobalHeader, bud_submitSlashingEvidence dahil."
+        );
+        tracing::warn!(
+            "[GUVENLIK] Yalnizca guvenilir / ozel ag uzerinde calistirin (auth_required=true onerilir)."
+        );
         Self {
             auth_required: false,
             api_key: None,
@@ -756,48 +794,6 @@ impl BudlumApiServer for RpcServer {
                 )
             })?;
         Ok(self.bridge_roots_json("registered").await)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn lock_bridge_transfer(
-        &self,
-        source_domain: crate::domain::DomainId,
-        target_domain: crate::domain::DomainId,
-        source_height: u64,
-        event_index: u32,
-        asset_id: crate::cross_domain::AssetId,
-        owner: crate::core::address::Address,
-        recipient: crate::core::address::Address,
-        amount: u128,
-        expiry_height: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let (transfer, event) = self
-            .chain
-            .lock_bridge_transfer(
-                source_domain,
-                target_domain,
-                source_height,
-                event_index,
-                asset_id,
-                owner,
-                recipient,
-                amount,
-                expiry_height,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge lock transfer: {}", e),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "transfer": transfer,
-            "event": event,
-            "messageId": Self::bytes32_to_0x(transfer.message_id),
-            "eventHash": Self::bytes32_to_0x(event.leaf_hash()),
-        }))
     }
 
     async fn mint_bridge_transfer(

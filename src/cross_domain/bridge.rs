@@ -31,6 +31,12 @@ pub struct BridgeTransfer {
     pub amount: u128,
     pub status: BridgeStatus,
     pub source_event_hash: Hash32,
+    /// TUR 6 (security audit §3): height at which this lock expires.
+    /// `BridgeState::sweep_expired_locks(current_height)` returns
+    /// `Locked` transfers to `Active` once `current_height >= expiry_height`,
+    /// preventing permanent DoS via a forgotten/abandoned lock.
+    #[serde(default)]
+    pub expiry_height: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +133,7 @@ impl BridgeState {
                 domain: source_domain,
             },
             source_event_hash: event.leaf_hash(),
+            expiry_height,
         };
 
         self.asset_locations.insert(
@@ -302,6 +309,56 @@ impl BridgeState {
 
     pub fn transfer(&self, message_id: &MessageId) -> Option<&BridgeTransfer> {
         self.transfers.get(message_id)
+    }
+
+    /// TUR 6 (security audit §3): sweep all `Locked` transfers whose
+    /// `expiry_height` is below `current_height`, returning their
+    /// `asset_id` back to `Active` so a forgotten/abandoned lock can
+    /// never permanently DoS the bridge. Returns the (asset_id, amount)
+    /// list of released locks for the caller's audit log.
+    ///
+    /// Idempotent: transfers already past `expiry_height` stay `Active`
+    /// once released; subsequent calls are no-ops.
+    pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(AssetId, u128)> {
+        let mut released: Vec<(AssetId, u128)> = Vec::new();
+        // Step 1: collect (asset_id, amount) of locked transfers to release.
+        for transfer in self.transfers.values() {
+            if !matches!(transfer.status, BridgeStatus::Locked { .. }) {
+                continue;
+            }
+            if transfer.expiry_height > 0 && current_height >= transfer.expiry_height {
+                released.push((transfer.asset_id, transfer.amount));
+            }
+        }
+        // Step 2: mutate. Split borrow so we can update both the transfers
+        // and the asset_locations maps.
+        let to_release: Vec<MessageId> = self
+            .transfers
+            .iter()
+            .filter(|(_, t)| {
+                matches!(t.status, BridgeStatus::Locked { .. })
+                    && t.expiry_height > 0
+                    && current_height >= t.expiry_height
+            })
+            .map(|(mid, _)| *mid)
+            .collect();
+        for mid in to_release {
+            if let Some(t) = self.transfers.get_mut(&mid) {
+                if let BridgeStatus::Locked { domain } = t.status.clone() {
+                    t.status = BridgeStatus::Active { domain };
+                }
+            }
+        }
+        // Step 3: also lift the corresponding asset_locations entry to
+        // Active so the bridge becomes usable again.
+        for (asset_id, _) in &released {
+            if let Some(BridgeStatus::Locked { domain }) = self.asset_locations.get(asset_id) {
+                let domain = *domain;
+                self.asset_locations
+                    .insert(*asset_id, BridgeStatus::Active { domain });
+            }
+        }
+        released
     }
 
     fn require_asset_status(

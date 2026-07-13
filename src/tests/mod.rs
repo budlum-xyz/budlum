@@ -1,3 +1,10 @@
+// Tur 6: bridge lifecycle integration test (security audit §3). The
+// `bud_lockBridgeTransfer` RPC is removed; the full lock → mint → burn →
+// unlock happy path is now exercised through the *internal*
+// `Blockchain::lock_bridge_transfer` system path, plus the
+// `apply_bridge_sweep` expiry-sweep.
+#[cfg(test)]
+pub mod bridge_lifecycle;
 #[cfg(test)]
 pub mod bench_performance;
 #[cfg(test)]

@@ -1341,9 +1341,12 @@ mod integration_tests {
         assert_eq!(operator_default.max_connections, Some(10));
         assert!(operator_default.max_request_body_size.is_some());
 
-        assert!(public_default.allowed_ips.is_empty());
-        assert!(!public_default.auth_required);
-        assert_eq!(public_default.max_connections, None);
+        // Tur 6 (security audit §5): public/Default config is now
+        // auth-required out of the box. Operators that want an
+        // unauthenticated RPC must opt in via `operator_default` (which
+        // also emits a loud startup warning).
+        assert!(public_default.auth_required);
+        assert!(public_default.allowed_ips.contains(&"127.0.0.1".to_string()));
     }
 
     #[test]

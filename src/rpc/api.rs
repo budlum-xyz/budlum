@@ -105,20 +105,17 @@ pub trait BudlumApi {
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    #[method(name = "bud_lockBridgeTransfer")]
-    #[allow(clippy::too_many_arguments)]
-    async fn lock_bridge_transfer(
-        &self,
-        source_domain: crate::domain::DomainId,
-        target_domain: crate::domain::DomainId,
-        source_height: u64,
-        event_index: u32,
-        asset_id: crate::cross_domain::AssetId,
-        owner: crate::core::address::Address,
-        recipient: crate::core::address::Address,
-        amount: u128,
-        expiry_height: u64,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+    // === TUR 6 SECURITY FIX (Güvenlik Denetimi §3) =========================
+    // `bud_lockBridgeTransfer` RPC'den KALDIRILDI. Yeni: hiçbir koşulda
+    // kimlik doğrulamasız (imza/kanıt olmadan) bridge lock oluşturulamaz.
+    // Bridge lock'lar artık yalnızca:
+    //   1. Internal `Blockchain::lock_bridge_transfer` çağrıları (system
+    //      path) — bu yorum, kod tabanındaki tek kalıntıdır.
+    //   2. (Tur 7+ planı) `lock_bridge_transfer_with_proof` API'si
+    //      (`verify_domain_event_proof` benzeri kanıt zorunlu).
+    //
+    // Mevcut implementasyon `Blockchain::lock_bridge_transfer`'da kalır
+    // çünkü internal kod yolları (bridge lock event handler) bunu çağırır.
 
     #[method(name = "bud_mintBridgeTransfer")]
     async fn mint_bridge_transfer(

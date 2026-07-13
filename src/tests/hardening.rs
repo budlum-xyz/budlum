@@ -215,4 +215,127 @@ mod hardening_tests {
         // filtresi bunu snapshot'tan çıkarır (rogue-key koruması).
         assert!(!verify_pop(&invalid));
     }
+
+    // === TUR 6 SECURITY FIX (Güvenlik Denetimi §2) =========================
+    // Snapshot session memory-bloat koruması: `in_progress_snapshots` map'i
+    // aşağıdaki sabitlerle sınırlı, eski session'lar sweep ile düşürülüyor.
+
+    /// DoS-hardening: `MAX_CONCURRENT_SNAPSHOTS` cap değeri pozitif ve
+    /// makul (>=1, <=1024) — operatörün keyfi cap'leyebileceği bir yapı.
+    #[test]
+    fn tur6_max_concurrent_snapshots_is_bounded() {
+        use crate::network::node::MAX_CONCURRENT_SNAPSHOTS;
+        assert!(MAX_CONCURRENT_SNAPSHOTS >= 1, "cap must be at least 1");
+        assert!(
+            MAX_CONCURRENT_SNAPSHOTS <= 1024,
+            "cap should be modest (got {MAX_CONCURRENT_SNAPSHOTS})"
+        );
+    }
+
+    /// DoS-hardening: `SNAPSHOT_SESSION_TIMEOUT_SECS` sıfırdan büyük ve
+    /// makul (1 dakika ile 1 saat arası) — çok kısa timeout iyi huylu
+    /// snapshot transferleri yanlışlıkla düşürür, çok uzun timeout
+    /// DoS penceresini açar.
+    #[test]
+    fn tur6_snapshot_session_timeout_is_sane() {
+        use crate::network::node::SNAPSHOT_SESSION_TIMEOUT_SECS;
+        assert!(SNAPSHOT_SESSION_TIMEOUT_SECS >= 60);
+        assert!(SNAPSHOT_SESSION_TIMEOUT_SECS <= 3600);
+    }
+
+    // === TUR 6 SECURITY FIX (Güvenlik Denetimi §5) =========================
+    // RPC kimlik doğrulaması varsayılan olarak AÇIK. Operatörün bilinçli
+    // olarak devre dışı bırakması (`operator_default`) log uyarısı verir.
+
+    /// Default config: kimlik doğrulama AÇIK (secure by default).
+    /// `auth_required=false` kullanan operatör kasıtlı olarak `operator_default`
+    /// çağırmalı; bu test Default'ın secure olduğunu sabitler.
+    #[test]
+    fn tur6_rpc_auth_required_default_true() {
+        use crate::rpc::RpcSecurityConfig;
+        let config = RpcSecurityConfig::default();
+        assert!(
+            config.auth_required,
+            "secure default: auth must be required unless operator opts in"
+        );
+    }
+
+    /// `operator_default` kimlik doğrulamayı kapatır ve `auth_required=false`
+    /// döner — operatörün bilinçli olarak devre dışı bıraktığını gösterir.
+    /// (Başlangıçta GÜVENLİK uyarıları loglanır, ama davranış kontratı
+    /// budur.)
+    #[test]
+    fn tur6_rpc_operator_default_disables_auth() {
+        use crate::rpc::RpcSecurityConfig;
+        let config = RpcSecurityConfig::operator_default();
+        assert!(!config.auth_required);
+        assert!(config.allowed_ips.contains(&"127.0.0.1".to_string()));
+    }
+
+    /// `from_env` ile `auth_required=true` ve boş api_key
+    /// (env var ayarlanmamış) geçirildiğinde hata döner — operatörün
+    /// public bir RPC'yi boş key ile başlatması engellenir.
+    #[test]
+    fn tur6_rpc_empty_api_key_rejected_when_auth_required() {
+        use crate::rpc::RpcSecurityConfig;
+        std::env::remove_var("BUDLUM_TUR6_RPC_TEST_KEY");
+        let res = RpcSecurityConfig::from_env(
+            true,
+            Some("BUDLUM_TUR6_RPC_TEST_KEY"),
+            vec![],
+            vec![],
+            None,
+        );
+        assert!(
+            res.is_err(),
+            "auth_required=true with unset env var must fail closed"
+        );
+    }
+
+    // === TUR 6 SECURITY FIX (Güvenlik Denetimi §6) =========================
+    // KeyPair / ValidatorKeys `save` artık dosyayı doğrudan 0o600 ile
+    // oluşturur (TOCTOU penceresi yok) ve izin hatalarını yutar (sessiz
+    // hata yok). Aşağıdaki test'ler bu iki garantiyi sabitler.
+
+    /// `KeyPair::save` strict 0o600 ile oluşturur (TOCTOU yok) ve
+    /// `load` sonrasında aynı anahtarı geri yükler.
+    #[cfg(unix)]
+    #[test]
+    fn tur6_keypair_save_creates_with_strict_permissions() {
+        use crate::crypto::primitives::KeyPair;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("kp.bin");
+        let kp = KeyPair::generate().expect("kp must generate");
+        kp.save(&path).expect("save must succeed");
+        let meta = std::fs::metadata(&path).expect("file must exist");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "KeyPair::save must create the file with 0o600, got {mode:o}"
+        );
+        // Round-trip: load sonrası aynı anahtar.
+        let kp2 = KeyPair::load(&path).expect("load must succeed");
+        assert_eq!(kp.private_key_bytes(), kp2.private_key_bytes());
+    }
+
+    /// `ValidatorKeys::save` de strict 0o600 ile oluşturur VE önceki
+    /// `let _ = set_permissions` regresyonu yok (hata artık `?` ile
+    /// yayılır).
+    #[cfg(unix)]
+    #[test]
+    fn tur6_validator_keys_save_creates_with_strict_permissions() {
+        use crate::crypto::primitives::ValidatorKeys;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("vk.bin");
+        let vk = ValidatorKeys::generate().expect("validator keys must generate");
+        vk.save(&path).expect("save must succeed");
+        let meta = std::fs::metadata(&path).expect("file must exist");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "ValidatorKeys::save must create the file with 0o600, got {mode:o}"
+        );
+    }
 }

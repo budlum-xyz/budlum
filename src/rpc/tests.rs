@@ -392,145 +392,21 @@ mod rpc_tests {
         let bridge_registration = server.register_bridge_asset(asset_id, 1).await.unwrap();
         assert_eq!(bridge_registration["status"], "registered");
 
-        let owner = Address::from([11u8; 32]);
-        let recipient = Address::from([12u8; 32]);
-        let lock_result = server
-            .lock_bridge_transfer(1, 2, 20, 0, asset_id, owner, recipient, 100, 1000)
-            .await
-            .unwrap();
-        let lock_event: crate::cross_domain::DomainEvent =
-            serde_json::from_value(lock_result["event"].clone()).unwrap();
-        let message_id = lock_event.message.as_ref().unwrap().message_id;
+        // TUR 6 (security audit §3): the bridge-lock → mint → burn → unlock
+        // happy path is exercised by `src/tests/bridge_lifecycle.rs` (an
+        // integration test against the internal `Blockchain` API), not via
+        // RPC. The RPC `bud_lockBridgeTransfer` is REMOVED because it
+        // allowed unauthenticated permanent DoS of any `asset_id`.
+        //
+        // What this RPC test still proves: domain registration, weak-proof
+        // rejection, relayed submit path with active-relayer gate, and
+        // global-header sealing — i.e. the full settlement surface minus
+        // the deprecated `lock_bridge_transfer` flow.
+        let _ = Address::from([11u8; 32]);
+        let _ = Address::from([12u8; 32]);
 
-        let mut event_tree = crate::cross_domain::DomainEventTree::new();
-        event_tree.push(lock_event.clone());
-
-        let mut bridge_block = block.clone();
-        bridge_block.index = 20;
-        let mut bridge_commitment = crate::domain::DomainCommitment::from_block(
-            &domain,
-            &bridge_block,
-            event_tree.root(),
-            [0u8; 32],
-            4,
-        )
-        .unwrap();
-        let bridge_proof = crate::domain::FinalityProof::PoW {
-            confirmations: 64,
-            total_work_hint: 64,
-            declared_head_hash: bridge_commitment.domain_block_hash,
-            declared_cumulative_work: 64,
-        };
-        bridge_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&bridge_proof);
-        server
-            .submit_verified_domain_commitment(crate::domain::VerifiedDomainCommitment {
-                commitment: bridge_commitment,
-                proof: bridge_proof,
-            })
-            .await
-            .unwrap();
-
-        let mint_result = server
-            .mint_bridge_transfer(1, 20, 4, None, lock_event, event_tree.proof(0).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(mint_result["status"], "minted");
-
-        let raw_burn_err = server
-            .burn_bridge_transfer(message_id, 2)
-            .await
-            .unwrap_err();
-        assert!(raw_burn_err
-            .message()
-            .contains("Raw bridge burn is disabled"));
-
-        let burn_result = server
-            .burn_bridge_transfer_with_event(message_id, 2, 21, 0, 1000)
-            .await
-            .unwrap();
-        assert_eq!(burn_result["status"], "burned");
-        let burn_event: crate::cross_domain::DomainEvent =
-            serde_json::from_value(burn_result["event"].clone()).unwrap();
-
-        let mut burn_event_tree = crate::cross_domain::DomainEventTree::new();
-        burn_event_tree.push(burn_event.clone());
-        let mut burn_block = block.clone();
-        burn_block.index = 21;
-        let target_domain = crate::domain::plugin::default_domain(
-            2,
-            crate::domain::ConsensusKind::PoA,
-            1338,
-            "poa-authority-quorum",
-            0,
-        );
-        let mut burn_commitment = crate::domain::DomainCommitment::from_block(
-            &target_domain,
-            &burn_block,
-            burn_event_tree.root(),
-            [0u8; 32],
-            5,
-        )
-        .unwrap();
-        // Tur 7: PoA finality needs real ed25519 authority signatures bound to
-        // the commitment. Build 3 authorities and have all 3 sign (quorum = 2).
-        let burn_proof = {
-            use crate::crypto::primitives::KeyPair;
-            use crate::domain::finality_adapter::{
-                poa_commit_signing_message, PoAAuthoritySignature,
-            };
-            let msg = poa_commit_signing_message(
-                target_domain.id,
-                burn_commitment.domain_height,
-                &burn_commitment.domain_block_hash,
-            );
-            let mut authorities = Vec::new();
-            let mut signatures = Vec::new();
-            for i in 0..3u8 {
-                let mut seed = [0u8; 32];
-                seed[0] = 0xC0 + i;
-                let kp = KeyPair::from_seed(&seed).unwrap();
-                let addr = Address::from(kp.public_key_bytes());
-                authorities.push(addr);
-                signatures.push(PoAAuthoritySignature {
-                    authority: addr,
-                    signature: kp.sign(&msg).to_vec(),
-                });
-            }
-            crate::domain::FinalityProof::PoA {
-                authorities,
-                signatures,
-            }
-        };
-        burn_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&burn_proof);
-        server
-            .submit_verified_domain_commitment(crate::domain::VerifiedDomainCommitment {
-                commitment: burn_commitment,
-                proof: burn_proof,
-            })
-            .await
-            .unwrap();
-
-        let raw_unlock_err = server
-            .unlock_bridge_transfer(message_id, 1)
-            .await
-            .unwrap_err();
-        assert!(raw_unlock_err
-            .message()
-            .contains("Raw bridge unlock is disabled"));
-
-        let unlock_result = server
-            .unlock_bridge_transfer_verified(
-                2,
-                21,
-                5,
-                None,
-                burn_event,
-                burn_event_tree.proof(0).unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(unlock_result["status"], "unlocked");
-
+        // Re-seal the global header to confirm the RPC surface still
+        // accepts new headers after the bridge-lock removal.
         let rpc_sealed = server.seal_global_header().await.unwrap();
         assert_eq!(rpc_sealed["globalHeight"], "0x1");
         assert!(rpc_sealed["domainRegistryRoot"]
