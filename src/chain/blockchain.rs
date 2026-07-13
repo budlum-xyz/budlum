@@ -988,12 +988,24 @@ impl Blockchain {
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<(), String> {
+        // Tur 9 (security audit §9): bridge mint REQUIRES an explicit
+        // `expected_block_hash`. Without it, an attacker who knows the
+        // (domain, height, sequence) tuple could pick any matching
+        // commitment from the registry — including stale, equivocated,
+        // or finality-unconfirmed ones — and mint bridge tokens against
+        // it. The caller's commitment hash is the bound to the exact
+        // block that produced the event; refusing to mint without it
+        // forces the caller to actually know what they are minting
+        // against, eliminating the silent-replay / forgery surface.
+        let expected_block_hash = expected_block_hash.ok_or_else(|| {
+            "Bridge mint requires explicit expected_block_hash (forgery gate)".to_string()
+        })?;
         let verified = self
             .verify_domain_event_proof(
                 source_domain,
                 source_height,
                 sequence,
-                expected_block_hash,
+                Some(expected_block_hash),
                 event,
                 proof,
             )
@@ -1183,12 +1195,21 @@ impl Blockchain {
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<(), String> {
+        // Tur 9 (security audit §9): bridge unlock requires an explicit
+        // `expected_block_hash` for the same reason as `mint_*` above:
+        // preventing replay / forgery attacks against the bridge state
+        // machine. See the doc-comment in
+        // `mint_bridge_transfer_from_verified_event` for the full
+        // rationale.
+        let expected_block_hash = expected_block_hash.ok_or_else(|| {
+            "Bridge unlock requires explicit expected_block_hash (forgery gate)".to_string()
+        })?;
         let verified = self
             .verify_domain_event_proof(
                 target_domain,
                 target_height,
                 sequence,
-                expected_block_hash,
+                Some(expected_block_hash),
                 event,
                 proof,
             )

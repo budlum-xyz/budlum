@@ -729,6 +729,10 @@ mod settlement_prod_tests {
         tree.push(lock_event.clone());
         let mut commitment = commitment_for(&pow, 55, 0, 4);
         commitment.event_root = tree.root();
+        // Tur 9 (security audit §9): capture the block hash before
+        // submission so the bridge-mint forgery gate can bind the mint
+        // to a specific commitment block.
+        let commitment_block_hash = commitment.domain_block_hash;
         blockchain.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
@@ -737,14 +741,21 @@ mod settlement_prod_tests {
                 pow.id,
                 55,
                 0,
-                None,
+                Some(commitment_block_hash),
                 lock_event.clone(),
                 &proof,
             )
             .unwrap();
         assert!(
             blockchain
-                .mint_bridge_transfer_from_verified_event(pow.id, 55, 0, None, lock_event, &proof)
+                .mint_bridge_transfer_from_verified_event(
+                    pow.id,
+                    55,
+                    0,
+                    Some(commitment_block_hash),
+                    lock_event,
+                    &proof
+                )
                 .is_err(),
             "verified messages still replay-protect at bridge state"
         );
@@ -1373,13 +1384,28 @@ mod settlement_prod_tests {
         tree.push(event.clone());
         let mut commitment = commitment_for(&pow, 1, 0, 50);
         commitment.event_root = tree.root();
+        let commitment_block_hash = commitment.domain_block_hash;
         bc.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
-        bc.mint_bridge_transfer_from_verified_event(1, 1, 0, None, event.clone(), &proof)
-            .unwrap();
+        bc.mint_bridge_transfer_from_verified_event(
+            1,
+            1,
+            0,
+            Some(commitment_block_hash),
+            event.clone(),
+            &proof,
+        )
+        .unwrap();
         let err = bc
-            .mint_bridge_transfer_from_verified_event(1, 1, 0, None, event, &proof)
+            .mint_bridge_transfer_from_verified_event(
+                1,
+                1,
+                0,
+                Some(commitment_block_hash),
+                event,
+                &proof,
+            )
             .unwrap_err();
         assert!(err.contains("already processed") || err.contains("replay"));
     }
@@ -1639,11 +1665,19 @@ mod settlement_prod_tests {
         tree.push(lock_event.clone());
         let mut commitment = commitment_for(&pow, 100, 0, 80);
         commitment.event_root = tree.root();
+        let commitment_block_hash = commitment.domain_block_hash;
         bc.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
-        bc.mint_bridge_transfer_from_verified_event(pow.id, 100, 0, None, lock_event, &proof)
-            .unwrap();
+        bc.mint_bridge_transfer_from_verified_event(
+            pow.id,
+            100,
+            0,
+            Some(commitment_block_hash),
+            lock_event,
+            &proof,
+        )
+        .unwrap();
 
         let burn_event = bc
             .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 101, 0, 5000)
@@ -1653,6 +1687,7 @@ mod settlement_prod_tests {
         burn_tree.push(burn_event.clone());
         let mut burn_commitment = commitment_for(&pos, 101, 0, 81);
         burn_commitment.event_root = burn_tree.root();
+        let burn_commitment_block_hash = burn_commitment.domain_block_hash;
         bc.submit_domain_commitment(burn_commitment).unwrap();
 
         let burn_proof = burn_tree.proof(0).unwrap();
@@ -1660,7 +1695,7 @@ mod settlement_prod_tests {
             pos.id,
             101,
             0,
-            None,
+            Some(burn_commitment_block_hash),
             burn_event,
             &burn_proof,
         )
@@ -1691,10 +1726,18 @@ mod settlement_prod_tests {
         lock_tree.push(lock_event.clone());
         let mut lock_commitment = commitment_for(&pow, 200, 0, 90);
         lock_commitment.event_root = lock_tree.root();
+        let lock_commitment_block_hash = lock_commitment.domain_block_hash;
         bc.submit_domain_commitment(lock_commitment).unwrap();
         let lock_proof = lock_tree.proof(0).unwrap();
-        bc.mint_bridge_transfer_from_verified_event(pow.id, 200, 0, None, lock_event, &lock_proof)
-            .unwrap();
+        bc.mint_bridge_transfer_from_verified_event(
+            pow.id,
+            200,
+            0,
+            Some(lock_commitment_block_hash),
+            lock_event,
+            &lock_proof,
+        )
+        .unwrap();
 
         assert!(
             bc.unlock_bridge_transfer(transfer.message_id, pow.id)

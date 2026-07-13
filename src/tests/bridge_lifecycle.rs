@@ -79,11 +79,16 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 
     // Step 6: the original `message_id` lock (released in step 5) is
     // still in the transfer ledger as `Active` and CANNOT be minted.
+    // Use an arbitrary-but-valid commitment block hash: this mint
+    // will fail either at the forgery gate (no matching commitment
+    // exists for this exact block hash) or at the bridge-state level
+    // (the lock has been released). Both are acceptable — the test's
+    // contract is "the released lock cannot be minted".
     let bad_mint = bc.mint_bridge_transfer_from_verified_event(
         1,
         20,
         0,
-        None,
+        Some([0xAAu8; 32]),
         lock_event.clone(),
         &crate::cross_domain::MerkleProof {
             leaf: [0u8; 32],
@@ -164,5 +169,88 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     assert!(
         r3.iter().any(|(a, _)| *a == asset_b),
         "asset_b must be released at height 500"
+    );
+}
+
+/// Tur 9 (security audit §9): bridge mint MUST reject calls that pass
+/// `expected_block_hash = None`. Without an explicit block-hash bound,
+/// a caller could pick ANY commitment matching (domain_id, height,
+/// sequence) — including stale or finality-unconfirmed ones — and
+/// mint against it. The forgery gate forces the caller to bind the
+/// mint to a specific block.
+#[test]
+fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
+    use crate::consensus::pos::PoSConfig;
+    use crate::consensus::pos::PoSEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(
+        Arc::new(PoSEngine::new(PoSConfig::default(), None)),
+        None,
+        1337,
+        None,
+    );
+    for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-confirmation-depth", 0);
+        d.operator = Some(operator);
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).unwrap();
+    }
+    bc.register_bridge_asset(asset_id(), 1).unwrap();
+
+    let owner = addr(11);
+    let recipient = addr(12);
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 30, 0, asset_id(), owner, recipient, 200, 5000)
+        .expect("internal lock must succeed");
+
+    // Forge an attempt to mint with NO expected_block_hash. The forgery
+    // gate must short-circuit the call before any merkle / commitment
+    // lookup is even attempted.
+    let result = bc.mint_bridge_transfer_from_verified_event(
+        1,
+        30,
+        0,
+        None,
+        lock_event.clone(),
+        &crate::cross_domain::MerkleProof {
+            leaf: [0u8; 32],
+            index: 0,
+            siblings: vec![],
+        },
+    );
+    assert!(
+        result.is_err(),
+        "bridge mint with None expected_block_hash must fail (forgery gate)"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("forgery gate") || err.contains("expected_block_hash"),
+        "error message must surface the forgery-gate rationale, got: {}",
+        err
+    );
+
+    // And the same gate must apply to the unlock path.
+    let unlock_result = bc.unlock_bridge_transfer_from_verified_event(
+        2,
+        30,
+        0,
+        None,
+        lock_event,
+        &crate::cross_domain::MerkleProof {
+            leaf: [0u8; 32],
+            index: 0,
+            siblings: vec![],
+        },
+    );
+    assert!(
+        unlock_result.is_err(),
+        "bridge unlock with None expected_block_hash must fail (forgery gate)"
+    );
+    let unlock_err = unlock_result.unwrap_err();
+    assert!(
+        unlock_err.contains("forgery gate") || unlock_err.contains("expected_block_hash"),
+        "unlock error message must surface the forgery-gate rationale, got: {}",
+        unlock_err
     );
 }
