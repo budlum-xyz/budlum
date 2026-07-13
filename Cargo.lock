@@ -424,6 +424,7 @@ dependencies = [
  "sha2",
  "sha3",
  "sled",
+ "subtle",
  "tempfile",
  "tokio",
  "toml",

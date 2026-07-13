@@ -376,6 +376,19 @@ impl RpcServer {
     }
 }
 
+fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    // Length mismatch must still run a dummy compare to avoid leaking length via early return
+    // of short-circuit equality on the string content alone.
+    let a_b = a.as_bytes();
+    let b_b = b.as_bytes();
+    if a_b.len() != b_b.len() {
+        let _ = a_b.ct_eq(a_b);
+        return false;
+    }
+    bool::from(a_b.ct_eq(b_b))
+}
+
 fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
     if !config.auth_required {
         return true;
@@ -385,19 +398,21 @@ fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
         return false;
     };
 
-    let bearer = format!("Bearer {expected}");
-    let api_key = HeaderValue::from_str(expected).ok();
-    let bearer = HeaderValue::from_str(&bearer).ok();
-
-    req.headers()
+    // Tur 12.5 / B3: constant-time compare of provided secret material.
+    let api_ok = req
+        .headers()
         .get("x-api-key")
-        .map(|value| Some(value) == api_key.as_ref())
-        .unwrap_or(false)
-        || req
-            .headers()
-            .get(AUTHORIZATION)
-            .map(|value| Some(value) == bearer.as_ref())
-            .unwrap_or(false)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|provided| constant_time_eq_str(provided, expected));
+
+    let bearer_expected = format!("Bearer {expected}");
+    let bearer_ok = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|provided| constant_time_eq_str(provided, &bearer_expected));
+
+    api_ok || bearer_ok
 }
 
 fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
@@ -420,17 +435,22 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
         }
     }
 
-    // Fall back to X-Real-IP
-    if let Some(real_ip) = req
-        .headers()
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|ip| ip.parse::<IpAddr>().ok())
-    {
-        return Some(real_ip);
+    // Tur 12.5 / B2: X-Real-IP is client-spoofable unless the request
+    // actually came through a reverse proxy we trust. Only honor it when
+    // `trusted_proxies` is non-empty (same gate as X-Forwarded-For).
+    if !config.trusted_proxies.is_empty() {
+        if let Some(real_ip) = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+        {
+            return Some(real_ip);
+        }
     }
 
-    // No identifiable IP — reject
+    // No identifiable IP — reject (callers should rely on ConnectInfo /
+    // network policy when headers are absent).
     None
 }
 
@@ -1230,10 +1250,30 @@ mod security_tests {
     }
 
     #[test]
-    fn ip_allowed_with_x_real_ip_fallback() {
+    fn x_real_ip_ignored_without_trusted_proxies() {
+        // Tur 12.5 / B2: bare X-Real-IP is spoofable; without trusted_proxies
+        // the IP cannot be extracted from headers alone.
         let config = RpcSecurityConfig {
             allowed_ips: vec!["10.0.0.1".to_string()],
             cors_origins: vec!["https://wallet.example".to_string()],
+            trusted_proxies: vec![],
+            ..Default::default()
+        };
+
+        let spoofed = request_with_headers(&[
+            ("x-real-ip", "10.0.0.1"),
+            ("origin", "https://wallet.example"),
+        ]);
+        assert!(extract_client_ip(&config, &spoofed).is_none());
+        assert!(!is_ip_allowed(&config, &spoofed));
+    }
+
+    #[test]
+    fn x_real_ip_honored_with_trusted_proxies() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.1".to_string()],
+            cors_origins: vec!["https://wallet.example".to_string()],
+            trusted_proxies: vec!["127.0.0.1".to_string()],
             ..Default::default()
         };
 

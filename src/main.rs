@@ -345,7 +345,17 @@ async fn main() {
                 epoch_length: network_params.epoch_len,
                 ..Default::default()
             };
-            let keys = if let Some(ref path) = config.validator_key_file {
+            // Tur 12.5 / B1: mainnet forbids disk-backed ValidatorKeys
+            // (BLS + Dilithium secrets stay plaintext on disk today).
+            let keys = if config.network == budlum_core::core::chain_config::Network::Mainnet {
+                if config.validator_key_file.is_some() {
+                    eprintln!(
+                        "CRITICAL: refusing to load ValidatorKeys from disk on mainnet (BLS/PQ plaintext)"
+                    );
+                    std::process::exit(1);
+                }
+                None
+            } else if let Some(ref path) = config.validator_key_file {
                 match budlum_core::crypto::primitives::ValidatorKeys::load(path) {
                     Ok(k) => Some(k),
                     Err(e) => {

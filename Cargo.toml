@@ -57,6 +57,7 @@ http-body-util = "0.1"
 tower = "0.4"
 cryptoki = "0.6"
 secrecy = "0.8"
+subtle = "2"
 async-trait = "0.1"
 rayon = "1.10"
 bud-isa = { path = "../BudZero/bud-isa" }

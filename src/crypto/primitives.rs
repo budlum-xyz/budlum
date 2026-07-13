@@ -233,7 +233,17 @@ impl ValidatorKeys {
             bls_key,
         })
     }
+    /// Persist validator key material to disk.
+    ///
+    /// # Security
+    /// Tur 12.5 / B4: contents are **plaintext** (sig + VRF + optional PQ + BLS).
+    /// File mode is `0o600` on Unix, but there is no password/KDF/AEAD.
+    /// **Do not use on mainnet** — `validate_strict_rules` rejects this path.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
+        tracing::warn!(
+            "ValidatorKeys::save writes plaintext key material to {}; mainnet forbids this path",
+            path.as_ref().display()
+        );
         let mut bytes = self.sig_key.signing_key.as_bytes().to_vec();
         bytes.extend_from_slice(&self.vrf_key.to_bytes());
         if let Some(pq_key) = &self.pq_key {

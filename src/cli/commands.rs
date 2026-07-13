@@ -772,6 +772,16 @@ impl NodeConfig {
                     eprintln!("CRITICAL SECURITY FAILURE: PKCS#11 PIN environment variable '{}' is missing or empty.", pin_env);
                     std::process::exit(1);
                 }
+                // Tur 12.5 / B1: PKCS#11 only covers the consensus Ed25519
+                // signer today. Disk-backed ValidatorKeys still embed BLS +
+                // Dilithium5 secrets in plaintext — forbidden on mainnet until
+                // those materials also live in HSM-backed storage.
+                if self.validator_key_file.is_some() {
+                    eprintln!(
+                        "CRITICAL SECURITY FAILURE: Mainnet validators must not load ValidatorKeys from disk (file holds BLS + post-quantum secrets in plaintext). Configure only PKCS#11 for consensus signing; BLS/PQ HSM paths are not yet available."
+                    );
+                    std::process::exit(1);
+                }
                 println!(
                     "INFO: Mainnet validator will use PKCS#11 HSM backend (module: {}, slot: {})",
                     module_path,
