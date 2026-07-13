@@ -123,13 +123,35 @@ impl Executor {
                     ));
                 }
 
-                if let Some(validator) = state.get_validator_mut(&tx.from) {
-                    if validator.stake < tx.amount {
-                        return Err(BudlumError::validation(
-                            "insufficient_stake",
-                            "Insufficient stake",
-                        ));
+                // Validate stake availability without holding a long-lived mut borrow.
+                let current_stake = state
+                    .get_validator(&tx.from)
+                    .map(|v| v.stake)
+                    .ok_or_else(|| BudlumError::validation("not_validator", "Not a validator"))?;
+                if current_stake < tx.amount {
+                    return Err(BudlumError::validation(
+                        "insufficient_stake",
+                        "Insufficient stake",
+                    ));
+                }
+
+                // Tur 11: stake-recycling double-vote mitigation.
+                // When stake is unbonded, reduce that voter's contribution
+                // on still-active governance proposals by the unstaked amount.
+                for proposal in state.governance.proposals.iter_mut() {
+                    if proposal.status == crate::core::governance::ProposalStatus::Active {
+                        if let Some(&voted_for) = proposal.voters.get(&tx.from) {
+                            if voted_for {
+                                proposal.votes_for = proposal.votes_for.saturating_sub(tx.amount);
+                            } else {
+                                proposal.votes_against =
+                                    proposal.votes_against.saturating_sub(tx.amount);
+                            }
+                        }
                     }
+                }
+
+                if let Some(validator) = state.get_validator_mut(&tx.from) {
                     validator.stake = validator.stake.saturating_sub(tx.amount);
                     if validator.stake == 0 {
                         validator.active = false;
@@ -198,6 +220,16 @@ impl Executor {
                             ));
                         }
                     } else {
+                        // Tur 11 / A2: only active validators (stake > 0) may create proposals.
+                        let proposer_stake =
+                            state.get_validator(&tx.from).map(|v| v.stake).unwrap_or(0);
+                        if proposer_stake == 0 {
+                            return Err(BudlumError::validation(
+                                "governance_proposer_not_validator",
+                                "Only active validators can create proposals",
+                            ));
+                        }
+
                         // Likely a Proposal: [duration (8), ProposalType (...)]
                         let mut dur_bytes = [0u8; 8];
                         dur_bytes.copy_from_slice(&tx.data[0..8]);
@@ -555,4 +587,126 @@ fn consensus_rejects_zero_fee_vote() {
         err.contains("vote_fee_zero") || err.contains("Vote fee cannot be 0"),
         "expected cost-floor error, got: {err}"
     );
+}
+
+/// Tur 11 / A2: only validators with stake > 0 may open governance proposals.
+#[test]
+fn tur11_non_validator_cannot_create_proposal() {
+    use crate::core::governance::ProposalType;
+    use crate::core::transaction::Transaction;
+
+    let mut state = AccountState::new();
+    let alice = Address::from_hex(&"0a".repeat(32)).unwrap();
+    state.add_balance(&alice, 1_000_000);
+    // deliberately NOT a validator
+
+    let tx = Transaction::new_proposal(alice, ProposalType::ChangeBaseFee(2), 10, 0);
+    let err = Executor::apply_transaction(&mut state, &tx)
+        .expect_err("non-validator must not create proposals");
+    assert!(
+        err.contains("governance_proposer_not_validator")
+            || err.contains("Only active validators can create proposals"),
+        "expected proposer gate error, got: {err}"
+    );
+}
+
+/// Tur 11 / A2: an active validator can still create a proposal.
+#[test]
+fn tur11_validator_can_create_proposal() {
+    use crate::core::governance::ProposalType;
+    use crate::core::transaction::Transaction;
+
+    let mut state = AccountState::new();
+    let alice = Address::from_hex(&"0b".repeat(32)).unwrap();
+    state.add_balance(&alice, 1_000_000);
+    state.add_validator(alice, 1_000);
+
+    let tx = Transaction::new_proposal(alice, ProposalType::ChangeBaseFee(2), 10, 0);
+    Executor::apply_transaction(&mut state, &tx).expect("validator proposal must succeed");
+    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.governance.proposals[0].proposer, alice);
+}
+
+/// Tur 11: unstaking reduces the unstaker's contribution on active proposals.
+#[test]
+fn tur11_unstake_reduces_active_proposal_vote_weight() {
+    use crate::core::governance::ProposalType;
+    use crate::core::transaction::Transaction;
+
+    let mut state = AccountState::new();
+    let alice = Address::from_hex(&"0c".repeat(32)).unwrap();
+    state.add_balance(&alice, 1_000_000);
+    state.add_validator(alice, 1_000);
+
+    // Create proposal + vote FOR with full stake.
+    let create = Transaction::new_proposal(alice, ProposalType::ChangeBaseFee(3), 10, 0);
+    Executor::apply_transaction(&mut state, &create).unwrap();
+    let proposal_id = state.governance.proposals[0].id;
+
+    let vote = Transaction::new_vote(alice, proposal_id, true, 1);
+    Executor::apply_transaction(&mut state, &vote).unwrap();
+    assert_eq!(state.governance.proposals[0].votes_for, 1_000);
+
+    // Unstake 400; active proposal weight must drop by 400.
+    let mut unstake = Transaction::new(alice, Address::zero(), 400, vec![]);
+    unstake.tx_type = TransactionType::Unstake;
+    unstake.fee = 1;
+    unstake.nonce = 2;
+    Executor::apply_transaction(&mut state, &unstake).unwrap();
+
+    assert_eq!(state.governance.proposals[0].votes_for, 600);
+    assert_eq!(state.get_validator(&alice).unwrap().stake, 600);
+}
+
+/// Tur 11 / A11: L1 VM memory is large enough for the compiler heap base (4096).
+/// `execute_bytecode` also runs the STARK path; here we pin the memory-size
+/// contract directly on the same `Vm::with_gas_limit` API L1 uses.
+#[test]
+fn tur11_zkvm_memory_covers_compiler_heap_base() {
+    use bud_isa::{Instruction, Opcode};
+    use bud_vm::Vm;
+
+    // Store value from r1 at absolute address 4096 (rs1=0 base + imm).
+    let program = vec![
+        Instruction {
+            opcode: Opcode::Load,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 7,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Store,
+            rd: 0,
+            rs1: 0,
+            rs2: 1,
+            imm: 4096,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    ];
+
+    // Old L1 size (1024) must reject the heap-base store.
+    let mut too_small = Vm::with_gas_limit(1024, 10_000);
+    assert!(
+        too_small.run(&program).is_err(),
+        "1024-byte memory must reject store at heap base 4096"
+    );
+
+    // Tur 11 L1 size (8192) must accept it.
+    let mut large_enough = Vm::with_gas_limit(8192, 10_000);
+    large_enough
+        .run(&program)
+        .expect("heap-base store must succeed with 8192-byte VM memory");
+    // 8 bytes starting at 4096 hold the stored little-endian value 7.
+    let word = u64::from_le_bytes(large_enough.memory[4096..4104].try_into().unwrap());
+    assert_eq!(word, 7);
 }

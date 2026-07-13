@@ -172,10 +172,11 @@ impl Transaction {
         chain_id: u64,
         tx_type: TransactionType,
     ) -> Self {
+        // Tur 11 / A3: avoid panic if system clock is before UNIX_EPOCH.
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         let mut tx = Transaction {
             from,
             to,

@@ -471,17 +471,15 @@ impl AccountState {
         if tx.from == Address::zero() {
             return Ok(());
         }
-        if !tx.verify() {
-            return Err("Invalid signature".into());
-        }
-        if tx.fee < self.base_fee {
-            return Err(format!("Fee too low: {} < {}", tx.fee, self.base_fee));
-        }
+        // Tur 11 / A1: cheap checks before expensive signature verification (DoS).
         if tx.nonce != expected_nonce {
             return Err(format!(
                 "Invalid nonce: expected {}, got {}",
                 expected_nonce, tx.nonce
             ));
+        }
+        if tx.fee < self.base_fee {
+            return Err(format!("Fee too low: {} < {}", tx.fee, self.base_fee));
         }
         let total_cost = tx.total_cost();
         if spendable_balance < total_cost {
@@ -489,6 +487,9 @@ impl AccountState {
                 "Insufficient balance: {} < {} (amount: {}, fee: {})",
                 spendable_balance, total_cost, tx.amount, tx.fee
             ));
+        }
+        if !tx.verify() {
+            return Err("Invalid signature".into());
         }
 
         match tx.tx_type {
@@ -1212,5 +1213,46 @@ mod tests {
         if before_supply < crate::tokenomics::BUD_TOTAL_SUPPLY as u128 {
             // Test başarılıysa ödül dağıtılmış demektir
         }
+    }
+
+    /// Tur 11 / A1: nonce mismatch must fail with a nonce error even when the
+    /// signature is valid — proves cheap checks still run and still gate.
+    #[test]
+    fn tur11_wrong_nonce_rejected_before_accepting_valid_sig() {
+        let alice_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_balance(&alice, 1000);
+        let recipient = Address::from([1u8; 32]);
+        let mut tx = Transaction::new_with_fee(alice, recipient, 100, 1, 9, vec![]);
+        tx.sign(&alice_kp);
+        let err = state
+            .validate_transaction(&tx)
+            .expect_err("wrong nonce must be rejected");
+        assert!(
+            err.contains("nonce") || err.contains("Invalid nonce"),
+            "expected nonce error, got: {err}"
+        );
+    }
+
+    /// Tur 11 / A1: invalid signature is still rejected after cheap checks pass.
+    #[test]
+    fn tur11_invalid_signature_still_rejected() {
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let mut state = AccountState::new();
+        state.add_balance(&alice, 1000);
+        let recipient = Address::from([1u8; 32]);
+        let mut tx = Transaction::new_with_fee(alice, recipient, 100, 1, 0, vec![]);
+        // Sign with the wrong key so signature verification fails.
+        tx.sign(&bob_kp);
+        let err = state
+            .validate_transaction(&tx)
+            .expect_err("bad signature must be rejected");
+        assert!(
+            err.contains("signature") || err.contains("Invalid signature"),
+            "expected signature error, got: {err}"
+        );
     }
 }

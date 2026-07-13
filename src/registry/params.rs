@@ -78,6 +78,27 @@ impl RegistryParams {
             MaliciousBehaviour => self.malicious_slash_ratio_fixed,
         }
     }
+
+    /// Tur 11: protocol-level bounds for governance-tunable registry params.
+    /// Prevents extreme values (e.g. zero unbonding, >100% slash ratios).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min_stake < 100 {
+            return Err("min_stake must be at least 100".into());
+        }
+        if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
+            return Err("unbonding_epochs must be between 1 and 100,000".into());
+        }
+        if self.double_sign_slash_ratio_fixed > FIXED_POINT_SCALE {
+            return Err("double_sign_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
+        }
+        if self.liveness_slash_ratio_fixed > FIXED_POINT_SCALE {
+            return Err("liveness_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
+        }
+        if self.malicious_slash_ratio_fixed > FIXED_POINT_SCALE {
+            return Err("malicious_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for RegistryParams {
@@ -127,5 +148,31 @@ impl Default for RegistryParams {
             max_invalid_votes_per_epoch: 20,
             liveness_slashing_enabled: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tur11_registry_params_validate_accepts_defaults() {
+        assert!(RegistryParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn tur11_registry_params_validate_rejects_zero_unbonding() {
+        let mut p = RegistryParams::default();
+        p.unbonding_epochs = 0;
+        let err = p.validate().expect_err("zero unbonding must fail");
+        assert!(err.contains("unbonding_epochs"), "got: {err}");
+    }
+
+    #[test]
+    fn tur11_registry_params_validate_rejects_slash_above_scale() {
+        let mut p = RegistryParams::default();
+        p.double_sign_slash_ratio_fixed = FIXED_POINT_SCALE + 1;
+        let err = p.validate().expect_err("slash > scale must fail");
+        assert!(err.contains("double_sign_slash_ratio_fixed"), "got: {err}");
     }
 }

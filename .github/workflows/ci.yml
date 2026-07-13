@@ -36,10 +36,15 @@ jobs:
       #    bu isim ve konum birebir önemli. lubosruler/BudZero bizim
       #    çalışma fork'umuz; upstream budlum-xyz/BudZero public bir
       #    referanstır ama bizim güncel Tur 8 değişikliklerimizi içermez.
-      - name: Checkout BudZero (as sibling ../BudZKVM)
+      - name: Checkout BudZero (as sibling ../BudZero)
         uses: actions/checkout@v4
         with:
           repository: lubosruler/BudZero
+          # Tur 11: pin to last known-good BudZero for budlum prove/verify.
+          # BudZero main after tur10.5.z_a_phase1 breaks simple program STARK verify
+          # (InvalidProof) against budlum-core's public-input path. Z-A/Z-B work
+          # continues on BudZero; budlum re-pins when the pair is green again.
+          ref: 06246f04fe63084e2a7be064e6d85cd64f546c6d
           path: BudZero
 
       # 3. Rust toolchain'i kur (reponun beklediği sürüm)

@@ -25,7 +25,7 @@ impl ZkVmExecutor {
         }
 
         let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_gas_limit(1024, gas_limit);
+        let mut vm = Vm::with_gas_limit(8192, gas_limit); // Tur 11 / A11: match compiler heap base 4096
 
         let receipt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run(&program)))
             .map_err(|_| "BudZKVM execution failed".to_string())?
@@ -63,7 +63,7 @@ pub fn prove_bytecode(
         return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
     }
     let program = decode_program(bytecode)?;
-    let mut vm = Vm::with_gas_limit(1024, gas_limit);
+    let mut vm = Vm::with_gas_limit(8192, gas_limit); // Tur 11 / A11: match compiler heap base 4096
     let receipt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run(&program)))
         .map_err(|_| "BudZKVM execution failed".to_string())?
         .map_err(|_| "BudZKVM execution failed".to_string())?;
