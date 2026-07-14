@@ -7,8 +7,9 @@ pub mod types;
 
 pub use commitment_registry::DomainCommitmentRegistry;
 pub use finality_adapter::{
-    hash_finality_proof, BftFinalityAdapter, DomainFinalityAdapter, FinalityError, FinalityProof,
-    FinalityStatus, PoAFinalityAdapter, PoSFinalityAdapter, PoWFinalityAdapter, ZkFinalityAdapter,
+    hash_finality_proof, hash_pow_header, BftFinalityAdapter, DomainFinalityAdapter, FinalityError,
+    FinalityProof, FinalityStatus, PoAFinalityAdapter, PoSFinalityAdapter, PoWFinalityAdapter,
+    PoWHeader, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
 };
 pub use plugin::{
     default_domain, BftDomainPlugin, ConsensusDomainPlugin, DomainContext, DomainError,
@@ -18,5 +19,5 @@ pub use plugin_registry::DomainPluginRegistry;
 pub use registry::ConsensusDomainRegistry;
 pub use types::{
     normalize_hash32, ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus,
-    Hash32, RootScheme, VerifiedDomainCommitment,
+    Hash32, PoWDomainParameters, RootScheme, VerifiedDomainCommitment, POW_HEADER_CHAIN_ADAPTER,
 };

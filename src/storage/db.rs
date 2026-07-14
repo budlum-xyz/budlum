@@ -12,6 +12,79 @@ use sled::Db;
 use std::str::from_utf8;
 use tracing::info;
 
+/// On-disk ConsensusDomain shape used before Tur 13.5 appended
+/// `pow_parameters`. Bincode is positional, so serde defaults alone cannot
+/// recover an older record that ends before the new field.
+#[derive(serde::Deserialize)]
+struct LegacyConsensusDomainV1 {
+    id: crate::domain::DomainId,
+    kind: crate::domain::ConsensusKind,
+    status: crate::domain::DomainStatus,
+    domain_chain_id: u64,
+    operator: Option<Address>,
+    operator_bond: u64,
+    config_hash: crate::domain::Hash32,
+    validator_set_hash: crate::domain::Hash32,
+    finality_adapter: String,
+    min_confirmations: u64,
+    bridge_enabled: bool,
+    block_hash_scheme: crate::domain::types::RootScheme,
+    state_root_scheme: crate::domain::types::RootScheme,
+    tx_root_scheme: crate::domain::types::RootScheme,
+    last_committed_height: u64,
+    last_committed_hash: crate::domain::Hash32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DatabaseBackupV1 {
+    format_version: u32,
+    entries_hash: [u8; 32],
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
+    let backup: DatabaseBackupV1 = decode(bytes)?;
+    if backup.format_version != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported backup format {}", backup.format_version),
+        ));
+    }
+    let payload = encode(&backup.entries)?;
+    let observed = crate::core::hash::calculate_hash_bytes(&payload);
+    if observed != backup.entries_hash {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup checksum mismatch",
+        ));
+    }
+    Ok(backup)
+}
+
+impl From<LegacyConsensusDomainV1> for ConsensusDomain {
+    fn from(domain: LegacyConsensusDomainV1) -> Self {
+        Self {
+            id: domain.id,
+            kind: domain.kind,
+            status: domain.status,
+            domain_chain_id: domain.domain_chain_id,
+            operator: domain.operator,
+            operator_bond: domain.operator_bond,
+            config_hash: domain.config_hash,
+            validator_set_hash: domain.validator_set_hash,
+            finality_adapter: domain.finality_adapter,
+            min_confirmations: domain.min_confirmations,
+            bridge_enabled: domain.bridge_enabled,
+            block_hash_scheme: domain.block_hash_scheme,
+            state_root_scheme: domain.state_root_scheme,
+            tx_root_scheme: domain.tx_root_scheme,
+            last_committed_height: domain.last_committed_height,
+            last_committed_hash: domain.last_committed_hash,
+            pow_parameters: None,
+        }
+    }
+}
+
 fn encode<T: Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     bincode::serialize(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
@@ -59,14 +132,143 @@ impl Storage {
         }
     }
 
+    /// Create an atomic, self-contained database backup.
+    ///
+    /// The temporary file is written beside the destination and renamed only
+    /// after all bytes are durable, so a crash never presents a partial file as
+    /// a usable backup.
     pub fn create_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+        use std::io::Write;
+
+        self.db.flush()?;
         let mut snapshot = Vec::new();
         for item in self.db.iter() {
             let (key, value) = item?;
             snapshot.push((key.to_vec(), value.to_vec()));
         }
-        let bytes = encode(&snapshot)?;
-        std::fs::write(path, bytes)?;
+        let entries_payload = encode(&snapshot)?;
+        let backup = DatabaseBackupV1 {
+            format_version: 1,
+            entries_hash: crate::core::hash::calculate_hash_bytes(&entries_payload),
+            entries: snapshot,
+        };
+        let bytes = encode(&backup)?;
+        let path = path.as_ref();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial = std::path::PathBuf::from(partial);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&partial)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&partial, path)?;
+        if let Err(error) = Self::verify_snapshot(path) {
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Validate backup framing and key uniqueness without modifying a database.
+    pub fn verify_snapshot<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<usize> {
+        let bytes = std::fs::read(path)?;
+        let backup = decode_database_backup(&bytes)?;
+        let entries = backup.entries;
+        if entries.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup contains no database entries",
+            ));
+        }
+        let mut keys: std::collections::HashSet<&[u8]> =
+            std::collections::HashSet::with_capacity(entries.len());
+        for (key, _) in &entries {
+            if !keys.insert(key.as_slice()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "backup contains duplicate database keys",
+                ));
+            }
+        }
+        if !keys.iter().any(|key| *key == b"SCHEMA_VERSION") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup has no schema version",
+            ));
+        }
+        Ok(entries.len())
+    }
+
+    /// Restore an offline backup into a new, empty sled directory and run the
+    /// normal migration/integrity checks before reporting success.
+    pub fn restore_snapshot<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+        snapshot_path: P,
+        target_db_path: Q,
+    ) -> std::io::Result<()> {
+        let snapshot_path = snapshot_path.as_ref();
+        let target_db_path = target_db_path.as_ref();
+        if target_db_path.exists()
+            && std::fs::read_dir(target_db_path)?
+                .next()
+                .transpose()?
+                .is_some()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("restore target {} is not empty", target_db_path.display()),
+            ));
+        }
+
+        let bytes = std::fs::read(snapshot_path)?;
+        let backup = decode_database_backup(&bytes)?;
+        let entries = backup.entries;
+        if entries.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup contains no database entries",
+            ));
+        }
+        if let Some(parent) = target_db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        {
+            let db = sled::open(target_db_path)?;
+            for chunk in entries.chunks(10_000) {
+                let mut batch = sled::Batch::default();
+                for (key, value) in chunk {
+                    batch.insert(key.as_slice(), value.as_slice());
+                }
+                db.apply_batch(batch)?;
+            }
+            db.flush()?;
+        }
+
+        let restored = Self::new(target_db_path.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "restore target path is not valid UTF-8",
+            )
+        })?)?;
+        let errors = restored.check_integrity().map_err(std::io::Error::other)?;
+        if !errors.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("restored database failed integrity check: {errors:?}"),
+            ));
+        }
         Ok(())
     }
     pub fn insert_block(&self, block: &Block) -> std::io::Result<()> {
@@ -373,7 +575,14 @@ impl Storage {
         let mut domains: Vec<ConsensusDomain> = Vec::new();
         for item in self.db.scan_prefix(b"DOMAIN:") {
             let (_key, val) = item?;
-            domains.push(decode(&val)?);
+            let domain = decode::<ConsensusDomain>(&val).or_else(|_| {
+                bincode::deserialize::<LegacyConsensusDomainV1>(&val)
+                    .map(ConsensusDomain::from)
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })
+            })?;
+            domains.push(domain);
         }
         domains.sort_by_key(|domain| domain.id);
         Ok(domains)
@@ -1025,5 +1234,34 @@ mod tests {
         assert!(storage2.get_block_by_height(2).unwrap().is_none());
         assert_eq!(storage2.get_canonical_height().unwrap(), 1);
         assert_eq!(storage2.get_last_hash().unwrap().unwrap(), block.hash);
+    }
+
+    #[test]
+    fn tur13_5_backup_restore_roundtrip_is_integrity_checked_and_non_destructive() {
+        let source_dir = tempdir().unwrap();
+        let backup_dir = tempdir().unwrap();
+        let restore_parent = tempdir().unwrap();
+        let source = Storage::new(source_dir.path().to_str().unwrap()).unwrap();
+        let genesis = Block::genesis();
+        source.commit_block(&genesis, &genesis.state_root).unwrap();
+
+        let backup = backup_dir.path().join("node.backup");
+        source.create_snapshot(&backup).unwrap();
+        assert!(backup.exists());
+        assert!(!backup.with_extension("backup.partial").exists());
+        drop(source);
+
+        let restored_path = restore_parent.path().join("restored.db");
+        Storage::restore_snapshot(&backup, &restored_path).unwrap();
+        let restored = Storage::new(restored_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            restored.get_block_by_height(0).unwrap().unwrap().hash,
+            genesis.hash
+        );
+        assert!(restored.check_integrity().unwrap().is_empty());
+        drop(restored);
+
+        let error = Storage::restore_snapshot(&backup, &restored_path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     }
 }

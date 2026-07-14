@@ -13,8 +13,77 @@ pub enum FinalityStatus {
     Rejected(String),
 }
 
+/// Canonical header consumed by the bounded PoW light client.
+///
+/// The target header binds the commitment roots; descendant headers provide
+/// confirmation work. `difficulty_bits` is consensus data but is accepted only
+/// inside the range pinned in `ConsensusDomain::pow_parameters`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PoWHeader {
+    pub height: u64,
+    pub parent_hash: Hash32,
+    pub state_root: Hash32,
+    pub tx_root: Hash32,
+    pub event_root: Hash32,
+    pub timestamp_ms: u128,
+    pub nonce: u64,
+    pub difficulty_bits: u32,
+}
+
+impl PoWHeader {
+    fn canonical_bytes(&self, domain_chain_id: u64) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + 8 + 32 * 4 + 16 + 8 + 4);
+        bytes.extend_from_slice(&domain_chain_id.to_le_bytes());
+        bytes.extend_from_slice(&self.height.to_le_bytes());
+        bytes.extend_from_slice(&self.parent_hash);
+        bytes.extend_from_slice(&self.state_root);
+        bytes.extend_from_slice(&self.tx_root);
+        bytes.extend_from_slice(&self.event_root);
+        bytes.extend_from_slice(&self.timestamp_ms.to_le_bytes());
+        bytes.extend_from_slice(&self.nonce.to_le_bytes());
+        bytes.extend_from_slice(&self.difficulty_bits.to_le_bytes());
+        bytes
+    }
+}
+
+/// Calculate a header hash with the immutable hash scheme registered for the
+/// source domain. Custom schemes require a domain plugin and are deliberately
+/// rejected by this generic light client.
+pub fn hash_pow_header(
+    domain: &ConsensusDomain,
+    header: &PoWHeader,
+) -> Result<Hash32, FinalityError> {
+    use crate::domain::types::RootScheme;
+    use sha2::{Digest, Sha256};
+
+    let encoded = header.canonical_bytes(domain.domain_chain_id);
+    match &domain.block_hash_scheme {
+        RootScheme::BudlumBlockV2 => Ok(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_POW_HEADER_V1",
+            &encoded,
+        ])),
+        RootScheme::Sha256 => {
+            let digest = Sha256::digest(&encoded);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&digest);
+            Ok(out)
+        }
+        RootScheme::Sha3_256 => {
+            let digest = sha3::Sha3_256::digest(&encoded);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&digest);
+            Ok(out)
+        }
+        RootScheme::Custom(name) => Err(FinalityError(format!(
+            "PoW header-chain adapter does not implement custom hash scheme {name}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FinalityProof {
+    /// Legacy self-declared confirmation proof. It remains decodable for
+    /// historical domains, but bridge mint never accepts it.
     PoW {
         confirmations: u64,
         total_work_hint: u128,
@@ -71,6 +140,11 @@ pub enum FinalityProof {
         final_state_root: Hash32,
     },
     Raw(Vec<u8>),
+    /// A target header followed by contiguous descendants. Appended to the
+    /// enum so existing bincode variant indices remain stable.
+    PoWHeaderChain {
+        headers: Vec<PoWHeader>,
+    },
 }
 
 /// A single PoA authority's ed25519 signature over a commitment binding message.
@@ -248,6 +322,135 @@ impl DomainFinalityAdapter for PoWFinalityAdapter {
             }
             _ => Err(FinalityError("Expected PoW finality proof".into())),
         }
+    }
+}
+
+/// Bounded, deterministic PoW light client used by bridge-enabled PoW domains.
+#[derive(Debug, Clone, Default)]
+pub struct PoWHeaderChainFinalityAdapter;
+
+impl DomainFinalityAdapter for PoWHeaderChainFinalityAdapter {
+    fn adapter_name(&self) -> &'static str {
+        crate::domain::types::POW_HEADER_CHAIN_ADAPTER
+    }
+
+    fn verify_finality(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        let FinalityProof::PoWHeaderChain { headers } = proof else {
+            return Err(FinalityError(
+                "Expected PoWHeaderChain finality proof".into(),
+            ));
+        };
+        let params = domain
+            .pow_parameters
+            .as_ref()
+            .ok_or_else(|| FinalityError("PoW header-chain domain has no pow_parameters".into()))?;
+        params
+            .validate(domain.min_confirmations)
+            .map_err(FinalityError)?;
+
+        if headers.is_empty() {
+            return Ok(FinalityStatus::Rejected("PoW header chain is empty".into()));
+        }
+        if headers.len() > params.max_headers as usize {
+            return Ok(FinalityStatus::Rejected(format!(
+                "PoW header chain has {} headers, maximum is {}",
+                headers.len(),
+                params.max_headers
+            )));
+        }
+
+        let target = &headers[0];
+        if target.height != commitment.domain_height
+            || target.parent_hash != commitment.parent_domain_block_hash
+            || target.state_root != commitment.state_root
+            || target.tx_root != commitment.tx_root
+            || target.event_root != commitment.event_root
+            || target.timestamp_ms != commitment.timestamp_ms
+        {
+            return Ok(FinalityStatus::Rejected(
+                "PoW target header does not bind the commitment height, parent, roots, or timestamp".into(),
+            ));
+        }
+
+        let mut previous_hash = [0u8; 32];
+        let mut previous_height = 0u64;
+        let mut previous_timestamp = 0u128;
+        let mut cumulative_work = 0u128;
+
+        for (index, header) in headers.iter().enumerate() {
+            if header.difficulty_bits < params.min_difficulty_bits
+                || header.difficulty_bits > params.max_difficulty_bits
+            {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "PoW header {} difficulty {} is outside registered range {}..={}",
+                    header.height,
+                    header.difficulty_bits,
+                    params.min_difficulty_bits,
+                    params.max_difficulty_bits
+                )));
+            }
+
+            if index > 0 {
+                if header.height != previous_height.saturating_add(1) {
+                    return Ok(FinalityStatus::Rejected(
+                        "PoW header heights are not contiguous".into(),
+                    ));
+                }
+                if header.parent_hash != previous_hash {
+                    return Ok(FinalityStatus::Rejected(
+                        "PoW header parent link mismatch".into(),
+                    ));
+                }
+                if header.timestamp_ms < previous_timestamp {
+                    return Ok(FinalityStatus::Rejected(
+                        "PoW header timestamps move backwards".into(),
+                    ));
+                }
+            }
+
+            let hash = hash_pow_header(domain, header)?;
+            let observed_bits = leading_zero_bits(&hash);
+            if observed_bits < header.difficulty_bits {
+                return Ok(FinalityStatus::Rejected(format!(
+                    "PoW header {} has {} leading zero bits, claims {}",
+                    header.height, observed_bits, header.difficulty_bits
+                )));
+            }
+            if index == 0 && hash != commitment.domain_block_hash {
+                return Ok(FinalityStatus::Rejected(
+                    "PoW target header hash does not match commitment block hash".into(),
+                ));
+            }
+
+            let header_work = 1u128.checked_shl(header.difficulty_bits).ok_or_else(|| {
+                FinalityError("PoW difficulty cannot be represented as u128 work".into())
+            })?;
+            cumulative_work = cumulative_work.saturating_add(header_work);
+            previous_hash = hash;
+            previous_height = header.height;
+            previous_timestamp = header.timestamp_ms;
+        }
+
+        let observed_depth = headers.len() as u64;
+        if observed_depth < domain.min_confirmations {
+            return Ok(FinalityStatus::Pending {
+                required_depth: domain.min_confirmations,
+                observed_depth,
+            });
+        }
+        if cumulative_work < params.min_cumulative_work {
+            return Ok(FinalityStatus::Rejected(format!(
+                "PoW header chain cumulative work {} is below registered minimum {}",
+                cumulative_work, params.min_cumulative_work
+            )));
+        }
+
+        Ok(FinalityStatus::Finalized)
     }
 }
 
@@ -790,6 +993,107 @@ mod tests {
         h[0] = 0x00;
         h[1] = 0x0f;
         assert_eq!(leading_zero_bits(&h), 12);
+    }
+
+    fn mine_header(domain: &ConsensusDomain, mut header: PoWHeader) -> (PoWHeader, Hash32) {
+        loop {
+            let hash = hash_pow_header(domain, &header).unwrap();
+            if leading_zero_bits(&hash) >= header.difficulty_bits {
+                return (header, hash);
+            }
+            header.nonce = header.nonce.checked_add(1).expect("test nonce space");
+        }
+    }
+
+    #[test]
+    fn tur13_5_pow_header_chain_recomputes_links_work_and_commitment_binding() {
+        let mut domain = default_domain(
+            9,
+            ConsensusKind::PoW,
+            9_001,
+            crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
+            3,
+        );
+        domain.pow_parameters = Some(crate::domain::types::PoWDomainParameters {
+            min_difficulty_bits: 4,
+            max_difficulty_bits: 8,
+            min_cumulative_work: 3 * (1u128 << 4),
+            max_headers: 8,
+        });
+
+        let mut commitment = commitment(ConsensusKind::PoW);
+        commitment.domain_id = domain.id;
+        commitment.domain_height = 10;
+        commitment.parent_domain_block_hash = [7u8; 32];
+        commitment.state_root = [11u8; 32];
+        commitment.tx_root = [12u8; 32];
+        commitment.event_root = [13u8; 32];
+        commitment.timestamp_ms = 100;
+
+        let (target, target_hash) = mine_header(
+            &domain,
+            PoWHeader {
+                height: commitment.domain_height,
+                parent_hash: commitment.parent_domain_block_hash,
+                state_root: commitment.state_root,
+                tx_root: commitment.tx_root,
+                event_root: commitment.event_root,
+                timestamp_ms: 100,
+                nonce: 0,
+                difficulty_bits: 4,
+            },
+        );
+        commitment.domain_block_hash = target_hash;
+
+        let (child, child_hash) = mine_header(
+            &domain,
+            PoWHeader {
+                height: 11,
+                parent_hash: target_hash,
+                state_root: [21u8; 32],
+                tx_root: [22u8; 32],
+                event_root: [23u8; 32],
+                timestamp_ms: 101,
+                nonce: 0,
+                difficulty_bits: 4,
+            },
+        );
+        let (tip, _) = mine_header(
+            &domain,
+            PoWHeader {
+                height: 12,
+                parent_hash: child_hash,
+                state_root: [31u8; 32],
+                tx_root: [32u8; 32],
+                event_root: [33u8; 32],
+                timestamp_ms: 102,
+                nonce: 0,
+                difficulty_bits: 4,
+            },
+        );
+
+        let adapter = PoWHeaderChainFinalityAdapter;
+        let proof = FinalityProof::PoWHeaderChain {
+            headers: vec![target, child, tip],
+        };
+        assert_eq!(
+            adapter
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap(),
+            FinalityStatus::Finalized
+        );
+
+        let mut broken = proof.clone();
+        let FinalityProof::PoWHeaderChain { headers } = &mut broken else {
+            unreachable!()
+        };
+        headers[1].parent_hash = [0xFF; 32];
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &commitment, &broken)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
     }
 
     #[test]

@@ -18,7 +18,8 @@ use crate::domain::{
     hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusDomainRegistry,
     ConsensusKind, DomainCommitment, DomainCommitmentRegistry, DomainFinalityAdapter, DomainId,
     DomainPluginRegistry, DomainStatus, FinalityProof, FinalityStatus, PoAFinalityAdapter,
-    PoSFinalityAdapter, PoWFinalityAdapter, ZkFinalityAdapter,
+    PoSFinalityAdapter, PoWFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter,
+    POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::execution::executor::Executor;
 use crate::mempool::pool::Mempool;
@@ -527,12 +528,15 @@ impl Blockchain {
             return Err(format!("Domain {} has invalid chain id 0", domain.id));
         }
 
-        let expected_adapter = match &domain.kind {
-            ConsensusKind::PoW => Some("pow-confirmation-depth"),
-            ConsensusKind::PoS => Some("pos-qc-finality"),
-            ConsensusKind::PoA => Some("poa-authority-quorum"),
-            ConsensusKind::Bft => Some("bft-quorum-commit"),
-            ConsensusKind::Zk => Some("zk-proof-verification"),
+        let adapter_valid = match &domain.kind {
+            ConsensusKind::PoW => {
+                domain.finality_adapter == "pow-confirmation-depth"
+                    || domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER
+            }
+            ConsensusKind::PoS => domain.finality_adapter == "pos-qc-finality",
+            ConsensusKind::PoA => domain.finality_adapter == "poa-authority-quorum",
+            ConsensusKind::Bft => domain.finality_adapter == "bft-quorum-commit",
+            ConsensusKind::Zk => domain.finality_adapter == "zk-proof-verification",
             ConsensusKind::Custom(name) => {
                 if name.trim().is_empty() {
                     return Err(format!(
@@ -540,19 +544,15 @@ impl Blockchain {
                         domain.id
                     ));
                 }
-                None
+                !domain.finality_adapter.trim().is_empty()
             }
         };
 
-        if let Some(expected) = expected_adapter {
-            if domain.finality_adapter != expected {
-                return Err(format!(
-                    "Domain {} adapter mismatch: expected {}, got {}",
-                    domain.id, expected, domain.finality_adapter
-                ));
-            }
-        } else if domain.finality_adapter.trim().is_empty() {
-            return Err(format!("Domain {} has empty finality adapter", domain.id));
+        if !adapter_valid {
+            return Err(format!(
+                "Domain {} has incompatible finality adapter {} for {:?}",
+                domain.id, domain.finality_adapter, domain.kind
+            ));
         }
 
         Ok(())
@@ -719,6 +719,16 @@ impl Blockchain {
                     )
                 })?;
         }
+        if let Some(metrics) = &self.metrics {
+            metrics.settlement_commitments_total.inc();
+            metrics.settlement_frozen_domains.set(
+                self.domain_registry
+                    .domains()
+                    .iter()
+                    .filter(|domain| domain.status == DomainStatus::Frozen)
+                    .count() as i64,
+            );
+        }
 
         Ok(())
     }
@@ -821,9 +831,17 @@ impl Blockchain {
 
         let status = match domain.kind {
             ConsensusKind::PoW => {
-                let adapter = PoWFinalityAdapter::default();
-                self.ensure_adapter_name(domain, adapter.adapter_name())?;
-                adapter.verify_finality(domain, commitment, proof)
+                if domain.finality_adapter == POW_HEADER_CHAIN_ADAPTER {
+                    let adapter = PoWHeaderChainFinalityAdapter;
+                    self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                    adapter.verify_finality(domain, commitment, proof)
+                } else {
+                    // Historical compatibility only. This adapter can archive
+                    // commitments but cannot authorize bridge mint.
+                    let adapter = PoWFinalityAdapter::default();
+                    self.ensure_adapter_name(domain, adapter.adapter_name())?;
+                    adapter.verify_finality(domain, commitment, proof)
+                }
             }
             ConsensusKind::PoS => {
                 let adapter = PoSFinalityAdapter;
@@ -968,6 +986,9 @@ impl Blockchain {
                 .map_err(|e| format!("Failed to persist global header: {}", e))?;
         }
         self.global_headers.push(header.clone());
+        if let Some(metrics) = &self.metrics {
+            metrics.settlement_global_headers_sealed.inc();
+        }
         Ok(header)
     }
 
@@ -1013,21 +1034,32 @@ impl Blockchain {
             "Bridge mint requires explicit expected_block_hash (forgery gate)".to_string()
         })?;
 
-        // Tur 12 / paradigm + BUG #9: PoW domain finality is still
-        // light-client incomplete (declared work + hash difficulty only).
-        // Refuse bridge mint from PoW sources until a real PoW header
-        // chain check exists — otherwise self-declared finality can
-        // inflate cross-domain supply.
-        if let Some(domain) = self.domain_registry.get(source_domain) {
-            if matches!(domain.kind, crate::domain::types::ConsensusKind::PoW) {
-                return Err(
-                    "Bridge mint from PoW domains disabled until light-client PoW verification (Tur 12)"
-                        .into(),
-                );
-            }
-            if !domain.bridge_enabled {
-                return Err(format!("Bridge mint disabled for domain {}", source_domain));
-            }
+        // Tur 13.5: PoW mint is enabled only for domains whose commitments
+        // were verified by the bounded header-chain adapter. Legacy
+        // self-declared PoW proofs remain readable for archival compatibility
+        // but can never authorize supply creation.
+        let domain = self
+            .domain_registry
+            .get(source_domain)
+            .ok_or_else(|| format!("Unknown bridge source domain {source_domain}"))?;
+        if matches!(domain.kind, crate::domain::types::ConsensusKind::PoW)
+            && domain.finality_adapter != POW_HEADER_CHAIN_ADAPTER
+        {
+            return Err(
+                "Bridge mint from PoW domains requires pow-header-chain-v1 finality".into(),
+            );
+        }
+        if !domain.bridge_enabled {
+            return Err(format!("Bridge mint disabled for domain {}", source_domain));
+        }
+        // A finalized proof may arrive out of order and be staged in the
+        // commitment registry. Do not let bridge verification consume it until
+        // the domain's contiguous parent-linked chain has actually advanced.
+        if source_height > domain.last_committed_height {
+            return Err(format!(
+                "Bridge source commitment at height {source_height} is not on the applied domain chain (tip {})",
+                domain.last_committed_height
+            ));
         }
 
         let verified = self
@@ -1302,6 +1334,10 @@ impl Blockchain {
         Ok(())
     }
     pub fn get_transaction_by_hash(&self, hash: &str) -> Option<Transaction> {
+        let _storage_timer = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.storage_read_seconds.start_timer());
         if let Some(ref store) = self.storage {
             if let Ok(Some(height)) = store.get_tx_block_height(hash) {
                 if let Some(block) = self.chain.get(height as usize) {
@@ -1319,6 +1355,10 @@ impl Blockchain {
         self.mempool.get(hash).cloned()
     }
     pub fn get_transaction_receipt(&self, hash: &str) -> Option<serde_json::Value> {
+        let _storage_timer = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.storage_read_seconds.start_timer());
         if let Some(ref store) = self.storage {
             if let Ok(Some(height)) = store.get_tx_block_height(hash) {
                 return Some(serde_json::json!({
@@ -2142,6 +2182,10 @@ impl Blockchain {
         block: &Block,
         committed_state: &AccountState,
     ) -> Result<(), String> {
+        let _storage_timer = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.storage_write_seconds.start_timer());
         if let Some(ref store) = self.storage {
             let mut accounts_to_save = Vec::new();
             for (pubkey, account) in &committed_state.accounts {
@@ -2205,6 +2249,10 @@ impl Blockchain {
     }
 
     pub fn produce_block(&mut self, producer_address: Address) -> Option<Block> {
+        let _consensus_timer = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.consensus_round_seconds.start_timer());
         let index = self.chain.len() as u64;
         let previous_hash = self
             .chain
@@ -2347,6 +2395,10 @@ impl Blockchain {
     }
 
     pub fn validate_and_add_block(&mut self, block: Block) -> Result<(), String> {
+        let _consensus_timer = self
+            .metrics
+            .as_ref()
+            .map(|metrics| metrics.consensus_round_seconds.start_timer());
         if block.index <= self.finalized_height && block.hash != self.finalized_hash {
             if let Some(finalized_path_block) = self.chain.get(block.index as usize) {
                 if finalized_path_block.hash != block.hash {

@@ -38,6 +38,8 @@ pub mod permissionless;
 #[cfg(test)]
 pub mod persistence;
 #[cfg(test)]
+pub mod pow_light_client;
+#[cfg(test)]
 pub mod prover;
 #[cfg(test)]
 pub mod relayer_liveness;

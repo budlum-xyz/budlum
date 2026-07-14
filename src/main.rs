@@ -19,6 +19,7 @@ use budlum_core::rpc::{RpcMode, RpcSecurityConfig, RpcServer};
 use budlum_core::storage::db::Storage;
 
 use clap::Parser;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -28,6 +29,38 @@ fn load_signing_key(path: &str) -> Option<KeyPair> {
         .map(|keys| keys.sig_key)
         .or_else(|_| KeyPair::load(path))
         .ok()
+}
+
+fn write_database_backup(
+    storage: &Storage,
+    backup_dir: &Path,
+    retention_count: usize,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(backup_dir)?;
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_millis();
+    let path = backup_dir.join(format!("budlum-{timestamp_ms}.budbak"));
+    storage.create_snapshot(&path)?;
+    Storage::verify_snapshot(&path)?;
+
+    let mut backups: Vec<PathBuf> = std::fs::read_dir(backup_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("budlum-") && name.ends_with(".budbak"))
+        })
+        .collect();
+    backups.sort();
+    let remove_count = backups.len().saturating_sub(retention_count);
+    for expired in backups.into_iter().take(remove_count) {
+        std::fs::remove_file(expired)?;
+    }
+    Ok(path)
 }
 
 #[tokio::main]
@@ -204,6 +237,37 @@ async fn main() {
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
+    if let Some(ref backup_path) = config.restore_backup {
+        Storage::restore_snapshot(backup_path, &config.db_path).unwrap_or_else(|error| {
+            eprintln!("CRITICAL: backup restore failed: {error}");
+            std::process::exit(1);
+        });
+        println!(
+            "Backup {} restored and integrity-checked at {}",
+            backup_path, config.db_path
+        );
+        return;
+    }
+
+    if config.backup_now {
+        let storage = Storage::new(&config.db_path).unwrap_or_else(|error| {
+            eprintln!("CRITICAL: failed to open database for backup: {error}");
+            std::process::exit(1);
+        });
+        let backup_dir = config.backup_dir.as_deref().unwrap_or("./data/backups");
+        let backup = write_database_backup(
+            &storage,
+            Path::new(backup_dir),
+            config.backup_retention_count,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("CRITICAL: database backup failed: {error}");
+            std::process::exit(1);
+        });
+        println!("Verified database backup written to {}", backup.display());
+        return;
+    }
 
     if let Some(ref path) = config.gen_key {
         match budlum_core::crypto::primitives::ValidatorKeys::generate() {
@@ -399,13 +463,28 @@ async fn main() {
         }
     };
 
-    let storage = Some(Storage::new(&config.db_path).unwrap_or_else(|e| {
+    let storage_instance = Storage::new(&config.db_path).unwrap_or_else(|e| {
         eprintln!(
             "CRITICAL: Failed to initialize storage at {}: {}",
             config.db_path, e
         );
         std::process::exit(1);
-    }));
+    });
+
+    let backup_schedule = (config.backups_enabled == Some(true)).then(|| {
+        (
+            storage_instance.clone(),
+            PathBuf::from(
+                config
+                    .backup_dir
+                    .clone()
+                    .unwrap_or_else(|| "./data/backups".to_string()),
+            ),
+            config.backup_interval_secs,
+            config.backup_retention_count,
+        )
+    });
+    let storage = Some(storage_instance);
 
     let genesis_config = if let Some(ref path) = config.genesis_file {
         let data = std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -451,6 +530,20 @@ async fn main() {
         genesis_config,
     )
     .with_metrics(metrics.clone());
+
+    if let Some((backup_storage, backup_dir, backup_interval, retention_count)) = backup_schedule {
+        tokio::spawn(async move {
+            // Blockchain initialization (including genesis) completed before
+            // this task is created, so the first backup is restorable.
+            loop {
+                match write_database_backup(&backup_storage, &backup_dir, retention_count) {
+                    Ok(path) => tracing::info!("Verified database backup: {}", path.display()),
+                    Err(error) => tracing::error!("Database backup failed: {error}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(backup_interval)).await;
+            }
+        });
+    }
 
     let domain_id = 1u32;
     let (domain_kind, adapter_name, min_conf) = match consensus_type {

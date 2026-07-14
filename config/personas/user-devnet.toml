@@ -14,6 +14,8 @@ data_dir = "./data/user-devnet/budlum.db"
 snapshot_dir = "./data/user-devnet/snapshots"
 backup_dir = "./data/user-devnet/backups"
 backups_enabled = false
+backup_interval_secs = 3600
+backup_retention_count = 24
 
 [p2p]
 identity_file = "./secrets/user-devnet-node-id.key"

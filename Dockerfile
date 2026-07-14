@@ -12,14 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Clone BudZKVM dependency (sibling dir required by Cargo.toml path dep)
-RUN git clone https://github.com/Budlum/BudZKVM.git /BudZKVM
-
-# Copy source and manifests
-COPY Cargo.toml Cargo.lock ./
+# Copy the monorepo manifests and sources. BudZero/BudZKVM is vendored as
+# source under budzero/ and is built from the same immutable checkout.
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
 COPY benches/ ./benches/
 COPY proto/ ./proto/
+COPY budzero/ ./budzero/
 
 # Build release binary
 RUN cargo build --release --locked && \

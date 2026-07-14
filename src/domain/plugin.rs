@@ -246,6 +246,7 @@ pub fn default_domain(
         validator_set_hash: [0u8; 32],
         finality_adapter: finality_adapter.into(),
         min_confirmations,
+        pow_parameters: None,
         bridge_enabled: true,
         block_hash_scheme: RootScheme::BudlumBlockV2,
         state_root_scheme: RootScheme::BudlumBlockV2,

@@ -104,12 +104,13 @@ Not: Faz 3, BudZero’da sağlam `VerifyMerkle` ister → Tur 13 Z-B ilerlemesi 
 3. **Org roadmap matrisi** README’ye: budlum-xyz maddeleri × durum (bu dosyanın özeti).
 4. **BudZero README** org Phase 9–12 ile senkron, “31 opcode production” iddiasını *gerçekle* hizala.
 
-### Tur 13.5 — “Settlement + operasyon (kurum + devnet)”
-1. **PoW light-client / mint politikası** (org bridge hardening devamı).
-2. **Archive-node policy + backup restore drill** (ch12 kalan).
-3. **Production runbooks** (node, PoA authority set, RPC, HSM pin).
-4. **BudZero Phase 10 baseline**: proof time/size bench iskeleti.
-5. Dual-RPC / per-IP quota netleştirme (ch12).
+### Tur 13.5 — “Settlement + operasyon (kurum + devnet)” — **uygulandı**
+1. ✅ **PoW light-client / mint:** `pow-header-chain-v1`; header hash/link/root/difficulty/work yeniden hesaplanır, legacy proof mint yapamaz.
+2. ✅ **Archive + restore:** fail-closed archive rolü, atomik doğrulanan `.budbak`, retention, boş hedef restore/integrity drill.
+3. ✅ **Production runbook:** node, PoA authority, RPC ayrımı, HSM PIN ve incident tetikleri `docs/operations/` altında.
+4. ✅ **BudZero Phase 10 baseline:** `budzero/bud-proof/benches/proof_baseline.rs` proof süre/boyut JSON çıktısı.
+5. ✅ **RPC quota/admin:** 10k IP bellek tavanlı per-IP pencere; imzasız yönetim yardımcıları operator-only.
+6. ✅ **Tek repo:** BudZero workspace `budzero/` altına taşındı; CI ve Docker harici sibling checkout kullanmaz.
 
 ### Tur 13.9 — “Mainnet v1 policy + anahtar + devir”
 1. **BLS/PQ key protection** (B1 tam kapanışa yaklaşım: mainnet policy + ops path; tam HSM yoksa açıkça “not done”).

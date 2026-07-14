@@ -7,7 +7,7 @@ mod rpc_tests {
     use crate::core::transaction::Transaction;
     use crate::network::node::Node;
     use crate::rpc::api::BudlumApiServer;
-    use crate::rpc::server::RpcServer;
+    use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
 
     async fn setup() -> (RpcServer, ChainHandle) {
@@ -19,7 +19,15 @@ mod rpc_tests {
         });
         let node_struct = Node::new(chain.clone()).unwrap();
         let node_client = node_struct.get_client();
-        (RpcServer::new(chain.clone(), node_client), chain)
+        (
+            RpcServer::with_security_and_mode(
+                chain.clone(),
+                node_client,
+                RpcSecurityConfig::operator_default(),
+                RpcMode::Operator,
+            ),
+            chain,
+        )
     }
 
     #[tokio::test]

@@ -60,9 +60,12 @@ secrecy = "0.8"
 subtle = "2"
 async-trait = "0.1"
 rayon = "1.10"
-bud-isa = { path = "../BudZero/bud-isa" }
-bud-vm = { path = "../BudZero/bud-vm" }
-bud-proof = { path = "../BudZero/bud-proof" }
+# BudZero/BudZKVM is part of this repository as of Tur 13.5. Keeping the
+# crates under `budzero/` preserves their own workspace while removing the
+# fragile sibling-checkout/pinned-repository requirement.
+bud-isa = { path = "budzero/bud-isa" }
+bud-vm = { path = "budzero/bud-vm" }
+bud-proof = { path = "budzero/bud-proof" }
 
 [build-dependencies]
 prost-build = "0.14.3"

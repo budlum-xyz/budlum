@@ -11,6 +11,8 @@ data_dir = "./data/testnet/budlum.db"
 snapshot_dir = "./data/testnet/snapshots"
 backup_dir = "./data/testnet/backups"
 backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
 
 [p2p]
 identity_file = "./secrets/testnet-node-id.key"

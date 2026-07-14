@@ -1,0 +1,44 @@
+# Tur 13.5 archive-node profile: full history, verified rotating backups,
+# public read RPC. Do not enable pruning on this role.
+
+[network]
+profile = "testnet"
+chain_id = 42
+genesis_file = "./config/testnet-genesis.json"
+
+[node]
+role = "archive"
+
+[storage]
+data_dir = "./data/archive/budlum.db"
+snapshot_dir = "./data/archive/snapshots"
+backup_dir = "./data/archive/backups"
+backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 168
+
+[p2p]
+identity_file = "./secrets/archive-node-id.key"
+bootnodes = []
+dns_seeds = []
+max_peers = 100
+banned_peer_db = "./data/archive/banned-peers.json"
+mdns_enabled = false
+
+[rpc]
+public_listener = "127.0.0.1:18545"
+operator_listener = "127.0.0.1:18546"
+enabled = true
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = ["127.0.0.1", "::1"]
+trusted_proxies = []
+rate_limit_per_minute = 600
+
+[metrics]
+listener = "127.0.0.1:19090"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false

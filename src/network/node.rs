@@ -823,6 +823,16 @@ impl Node {
 
                                     match msg {
                                         NetworkMessage::Block(block) => {
+                                        if let Some(metrics) = &self.metrics {
+                                            if let Ok(now) = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                            {
+                                                let observed_ms = now.as_millis().saturating_sub(block.timestamp);
+                                                metrics
+                                                    .block_propagation_seconds
+                                                    .observe(observed_ms as f64 / 1_000.0);
+                                            }
+                                        }
                                         if let Err(e) = NetworkMessage::validate_block_size(&block) {
                                             warn!("Received oversized block from {}: {:?}", peer_id, e);
                                             self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {}", e); std::process::exit(1); }).report_oversized_message(&peer_id);

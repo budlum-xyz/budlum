@@ -11,6 +11,8 @@ data_dir = "./data/mainnet/budlum.db"
 snapshot_dir = "./data/mainnet/snapshots"
 backup_dir = "./data/mainnet/backups"
 backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
 
 [p2p]
 identity_file = "./secrets/mainnet-node-id.key"

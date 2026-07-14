@@ -24,11 +24,11 @@ This chapter is the operational truth table for the current repository. Budlum C
 | --- | --- |
 | Finality | Prevote/Precommit structs, `FinalityAggregator`, certificate production and BLS verification are all implemented and tested. BLS-signed vote production from validators is wired: `sign_prevote()` and `sign_precommit()` use the validator's BLS secret key. The periodic voting loop auto-signs and broadcasts BLS prevotes; auto-precommit fires when the aggregator reports prevote quorum reached. Adversarial multi-node finality tests are implemented. |
 | P2P | Version and chain ID are enforced. Persistent identity, durable bans, mDNS policy, and DNS seed resolution are wired at runtime. Validator-set hash and supported-scheme policy remain pending. |
-| RPC | Config parses public/operator listeners and trusted proxies. Runtime starts two separate servers (public + operator). `is_ip_allowed` enforces trusted-proxy validation: only requests from configured proxy IPs may use `X-Forwarded-For`. Header-derived client IPs are constrained to trusted proxies. Health and node-info endpoints are live. Per-client quotas remain global-scope. |
-| Metrics | Prometheus descriptors and endpoint exist. Live collectors are wired: `budlum_chain_height`, `budlum_finalized_height`, `budlum_finality_lag`, `budlum_blocks_produced`, `budlum_transactions_processed`, `budlum_reorgs_total`, `budlum_mempool_size`, `budlum_mempool_evictions`, `budlum_mempool_expired_cleanups`, `budlum_p2p_messages_received`, `budlum_p2p_peers_connected`. Most storage, settlement, and consensus histograms still need collector wiring. |
-| Snapshot V2 | V2 is the canonical runtime format. `AccountState::from_snapshot_v2()` restores all consensus metadata (epoch, base_fee, block_reward, unbonding_queue, cross-domain roots, finality certs). `Blockchain` startup tries V2 then V1. P2P snapshots embed V2 data for backward-compatible transport. `apply_state_snapshot` tries V2 restore first. Chunk-session binding via `session_id` prevents cross-session chunk mixing. Replay equivalence is verified. Archive-node policy remains pending. |
-| Storage | Durable block commit exists. Complete persisted `ConsensusStateV2` envelope, released migrations, and restore drills remain. |
-| Deployment | Docker multi-stage image, 4-node docker-compose devnet with Prometheus, systemd unit file, and fuzz harnesses exist. Release ceremony records and incident runbooks remain. |
+| RPC | Separate public/operator listeners, trusted-proxy validation, per-IP sliding-window quotas, a 10,000-client accounting ceiling, and operator-only guards for administrative mutation helpers. Health and node-info endpoints are live. |
+| Metrics | Prometheus descriptors and endpoint exist. Live collectors include chain/finality/mempool/P2P counters plus block-propagation, consensus-round and storage read/write histograms, settlement commitments and sealed global headers. Deployment SLOs and external dashboards remain operator work. |
+| Snapshot V2 | V2 is the canonical runtime format. `AccountState::from_snapshot_v2()` restores consensus metadata; P2P snapshot chunks bind `session_id`; replay equivalence is tested. Archive nodes now fail closed against pruning and require rotating backups. |
+| Storage | Durable block commit plus checksummed atomic database backup, retention, empty-target restore and integrity drill exist. Complete released `ConsensusStateV2` migrations remain Tur 13.9 work. |
+| Deployment | Docker/systemd/devnet/Prometheus packages plus production, PoA and archive runbooks exist. Signed release ceremony and full incident exercises remain. |
 
 ## 3. Explicit Mainnet Blockers
 
@@ -57,8 +57,10 @@ Current: **332 tests, 0 clippy warnings.** All gates pass.
 ## 5. What Remains for Mainnet v1
 
 - External security audit
-- Archive-node policy and backup restore drills
-- Staged migration framework for `ConsensusStateV2`
-- Production runbooks and incident response procedures
-- Per-client (per-IP) RPC quotas and operator-only admin methods
-- Prometheus histograms for storage and consensus latency
+- Staged migration framework for `ConsensusStateV2` (Tur 13.9)
+- Full incident-response exercises and signed release ceremony
+- BLS/PQ HSM signing paths beyond Ed25519 PKCS#11 (Tur 13.9)
+
+Tur 13.5 closed the archive/restore policy, baseline production/PoA runbook,
+bounded per-IP quota accounting, operator-only guards and live latency
+histograms. See `docs/operations/`.

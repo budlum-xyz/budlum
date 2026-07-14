@@ -30,6 +30,31 @@ impl ConsensusDomainRegistry {
         if domain.operator == Some(crate::core::address::Address::zero()) {
             return Err(format!("Domain {} has invalid zero operator", domain.id));
         }
+
+        if domain.finality_adapter == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
+            if domain.kind != crate::domain::types::ConsensusKind::PoW {
+                return Err(format!(
+                    "Domain {} uses the PoW header adapter with a non-PoW consensus kind",
+                    domain.id
+                ));
+            }
+            domain
+                .pow_parameters
+                .as_ref()
+                .ok_or_else(|| {
+                    format!(
+                        "Domain {} uses the PoW header adapter without pow_parameters",
+                        domain.id
+                    )
+                })?
+                .validate(domain.min_confirmations)?;
+        } else if domain.pow_parameters.is_some() {
+            return Err(format!(
+                "Domain {} supplies pow_parameters for incompatible adapter {}",
+                domain.id, domain.finality_adapter
+            ));
+        }
+
         self.domains.insert(domain.id, domain);
         Ok(())
     }
@@ -77,27 +102,55 @@ pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     let block_scheme = domain.block_hash_scheme.as_bytes();
     let state_scheme = domain.state_root_scheme.as_bytes();
     let tx_scheme = domain.tx_root_scheme.as_bytes();
+    let operator = domain
+        .operator
+        .map(|address| address.as_bytes().to_vec())
+        .unwrap_or_default();
 
-    hash_fields_bytes(&[
-        b"BDLM_DOMAIN_REGISTRY_LEAF_V1",
-        &domain.id.to_le_bytes(),
-        &kind,
-        status,
-        &domain.domain_chain_id.to_le_bytes(),
-        &domain
-            .operator
-            .map(|address| address.as_bytes().to_vec())
-            .unwrap_or_default(),
-        &domain.operator_bond.to_le_bytes(),
-        &domain.config_hash,
-        &domain.validator_set_hash,
-        domain.finality_adapter.as_bytes(),
-        &domain.min_confirmations.to_le_bytes(),
-        &[domain.bridge_enabled as u8],
-        &block_scheme,
-        &state_scheme,
-        &tx_scheme,
-    ])
+    if let Some(params) = &domain.pow_parameters {
+        let mut pow_parameters = Vec::with_capacity(4 + 4 + 16 + 4);
+        pow_parameters.extend_from_slice(&params.min_difficulty_bits.to_le_bytes());
+        pow_parameters.extend_from_slice(&params.max_difficulty_bits.to_le_bytes());
+        pow_parameters.extend_from_slice(&params.min_cumulative_work.to_le_bytes());
+        pow_parameters.extend_from_slice(&params.max_headers.to_le_bytes());
+        hash_fields_bytes(&[
+            b"BDLM_DOMAIN_REGISTRY_LEAF_V2",
+            &domain.id.to_le_bytes(),
+            &kind,
+            status,
+            &domain.domain_chain_id.to_le_bytes(),
+            &operator,
+            &domain.operator_bond.to_le_bytes(),
+            &domain.config_hash,
+            &domain.validator_set_hash,
+            domain.finality_adapter.as_bytes(),
+            &domain.min_confirmations.to_le_bytes(),
+            &pow_parameters,
+            &[domain.bridge_enabled as u8],
+            &block_scheme,
+            &state_scheme,
+            &tx_scheme,
+        ])
+    } else {
+        // Preserve the exact V1 leaf for every pre-Tur-13.5 domain.
+        hash_fields_bytes(&[
+            b"BDLM_DOMAIN_REGISTRY_LEAF_V1",
+            &domain.id.to_le_bytes(),
+            &kind,
+            status,
+            &domain.domain_chain_id.to_le_bytes(),
+            &operator,
+            &domain.operator_bond.to_le_bytes(),
+            &domain.config_hash,
+            &domain.validator_set_hash,
+            domain.finality_adapter.as_bytes(),
+            &domain.min_confirmations.to_le_bytes(),
+            &[domain.bridge_enabled as u8],
+            &block_scheme,
+            &state_scheme,
+            &tx_scheme,
+        ])
+    }
 }
 
 #[cfg(test)]

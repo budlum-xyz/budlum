@@ -18,7 +18,7 @@ Same binary, three operator shapes. Configs are Strict Config V2 (`deny_unknown_
 | Produce blocks | — | ✓ devnet | ✓ HSM |
 | Disk `ValidatorKeys` (BLS/PQ) | — | ✓ devnet only | **forbidden** |
 | Bridge mint (non-PoW domains) | — | if features on | policy + `bridge_enabled` |
-| Bridge mint from **PoW** domains | disabled until light-client (Tur 13.5) | same | same |
+| Bridge mint from **PoW** domains | `pow-header-chain-v1` only; legacy proofs gated | same | same |
 | `VerifyMerkle` inside STARK | Production-gated (Z-B 3.5) | Testing/experimental | Production-gated |
 | B.U.D. storage network | — | — | — | **Tur 14 only** |
 

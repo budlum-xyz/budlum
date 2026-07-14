@@ -1,85 +1,57 @@
 name: CI
 
-# Bu iş akışı, main dalına her push'ta VE her Pull Request'te otomatik
-# çalışır. Amaç: kimsenin "derledim, testler geçti" demesine güvenmeden,
-# GitHub'ın kendi sunucusunda tarafsız bir şekilde bunu doğrulamak.
-#
-# Tur 8.x: Bu workflow mainnet-hazırlık sıkılığında. Tüm yeni
-# kodlar üç kapıdan geçmek zorunda:
-#   1. cargo fmt --check  (whitespace tutarlılığı)
-#   2. cargo clippy -D warnings  (lint ihlali YOK)
-#   3. cargo test --lib   (423 testin hepsi geçmeli)
-# `cargo deny` ve Nix/FlakeHub tabanlı CI kaldırıldı (lisans/advisory
-# taraması ayrı bir sprint'te eklenecek; budlum repo'sunda deny.toml
-# zaten var ama crate sayısı 96+ olduğu için upstream lisans cleanup'i
-# Tur 9.x'te planlanıyor).
-
 on:
   push:
-    branches: [ main ]
+    branches: [main, "arena/**"]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  build-and-test:
+  budlum:
+    name: Budlum Core
     runs-on: ubuntu-latest
-
     steps:
-      # 1. Budlum reposunu "Budlum" klasörüne çek
-      - name: Checkout Budlum
-        uses: actions/checkout@v4
-        with:
-          path: Budlum
-
-      # 2. BudZero (BudZKVM) sibling olarak bizim fork'umuzdan çek.
-      #    Budlum'un Cargo.toml'u ../BudZKVM path bağımlılığı beklediği için
-      #    bu isim ve konum birebir önemli. lubosruler/BudZero bizim
-      #    çalışma fork'umuz; upstream budlum-xyz/BudZero public bir
-      #    referanstır ama bizim güncel Tur 8 değişikliklerimizi içermez.
-      - name: Checkout BudZero (as sibling ../BudZero)
-        uses: actions/checkout@v4
-        with:
-          repository: lubosruler/BudZero
-          # Tur 12.9: pin BudZero main (event_digest AIR fix + budlum public-input align)
-          # (event_digest AIR limbs) with Z-A phase2 bindings.
-          ref: c9c5f477afa578f79872e6a2c688dd44720d74e9
-          path: BudZero
-
-      # 3. Rust toolchain'i kur (reponun beklediği sürüm)
+      - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.94.0"
           components: clippy, rustfmt
-
-      # 4. protoc kur (build.rs bunu gerektiriyor)
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           version: "29.x"
-
-      # 5. Cache: incremental build için cargo + target klasörünü sakla
-      - name: Cache cargo registry and build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: Budlum
-
-      # 6. FORMAT KAPISI: whitespace tutarlılığı. Reddedilirse
-      # `cargo fmt --all` ile düzeltilir.
-      - name: cargo fmt --check
-        working-directory: Budlum
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
         run: cargo fmt --all -- --check
-
-      # 7. CLIPPY KAPISI: lint ihlali YOK. -D warnings ile tüm
-      # uyarılar hata sayılır. Bu, Tur 8 audit findings #1, #2, #3, #4,
-      # #5, #6, #7, #8, #9, #10'un hepsi clippy-clean bir codebase
-      # üzerine inşa edildiğini garantiler.
-      - name: cargo clippy
-        working-directory: Budlum
+      - name: Clippy
         run: cargo clippy --lib --tests -- -D warnings
-
-      # 8. TEST KAPISI: asıl doğrulama burada. 423 testin hepsi
-      # geçmeli (Tur 8 sonrası).
-      - name: cargo test
-        working-directory: Budlum
+      - name: Test
         run: cargo test --lib --verbose
+
+  budzero:
+    name: BudZero / BudZKVM
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: budzero
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: budzero
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace

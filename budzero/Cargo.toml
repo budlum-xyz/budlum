@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "bud-compiler",
+    "bud-vm",
+    "bud-isa",
+    "bud-state",
+    "bud-proof",
+    "bud-node",
+    "bud-cli",
+]
+resolver = "2"
+
+[workspace.package]
+license = "MIT"

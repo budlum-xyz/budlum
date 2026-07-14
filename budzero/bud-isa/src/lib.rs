@@ -1,0 +1,224 @@
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opcode {
+    Halt = 0x00,
+    Add = 0x01,
+    Sub = 0x02,
+    Mul = 0x03,
+    Div = 0x04,
+    Inv = 0x05,
+    And = 0x06,
+    Or = 0x07,
+    Xor = 0x08,
+    Not = 0x09,
+    Eq = 0x0A,
+    Neq = 0x0B,
+    Lt = 0x0C,
+    Gt = 0x0D,
+    Lte = 0x0E,
+    Gte = 0x0F,
+    Jmp = 0x10,
+    Jnz = 0x11,
+    Call = 0x12,
+    Ret = 0x13,
+    Load = 0x14,
+    Store = 0x15,
+    Push = 0x16,
+    Pop = 0x17,
+    Assert = 0x18,
+    Poseidon = 0x19,
+    Log = 0x1A,
+    SRead = 0x1B,
+    SWrite = 0x1C,
+    Syscall = 0x1D,
+    VerifyMerkle = 0x1E,
+}
+
+impl Opcode {
+    /// Opcodes that must not run under the Production ISA profile.
+    /// Tur 13: VerifyMerkle stays experimental until Z-B Commit 3.5
+    /// (`proves_verify_merkle_valid_64_depth` green). Partial path fixes landed
+    /// (pre-round currents, single-round hash, original-only root check).
+    pub fn is_experimental(&self) -> bool {
+        matches!(self, Opcode::VerifyMerkle)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsaProfile {
+    Production,
+    Experimental,
+    Testing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    InvalidOpcode(u8),
+    ExperimentalOpcodeDisabled(Opcode, IsaProfile),
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::InvalidOpcode(op) => write!(f, "Unknown opcode 0x{:02X}", op),
+            DecodeError::ExperimentalOpcodeDisabled(op, profile) => {
+                write!(
+                    f,
+                    "Opcode {:?} is experimental and disabled in {:?} profile",
+                    op, profile
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Instruction {
+    pub opcode: Opcode,
+    pub rd: u8,
+    pub rs1: u8,
+    pub rs2: u8,
+    pub imm: i32,
+}
+
+impl Instruction {
+    pub fn encode(&self) -> u64 {
+        let mut res = self.opcode as u64;
+        res |= (self.rd as u64) << 8;
+        res |= (self.rs1 as u64) << 13;
+        res |= (self.rs2 as u64) << 18;
+        res |= ((self.imm as u32) as u64) << 23;
+        res
+    }
+
+    pub fn decode_any(val: u64) -> Result<Self, DecodeError> {
+        let op_u8 = (val & 0xFF) as u8;
+        let opcode = match op_u8 {
+            0x00 => Opcode::Halt,
+            0x01 => Opcode::Add,
+            0x02 => Opcode::Sub,
+            0x03 => Opcode::Mul,
+            0x04 => Opcode::Div,
+            0x05 => Opcode::Inv,
+            0x06 => Opcode::And,
+            0x07 => Opcode::Or,
+            0x08 => Opcode::Xor,
+            0x09 => Opcode::Not,
+            0x0A => Opcode::Eq,
+            0x0B => Opcode::Neq,
+            0x0C => Opcode::Lt,
+            0x0D => Opcode::Gt,
+            0x0E => Opcode::Lte,
+            0x0F => Opcode::Gte,
+            0x10 => Opcode::Jmp,
+            0x11 => Opcode::Jnz,
+            0x12 => Opcode::Call,
+            0x13 => Opcode::Ret,
+            0x14 => Opcode::Load,
+            0x15 => Opcode::Store,
+            0x16 => Opcode::Push,
+            0x17 => Opcode::Pop,
+            0x18 => Opcode::Assert,
+            0x19 => Opcode::Poseidon,
+            0x1A => Opcode::Log,
+            0x1B => Opcode::SRead,
+            0x1C => Opcode::SWrite,
+            0x1D => Opcode::Syscall,
+            0x1E => Opcode::VerifyMerkle,
+            _ => return Err(DecodeError::InvalidOpcode(op_u8)),
+        };
+        let rd = ((val >> 8) & 0x1F) as u8;
+        let rs1 = ((val >> 13) & 0x1F) as u8;
+        let rs2 = ((val >> 18) & 0x1F) as u8;
+        let imm = ((val >> 23) & 0xFFFFFFFF) as i32;
+
+        Ok(Self {
+            opcode,
+            rd,
+            rs1,
+            rs2,
+            imm,
+        })
+    }
+
+    pub fn decode_for_profile(val: u64, profile: IsaProfile) -> Result<Self, DecodeError> {
+        let inst = Self::decode_any(val)?;
+        if inst.opcode.is_experimental() {
+            // Production always rejects experimental opcodes (Tur 11.9 / A13).
+            // Testing/Experimental profiles allow them so unit/ZK harnesses can
+            // exercise VerifyMerkle while mainnet decode stays closed.
+            if profile == IsaProfile::Production {
+                return Err(DecodeError::ExperimentalOpcodeDisabled(
+                    inst.opcode,
+                    profile,
+                ));
+            }
+            #[cfg(not(feature = "experimental"))]
+            if profile == IsaProfile::Experimental {
+                // Experimental profile without the cargo feature still blocked.
+                return Err(DecodeError::ExperimentalOpcodeDisabled(
+                    inst.opcode,
+                    profile,
+                ));
+            }
+        }
+        Ok(inst)
+    }
+
+    pub fn decode(val: u64) -> Result<Self, String> {
+        #[cfg(feature = "experimental")]
+        let profile = IsaProfile::Experimental;
+        #[cfg(all(not(feature = "experimental"), test))]
+        let profile = IsaProfile::Testing;
+        #[cfg(all(not(feature = "experimental"), not(test)))]
+        let profile = IsaProfile::Production;
+
+        Self::decode_for_profile(val, profile).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tur119_verify_merkle_disabled_in_production() {
+        let raw = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
+        let err = Instruction::decode_for_profile(raw, IsaProfile::Production)
+            .expect_err("VerifyMerkle must be disabled in Production");
+        match err {
+            DecodeError::ExperimentalOpcodeDisabled(
+                Opcode::VerifyMerkle,
+                IsaProfile::Production,
+            ) => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // decode_any still parses the opcode for experimental/test tooling.
+        let inst = Instruction::decode_any(raw).unwrap();
+        assert_eq!(inst.opcode, Opcode::VerifyMerkle);
+        assert!(inst.opcode.is_experimental());
+    }
+
+    #[test]
+    fn tur119_plain_opcodes_still_decode_in_production() {
+        let raw = Instruction {
+            opcode: Opcode::Add,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
+        let inst = Instruction::decode_for_profile(raw, IsaProfile::Production).unwrap();
+        assert_eq!(inst.opcode, Opcode::Add);
+    }
+}

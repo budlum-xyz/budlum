@@ -179,8 +179,8 @@ pub trait BudlumApi {
         tx: Transaction,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Register as a relayer by bonding stake. Staking == registration; no
-    /// whitelist or approval. Returns the resulting relayer status.
+    /// Legacy operator helper for test/dev administration. Public participants
+    /// must use a signed Stake transaction through `bud_registryRegister`.
     #[method(name = "bud_registryBondRelayer")]
     async fn registry_bond_relayer(
         &self,
@@ -188,8 +188,8 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Register as a prover by bonding stake. OPTIONAL — proof submission is
-    /// permissionless; registering only makes a prover eligible for rewards.
+    /// Legacy operator helper for a prover bond. Proof submission remains
+    /// permissionless; public stake registration uses a signed Stake tx.
     #[method(name = "bud_registryBondProver")]
     async fn registry_bond_prover(
         &self,

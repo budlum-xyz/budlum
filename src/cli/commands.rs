@@ -158,6 +158,20 @@ pub struct NodeConfig {
     #[arg(long)]
     pub backups_enabled: Option<bool>,
 
+    #[arg(long, default_value = "3600")]
+    pub backup_interval_secs: u64,
+
+    #[arg(long, default_value = "24")]
+    pub backup_retention_count: usize,
+
+    /// Write one verified backup and exit.
+    #[arg(long)]
+    pub backup_now: bool,
+
+    /// Restore a backup into `db_path` (which must be empty) and exit.
+    #[arg(long)]
+    pub restore_backup: Option<String>,
+
     #[arg(long)]
     pub p2p_identity_file: Option<String>,
 
@@ -257,6 +271,10 @@ impl Default for NodeConfig {
             snapshot_dir: None,
             backup_dir: None,
             backups_enabled: None,
+            backup_interval_secs: 3600,
+            backup_retention_count: 24,
+            backup_now: false,
+            restore_backup: None,
             p2p_identity_file: None,
             dns_seeds: Vec::new(),
             max_peers: None,
@@ -317,6 +335,8 @@ pub struct StorageSection {
     pub snapshot_dir: Option<String>,
     pub backup_dir: Option<String>,
     pub backups_enabled: Option<bool>,
+    pub backup_interval_secs: Option<u64>,
+    pub backup_retention_count: Option<usize>,
     pub db_path: Option<String>, // backwards-compatibility alias
 }
 
@@ -516,6 +536,12 @@ impl NodeConfig {
             }
             if self.backups_enabled.is_none() {
                 self.backups_enabled = storage.backups_enabled;
+            }
+            if let Some(interval) = storage.backup_interval_secs {
+                self.backup_interval_secs = interval;
+            }
+            if let Some(retention) = storage.backup_retention_count {
+                self.backup_retention_count = retention;
             }
         }
 
@@ -737,6 +763,25 @@ impl NodeConfig {
 
     // Strict validation rules for production environments (especially Mainnet profile)
     fn validate_strict_rules(&self) {
+        if self.backup_interval_secs == 0 {
+            eprintln!("CRITICAL CONFIGURATION ERROR: backup_interval_secs must be non-zero.");
+            std::process::exit(1);
+        }
+        if self.backup_retention_count == 0 {
+            eprintln!("CRITICAL CONFIGURATION ERROR: backup_retention_count must be non-zero.");
+            std::process::exit(1);
+        }
+        if self.role == "archive" {
+            if self.features_pruning {
+                eprintln!("CRITICAL CONFIGURATION ERROR: archive nodes may not enable pruning.");
+                std::process::exit(1);
+            }
+            if self.backups_enabled != Some(true) || self.backup_dir.is_none() {
+                eprintln!("CRITICAL CONFIGURATION ERROR: archive nodes require backups_enabled=true and backup_dir.");
+                std::process::exit(1);
+            }
+        }
+
         if let Some(chain_id) = self.chain_id {
             let expected_chain_id = self.network.chain_id().value();
             if chain_id != expected_chain_id {
@@ -918,6 +963,7 @@ mod persona_config_tests {
             "config/personas/user-devnet.toml",
             "config/personas/developer.toml",
             "config/personas/enterprise-poa.toml",
+            "config/archive.toml",
         ] {
             let content =
                 std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));

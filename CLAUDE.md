@@ -2,8 +2,9 @@
 
 > Bu dosya AI ajanları (Cursor / Claude Code) her oturumda otomatik okur.
 > Master Context + bu repoya özel kurallar aşağıdadır. Kapsam: sadece
-> `budlum-core` (ağ / L1). Diğer bileşenler (DeEd, SocialFi, B.U.D., Budlum Go,
-> DeArt, katılım bankası, BudZKVM) bu talimat setinin dışındadır.
+> `budlum-core` (ağ / L1) ve Tur 13.5'te aynı repoya alınan `budzero/`
+> (BudZKVM). Diğer bileşenler (DeEd, SocialFi, B.U.D., Budlum Go, DeArt,
+> katılım bankası) bu talimat setinin dışındadır.
 
 ---
 
@@ -104,6 +105,10 @@ KABUL KRİTERLERİ:
 ---
 
 ## 4. Uygulama Durumu (mevcut kod haritası)
+
+- **Monorepo (Tur 13.5):** BudZero/BudZKVM kaynakları `budzero/` altındadır.
+  L1 path dependency'leri in-tree'dir; sibling checkout/pin geri getirme.
+  `budzero/CLAUDE.md` ZK katmanı için ek kuralları taşır.
 
 Permissionless katılım modeli ve PoA izolasyonu şu modüllerde uygulanmıştır:
 

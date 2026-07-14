@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub type DomainId = u32;
 pub type Hash32 = [u8; 32];
 
+pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConsensusKind {
     PoW,
@@ -72,6 +74,40 @@ fn default_domain_operator_bond() -> u64 {
     crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND
 }
 
+/// Consensus-critical limits for the bounded PoW header-chain verifier.
+///
+/// These parameters are fixed when a domain is registered. In particular,
+/// difficulty is never accepted from a relayer without checking it against
+/// this range, and the verifier never accepts an unbounded header vector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PoWDomainParameters {
+    pub min_difficulty_bits: u32,
+    pub max_difficulty_bits: u32,
+    pub min_cumulative_work: u128,
+    pub max_headers: u32,
+}
+
+impl PoWDomainParameters {
+    pub fn validate(&self, min_confirmations: u64) -> Result<(), String> {
+        if self.min_difficulty_bits == 0 || self.max_difficulty_bits > 120 {
+            return Err("PoW difficulty range must be within 1..=120 bits".into());
+        }
+        if self.min_difficulty_bits > self.max_difficulty_bits {
+            return Err("PoW min_difficulty_bits exceeds max_difficulty_bits".into());
+        }
+        if self.min_cumulative_work == 0 {
+            return Err("PoW min_cumulative_work must be non-zero".into());
+        }
+        if self.max_headers == 0 || self.max_headers > 4096 {
+            return Err("PoW max_headers must be within 1..=4096".into());
+        }
+        if min_confirmations == 0 || min_confirmations > u64::from(self.max_headers) {
+            return Err("PoW min_confirmations must be within 1..=max_headers".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConsensusDomain {
     pub id: DomainId,
@@ -92,6 +128,11 @@ pub struct ConsensusDomain {
     pub tx_root_scheme: RootScheme,
     pub last_committed_height: u64,
     pub last_committed_hash: Hash32,
+    /// Required when `finality_adapter == "pow-header-chain-v1"`.
+    /// Appended for bincode field-order stability; legacy records are migrated
+    /// by the storage loader and remain bridge-gated.
+    #[serde(default)]
+    pub pow_parameters: Option<PoWDomainParameters>,
 }
 
 impl ConsensusDomain {

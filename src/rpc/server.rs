@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 use tower::{Layer, Service, ServiceBuilder};
 use tracing::info;
 
+/// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
+/// rotating source addresses can turn rate limiting itself into a memory DoS.
+const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
+
 // Tur 6 (security audit §5): `auth_required` defaults to `true` (secure
 // by default). Operators that explicitly want an unauthenticated RPC
 // must call [`RpcSecurityConfig::operator_default`], which logs a
@@ -61,10 +65,10 @@ impl RpcSecurityConfig {
         // at every server start so an operator cannot accidentally ship
         // an unauthenticated RPC to the public internet.
         tracing::warn!(
-            "[GUVENLIK] RPC auth_required=false — tum state-degistiren metodlar aga acik!"
+            "[GUVENLIK] Operator RPC auth_required=false — yalnizca localhost/ozel ag icindir."
         );
         tracing::warn!(
-            "[GUVENLIK] bud_lockBridgeTransfer, bud_sealGlobalHeader, bud_submitSlashingEvidence dahil."
+            "[GUVENLIK] Yonetim metodlari public listener'da reddedilir; operator listener yine hassastir."
         );
         tracing::warn!(
             "[GUVENLIK] Yalnizca guvenilir / ozel ag uzerinde calistirin (auth_required=true onerilir)."
@@ -74,7 +78,7 @@ impl RpcSecurityConfig {
             api_key: None,
             allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
             cors_origins: Vec::new(),
-            rate_limit_per_minute: None,
+            rate_limit_per_minute: Some(120),
             trusted_proxies: Vec::new(),
             max_request_body_size: Some(50 * 1024 * 1024),
             max_connections: Some(10),
@@ -265,6 +269,18 @@ impl RpcServer {
         Ok(())
     }
 
+    fn require_operator(&self, method: &str) -> Result<(), ErrorObjectOwned> {
+        if self.mode == RpcMode::Operator {
+            Ok(())
+        } else {
+            Err(ErrorObjectOwned::owned(
+                -32004,
+                format!("{method} is available only on the operator RPC listener"),
+                None::<()>,
+            ))
+        }
+    }
+
     fn to_hex(n: u64) -> String {
         format!("0x{:x}", n)
     }
@@ -359,6 +375,7 @@ impl RpcServer {
             "validatorSetHash": Self::bytes32_to_0x(d.validator_set_hash),
             "finalityAdapter": d.finality_adapter,
             "minConfirmations": Self::to_hex(d.min_confirmations),
+            "powParameters": d.pow_parameters,
             "bridgeEnabled": d.bridge_enabled,
             "blockHashScheme": format!("{:?}", d.block_hash_scheme),
             "stateRootScheme": format!("{:?}", d.state_root_scheme),
@@ -513,6 +530,20 @@ fn is_per_ip_rate_limited(
         Ok(rates) => rates,
         Err(_) => return false,
     };
+
+    // Opportunistically evict expired clients before admitting a new address.
+    // The retain scan happens only at the ceiling, not on every request.
+    if !rates.contains_key(&ip) && rates.len() >= MAX_TRACKED_RPC_CLIENTS {
+        rates.retain(|_, window| {
+            while window.front().is_some_and(|instant| *instant < cutoff) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
+        if rates.len() >= MAX_TRACKED_RPC_CLIENTS {
+            return false;
+        }
+    }
 
     let window = rates.entry(ip).or_default();
     while window.front().is_some_and(|instant| *instant < cutoff) {
@@ -715,6 +746,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         domain: crate::domain::ConsensusDomain,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerConsensusDomain")?;
         let domain_id = domain.id;
         self.chain
             .register_consensus_domain(domain)
@@ -802,6 +834,7 @@ impl BudlumApiServer for RpcServer {
         asset_id: crate::cross_domain::AssetId,
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerBridgeAsset")?;
         self.chain
             .register_bridge_asset(asset_id, domain)
             .await
@@ -940,6 +973,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_sealGlobalHeader")?;
         let header = self.chain.seal_global_header().await.map_err(|e| {
             ErrorObjectOwned::owned(
                 -32602,
@@ -989,6 +1023,10 @@ impl BudlumApiServer for RpcServer {
         address: String,
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // This legacy helper mutates stake without a signed transaction. Keep
+        // it operator-only; permissionless users use `bud_registryRegister`
+        // with a signed Stake transaction.
+        self.require_operator("bud_registryBondRelayer")?;
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {}", e), None::<()>)
@@ -1015,6 +1053,7 @@ impl BudlumApiServer for RpcServer {
         address: String,
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registryBondProver")?;
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {}", e), None::<()>)
