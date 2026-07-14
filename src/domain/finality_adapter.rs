@@ -890,7 +890,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     }
                     valid_signers.insert(sig.authority);
                 }
-                let required = (authority_set.len() * 2 + 2) / 3;
+                let required = (authority_set.len() * 2).div_ceil(3);
                 if valid_signers.len() >= required {
                     Ok(FinalityStatus::Finalized)
                 } else {
