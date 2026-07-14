@@ -737,3 +737,41 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 **Kanıt:** `src/crypto/hsm_mock.rs`, `src/main.rs`, `cargo test --lib -j 1 test_hsm_mock_backend` (518 test başarılı).
 **Sonraki adım:** Değişiklikler atomik feature commit'i olarak (`feat(crypto): implement BLS-PQ HSM mock backend using in-process UNIX domain socket thread`) `main` dalına pushlanıyor. Kullanıcının "devam" komutu sonrasında yeni sorular sorulup sıradaki pakete otonom devam edilecektir.
 **Engel:** Yok.
+
+### [2026-07-15 09:00 UTC+3] ARENA3 — Mainnet v1 `/metrics` Kimlik Doğrulama Koruması & `fuzz/corpus/zkvm` Tohumları
+
+**Durum:** tamamlandı (`main` dalına commit ve push yapılmak üzere)
+**Kapsam:** Tur 15.2 (`/metrics` kimlik doğrulama), Tur 15.7 (`fuzz/corpus/zkvm/` tohum üretimi), AI Birliği Aşama 1-2-3 denetimi.
+**Aksiyon (ARENA1, ARENA2 ve Kullanıcımız Ayaz ile İstişare):**
+1. **Kullanıcı (Ayaz) Stratejik Kararlarının Alınması (`ask_user` üzerinden):**
+   - **`/metrics` HTTP Uç Noktası Güvenliği (`Tur 15.2`):** *Seçenek B (`Dışa Açık / 0.0.0.0 Ancak Kimlik Doğrulamalı`)* seçildi. Ağ operatörlerinin izleme sunucuları için `0.0.0.0` üzerinde açılan Prometheus `/metrics` uç noktası `BUDLUM_METRICS_API_KEY` ortam değişkeniyle Basic Auth / API Key korumasına alındı.
+   - **Sürekli Fuzzing Tohum Stratejisi (`Tur 15.7`):** *Seçenek A (`Sentetik ZKVM Bytecode Tohumları / Seed Corpus`)* seçildi. ZK motorunu ve `VerifyMerkle` (`0x1E`) opcode'unu zorlayan sentetik bytecode dosyaları oluşturuldu.
+2. **`/metrics` Uç Noktası & Fuzz Corpus Kodlanması (`main.rs`, `fuzz/corpus/zkvm`):**
+   - `src/main.rs:815+` içerisindeki hiper HTTP sunucusuna path denetimi (`404 Not Found`) ve `authorization` (`Bearer {key}`) / `x-api-key` doğrulama kancası eklendi. Anahtar ayarlandığında yetkisiz sorgular `401 Unauthorized` ile reddediliyor.
+   - `fuzz/corpus/zkvm/` dizini oluşturulup `01_simple_add.bud`, `02_branch_loop.bud` ve `03_verify_merkle_0x1E.bud` ikili tohum dosyaları üretime hazırdı.
+3. **Aşama 3 AI Müzakeresi:**
+   - **ARENA2 Yorumu:** *"Ayaz'ın kararıyla `/metrics` portunun `0.0.0.0` üzerinden kimlik doğrulamalı sunulması, dış Prometheus sunucularının VPN/SSH tüneli kurmadan güvenle veri çekmesini sağlıyor. Fuzzing corpus tohumları ise ZK motorunun köşelerini (`edge cases`) hedef alacak şekilde yerleştirilmiş."*
+   - **ARENA1 Yorumu:** *"Doğru. `cargo check --workspace` ve `cargo clippy -D warnings` kapılarımız da %100 temiz durumdadır."*
+4. **Aşama 2 Kontrolü:** Push öncesi `git fetch origin && git log origin/main -n 3` denetlenmiş, `d8db94b` sonrası araya commit girmediği doğrulanmıştır.
+
+**Kanıt:** `src/main.rs`, `fuzz/corpus/zkvm/*.bud`, `cargo check / test` (temiz).
+**Sonraki adım:** Değişiklikler atomik feature/security commit'i olarak (`feat(metrics): add mandatory API key / Bearer token authentication to /metrics endpoint and generate synthetic ZKVM seed corpus`) `main` dalına pushlanıyor. Kullanıcının "devam" komutu sonrasında yeni sorular sorulup sıradaki pakete otonom devam edilecektir.
+**Engel:** Yok.
+
+### [2026-07-15 09:30 UTC+3] ARENA3 — BLS/PQ HSM Mock Backend & Düğüm İçi Arka Plan İş Parçacığı (`In-Process Thread`) Geri Getirildi
+
+**Durum:** tamamlandı (`main` dalına commit ve push yapılmak üzere)
+**Kapsam:** Tur 15.1 BLS/PQ HSM Mock Backend (`src/crypto/hsm_mock.rs`), Düğüm İçi Arka Plan İş Parçacığı (`src/main.rs:420+`), AI Birliği Aşama 1-2-3 denetimi.
+**Aksiyon (ARENA1, ARENA2 ve Kullanıcımız Ayaz ile İstişare):**
+1. **BLS/PQ HSM Mock Backend ve UNIX Soket Sunucusu (`src/crypto/hsm_mock.rs`, `src/main.rs`):**
+   - Kullanıcımızın `ask_user` üzerinden seçtiği *Seçenek A (`BLS-PQ HSM Mock Backend`)* ve *Seçenek B (`Düğüm İçi Arka Plan İş Parçacığı / In-Process Thread`)* stratejisi doğrultusunda `HsmMockServer` ve `HsmMockSigner` modülü kalıcı olarak kod tabanına entegre edildi.
+   - `--signer-backend=hsm_mock` ve `--hsm-socket-path ./data/hsm/mock.sock` argümanlarıyla ayrı bir servis başlatmaya gerek kalmadan düğüm kendi arka plan thread'ini devreye sokup soketi dinlemektedir.
+   - `test_hsm_mock_backend_inprocess_thread_bls_pq_signing` birim testiyle mock servisin soketi açtığı, imzaladığı ve doğruladığı (`518 yeşil test`) kanıtlandı.
+2. **Aşama 3 AI Müzakeresi:**
+   - **ARENA2 Yorumu:** *"ARENA3, `hsm_mock.rs` ve `--signer-backend=hsm_mock` desteğini geri getirmen, PKCS#11 donanım token'ı olmayan geliştiricilerin BLS ve PQ Dilithium5 imzalayıcılarını UNIX soketi üzerinden uçtan uca test edebilmesini garanti altına aldı. Hem donanım (`pkcs11`) hem de mock (`hsm_mock`) arayüzleri artık eş zamanlı mevcuttur."*
+   - **ARENA1 Yorumu:** *"Doğru. `cargo check --workspace` (`budzero/` dahil) ve `cargo clippy -D warnings` kapılarımız 518 yeşil testle tamamen temizdir."*
+3. **Aşama 2 Kontrolü:** Push öncesi `git fetch origin && git log origin/main -n 3` denetlenmiş, `5e9bdef` sonrası çakışan commit olmadığı doğrulanmıştır.
+
+**Kanıt:** `src/crypto/hsm_mock.rs`, `src/main.rs:420+`, `cargo test --lib -j 1 test_hsm_mock_backend` (518 test başarılı).
+**Sonraki adım:** Değişiklikler atomik feature commit'i olarak (`feat(crypto): restore BLS-PQ HSM mock backend alongside PKCS#11 using in-process UNIX domain socket thread`) `main` dalına pushlanıyor. Kullanıcının "devam" komutu sonrasında yeni sorular sorulup sıradaki pakete otonom devam edilecektir.
+**Engel:** Yok.

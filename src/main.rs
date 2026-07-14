@@ -418,6 +418,38 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        } else if config.signer_backend.as_deref() == Some("hsm_mock") {
+            let socket_path = &config.hsm_socket_path;
+            let kp = config
+                .validator_key_file
+                .as_ref()
+                .and_then(|p| load_signing_key(p));
+            let bls = budlum_core::crypto::primitives::BlsKeypair::generate().ok();
+            let pq = Some(budlum_core::crypto::primitives::PqKeyPair::generate());
+            match budlum_core::crypto::hsm_mock::HsmMockServer::spawn_inprocess(
+                socket_path,
+                kp,
+                bls,
+                pq,
+            ) {
+                Ok(_server) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    match budlum_core::crypto::hsm_mock::HsmMockSigner::new(socket_path) {
+                        Ok(signer) => {
+                            println!("BLS-PQ HSM mock backend initialized at UNIX socket: {}", socket_path);
+                            Some(Arc::new(signer))
+                        }
+                        Err(e) => {
+                            eprintln!("CRITICAL: Failed to connect to HSM mock socket {}: {}", socket_path, e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("CRITICAL: Failed to spawn HSM mock server: {}", e);
+                    std::process::exit(1);
+                }
+            }
         } else {
             None
         };
@@ -803,9 +835,40 @@ async fn main() {
                     let _ = hyper::server::conn::http1::Builder::new()
                         .serve_connection(
                             io,
-                            service_fn(move |_req: Request<hyper::body::Incoming>| {
+                            service_fn(move |req: Request<hyper::body::Incoming>| {
                                 let body = m.encode();
                                 async move {
+                                    if req.uri().path() != "/metrics" {
+                                        return Ok::<_, std::convert::Infallible>(
+                                            Response::builder()
+                                                .status(404)
+                                                .body(Full::new(Bytes::from("404 Not Found\n")))
+                                                .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("404")))),
+                                        );
+                                    }
+                                    if let Ok(key) = std::env::var("BUDLUM_METRICS_API_KEY") {
+                                        if !key.is_empty() {
+                                            let auth_hdr = req
+                                                .headers()
+                                                .get("authorization")
+                                                .and_then(|v| v.to_str().ok())
+                                                .unwrap_or("");
+                                            let api_key_hdr = req
+                                                .headers()
+                                                .get("x-api-key")
+                                                .and_then(|v| v.to_str().ok())
+                                                .unwrap_or("");
+                                            let bearer = format!("Bearer {key}");
+                                            if auth_hdr != bearer && api_key_hdr != key {
+                                                return Ok(
+                                                    Response::builder()
+                                                        .status(401)
+                                                        .body(Full::new(Bytes::from("401 Unauthorized: metrics require valid BUDLUM_METRICS_API_KEY\n")))
+                                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("401")))),
+                                                );
+                                            }
+                                        }
+                                    }
                                     Ok::<_, std::convert::Infallible>(Response::new(Full::new(
                                         Bytes::from(body),
                                     )))
