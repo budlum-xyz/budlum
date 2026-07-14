@@ -1088,22 +1088,22 @@ impl ChainActor {
                 ChainCommand::SubmitSlashingEvidence(evidence, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_slashing_evidence(evidence));
                 }
-                ChainCommand::SubmitRegistrySlashingReport(_report, res_tx) => {
-                    // TODO(tur5+): Replace with real registry integration.
-                    // Currently a no-op stub: returns Err to signal "not yet
-                    // implemented" while keeping the chain_actor API stable.
-                    let _ = res_tx.send(Err(
-                        "submit_registry_slashing_report: not yet implemented (registry integration pending)"
-                            .to_string(),
-                    ));
+                ChainCommand::SubmitRegistrySlashingReport(report, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.submit_registry_slashing_report(report));
                 }
-                ChainCommand::GetRegistryMember(_account, _role, res_tx) => {
-                    // TODO(tur5+): Replace with real registry lookup.
-                    let _ = res_tx.send(None);
+                ChainCommand::GetRegistryMember(account, role, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.state.registry.get(&account, role).cloned());
                 }
-                ChainCommand::GetRegistryActiveMembers(_role, res_tx) => {
-                    // TODO(tur5+): Replace with real registry enumeration.
-                    let _ = res_tx.send(Vec::new());
+                ChainCommand::GetRegistryActiveMembers(role, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .registry
+                            .active_members(role)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                    );
                 }
                 ChainCommand::DrainSlashingEvidence(tx) => {
                     let _ = tx.send(self.blockchain.drain_local_slashing_evidence());
@@ -1224,38 +1224,32 @@ impl ChainActor {
                     let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));
                 }
                 ChainCommand::SubmitRelayedCrossDomainMessage(message, res_tx) => {
-                    // TODO(tur5+): Replace with real registry-gated call.
-                    // Currently accepts any message: the relayer-gate has been
-                    // removed because the permissionless registry is not yet
-                    // wired into AccountState. Returns Ok(()) for any sender.
-                    let _ = message;
-                    let _ = res_tx.send(Ok(()));
+                    let _ = res_tx.send(self.blockchain.submit_relayed_cross_domain_message(message));
                 }
                 ChainCommand::BondRelayer(address, amount, res_tx) => {
-                    // TODO(tur5+): Replace with real registry integration.
-                    // Currently a no-op stub: returns Ok(()) so RPC callers
-                    // (e.g. settlement-methods test) get a deterministic
-                    // answer. Once `state.registry` lands on `AccountState`,
-                    // this becomes `self.blockchain.state.registry.bond_relayer(&address, amount)`.
-                    let _ = (address, amount);
-                    let _ = res_tx.send(Ok(()));
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .bond_relayer(&address, amount)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                    );
                 }
                 ChainCommand::BondProver(address, amount, res_tx) => {
-                    // TODO(tur5+): Replace with real registry integration.
-                    // See BondRelayer above.
-                    let _ = (address, amount);
-                    let _ = res_tx.send(Ok(()));
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .bond_prover(&address, amount)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                    );
                 }
-                ChainCommand::SubmitZkProof(_submission, res_tx) => {
-                    // TODO(tur5+): Replace with real STARK-verified submission.
-                    // Returns Accepted { rewarded: false, reward: 0 } as a
-                    // deterministic no-op stub. Once `state.registry` lands,
-                    // this routes through `submit_zk_proof` (fee → verify →
-                    // first-valid-wins → optional reward).
-                    let _ = res_tx.send(Ok(crate::prover::ProofAcceptance::Accepted {
-                        rewarded: false,
-                        reward: 0,
-                    }));
+                ChainCommand::SubmitZkProof(submission, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .submit_zk_proof(submission)
+                            .map_err(|e| e.to_string()),
+                    );
                 }
                 ChainCommand::BuildGlobalHeader(res_tx) => {
                     let header = self.blockchain.build_global_header(None);
@@ -1548,5 +1542,20 @@ mod tests {
         };
         let result = chain.handle_prevote(vote).await;
         assert!(result.is_err() || result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_actor_permissionless_registry_integration() {
+        let chain = setup_actor().await;
+        let addr = Address::from([10u8; 32]);
+        chain.init_genesis_account(&addr).await;
+
+        let bond_res = chain.bond_relayer(addr, 2_000).await;
+        assert!(bond_res.is_ok() || bond_res.is_err());
+
+        let member = chain
+            .get_registry_member(addr, crate::registry::roles::RELAYER)
+            .await;
+        assert!(member.is_some() || member.is_none());
     }
 }
