@@ -209,7 +209,10 @@ fn e2e_deal_queries_return_replica_set() {
         )
         .unwrap();
     }
-    assert_eq!(reg.deals_for_shard(&manifest.manifest_id, &shard_id).len(), 3);
+    assert_eq!(
+        reg.deals_for_shard(&manifest.manifest_id, &shard_id).len(),
+        3
+    );
     assert_eq!(reg.deals_for_manifest(&manifest.manifest_id).len(), 3);
 }
 
@@ -235,17 +238,7 @@ fn invariant_1_no_whitelist_for_deal_or_challenge() {
     // Hiçbir yerde kayıtlı olmayan hesap hem deal açar hem challenge açar.
     let stranger = addr(0xEE);
     let deal = reg
-        .open_deal(
-            1,
-            &manifest,
-            shard_id,
-            stranger,
-            0,
-            1,
-            10,
-            good_econ(),
-            &dp,
-        )
+        .open_deal(1, &manifest, shard_id, stranger, 0, 1, 10, good_econ(), &dp)
         .expect("stranger opens a deal without any prior approval");
     let _ = reg
         .open_challenge(deal, 0, 4, 2, 5, stranger, 10)
@@ -271,8 +264,8 @@ fn invariant_2_no_admin_pause_freeze_hook() {
     // elle sayıyoruz:
     let registry: StorageRegistry = StorageRegistry::new();
     let _ = registry; // sadece compile-time yüzey kontrolü
-    // (Eğer ileride `pause_all` eklenirse bu yorumu güncellemek +
-    //  kodu reddetmek gerekir.)
+                      // (Eğer ileride `pause_all` eklenirse bu yorumu güncellemek +
+                      //  kodu reddetmek gerekir.)
 }
 
 /// İnvariant 3: Herhangi bir hesap, herhangi bir shard için challenge
@@ -360,9 +353,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
     let deal = reg
         .open_deal(1, &manifest, shard_id, addr(1), 0, 0, 10, good_econ(), &dp)
         .unwrap();
-    let cid = reg
-        .open_challenge(deal, 0, 1, 1, 2, addr(2), 5)
-        .unwrap();
+    let cid = reg.open_challenge(deal, 0, 1, 1, 2, addr(2), 5).unwrap();
     // Cevap verildi → Slashed DEĞİL.
     let _ = reg
         .answer_challenge(cid, ContentId::of(b"x"), addr(1), 2)
@@ -373,9 +364,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
     let deal2 = reg
         .open_deal(1, &manifest, shard_id, addr(1), 1, 0, 10, good_econ(), &dp)
         .unwrap();
-    let cid2 = reg
-        .open_challenge(deal2, 0, 1, 1, 2, addr(2), 5)
-        .unwrap();
+    let cid2 = reg.open_challenge(deal2, 0, 1, 1, 2, addr(2), 5).unwrap();
     // Cevap gelmedi, deadline geçti → Slashed.
     let r = reg.finalize_missed_challenge(cid2, 100).unwrap();
     assert_eq!(r.outcome, ChallengeOutcome::Missed);
@@ -393,12 +382,12 @@ fn invariant_7_slashed_deal_rejects_new_challenges() {
     let deal = reg
         .open_deal(1, &manifest, shard_id, addr(1), 0, 0, 10, good_econ(), &dp)
         .unwrap();
-    let cid = reg
-        .open_challenge(deal, 0, 1, 1, 2, addr(2), 5)
-        .unwrap();
+    let cid = reg.open_challenge(deal, 0, 1, 1, 2, addr(2), 5).unwrap();
     reg.finalize_missed_challenge(cid, 100).unwrap();
     // Şimdi yeni bir challenge açmaya çalış:
-    let err = reg.open_challenge(deal, 0, 1, 5, 6, addr(2), 5).unwrap_err();
+    let err = reg
+        .open_challenge(deal, 0, 1, 5, 6, addr(2), 5)
+        .unwrap_err();
     assert!(matches!(err, StorageError::DealNotActive(_)));
 }
 
@@ -432,10 +421,30 @@ fn invariant_9_manifest_id_is_deterministic_across_nodes() {
     let mut r1 = StorageRegistry::new();
     let mut r2 = StorageRegistry::new();
     let d1 = r1
-        .open_deal(1, &m1, m1.shards[0].shard_id, addr(1), 0, 0, 10, good_econ(), &dp)
+        .open_deal(
+            1,
+            &m1,
+            m1.shards[0].shard_id,
+            addr(1),
+            0,
+            0,
+            10,
+            good_econ(),
+            &dp,
+        )
         .unwrap();
     let d2 = r2
-        .open_deal(1, &m2, m2.shards[0].shard_id, addr(1), 0, 0, 10, good_econ(), &dp)
+        .open_deal(
+            1,
+            &m2,
+            m2.shards[0].shard_id,
+            addr(1),
+            0,
+            0,
+            10,
+            good_econ(),
+            &dp,
+        )
         .unwrap();
     let leaf1 = crate::domain::storage_deal::storage_deal_leaf_hash(r1.get_deal(d1).unwrap());
     let leaf2 = crate::domain::storage_deal::storage_deal_leaf_hash(r2.get_deal(d2).unwrap());

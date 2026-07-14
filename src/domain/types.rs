@@ -56,9 +56,7 @@ impl ConsensusKind {
                 // downstream code that already pattern-matches on `as_bytes()`
                 // can recognize storage domains unambiguously.
                 let mut out = b"storage_attestation:".to_vec();
-                out.extend_from_slice(&crate::domain::storage_params::storage_params_bytes(
-                    params,
-                ));
+                out.extend_from_slice(&crate::domain::storage_params::storage_params_bytes(params));
                 out
             }
         }

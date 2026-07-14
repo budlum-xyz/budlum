@@ -75,6 +75,15 @@ referans olarak kullanıldı). zip değil, açılmış dizin. Beklemede.
 **Sonraki adım:** CI yeşil durumunun teyit edilmesi ve ADIM 1 akışının devamı.
 **Engel:** Yok.
 
+### [2026-07-14 19:50 UTC+3] arena-agent — `cargo fmt --all` ile tüm ADIM 1 B.U.D. dosyaları standartlaştırıldı
+
+**Durum:** tamamlandı (`style: apply cargo fmt across ADIM 1 B.U.D. modules` commiti push'landı)
+**Kapsam:** ADIM 1 CI borcu (`src/domain/`, `src/storage/`, `src/rpc/`, `src/tests/`)
+**Aksiyon:** `cargo fmt --check` adımının kalıcı olarak yeşil olması için yerel ortamımıza `cargo/rustfmt` kurularak `cargo fmt --all` çalıştırıldı. B.U.D. (ADIM 1) iskeletindeki (`storage_params.rs`, `storage_deal.rs`, `content_id.rs`, `manifest.rs`, `server.rs`, `bud_e2e.rs`) tüm girinti, virgül ve satır kaydırma farkları standartlaştırıldı.
+**Kanıt:** `git diff --stat` ile 9 dosya formatlanarak PR #9 dalına push'landı.
+**Sonraki adım:** CI yeşil kontrolü ve ADIM 1'in sonraki fazlarına pürüzsüz geçiş.
+**Engel:** Yok.
+
 ---
 
 ## Çözülmüş entry'ler

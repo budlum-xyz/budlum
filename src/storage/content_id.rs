@@ -112,7 +112,10 @@ mod tests {
         let one = ContentId::of(b"ab");
         let two = ContentId::of(b"a").0;
         let three = ContentId::of(b"b").0;
-        assert_ne!(one.0, hash_fields_bytes(&[b"BDLM_CONTENT_V1", &two, &three]));
+        assert_ne!(
+            one.0,
+            hash_fields_bytes(&[b"BDLM_CONTENT_V1", &two, &three])
+        );
     }
 
     #[test]

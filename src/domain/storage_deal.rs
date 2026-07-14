@@ -206,7 +206,10 @@ pub enum StorageError {
     /// Caller asked to open a deal for a shard that does not exist in the
     /// referenced manifest. (We can't know this without the manifest; we
     /// pass the manifest in for validation.)
-    UnknownShard { manifest_id: ContentId, shard_id: ContentId },
+    UnknownShard {
+        manifest_id: ContentId,
+        shard_id: ContentId,
+    },
     /// Deal end epoch must be strictly after start epoch.
     InvalidEpochRange { start: u64, end: u64 },
     /// Operator bond is below the per-domain minimum.
@@ -222,7 +225,10 @@ pub enum StorageError {
     DealNotActive(u64),
     /// Caller tried to answer a challenge with the wrong operator
     /// address (anyone can open; only the deal's operator can answer).
-    NotTheOperator { expected: Address, provided: Address },
+    NotTheOperator {
+        expected: Address,
+        provided: Address,
+    },
     /// Challenge deadline has already passed at response time.
     DeadlineElapsed { deadline_epoch: u64, now_epoch: u64 },
     /// Challenge has already been answered / finalized.
@@ -235,26 +241,30 @@ pub enum StorageError {
 impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StorageError::UnknownShard { manifest_id, shard_id } => write!(
-                f,
-                "shard {} not in manifest {}",
-                shard_id, manifest_id
-            ),
+            StorageError::UnknownShard {
+                manifest_id,
+                shard_id,
+            } => write!(f, "shard {} not in manifest {}", shard_id, manifest_id),
             StorageError::InvalidEpochRange { start, end } => {
                 write!(f, "deal epoch range {start}..{end} invalid")
             }
-            StorageError::InsufficientBond { required, provided } => write!(
-                f,
-                "operator bond {provided} below required {required}"
-            ),
+            StorageError::InsufficientBond { required, provided } => {
+                write!(f, "operator bond {provided} below required {required}")
+            }
             StorageError::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
             StorageError::UnknownDeal(id) => write!(f, "unknown deal {id}"),
             StorageError::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
             StorageError::DealNotActive(id) => write!(f, "deal {id} is not Active"),
             StorageError::NotTheOperator { expected, provided } => {
-                write!(f, "response signed by {provided} but deal operator is {expected}")
+                write!(
+                    f,
+                    "response signed by {provided} but deal operator is {expected}"
+                )
             }
-            StorageError::DeadlineElapsed { deadline_epoch, now_epoch } => write!(
+            StorageError::DeadlineElapsed {
+                deadline_epoch,
+                now_epoch,
+            } => write!(
                 f,
                 "challenge deadline {deadline_epoch} elapsed at epoch {now_epoch}"
             ),
@@ -656,7 +666,17 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let bogus = ContentId([0xFFu8; 32]);
         let err = reg
-            .open_deal(42, &m, bogus, operator(), 0, 100, 200, good_econ(), &params())
+            .open_deal(
+                42,
+                &m,
+                bogus,
+                operator(),
+                0,
+                100,
+                200,
+                good_econ(),
+                &params(),
+            )
             .unwrap_err();
         assert!(matches!(err, StorageError::UnknownShard { .. }));
     }
@@ -667,7 +687,17 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
         let err = reg
-            .open_deal(42, &m, shard_id, operator(), 0, 200, 100, good_econ(), &params())
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                operator(),
+                0,
+                200,
+                100,
+                good_econ(),
+                &params(),
+            )
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidEpochRange { .. }));
     }
@@ -691,10 +721,30 @@ mod tests {
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
         let id1 = reg
-            .open_deal(42, &m, shard_id, operator(), 0, 100, 200, good_econ(), &params())
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                operator(),
+                0,
+                100,
+                200,
+                good_econ(),
+                &params(),
+            )
             .unwrap();
         let id2 = reg
-            .open_deal(42, &m, shard_id, operator(), 1, 100, 200, good_econ(), &params())
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                operator(),
+                1,
+                100,
+                200,
+                good_econ(),
+                &params(),
+            )
             .unwrap();
         assert_ne!(id1, id2);
         assert_eq!(reg.deals_for_shard(&m.manifest_id, &shard_id).len(), 2);

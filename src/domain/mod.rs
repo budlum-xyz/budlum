@@ -24,8 +24,7 @@ pub use storage_deal::{
     RetrievalResponse, StorageDeal, StorageEconomicsParams, StorageError, StorageRegistry,
 };
 pub use storage_params::{
-    storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE,
-    MIN_CHUNK_SIZE,
+    storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
 };
 pub use types::{
     normalize_hash32, ConsensusDomain, ConsensusKind, DomainCommitment, DomainId, DomainStatus,

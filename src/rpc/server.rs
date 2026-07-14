@@ -1314,11 +1314,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean = manifest_id.strip_prefix("0x").unwrap_or(&manifest_id);
         let bytes = hex::decode(clean).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid manifest_id hex: {e}"),
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32602, format!("Invalid manifest_id hex: {e}"), None::<()>)
         })?;
         if bytes.len() != 32 {
             return Err(ErrorObjectOwned::owned(
@@ -1509,13 +1505,8 @@ impl BudlumApiServer for RpcServer {
 
 fn parse_content_id(s: &str) -> Result<ContentId, ErrorObjectOwned> {
     let clean = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(clean).map_err(|e| {
-        ErrorObjectOwned::owned(
-            -32602,
-            format!("Invalid hex: {e}"),
-            None::<()>,
-        )
-    })?;
+    let bytes = hex::decode(clean)
+        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("Invalid hex: {e}"), None::<()>))?;
     if bytes.len() != 32 {
         return Err(ErrorObjectOwned::owned(
             -32602,

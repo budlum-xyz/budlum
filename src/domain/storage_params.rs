@@ -166,6 +166,9 @@ mod tests {
     fn params_bytes_change_with_field() {
         let mut p2 = good_params();
         p2.chunk_size += 1;
-        assert_ne!(storage_params_bytes(&good_params()), storage_params_bytes(&p2));
+        assert_ne!(
+            storage_params_bytes(&good_params()),
+            storage_params_bytes(&p2)
+        );
     }
 }

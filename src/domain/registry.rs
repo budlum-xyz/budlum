@@ -65,7 +65,8 @@ impl ConsensusDomainRegistry {
                 return Err(format!(
                     "Domain {} uses StorageAttestation with non-storage finality adapter '{}' \
                      (expected '{}')",
-                    domain.id, domain.finality_adapter,
+                    domain.id,
+                    domain.finality_adapter,
                     crate::domain::types::STORAGE_ATTESTATION_ADAPTER
                 ));
             }

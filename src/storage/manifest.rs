@@ -193,8 +193,8 @@ mod tests {
     fn default_chunk_size_matches_content_id_default() {
         // Cross-module sanity check: the chunk-size default used by the
         // sharder is the same constant the ContentId module advertises.
-        let m = ContentManifest::from_bytes_sliced(&vec![0u8; 1024], DEFAULT_CHUNK_SIZE_BYTES)
-            .unwrap();
+        let m =
+            ContentManifest::from_bytes_sliced(&vec![0u8; 1024], DEFAULT_CHUNK_SIZE_BYTES).unwrap();
         // 1024 / 262_144 = 1 shard
         assert_eq!(m.shard_count, 1);
     }
