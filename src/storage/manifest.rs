@@ -13,8 +13,9 @@
 //! node. No "Budlum Inc. indexer" service is required.
 
 use crate::core::hash::hash_fields_bytes;
-use crate::domain::Hash32;
-use crate::storage::content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
+use crate::storage::content_id::ContentId;
+#[cfg(test)]
+use crate::storage::content_id::DEFAULT_CHUNK_SIZE_BYTES;
 use serde::{Deserialize, Serialize};
 
 /// A reference to a single shard (chunk) of a multi-shard piece of content.

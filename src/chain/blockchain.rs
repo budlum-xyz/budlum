@@ -546,6 +546,9 @@ impl Blockchain {
                 }
                 !domain.finality_adapter.trim().is_empty()
             }
+            ConsensusKind::StorageAttestation(_) => {
+                domain.finality_adapter == crate::domain::STORAGE_ATTESTATION_ADAPTER
+            }
         };
 
         if !adapter_valid {
@@ -886,6 +889,17 @@ impl Blockchain {
                         commitment.domain_id
                     ));
                 }
+            }
+            ConsensusKind::StorageAttestation(_) => {
+                // Tur 14: StorageAttestation domains do not produce
+                // finality-verified commitments in ADIM 1 (Faz 1-2).
+                // Faz 3 will introduce the real StorageFinalityAdapter.
+                // For now, reject with a clear message so callers cannot
+                // accidentally bridge against an unverified storage domain.
+                Ok(FinalityStatus::Rejected(format!(
+                    "StorageAttestation domain {} finality verification not yet implemented (ADIM 1, Faz 1-2)",
+                    commitment.domain_id
+                )))
             }
         }
         .map_err(|e| e.to_string())?;

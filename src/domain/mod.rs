@@ -21,7 +21,8 @@ pub use plugin_registry::DomainPluginRegistry;
 pub use registry::ConsensusDomainRegistry;
 pub use storage_deal::{
     storage_deal_leaf_hash, ChallengeOutcome, ChallengeResult, DealStatus, RetrievalChallenge,
-    RetrievalResponse, StorageDeal, StorageEconomicsParams, StorageError, StorageRegistry,
+    RetrievalChallengeRequest, RetrievalResponse, StorageDeal, StorageEconomicsParams,
+    StorageError, StorageRegistry,
 };
 pub use storage_params::{
     storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,

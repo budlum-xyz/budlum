@@ -84,6 +84,29 @@ referans olarak kullanıldı). zip değil, açılmış dizin. Beklemede.
 **Sonraki adım:** CI yeşil kontrolü ve ADIM 1'in sonraki fazlarına pürüzsüz geçiş.
 **Engel:** Yok.
 
+### [2026-07-14 22:15 UTC+3] ARENA1 — ADIM 1 derlenme hataları düzeltildi + 505 test yeşil
+
+**Durum:** tamamlandı
+**Kapsam:** ADIM 1 (eski Tur 14) B.U.D. kod stabilizasyonu — `budlum-core`
+**Aksiyon:**
+1. `arena/adim1-sync` dalında 12 derlenme hatası ve 5 clippy hatası düzeltildi:
+   - `ContentId`'ye `Ord` derive eklendi (BTreeMap key olarak kullanım için).
+   - `RetrievalChallengeRequest` `src/domain/mod.rs` export listesine eklendi.
+   - `retrieval_challenge_to_json` imza uyuşmazlığı closure ile giderildi.
+   - `ConsensusKind::StorageAttestation` match arm'leri `blockchain.rs`'te iki ayrı yerde (`validate_consensus_domain_registration`, `verify_domain_commitment_finality`) eklendi.
+   - `storage_deal_leaf_hash`'de `&deal.operator.as_bytes()` → `deal.operator.as_bytes()` düzeltildi.
+   - `open_deal` / `open_challenge`'a `#[allow(clippy::too_many_arguments)]` eklendi.
+   - Kullanılmayan importlar (`Hash32`, `DEFAULT_CHUNK_SIZE_BYTES`, `StorageDeal`) ve `_range_hash` düzeltildi.
+2. `cargo test --lib` → **505 passed; 0 failed**.
+3. `cargo fmt --all -- --check` → temiz.
+4. `cargo clippy --lib --tests -- -D warnings` → temiz.
+
+**Kanıt:** `git diff --stat` → 6 dosya değişti; `cargo test` 505 geçti.
+
+**Sonraki adım:** `STATUS_ONLINE.md` + değişiklikler commit edilip `arena/adim1-sync` dalına pushlanacak. Sonraki AI (ARENA2 veya kullanıcı) ADIM 1'in kapanışını / ADIM 2 planını değerlendirecek.
+
+**Engel:** Yok.
+
 ---
 
 ## Çözülmüş entry'ler

@@ -320,6 +320,7 @@ impl StorageRegistry {
     /// Open a new `StorageDeal`. The caller supplies the
     /// `ContentManifest` so we can validate shard membership on-chain
     /// (no off-chain indexer dependency).
+    #[allow(clippy::too_many_arguments)]
     pub fn open_deal(
         &mut self,
         domain_id: u32,
@@ -372,6 +373,7 @@ impl StorageRegistry {
 
     /// Open a retrieval challenge. Anyone can call this (no role
     /// required) — the opener_bond is the anti-spam mechanism.
+    #[allow(clippy::too_many_arguments)]
     pub fn open_challenge(
         &mut self,
         deal_id: u64,
@@ -430,7 +432,7 @@ impl StorageRegistry {
     pub fn answer_challenge(
         &mut self,
         challenge_id: u64,
-        range_hash: ContentId,
+        _range_hash: ContentId,
         responder: Address,
         response_epoch: u64,
     ) -> Result<ChallengeResult, StorageError> {
@@ -596,7 +598,7 @@ pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
         &deal.domain_id.to_le_bytes(),
         &deal.manifest_id.0,
         &deal.shard_id.0,
-        &deal.operator.as_bytes(),
+        deal.operator.as_bytes(),
         &deal.economics.operator_bond.to_le_bytes(),
         &deal.economics.fee_per_epoch.to_le_bytes(),
         &[deal.replica_index],

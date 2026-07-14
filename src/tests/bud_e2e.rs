@@ -17,8 +17,8 @@
 
 use crate::core::address::Address;
 use crate::domain::storage_deal::{
-    ChallengeOutcome, DealStatus, RetrievalChallengeRequest, StorageDeal, StorageEconomicsParams,
-    StorageError, StorageRegistry,
+    ChallengeOutcome, DealStatus, RetrievalChallengeRequest, StorageEconomicsParams, StorageError,
+    StorageRegistry,
 };
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;

@@ -1440,7 +1440,7 @@ impl BudlumApiServer for RpcServer {
         let challenge = reg.get_challenge(challenge_id).cloned();
         Ok(serde_json::json!({
             "challengeId": challenge_id,
-            "challenge": challenge.map(retrieval_challenge_to_json),
+            "challenge": challenge.map(|c| retrieval_challenge_to_json(&c)),
         }))
     }
 

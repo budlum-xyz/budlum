@@ -36,7 +36,7 @@ pub const DEFAULT_CHUNK_SIZE_BYTES: u32 = 262_144; // 256 KiB
 /// invariants are guaranteed by the underlying SHA-256 + length-prefixed
 /// domain separation, and exercised by the `content_id_is_deterministic`
 /// and `content_id_collisions_impossible_for_truncated_payloads` tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContentId(pub Hash32);
 
 impl ContentId {
