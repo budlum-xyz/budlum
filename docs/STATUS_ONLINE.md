@@ -288,3 +288,22 @@ referans olarak kullanıldı). zip değil, açılmış dizin. Beklemede.
 **Kanıt:** `docs/THE_PLAN_SOURCE_MANIFEST.md`, `docs/TUR13_9_GAP_MATRIX.md`, `docs/TUR13_9_EXECUTION_PLAN.md`, `docs/TUR13_9_RAPOR.md`. `cargo test --lib` → 509 yeşil test.
 **Sonraki adım:** Değişiklikler `main` dalına pushlandı. Kullanıcı (Ayaz) tarafından commit/push onayı verildikten sonra sonraki aşama (ADIM 2) veya kullanıcı soruları için hazır durulacak.
 **Engel:** Yok.
+
+### [2026-07-15 00:05 UTC+3] ARENA1 — ADIM1 onay/review: ARENA3 merge commit'leri teyit edildi
+
+**Durum:** tamamlandı (onay)
+**Kapsam:** ADIM1 | kod review | CI teyit | AI koordinasyon
+**Aksiyon:**
+1. **ARENA3'nün main dalına attığı commit'ler incelendi:**
+   - `5664e9f` ("ADIM1: ARENA3 - PR #9 arena/adim1-sync dalini main dalina eksiksiz merge etti"): `arena/adim1-sync` HEAD `a91b251`'deki 18 derleme hatası düzeltmesi, `StorageAttestationFinalityAdapter` implementasyonu, `finality_live_path.rs` (4 test) ve 509 test yeşil durumu main'e aktarılmış. ✅ Onaylıyorum.
+   - `5cd0c2e` ("docs: DEVIR RAPORU YENI şartnamelerine uygun the-plan envanteri..."): `the-plan` kaynak manifesti, TUR13_9 gap matrisi, yürütme planı ve kapanış raporları eklemiş. ✅ Onaylıyorum.
+2. **Yerel CI teyiti (ARENA1 tarafından tekrar koşturuldu):**
+   - `cargo test --lib` → **509 passed, 0 failed**
+   - `cargo fmt --all -- --check` → temiz
+   - `cargo clippy --lib --tests -- -D warnings` → temiz (tek thread ile SIGKILL önlendi)
+3. **Önceki ARENA1 commit düzeltmesi:** `953f7ac` (eski main `2a16a54` üzerine kurulmuştu) ARENA3'nün main'i (`5cd0c2e`) üzerine rebase edildi. `STATUS_ONLINE.md` çakışması çözüldü; ARENA3'nün tüm entry'leri korundu, gerileme (regression) giderildi.
+4. **Hatalı revert notu:** `a776a39` ("tur15-pr-4-revert: finality_live_path.rs geri cekildi") gereksiz/hatalı bir revert'ti. Dosya ARENA1 (`72ab2c5`) ve ARENA3 (`a91b251`) tarafından başarıyla yeniden eklendi; 4 test derleniyor ve geçiyor.
+
+**Kanıt:** `git log --oneline origin/main -3` → `5cd0c2e`, `5664e9f`, `b2cb493`; `cargo test --lib` 509 passed.
+**Sonraki adım:** Onaylı review commit'i push edilecek. ADIM2 (eski Tur 15) planlamasına geçiş hazırlığı.
+**Engel:** Yok.
