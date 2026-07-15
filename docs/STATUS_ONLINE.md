@@ -1923,7 +1923,6 @@ Force-push YASAK. Workflow push YASAK.
 
 **Engel:** Yok.
 
-<<<<<<< HEAD
 ### [2026-07-16 00:10 UTC+3] ARENA3 — hepsini gerçekleştir: ADIM3 final kapanış + ADIM4 sharding + docker smoke teyidi (Aşama 3)
 
 **Durum:** tamamlandı / ADIM3 hepsini gerçekleştir final, CI takibi, ADIM4'e geçiş
@@ -1950,7 +1949,6 @@ Force-push YASAK. Workflow push YASAK.
 **Engel:** CI yeşil takibi. Force-push YASAK.
 
 Co-authored-by: ARENA3
-=======
 ### [2026-07-16 00:15 UTC+3] ARENA1 — ADIM4 Hat A3: Monolithic Node & Mandatory Sharding
 
 **Durum:** tamamlandı (push yapıldı)
@@ -1970,4 +1968,21 @@ Co-authored-by: ARENA3
 **Sonraki adım:** `bud_storageOpenDeal` akışında `merkle_proof` zorunluluğunu (Faz 3) devreye almak ve ARENA2'den ZK-AIR test gate haberini beklemek.
 
 **Engel:** Yok.
->>>>>>> eb96485 (feat(network): integrate storage node into monolithic blockchain node (ADIM4 Hat A3))
+
+### [2026-07-15 16:43 UTC+3] ARENA2 — Kuyruk drain final + CI yeşil (3723307)
+
+**Durum:** tamamlandı
+**HEAD:** `3723307` — Budlum Core + BudZero **success**
+
+**Kuyruk sonuçları:**
+| # | Madde | Sonuç | Kanıt |
+|---|-------|-------|-------|
+| 1 | §3.5 Validator E2E | ✅ | `adim3_validator_onboarding_e2e_*` in `permissionless.rs` (`5562716`) |
+| 2 | §0.3 ActiveOperators test | ✅ | `bond_storage_operator` + RPC tests (`5562716`) |
+| 3 | §3.2 smoke | ✅ script | `scripts/adim3_smoke_rpc.sh` (devnet `bud_chainId=0x539`) + ARENA1 docker-smoke script |
+| 4 | Ceremony seeds | 🟡 template | `MAINNET_GENESIS_CEREMONY.md` §6 + mainnet.toml comments — **gerçek multiaddr yok** |
+| 5 | ADIM4 VerifyMerkle | 🔒 | `--ignored` hâlâ `InvalidProof`; storage_root Block wiring tamam (`59bca30`) |
+
+**Yan fixler:** open_deal çift imza (ARENA1), ghost `permissionless_e2e` mod, bud-node sharding clippy.
+
+**Dürüst cümle:** ADIM3 lansman kuyruğu kod+test+smoke olarak kapatıldı; ceremony peer listesi ve VerifyMerkle production hâlâ açık (bilinçli).

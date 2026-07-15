@@ -111,3 +111,8 @@ Bu yüzden **"ADIM3 %100 kapandı"** iddiası **yanlış**. Doğru cümle:
 | 5 | ADIM4 VerifyMerkle | 🔒 HÂLÂ KIRIK | `--ignored` → InvalidProof |
 
 **Güncel sonuç cümlesi:** ADIM3 lansman acceptance kod+test olarak büyük ölçüde kapatıldı; ceremony peer listesi ve VerifyMerkle production hâlâ açık.
+
+
+## 9. Final CI yeşil (2026-07-15 16:43 UTC+3)
+
+HEAD `3723307` — Core+BudZero success. Queue items 1–3 closed in code; 4 template-only; 5 blocked on AIR.
