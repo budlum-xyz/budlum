@@ -992,3 +992,25 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 **Sonraki adım:** Diğer AI'lar VerifyMerkle ZK debugging'e devam edebilir veya B.U.D. Faz 6 (BNS/.bud) veya `bud-node` P2P storage backend'e geçilebilir.
 
 **Engel:** Yok. ARENA2 oturumu tamamlandı.
+
+---
+
+## 2026-07-15 — ARENA1 ADIM2 Kapanış + ADIM3 Plan Doğrulama
+
+### [2026-07-15 15:45 UTC+3] ARENA1 — ADIM2 push tamamlandı + ADIM3 plan iddiaları kanıtlandı
+
+**Durum:** tamamlandı (push yapıldı) / ADIM3 plan doğrulama raporu
+**Kapsam:** ADIM2 görev kapanışı (Prometheus/Metrics 2.5-2.6, ml-dsa, mock HSM removal) + ADIM3 planı (`ADIM3_PLAN_VE_GOREV_DAGILIMI.md`) kanıtlı denetim
+**Aksiyon:**
+1. **ADIM2 push:** `0da64d3` (ADIM2 tamamlama) + `origin/main` (f236589) merge → `00809fc` push edildi.
+2. **Mock HSM temizliği:** `src/crypto/hsm_mock.rs` silindi, `src/crypto/mod.rs`, `src/cli/commands.rs` referansları kaldırıldı.
+3. **CI kanıtı:** `cargo test --lib` → **523 passed; 0 failed**. `cargo fmt --check` → temiz. `cargo clippy --lib --tests -- -D warnings` (CARGO_BUILD_JOBS=1) → temiz. `cargo check --lib --features pq-ml-dsa --no-default-features` → temiz.
+4. **ADIM3 plan iddiaları kanıtlı doğrulama:**
+   - **0.1 StorageAttestationFinalityAdapter PoS/Bft dalı:** `src/domain/finality_adapter.rs` ~1280 satır (`FinalityProof::PoS { cert, .. } | FinalityProof::Bft { cert, .. }`) **DOĞRU** — `cert.verify(validator_snapshot)` çağrısı YOK. Sadece `agg_sig_bls.is_empty()` + height/hash eşleşmesi kontrol ediliyor. Sahte cert ile `Finalized` dönebilir. **Kritik güvenlik açığı.**
+   - **0.2 storage_open_challenge self-reported opener/responder:** `src/rpc/server.rs:1528` (`request.opener.unwrap_or_default()`) ve `:1560` (`response.responder`) **DOĞRU** — çağıranın kendi beyan ettiği adres, imza/nonce doğrulaması yok.
+   - **0.3 role.rs:70 hayalet RPC:** `src/registry/role.rs:70`'te `bud_storageActiveOperators` referansı var, gerçek RPC metodu yok. **DOĞRU**.
+   - **0.4 Mock HSM kararı:** `src/crypto/hsm_mock.rs` **YOK**, `src/crypto/mod.rs`'de `pub mod hsm_mock;` **YOK**. Kullanıcı kararı "sadece gerçek HSM kalsın" (B option) uygulanmış. **ÇÖZÜLDÜ**.
+
+**Kanıt:** Commit `00809fc` (push `f236589..00809fc`). `cargo test --lib` 523 passed. `grep -n 'cert.verify' src/domain/finality_adapter.rs` → sadece `PoSFinalityAdapter` ve `BftFinalityAdapter`'da var, `StorageAttestationFinalityAdapter`'da YOK.
+**Sonraki adım:** Kullanıcı "devam" kararı + ADIM3 öncelikli borçların (0.1, 0.2) kapatılması.
+**Engel:** Yok.
