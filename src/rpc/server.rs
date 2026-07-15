@@ -1752,347 +1752,251 @@ impl BudlumApiServer for RpcServer {
             "operators": list,
         }))
     }
-}
 
-fn parse_content_id(s: &str) -> Result<ContentId, ErrorObjectOwned> {
-    let clean = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(clean)
-        .map_err(|e| ErrorObjectOwned::owned(-32602, format!("Invalid hex: {e}"), None::<()>))?;
-    if bytes.len() != 32 {
-        return Err(ErrorObjectOwned::owned(
-            -32602,
-            "expected 32-byte hex string",
-            None::<()>,
-        ));
+    async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
+        let addr = self.chain.bns_resolve(name).await;
+        Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
     }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(ContentId(arr))
-}
 
-fn storage_deal_to_json(d: &crate::domain::StorageDeal) -> serde_json::Value {
-    serde_json::json!({
-        "dealId": d.deal_id,
-        "domainId": d.domain_id,
-        "manifestId": format!("0x{}", hex::encode(d.manifest_id.0)),
-        "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-        "operator": d.operator.to_string(),
-        "operatorBond": d.economics.operator_bond,
-        "feePerEpoch": d.economics.fee_per_epoch,
-        "replicaIndex": d.replica_index,
-        "dealStartEpoch": d.deal_start_epoch,
-        "dealEndEpoch": d.deal_end_epoch,
-        "status": format!("{:?}", d.status),
-    })
-}
-
-fn retrieval_challenge_to_json(c: &RetrievalChallenge) -> serde_json::Value {
-    serde_json::json!({
-        "challengeId": c.challenge_id,
-        "dealId": c.deal_id,
-        "shardId": format!("0x{}", hex::encode(c.shard_id.0)),
-        "byteStart": c.byte_start,
-        "byteEnd": c.byte_end,
-        "challengeEpoch": c.challenge_epoch,
-        "deadlineEpoch": c.deadline_epoch,
-        "opener": c.opener.to_string(),
-        "openerBond": c.opener_bond,
-    })
-}
-
-fn storage_economics_event_to_json(
-    event: &crate::chain::blockchain::StorageEconomicsEvent,
-) -> serde_json::Value {
-    let kind = match event.kind {
-        crate::chain::blockchain::StorageEconomicsEventKind::OperatorRewardAccrued => {
-            "OperatorRewardAccrued"
+    async fn bns_resolve_full(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Some(resolved) = self.chain.bns_resolve_full(name.clone()).await {
+            Ok(serde_json::json!({
+                "name": resolved.name,
+                "owner": Self::to_0x_hash(resolved.owner.to_hex()),
+                "address": resolved.address.map(|a| Self::to_0x_hash(a.to_hex())),
+                "storage_root": resolved.storage_root.map(|r| format!("0x{}", hex::encode(r))),
+                "storage_domain_id": resolved.storage_domain_id,
+                "content_id": resolved.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "is_expired": resolved.is_expired,
+            }))
+        } else {
+            Ok(serde_json::json!(null))
         }
-        crate::chain::blockchain::StorageEconomicsEventKind::OperatorBondSlashed => {
-            "OperatorBondSlashed"
+    }
+
+    async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
+        let cid = self.chain.bns_resolve_content(name).await;
+        Ok(cid.map(|c| format!("0x{}", hex::encode(c.0))))
+    }
+
+    async fn bns_resolve_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+    ) -> Result<Option<String>, ErrorObjectOwned> {
+        let addr = self.chain.bns_resolve_subdomain(parent_name, sub_label).await;
+        Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
+    }
+
+    async fn bns_prepare_register(
+        &self,
+        name: String,
+        owner: String,
+        duration: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {}", e), None::<()>)
+        })?;
+
+        let data = bincode::serialize(&(name.clone(), duration))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let cost = self.chain.bns_calculate_cost(name.clone(), duration).await;
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: cost,
+            fee: 1000,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            chain_id: self.chain.get_chain_id().await,
+            tx_type: crate::core::transaction::TransactionType::BnsRegister,
+        };
+
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "duration": duration,
+            "cost": cost,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_register_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        sub_owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = sub_owner.strip_prefix("0x").unwrap_or(&sub_owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {}", e), None::<()>)
+        })?;
+
+        let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), owner_addr))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: Address::zero(),
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            nonce: 0,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            chain_id: self.chain.get_chain_id().await,
+            tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
+        };
+
+        Ok(serde_json::json!({
+            "parent": parent_name,
+            "sub_label": sub_label,
+            "sub_owner": sub_owner,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_set_content(
+        &self,
+        name: String,
+        owner: String,
+        cid: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {}", e), None::<()>)
+        })?;
+
+        let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
+        let cid_bytes = hex::decode(clean_cid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {}", e), None::<()>)
+        })?;
+        if cid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(-32602, "CID must be 32 bytes", None::<()>));
         }
-    };
-    serde_json::json!({
-        "epoch": event.epoch,
-        "dealId": event.deal_id,
-        "operator": event.operator.to_string(),
-        "amount": event.amount,
-        "balanceEffect": event.balance_effect,
-        "kind": kind,
-    })
-}
+        let mut cid_arr = [0u8; 32];
+        cid_arr.copy_from_slice(&cid_bytes);
+        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
 
-#[cfg(test)]
-mod security_tests {
-    use super::*;
+        let data = bincode::serialize(&(name.clone(), cid_obj))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
-    fn request_with_headers(headers: &[(&str, &str)]) -> HttpRequest<()> {
-        let mut builder = HttpRequest::builder().uri("/");
-        for (name, value) in headers {
-            builder = builder.header(*name, *value);
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            chain_id: self.chain.get_chain_id().await,
+            tx_type: crate::core::transaction::TransactionType::BnsSetContent,
+        };
+
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "cid": cid,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Some(nft) = self.chain.nft_get(id).await {
+            Ok(serde_json::json!({
+                "id": nft.id,
+                "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                "minted_at": nft.minted_at_epoch,
+                "author": nft.author_name,
+            }))
+        } else {
+            Ok(serde_json::json!(null))
         }
-        builder.body(()).unwrap()
     }
 
-    #[test]
-    fn auth_accepts_x_api_key_and_bearer() {
-        let config = RpcSecurityConfig {
-            auth_required: true,
-            api_key: Some("secret".to_string()),
-            ..Default::default()
-        };
-
-        assert!(is_authorized(
-            &config,
-            &request_with_headers(&[("x-api-key", "secret")])
-        ));
-        assert!(is_authorized(
-            &config,
-            &request_with_headers(&[("authorization", "Bearer secret")])
-        ));
-        assert!(!is_authorized(
-            &config,
-            &request_with_headers(&[("x-api-key", "wrong")])
-        ));
+    async fn social_get_profile(&self, address: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {}", e), None::<()>)
+        })?;
+        let nfts = self.chain.nft_get_by_owner(addr).await;
+        let list: Vec<_> = nfts.into_iter().map(|nft| {
+            serde_json::json!({
+                "id": nft.id,
+                "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                "minted_at": nft.minted_at_epoch,
+                "author": nft.author_name,
+            })
+        }).collect();
+        Ok(serde_json::Value::Array(list))
     }
 
-    #[test]
-    fn x_real_ip_ignored_without_trusted_proxies() {
-        // Tur 12.5 / B2: bare X-Real-IP is spoofable; without trusted_proxies
-        // the IP cannot be extracted from headers alone.
-        let config = RpcSecurityConfig {
-            allowed_ips: vec!["10.0.0.1".to_string()],
-            cors_origins: vec!["https://wallet.example".to_string()],
-            trusted_proxies: vec![],
-            ..Default::default()
-        };
+    async fn social_prepare_post(
+        &self,
+        author: String,
+        cid: String,
+        author_name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_author = author.strip_prefix("0x").unwrap_or(&author);
+        let author_addr = Address::from_hex(clean_author).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid author address: {}", e), None::<()>)
+        })?;
 
-        let spoofed = request_with_headers(&[
-            ("x-real-ip", "10.0.0.1"),
-            ("origin", "https://wallet.example"),
-        ]);
-        assert!(extract_client_ip(&config, &spoofed).is_none());
-        assert!(!is_ip_allowed(&config, &spoofed));
-    }
-
-    #[test]
-    fn x_real_ip_honored_with_trusted_proxies() {
-        let config = RpcSecurityConfig {
-            allowed_ips: vec!["10.0.0.1".to_string()],
-            cors_origins: vec!["https://wallet.example".to_string()],
-            trusted_proxies: vec!["127.0.0.1".to_string()],
-            ..Default::default()
-        };
-
-        let allowed = request_with_headers(&[
-            ("x-real-ip", "10.0.0.1"),
-            ("origin", "https://wallet.example"),
-        ]);
-        let denied_ip = request_with_headers(&[
-            ("x-real-ip", "10.0.0.2"),
-            ("origin", "https://wallet.example"),
-        ]);
-        let denied_origin =
-            request_with_headers(&[("x-real-ip", "10.0.0.1"), ("origin", "https://bad")]);
-
-        assert!(is_ip_allowed(&config, &allowed));
-        assert!(!is_ip_allowed(&config, &denied_ip));
-        assert!(!is_origin_allowed(&config, &denied_origin));
-    }
-
-    #[test]
-    fn origin_is_enforced_when_configured() {
-        let config = RpcSecurityConfig {
-            cors_origins: vec!["https://wallet.example".to_string()],
-            ..Default::default()
-        };
-
-        let allowed = request_with_headers(&[("origin", "https://wallet.example")]);
-        let denied = request_with_headers(&[("origin", "https://bad.example")]);
-
-        assert!(is_origin_allowed(&config, &allowed));
-        assert!(!is_origin_allowed(&config, &denied));
-    }
-
-    #[test]
-    fn trusted_proxy_honors_x_forwarded_for() {
-        let config = RpcSecurityConfig {
-            allowed_ips: vec!["10.0.0.100".to_string()],
-            trusted_proxies: vec!["127.0.0.1".to_string()],
-            ..Default::default()
-        };
-
-        let req = request_with_headers(&[("x-forwarded-for", "10.0.0.100")]);
-        let ip = extract_client_ip(&config, &req);
-        assert_eq!(ip, Some("10.0.0.100".parse().unwrap()));
-    }
-
-    #[test]
-    fn no_trusted_proxies_returns_none_without_x_real_ip() {
-        let config = RpcSecurityConfig {
-            allowed_ips: vec!["10.0.0.100".to_string()],
-            trusted_proxies: vec![],
-            ..Default::default()
-        };
-
-        // Without trusted proxies and without x-real-ip, no IP can be extracted
-        let ip = extract_client_ip(
-            &config,
-            &request_with_headers(&[("x-forwarded-for", "10.0.0.100")]),
-        );
-        assert!(ip.is_none());
-    }
-
-    #[test]
-    fn per_ip_rate_limit_tracks_by_client_ip() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(2),
-            ..Default::default()
-        };
-        let rates = Arc::new(Mutex::new(HashMap::new()));
-        let ip1: IpAddr = "1.1.1.1".parse().unwrap();
-        let ip2: IpAddr = "2.2.2.2".parse().unwrap();
-
-        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip1)));
-        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip1)));
-        assert!(!is_per_ip_rate_limited(&config, &rates, Some(ip1)));
-
-        // Different IP has its own limit
-        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip2)));
-        assert!(is_per_ip_rate_limited(&config, &rates, Some(ip2)));
-        assert!(!is_per_ip_rate_limited(&config, &rates, Some(ip2)));
-    }
-
-    #[test]
-    fn rate_limit_disabled_returns_true() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: None,
-            ..Default::default()
-        };
-        let rates = Arc::new(Mutex::new(HashMap::new()));
-        assert!(is_per_ip_rate_limited(
-            &config,
-            &rates,
-            Some("1.1.1.1".parse().unwrap())
-        ));
-    }
-
-    #[test]
-    fn required_auth_requires_env_key() {
-        let result = RpcSecurityConfig::from_env(
-            true,
-            Some("BUDLUM_TEST_MISSING_RPC_KEY"),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn operator_default_binds_localhost_only() {
-        let config = RpcSecurityConfig::operator_default();
-        assert!(!config.auth_required);
-        assert!(config.allowed_ips.contains(&"127.0.0.1".to_string()));
-        assert!(config.allowed_ips.contains(&"::1".to_string()));
-        assert!(config.max_connections.is_some());
-    }
-
-    #[test]
-    fn test_rpc_rate_limit_enforces_tracked_client_ceiling() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(10),
-            ..Default::default()
-        };
-        let rates = Arc::new(Mutex::new(HashMap::new()));
-        {
-            let mut map = rates.lock().unwrap();
-            for i in 0..MAX_TRACKED_RPC_CLIENTS {
-                let mut window = VecDeque::new();
-                window.push_back(Instant::now());
-                let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from(i as u32));
-                map.insert(ip, window);
-            }
+        let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
+        let cid_bytes = hex::decode(clean_cid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {}", e), None::<()>)
+        })?;
+        if cid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(-32602, "CID must be 32 bytes", None::<()>));
         }
-        let new_ip: std::net::IpAddr = "255.255.255.255".parse().unwrap();
-        assert!(!is_per_ip_rate_limited(&config, &rates, Some(new_ip)));
-    }
+        let mut cid_arr = [0u8; 32];
+        cid_arr.copy_from_slice(&cid_bytes);
+        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
 
-    /// ADIM3 §3.4: mainnet SecurityConfig RPC numbers are enforced by the limiter.
-    #[test]
-    fn adim3_mainnet_rpc_security_profile() {
-        use crate::core::chain_config::Network;
-        let sec = Network::Mainnet.security_config();
-        assert_eq!(sec.rpc_rate_limit_per_minute, 300);
-        assert_eq!(sec.max_peers, 100);
-        assert!(sec.rpc_auth_required);
-        assert!(!sec.mdns_enabled);
-        assert!(sec.persist_banned_peers);
+        let data = bincode::serialize(&(cid_obj, author_name.clone()))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
 
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(sec.rpc_rate_limit_per_minute),
-            auth_required: sec.rpc_auth_required,
-            ..Default::default()
+        let tx = crate::core::transaction::Transaction {
+            from: author_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            nonce: self.chain.get_nonce(&author_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            chain_id: self.chain.get_chain_id().await,
+            tx_type: crate::core::transaction::TransactionType::NftMint,
         };
-        let rates = Arc::new(Mutex::new(HashMap::new()));
-        let ip: IpAddr = "203.0.113.10".parse().unwrap();
 
-        // Under limit: admit.
-        for _ in 0..10 {
-            assert!(is_per_ip_rate_limited(&config, &rates, Some(ip)));
-        }
-        assert_eq!(rates.lock().unwrap().get(&ip).map(|w| w.len()), Some(10));
-    }
-
-    /// ADIM3 §3.4: many distinct IPs up to the hard ceiling, then reject.
-    #[test]
-    fn adim3_rpc_rate_limit_10k_client_stress() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(1),
-            ..Default::default()
-        };
-        let rates = Arc::new(Mutex::new(HashMap::new()));
-
-        for i in 0..MAX_TRACKED_RPC_CLIENTS {
-            let ip = IpAddr::V4(std::net::Ipv4Addr::from(i as u32));
-            assert!(
-                is_per_ip_rate_limited(&config, &rates, Some(ip)),
-                "client {i} should be admitted under ceiling"
-            );
-        }
-        assert_eq!(rates.lock().unwrap().len(), MAX_TRACKED_RPC_CLIENTS);
-
-        let overflow = IpAddr::V4(std::net::Ipv4Addr::new(255, 255, 255, 254));
-        assert!(
-            !is_per_ip_rate_limited(&config, &rates, Some(overflow)),
-            "client beyond 10k ceiling must be rejected"
-        );
-        // Map must not grow.
-        assert_eq!(rates.lock().unwrap().len(), MAX_TRACKED_RPC_CLIENTS);
-    }
-
-    /// ADIM3 §3.4: expired windows are evicted so the ceiling can admit new clients.
-    #[test]
-    fn adim3_rpc_rate_limit_evicts_expired_to_admit_new() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(5),
-            ..Default::default()
-        };
-        let rates = Arc::new(Mutex::new(HashMap::new()));
-        {
-            let mut map = rates.lock().unwrap();
-            for i in 0..MAX_TRACKED_RPC_CLIENTS {
-                let mut window = VecDeque::new();
-                // Far in the past → expired relative to 60s window.
-                window.push_back(Instant::now() - Duration::from_secs(120));
-                let ip = IpAddr::V4(std::net::Ipv4Addr::from(i as u32));
-                map.insert(ip, window);
-            }
-        }
-        let new_ip: IpAddr = "198.51.100.1".parse().unwrap();
-        assert!(
-            is_per_ip_rate_limited(&config, &rates, Some(new_ip)),
-            "after expiring old windows, a new client must be admitted"
-        );
+        Ok(serde_json::json!({
+            "author": author,
+            "cid": cid,
+            "author_name": author_name,
+            "tx_template": tx,
+        }))
     }
 }

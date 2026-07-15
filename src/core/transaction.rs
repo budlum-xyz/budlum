@@ -51,27 +51,7 @@ impl crate::core::chain_config::Network {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ExternalChain {
-    Ethereum,
-    Solana,
-    Bitcoin,
-    Avalanche,
-    Polygon,
-    Arbitrum,
-    Optimism,
-    Custom(u32),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ExternalTransaction {
-    pub chain: ExternalChain,
-    pub target_address: String,
-    pub payload: Vec<u8>,
-    pub external_nonce: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TransactionType {
     Transfer,
     Stake,
@@ -81,20 +61,8 @@ pub enum TransactionType {
     BnsRegister,
     BnsSetContent,
     BnsRegisterSubdomain,
-    BnsSetStorage,
     NftMint,
     NftTransfer,
-    NftBurn,
-    NftBoost { nft_id: u64, amount: u64 },
-    UniversalRelay(ExternalTransaction),
-    AiOfferData { cid: crate::storage::content_id::ContentId, price: u64 },
-    AiPurchaseData { offer_id: u64 },
-    HubRegisterApp {
-        name: String,
-        category: crate::hub::types::AppCategory,
-        website_url: String,
-        manifest_id: Option<crate::storage::content_id::ContentId>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

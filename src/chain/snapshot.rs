@@ -325,6 +325,16 @@ pub struct StateSnapshotV2 {
     pub settlement_root: [u8; 32],
     pub global_header_summary: [u8; 32],
 
+    // ADIM 5: Phase 6+ Persistence
+    #[serde(default)]
+    pub bns_registry: Option<crate::bns::BnsRegistry>,
+    #[serde(default)]
+    pub nft_registry: Option<crate::nft::NftRegistry>,
+    #[serde(default)]
+    pub marketplace: Option<crate::marketplace::MarketplaceRegistry>,
+    #[serde(default)]
+    pub hub: Option<crate::hub::HubRegistry>,
+
     // --- schema_version 3 (Tur 9): previously-unpersisted state. All
     // `#[serde(default)]` so schema-2 snapshots still deserialize (the fields
     // simply come back empty/None — meaning "this feature wasn't active when the
@@ -437,6 +447,10 @@ impl StateSnapshotV2 {
             message_root: account_state.message_root,
             settlement_root: account_state.settlement_root,
             global_header_summary: account_state.global_header_summary,
+            bns_registry: Some(account_state.bns_registry.clone()),
+            nft_registry: Some(account_state.nft_registry.clone()),
+            marketplace: Some(account_state.marketplace.clone()),
+            hub: Some(account_state.hub.clone()),
             // Tur 2: `registry`, `liveness`, and `invalid_votes` are no longer
             // fields on `AccountState` (ghost-hunted). The struct fields were
             // already removed above; the live state is recovered by routing

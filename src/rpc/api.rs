@@ -312,6 +312,7 @@ pub trait BudlumApi {
     /// All `StorageDeal`s bound to a given `(manifest_id, shard_id)` pair.
     /// Used by clients that downloaded one shard and want to know which
     /// operators are also holding it.
+    /// operators are also holding it.
     #[method(name = "bud_storageGetDealsByShard")]
     async fn storage_get_deals_by_shard(
         &self,
@@ -360,4 +361,72 @@ pub trait BudlumApi {
     /// Returns active `PermissionlessRegistry` members filtered by storage operator role.
     #[method(name = "bud_storageActiveOperators")]
     async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    // --- B.U.D. Name Service (BNS) ---
+
+    /// Resolve a human-readable name to an address.
+    #[method(name = "bud_bnsResolve")]
+    async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned>;
+
+    /// Resolve a name to full BNS record (address, storage_root, etc).
+    #[method(name = "bud_bnsResolveFull")]
+    async fn bns_resolve_full(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Resolve a name to a B.U.D. Content ID (CID).
+    #[method(name = "bud_bnsResolveContent")]
+    async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned>;
+
+    /// Resolve a subdomain (e.g. photos.ayaz.bud).
+    #[method(name = "bud_bnsResolveSubdomain")]
+    async fn bns_resolve_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+    ) -> Result<Option<String>, ErrorObjectOwned>;
+
+    /// Prepare a registration transaction (offline helper).
+    #[method(name = "bud_bnsPrepareRegister")]
+    async fn bns_prepare_register(
+        &self,
+        name: String,
+        owner: String,
+        duration: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a subdomain registration transaction.
+    #[method(name = "bud_bnsPrepareRegisterSubdomain")]
+    async fn bns_prepare_register_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        sub_owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a transaction to link content (CID) to a name.
+    #[method(name = "bud_bnsPrepareSetContent")]
+    async fn bns_prepare_set_content(
+        &self,
+        name: String,
+        owner: String,
+        cid: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    // --- B.U.D. SocialFi ---
+
+    /// Get an NFT post by ID.
+    #[method(name = "bud_socialGetPost")]
+    async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get all posts by a user.
+    #[method(name = "bud_socialGetProfile")]
+    async fn social_get_profile(&self, address: String) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare an NFT post transaction (Mint).
+    #[method(name = "bud_socialPreparePost")]
+    async fn social_prepare_post(
+        &self,
+        author: String,
+        cid: String,
+        author_name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
