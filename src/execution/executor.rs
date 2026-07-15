@@ -158,8 +158,7 @@ impl Executor {
                         id_bytes.copy_from_slice(&tx.data[1..9]);
                         let proposal_id = u64::from_le_bytes(id_bytes);
 
-                        let voter_stake =
-                            state.get_validator(&tx.from).map(|v| v.stake).unwrap_or(0);
+                        let voter_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
                         if voter_stake == 0 {
                             return Err(BudlumError::validation(
                                 "governance_voter_not_validator",
@@ -186,8 +185,7 @@ impl Executor {
                                 )
                             })?;
 
-                        let proposer_stake =
-                            state.get_validator(&tx.from).map(|v| v.stake).unwrap_or(0);
+                        let proposer_stake = state.get_validator(&tx.from).map_or(0, |v| v.stake);
                         if proposer_stake == 0 {
                             return Err(BudlumError::validation(
                                 "governance_proposer_not_validator",

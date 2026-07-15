@@ -13,6 +13,8 @@ pub mod bridge_lifecycle;
 pub mod bench_performance;
 #[cfg(test)]
 pub mod block_reward;
+#[cfg(test)]
+pub mod bns;
 // Tur 14, Faz 1-2 + Faz 5: B.U.D. E2E test + ekip-bağımsızlık invariantları.
 // 3-aktör (operatör A + operatör B + izleyici C) senaryosu + 9 adet
 // permissionless/whitelist/data-sovereignty invariantı (Tur 14.5 plan §0.5
@@ -45,7 +47,6 @@ pub mod integration;
 pub mod liveness_consensus;
 #[cfg(test)]
 pub mod permissionless;
-#[cfg(test)]
 #[cfg(test)]
 pub mod persistence;
 #[cfg(test)]

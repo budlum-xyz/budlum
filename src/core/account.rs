@@ -344,7 +344,7 @@ impl AccountState {
     /// its `PermissionlessRegistry` membership. Called from `add_validator`
     /// and from the `Stake` / `Unstake` transaction paths.
     pub fn sync_validator_registration(&mut self, address: &Address) {
-        let stake = self.validators.get(address).map(|v| v.stake).unwrap_or(0);
+        let stake = self.validators.get(address).map_or(0, |v| v.stake);
         self.registry.upsert_stake(
             *address,
             crate::registry::role::roles::VALIDATOR,
@@ -503,7 +503,7 @@ impl AccountState {
             .unwrap_or(0)
     }
     pub fn get_nonce(&self, public_key: &Address) -> u64 {
-        self.accounts.get(public_key).map(|a| a.nonce).unwrap_or(0)
+        self.accounts.get(public_key).map_or(0, |a| a.nonce)
     }
     pub fn get_or_create(&mut self, public_key: &Address) -> &mut Account {
         if !self.accounts.contains_key(public_key) {
