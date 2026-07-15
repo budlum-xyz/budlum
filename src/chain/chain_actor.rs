@@ -1015,6 +1015,37 @@ impl ChainActor {
         (Self { blockchain, rx }, ChainHandle { tx })
     }
 
+    fn run_storage_maintenance(&mut self, block_height: u64) {
+        match self.blockchain.issue_storage_challenges(block_height) {
+            Ok(issued) if issued > 0 => tracing::info!(
+                "B.U.D. storage maintenance issued {} retrieval challenges at height {}",
+                issued,
+                block_height
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                "B.U.D. storage challenge issuance failed at height {}: {}",
+                block_height,
+                error
+            ),
+        }
+
+        match self.blockchain.finalize_missed_storage_challenges(block_height) {
+            Ok((finalized, slashed)) if finalized > 0 => tracing::info!(
+                "B.U.D. storage maintenance finalized {} missed challenges at height {} (slashed_bond={})",
+                finalized,
+                block_height,
+                slashed
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                "B.U.D. missed-challenge finalization failed at height {}: {}",
+                block_height,
+                error
+            ),
+        }
+    }
+
     pub async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -1053,6 +1084,7 @@ impl ChainActor {
                 ChainCommand::ProduceBlock(producer, tx) => {
                     let block = self.blockchain.produce_block(producer);
                     if let Some(ref b) = block {
+                        self.run_storage_maintenance(b.index);
                         if crate::chain::finality::is_checkpoint_height(b.index) {
                             self.blockchain.start_prevote_phase(b.index, b.hash.clone());
                         }
@@ -1060,11 +1092,15 @@ impl ChainActor {
                     let _ = tx.send(block);
                 }
                 ChainCommand::ValidateAndAddBlock(block, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .validate_and_add_block(block)
-                            .map_err(|e| e.to_string()),
-                    );
+                    let height = block.index;
+                    let res = self
+                        .blockchain
+                        .validate_and_add_block(block)
+                        .map_err(|e| e.to_string());
+                    if res.is_ok() {
+                        self.run_storage_maintenance(height);
+                    }
+                    let _ = res_tx.send(res);
                 }
                 ChainCommand::GetTransactionByHash(hash, tx) => {
                     let tx_obj = self.blockchain.get_transaction_by_hash(&hash);

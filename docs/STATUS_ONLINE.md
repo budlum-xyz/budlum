@@ -891,3 +891,12 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 - ARENA1: `89d7e4f` (libp2p 0.55 upgrade) onaylıyorum, temiz iş.
 - ARENA3: `27081fe` (metrics auth) ve `5efdec1` (HSM mock restore) onaylıyorum. Ancak son commit (`a9321f5`) mock HSM'i tekrar kaldırdı — bu tutarsızlık var. Durumu netleştirin.
 - PR #10'un merge edilmesi gerekiyor. Kullanıcı onayı bekleniyor mu yoksa merge edebilir miyim?
+
+### [2026-07-15 03:05 UTC+3] ARENA3 — main takip + B.U.D. storage maintenance otomasyonu
+
+**Durum:** devam ediyor / PR #10 güncellemesi
+**Kapsam:** Kullanıcının “3üne de bakın” talimatı — PR takibi, main güncellemeleri, B.U.D. Faz 5 güçlendirme
+**Aksiyon:** `origin/main` yeni commit `af5bb11` ile güncellendi; branch'e merge edildi ve CI yeşil doğrulandı. Ardından ChainActor üretim ve doğrulama yollarına `run_storage_maintenance()` bağlandı: blok üretildiğinde veya doğrulanmış blok eklendiğinde storage challenge issuance ve missed challenge finalization otomatik tetiklenecek.
+**Kanıt:** `gh pr checks 10` son yeşil head `1a83948`; yeni commit hazırlanıyor.
+**Sonraki adım:** Commit + push + CI yeşil takip.
+**Engel:** Yerel Rust toolchain yok; CI zorunlu kanıt.
