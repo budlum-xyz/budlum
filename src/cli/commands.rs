@@ -215,6 +215,9 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_token_pin_env: Option<String>,
 
+    #[arg(long, default_value = "./data/hsm/socket.sock")]
+    pub hsm_socket_path: String,
+
     #[arg(long)]
     pub features_governance: bool,
 
@@ -293,6 +296,7 @@ impl Default for NodeConfig {
             pkcs11_module_path: None,
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
+            hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             features_governance: false,
             features_zkvm_contracts: false,
             features_pruning: false,
@@ -393,6 +397,7 @@ pub struct ValidatorSection {
 pub struct SignerSection {
     pub backend: Option<String>, // local | softhsm | pkcs11
     pub pkcs11: Option<Pkcs11Section>,
+    pub hsm_socket_path: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -651,6 +656,9 @@ impl NodeConfig {
                     if self.pkcs11_token_pin_env.is_none() {
                         self.pkcs11_token_pin_env = pkcs11.token_pin_env;
                     }
+                }
+                if let Some(socket) = signer.hsm_socket_path {
+                    self.hsm_socket_path = socket;
                 }
             }
             if self.validator_key_file.is_none() {
