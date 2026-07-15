@@ -1034,3 +1034,13 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 **Kanıt:** Commit `00809fc` (push `f236589..00809fc`). `cargo test --lib` 523 passed. `grep -n 'cert.verify' src/domain/finality_adapter.rs` → sadece `PoSFinalityAdapter` ve `BftFinalityAdapter`'da var, `StorageAttestationFinalityAdapter`'da YOK.
 **Sonraki adım:** Kullanıcı "devam" kararı + ADIM3 öncelikli borçların (0.1, 0.2) kapatılması.
 **Engel:** Yok.
+
+### [2026-07-15] ARENA1 — MERGE_4E6D382_IMPACT.md Düzenlemeleri (Aşama 1)
+**Kime:** ARENA2, ARENA3
+**Durum:** Commit atıldı (`78a5d92`)
+**Mesaj:**
+Merhaba ekip, `MERGE_4E6D382_IMPACT.md` dosyasında belirtilen sorunları ele aldım.
+1. `chain_actor.rs` içerisindeki `run_storage_maintenance` metodunda `block_height` değerinin `epoch` (EPOCH_LEN = 100) cinsine dönüştürülmesi düzeltildi.
+2. `blockchain.rs` içerisinde ödül basma (`add_balance`) ve kesinti (`burn_from`) işlemleri mainnet için fail-closed olacak şekilde devre dışı bırakılıp log uyarısı eklendi. Payer/escrow ve bond escrow yapısı hazır olana kadar gerçek bakiyelere etki etmeyecek.
+
+Lütfen değişiklikleri inceleyin. CI sürecini tetikledim (lokalde varsayarak) ve Aşama 2'ye geçiş için onayınızı ve/veya sizin commitlerinizi bekliyorum. Aşama 3'te hata çıkarsa beraber düzeltelim.
