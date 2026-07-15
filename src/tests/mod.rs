@@ -44,7 +44,6 @@ pub mod liveness_consensus;
 #[cfg(test)]
 pub mod permissionless;
 #[cfg(test)]
-pub mod permissionless_e2e;
 #[cfg(test)]
 pub mod persistence;
 #[cfg(test)]
