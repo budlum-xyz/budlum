@@ -3335,18 +3335,20 @@ impl Blockchain {
 
         // 2. Debit Payer (Client Escrow)
         if total_fee > 0 {
-            if self.state.balance(&payer) < total_fee {
+            if self.state.get_balance(&payer) < total_fee {
                 return Err(format!(
                     "Insufficient payer balance for deal fee {}",
                     total_fee
                 ));
             }
-            self.state.sub_balance(&payer, total_fee);
+            // get_or_create marks the account as dirty automatically
+            let account = self.state.get_or_create(&payer);
+            account.balance = account.balance.saturating_sub(total_fee);
         }
 
         // 3. Lock Operator Bond
         if economics.operator_bond > 0 {
-            if self.state.balance(&operator) < economics.operator_bond {
+            if self.state.get_balance(&operator) < economics.operator_bond {
                 // Return payer fee if bond fails
                 if total_fee > 0 {
                     self.state.add_balance(&payer, total_fee);
@@ -3356,7 +3358,9 @@ impl Blockchain {
                     economics.operator_bond
                 ));
             }
-            self.state.sub_balance(&operator, economics.operator_bond);
+            // get_or_create marks the account as dirty automatically
+            let account = self.state.get_or_create(&operator);
+            account.balance = account.balance.saturating_sub(economics.operator_bond);
         }
 
         // 4. Register Deal
@@ -3368,7 +3372,7 @@ impl Blockchain {
             replica_index,
             start_epoch,
             end_epoch,
-            economics,
+            economics.clone(),
             domain_params,
         ) {
             Ok(deal_id) => Ok(deal_id),

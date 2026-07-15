@@ -434,7 +434,7 @@ mod rpc_tests {
 
     #[tokio::test]
     async fn test_storage_rpc_full_lifecycle_register_deal_challenge_answer() {
-        let (server, _) = setup().await;
+        let (server, bc) = setup().await;
         let manifest = crate::storage::ContentManifest::from_bytes_sliced(
             b"hello storage rpc lifecycle test",
             16,
@@ -456,13 +456,19 @@ mod rpc_tests {
 
         let op_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
         let op = Address::from(op_keypair.public_key_bytes());
+        let payer = Address::from([8u8; 32]);
+
+        // Give payer and operator enough balance for deal fees and bond
+        bc.add_balance(&payer, 100_000_000).await;
+        bc.add_balance(&op, 100_000_000).await;
+
         let deal_res = server
             .storage_open_deal(
                 1,
                 manifest.clone(),
                 format!("0x{}", hex::encode(s_id.0)),
                 format!("0x{}", op.to_hex()),
-                format!("0x{}", Address::from([8u8; 32]).to_hex()), // payer
+                format!("0x{}", payer.to_hex()),
                 0,
                 10,
                 100,

@@ -1385,20 +1385,46 @@ impl BudlumApiServer for RpcServer {
             .chain
             .open_storage_deal(
                 domain_id,
-                manifest,
+                manifest.clone(),
                 s_id,
                 op_addr,
                 payer_addr,
                 replica_index,
                 start_epoch,
                 end_epoch,
-                economics,
+                economics.clone(),
                 domain_params,
             )
             .await
             .map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
             })?;
+
+        // Sync the deal to the RPC server's local StorageRegistry so that
+        // subsequent storage_open_challenge / storage_answer_challenge calls
+        // (which use self.storage) can find the deal.
+        // TODO(ARENA2): unify the two registries into a single source of truth.
+        {
+            let mut reg = self.storage.lock().map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("storage registry lock poisoned: {e}"),
+                    None::<()>,
+                )
+            })?;
+            reg.register_manifest(&manifest);
+            let _ = reg.open_deal(
+                domain_id,
+                &manifest,
+                s_id,
+                op_addr,
+                replica_index,
+                start_epoch,
+                end_epoch,
+                economics,
+                &crate::domain::storage_params::StorageDomainParams::default(),
+            );
+        }
 
         Ok(serde_json::json!({
             "dealId": deal_id,
