@@ -432,44 +432,6 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-    } else if config.signer_backend.as_deref() == Some("hsm_mock") {
-        let socket_path = &config.hsm_socket_path;
-        let kp = config
-            .validator_key_file
-            .as_ref()
-            .and_then(|p| load_signing_key(p));
-        let bls = budlum_core::crypto::primitives::BlsKeypair::generate().ok();
-        let pq = Some(budlum_core::crypto::primitives::PqKeyPair::generate());
-        match budlum_core::crypto::hsm_mock::HsmMockServer::spawn_inprocess(
-            socket_path,
-            kp,
-            bls,
-            pq,
-        ) {
-            Ok(_server) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                match budlum_core::crypto::hsm_mock::HsmMockSigner::new(socket_path) {
-                    Ok(signer) => {
-                        println!(
-                            "BLS-PQ HSM mock backend initialized at UNIX socket: {}",
-                            socket_path
-                        );
-                        Some(Arc::new(signer))
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "CRITICAL: Failed to connect to HSM mock socket {}: {}",
-                            socket_path, e
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("CRITICAL: Failed to spawn HSM mock server: {}", e);
-                std::process::exit(1);
-            }
-        }
     } else {
         None
     };

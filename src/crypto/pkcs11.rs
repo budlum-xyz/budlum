@@ -94,6 +94,7 @@ impl Pkcs11Signer {
 
         let bls_key = Self::extract_data_object(&session, BLS_DATA_LABEL)
             .and_then(|bytes| BlsKeypair::from_bytes(&bytes).ok());
+        #[cfg(feature = "pq-dilithium")]
         let pq_key = Self::extract_data_object(&session, PQ_DATA_LABEL).and_then(|bytes| {
             if bytes.len()
                 >= pqcrypto_dilithium::dilithium5::public_key_bytes()
@@ -102,6 +103,14 @@ impl Pkcs11Signer {
                 let pk_len = pqcrypto_dilithium::dilithium5::public_key_bytes();
                 let sk_len = pqcrypto_dilithium::dilithium5::secret_key_bytes();
                 PqKeyPair::from_bytes(&bytes[..pk_len], &bytes[pk_len..pk_len + sk_len]).ok()
+            } else {
+                None
+            }
+        });
+        #[cfg(feature = "pq-ml-dsa")]
+        let pq_key = Self::extract_data_object(&session, PQ_DATA_LABEL).and_then(|bytes| {
+            if bytes.len() >= 1952 + 32 {
+                PqKeyPair::from_bytes(&bytes[..1952], &bytes[1952..1952 + 32]).ok()
             } else {
                 None
             }

@@ -605,8 +605,13 @@ fn trace_matrix(
             let s0_in = if bit == 0 { cur } else { sibling };
             let s1_in = if bit == 0 { sibling } else { cur };
             // x^2 = (s + rc)^2 (mod P)
+            // ARENA2 fix (Z-B gate): use u128 for addition to prevent
+            // Goldilocks field overflow. `wrapping_add` wraps at u64::MAX
+            // but Goldilocks P = 2^64-2^32+1 < u64::MAX, so when
+            // s_in + rc0[i] > u64::MAX the wrapping_add result is wrong
+            // mod P. The VM uses u128 correctly in `merkle_poseidon_round`.
             for (i, s_in) in [s0_in, s1_in].iter().enumerate() {
-                let s_plus_rc = s_in.wrapping_add(rc0[i]) % p;
+                let s_plus_rc = ((*s_in as u128 + rc0[i] as u128) % p as u128) as u64;
                 let x2 = ((s_plus_rc as u128 * s_plus_rc as u128) % p as u128) as u64;
                 let x4 = ((x2 as u128 * x2 as u128) % p as u128) as u64;
                 values[row_start + COL_MERKLE_POSEIDON_X2_0 + i] = Goldilocks::new(x2);
@@ -1972,7 +1977,7 @@ mod tests {
     /// Tur 13 (pre-round currents, single-round hash align, original-only
     /// root check, expand gas). Still ignored until full prove is green.
     #[test]
-    #[ignore = "Z-B Commit 3.5: valid 64-depth still InvalidProof; opcode Production-gated"]
+    #[ignore = "Z-B Commit 3.5: ARENA2 wrapping_add→u128 fix applied but additional AIR constraint mismatch remains; requires deeper trace-matrix debugging"]
     fn proves_verify_merkle_valid_64_depth() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),

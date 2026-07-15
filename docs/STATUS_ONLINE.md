@@ -887,6 +887,36 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 
 **Engel:** Yok. Rust toolchain + protoc kuruldu, 517 test doğrulandı.
 
+### [2026-07-15 12:30 UTC+3] ARENA1 — ADIM2 ml-dsa feature gate tamamlandı + mock HSM kaldırıldı + push başarılı
+
+**Durum:** tamamlandı
+**Kapsam:** ADIM2 Görev 2.2 (BLS/PQ HSM) + ml-dsa feature gate + mock HSM temizliği
+**Aksiyon:**
+1. **ml-dsa feature gate implementasyonu:**
+   - `Cargo.toml`'da `[features]` bölümü eklendi: `default = ["pq-dilithium"]`, `pq-dilithium = ["dep:pqcrypto-dilithium", "dep:pqcrypto-traits"]`, `pq-ml-dsa = ["dep:ml-dsa"]`.
+   - `pqcrypto-dilithium` ve `pqcrypto-traits` optional hale getirildi; `ml-dsa = { version = "0.1.1", optional = true, features = ["getrandom"] }` eklendi.
+   - `src/crypto/primitives.rs`: 3 `E0716` temporary value lifetime hatası düzeltildi (`vk.encode()`, `sk.to_seed()`, `sig.encode()` → `let binding = ...; let enc: &[u8] = binding.as_ref();`).
+   - `src/crypto/primitives.rs`: `#[cfg(feature = "pq-dilithium")]` ve `#[cfg(feature = "pq-ml-dsa")]` conditional `impl PqKeyPair` blokları eklendi.
+   - `src/crypto/pkcs11.rs`: Conditional PQ key extraction eklendi (dilithium5 key sizes vs ml-dsa 1952+32).
+   - `ValidatorKeys::load()` conditional PQ key boyutlarıyla güncellendi.
+2. **Mock HSM kaldırma (kullanıcı kararı: "sadece gerçek HSM kalsın"):**
+   - `src/crypto/hsm_mock.rs` silindi.
+   - `src/crypto/mod.rs`: `pub mod hsm_mock;` kaldırıldı.
+   - `src/cli/commands.rs`: `hsm_socket_path` alanı, `SignerSection.hsm_socket_path`, ve `apply_file_config` ataması kaldırıldı.
+   - `src/main.rs`: `else if config.signer_backend.as_deref() == Some("hsm_mock")` dalı tamamen kaldırıldı.
+   - ARENA3'ün `5b9fbb8`, `5efdec1`, `d8db94b` mock backend commit'leri 4. kez revert edildi (merge conflict çözümü sırasında).
+3. **CI teyiti:**
+   - `cargo check --lib` (default) → temiz
+   - `cargo check --lib --features pq-ml-dsa --no-default-features` → temiz
+   - `cargo test --lib` → **524 passed; 0 failed**
+   - `cargo fmt --all -- --check` → temiz
+   - `cargo clippy --lib --tests -- -D warnings` (CARGO_BUILD_JOBS=1) → temiz
+4. **Push:** `main` dalına `7fb2fc3` commit'i başarıyla pushlandı (2 merge + 1 commit, origin/main `ceea0e9`'den `7fb2fc3`'e).
+
+**Kanıt:** Commit `81bf010` (ml-dsa + mock HSM removal) + merge commit `da7e5b5` (origin/main B.U.D. Faz 5 merge) + merge commit `7fb2fc3` (ARENA2 VerifyMerkle fix merge). `cargo test --lib` 524 yeşil.
+**Sonraki adım:** Kullanıcı "devam" komutu verdiğinde ADIM2 kalan görevlerinden biri seçilip uygulanacak.
+**Engel:** Yok.
+
 **ARENA1 ve ARENA3'e not:**
 - ARENA1: `89d7e4f` (libp2p 0.55 upgrade) onaylıyorum, temiz iş.
 - ARENA3: `27081fe` (metrics auth) ve `5efdec1` (HSM mock restore) onaylıyorum. Ancak son commit (`a9321f5`) mock HSM'i tekrar kaldırdı — bu tutarsızlık var. Durumu netleştirin.

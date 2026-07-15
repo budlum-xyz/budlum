@@ -2,7 +2,9 @@ use bls12_381::{G2Affine, G2Projective, Scalar};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,
 };
+#[cfg(feature = "pq-dilithium")]
 use pqcrypto_dilithium::dilithium5;
+#[cfg(feature = "pq-dilithium")]
 use pqcrypto_traits::sign::{
     DetachedSignature as PqDetachedSignatureTrait, PublicKey as PqPublicKeyTrait,
     SecretKey as PqSecretKeyTrait,
@@ -172,6 +174,7 @@ pub struct PqKeyPair {
     secret_key: Vec<u8>,
 }
 
+#[cfg(feature = "pq-dilithium")]
 impl PqKeyPair {
     pub fn generate() -> Self {
         let (public_key, secret_key) = dilithium5::keypair();
@@ -225,6 +228,82 @@ impl PqKeyPair {
             .map_err(|e| CryptoError::Verification(e.to_string()))?;
         dilithium5::verify_detached_signature(&signature, message, &public_key)
             .map_err(|e| CryptoError::Verification(e.to_string()))
+    }
+}
+
+#[cfg(feature = "pq-ml-dsa")]
+impl PqKeyPair {
+    pub fn generate() -> Self {
+        use ml_dsa::{Generate, Keypair};
+        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::generate();
+        let vk = sk.verifying_key();
+        PqKeyPair {
+            public_key: {
+                let binding = vk.encode();
+                let enc: &[u8] = binding.as_ref();
+                enc.to_vec()
+            },
+            secret_key: {
+                let binding = sk.to_seed();
+                let seed: &[u8] = binding.as_ref();
+                seed.to_vec()
+            },
+        }
+    }
+
+    pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
+        if public_key.len() != 1952 {
+            return Err(CryptoError::InvalidKey(format!(
+                "Invalid ML-DSA public key length: expected 1952, got {}",
+                public_key.len()
+            )));
+        }
+        if secret_key.len() != 32 {
+            return Err(CryptoError::InvalidKey(format!(
+                "Invalid ML-DSA seed length: expected 32, got {}",
+                secret_key.len()
+            )));
+        }
+        Ok(Self {
+            public_key: public_key.to_vec(),
+            secret_key: secret_key.to_vec(),
+        })
+    }
+
+    pub fn public_key_bytes(&self) -> &[u8] {
+        &self.public_key
+    }
+
+    pub fn secret_key_bytes(&self) -> &[u8] {
+        &self.secret_key
+    }
+
+    pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        use ml_dsa::Signer;
+        let seed = ml_dsa::Seed::try_from(self.secret_key.as_slice())
+            .map_err(|_| CryptoError::Signing("Invalid ML-DSA seed".to_string()))?;
+        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&seed);
+        let sig = sk.sign(message);
+        let binding = sig.encode();
+        let enc: &[u8] = binding.as_ref();
+        Ok(enc.to_vec())
+    }
+
+    pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
+        let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(public_key)
+            .map_err(|_| CryptoError::Verification("Invalid ML-DSA public key".to_string()))?;
+        let vk = ml_dsa::VerifyingKey::<ml_dsa::MlDsa65>::decode(&enc_vk);
+        let enc_sig = ml_dsa::EncodedSignature::<ml_dsa::MlDsa65>::try_from(signature)
+            .map_err(|_| CryptoError::Verification("Invalid ML-DSA signature".to_string()))?;
+        let sig = ml_dsa::Signature::<ml_dsa::MlDsa65>::decode(&enc_sig).ok_or_else(|| {
+            CryptoError::Verification("Invalid ML-DSA signature decode".to_string())
+        })?;
+        if !vk.verify_with_context(message, &[], &sig) {
+            return Err(CryptoError::Verification(
+                "ML-DSA signature verification failed".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -297,12 +376,24 @@ impl ValidatorKeys {
             .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
 
         let mut cursor = 128;
+        #[cfg(feature = "pq-dilithium")]
         let pq_key = if bytes.len() > cursor
             && bytes.len()
                 >= cursor + dilithium5::public_key_bytes() + dilithium5::secret_key_bytes()
         {
             let pq_pk_end = cursor + dilithium5::public_key_bytes();
             let pq_sk_end = pq_pk_end + dilithium5::secret_key_bytes();
+            let pk =
+                PqKeyPair::from_bytes(&bytes[cursor..pq_pk_end], &bytes[pq_pk_end..pq_sk_end])?;
+            cursor = pq_sk_end;
+            Some(pk)
+        } else {
+            None
+        };
+        #[cfg(feature = "pq-ml-dsa")]
+        let pq_key = if bytes.len() > cursor && bytes.len() >= cursor + 1952 + 32 {
+            let pq_pk_end = cursor + 1952;
+            let pq_sk_end = pq_pk_end + 32;
             let pk =
                 PqKeyPair::from_bytes(&bytes[cursor..pq_pk_end], &bytes[pq_pk_end..pq_sk_end])?;
             cursor = pq_sk_end;
