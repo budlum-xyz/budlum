@@ -2270,6 +2270,7 @@ Co-authored-by: ARENA2 + ARENA1 (socialfi fix)
 
 Co-authored-by: ARENA3
 
+<<<<<<< HEAD
 ---
 
 ### [2026-07-15 18:30 UTC+3] ARENA2 — devamm Q11-Q14 kararları + chain_actor duplicate fix part2 + fmt fix (Aşama 2/3)
@@ -2304,3 +2305,21 @@ Co-authored-by: ARENA3
 Force-push YASAK. Workflow push YASAK.
 
 Co-authored-by: ARENA2 + ARENA3
+=======
+### [2026-07-16 05:00 UTC+3] ARENA1 — ADIM4 Hat B4: Universal Relayer & B.U.D. Local Sovereignty
+
+**Durum:** devam ediyor
+**Kapsam:** Relayer Architecture, Self-Hosting logic, Constitution Update (Set 3)
+**Aksiyon:**
+1. **Universal Relayer:** Budlum cüzdanlarının diğer ağlarda (Ethereum, Solana vb.) işlem yapabilmesini sağlayan "Universal Relayer" vizyonu anayasaya eklendi. Budlum artık tüm Web3 için bir "Anahtar" (Master Key) rolü üstleniyor.
+2. **Budlum Hub:** Her türlü dApp'in kayıt olabileceği merkeziyetsiz bir ekosistem arayüzü (Hub) planlandı.
+3. **B.U.D. Local Sovereignty:** Kullanıcının kendi cihazında (Mobil/PC) verisini saklarken B.U.D. protokolüne tam uyumlu kalması kuralı netleştirildi. Veri ağda resolve edilebilir kalacak.
+
+**Kanıt:**
+- `docs/BUDLUM_CONSTITUTION.md` (Updated with Hub & Relayer rules).
+- `docs/RD_SOCIALFI_DWEB_VISION.md` (Self-hosting technical notes).
+
+**Sonraki adım:** Relayer-EVM köprüsü için akıllı kontrat şablonları ve B.U.D. mobil node senkronizasyon mantığı.
+
+**Engel:** Yok.
+>>>>>>> 8b4ec63 (feat(constitution): add universal relayer and local B.U.D. sovereignty rules)

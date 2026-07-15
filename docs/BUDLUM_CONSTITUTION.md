@@ -4,7 +4,7 @@
 **Author:** ARENA1 (Core/R&D)
 **Status:** Canonical / User-Decided
 
-Based on the 10 strategic decisions made by the owner (Ayaz), the following rules are now part of the Budlum "Digital Constitution". These rules will govern the development of SocialFi, BNS, and AI integration.
+Based on the strategic decisions made by the owner (Ayaz), the following rules are now part of the Budlum "Digital Constitution". These rules will govern the development of SocialFi, BNS, and AI integration.
 
 ---
 
@@ -24,29 +24,41 @@ Based on the 10 strategic decisions made by the owner (Ayaz), the following rule
 ## 3. Data Sovereignty & Economics
 -   **Spam Protection:** Fee per post. Every SocialFi interaction (NFT Mint) incurs a transaction fee.
 -   **Longevity:** Permanent by default. Data remains on the network until the owner explicitly burns the NFT.
--   **Self-Hosting Option:** Users who do not wish to pay annual storage rent can opt to "Self-Host" their data. In this mode, the user's own node is responsible for providing the data to the network (Vision: WhatsApp-style local sovereignty).
+-   **Self-Hosting Option:** Users who do not wish to pay annual storage rent can opt to "Self-Host" their data via their local B.U.D. node. This data remains fully resolveable and accessible via the B.U.D. protocol as long as the user's device is online.
 -   **Rewards:** Storage Provider Heavy. The majority of new $BUD issuance goes to B.U.D. operators (Storage Proofs).
--   **Advertising Revenue Model:**
+-   **Advertising & Highlighting Model:**
     -   When an NFT is "Highlighted" (Boosted/Ads):
-        -   4% to B.U.D. (Storage Operators).
+        -   4% to B.U.D. (Storage Operators/Providers).
         -   16% to the Content Creator/Context (if ad appears inside a profile/content).
         -   80% to Budlum Protocol (Treasury/Burn).
--   **Interoperability:** Universal Bridge Hub.
+-   **Interoperability:** Universal Bridge Hub (Master Key for all Web3).
+
+---
+
+## 4. Universal Ecosystem & Relayer
+-   **Budlum Hub:** A unified ecosystem interface where any blockchain application (dApp) can register and be visible to Budlum users.
+-   **Universal Relayer:** The Budlum Relayer serves as a master translator, allowing Budlum wallets/HSMs to sign and execute transactions on external chains (EVM, Solana, Bitcoin, etc.), making the Budlum wallet the universal gateway.
+
+---
+
+## 5. Artificial Intelligence (AI) Layer
+-   **Access Policy:** Permissioned & Monetized.
+-   **Data Marketplace:** Users "market" their data to Arena AI agents. AI access requires explicit user permission and payment in $BUD.
 
 ---
 
 ## 6. Infrastructure & Devices
--   **Physical Hardware:** Specialized, pre-configured Budlum physical nodes will be available for purchase with $BUD, providing a "Plug & Play" entry into the storage economy.
--   **Mobile Integration:** Mobile devices are treated as high-priority storage and validation nodes, allowing users to secure the network and host their own data directly from their phones.
+-   **Physical Hardware:** Pre-configured physical nodes available for purchase with $BUD (Plug & Play storage economy).
+-   **Mobile Integration:** Mobile devices are high-priority storage and validation nodes. Users can host their own B.U.D. data directly from their phones.
 
 ---
 
 ## 7. Social & BNS Rules
--   **Verified Status:** Premium BNS records (High-tier annual payment) can grant a "Verified" badge, ensuring trust for public figures/brands.
--   **Data Portability:** Internal focus. Budlum data structures are unique and optimized for B.U.D./BudZKVM; while the protocol is open, there is no focus on external "Export" compatibility to maintain internal sovereignty.
--   **Sub-BNS Market:** Parent-controlled. Sub-domains (x.ayaz.bud) are strictly controlled and managed by the parent name owner, ensuring brand integrity.
--   **Emergency Protocol:** DAO Halt. In the event of a critical security failure, the community (DAO) can vote to temporarily halt the chain to prevent damage.
--   **Token Boosters:** $BUD can be burned/spent to "Boost" storage access speed and network priority for specific CIDs.
+-   **Verified Status:** Premium BNS records (High-tier annual payment) can grant a "Verified" badge.
+-   **Data Portability:** Internal focus. No focus on external "Export" compatibility to maintain internal sovereignty.
+-   **Sub-BNS Market:** Parent-controlled. Sub-domains (x.ayaz.bud) are managed by the parent name owner.
+-   **Emergency Protocol:** DAO Halt. The community can vote to temporarily halt the chain during critical failures.
+-   **Token Boosters:** $BUD can be spent to "Boost" storage access speed and network priority for specific CIDs.
 
 ---
 
