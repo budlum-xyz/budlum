@@ -1,5 +1,5 @@
-pub mod types;
 pub mod registry;
+pub mod types;
 
 pub use registry::BnsRegistry;
-pub use types::{NameRecord, BnsError};
+pub use types::{BnsError, NameRecord};

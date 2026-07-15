@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NameRecord {
-    pub name: String,         // e.g., "ayaz.bud"
-    pub owner: Address,       // The account that owns the name
-    pub expires_at: u64,      // Epoch when the name expires
+    pub name: String,              // e.g., "ayaz.bud"
+    pub owner: Address,            // The account that owns the name
+    pub expires_at: u64,           // Epoch when the name expires
     pub resolver: Option<Address>, // Optional smart contract for complex resolution
 }
 

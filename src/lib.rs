@@ -1,3 +1,4 @@
+pub mod bns;
 pub mod chain;
 pub mod cli;
 pub mod consensus;
@@ -14,7 +15,6 @@ pub mod registry;
 pub mod rpc;
 pub mod settlement;
 pub mod storage;
-pub mod bns;
 pub mod tokenomics;
 
 #[cfg(test)]

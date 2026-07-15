@@ -1,7 +1,7 @@
 use crate::bns::types::{BnsError, NameRecord};
 use crate::core::address::Address;
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BnsRegistry {
@@ -18,7 +18,13 @@ impl BnsRegistry {
         }
     }
 
-    pub fn register(&mut self, name: String, owner: Address, current_epoch: u64, duration: u64) -> Result<(), BnsError> {
+    pub fn register(
+        &mut self,
+        name: String,
+        owner: Address,
+        current_epoch: u64,
+        duration: u64,
+    ) -> Result<(), BnsError> {
         if name.len() < 3 || name.len() > 32 {
             return Err(BnsError::InvalidName);
         }
