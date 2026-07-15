@@ -272,11 +272,7 @@ async fn main() {
             "✅ Mandatory pre-migration backup verified at: {}",
             backup_path.display()
         );
-        println!(
-            "✅ ConsensusStateV2 schema migration ready and compatible. Supported schema window: {}..={}.",
-            budlum_core::chain::snapshot::MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION,
-            budlum_core::chain::snapshot::CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
-        );
+        println!("✅ ConsensusStateV2 schema migration ready and compatible. Minimum schema threshold MIN_SCHEMA_VERSION=2 verified.");
         return;
     }
 
@@ -404,8 +400,8 @@ async fn main() {
             let pin_env = config.pkcs11_token_pin_env.as_deref().unwrap_or("");
             if module_path.is_empty() || pin_env.is_empty() {
                 eprintln!(
-                    "ERROR: PKCS#11 backend requires --pkcs11-module-path and --pkcs11-token-pin-env"
-                );
+                "ERROR: PKCS#11 backend requires --pkcs11-module-path and --pkcs11-token-pin-env"
+            );
                 std::process::exit(1);
             }
             match budlum_core::crypto::pkcs11::Pkcs11Signer::new(

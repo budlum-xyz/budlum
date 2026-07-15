@@ -12,7 +12,7 @@ dependency audit + SBOM.
 |------|-------|-------|
 | §1.1 BLS/PQ HSM policy/tooling | ✅ PR kapsamına alındı | `src/crypto/hsm_mock.rs` main entegrasyonu, mainnet disk-key fail-closed policy, `docs/operations/HSM_BLS_PQ_POLICY.md` |
 | §1.3 Finality live-path son taraması | ✅ PR kapsamına alındı | `src/tests/finality_live_path.rs`, `docs/operations/FINALITY_LIVE_PATH.md` |
-| §1.4 ConsensusStateV2 migration iskeleti | ✅ PR kapsamına alındı | `StateSnapshotV2::migration_report()`, schema window constants, `--migrate-v2` backup gate, `docs/operations/MIGRATION_V2.md` |
+| §1.4 ConsensusStateV2 migration iskeleti | ✅ PR kapsamına alındı | `StateSnapshotV2::from_bytes()` schema window, `--migrate-v2` backup gate, `docs/operations/MIGRATION_V2.md` |
 | §1.5 External audit checklist | ✅ Güncellendi | `docs/AUDIT_CHECKLIST.md` — audit yapılmadı iddiası korunuyor |
 | §1.6 README roadmap kapanış tablosu | ✅ Güncellendi | `README.md` Research Roadmap Status tablosu ADIM 2 §1.3-§1.7 durumlarını yansıtıyor |
 | §1.7 Fuzzing + dependency audit + SBOM | ✅ Tooling/prosedür hazır | `fuzz/`, `scripts/audit-deps.sh`, `scripts/generate-sbom.sh`, `docs/operations/DEPENDENCY_AUDIT.md`, `docs/operations/SBOM.md` |

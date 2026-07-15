@@ -9,31 +9,22 @@
 
 ## Sürüm penceresi
 
-`src/chain/snapshot.rs` içinde iki sabit vardır:
+`src/chain/snapshot.rs::StateSnapshotV2::from_bytes()` içinde desteklenen schema
+penceresi fail-closed kontrol edilir:
 
-| Sabit | Değer | Anlam |
-|-------|-------|-------|
-| `MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION` | `2` | Bu binary’nin kabul ettiği en eski V2 snapshot şeması. |
-| `CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION` | `3` | Bu binary’nin ürettiği güncel durable snapshot şeması. |
-
-Desteklenmeyen şemalar fail-closed reddedilir:
-
-- `schema_version < 2` → legacy snapshot reddedilir; ara release ile restore gerekir.
-- `schema_version > 3` → future snapshot reddedilir; downgrade/yanlış binary riski.
+| Pencere | Davranış |
+|---------|----------|
+| `schema_version < 2` | Legacy snapshot reddedilir; ara release ile restore gerekir. |
+| `schema_version = 2 veya 3` | Kabul edilir; `#[serde(default)]` alanlarıyla geriye uyum korunur. |
+| `schema_version > 3` | Future snapshot reddedilir; downgrade/yanlış binary riski engellenir. |
 
 ## Kod iskeleti
 
-`StateSnapshotV2::migration_report()` şu raporu üretir:
-
-- `original_schema_version`
-- `target_schema_version`
-- `migrated` (`schema_version < CURRENT` ise `true`)
-- `requires_backup` (`true`; migration öncesi backup zorunlu)
-- `notes` (schema-2 default-field kabulü veya zaten güncel notu)
-
-`StateSnapshotV2::from_bytes()` artık doğrudan gömülü sayı kontrolü yapmaz;
-aynı kontrolü bu migration hook üzerinden çağırır. Böylece gelecek şema
-geçişleri tek noktadan genişletilebilir.
+`StateSnapshotV2::from_bytes()` şu an minimum migration hook görevi görür:
+unsupported legacy/future şemaları reddeder, schema-2/3 snapshot’ları deserialize
+eder. ADIM 2 kapsamı bunu operasyon dokümanı ve offline CLI preflight ile
+sabitlemek; gelecekteki `v3 -> v4` gibi gerçek transform fonksiyonları bu alana
+explicit olarak eklenecektir.
 
 ## Offline CLI kapısı
 
@@ -61,8 +52,8 @@ explicit `v2 -> v3 -> v4` transform fonksiyonları eklenecek.
 
 - `schema_version = 1` reddedilir,
 - `schema_version = 99` reddedilir,
-- `schema_version = 2` desteklenir ve `migrated = true` raporu üretir,
-- güncel schema desteklenir ve `migrated = false` raporu üretir.
+- `schema_version = 2` desteklenir,
+- güncel schema (`3`) desteklenir.
 
 ## Doğrulama komutları
 
@@ -77,11 +68,11 @@ Bu sandbox oturumunda `cargo`/`rustc` binary’si bulunmadığı için komutlar 
 
 ## Kabul kriteri
 
-- [x] Desteklenen schema penceresi sabitlerle merkezi tanımlı.
+- [x] Desteklenen schema penceresi `StateSnapshotV2::from_bytes()` içinde fail-closed tanımlı.
 - [x] Unsupported legacy/future snapshot fail-closed.
 - [x] Offline migration CLI preflight + zorunlu backup mevcut.
-- [x] Migration raporu audit edilebilir veri döndürüyor.
-- [x] Test iskeleti schema-2/current/legacy/future yollarını kapsıyor.
+- [x] Offline migration preflight audit edilebilir CLI çıktısı üretiyor.
+- [x] Test iskeleti legacy/future/current yollarını kapsıyor; schema-2 geriye uyum persistence testlerinde korunuyor.
 - [ ] CI `Budlum Core` yeşil.
 
 ## Bilinçli sınırlar

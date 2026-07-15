@@ -162,7 +162,7 @@ tablodan bilinçli olarak hariç tutulmuştur** — ayrı turlarda
 | Snapshot V2 | ✅ Closed (archive policy `config/archive.toml`) | 13.5 |
 | Observability Prometheus | ✅ Closed (latency histogram wiring) | 13.5 |
 | Deployment docker/systemd | ✅ Closed (runbook) | 13.5 |
-| **ConsensusStateV2 migration** | ✅ **Closed / skeleton** — schema window constants + `migration_report()` + offline `--migrate-v2` backup gate | **ADIM 2.4** |
+| **ConsensusStateV2 migration** | ✅ **Closed / skeleton** — fail-closed `from_bytes()` schema window + offline `--migrate-v2` backup gate | **ADIM 2.4** |
 | **External audit** | ✅ **Checklist ready** — `docs/AUDIT_CHECKLIST.md`; harici audit yapılmadı/audited iddiası yok | **ADIM 2.5** + launch öncesi |
 | **Fuzzing + dependency audit + SBOM** | ✅ **Tooling ready** — `fuzz/`, `scripts/audit-deps.sh`, `scripts/generate-sbom.sh`, `docs/operations/*` | **ADIM 2.7** |
 | ZKVM optimizations | ⏳ Baseline complete (proof time/size harness) | 13.5 |
