@@ -1397,7 +1397,7 @@ impl BudlumApiServer for RpcServer {
                 economics.clone(),
                 domain_params,
                 merkle_proof.clone(),
-                storage_root.clone(),
+                storage_root,
             )
             .await
             .map_err(|e| {

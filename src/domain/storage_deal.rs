@@ -91,22 +91,27 @@ pub struct StorageEconomicsParams {
 /// A storage deal binding an operator to host a specific shard of a
 /// specific manifest. One shard may have multiple deals (replication =
 /// different `replica_index`).
+fn default_merkle_depth() -> u8 {
+    64
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageDeal {
     // === B.U.D. Faz 3: Merkle Proof (ADIM4) ===
-    
+
     // 64-depth Merkle proof serialized as [leaf || siblings || path_bits].
     // Present when `verify_merkle = Some(...)`.
     // None = interim challenge mode (Faz 2 compatibility).
     #[serde(default)]
     pub merkle_proof: Option<Vec<u8>>,
-    
+
     // The global storage root this proof was verified against.
     // Must match `GlobalBlockHeader.storage_root`.
     #[serde(default)]
     pub storage_root: Option<Hash32>,
-    
+
     // Proof depth: 64 for full verification.
+    #[serde(default = "default_merkle_depth")]
     pub merkle_depth: u8,
     pub deal_id: u64,
     pub domain_id: u32,
@@ -372,6 +377,7 @@ impl StorageRegistry {
         economics: StorageEconomicsParams,
         domain_params: &StorageDomainParams,
         // === B.U.D. Faz 3: Merkle Proof (ADIM4) ===
+        // Optional in Faz 2 (interim); required in Faz 3 once VerifyMerkle gate opens.
         merkle_proof: Option<Vec<u8>>,
         storage_root: Option<Hash32>,
     ) -> Result<u64, StorageError> {
@@ -807,13 +813,13 @@ mod tests {
             )
             .unwrap();
         assert_ne!(id1, id2);
-        
+
         // Test with merkle proof (Faz 3 mode)
         let shard_id = m.shards[0].shard_id;
         let id3 = reg
             .open_deal(
                 42,
-                m,
+                &m,
                 shard_id,
                 operator(),
                 2,
@@ -822,18 +828,18 @@ mod tests {
                 good_econ(),
                 &params(),
                 Some(vec![0u8; 100]), // merkle_proof: Faz 3 proof
-                Some(Hash32([0x42u8; 32])), // storage_root
+                Some([0x42u8; 32]),   // storage_root
             )
             .unwrap();
         assert_ne!(id2, id3);
-        
+
         // Verify merkle proof is stored
         let deal3 = reg.get_deal(id3).unwrap();
         assert!(deal3.merkle_proof.is_some());
         assert!(deal3.storage_root.is_some());
         assert_eq!(deal3.merkle_depth, 64);
-        assert_eq!(reg.deals_for_shard(&m.manifest_id, &shard_id).len(), 2);
-        assert_eq!(reg.deals_for_manifest(&m.manifest_id).len(), 2);
+        assert_eq!(reg.deals_for_shard(&m.manifest_id, &shard_id).len(), 3);
+        assert_eq!(reg.deals_for_manifest(&m.manifest_id).len(), 3);
     }
 
     #[test]

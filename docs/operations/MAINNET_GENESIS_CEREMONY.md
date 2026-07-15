@@ -133,3 +133,33 @@ signatures). Do not store private keys in the repository.
 - This document does **not** mark Mainnet as audited.
 - VerifyMerkle / B.U.D. Faz 3 remains ADIM4; interim retrieval is documented in
   `docs/BUD_INTERIM.md`.
+
+
+---
+
+## 6. Seed multiaddr template (fill at ceremony)
+
+Copy into `config/mainnet.toml` only after N-of-M signatures:
+
+```toml
+[p2p]
+bootnodes = [
+  # "/ip4/<A.B.C.D>/tcp/4001/p2p/<PeerId>",
+  # "/ip6/<addr>/tcp/4001/p2p/<PeerId>",
+]
+dns_seeds = [
+  # "_dnsaddr.mainnet.seed.example.org",
+]
+```
+
+Also update `src/core/chain_config.rs` `MAINNET_BOOTNODES` / `MAINNET_DNS_SEEDS`
+if the binary built-in list is used without a TOML overlay.
+
+| Slot | Operator | multiaddr | PeerId | Signer |
+|------|----------|-----------|--------|--------|
+| 1 | | | | |
+| 2 | | | | |
+| 3 | | | | |
+
+After freeze, recompute genesis hash only if genesis JSON changed; seed-only
+updates do **not** change the genesis block hash.

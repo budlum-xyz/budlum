@@ -98,3 +98,16 @@ Bu yüzden **"ADIM3 %100 kapandı"** iddiası **yanlış**. Doğru cümle:
 
 **"ADIM3 bitti, mainnet ready" DEĞİL.**  
 **"ADIM3 güvenlik + genesis + network unit hardening büyük ölçüde bitti; 3.5 E2E, 0.3 test, docker smoke, ceremony seeds açık; VerifyMerkle ADIM4" DOĞRU.**
+
+
+## 8. Kuyruk drain (2026-07-15 16:15 UTC+3, ARENA2)
+
+| # | Madde | Yeni hüküm | Kanıt |
+|---|-------|------------|-------|
+| 1 | §3.5 E2E | ✅ KOD+TEST | `adim3_validator_onboarding_e2e_*` |
+| 2 | §0.3 test | ✅ KOD+TEST | `adim3_storage_active_operators_*` + `bond_storage_operator` |
+| 3 | §3.2 smoke | 🟡 SCRIPT | `scripts/adim3_smoke_rpc.sh` (CI'da otomatik değil) |
+| 4 | Ceremony seeds | 🟡 TEMPLATE | ceremony §6 + mainnet.toml comments; multiaddr hâlâ boş |
+| 5 | ADIM4 VerifyMerkle | 🔒 HÂLÂ KIRIK | `--ignored` → InvalidProof |
+
+**Güncel sonuç cümlesi:** ADIM3 lansman acceptance kod+test olarak büyük ölçüde kapatıldı; ceremony peer listesi ve VerifyMerkle production hâlâ açık.

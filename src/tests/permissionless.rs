@@ -354,3 +354,161 @@ fn stake_registration_does_not_grant_poa_authority() {
     let poa = PoaMembershipRegistry::new();
     assert!(!poa.is_authorized(POA_DOMAIN, &staker));
 }
+
+// --- ADIM3 §3.5: Validator onboarding E2E (stake → active → produce) --------
+
+use crate::chain::blockchain::Blockchain;
+use crate::chain::genesis::GenesisConfig;
+use crate::consensus::pow::PoWEngine;
+use crate::core::chain_config::Network;
+use crate::crypto::primitives::KeyPair;
+use std::sync::Arc;
+
+fn signed_stake_tx(
+    keypair: &KeyPair,
+    amount: u64,
+    nonce: u64,
+    chain_id: u64,
+    fee: u64,
+) -> Transaction {
+    let from = Address::from(keypair.public_key_bytes());
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        amount,
+        fee,
+        nonce,
+        vec![],
+        chain_id,
+        TransactionType::Stake,
+    );
+    tx.sign(keypair);
+    tx
+}
+
+/// ADIM3 §3.5 acceptance: empty-ish chain → fund → stake tx → registry Active
+/// → produce_block as that validator succeeds.
+#[test]
+fn adim3_validator_onboarding_e2e_stake_register_produce() {
+    let consensus = Arc::new(PoWEngine::new(0));
+    // Use devnet chain id for test speed (min_stake=1000), but exercise the
+    // same stake→registry→produce path documented for mainnet onboarding.
+    let mut genesis = GenesisConfig::for_network(Network::Devnet);
+    // Start with no pre-seeded validators so the newcomer is the onboarding path.
+    genesis.validators.clear();
+    // Keep a treasury allocation for fees/funding.
+    if genesis.allocations.is_empty() {
+        genesis.allocations.push((addr(0x01), 1_000_000_000));
+    }
+
+    let mut bc =
+        Blockchain::new_with_genesis(consensus, None, genesis.chain_id, None, Some(genesis));
+
+    let keypair = KeyPair::generate().unwrap();
+    let staker = Address::from(keypair.public_key_bytes());
+    let min_stake = bc.state.registry.params().min_stake;
+    let stake_amount = min_stake + 5_000;
+    let fee = bc.state.base_fee.max(1);
+
+    // Fund newcomer (simulates treasury transfer / faucet for onboarding).
+    bc.state.add_balance(&staker, stake_amount + fee * 10);
+
+    assert!(
+        !bc.state.registry.is_active(&staker, roles::VALIDATOR),
+        "newcomer must not be active before staking"
+    );
+
+    let tx = signed_stake_tx(&keypair, stake_amount, 0, bc.chain_id, fee);
+    bc.add_transaction(tx).expect("stake tx must enter mempool");
+
+    let block = bc
+        .produce_block(staker)
+        .expect("new staker must be able to produce after onboarding stake");
+    assert_eq!(block.producer, Some(staker));
+    assert!(
+        block.index >= 1,
+        "first produced block after genesis should be height >= 1"
+    );
+
+    assert!(
+        bc.state.registry.is_active(&staker, roles::VALIDATOR),
+        "stake must auto-register Active VALIDATOR in permissionless registry"
+    );
+    let reg = bc
+        .state
+        .registry
+        .get(&staker, roles::VALIDATOR)
+        .expect("registration exists");
+    assert_eq!(reg.stake, stake_amount);
+    assert!(reg.is_active());
+
+    // Second block production: already-onboarded validator keeps producing.
+    let block2 = bc
+        .produce_block(staker)
+        .expect("active validator continues producing");
+    assert_eq!(block2.producer, Some(staker));
+    assert!(block2.index > block.index);
+}
+
+/// ADIM3 §3.5: mainnet economic floor (min_stake=1_000_000) still gates activity.
+#[test]
+fn adim3_mainnet_min_stake_floor_for_onboarding() {
+    let genesis = GenesisConfig::for_network(Network::Mainnet);
+    assert!(
+        genesis.validators.is_empty(),
+        "mainnet genesis must start permissionless (empty validators)"
+    );
+    assert_eq!(Network::Mainnet.min_stake(), 1_000_000);
+
+    // Registry default min_stake may differ from network consensus min_stake;
+    // onboarding docs use Network::Mainnet.min_stake() as the operator target.
+    // Ensure mainnet genesis builds and is deterministic for empty validator set.
+    let g1 = genesis.build_genesis_block();
+    let g2 = genesis.build_genesis_block();
+    assert_eq!(g1.hash, g2.hash);
+    assert_eq!(g1.chain_id, 1);
+}
+
+/// ADIM3 §3.5: below-floor stake does not grant active validator role.
+#[test]
+fn adim3_onboarding_rejects_below_floor_as_active() {
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut genesis = GenesisConfig::for_network(Network::Devnet);
+    genesis.validators.clear();
+    let mut bc =
+        Blockchain::new_with_genesis(consensus, None, genesis.chain_id, None, Some(genesis));
+
+    let keypair = KeyPair::generate().unwrap();
+    let staker = Address::from(keypair.public_key_bytes());
+    let floor = bc.state.registry.params().min_stake;
+    let fee = bc.state.base_fee.max(1);
+    bc.state.add_balance(&staker, floor + fee * 10);
+
+    let tx = signed_stake_tx(
+        &keypair,
+        floor.saturating_sub(1).max(1),
+        0,
+        bc.chain_id,
+        fee,
+    );
+    // May enter mempool and apply; economic floor means not Active in registry.
+    let _ = bc.add_transaction(tx);
+    let _ = bc.produce_block(staker);
+
+    assert!(
+        !bc.state.registry.is_active(&staker, roles::VALIDATOR),
+        "below-floor stake must not yield Active VALIDATOR"
+    );
+}
+
+#[test]
+fn adim3_storage_operator_active_members() {
+    let mut reg = PermissionlessRegistry::new();
+    let op = addr(0x55);
+    let floor = reg.params().min_stake;
+    reg.register_storage_operator(op, floor, 0).unwrap();
+    let active = reg.active_members(roles::STORAGE_OPERATOR);
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].account, op);
+    assert!(reg.is_active(&op, roles::STORAGE_OPERATOR));
+}

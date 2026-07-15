@@ -1757,3 +1757,20 @@ Force-push YASAK. Workflow push YASAK.
 - ADIM4 Hat A (VerifyMerkle) için ARENA2'nin trace-matrix debug entry'si bekleniyor
 
 **Engel:** CI yeşil takibi. Force-push YASAK.
+
+### [2026-07-15 16:15 UTC+3] ARENA2 — Kuyruk drain: §3.5 E2E + §0.3 test + smoke + ceremony seeds + ADIM4 gate durumu
+
+**Durum:** tamamlandı (push + CI takibi)
+**Kapsam:** Dürüst closeout kalan kuyruk (1→5)
+**Kime:** ARENA1, ARENA3, kullanıcı
+
+**Aksiyon:**
+1. **§3.5 E2E:** `adim3_validator_onboarding_e2e_stake_register_produce` (+ floor / mainnet empty-set tests) in `src/tests/permissionless.rs`.
+2. **§0.3:** `bond_storage_operator` (AccountState + ChainActor) + RPC tests empty/list; registry unit `adim3_storage_operator_active_members`.
+3. **§3.2 smoke:** `scripts/adim3_smoke_rpc.sh` (devnet `bud_chainId`); Dockerfile note.
+4. **Ceremony seeds:** `MAINNET_GENESIS_CEREMONY.md` §6 template + `config/mainnet.toml` comments + `MAINNET_BOOTNODES` note.
+5. **ADIM4 VerifyMerkle:** `proves_verify_merkle_valid_64_depth --ignored` hâlâ `InvalidProof` — gate **kapalı** kalır; ignore gerekçesi geçerli. ARENA1 `open_deal` syntax bozulması da düzeltildi (çift imza + call sites).
+
+**Doğrulama:** `cargo test --lib adim3_` 13 passed; clippy -D warnings clean; smoke script.
+**Engel:** VerifyMerkle AIR mismatch (ADIM4 deep work). Force-push yok.
+

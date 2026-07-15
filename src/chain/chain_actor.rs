@@ -109,6 +109,11 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Result<(), String>>,
     ),
+    BondStorageOperator(
+        crate::core::address::Address,
+        u64,
+        oneshot::Sender<Result<(), String>>,
+    ),
     SubmitZkProof(
         crate::prover::ZkProofSubmission,
         oneshot::Sender<Result<crate::prover::ProofAcceptance, String>>,
@@ -808,6 +813,21 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// ADIM3 §0.3: bond stake for STORAGE_OPERATOR (permissionless).
+    pub async fn bond_storage_operator(
+        &self,
+        address: crate::core::address::Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondStorageOperator(address, amount, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
     /// Submit a ZK proof (permissionless; L1 ↔ BudZKVM bridge).
     pub async fn submit_zk_proof(
         &self,
@@ -1445,6 +1465,15 @@ impl ChainActor {
                         self.blockchain
                             .state
                             .bond_prover(&address, amount)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::BondStorageOperator(address, amount, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .bond_storage_operator(&address, amount)
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
                     );

@@ -45,4 +45,5 @@ EXPOSE 4001 8545 8546 9090
 ENV RUST_LOG=info
 
 ENTRYPOINT ["budlum-core"]
+# Local smoke: scripts/adim3_smoke_rpc.sh (devnet override recommended)
 CMD ["--network", "mainnet", "--port", "4001"]

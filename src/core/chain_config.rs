@@ -202,11 +202,13 @@ pub const QC_BLOB_TTL_EPOCHS: u64 = 10;
 pub const MAX_QC_BLOB_BYTES: usize = 1_048_576;
 pub const MAX_VOTES_PER_MSG: usize = 128;
 
+// ADIM3: empty until MAINNET_GENESIS_CEREMONY fills multiaddrs (see docs/operations/MAINNET_GENESIS_CEREMONY.md §6).
 const MAINNET_BOOTNODES: &[&str] = &[];
 const TESTNET_BOOTNODES: &[&str] = &[];
 const DEVNET_BOOTNODES: &[&str] = &[];
 const MAINNET_FALLBACK_BOOTNODES: &[&str] = &[];
 const TESTNET_FALLBACK_BOOTNODES: &[&str] = &[];
+// ADIM3: empty until ceremony DNS seeds published.
 const MAINNET_DNS_SEEDS: &[&str] = &[];
 const TESTNET_DNS_SEEDS: &[&str] = &[];
 

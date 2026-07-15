@@ -548,4 +548,44 @@ mod rpc_tests {
         assert_eq!(events["count"], serde_json::json!(0));
         assert!(events["events"].as_array().unwrap().is_empty());
     }
+
+    /// ADIM3 §0.3: empty registry → count 0, empty operators list.
+    #[tokio::test]
+    async fn adim3_storage_active_operators_empty() {
+        let (server, _) = setup().await;
+        let res = server.storage_active_operators().await.unwrap();
+        assert_eq!(res["roleId"], serde_json::json!(5));
+        assert_eq!(res["role"], "storage_operator");
+        assert_eq!(res["count"], serde_json::json!(0));
+        assert!(res["operators"].as_array().unwrap().is_empty());
+    }
+
+    /// ADIM3 §0.3: registered STORAGE_OPERATOR appears in RPC listing.
+    #[tokio::test]
+    async fn adim3_storage_active_operators_lists_registered() {
+        let (server, chain) = setup().await;
+
+        let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
+        let min_stake = 1_000u64; // PermissionlessRegistry default floor
+        chain.add_balance(&operator, min_stake * 2).await;
+        chain
+            .bond_storage_operator(operator, min_stake)
+            .await
+            .expect("bond_storage_operator must succeed with sufficient balance");
+
+        let res = server.storage_active_operators().await.unwrap();
+        assert_eq!(res["roleId"], serde_json::json!(5));
+        assert_eq!(res["role"], "storage_operator");
+        assert_eq!(res["count"], serde_json::json!(1));
+        let ops = res["operators"].as_array().unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["role"], "storage_operator");
+        assert_eq!(ops[0]["stake"], serde_json::json!(min_stake));
+        let listed = ops[0]["address"].as_str().unwrap().to_lowercase();
+        assert!(
+            listed.contains(&operator.to_hex().to_lowercase())
+                || listed.contains(&format!("0x{}", operator.to_hex()).to_lowercase()),
+            "listed address {listed} must match operator"
+        );
+    }
 }

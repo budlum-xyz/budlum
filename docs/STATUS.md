@@ -286,3 +286,16 @@ Budlumdevnet / Budlumdevnet2 / B.U.D. / BudZero yol haritasının **kodlanabilir
 | VerifyMerkle / BNS | 🔒 ADIM4/5 |
 
 **Sonuç:** ADIM3 %100 kapalı değil. Mainnet "audited ready" değil.
+
+
+---
+
+## Kuyruk drain (ARENA2, 2026-07-15 16:15 UTC+3)
+
+| Madde | Hüküm |
+|------|-------|
+| §3.5 E2E | ✅ |
+| §0.3 RPC tests | ✅ |
+| §3.2 smoke script | 🟡 (manuel script) |
+| Ceremony seeds | 🟡 template only |
+| VerifyMerkle | 🔒 InvalidProof |

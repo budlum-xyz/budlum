@@ -395,6 +395,37 @@ impl AccountState {
         Ok(amount)
     }
 
+    /// ADIM3 §0.3: bond `amount` into the STORAGE_OPERATOR role (permissionless).
+    /// Used for B.U.D. operator reward eligibility and `bud_storageActiveOperators`.
+    pub fn bond_storage_operator(
+        &mut self,
+        address: &Address,
+        amount: u64,
+    ) -> Result<u64, crate::registry::RegistryError> {
+        if amount == 0 {
+            return Err(crate::registry::RegistryError::InsufficientStake {
+                required: 1,
+                provided: 0,
+            });
+        }
+        let account = self.get_or_create(address);
+        if account.balance < amount {
+            return Err(crate::registry::RegistryError::InsufficientStake {
+                required: amount,
+                provided: account.balance,
+            });
+        }
+        account.balance -= amount;
+        self.dirty_accounts.insert(*address);
+        self.registry.upsert_stake(
+            *address,
+            crate::registry::role::roles::STORAGE_OPERATOR,
+            amount,
+            self.epoch_index,
+        );
+        Ok(amount)
+    }
+
     /// Tur 5: run one epoch's liveness check on the state-level
     /// `LivenessTracker`. Returns the canonical `SlashingReport`s produced
     /// this epoch. `participated` is the set of validators that showed the
