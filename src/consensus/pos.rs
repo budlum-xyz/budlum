@@ -545,7 +545,7 @@ impl ConsensusEngine for PoSEngine {
         format!(
             "PoS (min_stake: {}, checkpoints: {})",
             self.config.min_stake,
-            self.checkpoints.read().map(|c| c.len()).unwrap_or(0)
+            self.checkpoints.read().map_or(0, |c| c.len())
         )
     }
     fn select_best_chain<'a>(&self, chains: &[&'a [Block]]) -> Option<&'a [Block]> {

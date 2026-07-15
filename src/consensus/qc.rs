@@ -105,7 +105,7 @@ impl QcBlob {
         let mut layers: Vec<Vec<[u8; 32]>> = Vec::new();
         layers.push(signatures.iter().map(Self::leaf_hash).collect());
 
-        while layers.last().map(|layer| layer.len()).unwrap_or(0) > 1 {
+        while layers.last().map_or(0, |layer| layer.len()) > 1 {
             let current = layers.last().cloned().unwrap_or_default();
             let mut next_level = Vec::new();
             let mut i = 0;

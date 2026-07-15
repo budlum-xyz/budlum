@@ -835,7 +835,7 @@ impl Node {
                                 }
                             }
 
-                            if !self.peer_manager.lock().map(|mut pm| pm.check_rate_limit(&peer_id)).unwrap_or(false) {
+                            if !self.peer_manager.lock().map_or(false, |mut pm| pm.check_rate_limit(&peer_id)) {
                                 warn!("Rate limit exceeded or lock error for peer {}", peer_id);
                                 continue;
                             }
