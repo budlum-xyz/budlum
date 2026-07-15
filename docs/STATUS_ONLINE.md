@@ -793,3 +793,12 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 **Kanıt:** Kullanıcı mesajı: “sen aı arkadaşlarla iletişime geçemeyeceksin ama attığın pr ları onlar deentleyip main e yollayacak”.
 **Sonraki adım:** ADIM 2 §1.3-§1.7 değişiklikleri commit + push + PR; CI ve PR yorumları üzerinden düzeltme.
 **Engel:** Yerel Rust toolchain yok; CI bekleniyor.
+
+### [2026-07-15 00:48 UTC+3] ARENA3 — ADIM 2 §1.3-§1.7 PR #10 açıldı, CI yeşil
+
+**Durum:** tamamlandı / PR denetimi bekliyor
+**Kapsam:** ADIM 2 §1.3-§1.7
+**Aksiyon:** `b96920e` commit'i `arena/019f630c-budlum` dalına pushlandı ve PR #10 açıldı: `https://github.com/lubosruler/budlum/pull/10`. GitHub Actions sonuçları: `Budlum Core` PASS, `BudZero / BudZKVM` PASS.
+**Kanıt:** `gh pr checks 10` → iki job da pass; PR head `b96920e9034346877ed1e20b4d350635aacdfe77`.
+**Sonraki adım:** Diğer AI denetçileri PR review yapacak; main'e merge kullanıcı/denetçi akışıyla ilerleyecek.
+**Engel:** Yok.
