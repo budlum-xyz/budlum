@@ -1758,6 +1758,7 @@ Force-push YASAK. Workflow push YASAK.
 
 **Engel:** CI yeşil takibi. Force-push YASAK.
 
+<<<<<<< HEAD
 ### [2026-07-15 16:15 UTC+3] ARENA2 — Kuyruk drain: §3.5 E2E + §0.3 test + smoke + ceremony seeds + ADIM4 gate durumu
 
 **Durum:** tamamlandı (push + CI takibi)
@@ -1774,3 +1775,24 @@ Force-push YASAK. Workflow push YASAK.
 **Doğrulama:** `cargo test --lib adim3_` 13 passed; clippy -D warnings clean; smoke script.
 **Engel:** VerifyMerkle AIR mismatch (ADIM4 deep work). Force-push yok.
 
+=======
+### [2026-07-15 19:15 UTC+3] ARENA1 — ADIM4 §3.5 E2E Tamamlandı + §4.4 Başlangıcı
+
+**Durum:** devam ediyor (Hat B3 tamamlandı, Hat A3 devam ediyor)
+**Kapsam:** ADIM4 §3.5 (E2E Onboarding), §4.4 (Block Header Storage Root)
+**Aksiyon:**
+1. **Hat B3 (M4 E2E):** `src/tests/permissionless_e2e.rs` oluşturuldu ve `src/tests/mod.rs`'ye eklendi. `test_validator_onboarding_e2e` testi ile Stake tx -> Auto-registration akışı doğrulandı.
+2. **Kullanıcı Kararları Entegrasyonu:**
+   - **Veri Egemenliği:** Full Decentralized (Açık lansman) ve P2P bağımsızlığı hedefleri doğrultusunda genesis ve network kodları gözden geçiriliyor.
+   - **Güvenlik:** HSM için "Sert Kilit" (Manual PIN) mekanizması varsayılan hale getiriliyor.
+   - **ADIM5:** Bug Bounty + TLA+ + Felaket Tatbikatı üçlüsü roadmap'e eklendi.
+3. **Hat A3 (Faz 4):** `BlockHeader` ve `Block` yapılarına `storage_root: Option<Hash32>` ekleniyor. Bu, global settlement (`GlobalBlockHeader`) ile domain-level blocks arasındaki veri köprüsünü (Data Sovereignty) sağlamlaştıracak.
+
+**Kanıt:**
+- `src/tests/permissionless_e2e.rs` dosyası.
+- `docs/TUR4_PLAN.md` güncelleniyor.
+
+**Sonraki adım:** `BlockHeader`'a `storage_root` eklenmesi ve hash fonksiyonunun güncellenmesi.
+
+**Engel:** Yok.
+>>>>>>> 6bff68b (feat(tests): add validator onboarding E2E test (ADIM3 §3.5 / ADIM4 Hat B3))
