@@ -406,7 +406,7 @@ mod settlement_prod_tests {
         // Below-depth (pending) proof, correctly bound to its commitment.
         let base = commitment_for(&pow, 10, 0, 1);
         let pending_proof = pow_proof_for(&base, 3);
-        let pending_commitment = commitment_with_proof(&pow, 10, 0, 1, &pending_proof);
+        let pending_commitment = commitment_with_proof(&pow, 10, 0, 1, &pending_proof, Address::zero());
         let err = blockchain
             .submit_verified_domain_commitment(pending_commitment, pending_proof)
             .unwrap_err();
@@ -415,14 +415,14 @@ mod settlement_prod_tests {
 
         // Finalized-depth proof, bound to the same commitment.
         let finalized_proof = pow_proof_for(&base, 64);
-        let mut bad_hash_commitment = commitment_with_proof(&pow, 10, 0, 1, &finalized_proof);
+        let mut bad_hash_commitment = commitment_with_proof(&pow, 10, 0, 1, &finalized_proof, Address::zero());
         bad_hash_commitment.finality_proof_hash = [9u8; 32];
         let err = blockchain
             .submit_verified_domain_commitment(bad_hash_commitment, finalized_proof.clone())
             .unwrap_err();
         assert!(err.contains("proof hash mismatch"));
 
-        let finalized_commitment = commitment_with_proof(&pow, 10, 0, 1, &finalized_proof);
+        let finalized_commitment = commitment_with_proof(&pow, 10, 0, 1, &finalized_proof, Address::zero());
         blockchain
             .submit_verified_domain_commitment(finalized_commitment, finalized_proof)
             .unwrap();
@@ -490,7 +490,7 @@ mod settlement_prod_tests {
         // Below quorum: 2 of 4 authorities sign (need ceil(4*2/3)=3).
         let base = commitment_for(&poa, 3, 0, 3);
         let weak_proof = poa_proof_for(&base, poa.id, 4, 2);
-        let weak_commitment = commitment_with_proof(&poa, 3, 0, 3, &weak_proof);
+        let weak_commitment = commitment_with_proof(&poa, 3, 0, 3, &weak_proof, Address::zero());
         let err = blockchain
             .submit_verified_domain_commitment(weak_commitment, weak_proof)
             .unwrap_err();
@@ -498,7 +498,7 @@ mod settlement_prod_tests {
 
         // At quorum: 3 of 4 real signatures.
         let quorum_proof = poa_proof_for(&base, poa.id, 4, 3);
-        let quorum_commitment = commitment_with_proof(&poa, 3, 0, 3, &quorum_proof);
+        let quorum_commitment = commitment_with_proof(&poa, 3, 0, 3, &quorum_proof, Address::zero());
         blockchain
             .submit_verified_domain_commitment(quorum_commitment, quorum_proof)
             .unwrap();
@@ -521,7 +521,7 @@ mod settlement_prod_tests {
                 s.signature = vec![0u8; 64]; // invalid ed25519 signature
             }
         }
-        let c = commitment_with_proof(&poa, 3, 0, 31, &proof);
+        let c = commitment_with_proof(&poa, 3, 0, 31, &proof, Address::zero());
         let err = blockchain
             .submit_verified_domain_commitment(c, proof)
             .unwrap_err();
@@ -541,7 +541,7 @@ mod settlement_prod_tests {
         if let FinalityProof::PoA { signatures, .. } = &mut proof {
             signatures[0].authority = Address::from([0xEE; 32]);
         }
-        let c = commitment_with_proof(&poa, 3, 0, 32, &proof);
+        let c = commitment_with_proof(&poa, 3, 0, 32, &proof, Address::zero());
         let err = blockchain
             .submit_verified_domain_commitment(c, proof)
             .unwrap_err();
@@ -560,7 +560,7 @@ mod settlement_prod_tests {
         let other = commitment_for(&poa, 99, 0, 33);
         let proof = poa_proof_for(&other, poa.id, 4, 3);
         // ...but attach it to height-3 commitment.
-        let c = commitment_with_proof(&poa, 3, 0, 33, &proof);
+        let c = commitment_with_proof(&poa, 3, 0, 33, &proof, Address::zero());
         let err = blockchain
             .submit_verified_domain_commitment(c, proof)
             .unwrap_err();
@@ -577,7 +577,7 @@ mod settlement_prod_tests {
             authorities: vec![],
             signatures: vec![],
         };
-        let c = commitment_with_proof(&poa, 1, 0, 34, &proof);
+        let c = commitment_with_proof(&poa, 1, 0, 34, &proof, Address::zero());
         let err = blockchain
             .submit_verified_domain_commitment(c, proof)
             .unwrap_err();
@@ -674,13 +674,12 @@ mod settlement_prod_tests {
                 0,
                 Some(expected_block_hash),
                 event.clone(),
-                &proof,
-            )
+                &proof, Address::zero())
             .unwrap();
         assert_eq!(verified.event.event_index, 1);
 
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 44, 0, Some([0u8; 32]), event.clone(), &proof)
+            .verify_domain_event_proof(pow.id, 44, 0, Some([0u8; 32]), event.clone(), &proof, Address::zero())
             .is_err());
 
         let mut wrong_index = proof.clone();
@@ -699,7 +698,7 @@ mod settlement_prod_tests {
         let missing_event = event_tree.events()[0].clone();
         let missing_proof = event_tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 999, 0, None, missing_event, &missing_proof,)
+            .verify_domain_event_proof(pow.id, 999, 0, None, missing_event, &missing_proof, Address::zero())
             .is_err());
     }
 
@@ -743,8 +742,7 @@ mod settlement_prod_tests {
                 0,
                 Some(commitment_block_hash),
                 lock_event.clone(),
-                &proof,
-            )
+                &proof, Address::zero())
             .unwrap();
         assert!(
             blockchain
@@ -754,8 +752,7 @@ mod settlement_prod_tests {
                     0,
                     Some(commitment_block_hash),
                     lock_event,
-                    &proof
-                )
+                    &proof, Address::zero())
                 .is_err(),
             "verified messages still replay-protect at bridge state"
         );
@@ -823,7 +820,7 @@ mod settlement_prod_tests {
 
         let proof = tree.proof(0).unwrap();
         let err = blockchain
-            .mint_bridge_transfer_from_verified_event(pow.id, 88, 0, None, event, &proof)
+            .mint_bridge_transfer_from_verified_event(pow.id, 88, 0, None, event, &proof, Address::zero(, Address::zero()))
             .unwrap_err();
         assert!(err.contains("not a bridge lock event"));
     }
@@ -855,7 +852,7 @@ mod settlement_prod_tests {
 
         let proof = tree.proof(0).unwrap();
         let err = blockchain
-            .mint_bridge_transfer_from_verified_event(pow.id, 77, 0, None, mutated_event, &proof)
+            .mint_bridge_transfer_from_verified_event(pow.id, 77, 0, None, mutated_event, &proof, Address::zero(, Address::zero()))
             .unwrap_err();
         assert!(
             err.contains("payload hash mismatch") || err.contains("source event hash mismatch")
@@ -1019,7 +1016,7 @@ mod settlement_prod_tests {
         let mut c = commitment_for(&dom, 5, 0, 10);
         c.consensus_kind = ConsensusKind::Bft;
         let proof = bft_proof_for(&c);
-        c.finality_proof_hash = hash_finality_proof(&proof);
+        c.finality_proof_hash = hash_finality_proof(&proof, Address::zero());
         bc.submit_verified_domain_commitment(c, proof).unwrap();
         assert_eq!(bc.domain_commitment_registry.len(), 1);
     }
@@ -1040,7 +1037,7 @@ mod settlement_prod_tests {
         if let FinalityProof::Bft { cert, .. } = &mut proof {
             cert.agg_sig_bls = vec![0u8; 48]; // invalid signature
         }
-        c.finality_proof_hash = hash_finality_proof(&proof);
+        c.finality_proof_hash = hash_finality_proof(&proof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, proof).unwrap_err();
         assert!(
             err.contains("Invalid BFT finality cert") || err.contains("verification failed"),
@@ -1077,7 +1074,7 @@ mod settlement_prod_tests {
                 .to_vec();
             let _ = validator_snapshot; // unchanged
         }
-        c.finality_proof_hash = hash_finality_proof(&proof);
+        c.finality_proof_hash = hash_finality_proof(&proof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, proof).unwrap_err();
         assert!(
             err.contains("quorum") || err.contains("Invalid BFT finality cert"),
@@ -1107,7 +1104,7 @@ mod settlement_prod_tests {
             },
             validator_snapshot: ValidatorSetSnapshot::new(1, vec![]),
         };
-        c.finality_proof_hash = hash_finality_proof(&proof);
+        c.finality_proof_hash = hash_finality_proof(&proof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, proof).unwrap_err();
         assert!(
             err.contains("Rejected") || err.contains("empty"),
@@ -1128,7 +1125,7 @@ mod settlement_prod_tests {
         if let FinalityProof::Bft { commit_hash, .. } = &mut proof {
             *commit_hash = [0xFFu8; 32];
         }
-        c.finality_proof_hash = hash_finality_proof(&proof);
+        c.finality_proof_hash = hash_finality_proof(&proof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, proof).unwrap_err();
         assert!(
             err.contains("Rejected") || err.contains("not match"),
@@ -1158,7 +1155,7 @@ mod settlement_prod_tests {
             target_height: c.domain_height,
             final_state_root: c.state_root,
         };
-        c.finality_proof_hash = hash_finality_proof(&proof);
+        c.finality_proof_hash = hash_finality_proof(&proof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, proof).unwrap_err();
         assert!(
             err.contains("no accepted ZK proof"),
@@ -1180,7 +1177,7 @@ mod settlement_prod_tests {
         };
         let mut c = commitment_for(&dom, 1, 0, 22);
         c.consensus_kind = ConsensusKind::Zk;
-        c.finality_proof_hash = hash_finality_proof(&wrong_proof);
+        c.finality_proof_hash = hash_finality_proof(&wrong_proof, Address::zero());
         assert!(bc
             .submit_verified_domain_commitment(c, wrong_proof)
             .is_err());
@@ -1205,7 +1202,7 @@ mod settlement_prod_tests {
             declared_cumulative_work: 10,
         };
         let mut c = commitment_for(&pow, 10, 0, 1);
-        c.finality_proof_hash = hash_finality_proof(&fake_proof);
+        c.finality_proof_hash = hash_finality_proof(&fake_proof, Address::zero());
         let err = bc
             .submit_verified_domain_commitment(c, real_proof)
             .unwrap_err();
@@ -1394,8 +1391,7 @@ mod settlement_prod_tests {
             0,
             Some(commitment_block_hash),
             event.clone(),
-            &proof,
-        )
+            &proof, Address::zero())
         .unwrap();
         let err = bc
             .mint_bridge_transfer_from_verified_event(
@@ -1404,8 +1400,7 @@ mod settlement_prod_tests {
                 0,
                 Some(commitment_block_hash),
                 event,
-                &proof,
-            )
+                &proof, Address::zero())
             .unwrap_err();
         assert!(err.contains("already processed") || err.contains("replay"));
     }
@@ -1450,7 +1445,7 @@ mod settlement_prod_tests {
         let mut forged_proof = tree.proof(1).unwrap();
         forged_proof.siblings[0] = [0xFFu8; 32];
         let err = bc
-            .verify_domain_event_proof(1, 10, 0, None, event, &forged_proof)
+            .verify_domain_event_proof(1, 10, 0, None, event, &forged_proof, Address::zero())
             .unwrap_err();
         assert_eq!(
             err,
@@ -1495,7 +1490,7 @@ mod settlement_prod_tests {
 
         let proof = tree.proof(0).unwrap();
         let err = bc
-            .verify_domain_event_proof(1, 10, 0, None, event, &proof)
+            .verify_domain_event_proof(1, 10, 0, None, event, &proof, Address::zero())
             .unwrap_err();
         assert_eq!(
             err,
@@ -1675,8 +1670,7 @@ mod settlement_prod_tests {
             0,
             Some(commitment_block_hash),
             lock_event,
-            &proof,
-        )
+            &proof, Address::zero())
         .unwrap();
 
         let burn_event = bc
@@ -1697,8 +1691,7 @@ mod settlement_prod_tests {
             0,
             Some(burn_commitment_block_hash),
             burn_event,
-            &burn_proof,
-        )
+            &burn_proof, Address::zero())
         .unwrap();
 
         let final_header = bc.seal_global_header(None).unwrap();
@@ -1735,8 +1728,7 @@ mod settlement_prod_tests {
             0,
             Some(lock_commitment_block_hash),
             lock_event,
-            &lock_proof,
-        )
+            &lock_proof, Address::zero())
         .unwrap();
 
         assert!(
@@ -1764,8 +1756,7 @@ mod settlement_prod_tests {
                 0,
                 None,
                 wrong_kind,
-                &burn_proof
-            )
+                &burn_proof, Address::zero())
             .is_err());
 
         let mut wrong_message = burn_event.clone();
@@ -1777,8 +1768,7 @@ mod settlement_prod_tests {
                 0,
                 None,
                 wrong_message,
-                &burn_proof
-            )
+                &burn_proof, Address::zero())
             .is_err());
 
         bc.unlock_bridge_transfer_from_verified_event(
@@ -1787,8 +1777,7 @@ mod settlement_prod_tests {
             0,
             None,
             burn_event,
-            &burn_proof,
-        )
+            &burn_proof, Address::zero())
         .unwrap();
     }
 
@@ -1955,7 +1944,7 @@ mod zk_finality_real_proof {
             target_height: HEIGHT,
             final_state_root: pi.final_state_root,
         };
-        c.finality_proof_hash = hash_finality_proof(&fproof);
+        c.finality_proof_hash = hash_finality_proof(&fproof, Address::zero());
         bc.submit_verified_domain_commitment(c, fproof).unwrap();
         assert_eq!(bc.domain_commitment_registry.len(), 1);
     }
@@ -1980,7 +1969,7 @@ mod zk_finality_real_proof {
             target_height: HEIGHT,
             final_state_root: wrong_root,
         };
-        c.finality_proof_hash = hash_finality_proof(&fproof);
+        c.finality_proof_hash = hash_finality_proof(&fproof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, fproof).unwrap_err();
         assert!(
             err.contains("does not match accepted claim") || err.contains("state root mismatch"),
@@ -2002,7 +1991,7 @@ mod zk_finality_real_proof {
             target_height: HEIGHT,
             final_state_root: pi.final_state_root,
         };
-        c.finality_proof_hash = hash_finality_proof(&fproof);
+        c.finality_proof_hash = hash_finality_proof(&fproof, Address::zero());
         let err = bc.submit_verified_domain_commitment(c, fproof).unwrap_err();
         assert!(err.contains("no accepted ZK proof"), "got: {err}");
     }
@@ -2030,7 +2019,7 @@ mod zk_finality_real_proof {
             target_height: HEIGHT,
             final_state_root: pi.final_state_root,
         };
-        c.finality_proof_hash = hash_finality_proof(&fproof);
+        c.finality_proof_hash = hash_finality_proof(&fproof, Address::zero());
         assert!(bc.submit_verified_domain_commitment(c, fproof).is_err());
     }
 }

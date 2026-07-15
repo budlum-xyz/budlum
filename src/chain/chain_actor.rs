@@ -155,6 +155,7 @@ pub enum ChainCommand {
         expected_block_hash: Option<crate::domain::Hash32>,
         event: crate::cross_domain::DomainEvent,
         proof: crate::cross_domain::MerkleProof,
+        relayer: Address,
         response: oneshot::Sender<Result<(), String>>,
     },
     BurnBridgeTransfer {
@@ -907,6 +908,7 @@ impl ChainHandle {
         expected_block_hash: Option<crate::domain::Hash32>,
         event: crate::cross_domain::DomainEvent,
         proof: crate::cross_domain::MerkleProof,
+        relayer: Address,
     ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -918,6 +920,7 @@ impl ChainHandle {
                 expected_block_hash,
                 event,
                 proof,
+                relayer,
                 response: tx,
             })
             .await;
@@ -1536,6 +1539,7 @@ impl ChainActor {
                     expected_block_hash,
                     event,
                     proof,
+                    relayer,
                     response,
                 } => {
                     let _ =
@@ -1546,6 +1550,7 @@ impl ChainActor {
                             expected_block_hash,
                             event,
                             &proof,
+                            relayer,
                         ));
                 }
                 ChainCommand::BurnBridgeTransfer {

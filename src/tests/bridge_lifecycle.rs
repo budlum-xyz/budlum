@@ -95,6 +95,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
             index: 0,
             siblings: vec![],
         },
+        Address::zero(),
     );
     assert!(
         bad_mint.is_err(),
@@ -218,6 +219,7 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
             index: 0,
             siblings: vec![],
         },
+        Address::zero(),
     );
     assert!(
         result.is_err(),

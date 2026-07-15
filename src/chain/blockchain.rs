@@ -1084,6 +1084,7 @@ impl Blockchain {
         expected_block_hash: Option<crate::domain::Hash32>,
         event: DomainEvent,
         proof: &MerkleProof,
+        relayer: Address,
     ) -> Result<(), String> {
         // Tur 9 (security audit §9): bridge mint REQUIRES an explicit
         // `expected_block_hash`. Without it, an attacker who knows the
@@ -1164,6 +1165,20 @@ impl Blockchain {
         self.bridge_state
             .mint(&message)
             .map_err(|e| e.to_string())?;
+
+        // ADIM 5 Q9: Deduct relayer fee from arriving asset if inbound to Budlum
+        let transfer = self.bridge_state.get_transfer(&message.message_id)
+            .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?;
+        
+        let mut final_amount = transfer.amount;
+        
+        // Fee deduction: 1% for the relayer (Decision 9)
+        let fee = final_amount.saturating_mul(1) / 100;
+        final_amount = final_amount.saturating_sub(fee);
+        
+        // Credit the recipient and the relayer
+        self.state.add_balance(&transfer.recipient, final_amount as u64);
+        self.state.add_balance(&relayer, fee as u64);
 
         if let Some(store) = &self.storage {
             store

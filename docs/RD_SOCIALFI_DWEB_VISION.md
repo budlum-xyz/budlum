@@ -26,6 +26,7 @@ Budlum is the **Universal Consensus Layer**—the next layer of the internet foc
 ### 2.2 BNS-to-Site Mapping
 -   **Social/Web Binding:** `.bud` names point to B.U.D. `ManifestId`s.
 -   **Subdomains:** Parent-controlled subdomains (e.g., `blog.ayaz.bud`) for modular D-Web organization.
+-   **NFT-Driven Feed:** The SocialFi application renders a user's feed based on the NFTs they currently hold. Transferring an NFT effectively "transfers" the social content, making posts tradable or movable across different wallets while maintaining the B.U.D. storage link.
 
 ### 2.3 Universal Ecosystem Interface (Budlum Hub)
 -   **Unified Portal:** A master interface where all blockchain applications (dApps) can register on-chain.

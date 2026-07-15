@@ -189,6 +189,10 @@ impl BridgeState {
         Ok(())
     }
 
+    pub fn get_transfer(&self, message_id: &MessageId) -> Option<&BridgeTransfer> {
+        self.transfers.get(message_id)
+    }
+
     pub fn burn(&mut self, message_id: MessageId, domain: DomainId) -> Result<(), BridgeError> {
         self.burn_with_event(message_id, domain, 0, 0, 0)
             .map(|_| ())

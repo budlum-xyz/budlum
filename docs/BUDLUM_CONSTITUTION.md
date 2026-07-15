@@ -11,6 +11,7 @@ Based on the strategic decisions made by the owner (Ayaz), the following rules a
 ## 1. Content & Moderation
 -   **Policy:** Community Voting. Reported content will be voted on by validators/governance.
 -   **Right to be Forgotten:** Hard Pruning. If an NFT is burned via an `NftBurn` transaction, the linked data in B.U.D. storage is physically deleted from the network nodes holding that shard. **NFT = Ownership, Control, and Kill-Switch.**
+-   **Content Portability:** Social posts and D-Web content are bound to the NFT. If an NFT is transferred to another Budlum wallet, the content is automatically "moved" to the new owner's profile and SocialFi feed. Content mobility is driven by NFT ownership.
 
 ---
 

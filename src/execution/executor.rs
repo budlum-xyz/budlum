@@ -270,6 +270,119 @@ impl Executor {
                 sender.balance = sender.balance.saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::BnsRegister => {
+                let (name, duration): (String, u64) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+                let cost = state.bns_registry.calculate_cost(&name, duration);
+                if tx.amount < cost {
+                    return Err(BudlumError::validation("bns_insufficient_payment", format!("Req: {}, got: {}", cost, tx.amount)));
+                }
+                state.bns_registry.register(name, tx.from, state.epoch_index, duration)
+                    .map_err(|e| BudlumError::validation("bns_reg_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee).saturating_sub(cost);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::BnsSetContent => {
+                let (name, cid): (String, crate::storage::content_id::ContentId) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+                state.bns_registry.set_content(&name, &tx.from, cid)
+                    .map_err(|e| BudlumError::validation("bns_set_content_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::BnsRegisterSubdomain => {
+                let (parent, label, sub_owner): (String, String, Address) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+                state.bns_registry.register_subdomain(&parent, label, sub_owner, &tx.from)
+                    .map_err(|e| BudlumError::validation("bns_sub_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::BnsSetStorage => {
+                let (name, root, dom_id): (String, [u8; 32], u32) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("bns_invalid_data", e.to_string()))?;
+                state.bns_registry.set_storage(&name, tx.from, root, dom_id, state.epoch_index)
+                    .map_err(|e| BudlumError::validation("bns_set_storage_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::NftMint => {
+                let (cid, author): (crate::storage::content_id::ContentId, Option<String>) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
+                state.nft_registry.mint(tx.from, cid, state.epoch_index, author);
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::NftTransfer => {
+                let (id, to): (u64, Address) = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
+                state.nft_registry.transfer(id, &tx.from, to)
+                    .map_err(|e| BudlumError::validation("nft_transfer_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::NftBurn => {
+                let id: u64 = bincode::deserialize(&tx.data)
+                    .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
+                let cid = state.nft_registry.burn(id, &tx.from)
+                    .map_err(|e| BudlumError::validation("nft_burn_failed", e.to_string()))?;
+                tracing::info!(%cid, "B.U.D. Hard Prune Triggered by NftBurn");
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::NftBoost { nft_id, amount } => {
+                let amount = *amount;
+                let bud_share = amount.saturating_mul(4) / 100;
+                let creator_share = amount.saturating_mul(16) / 100;
+                let protocol_share = amount.saturating_sub(bud_share).saturating_sub(creator_share);
+                let nft = state.nft_registry.get_nft(*nft_id).cloned().ok_or("NFT not found")?;
+                let booster = state.get_or_create(&tx.from);
+                if booster.balance < amount.saturating_add(tx.fee) {
+                    return Err(BudlumError::validation("insufficient_funds", "Cannot afford boost"));
+                }
+                booster.balance = booster.balance.saturating_sub(amount).saturating_sub(tx.fee);
+                booster.nonce = booster.nonce.saturating_add(1);
+                let creator = state.get_or_create(&nft.owner);
+                creator.balance = creator.balance.saturating_add(creator_share);
+                tracing::info!(nft_id = %nft_id, creator_reward = %creator_share, protocol_fee = %protocol_share, "SocialFi: Content Boosted");
+            }
+            TransactionType::UniversalRelay(ext_tx) => {
+                tracing::info!(chain = ?ext_tx.chain, target = %ext_tx.target_address, "Universal Relayer authorization");
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::AiOfferData { cid, price } => {
+                state.marketplace.create_offer(tx.from, *cid, *price);
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::AiPurchaseData { offer_id } => {
+                let offer = state.marketplace.get_offer(*offer_id).cloned().ok_or("Offer not found")?;
+                if !offer.active { return Err(BudlumError::validation("marketplace_offer_inactive", "Offer inactive")); }
+                state.marketplace.close_offer(*offer_id, &offer.seller).map_err(|e| BudlumError::validation("race", e))?;
+                let total_cost = offer.price.saturating_add(tx.fee);
+                if state.get_balance(&tx.from) < total_cost { return Err(BudlumError::validation("funds", "Cannot afford data")); }
+                let buyer = state.get_or_create(&tx.from);
+                buyer.balance = buyer.balance.saturating_sub(total_cost);
+                buyer.nonce = buyer.nonce.saturating_add(1);
+                let seller = state.get_or_create(&offer.seller);
+                seller.balance = seller.balance.saturating_add(offer.price);
+            }
+            TransactionType::HubRegisterApp { name, category, website_url, manifest_id } => {
+                state.hub.register_app(name.clone(), tx.from, category.clone(), website_url.clone(), *manifest_id, state.epoch_index);
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
         }
 
         Ok(())
