@@ -114,13 +114,6 @@ impl NodeClient {
             NetworkMessage::SlashingEvidence(evidence),
         ));
     }
-
-    pub fn broadcast_storage_economics_event_sync(&self, data: Vec<u8>) {
-        let _ = self.sender.try_send(NodeCommand::Broadcast(
-            "blocks".into(),
-            NetworkMessage::StorageEconomicsEvent { data },
-        ));
-    }
 }
 #[tokio::test]
 async fn test_node_creation() {
@@ -1563,16 +1556,6 @@ impl Node {
                                                     pm.report_bad_behavior(&peer_id);
                                                 }
                                             }
-                                        }
-                                    }
-                                    NetworkMessage::StorageEconomicsEvent { data } => {
-                                        info!(
-                                            "StorageEconomicsEvent from {} ({} bytes)",
-                                            peer_id,
-                                            data.len()
-                                        );
-                                        if let Ok(mut pm) = self.peer_manager.lock() {
-                                            pm.report_good_behavior(&peer_id);
                                         }
                                     }
                                     NetworkMessage::DomainCommitment(commitment) => {
