@@ -280,6 +280,25 @@ fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
     height_str.parse::<u64>().ok()
 }
 
+/// Oldest `StateSnapshotV2` schema that this binary will accept during the
+/// staged ConsensusStateV2 migration window. Older snapshots must be restored
+/// with an intermediate release first; silently accepting them would risk
+/// losing registry/tokenomics metadata that was not present yet.
+pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+
+/// Current durable snapshot schema emitted by this binary. This is the
+/// ConsensusStateV2 migration target for ADIM 2 §1.4.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateSnapshotV2MigrationReport {
+    pub original_schema_version: u32,
+    pub target_schema_version: u32,
+    pub migrated: bool,
+    pub requires_backup: bool,
+    pub notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateSnapshotV2 {
     pub schema_version: u32,
@@ -392,7 +411,7 @@ impl StateSnapshotV2 {
         });
 
         let mut snapshot = StateSnapshotV2 {
-            schema_version: 3,
+            schema_version: CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
             height: params.height,
             block_hash: params.block_hash,
             genesis_hash: params.genesis_hash,
@@ -515,21 +534,47 @@ impl StateSnapshotV2 {
             .expect("BUG: StateSnapshotV2 must serialize to_bytes")
     }
 
+    /// Produce the staged migration report used by the offline
+    /// `--migrate-v2` gate and by tests. ADIM 2 §1.4 deliberately keeps this
+    /// as a *skeleton*: supported schema-2 snapshots deserialize through
+    /// `#[serde(default)]` fields and are rewritten as schema 3 by
+    /// `from_state`; unsupported versions fail closed instead of being guessed.
+    pub fn migration_report(&self) -> Result<StateSnapshotV2MigrationReport, String> {
+        if self.schema_version < MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported legacy snapshot schema_version {} (minimum supported is {}; staged migration hook rejected)",
+                self.schema_version, MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION
+            ));
+        }
+        if self.schema_version > CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported future snapshot schema_version {} (current max supported is {}; staged migration hook rejected)",
+                self.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+            ));
+        }
+
+        let mut notes = Vec::new();
+        if self.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
+            notes.push(
+                "schema-2 snapshot accepted through serde defaults; rewrite through current binary to persist schema-3 registry/liveness/tokenomics fields".to_string(),
+            );
+        } else {
+            notes.push("snapshot already at current schema".to_string());
+        }
+
+        Ok(StateSnapshotV2MigrationReport {
+            original_schema_version: self.schema_version,
+            target_schema_version: CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
+            migrated: self.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
+            requires_backup: true,
+            notes,
+        })
+    }
+
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         let snapshot: StateSnapshotV2 = serde_json::from_slice(data)
             .map_err(|e| format!("Failed to parse snapshot V2: {}", e))?;
-        if snapshot.schema_version < 2 {
-            return Err(format!(
-                "Unsupported legacy snapshot schema_version {} (minimum supported is 2; staged migration hook rejected)",
-                snapshot.schema_version
-            ));
-        }
-        if snapshot.schema_version > 3 {
-            return Err(format!(
-                "Unsupported future snapshot schema_version {} (current max supported is 3; staged migration hook rejected)",
-                snapshot.schema_version
-            ));
-        }
+        snapshot.migration_report()?;
         Ok(snapshot)
     }
 }
@@ -599,14 +644,20 @@ mod tests {
             },
         );
 
-        assert_eq!(snapshot_v2.schema_version, 3); // Tur 9: bumped 2->3
+        assert_eq!(
+            snapshot_v2.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        ); // Tur 9: bumped 2->3
         assert_eq!(snapshot_v2.height, 105);
         assert!(snapshot_v2.verify());
 
         let bytes = snapshot_v2.to_bytes();
         let deserialized = StateSnapshotV2::from_bytes(&bytes).unwrap();
         assert_eq!(deserialized.height, 105);
-        assert_eq!(deserialized.schema_version, 3); // Tur 9: bumped 2->3
+        assert_eq!(
+            deserialized.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        ); // Tur 9: bumped 2->3
         assert!(deserialized.verify());
 
         // Test numerical sorting helper
@@ -666,8 +717,22 @@ mod tests {
             .unwrap_err()
             .contains("current max supported is 3"));
 
-        snapshot.schema_version = 3;
-        let bytes_v3 = serde_json::to_vec(&snapshot).unwrap();
-        assert!(StateSnapshotV2::from_bytes(&bytes_v3).is_ok());
+        snapshot.schema_version = 2;
+        let report = snapshot.migration_report().unwrap();
+        assert_eq!(report.original_schema_version, 2);
+        assert_eq!(
+            report.target_schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert!(report.migrated);
+        assert!(report.requires_backup);
+        assert!(report.notes[0].contains("schema-2 snapshot accepted"));
+
+        snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
+        let bytes_current = serde_json::to_vec(&snapshot).unwrap();
+        let current = StateSnapshotV2::from_bytes(&bytes_current).unwrap();
+        let report = current.migration_report().unwrap();
+        assert!(!report.migrated);
+        assert!(report.notes[0].contains("already at current schema"));
     }
 }

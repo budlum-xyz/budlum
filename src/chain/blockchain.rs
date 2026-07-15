@@ -3184,11 +3184,6 @@ impl Blockchain {
         checkpoint_hash: &str,
         voter_id: &Address,
     ) -> Result<Prevote, String> {
-        let sk = self
-            .consensus
-            .bls_secret_key()
-            .ok_or("No BLS secret key available")?;
-
         let msg = {
             let dummy = Prevote {
                 epoch,
@@ -3200,7 +3195,15 @@ impl Blockchain {
             dummy.signing_message()
         };
 
-        let sig = crate::chain::finality::sign_bls(&sk, &msg);
+        let sig = if let Some(sk) = self.consensus.bls_secret_key() {
+            crate::chain::finality::sign_bls(&sk, &msg)
+        } else if let Some(signer) = self.consensus.signer() {
+            signer
+                .bls_sign(&msg)
+                .map_err(|e| format!("BLS signer backend failed: {}", e))?
+        } else {
+            return Err("No BLS signing capability available".to_string());
+        };
 
         Ok(Prevote {
             epoch,
@@ -3218,18 +3221,21 @@ impl Blockchain {
         checkpoint_hash: &str,
         voter_id: &Address,
     ) -> Result<Precommit, String> {
-        let sk = self
-            .consensus
-            .bls_secret_key()
-            .ok_or("No BLS secret key available")?;
-
         let msg = crate::chain::finality::checkpoint_signing_message(
             epoch,
             checkpoint_height,
             checkpoint_hash,
         );
 
-        let sig = crate::chain::finality::sign_bls(&sk, &msg);
+        let sig = if let Some(sk) = self.consensus.bls_secret_key() {
+            crate::chain::finality::sign_bls(&sk, &msg)
+        } else if let Some(signer) = self.consensus.signer() {
+            signer
+                .bls_sign(&msg)
+                .map_err(|e| format!("BLS signer backend failed: {}", e))?
+        } else {
+            return Err("No BLS signing capability available".to_string());
+        };
 
         Ok(Precommit {
             epoch,

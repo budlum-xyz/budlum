@@ -539,6 +539,7 @@ impl ConsensusEngine for PoSEngine {
             .as_ref()
             .and_then(|k| k.bls_key.as_ref())
             .map(|b| b.public_key.clone())
+            .or_else(|| self.signer.as_ref().and_then(|s| s.bls_public_key()))
     }
     fn info(&self) -> String {
         format!(
