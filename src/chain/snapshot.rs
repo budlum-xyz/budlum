@@ -325,16 +325,6 @@ pub struct StateSnapshotV2 {
     pub settlement_root: [u8; 32],
     pub global_header_summary: [u8; 32],
 
-    // ADIM 5: Phase 6+ Persistence
-    #[serde(default)]
-    pub bns_registry: Option<crate::bns::BnsRegistry>,
-    #[serde(default)]
-    pub nft_registry: Option<crate::nft::NftRegistry>,
-    #[serde(default)]
-    pub marketplace: Option<crate::marketplace::MarketplaceRegistry>,
-    #[serde(default)]
-    pub hub: Option<crate::hub::HubRegistry>,
-
     // --- schema_version 3 (Tur 9): previously-unpersisted state. All
     // `#[serde(default)]` so schema-2 snapshots still deserialize (the fields
     // simply come back empty/None — meaning "this feature wasn't active when the
@@ -476,11 +466,6 @@ impl StateSnapshotV2 {
             registry: Some(account_state.registry.clone()),
             liveness: Some(account_state.liveness.clone()),
             invalid_votes: Some(account_state.invalid_votes.clone()),
-            // ADIM6 BNS/NFT/Hub/Marketplace persistence (ARENA3 audit: check_snapshot)
-            bns_registry: Some(account_state.bns_registry.clone()),
-            nft_registry: Some(account_state.nft_registry.clone()),
-            marketplace: Some(account_state.marketplace.clone()),
-            hub: Some(account_state.hub.clone()),
             snapshot_hash: String::new(),
         };
         snapshot.snapshot_hash = snapshot.calculate_hash();
