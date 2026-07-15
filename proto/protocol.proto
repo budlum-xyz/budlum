@@ -211,12 +211,7 @@ message ProtoQcFaultProof {
 }
 
 message ProtoStorageEconomicsEvent {
-    uint64 epoch = 1;
-    uint64 deal_id = 2;
-    string operator = 3;
-    uint64 amount = 4;
-    uint64 balance_effect = 5;
-    string kind = 6;
+    bytes data = 1;
 }
 
 message ProtoDomainCommitment {

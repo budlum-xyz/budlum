@@ -23,62 +23,6 @@ fn serialize_payload_or_log<T: serde::Serialize>(what: &str, value: &T) -> Vec<u
     }
 }
 
-fn storage_event_kind_to_str(
-    kind: crate::chain::blockchain::StorageEconomicsEventKind,
-) -> &'static str {
-    match kind {
-        crate::chain::blockchain::StorageEconomicsEventKind::OperatorRewardAccrued => {
-            "OperatorRewardAccrued"
-        }
-        crate::chain::blockchain::StorageEconomicsEventKind::OperatorBondSlashed => {
-            "OperatorBondSlashed"
-        }
-    }
-}
-
-fn storage_event_kind_from_str(
-    kind: &str,
-) -> Result<crate::chain::blockchain::StorageEconomicsEventKind, String> {
-    match kind {
-        "OperatorRewardAccrued" => Ok(
-            crate::chain::blockchain::StorageEconomicsEventKind::OperatorRewardAccrued,
-        ),
-        "OperatorBondSlashed" => Ok(
-            crate::chain::blockchain::StorageEconomicsEventKind::OperatorBondSlashed,
-        ),
-        other => Err(format!("Invalid storage economics event kind: {other}")),
-    }
-}
-
-impl From<&crate::chain::blockchain::StorageEconomicsEvent> for pb::ProtoStorageEconomicsEvent {
-    fn from(event: &crate::chain::blockchain::StorageEconomicsEvent) -> Self {
-        pb::ProtoStorageEconomicsEvent {
-            epoch: event.epoch,
-            deal_id: event.deal_id,
-            operator: event.operator.to_string(),
-            amount: event.amount,
-            balance_effect: event.balance_effect,
-            kind: storage_event_kind_to_str(event.kind).to_string(),
-        }
-    }
-}
-
-impl TryFrom<pb::ProtoStorageEconomicsEvent> for crate::chain::blockchain::StorageEconomicsEvent {
-    type Error = String;
-
-    fn try_from(proto: pb::ProtoStorageEconomicsEvent) -> Result<Self, Self::Error> {
-        Ok(crate::chain::blockchain::StorageEconomicsEvent {
-            epoch: proto.epoch,
-            deal_id: proto.deal_id,
-            operator: Address::from_hex(&proto.operator)
-                .map_err(|e| format!("Invalid storage event operator: {e}"))?,
-            amount: proto.amount,
-            balance_effect: proto.balance_effect,
-            kind: storage_event_kind_from_str(&proto.kind)?,
-        })
-    }
-}
-
 impl From<&Transaction> for pb::ProtoTransaction {
     fn from(tx: &Transaction) -> Self {
         pb::ProtoTransaction {
@@ -525,7 +469,9 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
             }
             NetworkMessage::StorageEconomicsEvent(event) => {
                 pb::proto_network_message::Payload::StorageEconomicsEvent(
-                    pb::ProtoStorageEconomicsEvent::from(event),
+                    pb::ProtoStorageEconomicsEvent {
+                        data: serialize_payload_or_log("StorageEconomicsEvent", event),
+                    },
                 )
             }
             NetworkMessage::GlobalHeader(header) => {
@@ -694,9 +640,11 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             pb::proto_network_message::Payload::SlashingEvidence(e) => Ok(
                 NetworkMessage::SlashingEvidence(SlashingEvidence::try_from(e)?),
             ),
-            pb::proto_network_message::Payload::StorageEconomicsEvent(event) => Ok(
-                NetworkMessage::StorageEconomicsEvent(event.try_into()?),
-            ),
+            pb::proto_network_message::Payload::StorageEconomicsEvent(e) => {
+                let event = serde_json::from_slice(&e.data)
+                    .map_err(|err| format!("Invalid storage economics event payload: {err}"))?;
+                Ok(NetworkMessage::StorageEconomicsEvent(event))
+            }
             pb::proto_network_message::Payload::GlobalHeader(h) => {
                 let header = serde_json::from_slice(&h.data)
                     .map_err(|e| format!("Invalid global header payload: {}", e))?;
