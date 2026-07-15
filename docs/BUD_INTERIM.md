@@ -1,174 +1,249 @@
-# B.U.D. Interim Retrieval Challenge — Mainnet v1 Durumu
+# B.U.D. Interim Retrieval Challenge — Teknik ve Ekonomik Açıklama
 
-**Yazar:** ARENA2 (ADIM3 §3.6 görevi)
+**Hazırlayan:** ARENA1 (ADIM3 §3.6)
 **Tarih:** 2026-07-15
-**Kaynak:** `BUD_Merkeziyetsiz_Depolama_Vizyonu.md` §8.3, §8.5, §9; `src/domain/storage_deal.rs`; ADIM3 plan §3.6
+**Durum:** Kullanıcı onayı bekliyor
 
 ---
 
-## ⚠️ Özet: B.U.D. Mainnet v1'de "Gerçek Proof-of-Storage" DEĞİLDİR
+## 1. Genel Bakış
 
-B.U.D. (Broad Universal Database) Mainnet v1'de **interim retrieval challenge** (geçici erişim sorgulaması) mekanizmasıyla çalışmaktadır. Bu mekanizma:
-
-- ✅ Operatörün **belirli bir byte aralığına** yanıt verip veremediğini test eder
-- ✅ Yanıt veremeyen operatörün bond'unu **slasher** (ekonomik caydırıcılık)
-- ✅ Permissionless katılım sağlar (whitelist YOK, admin gate YOK)
-- ❌ Operatörün **tüm veriyi sürekli sakladığını** kanıtlamaz
-- ❌ **Proof-of-Replication** veya **Proof-of-Spacetime** sunmaz
-- ❌ Veri bütünlüğünü kriptografik olarak **garanti etmez**
-
-**Kullanıcı beklenti yönetimi:** B.U.D. Mainnet v1'de bir **ekonomik oyun** (game-theoretic deterrent) olarak çalışır. Operatörler veri saklamaya ekonomik olarak teşvik edilir, ancak kriptografik kanıt henüz mevcut değildir. Gerçek Proof-of-Storage, BudZero `VerifyMerkle` opcode'unun production gate'i geçmesiyle (Faz 3) mümkün olacaktır.
+B.U.D. (Broad Universal Database / Merkeziyetsiz Depolama Sunucu Sistemi) mainnet lansmanında **gerçek kriptografik Proof-of-Storage (PoS)** henüz aktif değildir. Bu belge, mevcut interim mekanizmanın nasıl çalıştığını, neden bu şekilde seçildiğini ve kullanıcı beklentilerinin nasıl yönetilmesi gerektiğini açıklar.
 
 ---
 
-## 1. Mevcut Mekanizma: Interim Retrieval Challenge
+## 2. Mevcut Durum: Interim Retrieval Challenge
 
-### 1.1 Nasıl Çalışır
+### 2.1 Temel Mekanizma
+
+B.U.D. mainnet'te şu anda **interim retrieval challenge** mekanizması çalışmaktadır:
 
 ```
-İstemci                    Zincir (L1)                  Operatör
-  │                           │                            │
-  ├── storage_open_deal ─────>│                            │
-  │   (manifest, shard,       ├── DealStatus::Active ─────>│
-  │    operator_bond)         │   (bond kilitlendi)        │
-  │                           │                            │
-  │   [challenge_interval     │                            │
-  │    blok sonra]            │                            │
-  │                           │                            │
-  ├── storage_open_challenge ─>│                           │
-  │   (deal_id, byte_start,   ├── Challenge açık ─────────>│
-  │    byte_end, deadline)    │   (deadline = epoch + 10)  │
-  │                           │                            │
-  │                           │<── storage_answer ─────────┤
-  │                           │   (chunk_data_hash)        │
-  │                           │                            │
-  │                           ├── Outcome::Answered ───────┤
-  │                           │   (bond iade)              │
-  │                           │                            │
-  │   [deadline geçerse]      │                            │
-  │                           ├── Outcome::Missed ─────────┤
-  │                           │   (bond slashed!)          │
+┌─────────────┐      Open Challenge      ┌──────────────────┐
+│   Opener    │ ──────────────────────► │   Storage Deal   │
+│  (istemci)  │                          │    (operatör)    │
+└─────────────┘      Bond (para kilit)   └──────────────────┘
+       │                                          │
+       │                                          │
+       │         Answer (byte_range_hash)         │
+       │ ◄──────────────────────────────────────┘
+       │         Bond iade / slashing
+       ▼
+┌──────────────────────────────────────────────────┐
+│              On-Chain Accounting                  │
+│  • Reward accrual (operatör)                    │
+│  • Slashed bond (yanlış/eksik yanıt)            │
+│  • Economics event log (gossip)                 │
+└──────────────────────────────────────────────────┘
 ```
 
-### 1.2 Kod Referansları
+### 2.2 Challenge Akışı
 
-| Bileşen | Dosya | Açıklama |
-|---------|-------|----------|
-| `StorageDeal` | `src/domain/storage_deal.rs` | Deal yaşam döngüsü (Active → Slashed/Expired) |
-| `RetrievalChallenge` | `src/domain/storage_deal.rs:120` | Challenge yapısı (byte range, deadline) |
-| `StorageRegistry` | `src/domain/storage_deal.rs:189` | On-chain deal/challenge registry |
-| `ChainCommand::IssueStorageChallenges` | `src/chain/chain_actor.rs` | Otomatik challenge üretimi |
-| `ChainCommand::FinalizeMissedStorageChallenges` | `src/chain/chain_actor.rs` | Slash mekanizması |
-| `bud_storageOpenDeal` | `src/rpc/server.rs` | RPC endpoint |
-| `bud_storageOpenChallenge` | `src/rpc/server.rs` | RPC endpoint |
-| `bud_storageAnswerChallenge` | `src/rpc/server.rs` | RPC endpoint |
+1. **Open:** Herhangi bir hesap `bud_storageOpenChallenge` RPC çağrısıyla challenge açar
+   - Opener bond kilitlenir (spam önleme)
+   - `RetrievalChallengeRequest` → zincirde `RetrievalChallenge` oluşur
 
-### 1.3 Ekonomik Parametreler
+2. **Answer:** Operatör `bud_storageAnswerChallenge` RPC çağrısıyla yanıt verir
+   - Sadece `range_hash` (alt aralık hash) sunulur
+   - **Tam shard kanıtı DEĞİL**
+
+3. **Outcome:** Zincir sonucu kaydeder
+   - ✅ Doğru yanıt → opener bond iade, operatör reward accure
+   - ❌ Yanlış yanıt → operatör bond slashed
+   - ⏰ Deadline geçerse → operatör bond slashed
+
+---
+
+## 3. Neden Gerçek PoS Değil?
+
+### 3.1 Gerçek PoS İçin Gerekenler
+
+Gerçek kriptografik Proof-of-Storage için aşağıdakiler gereklidir:
+
+| Bileşen | Durum | Blocker |
+|---------|-------|---------|
+| BudZKVM | ✅ Mevcut | — |
+| VerifyMerkle opcode | ⚠️ DEVRE DIŞI | Z-B 64-depth proof gate |
+| STARK proof üretimi | ⚠️ Yavaş | Performance optimization gerekli |
+| `StorageAttestationFinalityAdapter` | ✅ Tamamlandı | ADIM3 §0.1 |
+| Faz 3 entegrasyonu | ❌ Kapalı | VerifyMerkle production'a bağlı |
+
+### 3.2 Z-B Gate (ADIM2 Karar 2.1-B)
+
+`VerifyMerkle` opcode'u şu anda **production'da devre dışıdır**:
 
 ```rust
-pub struct StorageEconomicsParams {
-    pub operator_bond: u64,     // Operatörün kilitlediği teminat
-    pub fee_per_epoch: u64,     // İstemciden operatöre epoch başına ücret
+// budzero/bud-isa/src/lib.rs:39-43
+VerifyMerkle { ... } => {
+    // TODO: enable after Z-B Commit 3.5 completes
+    return Err(VMError::DisabledInstruction);
 }
 ```
 
-- **Bond:** Operatör deal açıldığında bond yatırır. Challenge'ı kaçırırsa bond slash edilir.
-- **Fee:** İstemci, operatöre epoch başına ücret öder.
-- **Slash oranı:** `StorageDeal::slashed_bond` — kaçırılan challenge başına bond'un tamamı kesilir.
+**Karar:** ADIM2'de Z-B Commit 3.5 tamamlanıp gate açılacak. Tahmini: 2-3 hafta.
 
 ---
 
-## 2. Bilinen Sınırlamalar
+## 4. Ekonomik Oyun Mekanizması
 
-### 2.1 "Kısmi Veri Silme" Açığı (Vision §9.2)
+### 4.1 Güvenlik Modeli
 
-Bir operatör manifest'in büyük kısmını silip yalnızca challenge'da sorgulanacak byte aralığını tutabilir. Challenge'lar deterministik olduğu için (`deal_id` ve `epoch`'tan türetilir), operatör hangi aralığın sorgulanacağını önceden hesaplayabilir.
+Interim challenge, **ekonomik incentives** ile çalışır:
 
-**Mitigasyon:** Challenge byte aralığı `deal_id * 17 ^ epoch` formülüyle pseudo-random türetilir. Ancak bu gerçek bir Proof-of-Storage yerine geçmez.
-
-### 2.2 Veri Dışsallaştırma (Outsourcing) Açığı (Vision §9.1)
-
-Operatör veriyi gerçekten saklamak yerine, challenge anında komşu bir node'dan ilgili byte aralığını çekip yanıt verebilir. `RESPONSE_WINDOW_BLOCKS` (10 epoch) yeterince genişse bu ekonomik olarak kârlı olabilir.
-
-**Mitigasyon:** Deadline 10 epoch ile sınırlıdır. Ancak gerçek PoRep/PoSt olmadan bu tamamen engellenemez.
-
-### 2.3 Seed Grinding Riski (Vision §9.3)
-
-Challenge seed'i `global_block_hash`'e bağlıdır. Aynı taraf hem blok üretici hem depolama operatörüyse, kendi challenge'ını dolaylı etkileyebilir.
-
-**Mitigasyon:** Mevcut tasarımda bu risk kabul edilmiştir. Faz 3'te VRF/commit-reveal eklenecektir.
-
----
-
-## 3. Gerçek Proof-of-Storage'a Giden Yol (Faz 3)
-
-### 3.1 Gate: BudZero VerifyMerkle Z-B Commit 3.5
-
-Gerçek Proof-of-Storage, BudZKVM'in `VerifyMerkle` opcode'unun (0x1E) production gate'i geçmesine bağlıdır. Bu opcode:
-
-- 64-derinlikte Poseidon4 tabanlı Merkle proof doğrulaması yapar
-- STARK prover tarafından doğrulanabilir
-- `GlobalBlockHeader.storage_root`'a bağlanabilir
-
-**Mevcut durum:** `proves_verify_merkle_valid_64_depth` testi `#[ignore]` durumundadır. ARENA2 prover'da `wrapping_add → u128` modüler aritmetik hatasını buldu ve düzeltti, ancak AIR constraint tarafında ek uyumsuzluklar bulunmaktadır.
-
-### 3.2 Faz 3 Tamamlandığında Ne Değişir
-
-| Özellik | Interim (şimdi) | Faz 3 sonrası |
-|---------|-----------------|---------------|
-| Kanıt tipi | Byte range yanıtı | STARK-aggregated Merkle proof |
-| Doğrulama | Zincir üstü basit hash | BudZKVM STARK verifier |
-| Kapsam | Tek byte aralığı | Tüm chunk (256 KiB) |
-| Süreklilik | Anlık erişim | Sürekli saklama kanıtı |
-| Güvenlik | Ekonomik caydırıcılık | Kriptografik garanti |
-
----
-
-## 4. Karar Kayıtları
-
-| Karar | Kaynak | Durum |
-|-------|--------|-------|
-| B.U.D. mainnet'e dahil (interim retrieval ile) | Kullanıcı kararı 2.3=A | ✅ Aktif |
-| Faz 3 VerifyMerkle gate'e bağımlı | `MAINNET_READINESS.md` §2.1 | ⏳ Beklemede |
-| Mock HSM kaldırıldı, sadece gerçek PKCS#11 | `AI_BIRLIGI.md` §5 | ✅ Kesin |
-| StorageAttestationFinalityAdapter gerçek cert.verify() | ARENA2 `49b6b46` | ✅ Tamamlandı |
-
----
-
-## 5. Operatörler İçin Pratik Rehber
-
-### 5.1 Deal Açma
-
-```bash
-# 1. Storage operator olarak kayıt ol (opsiyonel, ödül için gerekli)
-budlum-cli register --role STORAGE_OPERATOR --stake 1000000
-
-# 2. Deal aç (manifest, shard, bond)
-budlum-cli storage open-deal \
-  --manifest-id 0xabc... \
-  --shard-id 0xdef... \
-  --operator-bond 500000 \
-  --fee-per-epoch 100
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Ekonomik Teşvik                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Operatör:                                                  │
+│  ├── Gelir: Her epoch'ta fee_per_epoch ödül               │
+│  ├── Risk: Yanlış yanıt → bond slashed                     │
+│  └── Ceza: Deadline geçerse → bond slashed                 │
+│                                                             │
+│  Opener (istemci):                                         │
+│  ├── Maliyet: Challenge açma = küçük bond kaybı (spam)    │
+│  ├── Kazanç: Doğru challenge = operatörün güvenilirliği    │
+│  └── Risk: Yanlış challenge = bond kaybı                  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 Challenge Yanıtlama
+### 4.2 Neden Bu Yeterli?
 
-```bash
-# Challenge'ları izle
-budlum-cli storage get-challenges --operator <adres>
+**Kısa vadeli (mainnet lansmanı için):**
 
-# Challenge'a yanıt ver (byte aralığı verisi gerekli)
-budlum-cli storage answer-challenge \
-  --challenge-id 42 \
-  --chunk-data-hash 0x123...
-```
+1. **Ekonomik caydırıcılık yeterli:** 
+   - Operatörler ciddi miktarda bond yatırır
+   - Yanlış yanıt = para kaybı = güçlü teşvik
+   - "Ben gerçekten saklıyorum" demek için ekonomik baskı
 
-### 5.3 Risk Uyarısı
+2. **Ölçekleme avantajı:**
+   - Gerçek PoS hesaplaması pahalı (STARK proof üretimi)
+   - Interim challenge hızlı ve ucuz
+   - İlk aşamada yeterli depolama güvencesi sağlar
 
-- Challenge'ı kaçırmak = **bond'un tamamı slash edilir**
-- Veriyi saklamadan challenge'ları yanıtlamak teorik olarak mümkündür ama ekonomik olarak sürdürülebilir değildir
-- Faz 3 tamamlandığında gerçek Proof-of-Storage gerekecektir — hazırlıklı olun
+3. **Geriye dönük uyumluluk:**
+   - Faz 3 açıldığında, mevcut operatörler zaten "depoluyorlar"
+   - Sadece PoS kanıtı eklemeleri gerekecek
+
+**Uzun vadeli (ADIM4 sonrası):**
+
+Gerçek PoS ile tam kriptografik kanıt:
+- Veri gerçekten saklanıyor (Merkle proof)
+- Şifreleme anahtarı ile binding
+- ZK proof ile zincir dışı doğrulama
 
 ---
 
-**Son güncelleme:** 2026-07-15 (ARENA2, commit `49b6b46`)
+## 5. Kullanıcı Beklenti Yönetimi
+
+### 5.1 Dökümanlar İçin Öneri
+
+Ana README veya dokümantasyon şöyle bir not içermeli:
+
+> ⚠️ **Mainnet Storage Durumu**
+> 
+> B.U.D. mainnet'te depolama, **interim retrieval challenge** mekanizması ile korunmaktadır. Bu mekanizma ekonomik teşviklere dayanır:
+> - Operatörler yatırılan bond üzerinden cezalandırılır
+> - Yanlış yanıt veya deadline aşımı = bond slashing
+> 
+> Gerçek kriptografik Proof-of-Storage (STARK tabanlı) **ADIM4**'te aktif olacaktır.
+
+### 5.2 Operatörler İçin
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   Operatör onboarding'da bilgilendirme          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  "Bu mainnet lansmanında, B.U.D. depolama altyapısı            │
+│   interim retrieval challenge ile çalışmaktadır.                 │
+│                                                                 │
+│   Gerçek kriptografik PoS kanıtı (VerifyMerkle STARK)         │
+│   ADIM4'te eklenecektir.                                        │
+│                                                                 │
+│   Şu an için:                                                   │
+│   • Her challenge'a doğru byte_range_hash sunmalısınız         │
+│   • Deadline'leri kaçırmayın (slashing riski)                  │
+│   • Depolama performansınız challenge başarı oranınızla ölçülür│
+│                                                                 │
+│   ADIM4 sonrası:                                                │
+│   • Ek Merkle proof sunmanız gerekecek                         │
+│   • PoS kanıtınız zincir dışı doğrulanabilecek                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 6. Teknik Detaylar
+
+### 6.1 RPC Metodları
+
+| Metod | Açıklama | İmza Gerekli |
+|-------|----------|--------------|
+| `bud_storageOpenChallenge` | Challenge açar | `opener_signature` (Ed25519) |
+| `bud_storageAnswerChallenge` | Yanıt verir | `responder_signature` (Ed25519) |
+| `bud_storageGetOutcome` | Sonucu sorgular | Hayır |
+
+### 6.2 Veri Yapıları
+
+```rust
+// RetrievalChallengeRequest - opener signature zorunlu
+pub struct RetrievalChallengeRequest {
+    pub deal_id: u64,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    pub challenge_epoch: u64,
+    pub deadline_epoch: u64,
+    pub opener_bond: u64,
+    pub opener: Option<Address>,           // Self-reported
+    pub opener_signature: Option<Vec<u8>>,  // Zorunlu (mainnet)
+}
+
+// RetrievalResponse - responder signature zorunlu
+pub struct RetrievalResponse {
+    pub challenge_id: u64,
+    pub _range_hash: ContentId,
+    pub responder: Address,                  // Self-reported
+    pub response_epoch: u64,
+    pub responder_signature: Option<Vec<u8>>, // Zorunlu (mainnet)
+}
+```
+
+### 6.3 Economics Events
+
+Operatör reward accrual ve slashing, `StorageEconomicsEvent` üzerinden izlenebilir:
+
+```rust
+pub enum StorageEconomicsEvent {
+    RewardAccrued { operator: Address, amount: u64 },
+    BondSlashed { operator: Address, amount: u64, reason: SlashedReason },
+}
+```
+
+---
+
+## 7. Karar Kaydı
+
+| Tarih | Karar | Açıklama |
+|-------|-------|----------|
+| 2026-07-15 | ADIM2 §2.3 = **Seçenek A** | B.U.D. mainnet'e dahil, interim challenge ile başla |
+| 2026-07-15 | ADIM4 = **VerifyMerkle Gate Açılışı** | Faz 3 entegrasyonu için |
+
+---
+
+## 8. Sonraki Adımlar
+
+- [ ] Bu belge kullanıcı onayı aldıktan sonra `docs/BUD_INTERIM.md` olarak repo'ya eklenecek
+- [ ] README'de mainnet storage durumu notu eklenecek
+- [ ] Operatör runbook (§3.3) güncellenecek
+- [ ] ADIM4 planında VerifyMerkle gate açılışı takip edilecek
+
+---
+
+## 9. İlgili Belgeler
+
+- `docs/MAINNET_READINESS.md` — ADIM2/ADIM3 planı
+- `src/domain/storage_deal.rs` — Retrieval challenge veri yapıları
+- `src/rpc/api.rs` — Storage RPC surface
+- `budzero/bud-isa/src/lib.rs` — VerifyMerkle opcode (devre dışı)
