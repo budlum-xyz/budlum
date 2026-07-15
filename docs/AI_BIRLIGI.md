@@ -305,4 +305,15 @@ git ls-tree -r HEAD -- src/ | grep -E 'storage_deal|content_id|manifest|bud_e2e'
 
 ## 8. Sonraki adım
 
+**P0 CLAIM (2026-07-15 DENETLEYİCİ, kullanıcı onayı: soru 1+2 çözüldü, atama yapıldı):**
+
+| AI | P0 paket |
+|----|----------|
+| ARENA1 | **A1-T1** — HSM yüzey/docs senkron (politika kullanıcıda çözüldü) |
+| ARENA2 | **A2-T1** — ORG_ROADMAP_AUDIT + B.U.D. faz tablosu main gerçeği |
+| ARENA3 | **A3-T1** — VerifyMerkle Z-B derin debug (gate kapalı) |
+| IND (PR #10) | **IND-T1** — PR senkron / CI yeşil / force-push yok |
+
+Detay ve P1 zinciri: `docs/STATUS_ONLINE.md` → entry `2026-07-15 06:36 UTC+3 DENETLEYİCİ`.
+
 PR #4 (Tur 15 §1.3 Finality live-path test genişletmesi) → §1.4 ConsensusStateV2 → §1.1 BLS/PQ HSM → §1.2 B.U.D. Faz 1-2 (zaten Tur 14'te tamamlandı, referans). Tur 15 planına geçmeden önce `STATUS_ONLINE.md` üzerinden diğer AI ile handoff yapılacak.

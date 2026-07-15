@@ -1125,3 +1125,54 @@ Kullanıcımız Ayaz tarafından iletilen son talimat doğrultusunda AI ekibimiz
 **Engel:** Yok. Merge ve stratejik politika (mock HSM keep/remove) kullanıcıya bağlı.
 **Sonraki adım:** Bu entry commit + push (`arena/019f63ce-budlum`). Diğer AI'lar CLAIM bekleniyor.
 
+
+### [2026-07-15 06:36 UTC+3] DENETLEYİCİ — P0 CLAIM ataması (kullanıcı: 1+2 çözüldü, 3 yapılsın)
+
+**Durum:** tamamlandı (görev dağıtımı tescil)
+**Kapsam:** Aşama 1 — P0 paket CLAIM; soru 1 (HSM mock politika) ve soru 2 (PR #10 merge) kullanıcı tarafından **çözüldü** ilan edildi — AI'lar bu iki konuyu yeniden sormaz.
+**Handle:** DENETLEYİCİ · `arena/019f63ce-budlum`
+
+#### Kullanıcı kararı kaydı
+
+| # | Konu | Durum |
+|---|------|-------|
+| 1 | Mock HSM keep/remove/dual-mode | **ÇÖZÜLDÜ (kullanıcı)** — AI tekrar sormaz; tree'deki mevcut durum (`hsm_mock.rs` var) operasyonel gerçek kabul |
+| 2 | PR #10 merge | **ÇÖZÜLDÜ (kullanıcı)** — merge kullanıcı/akışında; DENETLEYİCİ merge etmez |
+| 3 | P0 hangi AI | **ŞİMDİ ATANDI** (aşağıda) |
+
+#### P0 CLAIM tablosu (zorunlu sahiplik)
+
+| Paket ID | Sahip | Branch önerisi | Kapsam (kısa) | Kabul kriteri | ETA hedef |
+|----------|-------|----------------|---------------|---------------|-----------|
+| **A1-T1** | **ARENA1** | kendi arena/* veya main-sync dalı | HSM yüzeyini kullanıcı politikası (çözüldü) ile **kod+docs senkron** tut; STATUS ile tree çelişkisi bırakma | `HSM_BLS_PQ_POLICY.md` + kod yolu tek gerçek; test/clippy yeşil | ilk commit 1 tur içinde |
+| **A2-T1** | **ARENA2** | kendi arena/* | `ORG_ROADMAP_AUDIT.md` §4a + B.U.D. faz tablosu = main HEAD `3631e49` gerçeği (Faz4/5 ✅, Faz3 ⚠️, Faz6 ❌) | Sahte audited yok; kanıt satırları dosya/commit | ilk commit 1 tur içinde |
+| **A3-T1** | **ARENA3** | kendi arena/* | **VerifyMerkle Z-B derin debug** (AIR transition, final root, leaf binding) | `proves_verify_merkle_valid_64_depth` yeşile yaklaşır; **production gate KAPALI** kalır ta ki test yeşil + kullanıcı onayı | derin iş — ara STATUS entry her anlamlı adımda |
+| **IND-T1** | **Bağımsız agent (PR #10)** | `arena/019f630c-budlum` | PR #10'u main ile senkron, CI yeşil, force-push yok | `gh pr checks 10` SUCCESS; MERGEABLE | sürekli |
+
+#### P1 yedek zinciri (P0 bitince otomatik sıra — CLAIM yine yazılır)
+
+| Sahip | Sıradaki |
+|-------|----------|
+| ARENA1 | A1-T2 (PKCS#11 BLS/PQ runbook + negatif test) → A1-T3 → A1-T4 |
+| ARENA2 | A2-T2 (README hizalama) → A2-T3 (economics invariant) → A2-T4 |
+| ARENA3 | A3-T2 (finality regression) → A3-T3 → A3-T4 |
+| IND | IND-T2 (review fix) → IND-T3 (merge sonrası deferred test) |
+
+#### Çakışma yasağı
+
+- Aynı paket ID iki AI tarafından yazılamaz.
+- CLAIM devri: eski sahip `STATUS_ONLINE`'da `RELEASE <ID>` yazar; yeni sahip `CLAIM <ID>` yazar.
+- A3-T1 üzerinde **gate açma** hâlâ yasak (sadece debug + test yeşili hedefi).
+
+#### Aşama 2/3 emri (atama sonrası)
+
+```
+CLAIM alındı → git fetch origin → origin/main -5 kontrol
+→ iş → fmt/clippy/test → commit (mesajda paket ID) → push (force yok)
+→ STATUS_ONLINE Aşama 3 kanıt entry → diğer AI review
+```
+
+**Kanıt:** kullanıcı mesajı "1 2 zaten çözüldü 3 ü yap"; PR #10 hâlâ OPEN/MERGEABLE head `5ab8923`; main `3631e49`.
+**Sonraki adım:** ARENA1/2/3 ve IND agent bu entry'yi okuyup kendi P0'suna başlar; DENETLEYİCİ CLAIM ihlali ve yanlış commit tarar.
+**Engel:** Yok.
+
