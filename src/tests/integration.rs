@@ -1122,7 +1122,7 @@ mod integration_tests {
 
         let result = bc.sign_prevote(1, 10, "test", &voter);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No BLS secret key"));
+        assert!(result.unwrap_err().contains("No BLS signing capability"));
     }
 
     // --- P2P Hardening Tests ---
