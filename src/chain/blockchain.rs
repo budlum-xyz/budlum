@@ -3312,6 +3312,73 @@ impl Blockchain {
 
     // ─── B.U.D. Faz 5 (ARENA2): On-chain storage operations ────────────
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_storage_deal_with_escrow(
+        &mut self,
+        domain_id: u32,
+        manifest: &crate::storage::ContentManifest,
+        shard_id: crate::storage::ContentId,
+        operator: Address,
+        payer: Address,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: &crate::domain::storage_params::StorageDomainParams,
+    ) -> Result<u64, String> {
+        // 1. Calculate total client fee escrow needed
+        let epochs = end_epoch.saturating_sub(start_epoch);
+        if epochs == 0 {
+            return Err("Deal duration must be > 0".into());
+        }
+        let total_fee = epochs.saturating_mul(economics.fee_per_epoch);
+
+        // 2. Debit Payer (Client Escrow)
+        if total_fee > 0 {
+            if self.state.balance(&payer) < total_fee {
+                return Err(format!("Insufficient payer balance for deal fee {}", total_fee));
+            }
+            self.state.sub_balance(&payer, total_fee);
+        }
+
+        // 3. Lock Operator Bond
+        if economics.operator_bond > 0 {
+            if self.state.balance(&operator) < economics.operator_bond {
+                // Return payer fee if bond fails
+                if total_fee > 0 {
+                    self.state.add_balance(&payer, total_fee);
+                }
+                return Err(format!("Insufficient operator balance for bond {}", economics.operator_bond));
+            }
+            self.state.sub_balance(&operator, economics.operator_bond);
+        }
+
+        // 4. Register Deal
+        match self.storage_registry.open_deal(
+            domain_id,
+            manifest,
+            shard_id,
+            operator,
+            replica_index,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+        ) {
+            Ok(deal_id) => Ok(deal_id),
+            Err(e) => {
+                // Refund
+                if total_fee > 0 {
+                    self.state.add_balance(&payer, total_fee);
+                }
+                if economics.operator_bond > 0 {
+                    self.state.add_balance(&operator, economics.operator_bond);
+                }
+                Err(format!("open_deal failed: {:?}", e))
+            }
+        }
+    }
+
     /// Accrue storage operator rewards up to `current_epoch`. This is the
     /// canonical Faz 5 accounting path used by ChainActor maintenance ticks.
     /// It credits the operator account and records an event, while avoiding
@@ -3355,11 +3422,10 @@ impl Blockchain {
                 continue;
             }
 
-            // FAZ 5 FAIL-CLOSED: Payer escrow / debit eklenene kadar gerçek bakiye basımı durduruldu.
-            // self.state.add_balance(&operator, amount);
-            tracing::warn!(
-                "Fail-closed: Skipping real add_balance for reward. Payer escrow needed."
-            );
+            // FAZ 5 ESCROW: Payer already locked fee_per_epoch in blockchain state when deal was opened.
+            // We mint/add_balance back to operator from the virtual locked escrow.
+            self.state.add_balance(&operator, amount);
+            tracing::info!("Faz 5 Escrow: Accrued {} reward to operator {}", amount, operator);
 
             let reward_entry = self.storage_operator_rewards.entry(operator).or_default();
             *reward_entry = reward_entry.saturating_add(amount);

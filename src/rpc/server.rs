@@ -1351,6 +1351,7 @@ impl BudlumApiServer for RpcServer {
         manifest: crate::storage::ContentManifest,
         shard_id: String,
         operator: String,
+        payer: String,
         replica_index: u8,
         start_epoch: u64,
         end_epoch: u64,
@@ -1376,28 +1377,25 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid operator hex: {e}"), None::<()>)
         })?;
 
-        let mut reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
         })?;
-        let deal_id = reg
-            .open_deal(
-                domain_id,
-                &manifest,
-                s_id,
-                op_addr,
-                replica_index,
-                start_epoch,
-                end_epoch,
-                economics,
-                &domain_params,
-            )
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e:?}"), None::<()>)
-            })?;
+
+        let deal_id = self.chain.open_storage_deal(
+            domain_id,
+            manifest,
+            s_id,
+            op_addr,
+            payer_addr,
+            replica_index,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+        ).await.map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
+        })?;
+
         Ok(serde_json::json!({
             "dealId": deal_id,
             "status": "Active",

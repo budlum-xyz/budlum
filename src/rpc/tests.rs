@@ -462,6 +462,7 @@ mod rpc_tests {
                 manifest.clone(),
                 format!("0x{}", hex::encode(s_id.0)),
                 format!("0x{}", op.to_hex()),
+                format!("0x{}", Address::from([8u8; 32]).to_hex()), // payer
                 0,
                 10,
                 100,

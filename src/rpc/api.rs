@@ -283,6 +283,7 @@ pub trait BudlumApi {
         manifest: crate::storage::ContentManifest,
         shard_id: String,
         operator: String,
+        payer: String,
         replica_index: u8,
         start_epoch: u64,
         end_epoch: u64,

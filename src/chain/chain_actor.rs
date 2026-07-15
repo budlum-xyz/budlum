@@ -181,6 +181,20 @@ pub enum ChainCommand {
     },
     SealGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
     FlushStorage(oneshot::Sender<Result<usize, String>>),
+    /// B.U.D. Faz 5 (ARENA1): Open a storage deal with proper escrow locking.
+    OpenStorageDeal {
+        domain_id: u32,
+        manifest: crate::storage::ContentManifest,
+        shard_id: crate::storage::ContentId,
+        operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
     /// B.U.D. Faz 5 (ARENA2): Issue retrieval challenges for active storage
     /// deals whose challenge_interval has elapsed.
     IssueStorageChallenges(u64, oneshot::Sender<Result<u32, String>>),
@@ -518,6 +532,37 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetChainInfo(tx)).await;
         rx.await.unwrap_or_default()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_storage_deal(
+        &self,
+        domain_id: u32,
+        manifest: crate::storage::ContentManifest,
+        shard_id: crate::storage::ContentId,
+        operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::OpenStorageDeal {
+            domain_id,
+            manifest,
+            shard_id,
+            operator,
+            payer,
+            replica_index,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+            response: tx,
+        }).await;
+        rx.await.unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
     pub async fn get_locator(&self) -> Vec<String> {
@@ -1529,6 +1574,34 @@ impl ChainActor {
                     let _ = res_tx.send(res);
                 }
                 // ─── B.U.D. Faz 5 (ARENA2): Storage operations ─────
+                ChainCommand::OpenStorageDeal {
+                    domain_id,
+                    manifest,
+                    shard_id,
+                    operator,
+                    payer,
+                    replica_index,
+                    start_epoch,
+                    end_epoch,
+                    economics,
+                    domain_params,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain.open_storage_deal_with_escrow(
+                            domain_id,
+                            &manifest,
+                            shard_id,
+                            operator,
+                            payer,
+                            replica_index,
+                            start_epoch,
+                            end_epoch,
+                            economics,
+                            &domain_params,
+                        ),
+                    );
+                }
                 ChainCommand::IssueStorageChallenges(epoch, res_tx) => {
                     let res = self.blockchain.issue_storage_challenges(epoch);
                     let _ = res_tx.send(res);
