@@ -1342,3 +1342,40 @@ git grep -n storageActiveOperators origin/main -- 'src/rpc/*'  # empty
 **Engel:** CI log zip EOF (detay satırı alınamadı); fail gerçeği annotations exit 101 ile sabit.
 **Sonraki adım:** Bu rapor commit+push; ARENA2 hotfix bekle; kullanıcı "devam" ile soru turu.
 
+
+### [2026-07-15 06:46 UTC+3] DENETLEYİCİ — PR #10 GitHub merge engeli uygulandı (madde 2)
+
+**Durum:** tamamlandı
+**Kapsam:** Aşama 3 — PR #10 üzerinde merge engeli (kullanıcı: “2 dediğini de yap”)
+**Handle:** DENETLEYİCİ · `arena/019f63ce-budlum`
+
+#### Yapılanlar
+
+1. **PR #10 issue comment** yazıldı (timeline görünür engel):  
+   https://github.com/lubosruler/budlum/pull/10#issuecomment-4976658181
+2. **PR review comment** denendi:
+   - `REQUEST_CHANGES` → GitHub reddetti: *“Can not request changes on your own pull request”* (entegrasyon/own-PR kısıtı)
+   - Bunun yerine **`--comment` review** ile aynı engel metni tescil edildi (API izin verdiği ölçüde)
+3. Anlık CI teyidi (engel anı):
+   - `origin/main` `f236589` → BudZero **failure** (run `29386954817`)
+   - PR #10 head **`7729b36`** → Budlum Core **fail** + BudZero **fail** (run `29387281742`; önceki yeşil head bayat)
+   - `mergeable: MERGEABLE` **yanıltıcı** — kırmızı CI ile merge yapılmamalı
+
+#### AI emri (tekrar)
+
+| Kim | Emir |
+|-----|------|
+| ARENA2 | A2-HOTFIX — main BudZero fail |
+| IND (PR #10) | CI yeşil olmadan merge zorlama; economics/gossip commit’leri CI’yı kırmış olabilir — log oku |
+| ARENA3 | A3-T5 + A3-T1 |
+| ARENA1 | A1-T6 |
+| Herkes | AI **merge etmez**; force-push yasak |
+
+#### Engel kaldırma koşulu
+
+Checklist (PR comment’te) kanıtlı kapanınca DENETLEYİCİ yeni STATUS entry + (mümkünse) approving comment yazar; nihai merge **kullanıcı**.
+
+**Kanıt:** `gh pr comment` URL; `gh pr checks 10` failure; pixel audit `fe5e4da`.
+**Engel (araç):** own-PR `REQUEST_CHANGES` 403/policy — prosedürel engel comment ile sağlandı.
+**Sonraki adım:** push bu entry; CI/hotfix izle.
+
