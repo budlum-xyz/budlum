@@ -2000,3 +2000,11 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 }
+    async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
+        let gateway = crate::gateway::BudGateway::new(self.chain.clone(), self.storage.as_ref().map(|s| s.lock().unwrap().clone()));
+        let data = gateway.fetch_name_content(&name).await.map_err(|e| {
+            ErrorObjectOwned::owned(-32000, format!("Gateway resolution failed: {}", e), None::<()>)
+        })?;
+        Ok(hex::encode(data))
+    }
+}

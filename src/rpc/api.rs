@@ -429,4 +429,7 @@ pub trait BudlumApi {
         cid: String,
         author_name: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+    /// B.U.D. Gateway: Fetch raw content by BNS name (D-Web entry).
+    #[method(name = "bud_gatewayFetchContent")]
+    async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned>;
 }
