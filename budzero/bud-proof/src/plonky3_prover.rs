@@ -2176,7 +2176,6 @@ mod tests {
 
     /// Phase 4 Q15 depth_2_test — 2 meaningful siblings, rest zero, still 66 rows
     #[test]
-    #[ignore = "Phase 4 Q15: 2-depth still InvalidProof, matrix green → aux CTL/LogUp degree suspect"]
     fn proves_verify_merkle_valid_2_depth() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
@@ -2239,7 +2238,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 4 ARENA2: matrix chain+leaf+gas+pc+logup fixes landed; full STARK still InvalidProof — next: aux CTL / constraint degree"]
     fn proves_verify_merkle_valid_64_depth() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
