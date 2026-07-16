@@ -5,7 +5,7 @@ use crate::storage::db::Storage;
 /// Phase 6 §6.1: B.U.D. Universal Gateway.
 /// Resolves a BNS name (.bud) to content stored in B.U.D.
 ///
-/// Phase 8.9 (C1 fix): Bitswap + ContentDiscovery P2P fetch entegre edildi.
+/// Phase 8.9 (C1 fix): local Storage lookup + P2P Bitswap fallback path.
 
 pub struct BudGateway {
     chain: ChainHandle,
@@ -31,29 +31,31 @@ impl BudGateway {
             return Err(format!("BNS name '{name}' expired"));
         }
 
-        // 2. Resolve storage_root → ContentManifest → shards
+        // 2. Derive ContentId from storage_root or content_id
         let storage_root = resolved
             .storage_root
             .ok_or_else(|| format!("BNS name '{name}' has no storage binding"))?;
 
-        let cid = ContentId::from_bytes(&storage_root);
+        let cid = ContentId(storage_root);
 
         // 3. Local storage lookup (cached content)
         if let Some(ref storage) = self.storage {
-            let key = crate::budzero::bud_node::discovery::ContentDiscovery::cid_to_key(&cid);
-            if let Some(chunk) = storage.get(&key.to_hex()) {
+            if let Ok(Some(chunk)) = storage.get_content(&cid) {
                 return Ok(chunk);
             }
         }
 
-        // 4. P2P Bitswap fetch — request from network peers
-        //    When integrated with Node's libp2p swarm, the Bitswap behaviour
-        //    will request the content from KAD-discovered providers and stream
-        //    the result back. Until the full swarm wiring is complete, this
-        //    falls through to the error below.
+        // 4. P2P Bitswap fetch — request from network peers.
+        //    Full P2P swarm integration (ContentDiscovery + BudBitswap via
+        //    bud-node crate) pending Phase 9 when the monolithic Node wiring
+        //    exposes Bitswap as a ChainHandle capability.
         Err(format!(
-            "Content '{}' not available locally. Full P2P Bitswap fetch pending Node swarm integration.",
-            hex::encode(&storage_root[..8])
+            "Content {}:{} not available locally. P2P Bitswap fetch pending Node swarm integration (Phase 9).",
+            hex::encode(&storage_root[..8]),
+            resolved
+                .content_id
+                .map(|c| hex::encode(&c.as_bytes()[..4]))
+                .unwrap_or_else(|| "none".to_string())
         ))
     }
 }
