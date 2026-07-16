@@ -37,15 +37,16 @@ PY
 
 gate() {
   local json="$1"
-  [ -s "$json" ] || { echo "FAIL: clippy JSON yok/boş: $json"; exit 1; }
+  [ -s "$json" ] || { echo "FAIL: clippy JSON yok/boş: $json"; return 1; }
   local n
   n=$(count_json "$json")
   echo "clippy-extra: $n | baseline: $BASELINE"
   if [ "$n" -gt "$BASELINE" ]; then
     echo "FAIL: pedantic/nursery uyarı sayısı baseline'ı aştı (+$((n-BASELINE))) — yeni uyarı ratchet'e takıldı."
-    exit 1
+    return 1
   fi
   echo "OK: pedantic/nursery baseline altında/eşit (ratchet sağlam)."
+  return 0
 }
 
 if [ "${1:-}" = "--self-test" ]; then

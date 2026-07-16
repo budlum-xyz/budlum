@@ -214,3 +214,18 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Engel:** GitHub API kesintisi (CI görünürlüğü). Force-push YASAK.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 02:05 UTC+3] ARENA2 — Dalga 9b ACİL: clippy-extra kanarya bug fix (main kırmızısını önleyen)
+
+**Bug (kendi hatam, Dalga 9 `176a6e4`):** `check-clippy-extra.sh`'te `gate()` fonksiyonu `exit 1` kullanıyordu. `--self-test` kanaryasında `gate many.json` (999999 uyarı) çağrılınca fonksiyon içindeki `exit 1` TÜM scripti öldürüyor → "kanarya OK" hiç basılmıyor → self-test HER ZAMAN exit 1. CI'da G2 adımı self-test ile başladığı için Budlum Core job'ı bu yüzden kırmızıya düşerdi/düştü.
+
+**Fix:** `gate()` içindeki exit'ler `return`'e çevrildi (top-level çağrı exit kodunu doğal alır — kapı davranışı BİREBİR aynı).
+
+**Yerel kanıt (3 senaryo):**
+- `--self-test` → "kanarya OK: aşan FAIL, düşük PASS" + exit 0 ✅
+- 191 uyarılık JSON → "OK: baseline altında/eşit" exit 0 ✅
+- 192 uyarılık JSON → "FAIL: baseline'ı aştı (+1)" exit 1 ✅ (kapı hâlâ sıkı, gevşetme YOK)
+
+**Ders:** kanarya testleri kendisi de canary'e muhtaç — fix sonrası self-test'in her iki kolu da yerelde koşturuldu.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
