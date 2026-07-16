@@ -55,6 +55,10 @@ pub mod pow_light_client;
 pub mod prover;
 #[cfg(test)]
 pub mod relayer_liveness;
+// Phase 8.9 / Dalga 5: L1 relayer proof kripto-doorulama + M5 hub fee + M4 BNS fee
+// regresyon kapilari (kullanici karari Q-A, 2026-07-16).
+#[cfg(test)]
+pub mod relayer_gates;
 #[cfg(test)]
 pub mod settlement_prod;
 #[cfg(test)]

@@ -407,11 +407,28 @@ impl Executor {
                         "External state root cannot be zero",
                     ));
                 }
-                // Full Merkle-patricia proof verification against a previously
-                // finalized external state root (from a BridgeBurned/UniversalRelay
-                // commitment) is deferred to Phase 9+ when EVM light-client
-                // infrastructure is integrated. This gate ensures at minimum that
-                // both proof and root are present and non-trivial.
+                // Phase 8.9 / L1 fix: gerçek kriptografik doğrulama.
+                // receipt_proof = bincode(MerkleProof); leaf'in
+                // BDLM_RELAYER_RESULT_V1 result-fact leaf'i olduğu ve path'in
+                // external_state_root'a çıktığı kanıtlanır. (Kökün harici
+                // finalize commitment'a anchor'ı = EVM light-client → Phase 9;
+                // bu kapı kanıt zincirinin kendisini sound şekilde doğrular.)
+                let proof: crate::cross_domain::event_tree::MerkleProof =
+                    bincode::deserialize(&res.receipt_proof).map_err(|e| {
+                        BudlumError::validation("relayer_proof_malformed", e.to_string())
+                    })?;
+                if proof.leaf != res.result_leaf() {
+                    return Err(BudlumError::validation(
+                        "relayer_leaf_mismatch",
+                        "Proof leaf does not match the declared result facts",
+                    ));
+                }
+                if !proof.verify(res.external_state_root) {
+                    return Err(BudlumError::validation(
+                        "relayer_proof_invalid",
+                        "Merkle proof does not anchor to the declared external state root",
+                    ));
+                }
 
                 tracing::info!(
                     chain = ?res.chain,
@@ -470,6 +487,18 @@ impl Executor {
                 website_url,
                 manifest_id,
             } => {
+                // Phase 8.9 / M5: anti-sybil kayıt ücreti. BNS kolundaki
+                // H1 deseniyle simetrik: tam minimum ücret zorunlu + tam düşüm.
+                if tx.amount < crate::hub::HUB_REGISTER_MIN_FEE {
+                    return Err(BudlumError::validation(
+                        "hub_insufficient_fee",
+                        format!(
+                            "App registration requires {} fee, provided: {}",
+                            crate::hub::HUB_REGISTER_MIN_FEE,
+                            tx.amount
+                        ),
+                    ));
+                }
                 state.hub.register_app(
                     name.clone(),
                     tx.from,
@@ -479,7 +508,10 @@ impl Executor {
                     state.epoch_index,
                 );
                 let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.balance = sender
+                    .balance
+                    .saturating_sub(tx.fee)
+                    .saturating_sub(crate::hub::HUB_REGISTER_MIN_FEE);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
         }

@@ -82,6 +82,22 @@ pub struct RelayerExternalResult {
     pub external_state_root: [u8; 32],
 }
 
+impl RelayerExternalResult {
+    /// Phase 8.9 / L1: result-fact leaf'i. `receipt_proof`, bu leaf'in
+    /// `external_state_root`'a bağlandığını kanıtlar — leaf'e proof ve root
+    /// DAHİL DEĞİLDİR (döngüsel bağımlılık olmaz). Executor kapısı ve
+    /// relayer worker aynı şemayı kullanır. Domain: `BDLM_RELAYER_RESULT_V1`.
+    pub fn result_leaf(&self) -> [u8; 32] {
+        let chain_bytes = bincode::serialize(&self.chain).unwrap_or_default();
+        crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_RELAYER_RESULT_V1",
+            &chain_bytes,
+            self.tx_hash.as_bytes(),
+            &[u8::from(self.success)],
+        ])
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionType {
     Transfer,

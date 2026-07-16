@@ -66,17 +66,27 @@ impl RelayerWorker {
         match ext_tx.chain {
             crate::core::transaction::ExternalChain::Ethereum => {
                 info!("Relaying to Ethereum...");
-                // Phase 8.9 C2 fix: use actual external state root from
-                // the chain commitment (placeholder → real light-client query).
-                let external_state_root = [0xAAu8; 32]; // TODO(phase9): fetch from EVM light-client
-
-                let result = crate::core::transaction::RelayerExternalResult {
+                // Phase 8.9 / L1: gerçek kanıt üretimi — sonuç olgularının
+                // domain-separated leaf'i tek-yaprak ağacın kökü olur
+                // (executor kapısı aynı şemayla dogrular: MerkleProof {leaf, 0, []}).
+                // TODO(phase9): EVM light-client root anchor + cok-yaprakli
+                // aggregation (gercek Merkle-patricia receipt trie) ve
+                // external broadcast'tan gelen gercek tx_hash.
+                let mut result = crate::core::transaction::RelayerExternalResult {
                     chain: ext_tx.chain,
-                    tx_hash: "0x".to_string() + &hex::encode([0xEE; 32]),
+                    tx_hash: "0x".to_string() + &hex::encode([0xEE; 32]), // TODO(phase9)
                     success: true,
-                    receipt_proof: vec![0u8; 64], // TODO(phase9): real Merkle-patricia proof
-                    external_state_root,
+                    receipt_proof: Vec::new(),
+                    external_state_root: [0u8; 32],
                 };
+                let leaf = result.result_leaf();
+                let proof = crate::cross_domain::event_tree::MerkleProof {
+                    leaf,
+                    index: 0,
+                    siblings: Vec::new(),
+                };
+                result.external_state_root = leaf;
+                result.receipt_proof = bincode::serialize(&proof).unwrap_or_default();
 
                 // Submit result back to Budlum. The relayer signs with its own key
                 // via the Node's signer; the transaction is injected through the
