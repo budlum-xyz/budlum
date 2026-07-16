@@ -3079,3 +3079,28 @@ Force-push YASAK.
 **Co-authored-by:** ARENA1 <arena1@budlum.ai>
 
 Force-push YASAK.
+
+### [2026-07-16 22:15 UTC+3] ARENA1 — DÜZELTME TURU 2: consensus_validate harness BlockHeader drift (E0063)
+
+**Durum:** push aşaması (PR #13 iterasyon 2 → CI takibi → kullanıcı onayı bekleme modu)
+**Kapsam:** run #731 sonucu: **7/8 YEŞİL** — SBOM fix'i başarılı (Dependency Audit + SBOM (8.1) SUCCESS ✔), `block_deserialize` 90 sn × 1.36M exec temiz ✔. Kalan tek kırmızı: Fuzz Quick (8.5), yeni kök neden.
+
+**Bulgu (run #731, job 87711061218 log):** manifest fix sonrası fuzz derlemesi başladı; `fuzz/fuzz_targets/consensus_validate.rs:48` **E0063**: `missing fields chain_id, epoch, nonce and 6 other fields in initializer of BlockHeader`. `BlockHeader` (src/core/block.rs:13) 16 alana büyümüş, harness 7 alanlıktan kalmış — tip drift; fuzz kapısı CI'da hiç derlenmediği için şimdiye kadar görünmezdi.
+
+**Fix:** literal 16/16 alana tamamlandı; yeni alanlar fuzz byte'larından besleniyor (chain_id/nonce/epoch/slot → `take_u64`, vrf_output/vrf_proof → slice `to_vec`, validator_set_hash → `hex32`; `slashing_evidence`/`storage_root` → None). Dosyaya yorum eklendi: BlockHeader genişlerse E0063 ile bilinçli fail = sahte-yeşil karşıtı kilit.
+
+**Kanıt (yerel):**
+- Python alan-kesişim denetimi: struct (16 alan) vs literal (16 alan) → EKSİK YOK / FAZLA YOK / MÜKERRER YOK.
+- rustc sentaks denetimi: yalnızca beklenen import çözümleme hataları (E0432/E0433 — budlum_core bağımlılığı sandbox'ta derlenemiyor), sentaks temiz.
+- Diğer 4 target statik taramada drift temiz (deserialize-only); import yolları kaynakla doğrulandı (`src/chain/snapshot.rs`: StateSnapshot:7, StateSnapshotV2:303, from_bytes:95/594; `src/chain/mod.rs:5`).
+- block_deserialize CI kanıtı: run #731'de 90 sn koşu TEMİZ (1.363.798 exec, crash yok, corpus 758 yeni unit).
+
+**Sandbox sınırı:** 2 CPU/1 GB RAM → budlum-core ASAN derlemesi CI'a devredildi (block_deserialize'ın derlenip koştuğu CI'da kanıtlı; kalan risk sadece consensus_validate literaliydi ve alan düzeyinde statik olarak kapatıldı).
+
+**Sonraki adım:** push → run CI takibi (8/8 yeşil şart) → kullanıcı onayı BEKLENİYOR.
+
+**Engel:** Yok. Force-push YASAK. Workflow push YASAK (workflow değişmedi).
+
+**Co-authored-by:** ARENA1 <arena1@budlum.ai>
+
+Force-push YASAK.

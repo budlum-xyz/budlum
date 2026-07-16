@@ -45,14 +45,27 @@ fuzz_target!(|data: &[u8]| {
         None
     };
 
+    // BlockHeader alanları genişlerse bu literal bilinçli olarak derleme
+    // hatası verir (E0063) — fuzz harness'inin çekirdek tipten drift'i
+    // CI'da anında yakalanır (sahte-yeşil kapı yok). Alan eklerken
+    // burada da karşılığını fuzz byte'larından besleyin.
     let header = BlockHeader {
         index: take_u64(data, 1),
         hash: hex32(take_32(data, 9)),
         previous_hash: hex32(take_32(data, 41)),
         timestamp: take_u128(data, 73),
         producer,
+        chain_id: take_u64(data, 193),
         state_root: hex32(take_32(data, 129)),
         tx_root: hex32(take_32(data, 161)),
+        slashing_evidence: None,
+        nonce: take_u64(data, 201),
+        epoch: take_u64(data, 209),
+        slot: take_u64(data, 217),
+        vrf_output: data.get(225..257).unwrap_or(&[]).to_vec(),
+        vrf_proof: data.get(257..289).unwrap_or(&[]).to_vec(),
+        validator_set_hash: hex32(take_32(data, 289)),
+        storage_root: None,
     };
 
     let _ = bincode::serialize(&header);
