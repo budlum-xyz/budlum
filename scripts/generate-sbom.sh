@@ -27,24 +27,14 @@ fi
 
 # 2. SBOM üret
 SBOM_FILE="$REPO_ROOT/sbom.cdx.json"
-# Debug: cargo-cyclonedx çıktısını yakala
-CYCLONEDX_OUT=$(cargo cyclonedx --format json 2>&1) || {
-    echo "[generate-sbom] cargo cyclonedx HATA (exit=$?): $CYCLONEDX_OUT"
-    exit 1
-}
-echo "[generate-sbom] cargo cyclonedx çıktısı: ${CYCLONEDX_OUT:0:200}"
-echo "[generate-sbom] Dizindeki dosyalar:"
-ls -la *.json *.xml 2>/dev/null || echo "(hiç .json/.xml yok)"
-echo "[generate-sbom] target/cy* altında:"
-ls target/cyclonedx/ 2>/dev/null || echo "(target/cyclonedx yok)"
-find . -maxdepth 1 -name "*.json" -o -name "*.xml" 2>/dev/null
-if [ -f bom.json ]; then
-    mv bom.json "$SBOM_FILE"
-elif [ -f bom.xml ]; then
-    echo "[generate-sbom] bom.xml bulundu (format json istenmişti!)"
-    exit 1
+cargo cyclonedx --format json
+# cargo-cyclonedx writes <package-name>.cdx.json (e.g. budlum-core.cdx.json)
+SBOM_TMP=$(ls -t *.cdx.json 2>/dev/null | head -1)
+if [ -n "$SBOM_TMP" ] && [ -f "$SBOM_TMP" ]; then
+    mv "$SBOM_TMP" "$SBOM_FILE"
 else
-    echo "[generate-sbom] HATA: bom.json bulunamadı."
+    echo "[generate-sbom] HATA: .cdx.json dosyası bulunamadı."
+    ls -la *.json *.xml 2>/dev/null || true
     exit 1
 fi
 
