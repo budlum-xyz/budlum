@@ -1,4 +1,8 @@
 #![allow(warnings)]
+// Phase 8.3 (ADIM8): unsafe kilidi — src/ şu an 0 unsafe temiz taban;
+// bir `unsafe` blok girdiği an derleme FAIL eder (regresyon kapısı).
+// Not: üstteki `#![allow(warnings)]` kullanıcı kararıyla korunur — forbid ayrı eksen.
+#![forbid(unsafe_code)]
 pub mod bns;
 pub mod chain;
 pub mod cli;
