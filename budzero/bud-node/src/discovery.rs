@@ -298,7 +298,7 @@ mod tests {
         let disc = ContentDiscovery::new(config);
 
         for i in 0..4 {
-            let cid = ContentId::of(format!("chunk {i}").as_bytes());
+            let cid = ContentId::of(&format!("chunk {}", i).into_bytes());
             disc.mark_announced(&cid);
         }
 
