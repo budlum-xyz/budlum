@@ -218,7 +218,7 @@ impl Executor {
                 if tx.amount < cost {
                     return Err(BudlumError::validation(
                         "bns_insufficient_payment",
-                        format!("Required: {}, provided: {}", cost, tx.amount),
+                        format!("Required: {cost}, provided: {amount}", cost = cost, amount = tx.amount),
                     ));
                 }
 
