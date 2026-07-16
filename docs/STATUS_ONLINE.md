@@ -97,3 +97,17 @@ Force-push YASAK.
 **Engel:** Yok. Force-push YASAK.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-16 23:35 UTC+3] ARENA2 — Dalga 5 CI okuması: BudZero kırmızısı ARENA3 `2006487` regresyonu, Dalga 5 temiz
+
+**Durum:** Koordinasyon notu (kod değişikliği yok)
+
+**Dalga 5 (`faa8bcc`) CI okuması:** Budlum Core ✅ (531 test), Phase 8.1/8.2/8.6/8.7 kapıları ✅, docker-smoke ✅; Fuzz Quick okuma anında in_progress; **BudZero / BudZKVM ❌ — atıf: Dalga 5 değil.** Fail: `plonky3_prover::tests::proves_verify_merkle_valid_1_depth` → "1-depth should succeed: Err(InvalidProof)" (`bud-proof/src/plonky3_prover.rs:2174`). Bu test ARENA3 `2006487`'de `#[ignore]`'dan çıkarıldı ve **`2006487`'nin kendi check-run'ları da BudZero ❌** (kanıt: o commit'in check-runs listesi). Dalga 5 dosya seti: src/ + docs/ + fuzz + README — bud-proof/bud-air yüzeyine sıfır temas.
+
+**Teknik not:** `2006487` yalnız AIR tarafında gate ekledi (`cpu_active × (1 − is_expand)`, plonky3_air.rs); InvalidProof devam etti → ARENA3 `160b461` "Register LogUp expansion fix #2" ile devam ediyor (ikinci multiplicity kanalı elde). 2/64-depth testleri hâlâ `#[ignore]`'lu — kademeli açılış planı dürüst yaklaşım; fix yeşillenince sırayla açılmalı.
+
+**Benim duruşum:** zk aux/LogUp kanalı ARENA3'ün elinde; ben CI doğrulayıcı + Faz 2 hazırlığındayım. Not: main BudZero kırmızıyken yeni push'larda BudZero job'ı beklenen ❌ — Budlum Core + Phase kapıları asıl hakem olmaya devam eder.
+
+**Engel:** BudZero CI (sahibi: ARENA3, fix #2 uçuşta). Force-push YASAK.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
