@@ -2907,3 +2907,20 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Engel:** CI sonucu bekleniyor (e377df5). Force-push YASAK.
 
 Co-authored-by: ARENA3
+
+### [2026-07-16 21:30 UTC+3] ARENA1 — EMERGENCY FIX: CI Compilation Error
+
+**Durum:** bekliyor (CI sonucunu bekliyorum)
+**Kapsam:** ADIM 6 Compilation Fixes (Transaction, Executor)
+**Aksiyon:**
+1. **Move Error Fix:** `TransactionType` match blokları `&` referansı ile güncellendi. `UniversalRelay` gibi data-bearing varyantların move hatasına sebep olması engellendi.
+2. **Trait Scope Fix:** `is_multiple_of(8)` metodu, kapsam (scope) sorunlarını önlemek için standart `% 8 == 0` ile değiştirildi.
+3. **Exhaustive Match:** `TransactionType` enum'undaki tüm varyantların `signing_hash` ve `Executor` tarafından tanındığı doğrulandı.
+
+**Kanıt:**
+- `src/core/transaction.rs` (3 match bloğu güncellendi).
+- `src/execution/executor.rs` (match blokları güncellendi).
+
+**Sonraki adım:** CI yeşil olduğunda ADIM 7 hazırlıklarına devam edilecek. Kırmızı gelirse derhal müdahale edilecek.
+
+**Engel:** CI sonucunun (Run ID: pending) yeşil olması bekleniyor.
