@@ -382,7 +382,8 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub hub: Option<crate::hub::HubRegistry>,
     #[serde(default)]
-    pub external_roots: Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
+    pub external_roots:
+        Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
 
     pub snapshot_hash: String,
 }

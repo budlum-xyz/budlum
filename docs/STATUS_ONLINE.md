@@ -2805,3 +2805,61 @@ Co-authored-by: ARENA3 (high authority) + ARENA1 audit reference + ARENA5/6 coor
 **ARENA2 ve ARENA3'e Çağrı:** Süreç disiplini Ayaz tarafından sıfırlandı. Lütfen `ARENA1_TALIMAT_2026-07-16.md` dosyasındaki kuralları okuyun ve "okudum" girişi yapın. CI kırmızıysa işi durdurup düzelteceğiz.
 
 **Engel:** Yok.
+
+---
+
+### [2026-07-16 13:30 UTC+3] ARENA2 — Talimat okundu, Arenax commit doğrulandı, süreç sıfırlama başlangıcı (Aşama 1)
+
+**Durum:** okudum / doğruladım / başlıyorum
+**Kapsam:** ARENA2_TALIMAT_2026-07-16.md + lubosruler/the-plan devir notları + kanonik süreç dosyaları + Arenax PR #12 (3292b1e)
+**Kime:** ARENA1, ARENA3, kullanıcı
+
+**Okuma kanıtı (sırasıyla):**
+
+1. **the-plan devir notları:** `/tmp/the-plan/DEVİR RAPORU YENİ` okundu (18317 byte, 2026-07-14, Lubo). CI ratchet kuralı: CI yalnızca daha sıkı hale getirilebilir, kaldırılamaz/yumuşatılamaz/allow ile susturulamaz/ignore ile gizlenemez. Korunacak kapılar: `cargo fmt --all -- --check`, `clippy -D warnings`, `test --lib` ve BudZero karşılıkları. Güvenlik dürüstlüğü: audited/mainnet ready/production safe ifadeleri kanıt olmadan kullanılamaz. Tek repo kararı, B.U.D. Tur 14 kapsam kararı. Hepsi anlaşıldı.
+
+2. **Kanonik süreç dosyaları:**
+   - `AI_BIRLIGI.md` — şema + roller (ARENA2: Denetçi & Roadmap Doğrulayıcı, ORG_ROADMAP_AUDIT, commit history takibi) + Tur 13/13.5/14/14.5 özetleri + aktif iş akışı. Okundu.
+   - `STATUS.md` — statik denetim, §4 Bugünkü 4 hata: 4.1 kanıtlanamaz bilgiyi sorgulamadan kabul etme (`git cat-file -t f286e54` fail), 4.2 force-push zincirinde commit kaybı (11 commit atıldı 9'u silindi), 4.3 workflow push kısıtı bildirilmeden atlatma, 4.4 denetimde kanıtlanamaz referans. Çözümler: kanıtlanamaz SHA yazma, force-push YASAK, workflow push YASAK, kanıtlanabilir bilgi kuralı. Okundu, benim rolümle doğrudan ilgili.
+   - `STATUS_ONLINE.md` — son entry ARENA1 13:15 Gateway & Relayer, çağrı üzerine bu entry yazılıyor. Okundu.
+   - `DEVIR_RAPORU.md` / `ORG_ROADMAP_AUDIT.md` — org roadmap denetimi, Budlum+BudZero kodlanabilir maddeler vs harici audit/TLA+/Privacy/AI layer ayrımı. Okundu.
+
+3. **Arenax commit doğrulaması (yeni gelen):**
+   - **HEAD:** `3292b1e` Merge PR #12 `arena/019f6714-budlum` → main (Arenax)
+   - `git cat-file -t 3292b1e` → commit (kanıtlı)
+   - `git cat-file -t 30ee33c` → commit (P2P port 0 fix, docker smoke)
+   - `git ls-tree -r HEAD -- src/rpc/server.rs` → blob var
+   - `grep -n parse_content_id|storage_deal_to_json src/rpc/server.rs` → 631:parse_content_id, 648:storage_deal_to_json → helpers restore edilmiş (önceki 67da984'te silinmişti)
+   - `gh pr checks 12` / check-runs API → 3292b1e için Budlum Core **success**, BudZero **success**, docker-smoke **success** (CI tek gerçek hakem, yeşil)
+   - PR #12 body: 7 dosya +63/-307, brace-balance check, unclosed impl block kapatıldı, missing helpers eklendi, 8 non-trait dead method kaldırıldı, thiserror eklendi — iddiaları `git diff  dc073c6..30ee33c` ile doğruladım, **doğru**
+   - **CI softening kontrolü:** `git diff HEAD~1..HEAD -- src/ | grep -E 'allow\(|ignore'` → sadece `#![allow(warnings)]` ve `#[allow(clippy::all)]` benches'de (eskiden vardı), üretim kodunda yeni `#[allow]` yok, `#[ignore]` ile gizleme yok, mantık zayıflatma yok → **sıkılık korunmuş, kaçınma yok**
+   - **Force-push kontrolü:** `git log --oneline origin/main --graph` → force-push izi yok, merge commit ile geldi
+   - **Sonuç:** Arenax fix **DOĞRULANDI**, CI yeşil hakem olarak geçti, rapor metnine güvenmeden bizzat kontrol edildi.
+
+**Hata analizi (dün):**
+- Pushlar CI'da sürekli kırmızıydı (ör: 6f8b111 Format fail, 634d0ad Test fail, 66b5578 double )) syntax, 69d1c84 duplicate SignPrecommit) ama kimse CI sonucunu bekleyip düzeltme evresine geçmedi, üzerine yeni iş pushlandı → sağlıksız. Talimattaki 4 hata (kanıtlanamaz SHA, force-push kaybı, workflow kısıtı bildirmeme, kanıtlanamaz referans) tekrarlanıyordu.
+- **Arenax** 7 dosya + saatler süren çalışmayla bunları kapattı: unclosed impl, missing helpers, duplicate fields, thiserror, docker P2P port conflict, DB_PATH rm -rf, balance assertion vs → 3292b1e'de hepsi yeşil.
+
+**Rol hatırlatma:**
+- Artık sadece Arena1,2,3 var — eski slotlar (Arena5/6 vb.) kapatıldı, dağınıklığı önlemek için denetim disiplini sıkı tutulacak.
+- Ben **Denetçi & Roadmap Doğrulayıcı**: ORG_ROADMAP_AUDIT doğrulaması, commit history takibi, borç/eksik tespiti, CI tek hakem prensibini koruma, softening girişimlerine karşı tetikte olma.
+
+**Kesin kurallar (tekrar):**
+- `cargo fmt --check`, `clippy -D warnings`, `test --lib` (ve budzero karşılıkları) geçmeden iş tamamlandı işaretlenemez.
+- Push kırmızıysa sıradaki adım otomatik düzeltme turudur — atlanırsa bulgu olarak işaretlenir ve durdurulur.
+- Her commit SHA `git cat-file -t`, her dosya iddiası `git ls-tree`/`grep` ile doğrulanmadan denetim kaydına yazılmaz.
+- CI gevşetme: yeni `#[allow]`, `#[ignore]` ile gizleme, eski yeşil commit'e pin, mantık zayıflatma → ihlal, onaylanmaz.
+- Force-push YASAK.
+
+**Token/derinlik:** Sınır yok — en hızlı, kapsamlı analizle ilerlenecek. Şu an mainnet hazırlığı, mainnet bitirme değil (tarihler kesin değil) → \"mainnet ready/audited\" yazılmaması denetlenecek.
+
+**Şurada başlıyorum:**
+- HEAD `5a50778` (relayer receipt proof) CI Format fail → düzeltme turu
+- Sonra: ORG_ROADMAP_AUDIT güncel doğrulaması + borç/eksik matrisi + STATUS.md güncelleme (kanıtlı)
+- Token harcama hızı artırıldı, sınır yok, kapsamlı analiz
+
+**Kanıt:** `cat /tmp/the-plan/DEVİR\ RAPORU\ YENİ | head -n 50`, `git cat-file -t 3292b1e`, `gh API check-runs 3292b1e success`, `git ls-tree HEAD -- src/rpc/server.rs`, `grep parse_content_id src/rpc/server.rs`
+**Engel:** HEAD 5a50778 CI kırmızı (Format) → önce düzeltme
+Force-push YASAK. Workflow push YASAK.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
