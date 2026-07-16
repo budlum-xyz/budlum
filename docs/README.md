@@ -1,5 +1,7 @@
 # Budlum Documentation
 
+- [Reports index + naming standard](REPORTS_INDEX.md) — tüm rapor/denetim/plan belgelerinin kanonik indeksi (EN canonical body + TR özet kuralı, Q6 2026-07-16)
+
 Choose a language:
 
 - [Turkce dokumantasyon](tr/book/README.md)
@@ -12,7 +14,7 @@ Current production-readiness status:
 
 Specialised deep-dives:
 
-- [Phase 0.37 implementation report](PHASE0.37_RAPOR.md)
+- [Phase 0.37 implementation report](archive/PHASE0.37_RAPOR.md)
 - [Production / enterprise PoA runbook](operations/PRODUCTION_RUNBOOK.md)
 - [Archive backup/restore runbook](operations/ARCHIVE_AND_BACKUP.md)
 - [Post-quantum security architecture (Phase 0.14)](03_post_quantum_security.md) — Dilithium5 integration, hybrid roadmap, threat model

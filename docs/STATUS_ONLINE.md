@@ -111,3 +111,15 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Engel:** BudZero CI (sahibi: ARENA3, fix #2 uçuşta). Force-push YASAK.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-16 23:44 UTC+3] ARENA2 — Dalga 6 (docs): REPORTS_INDEX + şablon + 15 tarihsel rapor arşive + MR-1..MR-10 kriter seti — Q1–Q10 kararları uygulandı
+
+**Kullanıcı kararları (10 genel soru, 2026-07-16/17):** Q1(a) zk regresyonu ARENA3'te — ARENA2 doğrulayıcı+ikinci göz · Q2 **Phase 9 hariç hepsi aynı anda** (Faz 2 + Faz 3 + Dalga 4 paralel dalgalar) · Q3(a) rapor evrenine tam standart (indeks+şablon+isim kuralı) · Q4(a) eski çiftler archive'e · Q5(a) test rozeti CI otomasyonu · Q6(a) EN kanonik + TR özet kalıcı kural · Q7(b) direct-main devam + her push öncesi zorunlu fetch · Q8(a) ARENA2 = CI/CD sertleştirme lideri · Q9(c) ceremony tarihsiz — checklist her-an-hazır modu · Q10(a) "mainnet ready" yazılı kriter setiyle mühürlenir.
+
+**Dalga 6 içeriği (bu push):** `docs/REPORTS_INDEX.md` v1 (isim standardı + 🟢🔵🟡⚪ etiketleri + tam envanter + 2. arşiv dalgası adayları ekip oylamasına açık) → `docs/README.md` köprüsü + `docs/templates/REPORT_TEMPLATE.md` (TR özet bloğu + kanıt zorunluluğu + SHA-doğrulama kuralı içeren şablon) · 15 tarihsel rapor `docs/archive/`'a `git mv` (PHASE3×3, PHASE4×2, PHASE5, PHASE7×2, 0.37_RAPOR, AGENT×3, ARENA3 tarihli denetim×2, DEVIR — history korunur; taşınanlara gelen markdown linkleri archive/ önekiyle tazelendi, kırık-link grep kanıtlı yok; backtick'li tarihsel atıflar kanonik muafiyetle el değmeden) · `MAINNET_READINESS.md §7` = **MR-1..MR-10 Mainnet Ready mühür kriterleri** (dürüst durum sütunu: MR-1/MR-3 ❌ mevcut zk kırmızısı, MR-8 🔴 başlamadı, gerisi 🟡 — "kanıtsız ibare yasak" kuralı MR-10'da mühürlendi).
+
+**Sıradaki dalgalar (Q2 onayıyla):** Dalga 7 = Faz 2 (8.3 clippy --all-targets, 8.4 nextest+llvm-cov %90, 8.8 SHA-pin+dependabot+permissions, 8.9 trivy+hadolint; Q5 rozet otomasyonu burya) · Dalga 8 = Faz 3 (8.10 actionlint, 8.11 buf+genesis schema CI, 8.12 CODEOWNERS+branch protection API'dan+bench baseline) · Dalga 9 = Dalga 4 iddia-hijyen taraması + 2. arşiv adaylarının oylaması.
+
+**Engel:** Yok. Force-push YASAK. Her push öncesi fetch (Q7(b)).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

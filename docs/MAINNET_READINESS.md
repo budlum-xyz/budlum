@@ -185,3 +185,24 @@ Bu maddeler **otomatik olarak** Phase 2 kapsamına alınabilir; stratejik karar 
 4. Kullanıcı "devam" komutu verdiğinde bir sonraki göreve geçilecek.
 
 **Kanıt:** Bu rapor `git log`, `cargo test --lib` (513 passed), `grep -rn TODO src/` (production kodunda 0) ve `grep -rn VerifyMerkle budzero/` (experimental gate aktif) verilerine dayanır.
+
+---
+
+## 7. Mainnet Ready Kriter Seti (MR-1..MR-10) — v1, 2026-07-16
+
+> **TR Özet:** "Mainnet ready" ibaresi **ancak** MR-1..MR-10'un tamamı ✅ ve Ayaz'ın nihai onayı ile kullanılır.
+> Kanıtsız ibare = kural ihlali (mevcut "kanıtsız mainnet-ready yasak" kuralının mühürlenmesi; kullanıcı kararı Q10, 2026-07-16).
+> Kriterler EN kanonik aşağıda; her madde bir kanıt bağlantısıyla mühürlenir.
+
+| ID | Criterion (EN canonical) | Proof source | Status (2026-07-16) |
+|----|---|---|---|
+| MR-1 | **CI fully green:** all 9 gates green on `main` for ≥3 consecutive pushes (Budlum Core, BudZero/BudZKVM, 8.1 SBOM, 8.2 deny ×2, 8.5 Fuzz Quick, 8.6 timing, 8.7 secret, docker-smoke). One red job ⇒ seal blocked. | GitHub check-runs | ❌ BudZero red (VerifyMerkle 1-depth, ARENA3 fixing `2006487` series) |
+| MR-2 | **Phase 8 full closure:** ADIM8-TALIMAT-1 (12 tasks) + ADIM8.5 add-ons (miri, geiger, semver-checks, cosign SBOM-signing, KAT vectors, dudect, PKCS#11 mock negative tests, X-Real-IP spoofing, zizmor, branch protection). | uploads talimat + CI kapıları | 🟡 Faz 1 done; Faz 2/3 in flight |
+| MR-3 | **ZK proof chain:** VerifyMerkle 1/2/64-depth tests active (no `#[ignore]`) and green; Prove/Verify round-trip KAT vectors in CI. | budzero CI | ❌ 1-depth InvalidProof açık |
+| MR-4 | **Claim-hygiene (Dalga 4):** zero open rows in PHASE8.9_ANALIZ_A1 matrix; every stub carries an honest marker + maps to the Phase 9 debt list. | PHASE8.9_ANALIZ_A1.md | 🟡 tarama planlandı |
+| MR-5 | **Coverage:** consensus / cross_domain / crypto ≥ 90% line (8.4 nextest + llvm-cov gate). | llvm-cov raporu | 🟡 8.4 bekliyor |
+| MR-6 | **Genesis readiness:** canonical ceremony inputs (real validator keys, bootnodes, HSM) + GENESIS_FLIP_CHECKLIST F1–F5 ✅ + fail-closed guard removal sign-off + mainnet-genesis.json hash freeze. | operations/ belgeleri | 🟡 tooling hazır, input'lar ceremony günü |
+| MR-7 | **Supply chain:** 8.8 SHA-pinned actions + dependabot + minimal permissions; 8.9 trivy + hadolint clean. | .github/workflows | 🟡 Faz 2 |
+| MR-8 | **External audit:** ≥1 independent security audit report (bug-bounty scope counts; firm optional). | rapor | 🔴 başlamadı |
+| MR-9 | **Operational smoke:** PRODUCTION_RUNBOOK rehearsed on devnet; docker-smoke ✅; backup/restore drill recorded. | operations/ | 🟡 docker ✅, tatbikat bekliyor |
+| MR-10 | **Announcement discipline:** only with MR-1..9 all ✅ + Ayaz's final sign-off; any unproven "mainnet ready/audited" claim = rule violation. | bu tablo | 🟢 kural aktif |

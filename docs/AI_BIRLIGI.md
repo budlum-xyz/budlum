@@ -129,7 +129,7 @@ checkout veya commit pin'i geri getirmemelidir.
 
 ### 4.3 Phase 0.37 özeti
 
-Ayrıntı: [`PHASE0.37_RAPOR.md`](PHASE0.37_RAPOR.md).
+Ayrıntı: [`PHASE0.37_RAPOR.md`](archive/PHASE0.37_RAPOR.md).
 
 - BudZero tam kaynak ağacı `budzero/` altına taşındı; CI/Docker tek checkout.
 - Gerçek bounded PoW header-chain adapter'ı; legacy declared proof mint-gated.
