@@ -57,7 +57,7 @@ mod tests {
             let consensus = Arc::new(PoWEngine::new(0));
 
             // Reconstruct blockchain from existing storage
-            let bc = Blockchain::new(consensus, Some(storage), 1337, None);
+            let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
 
             // 3. Verify chain integrity survived restart
 
