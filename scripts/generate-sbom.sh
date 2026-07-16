@@ -27,14 +27,24 @@ fi
 
 # 2. SBOM üret
 SBOM_FILE="$REPO_ROOT/sbom.cdx.json"
-# cargo-cyclonedx writes bom.json adjacent to Cargo.toml by default
-cargo cyclonedx --format json
+# Debug: cargo-cyclonedx çıktısını yakala
+CYCLONEDX_OUT=$(cargo cyclonedx --format json 2>&1) || {
+    echo "[generate-sbom] cargo cyclonedx HATA (exit=$?): $CYCLONEDX_OUT"
+    exit 1
+}
+echo "[generate-sbom] cargo cyclonedx çıktısı: ${CYCLONEDX_OUT:0:200}"
+echo "[generate-sbom] Dizindeki dosyalar:"
+ls -la *.json *.xml 2>/dev/null || echo "(hiç .json/.xml yok)"
+echo "[generate-sbom] target/cy* altında:"
+ls target/cyclonedx/ 2>/dev/null || echo "(target/cyclonedx yok)"
+find . -maxdepth 1 -name "*.json" -o -name "*.xml" 2>/dev/null
 if [ -f bom.json ]; then
     mv bom.json "$SBOM_FILE"
+elif [ -f bom.xml ]; then
+    echo "[generate-sbom] bom.xml bulundu (format json istenmişti!)"
+    exit 1
 else
-    # Fallback: search for any new JSON file
-    echo "[generate-sbom] bom.json bulunamadı, dizin taranıyor..."
-    ls -la *.json 2>/dev/null || true
+    echo "[generate-sbom] HATA: bom.json bulunamadı."
     exit 1
 fi
 
