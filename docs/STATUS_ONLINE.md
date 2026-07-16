@@ -229,3 +229,39 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Ders:** kanarya testleri kendisi de canary'e muhtaç — fix sonrası self-test'in her iki kolu da yerelde koşturuldu.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+### [2026-07-17 00:35 UTC+3] ARENA3 — ADIM 8/8.5 eksik maddeleri envanteri (rapor)
+
+**Durum:** raporlama
+**Kapsam:** ADIM 8 Faz 1 tamamlandıktan sonra kalan P1/P2 ve ADIM 8.5 maddeleri
+
+**Aksiyon:**
+1. Phase 8 Faz 1 P0 (8.1-8.7) 9/9 gate YEŞİL (`5105d51` CI okuması).
+2. **Tamamlanan P1/P2 parçaları (5105d51 Dalga 8 ile):**
+   - 8.2 Cargo Deny root + budzero ✅
+   - 8.3 feature matrix + `--all-features` kanarya ✅
+   - 8.4 nextest + llvm-cov coverage ratchet (%64.00 baseline) ✅
+   - 8.8 SHA-pinli actions + dependabot.yml + Dockerfile digest pin ✅
+   - 8.9 trivy + hadolint ✅
+   - 8.10 actionlint ✅
+   - 8.11 buf breaking + genesis schema validasyonu ✅
+   - 8.12 CODEOWNERS + branch protection ✅
+3. **Halen eksik P1/P2 maddeleri:**
+   - P1.1 `#![forbid(unsafe_code)]` — hiçbir crate seviyesinde yok
+   - P1.7 `critcmp` benchmark regresyonu — `docs/BENCH_BASELINE.md` eklendi ama CI regresyon gate'i yok
+4. **Halen eksik ADIM 8.5 maddeleri:**
+   - 8.5.1 `cargo miri` (UB tespiti)
+   - 8.5.2 `cargo geiger` (unsafe kullanım haritası)
+   - 8.5.3 `cargo semver-checks`
+   - 8.5.5 `critcmp` (benchmark regresyonu)
+   - 8.5.6 property-based tests (`proptest` vb.)
+   - 8.5.7 adversarial validator simülasyonu
+   - 8.5.8 `dudect-bencher` — `timing_safe.rs` var ama dedicated crate değil
+   - 8.5.9 PKCS#11 mock backend negative tests — kullanıcı kararı: mock yok
+   - 8.5.10 `zizmor`
+5. **Kritik not:** `4e2b920` (Phase 9) ile `VerifyMerkle` production gate AÇILDI (`is_experimental=false`). Kullanıcı Q1 kararı test yeşil olana kadar kapalı kalmaktı; gate açılmış durumda.
+
+**Kanıt:** `.github/workflows/ci.yml`, `.github/CODEOWNERS`, `buf.yaml`, `docs/BENCH_BASELINE.md`, `scripts/check-actionlint.sh`, `scripts/check_genesis_schema.py` incelendi.
+**Sonraki adım:** Kullanıcı onayıyla P1.1/P1.7/ADIM 8.5 item'larından biri seçilip uygulanacak; Paket B (compiler güvenlik fix'leri) bekliyor.
+**Engel:** Yok.
+
+Co-authored-by: ARENA3
