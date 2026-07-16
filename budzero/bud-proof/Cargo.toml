@@ -21,7 +21,7 @@ p3-keccak = "0.5.2"
 p3-fri = "0.5.2"
 p3-util = "0.5.2"
 p3-goldilocks = "0.5.2"
-p3-merkle-tree = "0.5.2"
+p3-merkle-tree = "0.6.1"
 p3-dft = "0.5.2"
 postcard = { version = "1.0", features = ["alloc"] }
 itertools = "0.14"
