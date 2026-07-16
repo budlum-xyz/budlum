@@ -51,10 +51,12 @@ impl Pkcs11Signer {
 
         pkcs11_client
             .initialize(cryptoki::context::CInitializeArgs::OsThreads)
-            .map_err(|e| CryptoError::KeyGeneration(format!("Failed to initialize PKCS#11: e")))?;
+            .map_err(|e| {
+                CryptoError::KeyGeneration(format!("Failed to initialize PKCS#11: {e}"))
+            })?;
 
         let slots = pkcs11_client.get_slots_with_token().map_err(|e| {
-            CryptoError::KeyGeneration(format!("Failed to enumerate PKCS#11 slots: e"))
+            CryptoError::KeyGeneration(format!("Failed to enumerate PKCS#11 slots: {e}"))
         })?;
 
         let target_slot = slots
@@ -81,7 +83,7 @@ impl Pkcs11Signer {
         let pin_secret = secrecy::Secret::new(pin);
         session
             .login(cryptoki::session::UserType::User, Some(&pin_secret))
-            .map_err(|e| CryptoError::KeyGeneration(format!("PKCS#11 login failed: e")))?;
+            .map_err(|e| CryptoError::KeyGeneration(format!("PKCS#11 login failed: {e}")))?;
 
         let public_key_bytes = Self::extract_ed25519_public_key(&session).map_err(|e| {
             CryptoError::KeyGeneration(format!(
@@ -174,13 +176,13 @@ impl Pkcs11Signer {
         ];
         let objects = session
             .find_objects(template)
-            .map_err(|e| format!("Failed to search for Ed25519 key: e"))?;
+            .map_err(|e| format!("Failed to search for Ed25519 key: {e}"))?;
         if objects.is_empty() {
             return Err("No Ed25519 public key found in HSM slot".to_string());
         }
         let attr = session
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
-            .map_err(|e| format!("Failed to read public key value: e"))?;
+            .map_err(|e| format!("Failed to read public key value: {e}"))?;
         if let Some(cryptoki::object::Attribute::Value(value)) = attr.first() {
             if value.len() >= 32 {
                 let mut key = [0u8; 32];
@@ -224,7 +226,7 @@ impl Pkcs11Signer {
         ];
         session
             .create_object(template)
-            .map_err(|e| CryptoError::KeyGeneration(format!("Failed to store label: e")))?;
+            .map_err(|e| CryptoError::KeyGeneration(format!("Failed to store label: {e}")))?;
         Ok(())
     }
 }
@@ -247,10 +249,9 @@ impl ConsensusSigner for Pkcs11Signer {
             cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PRIVATE_KEY),
             cryptoki::object::Attribute::KeyType(cryptoki::object::KeyType::EC_EDWARDS),
         ];
-        let objects = inner
-            .session
-            .find_objects(template)
-            .map_err(|e| CryptoError::Signing(format!("Failed to find Ed25519 private key: e")))?;
+        let objects = inner.session.find_objects(template).map_err(|e| {
+            CryptoError::Signing(format!("Failed to find Ed25519 private key: {e}"))
+        })?;
         if objects.is_empty() {
             return Err(CryptoError::Signing(
                 "No Ed25519 private key found in HSM slot".to_string(),
@@ -262,7 +263,7 @@ impl ConsensusSigner for Pkcs11Signer {
         let signature = inner
             .session
             .sign(&mechanism, key_handle, block_hash)
-            .map_err(|e| CryptoError::Signing(format!("HSM sign operation failed: e")))?;
+            .map_err(|e| CryptoError::Signing(format!("HSM sign operation failed: {e}")))?;
 
         if signature.len() < 64 {
             return Err(CryptoError::Signing(format!(

@@ -141,7 +141,7 @@ impl NetworkMessage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         use prost::Message;
         let proto_msg = crate::network::proto_conversions::pb::ProtoNetworkMessage::decode(bytes)
-            .map_err(|e| format!("Protobuf decode error: e"))?;
+            .map_err(|e| format!("Protobuf decode error: {e}"))?;
         Self::try_from(proto_msg)
     }
 

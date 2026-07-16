@@ -42,6 +42,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 TransactionType::Unstake => pb::ProtoTransactionType::Unstake as i32,
                 TransactionType::Vote => pb::ProtoTransactionType::Vote as i32,
                 TransactionType::ContractCall => pb::ProtoTransactionType::ContractCall as i32,
+                _ => pb::ProtoTransactionType::Transfer as i32,
             },
         }
     }
@@ -53,7 +54,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
         let timestamp = proto
             .timestamp
             .parse::<u128>()
-            .map_err(|e| format!("Invalid block timestamp string: e"))?;
+            .map_err(|e| format!("Invalid block timestamp string: {e}"))?;
         let signature = if proto.signature.is_empty() {
             None
         } else {
@@ -69,8 +70,9 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
         };
 
         Ok(Transaction {
-            from: Address::from_hex(&proto.from).map_err(|e| format!("Invalid from address: e"))?,
-            to: Address::from_hex(&proto.to).map_err(|e| format!("Invalid to address: e"))?,
+            from: Address::from_hex(&proto.from)
+                .map_err(|e| format!("Invalid from address: {e}"))?,
+            to: Address::from_hex(&proto.to).map_err(|e| format!("Invalid to address: {e}"))?,
             amount: proto.amount,
             fee: proto.fee,
             nonce: proto.nonce,
@@ -143,13 +145,13 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
         let timestamp = proto
             .timestamp
             .parse::<u128>()
-            .map_err(|e| format!("Invalid block header timestamp string: e"))?;
+            .map_err(|e| format!("Invalid block header timestamp string: {e}"))?;
         let producer = if proto.producer.is_empty() {
             None
         } else {
             Some(
                 Address::from_hex(&proto.producer)
-                    .map_err(|e| format!("Invalid producer address: e"))?,
+                    .map_err(|e| format!("Invalid producer address: {e}"))?,
             )
         };
         let mut evidence = Vec::new();
@@ -222,13 +224,13 @@ impl TryFrom<pb::ProtoBlock> for Block {
         let timestamp = proto
             .timestamp
             .parse::<u128>()
-            .map_err(|e| format!("Invalid block timestamp string: e"))?;
+            .map_err(|e| format!("Invalid block timestamp string: {e}"))?;
         let producer = if proto.producer.is_empty() {
             None
         } else {
             Some(
                 Address::from_hex(&proto.producer)
-                    .map_err(|e| format!("Invalid producer address: e"))?,
+                    .map_err(|e| format!("Invalid producer address: {e}"))?,
             )
         };
         let signature = if proto.signature.is_empty() {
@@ -623,12 +625,12 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             }
             pb::proto_network_message::Payload::DomainCommitment(c) => {
                 let commitment = serde_json::from_slice(&c.data)
-                    .map_err(|e| format!("Invalid domain commitment payload: e"))?;
+                    .map_err(|e| format!("Invalid domain commitment payload: {e}"))?;
                 Ok(NetworkMessage::DomainCommitment(commitment))
             }
             pb::proto_network_message::Payload::VerifiedDomainCommitment(c) => {
                 let payload = serde_json::from_slice(&c.data)
-                    .map_err(|e| format!("Invalid verified domain commitment payload: e"))?;
+                    .map_err(|e| format!("Invalid verified domain commitment payload: {e}"))?;
                 Ok(NetworkMessage::VerifiedDomainCommitment(payload))
             }
             pb::proto_network_message::Payload::SlashingEvidence(e) => Ok(
@@ -636,12 +638,12 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             ),
             pb::proto_network_message::Payload::GlobalHeader(h) => {
                 let header = serde_json::from_slice(&h.data)
-                    .map_err(|e| format!("Invalid global header payload: e"))?;
+                    .map_err(|e| format!("Invalid global header payload: {e}"))?;
                 Ok(NetworkMessage::GlobalHeader(header))
             }
             pb::proto_network_message::Payload::CrossDomainMessage(m) => {
                 let msg = serde_json::from_slice(&m.data)
-                    .map_err(|e| format!("Invalid cross domain message payload: e"))?;
+                    .map_err(|e| format!("Invalid cross domain message payload: {e}"))?;
                 Ok(NetworkMessage::CrossDomainMessage(msg))
             }
         }

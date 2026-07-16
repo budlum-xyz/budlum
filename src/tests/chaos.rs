@@ -449,27 +449,19 @@ mod chaos_tests {
 
         let proof = tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, event.clone(), &proof, Address::zero())
+            .verify_domain_event_proof(pow.id, 77, 0, None, event.clone(), &proof)
             .is_ok());
 
         let mut foreign_domain = event.clone();
         foreign_domain.domain_id = 99;
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, foreign_domain, &proof, Address::zero())
+            .verify_domain_event_proof(pow.id, 77, 0, None, foreign_domain, &proof)
             .is_err());
 
         let mut payload_tampered = event;
         payload_tampered.payload_hash = hash_fields_bytes(&[b"tampered"]);
         assert!(blockchain
-            .verify_domain_event_proof(
-                pow.id,
-                77,
-                0,
-                None,
-                payload_tampered,
-                &proof,
-                Address::zero()
-            )
+            .verify_domain_event_proof(pow.id, 77, 0, None, payload_tampered, &proof,)
             .is_err());
     }
 
@@ -591,7 +583,7 @@ mod chaos_tests {
                 declared_head_hash: [0u8; 32],
                 declared_cumulative_work: 1000 + (i as u128),
             };
-            pow_com.finality_proof_hash = hash_finality_proof(&pow_proof, Address::zero());
+            pow_com.finality_proof_hash = hash_finality_proof(&pow_proof);
             commitments_to_submit.push((pow_com, pow_proof));
 
             let mut block_pos = Block::new(i, "pos".repeat(32), vec![]);
@@ -618,7 +610,7 @@ mod chaos_tests {
                     total_stake: 100,
                 },
             };
-            pos_com.finality_proof_hash = hash_finality_proof(&pos_proof, Address::zero());
+            pos_com.finality_proof_hash = hash_finality_proof(&pos_proof);
             commitments_to_submit.push((pos_com, pos_proof));
 
             let mut block_poa = Block::new(i, "poa".repeat(32), vec![]);
@@ -632,7 +624,7 @@ mod chaos_tests {
                 authorities: vec![],
                 signatures: vec![],
             };
-            poa_com.finality_proof_hash = hash_finality_proof(&poa_proof, Address::zero());
+            poa_com.finality_proof_hash = hash_finality_proof(&poa_proof);
             commitments_to_submit.push((poa_com, poa_proof));
 
             let msg = CrossDomainMessage::new(CrossDomainMessageParams {

@@ -93,7 +93,7 @@ impl StateSnapshot {
         serde_json::to_vec(self).expect("BUG: StateSnapshot must serialize to_bytes")
     }
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: e"))
+        serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
     }
     pub fn size(&self) -> usize {
         self.to_bytes().len()
@@ -145,13 +145,13 @@ impl PruningManager {
         use std::path::Path;
         let dir = Path::new(&self.snapshot_dir);
         if !dir.exists() {
-            fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: e"))?;
+            fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: {e}"))?;
         }
         let filename = format!("snapshot_{}.json", snapshot.height);
         let path = dir.join(filename);
         let data = serde_json::to_string_pretty(snapshot)
-            .map_err(|e| format!("Failed to serialize snapshot: e"))?;
-        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot: e"))?;
+            .map_err(|e| format!("Failed to serialize snapshot: {e}"))?;
+        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot: {e}"))?;
         println!(
             "Snapshot saved: {} ({} accounts)",
             path.display(),
@@ -167,7 +167,7 @@ impl PruningManager {
             return Ok(None);
         }
         let mut snapshots: Vec<_> = fs::read_dir(dir)
-            .map_err(|e| format!("Failed to read snapshot dir: e"))?
+            .map_err(|e| format!("Failed to read snapshot dir: {e}"))?
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
                 entry
@@ -185,15 +185,15 @@ impl PruningManager {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
         let latest_path = snapshots[0].path();
-        let data =
-            fs::read_to_string(&latest_path).map_err(|e| format!("Failed to read snapshot: e"))?;
+        let data = fs::read_to_string(&latest_path)
+            .map_err(|e| format!("Failed to read snapshot: {e}"))?;
         let snapshot: StateSnapshot = match serde_json::from_str(&data) {
             Ok(s) => s,
             Err(e) => {
                 let mut quarantine_path = latest_path.clone();
                 quarantine_path.set_extension("json.corrupted");
                 let _ = fs::rename(&latest_path, &quarantine_path);
-                return Err(format!("Failed to parse snapshot: e"));
+                return Err(format!("Failed to parse snapshot: {e}"));
             }
         };
         if !snapshot.verify() {
@@ -211,13 +211,13 @@ impl PruningManager {
         use std::path::Path;
         let dir = Path::new(&self.snapshot_dir);
         if !dir.exists() {
-            fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: e"))?;
+            fs::create_dir_all(dir).map_err(|e| format!("Failed to create snapshot dir: {e}"))?;
         }
         let filename = format!("snapshot_{}.json", snapshot.height);
         let path = dir.join(filename);
         let data = serde_json::to_string_pretty(snapshot)
-            .map_err(|e| format!("Failed to serialize snapshot v2: e"))?;
-        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot v2: e"))?;
+            .map_err(|e| format!("Failed to serialize snapshot v2: {e}"))?;
+        fs::write(&path, data).map_err(|e| format!("Failed to write snapshot v2: {e}"))?;
         println!(
             "Snapshot V2 saved: {} ({} accounts)",
             path.display(),
@@ -234,7 +234,7 @@ impl PruningManager {
             return Ok(None);
         }
         let mut snapshots: Vec<_> = fs::read_dir(dir)
-            .map_err(|e| format!("Failed to read snapshot dir: e"))?
+            .map_err(|e| format!("Failed to read snapshot dir: {e}"))?
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
                 entry
@@ -252,15 +252,15 @@ impl PruningManager {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
         let latest_path = snapshots[0].path();
-        let data =
-            fs::read_to_string(&latest_path).map_err(|e| format!("Failed to read snapshot: e"))?;
+        let data = fs::read_to_string(&latest_path)
+            .map_err(|e| format!("Failed to read snapshot: {e}"))?;
         let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
             Ok(s) => s,
             Err(e) => {
                 let mut quarantine_path = latest_path.clone();
                 quarantine_path.set_extension("json.corrupted");
                 let _ = fs::rename(&latest_path, &quarantine_path);
-                return Err(format!("Failed to parse snapshot V2: e"));
+                return Err(format!("Failed to parse snapshot V2: {e}"));
             }
         };
         if !snapshot.verify() {
@@ -540,7 +540,7 @@ impl StateSnapshotV2 {
     /// an empty/corrupt snapshot. This is the exact failure class that hid the
     /// Tur-9 registry tuple-key bug.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: e"))
+        serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: {e}"))
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -588,8 +588,8 @@ impl StateSnapshotV2 {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        let snapshot: StateSnapshotV2 =
-            serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot V2: e"))?;
+        let snapshot: StateSnapshotV2 = serde_json::from_slice(data)
+            .map_err(|e| format!("Failed to parse snapshot V2: {e}"))?;
         snapshot.migration_report()?;
         Ok(snapshot)
     }

@@ -514,7 +514,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_consensus_domain(&domain)
-                .map_err(|e| format!("Failed to persist consensus domain: e"))?;
+                .map_err(|e| format!("Failed to persist consensus domain: {e}"))?;
         }
         Ok(())
     }
@@ -956,7 +956,7 @@ impl Blockchain {
                 required_depth, observed_depth
             )),
             FinalityStatus::Rejected(reason) => {
-                Err(format!("Domain commitment finality rejected: reason"))
+                Err(format!("Domain commitment finality rejected: {reason}"))
             }
         }
     }
@@ -1047,7 +1047,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_global_header(&header)
-                .map_err(|e| format!("Failed to persist global header: e"))?;
+                .map_err(|e| format!("Failed to persist global header: {e}"))?;
         }
         self.global_headers.push(header.clone());
         if let Some(metrics) = &self.metrics {
@@ -1186,7 +1186,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.bridge_state)
-                .map_err(|e| format!("Failed to persist bridge state: e"))?;
+                .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
         Ok(())
     }
@@ -1209,7 +1209,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.bridge_state)
-                .map_err(|e| format!("Failed to persist bridge state: e"))?;
+                .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
         Ok(())
     }
@@ -1262,7 +1262,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.bridge_state)
-                .map_err(|e| format!("Failed to persist bridge state: e"))?;
+                .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
         if let Some(message) = result.1.message.clone() {
             self.submit_cross_domain_message(message)?;
@@ -1278,7 +1278,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_cross_domain_message(&message)
-                .map_err(|e| format!("Failed to persist cross-domain message: e"))?;
+                .map_err(|e| format!("Failed to persist cross-domain message: {e}"))?;
         }
         Ok(())
     }
@@ -1313,7 +1313,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.bridge_state)
-                .map_err(|e| format!("Failed to persist bridge state: e"))?;
+                .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
         if let Some(message) = event.message.clone() {
             self.submit_cross_domain_message(message)?;
@@ -1411,7 +1411,7 @@ impl Blockchain {
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.bridge_state)
-                .map_err(|e| format!("Failed to persist bridge state: e"))?;
+                .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
         Ok(())
     }
@@ -1946,7 +1946,7 @@ impl Blockchain {
     ) -> Result<(), String> {
         if verdict.slash_validator || verdict.action == QcProofAction::SlashValidator {
             let validator_address = Address::from_hex(&proof.validator_address)
-                .map_err(|e| format!("Invalid QC fault-proof validator address: e"))?;
+                .map_err(|e| format!("Invalid QC fault-proof validator address: {e}"))?;
 
             // Tur 9.5 (security audit §8): the QC-fault slash
             // ratio is a critical security parameter and must
@@ -2154,6 +2154,7 @@ impl Blockchain {
                     reasons.push("invalid_contract_bytecode".to_string());
                 }
             }
+            _ => {}
         }
 
         if reasons.is_empty() {
@@ -2290,7 +2291,7 @@ impl Blockchain {
 
             store
                 .commit_durable_batch(&batch)
-                .map_err(|e| format!("Failed to commit durable batch: e"))?;
+                .map_err(|e| format!("Failed to commit durable batch: {e}"))?;
         }
         Ok(())
     }
@@ -2305,7 +2306,7 @@ impl Blockchain {
             &block.transactions,
             block.producer.as_ref(),
         )
-        .map_err(|e| format!("Failed to apply block: e"))?;
+        .map_err(|e| format!("Failed to apply block: {e}"))?;
         Self::apply_system_effects(&mut next_state, block);
         Ok(next_state)
     }
@@ -2458,7 +2459,7 @@ impl Blockchain {
     }
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), String> {
         self.validate_pool_transaction(&transaction)
-            .map_err(|e| format!("Invalid transaction: e"))?;
+            .map_err(|e| format!("Invalid transaction: {e}"))?;
 
         self.mempool
             .add_transaction(transaction.clone())
@@ -2528,7 +2529,7 @@ impl Blockchain {
             .consensus
             .full_validate(&block, &self.chain, &self.state)
         {
-            return Err(format!("Consensus validation failed: e"));
+            return Err(format!("Consensus validation failed: {e}"));
         }
 
         let mut temp_state = self.state.clone();
@@ -2546,11 +2547,11 @@ impl Blockchain {
             }
             if block.index > 0 {
                 if let Err(e) = temp_state.validate_transaction(tx) {
-                    return Err(format!("Invalid transaction at index i: e"));
+                    return Err(format!("Invalid transaction at index i: {e}"));
                 }
             }
             if let Err(e) = Executor::apply_transaction_checked(&mut temp_state, tx) {
-                return Err(format!("Failed to apply transaction at index i: e"));
+                return Err(format!("Failed to apply transaction at index i: {e}"));
             }
         }
 
@@ -3259,7 +3260,7 @@ impl Blockchain {
         } else if let Some(signer) = self.consensus.signer() {
             signer
                 .bls_sign(&msg)
-                .map_err(|e| format!("BLS signer backend failed: e"))?
+                .map_err(|e| format!("BLS signer backend failed: {e}"))?
         } else {
             return Err("No BLS signing capability available".to_string());
         };
@@ -3291,7 +3292,7 @@ impl Blockchain {
         } else if let Some(signer) = self.consensus.signer() {
             signer
                 .bls_sign(&msg)
-                .map_err(|e| format!("BLS signer backend failed: e"))?
+                .map_err(|e| format!("BLS signer backend failed: {e}"))?
         } else {
             return Err("No BLS signing capability available".to_string());
         };

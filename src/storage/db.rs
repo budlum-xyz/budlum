@@ -906,7 +906,7 @@ impl Storage {
                     errors.push(format!("Block {i}: missing in index"));
                 }
                 Err(e) => {
-                    errors.push(format!("Block i: read error: e"));
+                    errors.push(format!("Block i: read error: {e}"));
                 }
             }
         }

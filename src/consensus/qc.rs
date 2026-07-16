@@ -601,7 +601,7 @@ pub fn sign_attestation(
     let message = pq_signing_message(epoch, checkpoint_height, checkpoint_hash, validator_index);
     let signature = pq_key
         .sign(&message)
-        .map_err(|e| format!("Dilithium sign failed: e"))?;
+        .map_err(|e| format!("Dilithium sign failed: {e}"))?;
     Ok(PqSignatureEntry {
         validator_index,
         validator_address,

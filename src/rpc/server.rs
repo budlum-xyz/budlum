@@ -719,7 +719,7 @@ impl BudlumApiServer for RpcServer {
     async fn get_balance(&self, address: String) -> Result<String, ErrorObjectOwned> {
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         let balance = self.chain.get_balance(&addr).await;
         Ok(Self::to_hex(balance))
@@ -728,7 +728,7 @@ impl BudlumApiServer for RpcServer {
     async fn get_nonce(&self, address: String) -> Result<String, ErrorObjectOwned> {
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         let nonce = self.chain.get_nonce(&addr).await;
         Ok(Self::to_hex(nonce))
@@ -754,7 +754,7 @@ impl BudlumApiServer for RpcServer {
         let tx_hash = tx.hash.clone();
         let tx_clone = tx.clone();
         self.chain.add_transaction(tx).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid params: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid params: {e}"), None::<()>)
         })?;
         self.node.broadcast_tx_sync(tx_clone);
         Ok(Self::to_0x_hash(tx_hash))
@@ -874,7 +874,11 @@ impl BudlumApiServer for RpcServer {
             .register_consensus_domain(domain)
             .await
             .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid consensus domain: e"), None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid consensus domain: {e}"),
+                    None::<()>,
+                )
             })?;
 
         let info = self.chain.get_settlement_info().await;
@@ -913,7 +917,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid verified domain commitment: e"),
+                    format!("Invalid verified domain commitment: {e}"),
                     None::<()>,
                 )
             })?;
@@ -938,7 +942,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid cross domain message: e"),
+                    format!("Invalid cross domain message: {e}"),
                     None::<()>,
                 )
             })?;
@@ -959,7 +963,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid bridge asset registration: e"),
+                    format!("Invalid bridge asset registration: {e}"),
                     None::<()>,
                 )
             })?;
@@ -983,12 +987,13 @@ impl BudlumApiServer for RpcServer {
                 expected_block_hash,
                 event,
                 proof,
+                Address::zero(),
             )
             .await
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid bridge mint transfer: e"),
+                    format!("Invalid bridge mint transfer: {e}"),
                     None::<()>,
                 )
             })?;
@@ -1006,7 +1011,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid bridge burn transfer: e"),
+                    format!("Invalid bridge burn transfer: {e}"),
                     None::<()>,
                 )
             })?;
@@ -1034,7 +1039,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid bridge burn transfer: e"),
+                    format!("Invalid bridge burn transfer: {e}"),
                     None::<()>,
                 )
             })?;
@@ -1054,7 +1059,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid bridge unlock transfer: e"),
+                    format!("Invalid bridge unlock transfer: {e}"),
                     None::<()>,
                 )
             })?;
@@ -1083,7 +1088,7 @@ impl BudlumApiServer for RpcServer {
             .map_err(|e| {
                 ErrorObjectOwned::owned(
                     -32602,
-                    format!("Invalid bridge unlock transfer: e"),
+                    format!("Invalid bridge unlock transfer: {e}"),
                     None::<()>,
                 )
             })?;
@@ -1095,7 +1100,7 @@ impl BudlumApiServer for RpcServer {
         let header = self.chain.seal_global_header().await.map_err(|e| {
             ErrorObjectOwned::owned(
                 -32602,
-                format!("Unable to seal global header: e"),
+                format!("Unable to seal global header: {e}"),
                 None::<()>,
             )
         })?;
@@ -1126,7 +1131,7 @@ impl BudlumApiServer for RpcServer {
         let tx_hash = tx.hash.clone();
         let tx_clone = tx.clone();
         self.chain.add_transaction(tx).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid params: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid params: {e}"), None::<()>)
         })?;
         self.node.broadcast_tx_sync(tx_clone);
         Ok(serde_json::json!({
@@ -1147,10 +1152,10 @@ impl BudlumApiServer for RpcServer {
         self.require_operator("bud_registryBondRelayer")?;
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         self.chain.bond_relayer(addr, amount).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Relayer bond failed: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Relayer bond failed: {e}"), None::<()>)
         })?;
         let role = crate::registry::role::roles::RELAYER;
         let active = self
@@ -1174,10 +1179,10 @@ impl BudlumApiServer for RpcServer {
         self.require_operator("bud_registryBondProver")?;
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         self.chain.bond_prover(addr, amount).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Prover bond failed: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Prover bond failed: {e}"), None::<()>)
         })?;
         let role = crate::registry::role::roles::PROVER;
         let active = self
@@ -1214,7 +1219,7 @@ impl BudlumApiServer for RpcServer {
             })),
             Err(e) => Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Proof rejected: e"),
+                format!("Proof rejected: {e}"),
                 None::<()>,
             )),
         }
@@ -1227,7 +1232,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         let role = crate::registry::RoleId::new(role_id);
         match self.chain.get_registry_member(addr, role).await {
@@ -1302,7 +1307,7 @@ impl BudlumApiServer for RpcServer {
             })),
             Err(e) => Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Rejected slashing report: e"),
+                format!("Rejected slashing report: {e}"),
                 None::<()>,
             )),
         }
@@ -1330,7 +1335,7 @@ impl BudlumApiServer for RpcServer {
             })),
             Err(e) => Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Invalid QC fault proof: e"),
+                format!("Invalid QC fault proof: {e}"),
                 None::<()>,
             )),
         }
@@ -1853,7 +1858,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
         })?;
 
         let data = bincode::serialize(&(name.clone(), duration))
@@ -1895,7 +1900,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_owner = sub_owner.strip_prefix("0x").unwrap_or(&sub_owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
         })?;
 
         let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), owner_addr))
@@ -1934,12 +1939,12 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
         let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
         })?;
 
         let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
         let cid_bytes = hex::decode(clean_cid).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {e}"), None::<()>)
         })?;
         if cid_bytes.len() != 32 {
             return Err(ErrorObjectOwned::owned(
@@ -1999,7 +2004,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
         let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
         let nfts = self.chain.nft_get_by_owner(addr).await;
         let list: Vec<_> = nfts
@@ -2041,12 +2046,12 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_author = author.strip_prefix("0x").unwrap_or(&author);
         let author_addr = Address::from_hex(clean_author).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid author address: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid author address: {e}"), None::<()>)
         })?;
 
         let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
         let cid_bytes = hex::decode(clean_cid).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: e"), None::<()>)
+            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {e}"), None::<()>)
         })?;
         if cid_bytes.len() != 32 {
             return Err(ErrorObjectOwned::owned(

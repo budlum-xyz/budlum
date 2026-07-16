@@ -1721,6 +1721,7 @@ impl ChainActor {
                             expected_block_hash,
                             event,
                             &proof,
+                            Address::zero(),
                         ));
                 }
                 ChainCommand::BurnBridgeTransfer {
@@ -1915,13 +1916,19 @@ impl ChainActor {
                     storage_domain_id,
                     response,
                 } => {
-                    let _ = response.send(self.blockchain.state.bns_registry.set_storage(
-                        &name,
-                        owner,
-                        storage_root,
-                        storage_domain_id,
-                        self.blockchain.state.epoch_index,
-                    ));
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .set_storage(
+                                &name,
+                                owner,
+                                storage_root,
+                                storage_domain_id,
+                                self.blockchain.state.epoch_index,
+                            )
+                            .map_err(|e| e.to_string()),
+                    );
                 }
                 ChainCommand::BnsCalculateCost {
                     name,

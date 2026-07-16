@@ -113,8 +113,9 @@ pub trait ConsensusEngine: Send + Sync {
         }
         // Tur 11: a silent empty serialization would let an oversized block pass
         // this size check. Surface the error instead of defaulting to empty.
-        let serialized = serde_json::to_vec(block)
-            .map_err(|e| ConsensusError(format!("Failed to serialize block for size check: e")))?;
+        let serialized = serde_json::to_vec(block).map_err(|e| {
+            ConsensusError(format!("Failed to serialize block for size check: {e}"))
+        })?;
         if serialized.len() > MAX_BLOCK_SIZE {
             return Err(ConsensusError(format!(
                 "Block too large. Max: {} bytes, Got: {} bytes",

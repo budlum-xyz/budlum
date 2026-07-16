@@ -275,7 +275,7 @@ impl Block {
         self.hash = hex::encode(binary_hash);
         let signature = signer
             .sign_block(&binary_hash)
-            .map_err(|e| format!("Block signing failed: e"))?;
+            .map_err(|e| format!("Block signing failed: {e}"))?;
         self.signature = Some(signature);
         info!(
             "Block {} signed by {} (backend: {})",

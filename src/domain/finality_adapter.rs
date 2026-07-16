@@ -517,7 +517,7 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
         }
 
         cert.verify(validator_snapshot)
-            .map_err(|e| FinalityError(format!("Invalid PoS finality cert: e")))?;
+            .map_err(|e| FinalityError(format!("Invalid PoS finality cert: {e}")))?;
 
         Ok(FinalityStatus::Finalized)
     }
@@ -727,7 +727,7 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
 
         // Cryptographic quorum + aggregate-signature verification.
         cert.verify(validator_snapshot)
-            .map_err(|e| FinalityError(format!("Invalid BFT finality cert: e")))?;
+            .map_err(|e| FinalityError(format!("Invalid BFT finality cert: {e}")))?;
 
         Ok(FinalityStatus::Finalized)
     }

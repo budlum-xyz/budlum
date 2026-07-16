@@ -140,6 +140,13 @@ mod tests {
     }
 }
 
+use crate::chain::blockchain::Blockchain;
+use crate::consensus::pow::PoWEngine;
+use crate::core::address::Address;
+use crate::core::transaction::{Transaction, TransactionType};
+use crate::storage::db::Storage;
+use std::sync::Arc;
+use tempfile::tempdir;
 use tracing::info;
 
 #[tokio::test]

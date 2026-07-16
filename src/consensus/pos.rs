@@ -244,13 +244,13 @@ impl PoSEngine {
             }).collect::<Vec<_>>(),
             "slashing_evidence": *self.slashing_evidence.read().map_err(|_| "Lock error".to_string())?,
         });
-        serde_json::to_vec(&state).map_err(|e| format!("Serialization error: e"))
+        serde_json::to_vec(&state).map_err(|e| format!("Serialization error: {e}"))
     }
     pub fn save_state(&self, db: &sled::Db) -> Result<(), String> {
         let data = self.serialize_state()?;
         db.insert("POS_STATE", data)
-            .map_err(|e| format!("DB insert error: e"))?;
-        db.flush().map_err(|e| format!("DB flush error: e"))?;
+            .map_err(|e| format!("DB insert error: {e}"))?;
+        db.flush().map_err(|e| format!("DB flush error: {e}"))?;
         info!(
             "PoS state saved: {} new checkpoints",
             self.checkpoints
@@ -267,10 +267,10 @@ impl PoSEngine {
                 info!("No saved PoS state found, starting fresh");
                 return Ok(());
             }
-            Err(e) => return Err(format!("DB read error: e")),
+            Err(e) => return Err(format!("DB read error: {e}")),
         };
         let state: serde_json::Value =
-            serde_json::from_slice(&data).map_err(|e| format!("Deserialization error: e"))?;
+            serde_json::from_slice(&data).map_err(|e| format!("Deserialization error: {e}"))?;
 
         if let Some(checkpoints_data) = state.get("checkpoints").and_then(|c| c.as_array()) {
             let mut checkpoints = self
@@ -383,7 +383,7 @@ impl ConsensusEngine for PoSEngine {
         if let Some(signer) = &self.signer {
             block
                 .sign_with_signer(signer.as_ref())
-                .map_err(|e| ConsensusError(format!("HSM block signing failed: e")))?;
+                .map_err(|e| ConsensusError(format!("HSM block signing failed: {e}")))?;
             return Ok(());
         }
 

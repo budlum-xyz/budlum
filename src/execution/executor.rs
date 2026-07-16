@@ -332,7 +332,7 @@ impl Executor {
                     .nft_registry
                     .get_nft(*nft_id)
                     .cloned()
-                    .ok_or("NFT not found")?;
+                    .ok_or(BudlumError::validation("nft_not_found", "NFT not found"))?;
 
                 let booster = state.get_or_create(&tx.from);
                 if booster.balance < amount.saturating_add(tx.fee) {
@@ -371,11 +371,9 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::AiPurchaseData { offer_id } => {
-                let offer = state
-                    .marketplace
-                    .get_offer(*offer_id)
-                    .cloned()
-                    .ok_or("Offer not found")?;
+                let offer = state.marketplace.get_offer(*offer_id).cloned().ok_or(
+                    BudlumError::validation("offer_not_found", "Offer not found"),
+                )?;
                 if !offer.active {
                     return Err(BudlumError::validation(
                         "marketplace_offer_inactive",

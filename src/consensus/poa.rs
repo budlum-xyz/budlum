@@ -168,7 +168,7 @@ impl ConsensusEngine for PoAEngine {
                 if signer.address() == expected_signer_addr {
                     block
                         .sign_with_signer(signer.as_ref())
-                        .map_err(|e| ConsensusError(format!("HSM block signing failed: e")))?;
+                        .map_err(|e| ConsensusError(format!("HSM block signing failed: {e}")))?;
                     info!(
                         "PoA: Block {} signed via HSM ({})",
                         block.index, expected_signer_addr
