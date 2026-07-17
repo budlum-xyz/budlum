@@ -8,11 +8,17 @@
 //! göre dağıtır (yuvarlama tozu ilk deal'in operatörüne), aktif deal yoksa
 //! dürüst burn. Bu testler ağırlıklı dağıtımı, dust determinizmini, pending
 //! drain'i ve burn fallback'ini kilitler.
+//!
+//! NOT (ARENA3, CI kanıtlı): mempool zincir-seviyesi tx doğrulaması imza ister
+//! (`Transaction::verify` — imzasız tx sessizce blok dışı kalır). Bu yüzden
+//! aktörler gerçek `KeyPair` ile imzalar; nonce `bc.get_nonce` ile zincirden
+//! okunur, nft_id registry'den okunur (id sayacı varsayımı yoktur).
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::crypto::primitives::KeyPair;
 use crate::domain::storage_deal::StorageEconomicsParams;
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;
@@ -88,23 +94,40 @@ fn open_weighted_deal(
         .unwrap();
 }
 
-fn mint_nft(bc: &mut Blockchain, owner: Address, cid: ContentId) {
-    let data = bincode::serialize(&(cid, None::<String>)).unwrap();
-    let mut tx = Transaction::new(owner, Address::zero(), 0, data);
-    tx.tx_type = TransactionType::NftMint;
-    tx.fee = 1;
-    tx.hash = tx.calculate_hash();
+/// İmzalı tx gönderir ve tek blok üretir.
+fn submit_tx(bc: &mut Blockchain, mut tx: Transaction, kp: &KeyPair) {
+    tx.sign(kp);
     bc.mempool.add_transaction(tx).unwrap();
     bc.produce_block(Address::zero());
 }
 
-fn boost_nft(bc: &mut Blockchain, booster: Address, nft_id: u64, amount: u64) {
-    let mut tx = Transaction::new(booster, Address::zero(), 0, Vec::new());
+fn mint_nft(bc: &mut Blockchain, kp: &KeyPair, cid: ContentId) {
+    let from = Address::from(kp.public_key_bytes());
+    let data = bincode::serialize(&(cid, None::<String>)).unwrap();
+    let mut tx = Transaction::new_with_fee(
+        from,
+        Address::zero(),
+        0,
+        1,
+        bc.get_nonce(&from),
+        data,
+    );
+    tx.tx_type = TransactionType::NftMint;
+    submit_tx(bc, tx, kp);
+}
+
+fn boost_nft(bc: &mut Blockchain, kp: &KeyPair, nft_id: u64, amount: u64) {
+    let from = Address::from(kp.public_key_bytes());
+    let mut tx = Transaction::new_with_fee(
+        from,
+        Address::zero(),
+        0,
+        1,
+        bc.get_nonce(&from),
+        Vec::new(),
+    );
     tx.tx_type = TransactionType::NftBoost { nft_id, amount };
-    tx.fee = 1;
-    tx.hash = tx.calculate_hash();
-    bc.mempool.add_transaction(tx).unwrap();
-    bc.produce_block(Address::zero());
+    submit_tx(bc, tx, kp);
 }
 
 #[tokio::test]
@@ -113,8 +136,10 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     let db = dir.path().join("boost_weighted.db");
     let mut bc = fresh_chain(db.to_str().unwrap());
 
-    let alice = Address::from([0xAA; 32]);
-    let bob = Address::from([0xBB; 32]);
+    let alice_kp = KeyPair::generate().unwrap();
+    let bob_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob = Address::from(bob_kp.public_key_bytes());
     let op1 = Address::from([0x01; 32]);
     let op2 = Address::from([0x02; 32]);
     bc.state.add_balance(&alice, 1000);
@@ -125,9 +150,12 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     open_weighted_deal(&mut bc, &manifest, op1, 0, 100);
     open_weighted_deal(&mut bc, &manifest, op2, 1, 300);
 
-    mint_nft(&mut bc, alice, ContentId([0x77; 32]));
+    mint_nft(&mut bc, &alice_kp, ContentId([0x77; 32]));
     assert_eq!(bc.state.get_balance(&alice), 999);
-    boost_nft(&mut bc, bob, 0, BOOST_AMOUNT);
+
+    // NFT id'si registry'den okunur (id sayacı varsayımı yok).
+    let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
+    boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
 
     // bud_share = 10: op1 = 10*100/400 = 2, op2 = 10*300/400 = 7, dağıtılan 9.
     // dust 1 ilk deal'in operatörüne (deal_id sırası deterministik) -> op1 = 3.
@@ -147,14 +175,17 @@ async fn boost_without_active_deals_burns_share_and_drains_pool() {
     let db = dir.path().join("boost_burn.db");
     let mut bc = fresh_chain(db.to_str().unwrap());
 
-    let alice = Address::from([0xAA; 32]);
-    let bob = Address::from([0xBB; 32]);
+    let alice_kp = KeyPair::generate().unwrap();
+    let bob_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob = Address::from(bob_kp.public_key_bytes());
     let ghost = Address::from([0x09; 32]);
     bc.state.add_balance(&alice, 1000);
     bc.state.add_balance(&bob, 1_000_000);
 
-    mint_nft(&mut bc, alice, ContentId([0x79; 32]));
-    boost_nft(&mut bc, bob, 0, BOOST_AMOUNT);
+    mint_nft(&mut bc, &alice_kp, ContentId([0x79; 32]));
+    let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
+    boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
 
     // Aktif deal yok: creator %16'sını yine alır, %4 + %80 dürüst burn —
     // hiçbir operatör hesabı oluşmamalı ve havuz yine drain edilmeli.

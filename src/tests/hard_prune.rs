@@ -8,11 +8,15 @@
 //! kaldırır. Bu test produce_block yolundaki zincir-seviye etkiyi kilitler.
 //! Fiziksel chunk silme (NodeCommand::StoragePrune worker) ayrı doğrulama
 //! konusudur (bkz. ARENA3 STATUS_ONLINE bulgusu R1: sender wiring eksik).
+//!
+//! NOT (CI kanıtlı): mempool tx doğrulaması imza ister — tx'ler gerçek
+//! KeyPair ile imzalanır, nonce zincirden okunur, nft_id registry'den okunur.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
+use crate::crypto::primitives::KeyPair;
 use crate::storage::db::Storage;
 use crate::storage::manifest::ContentManifest;
 use std::sync::Arc;
@@ -28,7 +32,8 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     bc.state.base_fee = 0;
     bc.mempool.set_min_fee(0);
 
-    let alice = Address::from([0xAA; 32]);
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
     bc.state.add_balance(&alice, 1000);
 
     // Manifest zincir registry'sine kayıtlı; NFT aynı content_id'ye bağlı.
@@ -37,20 +42,37 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     bc.storage_registry.register_manifest(&manifest);
     assert!(bc.storage_registry.get_manifest(&cid).is_some());
 
+    // Mint.
     let data = bincode::serialize(&(cid, None::<String>)).unwrap();
-    let mut mint_tx = Transaction::new(alice, Address::zero(), 0, data);
+    let mut mint_tx = Transaction::new_with_fee(
+        alice,
+        Address::zero(),
+        0,
+        1,
+        bc.get_nonce(&alice),
+        data,
+    );
     mint_tx.tx_type = TransactionType::NftMint;
-    mint_tx.fee = 1;
-    mint_tx.hash = mint_tx.calculate_hash();
+    mint_tx.sign(&alice_kp);
     bc.mempool.add_transaction(mint_tx).unwrap();
     bc.produce_block(Address::zero());
     assert_eq!(bc.state.nft_registry.nfts.len(), 1);
 
-    let burn_data = bincode::serialize(&0u64).unwrap();
-    let mut burn_tx = Transaction::new(alice, Address::zero(), 0, burn_data);
+    // NFT id'si registry'den okunur (id sayacı varsayımı yok).
+    let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
+
+    // Burn.
+    let burn_data = bincode::serialize(&nft_id).unwrap();
+    let mut burn_tx = Transaction::new_with_fee(
+        alice,
+        Address::zero(),
+        0,
+        1,
+        bc.get_nonce(&alice),
+        burn_data,
+    );
     burn_tx.tx_type = TransactionType::NftBurn;
-    burn_tx.fee = 1;
-    burn_tx.hash = burn_tx.calculate_hash();
+    burn_tx.sign(&alice_kp);
     bc.mempool.add_transaction(burn_tx).unwrap();
     bc.produce_block(Address::zero());
 
