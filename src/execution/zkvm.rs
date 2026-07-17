@@ -22,11 +22,18 @@ impl ZkVmExecutor {
 
     /// F2: Execute bytecode in mainnet mode where VerifyMerkle is gated
     /// behind `MainnetActivation::full()`.
-    pub fn execute_bytecode_mainnet(bytecode: &[u8], gas_limit: u64) -> Result<ZkVmReceipt, String> {
+    pub fn execute_bytecode_mainnet(
+        bytecode: &[u8],
+        gas_limit: u64,
+    ) -> Result<ZkVmReceipt, String> {
         Self::execute_bytecode_inner(bytecode, gas_limit, true)
     }
 
-    fn execute_bytecode_inner(bytecode: &[u8], gas_limit: u64, mainnet: bool) -> Result<ZkVmReceipt, String> {
+    fn execute_bytecode_inner(
+        bytecode: &[u8],
+        gas_limit: u64,
+        mainnet: bool,
+    ) -> Result<ZkVmReceipt, String> {
         if bytecode.is_empty() {
             return Err("Empty BudZKVM bytecode".into());
         }
