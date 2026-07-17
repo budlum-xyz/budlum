@@ -99,7 +99,9 @@ impl BridgeRelayerPipeline {
 
     /// Get or create an event tree for a domain.
     fn get_or_create_tree(&mut self, domain: DomainId) -> &mut DomainEventTree {
-        self.event_trees.entry(domain).or_insert_with(DomainEventTree::new)
+        self.event_trees
+            .entry(domain)
+            .or_insert_with(DomainEventTree::new)
     }
 
     // ─── Stage 1: Lock (source domain) ────
@@ -134,18 +136,16 @@ impl BridgeRelayerPipeline {
         )?;
 
         // Register the cross-domain message
-        let message = event
-            .message
-            .clone()
-            .ok_or_else(|| PipelineError::Relayer(RelayerError::Other(
-                "lock event missing message".into(),
-            )))?;
+        let message = event.message.clone().ok_or_else(|| {
+            PipelineError::Relayer(RelayerError::Other("lock event missing message".into()))
+        })?;
         self.messages
             .insert(message.clone())
             .map_err(PipelineError::MessageRegistry)?;
 
         // Enqueue relay
-        self.relayer.enqueue_relay(event.clone(), &message, source_height);
+        self.relayer
+            .enqueue_relay(event.clone(), &message, source_height);
 
         // Add to event tree
         self.get_or_create_tree(source_domain).push(event.clone());
@@ -174,9 +174,9 @@ impl BridgeRelayerPipeline {
             .ok_or(PipelineError::NoEventTree(source_domain))?;
         let root = tree.root();
 
-        let message = self
-            .relayer
-            .process_relay(message_id, relayer, proof, root, current_height)?;
+        let message =
+            self.relayer
+                .process_relay(message_id, relayer, proof, root, current_height)?;
 
         Ok(message)
     }
@@ -184,10 +184,7 @@ impl BridgeRelayerPipeline {
     // ─── Stage 3: Mint (target domain) ────
 
     /// After relay verification, mint the asset on the target domain.
-    pub fn mint(
-        &mut self,
-        message: &CrossDomainMessage,
-    ) -> Result<(), PipelineError> {
+    pub fn mint(&mut self, message: &CrossDomainMessage) -> Result<(), PipelineError> {
         if !matches!(message.kind, MessageKind::BridgeLock) {
             return Err(PipelineError::UnexpectedMessageKind {
                 expected: "BridgeLock",
@@ -211,9 +208,13 @@ impl BridgeRelayerPipeline {
     ) -> Result<DomainEvent, PipelineError> {
         let event_index = self.get_or_create_tree(domain).events().len() as u32;
 
-        let event = self
-            .bridge
-            .burn_with_event(message_id, domain, domain_height, event_index, expiry_height)?;
+        let event = self.bridge.burn_with_event(
+            message_id,
+            domain,
+            domain_height,
+            event_index,
+            expiry_height,
+        )?;
 
         // Register the burn message
         if let Some(ref message) = event.message {
@@ -282,8 +283,8 @@ impl BridgeRelayerPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cross_domain::bridge::AssetId;
     use crate::core::hash::hash_fields_bytes;
+    use crate::cross_domain::bridge::AssetId;
 
     fn hash(label: &[u8]) -> Hash32 {
         hash_fields_bytes(&[label])
@@ -320,14 +321,18 @@ mod tests {
         p.register_asset(a, 1).unwrap();
 
         // Stage 1: Lock on source domain
-        let event = p.lock(1, 2, 100, a, owner(), recipient(), 1000, 1000).unwrap();
+        let event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 1000, 1000)
+            .unwrap();
         assert_eq!(p.relayer().pending_count(), 1);
         assert!(p.event_tree_root(1).is_some());
 
         // Stage 2: Relay with proof
         let msg_id = event.message.as_ref().unwrap().message_id;
         let proof = p.event_proof(1, 0).unwrap();
-        let relayed_msg = p.relay(msg_id, relayer_addr(), &proof, 1, 150).unwrap();
+        let relayed_msg = p
+            .relay(msg_id, relayer_addr(), &proof, 1, 150)
+            .unwrap();
         assert!(p.relayer().is_relayed(&msg_id));
         assert_eq!(p.relayer().pending_count(), 0);
 
@@ -350,10 +355,14 @@ mod tests {
         p.register_asset(a, 1).unwrap();
 
         // Lock + relay + mint
-        let lock_event = p.lock(1, 2, 100, a, owner(), recipient(), 500, 1000).unwrap();
+        let lock_event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 500, 1000)
+            .unwrap();
         let lock_msg_id = lock_event.message.as_ref().unwrap().message_id;
         let lock_proof = p.event_proof(1, 0).unwrap();
-        let mint_msg = p.relay(lock_msg_id, relayer_addr(), &lock_proof, 1, 150).unwrap();
+        let mint_msg = p
+            .relay(lock_msg_id, relayer_addr(), &lock_proof, 1, 150)
+            .unwrap();
         p.mint(&mint_msg).unwrap();
 
         // Burn on target domain (sends back to source)
@@ -384,7 +393,9 @@ mod tests {
     fn lock_rejects_unknown_asset() {
         let mut p = pipeline();
         let a = asset(99);
-        let err = p.lock(1, 2, 100, a, owner(), recipient(), 100, 1000).unwrap_err();
+        let err = p
+            .lock(1, 2, 100, a, owner(), recipient(), 100, 1000)
+            .unwrap_err();
         assert!(matches!(err, PipelineError::Bridge(_)));
     }
 
@@ -427,8 +438,10 @@ mod tests {
         let a = asset(10);
         p.register_asset(a, 1).unwrap();
 
-        p.lock(1, 2, 100, a, owner(), recipient(), 100, 1000).unwrap();
-        p.lock(1, 2, 101, a, owner(), recipient(), 200, 1000).unwrap();
+        p.lock(1, 2, 100, a, owner(), recipient(), 100, 1000)
+            .unwrap();
+        p.lock(1, 2, 101, a, owner(), recipient(), 200, 1000)
+            .unwrap();
 
         let tree_root = p.event_tree_root(1).unwrap();
         let proof0 = p.event_proof(1, 0).unwrap();
