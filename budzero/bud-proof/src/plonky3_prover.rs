@@ -2897,7 +2897,6 @@ mod tests {
             },
         );
     }
-}
 
     #[test]
     fn rejects_verify_merkle_with_incorrect_root() {
@@ -2911,7 +2910,7 @@ mod tests {
         let leaf: u64 = 0xBEEF;
         // Incorrect root
         let wrong_root = 0xBAD_C0DE;
-        
+
         vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
         for i in 0..64 {
             let off = 264 + i * 8;
@@ -2919,7 +2918,7 @@ mod tests {
         }
         vm.registers[2] = wrong_root;
         vm.registers[3] = leaf;
-        
+
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
         // The VM should return 0 in rd_val_new because root doesn't match
@@ -2939,9 +2938,10 @@ mod tests {
             trace_len: vm.trace.len() as u64,
             event_digest: [0u8; 32],
         };
-        
-        // This proof SHOULD verify because we are proving that the VM 
+
+        // This proof SHOULD verify because we are proving that the VM
         // CORRECTLY COMPUTES '0' when the root doesn't match.
         let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
         assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
     }
+}

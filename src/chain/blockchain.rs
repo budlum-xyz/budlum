@@ -1212,7 +1212,8 @@ impl Blockchain {
         if !domain_ref.is_active() || !domain_ref.bridge_enabled {
             return Err(format!("Domain {} is not bridge-enabled", domain));
         }
-        self.state.bridge_state
+        self.state
+            .bridge_state
             .register_asset(asset_id, domain)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
@@ -1414,7 +1415,8 @@ impl Blockchain {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
 
-        self.state.bridge_state
+        self.state
+            .bridge_state
             .unlock(transfer_id, source_domain)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
@@ -1809,7 +1811,8 @@ impl Blockchain {
                 self.state.add_balance(&relayer, fee as u64);
             }
             MessageKind::BridgeBurn => {
-                self.state.bridge_state
+                self.state
+                    .bridge_state
                     .unlock(message.message_id, source_domain)
                     .map_err(|e| e.to_string())?;
                 let transfer = self
