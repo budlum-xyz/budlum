@@ -308,3 +308,27 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Sıradaki (kullanıcı komutu):** chaos snapshot-corruption mühürü (q=chaos_snap), pre-push hook.
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-18 01:15 UTC+3] ARENA3 — Test Sayisi Otopsisi: "915/930" Kanitsizdi; 134 Dolgu Test Temizlendi (kullanici onayli)
+
+**Durum:** tamamlandı (bu push)
+**Kapsam:** Test-sayısı şişirmesinin kök-neden analizi + `target_700.rs` temizliği + raporlama kuralı (kullanıcı kararı: temizle + kural ekle)
+
+**BULGU (kanıtlı):**
+1. **Üç çelişen sayı:** ARENA2 STATUS beyanları "792 core + 123 budzero = 915" ve "915+" yazdı; sohbette "930" telaffuz edildi. **Hiçbiri CI doğrulamalı değildi** — bu beyanlar main'in derlenemediği (6ba5728 kırığı) dönemde yazıldı. BudZero gerçekte 123 değil 119.
+2. **CI-kanıtlı gerçek (@03493b3, yeşil run):** Budlum Core **874 passed + 1 ignored** (libtest `test result:` + nextest `874 tests run: 874 passed, 1 skipped`, job 87976691570) · BudZero **119 passed** (aynı job, ikinci summary). **Toplam = 993.** Rozetteki "874 lib" dürüsttür (badge-bot yalnız CI-yeşilken yazar).
+3. **Şişirme kaynağı tek dosya:** `src/tests/target_700.rs` — 140 fonksiyonda gövde-hash analizi yalnız **6 eşsiz davranış** buldu: 80 adet literal `assert!(true);` (`extra_test_*`), 20 kopya `state_test_val_*`, 10'ar kopya `nft/bns/market/relay_test_val_*` (yalnız sihirli sabit farklı). **134 dolgu = src/tests fonksiyonlarının %28'i.** Dosya başlığı "Phase 9: Testing target 840+" — sayı hedefi KPI'ya dönüşmüştü.
+4. **Adillik notu:** Tüm diğer test dosyaları aynı taramada temiz çıktı (settlement_prod 59/59 eşsiz, integration 52/52, adversarial_p2p, security_auditor, chaos vb.); genişleme dalgasının gerçek işlevsel katkısı vardır (7814d22'de ~749 kaynak-fn → ~936 + makro-üretimliler).
+
+**AKSİYON (bu push):**
+- `target_700.rs`: 140 fn → **7 gerçek test** (6 eşsiz davranış tablo-temelli korundu + 1 yeni negatif: duplicate live BNS kaydı `NameTaken` reddi). **Davranış kaybı sıfır.** Core libtest sayacının ~740'a inmesi beklenir — bu düşüş dolgu imhasıdır, kayıp değil; badge-bot yeni kanıt sayısını kendisi yazacak.
+- `docs/BUDLUM_TEST_INVENTORY.md`: "915 mühür" el-sayısı toplamı CI-kanıtlı tabloyla değiştirildi (denetim düzeltmesi notuyla).
+
+**YENİ BİRLİK KURALI (öneri → kullanıcı onayıyla fiilen yürürlükte):**
+1. Test sayısı yalnız CI özet satırından raporlanır (`test result:` / nextest `Summary`); el-sayısı ve sohbet beyanı beyan sayılmaz.
+2. "N test hedefi" konmaz; hedef `BUDLUM_TEST_INVENTORY`'deki **davranış maddesi**dir. Sayı, sonuçtur.
+3. "Doğrulandı/mühürlendi" ifadesi CI-run bağlantısı olmadan kullanılmaz (önceki turda önerilmişti, bu otopsiyle pratiğe geçti).
+
+**Not:** Bu push dokümantasyon + test-dosyası temizliğidir; konsensus/execution davranışına dokunmaz. Sıradaki işler (kullanıcı komutu, 3 hat paralel başlatıldı): crash-recovery + snapshot-corruption mühürü, ZK negative corpus genişletme, bridge negatifleri.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

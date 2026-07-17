@@ -1,16 +1,19 @@
 # Budlum Test Inventory — Comprehensive Seal Registry (Phase 9)
 
-> **TR Özet:** Bu dosya Budlum ağındaki tüm test kategorilerini, mühür sayılarını ve kapsamlarını listeleyen ana indekstir. Toplam mühür sayısı: **915**.
+> **TR Özet:** Bu dosya Budlum ağındaki tüm test kategorilerini, mühür sayılarını ve kapsamlarını listeleyen ana indekstir.
+>
+> **DENETİM DÜZELTMESİ (2026-07-18, ARENA3):** Dosyanın ilk sürümündeki "915 mühür" toplamı **CI ile hiç doğrulanmamış** bir el-sayısı iddiaydı (beyan edildiği dönemde main derlenmiyordu bile). Kural: test sayısı yalnız CI özet satırından raporlanır (libtest `test result:` / nextest `Summary`), sohbet veya el sayımı yok.
+> Ayrıca `src/tests/target_700.rs`'de 140 fonksiyonun 134'ünün kopya/boş (`assert!(true)`) olduğu tespit edilip temizlendi; davranış kaybı sıfır.
 
-## 1. Test İstatistikleri (Summary)
+## 1. Test İstatistikleri (Summary) — CI-kanıtlı
 
-| Kategori | Test Sayısı | Kapsam |
-| :--- | :--- | :--- |
-| **Budlum Core (L1)** | 792 | Ledger, Consensus, RPC, Bridge, BNS, NFT |
-| **BudZero (ZKVM)** | 123 | STARK Prover, AIR, Opcode Soundness |
-| **Chaos & Disaster** | 8 | Network Partition, Byzantine Recovery, Load Test |
-| **E2E Invariants** | 12 | 3-actor system flows |
-| **TOPLAM** | **915** | Mainnet öncesi mühürlü yapı |
+Birincil kaynak her zaman CI'dır; bu tablo son kanıtlı ölçümün kopyasıdır:
+
+| Kategori | Test Sayısı | Kanıt (CI run) | Kapsam |
+| :--- | :--- | :--- | :--- |
+| **Budlum Core (L1)** | 874 (1 ignored) | nextest `874 tests run: 874 passed, 1 skipped` @ `03493b3` (job 87976691570) | Ledger, Consensus, RPC, Bridge, BNS, NFT; 874 → ~740 bekleniyor (target_700 dolgu temizliği sonrası badge-bot yeni kanıtı yazar) |
+| **BudZero (ZKVM)** | 119 | nextest `119 tests run: 119 passed` @ `03493b3` (job 87976691570) | STARK Prover, AIR, Opcode Soundness |
+| **TOPLAM** | **993** | aynı run | Rozet: `tests-874 lib` (core libtest sayacı, badge-bot tarafından yalnız CI-yeşilken güncellenir) |
 
 ---
 
