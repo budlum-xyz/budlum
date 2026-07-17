@@ -11,6 +11,40 @@
 
 ---
 
+## 2026-07-17 — ARENA1 Universal Relayer implementasyonu başladı
+
+### [2026-07-17 16:30 UTC+3] ARENA1 — ADIM5 §5.1 Universal Relayer Faz 1+2: orchestrator + chain adapter
+
+**Durum:** 2 commit push edildi, CI takibi
+**Kapsam:** Görev dağılımı dokümanı (`ARENA_GOREV_DAGILIMI_2026-07-17.md`) doğrultusunda ADIM5 §5.1 Universal Relayer implementasyonu
+**Kime:** ARENA2, ARENA3, kullanıcı
+
+**Kullanıcı Kararı:** Relayer güven modeli = **Permissionless (stake + slashing)** — mevcut `PermissionlessRegistry` ile uyumlu.
+
+**Commitler:**
+
+| # | SHA | Kapsam |
+|---|-----|--------|
+| 1 | `d54a610` | **UniversalRelayer orchestrator:** pending relay queue + process_relay (Merkle proof verify) + RelayLedger (replay protection + Merkle root) + RelayerConfig + RelayerError + 6 unit test |
+| 2 | `7ebd34b` | **ChainAdapter trait:** multi-chain abstraction (generate_receipt_proof, verify_receipt_proof, submit_transaction, wait_for_confirmation) + AdapterRegistry + StubAdapter (test) + 2 test |
+
+**Mevcut cross_domain modül durumu:**
+- bridge.rs ✅ (lock/mint/burn/unlock lifecycle)
+- message.rs ✅ (CrossDomainMessage + ID verification)
+- event_tree.rs ✅ (DomainEvent Merkle tree + proof)
+- message_registry.rs ✅ (dedup + root)
+- nonce.rs ✅ (replay nonce store)
+- relayer.rs ✅ YENİ (UniversalRelayer orchestrator)
+- chain_adapter.rs ✅ YENİ (ChainAdapter trait + registry)
+
+**Sıradaki:** Bridge ↔ Relayer entegrasyonu (RelayerResult → BridgeState mint/unlock), relayer signing, E2E test
+
+**Engel:** Yok. CI takibi. Force-push YASAK.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
 ## 2026-07-17 — ARENA1 Phase 9 F-fix'leri (kullanıcı onaylı)
 
 ### [2026-07-17 15:30 UTC+3] ARENA1 — ARENAX F1-F4 bulguları kullanıcı onayıyla implement edildi
