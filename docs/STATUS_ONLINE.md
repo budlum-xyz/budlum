@@ -332,3 +332,23 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Not:** Bu push dokümantasyon + test-dosyası temizliğidir; konsensus/execution davranışına dokunmaz. Sıradaki işler (kullanıcı komutu, 3 hat paralel başlatıldı): crash-recovery + snapshot-corruption mühürü, ZK negative corpus genişletme, bridge negatifleri.
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-18 02:45 UTC+3] ARENA3 — Repo-Seviye Sertleştirme (API kanıtlı) + Devnet Multi-Node Smoke CI Job'u
+
+**Durum:** tamamlandı (repo ayarları API ile; CI job'u bu push)
+**Kapsam:** budlumdevnet salt-okunur denetimi bulgularının budlum'a uygulanması (kullanıcı kararları: yetki ARENA3'te; devnet'e dokunma; multinode job kur)
+
+**1) GitHub-native güvenlik sistemleri (API PATCH kanıtlı) — budlum:**
+- `secret_scanning: enabled` ✅ · `secret_scanning_push_protection: enabled` ✅ (önleyici katman — sır artık push anında engellenir; CI gitleaks dedektif hattı olarak kalır) · `dependabot_security_updates: enabled` ✅
+- API `disabled` döndürdü (plan/org kısıtı olabilir, düşük kritiklik): `secret_scanning_validity_checks`, `secret_scanning_non_provider_patterns`.
+- **budlumdevnet'e DOKUNULMADI** — mühür geçerli (HEAD=main=`6613219...`, işlem öncesi/sonrası ls-remote özdeş).
+
+**2) Branch protection — budlum `main` (API PUT kanıtlı):**
+- Öncesi: koruma var ama `required_status_checks` YOK (0 kontrol), PR-review yok; yalnız force-push engelli.
+- Sonrası: **15/15 kontrol zorunlu** (`Budlum Core`, `Coverage`, `BudZero / BudZKVM`, `Fuzz Quick`, `docker-smoke`, `B.U.D. E2E Invariants`, `Timing-Safe Regression`, `Secret Scan`, `Dependency Audit + SBOM`, `Cargo Deny` ×2, `Docker Security`, `Repo Lint`, `Geiger`, `Udeps`) · strict=false · **enforce_admins=false** (birlik doğrudan-push akışı korunur; zorunluluk non-admin ve gelecekteki PR akışı için bağlayıcı) · force-push engelli (değişmedi).
+
+**3) Yeni CI job'u: `Devnet Multi-Node Smoke` (bu push, docker-smoke.yml):**
+- CI'da hiç koşturulmayan 4-node PoS compose yüzeyini kapatır; kanıtlar: [1] `bud_netListening=true` · [2] `bud_netPeerCount>=0x3` (4-node mesh — gerçek multi-node kanıtı; node2..4 RPC açmaz, compose böyle sertleştirilmiş) · [3] `bud_blockNumber` artışı (konsensus liveness) · [4] `/metrics` 2xx + boş-değil · [5] operator RPC 8546 hosttan erişilemez (sızmaya FAIL). Teardown her durumda; timeout 25 dk.
+- Denetim bulgusu ayrıca: devnet'in kendi CI'sı 4 job ve tag-pinned action kullanıyor (ana repo SHA-pinned + zizmor kapılı); devnet'te açık PR #1/#2 + terk dallar var — kullanıcı kararıyla arşivleme YOK.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

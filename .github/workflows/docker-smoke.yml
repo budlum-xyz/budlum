@@ -6,8 +6,10 @@ on:
     paths:
       - 'Dockerfile'
       - 'config/mainnet.toml'
+      - 'docker-compose.yml'
       - 'scripts/phase3_smoke_rpc.sh'
       - 'scripts/docker-smoke-mainnet.sh'
+      - 'scripts/devnet-multinode-smoke.sh'
       - 'src/**'
       - '.github/workflows/docker-smoke.yml'  # G6: bu workflow degisince smoke+trivy tetiklensin
   pull_request:
@@ -49,3 +51,19 @@ jobs:
         run: |
           chmod +x scripts/docker-smoke-mainnet.sh
           ./scripts/docker-smoke-mainnet.sh || (docker logs budlum-mainnet-smoke-$$ 2>/dev/null; exit 1)
+
+  devnet-multinode-smoke:
+    name: Devnet Multi-Node Smoke (4x PoS mesh + metrics + operator-RPC izolasyon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: 4-node compose smoke (mesh/liveness/metrics/RPC-izolasyon)
+        run: |
+          chmod +x scripts/devnet-multinode-smoke.sh
+          ./scripts/devnet-multinode-smoke.sh || { docker compose -p budlum-multinode-smoke ps || true; docker compose -p budlum-multinode-smoke logs --tail=150 || true; exit 1; }
+      - name: Teardown (her durumda)
+        if: always()
+        run: docker compose -p budlum-multinode-smoke down -v --remove-orphans || true
