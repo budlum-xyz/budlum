@@ -54,6 +54,9 @@ impl std::error::Error for BridgeError {}
 pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
     transfers: BTreeMap<MessageId, BridgeTransfer>,
+    /// Expiry queue: expiry_height -> [message_id]
+    /// Phase 9 (ARENA2): Fix O(N) sweep DoS by indexing by height.
+    expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     replay: ReplayNonceStore,
 }
 
@@ -62,6 +65,7 @@ impl BridgeState {
         Self {
             asset_locations: BTreeMap::new(),
             transfers: BTreeMap::new(),
+            expiry_queue: BTreeMap::new(),
             replay: ReplayNonceStore::new(),
         }
     }
@@ -143,6 +147,12 @@ impl BridgeState {
             },
         );
         self.transfers.insert(transfer.message_id, transfer.clone());
+        if expiry_height > 0 {
+            self.expiry_queue
+                .entry(expiry_height)
+                .or_default()
+                .push(transfer.message_id);
+        }
         Ok((transfer, event))
     }
 
@@ -324,25 +334,27 @@ impl BridgeState {
     /// Idempotent: transfers already past `expiry_height` stay `Active`
     /// once released; subsequent calls are no-ops.
     pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(AssetId, u128)> {
-        let to_release: Vec<(MessageId, AssetId, u128)> = self
-            .transfers
-            .iter()
-            .filter(|(_, t)| {
-                matches!(t.status, BridgeStatus::Locked { .. })
-                    && t.expiry_height > 0
-                    && current_height >= t.expiry_height
-            })
-            .map(|(mid, t)| (*mid, t.asset_id, t.amount))
+        let mut released = Vec::new();
+
+        // Phase 9 (ARENA2): O(log N) sweep using the expiry queue.
+        let heights: Vec<u64> = self
+            .expiry_queue
+            .range(..=current_height)
+            .map(|(&h, _)| h)
             .collect();
 
-        let mut released = Vec::with_capacity(to_release.len());
-        for (mid, asset_id, amount) in to_release {
-            if let Some(t) = self.transfers.get_mut(&mid) {
-                if let BridgeStatus::Locked { domain } = t.status.clone() {
-                    t.status = BridgeStatus::Active { domain };
-                    self.asset_locations
-                        .insert(asset_id, BridgeStatus::Active { domain });
-                    released.push((asset_id, amount));
+        for h in heights {
+            if let Some(mids) = self.expiry_queue.remove(&h) {
+                for mid in mids {
+                    if let Some(t) = self.transfers.get_mut(&mid) {
+                        // Only release if it's still Locked (might have been minted/burned already)
+                        if let BridgeStatus::Locked { domain } = t.status.clone() {
+                            t.status = BridgeStatus::Active { domain };
+                            self.asset_locations
+                                .insert(t.asset_id, BridgeStatus::Active { domain });
+                            released.push((t.asset_id, t.amount));
+                        }
+                    }
                 }
             }
         }

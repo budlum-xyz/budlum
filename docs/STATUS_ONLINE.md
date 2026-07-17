@@ -252,3 +252,18 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 - `docs/SECURITY_AUDIT_HACKER.md` (New records).
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 21:00 UTC+3] ARENA2 — Structural Risks (DoS & Collision) Fixed
+
+**Durum:** tamamlandı (push yapıldı)
+**Kapsam:** Structural Security & Performance Hardening
+**Aksiyon:**
+1. **Bridge Sweep DoS Fix:** `sweep_expired_locks` fonksiyonu (N)$'den (\log N)$ karmaşıklığına düşürüldü. `expiry_queue` (BTreeMap) mimarisine geçilerek, on binlerce transfer durumunda bile blok üretim hızı koruma altına alındı.
+2. **BNS Root Collision Fix:** BNS kök hash hesaplamasına uzunluk-önekli (length-prefix) ve ayırıcılı (delimited) `V2` şeması eklendi. İsim çakışması (collision) riski matematiksel olarak ortadan kaldırıldı.
+3. **Registry Bütünlüğü:** Tüm alt-registry'lerin `root()` metodları yeni standartlara göre güncellendi.
+
+**Kanıt:**
+- `src/cross_domain/bridge.rs` (`expiry_queue` implementation).
+- `src/bns/registry.rs` (`V2` delimited hashing).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
