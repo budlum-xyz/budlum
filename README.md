@@ -5,7 +5,7 @@
 Budlum is a research-grade Layer-1 that does **not** replace other chains. It **settles** them: each domain keeps its own consensus (PoW, PoS, PoA, BFT, ZK, or custom); Budlum verifies finality proofs and records cross-domain value transfer as cryptographic fact.
 
 [![CI](https://github.com/lubosruler/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/lubosruler/budlum/actions)
-[![Tests](https://img.shields.io/badge/tests-533%20lib-blue)](https://github.com/lubosruler/budlum)
+[![Tests](https://img.shields.io/badge/tests-538%20lib-blue)](https://github.com/lubosruler/budlum)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
