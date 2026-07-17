@@ -839,7 +839,10 @@ mod chaos_tests {
         tx_back.fee = 10;
         tx_back.sign(&sender);
         let res = blockchain.add_transaction(tx_back);
-        assert!(res.is_err(), "zincir nonce=1 iken nonce=0 tx kabul edilmemeli");
+        assert!(
+            res.is_err(),
+            "zincir nonce=1 iken nonce=0 tx kabul edilmemeli"
+        );
 
         // Gap'li nonce (zincir 1, tx 5) doğrudan reddedilir.
         let mut tx_gap = Transaction::new(sender_pub, Address::from([0x77; 32]), 1, vec![4]);

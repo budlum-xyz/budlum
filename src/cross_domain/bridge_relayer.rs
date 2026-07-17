@@ -330,9 +330,7 @@ mod tests {
         // Stage 2: Relay with proof
         let msg_id = event.message.as_ref().unwrap().message_id;
         let proof = p.event_proof(1, 0).unwrap();
-        let relayed_msg = p
-            .relay(msg_id, relayer_addr(), &proof, 1, 150)
-            .unwrap();
+        let relayed_msg = p.relay(msg_id, relayer_addr(), &proof, 1, 150).unwrap();
         assert!(p.relayer().is_relayed(&msg_id));
         assert_eq!(p.relayer().pending_count(), 0);
 
@@ -405,7 +403,9 @@ mod tests {
         let a = asset(3);
         p.register_asset(a, 1).unwrap();
 
-        let event = p.lock(1, 2, 100, a, owner(), recipient(), 100, 1000).unwrap();
+        let event = p
+            .lock(1, 2, 100, a, owner(), recipient(), 100, 1000)
+            .unwrap();
         let msg_id = event.message.as_ref().unwrap().message_id;
         let proof = p.event_proof(1, 0).unwrap();
         let mut relayed = p.relay(msg_id, relayer_addr(), &proof, 1, 150).unwrap();
