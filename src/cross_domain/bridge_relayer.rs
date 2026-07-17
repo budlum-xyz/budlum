@@ -435,12 +435,14 @@ mod tests {
     #[test]
     fn event_tree_grows_with_locks() {
         let mut p = pipeline();
-        let a = asset(10);
-        p.register_asset(a, 1).unwrap();
+        let a1 = asset(10);
+        let a2 = asset(11);
+        p.register_asset(a1, 1).unwrap();
+        p.register_asset(a2, 1).unwrap();
 
-        p.lock(1, 2, 100, a, owner(), recipient(), 100, 1000)
+        p.lock(1, 2, 100, a1, owner(), recipient(), 100, 1000)
             .unwrap();
-        p.lock(1, 2, 101, a, owner(), recipient(), 200, 1000)
+        p.lock(1, 2, 101, a2, owner(), recipient(), 200, 1000)
             .unwrap();
 
         let tree_root = p.event_tree_root(1).unwrap();
