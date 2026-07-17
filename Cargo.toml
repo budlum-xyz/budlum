@@ -56,7 +56,7 @@ ml-dsa = { version = "0.1.1", optional = true, features = ["getrandom"] }
 bitvec = "1.0.1"
 group = "0.14"
 
-jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 prometheus = "0.14"
 toml = "0.8"
