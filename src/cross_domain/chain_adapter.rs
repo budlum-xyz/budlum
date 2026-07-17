@@ -182,10 +182,7 @@ pub mod test_adapter {
             &self,
             tx_hash: &str,
         ) -> Result<(MerkleProof, Hash32, String), AdapterError> {
-            let leaf = hash_fields_bytes(&[
-                b"BDLM_STUB_RECEIPT_V1",
-                tx_hash.as_bytes(),
-            ]);
+            let leaf = hash_fields_bytes(&[b"BDLM_STUB_RECEIPT_V1", tx_hash.as_bytes()]);
             let proof = MerkleProof {
                 leaf,
                 index: 0,
@@ -237,10 +234,7 @@ pub mod test_adapter {
         let adapter = StubAdapter::new(ExternalChain::Ethereum);
         assert_eq!(adapter.chain_type(), ExternalChain::Ethereum);
 
-        let (proof, root, hash) = adapter
-            .generate_receipt_proof("0xabc123")
-            .await
-            .unwrap();
+        let (proof, root, hash) = adapter.generate_receipt_proof("0xabc123").await.unwrap();
         assert!(adapter.verify_receipt_proof(&proof, &root, &hash).is_ok());
 
         let result = adapter.wait_for_confirmation("0xabc123", 1).await.unwrap();

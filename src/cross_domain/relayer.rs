@@ -31,7 +31,11 @@ pub enum RelayerError {
     /// The proof failed verification.
     InvalidProof(String),
     /// The relay exceeded the transfer's expiry window.
-    Expired { message_id: MessageId, expiry: u64, current_height: u64 },
+    Expired {
+        message_id: MessageId,
+        expiry: u64,
+        current_height: u64,
+    },
     /// The bridge transfer is in an unexpected state for this relay operation.
     InvalidTransferState(MessageId),
     /// The source domain does not match the transfer's source.
@@ -52,15 +56,21 @@ impl std::fmt::Display for RelayerError {
             RelayerError::InvalidProof(reason) => {
                 write!(f, "invalid relay proof: {}", reason)
             }
-            RelayerError::Expired { message_id, expiry, current_height } => {
+            RelayerError::Expired {
+                message_id,
+                expiry,
+                current_height,
+            } => {
                 write!(
                     f,
                     "relay expired: message {}, expiry={}, current={}",
-                    hex::encode(message_id), expiry, current_height
+                    hex::encode(message_id),
+                    expiry,
+                    current_height
                 )
             }
             RelayerError::InvalidTransferState(id) => {
-                write!(f, "transfer {} in invalid state for relay", hex::encode(id))
+                write!(f, "transfer {} in invalid state for relay", hex::encode(id),)
             }
             RelayerError::SourceDomainMismatch { expected, got } => {
                 write!(f, "source domain mismatch: expected {}, got {}", expected, got)
