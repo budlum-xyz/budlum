@@ -382,6 +382,12 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub hub: Option<crate::hub::HubRegistry>,
     #[serde(default)]
+    pub storage_registry: Option<crate::domain::storage_deal::StorageRegistry>,
+    #[serde(default)]
+    pub bridge_state: Option<crate::cross_domain::BridgeState>,
+    #[serde(default)]
+    pub message_registry: Option<crate::cross_domain::message_registry::CrossDomainMessageRegistry>,
+    #[serde(default)]
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
 
@@ -456,6 +462,9 @@ impl StateSnapshotV2 {
             nft_registry: Some(account_state.nft_registry.clone()),
             marketplace: Some(account_state.marketplace.clone()),
             hub: Some(account_state.hub.clone()),
+            storage_registry: Some(account_state.storage_registry.clone()),
+            bridge_state: Some(account_state.bridge_state.clone()),
+            message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
             // Phase 0.02: `registry`, `liveness`, and `invalid_votes` are no longer
             // fields on `AccountState` (ghost-hunted). The struct fields were
@@ -531,6 +540,11 @@ impl StateSnapshotV2 {
         hasher.update(self.message_root);
         hasher.update(self.settlement_root);
         hasher.update(self.global_header_summary);
+
+        if let Some(ref r) = self.storage_registry { hasher.update(r.root()); }
+        if let Some(ref r) = self.bridge_state { hasher.update(r.root()); }
+        if let Some(ref r) = self.bns_registry { hasher.update(r.root()); }
+        if let Some(ref r) = self.nft_registry { hasher.update(r.root()); }
 
         hex::encode(hasher.finalize())
     }

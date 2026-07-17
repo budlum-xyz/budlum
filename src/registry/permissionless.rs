@@ -803,3 +803,17 @@ mod tests {
         assert!(matches!(relayer.status, MemberStatus::Slashed));
     }
 }
+
+impl PermissionlessRegistry {
+    pub fn root(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_PERMISSIONLESS_REGISTRY_V1");
+        for (addr, reg) in &self.registrations {
+            hasher.update(addr.0);
+            hasher.update(reg.stake.to_le_bytes());
+            hasher.update(reg.role.id().to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
+}

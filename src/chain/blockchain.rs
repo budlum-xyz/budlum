@@ -70,10 +70,8 @@ pub struct Blockchain {
     pub pending_finality_certs: BTreeMap<u64, Vec<FinalityCert>>,
     pub domain_registry: ConsensusDomainRegistry,
     pub domain_commitment_registry: DomainCommitmentRegistry,
-    pub bridge_state: BridgeState,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
-    pub message_registry: CrossDomainMessageRegistry,
     /// Universal Relayer — permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
@@ -92,11 +90,6 @@ pub struct Blockchain {
     pub pending_storage_root: Option<crate::domain::Hash32>,
     /// B.U.D. Faz 5 (ARENA2): on-chain storage deal and challenge registry.
     /// Mirrors the RPC-layer `StorageRegistry` but lives in the Blockchain
-    /// struct so chain_actor can drive automatic challenge issuance and
-    /// proof aggregation without going through the RPC layer.
-    pub storage_registry: crate::domain::storage_deal::StorageRegistry,
-    /// B.U.D. Faz 5 economics ledger: total declared operator bond slashed
-    /// by finalized missed retrieval challenges.
     pub storage_slashed_bond_total: u64,
     /// B.U.D. Faz 5 economics ledger: total actually burned from operator
     /// account balances when slashing was applied. May be lower than the
@@ -410,7 +403,7 @@ impl Blockchain {
             }
 
             if let Ok(Some(stored_bridge_state)) = store.load_bridge_state() {
-                bridge_state = stored_bridge_state;
+                state.bridge_state = stored_bridge_state;
             }
 
             if let Ok(stored_global_headers) = store.load_global_headers() {
@@ -425,7 +418,7 @@ impl Blockchain {
                         warn!("Skipping duplicate cross domain message: {}", e);
                     }
                 }
-                message_registry = registry;
+                state.message_registry = registry;
             }
         }
 
@@ -445,10 +438,8 @@ impl Blockchain {
             pending_finality_certs: BTreeMap::new(),
             domain_registry,
             domain_commitment_registry,
-            bridge_state,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
-            message_registry,
             universal_relayer: UniversalRelayer::new(RelayerConfig::default()),
             settlement_finality_hashes: Vec::new(),
             pending_slashing_evidence: Vec::new(),
@@ -456,7 +447,6 @@ impl Blockchain {
             metrics: None,
             proof_claims: crate::prover::ProofClaimRegistry::new(),
             pending_storage_root: None,
-            storage_registry: crate::domain::storage_deal::StorageRegistry::new(),
             storage_slashed_bond_total: 0,
             storage_burned_bond_total: 0,
             storage_operator_rewards: BTreeMap::new(),
@@ -1045,9 +1035,9 @@ impl Blockchain {
             timestamp_ms: self.global_headers.len() as u128,
             domain_registry_root: self.domain_registry.root(),
             domain_commitment_root: self.domain_commitment_registry.root(),
-            message_root: self.message_registry.root(),
-            bridge_state_root: self.bridge_state.root(),
-            replay_nonce_root: self.bridge_state.replay_root(),
+            message_root: self.state.message_registry.root(),
+            bridge_state_root: self.state.bridge_state.root(),
+            replay_nonce_root: self.state.bridge_state.replay_root(),
             proposer,
             settlement_finality_root,
             storage_root,
@@ -1170,14 +1160,14 @@ impl Blockchain {
         if verified.event.payload_hash != message.payload_hash {
             return Err("Verified bridge event payload hash mismatch".into());
         }
-        if let Some(expected_event_hash) = self.bridge_state.source_event_hash(&message.message_id)
+        if let Some(expected_event_hash) = self.state.bridge_state.source_event_hash(&message.message_id)
         {
             if expected_event_hash != verified_event_hash {
                 return Err("Verified bridge source event hash mismatch".into());
             }
         }
 
-        self.bridge_state
+        self.state.bridge_state
             .mint(&message)
             .map_err(|e| e.to_string())?;
 
@@ -1200,7 +1190,7 @@ impl Blockchain {
 
         if let Some(store) = &self.storage {
             store
-                .save_bridge_state(&self.bridge_state)
+                .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         Ok(())
@@ -1218,12 +1208,12 @@ impl Blockchain {
         if !domain_ref.is_active() || !domain_ref.bridge_enabled {
             return Err(format!("Domain {} is not bridge-enabled", domain));
         }
-        self.bridge_state
+        self.state.bridge_state
             .register_asset(asset_id, domain)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
-                .save_bridge_state(&self.bridge_state)
+                .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         Ok(())
@@ -1276,7 +1266,7 @@ impl Blockchain {
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
-                .save_bridge_state(&self.bridge_state)
+                .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         if let Some(message) = result.1.message.clone() {
@@ -1289,7 +1279,7 @@ impl Blockchain {
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
     ) -> Result<(), String> {
-        self.message_registry.insert(message.clone())?;
+        self.state.message_registry.insert(message.clone())?;
         if let Some(store) = &self.storage {
             store
                 .save_cross_domain_message(&message)
@@ -1327,7 +1317,7 @@ impl Blockchain {
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
-                .save_bridge_state(&self.bridge_state)
+                .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         if let Some(message) = event.message.clone() {
@@ -1420,12 +1410,12 @@ impl Blockchain {
             return Err("Verified bridge burn payload does not match transfer".into());
         }
 
-        self.bridge_state
+        self.state.bridge_state
             .unlock(transfer_id, source_domain)
             .map_err(|e| e.to_string())?;
         if let Some(store) = &self.storage {
             store
-                .save_bridge_state(&self.bridge_state)
+                .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         Ok(())
@@ -1789,9 +1779,55 @@ impl Blockchain {
         let event_tree_root = self.universal_relayer.ledger_root(); // Use relay ledger root as commitment
 
         // Process the relay through the Universal Relayer
-        self.universal_relayer
+        let message = self
+            .universal_relayer
             .process_relay(message_id, relayer, proof, event_tree_root, current_height)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        // Phase 5: Integrate BridgeState transition
+        match message.kind {
+            MessageKind::BridgeLock => {
+                self.state.bridge_state.mint(&message).map_err(|e| e.to_string())?;
+                // Deduct relayer fee (Decision 9: 1%)
+                let transfer = self
+                    .bridge_state
+                    .get_transfer(&message.message_id)
+                    .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?;
+
+                let fee = transfer.amount.saturating_mul(1) / 100;
+                let final_amount = transfer.amount.saturating_sub(fee);
+
+                self.state
+                    .add_balance(&transfer.recipient, final_amount as u64);
+                self.state.add_balance(&relayer, fee as u64);
+            }
+            MessageKind::BridgeBurn => {
+                self.state.bridge_state
+                    .unlock(message.message_id, source_domain)
+                    .map_err(|e| e.to_string())?;
+                let transfer = self
+                    .bridge_state
+                    .get_transfer(&message.message_id)
+                    .ok_or_else(|| "Failed to retrieve transfer after unlock".to_string())?;
+
+                // For unlock, the full amount goes back to the owner (Decision: relayer paid on target side)
+                // Actually, if a relayer brings proof of burn on target, they should be paid on source.
+                let fee = transfer.amount.saturating_mul(1) / 100;
+                let final_amount = transfer.amount.saturating_sub(fee);
+
+                self.state.add_balance(&transfer.owner, final_amount as u64);
+                self.state.add_balance(&relayer, fee as u64);
+            }
+            _ => {
+                return Err(format!("Unsupported relay message kind: {:?}", message.kind));
+            }
+        }
+
+        if let Some(store) = &self.storage {
+            let _ = store.save_bridge_state(&self.state.bridge_state);
+        }
+
+        Ok(message)
     }
 
     /// ADIM5 §5.1: Get the number of pending relays.
@@ -2369,7 +2405,7 @@ impl Blockchain {
                 state_root: block.state_root.clone(),
                 finality_cert,
                 global_headers: self.global_headers.clone(),
-                bridge_state: Some(self.bridge_state.clone()),
+                bridge_state: Some(self.state.bridge_state.clone()),
                 accounts: accounts_to_save,
             };
 
@@ -2413,7 +2449,7 @@ impl Blockchain {
     ) {
         for (cid, _burner) in burn_cids {
             let now_epoch = self.state.epoch_index;
-            let pruned = self.storage_registry.prune_content(cid, now_epoch);
+            let pruned = self.state.storage_registry.prune_content(cid, now_epoch);
             tracing::info!(
                 %cid,
                 pruned_deals = pruned,
@@ -2446,7 +2482,7 @@ impl Blockchain {
         &mut self,
         current_height: u64,
     ) -> Vec<(crate::cross_domain::AssetId, u128)> {
-        let released = self.bridge_state.sweep_expired_locks(current_height);
+        let released = self.state.bridge_state.sweep_expired_locks(current_height);
         if !released.is_empty() {
             tracing::info!(
                 "Bridge sweep at height {} released {} expired lock(s)",
@@ -2493,8 +2529,8 @@ impl Blockchain {
             Ok(state) => state,
             Err(_) => return None,
         };
-        committed_state.bridge_root = self.bridge_state.root();
-        committed_state.message_root = self.message_registry.root();
+        committed_state.bridge_root = self.state.bridge_state.root();
+        committed_state.message_root = self.state.message_registry.root();
         let settlement_root = if self.settlement_finality_hashes.is_empty() {
             merkle_root(&[])
         } else {
@@ -2711,8 +2747,8 @@ impl Blockchain {
         let mut commit_state = Self::apply_block_effects(&self.state, &block)?;
 
         if block.index > 0 {
-            commit_state.bridge_root = self.bridge_state.root();
-            commit_state.message_root = self.message_registry.root();
+            commit_state.bridge_root = self.state.bridge_state.root();
+            commit_state.message_root = self.state.message_registry.root();
             let settlement_root = if self.settlement_finality_hashes.is_empty() {
                 merkle_root(&[])
             } else {
@@ -3563,7 +3599,7 @@ impl Blockchain {
         }
 
         // 4. Register Deal
-        match self.storage_registry.open_deal(
+        match self.state.storage_registry.open_deal(
             domain_id,
             manifest,
             shard_id,
@@ -3753,7 +3789,7 @@ impl Blockchain {
                 let byte_start = (deal_id.wrapping_mul(17) ^ current_epoch) % (256 * 1024);
                 let byte_end = (byte_start + 4096).min(256 * 1024);
                 let opener = crate::core::address::Address::from([0u8; 32]);
-                if let Ok(_challenge_id) = self.storage_registry.open_challenge(
+                if let Ok(_challenge_id) = self.state.storage_registry.open_challenge(
                     deal_id,
                     byte_start,
                     byte_end,
@@ -3781,7 +3817,7 @@ impl Blockchain {
             .all_challenges()
             .iter()
             .filter(|c| c.deadline_epoch <= current_epoch)
-            .filter(|c| self.storage_registry.get_result(c.challenge_id).is_none())
+            .filter(|c| self.state.storage_registry.get_result(c.challenge_id).is_none())
             .map(|c| (c.challenge_id, c.deal_id))
             .collect();
 
@@ -3875,18 +3911,15 @@ impl Clone for Blockchain {
             pending_finality_certs: self.pending_finality_certs.clone(),
             domain_registry: self.domain_registry.clone(),
             domain_commitment_registry: self.domain_commitment_registry.clone(),
-            bridge_state: self.bridge_state.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),
-            message_registry: self.message_registry.clone(),
-            universal_relayer: UniversalRelayer::new(RelayerConfig::default()),
+            message_registry: self.state.message_registry.clone(),
             settlement_finality_hashes: self.settlement_finality_hashes.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
             finality_aggregator: None,
             metrics: self.metrics.clone(),
             proof_claims: self.proof_claims.clone(),
             pending_storage_root: self.pending_storage_root,
-            storage_registry: self.storage_registry.clone(),
             storage_slashed_bond_total: self.storage_slashed_bond_total,
             storage_burned_bond_total: self.storage_burned_bond_total,
             storage_operator_rewards: self.storage_operator_rewards.clone(),

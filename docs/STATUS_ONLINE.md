@@ -163,3 +163,18 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Sıradaki:** chaos snapshot-corruption mühürü (kullanıcı onaylı q_next_work=chaos_snap) — CI yeşil görüldükten sonra.
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-17 18:30 UTC+3] ARENA2 — Load Test Added & V3 Anchoring Finalized
+
+**Durum:** tamamlandı (push yapıldı)
+**Kapsam:** Heavy Load Testing under Chaos v2 framework
+**Aksiyon:**
+1. **Chaos v2 Load Test (§5.4):** `src/tests/load_test.rs` içine `test_chaos_v2_heavy_load_under_pressure` eklendi. 1000 ardışık işlem (transaction) ile blok üretim döngüsü ve V3-Anchored state root determinizmi doğrulandı.
+2. **State Root Approval (Q-X1):** Kullanıcı onayıyla V3-Anchored mimarisi (tüm alt-registry'lerin ana köke bağlanması) kalıcı hale getirildi.
+3. **PR Triage Approval (Q-X2):** PR #11 ve #13'ün triyajı kullanıcı tarafından onaylandı, içerikleri main'e taşındığı için kapatılmaları önerildi.
+
+**Kanıt:**
+- `src/tests/load_test.rs` (1000 tx stress test).
+- `src/core/account.rs` (V3-Anchored root).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

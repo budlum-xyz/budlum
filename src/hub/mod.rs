@@ -85,3 +85,18 @@ impl HubRegistry {
         self.apps.values().cloned().collect()
     }
 }
+
+impl HubRegistry {
+    pub fn root(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_HUB_REGISTRY_V1");
+        hasher.update(self.next_app_id.to_le_bytes());
+        for (id, app) in &self.apps {
+            hasher.update(id.to_le_bytes());
+            hasher.update(app.developer.0);
+            hasher.update(app.name.as_bytes());
+        }
+        hasher.finalize().into()
+    }
+}

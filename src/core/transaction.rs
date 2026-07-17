@@ -76,6 +76,8 @@ pub struct RelayerExternalResult {
     pub chain: ExternalChain,
     pub tx_hash: String,
     pub success: bool,
+    /// Optional cross-domain message associated with this result (e.g. for inbound bridge)
+    pub message: Option<crate::cross_domain::message::CrossDomainMessage>,
     /// Merkle proof of the transaction receipt on the external chain.
     pub receipt_proof: Vec<u8>,
     /// The state root of the external chain that anchors this proof.
@@ -83,18 +85,18 @@ pub struct RelayerExternalResult {
 }
 
 impl RelayerExternalResult {
-    /// Phase 8.9 / L1: result-fact leaf'i. `receipt_proof`, bu leaf'in
-    /// `external_state_root`'a bağlandığını kanıtlar — leaf'e proof ve root
-    /// DAHİL DEĞİLDİR (döngüsel bağımlılık olmaz). Executor kapısı ve
-    /// relayer worker aynı şemayı kullanır. Domain: `BDLM_RELAYER_RESULT_V1`.
+    /// Phase 8.9 / L1: result-fact leaf'i.
     pub fn result_leaf(&self) -> [u8; 32] {
         let chain_bytes = bincode::serialize(&self.chain).unwrap_or_default();
-        crate::core::hash::hash_fields_bytes(&[
-            b"BDLM_RELAYER_RESULT_V1",
-            &chain_bytes,
-            self.tx_hash.as_bytes(),
-            &[u8::from(self.success)],
-        ])
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"BDLM_RELAYER_RESULT_V2");
+        hasher.update(&chain_bytes);
+        hasher.update(self.tx_hash.as_bytes());
+        hasher.update([u8::from(self.success)]);
+        if let Some(ref msg) = self.message {
+            hasher.update(msg.message_id);
+        }
+        hasher.finalize().into()
     }
 }
 

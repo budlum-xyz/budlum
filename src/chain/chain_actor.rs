@@ -119,6 +119,13 @@ pub enum ChainCommand {
         crate::prover::ZkProofSubmission,
         oneshot::Sender<Result<crate::prover::ProofAcceptance, String>>,
     ),
+    SubmitRelayProof {
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: crate::core::address::Address,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+        response: oneshot::Sender<Result<crate::cross_domain::message::CrossDomainMessage, String>>,
+    },
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -911,6 +918,31 @@ impl ChainHandle {
             .tx
             .send(ChainCommand::SubmitZkProof(submission, tx))
             .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn submit_relay_proof(
+        &self,
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: crate::core::address::Address,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+    ) -> Result<crate::cross_domain::message::CrossDomainMessage, String> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::SubmitRelayProof {
+                message_id,
+                relayer,
+                proof,
+                source_domain,
+                response: tx,
+            })
+            .await
+        {
+            return Err(format!("Actor dropped: {}", e));
+        }
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
@@ -1726,6 +1758,20 @@ impl ChainActor {
                             .submit_zk_proof(submission)
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::SubmitRelayProof {
+                    message_id,
+                    relayer,
+                    proof,
+                    source_domain,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.submit_relay_proof(
+                        message_id,
+                        relayer,
+                        &proof,
+                        source_domain,
+                    ));
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
                     let height = self.blockchain.chain.len() as u64;

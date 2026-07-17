@@ -434,3 +434,23 @@ mod tests {
         bridge.unlock(transfer.message_id, 1).unwrap();
     }
 }
+
+impl BridgeState {
+    pub fn root(&self) -> Hash32 {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BRIDGE_STATE_V1");
+        for (aid, status) in &self.asset_locations {
+            hasher.update(aid);
+            let s_byte: u8 = match status {
+                BridgeStatus::Active { .. } => 0,
+                BridgeStatus::Locked { .. } => 1,
+                BridgeStatus::Minted { .. } => 2,
+                BridgeStatus::Burned { .. } => 3,
+                BridgeStatus::Unlocked { .. } => 4,
+            };
+            hasher.update([s_byte]);
+        }
+        hasher.finalize().into()
+    }
+}

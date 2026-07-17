@@ -191,3 +191,16 @@ mod tests {
         }
     }
 }
+
+impl LivenessTracker {
+    pub fn root(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_LIVENESS_TRACKER_V1");
+        for (addr, count) in &self.missed {
+            hasher.update(addr.0);
+            hasher.update(count.to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
+}

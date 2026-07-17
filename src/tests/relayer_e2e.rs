@@ -166,3 +166,113 @@ fn expired_relays_detects_past_expiry() {
     bc.enqueue_bridge_relay(event, &message);
     assert_eq!(bc.expired_relays().len(), 0); // not expired yet (chain len < 200)
 }
+
+#[test]
+fn full_internal_relay_cycle_lock_mint() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("full_cycle.db");
+    let storage = Storage::new(db.to_str().unwrap()).unwrap();
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+
+    // 1. Register domains
+    for id in [1u32, 2u32] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-confirmation-depth", 0);
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).unwrap();
+    }
+
+    // 2. Register asset
+    let a = asset(1);
+    bc.register_bridge_asset(a, 1).unwrap();
+
+    // 3. Register relayer
+    let relayer = relayer_addr();
+    bc.state.add_balance(&relayer, 100_000_000);
+    bc.state.registry.bond_relayer(&relayer, 50_000_000).unwrap();
+
+    // 4. Lock on Domain 1
+    bc.state.add_balance(&owner(), 1000);
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 10, 0, a, owner(), recipient(), 100, 1000)
+        .unwrap();
+    let message = lock_event.message.clone().unwrap();
+    let message_id = message.message_id;
+
+    // Relayer enqueued it
+    assert_eq!(bc.pending_relay_count(), 1);
+
+    // 5. Generate proof (as a relayer would)
+    let mut tree = DomainEventTree::new();
+    tree.push(lock_event.clone());
+    let proof = tree.proof(0).unwrap();
+
+    // 6. Submit relay proof on Budlum
+    let relayed_msg = bc.submit_relay_proof(message_id, relayer, &proof, 1).unwrap();
+    assert_eq!(relayed_msg.message_id, message_id);
+
+    // 7. Verify effects:
+    // - Pending count decreased
+    assert_eq!(bc.pending_relay_count(), 0);
+    // - Bridge state: Minted
+    let t = bc.bridge_state.get_transfer(&message_id).unwrap();
+    assert!(matches!(t.status, crate::cross_domain::bridge::BridgeStatus::Minted { domain: 2 }));
+    // - Balances: recipient received 99 (100 - 1% fee), relayer received 1
+    assert_eq!(bc.state.get_balance(&recipient()), 99);
+    assert_eq!(bc.state.get_balance(&relayer()), 50_000_001); // 50M (bond) + 1 (fee)
+}
+
+use crate::domain::plugin::default_domain;
+use crate::domain::ConsensusKind;
+
+#[test]
+fn full_internal_relay_cycle_burn_unlock() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("full_cycle_burn.db");
+    let storage = Storage::new(db.to_str().unwrap()).unwrap();
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+
+    // 1. Setup domains and relayer
+    for id in [1u32, 2u32] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-confirmation-depth", 0);
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).unwrap();
+    }
+    let relayer = relayer_addr();
+    bc.state.add_balance(&relayer, 100_000_000);
+    bc.state.registry.bond_relayer(&relayer, 50_000_000).unwrap();
+
+    // 2. Setup asset and Minted state
+    let a = asset(1);
+    bc.register_bridge_asset(a, 1).unwrap();
+    bc.state.add_balance(&owner(), 1000);
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 10, 0, a, owner(), recipient(), 100, 1000)
+        .unwrap();
+    let lock_msg = lock_event.message.unwrap();
+    bc.bridge_state.mint(&lock_msg).unwrap();
+    
+    // 3. Burn on Domain 2
+    let burn_event = bc.bridge_state.burn_with_event(lock_msg.message_id, 2, 20, 0, 1000).unwrap();
+    let burn_msg = burn_event.message.clone().unwrap();
+    let burn_msg_id = burn_msg.message_id;
+    
+    // Relayer enqueued it
+    bc.enqueue_bridge_relay(burn_event.clone(), &burn_msg);
+    assert_eq!(bc.pending_relay_count(), 1);
+
+    // 4. Generate proof
+    let mut tree = DomainEventTree::new();
+    tree.push(burn_event.clone());
+    let proof = tree.proof(0).unwrap();
+
+    // 5. Submit relay proof
+    let relayed_msg = bc.submit_relay_proof(burn_msg_id, relayer, &proof, 2).unwrap();
+    assert_eq!(relayed_msg.message_id, burn_msg_id);
+
+    // 6. Verify effects:
+    // - Bridge state: Unlocked
+    let t = bc.bridge_state.get_transfer(&lock_msg.message_id).unwrap();
+    assert!(matches!(t.status, crate::cross_domain::bridge::BridgeStatus::Unlocked { domain: 1 }));
+    // - Owner received funds (100 - 1% relayer fee)
+    assert_eq!(bc.state.get_balance(&owner()), 99);
+}

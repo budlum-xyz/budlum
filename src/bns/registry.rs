@@ -162,3 +162,21 @@ impl BnsRegistry {
         Ok(())
     }
 }
+
+impl BnsRegistry {
+    pub fn root(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_BNS_REGISTRY_V1");
+        hasher.update(self.base_cost.to_le_bytes());
+        for (name, entry) in &self.names {
+            hasher.update(name.as_bytes());
+            hasher.update(entry.owner.0);
+            hasher.update(entry.expiry.to_le_bytes());
+            if let Some(ref c) = entry.content {
+                hasher.update(c.as_bytes());
+            }
+        }
+        hasher.finalize().into()
+    }
+}

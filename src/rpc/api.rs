@@ -163,6 +163,16 @@ pub trait BudlumApi {
         proof: crate::cross_domain::MerkleProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// ADIM5 §5.1: Submit a relay proof from a relayer.
+    #[method(name = "bud_submitRelayProof")]
+    async fn submit_relay_proof(
+        &self,
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: String,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_sealGlobalHeader")]
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 

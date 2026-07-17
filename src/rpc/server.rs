@@ -1103,6 +1103,37 @@ impl BudlumApiServer for RpcServer {
         Ok(self.bridge_roots_json("unlocked").await)
     }
 
+    async fn submit_relay_proof(
+        &self,
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: String,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = relayer.strip_prefix("0x").unwrap_or(&relayer);
+        let relayer_addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid relayer address: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let message = self
+            .chain
+            .submit_relay_proof(message_id, relayer_addr, proof, source_domain)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Relay proof submission failed: {e}"), None::<()>)
+            })?;
+
+        Ok(serde_json::json!({
+            "status": "success",
+            "message_id": hex::encode(message.message_id),
+            "kind": format!("{:?}", message.kind),
+        }))
+    }
+
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_sealGlobalHeader")?;
         let header = self.chain.seal_global_header().await.map_err(|e| {

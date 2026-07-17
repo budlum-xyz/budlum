@@ -78,3 +78,5 @@ pub mod hard_prune;
 // ADIM5 §5.1: Universal Relayer E2E integration tests (ARENA1).
 #[cfg(test)]
 pub mod relayer_e2e;
+#[cfg(test)]
+pub mod load_test;

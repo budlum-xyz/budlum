@@ -1,6 +1,9 @@
 use crate::consensus::pos::SlashingEvidence;
 use crate::core::address::Address;
 use crate::core::governance::GovernanceState;
+use crate::cross_domain::BridgeState;
+use crate::cross_domain::message_registry::CrossDomainMessageRegistry;
+use crate::domain::storage_deal::StorageRegistry;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::storage::db::Storage;
 use rayon::prelude::*;
@@ -105,6 +108,9 @@ pub struct AccountState {
     pub nft_registry: crate::nft::NftRegistry,
     pub marketplace: crate::marketplace::MarketplaceRegistry,
     pub hub: crate::hub::HubRegistry,
+    pub storage_registry: StorageRegistry,
+    pub bridge_state: BridgeState,
+    pub message_registry: CrossDomainMessageRegistry,
     pub external_roots: BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
     /// On-chain burn-reserve account the timed burn consumes. `None` when $BUD
     /// tokenomics is not enabled for this chain (e.g. plain devnet genesis).
@@ -159,6 +165,9 @@ impl AccountState {
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::nft::NftRegistry::new(),
             marketplace: crate::marketplace::MarketplaceRegistry::new(),
+            storage_registry: StorageRegistry::new(),
+            bridge_state: BridgeState::new(),
+            message_registry: CrossDomainMessageRegistry::new(),
             hub: crate::hub::HubRegistry::new(),
             external_roots: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
@@ -190,6 +199,9 @@ impl AccountState {
             epoch_index: 0,
             last_epoch_time: 0,
             governance: GovernanceState::default(),
+            storage_registry: StorageRegistry::new(),
+            bridge_state: BridgeState::new(),
+            message_registry: CrossDomainMessageRegistry::new(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::nft::NftRegistry::new(),
             marketplace: crate::marketplace::MarketplaceRegistry::new(),
@@ -236,6 +248,9 @@ impl AccountState {
             team_vesting: None,
             unbonding_queue: Vec::new(),
             storage: None,
+            storage_registry: StorageRegistry::new(),
+            bridge_state: BridgeState::new(),
+            message_registry: CrossDomainMessageRegistry::new(),
             epoch_index: snapshot.height / 100,
             last_epoch_time: 0,
             governance: GovernanceState::default(),
@@ -300,6 +315,9 @@ impl AccountState {
             tokenomics,
             timed_burn,
             burn_reserve_address,
+            storage_registry: snapshot.storage_registry.clone().unwrap_or_default(),
+            bridge_state: snapshot.bridge_state.clone().unwrap_or_default(),
+            message_registry: snapshot.message_registry.clone().unwrap_or_default(),
             team_vesting,
             unbonding_queue: snapshot.unbonding_queue.clone(),
             storage: None,
@@ -1164,6 +1182,14 @@ impl AccountState {
         final_hasher.update(self.message_root);
         final_hasher.update(self.settlement_root);
         final_hasher.update(self.global_header_summary);
+        final_hasher.update(self.bns_registry.root());
+        final_hasher.update(self.nft_registry.root());
+        final_hasher.update(self.marketplace.root());
+        final_hasher.update(self.hub.root());
+        final_hasher.update(self.storage_registry.root());
+        final_hasher.update(self.bridge_state.root());
+        final_hasher.update(self.registry.root());
+        final_hasher.update(self.liveness.root());
         final_hasher.update(b"gov_disabled"); // governance version/enabled flags
 
         let final_root = final_hasher.finalize();

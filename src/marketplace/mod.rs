@@ -60,3 +60,20 @@ impl MarketplaceRegistry {
         self.offers.get(&id)
     }
 }
+
+impl MarketplaceRegistry {
+    pub fn root(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_MARKETPLACE_REGISTRY_V1");
+        hasher.update(self.next_offer_id.to_le_bytes());
+        for (id, offer) in &self.offers {
+            hasher.update(id.to_le_bytes());
+            hasher.update(offer.seller.0);
+            hasher.update(offer.cid.0);
+            hasher.update(offer.price.to_le_bytes());
+            hasher.update([offer.active as u8]);
+        }
+        hasher.finalize().into()
+    }
+}
