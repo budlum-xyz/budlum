@@ -494,3 +494,9 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kanıt:** yaklaşan CI. Mantık simülasyonu: v1&v2 her kapanışta lookback'te → participated, aktif kalır; absentee her kapanışta absent → streak≥1 → tek slash + jail (<20_000 zaten CI'da gözlenen davranış).
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 08:20 UTC+3] ARENA2 — BudZero clippy tamamlama (S2 artığı)
+
+6953bb9 BudZero failure'ının kökü fmt değil clippy'ymiş: bud-isa `derivable_impls` (MainnetActivation manuel Default → derive, semantik birebir) + `collapsible_if` (decode_for_profile). İkisi de davranış-değiştirmeyen minimal fix — FMT TEMİZ ✓. Derleme/lint kanıtı bu push'un CI'ında.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

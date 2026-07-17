@@ -56,17 +56,11 @@ pub enum IsaProfile {
 /// S2 (Paket B, 2026-07-17): Controls which opcodes are active on mainnet.
 /// Default: VerifyMerkle NOT active on mainnet (staged rollout).
 /// After ceremony completion, flip `verify_merkle_enabled = true`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MainnetActivation {
+    /// false = mainnet'te KAPALI (staged rollout) — bool::default() ile aynı,
+    /// clippy::derivable_impls nedeniyle derive'a indirildi (ARENA2 2026-07-17).
     pub verify_merkle_enabled: bool,
-}
-
-impl Default for MainnetActivation {
-    fn default() -> Self {
-        Self {
-            verify_merkle_enabled: false,
-        }
-    }
 }
 
 impl MainnetActivation {
@@ -176,13 +170,11 @@ impl Instruction {
 
     pub fn decode_for_profile(val: u64, profile: IsaProfile) -> Result<Self, DecodeError> {
         let inst = Self::decode_any(val)?;
-        if inst.opcode.is_experimental() {
-            if profile == IsaProfile::Production {
-                return Err(DecodeError::ExperimentalOpcodeDisabled(
-                    inst.opcode,
-                    profile,
-                ));
-            }
+        if inst.opcode.is_experimental() && profile == IsaProfile::Production {
+            return Err(DecodeError::ExperimentalOpcodeDisabled(
+                inst.opcode,
+                profile,
+            ));
         }
         Ok(inst)
     }
