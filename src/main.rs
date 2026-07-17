@@ -1051,9 +1051,8 @@ async fn main() {
                             let producer = cli_producer_address.unwrap_or(Address::zero());
                             if let Some((block, pruned_cids)) = chain.produce_block(producer).await {
                                 println!("Produced block #{} with {} txs", block.index, block.transactions.len());
-                                let node_client = node.get_client();
                                 for cid in pruned_cids {
-                                    node_client.storage_prune_sync(cid);
+                                    client.storage_prune_sync(cid);
                                 }
                             }
                         }
