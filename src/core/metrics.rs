@@ -285,3 +285,21 @@ impl Default for Metrics {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_initialization_and_encoding() {
+        let metrics = Metrics::new();
+        metrics.chain_height.set(42);
+        metrics.blocks_produced.inc();
+        metrics.rpc_request_duration_seconds.observe(0.125);
+
+        let encoded = metrics.encode();
+        assert!(encoded.contains("budlum_chain_height 42"));
+        assert!(encoded.contains("budlum_blocks_produced 1"));
+        assert!(encoded.contains("budlum_rpc_request_duration_seconds"));
+    }
+}
