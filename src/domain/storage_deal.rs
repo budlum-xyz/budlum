@@ -707,30 +707,34 @@ impl StorageRegistry {
         self.results.values().collect()
     }
 
-    /// F1 fix (ARENAX): Hard Pruning — remove a manifest and all its deals.
-    /// Called when an NFT whose content_id equals a manifest_id is burned.
-    /// This is the consensus-level part of hard pruning (manifest + deals).
-    /// The physical B.U.D. chunk deletion (off-chain store) happens via
-    /// NodeCommand::StoragePrune worker (src/network/node.rs).
-    /// Returns true if a manifest was present and removed.
-    pub fn prune_manifest(&mut self, manifest_id: &ContentId) -> bool {
-        let existed = self.manifests.remove(manifest_id).is_some();
-        if existed {
-            // Remove all deals whose manifest_id matches, and clean the index
-            let deal_ids_to_remove: Vec<u64> = self
-                .deals
-                .iter()
-                .filter(|(_, d)| &d.manifest_id == manifest_id)
-                .map(|(id, _)| *id)
-                .collect();
-            for deal_id in deal_ids_to_remove {
-                self.deals.remove(&deal_id);
+    /// Force-prune all storage content associated with a manifest CID.
+    /// Called when an NFT is burned (Constitution §1: "NFT yakılırsa veri
+    /// B.U.D. storage'dan fiziksel silinir").
+    ///
+    /// Expires all active deals for this manifest and removes the manifest
+    /// from the registry. Deals that are already Slashed or Expired are
+    /// left as-is (audit trail).
+    ///
+    /// Returns the number of active deals that were expired by this prune.
+    pub fn prune_content(&mut self, manifest_id: &ContentId, now_epoch: u64) -> u64 {
+        let deal_ids: Vec<u64> = self
+            .deals_for_manifest(manifest_id)
+            .iter()
+            .filter(|d| d.is_active())
+            .map(|d| d.deal_id)
+            .collect();
+
+        let pruned = deal_ids.len() as u64;
+        for deal_id in deal_ids {
+            if let Some(deal) = self.deals.get_mut(&deal_id) {
+                deal.status = DealStatus::Expired;
             }
-            // Clean deals_by_shard index entries for this manifest
-            self.deals_by_shard.retain(|(mid, _), _| mid != manifest_id);
-            tracing::info!(%manifest_id, "StorageRegistry: hard pruned manifest and its deals (NftBurn)");
         }
-        existed
+
+        // Remove the manifest entry so it can no longer be referenced.
+        self.manifests.remove(manifest_id);
+
+        pruned
     }
 }
 
@@ -1174,5 +1178,55 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
+    }
+
+    #[test]
+    fn prune_content_expires_active_deals_and_removes_manifest() {
+        // F1 (Constitution §1): NFT yakılırsa veri B.U.D. storage'dan fiziksel silinir.
+        // REGRESYON KILIDI — prune_content aktif deal'leri expire etmeli
+        // ve manifest'i registry'den kaldırmalı.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let manifest_id = m.manifest_id;
+
+        // Open 2 deals for the same manifest.
+        let shard_id = m.shards[0].shard_id;
+        let _id1 = reg
+            .open_deal(
+                42, &m, shard_id, operator(), 0, 100, 200,
+                good_econ(), &params(), Some(valid_merkle_proof()), Some([0x42u8; 32]),
+            )
+            .unwrap();
+        let _id2 = reg
+            .open_deal(
+                42, &m, shard_id, operator(), 1, 100, 200,
+                good_econ(), &params(), Some(valid_merkle_proof()), Some([0x42u8; 32]),
+            )
+            .unwrap();
+
+        // Manifest should exist before prune.
+        assert!(reg.get_manifest(&manifest_id).is_some());
+
+        // Prune the content.
+        let pruned = reg.prune_content(&manifest_id, 150);
+        assert_eq!(pruned, 2);
+
+        // Both deals should now be Expired.
+        assert_eq!(reg.all_deals().len(), 2);
+        for deal in reg.all_deals() {
+            assert_eq!(deal.status, DealStatus::Expired);
+        }
+
+        // Manifest should be removed.
+        assert!(reg.get_manifest(&manifest_id).is_none());
+    }
+
+    #[test]
+    fn prune_content_idempotent_on_empty_manifest() {
+        // Pruning a manifest that doesn't exist should be a no-op.
+        let mut reg = StorageRegistry::new();
+        let bogus = ContentId([0xEEu8; 32]);
+        let pruned = reg.prune_content(&bogus, 100);
+        assert_eq!(pruned, 0);
     }
 }

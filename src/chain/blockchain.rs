@@ -2302,6 +2302,42 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Pre-scan a block for NftBurn transactions and collect the associated
+    /// content CIDs from the NFT registry (before the burn removes them).
+    /// Returns a list of `(ContentId, owner_address)` pairs for content that
+    /// should be pruned from the storage registry after block commit.
+    fn collect_nft_burn_cids(&self, block: &Block) -> Vec<(crate::storage::content_id::ContentId, Address)> {
+        let mut cids = Vec::new();
+        for tx in &block.transactions {
+            if let crate::core::transaction::TransactionType::NftBurn = tx.tx_type {
+                if let Ok(nft_id) = bincode::deserialize::<u64>(&tx.data) {
+                    if let Some(nft) = self.state.nft_registry.get_nft(nft_id) {
+                        cids.push((nft.content_id, tx.from));
+                    }
+                }
+            }
+        }
+        cids
+    }
+
+    /// Process storage pruning for NFTs that were burned in the block.
+    /// Constitution §1: "NFT yakılırsa veri B.U.D. storage'dan fiziksel silinir."
+    ///
+    /// This MUST be called after `apply_block_effects` (the NFT is already
+    /// removed from the registry in committed state) using CIDs collected
+    /// BEFORE the commit via `collect_nft_burn_cids`.
+    fn process_nft_burn_storage_pruning(&mut self, burn_cids: &[(crate::storage::content_id::ContentId, Address)]) {
+        for (cid, _burner) in burn_cids {
+            let now_epoch = self.state.epoch_index;
+            let pruned = self.storage_registry.prune_content(cid, now_epoch);
+            tracing::info!(
+                %cid,
+                pruned_deals = pruned,
+                "B.U.D. Hard Prune: storage content pruned after NftBurn"
+            );
+        }
+    }
+
     fn apply_block_effects(
         base_state: &AccountState,
         block: &Block,
@@ -2366,6 +2402,9 @@ impl Blockchain {
             return None;
         }
 
+        // F1 (Constitution §1): pre-scan NftBurn CIDs before state mutation.
+        let nft_burn_cids = self.collect_nft_burn_cids(&block);
+
         let mut committed_state = match Self::apply_block_effects(&self.state, &block) {
             Ok(state) => state,
             Err(_) => return None,
@@ -2427,6 +2466,10 @@ impl Blockchain {
         // whether the report is actioned.
 
         self.state = committed_state;
+
+        // F1 (Constitution §1): prune storage content for burned NFTs.
+        self.process_nft_burn_storage_pruning(&nft_burn_cids);
+
         self.record_validator_snapshot(self.state.epoch_index);
 
         if block.index > 0 && block.index.is_multiple_of(EPOCH_LENGTH) {
@@ -2593,6 +2636,9 @@ impl Blockchain {
             }
         }
 
+        // F1 (Constitution §1): pre-scan NftBurn CIDs before state mutation.
+        let nft_burn_cids = self.collect_nft_burn_cids(&block);
+
         let mut commit_state = Self::apply_block_effects(&self.state, &block)?;
 
         if block.index > 0 {
@@ -2647,6 +2693,10 @@ impl Blockchain {
         // would skip liveness accounting on a sync path.
 
         self.state = commit_state;
+
+        // F1 (Constitution §1): prune storage content for burned NFTs.
+        self.process_nft_burn_storage_pruning(&nft_burn_cids);
+
         self.record_validator_snapshot(self.state.epoch_index);
         self.mempool.set_min_fee(self.state.base_fee);
 
