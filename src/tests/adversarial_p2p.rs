@@ -58,3 +58,30 @@ async fn test_flood_protection_logic() {
 
     assert!(pm.is_banned(&peer_id));
 }
+
+#[tokio::test]
+async fn test_p2p_topology_latency_drift_simulation() {
+    // Phase 9: Industry Standard Simulation.
+    // Tests if the chain handles blocks with slightly future/past timestamps
+    // which simulate network propagation delays (latency drift).
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    
+    // 1. Block from the "Future" (+5 seconds propagation drift)
+    let mut future_block = crate::core::block::Block::new(1, bc.chain[0].hash.clone(), vec![]);
+    future_block.timestamp = now + 5000; 
+    future_block.hash = future_block.calculate_hash();
+    
+    // Usually accepted if within drift window (e.g. 15s in Bitcoin/Ethereum)
+    assert!(bc.validate_and_add_block(future_block).is_ok());
+    
+    // 2. Block from the "Past" (Older than genesis)
+    let mut past_block = crate::core::block::Block::new(2, bc.chain.last().unwrap().hash.clone(), vec![]);
+    past_block.timestamp = bc.chain[0].timestamp - 1000;
+    past_block.hash = past_block.calculate_hash();
+    
+    // MUST be rejected
+    assert!(bc.validate_and_add_block(past_block).is_err());
+}

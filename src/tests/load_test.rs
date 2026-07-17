@@ -77,3 +77,33 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     );
     println!("LOAD TEST SUCCESS: 1000 txs processed, state consistent.");
 }
+
+#[tokio::test]
+async fn test_chaos_v2_differential_vm_oracle() {
+    use crate::execution::zkvm::ZkVmExecutor;
+    use bud_isa::{Instruction, Opcode};
+    
+    // Simple arithmetic program: (10 + 20) * 2 = 60
+    let program = vec![
+        Instruction { opcode: Opcode::Load, rd: 1, rs1: 0, rs2: 0, imm: 10 }.encode(),
+        Instruction { opcode: Opcode::Load, rd: 2, rs1: 0, rs2: 0, imm: 20 }.encode(),
+        Instruction { opcode: Opcode::Add, rd: 3, rs1: 1, rs2: 2, imm: 0 }.encode(),
+        Instruction { opcode: Opcode::Load, rd: 4, rs1: 0, rs2: 0, imm: 2 }.encode(),
+        Instruction { opcode: Opcode::Mul, rd: 5, rs1: 3, rs2: 4, imm: 0 }.encode(),
+        Instruction { opcode: Opcode::Log, rd: 0, rs1: 5, rs2: 0, imm: 0 }.encode(),
+        Instruction { opcode: Opcode::Halt, rd: 0, rs1: 0, rs2: 0, imm: 0 }.encode(),
+    ];
+    
+    let bytecode: Vec<u8> = program.iter().flat_map(|inst| inst.to_le_bytes()).collect();
+    
+    // 1. ZKVM Execution (Oracle A)
+    let receipt = ZkVmExecutor::execute_bytecode(&bytecode, 1_000_000).unwrap();
+    let zkvm_result = receipt.events[0];
+    
+    // 2. Rust Native Oracle (Oracle B)
+    let rust_result = (10u64 + 20u64) * 2u64;
+    
+    // Differential Assert
+    assert_eq!(zkvm_result, rust_result, "ZKVM result {} must match Rust Oracle {}", zkvm_result, rust_result);
+    println!("DIFFERENTIAL VM TEST SUCCESS: ZKVM == Rust Oracle");
+}
