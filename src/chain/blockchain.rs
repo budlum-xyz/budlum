@@ -2444,26 +2444,6 @@ impl Blockchain {
             return None;
         }
 
-        // F1 fix (ARENAX): Hard Pruning — when NFT burned, prune B.U.D. storage manifests whose ID equals burned CID.
-        // This is consensus-level pruning (manifest + deals). Physical chunk deletion happens via NodeCommand::StoragePrune.
-        // Fix E0502: avoid simultaneous &self.state and &mut self.storage_registry borrow by cloning CID first.
-        for tx in &block.transactions {
-            if let crate::core::transaction::TransactionType::NftBurn = tx.tx_type {
-                if let Ok(nft_id) = bincode::deserialize::<u64>(&tx.data) {
-                    let cid_opt = self
-                        .state
-                        .nft_registry
-                        .get_nft(nft_id)
-                        .map(|nft| nft.content_id);
-                    if let Some(cid) = cid_opt {
-                        if self.storage_registry.prune_manifest(&cid) {
-                            tracing::info!(%cid, nft_id = %nft_id, "Hard prune: storage manifest pruned due to NftBurn (produce_block)");
-                        }
-                    }
-                }
-            }
-        }
-
         // Phase 0.08: observe the liveness of the epoch that *just closed* (if any)
         // AFTER we have committed the new state. The producer of the closing
         // block is the one validator we know for sure participated; everyone
@@ -2678,25 +2658,6 @@ impl Blockchain {
         // Commit durably to database first, ensuring fail-closed security
         self.commit_block_durable(&block, &commit_state)
             .map_err(|e| format!("Failed to commit block {} durably: {}", block.index, e))?;
-
-        // F1 fix (ARENAX): Hard Pruning — same as produce_block path, prune storage manifests on NftBurn
-        // Fix E0502: avoid simultaneous borrow
-        for tx in &block.transactions {
-            if let crate::core::transaction::TransactionType::NftBurn = tx.tx_type {
-                if let Ok(nft_id) = bincode::deserialize::<u64>(&tx.data) {
-                    let cid_opt = self
-                        .state
-                        .nft_registry
-                        .get_nft(nft_id)
-                        .map(|nft| nft.content_id);
-                    if let Some(cid) = cid_opt {
-                        if self.storage_registry.prune_manifest(&cid) {
-                            tracing::info!(%cid, nft_id = %nft_id, "Hard prune: storage manifest pruned due to NftBurn (validate_and_add_block)");
-                        }
-                    }
-                }
-            }
-        }
 
         // Phase 0.08: same epoch-close liveness hook as `produce_block`. The block
         // we just accepted is the one that closes the epoch; its producer

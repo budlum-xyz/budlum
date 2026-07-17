@@ -140,7 +140,6 @@ pub struct AccountState {
     /// F4: Accumulated B.U.D. boost share pending distribution to storage operators.
     /// Populated by executor during NftBoost (4% of boost amount).
     /// Distributed by blockchain after block commit via distribute_bud_boost_share.
-    #[serde(default)]
     pub pending_bud_boost_share: u64,
 }
 impl AccountState {
