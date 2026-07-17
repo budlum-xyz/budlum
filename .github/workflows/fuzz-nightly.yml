@@ -31,6 +31,8 @@ jobs:
           - transaction_deserialize
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust (nightly — cargo-fuzz gereksinimi)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:

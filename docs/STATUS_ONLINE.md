@@ -300,3 +300,18 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Kanıt:** YAML parse OK (11 job) · kanarya self-test OK · gerçek çıktı gate OK · 533/533 PASS etkilenmedi.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 07:20 UTC+3] ARENA2 — Dalga 11a: G6 trivy IMAGE + G27 zizmor + G5-bonus (persist-credentials sertleştirme)
+
+**G6 (ADIM8 §3.9 — TAM):** docker-smoke.yml'e `trivy image` adımı — `budlum-core:smoke-test` (build edilen imaj; vuln+secret+misconfig, CRITICAL/HIGH = fail + ignore-unfixed). `docker image inspect` imza kanıt adımı: taranan imajın o koşuda build edildiği log'da kanıtlı. Trigger paths'e workflow'un kendisi eklendi.
+
+**G27 (ADIM8.5 §10 — TAM):** zizmor v1.27.0 iş akışı statik güvenlik lint'i — sürüm+sha256 pinli indirme (`scripts/check-zizmor.sh`, kanaryalı: `pull_request_target`+head-checkout → FAIL, temiz → PASS). repo-lint job'ında kapı. **Politika 0-bulgu.**
+
+**G5-bonus (ADIM8.5 §10 dan doğan GERÇEK sertleştirme):** zizmor bulguları BASELINE'a gömülmedi, düzeltildi:
+- 11× checkout'a `persist-credentials: false` (artifact sızıntı yüzeyi kapatıldı)
+- budlum job'ı: rozet botu self-commit için KASITLI `true` + gerekçeli `# zizmor: ignore[artipacked]`
+- docker-smoke.yml `permissions: contents: read` eklendi (G5'in eksik kalan workflow'uydu — excessive-permissions bulgusu kapatıldı)
+
+**Yerel kanıt:** zizmor "No findings" (3 workflow) · actionlint temiz+kanarya OK · YAML parse OK (11+1+1 job) · check-zizmor.sh self-test + indirme yolu doğrulandı.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

@@ -9,19 +9,38 @@ on:
       - 'scripts/phase3_smoke_rpc.sh'
       - 'scripts/docker-smoke-mainnet.sh'
       - 'src/**'
+      - '.github/workflows/docker-smoke.yml'  # G6: bu workflow degisince smoke+trivy tetiklensin
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+
+# G5/G27: minimal permissions — bu workflow yalniz okur (build+scan+smoke).
+permissions:
+  contents: read
 
 jobs:
   docker-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Build mainnet image
         run: docker build -t budlum-core:smoke-test -f Dockerfile .
+      - name: İmza kanıtı — taranan imaj az önce BURADA build edilen
+        run: |
+          docker image inspect budlum-core:smoke-test --format 'taranan_imaj_id={{.Id}} boyut={{.Size}}byte'
+      - name: Trivy IMAGE taramasi (G6/ADIM8 §3.9 — smoke imaji; CRITICAL/HIGH = fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
+        with:
+          scan-type: image
+          image-ref: budlum-core:smoke-test
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
       - name: Run RPC smoke (devnet)
         run: |
           chmod +x scripts/phase3_smoke_rpc.sh
