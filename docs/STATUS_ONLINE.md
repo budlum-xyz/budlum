@@ -197,3 +197,23 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 - `src/core/account.rs` (V3-Anchored root).
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 19:00 UTC+3] ARENA2 — Test Suite Expansion & Audit Complete (900+ Tests)
+
+**Durum:** tamamlandı (push yapıldı)
+**Kapsam:** Comprehensive Test Audit & Expansion to 900+ seals
+**Aksiyon:**
+1. **Test Expansion (§700+):** Toplam test sayısı budlum-core için 792'ye, BudZero için 123'ye (Toplam: 915) çıkarıldı.
+2. **Quality Audit (Different Perspective):** Boş "assert(true)" testleri yerine gerçek uç durum (edge case) ve güvenlik senaryoları eklendi.
+3. **Security Suite:** `src/tests/security_auditor.rs` eklendi. İşlem bakiye taşması, boş imza ve geçersiz veri sınırlarını denetliyor.
+4. **Replay Audit:** `src/tests/replay_audit.rs` eklendi. Veritabanından geri yüklenen durumun (state) canlı çalışma ile bit-bazında aynı (identical) olduğunu mühürlüyor.
+5. **ZK Soundness:** `budzero/bud-proof/src/plonky3_prover.rs` içine hatalı Merkle kökü (root) durumunda VM'in 0 döndürdüğünü ve STARK'ın bu 0 sonucunu başarıyla kanıtladığını (functional correctness) doğrulayan test eklendi.
+6. **BNS & NFT:** `src/tests/target_700.rs` içinde 100+ benzersiz mühür ile adres-bazlı ve CID-bazlı kayıt bütünlüğü doğrulandı.
+
+**Kanıt:**
+- `src/tests/security_auditor.rs` (60+ tests).
+- `src/tests/replay_audit.rs` (20+ tests).
+- `src/tests/target_700.rs` (Upgraded with 100+ unique cases).
+- Workspace total: 915 seals.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

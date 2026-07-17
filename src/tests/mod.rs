@@ -80,3 +80,13 @@ pub mod hard_prune;
 pub mod relayer_e2e;
 #[cfg(test)]
 pub mod load_test;
+#[cfg(test)]
+pub mod bns_expanded;
+#[cfg(test)]
+pub mod target_700;
+#[cfg(test)]
+pub mod consensus_expanded;
+#[cfg(test)]
+pub mod replay_audit;
+#[cfg(test)]
+pub mod security_auditor;

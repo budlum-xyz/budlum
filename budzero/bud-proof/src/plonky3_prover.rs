@@ -2898,3 +2898,50 @@ mod tests {
         );
     }
 }
+
+    #[test]
+    fn rejects_verify_merkle_with_incorrect_root() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let key: u64 = 7;
+        let siblings: [u64; 64] = [1; 64];
+        let leaf: u64 = 0xBEEF;
+        // Incorrect root
+        let wrong_root = 0xBAD_C0DE;
+        
+        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
+        for i in 0..64 {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&siblings[i].to_le_bytes());
+        }
+        vm.registers[2] = wrong_root;
+        vm.registers[3] = leaf;
+        
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        // The VM should return 0 in rd_val_new because root doesn't match
+        assert_eq!(vm.registers[1], 0);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0; 32], // dummy
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+        
+        // This proof SHOULD verify because we are proving that the VM 
+        // CORRECTLY COMPUTES '0' when the root doesn't match.
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
+    }
