@@ -686,3 +686,33 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Kanıt:** Bu push öncesi `git diff` içinde F1-F9 fix'leri; CI kanıtı bu push'un check-runs'ından gelecek (KURAL 3: kırmızı gelirse düzeltme turu).
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+## [2026-07-17 ~12:55 UTC+3] ARENA3 — main YEŞİL (546/546) + PR #11/#13 triyaj raporu (Ayaz görev dağılımı Hedef 1)
+
+**Main yeşil mührü:** `dc4b2d2` CI 12/12 success, 0 failure. Badge `52df860` → 546 lib (CI kanıtlı). `aa9cfcd` Budlum Core "failure" etiketi yalnızca badge-bot race kozmetiği — job log'unda `test result: ok. 546 passed; 0 failed` yazıyor; kırmızının tek sebebi rozeti pushlamaya çalışan adımın non-fast-forward reddi (araya `dc4b2d2` upload'ı girmişti).
+
+**Bugünkü onarım zincirim (hepsi CI-log kanıtlı):**
+- `7755f18` — CI-rustfmt 9 nokta birebir kanonik + F4 socialfi v2 (pending→fee-per-epoch ağırlıklı dağıtım, dust deals.first(), burn+drain) + obsolete prune_manifest testi temizliği (62c7509'da fn kaldırılmıştı, prune_content testleri kapsamı koruyor).
+- `dcfa27e` — Test hijyeni bulgusu: `Transaction::verify` imzasız tx'i reddediyor; mempool zincir testlerinde tx'ler sessizce blok dışı kalıyordu (alice bakiyesi 1000'de takılı kaldı, mint hiç uygulanmamıştı). Çözüm: KeyPair.generate + new_with_fee + tx.sign (bench_performance.rs örüntüsü), nonce `bc.get_nonce`, nft_id registry'den (sayac varsayımı yok).
+- `ab4d521`+`c864f46` — rustfmt let-RHS eşiği: tek satır ≤96ch kabul, 97+ Tall (boost 96 ✓ / burn 97 ✗ gözlemi, CI hunk'larıyla mühürlü).
+- `aa9cfcd` — devnet_genesis tuzakları: `[0x01;32]`=1e9 alokasyon, `[0x02;32]`=validator (genesis.rs:284). op adresleri 0x51/0x52'ye taşındı + dağıtım assert'leri delta-bazlı (genesis değişikliklerine bağışık). left=1000000003 kanıtı: dağıtım zaten doğru çalışıyordu.
+
+**PR #11 (ARENA6 ADIM5 denetimi) → CLOSE ÖNERİSİ (merge etmiyorum — dağılım kuralı):**
+- A3-T5 BLS `FinalityCert::verify` + A1-T6 opener/RPC güvenlik fix'leri main'de ZATEN var. Kanıt: `git merge-base --is-ancestor b91a03f origin/main` ✓; ayrıca rpc/server.rs:1624 opener guard (H1 fix) ve :1799 storage_active_operators main'de mevcut.
+- Üç-nokta net katkısı tek dosya: `src/rpc/server.rs` +282/-5 = 9 bayat SocialFi/Marketplace/Hub/Relayer prepare RPC metodu (social_prepare_burn/boost, market_prepare_offer/purchase, hub_prepare_register, relayer_prepare_external_tx). Executor tx_type alanları o tarihten sonra değişti → ADIM5 §5.5 "uyumsuz" tespitiyle örtüşüyor; merge conflict + derleme riski taşır.
+
+**PR #13 (ARENA5 Phase 8 Faz 1 fix) → bakiyeyi taşıyıp CLOSE ÖNERİSİ:**
+- main'de zaten var: fuzz `[package.metadata] cargo-fuzz = true` ✓, consensus_validate harness BlockHeader alanları ✓ (üstelik storage_root koşullu doldurma — daha gelişmiş), SBOM `--output-file` hatası ✓ bayraksız `cargo cyclonedx --format json` ile çözülmüş.
+- Kalan değerli bakiye (main'de yok): (a) `CYCLONEDX_VERSION="0.5.9"` pin — run #728 tipi CLI-drift kırılmalarına kesin önlem; (b) `.gitignore: sbom.cdx.json`. Öneri: bu 2 maddeyi küçük bir commit'le main'e ben taşıyayım (Hedef 3 kapsamım).
+
+**B-RACE altyapı bulgusu:** Badge botu `git commit && git push` yapıyor, rebase/retry yok → araya giren herhangi bir commit job'ı sahte-kırmızı yapıyor (aa9cfcd örneği). Yama: push öncesi `git fetch && git rebase origin/main` + bounded retry. `.github/workflows/` push yasağım var → yamayı hazırlar, uygulamayı Ayaz'a/review'a bırakırım.
+
+**Kayıt için kalıcı bulgular (yeni dağılımdan bağımsız, geçerli):**
+- **F4 replay-divergence:** boost drain hook'ları yalnız produce (`blockchain.rs:2460-2462`) ve validate (`:2673-2675`) yollarında; restore/replay yolu (`apply_block_effects`→`commit_block_durable`) bunları çalıştırmıyor → restart eden node ile canlı node arasında operatör kredisi divergence riski. Dağıtımı executor/`apply_block_effects` içine taşımak replay-güvenli tek çözüm.
+- **R1:** `NodeCommand::StoragePrune` (node.rs) halen sıfır caller — fiziksel chunk silme tetiklenmiyor. ARENA2'nin yeni prune göreviyle (Mobile/Physical Prune API, ADIM5 §5.2/5.3) doğrudan kesişiyor → ARENA2'ye devredilebilir.
+
+**budlumdevnet dokunulmadı ✅:** main HEAD `6613219a` (oturum başında `git ls-remote` ile mühürlendi, bu oturumda hiçbir ref'ine dokunulmadı).
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
