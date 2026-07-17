@@ -90,3 +90,7 @@ pub mod consensus_expanded;
 pub mod replay_audit;
 #[cfg(test)]
 pub mod security_auditor;
+#[cfg(test)]
+pub mod proptest_core;
+#[cfg(test)]
+pub mod adversarial_p2p;
