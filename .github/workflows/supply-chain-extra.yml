@@ -1,4 +1,4 @@
-name: Supply Chain Extra (G3 udeps)
+name: Supply Chain Extra (G3 udeps + G11 geiger)
 
 on:
   push:
@@ -49,3 +49,30 @@ jobs:
           cd budzero
           cargo +nightly udeps --all-targets 2>&1 | tee /tmp/udeps2.txt || true
           bash ./scripts/check-udeps.sh /tmp/udeps2.txt
+
+  geiger:
+    name: "Geiger — unsafe görünürlük (G11; first-party 0 kanıt katmanı)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo-geiger kur (locked; crate.io sürümü log'da kanıtlı)
+        run: cargo install cargo-geiger --locked
+      - name: Kanarya (vacuous-gate koruması)
+        run: bash ./scripts/check-geiger.sh --self-test
+      - name: Ölçüm + first-party kapısı (budlum + budzero)
+        run: |
+          cargo geiger --all-targets 2>&1 | tee /tmp/geiger1.txt || true
+          bash ./scripts/check-geiger.sh /tmp/geiger1.txt
+          cd budzero
+          cargo geiger --all-targets 2>&1 | tee /tmp/geiger2.txt || true
+          bash ./scripts/check-geiger.sh /tmp/geiger2.txt

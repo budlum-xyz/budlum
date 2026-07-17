@@ -378,3 +378,10 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **G8-b (bir önceki kayıt):** main-guardrails-v1 aktif (id 19085254): creation+deletion+non_ff+linear_history; main-scoped; admin bypass; required checks kullanıcı kararıyla (b) ertelendi.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 10:05 UTC+3] ARENA2 — Dalga 13b: G11 geiger job + YAML tuzak düzeltmesi
+
+**Öz-düzeltme (dürüst kayıt):** Dalga 13'te `supply-chain-extra.yml` step `name:` değerinde `:` (kolon+boşluk) kaldı → YAML parse hatası (`ad31950` koşusu failure = workflow geçersiz). Hemen `e937a1c` ile tırnakla düzeltildi; taze koşu başladı. (Ders: workflow push'u öncesi YAML parse iki dosya için de zorunlu — ilk seferde yalnızca ci.yml'i doğrulamıştım.)
+**G11 (ADIM8.5 §2):** `scripts/check-geiger.sh` (kanaryalı: first-party unsafe FAIL / deps bilgi / temiz PASS) + `geiger` job'u supply-chain-extra'ya — first-party unsafe=0'ın G1 `forbid(unsafe_code)`'dan BAĞIMSIZ ikinci kanıt katmanı; üçüncü-taraf unsafe rapora düşer (gate değil, dürüst scoping gerekçesiyle birlikte).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
