@@ -73,7 +73,11 @@ impl std::fmt::Display for RelayerError {
                 write!(f, "transfer {} in invalid state for relay", hex::encode(id),)
             }
             RelayerError::SourceDomainMismatch { expected, got } => {
-                write!(f, "source domain mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "source domain mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
             RelayerError::Other(msg) => write!(f, "relay error: {}", msg),
         }
@@ -255,10 +259,12 @@ impl UniversalRelayer {
         let pending = self
             .pending
             .get(&message_id)
-            .ok_or_else(|| RelayerError::Other(format!(
-                "no pending relay for message {}",
-                hex::encode(message_id)
-            )))?
+            .ok_or_else(|| {
+                RelayerError::Other(format!(
+                    "no pending relay for message {}",
+                    hex::encode(message_id)
+                ))
+            })?
             .clone();
 
         // 2. Expiry check
@@ -290,16 +296,13 @@ impl UniversalRelayer {
             b"BDLM_RELAY_PROOF_HASH_V1",
             &bincode::serialize(proof).unwrap_or_default(),
         ]);
-        self.ledger.record(message_id, relayer, current_height, proof_hash)?;
+        self.ledger
+            .record(message_id, relayer, current_height, proof_hash)?;
 
         // 5. Extract the cross-domain message from the source event
-        let message = pending
-            .source_event
-            .message
-            .clone()
-            .ok_or_else(|| RelayerError::Other(
-                "source event has no cross-domain message".into()
-            ))?;
+        let message = pending.source_event.message.clone().ok_or_else(|| {
+            RelayerError::Other("source event has no cross-domain message".into())
+        })?;
 
         // Remove from pending
         self.pending.remove(&message_id);
@@ -387,13 +390,7 @@ mod tests {
 
         // Process relay
         let relayer_addr = Address::from([0xAA; 32]);
-        let result = relayer.process_relay(
-            message.message_id,
-            relayer_addr,
-            &proof,
-            root,
-            15,
-        );
+        let result = relayer.process_relay(message.message_id, relayer_addr, &proof, root, 15);
         assert!(result.is_ok());
         let relayed_msg = result.unwrap();
         assert_eq!(relayed_msg.message_id, message.message_id);
