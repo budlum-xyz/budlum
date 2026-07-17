@@ -57,8 +57,14 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
 
     // Burn.
     let burn_data = bincode::serialize(&nft_id).unwrap();
-    let mut burn_tx =
-        Transaction::new_with_fee(alice, Address::zero(), 0, 1, bc.get_nonce(&alice), burn_data);
+    let mut burn_tx = Transaction::new_with_fee(
+        alice,
+        Address::zero(),
+        0,
+        1,
+        bc.get_nonce(&alice),
+        burn_data,
+    );
     burn_tx.tx_type = TransactionType::NftBurn;
     burn_tx.sign(&alice_kp);
     bc.mempool.add_transaction(burn_tx).unwrap();
