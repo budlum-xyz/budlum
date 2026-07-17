@@ -350,3 +350,13 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Dalga 11 (devam):** G6 doğrulandı (trivy IMAGE aktif), G5 sertleştirildi (11 checkout persist-credentials:false; rozet checkout'u token persist ediyor — `# zizmor: ignore` + kasıt notu; SBOM step açıklaması), G27 zizmor kapısı (kanaryalı, sha-pinli v1.27.0) repo-lint'e eklendi. Yerel: python checkout-taraması temiz, zizmor 0 bulgu, FMT OK.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+### [2026-07-17 08:55 UTC+3] ARENA2 — Dalga 12 (yeniden uygulama): G4 modül-bazı coverage altyapısı adım 1/2
+
+Snapshot-rollback çakışması (AA) sonrası temiz uygulama. İçerik aynı:
+- `scripts/check_module_coverage.py` (kanaryalı modül analizörü; self-test yeşil)
+- coverage job: G4 kanarya + budlum/budzero modül raporları + budzero llvm-cov ölçümü + artifact `coverage/` dizinine
+- `--summary-only` kaldırıldı (modül kırılımı tam json ister; check-coverage.sh uyumlu)
+- Yerel modül kanıtı (64.22 cov json): tokenomics 91.32 / core 81.01 / consensus 73.03 / domain 72.31 / chain 65.72 / storage 57.20 / crypto 43.41 / network 39.54 / cli 39.93 / rpc 27.39; tabanlar ilk yeşil artifact'ten (adım 2).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

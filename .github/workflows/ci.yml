@@ -372,13 +372,23 @@ jobs:
       - name: Olcum + ratchet kapisi
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest --lib --json --summary-only --output-path coverage/cov.json
+          cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
           bash ./scripts/check-coverage.sh coverage/cov.json
+      - name: G4 modül analizi kanaryası (vacuous değil)
+        run: python3 ./scripts/check_module_coverage.py --self-test
+      - name: G4 modül coverage raporu — budlum (ADIM8.5 §4; baselines 2. adımda, vacuous-gate YOK)
+        run: python3 ./scripts/check_module_coverage.py coverage/cov.json
+      - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
+        run: |
+          cd budzero
+          cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
+      - name: G4 modül coverage raporu — budzero (rapor modu)
+        run: python3 ./scripts/check_module_coverage.py coverage/budzero-cov.json
       - name: Coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-${{ github.sha }}
-          path: coverage/cov.json
+          path: coverage/   # cov.json + budzero-cov.json (G4 modul tabanlari bu artifact'ten)
           retention-days: 30
 
   repo-lint:
