@@ -17,23 +17,31 @@ use tempfile::tempdir;
 async fn test_chaos_v2_heavy_load_under_pressure() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("load_test.db");
-    let storage = Storage::new(db.to_str().unwrap()).unwrap();
-    let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
-    bc.state.base_fee = 0;
-    bc.mempool.set_min_fee(0);
-
     let bob = Address::from([2u8; 32]);
 
-    println!("PHASE 1: Injecting 1000 transactions (10 senders x 100)...");
     // Mempool enforces a per-sender DoS cap (config.max_per_sender = 100),
     // so the 1000-tx workload is distributed across 10 funded senders,
-    // each exactly at the cap.
+    // each exactly at the cap. Funding MUST go through genesis allocations:
+    // reload replays blocks from the deterministic genesis state, and direct
+    // in-memory state mutations are not part of the chain (replaying block
+    // #1 against an unfunded account fails inside apply_block_effects and
+    // the init path hard-exits the process — blockchain.rs:339).
     let senders: Vec<KeyPair> = (0..10).map(|_| KeyPair::generate().unwrap()).collect();
-    for kp in &senders {
-        bc.state
-            .add_balance(&Address::from(kp.public_key_bytes()), 100_000);
-    }
+    let funded_genesis = || {
+        let mut g = crate::chain::genesis::GenesisConfig::new(1337);
+        for kp in &senders {
+            g = g.with_allocation(Address::from(kp.public_key_bytes()), 100_000);
+        }
+        g.base_fee = 0;
+        g
+    };
+    let storage = Storage::new(db.to_str().unwrap()).unwrap();
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc =
+        Blockchain::new_with_genesis(consensus, Some(storage), 1337, None, Some(funded_genesis()));
+    bc.mempool.set_min_fee(0);
+
+    println!("PHASE 1: Injecting 1000 transactions (10 senders x 100)...");
     for kp in &senders {
         let from = Address::from(kp.public_key_bytes());
         for i in 0..100 {
@@ -70,10 +78,17 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     println!("PHASE 3: Verifying V3-Anchored state root determinism...");
     let root1 = bc.state.calculate_state_root();
 
-    // Simulate restart and reload
+    // Simulate restart and reload (same funded genesis => same genesis hash,
+    // same funded accounts; replay reproduces the exact live state root).
     drop(bc);
     let storage2 = Storage::new(db.to_str().unwrap()).unwrap();
-    let bc2 = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage2), 1337, None);
+    let bc2 = Blockchain::new_with_genesis(
+        Arc::new(PoWEngine::new(0)),
+        Some(storage2),
+        1337,
+        None,
+        Some(funded_genesis()),
+    );
 
     let mut state2 = bc2.state.clone();
     let root2 = state2.calculate_state_root();
