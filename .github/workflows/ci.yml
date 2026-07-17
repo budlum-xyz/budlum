@@ -18,7 +18,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0  # zizmor: ignore[artipacked] rozet botu self-commit icin GITHUB_TOKEN kasitli
+        with:
+          persist-credentials: true
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
@@ -92,6 +94,8 @@ jobs:
         working-directory: budzero
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         # NOT: master 2026-07-16+ `toolchain` input'unu ZORUNLU kiliyor
@@ -119,6 +123,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
@@ -144,6 +150,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
@@ -173,6 +181,8 @@ jobs:
           - { name: budzero, manifest: "budzero/Cargo.toml" }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: cargo deny check (advisories, bans, licenses, sources)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -187,6 +197,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust (nightly — cargo-fuzz gereksinimi)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
@@ -232,6 +244,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: gitleaks v8.30.1 kur (sürüm + sha256 pinli)
         run: |
@@ -272,6 +285,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
@@ -296,6 +311,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: hadolint v2.14.0 kur (surum + sha256 pinli)
         run: |
           set -euo pipefail
@@ -325,6 +342,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
@@ -366,12 +385,14 @@ jobs:
     # Phase 8.10/8.11: actionlint + buf + genesis schema (tek birlesik statik kapi).
     # Araclar surum+sha256 pinli. buf breaking, main'de buf.yaml bulundugunda
     # aktiflesir (baseline bu dalgayla kuruluyor — ilk kosuda SKIP dürüst marker).
-    name: Repo Lint (actionlint + buf + genesis) (Phase 8.10/8.11)
+    # G27: zizmor workflow güvenlik lint'i de bu job'da (kanaryalı, 0-bulgu politikası).
+    name: Repo Lint (actionlint + buf + genesis + zizmor) (Phase 8.10/8.11 + G27)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: actionlint v1.7.12 kur (sha256 pinli)
         run: |
@@ -385,6 +406,10 @@ jobs:
         run: |
           bash ./scripts/check-actionlint.sh --self-test
           bash ./scripts/check-actionlint.sh
+      - name: zizmor kapisi + kanarya (G27)
+        run: |
+          bash ./scripts/check-zizmor.sh --self-test
+          bash ./scripts/check-zizmor.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail

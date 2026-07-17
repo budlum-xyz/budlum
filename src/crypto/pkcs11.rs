@@ -16,6 +16,12 @@ pub struct Pkcs11Signer {
     bls_key: Mutex<Option<BlsKeypair>>,
     pq_key: Mutex<Option<PqKeyPair>>,
     inner: Mutex<Option<Pkcs11Inner>>,
+    /// Phase 9 (ARENA3, 2026-07-16): Vendor-native mechanism IDs for BLS/PQ.
+    /// When set, the signer attempts hardware-native signing via
+    /// Mechanism::Other(mech_id). Falls back to software signing if None
+    /// or if the HSM doesn't support the mechanism.
+    bls_mechanism: Option<u32>,
+    pq_mechanism: Option<u32>,
 }
 
 struct Pkcs11Inner {
@@ -127,7 +133,72 @@ impl Pkcs11Signer {
                 pkcs11_client,
                 session,
             })),
+            bls_mechanism: None,
+            pq_mechanism: None,
         })
+    }
+
+    /// Phase 9 (ARENA3, 2026-07-16): Set vendor-native BLS/PQ mechanism IDs.
+    /// Parses hex (0x-prefix) or decimal strings. If the HSM supports these
+    /// mechanisms, signing will use hardware-native paths; otherwise falls
+    /// back to software signing via data objects.
+    pub fn with_vendor_mechanisms(
+        mut self,
+        bls_mech: Option<String>,
+        pq_mech: Option<String>,
+    ) -> Self {
+        self.bls_mechanism = bls_mech.and_then(|s| Self::parse_mechanism(&s));
+        self.pq_mechanism = pq_mech.and_then(|s| Self::parse_mechanism(&s));
+        if self.bls_mechanism.is_some() {
+            tracing::info!(
+                "PKCS#11: vendor-native BLS mechanism configured (0x{:08X})",
+                self.bls_mechanism.unwrap()
+            );
+        }
+        if self.pq_mechanism.is_some() {
+            tracing::info!(
+                "PKCS#11: vendor-native PQ mechanism configured (0x{:08X})",
+                self.pq_mechanism.unwrap()
+            );
+        }
+        self
+    }
+
+    /// Parse mechanism ID from hex (0xNNNN) or decimal string.
+    fn parse_mechanism(s: &str) -> Option<u32> {
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            s.parse::<u32>().ok()
+        }
+    }
+
+    /// Attempt vendor-native BLS signing via Mechanism::Other. Falls back
+    /// to software signing if the HSM rejects the mechanism or it's not configured.
+    fn try_vendor_bls_sign(
+        &self,
+        session: &cryptoki::session::Session,
+        msg: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let mech_id = self
+            .bls_mechanism
+            .ok_or_else(|| CryptoError::Signing("no BLS vendor mechanism configured".to_string()))?;
+        let mechanism = cryptoki::mechanism::Mechanism::Other(mech_id.into());
+        let template = &[
+            cryptoki::object::Attribute::Class(cryptoki::object::ObjectClass::PRIVATE_KEY),
+            cryptoki::object::Attribute::Label(BLS_DATA_LABEL.to_string().into()),
+        ];
+        let objects = session.find_objects(template).map_err(|e| {
+            CryptoError::Signing(format!("Failed to find BLS key for vendor sign: {e}"))
+        })?;
+        if objects.is_empty() {
+            return Err(CryptoError::Signing(
+                "No BLS private key found for vendor sign".to_string(),
+            ));
+        }
+        session
+            .sign(&mechanism, objects[0], msg)
+            .map_err(|e| CryptoError::Signing(format!("Vendor BLS sign failed: {e}")))
     }
 
     /// Store a BLS keypair into the HSM as a data object.
@@ -275,6 +346,24 @@ impl ConsensusSigner for Pkcs11Signer {
     }
 
     fn bls_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // Phase 9: try vendor-native HSM signing first
+        if self.bls_mechanism.is_some() {
+            let guard = self.inner.lock().map_err(|_| {
+                CryptoError::Signing("PKCS#11 inner mutex poisoned during BLS sign".to_string())
+            })?;
+            if let Some(inner) = guard.as_ref() {
+                match self.try_vendor_bls_sign(&inner.session, msg) {
+                    Ok(sig) => return Ok(sig),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Vendor BLS sign failed ({}), falling back to software",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        // Software fallback
         let guard = self
             .bls_key
             .lock()
@@ -286,6 +375,36 @@ impl ConsensusSigner for Pkcs11Signer {
     }
 
     fn pq_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // Phase 9: try vendor-native HSM signing first
+        if self.pq_mechanism.is_some() {
+            let guard = self.inner.lock().map_err(|_| {
+                CryptoError::Signing("PKCS#11 inner mutex poisoned during PQ sign".to_string())
+            })?;
+            if let Some(inner) = guard.as_ref() {
+                let mech_id = self.pq_mechanism.unwrap();
+                let mechanism = cryptoki::mechanism::Mechanism::Other(mech_id.into());
+                let template = &[
+                    cryptoki::object::Attribute::Class(
+                        cryptoki::object::ObjectClass::PRIVATE_KEY,
+                    ),
+                    cryptoki::object::Attribute::Label(PQ_DATA_LABEL.to_string().into()),
+                ];
+                if let Ok(objects) = inner.session.find_objects(template) {
+                    if !objects.is_empty() {
+                        match inner.session.sign(&mechanism, objects[0], msg) {
+                            Ok(sig) => return Ok(sig),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Vendor PQ sign failed ({}), falling back to software",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Software fallback
         let guard = self
             .pq_key
             .lock()
