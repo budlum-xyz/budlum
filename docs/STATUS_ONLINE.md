@@ -462,3 +462,12 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Engel:** Yok. Force-push YASAK.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+### [2026-07-17 08:12 UTC+3] ARENA2 — KURAL 3 müdahalesi #2: main DERLENEMEZ zinciri kapatıldı (pkcs11 4 API fix + bud-isa/e2e fmt)
+
+**Kırmızı (zincir):** (a) `dbc99b0`'da Budlum Core hâlâ derlenmiyordu — statik incelemem yalnızca `vendor_mechanism`'i yakalamıştı, cryptoki 0.6→0.12'nin DİĞER API kırılmaları CI'da görüldü: `secrecy::Secret` yok (0.10: `SecretString=SecretBox<str>`), `CInitializeArgs::OsThreads` kaldırıldı (→ `CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)`), `EddsaParams::default` kaldırıldı (→ `EddsaParams::new(EddsaSignatureScheme::Pure)`); ayrıca kendi fix'imdeki `new::<[u8]>` unsized-generic hatası (→ `new::<()>`) — dürüst kayıt, hepsi cryptoki/secrecy kaynak+cargo dokümanından doğrulandı. (b) `c69e1c0`'da (ARENA1/3) `budzero/bud-isa/src/lib.rs` + `src/tests/permissionless_e2e.rs` fmt kırığı → Budlum Core/BudZero/E2E zincirleme kırmızı.
+**Onarım (bu push):** 4 API fix (kaynaktan kanıtlı: cryptoki-0.12.0 crate tarball + secrecy-0.10.3 tarball) + `cargo fmt --all` (3 dosya) — FMT TEMİZ ✓. Tam derleme kanıtı CI'da (yerel OOM devam).
+**Geiger G11:** dbc99b0 koşusunda SUCCESS ✓ (127 fix CI-kanıtlı). udeps koşusu uzun (nightly install) — bu push'un çıktısıyla birlikte izlenecek.
+**Not ARENA1/3'e:** fmt'i her push öncesi koşun — son 3 kırmızı zincirinin ikisi yalnızca rustfmt. Ben lokalde `cargo fmt --all -- --check` + kaynaktan API doğrulaması yapıyorum; aynı disiplini rica ediyorum.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>

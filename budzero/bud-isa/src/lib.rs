@@ -1,16 +1,43 @@
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {
-    Halt = 0x00, Add = 0x01, Sub = 0x02, Mul = 0x03, Div = 0x04,
-    Inv = 0x05, And = 0x06, Or = 0x07, Xor = 0x08, Not = 0x09,
-    Eq = 0x0A, Neq = 0x0B, Lt = 0x0C, Gt = 0x0D, Lte = 0x0E, Gte = 0x0F,
-    Jmp = 0x10, Jnz = 0x11, Call = 0x12, Ret = 0x13, Load = 0x14,
-    Store = 0x15, Push = 0x16, Pop = 0x17, Assert = 0x18, Poseidon = 0x19,
-    Log = 0x1A, SRead = 0x1B, SWrite = 0x1C, Syscall = 0x1D, VerifyMerkle = 0x1E,
+    Halt = 0x00,
+    Add = 0x01,
+    Sub = 0x02,
+    Mul = 0x03,
+    Div = 0x04,
+    Inv = 0x05,
+    And = 0x06,
+    Or = 0x07,
+    Xor = 0x08,
+    Not = 0x09,
+    Eq = 0x0A,
+    Neq = 0x0B,
+    Lt = 0x0C,
+    Gt = 0x0D,
+    Lte = 0x0E,
+    Gte = 0x0F,
+    Jmp = 0x10,
+    Jnz = 0x11,
+    Call = 0x12,
+    Ret = 0x13,
+    Load = 0x14,
+    Store = 0x15,
+    Push = 0x16,
+    Pop = 0x17,
+    Assert = 0x18,
+    Poseidon = 0x19,
+    Log = 0x1A,
+    SRead = 0x1B,
+    SWrite = 0x1C,
+    Syscall = 0x1D,
+    VerifyMerkle = 0x1E,
 }
 
 impl Opcode {
-    pub fn is_experimental(&self) -> bool { false }
+    pub fn is_experimental(&self) -> bool {
+        false
+    }
 
     /// S2 (Paket B, 2026-07-17): Opcodes that require a separate mainnet
     /// activation gate. VerifyMerkle is the only opcode with a staged rollout.
@@ -36,14 +63,18 @@ pub struct MainnetActivation {
 
 impl Default for MainnetActivation {
     fn default() -> Self {
-        Self { verify_merkle_enabled: false }
+        Self {
+            verify_merkle_enabled: false,
+        }
     }
 }
 
 impl MainnetActivation {
     /// Full activation — all mainnet-gated opcodes enabled (post-ceremony).
     pub fn full() -> Self {
-        Self { verify_merkle_enabled: true }
+        Self {
+            verify_merkle_enabled: true,
+        }
     }
 
     /// Check if an opcode is allowed under this activation state.
@@ -67,8 +98,12 @@ impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecodeError::InvalidOpcode(op) => write!(f, "Unknown opcode 0x{:02X}", op),
-            DecodeError::ExperimentalOpcodeDisabled(op, p) => write!(f, "Opcode {:?} disabled in {:?}", op, p),
-            DecodeError::MainnetActivationRequired(op) => write!(f, "Opcode {:?} requires mainnet activation", op),
+            DecodeError::ExperimentalOpcodeDisabled(op, p) => {
+                write!(f, "Opcode {:?} disabled in {:?}", op, p)
+            }
+            DecodeError::MainnetActivationRequired(op) => {
+                write!(f, "Opcode {:?} requires mainnet activation", op)
+            }
         }
     }
 }
@@ -78,7 +113,10 @@ impl std::error::Error for DecodeError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instruction {
     pub opcode: Opcode,
-    pub rd: u8, pub rs1: u8, pub rs2: u8, pub imm: i32,
+    pub rd: u8,
+    pub rs1: u8,
+    pub rs2: u8,
+    pub imm: i32,
 }
 
 impl Instruction {
@@ -94,25 +132,56 @@ impl Instruction {
     pub fn decode_any(val: u64) -> Result<Self, DecodeError> {
         let op_u8 = (val & 0xFF) as u8;
         let opcode = match op_u8 {
-            0x00 => Opcode::Halt, 0x01 => Opcode::Add, 0x02 => Opcode::Sub, 0x03 => Opcode::Mul,
-            0x04 => Opcode::Div, 0x05 => Opcode::Inv, 0x06 => Opcode::And, 0x07 => Opcode::Or,
-            0x08 => Opcode::Xor, 0x09 => Opcode::Not, 0x0A => Opcode::Eq, 0x0B => Opcode::Neq,
-            0x0C => Opcode::Lt, 0x0D => Opcode::Gt, 0x0E => Opcode::Lte, 0x0F => Opcode::Gte,
-            0x10 => Opcode::Jmp, 0x11 => Opcode::Jnz, 0x12 => Opcode::Call, 0x13 => Opcode::Ret,
-            0x14 => Opcode::Load, 0x15 => Opcode::Store, 0x16 => Opcode::Push, 0x17 => Opcode::Pop,
-            0x18 => Opcode::Assert, 0x19 => Opcode::Poseidon, 0x1A => Opcode::Log,
-            0x1B => Opcode::SRead, 0x1C => Opcode::SWrite, 0x1D => Opcode::Syscall,
+            0x00 => Opcode::Halt,
+            0x01 => Opcode::Add,
+            0x02 => Opcode::Sub,
+            0x03 => Opcode::Mul,
+            0x04 => Opcode::Div,
+            0x05 => Opcode::Inv,
+            0x06 => Opcode::And,
+            0x07 => Opcode::Or,
+            0x08 => Opcode::Xor,
+            0x09 => Opcode::Not,
+            0x0A => Opcode::Eq,
+            0x0B => Opcode::Neq,
+            0x0C => Opcode::Lt,
+            0x0D => Opcode::Gt,
+            0x0E => Opcode::Lte,
+            0x0F => Opcode::Gte,
+            0x10 => Opcode::Jmp,
+            0x11 => Opcode::Jnz,
+            0x12 => Opcode::Call,
+            0x13 => Opcode::Ret,
+            0x14 => Opcode::Load,
+            0x15 => Opcode::Store,
+            0x16 => Opcode::Push,
+            0x17 => Opcode::Pop,
+            0x18 => Opcode::Assert,
+            0x19 => Opcode::Poseidon,
+            0x1A => Opcode::Log,
+            0x1B => Opcode::SRead,
+            0x1C => Opcode::SWrite,
+            0x1D => Opcode::Syscall,
             0x1E => Opcode::VerifyMerkle,
             _ => return Err(DecodeError::InvalidOpcode(op_u8)),
         };
-        Ok(Self { opcode, rd: ((val >> 8) & 0x1F) as u8, rs1: ((val >> 13) & 0x1F) as u8, rs2: ((val >> 18) & 0x1F) as u8, imm: ((val >> 23) & 0xFFFFFFFF) as i32 })
+        Ok(Self {
+            opcode,
+            rd: ((val >> 8) & 0x1F) as u8,
+            rs1: ((val >> 13) & 0x1F) as u8,
+            rs2: ((val >> 18) & 0x1F) as u8,
+            imm: ((val >> 23) & 0xFFFFFFFF) as i32,
+        })
     }
 
     pub fn decode_for_profile(val: u64, profile: IsaProfile) -> Result<Self, DecodeError> {
         let inst = Self::decode_any(val)?;
         if inst.opcode.is_experimental() {
             if profile == IsaProfile::Production {
-                return Err(DecodeError::ExperimentalOpcodeDisabled(inst.opcode, profile));
+                return Err(DecodeError::ExperimentalOpcodeDisabled(
+                    inst.opcode,
+                    profile,
+                ));
             }
         }
         Ok(inst)
@@ -120,7 +189,10 @@ impl Instruction {
 
     /// S2 (Paket B): decode with mainnet activation gate.
     /// Mainnet callers must pass `MainnetActivation::full()` post-ceremony.
-    pub fn decode_for_mainnet(val: u64, activation: MainnetActivation) -> Result<Self, DecodeError> {
+    pub fn decode_for_mainnet(
+        val: u64,
+        activation: MainnetActivation,
+    ) -> Result<Self, DecodeError> {
         let inst = Self::decode_for_profile(val, IsaProfile::Production)?;
         if !activation.allows(inst.opcode) {
             return Err(DecodeError::MainnetActivationRequired(inst.opcode));
@@ -132,8 +204,14 @@ impl Instruction {
         let profile = if cfg!(feature = "experimental") {
             IsaProfile::Experimental
         } else {
-            #[cfg(test)] { IsaProfile::Testing }
-            #[cfg(not(test))] { IsaProfile::Production }
+            #[cfg(test)]
+            {
+                IsaProfile::Testing
+            }
+            #[cfg(not(test))]
+            {
+                IsaProfile::Production
+            }
         };
         Self::decode_for_profile(val, profile).map_err(|e| e.to_string())
     }
@@ -145,7 +223,14 @@ mod tests {
 
     #[test]
     fn verify_merkle_enabled_in_production() {
-        let raw = Instruction { opcode: Opcode::VerifyMerkle, rd: 1, rs1: 2, rs2: 3, imm: 0 }.encode();
+        let raw = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
         let inst = Instruction::decode_for_profile(raw, IsaProfile::Production)
             .expect("VerifyMerkle enabled in Production");
         assert_eq!(inst.opcode, Opcode::VerifyMerkle);
@@ -154,15 +239,32 @@ mod tests {
 
     #[test]
     fn s2_mainnet_activation_default_rejects_verify_merkle() {
-        let raw = Instruction { opcode: Opcode::VerifyMerkle, rd: 1, rs1: 2, rs2: 3, imm: 0 }.encode();
+        let raw = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
         let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
             .expect_err("VerifyMerkle blocked on mainnet by default");
-        assert!(matches!(err, DecodeError::MainnetActivationRequired(Opcode::VerifyMerkle)));
+        assert!(matches!(
+            err,
+            DecodeError::MainnetActivationRequired(Opcode::VerifyMerkle)
+        ));
     }
 
     #[test]
     fn s2_mainnet_activation_full_allows_verify_merkle() {
-        let raw = Instruction { opcode: Opcode::VerifyMerkle, rd: 1, rs1: 2, rs2: 3, imm: 0 }.encode();
+        let raw = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
         let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::full())
             .expect("VerifyMerkle allowed with full mainnet activation");
         assert_eq!(inst.opcode, Opcode::VerifyMerkle);
@@ -170,7 +272,14 @@ mod tests {
 
     #[test]
     fn s2_mainnet_activation_allows_other_opcodes() {
-        let raw = Instruction { opcode: Opcode::Add, rd: 1, rs1: 2, rs2: 3, imm: 0 }.encode();
+        let raw = Instruction {
+            opcode: Opcode::Add,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
         let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
             .expect("Add always allowed on mainnet");
         assert_eq!(inst.opcode, Opcode::Add);
@@ -178,7 +287,14 @@ mod tests {
 
     #[test]
     fn tur119_plain_opcodes_still_decode_in_production() {
-        let raw = Instruction { opcode: Opcode::Add, rd: 1, rs1: 2, rs2: 3, imm: 0 }.encode();
+        let raw = Instruction {
+            opcode: Opcode::Add,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
         let inst = Instruction::decode_for_profile(raw, IsaProfile::Production).unwrap();
         assert_eq!(inst.opcode, Opcode::Add);
     }

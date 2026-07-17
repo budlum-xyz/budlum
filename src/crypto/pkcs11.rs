@@ -48,7 +48,9 @@ impl Pkcs11Signer {
             ))
         })?;
         client
-            .initialize(cryptoki::context::CInitializeArgs::OsThreads)
+            .initialize(cryptoki::context::CInitializeArgs::new(
+                cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
+            ))
             .map_err(|e| CryptoError::KeyGeneration(format!("Failed to init PKCS#11: {e}")))?;
         let slots = client.get_slots_with_token().map_err(|e| {
             CryptoError::KeyGeneration(format!("Failed to enumerate PKCS#11 slots: {e}"))
@@ -72,7 +74,9 @@ impl Pkcs11Signer {
                 slot_id, e
             ))
         })?;
-        let pin_secret = secrecy::Secret::new(pin);
+        // S1 fix (ARENA2, 2026-07-17): secrecy 0.10 — secrecy::Secret kaldırıldı;
+        // cryptoki 0.12 AuthPin = SecretString = SecretBox<str>.
+        let pin_secret = secrecy::SecretString::new(pin.into_boxed_str());
         session
             .login(cryptoki::session::UserType::User, Some(&pin_secret))
             .map_err(|e| CryptoError::KeyGeneration(format!("PKCS#11 login failed: {e}")))?;
@@ -154,7 +158,7 @@ impl Pkcs11Signer {
             ))
         })?;
         Ok(cryptoki::mechanism::Mechanism::VendorDefined(
-            VendorDefinedMechanism::new::<[u8]>(mech_type, None),
+            VendorDefinedMechanism::new::<()>(mech_type, None),
         ))
     }
 
@@ -310,7 +314,11 @@ impl ConsensusSigner for Pkcs11Signer {
             return Err(CryptoError::Signing("No Ed25519 private key in HSM".into()));
         }
         let mechanism = cryptoki::mechanism::Mechanism::Eddsa(
-            cryptoki::mechanism::eddsa::EddsaParams::default(),
+            // S1 fix (ARENA2, 2026-07-17): cryptoki 0.12 — EddsaParams::default
+            // kaldırıldı; paramsız saf Ed25519 = EddsaSignatureScheme::Pure.
+            cryptoki::mechanism::eddsa::EddsaParams::new(
+                cryptoki::mechanism::eddsa::EddsaSignatureScheme::Pure,
+            ),
         );
         let sig = inner
             .session

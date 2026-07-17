@@ -41,12 +41,16 @@ fn test_multi_validator_permissionless_lifecycle_and_slashing() {
     // Produce blocks with v1 and v2 participating, absentee missing
     for i in 0..(EPOCH_LENGTH * 2) {
         let producer = if i % 2 == 0 { v1 } else { v2 };
-        bc.produce_block(producer).expect("block production succeeds");
+        bc.produce_block(producer)
+            .expect("block production succeeds");
     }
 
     // Absentee missed epochs and should be slashed/jailed
     let absentee_reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
-    assert!(absentee_reg.stake < 20_000, "absentee stake must be slashed");
+    assert!(
+        absentee_reg.stake < 20_000,
+        "absentee stake must be slashed"
+    );
     assert!(
         !bc.state.registry.is_active(&absentee, roles::VALIDATOR),
         "absentee must be jailed"
