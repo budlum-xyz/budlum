@@ -335,6 +335,44 @@ fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
 /// staged ConsensusStateV2 migration window. Older snapshots must be restored
 /// with an intermediate release first; silently accepting them would risk
 /// losing registry/tokenomics metadata that was not present yet.
+/// GAP-1 trust policy (Phase 10.5 P2, Faz 1). Production mainnet
+/// `RequireSigned` zorunlu; devnet/legacy-import `AllowUnsigned`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SnapshotTrustPolicy {
+    /// Devnet / legacy-import geçiş penceresi. İmzasız snapshot kabul
+    /// (signer/sig None). Production mainnet'te derleme-uyarısı.
+    #[default]
+    AllowUnsigned,
+    /// Production: imzalı snapshot zorunlu. signer trust-list + Ed25519 verify.
+    RequireSigned,
+}
+
+/// GAP-1 authentication hatası (Phase 10.5 P2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotAuthError {
+    /// RequireSigned policy ama manifest_signer None.
+    MissingSigner,
+    /// RequireSigned policy ama manifest_signature None.
+    MissingSignature,
+    /// Signer trust-list'te değil (yetkisiz imzalayıcı).
+    UntrustedSigner,
+    /// Ed25519 verify başarısız (sahte/geçersiz imza).
+    InvalidSignature,
+}
+
+impl std::fmt::Display for SnapshotAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotAuthError::MissingSigner => write!(f, "snapshot: RequireSigned but manifest_signer missing"),
+            SnapshotAuthError::MissingSignature => write!(f, "snapshot: RequireSigned but manifest_signature missing"),
+            SnapshotAuthError::UntrustedSigner => write!(f, "snapshot: signer not in trust list"),
+            SnapshotAuthError::InvalidSignature => write!(f, "snapshot: Ed25519 signature verification failed"),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotAuthError {}
+
 pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Current durable snapshot schema emitted by this binary. This is the
@@ -445,6 +483,16 @@ pub struct StateSnapshotV2 {
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
 
     pub snapshot_hash: String,
+
+    // --- schema_version 4 (Phase 10.5 P2 GAP-1): manifest signature ---
+    // Ed25519 tek-imza (Faz 1). signer trust-list'ten; signature =
+    // sign(calculate_digest_v4()). AllowUnsigned devnet/legacy-import.
+    #[serde(default)]
+    pub manifest_signer: Option<[u8; 32]>,
+    #[serde(default)]
+    pub manifest_signature: Option<Vec<u8>>,
+    #[serde(default)]
+    pub trust_policy: SnapshotTrustPolicy,
 }
 
 /// Atomic tokenomics-burn restore block (Phase 0.16, Decision 2.3). These three
@@ -534,6 +582,9 @@ impl StateSnapshotV2 {
             liveness: Some(account_state.liveness.clone()),
             invalid_votes: Some(account_state.invalid_votes.clone()),
             snapshot_hash: String::new(),
+            manifest_signer: None,
+            manifest_signature: None,
+            trust_policy: SnapshotTrustPolicy::default(),
         };
         snapshot.snapshot_hash = snapshot.calculate_hash();
         snapshot
@@ -703,6 +754,33 @@ impl StateSnapshotV2 {
 
     pub fn verify(&self) -> bool {
         self.snapshot_hash == self.calculate_hash()
+    }
+
+    /// GAP-1 manifest authentication (Phase 10.5 P2 Faz 1). Ed25519 tek-imza.
+    /// `trust_list` = kabul edilen signer pubkey'leri (genesis bundle / CLI).
+    /// AllowUnsigned → her zaman OK (devnet/legacy-import). RequireSigned →
+    /// signer trust-list'te + Ed25519 verify(digest, sig, signer).
+    pub fn verify_authentic(
+        &self,
+        trust_list: &[[u8; 32]],
+    ) -> Result<(), SnapshotAuthError> {
+        if self.trust_policy == SnapshotTrustPolicy::AllowUnsigned {
+            return Ok(());
+        }
+        let signer = self
+            .manifest_signer
+            .ok_or(SnapshotAuthError::MissingSigner)?;
+        let sig = self
+            .manifest_signature
+            .as_ref()
+            .ok_or(SnapshotAuthError::MissingSignature)?;
+        if !trust_list.contains(&signer) {
+            return Err(SnapshotAuthError::UntrustedSigner);
+        }
+        // Digest (hex string) imzalanır — Ed25519 verify.
+        let digest = self.calculate_hash();
+        crate::crypto::primitives::ed25519::verify(&signer, digest.as_bytes(), sig)
+            .map_err(|_| SnapshotAuthError::InvalidSignature)
     }
 
     /// Fallible serialization for the durable snapshot-production path (Phase 0.32):
