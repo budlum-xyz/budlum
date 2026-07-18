@@ -232,18 +232,18 @@ Her bulgu: **Tip · Faz/Modül · Kanıt · Etki · Öneri · Öncelik.**
 
 ### 2.5 Tokenomics / Governance (C12 Holder · C13 Exchange · C15 Governance)
 
-**F10.5-17 🔴 · Governance modülü src/'te YOK (README iddiasıyla ÇELİŞKİ).**
-- **Kanıt:** README "Security posture" — "Governance: validator-only proposals,
-  fee/reward bounds, registry param validation". Ama `grep -rln
-  GovernanceProposal|fn propose src/` → **BOŞ**. `src/governance*` yok.
-- **Etki:** README iddiası **kanıtlanamaz** (sahte-yeşil). C15 governance
-  participant için **oylama/proposal yüzeyi yok**. Parametre değişikliği
-  (RegistryParams, slashing oranları) mekanizması kodda görünmüyor → governance
-  yoksa parametreler nasıl değişiyor? MR-10 (claim hygiene) ihlali.
-- **Öneri:** **ACİL** — README iddiasını düzelt (governance "planlanan" veya
-  mevcut executor içinde nerede olduğunu bul). Kod gerçekten yoksa "governance
-  YOK, parametreler config-gated" dürüst notu. **AÇIK SORU:** governance
-  mimarisi (token-weighted vs validator-only vs config-only) — kullanıcı kararı.
+**F10.5-17 🟢 · Governance crate README'de/crate-haritasında listelenmemiş (docs hygiene).**
+- **⚠ SELF-CORRECTION (2026-07-18, investigate_first):** İlk bu doküman sürümünde
+  bu bulgu "governance modülü src/'te YOK (README iddiasıyla ÇELİŞKİ), 🔴 mainnet-blocker"
+  idi — **YANLIŞTI.** `grep -rln GovernanceProposal|fn propose` (CamelCase) küçük-harfli
+  modülü kaçırdı. Doğrulama: `src/core/governance.rs` MEVCUT — `ProposalType`
+  (ChangeBaseFee/ChangeBlockReward/SlashValidator/ParameterUpdate) + stake-weighted
+  voting + quorum finalize; `executor.rs:190 "governance_proposer_not_validator"`
+  validator-only proposal. **README iddiası DOĞRU.** (Ders notu STATUS_ONLINE.)
+- **Kalan gerçek bulgu (🟢 docs hygiene):** `src/core/governance.rs` README
+  "Architecture" crate-haritasında listelenmemiş. C15 governance participant için
+  kod yüzeyi var ama keşfedilebilir değil. README'de satır eklemek yeterli.
+- **Düzeltme:** README'ye governance crate linki (bu commit).
 
 **F10.5-18 🟡 · Token-holder governance yok (PoS zincirlerinden farklı).**
 - **Kanıt:** C15 tipi için — validator-only proposal (varsa) token holder'ı
@@ -389,7 +389,7 @@ In-tree BudZKVM STARK execution" — Faz 1 attestation, STARK Faz 2. Net olmalı
 | K10.5-5 | **Cross-chain adapter Faz-1 zincirleri (EVM öncelik?)?** | F10 |
 | K10.5-6 | **BNS fiyat modeli (auction/premium/reserved)?** | F14 |
 | K10.5-7 | **BNS trademark/regulated-name koruması + hukuki duruş?** | F15 |
-| K10.5-8 | **Governance mimarisi (token/validator/config-only)?** — README düzeltme ACİL | F17 |
+| K10.5-8 | **Token-holder governance eklenecek mi?** (validator-only mevcut — F17 düzeltildi; F18 açık) | F18 |
 | K10.5-9 | **PoA KYC verifier modeli (3rd-party/attestation)?** | F21 |
 | K10.5-10 | **Bug bounty kapsam/ödül + external firm?** | F29 |
 
@@ -398,7 +398,7 @@ In-tree BudZKVM STARK execution" — Faz 1 attestation, STARK Faz 2. Net olmalı
 ## 5. Sprint önerisi (öncelik sırası — kullanıcı onayına)
 
 **Sprint 10.5-1 (mainnet hijyen + en-kritik boşluklar):**
-- F17/F33 — **governance README düzeltme** (kanıtlanamaz iddia; hygiene, hızlı).
+- F33 — **governance crate README linki** (F17 düzeltildi: governance mevcut, sadece listelenmemiş; hygiene, hızlı).
 - F02/F34/F35 — **sahte-yeşil dokümantasyon netliği** (AccessGrant soft / AI
   attestation / B.U.D. interim) — kod değil, README/docs, CI-güvenli.
 - F29 — **BUG_BOUNTY.md** (MR-8 başlangıç).

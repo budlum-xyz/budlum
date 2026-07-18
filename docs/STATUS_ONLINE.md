@@ -1116,3 +1116,21 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 - `src/tests/ai_rpc_e2e.rs` (veya `src/ai/tests.rs`): 3-aktörlü (Model Sahibi, İstemci, 2+ AiVerifier) tam yaşam döngüsü E2E testi.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+### [2026-07-18 13:21 UTC+3] ARENA1 — Phase 10.5 yayın (çapraz-kesit eksiklik analizi) · F17 self-correction (kendi bulgum kör tespitti)
+
+**Yayın:** `docs/PHASE10.5_CROSS_CUTTING_GAP_ANALYSIS.md` (`b38914f`, CI 12/13 yeşil) — 25 insan tipi (6 kategori), 35 kod-kanıtlı bulgu, 10 kullanıcı kararı, 4 sprint önerisi. Kullanıcı emri: "tüm aşamalardaki tüm insan tipleri açılarıyla eksik/tamamlanmamış bulguları incele". Kapsam: L1/BudZero/B.U.D./BNS/cross_domain/AI/socialfi × validator/miner/storage-op/relayer/prover/data-owner/consumer/AI-verifier/$BUD-holder/governance/BNS/light-client/auditor/regulator/attacker tipleri.
+
+**Sıra kullanıcının kararıyla (sırayı sen belirle):** 6 🔴 mainnet-blocker (F01 owner / F02 soft-enforcement / F06 AI dispute / F10 chain adapter / F27 ceremony / F29 external audit) + 17 🟡. F17 (governance hygiene) ile başlamıştım — **investigate_first kararı bir hatayı yakaladı:**
+
+**⚠ F17 SELF-CORRECTION (kendi bulgum kör tespit — point #6 benim için de işledi):**
+- İlk grep'im `grep -rln GovernanceProposal|fn propose` idi → **BOŞ** → "governance modülü yok" bulgusu (🔴 mainnet-blocker).
+- **YANLIŞ.** `src/core/governance.rs` MEVCUT: `ProposalType` (ChangeBaseFee/ChangeBlockReward/SlashValidator/ParameterUpdate) + `ProposalStatus` (Active/Passed/Failed/Executed) + stake-weighted voting + quorum finalize (`votes_for/votes_against`, `(votes_for+against)*100 >= total_stake*quorum_pct`). Executor.rs:190 "governance_proposer_not_validator" = **validator-only proposal DOĞRU**. README iddiası **kanıtlandı**.
+- **Ders:** CamelCase-specific grep küçük-harfli modülü kaçırdı. Bundan sonra modül-araştırma: `grep -il` (case-insensitive) + `find src -name "*governance*"` + `rg -i`.
+- **Düzeltme:** Phase 10.5 F17 🔴 mainnet-blocker → **geri çekildi**; kalan gerçek bulgu governance'ın README "Architecture"/"Module dashboard" crate haritasında **listelenmemiş** olması (🟢 docs hygiene) + token-holder governance yok (F18 geçerli). Phase 10.5 dokümanı bu düzeltme commit'inde güncelleniyor.
+
+**Sıradaki (kullanıcı 'sırayı sen belirle' dedi):** README governance crate linki (hygiene, CI-güvenli) → sonra gerçek 🔴 bulgulara geçerim (F10 EVM adapter benim domain'im öncelikli aday, F06 AI dispute kritik canlılık). STATUS_ONLINE aktif kullanım kuralına uyuyorum (bu girdi).
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

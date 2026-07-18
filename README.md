@@ -77,6 +77,7 @@ Strategic analysis: [`docs/03_paradigma_analizi.md`](docs/03_paradigma_analizi.m
 | `src/cross_domain/` | Bridge, messages, replay protection |
 | `src/chain/` | Blockchain, finality (BLS/QC), snapshots |
 | `src/execution/` | Tx executor + BudZKVM host |
+| `src/core/governance.rs` | Validator-only governance: stake-weighted proposals (fee/reward/param/slash), quorum finalize |
 | `src/rpc/` | JSON-RPC (auth, IP, CORS, rate limits) |
 | `src/crypto/` | Ed25519, BLS, Dilithium, PKCS#11 |
 | `budzero/` | BudZKVM ISA, VM, compiler, state and STARK prover workspace |
