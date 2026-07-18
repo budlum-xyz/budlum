@@ -12,7 +12,7 @@
 //!   Address deseniyle string-serialize (`core/address.rs:64-73`).
 //! - **B1 (ARENA1 review kararı; revize — kullanıcı scope_v1):** bu `AssetId`
 //!   başlangıçta `crate::bud::marketplace` yolundaydı; kategorizasyon C2 ile
-//!   `crate::bud_marketplace` altına taşındı. `cross_domain::AssetId`
+//!   `crate::pollen` altına taşındı. `cross_domain::AssetId`
 //!   (= `Hash32` alias) dokunulmaz.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

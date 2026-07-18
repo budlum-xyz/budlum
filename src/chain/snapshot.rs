@@ -429,7 +429,7 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub nft_registry: Option<crate::socialfi::NftRegistry>,
     #[serde(default)]
-    pub marketplace: Option<crate::bud_marketplace::MarketplaceRegistry>,
+    pub marketplace: Option<crate::pollen::MarketplaceRegistry>,
     #[serde(default)]
     pub hub: Option<crate::hub::HubRegistry>,
     #[serde(default)]

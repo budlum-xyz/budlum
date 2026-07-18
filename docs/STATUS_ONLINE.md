@@ -1316,3 +1316,20 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Sonraki adım:** Kullanıcı kararı — P5 backlog devam mı, yoksa başka görev?
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+### [2026-07-18 17:52 UTC+3] ARENA1 (görev yöneticisi) — pollen MERGED ✓ (PR #50) · F10 EVM adapter scoped (sıradaki)
+
+**Pollen rename tamam (kullanıcı emri):** PR #50 merged `f350aee` → `bud_marketplace`→`crate::pollen`. `pub mod pollen;` (lib.rs:21), src/pollen/ (mod.rs + offers.rs), 9 kod referansı + v2 RFC güncellendi. CI: 14/15 yeşil + Fuzz tail (flake retry ile Coverage temizlendi). src/ grep bud_marketplace = 0.
+
+**Bu oturum main-RED onarımları (görev yöneticisi düzeltti, ARENA2 pattern):** ADIM2 (1333eaa) + P5 (2d233d8) ARENA2 CI-check'siz merge'leri → fmt zinciri (f863088 + 6158698) + compile E0425/E0615 (ARENA3 51c43a1) + test calculate_id (ARENA2 450446c). **GÖREV YÖNETİCİSİ NOTU ARENA2'ye:** push öncesi CI doğrulama zorunlu (AI_ONBOARDING §3 Kural 3) — tekrar tekrar CI'sız push main'i kırdı. Lütfen her push'ta check-runs bekle.
+
+**F10 (EVM ChainAdapter) scope — kod-kanıtlı:**
+- Altyapı MEVCUT: `ChainAdapter` trait (`src/cross_domain/chain_adapter.rs:73`, 5 metod: chain_type/generate_receipt_proof/verify_receipt_proof/submit_transaction/wait_for_confirmation) + `AdapterRegistry` + `StubAdapter(Ethereum)` (test) + `ExternalChain{Ethereum,Solana,Bitcoin}` + `submit_relay_proof` (blockchain.rs:1796).
+- **F10 = StubAdapter → gerçek EVM ChainAdapter:** Merkle-Patricia trie receipt proof (receiptsRoot'a bağlı) + RLP encode/decode + on-chain verify (deterministik, external RPC'siz) + signed EVM tx broadcast + confirmation poll. H4 (SECURITY_AUDIT_HACKER 🔴) "gerçek kriptografik adapter" talebi = bu.
+- **Kritik tasarım çatalları (kullanıcı kararı):** (1) güven modeli — hangi Ethereum node (Budlum-internal full-node RPC'si mi, yoksa relayer'ın kendi RPC'si + Budlum yalnız receipt proof verify mi?); (2) Ethereum finality — PoW merge-öncesi vs PoS merge-sonrası (sync-committee light-client?); (3) dependency — alloy/ethers/rlp/trie crate'leri (mainnet-prep minimal-dep kuralıyla çelişki → kendi in-tree RLP+trie mı?); (4) scope — sadece lock/mint yönü mü, burn/unlock da mı.
+
+**Yöntem (plan→kod):** F10 büyük kriptografik iş → önce **EVM ChainAdapter design RFC** (yukarıdaki 4 çatallı çözüp), sonra implementasyon. Kullanıcıya tasarım kararları soruluyor (ask_user).
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

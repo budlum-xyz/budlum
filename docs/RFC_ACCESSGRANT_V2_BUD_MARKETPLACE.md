@@ -168,11 +168,11 @@ Mevcut 9 uç davranışı korunur (B.U.D. invariant kapısı `B.U.D. E2E Invaria
 | `bud_dataAssetRegister` | DataAsset+StorageCommitment kaydı | node sig + owner onayı |
 | `bud_dataAssetGet` | — | — |
 | `bud_saleAuthorizationSubmit` | SaleAuthorization kaydı | owner_signature |
-| `bud_marketplaceList` | listing = authorization bağlama | auth içinde |
+| `bud_pollenList` | listing = authorization bağlama | auth içinde |
 | `bud_accessGrantSubmit` | manuel grant | owner_signature |
 | `bud_accessGrantConsume` | once_consumed yazımı (K4) | consumer + grant bütünlüğü |
 | `bud_accessGrantRevoke` | revocation | owner_signature |
-| `bud_marketplacePurchase` | ödeme → auto-grant (K5) | buyer imzası + auth tüketimi |
+| `bud_pollenPurchase` | ödeme → auto-grant (K5) | buyer imzası + auth tüketimi |
 | `bud_accessGrantQuery` | — | — |
 
 ## §8. Fazlar
@@ -184,7 +184,7 @@ Mevcut 9 uç davranışı korunur (B.U.D. invariant kapısı `B.U.D. E2E Invaria
 
 Pozitif: register→list→purchase→auto-grant→consume akışı · manuel grant roundtrip · schema-4 snapshot roundtrip (alanların digest'e girdiği kanıtlı).
 Negatif: sahte grant (imza uydurma) RED · boş-sentinel imza RED · kapsam-dışı scope_version RED · ikinci ReadOnce RED · yanlış allowed_buyer RED · replay nonce RED · revocation sonrası consume RED · `[u8;32]` ham-key serialize girişimi derleme/roundtrip güvenlik testiyle YAKALANIR.
-Gate: `src/tests/bud_marketplace.rs` + `scripts/check-bud-marketplace.sh` (isim-kilitli, vacuous kanaryalı — B.U.D./BNS deseni) + ayrı CI job + korumaya ekleme.
+Gate: `src/tests/pollen.rs` + `scripts/check-bud-marketplace.sh` (isim-kilitli, vacuous kanaryalı — B.U.D./BNS deseni) + ayrı CI job + korumaya ekleme.
 
 ## §10. Uygulama planı (P0-deseni: plan onayı → kod; tek atomik PR'lar)
 
@@ -194,7 +194,7 @@ Gate: `src/tests/bud_marketplace.rs` + `scripts/check-bud-marketplace.sh` (isim-
 | P1 | §3.2 primitifler + imza-doğrulama yardımcıları (canlı AccountState'e BAĞLI) | yeni ARENA1 + ARENA3 review | negatif matris |
 | P2 | §3.3/§4 snapshot+root genişletme (GAP-2 kapsamıyla TEK PR — koordineli) | ARENA3 + yeni ARENA2 | pin testleri |
 | P3 | §7 RPC uçları (imza şartlı) | yeni ARENA2 (rpc domain) | gate script |
-| P4 | bud_marketplace test suite + CI gate + koruma eklentisi | ARENA3 | 16→17 check |
+| P4 | pollen test suite + CI gate + koruma eklentisi | ARENA3 | 16→17 check |
 | P5 | AI Verifier grant-check entegrasyonu (Bölüm 1; grantee_role_constraint) | yeni ARENA2 | ayrı RFC |
 
 ## §11. Açık sorular (gözden geçirenler için)
