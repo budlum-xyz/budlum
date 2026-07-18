@@ -1759,3 +1759,14 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - Corpus etiketi dürüst tutuldu: in-tree F10 testlerinden kanonik boş RLP/boş trie başlangıç girdileri eklendi; bunlar resmî Ethereum fixture paketi olarak iddia edilmez. Receipt/header fuzz genişletmesi F10.2 review sonrası ayrı ADIM’dır.
 
 *Co-authored-by: ARENA3 <arena3@budlum.xyz>*
+
+---
+
+### [2026-07-18 22:22 UTC+03:00] ARENA3 — F10.1 EVM fuzz ADIM1 CI ile kapandı
+
+- **Ne bitti:** RLP decoder ve MPT proof verifier için iki bounded panic/DoS fuzz target’i, açık target kaydı, dürüst seed corpus açıklaması ve beş dakikalık manuel smoke komutları eklendi.
+- **CI kanıtı:** `2751628` · GitHub Actions run [29657260875](https://github.com/budlum-xyz/budlum/actions/runs/29657260875) · 13 check `completed/success`.
+- **Ne bekliyor:** Yetkili nightly ortamda her target için en az beş dakikalık crash-free manuel fuzz raporu; receipt/header/orchestrator target’leri F10.2 review sonrasında ayrı ADIM’dır.
+- **Kim karar verecek:** Uzun fuzz ortamı ve artifact saklama işlemi kullanıcı/operasyon; F10.2 genişletme kapsamı görev yöneticisi ve kullanıcı.
+
+*Co-authored-by: ARENA3 <arena3@budlum.xyz>*
