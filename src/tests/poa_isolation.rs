@@ -40,11 +40,15 @@ mod poa_isolation_tests {
             "PoA member should NOT be active as a permissionless validator without stake"
         );
         assert!(
-            !perm_state.registry.is_active(&poa_member, roles::STORAGE_OPERATOR),
+            !perm_state
+                .registry
+                .is_active(&poa_member, roles::STORAGE_OPERATOR),
             "PoA member should NOT be active as a storage operator without stake"
         );
         assert!(
-            !perm_state.registry.is_active(&poa_member, roles::AI_VERIFIER),
+            !perm_state
+                .registry
+                .is_active(&poa_member, roles::AI_VERIFIER),
             "PoA member should NOT be active as an AI verifier without stake"
         );
     }
@@ -73,7 +77,11 @@ mod poa_isolation_tests {
 
         // Active validators listesinde sadece permissionless validator olmalı
         let active = perm_state.get_active_validators();
-        assert_eq!(active.len(), 1, "Only permissionless validator should be in active set");
+        assert_eq!(
+            active.len(),
+            1,
+            "Only permissionless validator should be in active set"
+        );
         assert_eq!(active[0], permissionless_validator);
 
         // PoA üyesi active validators listesinde olmamalı
@@ -116,7 +124,10 @@ mod poa_isolation_tests {
         );
 
         // Mesaj sadece hash taşır, ham veri değil
-        assert_ne!(message.payload_hash, [0u8; 32], "Payload hash should be present");
+        assert_ne!(
+            message.payload_hash, [0u8; 32],
+            "Payload hash should be present"
+        );
     }
 
     /// Senaryo 4: Log Leak — PoA bilgisi zincir verilerinde sızdırılmamalı.

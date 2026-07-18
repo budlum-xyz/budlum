@@ -50,9 +50,9 @@ pub mod migration_v2;
 pub mod permissionless;
 #[cfg(test)]
 pub mod permissionless_e2e;
-pub mod poa_isolation;
 #[cfg(test)]
 pub mod persistence;
+pub mod poa_isolation;
 #[cfg(test)]
 pub mod pow_light_client;
 #[cfg(test)]
