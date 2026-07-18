@@ -384,7 +384,7 @@ dependencies = [
  "p3-goldilocks",
  "p3-keccak",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.6.1",
  "p3-merkle-tree",
  "p3-symmetric",
  "p3-uni-stark",
@@ -2250,7 +2250,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8972ccd1d5dc90e46cdb1f2ab4ee2bae49b3917e5e98aa533f0c2b779c010445"
 dependencies = [
  "p3-field",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-monty-31",
  "p3-symmetric",
  "p3-util",
@@ -2281,7 +2281,7 @@ dependencies = [
  "itertools",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-util",
  "spin 0.10.0",
  "tracing",
@@ -2295,7 +2295,7 @@ checksum = "6f3eb24d0591fd4d282d89cbe4e4efba5571c699375006f80b2cbf53ce83461c"
 dependencies = [
  "itertools",
  "num-bigint",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-util",
  "paste",
  "rand 0.10.1",
@@ -2316,7 +2316,7 @@ dependencies = [
  "p3-field",
  "p3-interpolation",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-util",
  "rand 0.10.1",
  "serde",
@@ -2353,7 +2353,7 @@ checksum = "14fd48db63ff15f5e96dc46e6991dbc2d39431b82dcb154bad90f4579236e328"
 dependencies = [
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-util",
 ]
 
@@ -2376,7 +2376,7 @@ checksum = "ea9c94c0714944e7b8a9a62e6340b1e3e1d3f8ecfd3e35c08798360200e73eff"
 dependencies = [
  "itertools",
  "p3-field",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-util",
  "rand 0.10.1",
  "serde",
@@ -2388,6 +2388,12 @@ name = "p3-maybe-rayon"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eebc233a34b1ab0273f35b4052fa2eeb3114b22ba4575bd7da00716e878ffb77"
+
+[[package]]
+name = "p3-maybe-rayon"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49c17330c94d04221bafe310d2c13afedd9d26bb57a63ec088b68b6cfe64b357"
 
 [[package]]
 name = "p3-mds"
@@ -2412,7 +2418,7 @@ dependencies = [
  "p3-commit",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-symmetric",
  "p3-util",
  "rand 0.10.1",
@@ -2432,7 +2438,7 @@ dependencies = [
  "p3-dft",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-mds",
  "p3-poseidon1",
  "p3-poseidon2",
@@ -2493,7 +2499,7 @@ dependencies = [
  "p3-commit",
  "p3-field",
  "p3-matrix",
- "p3-maybe-rayon",
+ "p3-maybe-rayon 0.5.3",
  "p3-util",
  "serde",
  "thiserror 2.0.18",
