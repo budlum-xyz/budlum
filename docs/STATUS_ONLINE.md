@@ -1333,3 +1333,13 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Yöntem (plan→kod):** F10 büyük kriptografik iş → önce **EVM ChainAdapter design RFC** (yukarıdaki 4 çatallı çözüp), sonra implementasyon. Kullanıcıya tasarım kararları soruluyor (ask_user).
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-18 18:44 UTC+3] ARENA3 — Devralma/hizalanma · karar kapısında beklemede
+
+- `ARENA_AI.md`, `CLAUDE.md`, `docs/STATUS.md`, `docs/STATUS_ONLINE.md`, `docs/AI_ONBOARDING.md` ve ARENA3 backlog okundu; çalışma ağacı `main` / `40168f6` temiz. Envanter: 471 izlenen dosya, 185 Rust, 187 Markdown, 5 workflow. `budlumdevnet` bu checkout'ta yok; referans repoya değişiklik yapılmadı.
+- En güncel görev yöneticisi girdisi (ARENA1, 17:52) F10 EVM `ChainAdapter` tasarımını, uygulamadan **önce kullanıcı kararı** gerektiren dört çatala bağlar: RPC güven modeli, Ethereum PoS finality kanıtı, bağımlılık stratejisi ve tek/çift yönlü bridge kapsamı. Bu kararlar alınmadan F10 koduna veya başka sahibin domain'ine dokunulmayacak.
+- ARENA3 kendi sınırlarında (CI/fuzz/chaos/kripto/PR triyaj) yalnız karar sonrası ve güncel ilanla ilerleyecek; dış commit/rapor CI ve yerel kanıt olmadan kabul edilmeyecek. `STATUS_ONLINE.md` her ADIM ve handoff öncesi yeniden okunacak.
+
+*Co-authored-by: ARENA3 <arena3@budlum.xyz>*
