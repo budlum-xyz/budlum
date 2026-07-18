@@ -1,13 +1,12 @@
 //! P0 mainnet-gap (ARENA3, 2026-07-19): snapshot-corruption + crash-recovery
 //! kaos süiti. Üçüncü P0 hattı ("hepsine başla": crash-recovery + snapshot-chaos).
 //!
-//! İki sınıf pin vardır:
-//!  * POZİTİF pinler: integrity/quarantine/fallback davranışının bugün
-//!    doğru çalıştığını mühürler.
-//!  * GAP pinleri: bugünkü davranışı BİLEREK doğrular; adı `_gap` ile biter.
-//!    Ürün düzeltmesi (snapshot imzası / hash kapsam genişlemesi / boot
-//!    fail-loud) emirle geldiğinde bu testler TERS ÇEVRİLİR. Ayrıntı:
-//!    docs/STATUS_ONLINE.md (2026-07-19 girdisi).
+//! GAP-3 (boot sessiz-yutma) ve GAP-4 (çapraz-şema gölgeleme) 2026-07-19'da
+//! KAPANDI (ARENA3, a3_all emri): loader'lar karantina-sonrası eski adaya düşer,
+//! v1 probe'u v2 dosyasını ISKART eder (karantinasız), boot Err'de fail-loud
+//! loglar. Kalan GAP pinleri: GAP-1 (authenticity — imza fazi) +
+//! GAP-2 (hash kapsamı — versiyonlu genişletme, halefle koordineli);
+//! `_gap` testleri o fazlarda TERS ÇEVRİLİR.
 
 #[cfg(test)]
 mod tests {
@@ -228,8 +227,14 @@ mod tests {
         let raw = std::fs::read_to_string(&newer_file).expect("read");
         std::fs::write(&newer_file, &raw[..raw.len() / 2]).expect("truncate");
 
-        let first = pm.load_latest_snapshot_v2();
-        assert!(first.is_err(), "yarım dosya parse edilememeli");
+        // GAP-3 onarımı sonrası: TEK çağrı yeterli — loader yarım dosyayı
+        // karantinalayıp eski-geçerli adaya kendi içinde düşer.
+        let first = pm
+            .load_latest_snapshot_v2()
+            .expect("older'a düşmeli")
+            .expect("older present");
+        assert_eq!(first.height, 10);
+        assert_eq!(first.balances.values().next().copied(), Some(700));
         assert!(
             dir.path()
                 .join("snaps")
@@ -237,68 +242,58 @@ mod tests {
                 .exists(),
             "yarim dosya karantinada tasinmali"
         );
-
-        // Karantinadan sonra bir SONRAKİ deneme .corrupted uzantıyı filtreler
-        // ve eski ama sağlam snapshot'ı bulur (resilience pin).
-        let second = pm
-            .load_latest_snapshot_v2()
-            .expect("second load ok")
-            .expect("older present");
-        assert_eq!(second.height, 10);
-        assert_eq!(second.balances.values().next().copied(), Some(700));
     }
 
-    // ── 5) Çapraz-şema gölgeleme (GAP): v1 yükleyici v2 dosyasını karantinalar ─
-    // v1 fallback (load_latest_snapshot) dosya uzantısına bakar; v2 dosyası da
-    // ".json" olduğundan v1 olarak parse edilir, v1-hash uyuşmaz → GEÇERLİ v2
-    // dosyası v1 probe'u sırasında karantinaya gider (yan etki), eski v1 dosyası
-    // gölgede kalır. İkinci çağrı kendi kendine iyileşir.
+    // ── 5) Çapraz-şema (GAP-4 KAPANDI): v1 loader v2 dosyasını ıskart eder ──
+    // Onarım öncesi: v1 probe'u geçerli v2 dosyasını karantinalardı. Onarım
+    // sonrası pin: v1 loader "schema_version" sniffing ile v2'yi KARANTİNASIZ
+    // atlar ve doğrudan gerçek v1 dosyasını döndürür.
     #[test]
-    fn test_snapshot_v1_loader_shadowed_by_v2_file_gap() {
+    fn test_snapshot_v1_loader_skips_v2_without_quarantine() {
         let dir = tempdir().expect("tempdir");
         let snaps = snap_dir_of(&dir);
         let pm = PruningManager::new(10, 10, snaps);
 
         let alice = Address::from([0xA1; 32]);
         let v1_state = funded_state(&alice, 700);
-        let v1_snap =
-            StateSnapshot::from_state(10, "dd".repeat(32), 1337, &v1_state, 10, "ee".repeat(32));
-        let v2_snap =
-            StateSnapshotV2::from_state(&funded_state(&alice, 1_000), params_v2(20, 1337));
+        let v1_snap = StateSnapshot::from_state(
+            10,
+            "dd".repeat(32),
+            1337,
+            &v1_state,
+            10,
+            "ee".repeat(32),
+        );
+        let v2_snap = StateSnapshotV2::from_state(
+            &funded_state(&alice, 1_000),
+            params_v2(20, 1337),
+        );
         pm.save_snapshot(&v1_snap).expect("save v1");
         pm.save_snapshot_v2(&v2_snap).expect("save v2");
 
-        // GAP PIN 1: v1 yükleme, en-yeni ".json" = v2 dosyasını seçer ve
-        // v1-integrity altında reddedip karantinalar (geçerli v2 kaybı!).
-        let first = pm.load_latest_snapshot();
-        assert!(first.is_err(), "v1 probe v2 dosyasını reddeder");
+        // PIN 1: tek çağrıda doğrudan v1 h10 döner (v2 ıskart edilir).
+        let loaded = pm.load_latest_snapshot().expect("ok").expect("v1 present");
+        assert_eq!(loaded.height, 10);
+        assert_eq!(loaded.balances.values().next().copied(), Some(700));
+
+        // PIN 2: geçerli v2 dosyası YERİNDE kalır (karantina YOK — GAP-4 giderildi).
+        assert!(dir.path().join("snaps").join("snapshot_20.json").exists());
         assert!(
-            dir.path()
+            !dir
+                .path()
                 .join("snaps")
                 .join("snapshot_20.json.corrupted")
                 .exists(),
-            "GAP: geçerli v2 dosyası v1 probe'unda karantinalandı"
+            "GAP-4 giderildi: v2 dosyasi karantinalanmamali"
         );
-
-        // PIN 2: ikinci denemede gölgedeki v1 dosyası bulunur (self-heal).
-        let second = pm
-            .load_latest_snapshot()
-            .expect("second ok")
-            .expect("v1 present");
-        assert_eq!(second.height, 10);
-        assert_eq!(second.balances.values().next().copied(), Some(700));
     }
 
-    // ── 6) Boot entegrasyonu (GAP): bozuk-latest → sessiz, KALICI rollback ─
-    // blockchain.rs boot zinciri (KANITLI DAVRANIŞ):
-    //  a) load_latest_snapshot_v2 Err'i `if let Ok(..)` ile yutulur;
-    //  b) v1 fallback probe'u aynı dizinde kalan geçerli V2 dosyasını v1-hash
-    //     uyuşmazlığından KARANTİNALAR (GAP-4 çapraz-şema, canlı);
-    //  c) sonuç: TEK yarım dosya + TEK boot = İKİ snapshot da imha,
-    //     state genesis'e döner; self-heal YOK (pm-seviyesindeki self-heal
-    //     sadece aynı-API tekrar çağrısında geçerli — boot o yolu yürümez).
+    // ── 6) Boot entegrasyonu (GAP-3 KAPANDI): bozuk-latest → tek boot self-heal ─
+    // Onarım öncesi: bozuk-latest Err'i yutulur + v1 probe'u geçerli v2'yi
+    // karantinalardı → kalıcı sessiz rollback. Onarım sonrası: loader B'yi
+    // karantinalayıp A'ya düşer; boot fail-loud loglar; TEK boot'ta iyileşir.
     #[test]
-    fn test_boot_corrupt_latest_permanent_rollback_gap() {
+    fn test_boot_corrupt_latest_quarantine_self_heal() {
         let dir = tempdir().expect("tempdir");
         let db_path = dir.path().join("boot.db");
         let db_str = db_path.to_str().unwrap();
@@ -309,7 +304,12 @@ mod tests {
         let mut snap_height_b = 0u64;
         {
             let storage = open_storage_bounded(db_str);
-            let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+            let mut bc = Blockchain::new(
+                Arc::new(PoWEngine::new(0)),
+                Some(storage),
+                1337,
+                None,
+            );
             bc.state.base_fee = 0;
             bc.mempool.set_min_fee(0);
 
@@ -317,7 +317,10 @@ mod tests {
             let _ = bc.produce_block(zero); // tip 1
             snap_height_a = bc.last_block().index;
             let pm = PruningManager::new(10, 10, snap_dir_of(&dir));
-            let snap_a = StateSnapshotV2::from_state(&bc.state, params_v2(snap_height_a, 1337));
+            let snap_a = StateSnapshotV2::from_state(
+                &bc.state,
+                params_v2(snap_height_a, 1337),
+            );
             pm.save_snapshot_v2(&snap_a).expect("save A");
 
             bc.state.add_balance(&alice, 300); // 1000
@@ -334,16 +337,15 @@ mod tests {
             std::fs::write(&file_b, &raw[..raw.len() / 2]).expect("truncate B");
         }
 
-        // BOOT 1 (GAP): bozuk-B Err'i yutulur; v1 probe'u geçerli A dosyasını
-        // da karantinalar → state genesis'e döner (sessiz rollback).
+        // BOOT 1 (onarım sonrası): B karantinalanır, A yüklenir → alice=700.
         {
             let storage = open_storage_bounded(db_str);
             let pm = PruningManager::new(10, 10, snap_dir_of(&dir));
             let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, Some(pm));
             assert_eq!(
                 bc.state.get_balance(&alice),
-                0,
-                "GAP: bozuk-latest varken eski-gecerli v2 denenmez (sessiz rollback)"
+                700,
+                "loader eski-gecerli A'ya dustu (tek boot self-heal)"
             );
             assert!(
                 dir.path()
@@ -355,22 +357,21 @@ mod tests {
             assert!(
                 dir.path()
                     .join("snaps")
-                    .join(format!("snapshot_{snap_height_a}.json.corrupted"))
+                    .join(format!("snapshot_{snap_height_a}.json"))
                     .exists(),
-                "GAP-4 canli: gecerli A da v1 probe'unda karantinalandi"
+                "A karantinasiz yerinde kalmali"
             );
         }
 
-        // BOOT 2 (GAP): self-heal YOK — iki snapshot da imha edildi, zincir
-        // replay'de alice tx'i olmadığından state kalıcı olarak genesis'te.
+        // BOOT 2: A hâlâ geçerli → yine 700 (kalıcı iyileşme).
         {
             let storage = open_storage_bounded(db_str);
             let pm = PruningManager::new(10, 10, snap_dir_of(&dir));
             let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, Some(pm));
             assert_eq!(
                 bc.state.get_balance(&alice),
-                0,
-                "GAP: kalici kayip — self-heal yok (dokuman pin)"
+                700,
+                "ikinci boot da A'dan iyilesir"
             );
         }
     }

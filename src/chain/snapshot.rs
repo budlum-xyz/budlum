@@ -184,26 +184,56 @@ impl PruningManager {
         snapshots.sort_by_key(|entry| {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
-        let latest_path = snapshots[0].path();
-        let data = fs::read_to_string(&latest_path)
-            .map_err(|e| format!("Failed to read snapshot: {e}"))?;
-        let snapshot: StateSnapshot = match serde_json::from_str(&data) {
-            Ok(s) => s,
-            Err(e) => {
-                let mut quarantine_path = latest_path.clone();
-                quarantine_path.set_extension("json.corrupted");
-                let _ = fs::rename(&latest_path, &quarantine_path);
-                return Err(format!("Failed to parse snapshot: {e}"));
+        // GAP-3/GAP-4 onarımı (2026-07-19, ARENA3): tek-şans yüklemesi kaldırıldı —
+        // bozuk aday karantinaya gider ve bir SONRAKİ eski aday denenir; V2-şema
+        // dosyalar ("schema_version") v1 probe'unda karantinasız ISKART edilir
+        // (çapraz-şema gölgeleme giderildi: geçerli V2 artık imha edilmiyor).
+        let mut quarantined_any = false;
+        for entry in &snapshots {
+            let path = entry.path();
+            let data = match fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if data.contains("\"schema_version\"") {
+                tracing::warn!(
+                    "V1 loader V2-schema dosyasini atliyor (karantina YOK): {}",
+                    path.display()
+                );
+                continue;
             }
-        };
-        if !snapshot.verify() {
-            let mut quarantine_path = latest_path.clone();
-            quarantine_path.set_extension("json.corrupted");
-            let _ = fs::rename(&latest_path, &quarantine_path);
-            return Err("Snapshot integrity check failed".to_string());
+            let snapshot: StateSnapshot = match serde_json::from_str(&data) {
+                Ok(s) => s,
+                Err(e) => {
+                    let mut quarantine_path = path.clone();
+                    quarantine_path.set_extension("json.corrupted");
+                    let _ = fs::rename(&path, &quarantine_path);
+                    quarantined_any = true;
+                    tracing::error!(
+                        "Bozuk V1 snapshot karantinaya alindi, eski aday deneniyor: {} ({e})",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            if !snapshot.verify() {
+                let mut quarantine_path = path.clone();
+                quarantine_path.set_extension("json.corrupted");
+                let _ = fs::rename(&path, &quarantine_path);
+                quarantined_any = true;
+                tracing::error!(
+                    "Integrity-bozuk V1 snapshot karantinaya alindi, eski aday deneniyor: {}",
+                    path.display()
+                );
+                continue;
+            }
+            println!("Loaded snapshot at height {}", snapshot.height);
+            return Ok(Some(snapshot));
         }
-        println!("Loaded snapshot at height {}", snapshot.height);
-        Ok(Some(snapshot))
+        if quarantined_any {
+            return Err("Tum V1 snapshot adaylari bozuk (karantinalandi)".to_string());
+        }
+        Ok(None)
     }
 
     pub fn save_snapshot_v2(&self, snapshot: &StateSnapshotV2) -> Result<(), String> {
@@ -251,27 +281,49 @@ impl PruningManager {
         snapshots.sort_by_key(|entry| {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
-        let latest_path = snapshots[0].path();
-        let data = fs::read_to_string(&latest_path)
-            .map_err(|e| format!("Failed to read snapshot: {e}"))?;
-        let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
-            Ok(s) => s,
-            Err(e) => {
-                let mut quarantine_path = latest_path.clone();
+        // GAP-3 onarımı (2026-07-19, ARENA3): tek-şans yüklemesi kaldırıldı —
+        // bozuk aday karantinaya gider ve bir sonraki eski aday denenir.
+        let mut quarantined_any = false;
+        for entry in &snapshots {
+            let path = entry.path();
+            let data = match fs::read_to_string(&path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
+                Ok(s) => s,
+                Err(e) => {
+                    let mut quarantine_path = path.clone();
+                    quarantine_path.set_extension("json.corrupted");
+                    let _ = fs::rename(&path, &quarantine_path);
+                    quarantined_any = true;
+                    tracing::error!(
+                        "Bozuk V2 snapshot karantinaya alindi, eski aday deneniyor: {} ({e})",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            if !snapshot.verify() {
+                let mut quarantine_path = path.clone();
                 quarantine_path.set_extension("json.corrupted");
-                let _ = fs::rename(&latest_path, &quarantine_path);
-                return Err(format!("Failed to parse snapshot V2: {e}"));
+                let _ = fs::rename(&path, &quarantine_path);
+                quarantined_any = true;
+                tracing::error!(
+                    "Integrity-bozuk V2 snapshot karantinaya alindi, eski aday deneniyor: {}",
+                    path.display()
+                );
+                continue;
             }
-        };
-        if !snapshot.verify() {
-            let mut quarantine_path = latest_path.clone();
-            quarantine_path.set_extension("json.corrupted");
-            let _ = fs::rename(&latest_path, &quarantine_path);
-            return Err("Snapshot V2 integrity check failed".to_string());
+            println!("Loaded snapshot V2 at height {}", snapshot.height);
+            return Ok(Some(snapshot));
         }
-        println!("Loaded snapshot V2 at height {}", snapshot.height);
-        Ok(Some(snapshot))
+        if quarantined_any {
+            return Err("Tum V2 snapshot adaylari bozuk (karantinalandi)".to_string());
+        }
+        Ok(None)
     }
+
 }
 
 fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {

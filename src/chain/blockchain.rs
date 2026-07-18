@@ -253,8 +253,17 @@ impl Blockchain {
         let mut restored_finalized_hash = chain_vec[0].hash.clone();
 
         if let Some(ref pm) = pruning_manager {
+            // GAP-3 onarımı (2026-07-19, ARENA3): yükleme hatası artık yutulmuyor —
+            // fail-loud error! log (karantina detaylı). Loader kendi içinde eski
+            // adaylara düşer; Err ancak TÜM adaylar bozuksa gelir.
+            let v2_load = pm.load_latest_snapshot_v2();
+            if let Err(ref e) = v2_load {
+                error!(
+                    "V2 snapshot yukleme basarisiz (FAIL-LOUD): {e}. Genesis/DB state ile devam ediliyor — operator mudahalesi onerilir!"
+                );
+            }
             // Try V2 snapshot first, fall back to V1
-            let v2_loaded = if let Ok(Some(v2_snapshot)) = pm.load_latest_snapshot_v2() {
+            let v2_loaded = if let Ok(Some(v2_snapshot)) = v2_load {
                 if v2_snapshot.chain_id == chain_id {
                     state = crate::core::account::AccountState::from_snapshot_v2(&v2_snapshot);
                     snapshot_height = v2_snapshot.height;
@@ -277,7 +286,13 @@ impl Blockchain {
             };
 
             if !v2_loaded {
-                if let Ok(Some(snapshot)) = pm.load_latest_snapshot() {
+                let v1_load = pm.load_latest_snapshot();
+                if let Err(ref e) = v1_load {
+                    error!(
+                        "V1 snapshot yukleme basarisiz (FAIL-LOUD): {e}. Genesis/DB state ile devam ediliyor!"
+                    );
+                }
+                if let Ok(Some(snapshot)) = v1_load {
                     if snapshot.chain_id == chain_id {
                         for (addr, balance) in &snapshot.balances {
                             let acc = state.get_or_create(addr);

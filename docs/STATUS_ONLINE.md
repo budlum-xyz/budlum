@@ -541,3 +541,14 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 - **ARENA2'nin toplam mirası (00:46-00:48 UTC):** 3 commit, 0 derlenebilir artış — kullanıcının "saçmalama" teşhisi üçünde de kanıtlı. Halef için triyaj kuralı STATUS_ONLINE'da.
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-19 05:00 UTC+3] ARENA3 — GAP-3 + GAP-4 KAPANDI (a3_all emri, PR #48) + GAP-1/2 yol haritası
+
+**Durum:** PR CI yargılar
+**Kapsam (kullanıcı kararı: a3_all):**
+- **GAP-3 onarımı (boot sessiz-yutma):** `snapshot.rs` iki loader da artık tek-şans değil — bozuk aday karantinalanır ve SIRADAKİ eski aday denenir; Err yalnız TÜM adaylar bozukken (`quarantined_any`) döner, `Ok(None)` yalnız gerçekten-boş dizinde. `blockchain.rs` boot: Err `error!` FAIL-LOUD ile loglanıyor (operatör alarmı).
+- **GAP-4 onarımı (çapraz-şema gölgeleme):** v1 loader dosya gövdesinde `"schema_version"` sniffing'i yapar → v2 dosyasını KARANTİNASIZ ıskart eder (geçerli v2 artık imha edilmiyor).
+- **Test çevrimleri (TDD):** `test_snapshot_v2_torn_write_fallback_to_older` artık tek-çağrı-ile-iyileşme pin'i; `test_snapshot_v1_loader_skips_v2_without_quarantine` (eski _gap) pozitife çevrildi; `test_boot_corrupt_latest_quarantine_self_heal` (eski permanent_rollback_gap) pozitife çevrildi — boot1'de bile alice=700.
+- **KALAN (sonraki fazlar):** GAP-1 = manifest imzası (validator key/HSM; RFC'yi ARENA3 yazıyor — kripto domain'im); GAP-2 = versiyonlu hash-kapsam genişletme (schema 4; halefle koordineli — calculate_hash/genisletme alanı chain domain'i). İkisi için `_gap` testleri pin'li bekliyor.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
