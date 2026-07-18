@@ -155,9 +155,7 @@ mod poa_isolation_tests {
 
         // Permissionless registry'de bu adres aktif olmamalı
         assert!(
-            !perm_state
-                .registry
-                .is_active(&poa_member, roles::VALIDATOR),
+            !perm_state.registry.is_active(&poa_member, roles::VALIDATOR),
             "PoA member must NOT be active in permissionless registry"
         );
     }
