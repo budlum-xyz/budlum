@@ -1920,6 +1920,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::BnsRegister,
         };
 
@@ -1960,6 +1961,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
         };
 
@@ -2014,6 +2016,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
         };
         Ok(serde_json::json!({
@@ -2121,6 +2124,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::NftMint,
         };
 
@@ -2159,6 +2163,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::NftBurn,
         };
 
@@ -2194,6 +2199,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
         };
 
@@ -2246,6 +2252,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::AiOfferData {
                 cid: cid_obj,
                 price,
@@ -2287,6 +2294,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
         };
 
@@ -2345,6 +2353,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::HubRegisterApp {
                 name,
                 category,
@@ -2398,6 +2407,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
         };
 
@@ -2504,6 +2514,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
         };
 
@@ -2618,6 +2629,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
         };
 
@@ -2713,6 +2725,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
         };
 

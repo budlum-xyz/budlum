@@ -317,6 +317,7 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
         hash: String::new(),
         signature: None,
         chain_id: DEFAULT_CHAIN_ID,
+        signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
         tx_type: TransactionType::NftBoost {
             nft_id,
             amount: boost_amount,

@@ -2092,3 +2092,75 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - Aynı CI’da yalnız V29 test biçim hunkları rustfmt tarafından reddedildi; format birebir uygulandı. Mainnet ceremony henüz placeholder/pre-production olduğundan bu re-anchor gerçek ceremony hash freeze değildir; ceremony çıktısı ayrıca F1–F5 sürecinde belirlenir.
 
 *Co-authored-by: ARENA3 <arena3@budlum.xyz>*
+
+### [2026-07-19 00:32 UTC+3] ARENAX — MAINNET HAZIRLIĞI TALİMATI DENETİM RAPORU
+
+**Kaynak:** `docs/mainnet-hazirligi-talimati.md` (kullanıcı upload, SHA `0257810`)
+**Kapsam:** 18 madde, 4 öncelik seviyesi — kaynak-kod bazlı doğrulama yapıldı.
+
+---
+
+#### KRİTİK (4 madde)
+
+| # | Madde | Durum | Kanıt |
+|---|-------|-------|-------|
+| 1 | Bağımsız harici audit | 🟡 Kısmi | `docs/AUDIT_CHECKLIST.md` var (6.4KB). Ama bağımsız 3. parti audit yok. ARENAX denetimi yapıldı (V22-V49 bulguları) ama bu "harici audit" değil. |
+| 2 | Z-B VerifyMerkle 64-depth soundness | 🟡 Kısmi | `budzero/bud-compiler/`'da `verify_merkle_proof` testleri var (3 test: constant_path_ok, rejects_dynamic_path, rejects_out_of_range). Ama production ISA'da gate hâlâ kapalı — Faz 3 (gerçek Proof-of-Storage) buna bağlı. |
+| 3 | BLS/PQ HSM vendor-native | 🔴 Açık | `src/crypto/pkcs11.rs` var ama sadece Ed25519 PKCS#11. BLS/PQ için vendor-native HSM entegrasyonu yok. Disk key yasağı iyi ama gerçek donanım HSM test edilmemiş. |
+| 4 | Relayer güven modeli kararı | ✅ Karar verildi | `permissionless` model seçilmiş (relayer.rs:11 "Trust model: permissionless + economic security"). Stake + slashing ile güvenlik. Whitelist/admin gate yok. |
+
+---
+
+#### YÜKSEK (7 madde)
+
+| # | Madde | Durum | Kanıt |
+|---|-------|-------|-------|
+| 5 | Fuzzing süresi | 🟡 Kısmi | `.github/workflows/fuzz-nightly.yml` var. Ama "Fuzz Quick" job'ı sadece 90s × 5 target. 24-48 saat sürekli fuzzing kanıtı yok. |
+| 6 | Bug bounty programı | 🟡 Kısmi | `SECURITY.md` (3.7KB) + `docs/BUG_BOUNTY.md` (7.5KB) var. Immunefi başvuru durumu belirsiz. Dış erişilebilirlik kanıtı yok. |
+| 7 | PoW light-client + eski proof yolu | 🟡 Kısmi | `src/domain/finality_adapter.rs`'da bounded header-chain proof'u var. Legacy declared-depth proofs hâlâ kod tabanında (mint-gated). Silinip silinmeyeceği karara bağlanmamış. |
+| 8 | Bağımlılık birikintisi | 🔴 Açık | **9 açık PR** (7 dependabot + 2 feature). Major version atlayanlar: `toml 0.8→1.1`, `tower 0.4→0.5`, `p3-commit/field/maybe-rayon 0.5→0.6`, `sha2 0.10→0.11`, `itertools 0.14→0.15`. |
+| 9 | Coverage job kırmızı | 🟡 Kısmi | Coverage job'ı son CI'da bazen yeşil (17/17), bazen kırmızı (ratchet/sled flake). Sürekli kırmızı değil ama kararsız. |
+| 10 | Governance model dokümanı | 🔴 Açık | `docs/GOVERNANCE.md` **YOK**. `src/core/governance.rs`'de kod var ama süreç dokümantasyonu yok. |
+| 11 | PoA domain gerçek donanım test | 🔴 Açık | `config/enterprise-poa.toml` var ama gerçek kurumsal ortam test kanıtı yok. |
+
+---
+
+#### ORTA (6 madde)
+
+| # | Madde | Durum | Kanıt |
+|---|-------|-------|-------|
+| 12 | README/badge tutarlılığı | 🔴 Açık | README'de **5 yerde** `lubosruler` geçiyor. `budlum-xyz/budlum`'a taşınmış ama URL'ler güncellenmemiş. |
+| 13 | Formal verification kapsam-dışı beyanı | 🟡 Kısmi | README satır 192: "AI execution layer ❌ Araştırma". Ama "mainnet v1 kapsamı" bölümü yok. |
+| 14 | Çoklu Arena koordinasyonu | 🟡 Kısmi | STATUS_ONLINE'da koordinasyon kuralları var ama paralel instance conflict'leri hâlâ yaşanıyor. |
+| 15 | Scope creep | 🟡 Gözlemlendi | CI kırmızıyken yeni spec/döküman commit'leri atılmış (geçmiş örnekler mevcut). Talimat dosyasında kural olarak belgelendi. |
+| 16 | Verifier Registry birleştirme | 🔴 Açık | `VerifierRegistry` adında ayrı bir modül **YOK**. Mevcut `PermissionlessRegistry` RoleId-tabanlı. Farklı kullanım alanları (DeEd, SocialFi, relayer, supply chain) ayrı çözüyor. |
+| 17 | Açık PR bağımsız review | 🔴 Açık | 9 açık PR var. `#51` ve `#49` lubosruler tarafından açılmış, bağımsız review yok. Dependabot PR'ları (7 adet) günlerdir açık. |
+
+---
+
+#### STRATEJİK (1 madde)
+
+| # | Madde | Durum | Kanıt |
+|---|-------|-------|-------|
+| 18 | Monolitik/modüler anlatı | ⏳ Ayaz'a ait | CLAUDE.md'de "monolitik entegrasyon ile modüler/unbundling tezi arasındaki gerilim" belgelenmiş. Pozisyonlama netleşmemiş. |
+
+---
+
+### Genel Değerlendirme
+
+**KRİTİK:** 4 maddeden 1'i karar verildi (Relayer), 2'si kısmi, 1'i açık (HSM).
+**YÜKSEK:** 7 maddeden 4'ü açık veya kısmi.
+**ORTA:** 6 maddeden 4'ü açık.
+
+**Mainnet readiness skoru:** 18 maddeden **5'i kapalı/karar verildi**, **7'si kısmi**, **6'sı açık**.
+
+**Acil eylem gerekenler:**
+1. Madde 12: `lubosruler` URL'leri güncellenmeli (ben yapabilirim)
+2. Madde 8: 7 dependabot PR triyajı (kullanıcı kararı gerekli)
+3. Madde 10: `GOVERNANCE.md` yazılmalı (kullanıcı kararı + ben yazabilirim)
+
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Kullanıcı (Ayaz) — hangi maddelerle başlayacağım konusunda talimat.
+**Kim karar verecek:** Kullanıcı (Ayaz)
+
+Co-authored-by: ARENAX <arenax@budlum.ai>

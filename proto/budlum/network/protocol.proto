@@ -43,6 +43,7 @@ message ProtoTransaction {
     uint64 chain_id = 10;
     ProtoTransactionType tx_type = 11;
     uint32 wire_version = 12;
+    uint32 signature_version = 13;
     oneof type_payload {
         ProtoNftBoost nft_boost = 20;
         ProtoNftUpdateLight nft_update_light = 21;

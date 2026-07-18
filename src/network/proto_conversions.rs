@@ -198,6 +198,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
             chain_id: tx.chain_id,
             tx_type: tx_type_i32,
             wire_version: 2,
+            signature_version: tx.signature_version,
             type_payload,
         }
     }
@@ -788,6 +789,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             hash: proto.hash,
             signature,
             chain_id: proto.chain_id,
+            signature_version: proto.signature_version,
             tx_type,
         })
     }
@@ -1505,6 +1507,7 @@ mod tests {
             hash: "abc".into(),
             signature: vec![],
             chain_id: 1337,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: pb::ProtoTransactionType::NftBoost as i32,
             wire_version: 2,
             type_payload: None, // Missing payload for NftBoost!

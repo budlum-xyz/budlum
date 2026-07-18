@@ -207,6 +207,32 @@ jobs:
   # Strict mod: aşağıdaki tüm job'lar ilk günden FAIL kapısıdır (Phase 8.5 ruhu).
   # Kapıların "boş" (vacuous) olmadığı kanarya testleriyle her koşuda kanıtlanır.
 
+  poa-isolation:
+    # CI Genişletme Madde 9: PoA/Permissionless izolasyon test seti.
+    # 5 farklı sızma senaryosu + 2 ek invariant testi.
+    name: PoA Isolation (7/7 sızma-kilitli) (CI Madde 9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PoA izolasyon testleri (7 test, 5 sızma senaryosu)
+        run: |
+          cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
+          N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
+          echo "PoA izolasyon test sayısı: $N"
+          if [ "$N" -lt 7 ]; then
+            echo "FAIL: PoA izolasyon test sayısı 7'den az ($N)"
+            exit 1
+          fi
+
   dependency-audit:
     # Phase 8.1: cargo audit + SBOM üretimi + SBOM artifact.
     name: Dependency Audit + SBOM (Phase 8.1)

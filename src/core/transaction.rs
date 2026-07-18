@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 pub const DEFAULT_CHAIN_ID: u64 = 1337;
+/// V29 strict signing format; all non-genesis transaction admission requires V4.
+pub const SIGNATURE_VERSION_V4: u32 = 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GasSchedule {
@@ -165,6 +167,8 @@ pub struct Transaction {
     pub hash: String,
     pub signature: Option<Vec<u8>>,
     pub chain_id: u64,
+    #[serde(default)]
+    pub signature_version: u32,
     pub tx_type: TransactionType,
 }
 impl Transaction {
@@ -269,6 +273,7 @@ impl Transaction {
             hash: String::new(),
             signature: None,
             chain_id,
+            signature_version: SIGNATURE_VERSION_V4,
             tx_type,
         };
         tx.hash = tx.calculate_hash();
@@ -305,6 +310,7 @@ impl Transaction {
             hash: String::new(),
             signature: None,
             chain_id: DEFAULT_CHAIN_ID,
+            signature_version: SIGNATURE_VERSION_V4,
             tx_type: TransactionType::Transfer,
         };
         tx.hash = tx.calculate_hash();
@@ -324,6 +330,7 @@ impl Transaction {
         put_bytes(&mut preimage, &self.data);
         put_u128(&mut preimage, self.timestamp);
         put_u64(&mut preimage, self.chain_id);
+        put_u32(&mut preimage, self.signature_version);
         encode_transaction_type_payload(&self.tx_type, &mut preimage);
 
         let mut hasher = Sha3_256::new();
@@ -348,11 +355,24 @@ impl Transaction {
         self.signature = Some(signature.to_vec());
     }
     pub fn verify(&self) -> bool {
+        let canonical_genesis = self.from == Address::zero()
+            && self.to == Address::zero()
+            && self.amount == 0
+            && self.fee == 0
+            && self.nonce == 0
+            && self.timestamp == 0
+            && self.chain_id == DEFAULT_CHAIN_ID
+            && self.tx_type == TransactionType::Transfer
+            && self.data == b"BUDLUM_GENESIS_TX"
+            && self.signature.is_none();
+        if self.signature_version != SIGNATURE_VERSION_V4 && !canonical_genesis {
+            return false;
+        }
         if self.hash != self.calculate_hash() {
             println!("TX hash does not match canonical transaction hash");
             return false;
         }
-        if self.from == Address::zero() && self.to == Address::zero() && self.signature.is_none() {
+        if canonical_genesis {
             return true;
         }
         let signature = match &self.signature {

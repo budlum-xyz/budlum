@@ -4,8 +4,8 @@
 
 Budlum is a research-grade Layer-1 that does **not** replace other chains. It **settles** them: each domain keeps its own consensus (PoW, PoS, PoA, BFT, ZK, or custom); Budlum verifies finality proofs and records cross-domain value transfer as cryptographic fact.
 
-[![CI](https://github.com/lubosruler/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/lubosruler/budlum/actions)
-[![Tests](https://img.shields.io/badge/tests-885%20lib-blue)](https://github.com/lubosruler/budlum)
+[![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions)
+[![Tests](https://img.shields.io/badge/tests-885%20lib-blue)](https://github.com/budlum-xyz/budlum)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -83,7 +83,8 @@ Strategic analysis: [`docs/03_paradigma_analizi.md`](docs/03_paradigma_analizi.m
 | `budzero/` | BudZKVM ISA, VM, compiler, state and STARK prover workspace |
 
 Since Phase 0.37, **BudZero is integrated into this repository**. The former
-`lubosruler/BudZero` repository is historical input, not a build-time dependency.
+`lubosruler/BudZero` repository (historical) is not a build-time dependency.
+The canonical repository is `budlum-xyz/budlum`.
 
 ---
 
@@ -91,7 +92,7 @@ Since Phase 0.37, **BudZero is integrated into this repository**. The former
 
 ```bash
 # Requires Rust 1.94+, protoc
-git clone https://github.com/lubosruler/budlum.git
+git clone https://github.com/budlum-xyz/budlum.git
 cd budlum
 
 # L1 (uses the in-tree budzero crates)
@@ -167,7 +168,7 @@ maddelerinin durumunu gösterir. B.U.D. (Broad Universal Database) **bu
 tablodan bilinçli olarak hariç tutulmuştur** — ayrı turlarda
 (Phase 0.38/0.40/0.42+) takip edilir.
 
-| Madde (org) | Durum (lubosruler fork, 2026-07-15) | Adım |
+| Madde (org) | Durum (budlum-xyz, 2026-07-19) | Adım |
 |-------------|--------------------------------------|-----|
 | Devnet economic hardening | ✅ Closed (erken turlar + tokenomics) | — |
 | Settlement atomicity | ✅ Closed | — |
