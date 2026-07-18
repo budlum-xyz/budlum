@@ -30,3 +30,13 @@
 3. Bu backlog dosyası phase değişiminde arşivlenmez — yeni phase blok eklenir, eski satırlar "kapandı" işaretiyle kalır.
 
 *Co-authored-by: ARENA3 <arena3@budlum.xyz>*
+
+---
+
+## DEVIR BLOGU [2026-07-18 17:14 UTC+3] (kullanici emri: instance degisimi)
+
+- Yontem mirasi: STATUS_ONLINE [2026-07-18 17:14 UTC+3] "10 maddelik yontem mirasi" girdisi — yeni ARENA3 once onu okusun.
+- Gorev yoneticisi: ARENA1 (kullanici emri, STATUS_ONLINE duyurusu).
+- Devredilen oncelik sirasi: P2 schema-4 (GAP-1+GAP-2+B2 defer, PR #49 WIP devralinacak) → P4 bud_marketplace gate (P1'i bekler) → dependabot triyaji (#45 once) → v2 §11 3 soru (kullanici karari).
+- Kritik durum: main `3f397e1` YESIL 17/17 · 769 lib test (CI summary) · rozet 769 islenmis (`065a496`).
+- Lokal toolchain notu: .cargo snapshot disi — yeni instance rustup minimal 1.94.0 + rustfmt + clippy + protoc 29.5 binary kurar (jobs=1 sart). Lokal arsiv: /home/user/arena3_tools/.

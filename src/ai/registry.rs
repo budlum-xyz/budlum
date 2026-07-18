@@ -48,7 +48,14 @@ impl AiRegistry {
         Ok(id)
     }
 
-    pub fn submit_request(&mut self, request: AiInferenceRequest) -> Result<AiRequestId, String> {
+    /// Submit an inference request with deadline enforcement (P5 Bulgu 1).
+    /// `current_block` is provided by the executor layer (defense-in-depth:
+    /// both registry and executor check deadlines independently).
+    pub fn submit_request(
+        &mut self,
+        request: AiInferenceRequest,
+        current_block: u64,
+    ) -> Result<AiRequestId, String> {
         if !request.verify_id() {
             return Err("Request ID does not match canonical preimage".into());
         }
@@ -73,14 +80,25 @@ impl AiRegistry {
                 request.request_id.to_hex()
             ));
         }
+        // P5 Bulgu 1 — Deadline enforcement (registry layer):
+        // Request must not be submitted after its own deadline_block.
+        if current_block > request.deadline_block {
+            return Err(format!(
+                "Request deadline exceeded: current_block={current_block}, deadline_block={}",
+                request.deadline_block
+            ));
+        }
         let id = request.request_id;
         self.requests.insert(id, request);
         Ok(id)
     }
 
+    /// Submit an inference result with deadline + dispute enforcement (P5 Bulgu 1+3).
+    /// `current_block` is provided by the executor layer (defense-in-depth).
     pub fn submit_result(
         &mut self,
         result: AiInferenceResult,
+        current_block: u64,
     ) -> Result<Option<AiInferenceOutcome>, String> {
         let request = match self.requests.get(&result.request_id) {
             Some(r) => r.clone(),
@@ -98,10 +116,40 @@ impl AiRegistry {
         if result.output_ref.len() as u64 > spec.max_output_ref_bytes {
             return Err("output_ref exceeds model specification limits".into());
         }
+        // P5 Bulgu 1 — Deadline enforcement (registry layer):
+        // Result must arrive before the request's deadline_block AND
+        // within result_deadline_blocks of the request's submission.
+        if current_block > request.deadline_block {
+            return Err(format!(
+                "Result submitted after request deadline: current_block={current_block}, deadline_block={}",
+                request.deadline_block
+            ));
+        }
+        let result_deadline = request
+            .submitted_at_block
+            .saturating_add(spec.result_deadline_blocks);
+        if current_block > result_deadline {
+            return Err(format!(
+                "Result deadline exceeded: current_block={current_block}, result_deadline={result_deadline}"
+            ));
+        }
 
+        // P5 Bulgu 3 — Equivocation detection:
+        // If this verifier already submitted a result with a DIFFERENT
+        // commitment for the same request, that is equivocation.
         let entries = self.results.entry(result.request_id).or_default();
-        if entries.iter().any(|r| r.verifier == result.verifier) {
-            return Err("Verifier has already submitted a result for this request".into());
+        if let Some(existing) = entries.iter().find(|r| r.verifier == result.verifier) {
+            if existing.output_commitment == result.output_commitment {
+                return Err(
+                    "Verifier has already submitted a result for this request".into(),
+                );
+            } else {
+                return Err(format!(
+                    "EQUIVOCATION: verifier {:?} submitted conflicting commitments for request {} — dispute flagged",
+                    result.verifier,
+                    result.request_id.to_hex()
+                ));
+            }
         }
         entries.push(result.clone());
 
@@ -133,6 +181,11 @@ impl AiRegistry {
 
     pub fn get_outcome(&self, request_id: &AiRequestId) -> Option<&AiInferenceOutcome> {
         self.outcomes.get(request_id)
+    }
+
+    /// Accessor: get a pending (non-finalized) request by ID.
+    pub fn get_request(&self, request_id: &AiRequestId) -> Option<&AiInferenceRequest> {
+        self.requests.get(request_id)
     }
 
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.

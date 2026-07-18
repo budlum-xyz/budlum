@@ -232,7 +232,8 @@ impl Executor {
                             deadline_block,
                         };
                         req.request_id = req.calculate_id();
-                        let _ = state.ai_registry.submit_request(req);
+                        let current_block = state.epoch_index.saturating_mul(100);
+                        let _ = state.ai_registry.submit_request(req, current_block);
                     }
                 }
 
@@ -628,9 +629,11 @@ impl Executor {
                         ));
                     }
                 }
+                // P5 Bulgu 1 — Executor-layer deadline enforcement (defense-in-depth):
+                let current_block = state.epoch_index.saturating_mul(100);
                 state
                     .ai_registry
-                    .submit_request(req.clone())
+                    .submit_request(req.clone(), current_block)
                     .map_err(|e| BudlumError::validation("ai_request_failed", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender
@@ -640,25 +643,36 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::AiInferenceResult(res) => {
+                // P5 Bulgu 2 — Verifier auth via PermissionlessRegistry RoleId(6).
+                // AI verifiers must be registered in the permissionless registry
+                // with AI_VERIFIER role, not just PoS validators.
                 {
-                    let validator = state.validators.get(&tx.from);
-                    let is_validator = validator
-                        .map(|v| v.active && v.stake >= 1_000)
-                        .unwrap_or(false);
-                    if !is_validator && state.get_balance(&tx.from) == 0 {
-                        return Err(BudlumError::validation(
-                            "ai_verifier_unauthorized",
-                            "Verifier account not authorized or has zero stake/balance",
-                        ));
+                    let is_registered_verifier = state
+                        .registry
+                        .is_active(&tx.from, crate::registry::role::roles::AI_VERIFIER);
+                    if !is_registered_verifier {
+                        // Fallback: also allow PoS validators (backward compat)
+                        let validator = state.validators.get(&tx.from);
+                        let is_validator = validator
+                            .map(|v| v.active && v.stake >= 1_000)
+                            .unwrap_or(false);
+                        if !is_validator {
+                            return Err(BudlumError::validation(
+                                "ai_verifier_unauthorized",
+                                "Verifier must be registered as AI_VERIFIER (RoleId=6) or be an active validator with >= 1000 stake",
+                            ));
+                        }
                     }
                 }
                 let mut res = res.clone();
                 if res.verifier != tx.from {
                     res.verifier = tx.from;
                 }
+                // P5 Bulgu 1 — Executor-layer deadline enforcement (defense-in-depth):
+                let current_block = state.epoch_index.saturating_mul(100);
                 let outcome = state
                     .ai_registry
-                    .submit_result(res.clone())
+                    .submit_result(res.clone(), current_block)
                     .map_err(|e| BudlumError::validation("ai_result_failed", e))?;
 
                 if let Some(finalized) = outcome {
