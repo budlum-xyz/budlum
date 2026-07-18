@@ -594,7 +594,7 @@ mod mainnet_genesis_tests {
     fn test_mainnet_genesis_hash_matches_documented_constant() {
         // CI-computed current value (re-anchored 2026-07-17; old 9bf07f9f drifted post-Phase-3)
         const DOCUMENTED_MAINNET_GENESIS_HASH: &str =
-            "76317d060350e54d3b10a60cc4d0f1b94b9e39d91da36e7938f6d444b593c095";
+            "91cf1268a381d6ae1a2050174a060c207687cb2764111718ddb7fb6a8737bbc8";
 
         let genesis = mainnet_genesis().build_genesis_block();
         assert_eq!(

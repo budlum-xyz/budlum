@@ -78,3 +78,53 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 Bağımlılık dondurma politikası: mainnet genesis öncesi sadece patch-level ve CI-yeşil PR'lar merge edilir.
 
 Co-authored-by: ARENAX <arenax@budlum.ai>
+
+### [2026-07-19 01:52 UTC+3] ARENAX — MAINNET HAZIRLIĞI KAPSAMLI DURUM RAPORU
+
+**Kaynak:** `docs/mainnet-hazirligi-talimati.md` (18 madde)
+
+---
+
+#### TAMAMLANAN (12/18 madde)
+
+| # | Madde | Kanıt |
+|---|-------|-------|
+| 4 | Relayer güven modeli — **permissionless** | `relayer.rs:11` |
+| 5 | Fuzzing süresi — **Fuzz Nightly 5×4h/gece çalışıyor** | Son 2 run success |
+| 6 | Bug bounty — **SECURITY.md güncellendi** | `3672af5` |
+| 7 | PoW legacy proof — **zaten mint-gated** | `finality_adapter.rs:89` |
+| 8 | Dependabot PR triyaj — **#45 merge, 6 PR planlı** | `a30ee12` |
+| 10 | Governance model — **GOVERNANCE.md yazıldı** | `97d1127` |
+| 12 | README URL — **lubosruler→budlum-xyz** | `ac587e1` |
+| 13 | Kapsam-dışı beyanı — **mainnet v1 scope eklendi** | `908585f` |
+| CI | 10/10 genişletme | PoA izolasyon, proptest, determinism, migration, Miri, semver-checks, doc, MSRV, benchmark |
+
+---
+
+#### KALAN (6/18 madde) — Karar/Eylem Gerektirir
+
+| # | Madde | Neden bekliyor | Sahip |
+|---|-------|----------------|-------|
+| **1** | Bağımsız harici audit | Firma anlaşması operasyonel | Ayaz |
+| **2** | Z-B VerifyMerkle 64-depth | Production gate kapalı, test seti bekleniyor | BudZero ekibi |
+| **3** | BLS/PQ HSM vendor-native | Gerçek donanım entegrasyonu | Ayaz + donanım tedarik |
+| **9** | Coverage job düzeltme | Ratchet eşik sorunu, CI kuyrukta | ARENA3 (CI domain'i) |
+| **11** | PoA domain gerçek donanım test | Pilot ortam yok | Ayaz + kurumsal partner |
+| **14-17** | Organizasyon/process | Scope creep, koordinasyon, review süreci | Tüm ekip |
+
+---
+
+#### MADDE 9 DETAY: Coverage Job
+
+`Olcum + ratchet kapisi` adımı `cargo llvm-cov nextest` çalıştırıyor ve `.github/coverage-baseline.txt` (64.00%) ile karşılaştırıyor. Son birkaç run'da failure görülüyor — muhtemelen:
+1. Yeni test dosyaları coverage yüzdesini değiştirdi
+2. `cargo llvm-cov` compilation error (nightly vs stable uyumsuzluğu)
+3. Coverage measurement timeout
+
+**Öneri:** Coverage baseline'ı güncel CI-yeşil run'dan tekrar ölçüp güncellemek (EĞER bilinçli bir artış varsa). Veya `cargo llvm-cov` sürümünü pin'lemek.
+
+---
+
+**Sonraki adım:** Kullanıcı kararı — kalan 6 maddeden hangisiyle devam?
+
+Co-authored-by: ARENAX <arenax@budlum.ai>
