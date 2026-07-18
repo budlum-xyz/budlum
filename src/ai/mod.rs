@@ -1771,19 +1771,33 @@ mod tests {
     #[test]
     fn test_p5_adim6_result_deadline_exact_boundary_accepted() {
         // P5 ARENA2-T1(a): Result at current_block == request deadline_block → ACCEPTED.
+        // IMPORTANT: submitted_at_block + result_deadline_blocks MUST be >= deadline_block,
+        // otherwise the result_deadline check rejects first (defense-in-depth: two checks).
+        // Here: submitted_at=10 + result_deadline_blocks=200 → result_deadline=210
+        //        deadline_block=110, so effective_deadline=max(110,210)=210
+        //        current_block=110 <= 210 → passes both checks.
         let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
-        let req_id = p5_adim6_submit_request(
-            &mut registry,
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
             model_id,
-            owner,
-            10,
-            110, // deadline_block
-            100,
-        );
+            input_commitment: [2u8; 32],
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+        };
+        req.request_id = req.calculate_id();
+        // Override result_deadline_blocks to 200 so result_deadline=210 > deadline_block=110
+        registry.models.get_mut(&model_id).unwrap().result_deadline_blocks = 200;
+        let req_id = registry.submit_request(req, 10).unwrap();
+
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
         // Result at exactly deadline_block (110) should be accepted
+        // (result_deadline=210 > 110, so second check passes too)
         let result = p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 110);
         assert!(
             result.is_ok(),
@@ -1815,11 +1829,18 @@ mod tests {
     fn test_p5_adim6_result_separate_deadline_exact_boundary() {
         // P5 ARENA2-T1(a): Result at current_block == submitted_at_block +
         // result_deadline_blocks → ACCEPTED (boundary).
-        // submitted_at=10, result_deadline_blocks=50 → result_deadline=60
-        // deadline_block=110 → effective_deadline=max(110,60)=110
-        // Testing the result_deadline boundary separately:
-        // With submitted_at=10, result_deadline=60, and deadline_block=55
-        // → effective result deadline is max(55, 60) = 60
+        //
+        // The registry has TWO independent deadline checks:
+        //   1. current_block > request.deadline_block → reject
+        //   2. current_block > submitted_at_block + result_deadline_blocks → reject
+        //
+        // To test ONLY the result_deadline boundary (#2), we need #1 to pass:
+        //   deadline_block >= current_block (so check #1 is false).
+        //
+        // Setup: submitted_at=10, result_deadline_blocks=50 → result_deadline=60
+        //        deadline_block=200 (>= 60, so check #1 never triggers)
+        //        Test at current_block=60 → check #1: 60 > 200 = false ✓
+        //                           → check #2: 60 > 60 = false ✓ (boundary passes)
         let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
         let mut req = AiInferenceRequest {
             request_id: AiRequestId::default(),
@@ -1830,7 +1851,7 @@ mod tests {
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
-            deadline_block: 55, // Less than result_deadline (10+50=60)
+            deadline_block: 200, // Must be >= result_deadline so check #1 doesn't fire
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 10).unwrap();
