@@ -2635,7 +2635,7 @@ impl BudlumApiServer for RpcServer {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
-        let id = crate::domain::Hash32(arr);
+        let id = arr;
 
         let market = self.chain.get_marketplace_registry().await;
         match market.get_asset(&id) {
@@ -2688,7 +2688,7 @@ impl BudlumApiServer for RpcServer {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
-        let id = crate::domain::Hash32(arr);
+        let id = arr;
 
         let market = self.chain.get_marketplace_registry().await;
         let current_block = self.chain.get_height().await;
@@ -2763,7 +2763,7 @@ impl BudlumApiServer for RpcServer {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
-        let id = crate::domain::Hash32(arr);
+        let id = arr;
 
         let market = self.chain.get_marketplace_registry().await;
         match market.get_listing(&id) {
@@ -2790,7 +2790,7 @@ impl BudlumApiServer for RpcServer {
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
-        let id = crate::domain::Hash32(arr);
+        let id = arr;
 
         let clean_buyer = buyer.strip_prefix("0x").unwrap_or(&buyer);
         let buyer_addr = crate::core::address::Address::from_hex(clean_buyer).map_err(|e| {

@@ -20,7 +20,6 @@ use std::collections::BTreeMap;
 
 /// Grant scope: defines the access boundaries for a grantee.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
 pub enum GrantScope {
     /// Single-read access (e.g., for challenge/verify). Enforcement is off-chain:
     /// grantee tracks "read once" locally via counter + audit log. No on-chain gas cost.
@@ -39,8 +38,7 @@ impl Default for GrantScope {
 
 /// Grantee identity: supports both RoleId (PermissionlessRegistry) and Address (EOA/Contract).
 /// Phase 1 supports both from the start.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Grantee {
     RoleId(crate::registry::role::RoleId),
     Address(Address),

@@ -4032,6 +4032,7 @@ impl Clone for Blockchain {
             metrics: self.metrics.clone(),
             proof_claims: self.proof_claims.clone(),
             pending_storage_root: self.pending_storage_root,
+            marketplace_registry: self.marketplace_registry.clone(),
             storage_slashed_bond_total: self.storage_slashed_bond_total,
             storage_burned_bond_total: self.storage_burned_bond_total,
             storage_operator_rewards: self.storage_operator_rewards.clone(),
