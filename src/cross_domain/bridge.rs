@@ -9,7 +9,97 @@ use crate::domain::types::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub type AssetId = Hash32;
+// B2 fix (ARENA1, cross_domain, 2026-07-18): `AssetId` eskiden `Hash32`
+// (= [u8;32]) alias'ıydı — serde_json object-key olarak serialize EDİLEMEZDİ
+// (R3 anti-pattern; `bridge_state` snapshot/RPC yoluna girerse patlar). Artık
+// string-serde struct (Address deseni, `src/core/address.rs`); bud::marketplace
+// tipinden AYRI (separate-namespace kararı, ARENA3); AsRef<[u8]> migration kolaylığı.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AssetId(pub [u8; 32]);
+
+impl AssetId {
+    pub fn from_hex(s: &str) -> Result<Self, String> {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        if s == "0" {
+            return Ok(AssetId([0u8; 32]));
+        }
+        let bytes = hex::decode(s).map_err(|e| e.to_string())?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "Invalid asset id length: expected 32, got {}",
+                bytes.len()
+            ));
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes);
+        Ok(AssetId(id))
+    }
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+    pub fn zero() -> Self {
+        AssetId([0u8; 32])
+    }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Default for AssetId {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+impl std::str::FromStr for AssetId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(s)
+    }
+}
+
+impl std::fmt::Display for AssetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
+
+impl std::fmt::Debug for AssetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AssetId({})", self.to_hex())
+    }
+}
+
+impl serde::Serialize for AssetId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AssetId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        AssetId::from_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<[u8; 32]> for AssetId {
+    fn from(bytes: [u8; 32]) -> Self {
+        AssetId(bytes)
+    }
+}
+
+impl AsRef<[u8]> for AssetId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BridgeStatus {
@@ -305,7 +395,7 @@ impl BridgeState {
             .iter()
             .map(|(asset_id, status)| {
                 let status = status_bytes(status);
-                hash_fields_bytes(&[b"BDLM_BRIDGE_ASSET_LEAF_V1", asset_id, &status])
+                hash_fields_bytes(&[b"BDLM_BRIDGE_ASSET_LEAF_V1", asset_id.as_ref(), &status])
             })
             .collect();
         crate::settlement::commitment_tree::merkle_root(&leaves)
@@ -380,7 +470,7 @@ impl BridgeState {
 }
 
 pub fn bridge_payload_hash(asset_id: AssetId, amount: u128) -> Hash32 {
-    hash_fields_bytes(&[b"BDLM_BRIDGE_PAYLOAD_V1", &asset_id, &amount.to_le_bytes()])
+    hash_fields_bytes(&[b"BDLM_BRIDGE_PAYLOAD_V1", asset_id.as_ref(), &amount.to_le_bytes()])
 }
 
 fn status_bytes(status: &BridgeStatus) -> Vec<u8> {
@@ -406,7 +496,7 @@ mod tests {
     #[test]
     fn bridge_prevents_replay_mint() {
         let mut bridge = BridgeState::new();
-        let asset = hash_fields_bytes(&[b"asset"]);
+        let asset = AssetId(hash_fields_bytes(&[b"asset"]));
         let owner = Address::zero();
         let recipient = Address::zero();
         bridge.register_asset(asset, 1).unwrap();
@@ -423,7 +513,7 @@ mod tests {
     #[test]
     fn bridge_rejects_double_lock_and_out_of_order_transitions() {
         let mut bridge = BridgeState::new();
-        let asset = hash_fields_bytes(&[b"asset"]);
+        let asset = AssetId(hash_fields_bytes(&[b"asset"]));
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
         bridge.register_asset(asset, 1).unwrap();
@@ -445,4 +535,29 @@ mod tests {
         assert!(bridge.unlock(transfer.message_id, 9).is_err());
         bridge.unlock(transfer.message_id, 1).unwrap();
     }
+
+    /// B2 kilidi (ARENA1 cross_domain, 2026-07-18): `BridgeState.asset_locations`
+    /// (`BTreeMap<AssetId, BridgeStatus>`) dolu halde serde_json'a serialize→deserialize
+    /// roundtrip yapmalı; anahtarlar string olmalı. Alias `[u8;32]` ile bu FAIL ederdi
+    /// (R3 anti-pattern) — struct string-serde ile kapanır.
+    #[test]
+    fn bridge_asset_locations_is_json_map_key_safe() {
+        let mut bridge = BridgeState::new();
+        let a1 = AssetId::from([1u8; 32]);
+        let a2 = AssetId::from([2u8; 32]);
+        bridge.register_asset(a1, 1).unwrap();
+        bridge.register_asset(a2, 1).unwrap();
+        // Anahtar JSON string olarak serileşiyor mu (R3 kilidi)?
+        let json = serde_json::to_string(&bridge.asset_locations)
+            .expect("asset_locations JSON serialize");
+        assert!(
+            json.starts_with("{\""),
+            "JSON object-key string olmali: {json}"
+        );
+        // Roundtrip eşitliği
+        let back: BTreeMap<AssetId, BridgeStatus> =
+            serde_json::from_str(&json).expect("asset_locations JSON deserialize");
+        assert_eq!(back, bridge.asset_locations);
+    }
+
 }
