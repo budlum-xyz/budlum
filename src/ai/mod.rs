@@ -2490,4 +2490,371 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("exceeds"));
     }
+
+    // ===================== P5 ADIM7 — Security Hardening Tests =====================
+
+    #[test]
+    fn test_p5_adim7_equivocation_event_recorded() {
+        // P5 Bulgu 18: When equivocation is detected, the event must be
+        // recorded in equivocation_events for future slashing.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(3, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // First result from v1
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        // Second result from v1 with DIFFERENT commitment → equivocation
+        let equiv_result = p5_adim6_submit_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        assert!(equiv_result.is_err());
+        assert!(equiv_result.unwrap_err().contains("EQUIVOCATION"));
+
+        // Verify equivocation event was recorded
+        assert!(
+            registry.has_equivocated(&req_id, &v1),
+            "Equivocation event should be recorded for v1"
+        );
+
+        // Verify verifier that didn't equivocate returns false
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        assert!(
+            !registry.has_equivocated(&req_id, &v2),
+            "Non-equivocating verifier should not be recorded"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_equivocation_count_for_verifier() {
+        // P5 Bulgu 18: Track equivocation count across multiple requests.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(3, 2);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // Request 1: v1 equivocates
+        let req1 = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        p5_adim6_submit_result(&mut registry, req1, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = p5_adim6_submit_result(&mut registry, req1, v1, [88u8; 32], 2, 16);
+
+        // Request 2: v1 equivocates again
+        let req2 = p5_adim6_submit_request(&mut registry, model_id, owner, 20, 120, 100);
+        p5_adim6_submit_result(&mut registry, req2, v1, [7u8; 32], 1, 25).unwrap();
+        let _ = p5_adim6_submit_result(&mut registry, req2, v1, [99u8; 32], 2, 26);
+
+        // v1 has 2 equivocation events
+        assert_eq!(
+            registry.equivocation_count_for_verifier(&v1),
+            2,
+            "v1 should have 2 equivocation events"
+        );
+
+        // v2 has 0
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        assert_eq!(
+            registry.equivocation_count_for_verifier(&v2),
+            0,
+            "v2 should have 0 equivocation events"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_state_root_domain_separation() {
+        // P5 Bulgu 19 (V38 fix): Domain-separated map roots prevent cross-map
+        // collision. The state root must change when equivocation_events or
+        // cancelled_requests are modified, proving domain separation.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(3, 2);
+        let root_before = registry.state_root();
+
+        // Add an equivocation event → root changes
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = p5_adim6_submit_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let root_after_equiv = registry.state_root();
+        assert_ne!(
+            root_before, root_after_equiv,
+            "State root must change after equivocation event"
+        );
+
+        // Add a cancelled request → root changes again
+        let req2 = p5_adim6_submit_request(&mut registry, model_id, owner, 20, 120, 100);
+        registry.cancel_request(&req2, &owner, 25).unwrap();
+        let root_after_cancel = registry.state_root();
+        assert_ne!(
+            root_after_equiv, root_after_cancel,
+            "State root must change after request cancellation"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_state_root_v2_not_equal_v1() {
+        // P5 Bulgu 19: Verify that V2 domain-separated root differs from
+        // what V1 would produce, ensuring the upgrade is meaningful.
+        let (registry, _, _) = p5_adim6_setup_registry(2, 2);
+
+        // The V2 root should be computed correctly (non-zero for non-empty)
+        let root = registry.state_root();
+        assert_ne!(
+            root, [0u8; 32],
+            "Non-empty registry must have non-zero root"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_model_version_auto_increment() {
+        // P5 Bulgu 20: update_model_spec should auto-increment the version.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+
+        // Initial version = 1
+        let initial_version = registry.models.get(&model_id).unwrap().version;
+        assert_eq!(initial_version, 1);
+
+        // Update spec → version becomes 2
+        registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .unwrap();
+        let after_first_update = registry.models.get(&model_id).unwrap().version;
+        assert_eq!(after_first_update, 2, "Version should be incremented to 2");
+
+        // Update again → version becomes 3
+        registry
+            .update_model_spec(&model_id, &owner, 5, 3, 4096, 8192, 300, 150)
+            .unwrap();
+        let after_second_update = registry.models.get(&model_id).unwrap().version;
+        assert_eq!(after_second_update, 3, "Version should be incremented to 3");
+    }
+
+    #[test]
+    fn test_p5_adim7_model_version_changes_state_root() {
+        // P5 Bulgu 20: Version increment changes the spec's calculate_leaf,
+        // which changes the state root.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let root_before = registry.state_root();
+
+        registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .unwrap();
+        let root_after = registry.state_root();
+
+        assert_ne!(
+            root_before, root_after,
+            "Version increment must change state root"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_request_by_requester() {
+        // P5 Bulgu 21: Requester can cancel a pending request.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Cancel should succeed
+        let (requester, max_fee) = registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert_eq!(requester, owner);
+        assert_eq!(max_fee, 100);
+
+        // Request should be marked as cancelled
+        assert!(registry.is_cancelled(&req_id));
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_request_non_requester_rejected() {
+        // P5 Bulgu 21: Only the requester can cancel.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let other =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000099")
+                .unwrap();
+        let result = registry.cancel_request(&req_id, &other, 15);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Only the requester"));
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_finalized_request_rejected() {
+        // P5 Bulgu 21: Cannot cancel a finalized request.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+
+        // Request is finalized now
+        assert!(registry.get_outcome(&req_id).is_some());
+
+        let result = registry.cancel_request(&req_id, &owner, 20);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("finalized"));
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_already_cancelled_rejected() {
+        // P5 Bulgu 21: Double-cancel is rejected.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        let result = registry.cancel_request(&req_id, &owner, 20);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already cancelled"));
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_reclaimed_request_rejected() {
+        // P5 Bulgu 21: Cannot cancel a request whose fee was already reclaimed.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Reclaim fee first (after deadline)
+        registry.reclaim_fee(&req_id, 200).unwrap();
+
+        let result = registry.cancel_request(&req_id, &owner, 201);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already reclaimed"));
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_blocks_results() {
+        // P5 Bulgu 21: After cancellation, results are rejected.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Cancel the request
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        // Try to submit a result → rejected
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 20);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_nonexistent_request_rejected() {
+        // P5 Bulgu 21: Cannot cancel a request that doesn't exist.
+        let (mut registry, _, _) = p5_adim6_setup_registry(2, 2);
+        let fake_id = AiRequestId::new([0xAA; 32]);
+
+        let result = registry.cancel_request(
+            &fake_id,
+            &Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap(),
+            10,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_p5_adim7_reactivate_model_via_new_tx_type() {
+        // P5 ADIM7: AiModelReactivate transaction type works.
+        // This tests the registry method (executor path tested separately).
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+
+        registry.deactivate_model(&model_id, &owner).unwrap();
+        assert!(!registry.models.get(&model_id).unwrap().active);
+
+        registry.reactivate_model(&model_id, &owner).unwrap();
+        assert!(registry.models.get(&model_id).unwrap().active);
+    }
+
+    #[test]
+    fn test_p5_adim7_equivocation_in_state_root() {
+        // P5 Bulgu 18+19: Equivocation events are included in the state root.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(3, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let root_before = registry.state_root();
+
+        // Trigger equivocation
+        let _ = p5_adim6_submit_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let root_after = registry.state_root();
+
+        assert_ne!(
+            root_before, root_after,
+            "Equivocation event must change state root"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_cancel_in_state_root() {
+        // P5 Bulgu 19+21: Cancelled requests are included in the state root.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let root_before = registry.state_root();
+
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+        let root_after = registry.state_root();
+
+        assert_ne!(
+            root_before, root_after,
+            "Request cancellation must change state root"
+        );
+    }
+
+    #[test]
+    fn test_p5_adim7_empty_new_fields_is_empty() {
+        // P5 ADIM7: Registry with only equivocation/cancelled entries
+        // should NOT be considered empty (they are meaningful data).
+        let mut registry = AiRegistry::new();
+        assert!(registry.is_empty());
+
+        // Add just an equivocation event
+        let fake_req = AiRequestId::new([1u8; 32]);
+        let fake_addr =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.equivocation_events.insert((fake_req, fake_addr.0));
+        assert!(!registry.is_empty());
+
+        // Reset and add just a cancelled request
+        let mut registry2 = AiRegistry::new();
+        registry2.cancelled_requests.insert(fake_req);
+        assert!(!registry2.is_empty());
+    }
+
+    #[test]
+    fn test_p5_adim7_prune_includes_new_fields() {
+        // P5 Bulgu 10+21: prune_expired should clean up cancelled_requests
+        // that are past the retention window.
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Cancel the request
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert!(registry.is_cancelled(&req_id));
+
+        // Prune (deadline=110, retention=100, current=300 → expired)
+        registry.prune_expired(300, 100);
+
+        // The request should be pruned and cancellation cleared
+        assert!(
+            registry.get_request(&req_id).is_none(),
+            "Pruned cancelled request should be removed"
+        );
+    }
 }

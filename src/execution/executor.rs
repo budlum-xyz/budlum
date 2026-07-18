@@ -754,6 +754,36 @@ impl Executor {
                 sender.balance = sender.balance.saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::AiModelReactivate(model_id) => {
+                // P5 ADIM7 Bulgu 6 extension: Reactivate a previously
+                // deactivated AI model (owner-only).
+                state
+                    .ai_registry
+                    .reactivate_model(&model_id, &tx.from)
+                    .map_err(|e| BudlumError::validation("ai_model_reactivate_failed", e))?;
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::AiRequestCancel(request_id) => {
+                // P5 ADIM7 Bulgu 21: Cancel a pending AI inference request.
+                // Only the original requester can cancel. Escrowed max_fee
+                // is refunded to the requester.
+                let current_block = state.epoch_index.saturating_mul(100);
+                let (requester, max_fee) = state
+                    .ai_registry
+                    .cancel_request(&request_id, &tx.from, current_block)
+                    .map_err(|e| BudlumError::validation("ai_request_cancel_failed", e))?;
+
+                // Refund escrowed max_fee to the requester
+                let requester_acc = state.get_or_create(&requester);
+                requester_acc.balance = requester_acc.balance.saturating_add(max_fee);
+
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
         }
 
         Ok(())

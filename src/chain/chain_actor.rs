@@ -142,6 +142,12 @@ pub enum ChainCommand {
         crate::ai::types::AiRequestId,
         oneshot::Sender<Result<(crate::core::address::Address, u64), String>>,
     ),
+    GetAiEquivocationStatus(
+        crate::ai::types::AiRequestId,
+        crate::core::address::Address,
+        oneshot::Sender<bool>,
+    ),
+    GetAiCancelStatus(crate::ai::types::AiRequestId, oneshot::Sender<bool>),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -1029,6 +1035,38 @@ impl ChainHandle {
             .map_err(|_| "ChainActor response dropped".to_string())?
     }
 
+    pub async fn get_ai_equivocation_status(
+        &self,
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiEquivocationStatus(
+                request_id, verifier, tx,
+            ))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn get_ai_cancel_status(&self, request_id: crate::ai::types::AiRequestId) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiCancelStatus(request_id, tx))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     pub async fn get_prune_status(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.tx.send(ChainCommand::GetPruneStatus(tx)).await {
@@ -1875,6 +1913,18 @@ impl ChainActor {
                     let mut registry = self.blockchain.state.ai_registry.clone();
                     let res = registry.reclaim_fee(&id, current_block);
                     let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiEquivocationStatus(request_id, verifier, res_tx) => {
+                    let has_equivocated = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .has_equivocated(&request_id, &verifier);
+                    let _ = res_tx.send(has_equivocated);
+                }
+                ChainCommand::GetAiCancelStatus(request_id, res_tx) => {
+                    let is_cancelled = self.blockchain.state.ai_registry.is_cancelled(&request_id);
+                    let _ = res_tx.send(is_cancelled);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
                     let height = self.blockchain.chain.len() as u64;

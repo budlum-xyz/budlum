@@ -683,6 +683,12 @@ impl PermissionlessRegistry {
     pub fn is_empty(&self) -> bool {
         self.registrations.is_empty()
     }
+
+    /// Return all registrations as a flat `Vec<Registration>`.
+    /// Useful for test introspection and audit queries.
+    pub fn registrations_as_seq(&self) -> Vec<&Registration> {
+        self.registrations.values().collect()
+    }
 }
 
 #[cfg(test)]

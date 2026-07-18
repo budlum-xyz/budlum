@@ -183,6 +183,22 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::AiModelReactivate(model_id) => (
+                pb::ProtoTransactionType::AiModelReactivate as i32,
+                Some(pb::proto_transaction::TypePayload::AiModelReactivate(
+                    pb::ProtoAiModelDeactivate {
+                        model_id: model_id.0.to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::AiRequestCancel(request_id) => (
+                pb::ProtoTransactionType::AiRequestCancel as i32,
+                Some(pb::proto_transaction::TypePayload::AiRequestCancel(
+                    pb::ProtoAiFeeReclaim {
+                        request_id: request_id.0.to_vec(),
+                    },
+                )),
+            ),
         };
 
         pb::ProtoTransaction {
@@ -196,9 +212,9 @@ impl From<&Transaction> for pb::ProtoTransaction {
             hash: tx.hash.clone(),
             signature: tx.signature.clone().unwrap_or_default(),
             chain_id: tx.chain_id,
+            signature_version: tx.signature_version,
             tx_type: tx_type_i32,
             wire_version: 2,
-            signature_version: tx.signature_version,
             type_payload,
         }
     }
@@ -774,6 +790,30 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 let mut mid = [0u8; 32];
                 mid.copy_from_slice(&payload.model_id);
                 TransactionType::AiModelDeactivate(crate::ai::types::AiModelId(mid))
+            }
+            pb::ProtoTransactionType::AiModelReactivate => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::AiModelReactivate(p)) => p,
+                    _ => return Err("Missing or mismatched AiModelReactivate payload".into()),
+                };
+                if payload.model_id.len() != 32 {
+                    return Err("AiModelReactivate model_id must be 32 bytes".into());
+                }
+                let mut mid = [0u8; 32];
+                mid.copy_from_slice(&payload.model_id);
+                TransactionType::AiModelReactivate(crate::ai::types::AiModelId(mid))
+            }
+            pb::ProtoTransactionType::AiRequestCancel => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::AiRequestCancel(p)) => p,
+                    _ => return Err("Missing or mismatched AiRequestCancel payload".into()),
+                };
+                if payload.request_id.len() != 32 {
+                    return Err("AiRequestCancel request_id must be 32 bytes".into());
+                }
+                let mut rid = [0u8; 32];
+                rid.copy_from_slice(&payload.request_id);
+                TransactionType::AiRequestCancel(crate::ai::types::AiRequestId(rid))
             }
         };
 

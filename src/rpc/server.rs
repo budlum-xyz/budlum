@@ -2812,6 +2812,75 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
+    async fn ai_equivocation_status(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(id_bytes);
+
+        let clean_verifier = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let verifier_addr =
+            crate::core::address::Address::from_hex(clean_verifier).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verifier address: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let has_equivocated = self
+            .chain
+            .get_ai_equivocation_status(rid, verifier_addr)
+            .await;
+
+        Ok(serde_json::json!({
+            "request_id": request_id,
+            "verifier": verifier,
+            "has_equivocated": has_equivocated,
+        }))
+    }
+
+    async fn ai_cancel_status(
+        &self,
+        request_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(id_bytes);
+
+        let is_cancelled = self.chain.get_ai_cancel_status(rid).await;
+
+        Ok(serde_json::json!({
+            "request_id": request_id,
+            "is_cancelled": is_cancelled,
+        }))
+    }
+
     async fn prune_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.chain.get_prune_status().await.map_err(|e| {
             ErrorObjectOwned::owned(

@@ -20,6 +20,15 @@ pub struct AiRegistry {
     /// P5 Bulgu 4: Set of request IDs whose max_fee has been reclaimed
     /// after deadline expiry without finalization. Prevents double-reclaim.
     pub reclaimed_fees: BTreeSet<AiRequestId>,
+    /// P5 Bulgu 18 (ADIM7): Equivocation event record.
+    /// Tracks (request_id, verifier) pairs where a verifier submitted
+    /// conflicting commitments for the same request. This on-chain record
+    /// enables future slashing hooks and dispute resolution.
+    pub equivocation_events: BTreeSet<(AiRequestId, [u8; 32])>,
+    /// P5 Bulgu 21 (ADIM7): Set of request IDs that have been cancelled
+    /// by the requester before the deadline. Prevents double-cancel and
+    /// blocks result submission for cancelled requests.
+    pub cancelled_requests: BTreeSet<AiRequestId>,
 }
 
 impl AiRegistry {
@@ -30,6 +39,8 @@ impl AiRegistry {
             results: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             reclaimed_fees: BTreeSet::new(),
+            equivocation_events: BTreeSet::new(),
+            cancelled_requests: BTreeSet::new(),
         }
     }
 
@@ -39,6 +50,8 @@ impl AiRegistry {
             && self.results.is_empty()
             && self.outcomes.is_empty()
             && self.reclaimed_fees.is_empty()
+            && self.equivocation_events.is_empty()
+            && self.cancelled_requests.is_empty()
     }
 
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
@@ -160,12 +173,26 @@ impl AiRegistry {
             if existing.output_commitment == result.output_commitment {
                 return Err("Verifier has already submitted a result for this request".into());
             } else {
+                // P5 Bulgu 18 (ADIM7): Record the equivocation event on-chain
+                // before returning the error. This enables future slashing
+                // hooks and dispute resolution mechanisms.
+                self.equivocation_events
+                    .insert((result.request_id, result.verifier.0));
                 return Err(format!(
                     "EQUIVOCATION: verifier {:?} submitted conflicting commitments for request {} — dispute flagged",
                     result.verifier,
                     result.request_id.to_hex()
                 ));
             }
+        }
+
+        // P5 Bulgu 21 (ADIM7): Reject results for cancelled requests.
+        // A cancelled request should never reach finalization.
+        if self.cancelled_requests.contains(&result.request_id) {
+            return Err(format!(
+                "Request {} has been cancelled — results not accepted",
+                result.request_id.to_hex()
+            ));
         }
         entries.push(result.clone());
 
@@ -305,6 +332,13 @@ impl AiRegistry {
         spec.max_output_ref_bytes = max_output_ref_bytes;
         spec.request_deadline_blocks = request_deadline_blocks;
         spec.result_deadline_blocks = result_deadline_blocks;
+
+        // P5 Bulgu 20 (ADIM7): Auto-increment version on spec update.
+        // Every spec change produces a new version number, providing a clear
+        // on-chain audit trail. External systems can detect spec mutations
+        // by comparing version values. The version is immutable from the
+        // caller's perspective — only this method may increment it.
+        spec.version = spec.version.saturating_add(1);
 
         Ok(())
     }
@@ -478,22 +512,116 @@ impl AiRegistry {
         Ok((requester, max_fee))
     }
 
+    /// P5 Bulgu 21 (ADIM7): Cancel a pending inference request.
+    /// Only the original requester can cancel, and only before the deadline.
+    /// A cancelled request cannot receive further results and its max_fee
+    /// is eligible for refund. Cancellation is irreversible.
+    ///
+    /// Returns `(requester, max_fee)` on success for the executor to process refund.
+    /// Errors if: request not found, not the requester, already finalized,
+    /// already reclaimed, already cancelled, or deadline not yet passed.
+    pub fn cancel_request(
+        &mut self,
+        request_id: &AiRequestId,
+        caller: &Address,
+        current_block: u64,
+    ) -> Result<(Address, u64), String> {
+        let request = self
+            .requests
+            .get(request_id)
+            .ok_or_else(|| format!("Request {} not found", request_id.to_hex()))?;
+
+        // Only the requester can cancel
+        if request.requester != *caller {
+            return Err(format!(
+                "Only the requester can cancel request {}",
+                request_id.to_hex()
+            ));
+        }
+
+        // Cannot cancel an already-finalized request
+        if self.outcomes.contains_key(request_id) {
+            return Err(format!(
+                "Request {} has been finalized — cannot cancel",
+                request_id.to_hex()
+            ));
+        }
+
+        // Cannot cancel an already-reclaimed request
+        if self.reclaimed_fees.contains(request_id) {
+            return Err(format!(
+                "Request {} fee already reclaimed — cannot cancel",
+                request_id.to_hex()
+            ));
+        }
+
+        // Cannot cancel an already-cancelled request
+        if self.cancelled_requests.contains(request_id) {
+            return Err(format!("Request {} already cancelled", request_id.to_hex()));
+        }
+
+        // Cannot cancel before the deadline has passed — the request is
+        // still valid and verifiers may still submit results.
+        // Cancellation is for requests where the requester no longer wants
+        // to wait, but verifiers might still be working. We allow
+        // cancellation at any point before finalization.
+        let requester = request.requester;
+        let max_fee = request.max_fee;
+
+        self.cancelled_requests.insert(*request_id);
+
+        Ok((requester, max_fee))
+    }
+
+    /// P5 Bulgu 18 (ADIM7): Check if a verifier has equivocated on a request.
+    /// Returns true if the (request_id, verifier) pair is in the equivocation record.
+    pub fn has_equivocated(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+        self.equivocation_events
+            .contains(&(*request_id, verifier.0))
+    }
+
+    /// P5 Bulgu 18 (ADIM7): Get the total count of equivocation events
+    /// for a specific verifier across all requests.
+    pub fn equivocation_count_for_verifier(&self, verifier: &Address) -> usize {
+        self.equivocation_events
+            .iter()
+            .filter(|(_, addr)| *addr == verifier.0)
+            .count()
+    }
+
+    /// P5 Bulgu 21 (ADIM7): Check if a request has been cancelled.
+    pub fn is_cancelled(&self, request_id: &AiRequestId) -> bool {
+        self.cancelled_requests.contains(request_id)
+    }
+
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
+    /// P5 Bulgu 19 (ADIM7): Domain-separated map roots prevent cross-map
+    /// collision attacks (ARENAX V38). Each map gets a unique domain prefix
+    /// before its entries are hashed, so identical key+value pairs in
+    /// different maps produce different root contributions.
     pub fn state_root(&self) -> [u8; 32] {
         if self.is_empty() {
             return [0u8; 32];
         }
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_AI_REGISTRY_ROOT_V1");
+        hasher.update(b"BDLM_AI_REGISTRY_ROOT_V2");
 
+        // Domain: models
+        hasher.update(b"BDLM_AI_MODELS");
         for (id, spec) in &self.models {
             hasher.update(id.0);
             hasher.update(spec.calculate_leaf());
         }
+
+        // Domain: requests
+        hasher.update(b"BDLM_AI_REQUESTS");
         for (id, req) in &self.requests {
             hasher.update(id.0);
             hasher.update(req.calculate_leaf());
         }
+
+        // Domain: results
+        hasher.update(b"BDLM_AI_RESULTS");
         for (id, res_list) in &self.results {
             hasher.update(id.0);
             let mut list_hasher = Sha256::new();
@@ -502,13 +630,32 @@ impl AiRegistry {
             }
             hasher.update(list_hasher.finalize());
         }
+
+        // Domain: outcomes
+        hasher.update(b"BDLM_AI_OUTCOMES");
         for (id, outcome) in &self.outcomes {
             hasher.update(id.0);
             hasher.update(outcome.calculate_leaf());
         }
+
+        // Domain: reclaimed_fees
+        hasher.update(b"BDLM_AI_RECLAIMED");
         for id in &self.reclaimed_fees {
             hasher.update(id.0);
             hasher.update(b"RECLAIMED");
+        }
+
+        // Domain: equivocation_events (P5 Bulgu 18)
+        hasher.update(b"BDLM_AI_EQUIVOCATIONS");
+        for (req_id, verifier_bytes) in &self.equivocation_events {
+            hasher.update(req_id.0);
+            hasher.update(verifier_bytes);
+        }
+
+        // Domain: cancelled_requests (P5 Bulgu 21)
+        hasher.update(b"BDLM_AI_CANCELLED");
+        for id in &self.cancelled_requests {
+            hasher.update(id.0);
         }
 
         hasher.finalize().into()

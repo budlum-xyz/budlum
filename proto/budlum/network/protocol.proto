@@ -28,6 +28,8 @@ enum ProtoTransactionType {
     AI_INFERENCE_RESULT = 22;
     AI_FEE_RECLAIM = 23;
     AI_MODEL_DEACTIVATE = 24;
+    AI_MODEL_REACTIVATE = 25;
+    AI_REQUEST_CANCEL = 26;
 }
 
 message ProtoTransaction {
@@ -58,6 +60,8 @@ message ProtoTransaction {
         ProtoAiInferenceResult ai_inference_result = 30;
         ProtoAiFeeReclaim ai_fee_reclaim = 31;
         ProtoAiModelDeactivate ai_model_deactivate = 32;
+        ProtoAiModelDeactivate ai_model_reactivate = 33;
+        ProtoAiFeeReclaim ai_request_cancel = 34;
     }
 }
 

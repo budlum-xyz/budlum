@@ -153,6 +153,11 @@ pub enum TransactionType {
     AiFeeReclaim(crate::ai::types::AiRequestId),
     /// Phase 10 (§1 P5): Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
+    /// Phase 10 (§1 P5 ADIM7): Reactivate a previously deactivated AI model.
+    AiModelReactivate(crate::ai::types::AiModelId),
+    /// Phase 10 (§1 P5 ADIM7): Cancel a pending AI inference request (requester-only).
+    /// Returns escrowed max_fee for refund by the executor layer.
+    AiRequestCancel(crate::ai::types::AiRequestId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -487,6 +492,8 @@ impl Transaction {
             TransactionType::AiInferenceResult(_) => schedule.contract_call_gas,
             TransactionType::AiFeeReclaim(_) => schedule.contract_call_gas,
             TransactionType::AiModelDeactivate(_) => schedule.contract_call_gas,
+            TransactionType::AiModelReactivate(_) => schedule.contract_call_gas,
+            TransactionType::AiRequestCancel(_) => schedule.contract_call_gas,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -627,6 +634,8 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::AiInferenceResult(_) => 22,
         TransactionType::AiFeeReclaim(_) => 23,
         TransactionType::AiModelDeactivate(_) => 24,
+        TransactionType::AiModelReactivate(_) => 25,
+        TransactionType::AiRequestCancel(_) => 26,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -789,6 +798,8 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         }
         TransactionType::AiFeeReclaim(request_id) => put_fixed(out, &request_id.0),
         TransactionType::AiModelDeactivate(model_id) => put_fixed(out, &model_id.0),
+        TransactionType::AiModelReactivate(model_id) => put_fixed(out, &model_id.0),
+        TransactionType::AiRequestCancel(request_id) => put_fixed(out, &request_id.0),
     }
 }
 

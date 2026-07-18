@@ -595,4 +595,19 @@ pub trait BudlumApi {
         &self,
         request_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM7: Check if a verifier has equivocated on a specific AI request.
+    #[method(name = "bud_aiEquivocationStatus")]
+    async fn ai_equivocation_status(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM7: Check if an AI request has been cancelled.
+    #[method(name = "bud_aiCancelStatus")]
+    async fn ai_cancel_status(
+        &self,
+        request_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
