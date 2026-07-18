@@ -42,6 +42,34 @@
 - Commit trailer: `Co-authored-by: ARENAX <arenax@budlum.xyz>`; identity repo-local (`git config user.name/email` — `.git/config` kalıcı değildir, her oturumda kur).
 - Push öncesi `git fetch`; çalışma ağacında sahipsiz değişiklik bırakma (`git reset --hard` commit'siz işi SİLER — pre-push-check.sh kaybı STATUS'ta kayıtlı).
 
+## 3A. Ayaz koordinasyon ve kanıt protokolü — zorunlu (2026-07-18)
+
+> **Yetkili kaynak:** `docs/AI_KOORDINASYON_TALIMATI_2026-07-18.md` (`2a3a6aa`).
+> Bu bölüm tüm phase ve tüm ajan instance’ları için geçerlidir; mevcut başka
+> bir metinle çelişirse bu kural seti uygulanır.
+
+1. **Kanıtsız süreç beyanı yok.** `STATUS_ONLINE.md`deki “main yeşil”,
+   “doğrulandı”, “koordineli” ve benzeri her süreç özeti, ilgili commit SHA ile
+   GitHub Actions run linkini veya run ID’sini birlikte taşır. Test sayıları da
+   yalnız CI summary’den yazılır.
+2. **Tek instance / handle doğrulaması.** Aynı ARENA handle’ı altında ikinci
+   instance ortaya çıktığında, kod veya yetkili koordinasyon girdisi yazmadan
+   önce kullanıcı (Ayaz) onayı alınır. Onaysız instance girdisi yetkili kaynak
+   değildir. Kullanıcı onayı, tarihli `STATUS_ONLINE.md` kaydında izlenebilir
+   biçimde belirtilir.
+3. **CI-yeşil zemin kapısı.** Yeni modül, refactor veya kapsam genişletmesine
+   başlamadan önce `git fetch` yapılır; güncel `origin/main` için son Actions
+   sonucu bağımsız incelenir. Tüm gerekli check’ler tamamlanmış/başarılı değilse
+   yeni iş açılmaz; yalnız mevcut kırılımın kök-neden ve minimal onarımı yapılır.
+4. **Makine zamanı.** `STATUS_ONLINE.md` zaman damgaları yorumla üretilmez;
+   makinenin `TZ=Europe/Istanbul date '+%Y-%m-%d %H:%M UTC%:z'` çıktısı aynen
+   kullanılır. Hatalı damga silinmez; düzeltme notu ile audit trail korunur.
+5. **Zorunlu kapanış kaydı.** Bir iş/PR kapatılırken `STATUS_ONLINE.md` kaydı
+   şu dört açık satırı içerir: **Ne bitti**; **CI kanıtı** (SHA + run linki/ID);
+   **Ne bekliyor** (yoksa “yok”); **Kim karar verecek** (kullanıcı, ilgili
+   ARENA veya otomatik). Bu dört alan yoksa iş kapalı sayılmaz ve üzerine yeni
+   iş inşa edilmez.
+
 ## 4. Repo haritası (hızlı)
 
 - İş akışları: `.github/workflows/` — `ci.yml` (13 job + badge-bot), docker smoke + multinode (ayrı workflow), nightly fuzz, supply-chain extra.

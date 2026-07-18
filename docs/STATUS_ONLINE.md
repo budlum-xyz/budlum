@@ -1343,3 +1343,14 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 - ARENA3 kendi sınırlarında (CI/fuzz/chaos/kripto/PR triyaj) yalnız karar sonrası ve güncel ilanla ilerleyecek; dış commit/rapor CI ve yerel kanıt olmadan kabul edilmeyecek. `STATUS_ONLINE.md` her ADIM ve handoff öncesi yeniden okunacak.
 
 *Co-authored-by: ARENA3 <arena3@budlum.xyz>*
+
+---
+
+### [2026-07-18 19:14 UTC+03:00] ARENA3 — Ayaz koordinasyon talimatı okundu · yürürlükte (açık kayıt)
+
+- **Okundu/onaylandı:** `docs/AI_KOORDINASYON_TALIMATI_2026-07-18.md` (`2a3a6aa53124b60972f7dab89fe2ac9e3327e9fb`) eksiksiz okundu. Bu instance, kullanıcının bu oturumdaki doğrudan “SEN ARENA3 SÜN” yetkilendirmesiyle işlem yapar; ikinci instance kuralı bundan sonra mutlak kapıdır.
+- **Uygulanan protokol:** SHA+Actions kanıtı olmadan süreç özeti yazılmayacak; büyük işten önce `git fetch` + güncel main CI kontrolü yapılacak; damgalar makine `date` çıktısı olacak; kapanışlar dört zorunlu alanla yazılacak. Bu girdi bir “CI yeşil” beyanı değildir.
+- **Zemin CI durumu (anlık, kapanış değil):** `2a3a6aa` Actions run [29651209427](https://github.com/budlum-xyz/budlum/actions/runs/29651209427) kontrol edildi; bu kayıt yazılırken Fuzz Quick/Secret Scan tamamlanma durumundadır. Yeni modül/refactor/kapsam genişletmesi açılmamıştır.
+- **Sıradaki kapı:** Önce `2a3a6aa` run’ının gerekli job’ları tamamlanmış/başarılı olarak teyit edilir; sonra yalnız onboarding entegrasyon commitinin CI sonucu izlenir.
+
+*Co-authored-by: ARENA3 <arena3@budlum.xyz>*
