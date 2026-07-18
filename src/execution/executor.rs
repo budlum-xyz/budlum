@@ -233,7 +233,23 @@ impl Executor {
                         };
                         req.request_id = req.calculate_id();
                         let current_block = state.epoch_index.saturating_mul(100);
-                        let _ = state.ai_registry.submit_request(req, current_block);
+                        // P5 Bulgu 14+17: Previously the error was silently swallowed
+                        // with `let _ = ...`, and max_fee was never deducted from the
+                        // sender's balance. Now we properly handle the result:
+                        // - On success: deduct max_fee from sender balance (escrow)
+                        // - On failure: don't deduct max_fee, but the contract call
+                        //   fee was already consumed by the ZKVM execution
+                        match state.ai_registry.submit_request(req, current_block) {
+                            Ok(_) => {
+                                // Deduct max_fee from sender (escrow for verifiers)
+                                let sender = state.get_or_create(&tx.from);
+                                sender.balance = sender.balance.saturating_sub(max_fee);
+                            }
+                            Err(_) => {
+                                // Request rejected (deadline, max_fee=0, etc.)
+                                // max_fee NOT deducted — no fee leak
+                            }
+                        }
                     }
                 }
 
@@ -679,11 +695,20 @@ impl Executor {
                     let req = state.ai_registry.requests.get(&finalized.request_id);
                     if let Some(req) = req {
                         if !finalized.agreeing_verifiers.is_empty() {
-                            let reward_per_verifier =
-                                req.max_fee / finalized.agreeing_verifiers.len() as u64;
-                            for verifier_addr in &finalized.agreeing_verifiers {
+                            // P5 Bulgu 16: Integer division remainder protection.
+                            // max_fee / verifier_count loses the remainder.
+                            // Distribute remaining units to verifiers in order
+                            // (first verifier gets the extra unit).
+                            let verifier_count = finalized.agreeing_verifiers.len() as u64;
+                            let reward_per_verifier = req.max_fee / verifier_count;
+                            let remainder = req.max_fee % verifier_count;
+                            for (i, verifier_addr) in
+                                finalized.agreeing_verifiers.iter().enumerate()
+                            {
                                 let acc = state.get_or_create(verifier_addr);
-                                acc.balance = acc.balance.saturating_add(reward_per_verifier);
+                                let extra = if (i as u64) < remainder { 1 } else { 0 };
+                                acc.balance =
+                                    acc.balance.saturating_add(reward_per_verifier + extra);
                             }
                         }
                     }

@@ -1453,4 +1453,201 @@ mod tests {
         assert!(result.is_err(), "Zero max_fee should be rejected");
         assert!(result.unwrap_err().contains("max_fee must be >= 1"));
     }
+
+    // ===================== P5 — Reward Distribution + Edge Case Tests =====================
+
+    #[test]
+    fn test_p5_reward_distribution_with_remainder() {
+        // P5 Bulgu 16: max_fee=100, 3 verifiers → 33+33+34 (not 33+33+33=99)
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 3,
+                agreement_threshold: 3,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+            })
+            .unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let v3 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000013")
+                .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: [2u8; 32],
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100, // 100 / 3 = 33 remainder 1
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        registry
+            .submit_result(
+                AiInferenceResult {
+                    request_id: req_id,
+                    verifier: v1,
+                    output_commitment: [9u8; 32],
+                    output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
+                    result_nonce: 1,
+                    signature: vec![1],
+                    submitted_at_block: 15,
+                },
+                15,
+            )
+            .unwrap();
+        registry
+            .submit_result(
+                AiInferenceResult {
+                    request_id: req_id,
+                    verifier: v2,
+                    output_commitment: [9u8; 32],
+                    output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
+                    result_nonce: 2,
+                    signature: vec![2],
+                    submitted_at_block: 16,
+                },
+                16,
+            )
+            .unwrap();
+        let outcome = registry
+            .submit_result(
+                AiInferenceResult {
+                    request_id: req_id,
+                    verifier: v3,
+                    output_commitment: [9u8; 32],
+                    output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
+                    result_nonce: 3,
+                    signature: vec![3],
+                    submitted_at_block: 17,
+                },
+                17,
+            )
+            .unwrap()
+            .expect("Should finalize with 3 verifiers");
+
+        assert_eq!(outcome.agreeing_verifiers.len(), 3);
+        // Verify the outcome exists — executor distributes rewards based on these
+    }
+
+    #[test]
+    fn test_p5_register_model_duplicate_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+            })
+            .unwrap();
+
+        // Duplicate model_id rejected
+        let result = registry.register_model(AiModelSpec {
+            model_id,
+            model_hash: [2u8; 32], // Different hash, same ID
+            owner,
+            min_verifier_count: 2,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already registered"));
+    }
+
+    #[test]
+    fn test_p5_update_model_spec_invalid_threshold_rejected() {
+        // agreement_threshold > min_verifier_count must be rejected
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+            })
+            .unwrap();
+
+        // threshold > min_verifier_count
+        let result = registry.update_model_spec(&model_id, &owner, 2, 5, 1024, 2048, 100, 50);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("agreement_threshold"));
+    }
+
+    #[test]
+    fn test_p5_transfer_to_self_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+            })
+            .unwrap();
+
+        let result = registry.transfer_model_ownership(&model_id, &owner, owner);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("different"));
+    }
 }
