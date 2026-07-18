@@ -43,12 +43,20 @@ impl ShardRef {
 
 /// A content manifest — the on-chain commitment to a sharded piece of
 /// content. `manifest_id` is the canonical identity of the whole piece; it
-/// is computed deterministically from `(total_size, shards)` so two
+/// is computed deterministically from `(owner, total_size, shards)` so two
 /// clients sharding the same content the same way always produce the
 /// same `manifest_id`.
+///
+/// `owner` alanı F01 (Phase 10.5) ile eklendi — veri sahipliği zincir-üstü
+/// kanıtlanabilir (Data Owner identity). `#[serde(default)]` ile eski
+/// snapshot'lar/JSON'lar backward-compat (owner = zero = "belirsiz").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContentManifest {
     pub manifest_id: ContentId,
+    /// F01 (Phase 10.5): içerik sahibinin adresi. Zero-address = eski/pre-F01
+    /// manifest (backward-compat); yeni manifest'ler gerçek owner taşır.
+    #[serde(default)]
+    pub owner: crate::core::address::Address,
     pub total_size: u64,
     pub shard_count: u32,
     pub shards: Vec<ShardRef>,

@@ -29,6 +29,11 @@ modül satırında (ve modül README'sinde) kalır.
 | BudZero (BudZKVM) | **124** (`cargo test --workspace`, CI-kanıtlı) | `BudZero / BudZKVM` job | Z-B 64-derinlik Production-gated — ayrıntı: `budzero/README.md` |
 | B.U.D. | **12 zorunlu** (9 invariant + 3 e2e) | `B.U.D. E2E Invariants` job + `scripts/check-bud-e2e.sh` | devnet-only; sahte-yeşil riski işaretli — `src/storage/README.md` |
 | BNS (`.bud`) | **8 test** (`test_bns_*`) | `BNS Name Registry` job + `scripts/check-bns-gate.sh` | iskelet mevcut; genişletme ayrı talimat — `src/bns/README.md` |
+| EVM ChainAdapter | **58 test** (RLP+MPT+receipt+header+verify) | `Budlum Core` job (F10.1+F10.2 ship edildi) | H4 kapanması (kriptografik receipt verify); sync-committee opsiyonel — `src/cross_domain/evm/README.md` |
+| AI Inference | **76 test** (P0+P5 ship) | `Budlum Core` job | attestation model (zkML DEĞİL); F06 largely closed — `src/ai/README.md` |
+| Pollen (B.U.D. Marketplace) | **8 test** (P0 tipler) | `Budlum Core` job (P1+ sonrası gate adayı) | iskelet (P0); Faz-1 soft-enforcement — `src/pollen/README.md` |
+| Hub Registry | iskelet (parent suite) | — | mainnet v1 kapsam dışı (M10) — `src/hub/README.md` |
+| SocialFi/NFT | parent suite | — | mainnet v1 kapsam dışı (M10) — `src/socialfi/README.md` |
 
 Not: Core'un 755 sayısı B.U.D. ve BNS testlerini de içerir (paylaşılan lib suite);
 modül satırları kendi isim-kilitli kapılarını ayrıca raporlar.
