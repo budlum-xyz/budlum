@@ -614,3 +614,27 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Bekleyen kullanıcı kararı:** RFC §7'deki 4 açık soru (üstte özetli) — onay gelirse P1 hemen başlar.
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+### [2026-07-18 13:05 UTC+3] ARENA3 — sled lock-release flake kök-neden onarımı + oturum kapanışı
+
+**Durum:** main `d8084aa` tam yeşil (12/12 + smoke + multinode + supply-chain) · rozet **755 lib** (+2 yeni determinstik test)
+**Kime:** kullanıcı, ARENA1, ARENA2-halef
+
+**CI flake kök-nedeni (kanıt: `0894fd1` Coverage işi):** `tur13_5_backup_restore_roundtrip...` paniği — `sled::open("restored.db/db")` üzerinde `could not acquire lock / WouldBlock`. `restore_snapshot` hedef DB'yi açıp batch+flush yaptıktan sonra handle'ı düşürüyor ve **aynı path'i derhal yeniden açıyordu** (`Self::new`); sled'in dosya-kilit release'i `Db::drop` ile senkron değil (flusher thread) → back-to-back reopen yarışı → CI yükü altında ara sıra kaybedilir (yeşil geçmişli flake).
+
+**Onarım (`1997121` + `85dee5c` + `593b156`):**
+- `restore_snapshot` artık migration/recovery/integrity kontrollerini **tek sled handle** üzerinden koşturuyor (ikinci open yok; semantik birebir aynı).
+- `sled_open_with_retry` helper: sled lock contention'ını (`Other` + "could not acquire lock" mesajı; sled `sled::Error`'ı döner, `From` ile io'ya normalize) bounded backoff ile emer; diğer hatalar ve kalıcı contention'da hata yüzeyi eskisiyle aynı. `Storage::new` da aynı helper'ı kullanıyor (daemon boot lock-yarışı için de koruma).
+- 2 deterministik test: kilit-release beklenerek başarı + kalıcı contention'da temiz `Err` (755 lib sayımı buradan geliyor).
+
+**Süreç itirafı (şeffaflık):** onarım iki ek push gerektirdi — (1) rustfmt'ın `fn_call_width` davranışı 98-sütunluk iç-içe çağrıyı tek satıra topladı, (2) helper'ı `io::Error` farzıyla yazmışım, gerçekte `sled::open` → `sled::Error` (E0599+E0308; dönüşüm `From<sled::Error>` impl'i ile). Lokal toolchain yok, CI tek hakem — ikisi de ilk CI turunda yakalandı, fix'ler aynı oturumda. Ders kaydı: helper tasarımında hata tipini jenerik varsayma; `?`'nin arkasındaki From impl'ini elle çağırırken tipi doğrula.
+
+**İki emir durumu (bu girdinin üstündeki ana başlık):** ✅ GAP-1 RFC taslağı push'landı (`docs/RFC_GAP1_SNAPSHOT_MANIFEST_SIGNATURE.md`, §7'de 4 açık soru kullanıcıda) · ✅ Halef el kitabı yukarıda · taze tam-tarama hafıza doğrulaması yapıldı (main/alert/PR tablosu).
+
+**Bekleyen kullanıcı kararları:** RFC §7 Soru 1-4 (trust model onayı · genesis trust-list kanalı · imzasız geçiş penceresi · GAP-2 tek schema-4 birleşimi) · #45 toml merge adayı (yeşil; majors halef+kullanıcı kararı).
+
+**Oturum sonu tablo:** main yeşil · alert 0 · rozet 755 · GAP-3/4 kapalı · GAP-1 RFC draft açık · GAP-2 halefte · tur13_5 flake sınıfı kapanmış sayılır (tekrar görülürse bu girdiye referans).
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
