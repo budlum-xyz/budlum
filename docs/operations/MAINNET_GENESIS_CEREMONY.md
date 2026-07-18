@@ -286,3 +286,125 @@ updates do **not** change the genesis block hash.
 - 🟡 HSM vendor-native BLS/PQ mechanism (hardware-dependent)
 - 🟡 External security audit (Phase 5)
 - 🟡 Mainnet launch announcement
+
+---
+
+## 9. Phase 10.5 Augmentation — MPC key-gen, rotation, destruction, timeline (F27)
+
+> **Kaynak:** Phase 10.5 çapraz-kesit eksiklik analizi (`docs/PHASE10.5_CROSS_CUTTING_GAP_ANALYSIS.md` F27, 🔴 mainnet-blocker).
+> **Yazar:** ARENA1 (görev yöneticisi), 2026-07-18.
+> Bu bölüm, yukarıdaki §1–§8 prosedürünü **değiştirmez**; onun **eksik
+> kalan boyutlarını** (MPC, rotation, destruction, timeline) ekler. MR-6
+> (Mainnet Readiness criterion 6: genesis ceremony) kapanışı için gereklidir.
+
+### 9.1 Neden augmentation
+
+§2.1 Ed25519 `keygen` tek-party (her validator kendi makinesinde). Bu consensus
+imzaları için yeterli (her validator bağımsız imzalar). Ama **treasury/team
+multi-sig** ve **HSM-içi BLS/PQ key-custody** için **N-of-M threshold** modeli
+gerekir — tek bir key holder'ın compromize olması treasury drain'e yol açar.
+Ayrıca §5'te "ceremony sonrası key rotation" prosedürü YOK: bir validator key'i
+sızarsa zincir nasıl rotate eder? Bu bölüm her iki boşluğu kapatır.
+
+### 9.2 Threshold key generation (MPC / DKG) — treasury + HSM BLS/PQ
+
+**Amaç:** Hiçbir single party tüm özel anahtarı görmesin; N-of-M threshold imza.
+
+**Model:** Distributed Key Generation (DKG, Pedersen verisini her party broadcast
+eder; hiçbir party full sk'yi öğrenmez). Threshold = `t` of `n` (örn. 3-of-5).
+
+| Anahtar sınıfı | Threshold modeli | Tooling | Not |
+|---|---|---|---|
+| Treasury/team multi-sig (Ed25519) | FROST-style threshold Ed25519 (t-of-n) | ceremony-time: external audited FROST impl (örn. `frost-core` reference) | §3.1 allocation'daki treasury adresleri threshold pubkey'ine bağlı |
+| BLS12-381 finality (PoS/BFT) | DKG inside HSM (vendor-native; M6 debt) | HSM vendor SDK | Henüz HSM yoksa: Ed25519-only başlar, BLS/PQ post-launch (M6) |
+| PQ Dilithium5 backup | HSM-içi DKG | HSM vendor SDK | M6'ya bağlı |
+
+**Ceremony akışı (DKG round):**
+1. Her party `i` air-gap makinede `(polynomial_share_i, commit_i)` üretir.
+2. `commit_i`'ler witness'a notarize edilir (§9.4 destruction evidence ile).
+3. Party'ler private channel (ceremony room / mTLS) üzerinden share'lerini exchange eder.
+4. Aggregate → threshold pubkey `PK_t` + per-party private share `sk_i`.
+5. **Hiçbir party `PK_t`'nin karşılığı olan full sk'yi öğrenmez.**
+6. `PK_t` → treasury/team adresi olarak §3.1 allocation'a yazılır.
+
+**Kabul:** Budlum konsensüsü **tek-party validator Ed25519** ile başlayabilir
+(M6'ya kadar BLS/PQ yok). Threshold treasury multi-sig **best-effort**: HSM
+yoksa ceremony, treasury'i tek-party controlled address ile dondurur ve
+bu **bilinçli borç (M6-treasury-threshold)** olarak §5.1'e eklenir.
+
+### 9.3 Emergency key rotation (key-compromise prosedürü)
+
+**Tetikleyiciler:** (a) validator key sızması (kanıt veya şüphe), (b) HSM
+hardware failure, (c) ceremony participant offboarding, (d) slashing sonrası
+key deprecation.
+
+**Akış (post-launch):**
+
+| Adım | Aksiyon | Sorumlu | SLA |
+|---|---|---|---|
+| 1 | Compromise şüphesi → incident raporu (`security@budlum.network`) | reporter | T+0 |
+| 2 | Triage: kanıt değerlendirme, severity (Critical/High) | security lead | T+24h |
+| 3 | **Slashing:** compromize validator'ın equivocation/liveness kanıtı → on-chain slash (CLAUDE.md slashing akışı) | consensus | T+72h |
+| 4 | **Key rotation:** yeni validator key üretimi (air-gap), PoP güncellemesi | operator | T+7d |
+| 5 | **Validator set update:** governance proposal (`ProposalType::ParameterUpdate` veya slashing-ledger rotate) | governance | T+14d |
+| 6 | **Old key deprecation:** eski pubkey blacklist (consensus reject) | consensus | T+30d |
+| 7 | **Post-mortem:** incident raporu + timeline + witness imza | ceremony lead | T+45d |
+
+**Mainnet öncesi (ceremony'de) compromise:** key yeniden üretilir, ceremony
+restart (T-0'dan önce → genesis JSON rebuild + hash re-freeze). Ceremony
+minutes'ta (§3.5) "deviation/incident" alanına yazılır.
+
+**Threshold treasury (§9.2) compromise:** t-of-n threshold → `t`'den az party
+compromize olursa treasury güvenli. `t+1` party compromize → acil key-rotate
+(yeni DKG round, eski threshold deprecate).
+
+### 9.4 Key destruction evidence (üretim materyalinin imhası)
+
+**Kural:** ceremony'de kullanılan tüm **ephemeral üretim materyali** (DKG
+polynomial'ları, intermediate share'ler, RNG seed'leri, `keygen` CLI çıktı
+logları) ceremony bitiminde **yok edilir** ve imha **witness tarafından
+notarize edilir**.
+
+**Imha checklist (§3.5 minutes'e ek):**
+
+```
+Destruction evidence:
+- [ ] DKG polynomial'lar (her party): shred + 7-pass overwrite
+- [ ] RNG seed material: HSM-içi purge (vendor komutu)
+- [ ] keygen CLI intermediate files: rm + disk wipe
+- [ ] Air-gap makine RAM: power-cycle (cold boot residue)
+- [ ] Ceremony call recording (varsa): encrypted archive + access log
+- [ ] Printed materials (private key printouts YASAK, varsa): shredder
+Witness destruction signature: ___DOLDUR___ (commit SHA + date)
+```
+
+**Kalıcı materyal (imha EDİLMEZ):** final validator pubkey'leri, threshold
+treasury pubkey'i, genesis JSON — bunlar public artifacts (git commit).
+
+### 9.5 Ceremony timeline (T-7d → T+1d)
+
+| Faz | Zaman | Aktivite | Çıktı |
+|---|---|---|---|
+| **T-7d** | 1 hafta önce | Participant onboarding, HSM envanter kontrol, air-gap makine setup, dry-run (testnet genesis) | dry-run hash (testnet), participant list locked |
+| **T-3d** | 3 gün önce | Ceremony materials dağıtımı (sealed envelopes / HSM provisioning), witness brief | sealed-material receipt log |
+| **T-1d** | 1 gün önce | Final CI green confirmation (`MR-1` 3 consecutive green pushes), git tag candidate | release tag SHA |
+| **T-0 ceremony** | tören günü | §2.1 Ed25519 keygen + §9.2 DKG (treasury/BLS) + §3.1 genesis JSON build + §3.2 hash freeze + §3.5 minutes + §9.4 destruction | signed genesis JSON + minutes + destruction evidence |
+| **T+1d** | ertesi gün | §3.4 bootnode publication + §3.6 first-block T-0 checks + PRODUCTION_RUNBOOK §8 update + immunefi launch (§BUG_BOUNTY M7) | public genesis hash + live mainnet |
+
+### 9.6 MR-6 kapanış kriterleri (F27)
+
+MR-6 (genesis readiness) kapanması için bu bölümün tüm maddeleri **doldurulmuş**
+olmalı:
+
+- [ ] §9.2 threshold model kararı (HSM varsa DKG / yoksa Ed25519-only + M6-treasury-threshold borcu)
+- [ ] §9.3 emergency rotation akışı reviewer onayı (security + governance)
+- [ ] §9.4 destruction checklist ceremony-day doldurulmuş (___DOLDUR___ alanları)
+- [ ] §9.5 timeline T-0 gerçekeşmiş + minutes imzalı
+- [ ] GENESIS_FLIP_CHECKLIST F1-F5 ✅ (§3.2 referans)
+
+**Bu doküman hâlâ "procedure only"dir** — ceremony gerçekleşene kadar MR-6 🟡
+(template ready) kalır. F27 🔴 → MR-6 kapanışıyla 🟢 → ✅.
+
+---
+
+*Co-authored-by: ARENA1 <arena1@budlum.ai> (F27 augmentation, Phase 10.5)*

@@ -1466,3 +1466,58 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Sıradaki (görev yöneticisi):** F10.2 ile H4 kriptografik temel kapatıldı. Görev yöneticisi talimatlarından (c8802f2) öncelik sırasıyla ARENA3-T1 (P2 schema-4) / ARENA3-T5 (F27 ceremony) / ARENA3-T6 (F29 bug bounty) — kullanıcı kararı.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-18 22:10 UTC+3] ARENA1 — F27 ceremony + F29 bug bounty augmented (MR-6/MR-8 kapanış hazırlığı)
+
+**Sıradaki öncelik (görev yöneticisi talimatı c8802f2, #3+#4):** Phase 10.5 🔴 mainnet-engellerinden F27 + F29 — docs augmentation (her AI yapabilir, ARENA3 domain'i değildi).
+
+**F27 (MR-6 mainnet-launch engeli) — `docs/operations/MAINNET_GENESIS_CEREMONY.md` §9:**
+Mevcut ceremony prosedürü §1-8 zengindi (roller/keygen/hash-freeze/minutes) ama Phase 10.5 F27'nin spesifik boşlukları vardı. Append-only §9 augmentation:
+- §9.2 **Threshold key generation (DKG/MPC)** — treasury/team multi-sig + HSM-içi BLS/PQ. Neden: §2.1 sadece tek-party keygen CLI; treasury drain için threshold gerek. HSM yoksa Ed25519-only + M6-treasury-threshold bilinçli borcu.
+- §9.3 **Emergency key rotation** — key-compromise akışı (slashing → rotate → validator-set update → deprecation → post-mortem) + SLA tablosu (T+72h/T+7d/T+14d/T+30d). Mainnet öncesi compromise = restart.
+- §9.4 **Key destruction evidence** — ephemeral üretim materyali imha checklist (DKG polynomial shred, RNG HSM purge, RAM power-cycle) + witness notarize.
+- §9.5 **Ceremony timeline** — T-7d/T-3d/T-1d/T-0/T+1d faz haritası (dry-run → HSM provisioning → CI green → genesis build → bootnode publish).
+- §9.6 **MR-6 kapanış kriterleri** — tüm ___DOLDUR___ alanları + F1-F5 flip checklist.
+
+**F29 (MR-8) — `docs/BUG_BOUNTY.md` §7:**
+Mevcut BUG_BOUNTY.md zengindi (kapsam/ödül/süreç/kurallar) ama Phase 10.5 F29 boşlukları:
+- §7.1 **F10 EVM kapsamı** — cross_domain/evm/ (RLP/MPT/receipt/header/verify) Kritik saldırı yüzeyleri (PR #52+#53 shipled, Augmentation dünkü commit'ten önce yazılmamıştı).
+- §7.2 **Safe harbor / responsible disclosure** — good-faith araştırmacı koruması + out-of-safe-harbor (yasal).
+- §7.3 **Immunefi başvuru durumu** — Medium tier (self-audited) ile başlama + High tier external-audit koşulu + mainnet T+1d launch.
+- §7.4 **MR-8 kapanış kriterleri** — Immunefi submitted + PGP key + (opsiyonel) firm.
+
+**Netice:** F27/F29 dokümanları artık mainnet-launch'a hazır (template ready). Gerçek kapanış (MR-6/MR-8 ✅) için ceremony gerçekleşmesi (F27) + Immunefi launch (F29) gerek — bunlar operasyonel, kod değil. **F27/F29 🔴 → 🟡 (template ready, awaiting operation).**
+
+**Sıradaki (görev yöneticisi):** ARENA3-T1 P2 schema-4 (en kritik #2, ARENA3+ARENA2 deep code — ilan+koordinasyon gerek) VEYA F01 ContentManifest owner tasarım kararı (K10.5-1, kullanıcı kararı). F27/F29 sonrası F10.3 (sync-committee) ARENA1 opsiyonel.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+### [2026-07-18 22:55 UTC+3] ARENAX — ADIM 1+2+3 CI KAPANISI BEKLENIYOR (V17-V21 FIX)
+
+**Ne bitti:** Bulgu 1, 3, 4 ve 5 için onarımlar uygulandı.
+1. **Bridge Unlock Fix:** `src/cross_domain/bridge.rs`'deki domain mismatch hatası düzeltildi (target_domain karşılaştırması).
+2. **SocialFi Root Integrity:** `NftRegistry::root` fonksiyonuna `tags` ve `author_name` dahil edildi (konsensüs güvenliği).
+3. **SocialFi Boost Logic:** `NftBoost` artık luminance skorunu artırıyor; `NftUpdateLight` (serbest skor belirleme) devre dışı bırakıldı.
+4. **Persistence Guard:** `blockchain.rs`'deki kritik storage çağrılarına (bridge/qc/finality) hata loglaması eklendi.
+
+**CI Kanıtı:** Commit `fd7482d` push edildi. Actions run sonucu bekleniyor.
+**Ne bekliyor:** CI yeşil olduktan sonra SocialFi ve EVM Bridge modüllerinde negatif test matrisi genişletilecek. Bulgu 2 (Bridge Replay) kullanıcı kararı gereği ("no_fix_replay") ertelenmiştir.
+**Kim karar verecek:** Kullanıcı (Ayaz).
+
+---
+
+*Önceki rapor (Bulgu 1-3) V17-V19 bu onarımlarla çözülmüştür.*
+
+---
+
+---
+
+### [2026-07-18 21:04 UTC+03:00] ARENA3 — MAIN-RED kök neden / ARENAX onarımının bağımsız düzeltmesi (ADIM açık)
+
+- Kullanıcı acil emriyle `fd7482d` ARENAX değişikliği bağımsız incelendi. `f746f5c` CI run [29654813454](https://github.com/budlum-xyz/budlum/actions/runs/29654813454) kırmızıdır: `bridge_rejects_double_lock_and_out_of_order_transitions` başarısız; `unlock` kontrolünün `target_domain`a çevrilmesi, state-machine sözleşmesi ve mevcut lifecycle testiyle çelişir.
+- Main-RED kolektif-onarım istisnasıyla yalnız üç yanlış davranış geri alınıyor: unlock origin-domain denetimi; `NftBoost`un yapılandırılmış treasury/burn ayrımı; owner-only `NftUpdateLight` yürütmesi. ARENAX’ın persistence hata görünürlüğü ve SocialFi root alan-kapsamı bu ADIM’da değiştirilmedi.
+- ARENAX raporundaki BridgeBurn `verify_id`/replay bulgusu ayrı doğrulama ve negatif test gerektirir; kanıtlanmadan kodlanmayacak.
+
+*Co-authored-by: ARENA3 <arena3@budlum.xyz>*

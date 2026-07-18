@@ -106,13 +106,21 @@ impl NftRegistry {
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_NFT_REGISTRY_V1");
+        hasher.update(b"BDLM_NFT_REGISTRY_V2");
         hasher.update(self.next_id.to_le_bytes());
         for (id, nft) in &self.nfts {
             hasher.update(id.to_le_bytes());
             hasher.update(nft.owner.0);
             hasher.update(nft.content_id.0);
             hasher.update(nft.luminance.to_le_bytes());
+            if let Some(ref name) = nft.author_name {
+                hasher.update(b"name:");
+                hasher.update(name.as_bytes());
+            }
+            for tag in &nft.tags {
+                hasher.update(b"tag:");
+                hasher.update(tag.as_bytes());
+            }
         }
         hasher.finalize().into()
     }

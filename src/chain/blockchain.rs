@@ -1921,7 +1921,9 @@ impl Blockchain {
         }
 
         if let Some(store) = &self.storage {
-            let _ = store.save_bridge_state(&self.state.bridge_state);
+            if let Err(e) = store.save_bridge_state(&self.state.bridge_state) {
+                tracing::error!("CRITICAL: Failed to persist bridge state: {}", e);
+            }
         }
 
         Ok(message)
@@ -2255,7 +2257,9 @@ impl Blockchain {
         self.verified_qc_blobs
             .insert(blob.checkpoint_height, blob.clone());
         if let Some(store) = &self.storage {
-            let _ = store.save_qc_blob(blob.checkpoint_height, &blob);
+            if let Err(e) = store.save_qc_blob(blob.checkpoint_height, &blob) {
+                tracing::error!("Failed to persist QC blob: {}", e);
+            }
         }
 
         self.process_pending_finality_certs(blob.checkpoint_height)?;
@@ -3436,7 +3440,9 @@ impl Blockchain {
         );
 
         if let Some(ref store) = self.storage {
-            let _ = store.save_finality_cert(self.finalized_height, &cert);
+            if let Err(e) = store.save_finality_cert(self.finalized_height, &cert) {
+                tracing::error!("Failed to persist finality cert: {}", e);
+            }
             if let Err(e) = store.save_canonical_height(self.finalized_height) {
                 tracing::error!(error = %e, height = self.finalized_height, "Failed to save canonical height");
             }
