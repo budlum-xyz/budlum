@@ -397,7 +397,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Current durable snapshot schema emitted by this binary. This is the
 /// ConsensusStateV2 migration target for Phase 2 §1.4.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -840,7 +840,7 @@ impl StateSnapshotV2 {
         let mut notes = Vec::new();
         if self.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
             notes.push(
-                "schema-2 snapshot accepted through serde defaults; rewrite through current binary to persist schema-3 registry/liveness/tokenomics fields".to_string(),
+                "schema-2/3 snapshot accepted through serde defaults; rewrite through current binary to persist schema-4 GAP-2 hash-kapsam + GAP-1 imza alanlari".to_string(),
             );
         } else {
             notes.push("snapshot already at current schema".to_string());
