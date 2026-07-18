@@ -622,23 +622,37 @@ mod v29_signing_tests {
 
     #[test]
     fn v29_nft_boost_payload_tampering_invalidates_signature() {
-        let mut tx = signed_variant(TransactionType::NftBoost { nft_id: 7, amount: 100 });
+        let mut tx = signed_variant(TransactionType::NftBoost {
+            nft_id: 7,
+            amount: 100,
+        });
         let original_hash = tx.hash.clone();
-        tx.tx_type = TransactionType::NftBoost { nft_id: 7, amount: 999_999 };
+        tx.tx_type = TransactionType::NftBoost {
+            nft_id: 7,
+            amount: 999_999,
+        };
         assert_ne!(tx.calculate_hash(), original_hash);
         assert!(!tx.verify());
     }
 
     #[test]
     fn v29_nft_tag_payload_tampering_invalidates_signature() {
-        let mut tx = signed_variant(TransactionType::NftTag { nft_id: 7, tag: "safe".into() });
-        tx.tx_type = TransactionType::NftTag { nft_id: 7, tag: "tampered".into() };
+        let mut tx = signed_variant(TransactionType::NftTag {
+            nft_id: 7,
+            tag: "safe".into(),
+        });
+        tx.tx_type = TransactionType::NftTag {
+            nft_id: 7,
+            tag: "tampered".into(),
+        };
         assert!(!tx.verify());
     }
 
     #[test]
     fn v29_ai_fee_reclaim_payload_tampering_invalidates_signature() {
-        let mut tx = signed_variant(TransactionType::AiFeeReclaim(crate::ai::types::AiRequestId([1u8; 32])));
+        let mut tx = signed_variant(TransactionType::AiFeeReclaim(
+            crate::ai::types::AiRequestId([1u8; 32]),
+        ));
         tx.tx_type = TransactionType::AiFeeReclaim(crate::ai::types::AiRequestId([2u8; 32]));
         assert!(!tx.verify());
     }
