@@ -134,6 +134,14 @@ pub enum ChainCommand {
         crate::ai::types::AiRequestId,
         oneshot::Sender<Option<crate::ai::types::AiInferenceOutcome>>,
     ),
+    GetAiRequest(
+        crate::ai::types::AiRequestId,
+        oneshot::Sender<Option<crate::ai::types::AiInferenceRequest>>,
+    ),
+    GetAiFeeReclaimStatus(
+        crate::ai::types::AiRequestId,
+        oneshot::Sender<Result<(crate::core::address::Address, u64), String>>,
+    ),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -295,7 +303,7 @@ pub enum ChainCommand {
         response: oneshot::Sender<Vec<crate::socialfi::types::Nft>>,
     },
     MarketGetOffers {
-        response: oneshot::Sender<Vec<crate::bud_marketplace::DataOffer>>,
+        response: oneshot::Sender<Vec<crate::pollen::DataOffer>>,
     },
     HubGetApps {
         response: oneshot::Sender<Vec<crate::hub::types::AppRecord>>,
@@ -988,6 +996,39 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    pub async fn get_ai_request(
+        &self,
+        id: crate::ai::types::AiRequestId,
+    ) -> Option<crate::ai::types::AiInferenceRequest> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiRequest(id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_ai_fee_reclaim_status(
+        &self,
+        id: crate::ai::types::AiRequestId,
+    ) -> Result<(crate::core::address::Address, u64), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiFeeReclaimStatus(id, tx))
+            .await
+            .is_err()
+        {
+            return Err("ChainActor disconnected".into());
+        }
+        rx.await
+            .map_err(|_| "ChainActor response dropped".to_string())?
+    }
+
     pub async fn get_prune_status(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.tx.send(ChainCommand::GetPruneStatus(tx)).await {
@@ -1386,7 +1427,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn market_get_offers(&self) -> Vec<crate::bud_marketplace::DataOffer> {
+    pub async fn market_get_offers(&self) -> Vec<crate::pollen::DataOffer> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -1823,6 +1864,16 @@ impl ChainActor {
                 }
                 ChainCommand::GetAiOutcome(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.outcomes.get(&id).cloned();
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiRequest(id, res_tx) => {
+                    let res = self.blockchain.state.ai_registry.requests.get(&id).cloned();
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiFeeReclaimStatus(id, res_tx) => {
+                    let current_block = self.blockchain.state.epoch_index.saturating_mul(100);
+                    let mut registry = self.blockchain.state.ai_registry.clone();
+                    let res = registry.reclaim_fee(&id, current_block);
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {

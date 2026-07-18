@@ -167,6 +167,22 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::AiFeeReclaim(request_id) => (
+                pb::ProtoTransactionType::AiFeeReclaim as i32,
+                Some(pb::proto_transaction::TypePayload::AiFeeReclaim(
+                    pb::ProtoAiFeeReclaim {
+                        request_id: request_id.0.to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::AiModelDeactivate(model_id) => (
+                pb::ProtoTransactionType::AiModelDeactivate as i32,
+                Some(pb::proto_transaction::TypePayload::AiModelDeactivate(
+                    pb::ProtoAiModelDeactivate {
+                        model_id: model_id.0.to_vec(),
+                    },
+                )),
+            ),
         };
 
         pb::ProtoTransaction {
@@ -733,6 +749,30 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     signature: payload.signature,
                     submitted_at_block: payload.submitted_at_block,
                 })
+            }
+            pb::ProtoTransactionType::AiFeeReclaim => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::AiFeeReclaim(p)) => p,
+                    _ => return Err("Missing or mismatched AiFeeReclaim payload".into()),
+                };
+                if payload.request_id.len() != 32 {
+                    return Err("AiFeeReclaim request_id must be 32 bytes".into());
+                }
+                let mut rid = [0u8; 32];
+                rid.copy_from_slice(&payload.request_id);
+                TransactionType::AiFeeReclaim(crate::ai::types::AiRequestId(rid))
+            }
+            pb::ProtoTransactionType::AiModelDeactivate => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::AiModelDeactivate(p)) => p,
+                    _ => return Err("Missing or mismatched AiModelDeactivate payload".into()),
+                };
+                if payload.model_id.len() != 32 {
+                    return Err("AiModelDeactivate model_id must be 32 bytes".into());
+                }
+                let mut mid = [0u8; 32];
+                mid.copy_from_slice(&payload.model_id);
+                TransactionType::AiModelDeactivate(crate::ai::types::AiModelId(mid))
             }
         };
 

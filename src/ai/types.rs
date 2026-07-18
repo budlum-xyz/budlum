@@ -269,6 +269,10 @@ pub struct AiInferenceOutcome {
     pub output_ref: BoundedBytes,
     pub agreeing_verifiers: Vec<Address>,
     pub finalized_at_block: u64,
+    /// P5 Bulgu 7: Callback address from the original request.
+    /// Set during finalization so consumers (RPC, event listeners) know
+    /// who to notify about the completed inference.
+    pub callback: Option<Address>,
 }
 
 impl AiInferenceOutcome {
@@ -282,6 +286,12 @@ impl AiInferenceOutcome {
             hasher.update(verifier.as_bytes());
         }
         hasher.update(self.finalized_at_block.to_le_bytes());
+        if let Some(ref cb) = self.callback {
+            hasher.update(b"cb");
+            hasher.update(cb.as_bytes());
+        } else {
+            hasher.update(b"no_cb");
+        }
         hasher.finalize().into()
     }
 }

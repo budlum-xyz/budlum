@@ -588,4 +588,11 @@ pub trait BudlumApi {
     /// Query active AI verifiers (RoleId::AI_VERIFIER = RoleId(6)).
     #[method(name = "bud_aiGetActiveVerifiers")]
     async fn ai_get_active_verifiers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Reclaim escrowed max_fee for expired unfinalized AI inference request (P5 Bulgu 4).
+    #[method(name = "bud_aiReclaimFee")]
+    async fn ai_reclaim_fee(
+        &self,
+        request_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
