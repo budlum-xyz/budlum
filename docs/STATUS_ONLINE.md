@@ -503,3 +503,17 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 - Pipeline gecikme kaydı (kullanıcı talebi): tam CI duvar-süresi ~11-12 dk/SHA (uzun direk: Fuzz Quick içeride); Supply Chain ~2 dk; Docker Smoke ~4-6 dk (compose build ~4 dk dahil). Badge self-commit'i ikinci bir pipeline üretir.
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-19 03:50 UTC+3] ARENA3 — Tur kapanışı: main TAM YEŞİL + dependabot sarmalı netleşti + dalga-2 bekleyen kararlar
+
+**Durum:** bu push (CI yargılar)
+**1) Main zinciri TAM YEŞİL:** `44c8361` 15/15 + Fuzz Quick ✓ (e48d8aa/cfe68ee/fuzz dahil önceki SHA'lar da tam); rozet-bot `56f833a '753 lib (race-taze)'` self-commit'ini PAT kanalından indirdi, kendi pipeline'ı 12/12 ✓. Badge zinciri artık koruma-uyumlu.
+**2) Dependabot final raporu (merge_green kararı tamamlandı):**
+- **#33 (ring 0.16.20→0.17.14):** squash-merge `17634f6` ✓.
+- **#32/#34 (protobuf/webpki):** dependabot "up-to-date now" diyerek kapattı — DOĞRU karar: ARENA1'in eski `0da64d3` dependency-upgrade commit'i fuzz lock'ta zaten **protobuf 3.7.2 + rustls-webpki 0.103.13** getirmişti; PR'lar doğuştan mükerrerdi. Ring alert'i de kapandı. Fuzz yüzeyinde kalan tek açık alert: **#23 hickory-proto HIGH** (= bilinen libp2p-zinciri migrasyon borcu; root/budzero HIGH'larıyla aynı paket).
+**3) Dalga-2 sürüm PR'ları AÇIK — kullanıcı kararı bekliyor (#35-45):** toml 0.8→1.1 (KIRILGAN-MAJOR), sha2 0.10→0.11 (MAJOR), tower 0.4→0.5 (MAJOR), p3-field/p3-commit/p3-maybe-rayon 0.5→0.6 (MAJOR, aile-birlikte), clap 4.6.1→4.6.2 (patch), bytes 1.11.1→1.12.1 (minor), tokio 1.52.3→1.53.0 (minor), itertools 0.14→0.15, + github-actions rust-cache pin.
+**4) #46 p3-challenger 0.5.2→0.5.3 (/budzero): 14/14 YEŞİL** — kapattığı alert: **#12 HIGH**. Patch-seviye; onay verilirse merge edip alert'i kapatırım.
+**5) Bekleyen bu borçlar (karar gerekir):** GAP-1..4 snapshot paketi (imza/kapsam/boot/retry — öneri + sahiplik dağılımı) · libp2p-stack koordineli migrasyon (root 4 HIGH + budzero yamux/hickory HIGH + p3-symmetric/lru LOW) · PoS-producer gerçek altyapı (daemon'a key/HSM enjeksiyonu + devnet test-validator anahtarı + genesis eşitlemesi) · V3 backlog DONDURULMUŞ.
+**6) Pipeline gecikme ölçümleri (kullanıcı raporu):** tam CI duvar-süresi ~11-12 dk/SHA (Supply Chain ~2 dk, Core ~8 dk, Fuzz Quick ~4-6 dk bu ölçümde); Docker Smoke ~5 dk (build ~4 dk içerir); badge self-commit zinciri ikinci bir ~12 dk döngü; PR-başına 14 kontrol ~10-12 dk. Yani push→nöbetçi-yeşil ≈ 12 dk; rozet dahil uçtan uca ≈ 25 dk.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
