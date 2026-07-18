@@ -32,8 +32,8 @@ jobs:
         run: |
           cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run1.txt
           HASH1=$(grep "GENESIS_HASH=" /tmp/genesis_run1.txt | tail -1 | cut -d= -f2)
-          echo "Run 1 hash: $HASH1"
-          echo "HASH1=$HASH1" >> $GITHUB_ENV
+          echo "Run 1 hash: ${HASH1}"
+          echo "HASH1=${HASH1}" >> "$GITHUB_ENV"
       - name: Clean build cache
         run: cargo clean 2>&1 | tail -3
       - name: Build (run 2)
@@ -42,13 +42,13 @@ jobs:
         run: |
           cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run2.txt
           HASH2=$(grep "GENESIS_HASH=" /tmp/genesis_run2.txt | tail -1 | cut -d= -f2)
-          echo "Run 2 hash: $HASH2"
-          echo "HASH2=$HASH2" >> $GITHUB_ENV
+          echo "Run 2 hash: ${HASH2}"
+          echo "HASH2=${HASH2}" >> "$GITHUB_ENV"
       - name: Compare hashes
         run: |
-          echo "Hash 1: ${{ env.HASH1 }}"
-          echo "Hash 2: ${{ env.HASH2 }}"
-          if [ "${{ env.HASH1 }}" != "${{ env.HASH2 }}" ]; then
+          echo "Hash 1: ${HASH1}"
+          echo "Hash 2: ${HASH2}"
+          if [ "${HASH1}" != "${HASH2}" ]; then
             echo "FAIL: Genesis hashes differ!"
             exit 1
           fi
