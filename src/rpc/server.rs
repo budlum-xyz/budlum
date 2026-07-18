@@ -2427,11 +2427,19 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid model_id hex: {e}"), None::<()>)
         })?;
         if id_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(-32602, "model_id must be 32 bytes", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "model_id must be 32 bytes",
+                None::<()>,
+            ));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&id_bytes);
-        match self.chain.get_ai_model(crate::ai::types::AiModelId(arr)).await {
+        match self
+            .chain
+            .get_ai_model(crate::ai::types::AiModelId(arr))
+            .await
+        {
             Some(spec) => Ok(serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null)),
             None => Ok(serde_json::Value::Null),
         }
@@ -2458,7 +2466,11 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid model_hash hex: {e}"), None::<()>)
         })?;
         if hash_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(-32602, "model_hash must be 32 bytes", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "model_hash must be 32 bytes",
+                None::<()>,
+            ));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&hash_bytes);
@@ -2482,7 +2494,7 @@ impl BudlumApiServer for RpcServer {
             from: owner_addr,
             to: crate::core::address::Address::zero(),
             amount: 0,
-            fee: crate::execution::zkvm::MIN_TX_FEE,
+            fee: crate::core::account::MIN_TX_FEE,
             nonce: 0,
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
@@ -2514,7 +2526,11 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_req = requester.strip_prefix("0x").unwrap_or(&requester);
         let req_addr = crate::core::address::Address::from_hex(clean_req).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid requester address: {e}"), None::<()>)
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid requester address: {e}"),
+                None::<()>,
+            )
         })?;
 
         let clean_mid = model_id.strip_prefix("0x").unwrap_or(&model_id);
@@ -2522,12 +2538,18 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid model_id hex: {e}"), None::<()>)
         })?;
         if mid_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(-32602, "model_id must be 32 bytes", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "model_id must be 32 bytes",
+                None::<()>,
+            ));
         }
         let mut mid = [0u8; 32];
         mid.copy_from_slice(&mid_bytes);
 
-        let clean_com = input_commitment.strip_prefix("0x").unwrap_or(&input_commitment);
+        let clean_com = input_commitment
+            .strip_prefix("0x")
+            .unwrap_or(&input_commitment);
         let com_bytes = hex::decode(clean_com).map_err(|e| {
             ErrorObjectOwned::owned(
                 -32602,
@@ -2549,20 +2571,21 @@ impl BudlumApiServer for RpcServer {
         let ref_bytes = hex::decode(clean_ref).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid input_ref hex: {e}"), None::<()>)
         })?;
-        let input_ref = crate::ai::types::BoundedBytes::try_new(ref_bytes).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, e, None::<()>)
-        })?;
+        let input_ref = crate::ai::types::BoundedBytes::try_new(ref_bytes)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
 
         let cb = match callback {
             Some(c) if !c.is_empty() => {
                 let clean_cb = c.strip_prefix("0x").unwrap_or(&c);
-                Some(crate::core::address::Address::from_hex(clean_cb).map_err(|e| {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        format!("Invalid callback address: {e}"),
-                        None::<()>,
-                    )
-                })?)
+                Some(
+                    crate::core::address::Address::from_hex(clean_cb).map_err(|e| {
+                        ErrorObjectOwned::owned(
+                            -32602,
+                            format!("Invalid callback address: {e}"),
+                            None::<()>,
+                        )
+                    })?,
+                )
             }
             _ => None,
         };
@@ -2585,7 +2608,7 @@ impl BudlumApiServer for RpcServer {
             from: req_addr,
             to: crate::core::address::Address::zero(),
             amount: 0,
-            fee: crate::execution::zkvm::MIN_TX_FEE,
+            fee: crate::core::account::MIN_TX_FEE,
             nonce: 0,
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
@@ -2624,12 +2647,18 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
         })?;
         if rid_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(-32602, "request_id must be 32 bytes", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes",
+                None::<()>,
+            ));
         }
         let mut rid = [0u8; 32];
         rid.copy_from_slice(&rid_bytes);
 
-        let clean_ocom = output_commitment.strip_prefix("0x").unwrap_or(&output_commitment);
+        let clean_ocom = output_commitment
+            .strip_prefix("0x")
+            .unwrap_or(&output_commitment);
         let com_bytes = hex::decode(clean_ocom).map_err(|e| {
             ErrorObjectOwned::owned(
                 -32602,
@@ -2651,9 +2680,8 @@ impl BudlumApiServer for RpcServer {
         let ref_bytes = hex::decode(clean_oref).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid output_ref hex: {e}"), None::<()>)
         })?;
-        let output_ref = crate::ai::types::BoundedBytes::try_new(ref_bytes).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, e, None::<()>)
-        })?;
+        let output_ref = crate::ai::types::BoundedBytes::try_new(ref_bytes)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
 
         let clean_sig = signature_hex.strip_prefix("0x").unwrap_or(&signature_hex);
         let sig_bytes = hex::decode(clean_sig).map_err(|e| {
@@ -2675,7 +2703,7 @@ impl BudlumApiServer for RpcServer {
             from: v_addr,
             to: crate::core::address::Address::zero(),
             amount: 0,
-            fee: crate::execution::zkvm::MIN_TX_FEE,
+            fee: crate::core::account::MIN_TX_FEE,
             nonce: 0,
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
@@ -2703,11 +2731,19 @@ impl BudlumApiServer for RpcServer {
             ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
         })?;
         if id_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(-32602, "request_id must be 32 bytes", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes",
+                None::<()>,
+            ));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&id_bytes);
-        match self.chain.get_ai_outcome(crate::ai::types::AiRequestId(arr)).await {
+        match self
+            .chain
+            .get_ai_outcome(crate::ai::types::AiRequestId(arr))
+            .await
+        {
             Some(outcome) => Ok(serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)),
             None => Ok(serde_json::Value::Null),
         }
@@ -2722,7 +2758,7 @@ impl BudlumApiServer for RpcServer {
                 serde_json::json!({
                     "address": Self::to_0x_hash(reg.account.to_hex()),
                     "stake": reg.stake,
-                    "active": reg.is_active,
+                    "active": reg.is_active(),
                 })
             })
             .collect();

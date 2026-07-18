@@ -537,10 +537,7 @@ pub trait BudlumApi {
 
     /// Query registered AI model specification by model_id hex.
     #[method(name = "bud_aiGetModel")]
-    async fn ai_get_model(
-        &self,
-        model_id: String,
-    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a model registration transaction.
     #[method(name = "bud_aiRegisterModel")]

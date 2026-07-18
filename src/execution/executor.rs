@@ -205,9 +205,8 @@ impl Executor {
                 }
             }
             TransactionType::ContractCall => {
-                let receipt =
-                    ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT)
-                        .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
+                let receipt = ZkVmExecutor::execute_bytecode(&tx.data, DEFAULT_CONTRACT_GAS_LIMIT)
+                    .map_err(|e| BudlumError::validation("contract_execution_failed", e))?;
 
                 if !receipt.events.is_empty() && receipt.events[0] == 0x00A1_00A1 {
                     if receipt.events.len() >= 4 {

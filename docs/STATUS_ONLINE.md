@@ -1153,3 +1153,38 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Sıradaki:** Push sonrası CI doğrulama kontrolünün (`checks`) izlenmesi ve sonuçların raporlanması.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+### [2026-07-18 16:41 UTC+3] ARENA3 — MAIN RED kök-neden + onarım (3 kırık, tek commit) · Phase 10 kalan-işler envanteri
+
+**Kural 3 kök-neden raporu (`9ebe01b` = 7 job RED · `e472f75` = Core RED):**
+
+1. **`e472f75` Budlum Core RED — BENİM C3 fmt hatam (kabul + özeleştiri):** `src/tests/target_700.rs` import sırası — `bud_marketplace` alfabetik olarak `core`'dan önce gelmeliydi, `socialfi` yanına koymuştum. `cargo fmt --check` diff'iyle sabit. Onarıldı; bundan böyle lokal toolchain ile push öncesi fmt doğrulaması yapacağım.
+2. **4 compile hatası (ARENA2 ADIM2 `src/rpc/server.rs`, `1333eaa`):** E0425 ×3 `crate::execution::zkvm::MIN_TX_FEE` (doğru yol `crate::core::account::MIN_TX_FEE`, compiler önerisiyle birebir) + E0615 `reg.is_active` (method, field değil → `is_active()`; aynı dosyada 1205/1232/1283 satırlarındaki yerleşik desenle aynı). Lib derlemesi kırıldığı için Fuzz/Timing/Coverage/BNS/B.U.D. E2E **toplu** düştü; BNS+E2E kanaryalarının "test çıktıda yok" FAIL'leri derleme kırılmasının yankısıydı — gate kodu sağlıklı, kapan derlemeydi.
+3. **BudZero RED (`bud-vm`):** `test_syscall_imm_6_emits_ai_request_event` — `inst(Opcode::Push, 1, 0, 0, 42)` ile "r1=42" varsayılmış; oysa VM'de `Push` = stack push (`src1_val`), immediate-load `Load`'dur (src1_idx==0 → `inst.imm as u64`; yerleşik kanıt: `gas_accounting_matches_instruction_costs` testi, r1=9 deseni). Tek kelime düzeltme: Push→Load. Lokal `cargo test -p bud-vm --lib` = **10/10**.
+
+**Süreç notu (Kural 3, olgusal):** `e472f75` RED iken üstüne ADIM2 push+merge zinciri kurulmuş; CI-bekleme adımı atlanınca kırıklar birikti. Ekibe hatırlatma: check-runs teyidi olmadan yeni katman eklemeyelim. Ben de C3'ümü yeşil teyidi almadan kapattım — aynı sorumluluk bende; bu giriş özeleştirimdir.
+
+**Yeni altyapı (ARENA3):** sandbox'a rust **1.94.0** (CI toolchain birebir) + rustfmt + clippy + protoc 29.5 kuruldu → ARENA3 artık push öncesi `fmt --check` · `cargo check --workspace --all-targets` · `clippy -D warnings` · hedefli `cargo test` çalıştırabiliyor (Kural 3 güçlendi). Not: 2GB RAM → `CARGO_BUILD_JOBS=1` şart; `$PROTOC=/home/user/protoc/bin/protoc`.
+
+**Bu commit'in lokal kanıtları:** fmt: TEMİZ · check (workspace --all-targets): TEMİZ · clippy -D warnings: TEMİZ · bud-vm lib: 10/10. CI teyidi sonraki girdide.
+
+**Phase 10 kalan-işler envanteri (kullanıcı emriyle, tek tablo):**
+
+| # | İş | Sahip | Durum |
+|---|---|---|---|
+| C1-C3 | kategorizasyon (nft→socialfi · bud marketplace→bud_marketplace · eski marketplace→offers birleştirme) | ARENA3 | ✅ yeşil (C3 fmt kazası bu commit'le onarıldı) |
+| C4 | AI modülü | ARENA2 | ✅ `src/ai/` aktif. NOT: v1 planındaki `src/ai_execution` iskeleti hiç oluşmadı; tek gerçek modül `src/ai/` → plan dokümanı revizesi yeterli (rename gerekmez), kullanıcı isterse güncellerim |
+| P1 | v2 §3.2 marketplace primitifleri (AccessGrant / SaleAuthorization / scope) | ARENA1 | ⏳ bekleniyor (P0 `775ab3a` kapısı açık) |
+| P2 | schema-4 tek PR (GAP-1 manifest imza + GAP-2 alan listesi + marketplace registry snapshot bağlama + B2 AssetId struct — B2 kullanıcı kararıyla GAP-2 kapsamında, `9bc3094`) | ARENA3 + ARENA2 | ⏳ sıradaki büyük işim; PR #49 WIP + ARENA1'in 30-sitelik E0308 haritası elimde |
+| P3 | 9 marketplace RPC (v2 §7) | ARENA2 | ⏳ P1/P2 sonrası |
+| P4 | bud_marketplace CI gate (16→17. zorunlu check) + modül README + dashboard satırı | ARENA3 | ⏳ BNS paterni: isim-kilitli test seti + `scripts/check-bud-marketplace-gate.sh` + workflow job + branch protection — P1 primitifleri inince |
+| P5 | AI attestation derinleşme: soft-incentive slashing (kararlı), agreement_threshold E2E | ARENA2 | 🔵 ADIM akışında (6 AI RPC + zkVM host-call main'de; test/fmt kazaları bu commit'le onarıldı) |
+| §11 | v2 açık 3 soru: Perpetual üst sınır / once_consumed pruning / Faz1 `encrypted=false` caydırıcılığı | kullanıcı | ⏳ karar kapısı |
+| README | modül README eksikleri: `src/ai` (ARENA2), `src/socialfi` + `src/bud_marketplace` (ARENA3, P4 ile) | karışık | ⏳ Bölüm 4 kuralı |
+| BOT | dependabot majors triyajı (#45 yeşil aday; #36-43 kırılım sınıfı) | ARENA3 | ⏳ P10 kapıları sonrası |
+
+**Sıradaki (ARENA3):** CI yeşil teyidi → P2 schema-4 hazırlığı (GAP-2 alan haritası + PR #49 WIP devralma) → P4 gate taslağı.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

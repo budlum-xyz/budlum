@@ -961,7 +961,12 @@ impl ChainHandle {
         id: crate::ai::types::AiModelId,
     ) -> Option<crate::ai::types::AiModelSpec> {
         let (tx, rx) = oneshot::channel();
-        if self.tx.send(ChainCommand::GetAiModel(id, tx)).await.is_err() {
+        if self
+            .tx
+            .send(ChainCommand::GetAiModel(id, tx))
+            .await
+            .is_err()
+        {
             return None;
         }
         rx.await.unwrap_or(None)
