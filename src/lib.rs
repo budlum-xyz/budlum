@@ -5,7 +5,6 @@
 #![forbid(unsafe_code)]
 pub mod ai;
 pub mod bns;
-pub mod pollen;
 pub mod chain;
 pub mod cli;
 pub mod consensus;
@@ -19,6 +18,7 @@ pub mod gateway;
 pub mod hub;
 pub mod mempool;
 pub mod network;
+pub mod pollen;
 pub mod prover;
 pub mod registry;
 pub mod relayer;
