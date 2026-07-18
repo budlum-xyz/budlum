@@ -3866,3 +3866,91 @@ Do not attempt to edit, create, or delete files in these directories. If Arena A
 
 ---
 **Durum:** Phase 5 Evrensel Mutabakat yolunda tüm ajanlar tam uyumla çalışmaktadır.
+
+
+---
+
+# BUDLUM ZORUNLU ÇALIŞMA PROTOKOLÜ — SORU, KANIT VE DEVAM DÖNGÜSÜ
+
+> **Kullanıcı talimatı — en yüksek proje önceliği.** Bu bölüm, Budlum üzerinde
+> çalışan her AI ajanı için zorunludur. Hızlı sonuç üretmek, soruyu/kanıtı atlamak
+> veya "iş tamam" diye erken kapanmak başarı sayılmaz. Amaç mainnet hazırlığında
+> her kararı denetlenebilir, geri izlenebilir ve doğru süreçle almaktır.
+
+## Temel ilke: soru sorup durmak değil, soru sorup devam etmek
+
+Ajanın görevi tek seferde cevap yapıştırmak ya da işi bitirip kaybolmak değildir.
+Her önemli karar noktasında kullanıcıya **seçenekli, gerekçeli bir soru** sorar;
+kullanıcının yanıtını aldıktan sonra **aynı süreçte çalışmaya devam eder**.
+
+"Soru sormak" şunlar demek değildir:
+
+- İş sonunda genel bir "başka bir şey var mı?" sorusu bırakıp süreci kapatmak.
+- Kullanıcı açık komut verdi diye güvenlik, CI, çakışma veya sahiplik kontrolünü
+  atlamak.
+- Soru sorduktan sonra yanıtı beklemeden varsayımla kod yazmak.
+
+"Soru sormak" şunlar demektir:
+
+1. Karar gerektiren belirsizliği açıkça belirtmek.
+2. Anlaşılır seçenekleri ve **önerilen güvenli seçeneği** sunmak.
+3. Teknik ayrıntının yanına kısa, günlük dilde etkisini yazmak.
+4. Yanıt geldikten sonra seçimi STATUS/rapor bağlamına kaydetmek ve bir sonraki
+   denetimli adıma geçmek.
+5. Her alt iş kapısında aynı döngüyü yeniden uygulamak.
+
+## Zorunlu işlem döngüsü
+
+Her yeni komut, yeni ADIM/Phase kalemi, push sonrası durum veya başka ajanın
+commiti için aşağıdaki sıra uygulanır:
+
+1. **Hizalan:** `ARENA_AI.md`, `docs/STATUS.md`, `docs/STATUS_ONLINE.md`,
+   ilgili plan/RFC ve güncel remote durumunu oku.
+2. **Kanıtla:** Başka ajan commitini veya raporunu doğru kabul etme. Fetch,
+   diff, kaynak incelemesi, test/CI kanıtı ve sahiplik sınırını kontrol et.
+3. **Kendini denetle:** "Sonuca hızla mı gidiyorum? Hangi kanıt, karar veya
+   risk değerlendirmesi eksik? Bu değişiklik başka bir işi/agent domainini
+   etkiliyor mu?" sorularını cevaplamadan yazma/merge/push yapma.
+4. **Sor:** Karar noktası varsa `ask_user` ile seçenekli soru sor. Önerilen
+   seçeneği belirt; teknik olmayan kısa açıklamayı da ekle.
+5. **Devam et:** Yanıttan sonra seçilen kapsamda çalış; soru soruldu diye iş
+   kapanmış sayılmaz.
+6. **Kapı denetimi:** Her alt iş sonunda kaynak, diff, test ve CI durumunu
+   kontrol et; bulguyu STATUS_ONLINE'a zaman damgalı kaydet.
+7. **Tekrar sor:** Bir sonraki alt iş, merge, push, yeni domain veya yeni
+   karar öncesi kullanıcıya tekrar sor. Final mesajı verip kapanma yerine,
+   süreç aktifse bekleme/denetim modunda kal.
+
+## Push, CI ve main koruması
+
+- `budlum-xyz/budlumdevnet` **salt-okunurdur**; asla değiştirilmez.
+- Push öncesi mutlaka fetch yapılır. Başka commit varsa diff/inceleme olmadan
+  kabul edilmez. Force-push yasaktır.
+- Main'e ilerletme öncesi çakışma, branch-protection, sahiplik ve CI etkisi
+  kullanıcıya açıkça sorulur.
+- Push kabul edilse bile iş tamamlanmış sayılmaz: ilgili CI run bulunur ve
+  sonucu beklenir. Kırmızıysa kök neden çözülür; yeşilse kullanıcıdan yeni
+  komut beklenir.
+- Branch-protection bypass, eksik required check, CI'nin tetiklenmemesi veya
+  beklenmeyen remote commit süreç engelidir. Ajan devam etmeden önce bunu
+  kullanıcıya seçenekli soru olarak taşır.
+
+## İletişim standardı
+
+Sorular kısa fakat yeterince somut olmalıdır. Örnek biçim:
+
+> **Karar:** Tek kullanımlık erişim nasıl izlenecek?
+> **Önerilen:** Ayrı zincir üstü kullanım kaydı.
+> **Neden:** İzin kullanıldığında kayıt oluşur; ikinci deneme reddedilir.
+> Böylece yalnız node'un kendi notuna güvenilmez.
+> **Seçenekler:** (A) Önerilen ayrı kayıt, (B) iznin içindeki sayaç,
+> (C) ilk sürümden kaldır.
+
+Her raporda ayrıca şu cümle açıkça değerlendirilir:
+
+> "Bu sonuç doğru görünse bile, bu sonuca **doğru süreçle** mi ulaştım;
+> eksik kanıt, onaysız varsayım veya denetlenmemiş başka-ajan değişikliği var mı?"
+
+Bu protokol bütün diğer Budlum iş akışlarında kalıcıdır; her Phase açılışında
+`docs/AI_ONBOARDING.md`, `docs/STATUS_ONLINE.md` ve ilgili planla birlikte
+tekrar doğrulanır.

@@ -12,6 +12,7 @@
 
 ## 1. Okuma sırası (30 dakikada hizalanma)
 
+1. **`ARENA_AI.md` — “Budlum Zorunlu Çalışma Protokolü” bölümü:** Her karar kapısında seçenekli soru sorulur; yanıt alınca süreç devam eder. Hızlı sonuç, kanıt/CI/sahiplik kontrolünün yerine geçmez.
 1. **`docs/STATUS_ONLINE.md` — son 4 girdi** (aktif iletişim kanalı; burada timestamp'li girdi AÇMADAN kod yazma):
    - P10 açılış + kod doğrulama raporu (RPC 7→9, ContentManifest owner YOK, RoleId deseni)
    - Sprint-1 kapanışı (modül dashboard + BNS gate + 16 zorunlu check)
