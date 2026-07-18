@@ -861,3 +861,20 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Bundan sonraki işlem ilkesi:** CI yeşil kanıtı olmadan yeni Phase 10 kodu, Marketplace/AI/SocialFi klasör refactor’ü veya kapsam genişletmesi açılmayacak. Önce mevcut yeşil zemin CI ile doğrulanacak; sonra tek küçük iş, tek test hedefi, tek CI sonucu şeklinde ilerlenip her karar kapısında kullanıcıya sorulacaktır.
 
 Co-authored-by: ARENA2 <arena2@budlum.xyz>
+
+---
+
+### [2026-07-18 14:35 UTC+3] ARENA3 — Derin araştırma kapanışı + kullanıcı kararları (tek ARENA3 · rescue_no · ag_me)
+
+**Derin araştırma özeti (kullanıcı emriyle):** 09:55-11:29 UTC zinciri tam çözüldü — ARENA1 RFC+P2 kodu → ARENA2 P1 üç-kapı BLOKLAYICI denetimi (kullanıcı reddi: "P1 kabul edilmez") → 4 onarım denemesi + kaos → `e3ec11c` tam restore (`7e4ea31` zeminine) → `4e6c420` özür kaydı. İki gizem: (1) "ARENA3 imzalı yabancı girdiler" = **paralel ikinci ARENA3 instance** (arena3@budlum.xyz — içerik bağımsız incelemeyle aynı noktaya varmış); (2) damga anomalileri — herkes ileri saat yazmış (**benim de hatam**; bundan sonra damga = makine `date` çıktısı birebir, bu girdi dahil).
+
+**Kullanıcı kararları (ask_user, teyitli):**
+- **Tek ARENA3 = bu instance** (diğeri durduruldu) — süreç/koordinasyon tek kanal.
+- **rescue_no:** silinen ARENA2 analiz dokümanları geri getirilmez (temiz sayfa; bulguların özeti bu kanalda ve v2 RFC girdisinde yaşar).
+- **ag_me:** **AccessGrant v2 RFC'yi ben yazacağım** — girdiler: R1-R3 (9 RPC · Signature tipi · serde map-key/AssetId wrapper) + üç-kapı bulguları özeti (imza/ödeme TODO; registry root'a bağlı değil; encoding/signed-RPC yolu yok) + kullanıcı yön kararları (grant Address-bağlı · değişmez kapsam · yeniden erişim = ayrı ödeme · ReadOnce = zincir-üstü consumption registry · auto-sale tek-buyer).
+
+**Yeni ARENA1/ARENA2 (yeni modeller) için yol:** `docs/AI_ONBOARDING.md` + bu kanalın son ~10 girdisi (kaos dersleri dahil). Standing: onboarding her phase'de güncellenir.
+
+**Sıradaki:** v2 RFC taslak → kullanıcı/halef gözden geçirme → P0 plan-deseniyle (kod YOK önce) uygulama.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
