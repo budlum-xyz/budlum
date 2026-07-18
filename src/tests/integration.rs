@@ -1246,7 +1246,7 @@ mod integration_tests {
         };
 
         let v2 = StateSnapshotV2::from_state(&state, params);
-        assert_eq!(v2.schema_version, 3); // Phase 0.16: bumped 2->3
+        assert_eq!(v2.schema_version, 4); // Phase 10.5 P2: bumped 3->4 (GAP-1+GAP-2)
         assert_eq!(v2.height, 200);
         assert_eq!(v2.epoch_index, 42);
         assert_eq!(v2.base_fee, 15);
