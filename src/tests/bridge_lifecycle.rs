@@ -15,8 +15,8 @@ fn addr(b: u8) -> Address {
     Address::from([b; 32])
 }
 
-fn asset_id() -> [u8; 32] {
-    [42u8; 32]
+fn asset_id() -> crate::cross_domain::AssetId {
+    crate::cross_domain::AssetId([42u8; 32])
 }
 
 /// Bridge end-to-end: register domains, register the asset, lock through

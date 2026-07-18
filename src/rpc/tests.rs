@@ -419,7 +419,7 @@ mod rpc_tests {
             format!("0x{}", hex::encode(cross_domain_msg.message_id))
         );
 
-        let asset_id = [42u8; 32];
+        let asset_id = crate::cross_domain::AssetId([42u8; 32]);
         let bridge_registration = server.register_bridge_asset(asset_id, 1).await.unwrap();
         assert_eq!(bridge_registration["status"], "registered");
 

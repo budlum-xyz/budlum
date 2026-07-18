@@ -7,6 +7,7 @@ use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::cross_domain::AssetId;
 use crate::cross_domain::event_tree::{DomainEvent, DomainEventKind, DomainEventTree};
 use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams, MessageKind};
 use crate::cross_domain::relayer::RelayerConfig;
@@ -19,8 +20,8 @@ fn hash(label: &[u8]) -> Hash32 {
     hash_fields_bytes(&[label])
 }
 
-fn asset(id: u8) -> Hash32 {
-    hash(&[id])
+fn asset(id: u8) -> crate::cross_domain::AssetId {
+    crate::cross_domain::AssetId(hash(&[id]))
 }
 
 fn owner() -> Address {

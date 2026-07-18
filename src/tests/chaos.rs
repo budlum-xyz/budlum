@@ -132,14 +132,14 @@ mod chaos_tests {
     #[test]
     fn test_chaos_cross_domain_replay_and_tamper_resistance() {
         use crate::core::hash::hash_fields_bytes;
-        use crate::cross_domain::BridgeState;
+        use crate::cross_domain::{AssetId, BridgeState};
 
         let mut bridge = BridgeState::new();
         let owner = Address::from([7u8; 32]);
         let recipient = Address::from([8u8; 32]);
 
         for i in 0..64u8 {
-            let asset = hash_fields_bytes(&[b"asset", &[i]]);
+            let asset = AssetId(hash_fields_bytes(&[b"asset", &[i]]));
             bridge.register_asset(asset, 1).unwrap();
 
             let (_transfer, event) = bridge
@@ -511,7 +511,7 @@ mod chaos_tests {
     #[test]
     fn test_chaos_many_global_headers_preserve_hash_chain_under_root_changes() {
         use crate::core::hash::hash_fields_bytes;
-        use crate::cross_domain::BridgeState;
+        use crate::cross_domain::{AssetId, BridgeState};
 
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 1337, None);
@@ -519,7 +519,7 @@ mod chaos_tests {
 
         let mut previous_hash = [0u8; 32];
         for round in 0..16u8 {
-            let asset = hash_fields_bytes(&[b"asset", &[round]]);
+            let asset = AssetId(hash_fields_bytes(&[b"asset", &[round]]));
             let owner = Address::from([round.saturating_add(1); 32]);
             let recipient = Address::from([round.saturating_add(33); 32]);
             bridge.register_asset(asset, 1).unwrap();
@@ -677,7 +677,7 @@ mod chaos_tests {
     async fn test_chaos_end_to_end_cross_domain_concurrent_transfers() {
         use crate::core::block::Block;
         use crate::core::hash::hash_fields_bytes;
-        use crate::cross_domain::DomainEventTree;
+        use crate::cross_domain::{AssetId, DomainEventTree};
         use crate::domain::plugin::default_domain;
         use crate::domain::{ConsensusKind, DomainCommitment};
 
@@ -698,7 +698,7 @@ mod chaos_tests {
         let mut transfers_data = Vec::new();
 
         for i in 1..=num_transfers {
-            let asset = hash_fields_bytes(&[b"test-asset", &(i as u64).to_le_bytes()]);
+            let asset = AssetId(hash_fields_bytes(&[b"test-asset", &(i as u64).to_le_bytes()]));
             settlement_node
                 .state
                 .bridge_state

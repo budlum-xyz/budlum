@@ -8,7 +8,8 @@ mod settlement_prod_tests {
     use crate::core::address::Address;
     use crate::core::block::Block;
     use crate::core::hash::hash_fields_bytes;
-    use crate::cross_domain::message::CrossDomainMessageParams;
+    use crate::cross_domain::AssetId;
+use crate::cross_domain::message::CrossDomainMessageParams;
     use crate::cross_domain::{
         CrossDomainMessage, DomainEvent, DomainEventKind, DomainEventTree, MessageKind,
     };
@@ -732,7 +733,7 @@ mod settlement_prod_tests {
         blockchain.register_consensus_domain(pow.clone()).unwrap();
         blockchain.register_consensus_domain(pos.clone()).unwrap();
 
-        let asset_id = hash_fields_bytes(&[b"canonical-asset"]);
+        let asset_id = AssetId(hash_fields_bytes(&[b"canonical-asset"]));
         let owner = Address::from([11u8; 32]);
         let recipient = Address::from([12u8; 32]);
         blockchain
@@ -867,7 +868,7 @@ mod settlement_prod_tests {
         blockchain.register_consensus_domain(pow.clone()).unwrap();
         blockchain.register_consensus_domain(pos).unwrap();
 
-        let asset_id = hash_fields_bytes(&[b"mutated-lock-event"]);
+        let asset_id = AssetId(hash_fields_bytes(&[b"mutated-lock-event"]));
         let owner = Address::from([0x31; 32]);
         let recipient = Address::from([0x32; 32]);
         blockchain.register_bridge_asset(asset_id, pow.id).unwrap();
@@ -909,7 +910,7 @@ mod settlement_prod_tests {
         let baseline = blockchain.build_global_header(None);
 
         let mut bridge = BridgeState::new();
-        let asset_id = hash_fields_bytes(&[b"asset-root-change"]);
+        let asset_id = AssetId(hash_fields_bytes(&[b"asset-root-change"]));
         let owner = Address::from([21u8; 32]);
         let recipient = Address::from([22u8; 32]);
         bridge.register_asset(asset_id, 1).unwrap();
@@ -950,7 +951,7 @@ mod settlement_prod_tests {
             blockchain.register_consensus_domain(pow.clone()).unwrap();
             blockchain.register_consensus_domain(pos).unwrap();
 
-            let asset_id = hash_fields_bytes(&[b"stored-bridge-asset"]);
+            let asset_id = AssetId(hash_fields_bytes(&[b"stored-bridge-asset"]));
             blockchain.register_bridge_asset(asset_id, pow.id).unwrap();
             blockchain
                 .lock_bridge_transfer(
@@ -995,7 +996,7 @@ mod settlement_prod_tests {
             blockchain.register_consensus_domain(pos).unwrap();
 
             let baseline = blockchain.build_global_header(None);
-            let asset_id = hash_fields_bytes(&[b"bridge-lock-message-root"]);
+            let asset_id = AssetId(hash_fields_bytes(&[b"bridge-lock-message-root"]));
             blockchain.register_bridge_asset(asset_id, pow.id).unwrap();
             let (_transfer, event) = blockchain
                 .lock_bridge_transfer(
@@ -1308,7 +1309,7 @@ mod settlement_prod_tests {
         let pow = domain(1, ConsensusKind::PoW);
         bc.register_consensus_domain(pow.clone()).unwrap();
 
-        let asset = hash_fields_bytes(&[b"double-lock-asset"]);
+        let asset = AssetId(hash_fields_bytes(&[b"double-lock-asset"]));
         let owner = Address::from([10u8; 32]);
         let recipient = Address::from([20u8; 32]);
         bc.state.bridge_state.register_asset(asset, 1).unwrap();
@@ -1349,7 +1350,7 @@ mod settlement_prod_tests {
     #[test]
     fn attack_bridge_unlock_without_burn() {
         let mut bc = test_chain();
-        let asset = hash_fields_bytes(&[b"unlock-no-burn"]);
+        let asset = AssetId(hash_fields_bytes(&[b"unlock-no-burn"]));
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
         bc.state.bridge_state.register_asset(asset, 1).unwrap();
@@ -1370,7 +1371,7 @@ mod settlement_prod_tests {
     #[test]
     fn attack_bridge_replay_root_unchanged_when_mint_status_is_invalid() {
         let mut bc = test_chain();
-        let asset = hash_fields_bytes(&[b"mint-invalid-status"]);
+        let asset = AssetId(hash_fields_bytes(&[b"mint-invalid-status"]));
         let owner = Address::from([3u8; 32]);
         let recipient = Address::from([4u8; 32]);
         bc.state.bridge_state.register_asset(asset, 1).unwrap();
@@ -1396,7 +1397,7 @@ mod settlement_prod_tests {
     #[test]
     fn attack_bridge_burn_wrong_domain() {
         let mut bc = test_chain();
-        let asset = hash_fields_bytes(&[b"burn-wrong-domain"]);
+        let asset = AssetId(hash_fields_bytes(&[b"burn-wrong-domain"]));
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
         bc.state.bridge_state.register_asset(asset, 1).unwrap();
@@ -1420,7 +1421,7 @@ mod settlement_prod_tests {
         let pow = domain(1, ConsensusKind::PoW);
         bc.register_consensus_domain(pow.clone()).unwrap();
 
-        let asset = hash_fields_bytes(&[b"replay-test"]);
+        let asset = AssetId(hash_fields_bytes(&[b"replay-test"]));
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
         bc.state.bridge_state.register_asset(asset, 1).unwrap();
@@ -1701,7 +1702,7 @@ mod settlement_prod_tests {
         bc.register_consensus_domain(pow.clone()).unwrap();
         bc.register_consensus_domain(pos.clone()).unwrap();
 
-        let asset = hash_fields_bytes(&[b"lifecycle-asset"]);
+        let asset = AssetId(hash_fields_bytes(&[b"lifecycle-asset"]));
         let alice = Address::from([0xAA; 32]);
         let bob = Address::from([0xBB; 32]);
         bc.state.bridge_state.register_asset(asset, pow.id).unwrap();
@@ -1765,7 +1766,7 @@ mod settlement_prod_tests {
         bc.register_consensus_domain(pow.clone()).unwrap();
         bc.register_consensus_domain(pos.clone()).unwrap();
 
-        let asset = hash_fields_bytes(&[b"return-proof-asset"]);
+        let asset = AssetId(hash_fields_bytes(&[b"return-proof-asset"]));
         let alice = Address::from([0xA1; 32]);
         let bob = Address::from([0xB2; 32]);
         bc.state.bridge_state.register_asset(asset, pow.id).unwrap();

@@ -458,7 +458,7 @@ fn hash(label: &[u8]) -> Hash32 {
 }
 
 fn asset(id: u8) -> AssetId {
-    hash(&[id])
+    AssetId(hash(&[id]))
 }
 
 fn pipeline() -> BridgeRelayerPipeline {
