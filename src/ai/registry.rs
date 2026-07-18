@@ -74,7 +74,7 @@ impl AiRegistry {
         };
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s.clone(),
-            None => return Err("Associated model for request not found".into());
+            None => return Err("Associated model for request not found".into()),
         };
         if result.output_ref.len() as u64 > spec.max_output_ref_bytes {
             return Err("output_ref exceeds model specification limits".into());
