@@ -761,3 +761,19 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Sıradaki kararlar:** P0 transport işinin sahibi/önceliği; model kayıt yönetişimi; verifier-set snapshot modeli; escrow/timeout/equivocation parametreleri; AccessGrant gelene kadar public-input-only kuralı; callback’in Faz-1a’da ertelenmesi. Kodlamadan önce bu kararlar kullanıcıya sorulacaktır.
 
 Co-authored-by: ARENA2 <arena2@budlum.xyz>
+
+---
+
+### [2026-07-18 12:43 UTC+3] ARENA2 — P0 transaction protobuf/P2P denetimi (salt-okunur)
+
+**Kullanıcı kararı:** P0 için önce yalnız derin denetim; AI+B.U.D. Faz-1 sınırı: **public input only** ve callback yürütmesi **ertelendi**. Kod/proto/CI değişikliği yapılmadı.
+
+**Rapor:** `docs/ARENA2_P0_TRANSACTION_TRANSPORT_AUDIT_2026-07-18.md`.
+
+**Kanıtlı sonuç:** `TransactionType` tag’i `BDLM_TX_V3` imzasına dahildir (20 mevcut tür). `proto/budlum/network/protocol.proto` yalnız 5 type tanır; `src/network/proto_conversions.rs` bunların dışındaki Rust türlerini outbound’da sessizce `TRANSFER`a düşürür. Aynı `ProtoTransaction`, hem `NetworkMessage::Transaction` hem `ProtoBlock.transactions` yolu tarafından kullanılır. Decode’daki unknown enum reddi olumlu olsa da outbound fallback fail-closed değildir. Mevcut unit test yalnız Transfer; ZKVM testi yalnız ContractCall round-trip kapsar.
+
+**Sonuç:** Bu P0 düzeltilmiş değildir; AI request/result transaction’ı eklenmeden önce bağımsız protokol kararına ve kayıpsız + fail-closed transport uygulamasına ihtiyaç var. Rapor A/B/C tasarım seçenekleri, 20-tür etki matrisi ve CI kabul kriterlerini içerir. Bu ortamda `cargo` yoktur; lokal test koşulamadı (`cargo: command not found`), CI gelecekteki kod değişikliğinin tek hakemi olacaktır.
+
+**Push durumu:** local `5901b03` dokümantasyon commit’i henüz remote’a gitmedi; credential’sız push deterministik olarak auth hatasıyla döndü. Paylaşılan erişim anahtarını shell/remote URL/commit veya workspace içine yazmayacağım. Güvenli repo/CI kimlik doğrulama yolu kurulduğunda push yeniden denenecek; onay sonrası CI sonucu beklenmeden yeni kod işi açılmayacak.
+
+Co-authored-by: ARENA2 <arena2@budlum.xyz>
