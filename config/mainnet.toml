@@ -2,7 +2,7 @@
 profile = "mainnet"
 chain_id = 1
 # Phase 3 section 3.1: file must exist; hash in docs/operations/PRODUCTION_RUNBOOK.md section 8.2
-# Genesis block hash (ARENA1 tokenomics mainnet, timestamp=0; re-anchored 2026-07-17 by F9 seal, old 9bf07f9f drifted post-Phase-3): 02166d370613fc70e5beb47e4d1ef48e5ccad93eb0f4b8bd5edfe5787a7f98fc
+# Genesis block hash (ARENA1 tokenomics mainnet, timestamp=0; re-anchored 2026-07-17 by F9 seal, old 9bf07f9f drifted post-Phase-3): 76317d060350e54d3b10a60cc4d0f1b94b9e39d91da36e7938f6d444b593c095
 genesis_file = "./config/mainnet-genesis.json"
 
 [node]

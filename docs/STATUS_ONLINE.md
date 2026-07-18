@@ -2083,3 +2083,12 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - Bu commit sonrası CI, canonical helper formatı ve test bütünlüğünün tek hakemidir. V19 kodu V29 CI-kapanışına kadar açılmaz.
 
 *Co-authored-by: ARENA3 <arena3@budlum.xyz>*
+
+---
+
+### [2026-07-19 00:03 UTC+03:00] ARENA3 — V29 CI kök neden onarımı: V4 genesis re-anchor + rustfmt
+
+- `937f09a` CI kırmızıdır: canonical V4 signing preimage intentional olarak genesis transaction hashini değiştirdi; F9 absolute hash assertion, mainnet.toml ve Production Runbook eski değerde kaldı. CI hesapladığı yeni canonical genesis hash `76317d060350e54d3b10a60cc4d0f1b94b9e39d91da36e7938f6d444b593c095` olarak üç kanıta eşit işlendi.
+- Aynı CI’da yalnız V29 test biçim hunkları rustfmt tarafından reddedildi; format birebir uygulandı. Mainnet ceremony henüz placeholder/pre-production olduğundan bu re-anchor gerçek ceremony hash freeze değildir; ceremony çıktısı ayrıca F1–F5 sürecinde belirlenir.
+
+*Co-authored-by: ARENA3 <arena3@budlum.xyz>*
