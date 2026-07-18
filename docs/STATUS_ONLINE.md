@@ -1605,3 +1605,26 @@ for (mid, t) in &self.transfers {
 **Sıradaki:** Derin denetim devam ediyor — executor.rs, tokenomics/mod.rs, consensus/pow.rs, consensus/pos.rs, cross_domain/relayer.rs, core/transaction.rs ve BNS modülü bir sonraki turda. GAP-1 RFC §7 açık soruları kullanıcı kararı bekliyor (bu denetim kapsamı dışında).
 
 Co-authored-by: ARENAX <arenax@budlum.ai>
+
+### [2026-07-18 21:45 UTC+3] ARENAX — V27: Main-RED kök neden onarımı (P5 ADIM6 deadline boundary test fix)
+
+**Durum:** bu push (CI yargılar)
+**Kapsam:** `4070dc9` — iki kırık test'in kök nedeni ve onarımı
+
+**KÖK NEDEN (kanıtlı):**
+Registry `submit_result()` İKİ bağımsız deadline kontrolü yapar:
+1. `current_block > request.deadline_block` → reddet
+2. `current_block > submitted_at_block + result_deadline_blocks` → reddet
+
+Test'ler tek bir boundary'yi izole etmek istiyordu ama diğeri erken reddediyordu:
+- `test_p5_adim6_result_deadline_exact_boundary_accepted`: `current_block=110, deadline_block=110` → check #1 geçti ama `result_deadline=60` → check #2 reddetti
+- `test_p5_adim6_result_separate_deadline_exact_boundary`: `current_block=60, deadline_block=55` → check #1 reddetti (result_deadline boundary'sine hiç gelinmedi)
+
+**ONARIM:**
+- Test 1: `result_deadline_blocks=200` ile `result_deadline=210 > deadline_block=110` yapıldı → check #2 geçer, check #1 boundary test edilir
+- Test 2: `deadline_block=200` ile check #1 devre dışı → `current_block=60, result_deadline=60` → check #2 boundary izole test edilir
+
+**Ne bekliyor:** CI yeşil kanıtı
+**Kim karar verecek:** Kullanıcı (Ayaz)
+
+Co-authored-by: ARENAX <arenax@budlum.ai>
