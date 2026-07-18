@@ -8,8 +8,8 @@ pub mod types;
 
 pub use registry::AiRegistry;
 pub use types::{
-    AiInferenceOutcome, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
-    AiRequestId, AiResultId, BoundedBytes, MAX_INFERENCE_REF_BYTES,
+    AiInferenceOutcome, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId,
+    AiResultId, BoundedBytes, MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]
@@ -23,7 +23,9 @@ mod tests {
         assert!(registry.is_empty());
         assert_eq!(registry.state_root(), [0u8; 32]);
 
-        let owner = Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
         let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
         let spec = AiModelSpec {
             model_id,
@@ -47,7 +49,9 @@ mod tests {
     #[test]
     fn test_ai_inference_lifecycle_threshold_agreement() {
         let mut registry = AiRegistry::new();
-        let owner = Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
         let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
         let spec = AiModelSpec {
             model_id,
@@ -64,7 +68,9 @@ mod tests {
         };
         registry.register_model(spec).unwrap();
 
-        let requester = Address::from_hex("0000000000000000000000000000000000000000000000000000000000000002").unwrap();
+        let requester =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
         let mut req = AiInferenceRequest {
             request_id: AiRequestId::default(),
             requester,
@@ -81,7 +87,9 @@ mod tests {
         let req_id = registry.submit_request(req).unwrap();
 
         // Submit first result from verifier 1
-        let v1 = Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011").unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
         let res1 = AiInferenceResult {
             request_id: req_id,
             verifier: v1,
@@ -95,7 +103,9 @@ mod tests {
         assert!(outcome1.is_none()); // Threshold not reached yet (needs 2)
 
         // Submit second matching result from verifier 2
-        let v2 = Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012").unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
         let res2 = AiInferenceResult {
             request_id: req_id,
             verifier: v2,

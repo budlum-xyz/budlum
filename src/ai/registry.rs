@@ -38,7 +38,10 @@ impl AiRegistry {
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
         spec.validate()?;
         if self.models.contains_key(&spec.model_id) {
-            return Err(format!("Model ID {} is already registered", spec.model_id.to_hex()));
+            return Err(format!(
+                "Model ID {} is already registered",
+                spec.model_id.to_hex()
+            ));
         }
         let id = spec.model_id;
         self.models.insert(id, spec);
@@ -51,7 +54,12 @@ impl AiRegistry {
         }
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s,
-            None => return Err(format!("Model ID {} not registered", request.model_id.to_hex())),
+            None => {
+                return Err(format!(
+                    "Model ID {} not registered",
+                    request.model_id.to_hex()
+                ))
+            }
         };
         if !spec.active {
             return Err("Model is inactive".into());
@@ -60,17 +68,28 @@ impl AiRegistry {
             return Err("input_ref exceeds model specification limits".into());
         }
         if self.requests.contains_key(&request.request_id) {
-            return Err(format!("Request ID {} already exists", request.request_id.to_hex()));
+            return Err(format!(
+                "Request ID {} already exists",
+                request.request_id.to_hex()
+            ));
         }
         let id = request.request_id;
         self.requests.insert(id, request);
         Ok(id)
     }
 
-    pub fn submit_result(&mut self, result: AiInferenceResult) -> Result<Option<AiInferenceOutcome>, String> {
+    pub fn submit_result(
+        &mut self,
+        result: AiInferenceResult,
+    ) -> Result<Option<AiInferenceOutcome>, String> {
         let request = match self.requests.get(&result.request_id) {
             Some(r) => r.clone(),
-            None => return Err(format!("Request ID {} not found", result.request_id.to_hex())),
+            None => {
+                return Err(format!(
+                    "Request ID {} not found",
+                    result.request_id.to_hex()
+                ))
+            }
         };
         let spec = match self.models.get(&request.model_id) {
             Some(s) => s.clone(),
@@ -94,7 +113,9 @@ impl AiRegistry {
             }
         }
 
-        if agreeing_verifiers.len() as u32 >= spec.agreement_threshold && !self.outcomes.contains_key(&result.request_id) {
+        if agreeing_verifiers.len() as u32 >= spec.agreement_threshold
+            && !self.outcomes.contains_key(&result.request_id)
+        {
             agreeing_verifiers.sort();
             let outcome = AiInferenceOutcome {
                 request_id: result.request_id,

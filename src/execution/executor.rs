@@ -614,7 +614,9 @@ impl Executor {
             TransactionType::AiInferenceResult(res) => {
                 {
                     let validator = state.validators.get(&tx.from);
-                    let is_validator = validator.map(|v| v.active && v.stake >= 1_000).unwrap_or(false);
+                    let is_validator = validator
+                        .map(|v| v.active && v.stake >= 1_000)
+                        .unwrap_or(false);
                     if !is_validator && state.get_balance(&tx.from) == 0 {
                         return Err(BudlumError::validation(
                             "ai_verifier_unauthorized",
@@ -635,7 +637,8 @@ impl Executor {
                     let req = state.ai_registry.requests.get(&finalized.request_id);
                     if let Some(req) = req {
                         if !finalized.agreeing_verifiers.is_empty() {
-                            let reward_per_verifier = req.max_fee / finalized.agreeing_verifiers.len() as u64;
+                            let reward_per_verifier =
+                                req.max_fee / finalized.agreeing_verifiers.len() as u64;
                             for verifier_addr in &finalized.agreeing_verifiers {
                                 let acc = state.get_or_create(verifier_addr);
                                 acc.balance = acc.balance.saturating_add(reward_per_verifier);
