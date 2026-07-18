@@ -370,6 +370,13 @@ mod tests {
         let mut children: [Option<Vec<u8>>; 16] = Default::default();
         children[nib_a[0] as usize] = Some(hash_a.to_vec());
         children[nib_b[0] as usize] = Some(hash_b.to_vec());
+
+        // Absent-key kontrolü children move olmadan ÖNCE (branch_node_bytes
+        // ownership alır). c-key ilk nibble slot'u dolu mu?
+        let absent = b"c";
+        let nib_c = to_nibbles(&keccak256(absent));
+        let absent_slot_empty = children[nib_c[0] as usize].is_none();
+
         let branch_bytes = branch_node_bytes(children, None);
         let root = keccak256(&branch_bytes);
 
@@ -379,9 +386,7 @@ mod tests {
         assert_eq!(verify(&proof, &root, key_b).unwrap(), val_b);
 
         // Absent key → KeyNotFound (null child branch slot).
-        let absent = b"c";
-        let nib_c = to_nibbles(&keccak256(absent));
-        if children[nib_c[0] as usize].is_none() {
+        if absent_slot_empty {
             assert_eq!(
                 verify(&proof, &root, absent).unwrap_err(),
                 MptError::KeyNotFound
