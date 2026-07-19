@@ -2005,3 +2005,90 @@ kırmızı oluyor (benches/proof_verifier/merkle_trie). Bu benim değişiklikler
 değil — ekip yeni dosya ekledi ama fmt uygulamadı. Görev yöneticisi düzeltiyor.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+### [2026-07-20 12:30 UTC+3] ARENAS — İlk Denetim Oturumu: Yeni Bulgular V87-V94
+
+**Rol:** ARENAS (Denetim Ajanı) — DURMAKSIZIN AÇIK BULMAK ve raporlamak
+**Zemin:** main SHA `82f493c` (Phase 11.3 planı eklenmiş)
+**Kapsam:** Executor, Bridge, AI Registry, Cross-domain/EVM, Merkle Trie, Transaction types — bağımsız derin denetim
+
+---
+
+#### V87: Merkle Trie Sibling Key Collision (64-bit truncation)
+**Dosya:** `src/storage/merkle_trie.rs`
+**Ciddiyet:** 🟡 Yüksek
+**Sorun:** `compute_sibling_key` ve `compute_parent_key` adresin sadece ilk 64 bitini (8 byte) kullanıyor (`level.min(64)`). 256-bit adres uzayında 2^64'den fazla olası yol var, ancak key'ler 64-bit u64 olarak tutuluyor. İki farklı adres aynı 64-bit prefix'e sahipse, internal node hash'leri çarpışır (aynı `(level, key)` tuple'ına map edilir). Bu, sparse trie'de yanlış sibling hash'ler üretilmesine ve proof doğrulamanın başarısız olmasına yol açabilir.
+**Senaryo:** Saldırgan, varlığın üst 8 byte'ı aynı olan iki farklı adres oluşturursa, Merkle proof'ları bir hesap için diğer hesabın verisini "kanıtlamak" üzere kullanabilir.
+**Öneri:** Key hashing için en az 128-bit prefix kullanılmalı veya path bits tam olarak kodlanmalı.
+
+#### V88: BridgeState.mint() Fee Placeholder — No Actual Credit
+**Dosya:** `src/execution/executor.rs` satır ~560
+**Ciddiyet:** 🟡 Yüksek
+**Sorun:** `RelayerResult` işlenirken `BridgeLock` mesajı geldiğinde `bridge.mint()` çağrılıyor ama sonrasında `let fee = msg.nonce.saturating_mul(1); // placeholder for fee logic` satırı var — fee hesaplanıp hiçbir yere yazılmıyor ve `amount logic needs to be tied to msg payload` yorumu ile bırakılmış. Alıcıya (recipient) $BUD kredisi verilmiyor. Mint sadece status'u değiştiriyor, gerçek token transferi eksik.
+**Etki:** Bridge üzerinden gelen varlıklar mint ediliyor ama alıcının bakiyesine eklenmiyor — fonlar havada kalıyor.
+
+#### V89: AiAgentPayment Non-Escrowed Immediate Removal — Double-Spend Risk
+**Dosya:** `src/execution/executor.rs` satır ~860
+**Ciddiyet:** 🔴 Kritik
+**Sorun:** `AiAgentPayment` non-escrowed ödemelerde, `state.ai_registry.agent_payments.remove(&payment.payment_id)` çağrılıyor — payment registry'den hemen kaldırılıyor. Ancak payment_id önceden bilinirse, aynı payment_id ile tekrar submit edilebilir çünkü `submit_agent_payment` sadece `contains_key` kontrolü yapıyor. Dahası, `submit_agent_payment` doğrulaması `from_agent == tx.from` kontrolünü executor'da yapıyor (V84 fix), ama non-escrowed hemen remove edildiği için `get_agent_payment` sorgularında bu payment artık görünmüyor — audit trail kopuyor.
+**Etki:** Non-escrowed payment'ların on-chain geçmişi kayboluyor; replay saldırısı mümkün olabilir.
+
+#### V90: AiDisputeSlash Seized Stake Not Actually Burned
+**Dosya:** `src/execution/executor.rs` satır ~815
+**Ciddiyet:** 🟡 Yüksek
+**Sorun:** `let _ = seized_stake; // Burned` yorumu var, ancak `seized_stake` sadece `_` ile ignore ediliyor. Rust'ta `let _ = value` value'yi drop eder ama ekonomik anlamda "burn" değil. Eğer verifier stake'i `PermissionlessRegistry`'den geldiyse, `slash_equivocator` zaten oradan kesiyor. Ancak AI verifier stake ayrı bir mekanizma (`verifier_stakes: BTreeMap`) — `slash_equivocator` sadece `self.verifier_stakes.remove(verifier)` yapıyor ve çekilen miktar çağırıcıya döndürülüyor. Executor'da bu amount'un gerçekten burn reserve'ye veya `burn_from()` ile yok edilmesi gerekirken sadece ignore ediliyor.
+**Etki:** Slashed stake ekonomik sistemde kaybolmuyor — potansiyel olarak validator pool'a sızabilir.
+
+#### V91: EvmChainAdapter.verify_receipt_proof No-Op Still Present
+**Dosya:** `src/cross_domain/evm/adapter.rs` satır 140-148
+**Ciddiyet:** 🟡 Yüksek (V30 teyit + detay)
+**Sorun:** ARENAX daha önce V30 olarak raporlamış. Ben teyit ediyorum: `verify_receipt_proof` hala `let _ = receipt_bytes; let _ = external_state_root; let _ = expected_tx_hash; Ok(())` — tam no-op. Bu, `ChainAdapter` trait'i üzerinden çağrılabildiği için, herhangi bir kod bu metodu kullanıyorsa kriptografik doğrulama tamamen atlanır. `verify_deposit()` doğru yoldur ama trait'deki no-op hala güvenlik açığı olarak duruyor.
+**Öneri:** `verify_receipt_proof` ya gerçek MPT doğrulamasına yönlendirilmeli ya da `Err(AdapterError("use verify_deposit"))` ile açıkça engellenmeli.
+
+#### V92: NftTag Transaction — No Implementation
+**Dosya:** `src/execution/executor.rs` satır ~390
+**Ciddiyet:** ⚪ Düşük
+**Sorun:** `TransactionType::NftTag { nft_id, tag }` eşleşmesinde `let _ = (nft_id, tag);` var — hem nft_id hem tag ignore ediliyor. Tag hiç kaydedilmiyor, sadece fee düşülüp nonce artırılıyor. Kullanıcı tag için fee ödüyor ama tag hiçbir yere yazılmıyor.
+**Etki:** Feature advertised ama functional değil — kullanıcı fund kaybediyor.
+
+#### V93: BridgeState.lock() Expiry Queue — Zero Expiry Height Entries
+**Dosya:** `src/cross_domain/bridge.rs` satır ~175
+**Ciddiyet:** ⚪ Düşük
+**Sorun:** `lock()` fonksiyonunda `if expiry_height > 0 { self.expiry_queue... }` kontrolü var. Eğer `expiry_height == 0` verilirse, transfer Locked olarak kalır ama expiry queue'ya eklenmez. Bu `sweep_expired_locks` tarafından hiç temizlenmez — sonsuza kadar kilitli kalır. `lock()` fonksiyonunda `expiry_height == 0`'ın "no expiry" anlamına geldiği dokümante edilmemiş.
+**Öneri:** Ya `expiry_height == 0` açıkça reddedilmeli ya da "no expiry" davranışı belgelenmeli.
+
+#### V94: AiAgentPaymentRelease — Recipient Anybody Can Call
+**Dosya:** `src/execution/executor.rs` satır ~830
+**Ciddiyet:** 🟡 Yüksek
+**Sorun:** `AiAgentPaymentRelease(payment_id)` transaction'ında, herhangi bir `tx.from` adresi release çağırabilir. `release_agent_payment` sadece payment'ın varlığını ve outcome finalization'ı kontrol ediyor — ama çağıranın kim olduğu kontrol edilmiyor. Ödeme sahibi (from_agent) veya alıcı (to_agent) dışındaki bir üçüncü parti release tetikleyebilir. Release sonucu `recipient_acc`'ye kredi gittiği için bu doğrudan fund kaybına yol açmaz, ama çağıranın fee ödeyerek gereksiz release'ler tetiklemesi griefing attack vektörü olabilir.
+**Etki:** Griefing — kimliği doğrulanmamış taraf ödemeyi erken release edebilir.
+
+---
+
+**Pozitif Doğrulamalar (bu oturum):**
+- ✅ Bridge unlock domain karşılaştırması V17 fix doğru uygulandı (target_domain != source_domain → burn domain kontrolü)
+- ✅ Bridge root() V24 fix: transfer metadata artık digest'e dahil
+- ✅ AI inference request balance check (V32 fix) mevcut ve doğru
+- ✅ AI payment expiry horizon (V85 fix) MAX_PAYMENT_EXPIRY_HORIZON mevcut
+- ✅ AI payment from_agent spoofing (V84 fix) tx.from kontrolü mevcut
+- ✅ AI state_root() V3 domain-separation her map için unique prefix
+- ✅ BudToEthClaim V31 fix: Burned status kontrolü matches!() ile uygulandı
+- ✅ Transaction signing V29 fix: V4 canonical preimage tüm tipleri kapsıyor
+
+---
+
+**Güncel Toplam Denetim Tablosu:**
+
+| Ciddiyet | Sayı | Durum |
+|----------|------|-------|
+| 🔴 Kritik | 9 | 4 kapatıldı, 5 açık (V24, V37, V38, V86, **V89**) |
+| 🟡 Yüksek | 18 | 5 kapatıldı, 13 açık |
+| ⚪ Düşük | 33 | 4 kapatıldı, 29 açık |
+
+**Toplam: 60 bulgu (V22-V94), 13 kapatıldı, 47 açık**
+
+**Ne bitti:** İlk bağımsız denetim oturumu tamamlandı — 8 yeni bulgu (V87-V94), 1 kritik (V89).
+**Ne bekliyor:** V87-V94 kapatmaları + devam eden derin denetim (blockchain.rs, registry/, network/, storage/ alt modülleri henüz tam derinlemesine incelenmedi).
+**Kim karar verecek:** Ayaz (V89/V90/V94 önceliklendirme) + CI (push sonrası)
+
+Co-authored-by: ARENAS <arenas@budlum.ai>
