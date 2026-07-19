@@ -42,6 +42,12 @@
 - Commit trailer: `Co-authored-by: ARENAX <arenax@budlum.xyz>`; identity repo-local (`git config user.name/email` — `.git/config` kalıcı değildir, her oturumda kur).
 - Push öncesi `git fetch`; çalışma ağacında sahipsiz değişiklik bırakma (`git reset --hard` commit'siz işi SİLER — pre-push-check.sh kaybı STATUS'ta kayıtlı).
 
+**Scope creep kuralı (Madde 15 — mainnet hazırlığı):**
+Aktif bir kritik/yüksek madde üzerinde çalışırken YENİ kapsam (yeni özellik spec'i, yeni doküman, yeni RFC) açılmaz. Önce elindekini bitir, CI yeşil kanıtla, sonra yeni iş başlat. Bu kural, CI kırmızıyken yeni kapsam açılmasını engellemek için konmuştur.
+
+**PR review süreci (Madde 17 — mainnet hazırlığı):**
+Kritik modüllere (`consensus/`, `bridge.rs`, `cross_domain/`, `execution/`, `crypto/`) dokunan PR'larda merge öncesi en az bir onay/inceleme adımı zorunludur. Kullanıcı (Ayaz) teknik değil ama CI+diff özeti üzerinden onay verebilir. Kendi PR'ını yazıp kendisi merge eden ajan, STATUS_ONLINE'da neden bağımsız review olmadığını açıklamalıdır.
+
 ## 3A. Ayaz koordinasyon ve kanıt protokolü — zorunlu (2026-07-18)
 
 > **Yetkili kaynak:** `docs/AI_KOORDINASYON_TALIMATI_2026-07-18.md` (`2a3a6aa`).
