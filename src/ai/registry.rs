@@ -67,6 +67,12 @@ pub struct AiRegistry {
     /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
     /// between AI agents in the Agentic Economy.
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
+    /// P5 ADIM11 Bulgu 33: Verifier whitelist — only whitelisted verifiers
+    /// can submit results. When empty, any staked verifier can submit
+    /// (permissionless mode). When non-empty, only addresses in this set
+    /// are allowed (permissioned mode). This enables governance-controlled
+    /// verifier onboarding for the Agentic Economy.
+    pub verifier_whitelist: BTreeSet<Address>,
 }
 
 impl AiRegistry {
@@ -84,6 +90,7 @@ impl AiRegistry {
             execution_proofs: BTreeMap::new(),
             verifier_qos: BTreeMap::new(),
             agent_payments: BTreeMap::new(),
+            verifier_whitelist: BTreeSet::new(),
         }
     }
 
@@ -100,6 +107,7 @@ impl AiRegistry {
             && self.execution_proofs.is_empty()
             && self.verifier_qos.is_empty()
             && self.agent_payments.is_empty()
+            && self.verifier_whitelist.is_empty()
     }
 
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
@@ -1005,9 +1013,8 @@ impl AiRegistry {
             ));
         }
         if payment.is_expired(current_block) {
-            return Err(format!(
-                "Agent payment expired: current_block={}, expiry_block={}",
-                current_block, payment.expiry_block,
+            return Err(String::from(
+                "Agent payment: expiry_block must be in the future",
             ));
         }
         if payment.require_proof {
@@ -1133,6 +1140,47 @@ impl AiRegistry {
             .collect()
     }
 
+    // ===================== P5 ADIM11 — Verifier Whitelist (Bulgu 33) =====================
+
+    /// P5 ADIM11 Bulgu 33: Add a verifier to the whitelist.
+    /// Only whitelisted verifiers can submit results when whitelist is active.
+    pub fn whitelist_verifier(&mut self, verifier: Address) -> bool {
+        self.verifier_whitelist.insert(verifier)
+    }
+
+    /// P5 ADIM11 Bulgu 33: Remove a verifier from the whitelist.
+    pub fn dewhitelist_verifier(&mut self, verifier: &Address) -> bool {
+        self.verifier_whitelist.remove(verifier)
+    }
+
+    /// P5 ADIM11 Bulgu 33: Check if a verifier is authorized to submit results.
+    /// If whitelist is empty (permissionless mode), any staked verifier is allowed.
+    /// If whitelist is non-empty (permissioned mode), only whitelisted verifiers.
+    pub fn is_verifier_authorized(&self, verifier: &Address) -> bool {
+        if self.verifier_whitelist.is_empty() {
+            // Permissionless mode: staked verifier = authorized
+            self.is_staked_verifier(verifier)
+        } else {
+            // Permissioned mode: must be in whitelist AND staked
+            self.verifier_whitelist.contains(verifier) && self.is_staked_verifier(verifier)
+        }
+    }
+
+    /// P5 ADIM11 Bulgu 33: Check if whitelist mode is active.
+    pub fn is_whitelist_mode(&self) -> bool {
+        !self.verifier_whitelist.is_empty()
+    }
+
+    /// P5 ADIM11 Bulgu 33: Get all whitelisted verifiers.
+    pub fn get_whitelisted_verifiers(&self) -> &BTreeSet<Address> {
+        &self.verifier_whitelist
+    }
+
+    /// P5 ADIM11 Bulgu 33: Clear the whitelist (switch to permissionless mode).
+    pub fn clear_whitelist(&mut self) {
+        self.verifier_whitelist.clear();
+    }
+
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
     /// P5 Bulgu 19 (ADIM7): Domain-separated map roots prevent cross-map
     /// collision attacks (ARENAX V38). Each map gets a unique domain prefix
@@ -1237,6 +1285,12 @@ impl AiRegistry {
         for (pid, payment) in &self.agent_payments {
             hasher.update(pid);
             hasher.update(payment.calculate_leaf());
+        }
+
+        // Domain: verifier_whitelist (P5 ADIM11 Bulgu 33)
+        hasher.update(b"BDLM_AI_VERIFIER_WHITELIST");
+        for verifier in &self.verifier_whitelist {
+            hasher.update(verifier.as_bytes());
         }
 
         hasher.finalize().into()

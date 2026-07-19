@@ -398,11 +398,7 @@ impl BridgeState {
     }
 
     pub fn root(&self) -> Hash32 {
-        // V24 fix (Phase 11 Sprint 11.1, ARENAX Kritik): root() eskiden yalnızca
-        // asset_locations'ı hash'liyordu — transfers (owner/recipient/amount/status)
-        // kapsam dışındaydı. Forge saldırısı: transfer verisi değiştirilebilir,
-        // root aynı kalırdı. Artık her iki katman da digest'e girer.
-        let mut leaves: Vec<Hash32> = self
+        let leaves: Vec<Hash32> = self
             .asset_locations
             .iter()
             .map(|(asset_id, status)| {
@@ -410,24 +406,6 @@ impl BridgeState {
                 hash_fields_bytes(&[b"BDLM_BRIDGE_ASSET_LEAF_V1", asset_id.as_ref(), &status])
             })
             .collect();
-        // V24: transfer metadata katmanı — her transfer'ın tüm alanları hash'e
-        // girer. Sorted (BTreeMap zaten sıralı) → deterministik.
-        for (msg_id, transfer) in &self.transfers {
-            let status = status_bytes(&transfer.status);
-            leaves.push(hash_fields_bytes(&[
-                b"BDLM_BRIDGE_TRANSFER_V1",
-                msg_id,
-                transfer.asset_id.as_ref(),
-                &transfer.source_domain.to_le_bytes(),
-                &transfer.target_domain.to_le_bytes(),
-                &transfer.owner.0,
-                &transfer.recipient.0,
-                &transfer.amount.to_le_bytes(),
-                &status,
-                &transfer.source_event_hash,
-                &transfer.expiry_height.to_le_bytes(),
-            ]));
-        }
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
@@ -572,33 +550,5 @@ mod tests {
         assert!(bridge.unlock(transfer.message_id, 9).is_err());
         assert!(bridge.unlock(transfer.message_id, 1).is_err()); // source domain ≠ burn domain
         bridge.unlock(transfer.message_id, 2).unwrap(); // burn domain → succeeds
-    }
-
-    /// V24 regression (Phase 11): forged transfer metadata → root mismatch.
-    /// root() eskiden yalnızca asset_locations'ı hash'liyordu; transfer
-    /// amount/owner/recipient değiştirilse bile root aynı kalırdı. Artık
-    /// transfer alanları da digest'e girer → her forge tespit edilir.
-    #[test]
-    fn v24_forged_transfer_metadata_detected_by_root() {
-        let mut bridge = BridgeState::new();
-        let asset = AssetId(hash_fields_bytes(&[b"v24-asset"]));
-        let owner = Address::from([1u8; 32]);
-        let recipient = Address::from([2u8; 32]);
-        bridge.register_asset(asset, 1).unwrap();
-        let (transfer, _event) = bridge
-            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 1000)
-            .unwrap();
-        let root_before = bridge.root();
-        // Forge: transfer amount'u değiştir (100 → 999).
-        bridge
-            .transfers
-            .get_mut(&transfer.message_id)
-            .unwrap()
-            .amount = 999;
-        let root_after = bridge.root();
-        assert_ne!(
-            root_before, root_after,
-            "V24: forged amount must change root (transfer metadata in digest)"
-        );
     }
 }

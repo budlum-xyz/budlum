@@ -3264,6 +3264,20 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    /// P5 ADIM11 Bulgu 33: Query the verifier whitelist.
+    async fn ai_verifier_whitelist(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let whitelist = self.chain.get_ai_verifier_whitelist().await;
+        let list: Vec<serde_json::Value> = whitelist
+            .iter()
+            .map(|v| serde_json::json!(format!("0x{}", v.to_hex())))
+            .collect();
+        Ok(serde_json::json!({
+            "whitelist_mode": !list.is_empty(),
+            "verifier_count": list.len(),
+            "verifiers": list,
+        }))
+    }
+
     async fn prune_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.chain.get_prune_status().await.map_err(|e| {
             ErrorObjectOwned::owned(

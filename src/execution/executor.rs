@@ -680,6 +680,16 @@ impl Executor {
                         }
                     }
                 }
+                // P5 ADIM11 Bulgu 33: Verifier whitelist check.
+                // If whitelist is active, only whitelisted+staked verifiers
+                // can submit results. This enables governance-controlled
+                // verifier onboarding for the Agentic Economy.
+                if !state.ai_registry.is_verifier_authorized(&tx.from) {
+                    return Err(BudlumError::validation(
+                        "ai_verifier_not_whitelisted",
+                        "Verifier is not authorized (whitelist mode active, verifier not whitelisted or not staked)",
+                    ));
+                }
                 let mut res = res.clone();
                 if res.verifier != tx.from {
                     res.verifier = tx.from;

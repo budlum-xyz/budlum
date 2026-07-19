@@ -8,10 +8,10 @@ pub mod types;
 
 pub use registry::AiRegistry;
 pub use types::{
-    AiAgentPayment, AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome,
-    AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus,
-    AiRequestId, AiResultId, AiVerifierQos, AiVerifierStakeInfo, BoundedBytes,
-    MAX_INFERENCE_REF_BYTES,
+    AiAgentPayment, AiAgentReputation, AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof,
+    AiInferenceOutcome, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
+    AiPaymentEscrowStatus, AiRequestId, AiResultId, AiVerifierQos, AiVerifierStakeInfo,
+    BoundedBytes, MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]
@@ -3763,6 +3763,87 @@ mod tests {
             expiry_block: 200,
         };
         registry.submit_agent_payment(payment, 50).unwrap();
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    // ===================== P5 ADIM11 — B33 Verifier Whitelist =====================
+
+    #[test]
+    fn test_p5_adim11_whitelist_permissionless_mode() {
+        // P5 Bulgu 33: Empty whitelist = permissionless mode
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // Stake the verifier
+        registry.lock_verifier_stake(v1, 1_000).unwrap();
+
+        // In permissionless mode, staked verifier is authorized
+        assert!(!registry.is_whitelist_mode());
+        assert!(registry.is_verifier_authorized(&v1));
+    }
+
+    #[test]
+    fn test_p5_adim11_whitelist_permissioned_mode() {
+        // P5 Bulgu 33: Non-empty whitelist = permissioned mode
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        // Stake both verifiers
+        registry.lock_verifier_stake(v1, 1_000).unwrap();
+        registry.lock_verifier_stake(v2, 1_000).unwrap();
+
+        // Whitelist only v1
+        registry.whitelist_verifier(v1);
+
+        // v1 is authorized, v2 is not
+        assert!(registry.is_whitelist_mode());
+        assert!(registry.is_verifier_authorized(&v1));
+        assert!(!registry.is_verifier_authorized(&v2));
+    }
+
+    #[test]
+    fn test_p5_adim11_whitelist_unstaked_verifier_rejected() {
+        // P5 Bulgu 33: Whitelisted but unstaked = not authorized
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // Whitelist but don't stake
+        registry.whitelist_verifier(v1);
+        assert!(!registry.is_verifier_authorized(&v1));
+    }
+
+    #[test]
+    fn test_p5_adim11_whitelist_dewhitelist() {
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(v1, 1_000).unwrap();
+        registry.whitelist_verifier(v1);
+        assert!(registry.is_verifier_authorized(&v1));
+
+        registry.dewhitelist_verifier(&v1);
+        // After dewhitelist, whitelist is empty → permissionless mode
+        assert!(!registry.is_whitelist_mode());
+        // Staked verifier still authorized in permissionless mode
+        assert!(registry.is_verifier_authorized(&v1));
+    }
+
+    #[test]
+    fn test_p5_adim11_whitelist_changes_state_root() {
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let root_before = registry.state_root();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.whitelist_verifier(v1);
         assert_ne!(root_before, registry.state_root());
     }
 }

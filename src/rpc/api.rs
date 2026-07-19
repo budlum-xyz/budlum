@@ -688,4 +688,10 @@ pub trait BudlumApi {
         agent: String,
         direction: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM11 Bulgu 33: Query the verifier whitelist.
+    /// Returns all whitelisted verifier addresses. If empty, the system
+    /// is in permissionless mode (any staked verifier can submit).
+    #[method(name = "bud_aiVerifierWhitelist")]
+    async fn ai_verifier_whitelist(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

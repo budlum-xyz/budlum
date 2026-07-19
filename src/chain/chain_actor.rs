@@ -195,6 +195,8 @@ pub enum ChainCommand {
         direction: AiPaymentDirection,
         response: oneshot::Sender<Vec<crate::ai::types::AiAgentPayment>>,
     },
+    /// P5 ADIM11 Bulgu 33: Get verifier whitelist.
+    GetAiVerifierWhitelist(oneshot::Sender<Vec<crate::core::address::Address>>),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -1292,6 +1294,20 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// P5 ADIM11 Bulgu 33: Get verifier whitelist.
+    pub async fn get_ai_verifier_whitelist(&self) -> Vec<crate::core::address::Address> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifierWhitelist(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn get_prune_status(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.tx.send(ChainCommand::GetPruneStatus(tx)).await {
@@ -2236,6 +2252,17 @@ impl ChainActor {
                     .cloned()
                     .collect();
                     let _ = res_tx.send(payments);
+                }
+                ChainCommand::GetAiVerifierWhitelist(res_tx) => {
+                    let whitelist: Vec<_> = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_whitelisted_verifiers()
+                        .iter()
+                        .cloned()
+                        .collect();
+                    let _ = res_tx.send(whitelist);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
                     let height = self.blockchain.chain.len() as u64;
