@@ -261,3 +261,112 @@ Mainnet bir derleme hedefi değildir. Signing integrity, snapshot kapsamı,
 durability, HSM, audit, fuzz campaign, ceremony, bootnode ve genesis freeze
 aynı güvenlik zincirinin halkalarıdır. Bir halka kanıtsızsa bütün zincir
 mainnet-ready sayılmaz.
+
+# Bölüm 10 — Ekonomi, isimler ve topluluk altyapısı
+
+## 10.1 $BUD ve teşvikler
+
+Bir ağın güvenliği yalnız kriptografiyle değil, katılımcıların ekonomik
+teşvikleriyle de ilgilidir. Fee, stake, slash, storage reward, treasury/burn
+ve vesting gibi mekanizmalar ağın hangi davranışları ödüllendirdiğini belirler.
+
+Budlum’da tokenomics parametreleri state/snapshot kapsamının parçasıdır.
+Bu nedenle ekonomik parametre değişikliği yalnız bir UI ayarı değildir; governance,
+state root, migration ve test kabul kriterleriyle birlikte değerlendirilmelidir.
+
+<div class="tech">
+SocialFi boost dağıtım modelinde B.U.D. sağlayıcı, üretici ve protocol
+payları ayrı hesaplanır. Overflow, treasury/burn seçimi ve pending reward
+state’i executor atomikliği içinde değerlendirilmelidir.
+</div>
+
+<div class="plain">
+Ekonomi, ağın “teşekkür ederim” ve “bunu yapma” dilidir. Kimin emek verdiği,
+kimin depolama sağladığı ve ortak kasanın nasıl korunduğu açık değilse, teknik
+olarak çalışan bir ağ bile toplumsal olarak sürdürülebilir olmayabilir.
+</div>
+
+## 10.2 BNS ve dijital yön bulma
+
+BNS, insanın hatırlayabileceği `.bud` adlarını adres ve içerik çözümüne
+bağlar. Kayıt, expiration, renewal, transfer, subdomain ve full resolve
+kuralları isim sisteminin teknik temelidir.
+
+BNS’nin bağımsız crate’e taşınması, isim hizmetinin B.U.D. storage’dan farklı
+sahiplik ve test yüzeyi olduğunu açıklar. B.U.D. veriyi adresler ve deal
+oluşturur; BNS adı çözer. İki katman birlikte kullanılabilir ama aynı modül
+olmak zorunda değildir.
+
+## 10.3 Governance
+
+Governance; fee, reward, parametre ve slashing gibi kararların kim tarafından,
+hangi quorum ve hangi yürürlük süresiyle değiştirilebileceğini tanımlar.
+Governance dokümanı ile gerçek executor/state kodu birbirini doğrulamalıdır.
+Kanıtsız SlashValidator kararı veya sınırsız emergency override, governance
+olmak yerine keyfi yönetim riski yaratır.
+
+# Bölüm 11 — AI, BudZero ve doğrulanabilir hesaplama
+
+## 11.1 AI attestation katmanı
+
+Budlum AI primitive’leri model kaydı, inference request, verifier result,
+commitment, deadline, equivocation ve outcome mekanizmaları sağlar. Bu katman,
+modelin dünyaya dair her çıktısının matematiksel doğruluğunu tek başına ispat
+etmez.
+
+<div class="tech">
+AI request/result alanları transaction V4 signing payloadına dahil edilmelidir.
+AI registry state root’u snapshot/digest kapsamıyla birlikte değerlendirilir.
+Fee reclaim, verifier auth ve nonce kuralları liveness/ekonomi yüzeyinin
+parçasıdır.
+</div>
+
+<div class="plain">
+Birden çok uzman aynı sonucu imzalarsa, ağ onların aynı sonuca ulaştığını
+kaydedebilir. Bu, sonucun gerçek dünyada mutlak doğru olduğunu otomatik olarak
+kanıtlamaz; kimin neyi onayladığını şeffaflaştırır.
+</div>
+
+## 11.2 BudZero ve ZK sınırı
+
+BudZero in-tree workspace; ISA, VM, compiler, proof ve node bileşenlerini
+taşır. ZK proof, bir hesaplamanın belirli kurallara göre yürütüldüğünü kanıtlama
+aracıdır; her feature’ın otomatik production proof’u olduğu anlamına gelmez.
+
+VerifyMerkle 64-depth soundness gate’i, B.U.D. gerçek Proof-of-Storage
+iddiasının bağımlılığıdır. Gate kapanmadan public belgeler interim retrieval
+ile production proof arasındaki farkı korumalıdır.
+
+# Bölüm 12 — Güvenlik, test ve mainnet yolculuğu
+
+## 12.1 CI tek hakemdir
+
+Lokal test faydalıdır; fakat farklı toolchain, Docker, workspace, feature ve
+operasyon koşulları yüzünden tek başına kabul kanıtı değildir. CI build, format,
+test, coverage, fuzz, dependency, secret scan, PoA isolation ve smoke kapılarını
+bir arada değerlendirir.
+
+## 12.2 Fuzzing ve adversarial testler
+
+Fuzzing rastgele veya yönlendirilmiş girdilerle panic, memory safety ve parser
+zayıflıklarını arar. RLP/MPT, transaction deserialize, snapshot parse ve ZKVM
+hedefleri farklı saldırı yüzeyleridir. Kısa CI fuzz job’ı smoke kanıtıdır;
+uzun nightly campaign ise ayrı güvenlik kanıtı sağlar.
+
+## 12.3 Ceremony ve launch
+
+Mainnet launch; kodun deploy edilmesinden fazlasıdır: gerçek validator public
+key’leri, bootnode doğrulaması, HSM işletimi, genesis hash freeze, signed
+minutes, backup/restore, audit/bounty ve operator rehearsal birlikte gerekir.
+
+<div class="warning">
+Mainnet iddiası, en zayıf launch gate kadar güçlüdür. Bir kritik kapı kanıtsızsa
+lansman ertelenmelidir.
+</div>
+
+# Ek A — Okuma ve kanıt yöntemi
+
+Bu kitabın public bölümleri kaynak kodu, test, CI, operasyon dokümanı ve teknik
+kararları ayırır. Internal ek; commit/CI matrisi, migration ayrıntıları ve açık
+borçları taşır. Kaynak manifesti `research/SOURCE_MANIFEST.md` dosyasında
+yaşar; her yeni bölüm bu manifestteki ilgili kaynaklarla çapraz doğrulanır.
