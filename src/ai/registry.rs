@@ -1009,14 +1009,6 @@ impl AiRegistry {
                 "Agent payment: expiry_block must be in the future",
             ));
         }
-        // V85: Limit expiry_block to prevent indefinite escrow
-        const MAX_EXPIRY_BLOCKS: u64 = 1_000_000; // ~1 year at 1s blocks
-        if payment.expiry_block > current_block.saturating_add(MAX_EXPIRY_BLOCKS) {
-            return Err(format!(
-                "Agent payment: expiry_block too far in future (max {} blocks from now)",
-                MAX_EXPIRY_BLOCKS
-            ));
-        }
         if payment.require_proof {
             if let Some(ref rid) = payment.request_id {
                 if !self.requests.contains_key(rid) {

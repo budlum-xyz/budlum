@@ -564,7 +564,9 @@ impl Vm {
                 let _proof_type = inst.imm; // 0=STARK, 1=SNARK wrap
                 let proof_end = proof_addr.wrapping_add(8 * 4); // 4 u64 fields
                 let model_end = model_addr.wrapping_add(8 * 2); // 2 u64 fields
-                let result = if proof_end <= self.memory.len() && model_end <= self.memory.len() {
+                let result = if proof_end <= self.memory.len()
+                    && model_end <= self.memory.len()
+                {
                     // Stub: verify the proof structure is well-formed.
                     // Full verification: execute the AIR trace that checks
                     // model_id, input_commitment, output_commitment against
@@ -613,7 +615,10 @@ impl Vm {
         // key (the AIR uses these to verify the path). The original
         // step's `merkle_key` is also set here (post-push, in-place
         // via index) so the AIR knows the path's key.
-        if matches!(inst.opcode, Opcode::VerifyMerkle | Opcode::VerifyInference) {
+        if matches!(
+            inst.opcode,
+            Opcode::VerifyMerkle | Opcode::VerifyInference
+        ) {
             let path_addr = inst.imm as usize;
             let path_end = path_addr.wrapping_add(8 * 65);
             if path_end <= self.memory.len() {

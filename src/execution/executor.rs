@@ -807,15 +807,8 @@ impl Executor {
                 sender.balance = sender.balance.saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
-            TransactionType::AiAgentPayment(mut payment) => {
+            TransactionType::AiAgentPayment(payment) => {
                 // P5 ADIM11 Bulgu 31: Agent-to-Agent payment in Agentic Economy.
-                // V84 FIX: from_agent must match tx.from to prevent spoofing
-                if payment.from_agent != tx.from {
-                    return Err(BudlumError::validation(
-                        "ai_payment_from_agent_mismatch",
-                        "from_agent must match transaction sender",
-                    ));
-                }
                 let current_block = state.epoch_index.saturating_mul(100);
                 let total_cost = payment.amount.saturating_add(tx.fee);
                 // Check sender has sufficient balance
