@@ -228,11 +228,11 @@ impl Executor {
                                 .unwrap_or_default(),
                             max_fee,
                             callback: Some(tx.from),
-                            submitted_at_block: state.epoch_index.saturating_mul(100),
+                            submitted_at_block: state.current_block_height,
                             deadline_block,
                         };
                         req.request_id = req.calculate_id();
-                        let current_block = state.epoch_index.saturating_mul(100);
+                        let current_block = state.current_block_height;
                         // P5 Bulgu 14+17: Previously the error was silently swallowed
                         // with `let _ = ...`, and max_fee was never deducted from the
                         // sender's balance. Now we properly handle the result:
@@ -646,7 +646,7 @@ impl Executor {
                     }
                 }
                 // P5 Bulgu 1 — Executor-layer deadline enforcement (defense-in-depth):
-                let current_block = state.epoch_index.saturating_mul(100);
+                let current_block = state.current_block_height;
                 state
                     .ai_registry
                     .submit_request(req.clone(), current_block)
@@ -680,12 +680,22 @@ impl Executor {
                         }
                     }
                 }
+                // P5 ADIM11 Bulgu 33: Verifier whitelist check.
+                // If whitelist is active, only whitelisted+staked verifiers
+                // can submit results. This enables governance-controlled
+                // verifier onboarding for the Agentic Economy.
+                if !state.ai_registry.is_verifier_authorized(&tx.from) {
+                    return Err(BudlumError::validation(
+                        "ai_verifier_not_whitelisted",
+                        "Verifier is not authorized (whitelist mode active, verifier not whitelisted or not staked)",
+                    ));
+                }
                 let mut res = res.clone();
                 if res.verifier != tx.from {
                     res.verifier = tx.from;
                 }
                 // P5 Bulgu 1 — Executor-layer deadline enforcement (defense-in-depth):
-                let current_block = state.epoch_index.saturating_mul(100);
+                let current_block = state.current_block_height;
                 let outcome = state
                     .ai_registry
                     .submit_result(res.clone(), current_block)
@@ -721,7 +731,7 @@ impl Executor {
             TransactionType::AiFeeReclaim(request_id) => {
                 // P5 Bulgu 4: Reclaim escrowed max_fee for expired unfinalized request.
                 // Only the original requester can reclaim their fee.
-                let current_block = state.epoch_index.saturating_mul(100);
+                let current_block = state.current_block_height;
                 let (requester, max_fee) = state
                     .ai_registry
                     .reclaim_fee(&request_id, current_block)
@@ -770,7 +780,7 @@ impl Executor {
                 // P5 ADIM7 Bulgu 21: Cancel a pending AI inference request.
                 // Only the original requester can cancel. Escrowed max_fee
                 // is refunded to the requester.
-                let current_block = state.epoch_index.saturating_mul(100);
+                let current_block = state.current_block_height;
                 let (requester, max_fee) = state
                     .ai_registry
                     .cancel_request(&request_id, &tx.from, current_block)
@@ -790,7 +800,7 @@ impl Executor {
             } => {
                 // P5 ADIM8 Bulgu 23 + ADIM9 Bulgu 25+26: Slash a verifier
                 // for equivocation (with dispute window enforcement).
-                let current_block = state.epoch_index.saturating_mul(100);
+                let current_block = state.current_block_height;
                 let (slashed_verifier, seized_stake) = state
                     .ai_registry
                     .slash_equivocator(&request_id, &verifier, current_block)
@@ -809,7 +819,7 @@ impl Executor {
             }
             TransactionType::AiAgentPayment(payment) => {
                 // P5 ADIM11 Bulgu 31: Agent-to-Agent payment in Agentic Economy.
-                let current_block = state.epoch_index.saturating_mul(100);
+                let current_block = state.current_block_height;
                 let total_cost = payment.amount.saturating_add(tx.fee);
                 // Check sender has sufficient balance
                 if state.get_balance(&tx.from) < total_cost {

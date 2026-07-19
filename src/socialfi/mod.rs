@@ -60,6 +60,11 @@ impl NftRegistry {
         if new_val < 0 {
             new_val = 0;
         }
+        // V23 fix (Phase 11): clamp to u64::MAX — eskiden `as u64` truncate
+        // ediyordu (büyük delta_mcd değerinde sessiz overflow).
+        if new_val > u64::MAX as i128 {
+            new_val = u64::MAX as i128;
+        }
         nft.luminance = new_val as u64;
         Ok(())
     }
@@ -124,5 +129,30 @@ impl NftRegistry {
             }
         }
         hasher.finalize().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V23 regression: luminance overflow to u64::MAX must be clamped.
+    #[test]
+    fn v23_luminance_overflow_clamped() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xAB; 32]);
+        reg.mint(owner, cid, 0, None);
+        let nft_id = 0;
+        // Luminance'ı u64::MAX - 1000'e set et, sonra +2000 delta ver.
+        // Toplam: (u64::MAX - 1000) + 2000 = u64::MAX + 1000 > u64::MAX → clamp.
+        reg.nfts.get_mut(&nft_id).unwrap().luminance = u64::MAX - 1000;
+        reg.update_luminance(nft_id, 2000).unwrap();
+        let nft = reg.get_nft(nft_id).unwrap();
+        assert_eq!(
+            nft.luminance,
+            u64::MAX,
+            "V23: luminance must clamp to u64::MAX, not truncate"
+        );
     }
 }

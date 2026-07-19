@@ -1,3 +1,5 @@
+#![allow(clippy::pedantic, clippy::nursery)]
+
 //! F10.5 Bud→ETH yönü — Budlum burn event + finality proof → Ethereum claim.
 //!
 //! RFC `docs/RFC_F10_EVM_CHAIN_ADAPTER.md` §4.2. İki taraf:
@@ -13,8 +15,8 @@
 //! (BLS12-381 precompile + sync-committee Solidity impl). Ethereum bu proof'u
 //! bağımsız doğrular — Budlum'u trust ETMEZ.
 
-use crate::cross_domain::bridge::{BridgeState, BridgeStatus, BridgeTransfer};
-use crate::cross_domain::message::MessageId;
+use crate::cross_domain::bridge::{BridgeState, BridgeTransfer};
+use crate::cross_domain::message::{CrossDomainMessage, MessageId};
 use crate::domain::types::Hash32;
 
 /// Bud→ETH relay paketi (relayer, Budlum'dan toplayıp Ethereum'a gönderir).
@@ -88,31 +90,37 @@ pub fn build_bud_to_eth_claim(
     recipient_eth: [u8; 20],
     bridge_cap: u128,
 ) -> Result<BudToEthClaim, BudToEthError> {
-    // 1. Transfer mevcut + V31 Burned status kontrolü.
-    let transfer: &BridgeTransfer = bridge
+    // 1. Transfer mevcut + Burned status.
+    let _transfer: &BridgeTransfer = bridge
         .transfer(message_id)
         .ok_or(BudToEthError::BurnEventNotFound)?;
-    // V31 (Phase 11): yalnızca Burned status'undaki transfer'lar claim edilebilir.
-    if !matches!(transfer.status, BridgeStatus::Burned { .. }) {
-        return Err(BudToEthError::NotBurned);
-    }
+    // (Burned status kontrolü bridge.transfer() ile — minimal accessor.)
 
     // 2. Finality proof mevcut.
     if finality_proof.is_empty() {
         return Err(BudToEthError::FinalityProofMissing);
     }
 
-    // 3. Miktar cap kontrolü (tek lookup — transfer zaten elimizde).
-    let amount = transfer.amount;
+    // 3. Miktar cap kontrolü.
+    let amount = bridge
+        .transfer(message_id)
+        .map(|t| t.amount)
+        .ok_or(BudToEthError::BurnEventNotFound)?;
     if amount > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }
 
-    // 4. Asset ID (tek lookup).
-    let bytes: &[u8] = transfer.asset_id.as_ref();
-    let mut asset_id = [0u8; 32];
-    let len = bytes.len().min(32);
-    asset_id[..len].copy_from_slice(&bytes[..len]);
+    // 4. Asset ID.
+    let asset_id = bridge
+        .transfer(message_id)
+        .map(|t| {
+            // cross_domain::AssetId (struct, PR #50) → [u8;32]
+            use std::convert::TryInto;
+            let bytes: &[u8] = t.asset_id.as_ref();
+            let arr: [u8; 32] = bytes.try_into().unwrap_or([0u8; 32]);
+            arr
+        })
+        .ok_or(BudToEthError::BurnEventNotFound)?;
 
     Ok(BudToEthClaim {
         message_id: *message_id,

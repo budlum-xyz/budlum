@@ -123,6 +123,10 @@ pub struct AccountState {
     storage: Option<Storage>,
     pub epoch_index: u64,
     pub last_epoch_time: u64,
+    /// V28 fix (Phase 11): gerçek blok yüksekliği. Eskiden executor
+    /// `epoch_index * 100` approximation kullanıyordu (≤99 blok sapma).
+    /// Blockchain produce/validate'da tx işleme öncesi set edilir.
+    pub current_block_height: u64,
     pub governance: GovernanceState,
     pub base_fee: u64,
     dirty_accounts: HashSet<Address>,
@@ -162,6 +166,7 @@ impl AccountState {
             storage: None,
             epoch_index: 0,
             last_epoch_time: 0,
+            current_block_height: 0,
             governance: GovernanceState::default(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
@@ -200,6 +205,7 @@ impl AccountState {
             storage: Some(storage),
             epoch_index: 0,
             last_epoch_time: 0,
+            current_block_height: 0,
             governance: GovernanceState::default(),
             storage_registry: StorageRegistry::new(),
             ai_registry: crate::ai::registry::AiRegistry::new(),
@@ -257,6 +263,7 @@ impl AccountState {
             message_registry: CrossDomainMessageRegistry::new(),
             epoch_index: snapshot.height / 100,
             last_epoch_time: 0,
+            current_block_height: 0,
             governance: GovernanceState::default(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
@@ -327,6 +334,7 @@ impl AccountState {
             unbonding_queue: snapshot.unbonding_queue.clone(),
             storage: None,
             epoch_index: snapshot.epoch_index,
+            current_block_height: snapshot.height,
             last_epoch_time: snapshot.last_epoch_time,
             governance: GovernanceState::default(),
             bns_registry: snapshot.bns_registry.clone().unwrap_or_default(),

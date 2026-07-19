@@ -2431,6 +2431,7 @@ impl Blockchain {
         let pending_txs = self.mempool.get_sorted_transactions(10000);
         let mut valid_txs = Vec::new();
         let mut temp_state = self.state.clone();
+        temp_state.current_block_height = self.chain.len() as u64;
         let mut included = std::collections::HashSet::new();
         let mut progress = true;
 
@@ -2584,6 +2585,7 @@ impl Blockchain {
         block: &Block,
     ) -> Result<AccountState, String> {
         let mut next_state = base_state.clone();
+        next_state.current_block_height = block.index;
         Executor::apply_block_checked(
             &mut next_state,
             &block.transactions,
@@ -2844,6 +2846,7 @@ impl Blockchain {
         }
 
         let mut temp_state = self.state.clone();
+        temp_state.current_block_height = block.index;
         for (i, tx) in block.transactions.iter().enumerate() {
             if tx.chain_id != block.chain_id {
                 return Err(format!(

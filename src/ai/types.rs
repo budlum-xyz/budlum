@@ -583,7 +583,128 @@ impl AiAgentPayment {
     }
 }
 
-/// P5 ADIM11 Bulgu 31: Escrow status for an agent-to-agent payment.
+/// P5 ADIM11 Bulgu 34: Agent Reputation Score — Agentic Economy primitive.
+///
+/// In the paradigm shift #5, agents need to build trust through verifiable
+/// track records. This struct tracks an agent's reputation across multiple
+/// dimensions: payment reliability, inference quality, and uptime.
+///
+/// Reputation is the currency of trust in the Agentic Economy — an agent
+/// with high reputation can command higher fees and attract more requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiAgentReputation {
+    /// The agent's address.
+    pub agent: Address,
+    /// Total successful payments (as payer).
+    pub payments_completed: u64,
+    /// Total payments defaulted/expired.
+    pub payments_defaulted: u64,
+    /// Total inference requests submitted.
+    pub requests_submitted: u64,
+    /// Total inference results submitted (as verifier).
+    pub results_submitted: u64,
+    /// Total results that contributed to finalization.
+    pub results_finalized: u64,
+    /// Total equivocations detected.
+    pub equivocations: u64,
+    /// Total blocks active (from first to last activity).
+    pub active_block_span: u64,
+    /// First block with activity.
+    pub first_active_block: u64,
+    /// Last block with activity.
+    pub last_active_block: u64,
+}
+
+impl AiAgentReputation {
+    /// Create a new reputation record.
+    pub fn new(agent: Address) -> Self {
+        Self {
+            agent,
+            payments_completed: 0,
+            payments_defaulted: 0,
+            requests_submitted: 0,
+            results_submitted: 0,
+            results_finalized: 0,
+            equivocations: 0,
+            active_block_span: 0,
+            first_active_block: 0,
+            last_active_block: 0,
+        }
+    }
+
+    /// Record a completed payment.
+    pub fn record_payment_completed(&mut self, current_block: u64) {
+        self.payments_completed = self.payments_completed.saturating_add(1);
+        self.update_activity(current_block);
+    }
+
+    /// Record a defaulted/expired payment.
+    pub fn record_payment_defaulted(&mut self, current_block: u64) {
+        self.payments_defaulted = self.payments_defaulted.saturating_add(1);
+        self.update_activity(current_block);
+    }
+
+    /// Record an inference request submission.
+    pub fn record_request(&mut self, current_block: u64) {
+        self.requests_submitted = self.requests_submitted.saturating_add(1);
+        self.update_activity(current_block);
+    }
+
+    /// Update activity tracking.
+    fn update_activity(&mut self, current_block: u64) {
+        if self.first_active_block == 0 {
+            self.first_active_block = current_block;
+        }
+        self.last_active_block = current_block;
+        self.active_block_span = current_block.saturating_sub(self.first_active_block);
+    }
+
+    /// Calculate the agent's trust score (0.0 - 1.0).
+    /// Factors in payment reliability, inference quality, and equivocation rate.
+    pub fn trust_score(&self) -> f64 {
+        if self.payments_completed + self.payments_defaulted == 0 && self.results_submitted == 0 {
+            return 0.0;
+        }
+
+        // Payment reliability (0.0 - 1.0)
+        let total_payments = self.payments_completed + self.payments_defaulted;
+        let payment_reliability = if total_payments > 0 {
+            self.payments_completed as f64 / total_payments as f64
+        } else {
+            1.0 // no payments → no data → neutral
+        };
+
+        // Inference quality (0.0 - 1.0)
+        let inference_quality = if self.results_submitted > 0 {
+            let finalization_rate = self.results_finalized as f64 / self.results_submitted as f64;
+            let equivocation_penalty = (self.equivocations as f64 * 0.15).min(1.0);
+            finalization_rate * (1.0 - equivocation_penalty)
+        } else {
+            1.0 // no results → neutral
+        };
+
+        // Weighted combination: 40% payment, 60% inference
+        (payment_reliability * 0.4 + inference_quality * 0.6)
+            .max(0.0)
+            .min(1.0)
+    }
+
+    /// Calculate domain-separated hash for state root inclusion.
+    pub fn calculate_leaf(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_AI_AGENT_REPUTATION_V1");
+        hasher.update(self.agent.as_bytes());
+        hasher.update(self.payments_completed.to_le_bytes());
+        hasher.update(self.payments_defaulted.to_le_bytes());
+        hasher.update(self.requests_submitted.to_le_bytes());
+        hasher.update(self.results_submitted.to_le_bytes());
+        hasher.update(self.results_finalized.to_le_bytes());
+        hasher.update(self.equivocations.to_le_bytes());
+        hasher.update(self.active_block_span.to_le_bytes());
+        hasher.finalize().into()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AiPaymentEscrowStatus {
     /// Payment is escrowed, waiting for condition (outcome finalization / proof).
