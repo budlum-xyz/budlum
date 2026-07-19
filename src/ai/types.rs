@@ -507,3 +507,89 @@ impl AiInferenceOutcome {
         hasher.finalize().into()
     }
 }
+
+/// P5 ADIM11 Bulgu 31: Agent-to-Agent Payment — trustless value transfer
+/// between AI agents in the Agentic Economy.
+///
+/// In the paradigm shift #5 (AI + Blockchain Konverjansı), the core problem
+/// is: "AI ajanlarının birbirleriyle ve insanlarla güvenli value transfer
+/// yapamaması." This type enables:
+///
+/// 1. **Inference-linked payments** — agent pays for inference results
+///    (request_id binds the payment to a specific AI inference outcome)
+/// 2. **Autonomous agent payments** — agent-to-agent value transfer without
+///    human intervention (the foundation of Agentic Economy)
+/// 3. **Escrow-gated** — payments can be escrowed until a condition is met
+///    (e.g., outcome finalization, execution proof verification)
+///
+/// The payment is atomic: either the full payment succeeds (recipient gets
+/// amount, sender loses amount + fee) or it fails (no state change).
+///
+/// Future: ZKVM verification gate — payment only releases if an
+/// AiExecutionProof is attached and verified (trustless settlement).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiAgentPayment {
+    /// Unique payment identifier.
+    pub payment_id: [u8; 32],
+    /// The agent sending the payment.
+    pub from_agent: Address,
+    /// The agent receiving the payment.
+    pub to_agent: Address,
+    /// Payment amount in base units.
+    pub amount: u64,
+    /// Optional: Link to an AI inference request that triggers this payment.
+    /// If set, payment is escrowed until the outcome is finalized.
+    pub request_id: Option<AiRequestId>,
+    /// Optional: Require execution proof for payment release.
+    /// If true, the recipient must attach an AiExecutionProof before
+    /// the escrowed payment is released — this is the "trustless" path.
+    pub require_proof: bool,
+    /// Block when this payment was submitted.
+    pub submitted_at_block: u64,
+    /// Block after which the payment expires (if escrowed and not claimed).
+    /// The sender can reclaim expired payments.
+    pub expiry_block: u64,
+}
+
+impl AiAgentPayment {
+    /// Calculate domain-separated hash for state root inclusion.
+    pub fn calculate_leaf(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_AI_AGENT_PAYMENT_V1");
+        hasher.update(&self.payment_id);
+        hasher.update(self.from_agent.as_bytes());
+        hasher.update(self.to_agent.as_bytes());
+        hasher.update(self.amount.to_le_bytes());
+        if let Some(ref rid) = self.request_id {
+            hasher.update(b"rid");
+            hasher.update(rid.0);
+        } else {
+            hasher.update(b"no_rid");
+        }
+        hasher.update(if self.require_proof { [1u8] } else { [0u8] });
+        hasher.update(self.submitted_at_block.to_le_bytes());
+        hasher.update(self.expiry_block.to_le_bytes());
+        hasher.finalize().into()
+    }
+
+    /// Check if this payment is escrowed (linked to a request).
+    pub fn is_escrowed(&self) -> bool {
+        self.request_id.is_some()
+    }
+
+    /// Check if this payment has expired.
+    pub fn is_expired(&self, current_block: u64) -> bool {
+        current_block > self.expiry_block
+    }
+}
+
+/// P5 ADIM11 Bulgu 31: Escrow status for an agent-to-agent payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiPaymentEscrowStatus {
+    /// Payment is escrowed, waiting for condition (outcome finalization / proof).
+    Pending,
+    /// Payment released to recipient (condition met).
+    Released,
+    /// Payment reclaimed by sender (expired or cancelled).
+    Reclaimed,
+}

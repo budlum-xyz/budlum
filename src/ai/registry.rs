@@ -4,8 +4,9 @@
 //! and finalized consensus outcomes. Provides deterministic `state_root()` calculation.
 
 use crate::ai::types::{
-    AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
-    AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, AiVerifierQos, AiVerifierStakeInfo,
+    AiAgentPayment, AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome,
+    AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus,
+    AiRequestId, AiVerifierQos, AiVerifierStakeInfo,
 };
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,10 @@ pub struct AiRegistry {
     /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
     /// selection for the Agentic Economy.
     pub verifier_qos: BTreeMap<Address, AiVerifierQos>,
+    /// P5 ADIM11 Bulgu 31: Agent-to-Agent payment registry.
+    /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
+    /// between AI agents in the Agentic Economy.
+    pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
 }
 
 impl AiRegistry {
@@ -78,6 +83,7 @@ impl AiRegistry {
             callback_queue: BTreeMap::new(),
             execution_proofs: BTreeMap::new(),
             verifier_qos: BTreeMap::new(),
+            agent_payments: BTreeMap::new(),
         }
     }
 
@@ -93,6 +99,7 @@ impl AiRegistry {
             && self.callback_queue.is_empty()
             && self.execution_proofs.is_empty()
             && self.verifier_qos.is_empty()
+            && self.agent_payments.is_empty()
     }
 
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
@@ -979,6 +986,152 @@ impl AiRegistry {
         qos_list
     }
 
+    // ===================== P5 ADIM11 — Agent-to-Agent Payment (Bulgu 31) =====================
+
+    /// P5 ADIM11 Bulgu 31: Submit an agent-to-agent payment.
+    pub fn submit_agent_payment(
+        &mut self,
+        payment: AiAgentPayment,
+        current_block: u64,
+    ) -> Result<(), String> {
+        if payment.from_agent == payment.to_agent {
+            return Err(String::from(
+                "Agent payment: from_agent and to_agent must differ",
+            ));
+        }
+        if payment.amount == 0 {
+            return Err(String::from(
+                "Agent payment: amount must be greater than zero",
+            ));
+        }
+        if payment.is_expired(current_block) {
+            return Err(String::from(
+                "Agent payment: expiry_block must be in the future",
+            ));
+        }
+        if payment.require_proof {
+            if let Some(ref rid) = payment.request_id {
+                if !self.requests.contains_key(rid) {
+                    return Err(format!(
+                        "Agent payment: request {} not found for proof-gated escrow",
+                        rid.to_hex()
+                    ));
+                }
+            } else {
+                return Err(String::from(
+                    "Agent payment: require_proof requires a linked request_id",
+                ));
+            }
+        }
+        if self.agent_payments.contains_key(&payment.payment_id) {
+            return Err(String::from("Agent payment: payment_id already exists"));
+        }
+        self.agent_payments.insert(payment.payment_id, payment);
+        Ok(())
+    }
+
+    /// P5 ADIM11 Bulgu 31: Release an escrowed payment to the recipient.
+    pub fn release_agent_payment(
+        &mut self,
+        payment_id: &[u8; 32],
+        current_block: u64,
+    ) -> Result<Address, String> {
+        // Phase 1: Validate (immutable borrows)
+        {
+            let payment = self
+                .agent_payments
+                .get(payment_id)
+                .ok_or_else(|| String::from("Agent payment: payment_id not found"))?;
+            if payment.is_expired(current_block) {
+                return Err(String::from(
+                    "Agent payment: payment has expired, use reclaim",
+                ));
+            }
+            if let Some(ref rid) = payment.request_id {
+                let outcome = self.outcomes.get(rid).ok_or_else(|| {
+                    String::from("Agent payment: linked request has no finalized outcome yet")
+                })?;
+                if !outcome.agreeing_verifiers.contains(&payment.to_agent) {
+                    return Err(String::from(
+                        "Agent payment: recipient is not an agreeing verifier for this outcome",
+                    ));
+                }
+                if payment.require_proof {
+                    if !self.has_execution_proof(rid, &payment.to_agent) {
+                        return Err(String::from(
+                            "Agent payment: execution proof required but not attached",
+                        ));
+                    }
+                }
+            } else {
+                return Err(String::from(
+                    "Agent payment: cannot release non-escrowed payment (already available)",
+                ));
+            }
+        }
+        // Phase 2: Remove (mutable borrow)
+        let payment = self.agent_payments.remove(payment_id).unwrap();
+        Ok(payment.to_agent)
+    }
+
+    /// P5 ADIM11 Bulgu 31: Reclaim an expired escrowed payment.
+    pub fn reclaim_agent_payment(
+        &mut self,
+        payment_id: &[u8; 32],
+        claimant: &Address,
+        current_block: u64,
+    ) -> Result<u64, String> {
+        let payment = self
+            .agent_payments
+            .get(payment_id)
+            .ok_or_else(|| String::from("Agent payment: payment_id not found"))?;
+        if payment.from_agent != *claimant {
+            return Err(String::from("Agent payment: only the sender can reclaim"));
+        }
+        if !payment.is_expired(current_block) {
+            return Err(String::from(
+                "Agent payment: payment has not expired yet, cannot reclaim",
+            ));
+        }
+        let amount = payment.amount;
+        self.agent_payments.remove(payment_id);
+        Ok(amount)
+    }
+
+    /// P5 ADIM11 Bulgu 31: Get a payment by ID.
+    pub fn get_agent_payment(&self, payment_id: &[u8; 32]) -> Option<&AiAgentPayment> {
+        self.agent_payments.get(payment_id)
+    }
+
+    /// P5 ADIM11 Bulgu 31: Get escrow status of a payment.
+    pub fn get_payment_escrow_status(
+        &self,
+        payment_id: &[u8; 32],
+    ) -> Option<AiPaymentEscrowStatus> {
+        let payment = self.agent_payments.get(payment_id)?;
+        if payment.request_id.is_some() {
+            Some(AiPaymentEscrowStatus::Pending)
+        } else {
+            Some(AiPaymentEscrowStatus::Released)
+        }
+    }
+
+    /// P5 ADIM11 Bulgu 31: Get all payments from a specific agent.
+    pub fn payments_from_agent(&self, agent: &Address) -> Vec<&AiAgentPayment> {
+        self.agent_payments
+            .values()
+            .filter(|p| p.from_agent == *agent)
+            .collect()
+    }
+
+    /// P5 ADIM11 Bulgu 31: Get all payments to a specific agent.
+    pub fn payments_to_agent(&self, agent: &Address) -> Vec<&AiAgentPayment> {
+        self.agent_payments
+            .values()
+            .filter(|p| p.to_agent == *agent)
+            .collect()
+    }
+
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
     /// P5 Bulgu 19 (ADIM7): Domain-separated map roots prevent cross-map
     /// collision attacks (ARENAX V38). Each map gets a unique domain prefix
@@ -1076,6 +1229,13 @@ impl AiRegistry {
         for (verifier, qos) in &self.verifier_qos {
             hasher.update(verifier.as_bytes());
             hasher.update(qos.calculate_leaf());
+        }
+
+        // Domain: agent_payments (P5 ADIM11 Bulgu 31)
+        hasher.update(b"BDLM_AI_AGENT_PAYMENTS");
+        for (pid, payment) in &self.agent_payments {
+            hasher.update(pid);
+            hasher.update(payment.calculate_leaf());
         }
 
         hasher.finalize().into()

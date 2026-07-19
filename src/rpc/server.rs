@@ -3176,6 +3176,94 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    /// P5 ADIM11 Bulgu 31: Query an agent-to-agent payment by ID.
+    async fn ai_agent_payment(
+        &self,
+        payment_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = payment_id.strip_prefix("0x").unwrap_or(&payment_id);
+        let pid_bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payment_id hex: {e}"), None::<()>)
+        })?;
+        if pid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "payment_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut pid = [0u8; 32];
+        pid.copy_from_slice(&pid_bytes);
+
+        let payment = self.chain.get_ai_agent_payment(pid).await;
+
+        match payment {
+            Some(p) => Ok(serde_json::json!({
+                "payment_id": payment_id,
+                "from_agent": format!("0x{}", p.from_agent.to_hex()),
+                "to_agent": format!("0x{}", p.to_agent.to_hex()),
+                "amount": p.amount,
+                "escrowed": p.is_escrowed(),
+                "request_id": p.request_id.map(|rid| format!("0x{}", rid.to_hex())),
+                "require_proof": p.require_proof,
+                "submitted_at_block": p.submitted_at_block,
+                "expiry_block": p.expiry_block,
+            })),
+            None => Ok(serde_json::json!({
+                "payment_id": payment_id,
+                "found": false,
+            })),
+        }
+    }
+
+    /// P5 ADIM11 Bulgu 31: Query payments for an agent.
+    async fn ai_agent_payments(
+        &self,
+        agent: String,
+        direction: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = agent.strip_prefix("0x").unwrap_or(&agent);
+        let addr = crate::core::address::Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid agent address: {e}"), None::<()>)
+        })?;
+        let dir = match direction.to_lowercase().as_str() {
+            "from" => crate::chain::chain_actor::AiPaymentDirection::From,
+            "to" => crate::chain::chain_actor::AiPaymentDirection::To,
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "direction must be 'from' or 'to'",
+                    None::<()>,
+                ))
+            }
+        };
+
+        let payments = self.chain.get_ai_agent_payments(addr, dir).await;
+        let payments_json: Vec<serde_json::Value> = payments
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "payment_id": format!("0x{}", hex::encode(p.payment_id)),
+                    "from_agent": format!("0x{}", p.from_agent.to_hex()),
+                    "to_agent": format!("0x{}", p.to_agent.to_hex()),
+                    "amount": p.amount,
+                    "escrowed": p.is_escrowed(),
+                    "request_id": p.request_id.map(|rid| format!("0x{}", rid.to_hex())),
+                    "require_proof": p.require_proof,
+                    "submitted_at_block": p.submitted_at_block,
+                    "expiry_block": p.expiry_block,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "agent": agent,
+            "direction": direction,
+            "payment_count": payments_json.len(),
+            "payments": payments_json,
+        }))
+    }
+
     async fn prune_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.chain.get_prune_status().await.map_err(|e| {
             ErrorObjectOwned::owned(

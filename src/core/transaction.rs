@@ -163,6 +163,10 @@ pub enum TransactionType {
         request_id: crate::ai::types::AiRequestId,
         verifier: crate::core::address::Address,
     },
+    /// Phase 10 (§1 P5 ADIM11): Agent-to-Agent payment in the Agentic Economy.
+    /// Enables trustless value transfer between AI agents, with optional
+    /// escrow gating by inference outcome finalization and execution proof.
+    AiAgentPayment(crate::ai::types::AiAgentPayment),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -500,6 +504,7 @@ impl Transaction {
             TransactionType::AiModelReactivate(_) => schedule.contract_call_gas,
             TransactionType::AiRequestCancel(_) => schedule.contract_call_gas,
             TransactionType::AiDisputeSlash { .. } => schedule.contract_call_gas,
+            TransactionType::AiAgentPayment(_) => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -643,6 +648,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::AiModelReactivate(_) => 25,
         TransactionType::AiRequestCancel(_) => 26,
         TransactionType::AiDisputeSlash { .. } => 27,
+        TransactionType::AiAgentPayment(_) => 28,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -813,6 +819,22 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         } => {
             put_fixed(out, &request_id.0);
             put_fixed(out, &verifier.0);
+        }
+        TransactionType::AiAgentPayment(payment) => {
+            put_fixed(out, &payment.payment_id);
+            put_fixed(out, payment.from_agent.as_bytes());
+            put_fixed(out, payment.to_agent.as_bytes());
+            put_u64(out, payment.amount);
+            match payment.request_id {
+                Some(ref rid) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &rid.0);
+                }
+                None => put_u8(out, 0),
+            }
+            put_u8(out, if payment.require_proof { 1 } else { 0 });
+            put_u64(out, payment.submitted_at_block);
+            put_u64(out, payment.expiry_block);
         }
     }
 }

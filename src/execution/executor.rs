@@ -195,12 +195,12 @@ impl Executor {
                             ));
                         }
 
-                        state
-                            .governance
-                            .create_proposal(tx.from, p_type, state.epoch_index, duration)
-                            .map_err(|e| {
-                                BudlumError::validation("governance_proposal_failed", e)
-                            })?;
+                        state.governance.create_proposal(
+                            tx.from,
+                            p_type,
+                            state.epoch_index,
+                            duration,
+                        );
                     }
                 }
             }
@@ -806,6 +806,37 @@ impl Executor {
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::AiAgentPayment(payment) => {
+                // P5 ADIM11 Bulgu 31: Agent-to-Agent payment in Agentic Economy.
+                let current_block = state.epoch_index.saturating_mul(100);
+                let total_cost = payment.amount.saturating_add(tx.fee);
+                // Check sender has sufficient balance
+                if state.get_balance(&tx.from) < total_cost {
+                    return Err(BudlumError::validation(
+                        "ai_payment_insufficient_funds",
+                        "Insufficient funds for agent payment + fee",
+                    ));
+                }
+                // Validate and register the payment
+                state
+                    .ai_registry
+                    .submit_agent_payment(payment.clone(), current_block)
+                    .map_err(|e| BudlumError::validation("ai_payment_invalid", e))?;
+                // Deduct from sender immediately
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(total_cost);
+                sender.nonce = sender.nonce.saturating_add(1);
+                // If not escrowed, credit recipient immediately
+                if !payment.is_escrowed() {
+                    let recipient = state.get_or_create(&payment.to_agent);
+                    recipient.balance = recipient.balance.saturating_add(payment.amount);
+                    // Remove from registry (already settled)
+                    state.ai_registry.agent_payments.remove(&payment.payment_id);
+                }
+                // If escrowed, balance stays deducted but recipient is not
+                // credited until release_agent_payment is called (by executor
+                // on outcome finalization or by explicit release tx).
             }
         }
 
