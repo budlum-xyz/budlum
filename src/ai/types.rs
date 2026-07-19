@@ -309,6 +309,170 @@ pub struct AiVerifierStakeInfo {
     pub total_equivocations: usize,
 }
 
+/// P5 ADIM11 Bulgu 29: AI Execution Proof — ZKVM-based verifiable inference.
+///
+/// When a verifier submits a result, they can optionally attach a ZKVM execution
+/// proof that cryptographically verifies the inference output was produced by
+/// the claimed model on the claimed input. This bridges the gap between "verifier
+/// says so" (trust-based) and "mathematics prove it" (trustless) — the core
+/// paradigm shift needed for Agentic Economy.
+///
+/// The proof binds three things:
+/// 1. **Model identity** — `model_id` is embedded in the ZKVM program_hash
+/// 2. **Input commitment** — `input_commitment` is a public input to the proof
+/// 3. **Output commitment** — `output_commitment` is derived from the proof
+///
+/// Verification: `verify(model_id, input_commitment, output_commitment, proof)`
+/// returns true only if the output was produced by the model on the input.
+///
+/// This is the "AI Execution Layer" that the whitepaper describes as mainnet
+/// blocker #5: "Primitiflerin ötesinde AI yürütme katmanı — araştırma/
+/// entegrasyon aşamasında."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiExecutionProof {
+    /// The model that produced this inference. The ZKVM program_hash must
+    /// match this model's registered `model_hash` — this is the cryptographic
+    /// binding between the proof and the model.
+    pub model_id: AiModelId,
+    /// The input commitment that was the preimage to this proof.
+    /// This must match the AiInferenceRequest's `input_commitment`.
+    pub input_commitment: [u8; 32],
+    /// The output commitment derived from the proof execution.
+    /// This must match the AiInferenceResult's `output_commitment`.
+    pub output_commitment: [u8; 32],
+    /// The ZKVM program hash — keccak256 of the model's bytecode.
+    /// This binds the proof to a specific model implementation.
+    pub program_hash: [u8; 32],
+    /// The STARK proof envelope bytes produced by BudZKVM.
+    /// Contains the actual mathematical proof that can be verified.
+    pub proof_bytes: Vec<u8>,
+    /// Number of execution steps in the ZKVM trace.
+    pub steps: u64,
+    /// Gas used during ZKVM execution.
+    pub gas_used: u64,
+}
+
+impl AiExecutionProof {
+    /// Verify that this proof's commitments match the given request and result.
+    /// This is a structural check — cryptographic verification happens in
+    /// ZkVmExecutor::verify_proof.
+    pub fn commitments_match(
+        &self,
+        request: &AiInferenceRequest,
+        result: &AiInferenceResult,
+    ) -> bool {
+        self.input_commitment == request.input_commitment
+            && self.output_commitment == result.output_commitment
+            && self.model_id == request.model_id
+    }
+
+    /// Calculate domain-separated hash of this proof for state root inclusion.
+    pub fn calculate_leaf(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_AI_EXEC_PROOF_V1");
+        hasher.update(self.model_id.0);
+        hasher.update(self.input_commitment);
+        hasher.update(self.output_commitment);
+        hasher.update(self.program_hash);
+        hasher.update(self.steps.to_le_bytes());
+        hasher.update(self.gas_used.to_le_bytes());
+        // Note: proof_bytes is NOT hashed (too large, and the
+        // program_hash + commitments already uniquely identify the proof).
+        hasher.finalize().into()
+    }
+}
+
+/// P5 ADIM11 Bulgu 30: Verifier Quality of Service (QoS) reputation.
+///
+/// In the Agentic Economy paradigm, verifier stake is not just a slashing
+/// deposit — it's also a service quality guarantee. Agents selecting verifiers
+/// need to know which verifiers are reliable. This struct tracks per-verifier
+/// performance metrics that enable QoS-aware verifier selection.
+///
+/// Future work: verifier selection algorithms will use these metrics to
+/// prioritize high-reputation verifiers, creating a market for quality.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiVerifierQos {
+    /// The verifier address.
+    pub verifier: Address,
+    /// Total number of inference results submitted.
+    pub total_results_submitted: u64,
+    /// Number of results that contributed to successful finalization.
+    pub successful_finalizations: u64,
+    /// Number of equivocation events (slashing events).
+    pub equivocation_count: u64,
+    /// Average response time in blocks (request submission to result submission).
+    /// Computed as sum_of_response_blocks / total_results_submitted.
+    pub avg_response_blocks: u64,
+    /// Last block at which this verifier submitted a result.
+    pub last_active_block: u64,
+}
+
+impl AiVerifierQos {
+    /// Create a new QoS record with zero metrics.
+    pub fn new(verifier: Address) -> Self {
+        Self {
+            verifier,
+            total_results_submitted: 0,
+            successful_finalizations: 0,
+            equivocation_count: 0,
+            avg_response_blocks: 0,
+            last_active_block: 0,
+        }
+    }
+
+    /// Record a successful result submission.
+    pub fn record_result(&mut self, response_blocks: u64, current_block: u64) {
+        let total = self.total_results_submitted;
+        // Running average: new_avg = (old_avg * old_count + new_value) / (old_count + 1)
+        self.avg_response_blocks = if total == 0 {
+            response_blocks
+        } else {
+            (self.avg_response_blocks * total + response_blocks) / (total + 1)
+        };
+        self.total_results_submitted = total + 1;
+        self.last_active_block = current_block;
+    }
+
+    /// Record participation in a successful finalization.
+    pub fn record_finalization(&mut self) {
+        self.successful_finalizations = self.successful_finalizations.saturating_add(1);
+    }
+
+    /// Record an equivocation event (slashing).
+    pub fn record_equivocation(&mut self) {
+        self.equivocation_count = self.equivocation_count.saturating_add(1);
+    }
+
+    /// Calculate a reliability score (0.0 - 1.0).
+    /// Higher is better. Factors in:
+    /// - Finalization rate (successful / total)
+    /// - Equivocation penalty
+    /// - Response time efficiency
+    pub fn reliability_score(&self) -> f64 {
+        if self.total_results_submitted == 0 {
+            return 0.0;
+        }
+        let finalization_rate =
+            self.successful_finalizations as f64 / self.total_results_submitted as f64;
+        let equivocation_penalty = (self.equivocation_count as f64 * 0.1).min(1.0);
+        (finalization_rate * (1.0 - equivocation_penalty)).max(0.0)
+    }
+
+    /// Calculate domain-separated hash for state root inclusion.
+    pub fn calculate_leaf(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_AI_VERIFIER_QOS_V1");
+        hasher.update(self.verifier.as_bytes());
+        hasher.update(self.total_results_submitted.to_le_bytes());
+        hasher.update(self.successful_finalizations.to_le_bytes());
+        hasher.update(self.equivocation_count.to_le_bytes());
+        hasher.update(self.avg_response_blocks.to_le_bytes());
+        hasher.update(self.last_active_block.to_le_bytes());
+        hasher.finalize().into()
+    }
+}
+
 /// Finalized Consensus Outcome reaching agreement threshold among verifiers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiInferenceOutcome {

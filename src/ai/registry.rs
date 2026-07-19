@@ -4,8 +4,8 @@
 //! and finalized consensus outcomes. Provides deterministic `state_root()` calculation.
 
 use crate::ai::types::{
-    AiCallbackEvent, AiDisputeStatusInfo, AiInferenceOutcome, AiInferenceRequest,
-    AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, AiVerifierStakeInfo,
+    AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
+    AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, AiVerifierQos, AiVerifierStakeInfo,
 };
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,16 @@ pub struct AiRegistry {
     /// querying. Off-chain systems poll `bud_aiCallbackQueue` to deliver
     /// results to registered callback addresses.
     pub callback_queue: BTreeMap<Address, Vec<AiCallbackEvent>>,
+    /// P5 ADIM11 Bulgu 29: Execution proof registry.
+    /// Maps (request_id, verifier) → AiExecutionProof. When a verifier
+    /// submits a ZKVM-verified inference result, the proof is stored here.
+    /// This enables trustless verification — the paradigm shift from
+    /// "verifier says so" to "mathematics prove it."
+    pub execution_proofs: BTreeMap<(AiRequestId, [u8; 32]), AiExecutionProof>,
+    /// P5 ADIM11 Bulgu 30: Verifier Quality of Service registry.
+    /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
+    /// selection for the Agentic Economy.
+    pub verifier_qos: BTreeMap<Address, AiVerifierQos>,
 }
 
 impl AiRegistry {
@@ -66,6 +76,8 @@ impl AiRegistry {
             cancelled_requests: BTreeSet::new(),
             verifier_stakes: BTreeMap::new(),
             callback_queue: BTreeMap::new(),
+            execution_proofs: BTreeMap::new(),
+            verifier_qos: BTreeMap::new(),
         }
     }
 
@@ -79,6 +91,8 @@ impl AiRegistry {
             && self.cancelled_requests.is_empty()
             && self.verifier_stakes.is_empty()
             && self.callback_queue.is_empty()
+            && self.execution_proofs.is_empty()
+            && self.verifier_qos.is_empty()
     }
 
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
@@ -206,6 +220,12 @@ impl AiRegistry {
                 // hooks and dispute resolution mechanisms.
                 self.equivocation_events
                     .insert((result.request_id, result.verifier.0), current_block);
+
+                // P5 ADIM11 Bulgu 30: Record equivocation in QoS.
+                self.verifier_qos
+                    .entry(result.verifier)
+                    .or_insert_with(|| AiVerifierQos::new(result.verifier))
+                    .record_equivocation();
                 return Err(format!(
                     "EQUIVOCATION: verifier {:?} submitted conflicting commitments for request {} — dispute flagged",
                     result.verifier,
@@ -223,6 +243,18 @@ impl AiRegistry {
             ));
         }
         entries.push(result.clone());
+
+        // P5 ADIM11 Bulgu 30: Record verifier QoS metrics.
+        let response_blocks = result.submitted_at_block.saturating_sub(
+            self.requests
+                .get(&result.request_id)
+                .map(|r| r.submitted_at_block)
+                .unwrap_or(0),
+        );
+        self.verifier_qos
+            .entry(result.verifier)
+            .or_insert_with(|| AiVerifierQos::new(result.verifier))
+            .record_result(response_blocks, result.submitted_at_block);
 
         // Check if we reached agreement threshold for this commitment
         let mut agreeing_verifiers = Vec::new();
@@ -248,6 +280,13 @@ impl AiRegistry {
                 callback,
             };
             self.outcomes.insert(result.request_id, outcome.clone());
+
+            // P5 ADIM11 Bulgu 30: Record finalization in QoS for agreeing verifiers.
+            for verifier_addr in &outcome.agreeing_verifiers {
+                if let Some(qos) = self.verifier_qos.get_mut(verifier_addr) {
+                    qos.record_finalization();
+                }
+            }
 
             // P5 ADIM10 Bulgu 28: Record callback event if callback address is set.
             // The callback queue allows off-chain systems to discover finalized
@@ -843,6 +882,103 @@ impl AiRegistry {
         }
     }
 
+    // ===================== P5 ADIM11 — Execution Proof (Bulgu 29) =====================
+
+    /// P5 ADIM11 Bulgu 29: Attach a ZKVM execution proof to a result.
+    /// The proof cryptographically verifies that the inference output was
+    /// produced by the claimed model on the claimed input — the core
+    /// primitive for trustless AI inference in the Agentic Economy.
+    ///
+    /// Returns Ok(()) if the proof commitments match the existing result.
+    /// Returns Err if no result exists for this (request, verifier) pair,
+    /// or if commitments don't match.
+    pub fn attach_execution_proof(
+        &mut self,
+        request_id: &AiRequestId,
+        verifier: &Address,
+        proof: AiExecutionProof,
+    ) -> Result<(), String> {
+        // Verify that a result exists for this verifier
+        let results = self
+            .results
+            .get(request_id)
+            .ok_or_else(|| format!("No results found for request {}", request_id.to_hex()))?;
+        let result = results
+            .iter()
+            .find(|r| r.verifier == *verifier)
+            .ok_or_else(|| {
+                format!(
+                    "No result from verifier {} for request {}",
+                    verifier.to_hex(),
+                    request_id.to_hex()
+                )
+            })?;
+
+        // Verify commitment binding
+        if proof.output_commitment != result.output_commitment {
+            return Err(format!(
+                "Execution proof output_commitment does not match result for request {}",
+                request_id.to_hex()
+            ));
+        }
+
+        // Verify model binding — proof must be for the same model as the request
+        let request = self
+            .requests
+            .get(request_id)
+            .ok_or_else(|| format!("Request {} not found", request_id.to_hex()))?;
+        if proof.model_id != request.model_id {
+            return Err(format!(
+                "Execution proof model_id does not match request model_id"
+            ));
+        }
+
+        if proof.input_commitment != request.input_commitment {
+            return Err("Execution proof input_commitment does not match request".into());
+        }
+
+        // Store the proof
+        self.execution_proofs
+            .insert((*request_id, verifier.0), proof);
+        Ok(())
+    }
+
+    /// P5 ADIM11 Bulgu 29: Get the execution proof for a (request, verifier) pair.
+    pub fn get_execution_proof(
+        &self,
+        request_id: &AiRequestId,
+        verifier: &Address,
+    ) -> Option<&AiExecutionProof> {
+        self.execution_proofs.get(&(*request_id, verifier.0))
+    }
+
+    /// P5 ADIM11 Bulgu 29: Check if a result has an execution proof.
+    /// Results with execution proofs are "trustless" — verified by
+    /// mathematics rather than by verifier reputation.
+    pub fn has_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+        self.execution_proofs
+            .contains_key(&(*request_id, verifier.0))
+    }
+
+    // ===================== P5 ADIM11 — Verifier QoS (Bulgu 30) =====================
+
+    /// P5 ADIM11 Bulgu 30: Get QoS metrics for a verifier.
+    pub fn get_verifier_qos(&self, verifier: &Address) -> Option<&AiVerifierQos> {
+        self.verifier_qos.get(verifier)
+    }
+
+    /// P5 ADIM11 Bulgu 30: Get all verifiers ordered by reliability score (descending).
+    /// Used for QoS-aware verifier selection in the Agentic Economy.
+    pub fn verifiers_by_reliability(&self) -> Vec<AiVerifierQos> {
+        let mut qos_list: Vec<_> = self.verifier_qos.values().cloned().collect();
+        qos_list.sort_by(|a, b| {
+            b.reliability_score()
+                .partial_cmp(&a.reliability_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        qos_list
+    }
+
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
     /// P5 Bulgu 19 (ADIM7): Domain-separated map roots prevent cross-map
     /// collision attacks (ARENAX V38). Each map gets a unique domain prefix
@@ -925,6 +1061,21 @@ impl AiRegistry {
                 hasher.update(event.finalized_at_block.to_le_bytes());
                 hasher.update(event.callback_address.as_bytes());
             }
+        }
+
+        // Domain: execution_proofs (P5 ADIM11 Bulgu 29)
+        hasher.update(b"BDLM_AI_EXEC_PROOFS");
+        for ((req_id, verifier_bytes), proof) in &self.execution_proofs {
+            hasher.update(req_id.0);
+            hasher.update(verifier_bytes);
+            hasher.update(proof.calculate_leaf());
+        }
+
+        // Domain: verifier_qos (P5 ADIM11 Bulgu 30)
+        hasher.update(b"BDLM_AI_VERIFIER_QOS");
+        for (verifier, qos) in &self.verifier_qos {
+            hasher.update(verifier.as_bytes());
+            hasher.update(qos.calculate_leaf());
         }
 
         hasher.finalize().into()

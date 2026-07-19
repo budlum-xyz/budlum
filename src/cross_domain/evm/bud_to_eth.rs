@@ -1,3 +1,5 @@
+#![allow(clippy::pedantic, clippy::nursery)]
+
 //! F10.5 Bud→ETH yönü — Budlum burn event + finality proof → Ethereum claim.
 //!
 //! RFC `docs/RFC_F10_EVM_CHAIN_ADAPTER.md` §4.2. İki taraf:
@@ -14,7 +16,7 @@
 //! bağımsız doğrular — Budlum'u trust ETMEZ.
 
 use crate::cross_domain::bridge::{BridgeState, BridgeTransfer};
-use crate::cross_domain::message::MessageId;
+use crate::cross_domain::message::{CrossDomainMessage, MessageId};
 use crate::domain::types::Hash32;
 
 /// Bud→ETH relay paketi (relayer, Budlum'dan toplayıp Ethereum'a gönderir).
@@ -36,26 +38,6 @@ pub struct BudToEthClaim {
     pub finality_proof: Vec<u8>,
     /// Burn event Merkle proof (Budlum event tree → Budlum root).
     pub burn_event_proof: Vec<u8>,
-}
-
-/// `build_bud_to_eth_claim` girdi parametreleri (tek struct, çok parametre
-/// yerine — clippy::too_many_arguments'dan kaçınma).
-#[derive(Debug, Clone)]
-pub struct BudToEthClaimInput<'a> {
-    /// Budlum bridge state (burn transfer lookup kaynağı).
-    pub bridge: &'a BridgeState,
-    /// Budlum burn event'in message_id (replay koruması).
-    pub message_id: &'a MessageId,
-    /// Budlum finalized header hash (light-client checkpoint).
-    pub finalized_header_hash: Hash32,
-    /// Budlum finality proof (BLS aggregate veya QC) — Solidity verify eder.
-    pub finality_proof: Vec<u8>,
-    /// Burn event Merkle proof (Budlum event tree → Budlum root).
-    pub burn_event_proof: Vec<u8>,
-    /// Alıcı Ethereum adresi (20 byte).
-    pub recipient_eth: [u8; 20],
-    /// Bridge cap (maksimum unlock miktarı; governance ile ayarlanabilir).
-    pub bridge_cap: u128,
 }
 
 /// Bud→ETH claim hatası.
@@ -93,76 +75,85 @@ impl std::error::Error for BudToEthError {}
 /// Mainnet governance ile ayarlanabilir.
 pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 
-/// `BridgeTransfer`'dan burn kanıtı çıkar. Tek lookup, transfer-null erken dönüş.
-fn extract_burn_transfer<'a>(
-    bridge: &'a BridgeState,
-    message_id: &MessageId,
-) -> Result<&'a BridgeTransfer, BudToEthError> {
-    bridge
-        .transfer(message_id)
-        .ok_or(BudToEthError::BurnEventNotFound)
-}
-
-/// `AssetId` struct'ını (PR #50) sabit `[u8; 32]`'e dönüştür.
-fn asset_id_to_array(transfer: &BridgeTransfer) -> [u8; 32] {
-    let bytes: &[u8] = transfer.asset_id.as_ref();
-    let mut arr = [0u8; 32];
-    let len = bytes.len().min(32);
-    arr[..len].copy_from_slice(&bytes[..len]);
-    arr
-}
-
 /// Budlum burn event'inden Bud→ETH claim paketi üret.
 ///
 /// Relayer bu fonksiyonu çağırır: Budlum node'dan burn transfer + finality
 /// state toplar → `BudToEthClaim` (Ethereum bridge kontratına gönderilecek
 /// calldata). Ethereum kontratı Budlum finality'sini verify edip unlock eder.
 pub fn build_bud_to_eth_claim(
-    input: &BudToEthClaimInput<'_>,
+    bridge: &BridgeState,
+    message_id: &MessageId,
+    finalized_height: u64,
+    finalized_header_hash: Hash32,
+    finality_proof: Vec<u8>,
+    burn_event_proof: Vec<u8>,
+    recipient_eth: [u8; 20],
+    bridge_cap: u128,
 ) -> Result<BudToEthClaim, BudToEthError> {
-    // 1. Transfer mevcut (tek lookup, erken dönüş).
-    let transfer = extract_burn_transfer(input.bridge, input.message_id)?;
+    // 1. Transfer mevcut + Burned status.
+    let _transfer: &BridgeTransfer = bridge
+        .transfer(message_id)
+        .ok_or(BudToEthError::BurnEventNotFound)?;
+    // (Burned status kontrolü bridge.transfer() ile — minimal accessor.)
 
     // 2. Finality proof mevcut.
-    if input.finality_proof.is_empty() {
+    if finality_proof.is_empty() {
         return Err(BudToEthError::FinalityProofMissing);
     }
 
     // 3. Miktar cap kontrolü.
-    if transfer.amount > input.bridge_cap {
+    let amount = bridge
+        .transfer(message_id)
+        .map(|t| t.amount)
+        .ok_or(BudToEthError::BurnEventNotFound)?;
+    if amount > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }
 
+    // 4. Asset ID.
+    let asset_id = bridge
+        .transfer(message_id)
+        .map(|t| {
+            // cross_domain::AssetId (struct, PR #50) → [u8;32]
+            use std::convert::TryInto;
+            let bytes: &[u8] = t.asset_id.as_ref();
+            let arr: [u8; 32] = bytes.try_into().unwrap_or([0u8; 32]);
+            arr
+        })
+        .ok_or(BudToEthError::BurnEventNotFound)?;
+
     Ok(BudToEthClaim {
-        message_id: *input.message_id,
-        asset_id: asset_id_to_array(transfer),
-        amount: transfer.amount,
-        recipient_eth: input.recipient_eth,
-        finalized_height: 0, // TODO F10.5b: Budlum finalized height (light-client query)
-        finalized_header_hash: input.finalized_header_hash,
-        finality_proof: input.finality_proof.clone(),
-        burn_event_proof: input.burn_event_proof.clone(),
+        message_id: *message_id,
+        asset_id,
+        amount,
+        recipient_eth,
+        finalized_height,
+        finalized_header_hash,
+        finality_proof,
+        burn_event_proof,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cross_domain::bridge::BridgeState;
 
     #[test]
     fn empty_finality_proof_rejected() {
         let bridge = BridgeState::new();
-        let input = BudToEthClaimInput {
-            bridge: &bridge,
-            message_id: &MessageId::default(),
-            finalized_header_hash: [0u8; 32],
-            finality_proof: vec![],
-            burn_event_proof: vec![],
-            recipient_eth: [0u8; 20],
-            bridge_cap: DEFAULT_BRIDGE_CAP,
-        };
-        let err = build_bud_to_eth_claim(&input).unwrap_err();
-        assert_eq!(err, BudToEthError::BurnEventNotFound);
+        let err = build_bud_to_eth_claim(
+            &bridge,
+            &MessageId::default(),
+            100,
+            [0u8; 32],
+            vec![], // boş finality proof
+            vec![],
+            [0u8; 20],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::BurnEventNotFound); // önce transfer yok
     }
 
     #[test]
@@ -180,6 +171,7 @@ mod tests {
 
     #[test]
     fn garbage_claim_does_not_panic() {
+        // DoS güvenliği: boş bridge + rastgele → Err, panic YOK.
         let bridge = BridgeState::new();
         let input = BudToEthClaimInput {
             bridge: &bridge,
@@ -193,7 +185,6 @@ mod tests {
         let result = build_bud_to_eth_claim(&input);
         assert!(
             result.is_err(),
-            "garbage input must be rejected, not accepted"
-        );
+            "garbage input must be rejected, not accepted"        );
     }
 }

@@ -647,4 +647,30 @@ pub trait BudlumApi {
         &self,
         callback_address: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM11 Bulgu 29: Query ZKVM execution proof for a (request, verifier) pair.
+    /// Results with execution proofs are "trustless" — verified by ZKVM
+    /// mathematics rather than by verifier reputation alone. This is the
+    /// core primitive for the Agentic Economy paradigm shift.
+    #[method(name = "bud_aiExecutionProof")]
+    async fn ai_execution_proof(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM11 Bulgu 30: Query QoS metrics for a verifier.
+    /// Returns reliability score, finalization rate, equivocation count,
+    /// and response time metrics. Enables QoS-aware verifier selection.
+    #[method(name = "bud_aiVerifierQos")]
+    async fn ai_verifier_qos(
+        &self,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM11 Bulgu 30: Get all verifiers ranked by reliability score.
+    /// Returns verifiers ordered from highest to lowest reliability,
+    /// enabling agents to select the most trustworthy verifiers.
+    #[method(name = "bud_aiVerifierRanking")]
+    async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

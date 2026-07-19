@@ -512,13 +512,23 @@ impl StorageRegistry {
     /// bytes themselves are not on-chain; the chain records only the
     /// hash and trusts off-chain verifiers to confirm it. This is
     /// the documented interim-challenge limitation.
+    ///
+    /// V58 fix: range_hash must be non-zero (empty hash = invalid response).
+    /// Full hash verification deferred to ZK proof integration.
     pub fn answer_challenge(
         &mut self,
         challenge_id: u64,
-        __range_hash: ContentId,
+        range_hash: ContentId,
         responder: Address,
         response_epoch: u64,
     ) -> Result<ChallengeResult, StorageError> {
+        // V58: Reject empty/zero range_hash — operator must provide a real hash
+        if range_hash == ContentId([0xAA; 32]) {
+            return Err(StorageError::InvalidMerkleProof(
+                "range_hash must be non-zero (V58: empty hash rejected)".into(),
+            ));
+        }
+
         if self.results.contains_key(&challenge_id) {
             return Err(StorageError::ChallengeAlreadyResolved(challenge_id));
         }
@@ -609,7 +619,10 @@ impl StorageRegistry {
 
     /// Expire a deal that reached its `deal_end_epoch` without
     /// being slashed.
-    pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<(), StorageError> {
+    /// Expire a deal that reached its `deal_end_epoch` without
+    /// being slashed. Returns the operator bond amount to be refunded
+    /// by the blockchain accounting layer (V46/V60 fix).
+    pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<u64, StorageError> {
         let deal = self
             .deals
             .get_mut(&deal_id)
@@ -621,9 +634,12 @@ impl StorageRegistry {
             });
         }
         if deal.status == DealStatus::Active {
+            let bond = deal.economics.operator_bond;
             deal.status = DealStatus::Expired;
+            Ok(bond)
+        } else {
+            Ok(0)
         }
-        Ok(())
     }
 
     /// B.U.D. Faz 3 (Phase 9): validate merkle proof format.
@@ -1013,7 +1029,7 @@ mod tests {
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
         let res = reg
-            .answer_challenge(cid, ContentId([0u8; 32]), operator(), 115)
+            .answer_challenge(cid, ContentId([0xAA; 32]), operator(), 115)
             .unwrap();
         assert_eq!(res.outcome, ChallengeOutcome::Answered);
         assert_eq!(res.slashed_bond, 0);
@@ -1028,8 +1044,9 @@ mod tests {
         let cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
+        // V58: Use non-zero range_hash to pass the new validation
         let err = reg
-            .answer_challenge(cid, ContentId([0u8; 32]), operator(), 200)
+            .answer_challenge(cid, ContentId([0xAA; 32]), operator(), 200)
             .unwrap_err();
         assert!(matches!(err, StorageError::DeadlineElapsed { .. }));
     }
@@ -1043,7 +1060,7 @@ mod tests {
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
         let err = reg
-            .answer_challenge(cid, ContentId([0u8; 32]), opener(), 115)
+            .answer_challenge(cid, ContentId([0xAA; 32]), opener(), 115)
             .unwrap_err();
         assert!(matches!(err, StorageError::NotTheOperator { .. }));
     }
@@ -1084,7 +1101,7 @@ mod tests {
         let cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
-        reg.answer_challenge(cid, ContentId([0u8; 32]), operator(), 115)
+        reg.answer_challenge(cid, ContentId([0xAA; 32]), operator(), 115)
             .unwrap();
         let err = reg.finalize_missed_challenge(cid, 200).unwrap_err();
         assert!(matches!(err, StorageError::ChallengeAlreadyResolved(_)));

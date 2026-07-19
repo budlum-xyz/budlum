@@ -8,8 +8,9 @@ pub mod types;
 
 pub use registry::AiRegistry;
 pub use types::{
-    AiInferenceOutcome, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId,
-    AiResultId, BoundedBytes, MAX_INFERENCE_REF_BYTES,
+    AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome,
+    AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, AiResultId,
+    AiVerifierQos, AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]
@@ -3342,5 +3343,206 @@ mod tests {
 
         let events = registry.get_callback_queue(&cb_addr);
         assert_eq!(events.len(), 2);
+    }
+
+    // ===================== P5 ADIM11 — B29 + B30 =====================
+
+    #[test]
+    fn test_p5_adim11_attach_execution_proof() {
+        // P5 Bulgu 29: ZKVM execution proof can be attached to a result
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: [2u8; 32], // matches request's input_commitment
+            output_commitment: [9u8; 32], // matches result's output_commitment
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+        };
+
+        // Attach proof successfully
+        let result = registry.attach_execution_proof(&req_id, &v1, proof.clone());
+        assert!(result.is_ok());
+        assert!(registry.has_execution_proof(&req_id, &v1));
+
+        // Verify stored proof matches
+        let stored = registry.get_execution_proof(&req_id, &v1).unwrap();
+        assert_eq!(stored.program_hash, [0xAA; 32]);
+        assert_eq!(stored.steps, 100);
+    }
+
+    #[test]
+    fn test_p5_adim11_execution_proof_wrong_commitment_rejected() {
+        // P5 Bulgu 29: Proof with wrong output_commitment is rejected
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: [2u8; 32],
+            output_commitment: [0xFF; 32], // WRONG — doesn't match result
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![],
+            steps: 100,
+            gas_used: 50000,
+        };
+
+        let result = registry.attach_execution_proof(&req_id, &v1, proof);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("output_commitment"));
+    }
+
+    #[test]
+    fn test_p5_adim11_execution_proof_no_result_rejected() {
+        // P5 Bulgu 29: Cannot attach proof for non-existent result
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // No result submitted yet
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: [2u8; 32],
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![],
+            steps: 100,
+            gas_used: 50000,
+        };
+
+        let result = registry.attach_execution_proof(&req_id, &v1, proof);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_p5_adim11_verifier_qos_recorded_on_result() {
+        // P5 Bulgu 30: QoS metrics recorded when verifier submits result
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        assert!(registry.get_verifier_qos(&v1).is_none());
+
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let qos = registry.get_verifier_qos(&v1).unwrap();
+        assert_eq!(qos.total_results_submitted, 1);
+        assert_eq!(qos.last_active_block, 15);
+    }
+
+    #[test]
+    fn test_p5_adim11_verifier_qos_finalization_recorded() {
+        // P5 Bulgu 30: Finalization increments successful_finalizations
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v2, [9u8; 32], 2, 20);
+
+        // Both verifiers should have finalization recorded
+        let qos_v1 = registry.get_verifier_qos(&v1).unwrap();
+        assert_eq!(qos_v1.successful_finalizations, 1);
+        let qos_v2 = registry.get_verifier_qos(&v2).unwrap();
+        assert_eq!(qos_v2.successful_finalizations, 1);
+    }
+
+    #[test]
+    fn test_p5_adim11_verifier_qos_equivocation_recorded() {
+        // P5 Bulgu 30: Equivocation recorded in QoS
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(3, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = p5_adim6_submit_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+
+        let qos = registry.get_verifier_qos(&v1).unwrap();
+        assert_eq!(qos.equivocation_count, 1);
+    }
+
+    #[test]
+    fn test_p5_adim11_verifier_qos_reliability_score() {
+        // P5 Bulgu 30: Reliability score calculation
+        let mut qos = AiVerifierQos::new(
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap(),
+        );
+        qos.total_results_submitted = 10;
+        qos.successful_finalizations = 8;
+        qos.equivocation_count = 0;
+        let score = qos.reliability_score();
+        assert!((score - 0.8).abs() < 0.01);
+
+        // With equivocation penalty
+        qos.equivocation_count = 2;
+        let score_with_penalty = qos.reliability_score();
+        assert!(score_with_penalty < score);
+    }
+
+    #[test]
+    fn test_p5_adim11_execution_proof_changes_state_root() {
+        // P5 Bulgu 29: Execution proof affects state root
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let root_before = registry.state_root();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: [2u8; 32],
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 100,
+            gas_used: 50000,
+        };
+        registry
+            .attach_execution_proof(&req_id, &v1, proof)
+            .unwrap();
+
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    #[test]
+    fn test_p5_adim11_qos_changes_state_root() {
+        // P5 Bulgu 30: QoS changes affect state root
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let root_before = registry.state_root();
+
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let _ = root_before; // just trigger QoS via result submission
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        // QoS recorded → state root should change
+        assert_ne!(root_before, registry.state_root());
     }
 }

@@ -164,6 +164,19 @@ pub enum ChainCommand {
         crate::core::address::Address,
         oneshot::Sender<Vec<crate::ai::types::AiCallbackEvent>>,
     ),
+    /// P5 ADIM11 Bulgu 29: Get execution proof for a (request, verifier) pair.
+    GetAiExecutionProof {
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+        response: oneshot::Sender<Option<crate::ai::types::AiExecutionProof>>,
+    },
+    /// P5 ADIM11 Bulgu 30: Get QoS metrics for a verifier.
+    GetAiVerifierQos {
+        verifier: crate::core::address::Address,
+        response: oneshot::Sender<Option<crate::ai::types::AiVerifierQos>>,
+    },
+    /// P5 ADIM11 Bulgu 30: Get all verifiers ordered by reliability score (descending).
+    GetAiVerifiersByReliability(oneshot::Sender<Vec<crate::ai::types::AiVerifierQos>>),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -1161,6 +1174,64 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// P5 ADIM11 Bulgu 29: Get execution proof for a (request, verifier) pair.
+    /// Returns None if no proof exists — results without proofs are
+    /// "trust-based"; results with proofs are "trustless" (ZKVM-verified).
+    pub async fn get_ai_execution_proof(
+        &self,
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+    ) -> Option<crate::ai::types::AiExecutionProof> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiExecutionProof {
+                request_id,
+                verifier,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// P5 ADIM11 Bulgu 30: Get QoS metrics for a verifier.
+    pub async fn get_ai_verifier_qos(
+        &self,
+        verifier: crate::core::address::Address,
+    ) -> Option<crate::ai::types::AiVerifierQos> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifierQos {
+                verifier,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// P5 ADIM11 Bulgu 30: Get all verifiers ordered by reliability score.
+    pub async fn get_ai_verifiers_by_reliability(&self) -> Vec<crate::ai::types::AiVerifierQos> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifiersByReliability(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn get_prune_status(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.tx.send(ChainCommand::GetPruneStatus(tx)).await {
@@ -2044,6 +2115,35 @@ impl ChainActor {
                         .ai_registry
                         .get_callback_queue(&callback_address);
                     let _ = res_tx.send(events);
+                }
+                ChainCommand::GetAiExecutionProof {
+                    request_id,
+                    verifier,
+                    response: res_tx,
+                } => {
+                    let proof = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_execution_proof(&request_id, &verifier)
+                        .cloned();
+                    let _ = res_tx.send(proof);
+                }
+                ChainCommand::GetAiVerifierQos {
+                    verifier,
+                    response: res_tx,
+                } => {
+                    let qos = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_verifier_qos(&verifier)
+                        .cloned();
+                    let _ = res_tx.send(qos);
+                }
+                ChainCommand::GetAiVerifiersByReliability(res_tx) => {
+                    let ranking = self.blockchain.state.ai_registry.verifiers_by_reliability();
+                    let _ = res_tx.send(ranking);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
                     let height = self.blockchain.chain.len() as u64;

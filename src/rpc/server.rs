@@ -3065,6 +3065,117 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    /// P5 ADIM11 Bulgu 29: Query ZKVM execution proof for a (request, verifier) pair.
+    async fn ai_execution_proof(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_req = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let req_bytes = hex::decode(clean_req).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if req_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut req_arr = [0u8; 32];
+        req_arr.copy_from_slice(&req_bytes);
+        let req_id = crate::ai::types::AiRequestId::new(req_arr);
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let proof = self.chain.get_ai_execution_proof(req_id, v_addr).await;
+
+        match proof {
+            Some(p) => Ok(serde_json::json!({
+                "request_id": request_id,
+                "verifier": verifier,
+                "has_proof": true,
+                "model_id": format!("0x{}", p.model_id.to_hex()),
+                "input_commitment": format!("0x{}", hex::encode(p.input_commitment)),
+                "output_commitment": format!("0x{}", hex::encode(p.output_commitment)),
+                "program_hash": format!("0x{}", hex::encode(p.program_hash)),
+                "steps": p.steps,
+                "gas_used": p.gas_used,
+                "proof_size_bytes": p.proof_bytes.len(),
+                "trustless": true,
+            })),
+            None => Ok(serde_json::json!({
+                "request_id": request_id,
+                "verifier": verifier,
+                "has_proof": false,
+                "trustless": false,
+            })),
+        }
+    }
+
+    /// P5 ADIM11 Bulgu 30: Query QoS metrics for a verifier.
+    async fn ai_verifier_qos(
+        &self,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let qos = self.chain.get_ai_verifier_qos(v_addr).await;
+
+        match qos {
+            Some(q) => Ok(serde_json::json!({
+                "verifier": verifier,
+                "total_results_submitted": q.total_results_submitted,
+                "successful_finalizations": q.successful_finalizations,
+                "equivocation_count": q.equivocation_count,
+                "avg_response_blocks": q.avg_response_blocks,
+                "last_active_block": q.last_active_block,
+                "reliability_score": q.reliability_score(),
+                "finalization_rate": if q.total_results_submitted > 0 {
+                    q.successful_finalizations as f64 / q.total_results_submitted as f64
+                } else {
+                    0.0
+                },
+            })),
+            None => Ok(serde_json::json!({
+                "verifier": verifier,
+                "has_qos": false,
+                "reliability_score": 0.0,
+            })),
+        }
+    }
+
+    /// P5 ADIM11 Bulgu 30: Get all verifiers ranked by reliability score.
+    async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let ranking = self.chain.get_ai_verifiers_by_reliability().await;
+        let ranking_json: Vec<serde_json::Value> = ranking
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                serde_json::json!({
+                    "rank": i + 1,
+                    "verifier": format!("0x{}", q.verifier.to_hex()),
+                    "reliability_score": q.reliability_score(),
+                    "total_results_submitted": q.total_results_submitted,
+                    "successful_finalizations": q.successful_finalizations,
+                    "equivocation_count": q.equivocation_count,
+                    "avg_response_blocks": q.avg_response_blocks,
+                    "last_active_block": q.last_active_block,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "total_verifiers": ranking_json.len(),
+            "ranking": ranking_json,
+        }))
+    }
+
     async fn prune_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.chain.get_prune_status().await.map_err(|e| {
             ErrorObjectOwned::owned(
