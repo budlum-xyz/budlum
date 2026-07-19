@@ -393,3 +393,62 @@ Bu kitapta anlatılan her büyük katman için görsel referans
 [`docs/ARCHITECTURE.md`](../../ARCHITECTURE.md) içindeki Mimari Atlas’tır.
 Atlas; trust boundary, V4 signing, snapshot, durability, EVM bridge, B.U.D.,
 BNS, AI, BudZero ve launch gate diyagramlarını taşır.
+
+# Bölüm 13 — Bir teknik iddiayı nasıl okuruz?
+
+Budlum gibi uzun ömürlü bir altyapıda belge, test, kod ve CI aynı ağırlıkta
+değildir. Bir roadmap “planlandı” diyebilir; bir README “uygulandı” diyebilir;
+bir test belirli davranışı doğrulayabilir; CI ise belirli committe o testin
+çalıştığını kanıtlayabilir. Bunların hiçbiri tek başına bütün production
+iddiasını taşımaz.
+
+## 13.1 Dört kanıt sınıfı
+
+| Sınıf | Soru | Örnek |
+|---|---|---|
+| Tasarım | Ne hedefleniyor? | RFC, Constitution, Phase planı |
+| Kod | Ne uygulanmış? | Public type, executor davranışı, module API |
+| Test | Ne kontrol ediliyor? | Negatif mutation, lifecycle, invariant testi |
+| Operasyon | Gerçekte nasıl çalıştırılacak? | CI run, HSM runbook, ceremony minutes, audit raporu |
+
+<div class="plain">
+Bir binanın çizimi, binanın yapıldığı anlamına gelmez. Yapılmış duvar,
+dayanıklılık testinden geçtiği anlamına gelmez. Testten geçen duvar da binanın
+gerçek depremde ayakta kaldığını tek başına göstermez. Budlum’un güvenlik
+iddiaları bu katmanların birbirini tamamlamasıyla okunmalıdır.
+</div>
+
+## 13.2 Vacuous gate tehlikesi
+
+Bir CI job adı “BNS Tests” olabilir ama test listesi boşsa veya bir test
+silindiğinde job yine yeşil kalıyorsa, gate güvence üretmez. Bu nedenle B.U.D.
+ve BNS test kapılarında expected test isimleri ile self-test kanaryaları
+bulunur. Kanarya, eksik veya FAILED satırın kapıyı gerçekten kırdığını
+kanıtlamalıdır.
+
+## 13.3 Mainnet iddiası için kanıt zinciri
+
+Bir mainnet iddiası en az şu zinciri gerektirir:
+
+1. Kod ve deterministic encoding,
+2. adversarial ve lifecycle testleri,
+3. CI build/lint/test kanıtı,
+4. dependency/supply-chain kontrolü,
+5. uzun fuzz veya güvenlik campaign kanıtı,
+6. gerçek operasyon/HSM/ceremony doğrulaması,
+7. bağımsız audit veya public disclosure süreci.
+
+Bu zincirdeki açık halka “başarısızlık” değil, açıkça yönetilmesi gereken bir
+risk ve plan kalemidir.
+
+# Bölüm 14 — Budlum101 ile çalışma rehberi
+
+Bu kitabı okumak isteyen geliştirici önce mimari atlası, sonra kendi ilgilendiği
+modülün README/test/CI gate’ini okumalıdır. Validator adayı HSM/cere-mony ve
+finality bölümlerine; dApp geliştiricisi transaction/RPC/BNS bölümlerine; storage
+operatörü B.U.D. deal/challenge sınırlarına; güvenlik araştırmacısı V4 signing,
+snapshot, bridge ve fuzz bölümlerine odaklanmalıdır.
+
+Her teknik değişiklikte şu soru sorulmalıdır: Bu değişiklik hangi state’i
+etkiliyor, hangi hash/signature bunu bağlıyor, hangi test mutation’ı reddediyor,
+hangi CI job bunu çalıştırıyor ve failure halinde node ne yapıyor?
