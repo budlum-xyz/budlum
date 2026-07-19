@@ -918,3 +918,62 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 **Toplam: 21 bulgu (V22-V42), 2 kapatıldı (V27, V29), 19 açık**
 
 Co-authored-by: ARENAX <arenax@budlum.ai>
+
+### [2026-07-19 12:17 UTC+3] ARENAX — Derin Denetim Tamamlandı: BNS + B.U.D. + Tokenomics + Executor
+
+**Durum:** CI çalışıyor
+
+---
+
+#### BNS + B.U.D. Derin Denetim Özeti
+
+**BNS Bulguları:**
+- V33: calculate_cost overflow riski (🟡 Orta)
+- V34: Subdomain sınırsız büyüme (⚪ Düşük)
+- V35: Root hash kapsam eksikliği (🟡 Orta)
+- V36: Grace period sabit (⚪ Düşük)
+
+**B.U.D. Bulguları:**
+- V37: Challenge answer hash doğrulaması yok (🔴 Yüksek — interim limitation)
+- V38: Merkle proof format-only doğrulama (🟡 Orta)
+- V39: Shard size doğrulaması yok (⚪ Düşük)
+- V40: Challenge bond minimum yok (⚪ Düşük)
+- V41: Replica index bounds yok (⚪ Düşük)
+- V42: Deal expire sadece Active (⚪ Düşük)
+
+**Tokenomics + Executor Doğrulamaları:**
+- ✅ process_timed_burn doğru
+- ✅ Vesting schedule invariant korunuyor
+- ✅ Executor genel denetim temiz
+
+---
+
+**Güncel Bulgu Tablosu (V22-V42):**
+
+| # | Bulgu | Ciddiyet | Durum |
+|---|-------|----------|-------|
+| V22 | AI Registry domain-separation eksik | 🟡 | Açık |
+| V23 | NftRegistry luminance overflow | 🟡 | Açık |
+| V24 | BridgeState root scope eksik | 🔴 | Açık (GAP-2) |
+| V25 | Snapshot hash kapsam deliği | 🟡 | Açık |
+| V26 | Expiry queue stale entry | ⚪ | Açık |
+| V27 | Deadline boundary test | 🔴 | ✅ KAPANDI |
+| V28 | Executor current_block sapması | 🟡 | Açık |
+| V29 | Signing hash collision | 🔴 | ✅ KAPANDI |
+| V30 | EvmChainAdapter no-op | 🟡 | Açık (stub) |
+| V31 | build_bud_to_eth_claim Burned status yok | 🟡 | Açık |
+| V32 | AI max_fee balance check yok | ⚪ | Açık |
+| V33 | BNS calculate_cost overflow | 🟡 | Açık |
+| V34 | BNS subdomain sınırsız büyüme | ⚪ | Açık |
+| V35 | BNS root hash kapsam eksikliği | 🟡 | Açık |
+| V36 | BNS grace period sabit | ⚪ | Açık |
+| V37 | B.U.D. challenge answer hash doğrulaması yok | 🔴 | Açık (interim) |
+| V38 | B.U.D. Merkle proof format-only | 🟡 | Açık |
+| V39 | B.U.D. shard size doğrulaması yok | ⚪ | Açık |
+| V40 | B.U.D. challenge bond minimum yok | ⚪ | Açık |
+| V41 | B.U.D. replica index bounds yok | ⚪ | Açık |
+| V42 | B.U.D. deal expire sadece Active | ⚪ | Açık |
+
+**Toplam: 21 bulgu (V22-V42), 2 kapatıldı (V27, V29), 19 açık**
+
+Co-authored-by: ARENAX <arenax@budlum.ai>
