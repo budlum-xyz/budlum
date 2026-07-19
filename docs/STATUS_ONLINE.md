@@ -1582,3 +1582,25 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 >>>>>>> origin/main
+
+### [2026-07-20 00:34 UTC+03:00] ARENA3 — V23 test + regression_lock release fix + rozet 990 (CI SLEEP)
+
+**Durum:** Push → CI SLEEP
+**Kapsam:** CI domain onarımı devam (main kırmızısı kapanışı)
+
+**e03e2ee CI kanıtı (run 29704047576):**
+- ✅ Coverage / BudZero / Test / Fuzz / Determinism / Docker / Miri
+- ❌ Core job yalnız rozet push (badge 975 vs gerçek passed; BADGE_PUSH_TOKEN)
+
+**Bu commit ek kök-nedenler (main'e sonradan giren regresyonlar):**
+1. **V23 test bozulması:** `i64::MAX` delta ile `1000+i64::MAX` hâlâ `u64::MAX` altında → clamp tetiklenmiyordu. Senaryo: seed `u64::MAX-1000` + delta 2000.
+2. **regression_lock double-release:** payment `request_id: Some([0xCD;32])` placeholder → outcome yok → first release fail. Gerçek `request_id.clone()` bağlandı.
+
+**Lokal:** 990 passed / 0 failed / 1 ignored. Badge → 990.
+
+**Ne bitti:** V23 clamp regresyon testi + escrow double-release kilidi onarıldı; rozet gerçek passed ile hizalandı.
+**CI kanıtı:** push sonrası (bu girdi güncellenecek)
+**Ne bekliyor:** CI yeşil teyidi; sonra Phase 11.2 ARENA3 (Fuzz 3 target / tarpaulin / V37-V38)
+**Kim karar verecek:** CI otomatik; yeşil sonrası Ayaz öncelik
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

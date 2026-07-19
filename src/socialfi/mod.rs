@@ -144,8 +144,11 @@ mod tests {
         let cid = crate::storage::content_id::ContentId([0xAB; 32]);
         reg.mint(owner, cid, 0, None);
         let nft_id = 0;
-        // Max delta: current + i64::MAX → must clamp to u64::MAX, not truncate.
-        reg.update_luminance(nft_id, i64::MAX).unwrap();
+        // mint starts at luminance=1000. Seed near the top so a modest positive
+        // delta crosses u64::MAX and must clamp (not wrap/truncate).
+        // Total: (u64::MAX - 1000) + 2000 = u64::MAX + 1000 > u64::MAX → clamp.
+        reg.nfts.get_mut(&nft_id).unwrap().luminance = u64::MAX - 1000;
+        reg.update_luminance(nft_id, 2000).unwrap();
         let nft = reg.get_nft(nft_id).unwrap();
         assert_eq!(
             nft.luminance,

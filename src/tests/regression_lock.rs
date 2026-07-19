@@ -664,7 +664,7 @@ mod relayer_escrow_silent_failure_regression {
         );
         submit_result(
             &mut registry,
-            request_id,
+            request_id.clone(),
             verifier2,
             [0x11u8; 32],
             2,
@@ -676,7 +676,9 @@ mod relayer_escrow_silent_failure_regression {
             from_agent: requester,
             to_agent: verifier.clone(),
             amount: 150,
-            request_id: Some(AiRequestId([0xCDu8; 32])),
+            // Must link the REAL finalized request_id (not a placeholder).
+            // Placeholder [0xCD;32] has no outcome → release fails pre-condition.
+            request_id: Some(request_id.clone()),
             require_proof: false,
             submitted_at_block: current_block + 20,
             expiry_block: current_block + 200,
