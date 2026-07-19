@@ -553,6 +553,35 @@ impl Vm {
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
+            // P5 ADIM11 Bulgu 32: AI Inference verification opcode.
+            // Currently a stub that reads memory and returns success/failure.
+            // Full STARK verification logic will be implemented when the
+            // AI verification AIR is designed (mainnet activation gate ensures
+            // this is not active on mainnet until ready).
+            Opcode::VerifyInference => {
+                let proof_addr = src1_val as usize;
+                let model_addr = src2_val as usize;
+                let _proof_type = inst.imm; // 0=STARK, 1=SNARK wrap
+                let proof_end = proof_addr.wrapping_add(8 * 4); // 4 u64 fields
+                let model_end = model_addr.wrapping_add(8 * 2); // 2 u64 fields
+                let result = if proof_end <= self.memory.len()
+                    && model_end <= self.memory.len()
+                {
+                    // Stub: verify the proof structure is well-formed.
+                    // Full verification: execute the AIR trace that checks
+                    // model_id, input_commitment, output_commitment against
+                    // the STARK proof envelope.
+                    1u64 // success (stub)
+                } else {
+                    0u64 // out-of-bounds access
+                };
+                let dst_idx = inst.rd;
+                if dst_idx as usize > 0 {
+                    self.registers[dst_idx as usize] = result;
+                }
+                self.pc += 1;
+                (result, cur_pc + 1)
+            }
         };
 
         self.registers[0] = 0; // Enforce r0 is always 0
@@ -586,7 +615,10 @@ impl Vm {
         // key (the AIR uses these to verify the path). The original
         // step's `merkle_key` is also set here (post-push, in-place
         // via index) so the AIR knows the path's key.
-        if matches!(inst.opcode, Opcode::VerifyMerkle) {
+        if matches!(
+            inst.opcode,
+            Opcode::VerifyMerkle | Opcode::VerifyInference
+        ) {
             let path_addr = inst.imm as usize;
             let path_end = path_addr.wrapping_add(8 * 65);
             if path_end <= self.memory.len() {
@@ -798,7 +830,7 @@ impl Vm {
             // (persist / state-root impact); price them above Load/Store.
             Opcode::SRead => 8,
             Opcode::SWrite => 12,
-            Opcode::Poseidon | Opcode::VerifyMerkle => 10,
+            Opcode::Poseidon | Opcode::VerifyMerkle | Opcode::VerifyInference => 10,
             Opcode::Call | Opcode::Ret | Opcode::Push | Opcode::Pop => 2,
             Opcode::Syscall => 5,
             _ => 1,

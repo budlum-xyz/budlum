@@ -6,6 +6,13 @@ use crate::core::block::Block;
 use crate::core::transaction::Transaction;
 use tokio::sync::{mpsc, oneshot};
 
+/// P5 ADIM11 Bulgu 31: Direction filter for agent payment queries.
+#[derive(Debug)]
+pub enum AiPaymentDirection {
+    From,
+    To,
+}
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -177,6 +184,17 @@ pub enum ChainCommand {
     },
     /// P5 ADIM11 Bulgu 30: Get all verifiers ordered by reliability score (descending).
     GetAiVerifiersByReliability(oneshot::Sender<Vec<crate::ai::types::AiVerifierQos>>),
+    /// P5 ADIM11 Bulgu 31: Get agent payment by ID.
+    GetAiAgentPayment {
+        payment_id: [u8; 32],
+        response: oneshot::Sender<Option<crate::ai::types::AiAgentPayment>>,
+    },
+    /// P5 ADIM11 Bulgu 31: Get payments from/to an agent.
+    GetAiAgentPayments {
+        agent: crate::core::address::Address,
+        direction: AiPaymentDirection,
+        response: oneshot::Sender<Vec<crate::ai::types::AiAgentPayment>>,
+    },
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -1232,6 +1250,48 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// P5 ADIM11 Bulgu 31: Get agent payment by ID.
+    pub async fn get_ai_agent_payment(
+        &self,
+        payment_id: [u8; 32],
+    ) -> Option<crate::ai::types::AiAgentPayment> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiAgentPayment {
+                payment_id,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// P5 ADIM11 Bulgu 31: Get payments for an agent.
+    pub async fn get_ai_agent_payments(
+        &self,
+        agent: crate::core::address::Address,
+        direction: AiPaymentDirection,
+    ) -> Vec<crate::ai::types::AiAgentPayment> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiAgentPayments {
+                agent,
+                direction,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn get_prune_status(&self) -> Result<serde_json::Value, String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.tx.send(ChainCommand::GetPruneStatus(tx)).await {
@@ -2144,6 +2204,38 @@ impl ChainActor {
                 ChainCommand::GetAiVerifiersByReliability(res_tx) => {
                     let ranking = self.blockchain.state.ai_registry.verifiers_by_reliability();
                     let _ = res_tx.send(ranking);
+                }
+                ChainCommand::GetAiAgentPayment {
+                    payment_id,
+                    response: res_tx,
+                } => {
+                    let payment = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_agent_payment(&payment_id)
+                        .cloned();
+                    let _ = res_tx.send(payment);
+                }
+                ChainCommand::GetAiAgentPayments {
+                    agent,
+                    direction,
+                    response: res_tx,
+                } => {
+                    let payments = match direction {
+                        AiPaymentDirection::From => self
+                            .blockchain
+                            .state
+                            .ai_registry
+                            .payments_from_agent(&agent),
+                        AiPaymentDirection::To => {
+                            self.blockchain.state.ai_registry.payments_to_agent(&agent)
+                        }
+                    }
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                    let _ = res_tx.send(payments);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
                     let height = self.blockchain.chain.len() as u64;

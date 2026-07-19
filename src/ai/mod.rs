@@ -8,9 +8,10 @@ pub mod types;
 
 pub use registry::AiRegistry;
 pub use types::{
-    AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
-    AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, AiResultId, AiVerifierQos,
-    AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
+    AiAgentPayment, AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome,
+    AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus,
+    AiRequestId, AiResultId, AiVerifierQos, AiVerifierStakeInfo, BoundedBytes,
+    MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]
@@ -3543,6 +3544,225 @@ mod tests {
         p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
 
         // QoS recorded → state root should change
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    // ===================== P5 ADIM11 — B31 Agent-to-Agent Payment =====================
+
+    #[test]
+    fn test_p5_adim11_agent_payment_direct() {
+        // P5 Bulgu 31: Non-escrowed agent payment
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [1u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        assert!(registry.submit_agent_payment(payment, 50).is_ok());
+        let retrieved = registry.get_agent_payment(&[1u8; 32]).unwrap();
+        assert_eq!(retrieved.amount, 1000);
+        assert!(!retrieved.is_escrowed());
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_escrowed() {
+        // P5 Bulgu 31: Escrowed payment linked to a request
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [2u8; 32],
+            from_agent: agent_a,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: false,
+            submitted_at_block: 20,
+            expiry_block: 200,
+        };
+        assert!(registry.submit_agent_payment(payment, 20).is_ok());
+        let retrieved = registry.get_agent_payment(&[2u8; 32]).unwrap();
+        assert!(retrieved.is_escrowed());
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_self_payment_rejected() {
+        // P5 Bulgu 31: from_agent == to_agent is rejected
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [3u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_a,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        let err = registry.submit_agent_payment(payment, 50).unwrap_err();
+        assert!(err.contains("must differ"));
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_zero_amount_rejected() {
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [4u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 0,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        let err = registry.submit_agent_payment(payment, 50).unwrap_err();
+        assert!(err.contains("greater than zero"));
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_expired_rejected() {
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [5u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 100, // already expired
+        };
+        let err = registry.submit_agent_payment(payment, 200).unwrap_err();
+        assert!(err.contains("expired"));
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_release_on_finalization() {
+        // P5 Bulgu 31: Escrowed payment can be released after outcome finalization
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+
+        // Submit escrowed payment
+        let payment = AiAgentPayment {
+            payment_id: [6u8; 32],
+            from_agent: agent_a,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: false,
+            submitted_at_block: 20,
+            expiry_block: 200,
+        };
+        registry.submit_agent_payment(payment, 20).unwrap();
+
+        // Submit results to finalize outcome
+        p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        p5_adim6_submit_result(&mut registry, req_id, v2, [9u8; 32], 2, 20);
+
+        // Now release the payment
+        let recipient = registry.release_agent_payment(&[6u8; 32], 30).unwrap();
+        assert_eq!(recipient, v1);
+
+        // Payment should be removed
+        assert!(registry.get_agent_payment(&[6u8; 32]).is_none());
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_reclaim_expired() {
+        // P5 Bulgu 31: Sender can reclaim expired escrowed payment
+        let (mut registry, model_id, owner) = p5_adim6_setup_registry(2, 2);
+        let req_id = p5_adim6_submit_request(&mut registry, model_id, owner, 10, 110, 100);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        let payment = AiAgentPayment {
+            payment_id: [7u8; 32],
+            from_agent: agent_a,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: false,
+            submitted_at_block: 20,
+            expiry_block: 50,
+        };
+        registry.submit_agent_payment(payment, 20).unwrap();
+
+        // Reclaim after expiry
+        let amount = registry
+            .reclaim_agent_payment(&[7u8; 32], &agent_a, 100)
+            .unwrap();
+        assert_eq!(amount, 500);
+        assert!(registry.get_agent_payment(&[7u8; 32]).is_none());
+    }
+
+    #[test]
+    fn test_p5_adim11_agent_payment_changes_state_root() {
+        // P5 Bulgu 31: Agent payment affects state root
+        let (mut registry, _model_id, _owner) = p5_adim6_setup_registry(2, 2);
+        let root_before = registry.state_root();
+
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [8u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        registry.submit_agent_payment(payment, 50).unwrap();
         assert_ne!(root_before, registry.state_root());
     }
 }

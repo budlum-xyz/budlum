@@ -673,4 +673,19 @@ pub trait BudlumApi {
     /// enabling agents to select the most trustworthy verifiers.
     #[method(name = "bud_aiVerifierRanking")]
     async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM11 Bulgu 31: Query an agent-to-agent payment by ID.
+    #[method(name = "bud_aiAgentPayment")]
+    async fn ai_agent_payment(
+        &self,
+        payment_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// P5 ADIM11 Bulgu 31: Query payments for an agent (from or to).
+    #[method(name = "bud_aiAgentPayments")]
+    async fn ai_agent_payments(
+        &self,
+        agent: String,
+        direction: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

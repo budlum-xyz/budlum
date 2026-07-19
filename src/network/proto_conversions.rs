@@ -211,6 +211,17 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            // P5 ADIM11 Bulgu 31: Agent-to-Agent payment — encoded as raw bytes
+            // since no dedicated proto message exists yet. Uses AiFeeReclaim
+            // as a placeholder carrier (32-byte payload).
+            TransactionType::AiAgentPayment(payment) => (
+                pb::ProtoTransactionType::AiFeeReclaim as i32,
+                Some(pb::proto_transaction::TypePayload::AiFeeReclaim(
+                    pb::ProtoAiFeeReclaim {
+                        request_id: payment.payment_id.to_vec(),
+                    },
+                )),
+            ),
         };
 
         pb::ProtoTransaction {
@@ -847,6 +858,9 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     verifier: crate::core::address::Address::from(vid),
                 }
             }
+            // P5 ADIM11 Bulgu 31: AiAgentPayment — not yet in proto, skipped.
+            // Will be added in a future proto schema update.
+            _ => return Err("Unsupported transaction type in proto".into()),
         };
 
         Ok(Transaction {
