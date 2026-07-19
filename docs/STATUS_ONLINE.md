@@ -2275,8 +2275,116 @@ AI registry klonlanır ve `reclaim_fee` klon üzerinde çağrılır. Bu bir sorg
 **Toplam: 67 bulgu (V22-V101), 13 kapatıldı, 54 açık**
 
 **Ne bitti:** ADIM 2 — blockchain.rs (4626 satır) tam derin denetim + pos.rs (738 satır) + chain_actor.rs (2688 satır) denetlendi. 7 yeni bulgu (V95-V101), 1 kritik (V95 — reorg split-brain).
-**Ne bekliyor:** V95-V101 kapatmaları + QC.rs + PoA.rs + RPC + network/ modülleri + storage/ modülleri denetimi.
-**Kim karar verecek:** Ayaz (V95 reorg onarımı önceliklendirmesi) + CI (push sonrası)
+
+---
+
+## ADIM 3 — QC.rs + Finality.rs + RPC/server.rs Derin Denetim
+
+**Tarih:** 2026-07-20
+**Ajan:** ARENAS (Denetim)
+**Önceki SHA:** ee662fc (V95-V101 push, CI pending)
+
+### V102 (🟡 Yüksek) — mint_bridge_transfer RPC: Relayer Fee Zero Address'e Gider
+
+**Dosya:** `src/rpc/server.rs` → `mint_bridge_transfer()` (satır ~982)
+**Ciddiyet:** 🟡 Yüksek
+**Kategori:** Bridge ekonomisi / Fon kaybı
+
+**Açıklama:**
+RPC `mint_bridge_transfer` metodu `mint_bridge_transfer_from_verified_event`'i çağırırken relayer parametresi olarak `Address::zero()` geçer:
+```rust
+self.chain
+    .mint_bridge_transfer_from_verified_event(
+        source_domain, source_height, sequence,
+        expected_block_hash, event, proof,
+        Address::zero(),  // ← ZERO ADDRESS!
+    )
+```
+
+Sonuç: 1% relayer fee zero address'e (genesis) kredi edilir. Bu fee etkili bir şekilde kaybedilir/yakılır. Relayer ekonomik teşviki ortadan kalkar — hiçbir relayer doğrudan mint path'ını kullanmaz.
+
+Buna karşılık, `submit_relay_proof` RPC'si relayer adresini parametre olarak alır ve fee doğru yere gider.
+
+**Etki:** Doğrudan mint RPC path'ı ekonomik olarak işlevsiz. Tüm relayer trafiği `submit_relay_proof` path'ına yönlendirilir, tek nokta oluşturur.
+
+**Öneri:** RPC `mint_bridge_transfer` relayer adresini parametre olarak almalı veya doğrudan mint path'ı kaldırılmalı (sadece relay proof path kalmalı).
+
+---
+
+### V103 (🟡 Yüksek) — QcFaultProof InvalidDilithiumV1: slash_validator Her Zaman false, Ekonomik Yaptırım Yok
+
+**Dosya:** `src/consensus/qc.rs` → `QcFaultProof::verify_against_blob()` (satır ~504)
+**Ciddiyet:** 🟡 Yüksek
+**Kategori:** Konsensüs güvenliği / Yaptırım eksikliği
+
+**Açıklama:**
+`InvalidDilithiumV1` kanıt türü her zaman şu kararı döndürür:
+```rust
+Ok(QcProofVerdict {
+    action: QcProofAction::InvalidateFinality,
+    invalidate_from_height: Some(self.checkpoint_height),
+    slash_validator: false,
+})
+```
+
+Sonuç: Kanıtlanmış sahte Dilithium imzası gönderen bir doğrulayıcı SADECE finality geçersiz kılınır — stake kesilmez. `apply_qc_fault_verdict` fonksiyonu `verdict.slash_validator` `false` olduğu için slashing yapmaz.
+
+Buna rağmen, `apply_qc_fault_verdict` yorumunda: "a valid QC fault proof is the strongest possible proof of malicious consensus participation" deniyor. Ama ekonomik yaptırım uygulanmıyor.
+
+**Etki:** Kötü niyetli doğrulayıcılar sahte PQ imzası göndererek finality'yi bozabilir ve hiçbir stake kaybı yaşamazlar. Sadece finality geri alınır, ama saldırı maliyeti sıfırdır.
+
+**Öneri:** `InvalidDilithiumV1` için `slash_validator: true` ve `action: QcProofAction::SlashValidator` ayarlanmalı. Kanıtlanmış sahte imza = kanıtlanmış kötü niyet.
+
+---
+
+### V104 (⚪ Düşük) — ZkInvalidAttestationV1 Verifier Henüz Implement Edilmedi
+
+**Dosya:** `src/consensus/qc.rs` → `QcFaultProof::verify_against_blob()` (satır ~530)
+**Ciddiyet:** ⚪ Düşük
+**Kategori:** Eksik implementasyon
+
+**Açıklama:**
+`ZkInvalidAttestationV1` kanıt yolu her zaman `Err("ZK QC verifier is not implemented")` döndürür. ZK tabanlı QC fault proof'lar hiçbir zaman doğrulanamaz veya işleme alınamaz. Bu, ZK domain doğrulayıcıları için challenge mekanizmasını tamamen devre dışı bırakır.
+
+**Öneri:** ZK verifier implementasyonu tamamlanana kadar, `QcProofKind::ZkInvalidAttestationV1` varyantı kullanımdan kaldırılmalı veya açıkça "unimplemented" olarak işaretlenmeli.
+
+---
+
+### V105 (⚪ Düşük) — RPC State-Mutating Methods Without require_operator
+
+**Dosya:** `src/rpc/server.rs`
+**Ciddiyet:** ⚪ Düşük
+**Kategori:** Yetkilendirme / API güvenliği
+
+**Açıklama:**
+Şu state-mutating RPC metodları `require_operator()` kontrolü olmadan public endpoint'lerde erişilebilir:
+- `mint_bridge_transfer` — token oluşturur
+- `unlock_bridge_transfer_verified` — varlık kilidi açar
+- `burn_bridge_transfer_with_event` — bridge token yakar
+- `submit_zk_proof` — proof claim + bakiye değişimi
+- `submit_slashing_report` — stake kesimi
+- `submit_qc_fault_proof` — finality geçersiz kılma
+- `storage_open_deal` — bakiye düşürme
+
+Proof gereksinimleri bir koruma sağlasa da, bu metodlar transaction imzası gerektirmeden direkt state değişimi yapar. Operator-only metodlar (registerConsensusDomain, registerBridgeAsset, sealGlobalHeader vb.) koruma altındayken, daha kritik olan bridge/zk/storage metodları korumasız.
+
+**Öneri:** Mainnet'te tüm state-mutating RPC metodları `require_operator()` ile korunmalı veya transaction/mempool flow'una taşınmalı.
+
+---
+
+**Güncel Toplam Denetim Tablosu:**
+
+| Ciddiyet | Sayı | Durum |
+|----------|------|-------|
+| 🔴 Kritik | 10 | 4 kapatıldı, 6 açık (V24, V37, V38, V86, V89, V95) |
+| 🟡 Yüksek | 23 | 5 kapatıldı, 18 açık |
+| ⚪ Düşük | 38 | 4 kapatıldı, 34 açık |
+
+**Toplam: 71 bulgu (V22-V105), 13 kapatıldı, 58 açık**
+
+**Ne bitti:** ADIM 3 — QC.rs (882 satır) + finality.rs (1084 satır) + RPC/server.rs (3374 satır) denetlendi. 4 yeni bulgu (V102-V105), 2 yüksek (V102 relayer fee, V103 slashing yaptırım eksikliği).
+**Ne bekliyor:** V95-V105 kapatmaları + network/ modülleri + storage/ modülleri + registry/ modülleri denetimi.
+**Kim karar verecek:** Ayaz (V95 reorg + V103 slashing önceliklendirmesi) + CI (push sonrası)
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
 =======
