@@ -5,4 +5,6 @@
 //! in `budlum-core`; it is not a B.U.D. module.
 
 pub mod content_id;
+pub mod manifest;
 pub use content_id::ContentId;
+pub use manifest::{ContentManifest, ShardRef};
