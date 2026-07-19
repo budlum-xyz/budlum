@@ -8,6 +8,7 @@ Budlum is a research-grade Layer-1 that does **not** replace other chains. It **
 [![Tests](https://img.shields.io/badge/tests-990%20lib-blue)](https://github.com/budlum-xyz/budlum)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Security](https://img.shields.io/badge/security-report%20privately-blue)](SECURITY.md)
 
 ---
 

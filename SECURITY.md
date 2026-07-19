@@ -133,6 +133,24 @@ Budlum Core, mainnet v1 lansmanından itibaren bir bug bounty programı yürüte
 
 > Program henüz aktif değil — mainnet lansmanıyla birlikte Immunefi üzerinden açılacaktır.
 
+### Triage Kanalları
+
+- **Discord:** `#security-reports` (yalnızca reporter + security lead görür)
+- **Telegram:** `@budlum_security` (alternatif — PGP key talep edilir)
+- **GitHub:** Private security advisory (önerilen — audit trail)
+
+### Safe Harbor (İyi Niyetli Araştırmacı Koruması)
+
+Aşağıdaki koşulları sağlayan araştırmacılar iyi niyetli kabul edilir:
+
+1. Yalnızca **test hesapları** kullanılır; üçüncü parti fon/veriye dokunulmaz.
+2. Mainnet'te **fon/veri riske atmayan** salt-kanıt test (read-only).
+3. Bulgu paylaşılmadan önce `security@budlum.network`'e raporlanır.
+4. 90 gün coordinated disclosure penceresine uyulur.
+
+**Kapsam dışı:** sosyal mühendislik, üçüncü parti altyapı (RPC/HSM vendor),
+mainnet'te gerçek fon drain, kullanıcı verisi sızıntısı.
+
 ---
 
 ## Disclaimer

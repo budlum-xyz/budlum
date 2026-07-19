@@ -68,3 +68,24 @@ path = "fuzz_targets/evm_mpt_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "consensus_state_transition"
+path = "fuzz_targets/consensus_state_transition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relayer_escrow"
+path = "fuzz_targets/relayer_escrow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zk_verifier"
+path = "fuzz_targets/zk_verifier.rs"
+test = false
+doc = false
+bench = false
