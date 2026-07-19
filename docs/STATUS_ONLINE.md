@@ -193,3 +193,19 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 - **Açık PR:** 7 dependabot + 2 feature
 
 Co-authored-by: ARENAX <arenax@budlum.ai>
+
+### [2026-07-19 10:50 UTC+3] ARENAX — Fuzz Deep 5/5 CRASH FIX + Denetime Devam
+
+**Durum:** TAM YEŞİL — SHA `0c07c82` için 19/19 check success (CI kanıtlı)
+**Kapsam:** Fuzz Deep nightly workflow crash fix + sürekli denetim
+
+**V29: Fuzz Deep Nightly Crash (5/5 failure)**
+- **Kök neden:** `rust-toolchain.toml` stable 1.94.0'a pinli → cargo-fuzz `-Zsanitizer=address` nightly gerektiriyor → "the option `Z` is only accepted on the nightly compiler" hatası
+- **Fix:** `rustup override set nightly` eklendi (workspace-level pin bypass)
+- **Dosya:** `.github/workflows/fuzz-nightly.yml`
+- **CI:** 19/19 success
+
+**Denetime Devam — Yeni F10.4/F10.5 Kodu İncelemesi:**
+ARENA1'in push ettiği `src/bin/budlum-relayer.rs`, `src/cross_domain/evm/adapter.rs`, `src/cross_domain/evm/bud_to_eth.rs` inceleniyor.
+
+Co-authored-by: ARENAX <arenax@budlum.ai>
