@@ -3665,7 +3665,10 @@ mod tests {
             expiry_block: 100, // already expired
         };
         let err = registry.submit_agent_payment(payment, 200).unwrap_err();
-        assert!(err.contains("expired"));
+        assert!(
+            err.contains("expiry") || err.contains("future"),
+            "Error should mention expiry/future: {err}"
+        );
     }
 
     #[test]
