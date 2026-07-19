@@ -285,7 +285,7 @@ modülün hangi uyarıyla işaretli olduğunu söylemez.
 
 - Her modül kendi dizininde, kendi `README.md`'si ve kendi test
   suite'iyle yaşar: `README.md` (Core, kök), `budzero/README.md`,
-  `bud/README.md` (veya B.U.D.'un gerçek dizini), `bns/README.md`.
+  `B.U.D/README.md` (veya B.U.D.'un gerçek dizini), `BNS/README.md`.
 - Her modülün kendi CI job'u/gate'i olur (mevcut Core + BudZero
   ayrımı zaten bu deseni takip ediyor — B.U.D. ve BNS de aynısını
   izlemeli).

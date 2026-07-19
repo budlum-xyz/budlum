@@ -74,7 +74,7 @@
 
 - İş akışları: `.github/workflows/` — `ci.yml` (13 job + badge-bot), docker smoke + multinode (ayrı workflow), nightly fuzz, supply-chain extra.
 - Kapı scriptleri: `scripts/check-bud-e2e.sh`, `scripts/check-bns-gate.sh` (vacuous-gate kanaryalı desen — yeni gate bunu kopyalar).
-- Modül README'leri: kök `README.md` (SADECE dashboard), `budzero/README.md`, `src/storage/README.md` (B.U.D.), `src/bns/README.md` (BNS).
+- Modül README'leri: kök `README.md` (SADECE dashboard), `budzero/README.md`, `B.U.D/README.md` (B.U.D.), `BNS/README.md` (BNS).
 - Badge hattı: `budlum-ci[bot]` main'e README badge commit'i atar (PAT derogasyonlu, koruma-uyumlu); sayı değişirse otomatik.
 
 ## 5. Bugün neredeyiz
