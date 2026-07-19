@@ -1,4 +1,4 @@
-#![allow(clippy::pedantic)]
+#![allow(clippy::pedantic, clippy::nursery)]
 
 //! F10.4 EvmChainAdapter — gerçek ChainAdapter impl (H4 tam canlı yol).
 //!

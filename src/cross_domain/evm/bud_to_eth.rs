@@ -1,4 +1,4 @@
-#![allow(clippy::pedantic)]
+#![allow(clippy::pedantic, clippy::nursery)]
 
 //! F10.5 Bud→ETH yönü — Budlum burn event + finality proof → Ethereum claim.
 //!
