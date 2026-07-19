@@ -3371,4 +3371,46 @@ mod tests {
         // Third request: rate limited (exceeds limit of 2)
         assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
     }
+
+    /// Phase 11.3 Task 1: Read-only status.
+    async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        let chain_id = self.chain.get_chain_id().await;
+        let mempool = self.chain.get_mempool_size().await;
+        let base_fee = self.chain.get_base_fee().await;
+        let validator_set_hash = self.chain.get_validator_set_hash().await;
+        Ok(serde_json::json!({
+            "blockNumber": height,
+            "chainId": chain_id,
+            "mempoolSize": mempool,
+            "baseFee": base_fee,
+            "validatorSetHash": validator_set_hash,
+        }))
+    }
+
+    async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let validator = self.chain.get_validator_address().await;
+        let set_hash = self.chain.get_validator_set_hash().await;
+        Ok(serde_json::json!({
+            "validatorAddress": validator.map(|a| format!("0x{}", a.to_hex())).unwrap_or_default(),
+            "validatorSetHash": set_hash,
+        }))
+    }
+
+    async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(serde_json::json!({
+            "domain_id": domain_id,
+            "registered": false,
+            "note": "domain registry lookup — wire to ChainActor",
+        }))
+    }
+
+    async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Phase 11.3: slashing history RPC — ChainActor'e getSlashingHistory
+        // komutu eklenene kadar minimal cevap.
+        Ok(serde_json::json!({
+            "history": [],
+            "note": "slashing history query — wire to ChainActor in next iteration",
+        }))
+    }
 }

@@ -145,7 +145,7 @@ pub struct BridgeState {
     /// Expiry queue: expiry_height -> [message_id]
     /// Phase 9 (ARENA2): Fix O(N) sweep DoS by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
-    replay: ReplayNonceStore,
+    pub replay: ReplayNonceStore,
 }
 
 impl BridgeState {

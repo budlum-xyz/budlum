@@ -703,4 +703,20 @@ pub trait BudlumApi {
 
     #[method(name = "bud_aiAgentRanking")]
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Phase 11.3 Task 1: Read-only status endpoint (relayer kararından bağımsız).
+    #[method(name = "bud_getStatus")]
+    async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Phase 11.3 Task 1: Active validator set snapshot.
+    #[method(name = "bud_getValidatorSet")]
+    async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Phase 11.3 Task 1: Domain info by ID.
+    #[method(name = "bud_getDomainInfo")]
+    async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Phase 11.3 Task 1: Slashing history (audit trail).
+    #[method(name = "bud_getSlashingHistory")]
+    async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 }

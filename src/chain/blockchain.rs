@@ -1329,6 +1329,35 @@ impl Blockchain {
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
     ) -> Result<(), String> {
+        // Phase 11.3 Task 2: CrossDomainMessage sertleştirme.
+        // 1. verify_id: message_id canonical preimage ile eşleşmeli (kanıt uydurma yüzeyi).
+        if !message.verify_id() {
+            return Err(
+                "Cross-domain message ID does not match canonical preimage (potential forgery)".into(),
+            );
+        }
+        // 2. Domain-spoofing: source_domain ≠ target_domain (aynı domain'e cross-message yok).
+        if message.source_domain == message.target_domain {
+            return Err(format!(
+                "Cross-domain message source and target domains must differ (both={})",
+                message.source_domain
+            ));
+        }
+        // 3. Expiry check: mesaj süresi dolmuşsa reddet.
+        let current_height = self.chain.len() as u64;
+        if message.expiry_height > 0 && current_height > message.expiry_height {
+            return Err(format!(
+                "Cross-domain message expired (expiry={}, current={})",
+                message.expiry_height, current_height
+            ));
+        }
+        // 4. Replay protection: message_id daha önce işlendi mi?
+        self.state
+            .bridge_state
+            .replay
+            .mark_processed(message.message_id)
+            .map_err(|e| format!("Cross-domain replay detected: {e}"))?;
+        // 5. Message registry + persistence.
         self.state.message_registry.insert(message.clone())?;
         if let Some(store) = &self.storage {
             store
