@@ -29,7 +29,7 @@ mod integration_tests {
         state.add_validator(val_addr, 1000);
 
         let p_type = ProposalType::ChangeBaseFee(10);
-        let mut prop_tx = Transaction::new_proposal(val_addr, p_type, 1, 0);
+        let mut prop_tx = Transaction::new_proposal(val_addr, p_type, 100, 0);
         prop_tx.sign(&val_kp);
 
         Executor::apply_transaction(&mut state, &prop_tx).unwrap();
