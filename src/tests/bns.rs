@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::bns::BnsError;
     use crate::bns::BnsRegistry;
     use crate::core::address::Address;
 
@@ -37,10 +38,16 @@ mod tests {
         // Expired at epoch 25
         assert_eq!(reg.resolve("expire.bud", 25), None);
 
-        // Can be re-registered after expiration
+        // F14 (Phase 10.5): grace-period — expire (25) + GRACE_PERIOD (3000)
+        // içinde 3. parti squat edemez. epoch 30 < 3025 → bob RED.
         let bob = Address::from([2u8; 32]);
-        reg.register("expire.bud".to_string(), bob, 30, 100)
+        assert!(matches!(
+            reg.register("expire.bud".to_string(), bob, 30, 100),
+            Err(BnsError::NameTaken)
+        ));
+        // grace-period sonrası (epoch 3030 > 3025) → bob register OK.
+        reg.register("expire.bud".to_string(), bob, 3030, 100)
             .unwrap();
-        assert_eq!(reg.resolve("expire.bud", 35), Some(bob));
+        assert_eq!(reg.resolve("expire.bud", 3035), Some(bob));
     }
 }

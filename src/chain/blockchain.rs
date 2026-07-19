@@ -2752,7 +2752,11 @@ impl Blockchain {
             .add_transaction(transaction.clone())
             .map_err(|e| format!("Mempool error: {:?}", e))?;
         if let Some(ref store) = self.storage {
-            let _ = store.save_mempool_tx(&transaction);
+            if let Err(e) = store.save_mempool_tx(&transaction) {
+                tracing::error!(
+                    "save_mempool_tx failed (transaction will not survive restart): {e}"
+                );
+            }
         }
         Ok(())
     }

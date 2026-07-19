@@ -51,8 +51,16 @@ fn test_bns_renewal() {
         reg.renew("test.bud", &alice, 400, 100),
         Err(BnsError::Expired)
     ));
-    reg.register("test.bud".to_string(), bob, 400, 100).unwrap();
-    assert_eq!(reg.resolve("test.bud", 450), Some(bob));
+    // F14 (Phase 10.5): grace-period — expire (350) + GRACE_PERIOD (3000)
+    // içinde 3. parti squat edemez. epoch 400 < 3350 → bob RED.
+    assert!(matches!(
+        reg.register("test.bud".to_string(), bob, 400, 100),
+        Err(BnsError::NameTaken)
+    ));
+    // grace-period sonrası (epoch 3360 > 3350) → bob register OK.
+    reg.register("test.bud".to_string(), bob, 3360, 100)
+        .unwrap();
+    assert_eq!(reg.resolve("test.bud", 3370), Some(bob));
 }
 
 #[test]
