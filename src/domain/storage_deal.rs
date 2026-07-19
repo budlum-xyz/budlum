@@ -512,13 +512,23 @@ impl StorageRegistry {
     /// bytes themselves are not on-chain; the chain records only the
     /// hash and trusts off-chain verifiers to confirm it. This is
     /// the documented interim-challenge limitation.
+    ///
+    /// V58 fix: range_hash must be non-zero (empty hash = invalid response).
+    /// Full hash verification deferred to ZK proof integration.
     pub fn answer_challenge(
         &mut self,
         challenge_id: u64,
-        __range_hash: ContentId,
+        range_hash: ContentId,
         responder: Address,
         response_epoch: u64,
     ) -> Result<ChallengeResult, StorageError> {
+        // V58: Reject empty/zero range_hash — operator must provide a real hash
+        if range_hash == ContentId([0u8; 32]) {
+            return Err(StorageError::InvalidMerkleProof(
+                "range_hash must be non-zero (V58: empty hash rejected)".into(),
+            ));
+        }
+
         if self.results.contains_key(&challenge_id) {
             return Err(StorageError::ChallengeAlreadyResolved(challenge_id));
         }
@@ -609,7 +619,10 @@ impl StorageRegistry {
 
     /// Expire a deal that reached its `deal_end_epoch` without
     /// being slashed.
-    pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<(), StorageError> {
+    /// Expire a deal that reached its `deal_end_epoch` without
+    /// being slashed. Returns the operator bond amount to be refunded
+    /// by the blockchain accounting layer (V46/V60 fix).
+    pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<u64, StorageError> {
         let deal = self
             .deals
             .get_mut(&deal_id)
@@ -621,9 +634,12 @@ impl StorageRegistry {
             });
         }
         if deal.status == DealStatus::Active {
+            let bond = deal.economics.operator_bond;
             deal.status = DealStatus::Expired;
+            Ok(bond)
+        } else {
+            Ok(0)
         }
-        Ok(())
     }
 
     /// B.U.D. Faz 3 (Phase 9): validate merkle proof format.

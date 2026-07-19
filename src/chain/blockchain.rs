@@ -3978,12 +3978,17 @@ impl Blockchain {
                         .storage_slashed_bond_total
                         .saturating_add(result.slashed_bond);
 
-                    // FAZ 5 FAIL-CLOSED: Gerçek kilitli bond modeli eklenene kadar likit bakiyeden yakma durduruldu.
-                    // let burned = self.state.burn_from(&operator, result.slashed_bond);
-                    let burned = 0;
-                    tracing::warn!(
-                        "Fail-closed: Skipping real burn_from for slashed bond. Escrow needed."
-                    );
+                    // V43 fix: Enable real burn_from for slashed bond.
+                    // Operator's liquid balance is slashed when challenge is missed.
+                    // Full escrow model deferred to Phase 10+.
+                    let burned = self.state.burn_from(&operator, result.slashed_bond);
+                    if burned > 0 {
+                        tracing::warn!(
+                            "V43: Burned {} from operator {} for missed challenge",
+                            burned,
+                            operator
+                        );
+                    }
 
                     self.storage_burned_bond_total =
                         self.storage_burned_bond_total.saturating_add(burned);

@@ -24,15 +24,20 @@ impl BnsRegistry {
     }
 
     pub fn calculate_cost(&self, name: &str, duration: u64) -> u64 {
-        let length = name.len();
-        let multiplier = match length {
+        // V51: Use char count instead of byte length for Unicode support
+        let char_count = name.chars().count();
+        let multiplier: u64 = match char_count {
             1..=3 => 100,
             4..=6 => 10,
             _ => 1,
         };
-        let base = self.base_cost * multiplier * duration;
+        // V51: Use saturating_mul to prevent overflow
+        let base = self
+            .base_cost
+            .saturating_mul(multiplier)
+            .saturating_mul(duration);
         if multiplier >= 10 || duration >= 100 {
-            base * 2
+            base.saturating_mul(2)
         } else {
             base
         }
@@ -45,7 +50,9 @@ impl BnsRegistry {
         current_epoch: u64,
         duration: u64,
     ) -> Result<(), BnsError> {
-        if name.len() < 3 || name.len() > 32 {
+        // V47: Use char count instead of byte length for Unicode support
+        let char_count = name.chars().count();
+        if char_count < 3 || char_count > 32 {
             return Err(BnsError::InvalidName);
         }
         if let Some(record) = self.names.get(&name) {
