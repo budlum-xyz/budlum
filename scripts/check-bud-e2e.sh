@@ -37,7 +37,7 @@ gate() {
   local missing=0 name
   for name in "${EXPECTED[@]}"; do
     # Birebir isim + "ok" — alt-dize eşleşmesi (ör. invariant_1 → invariant_10) engelli:
-    if ! grep -Eq "test tests::bud_e2e::${name} \.\.\. ok$" "$out"; then
+    if ! grep -Eq "test ${name} \.\.\. ok$" "$out"; then
       echo "FAIL: beklenen test çıktıda yok veya ok değil: $name"
       missing=1
     fi
@@ -55,23 +55,23 @@ if [ "${1:-}" = "--self-test" ]; then
   # 1) TAM çıktı → PASS
   {
     for name in "${EXPECTED[@]}"; do
-      echo "test tests::bud_e2e::${name} ... ok"
+      echo "test ${name} ... ok"
     done
   } > "$tmp/full.txt"
   # 2) invariant_5 EKSİK → FAIL olmalı (vacuous değil)
   {
     for name in "${EXPECTED[@]}"; do
       [ "$name" = "invariant_5_opener_bond_must_be_positive" ] && continue
-      echo "test tests::bud_e2e::${name} ... ok"
+      echo "test ${name} ... ok"
     done
   } > "$tmp/missing.txt"
   # 3) invariant_3 FAILED → FAIL olmalı
   {
     for name in "${EXPECTED[@]}"; do
       if [ "$name" = "invariant_3_any_account_can_challenge_any_deal" ]; then
-        echo "test tests::bud_e2e::${name} ... FAILED"
+        echo "test ${name} ... FAILED"
       else
-        echo "test tests::bud_e2e::${name} ... ok"
+        echo "test ${name} ... ok"
       fi
     done
   } > "$tmp/failed.txt"

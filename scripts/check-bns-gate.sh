@@ -18,14 +18,14 @@ set -euo pipefail
 
 # Phase 10 Bölüm 4 zorunlu listesi — 8 BNS testi (birebir isim kilidi)
 EXPECTED=(
-  "test tests::bns::tests::test_bns_registration_and_resolution"
-  "test tests::bns::tests::test_bns_expiration"
-  "test tests::bns_expanded::test_bns_cost_scaling"
-  "test tests::bns_expanded::test_bns_renewal"
-  "test tests::bns_expanded::test_bns_subdomains_owner_only"
-  "test tests::bns_expanded::test_bns_invalid_names"
-  "test tests::bns_expanded::test_bns_transfer"
-  "test tests::bns_expanded::test_bns_full_resolve_with_storage"
+  "test_bns_registration_and_resolution"
+  "test_bns_expiration"
+  "test_bns_cost_scaling"
+  "test_bns_renewal"
+  "test_bns_subdomains_owner_only"
+  "test_bns_invalid_names"
+  "test_bns_transfer"
+  "test_bns_full_resolve_with_storage"
 )
 
 gate() {
@@ -34,7 +34,7 @@ gate() {
   local missing=0 name
   for name in "${EXPECTED[@]}"; do
     # Birebir yol + "ok" sonlanmasi — alt-dize eslesmesi engelli:
-    if ! grep -Eq "^${name} \.\.\. ok$" "$out"; then
+    if ! grep -Eq "^test ${name} \.\.\. ok$" "$out"; then
       echo "FAIL: beklenen test ciktida yok veya ok degil: $name"
       missing=1
     fi
@@ -52,23 +52,23 @@ if [ "${1:-}" = "--self-test" ]; then
   # 1) TAM cikti → PASS
   {
     for name in "${EXPECTED[@]}"; do
-      echo "${name} ... ok"
+      echo "test ${name} ... ok"
     done
   } > "$tmp/full.txt"
   # 2) test_bns_expiration EKSIK → FAIL olmali (vacuous degil)
   {
     for name in "${EXPECTED[@]}"; do
-      [ "$name" = "test tests::bns::tests::test_bns_expiration" ] && continue
-      echo "${name} ... ok"
+      [ "$name" = "test_bns_expiration" ] && continue
+      echo "test ${name} ... ok"
     done
   } > "$tmp/missing.txt"
   # 3) test_bns_transfer FAILED → FAIL olmali
   {
     for name in "${EXPECTED[@]}"; do
-      if [ "$name" = "test tests::bns_expanded::test_bns_transfer" ]; then
-        echo "${name} ... FAILED"
+      if [ "$name" = "test_bns_transfer" ]; then
+        echo "test ${name} ... FAILED"
       else
-        echo "${name} ... ok"
+        echo "test ${name} ... ok"
       fi
     done
   } > "$tmp/failed.txt"
