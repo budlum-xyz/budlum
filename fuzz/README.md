@@ -74,3 +74,14 @@ run'lar release/audit öncesi manuel veya ayrı yetkili CI job'ı ile çalışt�
 - `scripts/generate-sbom.sh` — CycloneDX SBOM üretimi.
 - `docs/operations/DEPENDENCY_AUDIT.md` — son dependency audit durumu.
 - `docs/operations/SBOM.md` — SBOM üretim prosedürü.
+
+
+## Phase 11.2 targets (ARENA3)
+
+| Target | Oracle |
+|--------|--------|
+| `consensus_state_transition` | produce_block + try_reorg panic-freedom / MAX_REORG_DEPTH |
+| `relayer_escrow` | bridge lock→mint→burn→unlock + UniversalRelayer proof path |
+| `zk_verifier` | ProofEnvelope bincode + DefaultAdapter::verify fail-closed |
+
+Quick CI: 60s × 8 listed targets (see `ci.yml`). Nightly: 4h matrix includes the three new targets.

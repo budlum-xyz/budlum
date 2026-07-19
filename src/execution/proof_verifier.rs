@@ -242,9 +242,7 @@ impl ProofVerifier {
 
     /// Quick structural validation without full STARK verification.
     /// Used for pre-flight checks before committing gas.
-    pub fn validate_envelope_structure(
-        envelope: &ProofEnvelope,
-    ) -> Result<(), ProofVerifyError> {
+    pub fn validate_envelope_structure(envelope: &ProofEnvelope) -> Result<(), ProofVerifyError> {
         if envelope.proof_bytes.len() > MAX_PROOF_BYTES {
             return Err(ProofVerifyError::ProofTooLarge {
                 size: envelope.proof_bytes.len(),

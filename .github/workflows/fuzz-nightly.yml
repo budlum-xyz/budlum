@@ -29,6 +29,9 @@ jobs:
           - fuzz_blockchain_serialize
           - snapshot_deserialize
           - transaction_deserialize
+          - consensus_state_transition
+          - relayer_escrow
+          - zk_verifier
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

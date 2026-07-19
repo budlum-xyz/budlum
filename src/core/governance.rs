@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(actions[0], GovernanceAction::WhitelistVerifier(verifier));
 
         // Proposal should now be Executed
-        let p = gov.find_proposal(0).unwrap();
+        let p = gov.find_proposal_mut(0).unwrap();
         assert_eq!(p.status, ProposalStatus::Executed);
     }
 

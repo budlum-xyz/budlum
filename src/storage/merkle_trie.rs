@@ -150,7 +150,7 @@ impl MerkleTrie {
 
     /// Bulk insert from an iterator — more efficient than individual inserts
     /// because it avoids redundant path traversals.
-    pub fn bulk_insert(&mut self, entries: &[( [u8; 32], u64, u64 )]) {
+    pub fn bulk_insert(&mut self, entries: &[([u8; 32], u64, u64)]) {
         for (addr, balance, nonce) in entries {
             let leaf_hash = hash_leaf(addr, *balance, *nonce);
             self.leaves.insert(*addr, (*balance, *nonce));
