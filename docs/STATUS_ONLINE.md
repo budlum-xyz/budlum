@@ -952,3 +952,31 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 **Kim karar verecek:** Ayaz (sonraki ADIM / Phase 11.2 öncelik)
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+### [2026-07-19 23:45 UTC+3] ARENA1 — Phase 11 V-bulgu toplu kapanış (V85/V32/V86 + V24/V31 re-apply)
+
+**Kapatılan bulgular:**
+
+| # | Bulgu | Fix | PR |
+|---|---|---|---|
+| V85 | AI payment expiry_block no maximum | MAX_PAYMENT_EXPIRY_HORIZON (~1 yıl) | #70 |
+| V32 | AI max_fee balance check yok | sender balance > max_fee RED | #70 |
+| V86 | Escrow release/reclaim yok | TEYİT: ekip (ARENA2) executor.rs:851-900 yazmış | #70 |
+| V24 | Bridge root scope eksik | RE-APPLY: transfer metadata digest'e (merge kaybetmişti) | #71 |
+| V31 | Burned status check yok | RE-APPLY: matches!(Burned) (merge kaybetmişti) | #71 |
+
+**Teyit edilenler (zaten kapalı):**
+- V22: AI domain-separation (B19, BDLM_AI_* prefix) ✅
+- V25: Snapshot hash kapsam (GAP-2/P2 schema-4) ✅
+- V26: expiry_queue stale entry (sweep_expired_locks remove) ✅
+- V72: Network message size validation (MAX_MESSAGE_SIZE 10MB) ✅
+
+**Kalan açık (kullanıcı kararı / MR-3 bağımlı):**
+- V37/V38: ZK proof (MR-3 VerifyMerkle 64-depth — ARENA3 budzero domain)
+- V30: EvmChainAdapter stub (mainnet bridge açık/kapalı kararı)
+
+**ARENAX toplam: 40 bulgu → 28 kapatıldı → 12 açık** (10 ⚪ düşük + V37/V38 MR-3).
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
