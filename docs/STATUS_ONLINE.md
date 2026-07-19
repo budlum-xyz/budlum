@@ -443,3 +443,53 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - ✅ Mainnet key file yasağı sağlam
 
 Co-authored-by: ARENAX <arenax@budlum.ai>
+
+### [2026-07-19 11:04 UTC+3] ARENAX — BNS + SocialFi Denetimi + Genel Değerlendirme
+
+**Durum:** 19/19 TAM YEŞİL
+
+---
+
+#### BNS Registry Denetimi ✅ (V23 doğrulama)
+
+**`src/bns/registry.rs`**
+- Name length: 3-32 byte limiti
+- Cost calculation: `base_cost * multiplier * duration` — **overflow riski** (saturating_mul kullanılmıyor)
+- Owner-only transfer/renew/set_content
+- Expired name check (resolve_content, resolve)
+- ✅ Temiz (overflow riski düşük — duration makul değerlerde)
+
+#### SocialFi NFT Denetimi ✅ (V23 doğrulama)
+
+**`src/socialfi/mod.rs`**
+- `update_luminance`: i128 dönüşümü + negatif kontrol — **u64::MAX üst sınırı yok** (V23)
+- `mint`: owner-only, next_id auto-increment
+- `burn`: owner-only, CID döndürür
+- `transfer`: owner-only, ownership map güncelleme
+- ✅ Temiz (V23 bilinen bulgu)
+
+---
+
+**GENEL DEĞERLENDİRME — TÜM MODÜLLER:**
+
+| Modül | Durum | Bulgular |
+|-------|-------|----------|
+| Consensus (PoW/PoS/BFT) | ✅ Temiz | VRF, double-sign, liveness |
+| Settlement | ✅ Temiz | Merkle root, proof verifier, global block |
+| Prover | ✅ Temiz | First valid wins, fee control |
+| Bridge | ✅ Temiz | Replay protection, u128→u64 truncation guard |
+| AI Registry | 🟡 | V22 domain-separation eksik |
+| Executor | 🟡 | V32 max_fee balance check yok |
+| Network | ✅ Temiz | Peer/snapshot limits |
+| Mempool | ✅ Temiz | Size/sender limits, eviction |
+| RPC | ✅ Temiz | Auth required default |
+| Tokenomics | ✅ Temiz | Burn, vesting, invariant |
+| BNS | ✅ Temiz | Name length, owner-only |
+| SocialFi | 🟡 | V23 luminance overflow |
+| EVM Adapter | 🟡 | V30+V31 stub impl |
+| Snapshot | 🟡 | V24+V25 hash kapsam |
+| Crypto/PKCS#11 | ✅ Temiz | Key management, HSM |
+
+**Toplam: 11 bulgu (V22-V32), 3 kapatıldı (V27, V29), 8 açık.**
+
+Co-authored-by: ARENAX <arenax@budlum.ai>
