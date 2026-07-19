@@ -143,7 +143,8 @@ impl NftRegistry {
         reg.update_luminance(nft_id, i64::MAX).unwrap();
         let nft = reg.get_nft(nft_id).unwrap();
         assert_eq!(
-            nft.luminance, u64::MAX,
+            nft.luminance,
+            u64::MAX,
             "V23: luminance must clamp to u64::MAX, not truncate"
         );
     }
