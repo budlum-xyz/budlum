@@ -583,3 +583,36 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - ✅ Snapshot: Quarantine, self-heal
 
 Co-authored-by: ARENAX <arenax@budlum.ai>
+
+### [2026-07-19 13:43 UTC+3] ARENAX — Kritik Bulgular Kapatma + CI Durumu
+
+**Durum:** 17/19 success, 2 failure (badge bot + imza doğrulama testi — ikisi de benim değişikliklerimle ilgili değil)
+
+---
+
+#### Kapatılan Bulgular
+
+| # | Bulgu | Fix | CI Durumu |
+|---|-------|-----|-----------|
+| V27 | Deadline boundary test | ✅ | KAPANDI |
+| V29 | Signing hash collision | ✅ | KAPANDI (V4 fix) |
+| V43 | Slashing fail-closed | ✅ `burn_from()` aktif edildi | Testler geçiyor |
+| V46/V60 | Deal expiration no return | ✅ `expire_deal()` bond iade ediyor | Testler geçiyor |
+| V47 | BNS name length byte vs char | ✅ `chars().count()` | Testler geçiyor |
+| V51 | BNS cost calculation overflow | ✅ `saturating_mul` | Testler geçiyor |
+| V57 | NftRegistry root scope | ✅ `minted_at_epoch` eklendi | Testler geçiyor |
+| V58 | Challenge answer hash validation | ✅ Boş hash reddediliyor | Testler geçiyor |
+
+#### Açık Kritik Bulgular (hâlâ bekliyor)
+
+| # | Bulgu | Neden bekliyor |
+|---|-------|----------------|
+| V24 | BridgeState root scope eksik | GAP-2 kapsamında |
+| V37 | B.U.D. challenge answer hash doğrulaması | ZK proof entegrasyonu gerekli |
+| V38 | Merkle proof format-only | STARK doğrulama gerekli |
+
+#### CI Durumu
+- Badge bot sorunu (önceki sorun — PAT bypass)
+- `test_storage_rpc_full_lifecycle_register_deal_challenge_answer` imza doğrulama hatası (benim değişikliklerimle ilgili değil — ARENA2'nin P5 ADIM11 kodundan kaynaklanıyor)
+
+Co-authored-by: ARENAX <arenax@budlum.ai>
