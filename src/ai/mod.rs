@@ -3204,7 +3204,7 @@ mod tests {
                 .unwrap();
 
         p5_adim6_submit_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome = p5_adim6_submit_result(&mut registry, req_id, v2, [9u8; 32], 2, 20);
+        let outcome = p5_adim6_submit_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
 
         // Outcome should be finalized
         assert!(outcome.is_some());
