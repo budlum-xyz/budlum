@@ -2006,7 +2006,6 @@ değil — ekip yeni dosya ekledi ama fmt uygulamadı. Görev yöneticisi düzel
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
-<<<<<<< HEAD
 ### [2026-07-20 12:30 UTC+3] ARENAS — İlk Denetim Oturumu: Yeni Bulgular V87-V94
 
 **Rol:** ARENAS (Denetim Ajanı) — DURMAKSIZIN AÇIK BULMAK ve raporlamak
@@ -2387,7 +2386,7 @@ Proof gereksinimleri bir koruma sağlasa da, bu metodlar transaction imzası ger
 **Kim karar verecek:** Ayaz (V95 reorg + V103 slashing önceliklendirmesi) + CI (push sonrası)
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
-=======
+
 ### [2026-07-20 02:33 UTC+03:00] ARENA3 — CI onarım: merkle_trie sparse fix + VerifyInference test + Fuzz Quick YEŞİL
 
 **Fuzz (Phase 11.2 G3) CI kanıtı:** SHA `6e3991b` run `29707391318`
@@ -2406,4 +2405,75 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 **Kim karar verecek:** CI otomatik
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
->>>>>>> 7ed196f (fix(storage+zkvm): sparse merkle trie proofs + VerifyInference wiring test)
+
+---
+
+## ADIM 4 — Cross-Domain Bridge Derin Denetim + Network/Storage/Registry Scan
+
+**Tarih:** 2026-07-20
+**Ajan:** ARENAS (Denetim)
+**Onceki SHA:** 4d249f0 (V102-V105 push, CI running)
+
+### V106 (🔴 Kritik) — sweep_expired_locks: Owner'a Bakiye iadesi Yapilmiyor
+
+**Dosya:** `src/chain/blockchain.rs` apply_bridge_sweep() + `src/cross_domain/bridge.rs` sweep_expired_locks()
+**Ciddiyet:** 🔴 Kritik
+**Kategori:** Fon kaybi / Bridge guvenligi
+
+**Aciklama:**
+apply_bridge_sweep suresi dolmus Locked transferleri Active durumuna getirir, ancak transfer sahibinin bakiyesine iade yapmaz. BridgeState::sweep_expired_locks sadece asset_locations'i Active'e cevirir - owner'a token iadesi yapilmaz.
+
+Karsilastirma: mint_bridge_transfer_from_verified_event ve submit_relay_proof fonksiyonlari add_balance ile acikca bakiye kredisi yapar. sweep_expired_locks ise bu adimi atlar.
+
+**Etki:** Kullanici bridge'e kilitledigi fonlari suresi dolsa bile geri alamaz. Fonlar bridge state'te Active olarak gorunur ama hicbir adresin bakiyesinde yoktur. Ayni asset tekrar lock edilebilir ama karsiligi yoktur.
+
+**Oneri:** apply_bridge_sweep icinde her released transfer icin self.state.add_balance(&transfer.owner, transfer.amount as u64) cagrilmali.
+
+---
+
+### V107 (🟡 Yuksek) — Bridge lock() Owner Bakiye Kontrolu Yok
+
+**Dosya:** `src/chain/blockchain.rs` lock_bridge_transfer()
+**Ciddiyet:** 🟡 Yuksek
+**Kategori:** Bridge guvenligi / Enflasyon riski
+
+**Aciklama:**
+lock_bridge_transfer fonksiyonu bridge state'i gunceller ama owner adresinden bakiye dusmez. BridgeState::lock() sadece internal state degisimi yapar. Lock + mint = enflasyon (kaynak zincirde dusulmedi, hedefte yaratildi).
+
+**Oneri:** lock_bridge_transfer icinde owner bakiyesinden amount dusulmeli veya lock() fonksiyonunun sadece kayit tuttugu belgelenmeli.
+
+---
+
+### V108 (⚪ Dusuk) — PipelineError::MissingCorrelationId Tanimli Ama Kullanilmiyor
+
+**Dosya:** `src/cross_domain/bridge_relayer.rs`
+**Ciddiyet:** ⚪ Dusuk
+
+**Aciklama:** MissingCorrelationId varyanti tanimlanmis ama hicbir yerde kullanilmiyor.
+
+---
+
+### V109 (⚪ Dusuk) — RelayerConfig Slash Ratio RegistryParams'tan Bagimsiz
+
+**Dosya:** `src/cross_domain/relayer.rs` RelayerConfig
+**Ciddiyet:** ⚪ Dusuk
+
+**Aciklama:** Relayer slash oranlari RelayerConfig icinde sabit degerlerle tanimli (50 ve 25), ancak RegistryParams'in slash_ratio() metodu da ayni amacla kullaniliyor. Tutarsizlik riski.
+
+---
+
+**Guncel Toplam Denetim Tablosu:**
+
+| Ciddiyet | Sayi | Durum |
+|----------|------|-------|
+| 🔴 Kritik | 11 | 4 kapatildi, 7 acik (V24, V37, V38, V86, V89, V95, V106) |
+| 🟡 Yuksek | 24 | 5 kapatildi, 19 acik |
+| ⚪ Dusuk | 40 | 4 kapatildi, 36 acik |
+
+**Toplam: 75 bulgu (V22-V109), 13 kapatildi, 62 acik**
+
+**Ne bitti:** ADIM 4 — bridge.rs + relayer.rs + bridge_relayer.rs + gossip_dedup.rs + liveness.rs + invalid_vote.rs + evidence.rs + permissionless.rs derin denetlendi. 4 yeni bulgu (V106-V109), 1 kritik (V106 sweep bakiye iadesi eksik).
+**Ne bekliyor:** CI onayi + V106 onarimi + storage/db.rs + evm/ modulleri denetimi.
+**Kim karar verecek:** Ayaz (V106 + V107) + CI (push sonrasi)
+
+Co-authored-by: ARENAS <arenas@budlum.ai>
