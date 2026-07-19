@@ -1001,7 +1001,7 @@ impl Storage {
     /// Stub: content-addressed blob storage is not yet implemented (Phase 0.40 scope).
     pub fn get_content(
         &self,
-        _cid: &crate::storage::content_id::ContentId,
+        _cid: &budlum_bud::ContentId,
     ) -> std::io::Result<Vec<u8>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
