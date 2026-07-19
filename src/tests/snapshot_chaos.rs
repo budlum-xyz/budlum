@@ -130,6 +130,10 @@ mod tests {
     fn recompute_v2_hash_for_test(s: &StateSnapshotV2) -> String {
         use sha3::{Digest, Sha3_256};
         let mut h = Sha3_256::new();
+        // C2/C3: schema>=4 uses domain-separation prefix
+        if s.schema_version >= 4 {
+            h.update(b"budlum.snapshot.v4");
+        }
         h.update(s.schema_version.to_le_bytes());
         h.update(s.height.to_le_bytes());
         h.update(s.block_hash.as_bytes());
