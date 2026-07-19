@@ -539,7 +539,7 @@ mod rpc_tests {
         let ans_res = server
             .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
                 challenge_id,
-                _range_hash: crate::storage::content_id::ContentId([0u8; 32]),
+                _range_hash: crate::storage::content_id::ContentId([1u8; 32]),
                 responder: op,
                 response_epoch: 18,
                 responder_signature: Some(answer_sig),
