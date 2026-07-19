@@ -35,7 +35,10 @@ pub enum SyncCommitteeError {
     /// Geçersiz imza boyutu/encoding.
     InvalidSignature,
     /// Participation eşiğin altında (<2/3 sync-committee).
-    InsufficientParticipation { participating: usize, threshold: usize },
+    InsufficientParticipation {
+        participating: usize,
+        threshold: usize,
+    },
     /// BLS aggregate verify başarısız.
     SignatureVerificationFailed,
     /// Light-client state ile uyumsuz (yanlış period / next_sync_committee).
@@ -102,7 +105,10 @@ pub struct SyncAggregate {
 impl SyncAggregate {
     /// Participation sayısı (bitmap'teki 1-bit sayısı).
     pub fn participation_count(&self) -> usize {
-        self.sync_committee_bits.iter().map(|b| b.count_ones() as usize).sum()
+        self.sync_committee_bits
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum()
     }
 
     /// `index`-inci sync-committee üyesi imzalamış mı?
