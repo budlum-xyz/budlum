@@ -304,9 +304,18 @@ fn invariant_2_no_admin_pause_freeze_hook() {
     let registry: StorageRegistry = StorageRegistry::new();
     // Permissionless yüzey doğrulama: boş registry tüm erişim metodları çalışır,
     // hiçbir admin/pause/freeze metodu yoktur (CLAUDE.md permissionless kuralı).
-    assert!(registry.all_deals().is_empty(), "empty registry has no deals");
-    assert!(registry.all_challenges().is_empty(), "empty registry has no challenges");
-    assert!(registry.all_results().is_empty(), "empty registry has no results");
+    assert!(
+        registry.all_deals().is_empty(),
+        "empty registry has no deals"
+    );
+    assert!(
+        registry.all_challenges().is_empty(),
+        "empty registry has no challenges"
+    );
+    assert!(
+        registry.all_results().is_empty(),
+        "empty registry has no results"
+    );
 }
 
 /// İnvariant 3: Herhangi bir hesap, herhangi bir shard için challenge

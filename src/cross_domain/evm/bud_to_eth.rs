@@ -191,6 +191,9 @@ mod tests {
             bridge_cap: DEFAULT_BRIDGE_CAP,
         };
         let result = build_bud_to_eth_claim(&input);
-        assert!(result.is_err(), "garbage input must be rejected, not accepted");
+        assert!(
+            result.is_err(),
+            "garbage input must be rejected, not accepted"
+        );
     }
 }
