@@ -209,7 +209,7 @@ mod tests {
         ];
         let bytecode: Vec<u8> = program
             .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
+            .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
         let receipt =
@@ -247,7 +247,7 @@ mod tests {
         ];
         let bytecode: Vec<u8> = program
             .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
+            .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
         // Non-mainnet mode should work.
@@ -293,7 +293,7 @@ mod tests {
         ];
         let bytecode: Vec<u8> = program
             .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
+            .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
         let receipt = ZkVmExecutor::execute_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
             .expect("prove/verify against BudZero main");
@@ -362,7 +362,7 @@ mod tests {
         ];
         let bytecode: Vec<u8> = program
             .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
+            .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
         // Non-mainnet mode: VerifyInference should execute successfully.
@@ -421,7 +421,7 @@ mod tests {
         ];
         let bytecode: Vec<u8> = program
             .into_iter()
-            .flat_map(|instruction| instruction.to_le_bytes())
+            .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
         // Mainnet mode without activation: VerifyInference should fail
