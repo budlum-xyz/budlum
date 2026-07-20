@@ -10,18 +10,69 @@ mod rpc_tests {
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
 
-    /// Phase 9 (Faz 3, `9d82f61`): format-gecerli test zarfi (durust marker).
+    /// B.U.D. Faz 3 (V37/V38, ARENA2): GERÇEK STARK kanıtı üreten test zarfı
+    /// (open_deal artık tam on-chain STARK doğrulama yapıyor). Basit bir program
+    /// (write yok → final_state_root = [0;32]) prove edilir, StorageProofBundle
+    /// olarak serialize edilir. storage_root = [0u8; 32] ile eşleşir.
     fn valid_merkle_proof() -> Vec<u8> {
-        let envelope = bud_proof::ProofEnvelope {
-            proof_format_version: 1,
-            backend: "test-backend".to_string(),
-            p3_version: "0.6".to_string(),
-            fri_params_id: "test-fri".to_string(),
-            public_inputs_hash: [0x42u8; 32],
-            proof_bytes: vec![0xABu8; 96],
-            degree_bits: 8,
-        };
-        bincode::serialize(&envelope).expect("test envelope serialize")
+        use bud_isa::{Instruction, Opcode};
+        use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProverAdapter};
+        use sha3::{Digest, Keccak256};
+        use std::sync::OnceLock;
+
+        static CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+        CACHE
+            .get_or_init(|| {
+                let program = vec![
+                    Instruction {
+                        opcode: Opcode::Load,
+                        rd: 1,
+                        rs1: 0,
+                        rs2: 0,
+                        imm: 7,
+                    }
+                    .encode(),
+                    Instruction {
+                        opcode: Opcode::Halt,
+                        rd: 0,
+                        rs1: 0,
+                        rs2: 0,
+                        imm: 0,
+                    }
+                    .encode(),
+                ];
+                let mut vm = bud_vm::Vm::new(8192);
+                let receipt = vm.run_receipt(&program);
+                assert!(receipt.success, "test program must run");
+                let mut hasher = Keccak256::new();
+                for w in &program {
+                    hasher.update(w.to_le_bytes());
+                }
+                let program_hash: [u8; 32] = hasher.finalize().into();
+                let public_inputs = ExecutionPublicInputs {
+                    chain_id: 1,
+                    program_hash,
+                    initial_state_root: [0u8; 32],
+                    final_state_root: receipt.state_writes_digest,
+                    sender: vm.context.sender,
+                    nonce: vm.context.nonce,
+                    block_height: vm.context.block_height,
+                    gas_limit: vm.gas_limit,
+                    gas_used: vm.gas_used,
+                    exit_code: 0,
+                    trace_len: vm.trace.len() as u64,
+                    event_digest: [0u8; 32],
+                };
+                let envelope =
+                    DefaultAdapter::prove(&vm.trace, &public_inputs, &program).expect("prove");
+                let bundle = crate::domain::storage_deal::StorageProofBundle {
+                    envelope,
+                    public_inputs,
+                    program,
+                };
+                bincode::serialize(&bundle).expect("serialize StorageProofBundle")
+            })
+            .clone()
     }
 
     async fn setup() -> (RpcServer, ChainHandle) {
@@ -492,7 +543,7 @@ mod rpc_tests {
                 },
                 crate::domain::storage_params::StorageDomainParams::default(),
                 Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
+                Some([0u8; 32]),
             )
             .await
             .unwrap();

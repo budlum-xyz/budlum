@@ -18,7 +18,7 @@
 use crate::core::address::Address;
 use crate::domain::storage_deal::{
     ChallengeOutcome, DealStatus, RetrievalChallengeRequest, StorageEconomicsParams, StorageError,
-    StorageRegistry,
+    StorageProofBundle, StorageRegistry,
 };
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;
@@ -54,19 +54,83 @@ fn good_econ() -> StorageEconomicsParams {
     }
 }
 
-/// Phase 9 (Faz 3, `9d82f61`): format-GEÇERLİ test zarfı (dürüst marker —
-/// GERÇEK STARK kanıtı değil; bincode-deserialize olabilen minimal ProofEnvelope).
+/// B.U.D. Faz 3 (V37/V38, ARENA2): GERÇEK STARK kanıtı üreten test zarfı.
+///
+/// Eski sürüm dürüst bir sahteydi (format-geçerli ProofEnvelope, gerçek STARK
+/// kanıtı değil). `open_deal` artık TAM on-chain STARK doğrulama yaptığı için
+/// bu yardımcı gerçek bir kanıt üretir: basit bir BudZKVM programı (storage
+/// write yok → `final_state_root = [0;32]`) çalıştırılır, STARK proof üretilir
+/// ve `StorageProofBundle` olarak serialize edilir. İlgili `storage_root`
+/// `[0u8; 32]`'dir (programın final_state_root'u). Kanıt bir kez üretilip
+/// cache'lenir (testler arası pahalı prove tekrarını önlemek için).
 fn valid_merkle_proof() -> Vec<u8> {
-    let envelope = bud_proof::ProofEnvelope {
-        proof_format_version: 1,
-        backend: "test-backend".to_string(),
-        p3_version: "0.6".to_string(),
-        fri_params_id: "test-fri".to_string(),
-        public_inputs_hash: [0x42u8; 32],
-        proof_bytes: vec![0xABu8; 96],
-        degree_bits: 8,
-    };
-    bincode::serialize(&envelope).expect("test envelope serialize")
+    use bud_isa::{Instruction, Opcode};
+    use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProverAdapter};
+    use sha3::{Digest, Keccak256};
+    use std::sync::OnceLock;
+
+    static CACHE: OnceLock<Vec<u8>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // Storage write içermeyen minimal program → final_state_root = [0;32].
+            let program = vec![
+                Instruction {
+                    opcode: Opcode::Load,
+                    rd: 1,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 7,
+                }
+                .encode(),
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ];
+            let mut vm = bud_vm::Vm::new(8192);
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success, "test program must run");
+
+            // program_hash: keccak over program words (zkvm.rs build_public_inputs deseni).
+            let mut hasher = Keccak256::new();
+            for w in &program {
+                hasher.update(w.to_le_bytes());
+            }
+            let program_hash: [u8; 32] = hasher.finalize().into();
+
+            let public_inputs = ExecutionPublicInputs {
+                chain_id: 1,
+                program_hash,
+                initial_state_root: [0u8; 32],
+                final_state_root: receipt.state_writes_digest, // [0;32] (write yok)
+                sender: vm.context.sender,
+                nonce: vm.context.nonce,
+                block_height: vm.context.block_height,
+                gas_limit: vm.gas_limit,
+                gas_used: vm.gas_used,
+                exit_code: 0,
+                trace_len: vm.trace.len() as u64,
+                event_digest: [0u8; 32],
+            };
+            let envelope =
+                DefaultAdapter::prove(&vm.trace, &public_inputs, &program).expect("prove");
+            let bundle = StorageProofBundle {
+                envelope,
+                public_inputs,
+                program,
+            };
+            bincode::serialize(&bundle).expect("serialize StorageProofBundle")
+        })
+        .clone()
+}
+
+/// `valid_merkle_proof` ile eşleşen storage_root (programın final_state_root'u).
+fn valid_storage_root() -> [u8; 32] {
+    [0u8; 32]
 }
 
 // =========================================================================
@@ -98,7 +162,7 @@ fn e2e_three_actor_manifest_to_challenge_flow() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .expect("A deal-open");
 
@@ -115,7 +179,7 @@ fn e2e_three_actor_manifest_to_challenge_flow() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .expect("B deal-open");
     assert_ne!(deal_a, deal_b);
@@ -185,7 +249,7 @@ fn e2e_missed_challenge_slashes_only_the_target_deal() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let deal_b = reg
@@ -200,7 +264,7 @@ fn e2e_missed_challenge_slashes_only_the_target_deal() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let cid = reg
@@ -232,7 +296,7 @@ fn e2e_deal_queries_return_replica_set() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     }
@@ -276,7 +340,7 @@ fn invariant_1_no_whitelist_for_deal_or_challenge() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .expect("stranger opens a deal without any prior approval");
     let _ = reg
@@ -340,7 +404,7 @@ fn invariant_3_any_account_can_challenge_any_deal() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
 
@@ -379,7 +443,7 @@ fn invariant_4_any_account_meeting_bond_can_open_deal() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .expect("any account with bond can open a deal");
     }
@@ -407,7 +471,7 @@ fn invariant_5_opener_bond_must_be_positive() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     assert_eq!(
@@ -438,7 +502,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let cid = reg.open_challenge(deal, 0, 1, 1, 2, addr(2), 5).unwrap();
@@ -461,7 +525,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let cid2 = reg.open_challenge(deal2, 0, 1, 1, 2, addr(2), 5).unwrap();
@@ -491,7 +555,7 @@ fn invariant_7_slashed_deal_rejects_new_challenges() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let cid = reg.open_challenge(deal, 0, 1, 1, 2, addr(2), 5).unwrap();
@@ -524,7 +588,7 @@ fn invariant_8_deal_requires_shard_to_be_in_manifest() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap_err();
     assert!(matches!(err, StorageError::UnknownShard { .. }));
@@ -556,7 +620,7 @@ fn invariant_9_manifest_id_is_deterministic_across_nodes() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let d2 = r2
@@ -571,7 +635,7 @@ fn invariant_9_manifest_id_is_deterministic_across_nodes() {
             good_econ(),
             &dp,
             Some(valid_merkle_proof()),
-            Some([0x42u8; 32]),
+            Some(valid_storage_root()),
         )
         .unwrap();
     let leaf1 = crate::domain::storage_deal::storage_deal_leaf_hash(r1.get_deal(d1).unwrap());

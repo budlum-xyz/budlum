@@ -36,6 +36,21 @@ use crate::storage::content_id::ContentId;
 use crate::storage::manifest::ContentManifest;
 use serde::{Deserialize, Serialize};
 
+/// B.U.D. Faz 3 (V37/V38, ARENA2 2026-07-20): full STARK proof material for a
+/// storage deal. Replaces the former format-only `ProofEnvelope`: carries
+/// everything needed for **on-chain** STARK verification — the proof envelope,
+/// the public inputs it was proven against, and the program. `open_deal`
+/// STARK-verifies this bundle and binds it to the claimed `storage_root`
+/// (`public_inputs.final_state_root == storage_root`), so a well-formed but
+/// invalid proof can no longer open a deal (closes V38 "format-only" and the
+/// V37 answer-hash gap).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageProofBundle {
+    pub envelope: bud_proof::ProofEnvelope,
+    pub public_inputs: bud_proof::ExecutionPublicInputs,
+    pub program: Vec<u64>,
+}
+
 /// RPC-facing DTO for `bud_storageOpenChallenge`.
 ///
 /// Wraps the chain-relevant fields so the JSON shape is explicit and
@@ -413,10 +428,9 @@ impl StorageRegistry {
             .ok_or(StorageError::MerkleProofRequired)?;
         let root = storage_root.ok_or(StorageError::MerkleProofRequired)?;
 
-        // Validate proof format: must deserialize as a valid ProofEnvelope.
-        // Full STARK verification deferred to nodes with prover capability;
-        // the chain validates structural integrity at deal-open time.
-        Self::validate_merkle_proof_format(proof_bytes, &root)?;
+        // Validate proof: FULL on-chain STARK verification + storage_root
+        // binding (V37/V38, ARENA2). Replaces the former format-only check.
+        Self::validate_merkle_proof(proof_bytes, &root)?;
         if start_epoch >= end_epoch {
             return Err(StorageError::InvalidEpochRange {
                 start: start_epoch,
@@ -667,40 +681,44 @@ impl StorageRegistry {
     }
 
     /// B.U.D. Faz 3 (Phase 9): validate merkle proof format.
-    /// Checks that proof_bytes deserializes to a valid ProofEnvelope.
-    /// Full STARK verification (Plonky3Adapter::verify) is deferred to
-    /// nodes with the bud-proof crate and prover capability.
-    pub fn validate_merkle_proof_format(
+    /// B.U.D. Faz 3 (V37/V38, ARENA2 2026-07-20): FULL on-chain STARK
+    /// verification of a storage deal proof. Replaces the former format-only
+    /// check (`validate_merkle_proof_format`).
+    ///
+    /// `proof_bytes` is a bincode-serialized [`StorageProofBundle`]. This:
+    /// 1. deserializes the bundle (envelope + public inputs + program),
+    /// 2. runs full STARK verification (`DefaultAdapter::verify`), and
+    /// 3. binds the proof to the claimed `storage_root`
+    ///    (`public_inputs.final_state_root == storage_root`).
+    ///
+    /// A well-formed but invalid/forged proof now fails deal-open (V38 closed);
+    /// the proof's committed final state must equal the declared storage root
+    /// (V37 answer-hash binding).
+    pub fn validate_merkle_proof(
         proof_bytes: &[u8],
         storage_root: &Hash32,
     ) -> Result<(), StorageError> {
-        // Phase 9 format validation: proof must be non-empty and at least
-        // contain a minimal ProofEnvelope header (version + backend + proof_bytes).
-        if proof_bytes.len() < 64 {
+        use bud_proof::ProverAdapter; // trait method `verify`'i scope'a getir
+
+        let bundle: StorageProofBundle = bincode::deserialize(proof_bytes).map_err(|e| {
+            StorageError::InvalidMerkleProof(format!(
+                "failed to deserialize StorageProofBundle: {e}"
+            ))
+        })?;
+
+        // 2. Full STARK verification (Plonky3Adapter).
+        bud_proof::DefaultAdapter::verify(&bundle.envelope, &bundle.public_inputs, &bundle.program)
+            .map_err(|e| {
+                StorageError::InvalidMerkleProof(format!("STARK verification failed: {e:?}"))
+            })?;
+
+        // 3. Bind the proof to the claimed storage root.
+        if &bundle.public_inputs.final_state_root != storage_root {
             return Err(StorageError::InvalidMerkleProof(
-                "proof too short (< 64 bytes)".into(),
+                "proof final_state_root does not match storage_root".into(),
             ));
         }
-        // Try deserializing as ProofEnvelope via bincode.
-        // The ProofEnvelope has: proof_format_version(u32), backend(String),
-        // p3_version(String), fri_params_id(String), public_inputs_hash([u8;32]),
-        // proof_bytes(Vec<u8>), degree_bits(u32).
-        match bincode::deserialize::<bud_proof::ProofEnvelope>(proof_bytes) {
-            Ok(envelope) => {
-                // Minimal sanity: proof_bytes inside envelope must not be empty.
-                if envelope.proof_bytes.is_empty() {
-                    return Err(StorageError::InvalidMerkleProof(
-                        "ProofEnvelope.proof_bytes is empty".into(),
-                    ));
-                }
-                // Log the proof acceptance (storage_root validated off-chain).
-                let _ = storage_root;
-                Ok(())
-            }
-            Err(e) => Err(StorageError::InvalidMerkleProof(format!(
-                "failed to deserialize ProofEnvelope: {e}"
-            ))),
-        }
+        Ok(())
     }
 
     // ---- Queries (all read-only, no state change) --------------------
