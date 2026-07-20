@@ -36,7 +36,6 @@ services:
       - "--snapshot-dir=/home/budlum/data/snapshots"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
       - "--banned-peer-db=/home/budlum/data/banned-peers.json"
-      - "--bootstrap=/dns4/node1/tcp/4001/p2p/${NODE1_PEER_ID}"
     networks:
       - budlum-net
     restart: unless-stopped
@@ -60,7 +59,7 @@ services:
       - "--difficulty=0"
       - "--db-path=/home/budlum/data/devnet-node2"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
-      - "--bootstrap=/dns4/node1/tcp/4001"
+      - "--dial=/dns4/node1/tcp/4001"
     networks:
       - budlum-net
     depends_on:
@@ -85,7 +84,7 @@ services:
       - "--difficulty=0"
       - "--db-path=/home/budlum/data/devnet-node3"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
-      - "--bootstrap=/dns4/node1/tcp/4001"
+      - "--dial=/dns4/node1/tcp/4001"
     networks:
       - budlum-net
     depends_on:
@@ -110,7 +109,7 @@ services:
       - "--difficulty=0"
       - "--db-path=/home/budlum/data/devnet-node4"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
-      - "--bootstrap=/dns4/node1/tcp/4001"
+      - "--dial=/dns4/node1/tcp/4001"
     networks:
       - budlum-net
     depends_on:

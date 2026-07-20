@@ -4282,6 +4282,22 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
 
+---
+
+### [2026-07-20 14:04 UTC+03:00] ARENA1 — Phase 11.6 SPEC-GATE ADIM BAŞLADI
+
+**Zemin:** origin/main `0396daa` — full CI 19/19 success (run set `29736449214`/`29736449251`; Fuzz Quick ve Genesis dahil yeşil).
+**Rol:** ARENA1 (görev yöneticisi / Phase 11.6 spec koordinasyonu).
+**Kapsam:** Phase 11.6 eksik kabul kriterleri: `docs/spec-review/` checklist + 4 spec review kaydı + `scripts/check-spec-coverage.sh` CI kapısı + spec'lerde `INTERFACE_FROZEN` marker'ları ve interface bölümlerinin netleştirilmesi.
+**Okuma durumu:** `git ls-files` 642 dosya tarandı; 607 text dosyası UTF-8 açıldı, 35 binary/fuzz corpus/PDF dosyası hash+metadata ile envanterlendi; `budlumdevnet` salt-okunur klonlandı (`6613219`) ve değiştirilmeyecek.
+**Budlumdevnet:** dokunulmadı / salt-okunur.
+**Ne bekliyor:** Lokal statik kontroller → push → CI SLEEP.
+**Kim karar verecek:** CI otomatik; Phase 11.6 spec drift çıkarsa Ayaz'a karar kapısı açılacak.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
 ### [2026-07-20 14:20 UTC+03:00] ARENA3 — HARDEN H5–H7 (+H8 prep) kilitleri + protokol progress
 
 **Durum:** Lokal YEŞİL — push → CI SLEEP
@@ -4304,6 +4320,8 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
+---
+
 ### [2026-07-20 14:35 UTC+03:00] ARENA3 — badge hizalama 1121 + H5–H7 CI follow-up
 
 **Durum:** Push → CI SLEEP
@@ -4316,6 +4334,22 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Kim karar verecek:** CI
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+### [2026-07-20 14:46 UTC+03:00] ARENA1 — Phase 11.6 PR #93 merge-sync CI kırmızısı: devnet peer mesh fix
+
+**Durum:** PR #93 branch `7073df6` CI'da 35/36 check yeşile giderken `Devnet Multi-Node Smoke` kırmızı oldu.
+**Kök neden:** origin/main `d7003ad` H5-H7 merge sonrası smoke compose hâlâ node2/3/4 için `--bootstrap=/dns4/node1/tcp/4001` kullanıyordu. H5 bootstrap parser artık `/p2p/<ID>` zorunlu fail-closed davranıyor; CI log kanıtı: `Bootstrap address must contain /p2p/<ID>` ve smoke `[2/5] node1 peer sayısı 3'e ulaşamadı (son=0x0)`.
+**Fix:** `docker-compose.yml` devnet smoke path'i direct dial modeline çekildi: node1 self-bootstrap kaldırıldı; node2/3/4 `--dial=/dns4/node1/tcp/4001` kullanıyor. Kademlia bootstrap yerine explicit libp2p dial ile 4-node mesh hedefleniyor.
+**Lokal doğrulama:** `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅, `git diff --check` ✅. Docker bu sandbox'ta yok; gerçek hakem CI smoke.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + CI SLEEP; özellikle Devnet Multi-Node Smoke sonucu.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
 
 ### [2026-07-20 14:47 UTC+03:00] ARENA3 — CI TAM YEŞİL (9c71dfb) — HARDEN H5–H7 KAPANDI / SLEEP
 

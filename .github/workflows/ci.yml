@@ -562,3 +562,7 @@ jobs:
         run: |
           python3 ./scripts/check_genesis_schema.py --self-test
           python3 ./scripts/check_genesis_schema.py config/mainnet-genesis.json
+      - name: Phase 11.6 spec coverage kapisi + kanarya
+        run: |
+          bash ./scripts/check-spec-coverage.sh --self-test
+          bash ./scripts/check-spec-coverage.sh
