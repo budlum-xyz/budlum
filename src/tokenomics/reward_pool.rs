@@ -133,7 +133,10 @@ mod tests {
             validation_pool_epochs: 0,
             ..Default::default()
         };
-        assert_eq!(schedule.validate(), Err(RewardPoolError::EmptyEpochSchedule));
+        assert_eq!(
+            schedule.validate(),
+            Err(RewardPoolError::EmptyEpochSchedule)
+        );
     }
 
     #[test]
@@ -170,7 +173,8 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        let payouts = reward_for_epoch(schedule, 0, 10, &[(addr(9), 1), (addr(1), 1), (addr(2), 1)]);
+        let payouts =
+            reward_for_epoch(schedule, 0, 10, &[(addr(9), 1), (addr(1), 1), (addr(2), 1)]);
         assert_eq!(total_epoch_payout(&payouts), 1);
         assert_eq!(payouts[0], (addr(1), 1));
         assert_eq!(payouts[1], (addr(2), 0));

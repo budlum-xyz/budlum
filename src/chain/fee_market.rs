@@ -75,7 +75,9 @@ pub fn next_base_fee(parent_base_fee: u64, parent_gas_used: u64, params: FeeMark
     let gas_delta = parent_gas_used as i128 - params.target_gas as i128;
     let denom = params.target_gas as i128 * params.base_fee_max_change_denominator as i128;
     let adjustment = parent.saturating_mul(gas_delta) / denom.max(1);
-    let next = parent.saturating_add(adjustment).max(params.min_base_fee as i128);
+    let next = parent
+        .saturating_add(adjustment)
+        .max(params.min_base_fee as i128);
     next.min(u64::MAX as i128) as u64
 }
 
@@ -127,7 +129,14 @@ mod tests {
 
     #[test]
     fn max_fee_below_base_fee_rejected() {
-        let err = effective_fee(FeeBid { max_fee: 9, priority_fee: 1 }, 10).unwrap_err();
+        let err = effective_fee(
+            FeeBid {
+                max_fee: 9,
+                priority_fee: 1,
+            },
+            10,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             FeeError::MaxFeeBelowBaseFee {
@@ -139,11 +148,25 @@ mod tests {
 
     #[test]
     fn effective_tip_cannot_exceed_priority_or_cap() {
-        let fee = effective_fee(FeeBid { max_fee: 15, priority_fee: 10 }, 10).unwrap();
+        let fee = effective_fee(
+            FeeBid {
+                max_fee: 15,
+                priority_fee: 10,
+            },
+            10,
+        )
+        .unwrap();
         assert_eq!(fee.base_fee_burned, 10);
         assert_eq!(fee.priority_fee_paid, 5);
 
-        let fee = effective_fee(FeeBid { max_fee: 30, priority_fee: 7 }, 10).unwrap();
+        let fee = effective_fee(
+            FeeBid {
+                max_fee: 30,
+                priority_fee: 7,
+            },
+            10,
+        )
+        .unwrap();
         assert_eq!(fee.priority_fee_paid, 7);
     }
 

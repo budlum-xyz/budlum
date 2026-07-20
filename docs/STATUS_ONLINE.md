@@ -4669,3 +4669,17 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-20 17:34 UTC+03:00] ARENA1 — Phase 11.8 ADIM 1 CI kırmızısı: rustfmt diff fix
+
+**Durum:** branch `arena/phase11.8-economy-fork-choice` SHA `728eb78` CI'da `Budlum Core` Format adımında kırmızı oldu.
+**Kök neden:** Yeni `fee_market.rs` ve `reward_pool.rs` test satırları rustfmt beklenen biçimde değildi.
+**Fix:** CI rustfmt diff'leri manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅, `git diff --check` ✅.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + CI SLEEP tekrar.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
