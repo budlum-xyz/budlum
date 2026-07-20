@@ -271,6 +271,16 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 **Kapı G5:** H5.1–H5.6 yeşil.
 
+### H5 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H5.1 /24 eclipse | implemented + locks |
+| H5.3 RPC auth default | locks (`auth_required=true`) |
+| H5.5 MAX_MESSAGE_SIZE | locks |
+| H5.6 multinode smoke | workflow + script lock |
+| H5.2/H5.7 | remaining (diversity/NAT) — mainnet v1 follow-up |
+
 ---
 
 ### Faz H6 — Snapshot, genesis, migration, boot
@@ -284,6 +294,16 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 | H6.5 | Boot quarantine / self-heal | Chaos pin'leri bilinçli |
 
 **Kapı G6:** H6.1+H6.3+H6.4 yeşil · H6.2 ceremony günü.
+
+### H6 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H6.1 determinism workflow | present + lock |
+| H6.3 GAP-1 RequireSigned | verify_authentic locks |
+| H6.4 migration bounds | migration_report locks |
+| H6.2 ceremony F1–F5 | checklist present (ceremony-day) |
+| H6.5 chaos | snapshot_chaos / chaos suites |
 
 ---
 
@@ -301,6 +321,15 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 **Kapı G7:** H7.1–H7.6 yeşil.
 
+### H7 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H7.1–H7.3 deny/gitleaks/CI pins | structural locks |
+| H7.5 coverage ratchet file | numeric baseline lock |
+| H7.6 miri/semver/doc | existing workflows |
+| H7.4 dependabot freeze | policy in STATUS/mainnet docs |
+
 ---
 
 ### Faz H8 — Operasyon, tatbikat, dış denetim, bounty
@@ -316,6 +345,14 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 | H8.7 | Monitoring/alerts | metrics + örnek Prometheus |
 
 **Kapı G8:** H8.1+H8.2+H8.4 yeşil · H8.5 audit başlatma kararı (§11 K4).
+
+### H8 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| Docs: runbook, bounty, audit checklist, validator onboarding | present + lock |
+| H8.1/H8.2 live drills | ceremony/ops day (not auto-claimed) |
+| H8.5 external audit kickoff | user decision K4 |
 
 ---
 

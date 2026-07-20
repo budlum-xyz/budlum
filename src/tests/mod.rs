@@ -121,6 +121,8 @@ pub mod hardening_h2_locks;
 #[cfg(test)]
 pub mod hardening_h4_locks;
 #[cfg(test)]
+pub mod hardening_h5_h7_locks;
+#[cfg(test)]
 pub mod hardening_locks;
 #[cfg(test)]
 pub mod regression_lock;

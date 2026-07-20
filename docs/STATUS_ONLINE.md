@@ -4295,3 +4295,27 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Kim karar verecek:** CI otomatik; Phase 11.6 spec drift çıkarsa Ayaz'a karar kapısı açılacak.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-20 14:20 UTC+03:00] ARENA3 — HARDEN H5–H7 (+H8 prep) kilitleri + protokol progress
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** Hardening Protocol H5/H6/H7 structural + behavioral locks
+
+**Yeni:** `src/tests/hardening_h5_h7_locks.rs` (11 test)
+- H5.1 eclipse bound, H5.3 RPC auth default, H5.5 MAX_MESSAGE_SIZE, H5.6 multinode smoke assets
+- H6.1 determinism/genesis assets, H6.3 GAP-1 RequireSigned sign/verify/untrusted, H6.4 migration bounds
+- H7 supply-chain files + coverage baseline ratchet
+- H8 prep: SECURITY↔BUG_BOUNTY + runbook/audit/onboarding paths
+
+**Docs:** `BUDLUM_HARDENING_PROTOCOL.md` H5–H8 progress tabloları
+
+**H4 teyit:** `hardening_h4_locks` 5/5 ok (mainnet pkcs11 policy, domain tags, CT eq)
+
+**Lokal:** hardening_* yeşil · clippy -D · fmt
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI 23/23; H8 live drills / audit kickoff (K4) ops
+**Kim karar verecek:** CI
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
