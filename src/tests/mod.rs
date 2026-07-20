@@ -54,6 +54,8 @@ pub mod permissionless_e2e;
 pub mod persistence;
 pub mod poa_isolation;
 #[cfg(test)]
+pub mod pollen_ai_data_rights;
+#[cfg(test)]
 pub mod pow_light_client;
 #[cfg(test)]
 pub mod prover;
@@ -103,6 +105,11 @@ pub mod target_700;
 #[cfg(test)]
 pub mod bridge_negatives;
 pub mod domain_edge_cases;
+#[cfg(test)]
+pub mod encryption_dao;
+// Phase 11.3 Görev 4: PoA katılımcı onboarding yaşam-döngüsü + whitelist
+// zorunluluğu + KYC expiry test matrisi. İzolasyon mührü poa_isolation.rs'de.
+pub mod poa_onboarding_matrix;
 // P0 mainnet-gap 3/3 (ARENA3, 2026-07-19): snapshot-corruption +
 // crash-recovery kaos süiti. İki _gap pini bilinçli olarak bugünkü davranışı
 // mühürler (snapshot authenticity yok + v1/v2 çapraz-gölgeleme + boot
@@ -111,6 +118,12 @@ pub mod domain_edge_cases;
 pub mod snapshot_chaos;
 // P5 regresyon kilidi (ARENA2, 2026-07-19): ZK finality fail-open +
 // relayer escrow silent-failure CI kırıcı güvenlik mühürleri.
+#[cfg(test)]
+pub mod hardening_h2_locks;
+#[cfg(test)]
+pub mod hardening_h4_locks;
+#[cfg(test)]
+pub mod hardening_h5_h7_locks;
 #[cfg(test)]
 pub mod hardening_locks;
 #[cfg(test)]

@@ -1,77 +1,124 @@
-# BUDLUM & BUDZERO — FORMAL THREAT MODEL & SECURITY SPECIFICATION
+# Budlum Threat Model v1
 
-**Tarih:** 2026-07-15  
-**Sürüm:** v0.3-dev (Controlled Public-Devnet Candidate)  
-**Hazırlayan:** Arena AI / ARENA3 (Lubo / Phase 0.378 Paket F)
+**Durum:** Draft v1 (Phase 11.6) → v2 Phase 11.20 (tüm fazların azaltmalarıyla güncellenir)
+**ADR:** [ADR-010](adr/ADR-010-security-audit-hsm.md)
+**Metodoloji:** STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege)
+**Tehdit sınıflandırması:** 🔴 Kritik / 🟠 Yüksek / 🟡 Orta / 🔵 Düşük
 
-> **Önemli Uarı:** Bu belge, `DEVIR_RAPORU_YENI.md` §7 Paket F gereğince
-> bağımsız dış denetçilerin (`External Security Audit`) incelemesine esas olmak
-> üzere hazırlanmış bir **teslim ve tehdit modeli paketidir**. Bu belgenin varlığı,
-> harici denetimin tamamlandığı anlamına gelmez; yalnızca sistemin varsayımlarını,
-> saldırı yüzeylerini ve mimari sınırlarını dürüstçe tanımlar.
+## 1. Sistem Sınırları ve Güven Varlıkları
 
----
+**Güven varlıkları:**
+- Konsensüs katmanı (PoW/PoS/BFT/PoA domain'leri)
+- State (ledger, account balances, registry)
+- Cross-domain bridge (lock/mint/burn)
+- Kullanıcı anahtarları (wallet, validator signing key)
+- AI/data layer (Pollen grants, B.U.D. storage)
+- p2p ağı (libp2p)
 
-## 1. Sistem ve Varlık Tanımı (Assets Identification)
+**Güven sınırı:**
+- Node operatörleri (validator)
+- Relayer (permissionless, staked)
+- Kullanıcı (wallet holder)
+- Dış zincir (Ethereum bridge)
 
-Budlum L1 (`budlum-core`) ve BudZero (`budzero/` BudZKVM + STARK motoru),
-çok-konsensüslü (`ConsensusDomain`) bir evrensel mutabakat katmanıdır. Sistem
-üzerinde korunan temel varlıklar:
+## 2. Konsensüs Tehditleri
 
-1. **`GlobalBlockHeader` Mutabakat Kaydı:** Çapraz domain transferlerinin ve
-   finality sertifikalarının geri dönülemez (durable) kaydı.
-2. **Çapraz Domain Köprü Varlıkları (`BridgeState`):** Kilitlenen (`Lock`) varlıkların
-   hedef domain'de basılması (`Mint`) ve yakıldıktan (`Burn`) sonra kaynak domain'de
-   serbest bırakılması (`Unlock`).
-3. **BLS + Dilithium5 (PQ) İmzacı Anahtarları:** Finality koordinatörü ve post-kuantum
-   doğrulama anahtarları.
-4. **`PermissionlessRegistry` Stake Depoları:** Validator, Verifier, Relayer, Prover
-   ve Storage Operator rollerinin teminatları (`bond`).
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| C1 | Nothing-at-stake (PoS — aynı blokta iki imza) | Tampering | 🔴 | SlashingCondition::DoubleSign (slashing_matrix.rs) | QC fault proof (V103) — slash uygulanıyor |
+| C2 | Long-range attack (PoS — eski key'lerle geçmiş rewrite) | Tampering | 🔴 | Finality checkpoint + weak-subjectivity | Light client checkpoint sync (ADR-007) |
+| C3 | Equivocation (BFT — iki çakışan blok) | Tampering | 🔴 | QcFaultProof::InvalidateFinality + slash | ✅ V103 |
+| C4 | 51% hash power (PoW — reorg) | Tampering | 🟠 | Finality checkpoint (finalized block reorg reddi) | — |
+| C5 | Validator key theft (imzalama anahtarı çalınma) | Spoofing | 🔴 | HSM policy (ADR-010) | Soft launch'ta software key risk |
+| C6 | Validator downtime (liveness fault) | DoS | 🟡 | LivenessTracker + LivenessFault slashing | — |
+| C7 | LMD-GHOST fork bomb (PoS — çok fork) | DoS | 🟠 | fork_choice bound + finality | ADR-007 impl |
+| C8 | Domain lifecycle abuse (kötü domain start) | EoP | 🟡 | proposal-driven lifecycle (ADR-007) | Governance whitelist |
 
----
+## 3. Bridge / Cross-Domain Tehditleri
 
-## 2. Kriptografik Varsayımlar (Cryptographic Assumptions)
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| B1 | Forged EVM receipt proof (sahte deposit) | Tampering | 🔴 | EvmChainAdapter Merkle verify (V30) + verify_evm_receipt | ✅ V30 |
+| B2 | Replay attack (aynı mesaj tekrar) | Tampering | 🔴 | BridgeState.replay.mark_processed (V24) | ✅ V24 |
+| B3 | Domain spoofing (source≠target bypass) | Tampering | 🟠 | submit_cross_domain_message spoof check (Görev 2) | ✅ Görev 2 |
+| B4 | Anchor substitution (sahte finalize anchor) | Tampering | 🟠 | bridge_negatives testleri (P0 gap) | ✅ |
+| B5 | Inactive relayer submits stale message | DoS | 🟡 | relayer active check (relayer_liveness) | ✅ |
+| B6 | Bridge unlock without burn (double-spend) | Tampering | 🔴 | V17 unlock fix + V24 lock | ✅ V17 |
 
-| Kriptografik Birim | Amaç | Güvenlik Varsayımı & Sınırı |
-|--------------------|------|-----------------------------|
-| **Ed25519** | Temel hesap kimliği & PoS/PoA blok üretimi | Standart ayrık logaritma zorluğu. Kuantum kırılmasında (`~2030-2035`) L1 blok üretimi BLS/PQ katmanına devredilmelidir. |
-| **BLS12-381** | Finality sertifikası agregasyonu | Çift doğrusal eşleme (`bilinear pairing`) zorluğu. Subgroup saldırılarına karşı `verify_bls_sig_rejects_subgroup_attack` denetimleri aktiftir. |
-| **Dilithium5 (ML-DSA)** | Post-kuantum finality & QC imza kanıtları | Modül örgüler (`Module-Lattice`) üzerinde kısa vektör bulma zoru (`NIST FIPS 204`). |
-| **Poseidon / Poseidon4** | BudZero STARK AIR & B.U.D. `ContentId` | Cebirsel saldırılara ve satır patlamalarına (`trace blowup`) karşı 10 gas sınırlı STARK dostu karma fonsiyonu. |
-| **SHA3-256 / Keccak-256** | Blok başlıkları, snapshot ID ve DB adresleme | Klasik çakışma (`collision`) direnci (256-bit). |
+## 4. p2p / Ağ Tehditleri
 
----
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| N1 | Eclipse attack (node kendi peer'larıyla çevrelenme) | DoS/Tampering | 🔴 | /24 subnet bound (H2, ekip 261df88) | ADR-008 full hardening |
+| N2 | Sybil (kimlik flooding) | DoS | 🟠 | stake/reputation | ADR-008 reputation |
+| N3 | Gossipsub MessageId collision (mesaj çakışma) | Tampering | 🟠 | V114 fix (ekip eb56e72) | ✅ V114 |
+| N4 | Peer reputation gaming | Tampering | 🟡 | reputation scoring (ADR-008) | Tuning testi |
+| N5 | NAT traversal abuse (relay üzerinden saldırı) | DoS | 🔵 | auto-nat config (ADR-008) | — |
 
-## 3. Tehdit Aktörleri & Saldırı Vektörleri (Threat Vectors)
+## 5. Wallet / Hesap Tehditleri
 
-### 3.1 Çapraz Domain Köprü Sahtekarlığı (Bridge Forgery & Replay)
-- **Tehdit:** Kötü niyetli bir relayer veya domain operatörü, sahte veya henüz kesinleşmemiş (`Pending/Rejected`) bir `DomainCommitment` veya `PoWHeaderChain` kanıtını kullanarak yoktan varlık basmak (`Infinite Mint`) veya çift harcama yapmak (`Replay Attack`).
-- **Azaltma / Koruma (Mitigation):**
-  - PoW mint işlemleri yalnızca `applied` ve `contiguous` domain zinciri üzerindeki `pow-header-chain-v1` finality sertifikaları üzerinden yapılabilir; legacy `pow-confirmation-depth` kanıtlarına mint yetkisi kapalıdır (`tur13_5_pow_header_finality...`).
-  - Çapraz domain mesajlarında deterministik `MessageId` ve her transfer için artan `replay_nonce_root` denetimi mecburidir.
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| W1 | Anahtar kaybı (fon kaybı) | — | 🔴 | Social recovery (ADR-005) | ADR-005 impl |
+| W2 | Guardian collusion (recovery saldırısı) | Tampering | 🟠 | Guardian threshold + rotation (ADR-005) | ADR-005 test |
+| W3 | Multisig owner compromise | Spoofing | 🟠 | M-of-N threshold (ADR-005) | ADR-005 impl |
+| W4 | Seed phrase leak (BIP39) | Info Disclosure | 🔴 | wallet-core + HSM (operatör) | HSM policy (ADR-010) |
 
-### 3.2 ZKVM Soundness & Sahte Kanıt Kabulü (STARK Forgery)
-- **Tehdit:** Kötü niyetli bir prover, geçersiz bir execution trace veya Merkle yolunu sahte bir STARK kanıtı ile sarmalayarak (`ProofClaimRegistry`) L1 mutabakatına kabul ettirmek.
-- **Azaltma / Koruma (Mitigation):**
-  - ZK finality adaptörü (`ZkFinalityAdapter::verify_finality`), trait üzerinden asla doğrudan kabul etmez (`fail-closed reject`). Yalnızca `verify_finality_with_claim` üzerinden `final_state_root` ve `ProofClaimRegistry` çift taraflı eşleşmesiyle onaylar.
-  - `VerifyMerkle` (0x1E) opcode'u, pozitif 64-depth proof tamamen yeşil olana kadar production decode aşamasında fail-closed reddedilir (`experimental gate`).
+## 6. AI / Data (Pollen) Tehditleri
 
-### 3.3 Düz Metin Anahtar Sızdırması (Key Exfiltration on Disk)
-- **Tehdit:** Sunucuya sızan bir saldırıcının disktki konfigürasyon veya anahtar dosyalarından BLS veya PQ Dilithium5 özel anahtarlarını ele geçirmesi.
-- **Azaltma / Koruma (Mitigation):**
-  - Mainnet konfigürasyonlarında düz metin olarak diske yazılmış BLS (`bls_key`) ve PQ Dilithium5 (`pq_key`) anahtarlarının yüklenmesi `validate_mainnet_disk_policy` tarafından anında reddedilir (`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`). Mainnet üzerinde donanımsal HSM (`PKCS#11 / BLS-PQ HSM mock`) kullanımı zorunludur.
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| A1 | AI izinsiz veri okuma | Info Disclosure | 🔴 | AI read gate (ai_data_access_denied, A4-1) | ✅ A4-1 |
+| A2 | AccessGrant replay (aynı grant tekrar) | Tampering | 🟠 | bounded reads (reads_used < max_reads) | ✅ A4-1 |
+| A3 | Grant forge (sahte owner imza) | Tampering | 🔴 | owner_signature validation + sentinel reddi | ✅ A4-1 |
+| A4 | DAO decrypt yetkisi gaslighting | EoP | 🔴 | DAO decrypt authority yok (invariant, P12-4) | P12-4 |
 
-### 3.4 Çapraz Sürüm (Schema Version) / Snapshot Zehirlenmesi
-- **Tehdit:** Saldırganın ağa eski şemalı (`v1`) eksik durum zarfları veya bozuk V2 anlık görüntüleri (`StateSnapshotV2`) sürerek düğümleri çökertecek reorg veya mutabakat yarılması (`Split-Brain`) yaratması.
-- **Azaltma / Koruma (Mitigation):**
-  - `StateSnapshotV2::from_bytes` içerisindeki `ConsensusStateV2` şema kancası, `MIN_SCHEMA_VERSION = 2` altındaki ve `MAX_SCHEMA_VERSION = 3` üstündeki tüm snapshot'ları fail-closed reddeder. Bozuk snapshot dosyaları `quarantine` edilerek `.corrupted` uzantısıyla izole edilir.
+## 7. PoA / Regülasyon Tehditleri
 
----
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| P1 | PoA rules permissionless'e sızma | EoP | 🔴 | PoA Isolation (CI Madde 9, 8 test) | ✅ Görev 4 mührü |
+| P2 | PoA admin freeze abuse | DoS | 🟠 | admin rotation + audit (ADR-009) | ADR-009 impl |
+| P3 | KYC metadata leak (cross-domain) | Info Disclosure | 🟠 | CrossDomainMessage KYC taşımaz (P0 gap test) | ✅ |
 
-## 4. Bilinen Sınırlar ve Dış Denetim Borçları (Known Limitations)
+## 8. Governance Tehditleri
 
-Aşağıdaki mimari yetenekler **Phase 0.40** kapsamında tamamlanacak olup, mevcut `v0.3-dev` sürümünde bilinçli olarak kapalı veya araştırma aşamasındadır:
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| G1 | Governance whitelist'e permissionless ekleme | EoP | 🔴 | Parametre whitelist invariant (ADR-004) | ADR-004 impl |
+| G2 | Vote manipulation (stake transfer) | Tampering | 🟠 | Stake-ağırlıklı vote + snapshot | ADR-004 impl |
+| G3 | Timelock bypass (anında parametre değişimi) | Tampering | 🟠 | Timelock zorunlu (ADR-004) | ADR-004 impl |
+| G4 | DAO halt rollback (no-rollback ihlali) | Tampering | 🔴 | Constitution no-rollback ilkesi | ✅ (mevcut) |
 
-1. **BLS / PQ Dilithium5 Donanım HSM Sürücüsü (`Phase 0.402`):** Ed25519 için PKCS#11 sürücüsü aktiftir; BLS/PQ için donanım entegrasyonu tamamlanana kadar disk yasağı fail-closed devrededir.
-2. **`ConsensusStateV2` Canlı Şema Göçü (`Phase 0.408`):** Şema kancaları (`snapshot.rs`) hazırdır; canlı zincir üzerinde dinamik state transform hook'ları Phase 0.408 borcudur.
-3. **Sürekli Fuzzing Altyapısı (`Phase 0.414`):** `cargo-audit` ve `SBOM` üretimi mevcuttur; sürekli (`continuous`) OZZ/AFL fuzzing hedeflenmektedir.
+## 9. Storage Tehditleri
+
+| # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
+|---|---|---|---|---|---|
+| S1 | Forged storage proof (sahte depolama kanıtı) | Tampering | 🔴 | Storage challenge + proof (spec Phase 11.6) | ADR-002 impl |
+| S2 | Storage node plaintext zorunlu kılma | EoP | 🔴 | Encryption policy (P12-4, DAO dokunamaz) | P12-4 |
+| S3 | Pruning ile finalized state kaybı | Tampering | 🟠 | Snapshot retantion (ADR-003) | ADR-003 impl |
+
+## 10. Özet: Açık Riskler (v2'de takip)
+
+**🔴 Kritik açık (mainnet öncesi kapatılmalı):**
+- C2 Long-range attack → light client checkpoint (ADR-007)
+- C5 Validator key theft → HSM policy (ADR-010)
+- W1 Anahtar kaybı → social recovery (ADR-005)
+- A4 DAO decrypt gaslighting → P12-4 invariant
+- S1 Forged storage proof → ADR-002 impl
+- G4 DAO halt rollback → sürekli kanıt
+
+**🟠 Yüksek (mainnet öncesi azaltma):**
+- N1 Eclipse → ADR-008
+- W2 Guardian collusion → ADR-005
+- P2 PoA admin abuse → ADR-009
+- G1/G2/G3 Governance → ADR-004
+
+**v2 (Phase 11.20):** tüm fazların (11.8-11.18) gerçekleşmiş azaltmalarıyla güncellenir; kalan açık riskler + mainnet sonrası takip listesi çıkarılır.
+
+## 11. İlgili
+
+- `docs/SECURITY_AUDIT_HACKER.md` — V17-V7 bulguları (geçmiş tehdit denetimi)
+- `SECURITY.md`, `docs/BUG_BOUNTY.md` — sürekli tehdit tespiti
+- 10 ADR (`docs/adr/`) — her tehdit için azaltma kararı
+- Phase 11.6-11.20 yol haritası — azaltmaların implementasyon fazları

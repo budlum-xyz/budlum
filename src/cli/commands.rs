@@ -869,42 +869,25 @@ impl NodeConfig {
         }
 
         if self.network == Network::Mainnet {
-            // Rule 1: Mainnet validators may not fall back to local key files.
-            if self.role == "validator" && self.signer_backend.as_deref() != Some("pkcs11") {
-                eprintln!("CRITICAL SECURITY FAILURE: Mainnet validators require validator.signer.backend = 'pkcs11'.");
-                std::process::exit(1);
-            }
+            // Rule 1 / H4.1: mainnet validators — pure policy (crypto::mainnet_policy).
             if self.role == "validator" {
-                let module_path = self.pkcs11_module_path.as_deref().unwrap_or_default();
-                if module_path.is_empty() {
-                    eprintln!("CRITICAL SECURITY FAILURE: Mainnet validators require a PKCS#11 module_path.");
-                    std::process::exit(1);
-                }
-                let pin_env = self.pkcs11_token_pin_env.as_deref().unwrap_or_default();
-                if pin_env.is_empty() {
-                    eprintln!("CRITICAL SECURITY FAILURE: Mainnet validators require a PKCS#11 token_pin_env.");
-                    std::process::exit(1);
-                }
-                if std::env::var(pin_env)
-                    .map(|pin| pin.is_empty())
-                    .unwrap_or(true)
-                {
-                    eprintln!("CRITICAL SECURITY FAILURE: PKCS#11 PIN environment variable '{}' is missing or empty.", pin_env);
-                    std::process::exit(1);
-                }
-                // Phase 2 §1.1: PKCS#11 must cover the consensus Ed25519 signer
-                // and the BLS + Dilithium/PQ materials. Disk-backed
-                // ValidatorKeys embed those secrets in plaintext and remain
-                // forbidden on mainnet.
-                if self.validator_key_file.is_some() {
-                    eprintln!(
-                        "CRITICAL SECURITY FAILURE: Mainnet validators must not load ValidatorKeys from disk (file holds BLS + post-quantum secrets in plaintext). Configure PKCS#11 with Ed25519 plus BLS and Dilithium/PQ key material."
-                    );
+                use crate::crypto::mainnet_policy::{
+                    check_mainnet_validator_key_policy, MainnetValidatorKeyConfig,
+                };
+                let cfg = MainnetValidatorKeyConfig {
+                    signer_backend: self.signer_backend.as_deref(),
+                    validator_key_file: self.validator_key_file.as_deref(),
+                    pkcs11_module_path: self.pkcs11_module_path.as_deref(),
+                    pkcs11_token_pin_env: self.pkcs11_token_pin_env.as_deref(),
+                    resolve_pin_env: true,
+                };
+                if let Err(v) = check_mainnet_validator_key_policy(&cfg) {
+                    eprintln!("CRITICAL SECURITY FAILURE: {v}");
                     std::process::exit(1);
                 }
                 println!(
                     "INFO: Mainnet validator will use PKCS#11 HSM backend (module: {}, slot: {})",
-                    module_path,
+                    self.pkcs11_module_path.as_deref().unwrap_or(""),
                     self.pkcs11_slot_id.unwrap_or(0)
                 );
             }

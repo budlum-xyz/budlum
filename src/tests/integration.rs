@@ -395,18 +395,15 @@ mod integration_tests {
             .validate_and_add_block(conflicting_block)
             .map(|_| ());
         assert!(result.is_err());
-        // V127: height continuity check may fire before the finalized check.
-        // Both correctly reject the block.
+        // Finality conflict is checked before tip continuity; accept either
+        // message if ordering changes again.
         let err = result.unwrap_err();
         assert!(
             err.contains("conflicts with finalized checkpoint")
-                || err.contains("height discontinuity"),
+                || err.contains("height discontinuity")
+                || err.contains("Block height discontinuity"),
             "unexpected error: {err}"
         );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("conflicts with finalized checkpoint"));
     }
 
     #[test]
@@ -592,8 +589,8 @@ mod integration_tests {
         blockchain.handle_qc_fault_proof(proof).unwrap();
 
         let validator = blockchain.state.get_validator(&pubkey).unwrap();
-        assert!(!validator.slashed);
-        assert_eq!(validator.stake, 2_000);
+        // V103: InvalidDilithium fault proof slashes the offender.
+        assert!(validator.slashed);
         assert_eq!(blockchain.finalized_height, 0);
     }
 

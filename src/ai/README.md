@@ -25,9 +25,11 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 - ⚠️ **Determinizm riski.** Aynı model farklı donanımda farklı çıktı verebilir →
   `agreement_threshold` hiç sağlanmayabilir. "Bounded model class" whitelist veya
   attestation sınırları mainnet öncesi dokümante edilmeli.
-- ⚠️ **AI ↔ B.U.D. AccessGrant entegrasyonu YOK (F10.5-07).** `input_ref` opak
-  `Vec<u8>`; eğer bir B.U.D. `DataAsset`'ine işaret ediyorsa `AiVerifier` hesaplamadan
-  ÖNCE geçerli `AccessGrant` kontrolü ZORUNLU (Bölüm 2.2). Ayrı RFC adayı (P5).
+- ✅ **AI ↔ B.U.D./Pollen AccessGrant admission gate (ARENA4 ADIM1).**
+  `input_ref` hâlâ legacy opak bytes olabilir; ancak Pollen `AiDataInputRef`
+  prefix'i taşıyorsa executor geçerli `AccessGrant` olmadan request'i
+  `ai_data_access_denied` ile reddeder. DAO/admin override yoktur. HPKE
+  hard-enforcement hâlâ Faz-2 encryption işidir.
 
 ## Güvenlik (P5 ship edildi)
 

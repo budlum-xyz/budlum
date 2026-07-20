@@ -1957,7 +1957,15 @@ impl Blockchain {
                 // lock message; the transfer lives under the lock message id
                 // and unlock must reference the TRANSFER's own source domain
                 // (same resolution as the direct verified-burn path).
-                let transfer_id = message.correlation_id.unwrap_or(message.message_id);
+                // V138 fix (ARENAS): correlation_id is MANDATORY for BridgeBurn.
+                // The executor path (RelayerResult) already requires it (V128 fix).
+                // Using unwrap_or(message.message_id) is incorrect because the burn
+                // message has its OWN message_id (different from the lock transfer id).
+                // Without correlation_id, we'd try to look up the burn message_id in
+                // the transfer table — which would only match by coincidence.
+                let transfer_id = message.correlation_id.ok_or_else(|| {
+                    "Bridge burn message missing correlation_id (V138: required to identify original lock transfer)".to_string()
+                })?;
                 let lock_source_domain = self
                     .state
                     .bridge_state
@@ -2677,11 +2685,15 @@ impl Blockchain {
             // V106: Transfer sahibine kilidi açılan miktarı iade et.
             // amount u128 olabilir ama budlum bakiyeleri u64 — truncate riski
             // düşük (6 ondalık BUD, max supply 100M = 100_000_000_000_000 u64)
-            if *amount <= u64::MAX as u128 {
-                self.state.add_balance(owner, *amount as u64);
-            } else {
+            // V135 fix (ARENAS): u128→u64 clip yerine u64::MAX ile refund.
+            // Önceki kod u64'ü aşan tutarları tamamen atlıyordu — BUD kaybı!
+            // u64::MAX = 18.4 quintillion base units = 18.4 trillion BUD.
+            // Pratikte bu asla aşılmaz ama güvenlik için kırpma yapıyoruz.
+            let refund_amount = (*amount).min(u64::MAX as u128) as u64;
+            self.state.add_balance(owner, refund_amount);
+            if *amount > u64::MAX as u128 {
                 tracing::warn!(
-                    "Bridge sweep: amount {} exceeds u64::MAX for owner {}, skipping balance refund",
+                    "Bridge sweep: amount {} exceeds u64::MAX for owner {}, clipped to u64::MAX",
                     amount,
                     owner
                 );
@@ -4527,23 +4539,17 @@ mod tests {
         bc.finalized_height = 0;
         bc.finalized_hash = bc.chain[0].hash.clone();
 
-        // V127 fix: height continuity is checked first. To test the
-        // finalized-conflict path, the block index must match the
-        // expected chain tip height (1, since genesis is at index 0).
+        // Conflict at finalized height 0 (genesis path) with a different hash.
+        // Finality check runs before tip continuity and must reject.
         let mut bad_block = bc.chain[0].clone();
-        bad_block.index = 1; // Must equal bc.chain.len() to pass height check
         bad_block.previous_hash = "wrong".to_string();
         bad_block.hash = bad_block.calculate_hash();
 
         let result = bc.validate_and_add_block(bad_block).map(|_| ());
         assert!(result.is_err());
-        // Either "conflicts with finalized" or "height discontinuity" is
-        // acceptable — both reject the block. The height check fires first
-        // when block.index doesn't match chain.len(), and the finalized
-        // check fires when it does but the hash conflicts.
         let err = result.unwrap_err();
         assert!(
-            err.contains("conflicts with finalized") || err.contains("height discontinuity"),
+            err.contains("conflicts with finalized"),
             "unexpected error: {err}"
         );
     }

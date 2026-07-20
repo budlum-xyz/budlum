@@ -133,7 +133,19 @@ jobs:
               fi
               sleep 2
             done
-            [ "$PUSH_OK" = "1" ] || { echo "FAIL: rozet 3 denemede pushlanamadi"; exit 1; }
+            # MR-1 false-red fix (ARENA3, 2026-07-20): rozet KOZMETİK'tir.
+            # BADGE_PUSH_TOKEN eksik/kesintili + protected main → push red gelmesi
+            # tüm Budlum Core job'unu yanıltıcı-kırmızı yapıyordu (kanıt: 21ea24e
+            # step 13 fail; tekrar ARENA4 13:18). Yukarıdaki test-failure gardı
+            # ('grep failed → exit 1') ve parse-failure gardı AYNEN korunur;
+            # yalnızca rozet-PUSH başarısızlığı artık job'u kırmızı yapmaz. Rozet
+            # BADGE_PUSH_TOKEN mevcutken otomatik pushlanmaya devam eder.
+            if [ "$PUSH_OK" = "1" ]; then
+              echo "rozet push OK"
+            else
+              echo "UYARI (soft-fail, MR-1): rozet 3 denemede pushlanamadi — BADGE_PUSH_TOKEN eksik/kesintili veya protected main. Cekirdek testler gecti; rozet kozmetiktir, is kirmizi yapilmaz."
+              exit 0
+            fi
           fi
 
   budzero:
@@ -562,3 +574,7 @@ jobs:
         run: |
           python3 ./scripts/check_genesis_schema.py --self-test
           python3 ./scripts/check_genesis_schema.py config/mainnet-genesis.json
+      - name: Phase 11.6 spec coverage kapisi + kanarya
+        run: |
+          bash ./scripts/check-spec-coverage.sh --self-test
+          bash ./scripts/check-spec-coverage.sh

@@ -184,6 +184,18 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 **Kapı G2:** `FIX-NOW` kuyruğu boş · `ACCEPT-RISK` listesi docs'ta · CI yeşil.
 
+### H2 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| V130 finalize/vote window | locked (`hardening_h2_locks`) |
+| V131 BNS duration=0 | locked |
+| V132 burn_from clip | locked (warn+return) |
+| V133 challenge cap | locked (`storage_deal::v133_max_open_challenges_per_deal`) |
+| V123 hub self-verify honesty | `developer_attested` ≠ `verified` |
+| H5.1 eclipse /24 | `PeerManager` + Node admission |
+| V111 L1 trie 256-bit | structural lock |
+
 ---
 
 ### Faz H3 — Derin dinamik güvenlik (fuzz / chaos / property)
@@ -203,6 +215,18 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 **Kapı G3:** H3.1–H3.2 yeşil · yeni crash = 🔴 aç ve G1'e düş.
 
+### H3 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H3.1 Fuzz Quick 8 targets | CI job present (60s×8) |
+| H3.2 Fuzz Nightly matrix | 8 targets × 4h (incl. consensus/relayer/zk) |
+| H3.3–H5 Phase 11.2 targets | present + expanded seed corpus |
+| H3.6 deserialize targets | present |
+| H3.7 chaos suites | `chaos.rs`, `snapshot_chaos.rs` |
+| H3.8 proptest | `tokenomics_proptest`, `proptest_core` |
+| V113 recover + bridge | `BRIDGE_STATE_AT:{h}` + rollback on interrupt |
+
 ---
 
 ### Faz H4 — Kriptografi ve anahtar koruma
@@ -217,6 +241,17 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 | H4.6 | Miri (crypto + seçili budzero) | UB = 0 |
 
 **Kapı G4:** H4.1+H4.4+H4.6 yeşil · H4.3 ya tamam ya "mainnet v1 out-of-scope" beyanı.
+
+### H4 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H4.1 disk / mock fail-closed | `mainnet_policy` + CLI wire + `validate_mainnet_disk_policy` locks |
+| H4.2 PKCS#11 path | existing `pkcs11.rs` + mainnet requires module/pin |
+| H4.3 vendor-native BLS/PQ | **mainnet v1 out-of-scope** (docs honesty lock) |
+| H4.4 timing-safe | CI job + `constant_time_eq_str` correctness lock |
+| H4.5 domain tags | `docs/CRYPTO_DOMAIN_TAGS.md` inventory + lock |
+| H4.6 Miri | existing `miri.yml` crypto+bud-vm |
 
 ---
 
@@ -236,6 +271,16 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 **Kapı G5:** H5.1–H5.6 yeşil.
 
+### H5 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H5.1 /24 eclipse | implemented + locks |
+| H5.3 RPC auth default | locks (`auth_required=true`) |
+| H5.5 MAX_MESSAGE_SIZE | locks |
+| H5.6 multinode smoke | workflow + script lock |
+| H5.2/H5.7 | remaining (diversity/NAT) — mainnet v1 follow-up |
+
 ---
 
 ### Faz H6 — Snapshot, genesis, migration, boot
@@ -249,6 +294,16 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 | H6.5 | Boot quarantine / self-heal | Chaos pin'leri bilinçli |
 
 **Kapı G6:** H6.1+H6.3+H6.4 yeşil · H6.2 ceremony günü.
+
+### H6 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H6.1 determinism workflow | present + lock |
+| H6.3 GAP-1 RequireSigned | verify_authentic locks |
+| H6.4 migration bounds | migration_report locks |
+| H6.2 ceremony F1–F5 | checklist present (ceremony-day) |
+| H6.5 chaos | snapshot_chaos / chaos suites |
 
 ---
 
@@ -266,6 +321,15 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 **Kapı G7:** H7.1–H7.6 yeşil.
 
+### H7 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| H7.1–H7.3 deny/gitleaks/CI pins | structural locks |
+| H7.5 coverage ratchet file | numeric baseline lock |
+| H7.6 miri/semver/doc | existing workflows |
+| H7.4 dependabot freeze | policy in STATUS/mainnet docs |
+
 ---
 
 ### Faz H8 — Operasyon, tatbikat, dış denetim, bounty
@@ -281,6 +345,14 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 | H8.7 | Monitoring/alerts | metrics + örnek Prometheus |
 
 **Kapı G8:** H8.1+H8.2+H8.4 yeşil · H8.5 audit başlatma kararı (§11 K4).
+
+### H8 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| Docs: runbook, bounty, audit checklist, validator onboarding | present + lock |
+| H8.1/H8.2 live drills | ceremony/ops day (not auto-claimed) |
+| H8.5 external audit kickoff | user decision K4 |
 
 ---
 
@@ -316,6 +388,13 @@ Mainnet sonrası da yürür:
 | V110 | VerifyInference stub | Disabled/fail path | Teyit + mainnet gate |
 | V116 | Proto payment types | Enum+decode fix serisi | Roundtrip test teyit |
 | V119 | Sync committee threshold | Threshold sayımı var | Test teyit |
+
+> **2026-07-20 ARENA3 doğrulama turu (kod + regresyon kilidiyle):**
+> V89 / V86 / V24 / V95 / V106 / V110 / V116 / V119 — hepsi **✅ FIXED teyit edildi**
+> (her biri güvenlik özelliğini iddia eden isimli testle; V24 transfer+replay kapsamı dahil).
+> V37/V38 — bilinçli mainnet sınırı (K2 + MR-3, kapatılamaz). Tam kanıt:
+> `docs/ARENA3_SECURITY_VERIFICATION_AUDIT_2026-07-20.md`. Bu tur sonrası §4.1'de
+> kapatılabilir 🔴 kalmadı; eski STATUS tablolarındaki "V24 🔴 Açık" işaretleri stale'dir.
 
 ### 4.2 Bilinçli mainnet sınırları (iddia etme)
 

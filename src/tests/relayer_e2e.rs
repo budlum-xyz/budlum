@@ -337,6 +337,6 @@ fn full_internal_relay_cycle_burn_unlock() {
         crate::cross_domain::bridge::BridgeStatus::Unlocked { domain: 1 }
     ));
     // V107: lock debits owner by full amount (100). Unlock credits
-    //   100 - 1% fee = 99. Start 1000 → 1000 - 100 + 99 = 999. (fix(ARENAS): Test regression fix — V107 bridge lock debit + V127 height continuity test uyumluluğu)
+    //   100 - 1% fee = 99. Start 1000 → 1000 - 100 + 99 = 999.
     assert_eq!(bc.state.get_balance(&owner()), 999);
 }

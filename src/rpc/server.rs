@@ -637,21 +637,31 @@ fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
         .expect("static RPC security response is valid")
 }
 
-fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
+fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorObjectOwned> {
     let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(clean).map_err(|e| {
-        ErrorObjectOwned::owned(-32602, format!("Invalid ContentId hex: {e}"), None::<()>)
+        ErrorObjectOwned::owned(-32602, format!("Invalid {field_name} hex: {e}"), None::<()>)
     })?;
     if bytes.len() != 32 {
         return Err(ErrorObjectOwned::owned(
             -32602,
-            "ContentId must be 32 bytes",
+            format!("{field_name} must be 32 bytes"),
             None::<()>,
         ));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
-    Ok(ContentId(arr))
+    Ok(arr)
+}
+
+fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
+    Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
+}
+
+fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorObjectOwned> {
+    Ok(crate::pollen::AssetId(parse_hex32_field(
+        hex_str, "AssetId",
+    )?))
 }
 
 fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
@@ -987,6 +997,7 @@ impl BudlumApiServer for RpcServer {
         expected_block_hash: Option<crate::domain::Hash32>,
         event: crate::cross_domain::DomainEvent,
         proof: crate::cross_domain::MerkleProof,
+        relayer: crate::core::address::Address,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.chain
             .mint_bridge_transfer_from_verified_event(
@@ -996,7 +1007,7 @@ impl BudlumApiServer for RpcServer {
                 expected_block_hash,
                 event,
                 proof,
-                Address::zero(),
+                relayer,
             )
             .await
             .map_err(|e| {
@@ -2305,6 +2316,96 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let assets = self.chain.pollen_get_data_assets().await;
+        Ok(serde_json::json!(assets))
+    }
+
+    async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let grants = self.chain.pollen_get_access_grants().await;
+        Ok(serde_json::json!(grants))
+    }
+
+    async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let authorizations = self.chain.pollen_get_sale_authorizations().await;
+        Ok(serde_json::json!(authorizations))
+    }
+
+    async fn pollen_build_ai_input_ref(
+        &self,
+        asset_id: String,
+        grant_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let asset_id = parse_pollen_asset_id(&asset_id)?;
+        let grant_id = parse_pollen_asset_id(&grant_id)?;
+        let input_ref = crate::pollen::AiDataInputRef { asset_id, grant_id }.encode();
+        Ok(serde_json::json!({
+            "assetId": asset_id.to_hex(),
+            "grantId": grant_id.to_hex(),
+            "inputRefHex": format!("0x{}", hex::encode(&input_ref)),
+            "inputRefBytes": input_ref,
+            "prefix": String::from_utf8_lossy(crate::pollen::POLLEN_AI_INPUT_REF_PREFIX),
+        }))
+    }
+
+    async fn pollen_prepare_sale_authorization(
+        &self,
+        seller: String,
+        asset_id: String,
+        unit_price: u64,
+        expires_at_block: u64,
+        max_grants: u32,
+        terms_hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
+        let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid seller address: {e}"), None::<()>)
+        })?;
+        if unit_price == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "unit_price must be greater than zero",
+                None::<()>,
+            ));
+        }
+        if max_grants == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "max_grants must be greater than zero",
+                None::<()>,
+            ));
+        }
+        let asset_id = parse_pollen_asset_id(&asset_id)?;
+        let terms_hash = parse_hex32_field(&terms_hash, "termsHash")?;
+        let valid_from_block = self.chain.get_height().await;
+        if expires_at_block <= valid_from_block {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "expires_at_block must be greater than current finalized height {valid_from_block}"
+                ),
+                None::<()>,
+            ));
+        }
+        let authorization = crate::pollen::SaleAuthorization::new_unsigned(
+            asset_id,
+            seller_addr,
+            unit_price,
+            valid_from_block,
+            expires_at_block,
+            max_grants,
+            terms_hash,
+        );
+        Ok(serde_json::json!({
+            "seller": seller_addr.to_hex(),
+            "assetId": asset_id.to_hex(),
+            "authorizationId": authorization.authorization_id.to_hex(),
+            "signingHash": format!("0x{}", hex::encode(authorization.signing_hash())),
+            "unsignedAuthorization": authorization,
+            "note": "seller_signature is sentinel until the owner signs this authorization; sentinel signatures are rejected on-chain",
+        }))
+    }
+
     async fn hub_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let apps = self.chain.hub_get_apps().await;
         Ok(serde_json::json!(apps))
@@ -2427,6 +2528,47 @@ impl BudlumApiServer for RpcServer {
             )
         })?;
         Ok(hex::encode(data))
+    }
+
+    async fn passport_get_profile(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        let manifest_id = resolved.as_ref().and_then(|r| {
+            r.content_id
+                .or(r.storage_root.map(crate::storage::ContentId))
+        });
+        let manifest = if let Some(id) = manifest_id {
+            let reg = self.storage.lock().map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("storage registry lock poisoned: {e}"),
+                    None::<()>,
+                )
+            })?;
+            reg.get_manifest(&id).cloned()
+        } else {
+            None
+        };
+        let data_assets = self.chain.pollen_get_data_assets().await;
+        let access_grants = self.chain.pollen_get_access_grants().await;
+        let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let profile = crate::gateway::build_passport_profile(
+            name,
+            resolved,
+            manifest,
+            &data_assets,
+            &access_grants,
+            &sale_authorizations,
+        );
+        serde_json::to_value(profile).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("failed to serialize passport profile: {e}"),
+                None::<()>,
+            )
+        })
     }
 
     // --- Phase 10 (§1): AI Inference & Verifier Layer ---

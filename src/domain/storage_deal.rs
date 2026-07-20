@@ -292,6 +292,8 @@ pub enum StorageError {
     /// B.U.D. Faz 3 (Phase 9): the provided merkle proof failed format validation
     /// or STARK verification. The proof must be a valid ProofEnvelope.
     InvalidMerkleProof(String),
+    /// V133 fix (ARENAS): Too many concurrent open challenges for a single deal.
+    TooManyOpenChallenges { deal_id: u64, max: usize },
 }
 
 impl std::fmt::Display for StorageError {
@@ -334,6 +336,9 @@ impl std::fmt::Display for StorageError {
             ),
             StorageError::InvalidMerkleProof(ref reason) => {
                 write!(f, "B.U.D. Faz 3: invalid merkle proof — {reason}")
+            }
+            StorageError::TooManyOpenChallenges { deal_id, max } => {
+                write!(f, "too many open challenges for deal {deal_id} (max {max})")
             }
         }
     }
@@ -457,6 +462,11 @@ impl StorageRegistry {
     /// Open a retrieval challenge. Anyone can call this (no role
     /// required) — the opener_bond is the anti-spam mechanism.
     #[allow(clippy::too_many_arguments)]
+    /// V133 fix (ARENAS): Maximum concurrent open challenges per deal.
+    /// Prevents spam attacks where a single deal gets unlimited challenges,
+    /// growing the StorageRegistry's challenge BTreeMap without bound.
+    const MAX_OPEN_CHALLENGES_PER_DEAL: usize = 10;
+
     pub fn open_challenge(
         &mut self,
         deal_id: u64,
@@ -488,6 +498,20 @@ impl StorageRegistry {
             .ok_or(StorageError::UnknownDeal(deal_id))?;
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal_id));
+        }
+
+        // V133 fix (ARENAS): Limit concurrent open challenges per deal.
+        // Count challenges for this deal that haven't been resolved yet.
+        let open_count = self
+            .challenges
+            .values()
+            .filter(|c| c.deal_id == deal_id && !self.results.contains_key(&c.challenge_id))
+            .count();
+        if open_count >= Self::MAX_OPEN_CHALLENGES_PER_DEAL {
+            return Err(StorageError::TooManyOpenChallenges {
+                deal_id,
+                max: Self::MAX_OPEN_CHALLENGES_PER_DEAL,
+            });
         }
 
         let challenge_id = self.next_challenge_id;
@@ -1262,5 +1286,23 @@ mod tests {
         let bogus = ContentId([0xEEu8; 32]);
         let pruned = reg.prune_content(&bogus, 100);
         assert_eq!(pruned, 0);
+    }
+    /// REGRESSION V133: max concurrent open challenges per deal.
+    #[test]
+    fn v133_max_open_challenges_per_deal() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        for i in 0..10 {
+            reg.open_challenge(deal_id, 0, 4, 110 + i as u64, 200 + i as u64, opener(), 50)
+                .unwrap_or_else(|e| panic!("challenge {i} should open: {e:?}"));
+        }
+        let err = reg
+            .open_challenge(deal_id, 0, 4, 500, 600, opener(), 50)
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::TooManyOpenChallenges { .. }),
+            "got {err:?}"
+        );
     }
 }

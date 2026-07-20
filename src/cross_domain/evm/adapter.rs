@@ -102,15 +102,22 @@ impl ChainAdapter for EvmChainAdapter {
         external_state_root: &Hash32,
         expected_tx_hash: &str,
     ) -> Result<(), AdapterError> {
-        // MPT verify: receiptsRoot → receipt bytes. F10.1.
-        // MerkleProof.leaf = receipt bytes (relayer tarafından paketlenmiş).
-        let receipt_bytes = &proof.leaf;
-        // NOTE: F10.1 mpt::verify proof_nodes + key bekler; bu trait MerkleProof
-        // (event-tree deseni) kullanır. Gerçek on-chain verify `verify_evm_receipt`
-        // üzerinden (verify.rs) — EvmDepositProof paketi. Bu metod minimal
-        // adapter entry-point; orchestrator verify.rs'te.
-        let _ = receipt_bytes;
-        let _ = external_state_root;
+        // V30/V91 partial fix (ARENAS): Previously a complete no-op — all
+        // inputs were silently ignored and Ok(()) always returned. This
+        // allowed any forged receipt proof to be accepted.
+        //
+        // Minimal fix: verify the Merkle proof against the declared root.
+        // This at least ensures the proof is self-consistent (leaf, siblings,
+        // and root match). Full MPT receipt verification (F10.1) requires
+        // proof_nodes + key format and should use `verify_evm_receipt` via
+        // the EvmDepositProof path, but this gate prevents trivial forgery.
+        if !proof.verify(*external_state_root) {
+            return Err(AdapterError::ProofVerificationFailed(
+                "EVM receipt Merkle proof does not verify against declared receipts root".into(),
+            ));
+        }
+        // TODO (design decision): Add receipt decode + tx_hash binding
+        // (receipt.transaction_hash == expected_tx_hash) for full V30 fix.
         let _ = expected_tx_hash;
         Ok(())
     }
@@ -223,7 +230,7 @@ mod tests {
 
     #[test]
     fn verify_receipt_proof_minimal_ok() {
-        // Minimal adapter entry-point (verify_evm_receipt orchestrator ana yol).
+        // V30/V91: proof must verify against declared root (empty siblings ⇒ leaf is root).
         let adapter = EvmChainAdapter::test_default();
         let leaf = crate::core::hash::hash_fields_bytes(&[b"test"]);
         let proof = MerkleProof {
@@ -231,9 +238,10 @@ mod tests {
             index: 0,
             siblings: vec![],
         };
-        // Stub minimal — gerçek verify verify_evm_receipt ile.
+        assert!(adapter.verify_receipt_proof(&proof, &leaf, "0xabc").is_ok());
+        // Forged root must fail.
         assert!(adapter
             .verify_receipt_proof(&proof, &[0u8; 32], "0xabc")
-            .is_ok());
+            .is_err());
     }
 }

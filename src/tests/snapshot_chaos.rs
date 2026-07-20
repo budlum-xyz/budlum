@@ -428,4 +428,30 @@ mod tests {
             assert_eq!(b5.index, tip3_index + 2);
         }
     }
+
+    // ── 8) V24 bridge_state internal binding (GAP-2 serde hash) ─────────────
+    // V24 transfer scope is locked at `root()` (bridge.rs). This pins the
+    // SECOND layer: the schema-4 GAP-2 digest covers the FULL serialized
+    // bridge_state via hash_opt_serializable — i.e. the private `expiry_queue`
+    // AND the `replay` store, neither of which is in `root()`. Forging the
+    // replay store (and, by the same serde binding, expiry_queue) without
+    // recomputing snapshot_hash must be rejected by verify().
+    #[test]
+    fn v24_bridge_state_replay_forgery_rejected_by_snapshot_digest() {
+        let alice = Address::from([0xA1; 32]);
+        let mut snap = StateSnapshotV2::from_state(&funded_state(&alice, 500), params_v2(60, 1337));
+
+        // root() (transfers) is left UNCHANGED; only the GAP-2 bridge_state
+        // serde binding (which also covers expiry_queue) must catch this.
+        let mut bs = snap.bridge_state.clone().unwrap_or_default();
+        let bogus_mid: [u8; 32] = [0x24u8; 32];
+        bs.replay.mark_processed(bogus_mid).expect("mark processed");
+        snap.bridge_state = Some(bs);
+
+        assert!(
+            !snap.verify(),
+            "V24: forged bridge_state replay (and, by the same serde binding, \
+             expiry_queue) must change the schema-4 snapshot digest"
+        );
+    }
 }

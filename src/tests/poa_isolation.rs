@@ -232,4 +232,55 @@ mod poa_isolation_tests {
             "PoA admin should NOT have permissionless validator status"
         );
     }
+
+    /// Ek izolasyon mührü (Phase 11.3 Görev 4): PoA whitelist'i permissionless
+    /// stake'ten tamamen bağımsızdır. Stake ile permissionless validator olan
+    /// hesap PoA whitelist'inde YOK; PoA whitelist üyeliği permissionless aktif
+    /// statü VERMEZ. Bu test "PoA Isolation" CI kapısının (≥7) bir parçasıdır.
+    #[test]
+    fn poa_whitelist_independent_of_permissionless_stake() {
+        use crate::registry::poa_onboarding::PoAOnboarding;
+
+        let mut perm_state = AccountState::new();
+        let mut poa = PoAOnboarding::new();
+        let admin = Address::from([0xAD; 32]);
+        poa.add_admin(POA_DOMAIN, admin);
+
+        // Permissionless validator — stake ile
+        let perm_validator = Address::from([0xBB; 32]);
+        perm_state.add_balance(&perm_validator, 10_000);
+        perm_state.add_validator(perm_validator, 5_000);
+        assert!(
+            perm_state
+                .registry
+                .is_active(&perm_validator, roles::VALIDATOR),
+            "sanity: stake validator is active in permissionless registry"
+        );
+
+        // Stake-only hesap PoA whitelist'inde değil
+        assert!(
+            !poa.whitelist(POA_DOMAIN, 1).contains(&perm_validator),
+            "stake-only account must NOT appear in PoA whitelist"
+        );
+
+        // Bir PoA üyesi onayla
+        let poa_member = Address::from([0xAA; 32]);
+        poa.submit_application(POA_DOMAIN, poa_member, [1u8; 32], 0)
+            .unwrap();
+        poa.approve(POA_DOMAIN, admin, poa_member, 0, 1_000)
+            .unwrap();
+
+        let wl = poa.whitelist(POA_DOMAIN, 1);
+        assert!(wl.contains(&poa_member));
+        assert!(
+            !wl.contains(&perm_validator),
+            "permissionless validator must NOT leak into PoA whitelist"
+        );
+
+        // Ters yönlü sızma: PoA whitelist üyeliği permissionless aktiflik vermez
+        assert!(
+            !perm_state.registry.is_active(&poa_member, roles::VALIDATOR),
+            "PoA whitelist membership must NOT grant permissionless validator status"
+        );
+    }
 }

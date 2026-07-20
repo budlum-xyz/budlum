@@ -34,6 +34,11 @@ enum ProtoTransactionType {
     AI_AGENT_PAYMENT = 28;
     AI_AGENT_PAYMENT_RELEASE = 29;
     AI_AGENT_PAYMENT_RECLAIM = 30;
+    POLLEN_REGISTER_DATA_ASSET = 31;
+    POLLEN_AUTHORIZE_SALE = 32;
+    POLLEN_GRANT_ACCESS = 33;
+    POLLEN_REVOKE_GRANT = 34;
+    POLLEN_REVOKE_DATA_ASSET = 35;
 }
 
 message ProtoTransaction {
@@ -72,6 +77,11 @@ message ProtoTransaction {
         ProtoAiAgentPayment ai_agent_payment = 36;
         ProtoAiAgentPaymentRelease ai_agent_payment_release = 37;
         ProtoAiAgentPaymentReclaim ai_agent_payment_reclaim = 38;
+        ProtoPollenDataAsset pollen_register_data_asset = 39;
+        ProtoPollenSaleAuthorization pollen_authorize_sale = 40;
+        ProtoPollenAccessGrant pollen_grant_access = 41;
+        ProtoPollenId pollen_revoke_grant = 42;
+        ProtoPollenId pollen_revoke_data_asset = 43;
     }
 }
 
@@ -251,6 +261,26 @@ message ProtoBlock {
     bytes vrf_output = 16;
     bytes vrf_proof = 17;
     string validator_set_hash = 18;
+}
+
+
+
+// Phase 12 Pollen transaction payloads. Data is bincode-encoded canonical Rust
+// struct payload; V4 signing still uses explicit field encoding in Rust.
+message ProtoPollenDataAsset {
+    bytes data = 1;
+}
+
+message ProtoPollenSaleAuthorization {
+    bytes data = 1;
+}
+
+message ProtoPollenAccessGrant {
+    bytes data = 1;
+}
+
+message ProtoPollenId {
+    bytes id = 1;
 }
 
 message ProtoNetworkMessage {
