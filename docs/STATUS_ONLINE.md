@@ -4981,3 +4981,46 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### ADIM 39 — ARENAS Denetim: Arena4 Phase 12 Sertleştirme (2026-07-20)
+
+**Arena4 commit denetimi tamamlandı:**
+- `e928315` style(gateway): rustfmt passport proof tests — ✅ TEMİZ
+- `e49da89` feat(gateway): dweb passport proof bundle — ✅ TEMİZ (read-only model, plaintext yok)
+- `a93762c` feat(pollen): issue sale-backed access grants — ✅ TEMİZ (fail-closed, sentinel reddi)
+- `f6dc8d3` feat(governance): constitution guardrail registry — ✅ TEMİZ (sabit key BTreeMap, büyüme yok)
+- `0cd672a` feat(prover): proof verification market primitives — V208 BULGU
+- `4a5e380` fix(relayer): harden phase12 policy intent bounds — ✅ ONAYLANDI (zero-address, domain, dweb name sanitization)
+- `fc585f6` feat(domain): sovereign domain kit primitives — ✅ TEMİZ
+- `f5bb8ea` feat(gateway): budlum atlas wallet context api — ✅ TEMİZ (read-only query model)
+- `7c4c878` feat(storage): mobile self hosting policy — ✅ TEMİZ
+
+**V201 (⚪→FIXED): chain_actor.rs epoch_index*100 → current_block_height**
+- 2 instance düzeltildi. V125 ile tutarlı.
+
+**V202 (⚪→FIXED): network/node.rs NonZeroUsize::new(1).unwrap() → .expect()**
+
+**V203 (⚪→FIXED): blockchain.rs/account.rs/ai/registry.rs/governance.rs saturating→checked**
+- 10+ balance/stake saturating_add/sub → checked_add/sub + add_balance
+- Bridge lock, proof claim reward/fee, storage deal fee, operator bond, unbonding, slashing, verifier stake, governance votes
+
+**V204 (⚪→FIXED): encryption_policy.rs asset_policies BTreeMap sınırsız büyüme**
+- `prune_asset_policies(max_policies)` metodu eklendi
+
+**V205 (⚪→FIXED): encryption_policy.rs version += 1 overflow risk**
+- `checked_add` + tracing::error koruma eklendi
+
+**V206 (⚪ NOTED): apply_dao_update changed_fields Vec — küçük heap allocation, düşük öncelikli**
+
+**V207 (⚪→FIXED): apply_dao_update EncryptionAlgorithm::None default olarak set engellenmedi**
+- None default set reddediliyor (is_algorithm_allowed zaten reddediyor ama update path'te ayrı kontrol eklendi)
+
+**V208 (⚪→FIXED): proof_market.rs active_tasks + pending_receipts Vec sınırsız büyüme**
+- `is_paid()` metodu eklendi
+- `prune_paid_receipts()` metodu eklendi
+- `enforce_max_sizes()` metodu eklendi (MAX=10_000)
+
+**Toplam:** 164 bulgu (V22-V208), 105 kapatıldı, 59 açık
+
