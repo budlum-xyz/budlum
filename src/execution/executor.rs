@@ -233,6 +233,10 @@ impl Executor {
                         };
                         req.request_id = req.calculate_id();
                         let current_block = state.current_block_height;
+                        let pollen_grant = state
+                            .marketplace
+                            .validate_ai_read_ref(req.input_ref.as_slice(), &tx.from, current_block)
+                            .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
                         // V32 fix (Phase 11): sender must have sufficient balance
                         // for max_fee escrow BEFORE submitting. Without this, an
                         // account with 0 balance can submit requests (the
@@ -255,6 +259,14 @@ impl Executor {
                         //   fee was already consumed by the ZKVM execution
                         match state.ai_registry.submit_request(req, current_block) {
                             Ok(_) => {
+                                if let Some(grant_id) = pollen_grant {
+                                    state
+                                        .marketplace
+                                        .consume_ai_read_grant(&grant_id, &tx.from, current_block)
+                                        .map_err(|e| {
+                                            BudlumError::validation("ai_data_access_denied", e)
+                                        })?;
+                                }
                                 // Deduct max_fee from sender (escrow for verifiers)
                                 let sender = state.get_or_create(&tx.from);
                                 sender.balance = sender.balance.saturating_sub(max_fee);
@@ -731,10 +743,20 @@ impl Executor {
                 }
                 // P5 Bulgu 1 — Executor-layer deadline enforcement (defense-in-depth):
                 let current_block = state.current_block_height;
+                let pollen_grant = state
+                    .marketplace
+                    .validate_ai_read_ref(req.input_ref.as_slice(), &tx.from, current_block)
+                    .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
                 state
                     .ai_registry
                     .submit_request(req.clone(), current_block)
                     .map_err(|e| BudlumError::validation("ai_request_failed", e))?;
+                if let Some(grant_id) = pollen_grant {
+                    state
+                        .marketplace
+                        .consume_ai_read_grant(&grant_id, &tx.from, current_block)
+                        .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender
                     .balance

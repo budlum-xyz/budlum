@@ -3965,3 +3965,74 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Kim karar verecek:** Ayaz / ARENA3 SLEEP (madde 3)
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+### [2026-07-20 10:38 UTC+03:00] ARENA4 — ADIM A4-1 BAŞLADI: Pollen Data Rights + AI read gate
+
+**Zemin:** origin/main `411fef1` (ARENA3 kapanış: main CI 23/23 yeşil).  
+**Branch:** `arena/arena4-pollen-ai-data-rights`.  
+**Kullanıcı kararları:**
+- Dosyalardaki kullanıcıya sorulacak yerlerde “önerilen” şıklar uygulanabilir.
+- İlk ADIM: **Pollen + AI veri yasağı**.
+- AI read policy: **strict no override** — geçerli Pollen AccessGrant yoksa AI veri okuyamaz; DAO/admin bypass yok.
+- D-Web Passport: core API/spec önce, budlum.xyz frontend ayrı yürütülür.
+- Encryption DAO: DAO yalnız parametre yönetir, decrypt/key yetkisi yok.
+
+**Kapsam:**
+1. `DataAsset`, `AccessGrant`, `AiDataInputRef` Pollen primitives.
+2. `MarketplaceRegistry` içine data asset + grant root kapsamı.
+3. Executor `AiInferenceRequest` admission gate: Pollen input_ref varsa grant zorunlu.
+4. Regresyon testleri: grant yoksa reject, geçerli grant tek okuma tüketir, legacy opaque input_ref bozulmaz.
+5. Rapor: `docs/ARENA4_APPROVED_SYSTEMS_ROADMAP_2026-07-20.md`.
+
+**Budlumdevnet dokunulmadı.**  
+**Ne bekliyor:** Lokal statik kontroller + push + CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 11:03 UTC+03:00] ARENA4 — CI kırmızısı: GrantId alias constructor fix
+
+**Durum:** `7bcc911` CI'da B.U.D. E2E ve BNS gate compile aşamasında kırmızı oldu.  
+**Kök neden:** `GrantId` bir `type GrantId = AssetId` alias'ı; alias tuple-struct constructor gibi `GrantId(...)` kullanılamaz.  
+**Fix:** `GrantId(...)` kullanımları `AssetId(...)` ile değiştirildi; `GrantId::from(...)` formatı korunuyor.  
+**Kapsam:** Compile unblock; davranış değişmedi.  
+**Ne bekliyor:** Push + CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 11:07 UTC+03:00] ARENA4 — CI kırmızısı: rustfmt diff fix
+
+**Durum:** `5eb19e3` CI'da `Budlum Core` Format adımında kırmızı oldu.  
+**Kök neden:** `offers.rs`, `tests/mod.rs`, `pollen_ai_data_rights.rs` rustfmt beklenen biçimde değildi.  
+**Fix:** CI rustfmt diff'leri birebir uygulandı.  
+**Kapsam:** Format-only CI unblock.  
+**Ne bekliyor:** Push + CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 11:22 UTC+03:00] ARENA4 — ADIM A4-1 TAMAMLANDI: Pollen Data Rights + AI read gate CI YEŞİL
+
+**Branch:** `arena/arena4-pollen-ai-data-rights`  
+**SHA:** `6189f12`  
+**CI kanıtı:** run `29726596216` — **14/14 success** (`Budlum Core`, `BudZero`, `Coverage`, `Fuzz Quick`, `B.U.D.`, `BNS`, `PoA`, `Secret Scan`, `Deny`, `Docker Security`, `Repo Lint`, `Timing`, `SBOM`).
+
+**Ne bitti:**
+1. `src/pollen/data_rights.rs`: `DataAsset`, `AccessGrant`, `AiDataInputRef` eklendi.
+2. `MarketplaceRegistry`: `data_assets` + `access_grants` map'leri ve state root kapsamı eklendi.
+3. Executor AI request admission gate: Pollen/B.U.D. data-ref varsa geçerli grant zorunlu; grant yok/expired/revoked/exhausted/wrong grantee → `ai_data_access_denied`.
+4. Grant tüketimi: başarılı AI request sonrası read count artar; başarısız request grant tüketmez.
+5. Regresyon kilitleri: `pollen_ai_data_ref_without_access_grant_is_rejected`, `pollen_ai_data_ref_with_access_grant_is_consumed_once`, `non_pollen_ai_input_ref_still_uses_legacy_opaque_path`.
+6. Rapor: `docs/ARENA4_APPROVED_SYSTEMS_ROADMAP_2026-07-20.md`.
+
+**Kullanıcı kararları uygulandı:** strict no override, DAO decrypt/key yetkisi yok, D-Web Passport core API/spec önce.  
+**Budlumdevnet dokunulmadı.**  
+**Ne bekliyor:** STATUS kapanış commit'i push edilecek ve CI tekrar izlenecek; yeşil olursa yeni komut/ADIM beklenir.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

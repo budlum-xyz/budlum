@@ -5,10 +5,14 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 
 ## Durum
 
-- **Olgunluk:** iskelet (P0 tipler ship edildi, P1+ primitifler bekliyor).
+- **Olgunluk:** P0 tipler + ARENA4 ADIM1 Data Rights gate. `DataAsset` ve
+  `AccessGrant` primitifleri artık kodda; AI input_ref Pollen/B.U.D. verisine
+  işaret ediyorsa grant olmadan reddedilir (strict no-override).
 - **Kod konumu:** `src/pollen/` — `mod.rs` (temel tipler: `AssetId`, `Signature64`,
-  `GrantId`), `offers.rs` (`DataOffer` — geçici offer modeli, P1 yerini alacak).
-- **Test sayısı:** 8 (`#[test]` sayımı, CI summary doğrulamalı).
+  `GrantId`), `data_rights.rs` (`DataAsset`, `AccessGrant`, `AiDataInputRef`),
+  `offers.rs` (`MarketplaceRegistry` + geçici `DataOffer`).
+- **Test sayısı:** CI summary doğrulamalı; Data Rights regresyonları
+  `pollen_ai_data_rights` ve `pollen::data_rights/offers` testlerindedir.
 - **İsimlendirme:** 2026-07-18 kullanıcı emriyle `bud_marketplace` → `pollen` rename.
 
 ## RFC
@@ -19,13 +23,15 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 
 ## Olgunluk uyarıları (Bölüm 4 kuralı: toplamın altında kaybolmaz)
 
-- ⚠️ **Faz-1 = soft enforcement.** AccessGrant'ın on-chain kontrolü ekonomik
-  caydırıcıdır (stake/slashing), **kriptografik garanti DEĞİL**. Storage node ham
-  veriyi izinsiz sunabilir. Hard enforcement (HPKE key-wrapping) Faz-2'de (HSM
-  domain'i). "İzinsiz erişemez" iddiası Faz-1'de teknik olarak YANLIŞ.
-- ⚠️ **P0 tipler mevcut** (`AssetId` JSON-safe, `Signature64` sentinel-default).
-  P1 primitifleri (`DataAsset`/`StorageCommitment`/`AccessGrant`/`SaleAuthorization`)
-  henüz main'de değil — RFC §10 sırası: P0 → P1 (ARENA1) → P2 snapshot → P3 RPC.
+- ⚠️ **Faz-1 = protocol admission enforcement.** AI inference request, Pollen
+  `AiDataInputRef` taşıyorsa geçerli `AccessGrant` olmadan kabul edilmez.
+  Bu güçlü bir on-chain okuma yasağıdır; fakat storage node plaintext görüyorsa
+  kriptografik gizlilik garanti etmez. Hard enforcement (HPKE key-wrapping)
+  Faz-2'de (HSM/encryption domain'i).
+- ✅ **P0/P1 temel tipler mevcut** (`AssetId` JSON-safe, `Signature64`
+  sentinel-default, `DataAsset`, `AccessGrant`, `AiDataInputRef`).
+  Sıradaki genişleme: `SaleAuthorization`, HPKE key-wrapping, DAO encryption
+  parametreleri ve RPC yüzeyi.
 
 ## Veri egemenliği
 
