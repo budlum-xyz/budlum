@@ -31,10 +31,14 @@ enum ProtoTransactionType {
     AI_MODEL_REACTIVATE = 25;
     AI_REQUEST_CANCEL = 26;
     AI_DISPUTE_SLASH = 27;
-    // V116: dedicated enum values (must match TransactionType type_byte 28/29/30).
     AI_AGENT_PAYMENT = 28;
     AI_AGENT_PAYMENT_RELEASE = 29;
     AI_AGENT_PAYMENT_RECLAIM = 30;
+    POLLEN_REGISTER_DATA_ASSET = 31;
+    POLLEN_AUTHORIZE_SALE = 32;
+    POLLEN_GRANT_ACCESS = 33;
+    POLLEN_REVOKE_GRANT = 34;
+    POLLEN_REVOKE_DATA_ASSET = 35;
 }
 
 message ProtoTransaction {
@@ -73,6 +77,11 @@ message ProtoTransaction {
         ProtoAiAgentPayment ai_agent_payment = 36;
         ProtoAiAgentPaymentRelease ai_agent_payment_release = 37;
         ProtoAiAgentPaymentReclaim ai_agent_payment_reclaim = 38;
+        ProtoPollenDataAsset pollen_register_data_asset = 39;
+        ProtoPollenSaleAuthorization pollen_authorize_sale = 40;
+        ProtoPollenAccessGrant pollen_grant_access = 41;
+        ProtoPollenId pollen_revoke_grant = 42;
+        ProtoPollenId pollen_revoke_data_asset = 43;
     }
 }
 
@@ -254,6 +263,26 @@ message ProtoBlock {
     string validator_set_hash = 18;
 }
 
+
+
+// Phase 12 Pollen transaction payloads. Data is bincode-encoded canonical Rust
+// struct payload; V4 signing still uses explicit field encoding in Rust.
+message ProtoPollenDataAsset {
+    bytes data = 1;
+}
+
+message ProtoPollenSaleAuthorization {
+    bytes data = 1;
+}
+
+message ProtoPollenAccessGrant {
+    bytes data = 1;
+}
+
+message ProtoPollenId {
+    bytes id = 1;
+}
+
 message ProtoNetworkMessage {
     oneof payload {
         ProtoHandshake handshake = 1;
@@ -432,7 +461,7 @@ message ProtoAiAgentPayment {
     bytes from_agent = 2;
     bytes to_agent = 3;
     uint64 amount = 4;
-    bytes request_id = 5; // empty = non-escrowed
+    bytes request_id = 5;
     bool require_proof = 6;
     uint64 submitted_at_block = 7;
     uint64 expiry_block = 8;

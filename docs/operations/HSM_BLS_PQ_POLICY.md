@@ -2,7 +2,11 @@
 
 **Tarih:** 2026-07-15
 **Durum:** PKCS#11 Ed25519 yolu + BLS/PQ mock backend main kod tabanında mevcut; mainnet disk-key yasağı fail-closed kalır. Vendor-native non-extractable BLS/Dilithium HSM mekanizmaları hâlâ ayrı audit/entegrasyon maddesidir.
-**Kod:** `src/crypto/pkcs11.rs`, `src/crypto/hsm_mock.rs`, `src/main.rs`, `src/cli/commands.rs`
+**Kod:** `src/crypto/pkcs11.rs`, `src/crypto/mainnet_policy.rs` (H4 pure admission), `src/main.rs`, `src/cli/commands.rs`
+
+> **Not (2026-07-20):** `hsm_mock` crate path may be absent; mainnet admission
+> explicitly rejects `hsm_mock`/`mock` backends via `MainnetKeyPolicyViolation::HsmMockBackend`.
+> Vendor-native non-extractable BLS/PQ remains **out of scope for mainnet v1** (K3).
 
 > Bu belge mainnet için sahte-yeşil iddia üretmez. Mock backend geliştirici ve
 > CI doğrulaması içindir; mainnet validator profili `hsm_mock` ile çalışmaz.

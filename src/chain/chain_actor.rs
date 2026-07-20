@@ -365,6 +365,15 @@ pub enum ChainCommand {
     MarketGetOffers {
         response: oneshot::Sender<Vec<crate::pollen::DataOffer>>,
     },
+    PollenGetDataAssets {
+        response: oneshot::Sender<Vec<crate::pollen::DataAsset>>,
+    },
+    PollenGetAccessGrants {
+        response: oneshot::Sender<Vec<crate::pollen::AccessGrant>>,
+    },
+    PollenGetSaleAuthorizations {
+        response: oneshot::Sender<Vec<crate::pollen::SaleAuthorization>>,
+    },
     HubGetApps {
         response: oneshot::Sender<Vec<crate::hub::types::AppRecord>>,
     },
@@ -1752,6 +1761,33 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn pollen_get_data_assets(&self) -> Vec<crate::pollen::DataAsset> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetDataAssets { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn pollen_get_access_grants(&self) -> Vec<crate::pollen::AccessGrant> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetAccessGrants { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn pollen_get_sale_authorizations(&self) -> Vec<crate::pollen::SaleAuthorization> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetSaleAuthorizations { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn hub_get_apps(&self) -> Vec<crate::hub::types::AppRecord> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2676,6 +2712,39 @@ impl ChainActor {
                         .cloned()
                         .collect();
                     let _ = response.send(offers);
+                }
+                ChainCommand::PollenGetDataAssets { response } => {
+                    let assets: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .data_assets
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(assets);
+                }
+                ChainCommand::PollenGetAccessGrants { response } => {
+                    let grants: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .access_grants
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(grants);
+                }
+                ChainCommand::PollenGetSaleAuthorizations { response } => {
+                    let authorizations: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .sale_authorizations
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(authorizations);
                 }
                 ChainCommand::HubGetApps { response } => {
                     let apps: Vec<_> = self.blockchain.state.hub.apps.values().cloned().collect();

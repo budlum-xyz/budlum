@@ -731,7 +731,7 @@ impl AccountState {
             if proposal.status == crate::core::governance::ProposalStatus::Active
                 && current_epoch >= proposal.end_epoch
             {
-                proposal.finalize(total_stake, quorum_pct);
+                proposal.finalize(total_stake, quorum_pct, current_epoch);
                 if proposal.status == crate::core::governance::ProposalStatus::Passed {
                     to_execute.push(proposal.clone());
                 }
@@ -770,11 +770,25 @@ impl AccountState {
 
         // DP2: Check supply cap
         // The total supply cap is 100M. We must ensure we don't mint past it.
-        let current_supply = self.circulating_supply();
+        // V144 fix (ARENAS): circulating_supply() only sums account balances —
+        // it does NOT include validator stake. But stake is also BUD in existence
+        // (locked from balance into validator.stake during Staking tx). If we
+        // only check circulating_supply, an attacker could stake most BUD, making
+        // circulating_supply very low, and the cap would allow massive yield minting.
+        // The correct denominator is circulating_supply + total_stake (= all BUD
+        // that currently exists on-chain). Unbonding queue is also included since
+        // those tokens are committed but not yet released.
+        let total_bud = self.circulating_supply()
+            + self.get_total_stake() as u128
+            + self
+                .unbonding_queue
+                .iter()
+                .map(|e| e.amount as u128)
+                .sum::<u128>();
         let max_supply = crate::tokenomics::BUD_TOTAL_SUPPLY as u128;
 
-        if current_supply < max_supply {
-            let space_left = max_supply - current_supply;
+        if total_bud < max_supply {
+            let space_left = max_supply - total_bud;
             if total_yield as u128 > space_left {
                 for (addr, amount) in payouts {
                     let scaled_amount =
@@ -894,6 +908,19 @@ impl AccountState {
                 self.ai_registry.dewhitelist_verifier(address);
                 tracing::info!("Executing Governance: Dewhitelisted verifier {}", address);
             }
+            ProposalType::SetEncryptionPolicy(policy) => {
+                match self.marketplace.set_encryption_policy(policy.clone()) {
+                    Ok(()) => tracing::info!(
+                        "Executing Governance: Encryption policy version {} updated",
+                        policy.version
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Rejecting SetEncryptionPolicy version {}: {}",
+                        policy.version,
+                        e
+                    ),
+                }
+            }
         }
     }
 
@@ -964,14 +991,26 @@ impl AccountState {
 
     /// Burn `amount` from `address`: reduce its balance and credit it NOWHERE,
     /// so total supply strictly decreases. Returns the amount actually burned
-    /// (capped at the available balance). This is the single canonical burn used
-    /// by both the timed reserve burn and the metabolic (tx-fee) burn.
+    /// (capped at the available balance). V132: If balance < amount, the
+    /// difference is silently clipped and a warning is logged. Callers that
+    /// require exact-burn semantics should check `get_balance()` first.
     pub fn burn_from(&mut self, address: &Address, amount: u64) -> u64 {
         if amount == 0 {
             return 0;
         }
         let account = self.get_or_create(address);
         let burned = amount.min(account.balance);
+        // V132 fix (ARENAS): Warn when burn is clipped — indicates a potential
+        // accounting error upstream (caller expected to burn more than available).
+        if burned < amount {
+            tracing::warn!(
+                "burn_from: requested {} but only {} available at {:?} (clipped by {})",
+                amount,
+                burned,
+                address,
+                amount - burned,
+            );
+        }
         account.balance -= burned;
         self.dirty_accounts.insert(*address);
         burned
@@ -1233,6 +1272,8 @@ impl AccountState {
             final_hasher.update(b"ai_v1");
             final_hasher.update(self.ai_registry.state_root());
         }
+        final_hasher.update(b"pollen_v1");
+        final_hasher.update(self.marketplace.root());
         final_hasher.update(self.global_header_summary);
         final_hasher.update(b"gov_disabled"); // governance version/enabled flags
 

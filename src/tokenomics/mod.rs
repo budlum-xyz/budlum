@@ -18,6 +18,8 @@
 //!   proven here is about the burn paths (a burn is never offset by a mint on
 //!   the same path), see `tests::tokenomics`.
 
+pub mod reward_pool;
+
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 

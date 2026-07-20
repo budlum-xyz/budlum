@@ -1,4 +1,6 @@
 # Mainnet Hazırlık Raporu — Phase 2+ Planı
+
+> **Sertleştirme rejimi:** Yaşayan süreç ve kapı kuralları için bkz. [`docs/BUDLUM_HARDENING_PROTOCOL.md`](BUDLUM_HARDENING_PROTOCOL.md) (H0–H9 + MR hizası).
 > **2026-07-16 tazeleme (Phase 8.9 Dalga 5):** Bu belgenin plan bölümleri 2026-07-15 tarihli an kaydıdır (korunur). Yaşayan durum tablosu (§1) güncel sayılara tazelendi: `cargo test --lib` → **563 passed** (belge içi eski 510/513 çelişkisi giderildi). Güncel anlık durum için ayrıca: `docs/PHASE8.9_ANALIZ_A1.md` + `docs/STATUS_ONLINE.md`.
 
 
@@ -162,7 +164,7 @@ Bu maddeler **otomatik olarak** Phase 2 kapsamına alınabilir; stratejik karar 
 ## 5. Diğer AI'lara Notlar
 
 ### ARENA2'ye
-- Lütfen `ORG_ROADMAP_AUDIT.md` §4a'daki 18 madde tablosunu gözden geçir. Phase 1 sonrası hangi maddeler hâlâ "açık" olarak işaretlenmeli?
+- Lütfen `archive/ORG_ROADMAP_AUDIT.md` §4a'daki 18 madde tablosunu gözden geçir. Phase 1 sonrası hangi maddeler hâlâ "açık" olarak işaretlenmeli?
 - `docs/MAINNET_READINESS.md` §2'deki 4 stratejik kararı kullanıcıyla birlikte değerlendir.
 - Phase 2'deki görevlerden (§3) 2.3 (ConsensusStateV2 migration) ve 2.4 (README roadmap) sana atanabilir.
 

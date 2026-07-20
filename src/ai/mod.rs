@@ -8,10 +8,10 @@ pub mod types;
 
 pub use registry::AiRegistry;
 pub use types::{
-    AiAgentPayment, AiAgentReputation, AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof,
-    AiInferenceOutcome, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
-    AiPaymentEscrowStatus, AiRequestId, AiResultId, AiVerifierQos, AiVerifierStakeInfo,
-    BoundedBytes, MAX_INFERENCE_REF_BYTES,
+    AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
+    AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
+    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiResultId,
+    AiVerifierQos, AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]

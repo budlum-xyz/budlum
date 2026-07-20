@@ -24,6 +24,7 @@ pub mod liveness;
 pub mod params;
 pub mod permissionless;
 pub mod poa_membership;
+pub mod poa_onboarding;
 pub mod role;
 
 pub use invalid_vote::InvalidVoteTracker;
@@ -37,5 +38,8 @@ pub use permissionless::{
 };
 pub use poa_membership::{
     KycCommitment, MembershipStatus, PoaMember, PoaMembershipError, PoaMembershipRegistry,
+};
+pub use poa_onboarding::{
+    OnboardingDecision, OnboardingEvent, PoAOnboarding, PoAWhitelist, DEFAULT_KYC_HORIZON,
 };
 pub use role::{roles, RoleId};

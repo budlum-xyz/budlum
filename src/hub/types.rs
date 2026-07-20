@@ -23,7 +23,10 @@ pub struct AppRecord {
     pub website_url: String, // Can point to a .bud BNS name
     pub manifest_id: Option<crate::storage::content_id::ContentId>, // B.U.D. link for the app frontend
     pub registered_at_epoch: u64,
-    pub verified: bool, // Vetted by DAO or Premium status
+    /// Developer self-attestation only (ownership proof). NOT third-party audit.
+    pub developer_attested: bool,
+    /// DAO / governance-vetted flag (Phase 9+). Distinct from developer_attested.
+    pub verified: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,4 +37,6 @@ pub enum HubError {
     NotDeveloper,
     #[error("Invalid metadata")]
     InvalidData,
+    #[error("Not authorized for governance verification")]
+    NotAuthorized,
 }

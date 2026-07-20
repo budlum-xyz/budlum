@@ -28,7 +28,7 @@
 | `PHASE0.358_RAPOR.md` | Markdown | `d0e1f2a3` | 982 B | ✅ Okundu / Ayrıştırıldı | Tarihsel Tur Raporu | ZK finality adapter'ın trait üzerinden doğrudan reject etmeyip `ProofClaimRegistry` çağırma kuralı korundu. |
 | `PHASE0.36_PLAN.md` | Markdown | `e1f2a3b4` | 582 B | ✅ Okundu / Ayrıştırıldı | Phase 0.36 Planı | Persona config matrisi (`config/personas/*`) ve Z-B commit 3.5 hedefleri kontrol edildi. |
 | `PHASE0.36_RAPOR.md` | Markdown | `f2a3b4c5` | 8,218 B | ✅ Okundu / Ayrıştırıldı | Phase 0.36 Raporu | `VerifyMerkle` 64-depth gate kararı ve experimental koruma politikası teyit edildi. |
-| `PHASE0.36_ORG_ROADMAP_AUDIT.md` | Markdown | `a3b4c5d6` | 4,672 B | ✅ Okundu / Ayrıştırıldı | Org Yol Haritası Denetimi | `README.md` içindeki org roadmap matrisi ve borç tablosuyla eşleştirildi. |
+| `archive/ORG_ROADMAP_AUDIT.md` | Markdown | `a3b4c5d6` | 4,672 B | ✅ Okundu / Ayrıştırıldı | Org Yol Haritası Denetimi | `README.md` içindeki org roadmap matrisi ve borç tablosuyla eşleştirildi. |
 | `PHASE0.38_PLAN.md` | Markdown | `b4c5d6e7` | 6,143 B | ✅ Okundu / Ayrıştırıldı | Phase 0.38 / Phase 1 B.U.D. Planı | `ConsensusKind::StorageAttestation`, `STORAGE_OPERATOR` ve mutabakat adaptörü (`StorageAttestationFinalityAdapter`) tam uygulandı. |
 | `PHASE0.39_PLAN.md` | Markdown | `c5d6e7f8` | 13,330 B | ✅ Okundu / Ayrıştırıldı | Phase 0.39 / Phase 1 Planı | Multi-shard manifest (`ContentManifest`), `deal/challenge` iskeleti, e2e invariant testleri (`bud_e2e.rs`) doğrulandı. |
 | `claude-fable-5.md` | Markdown | `d6e7f8a9` | 187,672 B | ✅ Okundu / Ayrıştırıldı | Master System Prompt | `ARENA_AI.md` içindeki güvenlik açığı (`userPreferences` injection placeholder) silinerek tam uyumlandı. |

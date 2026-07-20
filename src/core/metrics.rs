@@ -32,6 +32,12 @@ pub struct Metrics {
     pub rpc_request_duration_seconds: Histogram,
     pub rpc_requests_total: IntCounter,
     pub rpc_rate_limited_total: IntCounter,
+    pub bridge_transfers_total: IntCounter,
+    pub bridge_amount_locked: IntGauge,
+    pub ai_requests_total: IntCounter,
+    pub ai_outcomes_finalized: IntCounter,
+    pub bns_names_registered: IntCounter,
+    pub slashing_events_total: IntCounter,
 }
 
 impl Metrics {
@@ -145,6 +151,36 @@ impl Metrics {
         let rpc_requests_total =
             IntCounter::new("budlum_rpc_requests_total", "Total RPC requests received")
                 .expect("metric");
+        // Phase 11.3 Task 7: Domain metrics.
+        let bridge_transfers_total = IntCounter::new(
+            "budlum_bridge_transfers_total",
+            "Total bridge transfers processed",
+        )
+        .expect("metric");
+        let bridge_amount_locked = IntGauge::new(
+            "budlum_bridge_amount_locked",
+            "Assets currently locked in bridge",
+        )
+        .expect("metric");
+        let ai_requests_total = IntCounter::new(
+            "budlum_ai_requests_total",
+            "Total AI inference requests submitted",
+        )
+        .expect("metric");
+        let ai_outcomes_finalized = IntCounter::new(
+            "budlum_ai_outcomes_finalized",
+            "Total AI outcomes finalized",
+        )
+        .expect("metric");
+        let bns_names_registered =
+            IntCounter::new("budlum_bns_names_registered", "Total BNS names registered")
+                .expect("metric");
+        let slashing_events_total = IntCounter::new(
+            "budlum_slashing_events_total",
+            "Total slashing events executed",
+        )
+        .expect("metric");
+
         let rpc_rate_limited_total = IntCounter::new(
             "budlum_rpc_rate_limited_total",
             "Total RPC requests rejected due to rate limiting",
@@ -233,6 +269,24 @@ impl Metrics {
             .register(Box::new(rpc_requests_total.clone()))
             .expect("metric");
         registry
+            .register(Box::new(bridge_transfers_total.clone()))
+            .expect("metric");
+        registry
+            .register(Box::new(bridge_amount_locked.clone()))
+            .expect("metric");
+        registry
+            .register(Box::new(ai_requests_total.clone()))
+            .expect("metric");
+        registry
+            .register(Box::new(ai_outcomes_finalized.clone()))
+            .expect("metric");
+        registry
+            .register(Box::new(bns_names_registered.clone()))
+            .expect("metric");
+        registry
+            .register(Box::new(slashing_events_total.clone()))
+            .expect("metric");
+        registry
             .register(Box::new(rpc_rate_limited_total.clone()))
             .expect("metric");
 
@@ -266,6 +320,12 @@ impl Metrics {
             rpc_request_duration_seconds,
             rpc_requests_total,
             rpc_rate_limited_total,
+            bridge_transfers_total,
+            bridge_amount_locked,
+            ai_requests_total,
+            ai_outcomes_finalized,
+            bns_names_registered,
+            slashing_events_total,
         }
     }
 

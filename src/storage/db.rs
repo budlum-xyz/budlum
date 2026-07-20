@@ -110,7 +110,7 @@ pub struct Storage {
 /// A small bounded retry absorbs the race; non-contention errors and
 /// persistent contention keep the exact same failure surface as before.
 fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Db> {
-    const MAX_ATTEMPTS: u32 = 5;
+    const MAX_ATTEMPTS: u32 = 40;
     for attempt in 1..=MAX_ATTEMPTS {
         match sled::open(path.as_ref()) {
             Ok(db) => return Ok(db),
@@ -124,7 +124,7 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
                 if !is_lock_contention || attempt == MAX_ATTEMPTS {
                     return Err(io_err);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)));
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
     }
@@ -386,7 +386,23 @@ impl Storage {
                 batch.remove(b"CANONICAL_HEIGHT");
             }
 
-            // 4. Remove the IN_PROGRESS_HEIGHT marker
+            // 4. V113: Roll bridge state back to the previous durable tip.
+            // Durable commits store BRIDGE_STATE_AT:{h}. On interrupt at H we
+            // must not leave a newer BRIDGE_STATE than the restored tip (H-1).
+            batch.remove(format!("BRIDGE_STATE_AT:{height}").as_bytes());
+            if height > 0 {
+                let prev = height - 1;
+                let prev_key = format!("BRIDGE_STATE_AT:{prev}");
+                if let Some(prev_bridge) = self.db.get(prev_key.as_bytes())? {
+                    batch.insert(b"BRIDGE_STATE", prev_bridge);
+                } else {
+                    batch.remove(b"BRIDGE_STATE");
+                }
+            } else {
+                batch.remove(b"BRIDGE_STATE");
+            }
+
+            // 5. Remove the IN_PROGRESS_HEIGHT marker
             batch.remove(b"IN_PROGRESS_HEIGHT");
 
             // Apply rollback batch atomically
@@ -464,6 +480,9 @@ impl Storage {
         if let Some(ref bridge_state) = batch.bridge_state {
             let val = encode(bridge_state)?;
             b.insert(b"BRIDGE_STATE", val.as_slice());
+            // V113: height-indexed durable bridge snapshot for crash recovery.
+            let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
+            b.insert(at.as_bytes(), val.as_slice());
         }
 
         // 10. Accounts
@@ -1252,7 +1271,23 @@ mod tests {
         let accounts = storage.load_all_accounts().unwrap();
         assert_eq!(accounts.get(&addr).unwrap().balance, 500);
 
-        // 5. Simulate an interrupted commit at height 2
+        // 5a. Durable tip-1 bridge snapshot (as commit_durable_batch would write).
+        use crate::cross_domain::{AssetId, BridgeState};
+        let mut bridge_h1 = BridgeState::new();
+        let asset = AssetId([0x11u8; 32]);
+        bridge_h1.register_asset(asset, 1).unwrap();
+        let bridge_h1_root = bridge_h1.root();
+        let bridge_h1_bytes = encode(&bridge_h1).unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE", bridge_h1_bytes.as_slice())
+            .unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE_AT:1", bridge_h1_bytes.as_slice())
+            .unwrap();
+
+        // 5b. Simulate interrupted commit at height 2 with poisoned bridge state.
         storage.db.insert(b"IN_PROGRESS_HEIGHT", b"2").unwrap();
         let mut block2 = Block::new(2, block.hash.clone(), vec![]);
         block2.hash = block2.calculate_hash();
@@ -1267,6 +1302,20 @@ mod tests {
         storage.db.insert(b"STATE_ROOT:2", b"half_state").unwrap();
         storage.db.insert(b"LAST", block2.hash.as_bytes()).unwrap();
         storage.db.insert(b"CANONICAL_HEIGHT", b"2").unwrap();
+        let mut bridge_poison = BridgeState::new();
+        let poison_asset = AssetId([0xFFu8; 32]);
+        bridge_poison.register_asset(poison_asset, 9).unwrap();
+        let poison_root = bridge_poison.root();
+        assert_ne!(bridge_h1_root, poison_root);
+        let poison_bytes = encode(&bridge_poison).unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE", poison_bytes.as_slice())
+            .unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE_AT:2", poison_bytes.as_slice())
+            .unwrap();
         storage.db.flush().unwrap();
 
         // Drop the first storage handle to release the file lock
@@ -1280,6 +1329,17 @@ mod tests {
         assert!(storage2.get_block_by_height(2).unwrap().is_none());
         assert_eq!(storage2.get_canonical_height().unwrap(), 1);
         assert_eq!(storage2.get_last_hash().unwrap().unwrap(), block.hash);
+        // V113: live BRIDGE_STATE must match tip-1 snapshot, not poison.
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("bridge state restored");
+        assert_eq!(
+            restored.root(),
+            bridge_h1_root,
+            "V113: bridge must roll back to tip-1 after interrupted H=2"
+        );
+        assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
     }
 
     #[test]

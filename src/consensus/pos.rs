@@ -185,11 +185,25 @@ impl PoSEngine {
         slot: u64,
         validator_set_hash: &str,
     ) -> [u8; 32] {
+        // V98 fix (ARENAS): Lock poisoning must NOT return a zero seed.
+        // A zero seed makes VRF output fully predictable, allowing a
+        // validator-selection attack. On poison, we fall back to a
+        // domain-separated hash of the remaining inputs (chain_id, epoch,
+        // slot, validator_set_hash) — deterministic, non-zero, and still
+        // bound to the current state. This is strictly better than [0u8; 32].
         let prev_seed = match self.epoch_seed.read() {
             Ok(guard) => *guard,
-            Err(e) => {
-                tracing::error!("Epoch seed lock poisoned: {}", e);
-                [0u8; 32]
+            Err(_e) => {
+                tracing::error!("Epoch seed lock poisoned — falling back to poison-resistant seed");
+                // Deterministic fallback: hash the non-poisoned inputs
+                let mut fallback = Sha3_256::new();
+                fallback.update(b"BDLM_SEED_POISON_FALLBACK_V1");
+                fallback.update(chain_id.to_le_bytes());
+                fallback.update(epoch.to_le_bytes());
+                fallback.update(slot.to_le_bytes());
+                fallback.update(validator_set_hash.as_bytes());
+                let fallback_seed: [u8; 32] = fallback.finalize().into();
+                fallback_seed
             }
         };
         let mut hasher = Sha3_256::new();

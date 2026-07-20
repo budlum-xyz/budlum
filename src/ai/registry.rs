@@ -4,9 +4,10 @@
 //! and finalized consensus outcomes. Provides deterministic `state_root()` calculation.
 
 use crate::ai::types::{
-    AiAgentPayment, AiAgentReputation, AiCallbackEvent, AiDisputeStatusInfo, AiExecutionProof,
-    AiInferenceOutcome, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
-    AiPaymentEscrowStatus, AiRequestId, AiVerifierQos, AiVerifierStakeInfo,
+    AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
+    AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
+    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
+    AiVerifierStakeInfo,
 };
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,8 @@ pub struct AiRegistry {
     /// Maps payment_id → AiAgentPayment. Enables trustless value transfer
     /// between AI agents in the Agentic Economy.
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
+    /// V89: finalized payment receipts (payment_id never reusable).
+    pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
     /// P5 ADIM11 Bulgu 33: Verifier whitelist — only whitelisted verifiers
     /// can submit results. When empty, any staked verifier can submit
     /// (permissionless mode). When non-empty, only addresses in this set
@@ -94,6 +97,7 @@ impl AiRegistry {
             execution_proofs: BTreeMap::new(),
             verifier_qos: BTreeMap::new(),
             agent_payments: BTreeMap::new(),
+            settled_agent_payments: BTreeMap::new(),
             verifier_whitelist: BTreeSet::new(),
             agent_reputations: BTreeMap::new(),
         }
@@ -112,6 +116,7 @@ impl AiRegistry {
             && self.execution_proofs.is_empty()
             && self.verifier_qos.is_empty()
             && self.agent_payments.is_empty()
+            && self.settled_agent_payments.is_empty()
             && self.verifier_whitelist.is_empty()
             && self.agent_reputations.is_empty()
     }
@@ -1048,8 +1053,14 @@ impl AiRegistry {
                 ));
             }
         }
-        if self.agent_payments.contains_key(&payment.payment_id) {
-            return Err(String::from("Agent payment: payment_id already exists"));
+        if self.agent_payments.contains_key(&payment.payment_id)
+            || self
+                .settled_agent_payments
+                .contains_key(&payment.payment_id)
+        {
+            return Err(String::from(
+                "Agent payment: payment_id already exists or was previously settled",
+            ));
         }
         self.agent_payments.insert(payment.payment_id, payment);
         Ok(())
@@ -1094,9 +1105,11 @@ impl AiRegistry {
                 ));
             }
         }
-        // Phase 2: Remove (mutable borrow)
+        // Phase 2: Remove live entry and archive settlement (V89 audit trail).
         let payment = self.agent_payments.remove(payment_id).unwrap();
-        Ok(payment.to_agent)
+        let to = payment.to_agent;
+        self.archive_settled_payment(payment, current_block, AiPaymentEscrowStatus::Released);
+        Ok(to)
     }
 
     /// P5 ADIM11 Bulgu 31: Reclaim an expired escrowed payment.
@@ -1119,8 +1132,64 @@ impl AiRegistry {
             ));
         }
         let amount = payment.amount;
-        self.agent_payments.remove(payment_id);
+        let payment = self.agent_payments.remove(payment_id).unwrap();
+        self.archive_settled_payment(payment, current_block, AiPaymentEscrowStatus::Reclaimed);
         Ok(amount)
+    }
+
+    /// V89: Record immediate (non-escrowed) settlement without dropping audit trail.
+    /// Removes live escrow entry if present and inserts an immutable settlement receipt.
+    pub fn settle_agent_payment_immediate(
+        &mut self,
+        payment_id: &[u8; 32],
+        settled_at_block: u64,
+    ) -> Result<(), String> {
+        let payment = self
+            .agent_payments
+            .remove(payment_id)
+            .ok_or_else(|| String::from("Agent payment: payment_id not found for settle"))?;
+        if payment.is_escrowed() {
+            // Should not be called for escrowed payments — put back and error.
+            self.agent_payments.insert(payment.payment_id, payment);
+            return Err(String::from(
+                "Agent payment: escrowed payment cannot use immediate settle",
+            ));
+        }
+        if self.settled_agent_payments.contains_key(payment_id) {
+            return Err(String::from("Agent payment: already settled"));
+        }
+        let receipt = AiAgentPaymentSettlement::from_payment(
+            &payment,
+            settled_at_block,
+            AiPaymentEscrowStatus::SettledImmediate,
+        );
+        self.settled_agent_payments
+            .insert(payment.payment_id, receipt);
+        Ok(())
+    }
+
+    /// V89/V86: Move live payment to settled history with terminal status.
+    fn archive_settled_payment(
+        &mut self,
+        payment: AiAgentPayment,
+        settled_at_block: u64,
+        status: AiPaymentEscrowStatus,
+    ) {
+        let id = payment.payment_id;
+        let receipt = AiAgentPaymentSettlement::from_payment(&payment, settled_at_block, status);
+        self.settled_agent_payments.insert(id, receipt);
+    }
+
+    pub fn get_settled_agent_payment(
+        &self,
+        payment_id: &[u8; 32],
+    ) -> Option<&AiAgentPaymentSettlement> {
+        self.settled_agent_payments.get(payment_id)
+    }
+
+    pub fn is_payment_id_consumed(&self, payment_id: &[u8; 32]) -> bool {
+        self.agent_payments.contains_key(payment_id)
+            || self.settled_agent_payments.contains_key(payment_id)
     }
 
     /// P5 ADIM11 Bulgu 31: Get a payment by ID.
@@ -1133,12 +1202,16 @@ impl AiRegistry {
         &self,
         payment_id: &[u8; 32],
     ) -> Option<AiPaymentEscrowStatus> {
-        let payment = self.agent_payments.get(payment_id)?;
-        if payment.request_id.is_some() {
-            Some(AiPaymentEscrowStatus::Pending)
-        } else {
-            Some(AiPaymentEscrowStatus::Released)
+        if let Some(payment) = self.agent_payments.get(payment_id) {
+            if payment.request_id.is_some() {
+                return Some(AiPaymentEscrowStatus::Pending);
+            }
+            // Live non-escrowed should be rare after V89 settle path.
+            return Some(AiPaymentEscrowStatus::Pending);
         }
+        self.settled_agent_payments
+            .get(payment_id)
+            .map(|s| s.status.clone())
     }
 
     /// P5 ADIM11 Bulgu 31: Get all payments from a specific agent.
@@ -1382,8 +1455,12 @@ impl AiRegistry {
             hasher.update(pid);
             hasher.update(payment.calculate_leaf());
         }
-
-        // Domain: verifier_whitelist (P5 ADIM11 Bulgu 33)
+        // Domain: settled agent payments (V89 audit trail)
+        hasher.update(b"BDLM_AI_AGENT_PAYMENT_SETTLEMENTS_V1");
+        for (pid, settlement) in &self.settled_agent_payments {
+            hasher.update(pid);
+            hasher.update(settlement.calculate_leaf());
+        }
         hasher.update(b"BDLM_AI_VERIFIER_WHITELIST");
         for verifier in &self.verifier_whitelist {
             hasher.update(verifier.as_bytes());

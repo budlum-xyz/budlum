@@ -1,5 +1,5 @@
 use libp2p::PeerId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 pub const INVALID_BLOCK_PENALTY: i32 = -10;
@@ -108,6 +108,15 @@ pub struct PeerManager {
     pub(crate) msg_refill_rate: f64,
     /// Soft ceiling on tracked peer score entries (memory DoS guard).
     pub(crate) max_tracked_peers: usize,
+    /// H5.1 eclipse protection: max concurrent connections per IPv4 /24.
+    pub(crate) max_peers_per_subnet: usize,
+    /// Live connection count per IPv4 /24 key (first 3 octets).
+    subnet_counts: HashMap<[u8; 3], usize>,
+    /// Peer → subnet mapping for disconnect accounting.
+    peer_subnets: HashMap<PeerId, [u8; 3]>,
+    /// Live peer set. Libp2p can emit multiple connection events for one peer;
+    /// this set makes peer_count and /24 accounting idempotent.
+    connected_peers: HashSet<PeerId>,
 }
 impl Default for PeerManager {
     fn default() -> Self {
@@ -122,6 +131,10 @@ impl PeerManager {
             peers: HashMap::new(),
             msg_refill_rate: MSG_REFILL_RATE,
             max_tracked_peers: 10_000,
+            max_peers_per_subnet: 4,
+            subnet_counts: HashMap::new(),
+            peer_subnets: HashMap::new(),
+            connected_peers: HashSet::new(),
         }
     }
 
@@ -144,6 +157,62 @@ impl PeerManager {
 
     pub fn max_tracked_peers(&self) -> usize {
         self.max_tracked_peers
+    }
+
+    /// H5.1: maximum admitted connections sharing the same IPv4 /24.
+    pub fn max_peers_per_subnet(&self) -> usize {
+        self.max_peers_per_subnet
+    }
+
+    pub fn set_max_peers_per_subnet(&mut self, n: usize) {
+        self.max_peers_per_subnet = n.max(1);
+    }
+
+    /// Returns false if admitting `subnet` would exceed the eclipse bound.
+    pub fn can_admit_subnet(&self, subnet: Option<[u8; 3]>) -> bool {
+        let Some(key) = subnet else {
+            return true; // non-IPv4 (relay/circuit) — bound by max_peers only
+        };
+        self.subnet_counts.get(&key).copied().unwrap_or(0) < self.max_peers_per_subnet
+    }
+
+    /// Record a live connection under an optional /24 key.
+    ///
+    /// Returns `true` only for the first live connection for `peer_id`.
+    /// Libp2p may emit duplicate connection events for the same peer/address;
+    /// counting those duplicates was causing peer_count drift and /24 overcount.
+    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) -> bool {
+        if !self.connected_peers.insert(peer_id) {
+            return false;
+        }
+        if let Some(key) = subnet {
+            *self.subnet_counts.entry(key).or_insert(0) += 1;
+            self.peer_subnets.insert(peer_id, key);
+        }
+        true
+    }
+
+    /// Drop subnet accounting when a peer disconnects.
+    ///
+    /// Returns `true` if this call removed a previously live peer. Duplicate
+    /// disconnect events are ignored to prevent AtomicUsize underflow.
+    pub fn note_disconnected(&mut self, peer_id: &PeerId) -> bool {
+        if !self.connected_peers.remove(peer_id) {
+            return false;
+        }
+        if let Some(key) = self.peer_subnets.remove(peer_id) {
+            if let Some(c) = self.subnet_counts.get_mut(&key) {
+                *c = c.saturating_sub(1);
+                if *c == 0 {
+                    self.subnet_counts.remove(&key);
+                }
+            }
+        }
+        true
+    }
+
+    pub fn subnet_connection_count(&self, subnet: [u8; 3]) -> usize {
+        self.subnet_counts.get(&subnet).copied().unwrap_or(0)
     }
     fn get_or_create(&mut self, peer_id: &PeerId) -> &mut PeerScore {
         self.peers.entry(*peer_id).or_default()
@@ -551,5 +620,61 @@ mod tests {
         // Default burst is MAX_MSG_BURST = 20.
         assert_eq!(allowed, MAX_MSG_BURST as u32);
         assert!(!manager.check_rate_limit(&peer));
+    }
+
+    /// H5.1: eclipse protection — /24 subnet connection bound.
+    #[test]
+    fn h5_eclipse_subnet_bound_rejects_fifth_peer() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(4);
+        let subnet = [10, 0, 0];
+        for _ in 0..4 {
+            assert!(pm.can_admit_subnet(Some(subnet)));
+            let peer = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            pm.note_connected(peer, Some(subnet));
+        }
+        assert_eq!(pm.subnet_connection_count(subnet), 4);
+        assert!(
+            !pm.can_admit_subnet(Some(subnet)),
+            "5th peer on same /24 must be rejected"
+        );
+        // Different subnet still ok
+        assert!(pm.can_admit_subnet(Some([10, 0, 1])));
+    }
+
+    #[test]
+    fn h5_eclipse_disconnect_frees_subnet_slot() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(1);
+        let subnet = [192, 168, 1];
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        assert!(pm.can_admit_subnet(Some(subnet)));
+        assert!(pm.note_connected(peer, Some(subnet)));
+        assert!(!pm.can_admit_subnet(Some(subnet)));
+        assert!(pm.note_disconnected(&peer));
+        assert!(pm.can_admit_subnet(Some(subnet)));
+    }
+
+    /// H5.1 follow-up: duplicate libp2p connection events for one peer are
+    /// idempotent, and duplicate disconnects do not underflow accounting.
+    #[test]
+    fn h5_eclipse_peer_accounting_is_idempotent() {
+        let mut pm = PeerManager::new();
+        let subnet = [172, 18, 0];
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+
+        assert!(pm.note_connected(peer, Some(subnet)));
+        assert!(!pm.note_connected(peer, Some(subnet)));
+        assert_eq!(pm.subnet_connection_count(subnet), 1);
+
+        assert!(pm.note_disconnected(&peer));
+        assert!(!pm.note_disconnected(&peer));
+        assert_eq!(pm.subnet_connection_count(subnet), 0);
     }
 }

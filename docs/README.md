@@ -1,7 +1,7 @@
 # Budlum Documentation
 
 - [Architecture Atlas](ARCHITECTURE.md) — system, trust-boundary, signing, bridge, snapshot, durability, BudZero, AI, B.U.D., CI and mainnet-launch diagrams
-- [Reports index + naming standard](REPORTS_INDEX.md) — tüm rapor/denetim/plan belgelerinin kanonik indeksi (EN canonical body + TR özet kuralı, Q6 2026-07-16)
+- [Reports index + naming standard](archive/REPORTS_INDEX.md) — tüm rapor/denetim/plan belgelerinin kanonik indeksi (EN canonical body + TR özet kuralı, Q6 2026-07-16)
 
 Choose a language:
 
@@ -10,11 +10,15 @@ Choose a language:
 
 Current production-readiness status:
 
+- **[Budlum Full Hardening Protocol](BUDLUM_HARDENING_PROTOCOL.md)** — kanonik sertleştirme rejimi (H0–H9 kapıları, V-bulgu imhası, fuzz/HSM/ağ/ops, "tam sertleştirilmiş" mühür)
+
+
 - [Turkce production hardening durumu](tr/book/ch12_production_hardening.md)
 - [English production hardening status](en/book/ch12_production_hardening.md)
 
 Specialised deep-dives:
 
+- [ARENA4 approved systems roadmap](ARENA4_APPROVED_SYSTEMS_ROADMAP_2026-07-20.md) — Pollen, AI read gate, D-Web Passport, Relayer Policy, Atlas ve onaylanan sistemlerin uygulama sırası
 - [Phase 0.37 implementation report](archive/PHASE0.37_RAPOR.md)
 - [Production / enterprise PoA runbook](operations/PRODUCTION_RUNBOOK.md)
 - [Archive backup/restore runbook](operations/ARCHIVE_AND_BACKUP.md)

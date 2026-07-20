@@ -30,6 +30,7 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openssl \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core

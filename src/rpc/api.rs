@@ -126,6 +126,7 @@ pub trait BudlumApi {
         expected_block_hash: Option<crate::domain::Hash32>,
         event: crate::cross_domain::DomainEvent,
         proof: crate::cross_domain::MerkleProof,
+        relayer: crate::core::address::Address,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_burnBridgeTransfer")]
@@ -449,6 +450,20 @@ pub trait BudlumApi {
     #[method(name = "bud_gatewayFetchContent")]
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned>;
 
+    /// D-Web Passport profile bundle for budlum.xyz. Read-only and evidence-labelled.
+    #[method(name = "bud_passportGetProfile")]
+    async fn passport_get_profile(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Budlum Atlas wallet context for bud.scan/budlum.xyz. Read-only.
+    #[method(name = "bud_atlasGetWalletContext")]
+    async fn atlas_get_wallet_context(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     // --- B.U.D. SocialFi extended ---
 
     /// Prepare an NFT burn transaction.
@@ -489,6 +504,38 @@ pub trait BudlumApi {
         &self,
         buyer: String,
         offer_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// List Pollen DataAsset records visible in chain state.
+    #[method(name = "bud_pollenGetDataAssets")]
+    async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// List Pollen AccessGrant records visible in chain state.
+    #[method(name = "bud_pollenGetAccessGrants")]
+    async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// List Pollen SaleAuthorization records visible in chain state.
+    #[method(name = "bud_pollenGetSaleAuthorizations")]
+    async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Build canonical AiInferenceRequest.input_ref for Pollen-gated data reads.
+    #[method(name = "bud_pollenBuildAiInputRef")]
+    async fn pollen_build_ai_input_ref(
+        &self,
+        asset_id: String,
+        grant_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare unsigned owner/seller authorization for selling DataAsset pollen.
+    #[method(name = "bud_pollenPrepareSaleAuthorization")]
+    async fn pollen_prepare_sale_authorization(
+        &self,
+        seller: String,
+        asset_id: String,
+        unit_price: u64,
+        expires_at_block: u64,
+        max_grants: u32,
+        terms_hash: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     // --- B.U.D. Hub ---

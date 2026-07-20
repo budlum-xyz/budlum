@@ -16,6 +16,16 @@ fn fresh_chain() -> Blockchain {
     bc
 }
 
+fn total_bud_committed(bc: &Blockchain) -> u128 {
+    bc.state.circulating_supply()
+        + bc.state.get_total_stake() as u128
+        + bc.state
+            .unbonding_queue
+            .iter()
+            .map(|entry| entry.amount as u128)
+            .sum::<u128>()
+}
+
 #[test]
 fn test_block_reward_from_config() {
     let mut bc = fresh_chain();
@@ -54,18 +64,31 @@ fn test_block_reward_hard_supply_cap() {
     assert_eq!(bc.state.circulating_supply(), 0);
 
     let max = BUD_TOTAL_SUPPLY as u128;
-    // Set balance of some address to max - 50 (only 50 BUD room left under cap).
-    bc.state.add_balance(&addr(0x99), (max - 50) as u64);
-    assert_eq!(bc.state.circulating_supply(), max - 50);
+    let non_circulating = bc.state.get_total_stake() as u128
+        + bc.state
+            .unbonding_queue
+            .iter()
+            .map(|entry| entry.amount as u128)
+            .sum::<u128>();
+    assert!(
+        non_circulating <= max.saturating_sub(50),
+        "test setup must leave at least 50 BUD room under cap"
+    );
+
+    // V144: hard cap is circulating + staked + unbonding, not circulating only.
+    // Put the chain exactly 50 units below cap using the new denominator.
+    bc.state
+        .add_balance(&addr(0x99), (max - non_circulating - 50) as u64);
+    assert_eq!(total_bud_committed(&bc), max - 50);
 
     // Configure block_reward = 100. Produce a block: producer should be paid
     // only the 50 that fits under the cap (clamped), not 100.
     bc.state.tokenomics.block_reward = 100;
     let _ = bc.produce_block(producer).unwrap();
-    let supply_after_partial = bc.state.circulating_supply();
     assert_eq!(
-        supply_after_partial, max,
-        "Supply should be exactly at the cap after the partial-mint block"
+        total_bud_committed(&bc),
+        max,
+        "Total BUD should be exactly at the cap after the partial-mint block"
     );
 
     // Now produce another block with zero cap room: no more minted.
@@ -75,12 +98,12 @@ fn test_block_reward_hard_supply_cap() {
     // Only tx fees (zero here, empty txs) → producer balance unchanged.
     assert_eq!(
         balance_producer_after, balance_producer_before,
-        "Producer must NOT receive block_reward when supply is at cap"
+        "Producer must NOT receive block_reward when total BUD is at cap"
     );
     assert_eq!(
-        bc.state.circulating_supply(),
+        total_bud_committed(&bc),
         max,
-        "Supply must remain exactly at the cap"
+        "Total BUD must remain exactly at the cap"
     );
 }
 

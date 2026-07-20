@@ -64,6 +64,9 @@ fn tur13_5_pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
     chain
         .register_bridge_asset(asset, source.id)
         .expect("asset registration");
+    // V107: lock debits owner balance.
+    chain.init_genesis_account(&address(7));
+    chain.init_genesis_account(&address(8));
     let (_transfer, event) = chain
         .lock_bridge_transfer(source.id, 42, 1, 0, asset, address(7), address(8), 500, 100)
         .expect("bridge lock");

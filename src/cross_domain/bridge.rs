@@ -572,4 +572,28 @@ mod tests {
         assert!(bridge.unlock(transfer.message_id, 1).is_err()); // source domain ≠ burn domain
         bridge.unlock(transfer.message_id, 2).unwrap(); // burn domain → succeeds
     }
+
+    /// V24 regression: mutating transfer amount without going through state
+    /// transitions must change `root()` (transfer metadata is in digest).
+    #[test]
+    fn v24_forged_transfer_amount_changes_bridge_root() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"v24-asset"]));
+        let owner = Address::from([0x11u8; 32]);
+        let recipient = Address::from([0x22u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, _event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 1000)
+            .unwrap();
+        let root_before = bridge.root();
+        // Forge: change amount in-place (simulates corrupted snapshot/memory).
+        if let Some(t) = bridge.transfers.get_mut(&transfer.message_id) {
+            t.amount = t.amount.saturating_add(999);
+        }
+        let root_after = bridge.root();
+        assert_ne!(
+            root_before, root_after,
+            "V24: forged transfer amount must change bridge root"
+        );
+    }
 }

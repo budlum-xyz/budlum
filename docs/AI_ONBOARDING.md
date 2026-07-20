@@ -12,15 +12,16 @@
 
 ## 1. Okuma sırası (30 dakikada hizalanma)
 
-1. **`docs/STATUS_ONLINE.md` — son 4 girdi** (aktif iletişim kanalı; burada timestamp'li girdi AÇMADAN kod yazma):
+1. **`docs/BUDLUM_HARDENING_PROTOCOL.md`** — tam sertleştirme protokolü (H0–H9 kapıları; mainnet öncesi zorunlu rejim).
+2. **`docs/STATUS_ONLINE.md` — son 4 girdi** (aktif iletişim kanalı; burada timestamp'li girdi AÇMADAN kod yazma):
    - P10 açılış + kod doğrulama raporu (RPC 7→9, ContentManifest owner YOK, RoleId deseni)
    - Sprint-1 kapanışı (modül dashboard + BNS gate + 16 zorunlu check)
    - Phase 9.5 mühür envanteri
    - HALEF EL KİTABI bölümü (ARENA2'ye özel devir notları)
-2. **`docs/ARENA3_BACKLOG_2026-07-18.md`** — bekleyen işler (her satır sahip+koşul etiketli; kendi kalemini buradan sahiplen).
-3. **`docs/BUDLUM_PHASE10.md`** — mevcut fazın talimat dokümanı (4 bölüm). **Bölüm 3.0 dürüstlük notunu oku:** doküman README bazlı; benim kaynak-doğrulamam STATUS_ONLINE'daki P10 girdisinde (9 RPC, owner YOK, 755 lib — dokümandaki 452 güncel değil).
-4. **`docs/RFC_GAP1_SNAPSHOT_MANIFEST_SIGNATURE.md`** — açık RFC (Sprint-2'de AccessGrant RFC ile birleşik revize edilecek).
-5. **`docs/ARENA_GOREV_DAGILIMI_2026-07-17.md`** — orijinal görev dağılımı (hâlâ geçerli temel; aşağıdaki güncellemelerle birlikte oku).
+3. **`docs/ARENA3_BACKLOG_2026-07-18.md`** — bekleyen işler (her satır sahip+koşul etiketli; kendi kalemini buradan sahiplen).
+4. **`docs/archive/BUDLUM_PHASE10.md`** — tarihsel Phase 10 talimat dokümanı (4 bölüm; arşiv). **Bölüm 3.0 dürüstlük notunu oku:** doküman README bazlı; benim kaynak-doğrulamam STATUS_ONLINE'daki P10 girdisinde (9 RPC, owner YOK, 755 lib — dokümandaki 452 güncel değil).
+5. **`docs/RFC_GAP1_SNAPSHOT_MANIFEST_SIGNATURE.md`** — açık RFC (Sprint-2'de AccessGrant RFC ile birleşik revize edilecek).
+6. **`docs/ARENA_GOREV_DAGILIMI_2026-07-17.md`** — orijinal görev dağılımı (hâlâ geçerli temel; aşağıdaki güncellemelerle birlikte oku).
 
 ## 2. Görev sınırları (güncel)
 

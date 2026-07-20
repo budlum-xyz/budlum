@@ -36,7 +36,20 @@ services:
       - "--snapshot-dir=/home/budlum/data/snapshots"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
       - "--banned-peer-db=/home/budlum/data/banned-peers.json"
-      - "--bootstrap=/dns4/node1/tcp/4001/p2p/${NODE1_PEER_ID}"
+    # Devnet smoke flakiness fix (ARENA3, 2026-07-20): node2/3/4 tek-atış
+    # `--dial` ile node1'e bağlanıyordu; depends_on yalnız container başlangıcını
+    # beklediği için node1'in P2P listener'ı hazır olmadan dial ediliyordu →
+    # mesh çoğu zaman kurulamadı → smoke [2/5] flaky-fail. healthcheck,
+    # node1 P2P dinlediği doğrulanana (bud_netListening==true) kadar bağlımlıları
+    # bekletir (depends_on: service_healthy).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -sf --max-time 4 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"bud_netListening\",\"params\":[],\"id\":1}' http://127.0.0.1:8545 | grep -q '\"result\":true'"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     networks:
       - budlum-net
     restart: unless-stopped
@@ -60,11 +73,12 @@ services:
       - "--difficulty=0"
       - "--db-path=/home/budlum/data/devnet-node2"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
-      - "--bootstrap=/dns4/node1/tcp/4001"
+      - "--dial=/dns4/node1/tcp/4001"
     networks:
       - budlum-net
     depends_on:
-      - node1
+      node1:
+        condition: service_healthy
     restart: unless-stopped
 
   node3:
@@ -85,11 +99,12 @@ services:
       - "--difficulty=0"
       - "--db-path=/home/budlum/data/devnet-node3"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
-      - "--bootstrap=/dns4/node1/tcp/4001"
+      - "--dial=/dns4/node1/tcp/4001"
     networks:
       - budlum-net
     depends_on:
-      - node1
+      node1:
+        condition: service_healthy
     restart: unless-stopped
 
   node4:
@@ -110,11 +125,12 @@ services:
       - "--difficulty=0"
       - "--db-path=/home/budlum/data/devnet-node4"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
-      - "--bootstrap=/dns4/node1/tcp/4001"
+      - "--dial=/dns4/node1/tcp/4001"
     networks:
       - budlum-net
     depends_on:
-      - node1
+      node1:
+        condition: service_healthy
     restart: unless-stopped
 
   prometheus:

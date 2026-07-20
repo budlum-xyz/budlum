@@ -55,6 +55,12 @@ impl BnsRegistry {
         if char_count < 3 || char_count > 32 {
             return Err(BnsError::InvalidName);
         }
+        // V131 fix (ARENAS): duration must be > 0. Zero-duration registration
+        // would expire immediately (current_epoch + 0), creating a useless
+        // record that wastes state space and could be used for name squatting.
+        if duration == 0 {
+            return Err(BnsError::InvalidName);
+        }
         if let Some(record) = self.names.get(&name) {
             if record.expires_at > current_epoch {
                 return Err(BnsError::NameTaken);

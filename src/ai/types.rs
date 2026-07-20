@@ -713,4 +713,71 @@ pub enum AiPaymentEscrowStatus {
     Released,
     /// Payment reclaimed by sender (expired or cancelled).
     Reclaimed,
+    /// V89: Non-escrowed immediate settlement completed (audit trail retained).
+    SettledImmediate,
+}
+
+/// V89: Immutable settlement receipt kept after a payment leaves the live escrow map.
+/// Prevents payment_id reuse and preserves audit/root inclusion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiAgentPaymentSettlement {
+    pub payment_id: [u8; 32],
+    pub from_agent: Address,
+    pub to_agent: Address,
+    pub amount: u64,
+    pub request_id: Option<AiRequestId>,
+    pub require_proof: bool,
+    pub submitted_at_block: u64,
+    pub expiry_block: u64,
+    /// Block height when settlement was finalized on-chain.
+    pub settled_at_block: u64,
+    pub status: AiPaymentEscrowStatus,
+}
+
+impl AiAgentPaymentSettlement {
+    pub fn from_payment(
+        payment: &AiAgentPayment,
+        settled_at_block: u64,
+        status: AiPaymentEscrowStatus,
+    ) -> Self {
+        Self {
+            payment_id: payment.payment_id,
+            from_agent: payment.from_agent,
+            to_agent: payment.to_agent,
+            amount: payment.amount,
+            request_id: payment.request_id.clone(),
+            require_proof: payment.require_proof,
+            submitted_at_block: payment.submitted_at_block,
+            expiry_block: payment.expiry_block,
+            settled_at_block,
+            status,
+        }
+    }
+
+    pub fn calculate_leaf(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_AI_AGENT_PAYMENT_SETTLEMENT_V1");
+        hasher.update(&self.payment_id);
+        hasher.update(self.from_agent.as_bytes());
+        hasher.update(self.to_agent.as_bytes());
+        hasher.update(self.amount.to_le_bytes());
+        if let Some(ref rid) = self.request_id {
+            hasher.update(b"rid");
+            hasher.update(rid.0);
+        } else {
+            hasher.update(b"no_rid");
+        }
+        hasher.update([self.require_proof as u8]);
+        hasher.update(self.submitted_at_block.to_le_bytes());
+        hasher.update(self.expiry_block.to_le_bytes());
+        hasher.update(self.settled_at_block.to_le_bytes());
+        let status_tag: u8 = match self.status {
+            AiPaymentEscrowStatus::Pending => 0,
+            AiPaymentEscrowStatus::Released => 1,
+            AiPaymentEscrowStatus::Reclaimed => 2,
+            AiPaymentEscrowStatus::SettledImmediate => 3,
+        };
+        hasher.update([status_tag]);
+        hasher.finalize().into()
+    }
 }

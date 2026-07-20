@@ -3,6 +3,7 @@ pub mod finality_adapter;
 pub mod plugin;
 pub mod plugin_registry;
 pub mod registry;
+pub mod sovereign;
 pub mod storage_deal;
 pub mod storage_params;
 pub mod types;
@@ -19,6 +20,10 @@ pub use plugin::{
 };
 pub use plugin_registry::DomainPluginRegistry;
 pub use registry::ConsensusDomainRegistry;
+pub use sovereign::{
+    AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
+    SovereignDomainTemplate,
+};
 pub use storage_deal::{
     storage_deal_leaf_hash, ChallengeOutcome, ChallengeResult, DealStatus, RetrievalChallenge,
     RetrievalChallengeRequest, RetrievalResponse, StorageDeal, StorageEconomicsParams,

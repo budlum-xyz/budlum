@@ -9,7 +9,7 @@
 > - `CLAUDE.md` (budlum-spesifik master context — PoA izolasyonu,
 >   permissionless mimari, whitelist yasağı)
 > - `docs/STATUS.md` (güncel PR durum tablosu)
-> - `docs/ORG_ROADMAP_AUDIT.md` §4a (Phase 0.398 denetim sonuçları)
+> - `docs/archive/ORG_ROADMAP_AUDIT.md` §4a (Phase 0.398 denetim sonuçları)
 > - `the-plan/PHASE0.40_PLAN.md` (Phase 0.40 planı — şu an uygulanan)
 > - `the-plan/PHASE0.42_PLAN.md` (Phase 0.42 planı — Phase 0.40 sonrası)
 >

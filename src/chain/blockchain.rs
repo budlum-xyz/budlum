@@ -1318,6 +1318,29 @@ impl Blockchain {
                 expiry_height,
             )
             .map_err(|e| e.to_string())?;
+
+        // V107 fix (ARENAS): Debit the owner's balance when locking bridge
+        // transfer. Without this, the owner retains the locked amount while
+        // the recipient also receives it on the target domain — creating BUD
+        // out of thin air (inflation bug). The sweep_expired_locks path
+        // already refunds the owner on expiry, so this debit is the
+        // corresponding credit-side bookkeeping.
+        if amount > u64::MAX as u128 {
+            return Err(
+                "Bridge transfer amount exceeds maximum representable balance (u64 overflow)"
+                    .into(),
+            );
+        }
+        let owner_balance = self.state.get_balance(&owner);
+        if owner_balance < amount as u64 {
+            return Err(format!(
+                "Insufficient balance for bridge lock: owner has {}, needed {}",
+                owner_balance, amount
+            ));
+        }
+        let owner_account = self.state.get_or_create(&owner);
+        owner_account.balance = owner_account.balance.saturating_sub(amount as u64);
+
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.state.bridge_state)
@@ -1934,7 +1957,15 @@ impl Blockchain {
                 // lock message; the transfer lives under the lock message id
                 // and unlock must reference the TRANSFER's own source domain
                 // (same resolution as the direct verified-burn path).
-                let transfer_id = message.correlation_id.unwrap_or(message.message_id);
+                // V138 fix (ARENAS): correlation_id is MANDATORY for BridgeBurn.
+                // The executor path (RelayerResult) already requires it (V128 fix).
+                // Using unwrap_or(message.message_id) is incorrect because the burn
+                // message has its OWN message_id (different from the lock transfer id).
+                // Without correlation_id, we'd try to look up the burn message_id in
+                // the transfer table — which would only match by coincidence.
+                let transfer_id = message.correlation_id.ok_or_else(|| {
+                    "Bridge burn message missing correlation_id (V138: required to identify original lock transfer)".to_string()
+                })?;
                 let lock_source_domain = self
                     .state
                     .bridge_state
@@ -2654,11 +2685,15 @@ impl Blockchain {
             // V106: Transfer sahibine kilidi açılan miktarı iade et.
             // amount u128 olabilir ama budlum bakiyeleri u64 — truncate riski
             // düşük (6 ondalık BUD, max supply 100M = 100_000_000_000_000 u64)
-            if *amount <= u64::MAX as u128 {
-                self.state.add_balance(owner, *amount as u64);
-            } else {
+            // V135 fix (ARENAS): u128→u64 clip yerine u64::MAX ile refund.
+            // Önceki kod u64'ü aşan tutarları tamamen atlıyordu — BUD kaybı!
+            // u64::MAX = 18.4 quintillion base units = 18.4 trillion BUD.
+            // Pratikte bu asla aşılmaz ama güvenlik için kırpma yapıyoruz.
+            let refund_amount = (*amount).min(u64::MAX as u128) as u64;
+            self.state.add_balance(owner, refund_amount);
+            if *amount > u64::MAX as u128 {
                 tracing::warn!(
-                    "Bridge sweep: amount {} exceeds u64::MAX for owner {}, skipping balance refund",
+                    "Bridge sweep: amount {} exceeds u64::MAX for owner {}, clipped to u64::MAX",
                     amount,
                     owner
                 );
@@ -2853,6 +2888,11 @@ impl Blockchain {
             .metrics
             .as_ref()
             .map(|metrics| metrics.consensus_round_seconds.start_timer());
+
+        // Finality checkpoint conflict check MUST run before tip-height
+        // continuity: a block at or below finalized_height that disagrees with
+        // the canonical path is a consensus-safety violation even if it is not
+        // the next tip index (reorg / equivocation attempts).
         if block.index <= self.finalized_height && block.hash != self.finalized_hash {
             if let Some(finalized_path_block) = self.chain.get(block.index as usize) {
                 if finalized_path_block.hash != block.hash {
@@ -2867,6 +2907,19 @@ impl Blockchain {
                     block.index, self.finalized_height
                 ));
             }
+        }
+
+        // V127 fix (ARENAS): Height continuity defense-in-depth. The block
+        // index must be exactly one greater than the current chain tip.
+        // Consensus engines also enforce this, but the blockchain layer must
+        // reject discontinuous blocks independently (fork attacks, height
+        // jumps, etc.).
+        let expected_height = self.chain.len() as u64;
+        if block.index != expected_height {
+            return Err(format!(
+                "Block height discontinuity: expected {}, got {}",
+                expected_height, block.index
+            ));
         }
 
         if block.chain_id != self.chain_id {
@@ -4486,13 +4539,19 @@ mod tests {
         bc.finalized_height = 0;
         bc.finalized_hash = bc.chain[0].hash.clone();
 
+        // Conflict at finalized height 0 (genesis path) with a different hash.
+        // Finality check runs before tip continuity and must reject.
         let mut bad_block = bc.chain[0].clone();
         bad_block.previous_hash = "wrong".to_string();
         bad_block.hash = bad_block.calculate_hash();
 
         let result = bc.validate_and_add_block(bad_block).map(|_| ());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("conflicts with finalized"));
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("conflicts with finalized"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

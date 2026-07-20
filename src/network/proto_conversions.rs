@@ -248,6 +248,49 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::PollenRegisterDataAsset(asset) => (
+                pb::ProtoTransactionType::PollenRegisterDataAsset as i32,
+                Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(
+                    pb::ProtoPollenDataAsset {
+                        data: bincode::serialize(asset)
+                            .expect("BUG: DataAsset proto payload must serialize"),
+                    },
+                )),
+            ),
+            TransactionType::PollenAuthorizeSale(authorization) => (
+                pb::ProtoTransactionType::PollenAuthorizeSale as i32,
+                Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(
+                    pb::ProtoPollenSaleAuthorization {
+                        data: bincode::serialize(authorization)
+                            .expect("BUG: SaleAuthorization proto payload must serialize"),
+                    },
+                )),
+            ),
+            TransactionType::PollenGrantAccess(grant) => (
+                pb::ProtoTransactionType::PollenGrantAccess as i32,
+                Some(pb::proto_transaction::TypePayload::PollenGrantAccess(
+                    pb::ProtoPollenAccessGrant {
+                        data: bincode::serialize(grant)
+                            .expect("BUG: AccessGrant proto payload must serialize"),
+                    },
+                )),
+            ),
+            TransactionType::PollenRevokeGrant(grant_id) => (
+                pb::ProtoTransactionType::PollenRevokeGrant as i32,
+                Some(pb::proto_transaction::TypePayload::PollenRevokeGrant(
+                    pb::ProtoPollenId {
+                        id: grant_id.0.to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::PollenRevokeDataAsset(asset_id) => (
+                pb::ProtoTransactionType::PollenRevokeDataAsset as i32,
+                Some(pb::proto_transaction::TypePayload::PollenRevokeDataAsset(
+                    pb::ProtoPollenId {
+                        id: asset_id.0.to_vec(),
+                    },
+                )),
+            ),
         };
 
         pb::ProtoTransaction {
@@ -948,6 +991,60 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 let mut pid = [0u8; 32];
                 pid.copy_from_slice(&payload.payment_id);
                 TransactionType::AiAgentPaymentReclaim(pid)
+            }
+            pb::ProtoTransactionType::PollenRegisterDataAsset => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(p)) => p,
+                    _ => return Err("Missing or mismatched PollenRegisterDataAsset payload".into()),
+                };
+                TransactionType::PollenRegisterDataAsset(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid DataAsset payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::PollenAuthorizeSale => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(p)) => p,
+                    _ => return Err("Missing or mismatched PollenAuthorizeSale payload".into()),
+                };
+                TransactionType::PollenAuthorizeSale(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid SaleAuthorization payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::PollenGrantAccess => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PollenGrantAccess(p)) => p,
+                    _ => return Err("Missing or mismatched PollenGrantAccess payload".into()),
+                };
+                TransactionType::PollenGrantAccess(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid AccessGrant payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::PollenRevokeGrant => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PollenRevokeGrant(p)) => p,
+                    _ => return Err("Missing or mismatched PollenRevokeGrant payload".into()),
+                };
+                if payload.id.len() != 32 {
+                    return Err("PollenRevokeGrant id must be 32 bytes".into());
+                }
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&payload.id);
+                TransactionType::PollenRevokeGrant(crate::pollen::AssetId(id))
+            }
+            pb::ProtoTransactionType::PollenRevokeDataAsset => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PollenRevokeDataAsset(p)) => p,
+                    _ => return Err("Missing or mismatched PollenRevokeDataAsset payload".into()),
+                };
+                if payload.id.len() != 32 {
+                    return Err("PollenRevokeDataAsset id must be 32 bytes".into());
+                }
+                let mut id = [0u8; 32];
+                id.copy_from_slice(&payload.id);
+                TransactionType::PollenRevokeDataAsset(crate::pollen::AssetId(id))
             }
             _ => return Err("Unsupported transaction type in proto".into()),
         };

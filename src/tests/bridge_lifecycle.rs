@@ -43,6 +43,14 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 
     let owner = addr(11);
     let recipient = addr(12);
+    // V107: lock debits owner balance — fund accounts.
+    bc.init_genesis_account(&owner);
+    bc.init_genesis_account(&recipient);
+
+    // V107 fix: bridge lock now debits owner balance, so the owner must
+    // have sufficient funds before locking.
+    bc.init_genesis_account(&owner);
+    bc.state.add_balance(&owner, 1_000_000);
 
     // Step 3: lock via the internal path (the only path that exists
     // after Phase 0.10 — RPC is closed).
@@ -112,6 +120,8 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 #[test]
 fn bridge_sweep_is_height_aware_and_idempotent() {
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+    bc.init_genesis_account(&addr(11));
+    bc.init_genesis_account(&addr(12));
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
         let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-confirmation-depth", 0);
         d.operator = Some(operator);
@@ -122,6 +132,10 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     bc.register_bridge_asset(asset_id(), 1).unwrap();
     let owner = addr(11);
     let recipient = addr(12);
+
+    // V107 fix: bridge lock debits owner balance
+    bc.init_genesis_account(&owner);
+    bc.state.add_balance(&owner, 1_000_000);
 
     // Two locks: one expiring at 100, one at 500.
     bc.lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 100, 100)
@@ -196,6 +210,8 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
         1337,
         None,
     );
+    bc.init_genesis_account(&addr(11));
+    bc.init_genesis_account(&addr(12));
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
         let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-confirmation-depth", 0);
         d.operator = Some(operator);
@@ -206,6 +222,11 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
 
     let owner = addr(11);
     let recipient = addr(12);
+
+    // V107 fix: bridge lock debits owner balance
+    bc.init_genesis_account(&owner);
+    bc.state.add_balance(&owner, 1_000_000);
+
     let (_transfer, lock_event) = bc
         .lock_bridge_transfer(1, 2, 30, 0, asset_id(), owner, recipient, 200, 5000)
         .expect("internal lock must succeed");
