@@ -4159,3 +4159,15 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** STATUS kapanış commit'i push edilecek ve CI tekrar izlenecek; yeşil olursa A4-3 veya yeni komut beklenir.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 12:32 UTC+03:00] ARENA4 — MAIN CI kırmızısı: rustfmt unblock
+
+**Durum:** A4 merge main push `6dbe9d5` sonrası `Budlum Core` Format adımı kırmızı oldu.  
+**Kök neden:** `src/core/account.rs`, `src/execution/executor.rs`, `src/hub/mod.rs` rustfmt diff'leri. Bu farklar origin/main H3/H4 değişikliklerinden merge sonrası görünür oldu.  
+**Fix:** CI rustfmt diff'leri uygulandı.  
+**Not:** main push sırasında GitHub “merge commit içermemeli” kuralı için bypass uyarısı verdi; kullanıcı “mainden devam” dediği için merge main'e taşındı, sonraki push normal fix commit olarak ilerliyor.  
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

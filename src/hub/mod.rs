@@ -107,9 +107,7 @@ impl HubRegistry {
         id: u64,
         caller: &Address,
     ) -> Result<(), HubError> {
-        if !self.authorized_governors.is_empty()
-            && !self.authorized_governors.contains(caller)
-        {
+        if !self.authorized_governors.is_empty() && !self.authorized_governors.contains(caller) {
             return Err(HubError::NotAuthorized);
         }
         let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;

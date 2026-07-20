@@ -780,7 +780,11 @@ impl AccountState {
         // those tokens are committed but not yet released.
         let total_bud = self.circulating_supply()
             + self.get_total_stake() as u128
-            + self.unbonding_queue.iter().map(|e| e.amount as u128).sum::<u128>();
+            + self
+                .unbonding_queue
+                .iter()
+                .map(|e| e.amount as u128)
+                .sum::<u128>();
         let max_supply = crate::tokenomics::BUD_TOTAL_SUPPLY as u128;
 
         if total_bud < max_supply {
