@@ -158,6 +158,16 @@ pub enum TransactionType {
     /// Phase 10 (§1 P5 ADIM7): Cancel a pending AI inference request (requester-only).
     /// Returns escrowed max_fee for refund by the executor layer.
     AiRequestCancel(crate::ai::types::AiRequestId),
+    /// Phase 12: Register a Pollen DataAsset (owner-submitted).
+    PollenRegisterDataAsset(crate::pollen::DataAsset),
+    /// Phase 12: Register a seller/owner sale authorization for DataAsset pollen.
+    PollenAuthorizeSale(crate::pollen::SaleAuthorization),
+    /// Phase 12: Register an owner-submitted AccessGrant.
+    PollenGrantAccess(crate::pollen::AccessGrant),
+    /// Phase 12: Revoke a Pollen AccessGrant by id (owner-only in executor).
+    PollenRevokeGrant(crate::pollen::GrantId),
+    /// Phase 12: Revoke a Pollen DataAsset by id (owner-only in executor).
+    PollenRevokeDataAsset(crate::pollen::AssetId),
     /// Phase 10 (§1 P5 ADIM8): Slash a verifier for equivocation.
     AiDisputeSlash {
         request_id: crate::ai::types::AiRequestId,
@@ -508,6 +518,11 @@ impl Transaction {
             TransactionType::AiModelDeactivate(_) => schedule.contract_call_gas,
             TransactionType::AiModelReactivate(_) => schedule.contract_call_gas,
             TransactionType::AiRequestCancel(_) => schedule.contract_call_gas,
+            TransactionType::PollenRegisterDataAsset(_)
+            | TransactionType::PollenAuthorizeSale(_)
+            | TransactionType::PollenGrantAccess(_)
+            | TransactionType::PollenRevokeGrant(_)
+            | TransactionType::PollenRevokeDataAsset(_) => schedule.contract_call_gas * 2,
             TransactionType::AiDisputeSlash { .. } => schedule.contract_call_gas,
             TransactionType::AiAgentPayment(_) => schedule.contract_call_gas * 2,
             TransactionType::AiAgentPaymentRelease(_) => schedule.contract_call_gas,
@@ -658,6 +673,11 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::AiAgentPayment(_) => 28,
         TransactionType::AiAgentPaymentRelease(_) => 29,
         TransactionType::AiAgentPaymentReclaim(_) => 30,
+        TransactionType::PollenRegisterDataAsset(_) => 31,
+        TransactionType::PollenAuthorizeSale(_) => 32,
+        TransactionType::PollenGrantAccess(_) => 33,
+        TransactionType::PollenRevokeGrant(_) => 34,
+        TransactionType::PollenRevokeDataAsset(_) => 35,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -702,6 +722,59 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
     encode_message_kind(&message.kind, out);
     put_u64(out, message.expiry_height);
 }
+fn encode_pollen_asset(asset: &crate::pollen::DataAsset, out: &mut Vec<u8>) {
+    put_fixed(out, &asset.asset_id.0);
+    put_fixed(out, asset.owner.as_bytes());
+    put_fixed(out, &asset.manifest_id.0);
+    put_fixed(out, &asset.metadata_commitment);
+    put_u8(out, u8::from(asset.encrypted));
+    put_u8(
+        out,
+        match asset.status {
+            crate::pollen::DataAssetStatus::Active => 1,
+            crate::pollen::DataAssetStatus::Revoked => 2,
+        },
+    );
+}
+
+fn encode_pollen_grant(grant: &crate::pollen::AccessGrant, out: &mut Vec<u8>) {
+    put_fixed(out, &grant.grant_id.0);
+    put_fixed(out, &grant.asset_id.0);
+    put_fixed(out, grant.owner.as_bytes());
+    put_fixed(out, grant.grantee.as_bytes());
+    put_fixed(out, grant.payer.as_bytes());
+    put_u64(out, grant.price_paid);
+    put_u64(out, grant.issued_at_block);
+    put_u64(out, grant.expires_at_block);
+    put_u32(out, grant.max_reads);
+    put_u32(out, grant.reads_used);
+    put_fixed(out, &grant.purpose_hash);
+    put_u8(
+        out,
+        match grant.status {
+            crate::pollen::AccessGrantStatus::Active => 1,
+            crate::pollen::AccessGrantStatus::Revoked => 2,
+        },
+    );
+    put_fixed(out, grant.owner_signature.as_bytes());
+}
+
+fn encode_pollen_sale_authorization(
+    authorization: &crate::pollen::SaleAuthorization,
+    out: &mut Vec<u8>,
+) {
+    put_fixed(out, &authorization.authorization_id.0);
+    put_fixed(out, &authorization.asset_id.0);
+    put_fixed(out, authorization.seller.as_bytes());
+    put_u64(out, authorization.unit_price);
+    put_u64(out, authorization.valid_from_block);
+    put_u64(out, authorization.expires_at_block);
+    put_u32(out, authorization.max_grants);
+    put_u32(out, authorization.grants_issued);
+    put_fixed(out, &authorization.terms_hash);
+    put_fixed(out, authorization.seller_signature.as_bytes());
+}
+
 fn encode_app_category(category: &crate::hub::types::AppCategory, out: &mut Vec<u8>) {
     use crate::hub::types::AppCategory;
     put_u8(
@@ -822,6 +895,13 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         TransactionType::AiModelDeactivate(model_id) => put_fixed(out, &model_id.0),
         TransactionType::AiModelReactivate(model_id) => put_fixed(out, &model_id.0),
         TransactionType::AiRequestCancel(request_id) => put_fixed(out, &request_id.0),
+        TransactionType::PollenRegisterDataAsset(asset) => encode_pollen_asset(asset, out),
+        TransactionType::PollenAuthorizeSale(authorization) => {
+            encode_pollen_sale_authorization(authorization, out);
+        }
+        TransactionType::PollenGrantAccess(grant) => encode_pollen_grant(grant, out),
+        TransactionType::PollenRevokeGrant(grant_id) => put_fixed(out, &grant_id.0),
+        TransactionType::PollenRevokeDataAsset(asset_id) => put_fixed(out, &asset_id.0),
         TransactionType::AiDisputeSlash {
             request_id,
             verifier,

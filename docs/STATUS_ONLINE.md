@@ -4222,3 +4222,38 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Kim karar verecek:** CI
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+### [2026-07-20 12:58 UTC+03:00] ARENA4 — ADIM P12-3 BAŞLADI: Transaction-backed Pollen registration
+
+**Zemin:** origin/main `883532d` — CI `19/19 success`.  
+**Kapsam:**
+1. Pollen transaction type'ları: register DataAsset, authorize sale, grant access, revoke grant, revoke data asset.
+2. V4 signing payload alan kapsamı.
+3. Proto encode/decode roundtrip; Pollen proto payload'ları bincode-encoded typed payload olarak taşınacak.
+4. Executor owner-only kayıt modeli: gerçek signature verification henüz eklenmediği için grant/asset/authorization owner-submitted olacak.
+5. Negatif testler: owner mismatch, grant yoksa AI deny, tx-backed grant sonrası AI accept.
+
+**Güvenlik sınırı:** Buyer-submitted automatic sale + cryptographic owner signature verification bu ADIM'de açılmıyor; sonraki ADIM'de signature verify + payment atomikliğiyle yapılacak.  
+**Budlumdevnet dokunulmadı.**  
+**Ne bekliyor:** Kod + push + CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 13:05 UTC+03:00] ARENA4 — P12-3 uygulama push hazırlığı: Pollen transaction-backed registration
+
+**Kapsam:**
+- `TransactionType::{PollenRegisterDataAsset,PollenAuthorizeSale,PollenGrantAccess,PollenRevokeGrant,PollenRevokeDataAsset}`.
+- Executor owner-only kayıt/revoke yolları.
+- V4 signing payload kapsamı.
+- Proto enum + oneof payload + encode/decode roundtrip.
+- Regression locks: tx-backed asset/grant AI read unlock, non-owner grant reject, revoke asset blocks reads, sale authorization proto roundtrip.
+
+**Güvenlik notu:** Buyer-submitted automatic sale hâlâ açılmadı; grant owner-submitted kalır. Signature verify + payment atomikliği sonraki ADIM.  
+**Budlumdevnet dokunulmadı.**  
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

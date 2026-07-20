@@ -903,6 +903,81 @@ impl Executor {
                 sender.balance = sender.balance.saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::PollenRegisterDataAsset(asset) => {
+                let mut asset = asset.clone();
+                if asset.owner != tx.from {
+                    return Err(BudlumError::validation(
+                        "pollen_asset_owner_mismatch",
+                        "DataAsset owner must equal tx.from",
+                    ));
+                }
+                // Recompute canonical id from immutable fields to prevent forged ids.
+                asset.asset_id = crate::pollen::DataAsset::derive_id(
+                    &asset.owner,
+                    &asset.manifest_id,
+                    &asset.metadata_commitment,
+                );
+                state
+                    .marketplace
+                    .register_data_asset(asset)
+                    .map_err(|e| BudlumError::validation("pollen_asset_register_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::PollenAuthorizeSale(authorization) => {
+                let authorization = authorization.clone();
+                if authorization.seller != tx.from {
+                    return Err(BudlumError::validation(
+                        "pollen_sale_seller_mismatch",
+                        "SaleAuthorization seller must equal tx.from",
+                    ));
+                }
+                state
+                    .marketplace
+                    .create_sale_authorization(authorization)
+                    .map_err(|e| BudlumError::validation("pollen_sale_authorization_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::PollenGrantAccess(grant) => {
+                let grant = grant.clone();
+                // P12-3 conservative rule: until real owner-signature verification
+                // lands, grants are owner-submitted. This prevents buyer-side
+                // forged owner_signature from creating data access.
+                if grant.owner != tx.from {
+                    return Err(BudlumError::validation(
+                        "pollen_grant_owner_mismatch",
+                        "AccessGrant owner must equal tx.from",
+                    ));
+                }
+                state
+                    .marketplace
+                    .create_access_grant(grant)
+                    .map_err(|e| BudlumError::validation("pollen_grant_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::PollenRevokeGrant(grant_id) => {
+                state
+                    .marketplace
+                    .revoke_access_grant(grant_id, &tx.from)
+                    .map_err(|e| BudlumError::validation("pollen_grant_revoke_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::PollenRevokeDataAsset(asset_id) => {
+                state
+                    .marketplace
+                    .revoke_data_asset(asset_id, &tx.from)
+                    .map_err(|e| BudlumError::validation("pollen_asset_revoke_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::AiDisputeSlash {
                 request_id,
                 verifier,

@@ -247,6 +247,10 @@ impl DataAsset {
         if self.owner == Address::zero() {
             return Err("DataAsset owner cannot be zero".into());
         }
+        let expected = Self::derive_id(&self.owner, &self.manifest_id, &self.metadata_commitment);
+        if self.asset_id != expected {
+            return Err("DataAsset asset_id does not match canonical preimage".into());
+        }
         Ok(())
     }
 
