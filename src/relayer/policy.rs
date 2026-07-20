@@ -25,6 +25,46 @@ pub enum RelayerActionKind {
     },
 }
 
+impl RelayerActionKind {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            RelayerActionKind::ExternalTransaction {
+                target_address,
+                payload_hash,
+                ..
+            } => {
+                if target_address.is_empty() || target_address.len() > 256 {
+                    return Err("RelayerAction external target_address length invalid".into());
+                }
+                if target_address.bytes().any(|b| b.is_ascii_whitespace()) {
+                    return Err(
+                        "RelayerAction external target_address cannot contain whitespace".into(),
+                    );
+                }
+                if *payload_hash == [0u8; 32] {
+                    return Err("RelayerAction external payload_hash cannot be zero".into());
+                }
+            }
+            RelayerActionKind::DwebResolve { name } => {
+                if name.is_empty() || name.len() > 253 {
+                    return Err("RelayerAction dweb name length invalid".into());
+                }
+                if name.contains("..") || name.contains('/') || name.bytes().any(|b| b == 0) {
+                    return Err("RelayerAction dweb name contains an invalid label".into());
+                }
+            }
+            RelayerActionKind::PollenRead { asset_id, grant_id } => {
+                if *asset_id == crate::pollen::AssetId::zero()
+                    || *grant_id == crate::pollen::GrantId::zero()
+                {
+                    return Err("RelayerAction pollen ids cannot be zero".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyEnvelope {
     pub owner: Address,
@@ -38,14 +78,28 @@ pub struct PolicyEnvelope {
 
 impl PolicyEnvelope {
     pub fn validate_for_owner(&self, owner: &Address, current_block: u64) -> Result<(), String> {
+        if self.owner == Address::zero() {
+            return Err("PolicyEnvelope owner cannot be zero".into());
+        }
         if &self.owner != owner {
             return Err("PolicyEnvelope owner mismatch".into());
+        }
+        if let Some(session_key) = self.session_key {
+            if session_key == Address::zero() {
+                return Err("PolicyEnvelope session_key cannot be zero".into());
+            }
         }
         if self.expires_at_block <= current_block {
             return Err("PolicyEnvelope expired".into());
         }
         if self.spending_cap == 0 {
             return Err("PolicyEnvelope spending_cap must be >= 1".into());
+        }
+        if self.allowed_domains.len() > 64 {
+            return Err("PolicyEnvelope allowed_domains too large".into());
+        }
+        if self.allowed_domains.iter().any(|domain| *domain == 0) {
+            return Err("PolicyEnvelope allowed_domains cannot contain zero".into());
         }
         Ok(())
     }
@@ -133,8 +187,15 @@ impl UserIntent {
         if !self.verify_id() {
             return Err("UserIntent id mismatch".into());
         }
+        if self.owner == Address::zero() {
+            return Err("UserIntent owner cannot be zero".into());
+        }
+        if self.source_domain == 0 || self.target_domain == 0 {
+            return Err("UserIntent domains cannot be zero".into());
+        }
+        self.action.validate()?;
         policy.validate_for_owner(&self.owner, current_block)?;
-        if self.policy_hash != policy.policy_hash() {
+        if self.policy_hash == [0u8; 32] || self.policy_hash != policy.policy_hash() {
             return Err("UserIntent policy_hash mismatch".into());
         }
         if self.deadline_block <= current_block {
@@ -180,6 +241,9 @@ impl SolverBid {
         }
         if self.quoted_fee == 0 || self.quoted_fee > intent.max_fee {
             return Err("SolverBid quoted_fee must be >0 and <= intent.max_fee".into());
+        }
+        if self.proof_commitment == [0u8; 32] {
+            return Err("SolverBid proof_commitment cannot be zero".into());
         }
         if self.bond == 0 {
             return Err("SolverBid bond must be >= 1".into());
@@ -242,7 +306,7 @@ mod tests {
         Address::from([byte; 32])
     }
 
-    fn policy(owner: Address) -> PolicyEnvelope {
+    fn make_policy(owner: Address) -> PolicyEnvelope {
         PolicyEnvelope {
             owner,
             session_key: None,
@@ -272,7 +336,7 @@ mod tests {
     #[test]
     fn intent_validates_without_relayer_whitelist() {
         let owner = addr(1);
-        let policy = policy(owner);
+        let policy = make_policy(owner);
         let intent = intent(owner, &policy);
         assert!(intent.validate(&policy, 10).is_ok());
     }
@@ -280,7 +344,7 @@ mod tests {
     #[test]
     fn intent_replay_nonce_changes_id() {
         let owner = addr(1);
-        let policy = policy(owner);
+        let policy = make_policy(owner);
         let a = intent(owner, &policy);
         let mut b = intent(owner, &policy);
         b.replay_nonce = 8;
@@ -291,7 +355,7 @@ mod tests {
     #[test]
     fn fee_cap_is_enforced() {
         let owner = addr(1);
-        let policy = policy(owner);
+        let policy = make_policy(owner);
         let mut intent = intent(owner, &policy);
         intent.max_fee = 101;
         intent.intent_id = intent.calculate_id();
@@ -304,7 +368,7 @@ mod tests {
     #[test]
     fn solver_bid_cannot_exceed_user_fee_cap() {
         let owner = addr(1);
-        let policy = policy(owner);
+        let policy = make_policy(owner);
         let intent = intent(owner, &policy);
         let bid = SolverBid {
             intent_id: intent.intent_id,
@@ -315,5 +379,79 @@ mod tests {
             expires_at_block: 80,
         };
         assert!(bid.validate_for_intent(&intent, 10).is_err());
+    }
+
+    #[test]
+    fn policy_rejects_zero_owner_session_or_domain() {
+        let mut policy = make_policy(addr(1));
+        policy.owner = Address::zero();
+        assert!(policy
+            .validate_for_owner(&Address::zero(), 10)
+            .unwrap_err()
+            .contains("owner cannot be zero"));
+
+        let mut policy = make_policy(addr(1));
+        policy.session_key = Some(Address::zero());
+        assert!(policy
+            .validate_for_owner(&addr(1), 10)
+            .unwrap_err()
+            .contains("session_key"));
+
+        let mut policy = make_policy(addr(1));
+        policy.allowed_domains.push(0);
+        assert!(policy
+            .validate_for_owner(&addr(1), 10)
+            .unwrap_err()
+            .contains("allowed_domains"));
+    }
+
+    #[test]
+    fn dweb_action_rejects_invalid_names() {
+        for name in ["", "../ayaz.bud", "ayaz/bud", "bad..bud"] {
+            assert!(RelayerActionKind::DwebResolve { name: name.into() }
+                .validate()
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn pollen_read_action_requires_nonzero_ids() {
+        let action = RelayerActionKind::PollenRead {
+            asset_id: crate::pollen::AssetId::zero(),
+            grant_id: crate::pollen::GrantId::from([1u8; 32]),
+        };
+        assert!(action.validate().unwrap_err().contains("cannot be zero"));
+    }
+
+    #[test]
+    fn intent_rejects_zero_domain() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let mut intent = intent(owner, &policy);
+        intent.target_domain = 0;
+        intent.intent_id = intent.calculate_id();
+        assert!(intent
+            .validate(&policy, 10)
+            .unwrap_err()
+            .contains("domains cannot be zero"));
+    }
+
+    #[test]
+    fn solver_bid_requires_proof_commitment() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let intent = intent(owner, &policy);
+        let bid = SolverBid {
+            intent_id: intent.intent_id,
+            relayer: addr(9),
+            quoted_fee: 50,
+            proof_commitment: [0u8; 32],
+            bond: 10,
+            expires_at_block: 80,
+        };
+        assert!(bid
+            .validate_for_intent(&intent, 10)
+            .unwrap_err()
+            .contains("proof_commitment"));
     }
 }

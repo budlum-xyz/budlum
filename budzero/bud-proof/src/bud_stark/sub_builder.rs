@@ -12,8 +12,8 @@ use core::marker::PhantomData;
 use core::ops::Range;
 
 use p3_air::{
-    AirBuilder, AirBuilderWithContext, BaseAir, ExtensionBuilder, PeriodicAirBuilder,
-    PermutationAirBuilder, WindowAccess,
+    AirBuilder, AirBuilderWithContext, BaseAir, ExtensionBuilder, PermutationAirBuilder,
+    WindowAccess,
 };
 
 /// A column-restricted view over a trace window.
@@ -78,6 +78,7 @@ impl<AB: AirBuilder, SubAir: BaseAir<AB::F>, F> AirBuilder for SubAirBuilder<'_,
     type PreprocessedWindow = AB::PreprocessedWindow;
     type MainWindow = SubSliced<AB::MainWindow, AB::Var>;
     type PublicVar = AB::PublicVar;
+    type PeriodicVar = AB::PeriodicVar;
 
     fn main(&self) -> Self::MainWindow {
         SubSliced {
@@ -111,6 +112,14 @@ impl<AB: AirBuilder, SubAir: BaseAir<AB::F>, F> AirBuilder for SubAirBuilder<'_,
     fn public_values(&self) -> &[Self::PublicVar] {
         self.inner.public_values()
     }
+
+    fn is_transition(&self) -> Self::Expr {
+        self.inner.is_transition()
+    }
+
+    fn periodic_values(&self) -> &[Self::PeriodicVar] {
+        self.inner.periodic_values()
+    }
 }
 
 impl<AB, SubAir, F> AirBuilderWithContext for SubAirBuilder<'_, AB, SubAir, F>
@@ -122,18 +131,6 @@ where
 
     fn eval_context(&self) -> &Self::EvalContext {
         self.inner.eval_context()
-    }
-}
-
-impl<AB, SubAir, F> PeriodicAirBuilder for SubAirBuilder<'_, AB, SubAir, F>
-where
-    AB: PeriodicAirBuilder,
-    SubAir: BaseAir<AB::F>,
-{
-    type PeriodicVar = AB::PeriodicVar;
-
-    fn periodic_values(&self) -> &[Self::PeriodicVar] {
-        self.inner.periodic_values()
     }
 }
 

@@ -4949,3 +4949,149 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 21:40 UTC+03:00] ARENA4 — ADIM P12-15 BAŞLADI: ARENAX devir + P12-4/9 hardening turu
+
+**Zemin:** main `e928315c` — CI **23/23 success**. Kullanıcı komutu: artık yalnız main kullanılacak; Phase12 4/5/6/7/8/9 ARENAX'e devredildi; ARENA4 + ARENAX çalışmayı sertleştirecek ve atılan commitleri inceleyecek.
+**Koordinasyon:** `origin/arenas/audit-v145-plus` yeniden incelendi. ARENAX/ARENAS tarafındaki P12-4→P12-9 ters-sıra commit'i (`360cad22`) ve sonraki V183-V203 hardening serisi not edildi; büyük branch doğrudan merge edilmeyecek, main üzerinde küçük CI-kanitli sertleştirme ADIM'ları uygulanacak.
+
+**Bu ADIM kapsamı:** P12-5 Relayer Policy Layer ilk sertleştirme paketi.
+1. `RelayerActionKind::validate()` eklenecek: external payload hash / target shape, D-Web name shape, Pollen asset/grant id sıfır kontrolü.
+2. `PolicyEnvelope` zero owner/session/domain ve domain-list bloat guard.
+3. `UserIntent` zero owner/domain/action/policy hash fail-closed.
+4. `SolverBid` zero proof_commitment reject.
+5. Negatif regresyon testleri eklenecek.
+
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Kod + lokal statik kontroller + push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 22:07 UTC+03:00] ARENA4 — P12-15 CI kırmızısı: relayer policy rustfmt fix
+
+**Durum:** main `4a5e3805` CI'da `Budlum Core` / Format adımı kırmızı oldu.
+**Kök neden:** `src/relayer/policy.rs` yeni hardening satırlarında rustfmt beklenen satır kırılımı ve test modülü kapanışı öncesi fazla boş satır vardı.
+**Fix:** CI rustfmt diff'i manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### ADIM 39 — ARENAS Denetim: Arena4 Phase 12 Sertleştirme (2026-07-20)
+
+**Arena4 commit denetimi tamamlandı:**
+- `e928315` style(gateway): rustfmt passport proof tests — ✅ TEMİZ
+- `e49da89` feat(gateway): dweb passport proof bundle — ✅ TEMİZ (read-only model, plaintext yok)
+- `a93762c` feat(pollen): issue sale-backed access grants — ✅ TEMİZ (fail-closed, sentinel reddi)
+- `f6dc8d3` feat(governance): constitution guardrail registry — ✅ TEMİZ (sabit key BTreeMap, büyüme yok)
+- `0cd672a` feat(prover): proof verification market primitives — V208 BULGU
+- `4a5e380` fix(relayer): harden phase12 policy intent bounds — ✅ ONAYLANDI (zero-address, domain, dweb name sanitization)
+- `fc585f6` feat(domain): sovereign domain kit primitives — ✅ TEMİZ
+- `f5bb8ea` feat(gateway): budlum atlas wallet context api — ✅ TEMİZ (read-only query model)
+- `7c4c878` feat(storage): mobile self hosting policy — ✅ TEMİZ
+
+**V201 (⚪→FIXED): chain_actor.rs epoch_index*100 → current_block_height**
+- 2 instance düzeltildi. V125 ile tutarlı.
+
+**V202 (⚪→FIXED): network/node.rs NonZeroUsize::new(1).unwrap() → .expect()**
+
+**V203 (⚪→FIXED): blockchain.rs/account.rs/ai/registry.rs/governance.rs saturating→checked**
+- 10+ balance/stake saturating_add/sub → checked_add/sub + add_balance
+- Bridge lock, proof claim reward/fee, storage deal fee, operator bond, unbonding, slashing, verifier stake, governance votes
+
+**V204 (⚪→FIXED): encryption_policy.rs asset_policies BTreeMap sınırsız büyüme**
+- `prune_asset_policies(max_policies)` metodu eklendi
+
+**V205 (⚪→FIXED): encryption_policy.rs version += 1 overflow risk**
+- `checked_add` + tracing::error koruma eklendi
+
+**V206 (⚪ NOTED): apply_dao_update changed_fields Vec — küçük heap allocation, düşük öncelikli**
+
+**V207 (⚪→FIXED): apply_dao_update EncryptionAlgorithm::None default olarak set engellenmedi**
+- None default set reddediliyor (is_algorithm_allowed zaten reddediyor ama update path'te ayrı kontrol eklendi)
+
+**V208 (⚪→FIXED): proof_market.rs active_tasks + pending_receipts Vec sınırsız büyüme**
+- `is_paid()` metodu eklendi
+- `prune_paid_receipts()` metodu eklendi
+- `enforce_max_sizes()` metodu eklendi (MAX=10_000)
+
+**Toplam:** 164 bulgu (V22-V208), 105 kapatıldı, 59 açık
+
+---
+
+### [2026-07-20 22:10 UTC+03:00] ARENA4 — P12-15 CI kırmızısı: relayer policy test shadow fix
+
+**Durum:** main `8ff7c09b` CI'da `PoA Isolation` ve `Coverage` compile aşamasında kırmızı oldu.
+**Kök neden:** `src/relayer/policy.rs` test helper'ı `policy(...)`, test içindeki local `policy` binding ile gölgelenerek sonraki helper çağrısını E0618 ile kırdı.
+**Fix:** Test helper `make_policy(...)` olarak yeniden adlandırıldı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 22:20 UTC+03:00] ARENA4 — ADIM P12-16 BAŞLADI: Mobile Self network profile hardening
+
+**Zemin:** main `58e3a4da` ve ARENAX/ARENAS devir süreci; kullanıcı komutu: yalnız main kullanılacak, P12-4/5/6/7/8/9 ARENAX'e devredildi ve iki taraf commitleri inceleyerek sertleştirecek.
+**Koordinasyon:** ARENAX/ARENAS'in `src/network/mobile.rs` eklediği P12-9 Mobile Self mobil düğüm profili incelendi. Dosya main'de vardı ama `src/network/mod.rs` içinde export edilmiyordu; bu nedenle module/tests compile kapsamına alınmalı.
+
+**Kapsam:**
+1. `src/network/mod.rs`: `mobile` module export + `MobileNodeProfile` / `PowerMode` re-export.
+2. `BatteryStatus::validate`: impossible battery state reject.
+3. `NetworkStatus::validate`: zero bandwidth, aşırı latency, NAT None + no public IP reject.
+4. `StorageStatus::validate`: storage accounting overflow/inconsistency reject.
+5. `NatTraversalStatus::validate`: relay kullanımı için valid relay address zorunlu; relay + hole-punched çelişkisi reject.
+6. `MobileNodeProfile::validate`, `try_update_battery`, `set_relay_address` + negatif testler.
+
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Kod + lokal statik kontroller + push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 22:45 UTC+03:00] ARENA4 — P12-16 CI kırmızısı: root Cargo.lock p3 koordinasyon fix
+
+**Durum:** main `aee88335` CI'da Docker Smoke ve Devnet Multi-Node Smoke kırmızı oldu.
+**Kök neden:** ARENA3'ün p3/Plonky3 koordineli bump'ı `budzero/Cargo.lock` ve `budzero/bud-proof/Cargo.toml` tarafında yeşildi, fakat Docker build root `cargo build --release --locked` kullandığı için root `Cargo.lock` içindeki p3 0.5.3 kilidi güncellenmeden lockfile update isteyip fail etti.
+**Fix:** Root `Cargo.lock` p3 ailesi `budzero/Cargo.lock` ile 0.6.2 setine senkronlandı; `p3-interpolation` kaldırıldı, `p3-multilinear-util` eklendi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; Docker/compile hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 22:47 UTC+03:00] ARENA4 — P12-16 CI kırmızısı: Mobile Self rustfmt fix
+
+**Durum:** main `9ad2ff08` CI'da `Budlum Core` / Format adımı kırmızı oldu.
+**Kök neden:** `src/network/mobile.rs` içindeki yeni validation/test satırları rustfmt beklenen satır kırılımında değildi.
+**Fix:** CI rustfmt diff'i manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 22:52 UTC+03:00] ARENA4 — P12-16 CI kırmızısı: root lockfile p3 transitive deps fix
+
+**Durum:** main `1a0b9995` CI'da Docker Smoke ve Devnet Multi-Node Smoke yine `cargo build --release --locked` aşamasında kırmızı oldu.
+**Kök neden:** Root `Cargo.lock` p3 paketleri 0.6.2'ye güncellenmişti ancak p3 0.6 transitive dependency'leri `itertools 0.15.0` ve `spin 0.12.2` root lockfile'a eklenmemişti; Docker root build lockfile update istedi.
+**Fix:** Root `Cargo.lock` içine `itertools 0.15.0` ve `spin 0.12.2` blokları `budzero/Cargo.lock` checksum'larıyla eklendi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; Docker/compile hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

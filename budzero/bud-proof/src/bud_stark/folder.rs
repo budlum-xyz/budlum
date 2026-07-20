@@ -168,6 +168,12 @@ impl<'a, SC: StarkGenericConfig> AirBuilder for ProverConstraintFolder<'a, SC> {
     type PreprocessedWindow = RowWindow<'a, PackedVal<SC>>;
     type MainWindow = RowWindow<'a, PackedVal<SC>>;
     type PublicVar = Val<SC>;
+    type PeriodicVar = PackedVal<SC>;
+
+    #[inline]
+    fn is_transition(&self) -> Self::Expr {
+        self.is_transition
+    }
 
     #[inline]
     fn main(&self) -> Self::MainWindow {
@@ -256,6 +262,11 @@ impl<'a, SC: StarkGenericConfig> AirBuilder for VerifierConstraintFolder<'a, SC>
     type PreprocessedWindow = RowWindow<'a, SC::Challenge>;
     type MainWindow = RowWindow<'a, SC::Challenge>;
     type PublicVar = Val<SC>;
+    type PeriodicVar = SC::Challenge;
+
+    fn is_transition(&self) -> Self::Expr {
+        self.is_transition
+    }
 
     fn main(&self) -> Self::MainWindow {
         RowWindow::from_two_rows(self.main.top.values, self.main.bottom.values)
