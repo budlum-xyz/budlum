@@ -1,80 +1,78 @@
-# Budlum Reports Index — Canonical Registry (v1, 2026-07-16)
+# Budlum Reports Index — Canonical Registry (v2, 2026-07-20)
 
-> **TR Özet:** Bu dosya depodaki tüm rapor/denetim/plan belgelerinin kanonik indeksidir.
-> Durum etiketleri: 🟢 Kanonik (yaşayan) · 🔵 Aktif çalışma · 🟡 Arşiv adayı (ekip onayı bekliyor) · ⚪ Arşiv.
-> Yeni rapor açmadan önce bu indekse satır ekleyin ve aşağıdaki adlandırma kuralını izleyin.
-> Şablon: [`templates/REPORT_TEMPLATE.md`](templates/REPORT_TEMPLATE.md).
-
-> **Language rule (Q6, user decision 2026-07-16):** English is the canonical body language;
-> a Turkish 2–5 line summary block (`TR Özet`) sits at the top of every report.
-> Historical documents keep their original language (no retroactive translation).
+> **TR Özet:** Bu dosya Budlum repo içindeki rapor/denetim/plan belgelerinin arşiv indeksidir. 2026-07-20 arşiv dalgasından sonra kök `docs/` dizini yalnız yaşayan/aktif referans belgeleri taşır; kapanmış ADIM/Tur/Aşama/Phase raporları ve tarihsel denetimler `docs/archive/` altında tutulur.
+>
+> **Durum etiketleri:** 🟢 Yaşayan/kök · 🔵 Aktif çalışma/kök · ⚪ Arşiv · 🧾 Tarihsel kopya.
+> Yeni rapor açmadan önce isimlendirme kuralını izle ve gerekirse bu indekse satır ekle. Şablon: [`../templates/REPORT_TEMPLATE.md`](../templates/REPORT_TEMPLATE.md).
 
 ## Naming standard
 
-```
+```text
 PHASE<X.Y>_<TOPIC>_<ARENA{N}>[_YYYY-MM-DD].md
 ```
 
-- In-document Phase references use a space: **"Phase 0.38"** (canonical 5-anchor rule:
-  `t<10 → 0.02×(t−1)`; `t≥10 → 0.30+0.02×(t−10)`; ADIM series is 1:1 with Phase integers).
-- Date suffix is mandatory for point-in-time audits; omit only for living documents.
-- Backtick-quoted historical file/branch names are exempt from renaming/moving notes.
+- Noktasal denetimlerde tarih soneki zorunludur.
+- Yaşayan politika/spec belgeleri kökte kalabilir; kapanmış tur/faz/denetim belgeleri arşive taşınır.
+- Arşiv içindeki belgeler tarih kaydıdır; içerikleri zorunlu olmadıkça geriye dönük değiştirilmez.
 
-## 🟢 Canonical / living (root)
+## 🟢 Canonical / living root documents
 
-| File | Owner | Notes |
-|---|---|---|
-| `STATUS.md` | tüm AI'lar | PR/durum tablosu (snapshot banner'lı) |
-| `STATUS_ONLINE.md` | tüm AI'lar | akış günlüğü; sık arşivlenir → `archive/` |
-| `MAINNET_READINESS.md` | ARENA1 + ARENA2 | §1 durum tablosu yaşayan; sonunda MR-1..MR-10 kriter seti |
-| `ORG_ROADMAP_AUDIT.md` | ekip | §4a Phase 0.398 denetim bulguları |
-| `THE_PLAN_SOURCE_MANIFEST.md` | ekip | the-plan kaynak manifesi |
-| `README.md` | ekip | bu dokümantasyon kökünün giriş sayfası |
-| `REPORTS_INDEX.md` | ARENA2 | bu dosya |
+| File | Role |
+|---|---|
+| `docs/STATUS_ONLINE.md` | Aktif AI koordinasyon akış günlüğü |
+| `docs/README.md` | Dokümantasyon giriş sayfası |
+| `docs/BUDLUM_HARDENING_PROTOCOL.md` | Mainnet sertleştirme rejimi |
+| `docs/MAINNET_READINESS.md` | Mainnet readiness / MR kriterleri |
+| `docs/THREAT_MODEL.md` | Tehdit modeli |
+| `docs/AUDIT_CHECKLIST.md` | Yaşayan dış audit hazırlık checklist'i |
+| `docs/THE_PLAN_SOURCE_MANIFEST.md` | The-plan kaynak manifesti |
+| `docs/ARCHITECTURE.md` | Mimari atlas |
+| `docs/BUDLUM_CONSTITUTION.md` | Anayasa / yönetişim referansı |
+| `docs/BUG_BOUNTY.md` | Sürekli güvenlik raporlama kanalı |
 
-## 🔵 Active work (Phase 8.x, root)
+> Not: `STATUS.md` kökte bulunmuyor; tarihsel kopya `docs/archive/STATUS.md` altında.
 
-| File | Owner | Notes |
-|---|---|---|
-| `PHASE8.9_ANALIZ_A1.md` | ARENA2 | kullanıcı-onaylı iddia-vs-kanıt matrisi; Dalga 4 açık iş |
-| `PHASE89_DERIN_KOD_DENETIMI_ARENA3.md` | ARENA3 | C1–C6 + §8 bulgular; M4/M5/L1 kapandı (Dalga 5, `79f3784`) |
-| `YENI_ASAMALAR_PLAN_ARENA3_2026-07-16.md` | ARENA3 | güncel aşama planı |
-| `BUDZERO_DERIN_DENETIM_ARENA3.md` | ARENA3 | 7-crate zk denetimi |
-| `VERIFYMERKLE_CONSTRAINT_DEBUG_ARENA3.md` | ARENA3 | **AKTİF BUG** — 1-depth InvalidProof (`2006487` serisi) |
-| `M5_VERIFYMERKLE_RAPOR_ARENA5.md` | ARENA5 | aynı bug'ın ARENA5 raporu |
-| `CI_ROOT_CAUSE_ANALYSIS_ARENA5.md` | ARENA5 | CI kök-neden analizi |
-| `PHASE9_VIZYON_KOD_CELISKI_DENETIM_ARENAX_2026-07-17.md` | ARENAX | rapor↔vizyon↔kod denetimi; F1–F10 açık bulgular (Hard-Pruning, MainnetActivation ölü kod) |
+## 🔵 Active Phase 12 / current planning documents kept in root
 
-## Phase plans (executed / queued, root)
+| File | Role |
+|---|---|
+| `docs/PHASE12_ARENA4_RD_PLAN.md` | Phase 12 ARENA4 R&D planı |
+| `docs/ARENA4_APPROVED_SYSTEMS_ROADMAP_2026-07-20.md` | Kullanıcı onaylı Phase 12 sistem sıralaması |
 
-| File | Durum | Notes |
-|---|---|---|
-| `PHASE0.06_PLAN.md` … `PHASE0.10_PLAN.md` | 🟡 | kapanan Tur planları — 2. arşiv dalgası adayı |
-| `PHASE0.378_EXECUTION_PLAN.md` + `PHASE0.378_GAP_MATRIX.md` | 🔵 | 0.378 çalışma referansları |
-| `PHASE0.42_PLAN.md` | 🔵 | sıradaki plan |
-| `PHASE1_RAPOR.md` | 🟢 | Phase 1 kapanışının kanonik raporu (kopya `PHASE0.378_RAPOR` 2026-07-16 silindi) |
+## ⚪ Archive wave — 2026-07-20 ARENA4 hygiene
 
-## Security (root)
+User ara-görev talebiyle kökteki tarihsel ADIM/Tur/Aşama/Phase raporları ve eski denetim raporları arşive taşındı. Kökten taşınan dosyalar:
 
-`THREAT_MODEL.md` · `AUDIT_CHECKLIST.md` · `SECURITY_AUDIT_HACKER.md` · `BUG_BOUNTY.md` · `03_post_quantum_security.md` — hepsi 🟢 referans.
+| Archived file | Category |
+|---|---|
+| `docs/archive/BUDLUM_PHASE10.md` | Eski phase talimat/raporu |
+| `docs/archive/BUDLUM_PHASE11.md` | Eski phase talimat/raporu |
+| `docs/archive/BUDLUM_PHASE11_2.md` | Eski phase devam planı |
+| `docs/archive/PHASE0.08_PLAN.md` | Eski tur/phase planı |
+| `docs/archive/PHASE0.10_PLAN.md` | Eski tur/phase planı |
+| `docs/archive/PHASE11_3_7_GOREV.md` | Eski görev/ADIM raporu |
+| `docs/archive/PHASE11_4_DERIN_MIMARI.md` | Eski phase mimari raporu |
+| `docs/archive/PHASE11_6_MAINNET_YOL_HARITASI.md` | Eski phase karar/yol haritası |
+| `docs/archive/P2_SCHEMA4_UYGULAMA_PLANI_2026-07-18.md` | Eski uygulama planı |
+| `docs/archive/ORG_ROADMAP_AUDIT.md` | Tarihsel roadmap denetimi |
+| `docs/archive/ARENA3_SECURITY_VERIFICATION_AUDIT_2026-07-20.md` | Noktasal güvenlik doğrulama denetimi |
+| `docs/archive/SECURITY_AUDIT_HACKER.md` | Tarihsel tehdit/hacker denetimi |
+| `docs/archive/STATUS_ONLINE2.md` | Eski aktif kanal dökümü |
 
-## Vision / governance (root)
+Kökteki byte-identical kopyaları kaldırılan ve zaten arşivde bulunan dosyalar:
 
-`BUDLUM_CONSTITUTION.md` · `BUDLUM_ECOSYSTEM_INTERFACE.md` · `PERSONAS.md` · `RD_SOCIALFI_DWEB_VISION.md` · `01_multi_consensus_settlement.md` · `02_settlement_test_matrix.md` · `03_paradigma_analizi.md` — 🟢.
-`AI_BIRLIGI.md` · `BUD_INTERIM.md` — 🟡 2. arşiv dalgası adayı (içerik incelemesi Dalga 4'te).
+| Existing archived file | Action |
+|---|---|
+| `docs/archive/ARENA3_P2_SCHEMA4_SECURITY_REVIEW_2026-07-18.md` | Kök kopya kaldırıldı |
+| `docs/archive/ARENA3_V19_PERSISTENCE_FAIL_CLOSED_REVIEW_2026-07-18.md` | Kök kopya kaldırıldı |
+| `docs/archive/GOREV_YONETICISI_EKSIKLIK_ANALIZI_ARENA2_ARENA3_TALIMATLARI_2026-07-18.md` | Kök kopya kaldırıldı |
 
-## Operations
+## 🧾 Earlier archive waves / legacy index
 
-`operations/` → kanonik ceremony (`MAINNET_GENESIS_CEREMONY.md`), `GENESIS_FLIP_CHECKLIST.md` (F1–F5), `PRODUCTION_RUNBOOK.md`, `ARCHIVE_AND_BACKUP.md`. TR ceremony belgesi kökte (`MAINNET_GENESIS_CEREMONY.md`) özet + §A annex olarak kalır (EN kanonik kuralı).
+Aşağıdaki dosyalar 2026-07-16 ve önceki arşiv dalgalarında arşive alınmış tarih kayıtlarıdır:
 
-## ⚪ Archive (`docs/archive/`)
+`PHASE3_FINAL_KAPANIS_ARENA3.md` · `PHASE3_HONEST_CLOSEOUT.md` · `PHASE3_PLAN_VE_GOREV_DAGILIMI.md` · `PHASE4_ARENA2_ANALIZ_2026-07-15.md` · `PHASE4_TEKNIK_VE_SONUCLAR_ARENA2.md` · `PHASE5_ARENA6_DENETIM_2026-07-15.md` · `PHASE7_CEREMONY_PLAN.md` · `PHASE7_CEREMONY_BIRLESTIRME_ARENA5_ARENA1.md` · `PHASE0.37_RAPOR.md` · `AGENT_AUDIT_REPORT.md` · `AGENT4_5_6_ARENA3_DENETIM_RAPORU.md` · `AGENT4_5_6_DENETIM_ARENA2.md` · `BUDLUM_SUREKLI_DENETIM_ARENA3_2026-07-15.md` · `BUDLUM_BOS_KOD_BAGDASMAMA_DENETIM_ARENA3_2026-07-16.md` · `DEVIR_RAPORU.md`.
 
-15 dosya 2026-07-16 Dalga 6'da taşındı (kullanıcı Q4 kararı; `git mv` — history korunur):
+## Books / specs out of scope
 
-`PHASE3_FINAL_KAPANIS_ARENA3.md` · `PHASE3_HONEST_CLOSEOUT.md` · `PHASE3_PLAN_VE_GOREV_DAGILIMI.md` · `PHASE4_ARENA2_ANALIZ_2026-07-15.md` · `PHASE4_TEKNIK_VE_SONUCLAR_ARENA2.md` · `PHASE5_ARENA6_DENETIM_2026-07-15.md` · `PHASE7_CEREMONY_PLAN.md` · `PHASE7_CEREMONY_BIRLESTIRME_ARENA5_ARENA1.md` · `PHASE0.37_RAPOR.md` · `AGENT_AUDIT_REPORT.md` · `AGENT4_5_6_ARENA3_DENETIM_RAPORU.md` · `AGENT4_5_6_DENETIM_ARENA2.md` · `BUDLUM_SUREKLI_DENETIM_ARENA3_2026-07-15.md` · `BUDLUM_BOS_KOD_BAGDASMAMA_DENETIM_ARENA3_2026-07-16.md` · `DEVIR_RAPORU.md`
-
-Arşiv-içi dokümanlar **salt-okunur** tarih kaydıdır; güncel durum için kökteki 🔵/🟢 belgelere bakın.
-
-## Books
-
-`tr/book/` ve `en/book/` bölümleri bu indeksin kapsamı dışında — kendi `README.md`'leri kanonik.
+`docs/tr/book/`, `docs/en/book/`, `docs/spec-review/`, `docs/operations/` ve teknik spec/RFC dosyaları bu rapor arşiv dalgasının kapsamı dışındadır; kendi README/spec bağlamları kanoniktir.

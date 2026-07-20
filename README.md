@@ -148,7 +148,7 @@ CI (GitHub Actions): separate fmt → clippy `-D warnings` → test gates for th
 
 ## Status & roadmap
 
-Aligned with [budlum-xyz/Budlum](https://github.com/budlum-xyz/Budlum) Research Roadmap + ch12 mainnet blockers. Full matrix: `PHASE0.36_ORG_ROADMAP_AUDIT.md` (working notes) and below.
+Aligned with [budlum-xyz/Budlum](https://github.com/budlum-xyz/Budlum) Research Roadmap + ch12 mainnet blockers. Full matrix: `docs/archive/ORG_ROADMAP_AUDIT.md` (historical working notes) and below.
 
 | Area | State | Org roadmap |
 | --- | --- | --- |

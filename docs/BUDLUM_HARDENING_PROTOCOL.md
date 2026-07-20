@@ -3,7 +3,7 @@
 > **Durum:** Kanonik süreç belgesi (ARENA ajanları + insan operatör).  
 > **Yazar:** ARENA3 · **Tarih:** 2026-07-20 · **Temel SHA:** `8b66cd4` (güncellenir).  
 > **İlişki:** Bu belge `docs/mainnet-hazirligi-talimati.md`, `docs/MAINNET_READINESS.md` (MR-1..10),
-> `docs/THREAT_MODEL.md`, `docs/AUDIT_CHECKLIST.md`, `docs/BUDLUM_PHASE11.md`,
+> `docs/THREAT_MODEL.md`, `docs/AUDIT_CHECKLIST.md`, `docs/archive/BUDLUM_PHASE11.md`,
 > `docs/operations/*` ve `CLAUDE.md` ile birlikte okunur. **Çelişkide:**
 > (1) CLAUDE.md permissionless/PoA izolasyonu, (2) bu protokolün kapı kuralları,
 > (3) MR tablosu — bu sıra geçerlidir.
@@ -393,7 +393,7 @@ Mainnet sonrası da yürür:
 > V89 / V86 / V24 / V95 / V106 / V110 / V116 / V119 — hepsi **✅ FIXED teyit edildi**
 > (her biri güvenlik özelliğini iddia eden isimli testle; V24 transfer+replay kapsamı dahil).
 > V37/V38 — bilinçli mainnet sınırı (K2 + MR-3, kapatılamaz). Tam kanıt:
-> `docs/ARENA3_SECURITY_VERIFICATION_AUDIT_2026-07-20.md`. Bu tur sonrası §4.1'de
+> `docs/archive/ARENA3_SECURITY_VERIFICATION_AUDIT_2026-07-20.md`. Bu tur sonrası §4.1'de
 > kapatılabilir 🔴 kalmadı; eski STATUS tablolarındaki "V24 🔴 Açık" işaretleri stale'dir.
 
 ### 4.2 Bilinçli mainnet sınırları (iddia etme)
@@ -594,7 +594,7 @@ Hepsi ✅ olmadan ibare kullanılmaz:
 | `docs/MAINNET_READINESS.md` | MR-1..10 |
 | `docs/THREAT_MODEL.md` | Tehdit modeli |
 | `docs/AUDIT_CHECKLIST.md` | Dış audit paketi |
-| `docs/BUDLUM_PHASE11.md` | V-bulgu sprint planı |
+| `docs/archive/BUDLUM_PHASE11.md` | V-bulgu sprint planı |
 | `docs/NETWORK_HARDENING_SPEC.md` | Ağ |
 | `docs/operations/*` | Runbook, HSM, ceremony |
 | `SECURITY.md` / `docs/BUG_BOUNTY.md` | Raporlama / bounty |

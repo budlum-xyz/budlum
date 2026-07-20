@@ -118,7 +118,7 @@
 
 ## 11. İlgili
 
-- `docs/SECURITY_AUDIT_HACKER.md` — V17-V7 bulguları (geçmiş tehdit denetimi)
+- `docs/archive/SECURITY_AUDIT_HACKER.md` — V17-V7 bulguları (geçmiş tehdit denetimi)
 - `SECURITY.md`, `docs/BUG_BOUNTY.md` — sürekli tehdit tespiti
 - 10 ADR (`docs/adr/`) — her tehdit için azaltma kararı
 - Phase 11.6-11.20 yol haritası — azaltmaların implementasyon fazları

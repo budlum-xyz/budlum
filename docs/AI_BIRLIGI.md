@@ -33,7 +33,7 @@ Bu tablo **N AI'lı** çalışmayı destekler. Yeni AI eklendikçe satır ekleni
 | # | Handle (GitHub) | Tip | Birincil rol | Sorumluluk | İletişim kanalı | Durum |
 |---|-----------------|-----|--------------|------------|------------------|-------|
 | 1 | `arena-agent[bot]` (`ARENA1`) | Arena AI (Claude Fable 5 / Arena 5) | **Kod Yazarı & Phase 1 Altyapısı**. PR #6 (`arena/019f5f77-budlum`) ve PR #9 (`arena/phase1-sync`) kod stabilizasyonu. | Rust kodu (`budlum-core`), RPC, E2E invariantları ve `finality_live_path.rs` test seti bakımı. | `STATUS_ONLINE.md`, `ARENA_AI.md`, `CLAUDE.md` | 🟢 aktif |
-| 2 | `ARENA2` | Arena AI (Arena 5) | **Denetçi & Roadmap Doğrulayıcı**. Phase 1 (eski Phase 0.38) kapanış denetimi ve kayıp iş tespiti. | `ORG_ROADMAP_AUDIT.md` doğrulama, commit history takibi (`git log`), borç/eksik iş tespiti. | `STATUS_ONLINE.md`, `ORG_ROADMAP_AUDIT.md` | 🟢 aktif |
+| 2 | `ARENA2` | Arena AI (Arena 5) | **Denetçi & Roadmap Doğrulayıcı**. Phase 1 (eski Phase 0.38) kapanış denetimi ve kayıp iş tespiti. | `archive/ORG_ROADMAP_AUDIT.md` doğrulama, commit history takibi (`git log`), borç/eksik iş tespiti. | `STATUS_ONLINE.md`, `archive/ORG_ROADMAP_AUDIT.md` | 🟢 aktif |
 | 3 | `ARENA3` (me) | Arena AI (Arena 5) | **Kayıp/Uçmuş Commit Geri Getirici & Çekirdek Kodlayıcı**. Force-push veya revert ile kaybolan/boşalan commit'leri (`tur15-pr-5 ConsensusStateV2`, `pr-6 BLS/PQ HSM`, vb.) sırayla hayata getirmek ve kodlamak. | `ARENA1` ve `ARENA2` ile görev dağılımı yaparak ortak commit (`Co-authored-by`) oluşturmak, Phase 0.36/0.38/0.40 kayıp paketlerini sırayla kodlamak + `STATUS_ONLINE.md` müzakeresi. | `STATUS_ONLINE.md` (`main` branşı), `ARENA_AI.md`, `CLAUDE.md` | 🟢 aktif |
 | 4 | `ARENAX` | Arena AI (Arena 5) | **Bağımsız Denetçi — Rapor ↔ Vizyon ↔ Kod çelişki denetimi, boş/ölü kod envanteri, vaad-edilen işlem gerçekleşebilirliği, budlumdevnet bütünlük gözcüsü** (kullanıcı ataması, 2026-07-17). | Claim-vs-evidence matrisi (`PHASE9_VIZYON_KOD_CELISKI_DENETIM_ARENAX_2026-07-17.md`), dead-code scan, süreç kullanılabilirlik denetimi; kod yazmaz, acil kırmızı-fix istisnası (kural 3). | `STATUS_ONLINE.md` | 🟢 aktif |
 | 5 | (gelecek) | (TBD) | **Kullanıcı kararına göre** — örn. harici audit reviewer, Phase 2 (eski Phase 0.40) release manager, BNS/.bud uzmanı. | (TBD) | (TBD) | ⏳ boş slot |
@@ -212,7 +212,7 @@ kod incelemesiyle YOK (kanıt: `grep -n 'fn admin_\|fn pause_\|fn force_\|fn own
 
 ### 4.8 Phase 0.398 özeti (denetim turu) — kapatılan bulgular
 
-**Kapsam:** kod yazıldı, denetim yapıldı, 17 maddelik tablo `docs/ORG_ROADMAP_AUDIT.md` §4a'da güncel.
+**Kapsam:** kod yazıldı, denetim yapıldı, 17 maddelik tablo `docs/archive/ORG_ROADMAP_AUDIT.md` §4a'da güncel.
 
 **Denetim sonuçları (kanıtlanmış, HEAD `39e30c7`):**
 
@@ -301,7 +301,7 @@ git ls-tree -r HEAD -- src/ | grep -E 'storage_deal|content_id|manifest|bud_e2e'
 3. `budlum/STATUS_ONLINE.md` — aktif iletişim kanalı (anlık handoff, karar talepleri).
 4. `budlum/ARENA_AI.md` (3853 satır) — Arena AI master context.
 5. `budlum/CLAUDE.md` (296+ satır) — budlum-spesifik mimari kurallar.
-6. `budlum/docs/ORG_ROADMAP_AUDIT.md` §4a — Phase 0.398 denetim tablosu (güncel, kanıtlanmış).
+6. `budlum/docs/archive/ORG_ROADMAP_AUDIT.md` §4a — Phase 0.398 denetim tablosu (güncel, kanıtlanmış).
 7. `budlum/docs/PHASE0.42_PLAN.md` (~112 satır) — Phase 0.42 master plan.
 8. `budlum/docs/operations/DEPENDENCY_AUDIT.md` + `SBOM.md` — CI entegrasyon prosedürü.
 9. `the-plan/PHASE0.38_PLAN.md` (129 satır) + `PHASE0.39_PLAN.md` (267 satır) — referans planlar.

@@ -38,7 +38,7 @@ Bu ayrım üç güvenlik ilkesini doğurur:
 | A4-5 | D-Web Passport core | light-client state proof query, `.bud` resolver spec, budlum.xyz handoff | Bu ADIM başladı |
 | A4-6 | Sovereign Domain Kit | PoA/CBDC templates, compliance evidence, lifecycle docs/code | Bu ADIM başladı |
 | A4-7 | Budlum Atlas | read-only evidence cards, context maps, domain health proof model | Bu ADIM başladı |
-| A4-8 | Mobile Self | mobile self-hosting profile, QoS metadata, B.U.D. node policy | Sonraki ADIM |
+| A4-8 | Mobile Self | mobile self-hosting profile, QoS metadata, B.U.D. node policy | Bu ADIM başladı |
 | A4-9 | Governance/Constitution Engine | constitution parameter registry, DAO halt guardrails | Sonraki ADIM |
 | A4-10 | Developer OS / BudL SDK | devnet template, package layout, proof fixtures, SDK docs | Sonraki ADIM |
 

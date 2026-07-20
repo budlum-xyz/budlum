@@ -4715,6 +4715,54 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
+### [2026-07-20 17:32 UTC+03:00] ARENA4 — ADIM P12-9 BAŞLADI: Mobile Self primitives
+
+**Zemin:** main `f5bb8ea` — CI **23/23 success**.
+**Kullanıcı kararı:** Mobile Self kesinlikle yapılacak.
+**Kapsam:**
+1. `src/storage/mobile_self.rs`: `MobileSelfProfile`, `MobileSelfContentPolicy`, `MobileAvailabilityClass`, `ReplicaRecommendation`.
+2. Opportunistic/scheduled mobile self-hosting “always online” iddiası kurmaz.
+3. Critical content paid replica olmadan kabul edilmez.
+4. Export: `src/storage/mod.rs`.
+
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 18:12 UTC+03:00] ARENA4 — ARA GÖREV: Faz/ADIM/denetim raporları arşiv hijyeni
+
+**Kullanıcı talebi:** Budlum için ADIM/Tur/Aşama/Phase raporları ve eski denetleme raporları arşivlenecek; işlem bitince yeni komut beklenecek.
+**Zemin:** origin/main `ecba179`; yerel P12-9 commit'i rebase edildi (`262cbf4` → arşiv commit'i bunun üstüne gelecek).
+**Kapsam:**
+1. Kök `docs/` içindeki kapanmış Phase 0/10/11 planları, görev/yol haritası raporları ve tarihsel denetim raporları `docs/archive/` altına `git mv` ile taşındı.
+2. Byte-identical arşiv kopyası bulunan eski kök denetim dosyalarının kök kopyaları kaldırıldı.
+3. `docs/archive/REPORTS_INDEX.md` v2 olarak güncellendi; aktif Phase 12 planları kökte bırakıldı.
+4. Kök/aktif dosyalardaki referanslar `docs/archive/...` yollarına güncellendi.
+
+**Kasıtlı olarak kökte bırakılanlar:** `docs/STATUS_ONLINE.md`, `docs/BUDLUM_HARDENING_PROTOCOL.md`, `docs/MAINNET_READINESS.md`, `docs/AUDIT_CHECKLIST.md`, `docs/THREAT_MODEL.md`, `docs/PHASE12_ARENA4_RD_PLAN.md`, `docs/ARENA4_APPROVED_SYSTEMS_ROADMAP_2026-07-20.md`.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP; CI yeşil olunca kullanıcıdan yeni komut beklenecek.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 18:17 UTC+03:00] ARENA4 — CI kırmızı: Mobile Self rustfmt fix
+
+**Durum:** main `85ee107` CI'da `Budlum Core` / Format adımı kırmızı oldu.
+**Kök neden:** `src/storage/mobile_self.rs` içindeki `availability_label` match arm'ı rustfmt beklenen satır kırılımında değildi.
+**Fix:** CI rustfmt diff'i manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
 ### [2026-07-20 18:27 UTC+03:00] ARENA1 — Phase 11.8 ADIM 1 KAPANDI / SLEEP
 
 **Ne bitti:** Phase 11.8 ekonomi temelinin ilk dilimi main'e alındı. `src/chain/fee_market.rs` EIP-1559 pure fee market primitive'leri ve `src/tokenomics/reward_pool.rs` pre-allocated genesis validation reward pool primitive'leri eklendi. `sled_open_with_retry` CI flake'i bounded retry ile kapatıldı. Bu ADIM state machine'e bağlanmayan saf arithmetic/test temelidir; full executor/block integration ve fork-choice/lifecycle sonraki ADIM'larda.

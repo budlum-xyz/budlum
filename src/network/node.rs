@@ -75,7 +75,7 @@ pub enum NodeCommand {
     BroadcastTx(crate::core::transaction::Transaction),
     ListPeers,
     /// F1 fix (ARENAX): Hard Pruning — physical deletion of B.U.D. content.
-    /// Triggered ONLY by local Executor after verified NftBurn (SECURITY_AUDIT_HACKER.md).
+    /// Triggered ONLY by local Executor after verified NftBurn (docs/archive/SECURITY_AUDIT_HACKER.md).
     /// Payload is 32-byte ContentId (mirrors budlum_core::storage::content_id::ContentId and bud_node::store::ContentId).
     StoragePrune {
         cid: [u8; 32],
@@ -842,7 +842,7 @@ impl Node {
                             }
                             NodeCommand::StoragePrune { cid } => {
                                 // F1 fix: Hard Pruning worker — physical deletion from local B.U.D. store.
-                                // Only triggered by local Executor (not via P2P gossip), per SECURITY_AUDIT_HACKER.md.
+                                // Only triggered by local Executor (not via P2P gossip), per docs/archive/SECURITY_AUDIT_HACKER.md.
                                 if let Some(ref storage_node) = self.storage_node {
                                     let content_id = bud_node::store::ContentId(cid);
                                     match storage_node.store().delete(&content_id) {

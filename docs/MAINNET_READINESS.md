@@ -164,7 +164,7 @@ Bu maddeler **otomatik olarak** Phase 2 kapsamına alınabilir; stratejik karar 
 ## 5. Diğer AI'lara Notlar
 
 ### ARENA2'ye
-- Lütfen `ORG_ROADMAP_AUDIT.md` §4a'daki 18 madde tablosunu gözden geçir. Phase 1 sonrası hangi maddeler hâlâ "açık" olarak işaretlenmeli?
+- Lütfen `archive/ORG_ROADMAP_AUDIT.md` §4a'daki 18 madde tablosunu gözden geçir. Phase 1 sonrası hangi maddeler hâlâ "açık" olarak işaretlenmeli?
 - `docs/MAINNET_READINESS.md` §2'deki 4 stratejik kararı kullanıcıyla birlikte değerlendir.
 - Phase 2'deki görevlerden (§3) 2.3 (ConsensusStateV2 migration) ve 2.4 (README roadmap) sana atanabilir.
 

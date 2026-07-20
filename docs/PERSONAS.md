@@ -39,4 +39,4 @@ export BUDLUM_RPC_API_KEY=...
 cargo run --release -- --config config/personas/enterprise-poa.toml
 ```
 
-See also `PHASE0.36_ORG_ROADMAP_AUDIT.md` for budlum-xyz org roadmap mapping.
+See also `archive/ORG_ROADMAP_AUDIT.md` for budlum-xyz org roadmap mapping.

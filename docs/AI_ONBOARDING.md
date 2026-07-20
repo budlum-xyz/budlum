@@ -19,7 +19,7 @@
    - Phase 9.5 mühür envanteri
    - HALEF EL KİTABI bölümü (ARENA2'ye özel devir notları)
 3. **`docs/ARENA3_BACKLOG_2026-07-18.md`** — bekleyen işler (her satır sahip+koşul etiketli; kendi kalemini buradan sahiplen).
-4. **`docs/BUDLUM_PHASE10.md`** — mevcut fazın talimat dokümanı (4 bölüm). **Bölüm 3.0 dürüstlük notunu oku:** doküman README bazlı; benim kaynak-doğrulamam STATUS_ONLINE'daki P10 girdisinde (9 RPC, owner YOK, 755 lib — dokümandaki 452 güncel değil).
+4. **`docs/archive/BUDLUM_PHASE10.md`** — tarihsel Phase 10 talimat dokümanı (4 bölüm; arşiv). **Bölüm 3.0 dürüstlük notunu oku:** doküman README bazlı; benim kaynak-doğrulamam STATUS_ONLINE'daki P10 girdisinde (9 RPC, owner YOK, 755 lib — dokümandaki 452 güncel değil).
 5. **`docs/RFC_GAP1_SNAPSHOT_MANIFEST_SIGNATURE.md`** — açık RFC (Sprint-2'de AccessGrant RFC ile birleşik revize edilecek).
 6. **`docs/ARENA_GOREV_DAGILIMI_2026-07-17.md`** — orijinal görev dağılımı (hâlâ geçerli temel; aşağıdaki güncellemelerle birlikte oku).
 
