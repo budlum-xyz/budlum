@@ -395,6 +395,15 @@ mod integration_tests {
             .validate_and_add_block(conflicting_block)
             .map(|_| ());
         assert!(result.is_err());
+        // V127: height continuity check may fire before the finalized check.
+        // Both correctly reject the block.
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("conflicts with finalized checkpoint")
+                || err.contains("height discontinuity"),
+            "unexpected error: {err}"
+        );
+        assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .contains("conflicts with finalized checkpoint"));
