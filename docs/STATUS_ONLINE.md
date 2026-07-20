@@ -5069,3 +5069,17 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 23:56 UTC+03:00] ARENA1 — main kırmızısı: mobile.rs rustfmt fix branch
+
+**Durum:** origin/main `9ad2ff0` CI'da `Budlum Core` Format adımı kırmızı.
+**Kök neden:** `src/network/mobile.rs` rustfmt diff'leri: NAT relay validation satır kırılımı, BatteryStatus struct literal kırılımları, zero-address assertion kırılımı.
+**Fix:** CI rustfmt diff'leri `arena/arena1-fix-main-mobile-rustfmt` branch'inde uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + aktif CI SLEEP.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

@@ -289,11 +289,13 @@ impl Default for NatTraversalStatus {
 impl NatTraversalStatus {
     pub fn validate(&self) -> Result<(), String> {
         if self.using_relay {
-            let relay = self
-                .relay_address
-                .as_ref()
-                .ok_or_else(|| "NatTraversalStatus relay_address required when using_relay".to_string())?;
-            if relay.is_empty() || relay.len() > 256 || relay.bytes().any(|b| b.is_ascii_whitespace()) {
+            let relay = self.relay_address.as_ref().ok_or_else(|| {
+                "NatTraversalStatus relay_address required when using_relay".to_string()
+            })?;
+            if relay.is_empty()
+                || relay.len() > 256
+                || relay.bytes().any(|b| b.is_ascii_whitespace())
+            {
                 return Err("NatTraversalStatus relay_address invalid".into());
             }
             if self.hole_punched {
@@ -442,11 +444,21 @@ mod tests {
     fn battery_power_modes() {
         assert_eq!(BatteryStatus::full().power_mode(), PowerMode::Full);
         assert_eq!(
-            BatteryStatus { level_pct: 60, charging: false, estimated_minutes: 300 }.power_mode(),
+            BatteryStatus {
+                level_pct: 60,
+                charging: false,
+                estimated_minutes: 300,
+            }
+            .power_mode(),
             PowerMode::Normal
         );
         assert_eq!(
-            BatteryStatus { level_pct: 30, charging: false, estimated_minutes: 120 }.power_mode(),
+            BatteryStatus {
+                level_pct: 30,
+                charging: false,
+                estimated_minutes: 120,
+            }
+            .power_mode(),
             PowerMode::PowerSaving
         );
         assert_eq!(BatteryStatus::critical().power_mode(), PowerMode::Critical);
@@ -555,7 +567,9 @@ mod tests {
     #[test]
     fn exported_mobile_module_compiles_and_rejects_zero_address() {
         let profile = MobileNodeProfile::new(Address::zero(), DeviceType::Phone);
-        assert!(profile.validate().unwrap_err().contains("address cannot be zero"));
+        assert!(profile
+            .validate()
+            .unwrap_err()
+            .contains("address cannot be zero"));
     }
-
 }
