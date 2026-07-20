@@ -142,7 +142,7 @@ impl Default for EncryptionPolicy {
             ],
             kdf: KeyDerivationFunction::HkdfSha256,
             min_key_length_bits: 256,
-            key_rotation_epochs: 10080, // 7 gün
+            key_rotation_epochs: 10080,             // 7 gün
             max_encrypted_data_size: 1_073_741_824, // 1 GB
             nonce_size_bytes: 12,
             asset_policies: BTreeMap::new(),
@@ -260,14 +260,10 @@ impl EncryptionPolicy {
             // default — even if someone adds it to allowed_algorithms, the
             // default must require encryption.
             if algo == EncryptionAlgorithm::None {
-                return Err(EncryptionPolicyError::AlgorithmNotAllowed {
-                    algorithm: algo,
-                });
+                return Err(EncryptionPolicyError::AlgorithmNotAllowed { algorithm: algo });
             }
             if !self.allowed_algorithms.contains(&algo) {
-                return Err(EncryptionPolicyError::AlgorithmNotAllowed {
-                    algorithm: algo,
-                });
+                return Err(EncryptionPolicyError::AlgorithmNotAllowed { algorithm: algo });
             }
             self.default_algorithm = algo;
             changed_fields.push("default_algorithm".to_string());
@@ -343,7 +339,12 @@ impl EncryptionPolicy {
             return 0;
         }
         let to_remove = self.asset_policies.len() - max_policies;
-        let keys: Vec<AssetId> = self.asset_policies.keys().take(to_remove).copied().collect();
+        let keys: Vec<AssetId> = self
+            .asset_policies
+            .keys()
+            .take(to_remove)
+            .copied()
+            .collect();
         for key in keys {
             self.asset_policies.remove(&key);
         }
@@ -472,7 +473,10 @@ mod tests {
         };
         // 50% < 80% threshold
         let result = policy.apply_dao_update(update, 100, 1, 500_000);
-        assert!(matches!(result, Err(EncryptionPolicyError::InsufficientVotes { .. })));
+        assert!(matches!(
+            result,
+            Err(EncryptionPolicyError::InsufficientVotes { .. })
+        ));
     }
 
     #[test]
@@ -498,7 +502,10 @@ mod tests {
             ..Default::default()
         };
         let result = policy.apply_dao_update(update, 100, 1, 900_000);
-        assert!(matches!(result, Err(EncryptionPolicyError::KeyTooShort { .. })));
+        assert!(matches!(
+            result,
+            Err(EncryptionPolicyError::KeyTooShort { .. })
+        ));
     }
 
     #[test]
@@ -509,7 +516,10 @@ mod tests {
             ..Default::default()
         };
         let result = policy.apply_dao_update(update, 100, 1, 900_000);
-        assert!(matches!(result, Err(EncryptionPolicyError::InvalidRotationPeriod)));
+        assert!(matches!(
+            result,
+            Err(EncryptionPolicyError::InvalidRotationPeriod)
+        ));
     }
 
     #[test]
@@ -603,5 +613,4 @@ mod tests {
             })
         ));
     }
-
 }

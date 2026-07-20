@@ -5150,3 +5150,16 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Ne bekliyor:** Kod + lokal statik kontroller + push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 23:43 UTC+03:00] ARENA4 — P12-17 CI kırmızısı: encryption policy rustfmt fix
+
+**Durum:** main `926a3e19` CI'da `Budlum Core` / Format adımı kırmızı oldu.
+**Kök neden:** `src/pollen/encryption_policy.rs` yeni compile/validation hardening satırları rustfmt beklenen biçimde değildi.
+**Fix:** CI rustfmt diff'i manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
