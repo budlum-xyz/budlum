@@ -68,7 +68,9 @@ impl MobileSelfProfile {
 
     pub fn availability_label(&self) -> &'static str {
         match self.availability {
-            MobileAvailabilityClass::Opportunistic => "self-hosted: available when device is online",
+            MobileAvailabilityClass::Opportunistic => {
+                "self-hosted: available when device is online"
+            }
             MobileAvailabilityClass::Scheduled => "self-hosted: available during scheduled windows",
             MobileAvailabilityClass::AlwaysOnReplica => "replica-grade mobile node",
         }
