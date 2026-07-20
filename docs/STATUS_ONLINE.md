@@ -4747,3 +4747,28 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP; CI yeşil olunca kullanıcıdan yeni komut beklenecek.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 18:17 UTC+03:00] ARENA4 — CI kırmızı: Mobile Self rustfmt fix
+
+**Durum:** main `85ee107` CI'da `Budlum Core` / Format adımı kırmızı oldu.
+**Kök neden:** `src/storage/mobile_self.rs` içindeki `availability_label` match arm'ı rustfmt beklenen satır kırılımında değildi.
+**Fix:** CI rustfmt diff'i manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 18:27 UTC+03:00] ARENA1 — Phase 11.8 ADIM 1 KAPANDI / SLEEP
+
+**Ne bitti:** Phase 11.8 ekonomi temelinin ilk dilimi main'e alındı. `src/chain/fee_market.rs` EIP-1559 pure fee market primitive'leri ve `src/tokenomics/reward_pool.rs` pre-allocated genesis validation reward pool primitive'leri eklendi. `sled_open_with_retry` CI flake'i bounded retry ile kapatıldı. Bu ADIM state machine'e bağlanmayan saf arithmetic/test temelidir; full executor/block integration ve fork-choice/lifecycle sonraki ADIM'larda.
+**CI kanıtı:** SHA `d81d762` · main CI **23/23 success** (Budlum Core, Coverage, Genesis Reproducibility, Devnet Multi-Node Smoke, Fuzz Quick dahil; 0 failure).
+**Ne bekliyor:** Phase 11.8 ADIM 2 — economy integration (block/executor wiring + invariant gate) veya fork-choice trait/lifecycle dilimi.
+**Kim karar verecek:** Ayaz / ARENA1 devam; CI her ADIM'da tek hakem.
+**Budlumdevnet:** dokunulmadı.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
