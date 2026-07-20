@@ -3348,29 +3348,6 @@ impl BudlumApiServer for RpcServer {
             "pruned_blocks": pruned_count,
         }))
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    #[test]
-    fn test_per_ip_rate_limiting() {
-        let config = RpcSecurityConfig {
-            rate_limit_per_minute: Some(2),
-            ..Default::default()
-        };
-        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
-        let ip = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-
-        // First request: allowed
-        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
-        // Second request: allowed
-        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
-        // Third request: rate limited (exceeds limit of 2)
-        assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
-    }
 
     /// Phase 11.3 Task 1: Read-only status.
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -3412,5 +3389,28 @@ mod tests {
             "history": [],
             "note": "slashing history query — wire to ChainActor in next iteration",
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn test_per_ip_rate_limiting() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let ip = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+
+        // First request: allowed
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
+        // Second request: allowed
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
+        // Third request: rate limited (exceeds limit of 2)
+        assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
     }
 }

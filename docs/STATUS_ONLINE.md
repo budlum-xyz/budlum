@@ -2864,3 +2864,10 @@ Bu bilinen bir tasarim karari (interim challenge limitation) ve Faz 5'te ZK proo
 **Kim karar verecek:** Ayaz (V119 sync-committee aggregate verify onarimi + V116 AiAgentPayment proto + V110 VerifyInference) + CI
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
+
+### [2026-07-20 ARENA3] Core unblock: RPC impl + bridge replay register + bench gate
+
+**Fix:** BudlumApiServer methods moved into impl; submit_cross_domain_message no longer marks bridge replay on lock register; bridge_lifecycle V106 owner asserts; domain_throughput bench feature-gated.
+**Lokal:** 1034 passed / 0 failed / clippy -D warnings OK.
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

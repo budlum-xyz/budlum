@@ -1352,12 +1352,10 @@ impl Blockchain {
                 message.expiry_height, current_height
             ));
         }
-        // 4. Replay protection: message_id daha önce işlendi mi?
-        self.state
-            .bridge_state
-            .replay
-            .mark_processed(message.message_id)
-            .map_err(|e| format!("Cross-domain replay detected: {e}"))?;
+        // 4. Message-registry duplicate protection (registration ≠ consumption).
+        // Bridge lock/burn *register* the message here; mint/unlock consume it
+        // and mark `bridge_state.replay` (V-replay). Marking replay at register
+        // time made every subsequent mint fail with "already processed".
         // 5. Message registry + persistence.
         self.state.message_registry.insert(message.clone())?;
         if let Some(store) = &self.storage {

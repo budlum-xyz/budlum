@@ -115,4 +115,5 @@ harness = false
 [[bench]]
 name = "domain_throughput"
 path = "benches/domain_throughput.rs"
+required-features = ["__bench_domain_throughput_disabled"]
 harness = false

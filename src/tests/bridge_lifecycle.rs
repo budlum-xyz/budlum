@@ -66,7 +66,9 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
         1,
         "exactly one lock must be released at expiry"
     );
-    assert_eq!(released[0].0, asset_id());
+    // V106: sweep returns (owner, amount) for balance refund.
+    assert_eq!(released[0].0, owner);
+    assert_eq!(released[0].1, 100);
 
     // The asset is back to `Active` and reusable.
     let fresh = bc
@@ -145,7 +147,9 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
         1,
         "only the 100-expiry lock releases at height 100"
     );
-    assert_eq!(r[0].0, asset_id());
+    // V106: (owner, amount)
+    assert_eq!(r[0].0, owner);
+    assert_eq!(r[0].1, 100);
 
     // The 100-expiry lock is now Active and the asset is reusable,
     // but the second lock (expiry=500) still holds asset_b as Locked.
@@ -167,9 +171,10 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     // release is the contract-bearing observation) and that asset_b
     // is among the released set.
     let r3 = bc.apply_bridge_sweep(500);
+    // V106: returns owner addresses; asset_b lock owner is `owner`.
     assert!(
-        r3.iter().any(|(a, _)| *a == asset_b),
-        "asset_b must be released at height 500"
+        r3.iter().any(|(a, amt)| *a == owner && *amt == 50),
+        "owner must be refunded 50 for asset_b lock at height 500: {r3:?}"
     );
 }
 

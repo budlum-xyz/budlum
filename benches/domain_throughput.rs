@@ -63,7 +63,7 @@ fn bench_tx_execution(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     // Transfer
-    let (mut state, kps) = setup_funded_state(2);
+    let (state, kps) = setup_funded_state(2);
     let sender = &kps[0];
     let recipient = addr(0xFF);
     let mut tx = Transaction::new(
@@ -84,7 +84,7 @@ fn bench_tx_execution(c: &mut Criterion) {
     });
 
     // Stake
-    let (mut state2, kps2) = setup_funded_state(1);
+    let (state2, kps2) = setup_funded_state(1);
     let mut stake_tx = Transaction::new(
         Address::from(kps2[0].public_key_bytes()),
         Address::from(kps2[0].public_key_bytes()),
@@ -105,7 +105,7 @@ fn bench_tx_execution(c: &mut Criterion) {
     });
 
     // Vote (governance)
-    let (mut state3, kps3) = setup_funded_state(1);
+    let (state3, kps3) = setup_funded_state(1);
     let mut vote_data = vec![1u8]; // vote_for = true
     vote_data.extend_from_slice(&0u64.to_le_bytes()); // proposal_id = 0
     let mut vote_tx = Transaction::new(
