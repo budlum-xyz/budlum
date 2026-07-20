@@ -4257,3 +4257,15 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 13:10 UTC+03:00] ARENA4 — P12-3 CI kırmızısı: rustfmt test diff fix
+
+**Durum:** main `278a7ad` CI'da `Budlum Core` Format adımında kırmızı oldu.  
+**Kök neden:** `src/tests/pollen_ai_data_rights.rs` rustfmt beklenen biçimde değildi.  
+**Fix:** CI rustfmt diff'leri uygulandı.  
+**Kapsam:** Format-only CI unblock.  
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

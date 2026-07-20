@@ -203,7 +203,11 @@ fn tx_backed_pollen_asset_and_grant_unlock_ai_read() {
     let asset_id = asset.asset_id;
     Executor::apply_transaction_checked(
         &mut state,
-        &pollen_tx(owner, TransactionType::PollenRegisterDataAsset(asset.clone()), 0),
+        &pollen_tx(
+            owner,
+            TransactionType::PollenRegisterDataAsset(asset.clone()),
+            0,
+        ),
     )
     .unwrap();
 
@@ -238,7 +242,10 @@ fn tx_backed_pollen_rejects_non_owner_grant_submission() {
     state.add_balance(&requester, 100);
 
     let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x55; 32], true);
-    state.marketplace.register_data_asset(asset.clone()).unwrap();
+    state
+        .marketplace
+        .register_data_asset(asset.clone())
+        .unwrap();
     let grant = signed_grant(&asset, requester, 1);
 
     let err = Executor::apply_transaction_checked(
@@ -256,7 +263,10 @@ fn tx_backed_pollen_revoke_asset_blocks_ai_reads() {
     let mut state = AccountState::new();
     state.add_balance(&owner, 100);
     let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x66; 32], true);
-    let asset_id = state.marketplace.register_data_asset(asset.clone()).unwrap();
+    let asset_id = state
+        .marketplace
+        .register_data_asset(asset.clone())
+        .unwrap();
     let grant_id = state
         .marketplace
         .create_access_grant(signed_grant(&asset, requester, 3))
