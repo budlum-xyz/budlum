@@ -3830,3 +3830,47 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Kim karar verecek:** CI
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+## ADIM 15 — V134 Onarım + Derin Tarama Devam
+
+**Tarih:** 2026-07-20
+**Ajan:** ARENAS (Denetim)
+
+### Onarılan Bulgular
+
+**V134 (🟡 FIXED):** `RelayerResult` bridge mint/unlock yollarında relayer fee
+sessizce yok oluyordu. `submit_relay_proof` yolu doğru şekilde fee credit ediyordu
+ama executor.rs'deki `RelayerResult` kod yolunda 1% relayer fee `tx.from`'a
+credit edilmiyordu — BUD kalıcı olarak kayboluyordu. Her iki yolda da
+`state.add_balance(&tx.from, fee as u64)` eklendi.
+
+**V133 (⚪ FIXED):** `TooManyOpenChallenges` varyantı düzgün eklendi —
+`InvalidMerkleProof` yerine semantik olarak doğru hata türü kullanılıyor.
+Display impl ve hata mesajı güncellendi.
+
+### Denetlenen Modüller (bu ADIM)
+- `src/execution/executor.rs` (1040 satır) — V134 fix, tüm tx tipleri denetlendi
+- `src/core/governance.rs` (294 satır) — V130 fix doğrulandı
+- `src/core/account.rs` (1562 satır) — burn_from, finalize, supply cap
+- `src/bns/registry.rs` (237 satır) — V131 fix doğrulandı
+- `src/socialfi/mod.rs` (NFT Registry) — sağlam, V23 fix mevcut
+- `src/pollen/offers.rs` (Marketplace) — sağlam, price>0 ve owner kontrolleri
+- `src/prover/mod.rs` (282 satır) — ZK proof claim sistemi, first-valid-wins
+- `src/execution/proof_verifier.rs` (405 satır) — structural check + STARK delegate
+- `src/chain/blockchain.rs` submit_zk_proof — `bud_proof::DefaultAdapter::verify()` çağrılıyor
+- `src/domain/finality_adapter.rs` (1482 satır) — PoA/PoW/ZK adapter'lar sağlam
+- `src/tokenomics/mod.rs` (515 satır) — arz kontrolü, vesting, burn mekanizmaları
+
+### Güncel Toplam Denetim Tablosu
+
+| Ciddiyet | Sayi | Durum |
+|----------|------|-------|
+| 🔴 Kritik | 17 | 15 kapatildi, 2 acik (CI bekleniyor) |
+| 🟡 Yuksek | 34 | 16 kapatildi, 18 acik |
+| ⚪ Dusuk | 47 | 6 kapatildi, 47 acik |
+
+**Toplam: 101 bulgu (V22-V134), 37 kapatildi, 64 acik**
+
+Co-authored-by: ARENAS <arenas@budlum.ai>
