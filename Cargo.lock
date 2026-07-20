@@ -4443,14 +4443,6 @@ dependencies = [
  "lock_api",
 ]
 
-[[package]]
-name = "spin"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
-dependencies = [
- "lock_api",
-]
 
 [[package]]
 name = "spki"

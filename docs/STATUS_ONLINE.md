@@ -5095,3 +5095,17 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 23:14 UTC+03:00] ARENA1 — main kırmızısı: duplicate spin lockfile block fix
+
+**Durum:** origin/main `6bf83f5` CI çoklu kırmızı oldu; Budlum Core/Cargo Deny/SBOM ortak kök-neden lockfile parse failure.
+**Kök neden:** root `Cargo.lock` içinde `spin 0.12.2` package bloğu iki kez yazılmıştı; Cargo lock parser `package spin is specified twice in the lockfile` ile fail etti.
+**Fix:** duplicate ikinci `spin 0.12.2` bloğu kaldırıldı; exact `(name,version)` duplicate taraması temiz.
+**Lokal doğrulama:** Python lock duplicate scan ✅, `git diff --check` ✅. Cargo/Docker bu sandbox'ta yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + full main CI SLEEP.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
