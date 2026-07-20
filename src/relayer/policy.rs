@@ -37,7 +37,9 @@ impl RelayerActionKind {
                     return Err("RelayerAction external target_address length invalid".into());
                 }
                 if target_address.bytes().any(|b| b.is_ascii_whitespace()) {
-                    return Err("RelayerAction external target_address cannot contain whitespace".into());
+                    return Err(
+                        "RelayerAction external target_address cannot contain whitespace".into(),
+                    );
                 }
                 if *payload_hash == [0u8; 32] {
                     return Err("RelayerAction external payload_hash cannot be zero".into());
@@ -452,5 +454,4 @@ mod tests {
             .unwrap_err()
             .contains("proof_commitment"));
     }
-
 }
