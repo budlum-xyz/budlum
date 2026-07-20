@@ -184,6 +184,18 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 **Kapı G2:** `FIX-NOW` kuyruğu boş · `ACCEPT-RISK` listesi docs'ta · CI yeşil.
 
+### H2 progress (ARENA3, 2026-07-20)
+
+| Item | Status |
+|------|--------|
+| V130 finalize/vote window | locked (`hardening_h2_locks`) |
+| V131 BNS duration=0 | locked |
+| V132 burn_from clip | locked (warn+return) |
+| V133 challenge cap | locked (`storage_deal::v133_max_open_challenges_per_deal`) |
+| V123 hub self-verify honesty | `developer_attested` ≠ `verified` |
+| H5.1 eclipse /24 | `PeerManager` + Node admission |
+| V111 L1 trie 256-bit | structural lock |
+
 ---
 
 ### Faz H3 — Derin dinamik güvenlik (fuzz / chaos / property)

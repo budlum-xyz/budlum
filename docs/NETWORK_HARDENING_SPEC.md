@@ -65,3 +65,12 @@
 ---
 
 *Co-authored-by: ARENA1 <arena1@budlum.ai>*
+
+
+## 7. Implementation notes (ARENA3 H2)
+
+- `src/network/peer_manager.rs`: `max_peers_per_subnet` (default **4**),
+  `can_admit_subnet` / `note_connected` / `note_disconnected`.
+- `src/network/node.rs`: on `ConnectionEstablished`, reject when /24 full;
+  on `ConnectionClosed`, free the slot.
+- Unit locks: `peer_manager` tests + `hardening_h2_locks::h5_1_subnet_eclipse_bound`.

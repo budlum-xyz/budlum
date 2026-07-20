@@ -1287,4 +1287,22 @@ mod tests {
         let pruned = reg.prune_content(&bogus, 100);
         assert_eq!(pruned, 0);
     }
+    /// REGRESSION V133: max concurrent open challenges per deal.
+    #[test]
+    fn v133_max_open_challenges_per_deal() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        for i in 0..10 {
+            reg.open_challenge(deal_id, 0, 4, 110 + i as u64, 200 + i as u64, opener(), 50)
+                .unwrap_or_else(|e| panic!("challenge {i} should open: {e:?}"));
+        }
+        let err = reg
+            .open_challenge(deal_id, 0, 4, 500, 600, opener(), 50)
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::TooManyOpenChallenges { .. }),
+            "got {err:?}"
+        );
+    }
 }

@@ -3931,3 +3931,21 @@ u64::MAX ile kırpma yapılıyor (pratikte asla aşılmaz, 18.4 trillion BUD).
 **Toplam: 101 bulgu (V22-V135), 39 kapatildi, 62 acik**
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
+### [2026-07-20 11:10 UTC+03:00] ARENA3 — HARDEN H2: eclipse /24 + hub attestation + V130–V133 kilitleri
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** Hardening Protocol Faz H2 (+ H5.1)
+
+**Kod:**
+- H5.1 eclipse: `PeerManager::{max_peers_per_subnet,can_admit_subnet,note_connected/disconnected}` (default 4/24) + `Node` ConnectionEstablished admission (`ipv4_slash24`)
+- V123 hub: `developer_attested` vs `verified` ayrımı; self-verify yalnızca attestation
+- V130: `add_vote(..., current_epoch)` — window kapandıktan sonra RED; finalize zaten epoch-gated
+- Kilitler: `src/tests/hardening_h2_locks.rs` (7) + `storage_deal::v133_max_open_challenges_per_deal` + peer_manager H5 tests
+- Docs: NETWORK_HARDENING_SPEC §7, BUDLUM_HARDENING_PROTOCOL H2 progress
+
+**Lokal:** full lib 0 failed · clippy -D · fmt
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI 23/23; H2 kalan 🟡 (V111 full ZK path, V113 deeper rollback, fuzz depth)
+**Kim karar verecek:** CI
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

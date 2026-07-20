@@ -41,6 +41,18 @@ pub const MAX_CONCURRENT_SNAPSHOTS: usize = 10;
 /// this many seconds the session is dropped, freeing the per-height
 /// `Vec<Option<Vec<u8>>>` buffer.
 pub const SNAPSHOT_SESSION_TIMEOUT_SECS: u64 = 60;
+
+/// H5.1: extract IPv4 /24 key from a multiaddr (first 3 octets), if present.
+pub fn ipv4_slash24(addr: &Multiaddr) -> Option<[u8; 3]> {
+    for proto in addr.iter() {
+        if let libp2p::multiaddr::Protocol::Ip4(ip) = proto {
+            let o = ip.octets();
+            return Some([o[0], o[1], o[2]]);
+        }
+    }
+    None
+}
+
 #[derive(NetworkBehaviour)]
 pub struct BudlumBehaviour {
     ping: ping::Behaviour,
@@ -864,13 +876,32 @@ impl Node {
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!("Listening on {}", address);
                         }
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                            let remote = endpoint.get_remote_address();
+                            let subnet = ipv4_slash24(remote);
+                            // H5.1 eclipse bound before admitting.
+                            let admit = self
+                                .peer_manager
+                                .lock()
+                                .map(|pm| pm.can_admit_subnet(subnet))
+                                .unwrap_or(true);
+                            if !admit {
+                                warn!(
+                                    "Eclipse bound: rejecting {} from {:?} (/24 limit)",
+                                    peer_id, subnet
+                                );
+                                let _ = self.swarm.disconnect_peer_id(peer_id);
+                                continue;
+                            }
                             let count = self.peer_count.fetch_add(1, Ordering::SeqCst) + 1;
                             if count > self.max_peers {
                                 warn!("Max peers reached ({}/{}), disconnecting {}", count, self.max_peers, peer_id);
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 self.peer_count.fetch_sub(1, Ordering::SeqCst);
                                 continue;
+                            }
+                            if let Ok(mut pm) = self.peer_manager.lock() {
+                                pm.note_connected(peer_id, subnet);
                             }
                             if let Some(ref m) = self.metrics {
                                 m.p2p_peers_connected.set(count as i64);
@@ -917,6 +948,9 @@ impl Node {
                             }
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            if let Ok(mut pm) = self.peer_manager.lock() {
+                                pm.note_disconnected(&peer_id);
+                            }
                             self.peer_count.fetch_sub(1, Ordering::SeqCst);
                             if let Some(ref m) = self.metrics {
                                 m.p2p_peers_connected.set(self.peer_count.load(Ordering::SeqCst) as i64);

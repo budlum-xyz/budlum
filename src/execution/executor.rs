@@ -170,7 +170,7 @@ impl Executor {
 
                         if let Some(proposal) = state.governance.find_proposal_mut(proposal_id) {
                             proposal
-                                .add_vote(tx.from, voter_stake, vote_for)
+                                .add_vote(tx.from, voter_stake, vote_for, state.epoch_index)
                                 .map_err(|e| {
                                     BudlumError::validation("governance_vote_failed", e)
                                 })?;
