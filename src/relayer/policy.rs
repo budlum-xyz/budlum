@@ -167,7 +167,11 @@ pub struct SolverBid {
 }
 
 impl SolverBid {
-    pub fn validate_for_intent(&self, intent: &UserIntent, current_block: u64) -> Result<(), String> {
+    pub fn validate_for_intent(
+        &self,
+        intent: &UserIntent,
+        current_block: u64,
+    ) -> Result<(), String> {
         if self.intent_id != intent.intent_id {
             return Err("SolverBid intent_id mismatch".into());
         }

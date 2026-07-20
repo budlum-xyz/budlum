@@ -4570,3 +4570,15 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Ne bekliyor:** Push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 16:46 UTC+03:00] ARENA4 — P12-5 CI kırmızısı: rustfmt relayer policy diff fix
+
+**Durum:** main `e06211f` CI'da `Budlum Core` Format adımında kırmızı oldu.  
+**Kök neden:** `src/relayer/policy.rs::SolverBid::validate_for_intent` imzası rustfmt beklenen biçimde değildi.  
+**Fix:** CI rustfmt diff'i uygulandı.  
+**Kapsam:** Format-only CI unblock.  
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
