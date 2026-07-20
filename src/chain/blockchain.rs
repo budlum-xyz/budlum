@@ -1957,7 +1957,15 @@ impl Blockchain {
                 // lock message; the transfer lives under the lock message id
                 // and unlock must reference the TRANSFER's own source domain
                 // (same resolution as the direct verified-burn path).
-                let transfer_id = message.correlation_id.unwrap_or(message.message_id);
+                // V138 fix (ARENAS): correlation_id is MANDATORY for BridgeBurn.
+                // The executor path (RelayerResult) already requires it (V128 fix).
+                // Using unwrap_or(message.message_id) is incorrect because the burn
+                // message has its OWN message_id (different from the lock transfer id).
+                // Without correlation_id, we'd try to look up the burn message_id in
+                // the transfer table — which would only match by coincidence.
+                let transfer_id = message.correlation_id.ok_or_else(|| {
+                    "Bridge burn message missing correlation_id (V138: required to identify original lock transfer)".to_string()
+                })?;
                 let lock_source_domain = self
                     .state
                     .bridge_state

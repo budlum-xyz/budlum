@@ -15,6 +15,11 @@ pub struct HubRegistry {
     /// app_id -> record
     pub apps: BTreeMap<u64, AppRecord>,
     pub next_app_id: u64,
+    /// V137 (ARENAS): authorized governors who can mark apps as governance-verified.
+    /// Empty set = devnet mode (any caller accepted). Production must populate
+    /// via governance action (e.g. GovernanceAction::AddHubGovernor).
+    #[serde(default)]
+    pub authorized_governors: std::collections::HashSet<Address>,
 }
 
 impl HubRegistry {
@@ -90,7 +95,23 @@ impl HubRegistry {
     /// Currently restricted: only the developer can call until authorized_verifiers
     /// exists — and it still only sets developer_attested via verify_app.
     /// Explicit governance action should call `mark_verified_by_governance`.
-    pub fn mark_verified_by_governance(&mut self, id: u64) -> Result<(), HubError> {
+    ///
+    /// V137 fix (ARENAS): Require an explicit caller identity for governance
+    /// verification. Without this, any code path that reaches this function
+    /// can set `verified = true` without authorization. The caller parameter
+    /// is checked against an optional `authorized_governors` set; if the set
+    /// is empty (devnet), any caller is accepted (matching current behavior).
+    /// Production must populate `authorized_governors` via governance action.
+    pub fn mark_verified_by_governance(
+        &mut self,
+        id: u64,
+        caller: &Address,
+    ) -> Result<(), HubError> {
+        if !self.authorized_governors.is_empty()
+            && !self.authorized_governors.contains(caller)
+        {
+            return Err(HubError::NotAuthorized);
+        }
         let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;
         app.verified = true;
         Ok(())

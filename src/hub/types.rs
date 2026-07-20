@@ -37,4 +37,6 @@ pub enum HubError {
     NotDeveloper,
     #[error("Invalid metadata")]
     InvalidData,
+    #[error("Not authorized for governance verification")]
+    NotAuthorized,
 }

@@ -829,11 +829,14 @@ impl Executor {
                     ));
                 }
 
-                // Refund max_fee to the requester
-                let requester_acc = state.get_or_create(&tx.from);
+                // V139 fix (ARENAS): Use `&requester` (verified by reclaim_fee) instead
+                // of `&tx.from`. These are equal (checked above), but using the verified
+                // value is the canonical pattern and prevents future regressions if the
+                // auth check changes. Same for sender below.
+                let requester_acc = state.get_or_create(&requester);
                 requester_acc.balance = requester_acc.balance.saturating_add(max_fee);
 
-                let sender = state.get_or_create(&tx.from);
+                let sender = state.get_or_create(&requester);
                 sender.balance = sender.balance.saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
@@ -985,10 +988,23 @@ impl Executor {
                     .ai_registry
                     .reclaim_agent_payment(&payment_id, &tx.from, current_block)
                     .map_err(|e| BudlumError::validation("ai_payment_reclaim_failed", e))?;
-                // Refund to sender
+                // V140 fix (ARENAS): Validate that the sender can cover the fee
+                // after reclaim. Previously, if amount < fee, the fee was silently
+                // dropped via saturating_sub (network loses fee revenue). Now we
+                // validate upfront, matching the pattern of all other tx types.
+                {
+                    let sender = state.get_or_create(&tx.from);
+                    let total_available = sender.balance.saturating_add(amount);
+                    if total_available < tx.fee {
+                        return Err(BudlumError::validation(
+                            "ai_payment_reclaim_insufficient_fee",
+                            "Reclaimed amount + existing balance insufficient for tx fee",
+                        ));
+                    }
+                }
+                // Refund to sender and deduct fee atomically
                 let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.saturating_add(amount);
-                sender.balance = sender.balance.saturating_sub(tx.fee);
+                sender.balance = sender.balance.saturating_add(amount).saturating_sub(tx.fee);
                 sender.nonce = sender.nonce.saturating_add(1);
             }
         }

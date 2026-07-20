@@ -59,7 +59,7 @@ mod tests {
         let app = hub.apps.get(&id).unwrap();
         assert!(app.developer_attested);
         assert!(!app.verified, "self-verify must not set verified badge");
-        hub.mark_verified_by_governance(id).unwrap();
+        hub.mark_verified_by_governance(id, &dev).unwrap();
         assert!(hub.apps.get(&id).unwrap().verified);
     }
 
