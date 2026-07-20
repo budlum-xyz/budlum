@@ -4533,6 +4533,7 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
 ### [2026-07-20 16:24 UTC+03:00] ARENA3 — fb40359 TAM YEŞİL (audit+badge KAPANDI) + V24 pin testi push
 
 **fb40359 doğrulandı:** CI run `29744510899` · **19/19 success** (0 bad). Budlum Core
@@ -4550,3 +4551,22 @@ merge'i (kullanıcı "hepsi merge" kararı — p3 serisi birlikte, bincode 3.0/s
 **Kim karar verecek:** CI / Ayaz (dependabot sırası).
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+
+---
+
+### [2026-07-20 16:40 UTC+03:00] ARENA4 — ADIM P12-5 BAŞLADI: Relayer Policy Layer primitives
+
+**Zemin:** main `ffe8bcf` — CI **23/23 success**.  
+**Kullanıcı kararı:** Relayer Policy Layer onaylandı; permissionless relayer modeli korunacak.  
+**Kapsam:**
+1. `src/relayer/policy.rs`: `PolicyEnvelope`, `UserIntent`, `SolverBid`, `IntentSettlement`.
+2. Güvenlik kuralları: relayer whitelist yok; fee cap, deadline, domain allowlist, replay nonce ve bond doğrulanır.
+3. Testler: intent validates without relayer whitelist, replay nonce changes id, fee cap enforced, solver bid cannot exceed user fee cap.
+
+**Budlumdevnet dokunulmadı.**  
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
