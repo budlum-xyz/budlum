@@ -463,7 +463,8 @@ impl MarketplaceRegistry {
             .record_issued_grant()?;
         let grant_id = grant.grant_id;
         self.access_grants.insert(grant_id, grant);
-        self.purchase_receipts.insert(receipt.receipt_id, receipt.clone());
+        self.purchase_receipts
+            .insert(receipt.receipt_id, receipt.clone());
         Ok((grant_id, receipt))
     }
 
