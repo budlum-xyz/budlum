@@ -893,15 +893,35 @@ impl Node {
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
                                 continue;
                             }
-                            let count = self.peer_count.fetch_add(1, Ordering::SeqCst) + 1;
+                            let newly_connected = self
+                                .peer_manager
+                                .lock()
+                                .map(|mut pm| pm.note_connected(peer_id, subnet))
+                                .unwrap_or(true);
+                            let count = if newly_connected {
+                                self.peer_count.fetch_add(1, Ordering::SeqCst) + 1
+                            } else {
+                                self.peer_count.load(Ordering::SeqCst)
+                            };
                             if count > self.max_peers {
-                                warn!("Max peers reached ({}/{}), disconnecting {}", count, self.max_peers, peer_id);
+                                warn!(
+                                    "Max peers reached ({}/{}), disconnecting {}",
+                                    count, self.max_peers, peer_id
+                                );
                                 let _ = self.swarm.disconnect_peer_id(peer_id);
-                                self.peer_count.fetch_sub(1, Ordering::SeqCst);
+                                if newly_connected {
+                                    self.peer_count
+                                        .fetch_update(
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                            |v| Some(v.saturating_sub(1)),
+                                        )
+                                        .ok();
+                                    if let Ok(mut pm) = self.peer_manager.lock() {
+                                        pm.note_disconnected(&peer_id);
+                                    }
+                                }
                                 continue;
-                            }
-                            if let Ok(mut pm) = self.peer_manager.lock() {
-                                pm.note_connected(peer_id, subnet);
                             }
                             if let Some(ref m) = self.metrics {
                                 m.p2p_peers_connected.set(count as i64);
@@ -948,14 +968,29 @@ impl Node {
                             }
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            if let Ok(mut pm) = self.peer_manager.lock() {
-                                pm.note_disconnected(&peer_id);
+                            let was_connected = self
+                                .peer_manager
+                                .lock()
+                                .map(|mut pm| pm.note_disconnected(&peer_id))
+                                .unwrap_or(true);
+                            if was_connected {
+                                self.peer_count
+                                    .fetch_update(
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                        |v| Some(v.saturating_sub(1)),
+                                    )
+                                    .ok();
                             }
-                            self.peer_count.fetch_sub(1, Ordering::SeqCst);
                             if let Some(ref m) = self.metrics {
-                                m.p2p_peers_connected.set(self.peer_count.load(Ordering::SeqCst) as i64);
+                                m.p2p_peers_connected
+                                    .set(self.peer_count.load(Ordering::SeqCst) as i64);
                             }
-                            warn!("Disconnected from {}, Peers: {}", peer_id, self.peer_count.load(Ordering::SeqCst));
+                            warn!(
+                                "Disconnected from {}, Peers: {}",
+                                peer_id,
+                                self.peer_count.load(Ordering::SeqCst)
+                            );
                         }
                         SwarmEvent::Behaviour(BudlumBehaviourEvent::Ping(_event)) => {
                         }

@@ -1,5 +1,5 @@
 use libp2p::PeerId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 pub const INVALID_BLOCK_PENALTY: i32 = -10;
@@ -114,6 +114,9 @@ pub struct PeerManager {
     subnet_counts: HashMap<[u8; 3], usize>,
     /// Peer → subnet mapping for disconnect accounting.
     peer_subnets: HashMap<PeerId, [u8; 3]>,
+    /// Live peer set. Libp2p can emit multiple connection events for one peer;
+    /// this set makes peer_count and /24 accounting idempotent.
+    connected_peers: HashSet<PeerId>,
 }
 impl Default for PeerManager {
     fn default() -> Self {
@@ -131,6 +134,7 @@ impl PeerManager {
             max_peers_per_subnet: 4,
             subnet_counts: HashMap::new(),
             peer_subnets: HashMap::new(),
+            connected_peers: HashSet::new(),
         }
     }
 
@@ -173,15 +177,29 @@ impl PeerManager {
     }
 
     /// Record a live connection under an optional /24 key.
-    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) {
+    ///
+    /// Returns `true` only for the first live connection for `peer_id`.
+    /// Libp2p may emit duplicate connection events for the same peer/address;
+    /// counting those duplicates was causing peer_count drift and /24 overcount.
+    pub fn note_connected(&mut self, peer_id: PeerId, subnet: Option<[u8; 3]>) -> bool {
+        if !self.connected_peers.insert(peer_id) {
+            return false;
+        }
         if let Some(key) = subnet {
             *self.subnet_counts.entry(key).or_insert(0) += 1;
             self.peer_subnets.insert(peer_id, key);
         }
+        true
     }
 
     /// Drop subnet accounting when a peer disconnects.
-    pub fn note_disconnected(&mut self, peer_id: &PeerId) {
+    ///
+    /// Returns `true` if this call removed a previously live peer. Duplicate
+    /// disconnect events are ignored to prevent AtomicUsize underflow.
+    pub fn note_disconnected(&mut self, peer_id: &PeerId) -> bool {
+        if !self.connected_peers.remove(peer_id) {
+            return false;
+        }
         if let Some(key) = self.peer_subnets.remove(peer_id) {
             if let Some(c) = self.subnet_counts.get_mut(&key) {
                 *c = c.saturating_sub(1);
@@ -190,6 +208,7 @@ impl PeerManager {
                 }
             }
         }
+        true
     }
 
     pub fn subnet_connection_count(&self, subnet: [u8; 3]) -> usize {
@@ -634,9 +653,28 @@ mod tests {
             .public()
             .to_peer_id();
         assert!(pm.can_admit_subnet(Some(subnet)));
-        pm.note_connected(peer, Some(subnet));
+        assert!(pm.note_connected(peer, Some(subnet)));
         assert!(!pm.can_admit_subnet(Some(subnet)));
-        pm.note_disconnected(&peer);
+        assert!(pm.note_disconnected(&peer));
         assert!(pm.can_admit_subnet(Some(subnet)));
+    }
+
+    /// H5.1 follow-up: duplicate libp2p connection events for one peer are
+    /// idempotent, and duplicate disconnects do not underflow accounting.
+    #[test]
+    fn h5_eclipse_peer_accounting_is_idempotent() {
+        let mut pm = PeerManager::new();
+        let subnet = [172, 18, 0];
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+
+        assert!(pm.note_connected(peer, Some(subnet)));
+        assert!(!pm.note_connected(peer, Some(subnet)));
+        assert_eq!(pm.subnet_connection_count(subnet), 1);
+
+        assert!(pm.note_disconnected(&peer));
+        assert!(!pm.note_disconnected(&peer));
+        assert_eq!(pm.subnet_connection_count(subnet), 0);
     }
 }

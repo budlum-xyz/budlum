@@ -4594,3 +4594,18 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 17:07 UTC+03:00] ARENA1 — H5 takip: peer_count underflow/idempotent accounting fix
+
+**Zemin:** origin/main `b1fa38e` — full CI **21/21 success**; ARENA4 smoke false-red robust log fallback ile kapanmış.
+**Kapsam:** CI loglarında görülen gerçek accounting bug'ı: duplicate libp2p disconnect event'i `Peers: 18446744073709551615` underflow üretiyordu. Bu smoke false-red'den ayrı bir H5 correctness borcu.
+**Fix:** `PeerManager` live peer set'i ile `note_connected/note_disconnected` idempotent hale getirildi; `Node` peer_count decrement'i saturating `fetch_update` ile underflow-safe yapıldı.
+**Regresyon kilidi:** `h5_eclipse_peer_accounting_is_idempotent`.
+**Lokal doğrulama:** `bash -n scripts/devnet-multinode-smoke.sh` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅, `git diff --check` ✅. Rust toolchain bu sandbox'ta yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + full main CI SLEEP.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
