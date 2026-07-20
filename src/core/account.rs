@@ -908,6 +908,19 @@ impl AccountState {
                 self.ai_registry.dewhitelist_verifier(address);
                 tracing::info!("Executing Governance: Dewhitelisted verifier {}", address);
             }
+            ProposalType::SetEncryptionPolicy(policy) => {
+                match self.marketplace.set_encryption_policy(policy.clone()) {
+                    Ok(()) => tracing::info!(
+                        "Executing Governance: Encryption policy version {} updated",
+                        policy.version
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Rejecting SetEncryptionPolicy version {}: {}",
+                        policy.version,
+                        e
+                    ),
+                }
+            }
         }
     }
 

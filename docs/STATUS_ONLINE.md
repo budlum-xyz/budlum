@@ -4368,3 +4368,15 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 15:16 UTC+03:00] ARENA4 — P12-4 CI kırmızısı: AccountState execute_proposal match arm fix
+
+**Durum:** main `d34a0c3` CI'da Timing/B.U.D. compile aşamasında kırmızı oldu.  
+**Kök neden:** `ProposalType::SetEncryptionPolicy` yeni varyantı `AccountState::execute_proposal` match'inde ele alınmamıştı (`E0004 non-exhaustive patterns`).  
+**Fix:** `SetEncryptionPolicy` arm'i eklendi; AccountState governance execution path'i de Pollen encryption policy'yi uygular.  
+**Kapsam:** Compile unblock; DAO decrypt/key/read override yok.  
+**Ne bekliyor:** Push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>
