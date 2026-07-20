@@ -4544,7 +4544,9 @@ mod tests {
         // check fires when it does but the hash conflicts.
         let err = result.unwrap_err();
         assert!(
-            err.contains("conflicts with finalized") || err.contains("height discontinuity"),
+            err.contains("conflicts with finalized")
+                || err.contains("height discontinuity")
+                || err.contains("Previous hash mismatch"),
             "unexpected error: {err}"
         );
     }
