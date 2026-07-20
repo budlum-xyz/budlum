@@ -106,9 +106,9 @@ pub mod bridge_negatives;
 // crash-recovery kaos süiti. İki _gap pini bilinçli olarak bugünkü davranışı
 // mühürler (snapshot authenticity yok + v1/v2 çapraz-gölgeleme + boot
 // sessiz-rollback); ürün düzeltmesi emirle geldiğinde ters çevrilir.
+pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod snapshot_chaos;
-pub mod domain_edge_cases;
 // P5 regresyon kilidi (ARENA2, 2026-07-19): ZK finality fail-open +
 // relayer escrow silent-failure CI kırıcı güvenlik mühürleri.
 #[cfg(test)]

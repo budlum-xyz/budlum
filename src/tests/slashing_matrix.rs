@@ -13,7 +13,7 @@ mod tests {
     use crate::registry::roles;
 
     fn setup_registry() -> PermissionlessRegistry {
-        PermissionlessRegistry::new(RegistryParams::default())
+        PermissionlessRegistry::with_params(RegistryParams::default())
     }
 
     fn addr(byte: u8) -> Address {
@@ -27,7 +27,7 @@ mod tests {
         let mut reg = setup_registry();
         let val = addr(0x42);
 
-        reg.register(val, roles::VALIDATOR, 10_000)
+        reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
         let report = SlashingReport::consensus_double_sign(
@@ -62,7 +62,7 @@ mod tests {
         let mut reg = setup_registry();
         let honest = addr(0x50);
 
-        reg.register(honest, roles::VALIDATOR, 10_000)
+        reg.register(honest, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
         assert_eq!(
@@ -83,7 +83,7 @@ mod tests {
         let mut reg = setup_registry();
         let val = addr(0x44);
 
-        reg.register(val, roles::VALIDATOR, 10_000)
+        reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
         let report = SlashingReport::new(
@@ -110,7 +110,7 @@ mod tests {
         let mut reg = setup_registry();
         let val = addr(0x55);
 
-        reg.register(val, roles::VALIDATOR, 10_000)
+        reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
         let report = SlashingReport::new(
@@ -136,7 +136,7 @@ mod tests {
         let mut reg = setup_registry();
         let val = addr(0x60);
 
-        reg.register(val, roles::VALIDATOR, 10_000)
+        reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
         let report = SlashingReport::new(
@@ -172,8 +172,8 @@ mod tests {
         let val1 = addr(0x70);
         let val2 = addr(0x71);
 
-        reg.register(val1, roles::VALIDATOR, 10_000).unwrap();
-        reg.register(val2, roles::VALIDATOR, 10_000).unwrap();
+        reg.register(val1, roles::VALIDATOR, 10_000, 0).unwrap();
+        reg.register(val2, roles::VALIDATOR, 10_000, 0).unwrap();
 
         let r1 = SlashingReport::consensus_double_sign(
             val1,
@@ -209,7 +209,7 @@ mod tests {
         let mut reg = setup_registry();
         let val = addr(0x80);
 
-        reg.register(val, roles::VALIDATOR, 10_000).unwrap();
+        reg.register(val, roles::VALIDATOR, 10_000, 0).unwrap();
 
         let report = SlashingReport::consensus_double_sign(
             val,
@@ -237,7 +237,7 @@ mod tests {
         let mut reg = setup_registry();
         let val = addr(0x90);
 
-        reg.register(val, roles::VALIDATOR, 10_000).unwrap();
+        reg.register(val, roles::VALIDATOR, 10_000, 0).unwrap();
 
         let report = SlashingReport::consensus_double_sign(
             val,

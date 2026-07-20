@@ -31,6 +31,10 @@ enum ProtoTransactionType {
     AI_MODEL_REACTIVATE = 25;
     AI_REQUEST_CANCEL = 26;
     AI_DISPUTE_SLASH = 27;
+    // V116: dedicated enum values (must match TransactionType type_byte 28/29/30).
+    AI_AGENT_PAYMENT = 28;
+    AI_AGENT_PAYMENT_RELEASE = 29;
+    AI_AGENT_PAYMENT_RECLAIM = 30;
 }
 
 message ProtoTransaction {
@@ -425,6 +429,13 @@ message ProtoAiDisputeSlash {
 
 message ProtoAiAgentPayment {
     bytes payment_id = 1;
+    bytes from_agent = 2;
+    bytes to_agent = 3;
+    uint64 amount = 4;
+    bytes request_id = 5; // empty = non-escrowed
+    bool require_proof = 6;
+    uint64 submitted_at_block = 7;
+    uint64 expiry_block = 8;
 }
 
 message ProtoAiAgentPaymentRelease {

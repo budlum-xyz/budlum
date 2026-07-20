@@ -494,6 +494,16 @@ impl PermissionlessRegistry {
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
 
+        // Already jailed: treat as no-op so the same evidence cannot inflate
+        // slashing_history / re-apply penalty (dedup for slash_from_report).
+        if matches!(reg.status, MemberStatus::Slashed) {
+            return Ok(SlashOutcome {
+                condition,
+                penalty: 0,
+                remaining_stake: reg.stake,
+            });
+        }
+
         let penalty =
             ((reg.stake as u128 * slash_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64;
         reg.stake = reg.stake.saturating_sub(penalty);
@@ -565,9 +575,11 @@ impl PermissionlessRegistry {
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
-                // Görev 1: persist the actioned report + outcome for audit /
-                // dispute / restart survival. Written INSIDE the single slash
-                // path, so no second slashing path is introduced.
+                // Dedup: already-slashed re-submission (penalty==0) must not
+                // inflate audit history.
+                if outcome.penalty == 0 {
+                    return Ok(None);
+                }
                 self.slashing_history.push(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,

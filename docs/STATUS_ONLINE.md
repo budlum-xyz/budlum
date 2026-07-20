@@ -3085,3 +3085,33 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 **Kim karar verecek:** CI (onarim onayi) + Ayaz (V89 on-chain fix karari)
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
+
+### [2026-07-20 05:40 UTC+03:00] ARENA3 — Phase 11.2 sonrası main kırmızı onarım (V116 proto + tests + V110 clippy)
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** CI domain (Phase 11.2 tamam iddiası sonrası main kırığı)
+
+**Kök nedenler (bağımsız):**
+1. **V116 yarım:** `ProtoAiAgentPayment*` oneof mesajları vardı ama `ProtoTransactionType` enum'da 28/29/30 YOK → prost varyant üretmiyor → Core compile RED.
+2. **Decode iskeleti yanlış:** `AiAgentPayment` yalnızca `payment_id` (üstelik `AiRequestId` tipi) — struct alanları eksik; Release/Reclaim `[u8;32]` vs `AiRequestId` E0308.
+3. **V110 stub clippy:** `VerifyInference` unused `proof_type` (`-D warnings`).
+4. **Test suite drift:** `slashing_matrix` `PermissionlessRegistry::new(params)` (API `new()`/`with_params`) + `register` 3-arg; `domain_edge_cases` `|| true` clippy + mut; sync-committee test yanlış error arm; slash dedup history şişmesi.
+
+**Fix:**
+- `protocol.proto`: enum AI_AGENT_PAYMENT{,_RELEASE,_RECLAIM}=28/29/30 + full payment fields
+- `proto_conversions.rs`: full encode/decode
+- `bud-vm`: V110 stub operands `_` prefix / no-op body
+- `permissionless::slash`: already-Slashed → penalty 0; `slash_from_report` history dedup
+- tests: setup/register/sync/domain fixes
+- fmt: blockchain + mod.rs
+
+**Lokal:** fmt ✅ · budzero+core clippy `-D warnings` ✅ · **1053 passed / 0 failed / 1 ignored** · BNS/BUD gate OK · PoA 7/7 OK
+
+**Phase 11.2 notu:** G3 fuzz target'ları + G2 badge zaten main'de; bu tur yeşil zemin onarımı.
+
+**Ne bitti:** Main derleme/test kırmızısı kapatıldı (push öncesi).
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI 23/23; sonra kalan açık kritikler (V24/V89…) veya sizin ADIM
+**Kim karar verecek:** CI otomatik; yeşil sonrası Ayaz
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

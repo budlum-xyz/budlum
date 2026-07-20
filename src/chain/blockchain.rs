@@ -1232,9 +1232,7 @@ impl Blockchain {
             );
         }
         if fee > u64::MAX as u128 {
-            return Err(
-                "Bridge fee exceeds maximum representable balance (u64 overflow)".into(),
-            );
+            return Err("Bridge fee exceeds maximum representable balance (u64 overflow)".into());
         }
 
         // Credit the recipient and the relayer
@@ -1971,10 +1969,7 @@ impl Blockchain {
                     ));
                 }
                 if fee > u64::MAX as u128 {
-                    return Err(format!(
-                        "Unlock fee {} exceeds maximum balance",
-                        fee
-                    ));
+                    return Err(format!("Unlock fee {} exceeds maximum balance", fee));
                 }
 
                 self.state.add_balance(&transfer.owner, final_amount as u64);

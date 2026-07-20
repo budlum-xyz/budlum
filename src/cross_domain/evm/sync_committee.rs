@@ -262,12 +262,20 @@ mod tests {
 
     #[test]
     fn full_participation_all_zero_pubkeys_fails_signature() {
-        // Zero pubkeys (invalid encoding) → verify_bls_sig RED → aggregate RED.
-        // Participation threshold geçer (512) ama imza verify başarısız.
+        // Zero pubkeys → every per-participant BLS verify fails → valid_count=0.
+        // V119 path reports InsufficientParticipation (valid signatures < 342),
+        // not a separate SignatureVerificationFailed arm (that remains for
+        // future aggregate-pubkey failures).
         let state = dummy_state();
         let agg = full_participation_aggregate();
         let err = verify_sync_aggregate(&state, &agg, b"msg").unwrap_err();
-        assert_eq!(err, SyncCommitteeError::SignatureVerificationFailed);
+        assert_eq!(
+            err,
+            SyncCommitteeError::InsufficientParticipation {
+                participating: 0,
+                threshold: 342
+            }
+        );
     }
 
     #[test]

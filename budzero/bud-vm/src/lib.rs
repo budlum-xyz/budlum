@@ -574,24 +574,13 @@ impl Vm {
             // Mainnet activation gate: this ensures no AI output can be "verified"
             // without real cryptographic proof.
             Opcode::VerifyInference => {
-                let proof_addr = src1_val as usize;
-                let model_addr = src2_val as usize;
-                let proof_type = inst.imm; // 0=STARK, 1=SNARK wrap
-                let proof_size = 8 * 4; // 4 u64 fields
-                let model_size = 8 * 2; // 2 u64 fields
-                let proof_end = proof_addr.wrapping_add(proof_size);
-                let model_end = model_addr.wrapping_add(model_size);
-
-                let result = if proof_end <= self.memory.len() && model_end <= self.memory.len() {
-                    // V110: Always return 0 (verification failed) until proper
-                    // STARK verification is implemented. The old implementation
-                    // accepted any non-zero commitment hash, which allowed
-                    // arbitrary AI outputs to pass "verification".
-                    // When STARK AIR is ready, replace this with real verification.
-                    0u64
-                } else {
-                    0u64
-                };
+                // V110: Always return 0 (verification failed) until proper
+                // STARK verification AIR is implemented. Operands intentionally
+                // unread — keep decode/execute shape for future activation.
+                let _proof_addr = src1_val as usize;
+                let _model_addr = src2_val as usize;
+                let _proof_type = inst.imm; // 0=STARK, 1=SNARK wrap
+                let result = 0u64;
                 let dst_idx = inst.rd;
                 if dst_idx as usize > 0 {
                     self.registers[dst_idx as usize] = result;

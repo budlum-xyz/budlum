@@ -70,9 +70,12 @@ mod tests {
         bc.init_genesis_account(&validator);
         // Validator registration via stake (permissionless)
         // The chain must accept stake-based registration
+        // Validator set is managed by the permissionless registry, not
+        // necessarily mirrored into bc.state.validators on stake alone.
+        // Smoke: genesis account exists; registration path is covered elsewhere.
         assert!(
-            bc.state.validators.contains_key(&validator) || true,
-            "validator set management is via permissionless registry"
+            bc.state.accounts.contains_key(&validator),
+            "genesis account must exist for validator candidate"
         );
     }
 
@@ -108,7 +111,7 @@ mod tests {
     fn bft_block_validation_rejects_wrong_chain_id() {
         let bc1 = setup_chain(); // chain_id 1337
         let consensus2 = Arc::new(PoWEngine::new(0));
-        let bc2 = Blockchain::new(consensus2, None, 9999, None); // chain_id 9999
+        let mut bc2 = Blockchain::new(consensus2, None, 9999, None); // chain_id 9999
 
         // Block from chain 9999 must not be valid in chain 1337
         let block_from_other = bc2.chain[0].clone();
@@ -121,7 +124,7 @@ mod tests {
     fn cross_chain_id_block_rejected() {
         let mut bc = setup_chain();
         let consensus2 = Arc::new(PoWEngine::new(0));
-        let bc2 = Blockchain::new(consensus2, None, 9999, None);
+        let mut bc2 = Blockchain::new(consensus2, None, 9999, None);
 
         let producer = addr(0x40);
         for _ in 0..3 {

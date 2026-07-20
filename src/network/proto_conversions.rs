@@ -218,6 +218,17 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 Some(pb::proto_transaction::TypePayload::AiAgentPayment(
                     pb::ProtoAiAgentPayment {
                         payment_id: payment.payment_id.to_vec(),
+                        from_agent: payment.from_agent.as_bytes().to_vec(),
+                        to_agent: payment.to_agent.as_bytes().to_vec(),
+                        amount: payment.amount,
+                        request_id: payment
+                            .request_id
+                            .as_ref()
+                            .map(|r| r.0.to_vec())
+                            .unwrap_or_default(),
+                        require_proof: payment.require_proof,
+                        submitted_at_block: payment.submitted_at_block,
+                        expiry_block: payment.expiry_block,
                     },
                 )),
             ),
@@ -882,10 +893,36 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 if payload.payment_id.len() != 32 {
                     return Err("AiAgentPayment payment_id must be 32 bytes".into());
                 }
+                if payload.from_agent.len() != 32 {
+                    return Err("AiAgentPayment from_agent must be 32 bytes".into());
+                }
+                if payload.to_agent.len() != 32 {
+                    return Err("AiAgentPayment to_agent must be 32 bytes".into());
+                }
                 let mut pid = [0u8; 32];
                 pid.copy_from_slice(&payload.payment_id);
+                let mut from_b = [0u8; 32];
+                from_b.copy_from_slice(&payload.from_agent);
+                let mut to_b = [0u8; 32];
+                to_b.copy_from_slice(&payload.to_agent);
+                let request_id = if payload.request_id.is_empty() {
+                    None
+                } else if payload.request_id.len() == 32 {
+                    let mut rid = [0u8; 32];
+                    rid.copy_from_slice(&payload.request_id);
+                    Some(crate::ai::types::AiRequestId(rid))
+                } else {
+                    return Err("AiAgentPayment request_id must be empty or 32 bytes".into());
+                };
                 TransactionType::AiAgentPayment(crate::ai::types::AiAgentPayment {
-                    payment_id: crate::ai::types::AiRequestId(pid),
+                    payment_id: pid,
+                    from_agent: crate::core::address::Address::from(from_b),
+                    to_agent: crate::core::address::Address::from(to_b),
+                    amount: payload.amount,
+                    request_id,
+                    require_proof: payload.require_proof,
+                    submitted_at_block: payload.submitted_at_block,
+                    expiry_block: payload.expiry_block,
                 })
             }
             pb::ProtoTransactionType::AiAgentPaymentRelease => {
@@ -898,7 +935,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 }
                 let mut pid = [0u8; 32];
                 pid.copy_from_slice(&payload.payment_id);
-                TransactionType::AiAgentPaymentRelease(crate::ai::types::AiRequestId(pid))
+                TransactionType::AiAgentPaymentRelease(pid)
             }
             pb::ProtoTransactionType::AiAgentPaymentReclaim => {
                 let payload = match proto.type_payload {
@@ -910,7 +947,7 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 }
                 let mut pid = [0u8; 32];
                 pid.copy_from_slice(&payload.payment_id);
-                TransactionType::AiAgentPaymentReclaim(crate::ai::types::AiRequestId(pid))
+                TransactionType::AiAgentPaymentReclaim(pid)
             }
             _ => return Err("Unsupported transaction type in proto".into()),
         };
