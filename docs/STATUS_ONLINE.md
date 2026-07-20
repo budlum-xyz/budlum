@@ -4654,3 +4654,61 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+### [2026-07-20 17:29 UTC+03:00] ARENA1 — Phase 11.8 BAŞLADI: economy + fork-choice çekirdeği
+
+**Zemin:** origin/main `36f767c` — full CI **23/23 success** (Devnet Multi-Node Smoke, Coverage, Genesis Reproducibility, Fuzz Quick dahil; 0 failure).
+**Kullanıcı komutu:** Phase12 öncesindeki aşamaları tamamlayalım; uzun sürecek.
+**Kapsam (ADIM 11.8-1):** Phase 11.8'in ilk dilimi: genesis validation reward pool implementation temeli + EIP-1559 fee market saf modülü + acceptance test/CI hazırlığı. Fork-choice trait/lifecycle ikinci dilimde yapılacak; çakışma önlemek için küçük, CI-kanitli parçalarla ilerleniyor.
+**Koordinasyon notu:** ARENA4 Phase12 primitives main'e girmiş durumda; bu çalışma Phase12 öncesi roadmap borcunu kapatmak için ayrı branch `arena/phase11.8-economy-fork-choice` üzerinde yürütülüyor.
+**Budlumdevnet:** dokunulmayacak / salt-okunur.
+**Ne bekliyor:** Kod + lokal statik kontroller + push + CI SLEEP.
+**Kim karar verecek:** CI otomatik; ekonomi parametrelerinde spec dışı karar çıkarsa Ayaz.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-20 17:31 UTC+03:00] ARENA1 — Phase 11.8 ADIM 1 PUSH HAZIR: pure economy primitives
+
+**Kapsam:** Phase 11.8 ekonomi temelinin ilk küçük parçası.
+**Ne eklendi:**
+1. `src/chain/fee_market.rs` — EIP-1559 pure fee market primitives: `FeeMarketParams`, `FeeBid`, `EffectiveFee`, `next_base_fee`, `effective_fee`, underpriced tx reject, bounded base-fee tests.
+2. `src/tokenomics/reward_pool.rs` — pre-allocated genesis validation reward pool primitives: `RewardPoolSchedule`, deterministic stake-proportional `reward_for_epoch`, schedule validation, budget conservation tests.
+3. Module exports: `chain::fee_market`, `tokenomics::reward_pool`.
+**Güvenlik sınırı:** Bu ADIM state machine'e henüz bağlamıyor; saf/pure arithmetic + unit-regression temeli. Full executor/block integration sonraki 11.8 ADIM'ı.
+**Lokal doğrulama:** `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅, `git diff --check` ✅. Rust toolchain bu sandbox'ta yok; compile/test hakemi CI.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + CI SLEEP.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-20 17:34 UTC+03:00] ARENA1 — Phase 11.8 ADIM 1 CI kırmızısı: rustfmt diff fix
+
+**Durum:** branch `arena/phase11.8-economy-fork-choice` SHA `728eb78` CI'da `Budlum Core` Format adımında kırmızı oldu.
+**Kök neden:** Yeni `fee_market.rs` ve `reward_pool.rs` test satırları rustfmt beklenen biçimde değildi.
+**Fix:** CI rustfmt diff'leri manuel uygulandı; davranış değişmedi.
+**Lokal doğrulama:** `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅, `git diff --check` ✅.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + CI SLEEP tekrar.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-20 17:42 UTC+03:00] ARENA1 — Phase 11.8 ADIM 1 CI kırmızısı: sled lock retry flake fix
+
+**Durum:** branch `arena/phase11.8-economy-fork-choice` SHA `7adf31c` CI'da `Budlum Core` kırmızı oldu.
+**Kök neden:** Kod/format değil; `storage::db::tests::sled_open_with_retry_waits_for_lock_release` CI yükünde sled lock release yarışında `could not acquire lock` hatasıyla flake üretti. Mevcut retry 5 denemede toplam kısa pencereye sahipti.
+**Fix:** `sled_open_with_retry` lock-contention retry sayısı 5 → 40 yapıldı; backoff sabit 25ms ile yaklaşık 1 saniyelik bounded pencere sağlandı. Persistent contention testi hâlâ fail-surface'i korur.
+**Lokal doğrulama:** `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅, `git diff --check` ✅. Rust toolchain bu sandbox'ta yok; test hakemi CI.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + CI SLEEP tekrar.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
