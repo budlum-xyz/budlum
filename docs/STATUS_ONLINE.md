@@ -5193,3 +5193,16 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-21 00:31 UTC+03:00] ARENA4 — P12-18 CI kırmızısı: Atlas domain fixture fix
+
+**Durum:** main `ecf3ebe4` CI'da `Coverage` kapısı `rpc::atlas::tests::atlas_query_by_domain` testinde kırmızı oldu.
+**Kök neden:** Test fixture'ında iki evidence record aynı `domain_id=1` ile kalmıştı; domain query sonucu 2 dönüyordu. Ayrıca height-range fixture'da duplicate `domain_height` satırı vardı.
+**Fix:** İkinci evidence record `domain_id=2` yapıldı; duplicate fixture satırı kaldırıldı. Davranış değişmedi.
+**Lokal doğrulama:** `git diff --check` ✅, `scripts/check-spec-coverage.sh --self-test` ✅, `scripts/check-spec-coverage.sh` ✅. Rust toolchain bu sandbox'ta yok; test hakemi CI.
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Push + full main CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

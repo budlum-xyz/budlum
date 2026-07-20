@@ -396,7 +396,7 @@ mod tests {
             consensus_kind: ConsensusKind::PoW,
         });
         engine.evidence_records.push(EvidenceRecord {
-            domain_id: 1,
+            domain_id: 2,
             domain_height: 200,
             event_index: 0,
             event_kind: "BridgeMinted".to_string(),
