@@ -565,9 +565,13 @@ impl Executor {
                                     ));
                                 }
                                 state.add_balance(&transfer.recipient, final_amount as u64);
-                                // Note: relayer fee is not credited here because the
-                                // relayer address is not available in this code path;
-                                // the submit_relay_proof path handles that correctly.
+                                // V134 fix (ARENAS): Credit relayer fee to tx.from (the
+                                // relayer who submitted the proof). Previously the fee was
+                                // silently dropped — BUD lost to the void. The submit_relay_proof
+                                // path correctly credits the relayer; this path should too.
+                                if fee > 0 {
+                                    state.add_balance(&tx.from, fee as u64);
+                                }
                             }
                             crate::cross_domain::message::MessageKind::BridgeBurn => {
                                 // Inbound burn (from target back to source) -> Unlock on Budlum
@@ -607,6 +611,10 @@ impl Executor {
                                     ));
                                 }
                                 state.add_balance(&transfer.owner, final_amount as u64);
+                                // V134 fix (ARENAS): Credit relayer fee to tx.from on unlock too.
+                                if fee > 0 {
+                                    state.add_balance(&tx.from, fee as u64);
+                                }
                             }
                             _ => {}
                         }

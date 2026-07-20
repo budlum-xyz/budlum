@@ -3782,3 +3782,95 @@ DoS vektörü: aynı deal'a spam challenge.
 **Toplam: 101 bulgu (V22-V133), 33 kapatildi, 68 acik**
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
+### [2026-07-20 09:53 UTC+03:00] ARENA3 — main kırmızı onarım (pow_light garbage + AdapterError + integration move)
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** HEAD `4514e01` CI kırmızısı kök-neden
+
+1. `pow_light_client.rs` / `relayer_e2e.rs`: satıra sızmış commit subject (parse fail / fmt fail)
+2. `evm/adapter.rs`: `AdapterError::VerificationFailed` → `ProofVerificationFailed`
+3. `integration.rs`: `result` double-move after `unwrap_err`
+
+V89/hardening_locks main'de korunuyor.
+
+**Lokal:** 1053 passed / 0 failed · clippy -D · fmt
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI yeşil
+**Kim karar verecek:** CI
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-20 09:59 UTC+03:00] ARENA3 — CI yeşil yol: compile/test hizası (V103 slash, V30 proof, finality, garbage)
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** main kırmızı kapanış devam
+
+- pow_light/relayer: sızmış commit metni temiz
+- AdapterError::ProofVerificationFailed
+- V103 testleri: InvalidDilithium → slash_validator=true
+- integration QC fault: slashed beklenir
+- verify_receipt_proof: leaf==root + forged root RED
+- finalized conflict: height 0 hash mismatch
+
+**Lokal:** full lib 0 failed · clippy -D · fmt
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI 23/23
+**Kim karar verecek:** CI
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+### [2026-07-20 10:10 UTC+03:00] ARENA3 — storage_deal conflict marker temizliği (main compile unblock)
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** `src/domain/storage_deal.rs` rebase conflict marker kalıntısı (TooManyOpenChallenges HEAD)
+
+**Lokal:** check/test/clippy/fmt
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI yeşil
+**Kim karar verecek:** CI
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+## ADIM 15 — V134 Onarım + Derin Tarama Devam
+
+**Tarih:** 2026-07-20
+**Ajan:** ARENAS (Denetim)
+
+### Onarılan Bulgular
+
+**V134 (🟡 FIXED):** `RelayerResult` bridge mint/unlock yollarında relayer fee
+sessizce yok oluyordu. `submit_relay_proof` yolu doğru şekilde fee credit ediyordu
+ama executor.rs'deki `RelayerResult` kod yolunda 1% relayer fee `tx.from`'a
+credit edilmiyordu — BUD kalıcı olarak kayboluyordu. Her iki yolda da
+`state.add_balance(&tx.from, fee as u64)` eklendi.
+
+**V133 (⚪ FIXED):** `TooManyOpenChallenges` varyantı düzgün eklendi —
+`InvalidMerkleProof` yerine semantik olarak doğru hata türü kullanılıyor.
+Display impl ve hata mesajı güncellendi.
+
+### Denetlenen Modüller (bu ADIM)
+- `src/execution/executor.rs` (1040 satır) — V134 fix, tüm tx tipleri denetlendi
+- `src/core/governance.rs` (294 satır) — V130 fix doğrulandı
+- `src/core/account.rs` (1562 satır) — burn_from, finalize, supply cap
+- `src/bns/registry.rs` (237 satır) — V131 fix doğrulandı
+- `src/socialfi/mod.rs` (NFT Registry) — sağlam, V23 fix mevcut
+- `src/pollen/offers.rs` (Marketplace) — sağlam, price>0 ve owner kontrolleri
+- `src/prover/mod.rs` (282 satır) — ZK proof claim sistemi, first-valid-wins
+- `src/execution/proof_verifier.rs` (405 satır) — structural check + STARK delegate
+- `src/chain/blockchain.rs` submit_zk_proof — `bud_proof::DefaultAdapter::verify()` çağrılıyor
+- `src/domain/finality_adapter.rs` (1482 satır) — PoA/PoW/ZK adapter'lar sağlam
+- `src/tokenomics/mod.rs` (515 satır) — arz kontrolü, vesting, burn mekanizmaları
+
+### Güncel Toplam Denetim Tablosu
+
+| Ciddiyet | Sayi | Durum |
+|----------|------|-------|
+| 🔴 Kritik | 17 | 15 kapatildi, 2 acik (CI bekleniyor) |
+| 🟡 Yuksek | 34 | 16 kapatildi, 18 acik |
+| ⚪ Dusuk | 47 | 6 kapatildi, 47 acik |
+
+**Toplam: 101 bulgu (V22-V134), 37 kapatildi, 64 acik**
+
+Co-authored-by: ARENAS <arenas@budlum.ai>

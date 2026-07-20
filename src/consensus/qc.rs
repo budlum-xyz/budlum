@@ -742,7 +742,8 @@ mod tests {
         let verdict = proofs[0].verify_against_blob(&blob, &snapshot).unwrap();
         assert_eq!(verdict.action, QcProofAction::InvalidateFinality);
         assert_eq!(verdict.invalidate_from_height, Some(100));
-        assert!(verdict.slash_validator); // V103 (ARENAS): geçerli fault proof slash uygular
+        // V103: InvalidDilithium is proven malicious → slash.
+        assert!(verdict.slash_validator);
     }
 
     #[test]
@@ -882,6 +883,7 @@ mod tests {
             .expect("valid fault proof must verify");
         assert_eq!(verdict.action, QcProofAction::InvalidateFinality);
         assert_eq!(verdict.invalidate_from_height, Some(100));
-        assert!(verdict.slash_validator); // V103 (ARENAS): geçerli fault proof slash uygular
+        // V103: invalid Dilithium fault is slashable.
+        assert!(verdict.slash_validator);
     }
 }

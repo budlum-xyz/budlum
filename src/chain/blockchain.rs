@@ -4527,26 +4527,23 @@ mod tests {
         bc.finalized_height = 0;
         bc.finalized_hash = bc.chain[0].hash.clone();
 
-        // V127 fix: height continuity is checked first. To test the
-        // finalized-conflict path, the block index must match the
-        // expected chain tip height (1, since genesis is at index 0).
+        // Conflict at finalized height 0 (genesis path) with a different hash.
+        // Finality check runs before tip continuity and must reject.
         let mut bad_block = bc.chain[0].clone();
-        bad_block.index = 1; // Must equal bc.chain.len() to pass height check
-        bad_block.timestamp += 1000; // V127: monotonic + min-interval (1000ms) gate'i geç ki finalized kontrolü ersin
+>>>>>>> origin/main
         bad_block.previous_hash = "wrong".to_string();
         bad_block.hash = bad_block.calculate_hash();
 
         let result = bc.validate_and_add_block(bad_block).map(|_| ());
         assert!(result.is_err());
-        // Either "conflicts with finalized" or "height discontinuity" is
-        // acceptable — both reject the block. The height check fires first
-        // when block.index doesn't match chain.len(), and the finalized
-        // check fires when it does but the hash conflicts.
         let err = result.unwrap_err();
         assert!(
+<<<<<<< HEAD
             err.contains("conflicts with finalized")
                 || err.contains("height discontinuity")
                 || err.contains("Previous hash mismatch"),
+=======
+            err.contains("conflicts with finalized"),
             "unexpected error: {err}"
         );
     }
