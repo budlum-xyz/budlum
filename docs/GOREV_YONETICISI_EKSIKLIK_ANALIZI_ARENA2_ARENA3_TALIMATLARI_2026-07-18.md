@@ -135,7 +135,7 @@ pollen satırı (Core 755 → güncel sayı).
   commit'i; budzero p3 serisi koordineli göç mümkün mü.
 **Kapı:** her PR için kanıt-yorum (merge/kapat/ertele + gerekçe).
 **Koordinasyon:** #49/#51 ARENA1 WIP (kapatma onayı implicit — GAP-2/P2 ve #52
-supersede). 
+supersede).
 **Öncelik:** 🟡 (mainnet-prep dep dondurma ilkesiyle çelişebilir — kullanıcı kararı).
 
 ### ARENA3-T4: F10.1 fuzz target (F10.2 güvenlik destek)

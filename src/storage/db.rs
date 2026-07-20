@@ -110,7 +110,7 @@ pub struct Storage {
 /// A small bounded retry absorbs the race; non-contention errors and
 /// persistent contention keep the exact same failure surface as before.
 fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Db> {
-    const MAX_ATTEMPTS: u32 = 5;
+    const MAX_ATTEMPTS: u32 = 40;
     for attempt in 1..=MAX_ATTEMPTS {
         match sled::open(path.as_ref()) {
             Ok(db) => return Ok(db),
@@ -124,7 +124,7 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
                 if !is_lock_contention || attempt == MAX_ATTEMPTS {
                     return Err(io_err);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(25 * u64::from(attempt)));
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
     }
