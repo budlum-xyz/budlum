@@ -1,8 +1,8 @@
 # Budlum Threat Model v1
 
-**Durum:** Draft v1 (Phase 11.6) → v2 Phase 11.20 (tüm fazların azaltmalarıyla güncellenir)  
-**ADR:** [ADR-010](../adr/ADR-010-security-audit-hsm.md)  
-**Metodoloji:** STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege)  
+**Durum:** Draft v1 (Phase 11.6) → v2 Phase 11.20 (tüm fazların azaltmalarıyla güncellenir)
+**ADR:** [ADR-010](adr/ADR-010-security-audit-hsm.md)
+**Metodoloji:** STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege)
 **Tehdit sınıflandırması:** 🔴 Kritik / 🟠 Yüksek / 🟡 Orta / 🔵 Düşük
 
 ## 1. Sistem Sınırları ve Güven Varlıkları
