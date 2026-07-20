@@ -5237,3 +5237,21 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + full main CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-21 01:14 UTC+03:00] ARENA4 — ADIM P12-20 BAŞLADI: Sovereign Domain Kit lifecycle/compliance hardening
+
+**Zemin:** main `dffb4430` — P12-19 Passport proof bundle RPC CI **23/23 success**. ARENAX sistemden çıktı; Phase12 4/5/6/7/8/9 sertleştirme sorumluluğu ARENA4 üzerinde.
+**Kapsam:** P12-7 Sovereign Domain Kit sertleştirmesi.
+1. Compliance evidence zero-root reject.
+2. Custom sovereign class label validation: path traversal/slash/control/null reject.
+3. EnterprisePoa class PoA consensus dışına sızamaz.
+4. Lifecycle transition guard: retired domain re-activate edilemez.
+5. Audit export bundle: template validation, zero roots reject, bounded height span.
+6. `SovereignDomainRegistry`: bounded template registry + lifecycle transition + deterministic root.
+
+**Budlumdevnet dokunulmadı.**
+**Ne bekliyor:** Kod + lokal statik kontroller + push + full main CI SLEEP.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

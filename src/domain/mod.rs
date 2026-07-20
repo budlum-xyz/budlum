@@ -22,7 +22,7 @@ pub use plugin_registry::DomainPluginRegistry;
 pub use registry::ConsensusDomainRegistry;
 pub use sovereign::{
     AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
-    SovereignDomainTemplate,
+    SovereignDomainRegistry, SovereignDomainTemplate,
 };
 pub use storage_deal::{
     storage_deal_leaf_hash, ChallengeOutcome, ChallengeResult, DealStatus, RetrievalChallenge,
