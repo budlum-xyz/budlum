@@ -66,9 +66,19 @@ impl Proposal {
         }
     }
 
-    pub fn add_vote(&mut self, voter: Address, stake: u64, vote_for: bool) -> Result<(), String> {
+    pub fn add_vote(
+        &mut self,
+        voter: Address,
+        stake: u64,
+        vote_for: bool,
+        current_epoch: u64,
+    ) -> Result<(), String> {
         if self.status != ProposalStatus::Active {
             return Err("Proposal is not active".into());
+        }
+        // H2: voting window closed after end_epoch (pairs with V130 finalize gate).
+        if current_epoch >= self.end_epoch {
+            return Err("Voting period has ended".into());
         }
         if self.voters.contains_key(&voter) {
             return Err("Already voted".into());
@@ -244,7 +254,7 @@ mod tests {
 
         // Vote to pass (add enough stake)
         let proposal = gov.find_proposal_mut(0).unwrap();
-        proposal.add_vote(proposer, 100_000, true).unwrap();
+        proposal.add_vote(proposer, 100_000, true, 0).unwrap();
         proposal.status = ProposalStatus::Passed; // simulate passage
 
         let actions = gov.execute_passed_proposals();
@@ -274,7 +284,7 @@ mod tests {
         .unwrap();
 
         let proposal = gov.find_proposal_mut(0).unwrap();
-        proposal.add_vote(proposer, 100_000, true).unwrap();
+        proposal.add_vote(proposer, 100_000, true, 0).unwrap();
         proposal.status = ProposalStatus::Passed;
 
         let actions = gov.execute_passed_proposals();

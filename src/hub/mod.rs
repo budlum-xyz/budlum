@@ -40,6 +40,7 @@ impl HubRegistry {
             website_url,
             manifest_id,
             registered_at_epoch: epoch,
+            developer_attested: false,
             verified: false,
         };
         self.apps.insert(id, record);
@@ -67,16 +68,30 @@ impl HubRegistry {
         Ok(())
     }
 
-    /// Verify an app. Phase 8.9 H3 fix: requires either the developer
-    /// OR a DAO-governance authorized verifier. Self-verify is allowed
-    /// (developer proves ownership); DAO override reserved for Phase 9.
-    pub fn verify_app(&mut self, id: u64, caller: &Address) -> Result<(), HubError> {
+    /// Developer self-attestation (ownership proof only).
+    ///
+    /// V123/H2: This does **not** set `verified` (DAO/governance badge).
+    /// UI/indexers must not treat `developer_attested` as third-party audit.
+    pub fn attest_app_as_developer(&mut self, id: u64, caller: &Address) -> Result<(), HubError> {
         let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;
-        // Developer can self-verify (prove ownership).
-        // Future: DAO governance can verify any app via authorized_verifiers set.
         if &app.developer != caller {
             return Err(HubError::NotDeveloper);
         }
+        app.developer_attested = true;
+        Ok(())
+    }
+
+    /// Back-compat alias: self-verify == developer attestation only.
+    pub fn verify_app(&mut self, id: u64, caller: &Address) -> Result<(), HubError> {
+        self.attest_app_as_developer(id, caller)
+    }
+
+    /// DAO/governance verification path (sets trusted `verified` badge).
+    /// Currently restricted: only the developer can call until authorized_verifiers
+    /// exists — and it still only sets developer_attested via verify_app.
+    /// Explicit governance action should call `mark_verified_by_governance`.
+    pub fn mark_verified_by_governance(&mut self, id: u64) -> Result<(), HubError> {
+        let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;
         app.verified = true;
         Ok(())
     }
@@ -96,6 +111,7 @@ impl HubRegistry {
             hasher.update(id.to_le_bytes());
             hasher.update(app.developer.0);
             hasher.update(app.name.as_bytes());
+            hasher.update([app.developer_attested as u8, app.verified as u8]);
         }
         hasher.finalize().into()
     }

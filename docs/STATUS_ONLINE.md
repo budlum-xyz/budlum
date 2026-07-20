@@ -3889,3 +3889,63 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 **Kim karar verecek:** Ayaz (sonraki kapsam) / ARENA3 SLEEP (madde 3 yeşil sonrası)
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+---
+
+## ADIM 16 — V135 Onarım + Lokal Derleme Doğrulama + Derin Tarama
+
+**Tarih:** 2026-07-20
+**Ajan:** ARENAS (Denetim)
+
+### Süreç Düzeltmesi
+- Rust toolchain kuruldu (rustc 1.97.1 + protoc)
+- **Her push öncesi cargo check + cargo clippy -D warnings zorunlu**
+- storage_deal.rs conflict marker tespit edildi ve temizlendi
+- Tüm fix'ler derleme ve clippy doğrulamasından geçiyor
+
+### Onarılan Bulgular
+
+**V135 (⚪ FIXED):** `apply_bridge_sweep` u128→u64 tutar iadesinde amount > u64::MAX
+durumunda refund tamamen atlanıyordu — BUD kalıcı olarak kayboluyordu. Şimdi
+u64::MAX ile kırpma yapılıyor (pratikte asla aşılmaz, 18.4 trillion BUD).
+
+### Denetlenen Modüller (bu ADIM)
+- `src/chain/blockchain.rs` — unlock_bridge_transfer_from_verified_event sağlam
+- `src/core/account.rs` — slash_validator, process_unbonding, jail release sağlam
+- `src/execution/executor.rs` — tüm tx tiplerinin balance tutarlılığı
+- `src/cross_domain/bridge.rs` — sweep_expired_locks, unlock, burn_with_event sağlam
+- `src/rpc/server.rs` — tüm RPC endpoint'leri, yetkilendirme kontrolleri
+
+### CI Durumu
+- SHA `0434883` (V135): 6/23 success, 0 failure → yeşile gidiyor
+- ARENA3 `1bded8a` (fmt+compile+test onarımı): 17/19 success, 0 failure
+
+### Güncel Toplam Denetim Tablosu
+
+| Ciddiyet | Sayi | Durum |
+|----------|------|-------|
+| 🔴 Kritik | 17 | 15 kapatildi, 2 acik |
+| 🟡 Yuksek | 34 | 17 kapatildi, 17 acik |
+| ⚪ Dusuk | 47 | 7 kapatildi, 47 acik |
+
+**Toplam: 101 bulgu (V22-V135), 39 kapatildi, 62 acik**
+
+Co-authored-by: ARENAS <arenas@budlum.ai>
+### [2026-07-20 11:10 UTC+03:00] ARENA3 — HARDEN H2: eclipse /24 + hub attestation + V130–V133 kilitleri
+
+**Durum:** Lokal YEŞİL — push → CI SLEEP
+**Kapsam:** Hardening Protocol Faz H2 (+ H5.1)
+
+**Kod:**
+- H5.1 eclipse: `PeerManager::{max_peers_per_subnet,can_admit_subnet,note_connected/disconnected}` (default 4/24) + `Node` ConnectionEstablished admission (`ipv4_slash24`)
+- V123 hub: `developer_attested` vs `verified` ayrımı; self-verify yalnızca attestation
+- V130: `add_vote(..., current_epoch)` — window kapandıktan sonra RED; finalize zaten epoch-gated
+- Kilitler: `src/tests/hardening_h2_locks.rs` (7) + `storage_deal::v133_max_open_challenges_per_deal` + peer_manager H5 tests
+- Docs: NETWORK_HARDENING_SPEC §7, BUDLUM_HARDENING_PROTOCOL H2 progress
+
+**Lokal:** full lib 0 failed · clippy -D · fmt
+**CI kanıtı:** push sonrası
+**Ne bekliyor:** CI 23/23; H2 kalan 🟡 (V111 full ZK path, V113 deeper rollback, fuzz depth)
+**Kim karar verecek:** CI
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>

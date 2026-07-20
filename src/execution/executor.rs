@@ -170,7 +170,7 @@ impl Executor {
 
                         if let Some(proposal) = state.governance.find_proposal_mut(proposal_id) {
                             proposal
-                                .add_vote(tx.from, voter_stake, vote_for)
+                                .add_vote(tx.from, voter_stake, vote_for, state.epoch_index)
                                 .map_err(|e| {
                                     BudlumError::validation("governance_vote_failed", e)
                                 })?;
@@ -425,6 +425,12 @@ impl Executor {
 
                 // F4 treasury_pool (Q-X4 config_driven): 80% protocol share goes to burn_reserve (treasury) if set,
                 // otherwise implicit burn (honest fallback). This makes Treasury/Burn explicit per Constitution §3.
+                // V136 analysis (ARENAS): "Implicit burn" is CORRECT — the booster's
+                // balance was already reduced by `amount`, and only `creator_share`
+                // + `bud_share` are credited elsewhere. The remaining `protocol_share`
+                // (80%) is effectively burned because it leaves no account balance.
+                // This is equivalent to deducting from booster and not crediting
+                // anyone — circulating_supply strictly decreases. No fix needed.
                 if protocol_share > 0 {
                     if let Some(treasury_addr) = state.burn_reserve_address {
                         let treasury = state.get_or_create(&treasury_addr);

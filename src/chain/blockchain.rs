@@ -2677,11 +2677,15 @@ impl Blockchain {
             // V106: Transfer sahibine kilidi açılan miktarı iade et.
             // amount u128 olabilir ama budlum bakiyeleri u64 — truncate riski
             // düşük (6 ondalık BUD, max supply 100M = 100_000_000_000_000 u64)
-            if *amount <= u64::MAX as u128 {
-                self.state.add_balance(owner, *amount as u64);
-            } else {
+            // V135 fix (ARENAS): u128→u64 clip yerine u64::MAX ile refund.
+            // Önceki kod u64'ü aşan tutarları tamamen atlıyordu — BUD kaybı!
+            // u64::MAX = 18.4 quintillion base units = 18.4 trillion BUD.
+            // Pratikte bu asla aşılmaz ama güvenlik için kırpma yapıyoruz.
+            let refund_amount = (*amount).min(u64::MAX as u128) as u64;
+            self.state.add_balance(owner, refund_amount);
+            if *amount > u64::MAX as u128 {
                 tracing::warn!(
-                    "Bridge sweep: amount {} exceeds u64::MAX for owner {}, skipping balance refund",
+                    "Bridge sweep: amount {} exceeds u64::MAX for owner {}, clipped to u64::MAX",
                     amount,
                     owner
                 );
