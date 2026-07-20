@@ -52,9 +52,9 @@ pub mod permissionless;
 pub mod permissionless_e2e;
 #[cfg(test)]
 pub mod persistence;
+pub mod poa_isolation;
 #[cfg(test)]
 pub mod pollen_ai_data_rights;
-pub mod poa_isolation;
 #[cfg(test)]
 pub mod pow_light_client;
 #[cfg(test)]

@@ -28,7 +28,12 @@ fn model_spec(owner: Address) -> AiModelSpec {
     }
 }
 
-fn request(requester: Address, model_id: AiModelId, input_ref: Vec<u8>, seed: u8) -> AiInferenceRequest {
+fn request(
+    requester: Address,
+    model_id: AiModelId,
+    input_ref: Vec<u8>,
+    seed: u8,
+) -> AiInferenceRequest {
     let mut req = AiInferenceRequest {
         request_id: Default::default(),
         requester,
@@ -111,7 +116,10 @@ fn pollen_ai_data_ref_with_access_grant_is_consumed_once() {
 
     let asset = DataAsset::new(addr(1), ContentId::of(b"private data"), [0x22; 32], true);
     let asset_id = asset.asset_id;
-    state.marketplace.register_data_asset(asset.clone()).unwrap();
+    state
+        .marketplace
+        .register_data_asset(asset.clone())
+        .unwrap();
     let grant_id = state
         .marketplace
         .create_access_grant(signed_grant(&asset, requester, 1))
@@ -122,7 +130,12 @@ fn pollen_ai_data_ref_with_access_grant_is_consumed_once() {
     let first_tx = ai_request_tx(requester, first_req, 0);
     Executor::apply_transaction_checked(&mut state, &first_tx).unwrap();
     assert_eq!(
-        state.marketplace.access_grants.get(&grant_id).unwrap().reads_used,
+        state
+            .marketplace
+            .access_grants
+            .get(&grant_id)
+            .unwrap()
+            .reads_used,
         1
     );
 

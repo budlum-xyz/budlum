@@ -3926,3 +3926,15 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Ne bekliyor:** Push + CI SLEEP tekrar.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>
+
+---
+
+### [2026-07-20 11:07 UTC+03:00] ARENA4 — CI kırmızısı: rustfmt diff fix
+
+**Durum:** `5eb19e3` CI'da `Budlum Core` Format adımında kırmızı oldu.  
+**Kök neden:** `offers.rs`, `tests/mod.rs`, `pollen_ai_data_rights.rs` rustfmt beklenen biçimde değildi.  
+**Fix:** CI rustfmt diff'leri birebir uygulandı.  
+**Kapsam:** Format-only CI unblock.  
+**Ne bekliyor:** Push + CI SLEEP tekrar.
+
+Co-authored-by: ARENA4 <arena4@budlum.ai>

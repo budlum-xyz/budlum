@@ -168,7 +168,10 @@ impl MarketplaceRegistry {
             return Err("AI data read denied: grant owner mismatch".into());
         }
         if !grant.is_active_for(requester, current_block) {
-            return Err("AI data read denied: AccessGrant inactive, expired, exhausted, or wrong grantee".into());
+            return Err(
+                "AI data read denied: AccessGrant inactive, expired, exhausted, or wrong grantee"
+                    .into(),
+            );
         }
         Ok(Some(reference.grant_id))
     }
@@ -288,7 +291,9 @@ mod tests {
                 .unwrap(),
             Some(grant_id)
         );
-        registry.consume_ai_read_grant(&grant_id, &addr(2), 10).unwrap();
+        registry
+            .consume_ai_read_grant(&grant_id, &addr(2), 10)
+            .unwrap();
         assert!(registry
             .validate_ai_read_ref(&reference.encode(), &addr(2), 10)
             .is_err());
