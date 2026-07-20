@@ -267,7 +267,8 @@ mod poa_isolation_tests {
         let poa_member = Address::from([0xAA; 32]);
         poa.submit_application(POA_DOMAIN, poa_member, [1u8; 32], 0)
             .unwrap();
-        poa.approve(POA_DOMAIN, admin, poa_member, 0, 1_000).unwrap();
+        poa.approve(POA_DOMAIN, admin, poa_member, 0, 1_000)
+            .unwrap();
 
         let wl = poa.whitelist(POA_DOMAIN, 1);
         assert!(wl.contains(&poa_member));

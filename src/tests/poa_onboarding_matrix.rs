@@ -11,9 +11,7 @@
 #[cfg(test)]
 mod poa_onboarding_matrix {
     use crate::core::address::Address;
-    use crate::registry::poa_onboarding::{
-        OnboardingDecision, PoAOnboarding, DEFAULT_KYC_HORIZON,
-    };
+    use crate::registry::poa_onboarding::{OnboardingDecision, PoAOnboarding, DEFAULT_KYC_HORIZON};
 
     const DOMAIN: u32 = 3;
 
@@ -52,15 +50,25 @@ mod poa_onboarding_matrix {
         assert!(poa.whitelist(DOMAIN, 20).contains(&member));
 
         // İptal: whitelist'ten çıktı
-        poa.revoke(DOMAIN, admin, member, 30, "offboarding").unwrap();
+        poa.revoke(DOMAIN, admin, member, 30, "offboarding")
+            .unwrap();
         assert!(!poa.whitelist(DOMAIN, 30).contains(&member));
 
         // Audit izi: Submitted + Approved + Revoked (sıralı)
         let log = poa.audit_log();
         assert_eq!(log.len(), 3);
-        assert!(matches!(log[0].decision, OnboardingDecision::Submitted { .. }));
-        assert!(matches!(log[1].decision, OnboardingDecision::Approved { .. }));
-        assert!(matches!(log[2].decision, OnboardingDecision::Revoked { .. }));
+        assert!(matches!(
+            log[0].decision,
+            OnboardingDecision::Submitted { .. }
+        ));
+        assert!(matches!(
+            log[1].decision,
+            OnboardingDecision::Approved { .. }
+        ));
+        assert!(matches!(
+            log[2].decision,
+            OnboardingDecision::Revoked { .. }
+        ));
         assert_eq!(log[0].actor, member); // başvuruyu yapan aday
         assert_eq!(log[1].actor, admin);
         assert_eq!(log[2].actor, admin);
@@ -81,7 +89,8 @@ mod poa_onboarding_matrix {
         poa.submit_application(DOMAIN, pending, kyc(1), 0).unwrap();
 
         poa.submit_application(DOMAIN, rejected, kyc(2), 0).unwrap();
-        poa.reject(DOMAIN, admin, rejected, 0, "bad dossier").unwrap();
+        poa.reject(DOMAIN, admin, rejected, 0, "bad dossier")
+            .unwrap();
 
         poa.submit_application(DOMAIN, revoked, kyc(3), 0).unwrap();
         poa.approve(DOMAIN, admin, revoked, 0, 1_000).unwrap();
@@ -154,7 +163,10 @@ mod poa_onboarding_matrix {
         let wl = poa.whitelist(DOMAIN, 5);
 
         // Kapı: whiteliste üye işlem yapabilir, izinsiz olamaz
-        fn consensus_gate(wl: &crate::registry::poa_onboarding::PoAWhitelist, who: &Address) -> Result<(), &'static str> {
+        fn consensus_gate(
+            wl: &crate::registry::poa_onboarding::PoAWhitelist,
+            who: &Address,
+        ) -> Result<(), &'static str> {
             if wl.contains(who) {
                 Ok(())
             } else {
@@ -164,7 +176,10 @@ mod poa_onboarding_matrix {
 
         assert!(consensus_gate(&wl, &member).is_ok());
         assert!(consensus_gate(&wl, &impostor).is_err());
-        assert!(consensus_gate(&wl, &admin).is_err(), "admin authority ≠ block production authority");
+        assert!(
+            consensus_gate(&wl, &admin).is_err(),
+            "admin authority ≠ block production authority"
+        );
     }
 
     /// 6. Audit izi ekle-only ve blok sıralı; her olay kendi alanlarını taşır.
