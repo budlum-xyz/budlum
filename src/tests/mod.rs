@@ -102,12 +102,11 @@ pub mod target_700;
 // Yalnızca mevcut tanımlı red yollarını doğrular; protokol davranışı değişmez.
 #[cfg(test)]
 pub mod bridge_negatives;
-// P0 mainnet-gap 3/3 (ARENA3, 2026-07-19): snapshot-corruption +
 pub mod domain_edge_cases;
+// P0 mainnet-gap 3/3 (ARENA3, 2026-07-19): snapshot-corruption +
 // crash-recovery kaos süiti. İki _gap pini bilinçli olarak bugünkü davranışı
 // mühürler (snapshot authenticity yok + v1/v2 çapraz-gölgeleme + boot
 // sessiz-rollback); ürün düzeltmesi emirle geldiğinde ters çevrilir.
-pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod snapshot_chaos;
 // P5 regresyon kilidi (ARENA2, 2026-07-19): ZK finality fail-open +
