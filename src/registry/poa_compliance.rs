@@ -25,6 +25,7 @@ pub enum ScreeningStatus {
 pub enum ComplianceAction {
     ScreeningUpdated,
     AccountFrozen,
+    TravelRuleMetadataRecorded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +41,14 @@ pub struct FreezeRecord {
     pub address: Address,
     pub reason_hash: [u8; 32],
     pub frozen_at_block: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TravelRuleRecord {
+    pub tx_hash: [u8; 32],
+    pub subject: Address,
+    pub metadata_hash: [u8; 32],
+    pub recorded_block: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +91,7 @@ impl std::error::Error for PoaComplianceError {}
 pub struct PoaComplianceRegistry {
     screenings: HashMap<Address, ScreeningRecord>,
     freezes: HashMap<Address, FreezeRecord>,
+    travel_rules: HashMap<[u8; 32], TravelRuleRecord>,
     audit_log: Vec<ComplianceAuditEvent>,
 }
 
@@ -163,8 +173,41 @@ impl PoaComplianceRegistry {
         Ok(())
     }
 
+    pub fn record_travel_rule_metadata(
+        &mut self,
+        domain: ComplianceDomainKind,
+        tx_hash: [u8; 32],
+        subject: Address,
+        metadata_hash: [u8; 32],
+        block: u64,
+    ) -> Result<(), PoaComplianceError> {
+        Self::ensure_poa(domain)?;
+        let tx_hash = Self::ensure_non_zero(tx_hash)?;
+        let evidence_hash = Self::ensure_non_zero(metadata_hash)?;
+        self.travel_rules.insert(
+            tx_hash,
+            TravelRuleRecord {
+                tx_hash,
+                subject,
+                metadata_hash: evidence_hash,
+                recorded_block: block,
+            },
+        );
+        self.audit_log.push(ComplianceAuditEvent {
+            action: ComplianceAction::TravelRuleMetadataRecorded,
+            address: subject,
+            block,
+            evidence_hash,
+        });
+        Ok(())
+    }
+
     pub fn screening(&self, address: &Address) -> Option<&ScreeningRecord> {
         self.screenings.get(address)
+    }
+
+    pub fn travel_rule(&self, tx_hash: &[u8; 32]) -> Option<&TravelRuleRecord> {
+        self.travel_rules.get(tx_hash)
     }
 
     /// Permissionless domains deliberately ignore PoA freeze state.
@@ -317,6 +360,44 @@ mod tests {
                 .unwrap_err(),
             PoaComplianceError::ZeroEvidenceHash
         );
+    }
+
+    #[test]
+    fn phase11_18_poa_compliance_records_travel_rule_metadata_hash() {
+        let mut registry = PoaComplianceRegistry::new();
+        registry
+            .record_travel_rule_metadata(
+                ComplianceDomainKind::PoA,
+                hash(9),
+                addr(9),
+                hash(10),
+                42,
+            )
+            .unwrap();
+        let record = registry.travel_rule(&hash(9)).unwrap();
+        assert_eq!(record.subject, addr(9));
+        assert_eq!(record.metadata_hash, hash(10));
+        assert_eq!(record.recorded_block, 42);
+        assert_eq!(
+            registry.audit_events().last().unwrap().action,
+            ComplianceAction::TravelRuleMetadataRecorded
+        );
+    }
+
+    #[test]
+    fn phase11_18_poa_compliance_rejects_permissionless_travel_rule_metadata() {
+        let mut registry = PoaComplianceRegistry::new();
+        let err = registry
+            .record_travel_rule_metadata(
+                ComplianceDomainKind::Permissionless,
+                hash(9),
+                addr(9),
+                hash(10),
+                42,
+            )
+            .unwrap_err();
+        assert_eq!(err, PoaComplianceError::PermissionlessDomainForbidden);
+        assert!(registry.travel_rule(&hash(9)).is_none());
     }
 
     #[test]

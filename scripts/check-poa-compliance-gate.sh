@@ -8,6 +8,8 @@ required_tests=(
   phase11_18_poa_compliance_freeze_is_poa_only
   phase11_18_poa_compliance_audit_log_is_append_only
   phase11_18_poa_compliance_rejects_zero_evidence_hashes
+  phase11_18_poa_compliance_records_travel_rule_metadata_hash
+  phase11_18_poa_compliance_rejects_permissionless_travel_rule_metadata
   phase11_18_poa_compliance_exports_audit_csv
   phase11_18_poa_compliance_exports_audit_json
 )

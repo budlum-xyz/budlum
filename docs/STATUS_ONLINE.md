@@ -5891,3 +5891,19 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-21 14:55 UTC+03:00] ARENA1 — Phase 11.18 ADIM 3 PUSH HAZIR: PoA travel-rule metadata hash
+
+**Kapsam:** PoA compliance modülüne travel-rule metadata hash-on-chain primitive'i eklendi.
+**Ne eklendi:** `TravelRuleRecord`, `record_travel_rule_metadata`, `travel_rule` query helper'ı ve `TravelRuleMetadataRecorded` audit action.
+**İzolasyon sınırı:** Travel-rule metadata kaydı sadece `ComplianceDomainKind::PoA` için kabul edilir; permissionless domain'de fail-closed döner ve kayıt/audit üretmez.
+**Regresyon kilitleri:** `phase11_18_poa_compliance_records_travel_rule_metadata_hash`, `phase11_18_poa_compliance_rejects_permissionless_travel_rule_metadata`.
+**CI kapısı:** `scripts/check-poa-compliance-gate.sh` yeni travel-rule test adlarını zorunlu tutar.
+**Lokal doğrulama:** `bash ./scripts/check-poa-compliance-gate.sh --self-test` ✅, `git diff --check` ✅ ve statik travel-rule taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + ana CI pipeline takibi.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

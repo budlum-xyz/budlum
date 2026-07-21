@@ -39,7 +39,7 @@ pub use permissionless::{
 };
 pub use poa_compliance::{
     ComplianceAction, ComplianceAuditEvent, ComplianceDomainKind, FreezeRecord, PoaComplianceError,
-    PoaComplianceRegistry, ScreeningRecord, ScreeningStatus,
+    PoaComplianceRegistry, ScreeningRecord, ScreeningStatus, TravelRuleRecord,
 };
 pub use poa_membership::{
     KycCommitment, MembershipStatus, PoaMember, PoaMembershipError, PoaMembershipRegistry,
