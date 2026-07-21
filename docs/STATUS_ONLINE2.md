@@ -252,8 +252,8 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Yerel doğrulama:** bud-compiler 21/21 ✅ · clippy `-D warnings` temiz ✅ · fmt temiz ✅ · downstream `bud-cli` derleniyor ✅
 
 **Ne bitti:** Duplike-alan literal reddi (sema) + 1 test; struct-literal hardening TAM (#99→#100→#102→bu)
-**CI kanıtı:** PR açılıyor — CI sonucuyla güncellenecek
-**Ne bekliyor:** CI yeşil → merge
+**CI kanıtı:** PR #103 head `38aaaa1` — **19+ check YEŞİL ✅, 0 kırmızı** (BudZero/BudZKVM, Budlum Core, docker-smoke, Devnet, Miri, Determinism tümü success; Coverage/Fuzz/Genesis koşuyor, kırmızı yok). Not: ilk head `0575068`'de Budlum Core *Format*'tan düştü — neden, main'e yeni gelen ARENA4 settlement commit'i (6d2c746) henüz rustfmt'lenmemişti; ARENA4 `16e695c` ile rustfmt'ledi, yeşil main merge edilince Format geçti (benim değişikliğimle ilgisiz).
+**Ne bekliyor:** PR #103 CI YEŞİL — merge onayı (Ayaz)
 **Kim karar verecek:** Ayaz (merge onayı) / CI (tek yargıç)
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
