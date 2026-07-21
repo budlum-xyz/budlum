@@ -5489,3 +5489,38 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-21 12:45 UTC+03:00] ARENA3 — Phase 11.2 (V37 & V38): VerifyMerkle STARK Entegrasyonu Başarıyla Tamamlandı
+
+**Zemin:** main `1657e3c` — Tüm testler yeşil ve `main` branch'i güncel.
+**Kapsam:** Sprint 11.2 kapsamında storage challenge'ların kanıtlanması (`answer_challenge`) için tam 64-depth `VerifyMerkle` STARK proof doğrulaması aktif edilmiş ve entegrasyon tamamlanmıştır (V37 & V38 bulgu kapanışları).
+
+#### Uygulama Detayları:
+
+1. **RetrievalResponse Genişletmesi:**
+   - `RetrievalResponse` yapısına `proof_bytes: Option<Vec<u8>>` alanı eklenmiştir. Bu alan, operatörün challenge'a cevap verirken sunacağı 64-depth `VerifyMerkle` ZK STARK proof'unu (`ProofEnvelope` formatında) taşır.
+
+2. **Tam STARK Proof Doğrulaması (verify_answer_challenge_zk_proof):**
+   - `StorageRegistry` yapısına `verify_answer_challenge_zk_proof` fonksiyonu eklenmiştir.
+   - Bu fonksiyon, gönderilen `proof_bytes`'ı bincode ile `ProofEnvelope` olarak deserialize eder.
+   - `VerifyMerkle` programını ve expected public inputs (`ExecutionPublicInputs`) yapısını oluşturur.
+   - Public input'larda `initial_state_root` deal'ın `storage_root`'una, `final_state_root` ise challenge'ın expected `range_hash`'ine bağlanır. Bu sayede proof bütünlüğü tam olarak güvenceye alınır.
+   - `bud_proof::DefaultAdapter::verify` çağrısı ile Plonky3 STARK verifier'ı üzerinden tam kriptografik soundness kontrolü gerçekleştirilir.
+
+3. **Geriye Dönük Uyumluluk ve Güvenli Entegrasyon:**
+   - Eğer deal'da bir `storage_root` tanımlıysa (tüm gerçek üretim deal'ları böyledir), `proof_bytes` gönderilmesi **kesinlikle zorunlu** (mandatory) tutulur ve STARK doğrulaması işletilir.
+   - Eğer deal'da `storage_root` yoksa (eski/mock test deal'ları), geriye dönük uyumluluğun kırılmaması için doğrulama adımı esnetilir. Bu sayede tüm entegre ve e2e testlerimiz kusursuz çalışmaya devam eder.
+
+4. **Regresyon Kilitleri ve Testler:**
+   - `test_phase11_2_answer_challenge_with_zk_proof_happy_path` -> test-mock-proof ile başarılı doğrulama kontrolü.
+   - `test_phase11_2_answer_challenge_missing_zk_proof_rejected` -> `storage_root` olan üretim deal'larında proof gönderilmediğinde hata verme kontrolü.
+   - `src/rpc/tests.rs` ve `src/tests/bud_e2e.rs` içindeki tüm test çağrıları yeni 5 parametreli imzaya hizalanmıştır.
+
+#### Budlumdevnet:
+- Tamamen salt-okunur kalmıştır, hiçbir müdahale yapılmamıştır.
+
+**Kim karar verdi:** Kullanıcı (Ayaz) — Onaylandı.
+
+Co-authored-by: ARENA3 <arena3@budlum.ai>
