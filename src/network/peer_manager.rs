@@ -640,6 +640,21 @@ mod tests {
         assert_eq!(RATE_LIMIT_PENALTY, OVERSIZED_MESSAGE_PENALTY);
     }
 
+    #[test]
+    fn phase11_12_repeated_rate_limit_exhaustion_bans_peer() {
+        let mut manager = PeerManager::new();
+        manager.msg_refill_rate = 0.0;
+        let peer = test_peer_id();
+        for _ in 0..MAX_MSG_BURST as u32 {
+            assert!(manager.check_rate_limit(&peer));
+        }
+        for _ in 0..40 {
+            let _ = manager.check_rate_limit(&peer);
+        }
+        assert!(manager.is_banned(&peer));
+        assert!(manager.get_score(&peer) <= BAN_THRESHOLD);
+    }
+
     /// H5.1: eclipse protection — /24 subnet connection bound.
     #[test]
     fn h5_eclipse_subnet_bound_rejects_fifth_peer() {

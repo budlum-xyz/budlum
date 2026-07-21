@@ -3,6 +3,7 @@ set -euo pipefail
 
 required_tests=(
   phase11_12_rate_limit_exhaustion_uses_dedicated_penalty
+  phase11_12_repeated_rate_limit_exhaustion_bans_peer
   h5_eclipse_subnet_bound_rejects_fifth_peer
   h5_eclipse_disconnect_frees_subnet_slot
   h5_eclipse_peer_accounting_is_idempotent
