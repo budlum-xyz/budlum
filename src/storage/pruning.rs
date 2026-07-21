@@ -75,7 +75,8 @@ impl PruningPolicy {
         if self.mode == NodeMode::Archive && self.pruning_enabled {
             return Err("archive nodes must not enable pruning".into());
         }
-        if self.mode == NodeMode::Archive && (!self.backups_enabled || !self.backup_dir_configured) {
+        if self.mode == NodeMode::Archive && (!self.backups_enabled || !self.backup_dir_configured)
+        {
             return Err("archive nodes require backups_enabled=true and backup_dir".into());
         }
         if self.pruning_enabled && !self.finalized_snapshot_retention {
@@ -105,14 +106,14 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_archive_rejects_pruning() {
+    fn phase11_10_node_archive_rejects_pruning() {
         let mut policy = PruningPolicy::archive_node_default();
         policy.pruning_enabled = true;
         assert!(policy.validate().unwrap_err().contains("archive nodes"));
     }
 
     #[test]
-    fn phase11_10_archive_requires_backups() {
+    fn phase11_10_node_archive_requires_backups() {
         let mut policy = PruningPolicy::archive_node_default();
         policy.backups_enabled = false;
         assert!(policy.validate().unwrap_err().contains("backup"));
@@ -123,21 +124,21 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_full_pruning_requires_finalized_snapshot_retention() {
+    fn phase11_10_node_full_pruning_requires_finalized_snapshot_retention() {
         let mut policy = PruningPolicy::full_node_default();
         policy.finalized_snapshot_retention = false;
         assert!(policy.validate().unwrap_err().contains("finalized"));
     }
 
     #[test]
-    fn phase11_10_full_pruning_requires_nonzero_retention() {
+    fn phase11_10_node_full_pruning_requires_nonzero_retention() {
         let mut policy = PruningPolicy::full_node_default();
         policy.retention_blocks = 0;
         assert!(policy.validate().unwrap_err().contains("non-zero"));
     }
 
     #[test]
-    fn phase11_10_prune_decision_distinguishes_full_and_archive() {
+    fn phase11_10_node_prune_decision_distinguishes_full_and_archive() {
         assert!(PruningPolicy::full_node_default().should_prune_historical_state());
         assert!(!PruningPolicy::archive_node_default().should_prune_historical_state());
     }

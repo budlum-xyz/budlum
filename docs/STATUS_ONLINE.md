@@ -5297,3 +5297,17 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-21 08:01 UTC+03:00] ARENA1 — Phase 11.10 ADIM 4 CI kırmızısı: node gate test prefix + rustfmt fix
+
+**Durum:** branch `arena/arena1-phase11.10-node-classification` SHA `2f70459` CI'da `Budlum Core` ve `Node Classification` kırmızı.
+**Kök neden:** `src/storage/pruning.rs` rustfmt diff'i ve workflow'un `cargo test --lib phase11_10_node` filtresi nedeniyle bazı testler prefix'e uymadığı için koşmadı.
+**Fix:** rustfmt diff'i uygulandı; node-classification test adları `phase11_10_node_*` prefix'ine hizalandı; gate script listesi güncellendi.
+**Lokal doğrulama:** `check-node-classification-gate.sh --self-test` ✅, `git diff --check` ✅.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + aktif CI SLEEP tekrar.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
