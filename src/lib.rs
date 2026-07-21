@@ -17,6 +17,7 @@ pub mod error;
 pub mod execution;
 pub mod gateway;
 pub mod hub;
+pub mod lubot;
 pub mod mempool;
 pub mod network;
 pub mod pollen;
