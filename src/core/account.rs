@@ -1546,13 +1546,18 @@ mod tests {
         let mut tx = Transaction::new_with_fee(alice, bob, 1, 15, 0, vec![]);
         tx.priority_fee = 5;
         tx.sign(&alice_kp);
-        assert!(state.validate_transaction(&tx).is_ok(), "priority_fee within max_fee should be accepted");
+        assert!(
+            state.validate_transaction(&tx).is_ok(),
+            "priority_fee within max_fee should be accepted"
+        );
 
         // Invalid: priority_fee exceeds max_fee
         let mut tx2 = Transaction::new_with_fee(alice, bob, 1, 15, 0, vec![]);
         tx2.priority_fee = 20; // exceeds max_fee
         tx2.sign(&alice_kp);
-        let err = state.validate_transaction(&tx2).expect_err("priority_fee exceeding max_fee must be rejected");
+        let err = state
+            .validate_transaction(&tx2)
+            .expect_err("priority_fee exceeding max_fee must be rejected");
         assert!(err.contains("priority_fee"), "got {err}");
     }
 
@@ -1573,13 +1578,18 @@ mod tests {
         tx.max_fee = 15;
         tx.priority_fee = 5;
         tx.sign(&alice_kp);
-        assert!(state.validate_transaction(&tx).is_ok(), "max_fee > fee should be accepted");
+        assert!(
+            state.validate_transaction(&tx).is_ok(),
+            "max_fee > fee should be accepted"
+        );
 
         // Invalid: max_fee below base_fee
         let mut tx2 = Transaction::new_with_fee(alice, bob, 1, 10, 0, vec![]);
         tx2.max_fee = 5; // below base_fee
         tx2.sign(&alice_kp);
-        let err = state.validate_transaction(&tx2).expect_err("max_fee below base_fee must be rejected");
+        let err = state
+            .validate_transaction(&tx2)
+            .expect_err("max_fee below base_fee must be rejected");
         assert!(err.contains("Fee too low"), "got {err}");
     }
 
