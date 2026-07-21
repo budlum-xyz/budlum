@@ -5,6 +5,8 @@ required_tests=(
   phase11_16_governance_rejects_non_whitelisted_parameter_proposal
   phase11_16_governance_rejects_invalid_parameter_value
   phase11_16_governance_sets_parameter_activation_timelock
+  phase11_16_governance_records_vote_weight_snapshot
+  phase11_16_governance_stake_transfer_cannot_double_count_vote_weight
   phase11_16_governance_parameter_update_waits_for_activation_epoch
 )
 

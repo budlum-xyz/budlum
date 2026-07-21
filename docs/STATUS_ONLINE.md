@@ -5807,3 +5807,20 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
 **Kim karar verdi:** Kullanıcı (Ayaz) — Onaylandı.
 
 Co-authored-by: ARENA3 <arena3@budlum.ai>
+
+---
+
+### [2026-07-21 14:05 UTC+03:00] ARENA1 — Phase 11.16 ADIM 2 PUSH HAZIR: governance vote-weight snapshot
+
+**Kapsam:** Minimal governance vote manipülasyonu koruması güçlendirildi.
+**Ne eklendi:** `Proposal::voter_weights`, `vote_weight_of`, `reduce_vote_weight`; vote ağırlığı oy anında snapshot edilir ve unstake sonrası yalnızca snapshot edilmiş ağırlık azaltılır.
+**Güvenlik sınırı:** Voter adresi `voters` içinde kalır; stake taşınıp/yeniden stake edilse bile aynı adres aynı proposal'da tekrar oy veremez ve vote weight double-count edilemez.
+**Executor hizası:** `TransactionType::Unstake` artık aktif proposal vote ağırlığını manuel saturating subtract yerine `proposal.reduce_vote_weight(...)` ile düşürür.
+**Regresyon kilitleri:** `phase11_16_governance_records_vote_weight_snapshot`, `phase11_16_governance_stake_transfer_cannot_double_count_vote_weight`.
+**CI kapısı:** `scripts/check-governance-invariants.sh` bu iki yeni Phase 11.16 isim kilidini zorunlu tutar.
+**Lokal doğrulama:** `bash ./scripts/check-governance-invariants.sh --self-test` ✅, `git diff --check` ✅ ve statik governance/executor taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + ana CI pipeline takibi.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

@@ -110,14 +110,7 @@ impl Executor {
 
                 for proposal in state.governance.proposals.iter_mut() {
                     if proposal.status == crate::core::governance::ProposalStatus::Active {
-                        if let Some(&voted_for) = proposal.voters.get(&tx.from) {
-                            if voted_for {
-                                proposal.votes_for = proposal.votes_for.saturating_sub(tx.amount);
-                            } else {
-                                proposal.votes_against =
-                                    proposal.votes_against.saturating_sub(tx.amount);
-                            }
-                        }
+                        proposal.reduce_vote_weight(&tx.from, tx.amount);
                     }
                 }
 

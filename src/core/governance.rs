@@ -104,6 +104,9 @@ pub struct Proposal {
     pub votes_against: u64, // Total stake voting AGAINST
     pub status: ProposalStatus,
     pub voters: HashMap<Address, bool>, // Address -> Vote (true = for)
+    /// Phase 11.16: vote-weight snapshot captured when each validator votes.
+    #[serde(default)]
+    pub voter_weights: HashMap<Address, u64>,
     /// Phase 11.16: optional delayed activation epoch after a proposal passes.
     #[serde(default)]
     pub activation_epoch: Option<u64>,
@@ -127,6 +130,7 @@ impl Proposal {
             votes_against: 0,
             status: ProposalStatus::Active,
             voters: HashMap::new(),
+            voter_weights: HashMap::new(),
             activation_epoch: None,
         }
     }
@@ -163,7 +167,32 @@ impl Proposal {
             self.votes_against = self.votes_against.saturating_add(stake);
         }
         self.voters.insert(voter, vote_for);
+        self.voter_weights.insert(voter, stake);
         Ok(())
+    }
+
+    pub fn vote_weight_of(&self, voter: &Address) -> u64 {
+        self.voter_weights.get(voter).copied().unwrap_or(0)
+    }
+
+    /// Phase 11.16: reduce only the stake weight originally snapshotted for a voter.
+    /// The address remains in `voters`, so moving/re-staking stake cannot vote twice.
+    pub fn reduce_vote_weight(&mut self, voter: &Address, reduction: u64) {
+        let Some(vote_for) = self.voters.get(voter).copied() else {
+            return;
+        };
+        let current = self.voter_weights.get(voter).copied().unwrap_or(0);
+        let applied = current.min(reduction);
+        if applied == 0 {
+            return;
+        }
+        if vote_for {
+            self.votes_for = self.votes_for.saturating_sub(applied);
+        } else {
+            self.votes_against = self.votes_against.saturating_sub(applied);
+        }
+        self.voter_weights
+            .insert(*voter, current.saturating_sub(applied));
     }
 
     /// V130 fix (ARENAS): Finalize proposal — now requires current_epoch >= end_epoch.
@@ -550,5 +579,45 @@ mod tests {
         );
         assert!(!proposal.activation_ready(26));
         assert!(proposal.activation_ready(27));
+    }
+
+    #[test]
+    fn phase11_16_governance_records_vote_weight_snapshot() {
+        let proposer = Address::from([0x01; 32]);
+        let voter = Address::from([0x02; 32]);
+        let mut proposal = Proposal::new(
+            7,
+            proposer,
+            ProposalType::ParameterUpdate("min_stake".into(), "5000".into()),
+            0,
+            10,
+        );
+        proposal.add_vote(voter, 1_000, true, 0).unwrap();
+        assert_eq!(proposal.votes_for, 1_000);
+        assert_eq!(proposal.vote_weight_of(&voter), 1_000);
+        assert!(proposal.add_vote(voter, 1_000, true, 0).is_err());
+    }
+
+    #[test]
+    fn phase11_16_governance_stake_transfer_cannot_double_count_vote_weight() {
+        let proposer = Address::from([0x01; 32]);
+        let voter = Address::from([0x02; 32]);
+        let mut proposal = Proposal::new(
+            8,
+            proposer,
+            ProposalType::ParameterUpdate("min_stake".into(), "5000".into()),
+            0,
+            10,
+        );
+        proposal.add_vote(voter, 1_000, true, 0).unwrap();
+
+        proposal.reduce_vote_weight(&voter, 400);
+        assert_eq!(proposal.votes_for, 600);
+        assert_eq!(proposal.vote_weight_of(&voter), 600);
+
+        proposal.reduce_vote_weight(&voter, 10_000);
+        assert_eq!(proposal.votes_for, 0);
+        assert_eq!(proposal.vote_weight_of(&voter), 0);
+        assert!(proposal.add_vote(voter, 1_000, true, 0).is_err());
     }
 }
