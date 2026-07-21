@@ -19,7 +19,8 @@ SHA256="277f2bd8fd37cf60c42ab7afca6faa884e65440fa31e02b44bdaae60f62a358f"
 BIN="${ZIZMOR_BIN:-}"
 if [ -z "$BIN" ]; then
   tgz="/tmp/zizmor-${VERSION}.tar.gz"
-  curl -sSfL -o "$tgz" \
+  curl --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 2 \
+    -sSfL -o "$tgz" \
     "https://github.com/zizmorcore/zizmor/releases/download/v${VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
   echo "${SHA256}  ${tgz}" | sha256sum -c - >/dev/null
   tar xzf "$tgz" -C /tmp zizmor
