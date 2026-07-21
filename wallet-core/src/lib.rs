@@ -276,6 +276,57 @@ pub struct Wallet {
 /// `core::address::Address` deseni ile uyumlu.
 pub type BudlumAddress = [u8; 32];
 
+/// Phase 11.14 mobile/browser binding ABI marker.
+pub const WALLET_BINDING_STUB_VERSION: &str = "phase11.14-binding-stub-v1";
+
+/// Binding capability descriptor shared by mobile (UniFFI) and browser (WASM) stubs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletBindingCapabilities {
+    pub stub_version: String,
+    pub uniffi_mobile: bool,
+    pub wasm_browser: bool,
+    pub exports_seed_material: bool,
+}
+
+impl WalletBindingCapabilities {
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            stub_version: WALLET_BINDING_STUB_VERSION.to_string(),
+            uniffi_mobile: true,
+            wasm_browser: true,
+            exports_seed_material: false,
+        }
+    }
+}
+
+/// FFI-safe wallet public export; mnemonic seed/private key material is redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletBindingExport {
+    pub address_hex: String,
+    pub public_key_hex: String,
+    pub mnemonic_word_count: usize,
+}
+
+#[cfg(feature = "uniffi")]
+pub mod uniffi_bindings {
+    use super::WalletBindingCapabilities;
+
+    #[must_use]
+    pub fn binding_capabilities() -> WalletBindingCapabilities {
+        WalletBindingCapabilities::current()
+    }
+}
+
+#[cfg(feature = "wasm")]
+pub mod wasm_bindings {
+    use super::WalletBindingCapabilities;
+
+    #[must_use]
+    pub fn binding_capabilities() -> WalletBindingCapabilities {
+        WalletBindingCapabilities::current()
+    }
+}
 
 /// M-of-N multisig policy (Phase 11.14).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,6 +497,16 @@ impl Wallet {
         hex::encode(self.address())
     }
 
+    /// Mobile/browser binding için public-only export üret.
+    #[must_use]
+    pub fn binding_export(&self) -> WalletBindingExport {
+        WalletBindingExport {
+            address_hex: self.address_hex(),
+            public_key_hex: hex::encode(self.public_key()),
+            mnemonic_word_count: self.mnemonic.split_whitespace().count(),
+        }
+    }
+
     /// Mesaj imzala (Ed25519).
     #[must_use]
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
@@ -562,6 +623,41 @@ mod tests {
         let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
         assert_eq!(short.mnemonic().split_whitespace().count(), 12);
         assert_eq!(long.mnemonic().split_whitespace().count(), 24);
+    }
+
+    #[test]
+    fn phase11_14_binding_capabilities_include_mobile_and_browser_stubs() {
+        let caps = WalletBindingCapabilities::current();
+        assert_eq!(caps.stub_version, WALLET_BINDING_STUB_VERSION);
+        assert!(caps.uniffi_mobile);
+        assert!(caps.wasm_browser);
+        assert!(!caps.exports_seed_material);
+    }
+
+    #[test]
+    fn phase11_14_binding_export_redacts_seed_and_counts_words() {
+        let wallet = Wallet::generate(24).unwrap();
+        let export = wallet.binding_export();
+        assert_eq!(export.address_hex, wallet.address_hex());
+        assert_eq!(export.public_key_hex, hex::encode(wallet.public_key()));
+        assert_eq!(export.mnemonic_word_count, 24);
+        assert!(!format!("{export:?}").contains(&hex::encode(wallet.seed())));
+    }
+
+    #[cfg(feature = "uniffi")]
+    #[test]
+    fn phase11_14_binding_uniffi_feature_stub_exports_capabilities() {
+        let caps = uniffi_bindings::binding_capabilities();
+        assert!(caps.uniffi_mobile);
+        assert!(!caps.exports_seed_material);
+    }
+
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn phase11_14_binding_wasm_feature_stub_exports_capabilities() {
+        let caps = wasm_bindings::binding_capabilities();
+        assert!(caps.wasm_browser);
+        assert!(!caps.exports_seed_material);
     }
 
     #[test]

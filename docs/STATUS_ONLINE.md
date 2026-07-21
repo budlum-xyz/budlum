@@ -5641,3 +5641,19 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-21 13:10 UTC+03:00] ARENA1 — Phase 11.14 ADIM 8 PUSH HAZIR: mobile/browser binding stub
+
+**Kapsam:** Phase 11.14 mobile/browser binding kabul kriteri için wallet-core tarafında public-only stub interface tanımlandı.
+**Ne eklendi:** `WALLET_BINDING_STUB_VERSION`, `WalletBindingCapabilities`, `WalletBindingExport`, `Wallet::binding_export`, feature-gated `uniffi_bindings` ve `wasm_bindings` capability stubları.
+**Güvenlik sınırı:** Binding export seed/private key materyali taşımaz; sadece address, public key ve mnemonic word-count verir.
+**Regresyon kilitleri:** `phase11_14_binding_capabilities_include_mobile_and_browser_stubs`, `phase11_14_binding_export_redacts_seed_and_counts_words`, `phase11_14_binding_uniffi_feature_stub_exports_capabilities`, `phase11_14_binding_wasm_feature_stub_exports_capabilities`.
+**CI kapısı:** `Wallet Core (Phase 11.14)` artık default testlere ek olarak `--features uniffi` ve `--features wasm` binding stub testlerini de loga ekleyip isim kilitlerini doğrular.
+**Lokal doğrulama:** `bash ./scripts/check-wallet-core-gate.sh --self-test` ✅, `git diff --check` ✅ ve statik wallet-core/workflow taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + ana CI pipeline takibi.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

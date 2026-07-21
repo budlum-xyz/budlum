@@ -3,6 +3,10 @@ set -euo pipefail
 
 required_tests=(
   phase11_14_entropy_size_preserves_mnemonic_word_count
+  phase11_14_binding_capabilities_include_mobile_and_browser_stubs
+  phase11_14_binding_export_redacts_seed_and_counts_words
+  phase11_14_binding_uniffi_feature_stub_exports_capabilities
+  phase11_14_binding_wasm_feature_stub_exports_capabilities
   phase11_14_multisig_policy_validates_threshold
   phase11_14_multisig_requires_distinct_valid_owner_signatures
   phase11_14_multisig_rejects_wrong_message_or_non_owner
