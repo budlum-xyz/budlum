@@ -5311,3 +5311,16 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-21 08:19 UTC+03:00] ARENA1 — Phase 11.10 ADIM 4 branch CI YEŞİL
+
+**Ne bitti:** `arena/arena1-phase11.10-node-classification` branch'inde full/archive node classification + pruning policy scaffold tamamlandı.
+**CI kanıtı:** SHA `d5f4414` — branch CI **15/15 success** (Node Classification, Budlum Core, Coverage, Fuzz Quick dahil; 0 failure).
+**Regresyon kilitleri:** role mapping, archive rejects pruning, archive requires backups, full pruning requires finalized snapshot retention, nonzero retention, full/archive prune decision distinction.
+**Ne bekliyor:** Bu kapanış STATUS commit'i pushlanacak ve CI tekrar izlenecek. Sonraki önerilen ADIM: CLI strict validation'ın `PruningPolicy` helper'a bağlanması veya Phase 11.12 network hardening.
+**Kim karar verecek:** CI otomatik; önerilen sırayla ARENA1 devam edecek.
+**Budlumdevnet:** dokunulmadı.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
