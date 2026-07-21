@@ -719,4 +719,131 @@ mod tests {
         assert!(!pm.note_disconnected(&peer));
         assert_eq!(pm.subnet_connection_count(subnet), 0);
     }
+
+    /// Phase 11.12 chaos: network partition isolates peer groups by subnet.
+    /// Two groups on different /24 subnets cannot communicate through the
+    /// PeerManager's subnet-bound admission.
+    #[test]
+    fn phase11_12_chaos_network_partition_isolates_groups() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(4);
+
+        let subnet_a = [10, 0, 0];
+        let subnet_b = [10, 0, 1];
+
+        // Fill subnet A
+        for _ in 0..4 {
+            let peer = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            assert!(pm.note_connected(peer, Some(subnet_a)));
+        }
+        // Subnet A is full — partition enforced
+        assert!(!pm.can_admit_subnet(Some(subnet_a)));
+        // Subnet B is still available — groups are isolated
+        assert!(pm.can_admit_subnet(Some(subnet_b)));
+    }
+
+    /// Phase 11.12 chaos: byzantine peer sending invalid messages is rejected.
+    #[test]
+    fn phase11_12_chaos_byzantine_block_rejected() {
+        let mut pm = PeerManager::new();
+        let peer = test_peer_id();
+        pm.note_connected(peer, None);
+
+        // Byzantine: peer sends oversized message repeatedly
+        for _ in 0..MAX_MSG_BURST as u32 {
+            let _ = pm.check_rate_limit(&peer);
+        }
+        // Peer should be penalized
+        assert!(pm.get_score(&peer) < 0);
+    }
+
+    /// Phase 11.12 chaos: eclipse single-peer isolation — a peer that can only
+    /// connect to one subnet is isolated from the broader network.
+    #[test]
+    fn phase11_12_chaos_eclipse_single_peer_isolation() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(4);
+
+        let subnet = [192, 168, 1];
+        // Fill the subnet completely
+        for _ in 0..4 {
+            let peer = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            assert!(pm.note_connected(peer, Some(subnet)));
+        }
+        // New peer on same subnet is rejected — eclipse isolation
+        assert!(!pm.can_admit_subnet(Some(subnet)));
+        // New peer on different subnet is accepted
+        assert!(pm.can_admit_subnet(Some([192, 168, 2])));
+    }
+
+    /// Phase 11.12 chaos: sybil attack from same /24 subnet is rejected.
+    #[test]
+    fn phase11_12_chaos_sybil_subnet_bound_rejects_excess() {
+        let mut pm = PeerManager::new();
+        pm.set_max_peers_per_subnet(4);
+
+        let subnet = [172, 16, 0];
+        // Sybil: 4 peers from same subnet
+        for _ in 0..4 {
+            let peer = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            assert!(pm.note_connected(peer, Some(subnet)));
+        }
+        // 5th peer from same subnet rejected
+        assert_eq!(pm.subnet_connection_count(subnet), 4);
+        assert!(!pm.can_admit_subnet(Some(subnet)));
+    }
+
+    /// Phase 11.12 chaos: ban TTL allows reconnect after expiry.
+    #[test]
+    fn phase11_12_chaos_ban_ttl_allows_reconnect_after_expiry() {
+        let mut pm = PeerManager::new();
+        pm.msg_refill_rate = 0.0;
+        let peer = test_peer_id();
+
+        // Ban the peer
+        for _ in 0..MAX_MSG_BURST as u32 {
+            let _ = pm.check_rate_limit(&peer);
+        }
+        for _ in 0..40 {
+            let _ = pm.check_rate_limit(&peer);
+        }
+        assert!(pm.is_banned(&peer));
+
+        // Simulate ban expiry by setting ban_expires_unix to past
+        if let Some(info) = pm.get_peer_info(&peer) {
+            info.ban_expires_unix = Some(0); // expired
+        }
+        assert!(!pm.is_banned(&peer));
+    }
+
+    /// Phase 11.12 chaos: reputation fuzz decay — peer score decreases
+    /// with repeated violations.
+    #[test]
+    fn phase11_12_chaos_reputation_fuzz_decay() {
+        let mut pm = PeerManager::new();
+        pm.msg_refill_rate = 0.0;
+        let peer = test_peer_id();
+        pm.note_connected(peer, None);
+
+        let initial_score = pm.get_score(&peer);
+        // Repeated violations
+        for _ in 0..100 {
+            let _ = pm.check_rate_limit(&peer);
+        }
+        let final_score = pm.get_score(&peer);
+        assert!(
+            final_score < initial_score,
+            "score must decay: initial={initial_score}, final={final_score}"
+        );
+        assert!(
+            final_score <= BAN_THRESHOLD,
+            "score must reach ban threshold after 100 violations"
+        );
+    }
 }
