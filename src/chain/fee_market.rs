@@ -277,8 +277,9 @@ mod tests {
     #[test]
     fn phase11_8_fee_distribution_large_fee_exercises_treasury() {
         // Large priority_fee so treasury cut is non-zero (integer floor)
+        // max_fee must cover base_fee + priority_fee: 10 + 1_000_000 = 1_000_010
         let bid = FeeBid {
-            max_fee: 1_000_000,
+            max_fee: 1_000_010,
             priority_fee: 1_000_000,
         };
         let dist = distribute_fee(bid, 10, 1, 10_000).unwrap();
