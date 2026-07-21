@@ -699,4 +699,108 @@ mod tests {
             other => panic!("expected SemanticError, got: {other:?}"),
         }
     }
+
+    // === STRUCT TYPE REFERENCE VALIDATION ======================================
+
+    /// A function parameter typed as a struct that is not declared is
+    /// rejected. `Type::from_str` would otherwise turn the unknown name
+    /// into a phantom struct type, silently disabling field validation on
+    /// the parameter (a soundness gap).
+    #[test]
+    fn test_undefined_struct_type_in_param_rejected() {
+        let source = r#"
+            contract BadParamType {
+                struct Point {
+                    x: u64,
+                    y: u64,
+                }
+
+                // `Ponit` is a typo — not a declared struct.
+                fn read(p: Ponit) -> u64 {
+                    return p.x;
+                }
+
+                pub fn main() {
+                    let p = Point { x: 1, y: 2 };
+                    emit Result(read(p));
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(
+            res.is_err(),
+            "undefined struct type in param must be rejected"
+        );
+        match res.unwrap_err() {
+            CompileError::SemanticError(msg) => {
+                assert!(
+                    msg.contains("Undefined struct type") && msg.contains("Ponit"),
+                    "error should name the undefined struct type, got: {msg}"
+                );
+            }
+            other => panic!("expected SemanticError, got: {other:?}"),
+        }
+    }
+
+    /// A struct field typed as an undeclared struct is rejected (the
+    /// referenced name never appears as a declared struct).
+    #[test]
+    fn test_undefined_struct_type_in_field_rejected() {
+        let source = r#"
+            contract BadFieldType {
+                struct Wrapper {
+                    inner: Missing,
+                }
+
+                pub fn main() {
+                    emit Result(0);
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(
+            res.is_err(),
+            "undefined struct type in field must be rejected"
+        );
+        match res.unwrap_err() {
+            CompileError::SemanticError(msg) => {
+                assert!(
+                    msg.contains("Undefined struct type") && msg.contains("Missing"),
+                    "error should name the undefined struct type, got: {msg}"
+                );
+            }
+            other => panic!("expected SemanticError, got: {other:?}"),
+        }
+    }
+
+    /// A struct field may reference another struct declared *later* in the
+    /// contract (forward reference). Validation runs after all structs are
+    /// registered, so this still compiles — the check rejects only truly
+    /// undefined struct names, not forward references.
+    #[test]
+    fn test_struct_field_forward_reference_compiles() {
+        let source = r#"
+            contract ForwardRef {
+                struct Outer {
+                    inner: Inner,
+                }
+                struct Inner {
+                    v: u64,
+                }
+
+                pub fn main() {
+                    emit Result(0);
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(
+            res.is_ok(),
+            "forward struct reference should compile: {:?}",
+            res.err()
+        );
+    }
 }

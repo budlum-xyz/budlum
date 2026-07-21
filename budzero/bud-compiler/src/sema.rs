@@ -57,15 +57,46 @@ impl SemanticAnalyzer {
             self.structs.insert(s.name.clone(), fields);
         }
 
+        // 1b. Validate struct *type references* in field declarations.
+        // `Type::from_str` maps ANY non-primitive name to
+        // `Type::Struct(name)` without checking the struct exists, so a
+        // typo in a field's type (e.g. `b: Ponit`) would silently become
+        // a phantom struct type — and field access on values of that
+        // type would then skip validation entirely (a soundness gap).
+        // This runs *after* the registration pass so fields may reference
+        // structs declared later in the contract.
+        for s in &contract.structs {
+            for f in &s.fields {
+                if let Ok(ty) = Type::from_str(&f.ty) {
+                    self.check_struct_type(
+                        &ty,
+                        &format!("field '{}.{}'", s.name, f.name),
+                        &mut errors,
+                    );
+                }
+            }
+        }
+
         // 2. Register functions
         for f in &contract.functions {
             let mut params = Vec::new();
             for p in &f.params {
                 let ty = Type::from_str(&p.ty).unwrap_or(Type::Unknown);
+                self.check_struct_type(
+                    &ty,
+                    &format!("parameter '{}' of function '{}'", p.name, f.name),
+                    &mut errors,
+                );
                 params.push(ty);
             }
             let ret_ty = if let Some(r) = &f.return_type {
-                Type::from_str(r).unwrap_or(Type::Unknown)
+                let ty = Type::from_str(r).unwrap_or(Type::Unknown);
+                self.check_struct_type(
+                    &ty,
+                    &format!("return type of function '{}'", f.name),
+                    &mut errors,
+                );
+                ty
             } else {
                 Type::Void
             };
@@ -96,6 +127,23 @@ impl SemanticAnalyzer {
             Ok(())
         } else {
             Err(errors.remove(0))
+        }
+    }
+
+    /// Validate that a type reference resolving to a struct names a
+    /// struct that is actually declared. `Type::from_str` maps ANY
+    /// non-primitive name to `Type::Struct(name)`, so without this check
+    /// a typo in a struct type annotation (field / parameter / return)
+    /// would silently become a phantom struct type — and field access on
+    /// values of that type would then skip validation entirely.
+    fn check_struct_type(&self, ty: &Type, ctx: &str, errors: &mut Vec<CompileError>) {
+        if let Type::Struct(name) = ty {
+            if !self.structs.contains_key(name) {
+                errors.push(CompileError::SemanticError(format!(
+                    "Undefined struct type '{}' in {}",
+                    name, ctx
+                )));
+            }
         }
     }
 
