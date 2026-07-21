@@ -48,6 +48,7 @@ This review covers the pre-Phase12 hardening track:
 - `docs/VALIDATOR_KEY_MANAGEMENT.md`
 - `docs/operations/PRODUCTION_RUNBOOK.md`
 - `docs/operations/HSM_BLS_PQ_POLICY.md`
+- `docs/audit_prep/CI_STABILITY_WINDOW.md` — 7-day launch-lock CI stability ledger
 
 ## Review conclusion template
 

@@ -20,7 +20,7 @@
 | Phase 11.18 PoA compliance | `src/registry/poa_compliance.rs`, `scripts/check-poa-compliance-gate.sh` | `PoA Compliance Isolation (Phase 11.18)` |
 | Phase 11.20 validator keys | `docs/VALIDATOR_KEY_MANAGEMENT.md`, `docs/operations/HSM_BLS_PQ_POLICY.md` | `Audit Prep (Phase 11.20)` |
 | Phase 11.20 lockdown | `docs/MAINNET_LOCKDOWN_CHECKLIST.md` | `Audit Prep (Phase 11.20)` |
-| Phase 11.20 readiness review | `docs/audit_prep/MAINNET_READINESS_REVIEW.md` | `Audit Prep (Phase 11.20)` |
+| Phase 11.20 readiness review | `docs/audit_prep/MAINNET_READINESS_REVIEW.md` | `Audit Prep (Phase 11.20)` |\n| Phase 11.20 CI stability | `docs/audit_prep/CI_STABILITY_WINDOW.md` | `Audit Prep (Phase 11.20)` |
 
 ## Review order
 

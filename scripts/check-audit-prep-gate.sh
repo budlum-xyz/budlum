@@ -21,6 +21,7 @@ check_root() {
   [[ -f "$root/docs/audit_prep/MAINNET_READINESS_REVIEW.md" ]] || fail "missing docs/audit_prep/MAINNET_READINESS_REVIEW.md"
   [[ -f "$root/docs/operations/PRODUCTION_RUNBOOK.md" ]] || fail "missing docs/operations/PRODUCTION_RUNBOOK.md"
   [[ -f "$root/docs/operations/HSM_BLS_PQ_POLICY.md" ]] || fail "missing docs/operations/HSM_BLS_PQ_POLICY.md"
+  [[ -f "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" ]] || fail "missing docs/audit_prep/CI_STABILITY_WINDOW.md"
 
   check_contains "$root/docs/THREAT_MODEL.md" "Threat Model v2"
   check_contains "$root/docs/THREAT_MODEL.md" "Phase 11.20 Mitigation Closure Matrix"
@@ -39,6 +40,8 @@ check_root() {
   check_contains "$root/docs/audit_prep/MAINNET_READINESS_REVIEW.md" "Mainnet Readiness Review"
   check_contains "$root/docs/audit_prep/MAINNET_READINESS_REVIEW.md" "MR-1..MR-10 review ledger"
   check_contains "$root/docs/audit_prep/MAINNET_READINESS_REVIEW.md" "Required sign-offs before launch lock"
+  check_contains "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" "CI Stability Window"
+  check_contains "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" "7 günlük launch-lock stabilite penceresi"
   echo "Audit prep gate OK"
 }
 
@@ -77,6 +80,7 @@ DOC
 DOC
   printf 'runbook\n' > "$tmp/docs/operations/PRODUCTION_RUNBOOK.md"
   printf 'hsm policy\n' > "$tmp/docs/operations/HSM_BLS_PQ_POLICY.md"
+  printf '# CI Stability Window\n7 günlük launch-lock stabilite penceresi\n' > "$tmp/docs/audit_prep/CI_STABILITY_WINDOW.md"
   check_root "$tmp" >/dev/null
   rm "$tmp/docs/VALIDATOR_KEY_MANAGEMENT.md"
   if ( check_root "$tmp" ) >/dev/null 2>&1; then
