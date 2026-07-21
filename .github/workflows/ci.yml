@@ -201,6 +201,30 @@ jobs:
           cargo test --lib bud_e2e 2>&1 | tee /tmp/bud-e2e.txt
           bash ./scripts/check-bud-e2e.sh /tmp/bud-e2e.txt
 
+  economy-invariants:
+    # Phase 11.8: EIP-1559 + reward-pool + committed-supply denominator locks.
+    # Name canary prevents a vacuous green if tests are renamed/deleted.
+    name: Economy Invariants (Phase 11.8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Economy invariant gate canary
+        run: bash ./scripts/check-economy-invariants.sh --self-test
+      - name: Phase 11.8 named invariant tests
+        run: |
+          set -euo pipefail
+          cargo test --lib phase11_8 2>&1 | tee /tmp/economy-invariants.txt
+          bash ./scripts/check-economy-invariants.sh /tmp/economy-invariants.txt
+
   # ============================ Phase 10 / Bolum 4 (BNS gate) ============================
   bns-gate:
     # Phase 10 Bolum 4 modul-ayrimi: BNS'in kendi CI gate'i (B.U.D. kapi deseni).

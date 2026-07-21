@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn default_schedule_is_valid_and_preallocated() {
+    fn phase11_8_reward_pool_default_schedule_valid() {
         let schedule = RewardPoolSchedule::default();
         assert!(schedule.validate().is_ok());
         assert_eq!(schedule.validation_reward_pool, bud(10_000_000));
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_rejects_zero_epochs() {
+    fn phase11_8_reward_pool_rejects_zero_epochs() {
         let schedule = RewardPoolSchedule {
             validation_pool_epochs: 0,
             ..Default::default()
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_rejects_pool_over_fixed_supply() {
+    fn phase11_8_reward_pool_rejects_pool_over_fixed_supply() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: BUD_TOTAL_SUPPLY,
             treasury_pool: 1,
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn rewards_are_stake_proportional_and_conserve_budget() {
+    fn phase11_8_reward_pool_conserves_budget() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 100,
             validation_pool_epochs: 10,
@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn rounding_remainder_goes_to_lowest_address() {
+    fn phase11_8_reward_pool_rounding_remainder_deterministic() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 10,
             validation_pool_epochs: 10,
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn no_rewards_before_start_or_after_pool_empty() {
+    fn phase11_8_reward_pool_halts_before_start_or_empty() {
         let schedule = RewardPoolSchedule {
             reward_pool_start_epoch: 10,
             ..Default::default()
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_stake_validators_are_ignored() {
+    fn phase11_8_reward_pool_ignores_zero_stake() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 10,
             validation_pool_epochs: 10,

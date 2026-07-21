@@ -105,21 +105,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_fee_increase_is_bounded() {
+    fn phase11_8_base_fee_increase_is_bounded() {
         let params = FeeMarketParams::default();
         let next = next_base_fee(800, params.target_gas * 2, params);
         assert_eq!(next, 900, "full block raises by 12.5%");
     }
 
     #[test]
-    fn base_fee_decrease_is_bounded() {
+    fn phase11_8_base_fee_decrease_is_bounded() {
         let params = FeeMarketParams::default();
         let next = next_base_fee(800, 0, params);
         assert_eq!(next, 700, "empty block lowers by 12.5%");
     }
 
     #[test]
-    fn min_base_fee_is_respected() {
+    fn phase11_8_min_base_fee_is_respected() {
         let params = FeeMarketParams {
             min_base_fee: 10,
             ..Default::default()
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn max_fee_below_base_fee_rejected() {
+    fn phase11_8_max_fee_below_base_fee_rejected() {
         let err = effective_fee(
             FeeBid {
                 max_fee: 9,
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_tip_cannot_exceed_priority_or_cap() {
+    fn phase11_8_effective_tip_cannot_exceed_priority_or_cap() {
         let fee = effective_fee(
             FeeBid {
                 max_fee: 15,
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fee_maps_to_zero_tip() {
+    fn phase11_8_legacy_fee_maps_to_zero_tip() {
         let fee = effective_fee(FeeBid::legacy(10), 10).unwrap();
         assert_eq!(fee.base_fee_burned, 10);
         assert_eq!(fee.priority_fee_paid, 0);
