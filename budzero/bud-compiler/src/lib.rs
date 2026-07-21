@@ -665,4 +665,38 @@ mod tests {
         vm.run(&bytecode).expect("VM should run");
         assert_eq!(vm.events, vec![30]);
     }
+
+    /// A struct literal that initializes the same field twice is rejected
+    /// at compile time. Without this check, codegen stores both values at
+    /// the field's single declared offset and the last write silently
+    /// wins — a hidden, order-dependent value.
+    #[test]
+    fn test_struct_literal_duplicate_field_rejected() {
+        let source = r#"
+            contract DuplicateField {
+                struct Point {
+                    x: u64,
+                    y: u64,
+                }
+
+                pub fn main() {
+                    // `x` is initialized twice.
+                    let p = Point { x: 1, y: 2, x: 3 };
+                    emit Result(p.x);
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(res.is_err(), "duplicate field literal must be rejected");
+        match res.unwrap_err() {
+            CompileError::SemanticError(msg) => {
+                assert!(
+                    msg.contains("more than once") && msg.contains('x'),
+                    "error should name the duplicated field, got: {msg}"
+                );
+            }
+            other => panic!("expected SemanticError, got: {other:?}"),
+        }
+    }
 }

@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::CompileError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -307,6 +307,20 @@ impl SemanticAnalyzer {
                         if !fields.iter().any(|(provided, _)| provided == fname) {
                             errors.push(CompileError::SemanticError(format!(
                                 "Struct {} literal is missing field {}",
+                                name, fname
+                            )));
+                        }
+                    }
+                    // Reject duplicate field initializers: a field listed
+                    // twice is almost certainly a mistake — codegen stores
+                    // both at the same declared offset, so the last write
+                    // silently wins (a hidden, order-dependent value).
+                    // Fail at compile time instead.
+                    let mut seen_fields: HashSet<&String> = HashSet::new();
+                    for (fname, _) in fields {
+                        if !seen_fields.insert(fname) {
+                            errors.push(CompileError::SemanticError(format!(
+                                "Struct {} literal initializes field {} more than once",
                                 name, fname
                             )));
                         }
