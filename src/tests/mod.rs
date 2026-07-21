@@ -135,3 +135,7 @@ pub mod slashing_matrix;
 // determinism.yml bu modüldeki testten üretilen CONSENSUS_DIGEST satırını üç
 // işletim sisteminde toplayıp byte-eşitlik ister.
 pub mod consensus_digest;
+// ADIM-1 (ARENA2, 2026-07-21): CI Genişletme Madde 1 — genesis
+// reproducibility sondası (`genesis_hash_deterministic`, bkz. determinism.yml).
+#[cfg(test)]
+pub mod genesis_repro;

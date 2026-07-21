@@ -44,8 +44,12 @@ self_test() {
 }
 
 semver_checks_gate() {
-  local current="$1"
-  local baseline="$2"
+  # Mutlak yola kanonikleştir: gate alt kabuğu `cd "$current"` yapar; göreli
+  # baseline yolu (ör. ./baseline) cd sonrası çözümsüz kalır → CI'da
+  # "path './baseline' is not a directory or a manifest" (ilk koşu, kök neden).
+  local current baseline
+  current="$(cd "$1" 2>/dev/null && pwd)" || fail "current root yok: $1"
+  baseline="$(cd "$2" 2>/dev/null && pwd)" || fail "baseline root yok: $2"
   [[ -f "$current/Cargo.toml" ]] || fail "current root without Cargo.toml: $current"
   [[ -f "$baseline/Cargo.toml" ]] || fail "baseline root without Cargo.toml: $baseline"
   command -v cargo-semver-checks >/dev/null 2>&1 \

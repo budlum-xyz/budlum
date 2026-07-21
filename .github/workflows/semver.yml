@@ -46,6 +46,10 @@ jobs:
       - name: Install nightly (rustdoc-json backend for semver-checks)
         run: rustup toolchain install nightly --profile minimal
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # İki-checkout yerleşiminde workspace kökünde Cargo.toml yok;
+          # rust-cache'in `cargo metadata` çağrısı kökte patlar (Error logu).
+          workspaces: ./current
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo-semver-checks kur (locked)
