@@ -577,7 +577,12 @@ impl AccountState {
                 expected_nonce, tx.nonce
             ));
         }
-        if tx.fee < self.base_fee {
+        if crate::chain::fee_market::effective_fee(
+            crate::chain::fee_market::FeeBid::legacy(tx.fee),
+            self.base_fee,
+        )
+        .is_err()
+        {
             return Err(format!("Fee too low: {} < {}", tx.fee, self.base_fee));
         }
         // Overflow guard (security): reject amount+fee > u64::MAX explicitly.
@@ -1438,6 +1443,27 @@ mod tests {
         let result = state.validate_transaction(&tx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Fee"));
+    }
+
+    #[test]
+    fn phase11_8_legacy_fee_validation_uses_fee_market_gate() {
+        let alice_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from([8u8; 32]);
+        let mut state = AccountState::new();
+        state.base_fee = 10;
+        state.add_balance(&alice, 1_000);
+
+        let mut underpriced = Transaction::new_with_fee(alice, bob, 1, 9, 0, vec![]);
+        underpriced.sign(&alice_kp);
+        let err = state
+            .validate_transaction(&underpriced)
+            .expect_err("max_fee below base fee must be rejected");
+        assert!(err.contains("Fee too low"), "got {err}");
+
+        let mut priced = Transaction::new_with_fee(alice, bob, 1, 10, 0, vec![]);
+        priced.sign(&alice_kp);
+        assert!(state.validate_transaction(&priced).is_ok());
     }
 
     #[test]

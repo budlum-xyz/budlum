@@ -12,6 +12,7 @@ required_tests=(
   phase11_8_reward_pool_rounding_remainder_deterministic
   phase11_8_total_bud_committed_counts_stake_and_unbonding
   phase11_8_supply_capacity_remaining_uses_committed_denominator
+  phase11_8_legacy_fee_validation_uses_fee_market_gate
 )
 
 fail() {
