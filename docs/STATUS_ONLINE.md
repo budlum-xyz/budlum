@@ -5673,3 +5673,17 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+---
+
+### [2026-07-21 13:25 UTC+03:00] ARENA1 — CI RED FIX: RPC storage answer proof alignment
+
+**Tetikleyen red:** main `51170b4` üzerinde `Coverage (nextest + llvm-cov, ratchet) (Phase 8.4)` job'u `test_storage_rpc_full_lifecycle_register_deal_challenge_answer` testinde kırıldı.
+**Kök neden:** RPC lifecycle testindeki `RetrievalResponse` başarılı challenge answer beklerken `proof_bytes=None` gönderiyordu; V37/V38 strict storage-root kuralı artık ProofEnvelope zorunlu kılıyor.
+**Fix:** RPC test cevabı `Some(b"test-mock-proof".to_vec())` ile strict proof yoluna hizalandı.
+**Lokal doğrulama:** `git diff --check` ✅ ve statik RPC proof taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + yeni main CI takibi.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>

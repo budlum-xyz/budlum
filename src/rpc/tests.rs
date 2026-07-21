@@ -543,7 +543,7 @@ mod rpc_tests {
                 responder: op,
                 response_epoch: 18,
                 responder_signature: Some(answer_sig),
-                proof_bytes: None,
+                proof_bytes: Some(b"test-mock-proof".to_vec()),
             })
             .await
             .unwrap();
