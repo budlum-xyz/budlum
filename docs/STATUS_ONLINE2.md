@@ -257,3 +257,28 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Kim karar verecek:** Ayaz (merge onayı) / CI (tek yargıç)
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+## [2026-07-21 15:06 UTC+03:00] ARENA2 — BudL Derleyici Tip Hardening + VM/AIR Field Tutarlılığı (doğrudan main, yeni akış)
+
+Ayaz'ın "artık her şeyi main'den yapın" talimatıyla bu işler PR yerine **doğrudan main'e** commit'lendi (öncesinde lokal tam doğrulama: test + clippy + fmt + downstream + prover round-trip).
+
+**Yapılan 5 düzeltme (commit sırasıyla):**
+1. `47feea2` — **Tanımsız struct-tip reddi:** `Type::from_str` bilinmeyen her ismi sessizce `Struct(isim)` yapıyordu; struct tip anotasyonları (param/alan/dönüş) doğrulanmıyordu → yazım hatası "hayalet struct" tipi yaratıp alan denetimlerini kapatıyordu. Artık struct-tip referansları kayıtlı struct'lara karşı doğrulanıyor (forward-ref serbest).
+2. `0d5293d` — **struct/void aritmetik+sıralama reddi:** `p + q`, `p < q` (pointer aritmetiği) sessizce type-check geçiyordu. Artık aritmetik/sıralama operatörleri struct/void operand reddediyor (eşitlik `==`/`!=` struct'ta serbest; Bool aritmetiği serbest — BudL'da And/Or yok).
+3. `4ff80e6` — **VM/AIR Goldilocks-field tutarlılığı (KRİTİK ZK-soundness):** AIR `Add/Sub/Mul/Div`'i Goldilocks field (mod P=2⁶⁴−2³²+1) kısıtlıyor, VM `Add/Sub/Mul`'ı wrapping-u64 (mod 2⁶⁴) çalıştırıyordu → sonucu [P,2⁶⁴) aralığına düşen işlemlerde kanıt, VM'in yapmadığı hesabı onaylayabilirdi. VM `Add/Sub/Mul` field'a çevrildi (`field_add/sub/mul_goldilocks`), tüm register değerleri canonical (<P). Eşlik: P'den büyük integer literal artık derleme hatası (en büyük geçerli literal P−1).
+4. `f7c9a07` — **struct/void koşul reddi:** `if`/`while`/`constrain` koşulu struct (pointer, hep non-zero → kontrol hep true) veya void olamıyor; skaler (u64/bool/field) serbest. (match zaten denetliyordu.)
+5. `4335a1a` — **Karşılaştırma→Bool dönüş tipi:** karşılaştırmalar (`== != < > <= >=`) operand tipi yerine Bool dönüyor; karşılaştırma sonucunu u64 aritmetiğinde kullanmak artık tip uyumsuzluğu. Tüm repo'ya karşı güvenli doğrulandı (karşılaştırmalar sadece koşul/emit'te; 4 örnek kontrat derleniyor).
+
+**Öncesinde merge'lenen PR'lar:** #99 (FieldAccess tip-farkındalıklı offset) · #100 (StructLiteral tanım-offset) · #102 (eksik-alan reddi) · #103 (duplike-alan reddi).
+
+**Doğrulama:** bud-vm 13/13 (3 field testi: (P−1)+1=0, 0−1=P−1, (P−1)·2=P−2) · **bud-proof 54/54 prover round-trip** (VM/AIR tutarlılık sınavı) · bud-compiler 33/33 · clippy `-D warnings` temiz · fmt temiz · bud-cli + 4 örnek .bud derleniyor · tüm değişiklikler negatif-doğrulamalı (eski kodda FAIL).
+
+**CI kanıtı:** main `4335a1a` — **21+ check YEŞİL, 0 kırmızı** (ana CI run `29827472212`; Benchmark/Miri/Supply Chain ✅; Determinism+ana CI koşuyordu, kırmızı yok).
+
+**Ne bitti:** BudL tip sistemi uçtan uca sertleştirildi + VM/AIR field tutarlılığı sağlandı (yukarıdaki 5 commit + 4 PR).
+**Ne bekliyor:** main CI tam yeşil onayı; olası follow-up: duplike-alan literal (yapıldı #103), VM/AIR bellek/Merkle/Poseidon kısıtlarının derin denetimi.
+**Kim karar verecek:** Ayaz (yön) / CI (tek yargıç).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
