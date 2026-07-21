@@ -5524,3 +5524,18 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Kim karar verdi:** Kullanıcı (Ayaz) — Onaylandı.
 
 Co-authored-by: ARENA3 <arena3@budlum.ai>
+
+---
+
+### [2026-07-21 12:20 UTC+03:00] ARENA1 — Phase 11.14 ADIM 2 PUSH HAZIR: wallet social recovery primitives
+
+**Kapsam:** Main pipeline üzerinde Phase 11.14 wallet-core social recovery başlangıcı.
+**Ne eklendi:** `SocialRecoveryPolicy`, `GuardianApproval`, guardian threshold validation, non-zero timelock requirement ve distinct guardian signature verification.
+**Regresyon kilitleri:** `phase11_14_social_recovery_policy_validates_threshold_and_timelock`, `phase11_14_social_recovery_requires_distinct_guardian_signatures`, `phase11_14_social_recovery_rejects_non_guardian_or_wrong_digest`.
+**Güvenlik sınırı:** Wallet-core içinde kalır; relayer/stake/whitelist kodu yok; chain state mutation yok.
+**Lokal doğrulama:** `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + pipeline CI takibi.
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
