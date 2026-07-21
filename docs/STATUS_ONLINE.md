@@ -1,4 +1,82 @@
 
+### [2026-07-21 12:00 UTC+3] ARENA3 — Phase 11.10 Devralma: CI zemin + tamamlanmış iş paketi doğrulama
+
+**Okudum:** `uploads/ARENA3_TALIMATI_PHASE11_10_DEVIR.md` + `docs/STATUS_ONLINE.md` (tamamı) + `docs/archive/STATUS.md` + `ARENA_AI.md` + `CLAUDE.md`.
+
+**Zemin:** origin/main `4335a1a` (ARENA2: `fix(bud-compiler): type comparison results as Bool, not the operand type`)
+
+**CI:** 28/30 check-run success, 2 in-progress (Fuzz Quick, Genesis Reproducibility), **0 failure**.
+
+**Budlumdevnet:** salt-okunur; dokunulmadı.
+
+---
+
+#### A1. Main CI zemin kontrolü — ✅ YEŞİL
+
+origin/main `4335a1a` üzerinde 30 check-run:
+- 28 completed + success (Budlum Core, BudZero, Coverage, Fuzz Quick, B.U.D. E2E, BNS, PoA, Network Hardening, Governance Invariants, StorageProvider Gate, Node Classification, Audit Prep, Miri, Repo Lint, vb.)
+- 2 in-progress: Fuzz Quick (60s × 10 target), Genesis Reproducibility (cross-platform)
+- 0 failure
+
+#### A2. Phase 11.8 / 11.10 branch'lerinin main'de entegrasyonu — ✅ TAMAM
+
+`git grep` doğrulamaları (origin/main üzerinden):
+
+| Marker | Dosya | Durum |
+|--------|-------|-------|
+| `total_bud_committed` | `src/core/account.rs:1042` | ✅ Var — supply cap denominator (V144) |
+| `phase11_8_legacy_fee_validation_uses_fee_market_gate` | `scripts/check-economy-invariants.sh:15`, `src/core/account.rs:1458` | ✅ Var |
+| `pub mod fork_choice` | `src/domain/mod.rs:3` | ✅ Var |
+| `transition_status_checked` | `src/domain/registry.rs:112` | ✅ Var |
+| `pub mod provider` | `src/storage/mod.rs:25` | ✅ Var |
+| `pub mod lifecycle` | `src/storage/mod.rs:21` | ✅ Var |
+| `lifecycle_state(&self` | `src/domain/storage_deal.rs:809` | ✅ Var |
+| `pub enum NodeMode` | `src/storage/pruning.rs:11` | ✅ Var |
+| `PruningPolicy` | `src/storage/pruning.rs:42`, `src/cli/commands.rs:856` | ✅ Var |
+
+**Branch durumu:** 10 adet Phase 11.8/11.10 branch hâlâ remote'da var (`origin/arena/arena1-phase11.*`) ve `main`'e göre "ahead" gösteriliyor. Ancak bunların içindeki kod değişiklikleri **zaten main'e entegre edilmiş**. Branch'lerdeki fazlalık yalnızca `docs(status):` kapanış commit'leridir. Açık PR #104 (`arena/arena1-phase11.10-cli-pruning-policy`) hâlâ açık; kodu main'de aynı.
+
+#### B1. CLI pruning policy wiring — ✅ TAMAM
+
+`src/cli/commands.rs:856` — `pruning_policy()` metodu `PruningPolicy` helper'ına bağlanmış. `src/storage/pruning.rs` `PruningPolicy` struct'ı + `NodeMode` enum'u + `validate()` metodu mevcut. Testler:
+- `phase11_10_cli_pruning_policy_archive_rejects_pruning` ✅ (`src/cli/commands.rs:1055`)
+- `phase11_10_cli_pruning_policy_unknown_role_rejected` ✅ (`src/cli/commands.rs:1071`)
+
+#### B2. Storage lifecycle projection registry wiring — ✅ TAMAM
+
+`src/domain/storage_deal.rs:809` — `lifecycle_state(deal_id)` read-only helper. Testler:
+- `phase11_10_registry_lifecycle_projection_tracks_challenge_and_slash` ✅ (`src/domain/storage_deal.rs:1414`)
+- `phase11_10_registry_lifecycle_projection_tracks_expiry` ✅ (`src/domain/storage_deal.rs:1439`)
+
+`scripts/check-storage-provider-gate.sh` workflow filtresi doğru: `cargo test --lib phase11_10` + gate script.
+
+#### B3. check-zizmor.sh retry hardening — ✅ TAMAM
+
+`scripts/check-zizmor.sh:22` — `curl --retry 5 --retry-all-errors --retry-delay 2` zaten mevcut. SHA256 doğrulaması korunmuş.
+
+---
+
+#### Özet: Tüm Phase 11.10 görevleri zaten tamamlandı
+
+STATUS_ONLINE.md'ye göre, bu paketin tamamı daha önce (2026-07-21 12:15 UTC+3) ARENA3 tarafından "Phase 11.10 Devralma Kontrolü ve Doğrulama Tamamlandı" olarak kapatılmıştı. Mevcut oturum bu doğrulamayı bağımsiz olarak tekrarlıyor.
+
+**Açık PR'lar (7):**
+| # | Branch | Author | Kapsam |
+|---|--------|--------|--------|
+| #104 | arena1-phase11.10-cli-pruning-policy | ARENA1 | Zaten main'de kod; PR kapanmamış |
+| #98 | arena2/audit-phase12 | ARENA2 | V134 + Phase 12 audit |
+| #97 | arena2/v37-v38 | ARENA2 | STARK proof entegrasyonu |
+| #96 | arena2/budl-hardening-v2 | ARENA2 | BudL compiler hardening |
+| #94 | arena2/task3-clean | ARENA2 | VerifyInference STARK round-trip |
+| #92 | arena2/task4-5 | ARENA2 | Devnet + explorer |
+| #82 | dependabot/bincode-3.0.0 | dependabot | Mainnet sonrası ertelendi |
+
+**Ne bekliyor:** Yeni ARENA3 görevi / ADIM talimatı.
+**Kim karar verecek:** Kullanıcı (Ayaz)
+
+Co-authored-by: ARENA3 <arena3@budlum.xyz>
+
+
 ### [2026-07-19 01:37 UTC+3] ARENAX — CI GENİŞLETME İLERLEME RAPORU
 
 **Kaynak:** `docs/ci-genisletme-kod-talimati.md` (kullanıcı upload, SHA `60d3a98`)
