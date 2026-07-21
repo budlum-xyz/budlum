@@ -44,6 +44,8 @@ check_root() {
   check_contains "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" "7 günlük launch-lock stabilite penceresi"
   check_contains "$root/docs/operations/HSM_CEREMONY_REHEARSAL.md" "HSM Ceremony Rehearsal"
   check_contains "$root/docs/operations/HSM_CEREMONY_REHEARSAL.md" "Mock geçmez kanıtı"
+  check_contains "$root/docs/MAINNET_READINESS.md" "Phase 11.20 Snapshot"
+  check_contains "$root/docs/MAINNET_READINESS.md" "28/28 success"
   echo "Audit prep gate OK"
 }
 
@@ -84,6 +86,7 @@ DOC
   printf 'hsm policy\n' > "$tmp/docs/operations/HSM_BLS_PQ_POLICY.md"
   printf '# CI Stability Window\n7 günlük launch-lock stabilite penceresi\n' > "$tmp/docs/audit_prep/CI_STABILITY_WINDOW.md"
   printf '# HSM Ceremony Rehearsal\nMock geçmez kanıtı\n' > "$tmp/docs/operations/HSM_CEREMONY_REHEARSAL.md"
+  printf '# Mainnet Readiness\nPhase 11.20 Snapshot\n28/28 success\n' > "$tmp/docs/MAINNET_READINESS.md"
   check_root "$tmp" >/dev/null
   rm "$tmp/docs/VALIDATOR_KEY_MANAGEMENT.md"
   if ( check_root "$tmp" ) >/dev/null 2>&1; then

@@ -3,6 +3,44 @@
 > **Sertleştirme rejimi:** Yaşayan süreç ve kapı kuralları için bkz. [`docs/BUDLUM_HARDENING_PROTOCOL.md`](BUDLUM_HARDENING_PROTOCOL.md) (H0–H9 + MR hizası).
 > **2026-07-16 tazeleme (Phase 8.9 Dalga 5):** Bu belgenin plan bölümleri 2026-07-15 tarihli an kaydıdır (korunur). Yaşayan durum tablosu (§1) güncel sayılara tazelendi: `cargo test --lib` → **563 passed** (belge içi eski 510/513 çelişkisi giderildi). Güncel anlık durum için ayrıca: `docs/PHASE8.9_ANALIZ_A1.md` + `docs/STATUS_ONLINE.md`.
 
+> **2026-07-21 Phase 11.20 snapshot (güncel):** Aşağıdaki §7 tablosu, 2026-07-21 itibarıyla `origin/main` `77ea61c` üzerindeki gerçek CI durumuna göre güncellenmiştir. Eski Phase 2/3/4 plan bölümleri (§2–§6) tarihsel kayıt olarak korunmaktadır. Güncel durum için §7 ve `docs/audit_prep/` paketine bakın.
+
+## 7. Phase 11.20 Snapshot — 2026-07-21 (Güncel)
+
+**Zemin:** `origin/main` `77ea61c` — CI **28/28 success**, 0 failure, 0 cancelled.  
+**Test sayısı:** 1129 lib test (README rozet).  
+**Budlumdevnet:** salt-okunur; dokunulmadı.
+
+| ID | Criterion (EN canonical) | Proof source | Status (2026-07-21) |
+|----|---|---|---|
+| MR-1 | **CI fully green:** all gates green on `main`. | GitHub check-runs (`77ea61c`) | ✅ 28/28 success |
+| MR-2 | **Phase 11.6 specs frozen + review.** | `docs/spec-review/`, `scripts/check-spec-coverage.sh` | ✅ `INTERFACE_FROZEN` marker'ları; Repo Lint gate yeşil |
+| MR-3 | **ZK proof chain:** VerifyMerkle 64-depth STARK proof mandatory. | `src/domain/storage_deal.rs`, `src/storage/provider.rs` | ✅ V37/V38 entegre; `test_phase11_2_answer_challenge_with_zk_proof_happy_path` |
+| MR-4 | **Claim-hygiene:** zero open rows in audit matrix. | `docs/ARENA3_SECURITY_VERIFICATION_AUDIT_2026-07-20.md` | ✅ 164 bulgu → 105 kapatıldı |
+| MR-5 | **Coverage:** ratchet gate yeşil. | `Coverage (nextest + llvm-cov, ratchet)` | ✅ CI yeşil |
+| MR-6 | **Genesis readiness:** ceremony inputs + fail-closed guards. | `docs/operations/`, `docs/MAINNET_GENESIS_CEREMONY.md` | 🟡 Tooling hazır; ceremony günü |
+| MR-7 | **Supply chain:** deny, SBOM, secret scan, docker security. | CI gates | ✅ Tümü yeşil |
+| MR-8 | **External audit:** ≥1 independent audit report. | `docs/audit_prep/` | 🟡 Audit prep paketi hazır; external audit owner kararı |
+| MR-9 | **Operational smoke:** runbook rehearsal + backup/restore drill. | `docs/operations/PRODUCTION_RUNBOOK.md` | 🟡 Docker smoke ✅; ceremony rehearsal devam ediyor |
+| MR-10 | **Announcement discipline:** MR-1..9 all ✅ + owner sign-off. | Bu tablo | 🟢 Kural aktif |
+
+### Phase 11.20 operasyonel kanıtları
+
+| ADIM | Dosya | Durum |
+|---|---|---|
+| A | `docs/audit_prep/CI_STABILITY_WINDOW.md` | ✅ Oluşturuldu; günlük kayıt başlatıldı |
+| B | `docs/operations/HSM_CEREMONY_REHEARSAL.md` | ✅ Oluşturuldu; mock geçmez kanıtı |
+| C | `docs/MAINNET_READINESS.md` (bu dosya) | ✅ 2026-07-21 snapshot eklendi |
+
+### Açık PR'lar (2026-07-21 itibarıyla)
+
+| PR | Durum | Açıklama |
+|---|---|---|
+| #104 | CLOSED | Stale; kod zaten main'de |
+| #98–#92 | CLOSED | ARENA2 branch'leri; kod zaten main'de |
+| #82 | CLOSED | bincode 3.0; mainnet sonrası ertelendi |
+| **Açık PR: 0** | | |
+
 
 **Hazırlayan:** ARENA1  
 **Tarih:** 2026-07-15 00:20 UTC+3  
