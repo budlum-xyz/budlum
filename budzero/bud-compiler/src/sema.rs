@@ -414,13 +414,43 @@ impl SemanticAnalyzer {
                     Type::Unknown
                 }
             }
-            Expr::Binary(left, _, right) => {
+            Expr::Binary(left, op, right) => {
                 let l_ty = self.analyze_expr(left, env, errors);
                 let r_ty = self.analyze_expr(right, env, errors);
                 if l_ty != r_ty && l_ty != Type::Unknown && r_ty != Type::Unknown {
                     errors.push(CompileError::SemanticError(
                         "Type mismatch in binary expression".to_string(),
                     ));
+                }
+                // Reject operators that are meaningless on the operand
+                // types. A struct value is a heap pointer and `void` is
+                // not a value, so arithmetic (+ - * /) and ordering
+                // (< > <= >=) over them would make the VM compute over
+                // raw pointer words — silent nonsense that previously
+                // type-checked. Equality (== !=) on structs stays
+                // allowed (pointer equality is meaningful). Booleans are
+                // permitted in arithmetic because BudL exposes no
+                // logical/bitwise operators, so 0/1 arithmetic is the
+                // sanctioned way to combine flags.
+                if matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Lt
+                        | BinOp::Gt
+                        | BinOp::Lte
+                        | BinOp::Gte
+                ) {
+                    for ty in [&l_ty, &r_ty] {
+                        if matches!(ty, Type::Struct(_) | Type::Void) && *ty != Type::Unknown {
+                            errors.push(CompileError::SemanticError(format!(
+                                "Operator {:?} cannot be applied to {:?} (struct/void operands are not numeric)",
+                                op, ty
+                            )));
+                        }
+                    }
                 }
                 l_ty // All binary ops return same type (or u64 for comparisons, which is currently our only type)
             }

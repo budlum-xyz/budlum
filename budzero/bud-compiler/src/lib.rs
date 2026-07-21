@@ -803,4 +803,101 @@ mod tests {
             res.err()
         );
     }
+
+    // === OPERATOR TYPE HARDENING ===============================================
+
+    /// Arithmetic on struct values (heap pointers) is rejected — adding two
+    /// pointers is meaningless and previously type-checked silently (the VM
+    /// would compute over raw pointer words).
+    #[test]
+    fn test_struct_arithmetic_rejected() {
+        let source = r#"
+            contract StructArith {
+                struct Point {
+                    x: u64,
+                    y: u64,
+                }
+
+                pub fn main() {
+                    let p = Point { x: 1, y: 2 };
+                    let q = Point { x: 3, y: 4 };
+                    let bad = p + q;
+                    emit Result(p.x);
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(res.is_err(), "struct arithmetic must be rejected");
+        match res.unwrap_err() {
+            CompileError::SemanticError(msg) => {
+                assert!(
+                    msg.contains("cannot be applied"),
+                    "expected operator-type error, got: {msg}"
+                );
+            }
+            other => panic!("expected SemanticError, got: {other:?}"),
+        }
+    }
+
+    /// Ordering comparisons on struct values (heap pointers) are rejected.
+    #[test]
+    fn test_struct_ordering_rejected() {
+        let source = r#"
+            contract StructOrder {
+                struct Point {
+                    x: u64,
+                    y: u64,
+                }
+
+                pub fn main() {
+                    let p = Point { x: 1, y: 2 };
+                    let q = Point { x: 3, y: 4 };
+                    let bad = p < q;
+                    emit Result(p.x);
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(res.is_err(), "struct ordering must be rejected");
+        match res.unwrap_err() {
+            CompileError::SemanticError(msg) => {
+                assert!(
+                    msg.contains("cannot be applied"),
+                    "expected operator-type error, got: {msg}"
+                );
+            }
+            other => panic!("expected SemanticError, got: {other:?}"),
+        }
+    }
+
+    /// Equality on struct values stays allowed (comparing two pointers for
+    /// equality is meaningful) — the hardening rejects only arithmetic and
+    /// ordering on struct/void operands.
+    #[test]
+    fn test_struct_equality_still_allowed() {
+        let source = r#"
+            contract StructEq {
+                struct Point {
+                    x: u64,
+                    y: u64,
+                }
+
+                pub fn main() {
+                    let p = Point { x: 1, y: 2 };
+                    let q = Point { x: 1, y: 2 };
+                    let same = p == q;
+                    emit Result(same);
+                }
+            }
+        "#;
+
+        let res = compile(source, IsaProfile::Production);
+        assert!(
+            res.is_ok(),
+            "struct equality should still compile: {:?}",
+            res.err()
+        );
+    }
 }
