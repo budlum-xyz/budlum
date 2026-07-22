@@ -22,9 +22,9 @@ self_test() {
   for name in "${required_tests[@]}"; do
     printf 'test %s ... ok\n' "$name" >> "$tmp"
   done
-  "$0" "$tmp" >/dev/null
+  bash "$0" "$tmp" >/dev/null
   grep -v "${required_tests[0]}" "$tmp" > "$tmp.bad" || true
-  if "$0" "$tmp.bad" >/dev/null 2>&1; then
+  if bash "$0" "$tmp.bad" >/dev/null 2>&1; then
     fail "self-test expected missing test to fail"
   fi
   echo "Governance invariant gate self-test OK"

@@ -110,9 +110,9 @@ EOF_REVIEW
     cp "$tmp/good/$review" "$tmp/bad/$review"
   done
 
-  BUDLUM_SPEC_ROOT="$tmp/good" "$0" >/dev/null
+  BUDLUM_SPEC_ROOT="$tmp/good" bash "$0" >/dev/null
   perl -0pi -e 's/INTERFACE_FROZEN:\*\* true/INTERFACE_FROZEN:** false/' "$tmp/bad/docs/GENESIS_REWARD_POOL_SPEC.md"
-  if BUDLUM_SPEC_ROOT="$tmp/bad" "$0" >/dev/null 2>&1; then
+  if BUDLUM_SPEC_ROOT="$tmp/bad" bash "$0" >/dev/null 2>&1; then
     fail "self-test expected bad fixture to fail"
   fi
   echo "Spec coverage self-test OK"
