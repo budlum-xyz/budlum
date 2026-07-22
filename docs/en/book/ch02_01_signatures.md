@@ -26,7 +26,7 @@ Verification checks that a signature was produced by the private key correspondi
 
 Budlum exposes public keys as hex strings because they are easy to serialize, log, store, and pass through JSON-RPC.
 
-## 3. Hardening Phase 2: Additional Cryptographic Schemes
+## 3. Hardening Task 2: Additional Cryptographic Schemes
 
 ### BLS Signatures
 

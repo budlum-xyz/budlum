@@ -84,7 +84,7 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
         if step.instruction.opcode == bud_isa::Opcode::Halt {
             continue;
         }
-        // ARENA2 Phase 4: Merkle expansion rows are synthetic — no register
+        // ARENA2 Task 4: Merkle expansion rows are synthetic — no register
         // bus traffic (they reuse Opcode::VerifyMerkle with zeroed operands).
         if step.merkle_is_expand {
             continue;
@@ -220,7 +220,7 @@ fn trace_matrix(
         values[row_start + COL_PC] = Goldilocks::new(step.pc as u64);
         values[row_start + COL_OPCODE] = Goldilocks::new(op as u64);
 
-        // Phase 0.31 (security audit Z-A): first-row initial-state binding
+        // Task 0.31 (security audit Z-A): first-row initial-state binding
         // and trace-length counter (only meaningful on the first real
         // row, but we update it on every real row so the AIR can check
         // it on the last row as well).
@@ -297,7 +297,7 @@ fn trace_matrix(
 
         // Soundness & public input columns
         values[row_start + COL_GAS_USED] = Goldilocks::new(running_gas);
-        // ARENA2 Phase 4: expansion rows reuse Opcode::VerifyMerkle but must
+        // ARENA2 Task 4: expansion rows reuse Opcode::VerifyMerkle but must
         // not re-charge gas (matches BudAir gas_cost = is_verify_merkle *
         // (1 - is_expand) * 10). VM only charges once for the original step.
         if !step.merkle_is_expand {
@@ -537,7 +537,7 @@ fn trace_matrix(
             }
         }
 
-        // Phase 0.31 (security audit Z-A): trace-length counter and
+        // Task 0.31 (security audit Z-A): trace-length counter and
         // (on the last real row) the final-state-root, event-digest
         // and exit-code binding. The counter is updated on every
         // real row so the AIR can assert `COL_TRACE_LEN_CTR == n_cpu`
@@ -559,7 +559,7 @@ fn trace_matrix(
             values[row_start + COL_EXIT_CODE] = Goldilocks::new(public_inputs.exit_code);
         }
 
-        // Phase 0.312 (security audit Z-B): Merkle expansion rows. The
+        // Task 0.312 (security audit Z-B): Merkle expansion rows. The
         // trace's CPU step is the original VerifyMerkle step on row
         // `i` if `step.merkle_is_expand` is true *or* if it carries
         // `merkle_key` (the original step's `merkle_key` patch
@@ -587,7 +587,7 @@ fn trace_matrix(
             values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
             values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
-            // Phase 0.312 Commit 3: only the *original* step is the
+            // Task 0.312 Commit 3: only the *original* step is the
             // final row of the path; expansion rows are intermediates.
             values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(0);
 
@@ -658,12 +658,12 @@ fn trace_matrix(
             // the expansion row 0 will write the real bit from
             // `(key >> 0) & 1`. They should match.
             values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(key & 1);
-            // Phase 0.312 Commit 3: this is the "final" row of the
+            // Task 0.312 Commit 3: this is the "final" row of the
             // VerifyMerkle path — the AIR uses the final_flag
             // (1 only here) to apply the final root check on the
             // *64th* expansion row's `merkle_current`.
             values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(1);
-            // Phase 0.36 / Z-B 3.5: inverse-witness for final root equality check.
+            // Task 0.36 / Z-B 3.5: inverse-witness for final root equality check.
             // rd_val_new is constrained to equal (final == root) as a field boolean.
             let root = step.src1_val;
             let diff = final_merkle.wrapping_sub(root);
@@ -691,7 +691,7 @@ fn trace_matrix(
             values[row_start + COL_NEXT_PC] = Goldilocks::new(last_pc);
             values[row_start + COL_STACK_PTR] =
                 Goldilocks::new(trace[n_cpu - 1].stack_pointer as u64);
-            // Phase 0.358: carry event_digest (and other accumulators) into
+            // Task 0.358: carry event_digest (and other accumulators) into
             // padding so the active→padding transition does not zero them.
             let last_start = (n_cpu - 1) * TRACE_WIDTH;
             for j in 0..8 {
@@ -835,7 +835,7 @@ fn aux_trace_generator(
             let is_syscall = row[COL_IS_SYSCALL];
             let is_verify_merkle = row[COL_IS_VERIFY_MERKLE];
 
-            // ARENA2 Phase 4: expansion rows keep is_verify_merkle=1 but must not
+            // ARENA2 Task 4: expansion rows keep is_verify_merkle=1 but must not
             // contribute to the register bus (operands are zeroed synthetics).
             let is_expand_aux = row[COL_VM_MERKLE_IS_EXPAND];
             let is_real_op = is_add
@@ -1015,7 +1015,7 @@ fn aux_trace_generator(
             let diff_cpu_prog = gamma - term_cpu_prog;
             let diff_pre_prog = gamma - term_pre_prog;
 
-            // ARENA2 Phase 4: expansion rows reuse opcode 0x1E at the same PC
+            // ARENA2 Task 4: expansion rows reuse opcode 0x1E at the same PC
             // but are NOT program fetches — counting them unbalances LogUp
             // (trace_len >> program.len() for VerifyMerkle paths).
             let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND];
@@ -1325,7 +1325,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.358: Log updates event_digest; public inputs must carry limb0=sum.
+    /// Task 0.358: Log updates event_digest; public inputs must carry limb0=sum.
     #[test]
     fn proves_log_event_digest() {
         let program = vec![
@@ -1742,31 +1742,31 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
-    // --- Phase 0.30 (security audit Z-B) — Phase 0.31 partial fix ---
+    // --- Task 0.30 (security audit Z-B) — Task 0.31 partial fix ---
     //
     // `VerifyMerkle` opcode'unun (0x1E) ZK soundness'ı iki katmandan oluşur:
     //
-    //   (a) **Selector binding (Phase 0.31 partial fix).** The prover can no
+    //   (a) **Selector binding (Task 0.31 partial fix).** The prover can no
     //       longer set `is_verify_merkle = 0` on a row where
     //       `COL_OPCODE = 0x1E` — the AIR forces
     //       `is_verify_merkle * (opcode - 0x1E) = 0`. This closes the
     //       trivial "set the selector to 0 and pick any rd_val_new" attack.
     //
-    //   (b) **Path verification (still TODO, Phase 0.312).** The
+    //   (b) **Path verification (still TODO, Task 0.312).** The
     //       `rd_val_new` for a VerifyMerkle row is currently constrained
     //       only to be 0 or 1. A malicious prover who knows the path
     //       can still claim "valid" for a fake root/leaf because the
     //       AIR does not recompute the Poseidon path. Closing this
     //       requires moving key + 64 siblings into the trace as
     //       witness columns and adding a 64-round Poseidon chain
-    //       constraint. That work is tracked in `PHASE0.30.5-PLAN.md` and
+    //       constraint. That work is tracked in `TASK0.30.5-PLAN.md` and
     //       is too large for a single sprint; the Z-B deprecation
-    //       therefore remains partially in effect until Phase 0.312.
+    //       therefore remains partially in effect until Task 0.312.
     //
     // The `verify_merkle_opcode_is_deprecated_for_zk_proofs` test below
     // pins the 0x1E encoding; a second test,
     // `rejects_verify_merkle_with_zero_selector`, validates the partial
-    // Phase 0.31 fix.
+    // Task 0.31 fix.
 
     #[test]
     fn verify_merkle_opcode_is_deprecated_for_zk_proofs() {
@@ -1784,7 +1784,7 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
-    /// Phase 0.31 (security audit Z-B): partial-fix test for the
+    /// Task 0.31 (security audit Z-B): partial-fix test for the
     /// selector binding. Take a valid Add+Halt program, mutate the
     /// trace so the *last* real row's `is_verify_merkle` column is
     /// zeroed out while `COL_OPCODE` is left at 0x00 (Halt) — that
@@ -1842,8 +1842,8 @@ mod tests {
         };
 
         // Build the matrix, then zero out the VerifyMerkle row's
-        // `is_verify_merkle` column. With the old (Phase 0.30) AIR, this
-        // would be a valid trace. With the Phase 0.31 fix, the
+        // `is_verify_merkle` column. With the old (Task 0.30) AIR, this
+        // would be a valid trace. With the Task 0.31 fix, the
         // constraint `is_verify_merkle * (opcode - 0x1E) = 0` is
         // violated because COL_OPCODE on that row IS 0x1E.
         let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
@@ -1907,7 +1907,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.312 (security audit Z-B): negative test for the Merkle
+    /// Task 0.312 (security audit Z-B): negative test for the Merkle
     /// expansion row transition. We take a valid VerifyMerkle
     /// trace (1 original + 64 expansion + 1 Halt = 66 rows) and
     /// tamper with one expansion row's `merkle_round` column so
@@ -2006,19 +2006,19 @@ mod tests {
         );
     }
 
-    /// Phase 0.312 (security audit Z-B), Commit 3: positive test for
+    /// Task 0.312 (security audit Z-B), Commit 3: positive test for
     /// the Poseidon single-round + final root check. We build a
     /// program that runs VerifyMerkle on a *real* 64-depth path
     /// (constructed by walking the path in software) and assert
     /// the proof verifies end-to-end.
     ///
     /// Z-B Commit 3.5 target: valid 64-depth path. Partial fixes landed in
-    /// Phase 0.36 (pre-round currents, single-round hash align, original-only
+    /// Task 0.36 (pre-round currents, single-round hash align, original-only
     /// root check, expand gas). Still ignored until full prove is green.
     /// ARENA2 diagnostic: check expansion Poseidon chain + leaf bind on matrix
     /// without running the full STARK (isolates witness vs AIR constraint bugs).
     #[test]
-    fn phase4_diagnose_verify_merkle_matrix_chain() {
+    fn task4_diagnose_verify_merkle_matrix_chain() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
             inst(Opcode::Halt, 0, 0, 0, 0),
@@ -2132,7 +2132,7 @@ mod tests {
         println!("matrix chain OK for 64-depth path (n_rows={n_rows})");
     }
 
-    /// Phase 4 Q15 depth_1_test — 1 meaningful sibling, but VM always does 64 rounds (66 rows total)
+    /// Task 4 Q15 depth_1_test — 1 meaningful sibling, but VM always does 64 rounds (66 rows total)
     /// This isolates whether InvalidProof is due to row count (64 vs small) — we still do 64 rounds,
     /// but 63 siblings are zero, so Poseidon chain is simple.
     #[test]
@@ -2196,7 +2196,7 @@ mod tests {
         assert!(res.is_ok(), "1-depth should succeed: {:?}", res);
     }
 
-    /// Phase 4 Q15 depth_2_test — 2 meaningful siblings, rest zero, still 66 rows
+    /// Task 4 Q15 depth_2_test — 2 meaningful siblings, rest zero, still 66 rows
     #[test]
     fn proves_verify_merkle_valid_2_depth() {
         let program = vec![
@@ -2330,7 +2330,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.312 (security audit Z-B), Commit 3: negative test for
+    /// Task 0.312 (security audit Z-B), Commit 3: negative test for
     /// the final root check. Build a valid path, then tamper the
     /// 64th expansion row's merkle_current to a value that
     /// doesn't match the (real) root. The inverse-witness check
@@ -2445,7 +2445,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.312 (security audit Z-B), Commit 3: negative test for
+    /// Task 0.312 (security audit Z-B), Commit 3: negative test for
     /// the Poseidon single-round transition. Build a valid path,
     /// then tamper one expansion row's Poseidon x^2 witness. The
     /// S-box identity check should reject.
@@ -2551,7 +2551,7 @@ mod tests {
 
     // --- Soundness negative tests (tampered trace rejection) ---
 
-    /// Phase 0.30 (security audit Z-C): negative test for the termination
+    /// Task 0.30 (security audit Z-C): negative test for the termination
     /// constraint. The last "real" (cpu_active=1) row in a trace must be
     /// a Halt. We take a valid Add + Halt program, then surgically
     /// rewrite the *last* step's `COL_OPCODE` and `COL_IS_HALT` columns
@@ -2574,7 +2574,7 @@ mod tests {
             Opcode::Halt
         ));
 
-        // Phase 0.31 (security audit Z-A): build `pi` first so we can
+        // Task 0.31 (security audit Z-A): build `pi` first so we can
         // pass it into `trace_matrix` for the public-input binding
         // columns (final_state_root, initial_state_root, gas_limit,
         // trace_len).
@@ -2652,7 +2652,7 @@ mod tests {
         );
     }
 
-    // --- Phase 0.31 (security audit Z-A): public-input binding tests ---
+    // --- Task 0.31 (security audit Z-A): public-input binding tests ---
 
     /// Helper: prove a trivial Add+Halt program and return the envelope + the
     /// public inputs. The caller mutates `pi` between prove/verify to assert
@@ -2831,7 +2831,7 @@ mod tests {
         let _receipt = vm.run_receipt(&program);
         assert!(_receipt.success);
 
-        // Phase 0.31 (security audit Z-A): build `pi` first so we can
+        // Task 0.31 (security audit Z-A): build `pi` first so we can
         // pass it into `trace_matrix` for the public-input binding
         // columns (final_state_root, initial_state_root, gas_limit,
         // trace_len).

@@ -1,15 +1,15 @@
-# Network Chaos — Phase 11.12 Extension
+# Network Chaos — Task 11.12 Extension
 
-**Status:** ADIM 5 — chaos scenario artifacts.  
-**Purpose:** partition, byzantine, eclipse, sybil smoke/chaos kanıtları.  
-**Gate:** `scripts/check-network-hardening-gate.sh` — yeni chaos test isimleri.  
+**Status:** ADIM 5 — chaos scenario artifacts.
+**Purpose:** partition, byzantine, eclipse, sybil smoke/chaos kanıtları.
+**Gate:** `scripts/check-network-hardening-gate.sh` — yeni chaos test isimleri.
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
 
 ## 1. Giriş
 
-Network hardening gate (Phase 11.12) unit/invariant testlerini kapsar. Bu belge,
+Network hardening gate (Task 11.12) unit/invariant testlerini kapsar. Bu belge,
 **chaos scenario** testlerini tanımlar: multi-node partition, byzantine, eclipse,
 sybil, ban TTL ve disconnect/reconnect long-run soak.
 
@@ -17,12 +17,12 @@ sybil, ban TTL ve disconnect/reconnect long-run soak.
 
 | Senaryo | Açıklama | Test adı |
 |---|---|---|
-| partition | 4-node devnet'te network partition; iki bölünmüş grup ayrı block üretir | `phase11_12_chaos_network_partition_isolates_groups` |
-| byzantine | 1/3 node sahte blok gönderir; diğerleri reddeder | `phase11_12_chaos_byzantine_block_rejected` |
-| eclipse | 1 node yalnızca 1 peer'e bağlanır; diğerlerinden izole | `phase11_12_chaos_eclipse_single_peer_isolation` |
-| sybil | 50 sahte node aynı /24 subnet'ten bağlanır; admission reddedilir | `phase11_12_chaos_sybil_subnet_bound_rejects_excess` |
-| ban-ttl | Banlanan peer timeout sonra yeniden kabul edilir | `phase11_12_chaos_ban_ttl_allows_reconnect_after_expiry` |
-| reputation-fuzz | 1000 rastgele mesajla peer score decay | `phase11_12_chaos_reputation_fuzz_decay` |
+| partition | 4-node devnet'te network partition; iki bölünmüş grup ayrı block üretir | `task11_12_chaos_network_partition_isolates_groups` |
+| byzantine | 1/3 node sahte blok gönderir; diğerleri reddeder | `task11_12_chaos_byzantine_block_rejected` |
+| eclipse | 1 node yalnızca 1 peer'e bağlanır; diğerlerinden izole | `task11_12_chaos_eclipse_single_peer_isolation` |
+| sybil | 50 sahte node aynı /24 subnet'ten bağlanır; admission reddedilir | `task11_12_chaos_sybil_subnet_bound_rejects_excess` |
+| ban-ttl | Banlanan peer timeout sonra yeniden kabul edilir | `task11_12_chaos_ban_ttl_allows_reconnect_after_expiry` |
+| reputation-fuzz | 1000 rastgele mesajla peer score decay | `task11_12_chaos_reputation_fuzz_decay` |
 
 ## 3. Devnet chaos smoke
 
@@ -51,4 +51,4 @@ check_contains "$root/docs/operations/NETWORK_CHAOS.md" "chaos scenario"
 
 ---
 
-*Bu dosya, `Network Hardening (Phase 11.12)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Network Hardening (Task 11.12)` CI gate'i tarafından doğrulanır.*

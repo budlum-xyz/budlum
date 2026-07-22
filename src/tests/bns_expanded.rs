@@ -1,4 +1,4 @@
-//! Expanded BNS Registry tests for Phase 9 coverage (ARENA2).
+//! Expanded BNS Registry tests for Task 9 coverage (ARENA2).
 
 use crate::bns::types::{BnsError, BnsResolved};
 use crate::bns::BnsRegistry;
@@ -51,7 +51,7 @@ fn test_bns_renewal() {
         reg.renew("test.bud", &alice, 400, 100),
         Err(BnsError::Expired)
     ));
-    // F14 (Phase 10.5): grace-period — expire (350) + GRACE_PERIOD (3000)
+    // F14 (Task 10.5): grace-period — expire (350) + GRACE_PERIOD (3000)
     // içinde 3. parti squat edemez. epoch 400 < 3350 → bob RED.
     assert!(matches!(
         reg.register("test.bud".to_string(), bob, 400, 100),

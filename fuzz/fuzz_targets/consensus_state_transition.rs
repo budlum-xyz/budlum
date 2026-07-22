@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Phase 11.2 Görev 3 — consensus state transition / reorg safety.
+//! Task 11.2 Görev 3 — consensus state transition / reorg safety.
 //!
 //! Oracle: panic/abort freedom. Random block production sequences and
 //! candidate reorg chains must not crash the L1 state machine. Deep reorgs

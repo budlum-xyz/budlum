@@ -4,9 +4,9 @@ use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 
 /// Global settlement block header — anchors all domain roots, bridge state,
-/// and (as of Phase 2 / B.U.D. Faz 4) the aggregated storage proof root.
+/// and (as of Task 2 / B.U.D. Görev 4) the aggregated storage proof root.
 ///
-/// **B.U.D. Faz 4 (vision §8.4):** `storage_root` is `Some(hash)` when the
+/// **B.U.D. Görev 4 (vision §8.4):** `storage_root` is `Some(hash)` when the
 /// block contains at least one verified `StorageProofResponse` from the
 /// B.U.D. storage domain operators; `None` when no storage proofs were
 /// submitted in this block. This field is committed to the same hash chain
@@ -33,7 +33,7 @@ pub struct GlobalBlockHeader {
     pub proposer: Option<Address>,
     pub settlement_finality_root: Hash32,
 
-    /// B.U.D. Faz 4 — Aggregated Merkle root of all verified
+    /// B.U.D. Görev 4 — Aggregated Merkle root of all verified
     /// `StorageProofResponse`s included in this block.
     ///
     /// `None`: no storage proofs were submitted or verified.
@@ -71,7 +71,7 @@ impl GlobalBlockHeader {
             .map(|address| address.as_bytes().to_vec())
             .unwrap_or_default();
 
-        // B.U.D. Faz 4: storage_root is included in the hash chain.
+        // B.U.D. Görev 4: storage_root is included in the hash chain.
         // When None, we use 32 zero bytes — this is safe because
         // the domain-separation tag (V2) prevents collision with
         // V1 headers that never had this field.

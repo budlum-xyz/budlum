@@ -116,7 +116,7 @@ mod tokenomics_proptest {
 
         /// INVARIANT 4: Vesting schedule tutarlılığı.
         ///
-        /// Vesting hiçbir zaman total'dan fazla unlock etmemeli.
+        /// Vesting hiçbir zaman total'dan görevla unlock etmemeli.
         #[test]
         fn vesting_never_exceeds_total(
             total in 1..10_000_000u64,

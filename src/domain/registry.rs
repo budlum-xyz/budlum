@@ -55,7 +55,7 @@ impl ConsensusDomainRegistry {
             ));
         }
 
-        // Phase 0.38, Faz 1 (B.U.D. Storage ConsensusDomain, vision §8.1):
+        // Task 0.38, Görev 1 (B.U.D. Storage ConsensusDomain, vision §8.1):
         // a `StorageAttestation` domain MUST use the dedicated
         // `STORAGE_ATTESTATION_ADAPTER` finality adapter, and the
         // parameters must validate. This is the same fail-fast-at-the-edge
@@ -106,7 +106,7 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
-    /// Phase 11.8 lifecycle guard: use this for governance/operator-driven
+    /// Task 11.8 lifecycle guard: use this for governance/operator-driven
     /// transitions. `set_status` remains for migration/tests, while this helper
     /// prevents accidental Active→Retired jumps and makes Retired terminal.
     pub fn transition_status_checked(
@@ -190,7 +190,7 @@ pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
             &tx_scheme,
         ])
     } else if let crate::domain::types::ConsensusKind::StorageAttestation(storage) = &domain.kind {
-        // Phase 0.38, Faz 1: B.U.D. storage domains get a V3 leaf that mixes the
+        // Task 0.38, Görev 1: B.U.D. storage domains get a V3 leaf that mixes the
         // storage parameters into the leaf. Without this, two storage domains
         // with different chunk_size / challenge_interval would hash to the
         // same leaf and the registry root would no longer be a sound
@@ -215,7 +215,7 @@ pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
             &tx_scheme,
         ])
     } else {
-        // Preserve the exact V1 leaf for every pre-Phase 0.37 domain.
+        // Preserve the exact V1 leaf for every pre-Task 0.37 domain.
         hash_fields_bytes(&[
             b"BDLM_DOMAIN_REGISTRY_LEAF_V1",
             &domain.id.to_le_bytes(),
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_domain_lifecycle_requires_freeze_before_retire() {
+    fn task11_8_domain_lifecycle_requires_freeze_before_retire() {
         let domain = default_domain(7, ConsensusKind::PoS, 1337, "pos", 0);
         let mut registry = ConsensusDomainRegistry::new();
         registry.register(domain).unwrap();
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_retired_domain_is_terminal() {
+    fn task11_8_retired_domain_is_terminal() {
         let domain = default_domain(8, ConsensusKind::Bft, 1337, "bft", 0);
         let mut registry = ConsensusDomainRegistry::new();
         registry.register(domain).unwrap();

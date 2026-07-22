@@ -13,7 +13,7 @@
 //!
 //! ## Transport
 //! The proof reaches core through the shared [`CrossDomainMessage`] primitive
-//! (not a bespoke bridge protocol). This is a *distinct* path from the Phase 0.04
+//! (not a bespoke bridge protocol). This is a *distinct* path from the Task 0.04
 //! relayer gate: a relayer *carries* messages, a prover *produces* proofs. The
 //! submission wraps the message together with the actual proof payload; the
 //! message's `payload_hash` binds to that payload.
@@ -66,7 +66,7 @@ impl ZkProofSubmission {
         public_inputs: &ExecutionPublicInputs,
         program: &[u64],
     ) -> Hash32 {
-        // SECURITY (Phase 0.32): serialize into a hash MUST NOT silently fall back
+        // SECURITY (Task 0.32): serialize into a hash MUST NOT silently fall back
         // to empty bytes — two different proofs whose serialization failed would
         // collide to the same hash, breaking the replay-protection guarantee this
         // function documents. bincode serialization of this plain data type is

@@ -1,8 +1,8 @@
 # ADR-009: MASAK / Uyum — PoA Domain'e İzole
 
-**Durum:** Kabul Edildi  
-**Tarih:** 2026-07-20  
-**Karar Verici:** Kullanıcı (onay) — Phase 11.6 karar turu q8
+**Durum:** Kabul Edildi
+**Tarih:** 2026-07-20
+**Karar Verici:** Kullanıcı (onay) — Task 11.6 karar turu q8
 
 ## Bağlam
 Türkiye finansal regülasyonu (MASAK AML), PoA domain banka pilotu için kritik. Soru: ağ geneli mi, PoA'ya izole mi? Ağ geneli compliance permissionless ilkesini bozar, sansür vektörü.
@@ -24,6 +24,6 @@ Türkiye finansal regülasyonu (MASAK AML), PoA domain banka pilotu için kritik
 Master-context (PoA izolasyonu, permissionless) ile tam uyumlu — MASAK PoA'da, permissionless'e sızma yok.
 
 ## İlgili
-- `src/registry/poa_compliance.rs`, `src/registry/poa_audit.rs` (implementasyon — Phase 11.18)
+- `src/registry/poa_compliance.rs`, `src/registry/poa_audit.rs` (implementasyon — Task 11.18)
 - ADR-004 (governance — PoA admin yetkisi)
 - PoA Isolation CI kapısı (CI Madde 9) — genişletilir

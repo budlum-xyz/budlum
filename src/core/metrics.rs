@@ -151,7 +151,7 @@ impl Metrics {
         let rpc_requests_total =
             IntCounter::new("budlum_rpc_requests_total", "Total RPC requests received")
                 .expect("metric");
-        // Phase 11.3 Task 7: Domain metrics.
+        // Task 11.3 Task 7: Domain metrics.
         let bridge_transfers_total = IntCounter::new(
             "budlum_bridge_transfers_total",
             "Total bridge transfers processed",

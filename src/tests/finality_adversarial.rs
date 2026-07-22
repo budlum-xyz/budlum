@@ -1,20 +1,20 @@
-//! Phase 0.36: Çok-node / adversarial finality testleri.
+//! Task 0.36: Çok-node / adversarial finality testleri.
 //!
 //! Bu paket, gerçek libp2p ağı kurmadan, `FinalityAggregator` + `sign_bls` +
-//! `FinalityCert::verify` fonksiyonlarını doğrudan çağırarak birden fazla
+//! `FinalityCert::verify` fonksiyonlarını doğrudan çağırarak birden görevla
 //! "sanal" validator kimliğini (her biri kendi GERÇEK BLS anahtar çiftiyle)
 //! simüle eder. `src/chain/finality.rs` içindeki mevcut test-harness deseninin
 //! (`make_test_key`, `make_snapshot_with_keys`, gerçek `sign_bls` imzaları)
 //! doğal bir genişlemesidir — mock/placeholder imza KULLANILMAZ.
 //!
-//! ## Phase 0.38 sonrası davranış (Phase 0.36 bulguları düzeltildi)
+//! ## Task 0.38 sonrası davranış (Task 0.36 bulguları düzeltildi)
 //!
 //! * **1.1 Equivocation:** Aynı voter'ın FARKLI bir hash'e verdiği oy hâlâ
-//!   sayıma girmez, AMA artık (Phase 0.38 Fix 1) bir `DoubleSign` slashing-evidence
+//!   sayıma girmez, AMA artık (Task 0.38 Fix 1) bir `DoubleSign` slashing-evidence
 //!   ÜRETİLİR ve mevcut `submit_registry_slashing_report` yolundan geçirilerek
 //!   gerçek bir slash'e yol açar (bkz. `equivocation_generates_slashing_evidence`).
 //! * **1.3 Geçersiz imza:** `add_prevote`/`add_precommit` artık bireysel BLS
-//!   imzasını INGEST'te doğrular (Phase 0.38 Fix 2, Seçenek A). Geçersiz imza
+//!   imzasını INGEST'te doğrular (Task 0.38 Fix 2, Seçenek A). Geçersiz imza
 //!   aggregat'a HİÇ girmez; dürüst alt-küme her zaman finalize edebilir — tek
 //!   kötü aktör round'u durduramaz (bkz.
 //!   `finality_recovers_honest_subset_after_invalid_signature`).
@@ -122,7 +122,7 @@ fn drive_prevote_quorum(
 
 /// Bir voter aynı yükseklik/epoch için iki FARKLI checkpoint hash'e prevote
 /// imzalıyor. Çelişkili oy sayıma GİRMEZ (aggregator tek-hash'e bağlı) AMA artık
-/// (Phase 0.38 Fix 1) bir equivocation slashing-evidence ÜRETİLİR — sessizce yutulmaz.
+/// (Task 0.38 Fix 1) bir equivocation slashing-evidence ÜRETİLİR — sessizce yutulmaz.
 /// Aynı hash'e tekrar oy ise "Duplicate" olur ve yeni evidence üretmez.
 #[test]
 fn finality_rejects_equivocating_voter() {
@@ -204,12 +204,12 @@ fn finality_stays_pending_below_quorum() {
 }
 
 // =============================================================================
-// 1.3 — Karışık geçersiz imza (Phase 0.38 Fix 2, Seçenek A: ingest-time doğrulama)
+// 1.3 — Karışık geçersiz imza (Task 0.38 Fix 2, Seçenek A: ingest-time doğrulama)
 // =============================================================================
 
-/// **Phase 0.36'ten BİLİNÇLİ davranış değişikliği** (regresyon DEĞİL):
+/// **Task 0.36'ten BİLİNÇLİ davranış değişikliği** (regresyon DEĞİL):
 /// Eski `finality_invalid_signature_poisons_aggregate` testi, tek geçersiz
-/// imzanın tüm agregasyonu düşürdüğünü (fail-closed) doğruluyordu. Phase 0.38 Fix 2
+/// imzanın tüm agregasyonu düşürdüğünü (fail-closed) doğruluyordu. Task 0.38 Fix 2
 /// (Seçenek A) ile geçersiz imza artık AGGREGAT'A HİÇ GİRMEZ — ingest'te
 /// reddedilir. Böylece dürüst alt-küme (3/4) yine de finalize edebilir ve tek
 /// kötü aktör round'u durduramaz (DoS önlendi).
@@ -288,7 +288,7 @@ fn finality_valid_quorum_produces_verifiable_cert() {
 // =============================================================================
 
 /// 4 validator, quorum 3 (2667). İki alt-grup 2-2 bölünür, her biri FARKLI bir
-/// checkpoint hash'e oy verir. Hiçbir taraf kendi başına quorum'a ulaşamaz;
+/// checkpoint hash'e oy verir. Hiçbir taraf kendi başına quorum'a ulgörevz;
 /// dolayısıyla aynı yükseklikte iki çelişkili cert (split-brain) OLUŞAMAZ.
 #[test]
 fn finality_prevents_split_brain_on_partition() {
@@ -408,7 +408,7 @@ fn finality_honest_quorum_survives_byzantine_noise() {
         "dürüst 5/7 quorum'u karşılamalı"
     );
 
-    // Byzantine gürültü precommit fazında da tekrar denesin -> yine reddedilir.
+    // Byzantine gürültü precommit görevında da tekrar denesin -> yine reddedilir.
     for i in 5..7 {
         let noise = Precommit {
             epoch,
@@ -445,11 +445,11 @@ fn finality_honest_quorum_survives_byzantine_noise() {
 }
 
 // =============================================================================
-// Phase 0.38 — Uçtan uca: equivocation -> evidence -> slash (Blockchain akışı)
+// Task 0.38 — Uçtan uca: equivocation -> evidence -> slash (Blockchain akışı)
 // =============================================================================
 
 /// Bir Blockchain kurar, `checkpoint_height` gerçek bloğa kadar üretir,
-/// prevote fazını başlatır. `voter` gerçek BLS anahtarıyla önce doğru hash'e,
+/// prevote görevını başlatır. `voter` gerçek BLS anahtarıyla önce doğru hash'e,
 /// sonra çelişkili bir hash'e imza atar. `Blockchain::handle_prevote`, tespit
 /// edilen equivocation evidence'ını mevcut `submit_registry_slashing_report`
 /// yolundan geçirir ve gerçek bir slash uygular.
@@ -503,7 +503,7 @@ fn equivocation_generates_slashing_evidence() {
     let (block, _) = bc.produce_block(honest).unwrap();
     assert_eq!(block.index, cp);
 
-    bc.start_prevote_phase(block.index, block.hash.clone());
+    bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc
         .finality_aggregator
         .as_ref()
@@ -554,7 +554,7 @@ fn equivocation_generates_slashing_evidence() {
 }
 
 // =============================================================================
-// Phase 0.40 Görev 1 — equivocation -> slash -> KALICILIK (snapshot round-trip)
+// Task 0.40 Görev 1 — equivocation -> slash -> KALICILIK (snapshot round-trip)
 // =============================================================================
 
 /// Equivocation üretilip slash uygulandıktan SONRA snapshot alınır
@@ -593,7 +593,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         let _ = bc.produce_block(honest).unwrap();
     }
     let (block, _) = bc.produce_block(honest).unwrap();
-    bc.start_prevote_phase(block.index, block.hash.clone());
+    bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     let mut pv1 = Prevote {
@@ -650,7 +650,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     assert_eq!(
         history_after.len(),
         1,
-        "restore sonrası kayıt kaybolmamalı (Phase 0.16 dersi)"
+        "restore sonrası kayıt kaybolmamalı (Task 0.16 dersi)"
     );
     assert_eq!(history_after[0].report.offender, equivocator);
     assert_eq!(history_after[0].penalty, rec_penalty);
@@ -662,7 +662,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
 }
 
 // =============================================================================
-// Phase 0.40 Görev 2 — tekrarlı geçersiz imza -> rate-limit tabanlı slash
+// Task 0.40 Görev 2 — tekrarlı geçersiz imza -> rate-limit tabanlı slash
 // =============================================================================
 
 /// Bir validator eşik (`max_invalid_votes_per_epoch`) kadar geçersiz imzalı oy
@@ -706,7 +706,7 @@ fn repeated_invalid_signatures_trigger_slash() {
         let _ = bc.produce_block(honest).unwrap();
     }
     let (block, _) = bc.produce_block(honest).unwrap();
-    bc.start_prevote_phase(block.index, block.hash.clone());
+    bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     // Eşik-1 geçersiz imza: henüz slash yok.
@@ -804,7 +804,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
         let _ = bc.produce_block(honest).unwrap();
     }
     let (block, _) = bc.produce_block(honest).unwrap();
-    bc.start_prevote_phase(block.index, block.hash.clone());
+    bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     // threshold-1 geçersiz imza: slash YOK.
@@ -832,7 +832,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
     );
 }
 
-/// Phase 0.38 Fix 2 uçtan uca: `Blockchain::handle_prevote` geçersiz BLS imzalı bir
+/// Task 0.38 Fix 2 uçtan uca: `Blockchain::handle_prevote` geçersiz BLS imzalı bir
 /// oyu ingest'te reddeder — aggregat'a hiç girmez, state değişmez.
 #[test]
 fn blockchain_rejects_invalid_vote_signature_at_ingest() {
@@ -857,7 +857,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
         let _ = bc.produce_block(honest).unwrap();
     }
     let (block, _) = bc.produce_block(honest).unwrap();
-    bc.start_prevote_phase(block.index, block.hash.clone());
+    bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     // Geçersiz imzalı oy -> ingest'te reddedilir.

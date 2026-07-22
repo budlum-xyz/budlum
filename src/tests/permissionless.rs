@@ -355,7 +355,7 @@ fn stake_registration_does_not_grant_poa_authority() {
     assert!(!poa.is_authorized(POA_DOMAIN, &staker));
 }
 
-// --- Phase 3 §3.5: Validator onboarding E2E (stake → active → produce) --------
+// --- Task 3 §3.5: Validator onboarding E2E (stake → active → produce) --------
 
 use crate::chain::blockchain::Blockchain;
 use crate::chain::genesis::GenesisConfig;
@@ -386,10 +386,10 @@ fn signed_stake_tx(
     tx
 }
 
-/// Phase 3 §3.5 acceptance: empty-ish chain → fund → stake tx → registry Active
+/// Task 3 §3.5 acceptance: empty-ish chain → fund → stake tx → registry Active
 /// → produce_block as that validator succeeds.
 #[test]
-fn phase3_validator_onboarding_e2e_stake_register_produce() {
+fn task3_validator_onboarding_e2e_stake_register_produce() {
     let consensus = Arc::new(PoWEngine::new(0));
     // Use devnet chain id for test speed (min_stake=1000), but exercise the
     // same stake→registry→produce path documented for mainnet onboarding.
@@ -450,9 +450,9 @@ fn phase3_validator_onboarding_e2e_stake_register_produce() {
     assert!(block2.index > block.index);
 }
 
-/// Phase 3 §3.5: mainnet economic floor (min_stake=1_000_000) still gates activity.
+/// Task 3 §3.5: mainnet economic floor (min_stake=1_000_000) still gates activity.
 #[test]
-fn phase3_mainnet_min_stake_floor_for_onboarding() {
+fn task3_mainnet_min_stake_floor_for_onboarding() {
     let genesis = GenesisConfig::for_network(Network::Mainnet);
     assert!(
         genesis.validators.is_empty(),
@@ -469,9 +469,9 @@ fn phase3_mainnet_min_stake_floor_for_onboarding() {
     assert_eq!(g1.chain_id, 1);
 }
 
-/// Phase 3 §3.5: below-floor stake does not grant active validator role.
+/// Task 3 §3.5: below-floor stake does not grant active validator role.
 #[test]
-fn phase3_onboarding_rejects_below_floor_as_active() {
+fn task3_onboarding_rejects_below_floor_as_active() {
     let consensus = Arc::new(PoWEngine::new(0));
     let mut genesis = GenesisConfig::for_network(Network::Devnet);
     genesis.validators.clear();
@@ -502,7 +502,7 @@ fn phase3_onboarding_rejects_below_floor_as_active() {
 }
 
 #[test]
-fn phase3_storage_operator_active_members() {
+fn task3_storage_operator_active_members() {
     let mut reg = PermissionlessRegistry::new();
     let op = addr(0x55);
     let floor = reg.params().min_stake;
@@ -514,7 +514,7 @@ fn phase3_storage_operator_active_members() {
 }
 
 #[test]
-fn phase3_validator_onboarding_e2e_multi_validator_parallel() {
+fn task3_validator_onboarding_e2e_multi_validator_parallel() {
     // Q9 add_more (10-question survey): additional E2E for parallel onboarding
     // Two validators stake at same epoch, both become active, both produce blocks
     let consensus = Arc::new(PoWEngine::new(0));

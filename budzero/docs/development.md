@@ -17,7 +17,7 @@ workspace root unless a command says otherwise.
 | --- | --- | --- |
 | Format check | `cargo fmt --all -- --check` | Required before opening a PR. |
 | Format files | `cargo fmt --all` | May touch many Rust files; review the diff. |
-| Minimum compile gate | `cargo check` | README Phase 0 health gate. |
+| Minimum compile gate | `cargo check` | README Task 0 health gate. |
 | Full unit test suite | `cargo test` | Runs all workspace tests. |
 | Prover-only tests | `cargo test -p bud-proof` | Fast feedback for AIR/prover work. |
 | Docs link check | `python3 scripts/check_docs_links.py` | Validates local Markdown links. |

@@ -5,10 +5,10 @@ Bu bölüm genel bir "sıfırdan ZKVM yazalım" metni değildir. BudZKVM reposun
 Bu bölümde üç şeyi birlikte tutacağız:
 
 1. Plonky3 0.5.2 tip sistemi ve konfigürasyon sınırları.
-2. İki fazlı trace yapısı: ana trace ve yardımcı trace.
+2. İki görevlı trace yapısı: ana trace ve yardımcı trace.
 3. Prover adapter, serde ve test stratejisi.
 
-## Neden Stabilizasyon Aşaması Var?
+## Neden Stabilizasyon Görevsı Var?
 
 Bir ZKVM'de VM'in çalışması tek başına yeterli değildir. VM doğru sonucu üretse bile prover şunları ayrıca kanıtlamalıdır:
 
@@ -19,7 +19,7 @@ Bir ZKVM'de VM'in çalışması tek başına yeterli değildir. VM doğru sonucu
 * Halt durumundan sonra trace yanlış şekilde devam etmiyor.
 * Kanıt byte dizisine çevrilip geri okunabiliyor.
 
-BudZKVM'de bu sorumlulukların büyük bölümü `bud-proof` crate'i içindedir. Stabilizasyon aşaması, bu crate'in Plonky3'ün güncel API'siyle konuşmasını ve ileride gerçek lookup/permutation kuralları eklendiğinde kırılmayacak bir iskelet kurmasını sağlar.
+BudZKVM'de bu sorumlulukların büyük bölümü `bud-proof` crate'i içindedir. Stabilizasyon görevsı, bu crate'in Plonky3'ün güncel API'siyle konuşmasını ve ileride gerçek lookup/permutation kuralları eklendiğinde kırılmayacak bir iskelet kurmasını sağlar.
 
 ## Dosya Haritası
 
@@ -36,7 +36,7 @@ Prover tarafını okurken şu dosyaları birlikte düşünmek gerekir:
 
 Bu ayrım önemlidir. `plonky3_air.rs` VM'in neyi kanıtladığını söyler. `bud_stark` altındaki dosyalar ise bu kuralların STARK kanıtına nasıl dönüştürüldüğünü yönetir.
 
-## Faz 1: Tip Sistemi ve Konfigürasyon
+## Görev 1: Tip Sistemi ve Konfigürasyon
 
 Plonky3 0.5.2 ile çalışırken en kritik konu, generic tiplerin tek bir yerde ve tutarlı biçimde tanımlanmasıdır. Eğer `Val<SC>`, `Challenge`, `Domain`, `Pcs` ve `Challenger` sınırları farklı dosyalarda farklı şekillerde kurulursa Rust derleyicisi çok uzun type inference hataları üretir.
 
@@ -47,7 +47,7 @@ BudZKVM'de bu yüzden `bud_stark/config.rs` merkezi dosya haline getirilir. Bura
 * PCS proof ve commitment tipleri ortak alias'larla taşınır.
 * Challenger ve domain tipleri prover ile verifier arasında birebir aynı kalır.
 
-Bu fazın çıktısı şudur: Prover ve verifier ayrı ayrı "ben hangi PCS'i kullanıyorum?" sorusuna cevap vermek zorunda kalmaz. İkisi de aynı `StarkGenericConfig` üzerinden konuşur.
+Bu görevın çıktısı şudur: Prover ve verifier ayrı ayrı "ben hangi PCS'i kullanıyorum?" sorusuna cevap vermek zorunda kalmaz. İkisi de aynı `StarkGenericConfig` üzerinden konuşur.
 
 ## Proof ve Serde Sınırları
 
@@ -61,9 +61,9 @@ BudZKVM'de çözüm, serde sınırlarını açık yazmaktır. Proof şu mantıkl
 
 Bu yaklaşım `postcard` desteğini getirir ve CLI/L1 entegrasyonu için gereken proof taşıma katmanını sadeleştirir. Proof formatının daha sonra kalıcı bir wire format haline gelmesi istenirse bu dosya doğal sınır noktasıdır.
 
-## Faz 2: Ana Trace ve Yardımcı Trace
+## Görev 2: Ana Trace ve Yardımcı Trace
 
-BudZKVM prover mimarisi iki fazlıdır:
+BudZKVM prover mimarisi iki görevlıdır:
 
 1. Main trace commit edilir.
 2. Transcript üzerinden challenge üretilir.
@@ -72,7 +72,7 @@ BudZKVM prover mimarisi iki fazlıdır:
 
 Bu yapı cross-table lookup ve permutation kuralları için gereklidir. Örneğin CPU tablosundaki bir register okuması, register event tablosundaki önceki yazma ile bağlanmak istediğinde sadece ana trace yeterli olmaz. Lookup accumulator değerleri challenge'a bağlı olarak auxiliary trace içinde taşınır.
 
-Güncel stabilizasyon aşamasında auxiliary trace, **LogUp (Fractional Sums)** mimarisine geçirilmiştir. Adapter tarafındaki `generate_aux_trace` fonksiyonu Fiat-Shamir randomness değerlerini ($\alpha, \beta, \gamma$) alır ve kesirli toplamları içeren **üç ana sütun** üretir:
+Güncel stabilizasyon görevsında auxiliary trace, **LogUp (Fractional Sums)** mimarisine geçirilmiştir. Adapter tarafındaki `generate_aux_trace` fonksiyonu Fiat-Shamir randomness değerlerini ($\alpha, \beta, \gamma$) alır ve kesirli toplamları içeren **üç ana sütun** üretir:
 
 * **Register Accumulator (S_REG):** Her CPU satırındaki `rs1`, `rs2` okumasını ve `rd` yazmasını paydadaki birer kesirli terim olarak eklerken, register event tablosundaki karşılıklarını çıkarır. `R0` donanımsal olarak sıfıra sabitlenmiştir; `dst_idx == 0` olan satırlarda `dst_val` trace'te `0` olarak zorlanır.
 * **Memory Accumulator (S_MEM):** CPU bellek erişimleri (`Load`, `Store`, `Push`, `Pop`, `Call`, `Ret`) ile hafıza tablosu arasındaki tutarlılığı sağlar. Buna ek olarak **storage işlemlerini de kapsar** (`SRead`, `SWrite`). Storage, `STORAGE_BASE = 2 << 60` adres ön eki ile memory adres alanına yerleştirilir — bu sayede ayrı bir LogUp tablosu gerekmez.
@@ -131,7 +131,7 @@ Doğrulama tarafında akış tersine döner:
 
 Bu adapter'ın amacı CLI, L1 entegrasyonu veya testlerin Plonky3 iç tiplerini bilmesini engellemektir.
 
-Auxiliary trace üretimi de adapter sınırında tutulur. `plonky3_prover.rs` önce main trace matrisini oluşturur, sonra aynı matristen register accumulator'ları hesaplayacak closure'ı prover'a verir. Böylece `bud_stark` çekirdeği sadece iki fazlı protokolü bilir; BudVM'e özgü register packet ayrıntıları adapter/AIR katmanında kalır.
+Auxiliary trace üretimi de adapter sınırında tutulur. `plonky3_prover.rs` önce main trace matrisini oluşturur, sonra aynı matristen register accumulator'ları hesaplayacak closure'ı prover'a verir. Böylece `bud_stark` çekirdeği sadece iki görevlı protokolü bilir; BudVM'e özgü register packet ayrıntıları adapter/AIR katmanında kalır.
 
 ## Test Stratejisi
 
@@ -154,7 +154,7 @@ Bu testler matematiksel güvenliği tek başına kanıtlamaz, ama prover entegra
 
 ## Bugün Stabil Olan Parçalar
 
-Faz 0 stabilizasyonu sonrası mevcut durum:
+Görev 0 stabilizasyonu sonrası mevcut durum:
 
 * `cargo check --workspace --all-targets` temiz.
 * `cargo clippy --workspace --all-targets -- -D warnings` temiz.
@@ -182,11 +182,11 @@ Bu noktadan sonra yapılacak işler:
 
 ## Sıradaki Sertleştirme Adımları
 
-Faz 0 sonrası sıradaki adımlar:
+Görev 0 sonrası sıradaki adımlar:
 
-* VerifyMerkle opcode'unu production'a taşımak (Phase 0.6).
-* Tracing/logging altyapısını tüm pipeline'a entegre etmek (Phase 0.7).
-* Kapsamlı negatif test suite ve CI genişletme (Phase 0.8).
+* VerifyMerkle opcode'unu production'a taşımak (Task 0.6).
+* Tracing/logging altyapısını tüm pipeline'a entegre etmek (Task 0.7).
+* Kapsamlı negatif test suite ve CI genişletme (Task 0.8).
 * Poseidon'un tüm round'ları için AIR doğrulaması.
 * Public input bağlamını netleştirmek: program hash, başlangıç state'i ve final state proof'a bağlanmalı.
 * Proof formatını uzun vadeli uyumluluk için versiyonlamak.

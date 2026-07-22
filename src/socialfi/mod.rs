@@ -1,4 +1,4 @@
-//! SocialFi modulu — Phase 10 kategorizasyonu (C1): src/nft -> src/socialfi
+//! SocialFi modulu — Task 10 kategorizasyonu (C1): src/nft -> src/socialfi
 //! rename'i (kullanici: scope_v1). Yalniz modul yolu degisti; RPC method
 //! string'leri ve tipler ayni (kamusal kirilma yok).
 pub mod types;
@@ -60,7 +60,7 @@ impl NftRegistry {
         if new_val < 0 {
             new_val = 0;
         }
-        // V23 fix (Phase 11): clamp to u64::MAX — eskiden `as u64` truncate
+        // V23 fix (Task 11): clamp to u64::MAX — eskiden `as u64` truncate
         // ediyordu (büyük delta_mcd değerinde sessiz overflow).
         if new_val > u64::MAX as i128 {
             new_val = u64::MAX as i128;

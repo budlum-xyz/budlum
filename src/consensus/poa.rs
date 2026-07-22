@@ -63,7 +63,7 @@ impl PoAEngine {
         }
     }
 
-    /// Deterministic leader selection for PoA (Phase 0.338 / A6).
+    /// Deterministic leader selection for PoA (Task 0.338 / A6).
     ///
     /// Replaces pure round-robin (`block_index % n`) with a hash mix over
     /// `block_index` and the active validator set fingerprint so the next
@@ -319,7 +319,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.338 / A6: leader slot is not `block_index % n`.
+    /// Task 0.338 / A6: leader slot is not `block_index % n`.
     #[test]
     fn tur119_leader_not_pure_round_robin() {
         let mut state = AccountState::new();

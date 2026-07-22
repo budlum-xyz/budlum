@@ -1,4 +1,4 @@
-//! D-Web Passport core profile model (Phase 12 / ARENA4).
+//! D-Web Passport core profile model (Task 12 / ARENA4).
 //!
 //! This module is intentionally read-only. It builds evidence-labelled profile
 //! data for budlum.xyz without claiming that unproven data is verified.

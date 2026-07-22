@@ -27,7 +27,7 @@ pub struct BlockHeader {
     pub tx_root: String,
     pub slashing_evidence: Option<Vec<SlashingEvidence>>,
     pub nonce: u64,
-    // --- Hardening Phase 2: VRF & Finalite ---
+    // --- Hardening Task 2: VRF & Finalite ---
     pub epoch: u64,
     pub slot: u64,
     pub proposer_pubkey: Option<String>,
@@ -91,10 +91,10 @@ Bir bloğun "parmak izini" (Hash) oluşturur.
 pub fn calculate_hash(&self) -> String {
     // 1. Önce opsiyonel alanları byte dizisine çevir (Serialization)
     let producer_bytes = self.producer.as_ref().map(...).unwrap_or_default();
-    
+
     // 2. slashing_evidence için bincode kullanarak deterministik serileştirme yap
     let evidence_bytes = self.slashing_evidence.as_ref().map(|e| bincode::serialize(e).unwrap_or_default()).unwrap_or_default();
-    
+
     // 3. hash_fields fonksiyonuna tüm verileri sırayla besle
     hash_fields(&[
         b"BDLM_BLOCK_V2",              // <--- Domain Separation Tag
@@ -140,7 +140,7 @@ pub fn calculate_tx_root(&self) -> String {
             let left = &chunk[0];
             // 5. Eğer sayı tekse, son elemanı kopyala (A, B, C -> A+B, C+C)
             let right = if chunk.len() > 1 { &chunk[1] } else { left };
-            
+
             // 6. İkisini birleştirip hashle: Hash(Left + Right)
             let combined = format!("{}{}", left, right);
             next_level.push(hex::encode(hash(combined)));
@@ -167,14 +167,14 @@ Bir bloğun gerçekten iddia edilen kişi tarafından üretildiğini doğrular.
 pub fn verify_signature(&self) -> bool {
     // 1. Producer (Üretici) var mı? Yoksa geçersiz.
     let producer_hex = match &self.producer { ... };
-    
+
     // 2. İmzası var mı? Yoksa geçersiz.
     let signature = match &self.signature { ... };
-    
+
     // 3. HEX formatındaki anahtarı byte dizisine çevir.
     let public_key = hex::decode(producer_hex)...;
 
-    // 4. KRİTİK PHASE: Bloğun hash'ini elindeki verilerle YENİDEN HESAPLA.
+    // 4. KRİTİK TASK: Bloğun hash'ini elindeki verilerle YENİDEN HESAPLA.
     // Asla blok üzerinde yazan 'self.hash'e güvenme, hileli olabilir.
     let calculated_hash = self.calculate_hash();
     if calculated_hash != self.hash { return false; } // Veri bütünlüğü bozuk!
@@ -203,7 +203,7 @@ pub fn mine(&mut self, difficulty: usize) {
     while !self.hash.starts_with(&target) {
         // 3. Nonce (deneme sayacı) değerini artır.
         self.nonce += 1;
-        
+
         // 4. Hash'i yeniden hesapla. Nonce değiştiği için hash tamamen değişecektir.
         self.hash = self.calculate_hash();
     }

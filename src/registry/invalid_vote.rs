@@ -1,6 +1,6 @@
-//! Repeated invalid-signature vote tracking (Phase 0.40, Görev 2).
+//! Repeated invalid-signature vote tracking (Task 0.40, Görev 2).
 //!
-//! Phase 0.38 Fix 2 rejects every cryptographically-invalid finality vote at ingest
+//! Task 0.38 Fix 2 rejects every cryptographically-invalid finality vote at ingest
 //! (closing a single-signature DoS). But a rejected vote never enters the
 //! aggregate, so the sender paid nothing — a validator could spam garbage
 //! signatures forever. This module closes that gap with the SAME pattern as
@@ -10,7 +10,7 @@
 //! provenance = `ConsensusVerified`) for the *existing* report→slash flow — no
 //! second slashing path is introduced.
 //!
-//! ## Design decisions (Phase 0.40, user-approved)
+//! ## Design decisions (Task 0.40, user-approved)
 //! * **Epoch-scoped counter** (Seçenek A+): the count resets at each new epoch,
 //!   mirroring `LivenessTracker`'s consecutive-epoch semantics. A validator that
 //!   spams within one epoch is caught; scattered single misjabs across epochs

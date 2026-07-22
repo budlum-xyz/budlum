@@ -1,20 +1,20 @@
-# Post-Quantum Security Architecture (Phase 0.14)
+# Post-Quantum Security Architecture (Task 0.14)
 
 **Tarih:** 13 Temmuz 2026
-**Kapsam:** `budlum-core` v0.3-dev + `budzkvm` (BudZero) Faz 0
+**Kapsam:** `budlum-core` v0.3-dev + `budzkvm` (BudZero) Görev 0
 **Durum:** Mevcut (Dilithium5 imza entegre), KEM/HSM/hash-imza backlog.
 
 ---
 
 ## 0. Özet (Tek Sayfa)
 
-Budlum, **NIST PQC standartlarına** dayalı hibrit bir kriptografik mimari kullanır. Günümüzde (Phase 0.14 itibarıyla) yalnızca **CRYSTALS-Dilithium** (imza) entegre edilmiş durumdadır; **ML-KEM** (KEM), **SLH-DSA** (hash-imza) ve **FN-DSA** (Falcon) **backlog'tadır** — bütçe veya NIST standartlaşma takvimine bağlı.
+Budlum, **NIST PQC standartlarına** dayalı hibrit bir kriptografik mimari kullanır. Günümüzde (Task 0.14 itibarıyla) yalnızca **CRYSTALS-Dilithium** (imza) entegre edilmiş durumdadır; **ML-KEM** (KEM), **SLH-DSA** (hash-imza) ve **FN-DSA** (Falcon) **backlog'tadır** — bütçe veya NIST standartlaşma takvimine bağlı.
 
 Bu doküman:
 1. Kuantum tehdidinin **somut** boyutunu Budlum'un protokol yüzeyine bağlar.
 2. **Mevcut** post-quantum korumayı dosya/satır referanslarıyla sabitler.
 3. **Eksik** korumayı ve **risk değerlendirmesini** yazar.
-4. **Yol haritası** (Phase 0.16+) için somut kabul kriterleri sunar.
+4. **Yol haritası** (Task 0.16+) için somut kabul kriterleri sunar.
 
 **Asıl ilke:** "Klasik + PQ hibrit" her zaman güvenli tarafta. Yeni bir kriptografik primitive eklerken **her iki dünyada** aynı anda çalışabilmeli veya klasik taraftan PQ tarafına **geçiş yolu** olmalı.
 
@@ -46,12 +46,12 @@ Aşağıdaki tablo, Budlum'un tüm kriptografik bağımlılıklarını haritalan
 
 ### 1.3 Hangi Saldırı Yüzeyi Bugün Hâlâ Açık?
 
-- **Finality QcBlob imzaları** → Dilithium5 ile **KORUNUYOR** ✅ (Phase 0.08'te eklendi).
+- **Finality QcBlob imzaları** → Dilithium5 ile **KORUNUYOR** ✅ (Task 0.08'te eklendi).
 - **Slashing raporları (SlashingReport)** → Dilithium5 imzalı → **KORUNUYOR** ✅.
 - **PoA domain imzaları (ed25519)** → **AÇIK** ⚠️ — PoA authority'lerinin finality kararları PQ-değil.
-- **BLS finality (prevote/precommit)** → **AÇIK** ⚠️ — Phase 0.34 plan: BLS'yi koruyup üstüne Dilithium binding eklemek (hibrit).
+- **BLS finality (prevote/precommit)** → **AÇIK** ⚠️ — Task 0.34 plan: BLS'yi koruyup üstüne Dilithium binding eklemek (hibrit).
 - **VRF (PoS leader election)** → **AÇIK** ⚠️.
-- **Anahtar depolama** → `KeyPair::save`/`ValidatorKeys::save` artık 0o600 ile yazılıyor (Phase 0.10 fix) ama **şifreleme yok** — yerel disk şifrelemesi operatöre bırakılmış (FS-level LUKS/dm-crypt önerilir).
+- **Anahtar depolama** → `KeyPair::save`/`ValidatorKeys::save` artık 0o600 ile yazılıyor (Task 0.10 fix) ama **şifreleme yok** — yerel disk şifrelemesi operatöre bırakılmış (FS-level LUKS/dm-crypt önerilir).
 - **HNDL (Harvest-Now-Decrypt-Later)** → **TAMAMEN AÇIK** ⚠️ — geçmiş P2P trafiği, geçmiş slashing raporları, geçmiş finality mesajları bugün kaydedilip 2030+'da çözülebilir.
 
 ---
@@ -79,14 +79,14 @@ dilithium5::verify_detached_signature(&sig, message, &public_key)
 
 **ValidatorKeys** (`ValidatorKeys::generate/save/load`):
 - Ed25519 + VRF + **Dilithium5** + BLS → tek bir struct içinde.
-- `save` (Phase 0.10 sonrası): `OpenOptions::new()...mode(0o600)` ile atomik 0o600.
+- `save` (Task 0.10 sonrası): `OpenOptions::new()...mode(0o600)` ile atomik 0o600.
 
 ### 2.2 QcBlob Quorum + PQ Attestation
 
 **`src/consensus/qc.rs`** — finality QcBlob yapısı:
 
 - Her imza bir `PqSignatureEntry { validator_index, validator_address, dilithium_signature: Vec<u8> }`.
-- **Toplam ≥ ceil(n × 2/3) imza** zorunlu (Phase 0.12 fix).
+- **Toplam ≥ ceil(n × 2/3) imza** zorunlu (Task 0.12 fix).
 - Merkle root = imzaların domain-separated SHA3-256 hash'i; **her dilithium imzası ayrıca leaf olarak doğrulanır**.
 - `verify_against_snapshot` ile:
   - Her validator_index için **unique** imza kontrolü (`"Duplicate PQ signature"` hatası).
@@ -98,17 +98,17 @@ dilithium5::verify_detached_signature(&sig, message, &public_key)
 
 ### 2.3 Hibrit Katmanı (Mevcut Olmayan — Gelecek)
 
-**Sorun:** Finality BLS imzaları hâlâ **klasik** (BLS12-381). Phase 0.08/0.10 PQ imzayı QcBlob'a ekledi ama BLS'yi değiştirmedi. Bu, **hibrit olmayan** bir sistem yaratıyor:
+**Sorun:** Finality BLS imzaları hâlâ **klasik** (BLS12-381). Task 0.08/0.10 PQ imzayı QcBlob'a ekledi ama BLS'yi değiştirmedi. Bu, **hibrit olmayan** bir sistem yaratıyor:
 - QcBlob **PQ güvenli** ✅
 - BLS finality **PQ güvenli değil** ⚠️
 
-**Çözüm yolu (Phase 0.34+):** BLS imzalarını **PQ imzalarla eş-bağlamak** (cross-sign). Bir BLS imzası geçerli sayılabilmesi için yanında bir Dilithium imzasıyla daha imzalanmış olmalı. Bu, **klasik + PQ hibrit** modeli sağlar: biri kırılsa bile diğeri güvende.
+**Çözüm yolu (Task 0.34+):** BLS imzalarını **PQ imzalarla eş-bağlamak** (cross-sign). Bir BLS imzası geçerli sayılabilmesi için yanında bir Dilithium imzasıyla daha imzalanmış olmalı. Bu, **klasik + PQ hibrit** modeli sağlar: biri kırılsa bile diğeri güvende.
 
 ---
 
-## 3. Post-Quantum Yol Haritası (Phase 0.16+)
+## 3. Post-Quantum Yol Haritası (Task 0.16+)
 
-### 3.1 Kısa Vadeli (Phase 0.16-10)
+### 3.1 Kısa Vadeli (Task 0.16-10)
 
 | ID | Görev | Kabul Kriteri |
 |---|---|---|
@@ -116,7 +116,7 @@ dilithium5::verify_detached_signature(&sig, message, &public_key)
 | **PQ-2** | BLS hibrit binding: `BLSFinalityCert` artık `pq_attestation: PqSignatureEntry` zorunlu alan içeriyor | Mevcut `handle_finality_cert` testleri geçiyor + yeni `bls_without_pq_attestation_rejected` testi ekleniyor |
 | **PQ-3** | VRF alternatifi: PoS için `pq_vrf: PqSignatureEntry` opsiyonel alan | PoS config flag'i `use_pq_vrf`; aktifse eski Schnorr VRF yerine Dilithium-based PRF kullanılıyor |
 
-### 3.2 Orta Vadeli (Phase 0.32-13)
+### 3.2 Orta Vadeli (Task 0.32-13)
 
 | ID | Görev | Kabul Kriteri |
 |---|---|---|
@@ -124,7 +124,7 @@ dilithium5::verify_detached_signature(&sig, message, &public_key)
 | **PQ-5** | HSM (PKCS#11) PQ modülü: `Pkcs11Signer` artık ed25519 + BLS + **Dilithium** destekliyor | `signer_backend = "pkcs11_pq"` config seçeneği; test fixture'ı YubiHSM2 veya simulated PKCS#11 ile |
 | **PQ-6** | **SLH-DSA (SPHINCS+)** fallback: bir PQ imza gerektiğinde Dilithium yoksa SLH-DSA imza yedek olarak kabul | Klasik + Dilithium + SLH-DSA üçlü imza, üçünden en az ikisi doğrulanırsa geçerli |
 
-### 3.3 Uzun Vadeli (Phase 0.38+)
+### 3.3 Uzun Vadeli (Task 0.38+)
 
 - **FN-DSA (Falcon)** entegrasyonu: kompakt imza gereken yerlerde (örn. mobil client) Dilithium yerine Falcon.
 - **Hash-based** fallback: eğer hem lattice-based hem hash-based kırılırsa (NIL: unlikely ama tehditsel analiz gerekir), **one-time signature** zincirine (Lamport / Winternitz) geçiş yolu.
@@ -139,17 +139,17 @@ Bir operatörün Budlum'u kurarken post-quantum güvenliğe nasıl baktığını
 1. **Anahtar depolama stratejisi:**
    - **Lokal (varsayılan):** `KeyPair::save`/`ValidatorKeys::save` 0o600 ile diske yazar. PQ-değil; **FS-level şifreleme** (LUKS/dm-crypt) operatörün sorumluluğu.
    - **PKCS#11 HSM:** `signer_backend = "pkcs11"` — anahtar hiç diske yazılmaz. Üretim için **önerilen**.
-   - **PKCS#11 PQ HSM:** Phase 0.32'de — YubiHSM2 + Dilithium5 destekli.
+   - **PKCS#11 PQ HSM:** Task 0.32'de — YubiHSM2 + Dilithium5 destekli.
 
 2. **Geçiş dönemi stratejisi:**
    - **Tek-imza (Dilithium5):** Şu an mevcut. HNDL'ye karşı yeterli.
-   - **Hibrit (BLS + Dilithium):** Phase 0.34 hedefi. Üretim mainnet için **önerilen**.
-   - **Üçlü (BLS + Dilithium + SLH-DSA):** Phase 0.36 hedefi. En yüksek güvenlik; **konservatif mainnet** için.
+   - **Hibrit (BLS + Dilithium):** Task 0.34 hedefi. Üretim mainnet için **önerilen**.
+   - **Üçlü (BLS + Dilithium + SLH-DSA):** Task 0.36 hedefi. En yüksek güvenlik; **konservatif mainnet** için.
 
 3. **Geçmiş arşiv politikası:**
    - **Yok:** geçmiş validatör imzaları nodes'un local state'inde.
-   - **PQ-tape:** `FinalityCertWithPQ` objeleri **bağımsız bir arşiv düğümünde** imzalanıp saklanır (Phase 0.16).
-   - **Tam zincir arşivi:** tüm eski block'lar + finality sertifikaları PQ-imzalı tutulur (Phase 0.38+).
+   - **PQ-tape:** `FinalityCertWithPQ` objeleri **bağımsız bir arşiv düğümünde** imzalanıp saklanır (Task 0.16).
+   - **Tam zincir arşivi:** tüm eski block'lar + finality sertifikaları PQ-imzalı tutulur (Task 0.38+).
 
 4. **Hata toleransı:**
    - **Sıkı:** PQ imza doğrulaması başarısızsa block reddedilir.
@@ -163,10 +163,10 @@ Bir operatörün Budlum'u kurarken post-quantum güvenliğe nasıl baktığını
 
 - `src/tests/integration.rs` — Dilithium keypair üretimi + sign/verify round-trip.
 - `src/tests/qcblob_quorum.rs` — QcBlob imza sayısı kontrolü (2/3 quorum).
-- `src/tests/finality_adversarial.rs` (Phase 0.08) — QcProofKind::InvalidDilithiumV1 fault-proof.
+- `src/tests/finality_adversarial.rs` (Task 0.08) — QcProofKind::InvalidDilithiumV1 fault-proof.
 - `src/consensus/qc.rs::tests` — birim testleri (verify, fault proof, conflict).
 
-### 5.2 PQ-Specific Test Listesi (Phase 0.16+)
+### 5.2 PQ-Specific Test Listesi (Task 0.16+)
 
 ```
 - [ ] pq_hndl_archive_replay_works_after_quantum_break
@@ -192,7 +192,7 @@ Bir operatörün Budlum'u kurarken post-quantum güvenliğe nasıl baktığını
 - **FIPS 204 standardizasyonu tamamlanmamışken** Dilithium5 implementasyonu (pqcrypto-dilithium 0.5.0) kararlı, ancak **parametre seçimi** (q, η, dilithium5 spesifik) final standartta değişebilir. Crate upgrade'leri **breaking change** riski taşır.
 - **Yan kanal saldırıları** (timing, cache) PQ implementasyonlarında da mevcut; HSM kullanımı zorunlu.
 - **Performans:** Dilithium5 imza doğrulama ~50µs, imzalama ~100µs (klasik Ed25519: 5µs / 30µs). QC üzerinde bu overhead **her QcBlob doğrulamasında** ödenir.
-- **Test kapsamı:** PQ'a özel fuzz hedefi yok (Phase 0.32'de eklenecek — `pq_signature_fuzz`).
+- **Test kapsamı:** PQ'a özel fuzz hedefi yok (Task 0.32'de eklenecek — `pq_signature_fuzz`).
 
 ---
 
@@ -208,4 +208,4 @@ Bir operatörün Budlum'u kurarken post-quantum güvenliğe nasıl baktığını
 
 ---
 
-*Bu doküman, v0.3-dev'in Phase 0.14 post-quantum güvenlik durumunu sabitler. Yeni PQ entegrasyonları bu dokümanı güncellemeden merge edilmez.*
+*Bu doküman, v0.3-dev'in Task 0.14 post-quantum güvenlik durumunu sabitler. Yeni PQ entegrasyonları bu dokümanı güncellemeden merge edilmez.*

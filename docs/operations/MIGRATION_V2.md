@@ -1,7 +1,7 @@
-# ConsensusStateV2 Migration İskeleti (Phase 2 §1.4)
+# ConsensusStateV2 Migration İskeleti (Task 2 §1.4)
 
-**Tarih:** 2026-07-15  
-**Durum:** Minimum migration hook + offline gate mevcut; canlı state transform yok.  
+**Tarih:** 2026-07-15
+**Durum:** Minimum migration hook + offline gate mevcut; canlı state transform yok.
 **Kod:** `src/chain/snapshot.rs`, `src/main.rs`, `src/cli/commands.rs`
 
 > Amaç: mainnet öncesi state şema geçişlerinin “sessizce kabul” yerine
@@ -22,7 +22,7 @@ penceresi fail-closed kontrol edilir:
 
 `StateSnapshotV2::from_bytes()` şu an minimum migration hook görevi görür:
 unsupported legacy/future şemaları reddeder, schema-2/3 snapshot’ları deserialize
-eder. Phase 2 kapsamı bunu operasyon dokümanı ve offline CLI preflight ile
+eder. Task 2 kapsamı bunu operasyon dokümanı ve offline CLI preflight ile
 sabitlemek; gelecekteki `v3 -> v4` gibi gerçek transform fonksiyonları bu alana
 explicit olarak eklenecektir.
 
@@ -41,7 +41,7 @@ akışı tanımlıdır. `src/main.rs` bu modda:
 3. desteklenen schema penceresini raporlar,
 4. canlı node başlatmadan çıkar.
 
-Bu Phase 2 iskeleti **veri transformasyonu yapmaz**; sadece preflight + backup +
+Bu Task 2 iskeleti **veri transformasyonu yapmaz**; sadece preflight + backup +
 fail-closed policy sağlar. Gerçek çok-adımlı migration gerekirse bu hook’a
 explicit `v2 -> v3 -> v4` transform fonksiyonları eklenecek.
 

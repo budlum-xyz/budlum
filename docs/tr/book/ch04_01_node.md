@@ -66,7 +66,7 @@ pub struct NodeClient {
 ```
 
 **Tasarım Kararı: Actor Model (ChainActor & ChainHandle)**
--   **Lockless Design:** Eskiden kullanılan `Arc<Mutex<Blockchain>>` yerine artık **Actor Model** kullanılmaktadır. 
+-   **Lockless Design:** Eskiden kullanılan `Arc<Mutex<Blockchain>>` yerine artık **Actor Model** kullanılmaktadır.
 -   **ChainActor:** Zincir verisinin (Blockchain, State, Mempool) tek sahibidir. Kendi thread'inde çalışır ve gelen mesajları (ChainCommand) sırayla işler.
 -   **ChainHandle:** Diğer modüllerin (Node, RPC) zincire erişmek için kullandığı asenkron kumandadır. Bu sayede ağ trafiği işlenirken veritabanı kilitlenmesi (lock contention) yaşanmaz.
 
@@ -80,12 +80,12 @@ Düğüm çalıştığı sürece (`run` fonksiyonu), hiç durmayan bir döngü i
 pub async fn run(&mut self) {
     let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
     let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
-    
+
     loop {
         tokio::select! {
             // DURUM 1: Arka Plan Bakım Görevleri (Background Maintenance)
             _ = gc_interval.tick() => {
-                // Her 60 saniyede bir Mempool'daki süresi dolmuş işlemleri (TTL) sil 
+                // Her 60 saniyede bir Mempool'daki süresi dolmuş işlemleri (TTL) sil
                 // ve PeerManager'daki yasak süresi dolmuş eşlerin (Bans) engelini kaldır.
             }
             _ = discovery_interval.tick() => {
@@ -130,7 +130,7 @@ Budlum **Hardening** ile birlikte artık daha akıllı bir blok işleme mantığ
 1. **Sıralı Blok (Normal):** Gelen bloğun indeksi, bizim zincir uzunluğumuza eşitse direkt doğrulanır ve eklenir.
 2. **Çatal (Fork):** Gelen bloğun indeksi bizimkinden küçükse ama hash farklıysa, ağda bir bölünme olduğu anlaşılır.
     - `try_reorg` fonksiyonu tetiklenir.
-    - Eğer gelen çatalın toplam zorluğu (veya uzunluğu) bizimkinden fazlaysa, eski state geri sarılır (Revert) ve yeni çatala geçilir.
+    - Eğer gelen çatalın toplam zorluğu (veya uzunluğu) bizimkinden görevlaysa, eski state geri sarılır (Revert) ve yeni çatala geçilir.
 3. **Senkronizasyon (Sync Request):** Eğer gelen blok çok ilerideyse (bizde aradaki bloklar yoksa), otomatik olarak `GetHeaders` isteği atılarak senkronizasyon başlatılır.
 4. **Handshake Height Gap:** Peer handshake sırasında bizden yüksek `best_height` bildirirse, node blok trafiğini beklemeden headers-first sync başlatır.
 
@@ -150,7 +150,7 @@ async fn handle_network_event(&mut self, event: SwarmEvent<BudlumBehaviourEvent>
             if let GossipsubEvent::Message { message, .. } = gossip_event {
                 // Mesajı Protobuf üzerinden ayrıştır ve boyut limitlerini uygula.
                 let network_msg = NetworkMessage::from_bytes_validated(&message.data)?;
-                
+
                 match network_msg {
                     NetworkMessage::Block(block) => {
                         tracing::info!(height = block.index, "new block received");
@@ -173,14 +173,14 @@ async fn handle_network_event(&mut self, event: SwarmEvent<BudlumBehaviourEvent>
 `run` döngüsü içinde `SwarmEvent::ConnectionEstablished` olduğunda `peer_count` artırılır, `ConnectionClosed` olduğunda azaltılır. Bu veri atomik olduğu için RPC sunucusu tarafından kilitlenme (lock) gerektirmeden anlık okunabilir.
 
 `Node::apply_network_security(network)` çağrısı, `src/core/chain_config.rs` içindeki network-specific `SecurityConfig` değerlerini node'a uygular. Böylece mainnet/testnet/devnet için maksimum peer limiti ayrı çalışır.
-        
+
         // Yeni biri bağlandığında (Connection Established)
         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
             tracing::info!(%peer_id, "peer connected");
             // Onu tanımak için Kademlia'ya ekle
             self.swarm.behaviour_mut().kad.add_address(&peer_id, ...);
         }
-        
+
         // ...
     }
 }

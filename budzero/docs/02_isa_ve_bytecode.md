@@ -7,7 +7,7 @@ BudZKVM için `bud-isa` isimli ayrı bir crate (Rust kütüphanesi) oluşturduk.
 ## Register Tabanlı vs. Stack Tabanlı
 
 Sanal makineler genellikle ikiye ayrılır:
-1. **Stack Tabanlı (Örn: EVM, JVM):** İşlemler bir yığın (stack) üzerinden yapılır. `PUSH 5`, `PUSH 3`, `ADD` gibi. Gerçeklemesi kolaydır, derleyici yazması görece kolaydır ancak aynı işlemi yapmak için çok fazla komut gerekir. STARK kanıtlayıcılarında "Stack Derinliği"ni takip etmek ZK açısından karmaşık (ve masraflı) olabilir.
+1. **Stack Tabanlı (Örn: EVM, JVM):** İşlemler bir yığın (stack) üzerinden yapılır. `PUSH 5`, `PUSH 3`, `ADD` gibi. Gerçeklemesi kolaydır, derleyici yazması görece kolaydır ancak aynı işlemi yapmak için çok görevla komut gerekir. STARK kanıtlayıcılarında "Stack Derinliği"ni takip etmek ZK açısından karmaşık (ve masraflı) olabilir.
 2. **Register Tabanlı (Örn: LuaVM, ARM, RISC-V, BudZKVM):** Veriler CPU içindeki sınırlı sayıdaki "Register"larda (yazmaç) tutulur. `ADD R1, R2, R3` (R2 ile R3'ü topla, R1'e yaz) gibi. Komutlar daha uzundur ama daha az adımda daha çok iş yapılır. ZKVM'ler için tablo yapısına (Trace) çok daha kolay oturtulur.
 
 **Karar:** BudZKVM **Register tabanlı** bir mimari kullanır. 32 adet genel amaçlı (R0'dan R31'e) register'ımız vardır. **R0 özel bir register'dır: donanımsal olarak her zaman 0 değerini tutar.** Bu sabit (hardwired to zero) özellik, hem VM'in determinizmi hem de STARK soundness'i için kritik önem taşır.
@@ -42,9 +42,9 @@ Bu sayede her instruction 8 byte'lık sabit boyutlu bir kelimedir — bu, L1 ent
 
 ## Opcodes (İşlem Kodları) ve Üretim Durumu
 
-BudZKVM ISA'sı **Production** ve **Experimental** olarak iki profile ayrılır. Production profilinde yalnızca AIR constraint'leri tamamlanmış, matematiksel olarak sound opcode'lar kullanılabilir. Experimental opcode'lar geliştirme aşamasındadır ve `cfg(feature = "experimental")` olmadan derleme veya çalışma zamanında reddedilir.
+BudZKVM ISA'sı **Production** ve **Experimental** olarak iki profile ayrılır. Production profilinde yalnızca AIR constraint'leri tamamlanmış, matematiksel olarak sound opcode'lar kullanılabilir. Experimental opcode'lar geliştirme görevsındadır ve `cfg(feature = "experimental")` olmadan derleme veya çalışma zamanında reddedilir.
 
-### ✅ Production Opcode'lar (Güncel: Faz 0 sonrası)
+### ✅ Production Opcode'lar (Güncel: Görev 0 sonrası)
 
 | Opcode | Hex | Açıklama |
 |--------|-----|----------|
@@ -80,7 +80,7 @@ BudZKVM ISA'sı **Production** ve **Experimental** olarak iki profile ayrılır.
 | `Syscall` | 0x1D | `rd = sistem_çağrısı(imm)` |
 | `VerifyMerkle` | 0x1E | `rd = MerkleDoğrula(root, leaf, path)` | Poseidon4 tabanlı 64-depth |
 
-> **Faz 0 Sonrası:** Tüm 31 opcode production seviyesindedir. Experimental opcode kalmamıştır. Her opcode'un VM implementasyonu ve AIR constraint'i tamamlanmıştır.
+> **Görev 0 Sonrası:** Tüm 31 opcode production seviyesindedir. Experimental opcode kalmamıştır. Her opcode'un VM implementasyonu ve AIR constraint'i tamamlanmıştır.
 
 ## Bytecode Formatı ve L1 Entegrasyonu
 
@@ -99,5 +99,5 @@ Budlum L1 `infra` reposundaki `TransactionType::ContractCall` bu formatı kullan
 
 Geleneksel VM'lerde bu `Instruction` struct'ı, bit-shifting yöntemleriyle tek bir 32-bit integer içine sıkıştırılır (Örn: `0b00000001_00000001_00000000_00001010`). Ancak ZKVM'lerde bit-shifting (bit kaydırma) polinomlar dünyasında çok "pahalı" bir işlemdir. Asal sayılar üzerinden çalıştığımız için bit-level operasyonlar karmaşık tablolar gerektirir.
 
-Bu yüzden STARK temelli VM'lerde, komutların Decode (çözülme) işlemini ZKVM'e yaptırmaktan olabildiğince kaçınırız. 
+Bu yüzden STARK temelli VM'lerde, komutların Decode (çözülme) işlemini ZKVM'e yaptırmaktan olabildiğince kaçınırız.
 **Püf Nokta:** BudZKVM'de `Instruction` bileşenleri (`opcode`, `rd`, `rs1`, `rs2`, `imm`) Execution Trace (Çalıştırma İzi) matrisinde ayrı ayrı sütunlara yerleştirilir. Böylece Prover, bit parçalama yapmak zorunda kalmaz, direkt sütun değerlerini alıp matematiksel denkleme koyar.

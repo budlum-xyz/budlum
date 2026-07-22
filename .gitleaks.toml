@@ -1,4 +1,4 @@
-# .gitleaks.toml — Budlum secret-scan yapılandırması (Phase 8.7 / Faz 1)
+# .gitleaks.toml — Budlum secret-scan yapılandırması (Task 8.7 / Görev 1)
 #
 # CI `gitleaks detect` ile TAM git geçmişini tarar (fetch-depth: 0).
 # Varsayılan kural seti korunur; hiçbir global pattern/path/commit muafiyeti
@@ -13,7 +13,7 @@
 #   - Kapının boş (vacuous) olmadığı CI'da her koşuda kanıtlanır: workflow
 #     önce sahte-PAT kanaryası üzerinde gitleaks'in ALARM verdiğini doğrular;
 #     kanarya yakalanamazsa asıl tarama güvenilmez sayılıp job FAIL eder.
-title = "Budlum gitleaks config (Phase 8.7)"
+title = "Budlum gitleaks config (Task 8.7)"
 
 [extend]
 useDefault = true

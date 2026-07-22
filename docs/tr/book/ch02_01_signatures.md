@@ -40,10 +40,10 @@ Sıfırdan yeni bir hesap oluşturur.
 pub fn new() -> Self {
     // 1. İşletim sisteminin güvenli rastgele sayı üretecini (CSPRNG) al.
     let mut csprng = OsRng {};
-    
+
     // 2. Bu rastgelelik ile yeni bir anahtar çifti türet.
     let keypair = ed25519_dalek::Keypair::generate(&mut csprng);
-    
+
     // 3. Sarmalayıp döndür.
     KeyPair { inner: keypair }
 }
@@ -62,7 +62,7 @@ Bir veriye (mesaja) onay verdiğinizi kanıtlar.
 pub fn sign(&self, message: &[u8]) -> Vec<u8> {
     // 1. Kütüphanenin sign fonksiyonunu çağır.
     let signature = self.inner.sign(message);
-    
+
     // 2. İmzayı byte dizisine (64 byte) çevirip döndür.
     signature.to_bytes().to_vec()
 }
@@ -111,7 +111,7 @@ Açık anahtarı, insanların okuyabileceği ve paylaşabileceği bir formata ("
 pub fn public_key_hex(&self) -> String {
     // 1. Public Key'i byte dizisi olarak al (32 byte).
     let bytes = self.inner.public.to_bytes();
-    
+
     // 2. Hexadecimal (16'lık taban) stringe çevir.
     // Örn: [255, 0, 10] -> "ff000a"
     hex::encode(bytes)
@@ -130,13 +130,13 @@ Budlum projesinde adres olarak doğrudan `Public Key`in Hex hali kullanılır.
 
 ---
 
-## 3. Hardening Phase 2: Yeni Kriptografik Şemalar
+## 3. Hardening Task 2: Yeni Kriptografik Şemalar
 
 Projenin güvenlik seviyesini artırmak için klasik Ed25519 imzalarının yanına iki yeni şema eklenmiştir: **BLS** (Finalite için) ve **Dilithium** (Kuantum Sonrası Güvenlik için).
 
 ### 1. BLS İmzaları (Boneh-Lynn-Shacham)
 
-BLS imzaları, birden fazla imzanın tek bir imza haline getirilebilmesi (Aggregation) özelliği için tercih edilmiştir.
+BLS imzaları, birden görevla imzanın tek bir imza haline getirilebilmesi (Aggregation) özelliği için tercih edilmiştir.
 
 - **Kullanım Alanı:** Finalite Katmanı oylamaları (Prevote/Precommit).
 - **Avantajı:** 100 validatörün farklı imzalarını 96 byte'lık tek bir imzaya indirger. Bu, blok boyutunu ve doğrulama maliyetini (CPU) devasa oranda düşürür.

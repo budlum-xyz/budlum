@@ -29,7 +29,7 @@
 //!
 //! - `budlum-xyz/B.U.D./BUD_Merkeziyetsiz_Depolama_Vizyonu.md` §2 (mantık örtüşmesi)
 //! - §7 (bugün kodda OLMAYANLAR — Bitswap, içerik routing)
-//! - Faz 2 (içerik adresleme)
+//! - Görev 2 (içerik adresleme)
 
 pub mod bitswap;
 pub mod discovery;

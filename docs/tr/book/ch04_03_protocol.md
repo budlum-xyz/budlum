@@ -50,7 +50,7 @@ Budlum, büyük veri transferleri için doğrudan birebir **Request-Response** p
 ## Serileştirme (Serialization)
 
 Mesajlar ağ üzerine bayt olarak çıkmadan önce serileştirilir.
-`budlum-core`, **Hardening Phase 2** ile birlikte hibrit bir serileştirme kullanır:
+`budlum-core`, **Hardening Task 2** ile birlikte hibrit bir serileştirme kullanır:
 - **Protobuf (`protocol.proto`):** Yüksek performanslı ağ mesajları ve ana veri yapıları için kullanılır (CPU ve bant genişliği tasarrufu).
 - **Serde-JSON:** Bazı yüksek seviye konfigürasyon ve tanı mesajları için (okunabilirlik amacıyla) kullanılır.
 - **Bincode:** Slashing kanıtları gibi deterministik (bayt-bayt aynı) olması gereken yapılar için tercih edilir.

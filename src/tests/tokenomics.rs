@@ -1,4 +1,4 @@
-//! Integration tests for $BUD tokenomics (Phase 0.14): genesis supply/distribution,
+//! Integration tests for $BUD tokenomics (Task 0.14): genesis supply/distribution,
 //! timed reserve burn (3.1), metabolic tx-fee burn (3.2), and the
 //! "supply only decreases on burn paths" property.
 
@@ -164,7 +164,7 @@ fn zero_fee_burns_nothing() {
     assert_eq!(params.metabolic_burn(50), 0);
 }
 
-// --- Phase 0.14b: REAL-FLOW integration (genesis / epoch / vesting) --------------
+// --- Task 0.14b: REAL-FLOW integration (genesis / epoch / vesting) --------------
 
 use crate::chain::genesis::GenesisConfig;
 use crate::tokenomics::VestingSchedule;

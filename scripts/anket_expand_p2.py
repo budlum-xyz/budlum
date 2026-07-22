@@ -8,7 +8,7 @@ NTE2[71] = ("Büyük bir taşınmadan önce her odanın fotoğrafını çekip 'b
 "Liste olmasa borçlar insanların kafasında yaşar; bir kişi ayrıldığında o borç da onunla gider ve bir gün kritik bir eksik, en uygunsuz anda — örneğin açılış haftası — 'bunu kimse yapmadı mı' sorusuyla ortaya çıkar. O sorunun cevabı her zaman aynıdır ve hep geç kalınmıştır.")
 
 NTE2[72] = ("Bir kebap ustasının lokanta açmadan önce yemekleri önce arkadaşlarına sunması, sonra ilçenin gıda denetçisini çağırması, ancak ondan sonra tabela asması gibi: Budlum önce küçük bir deneme sürüşü yapacak, sonra bağımsız uzman denetinden geçecek, ancak ikisi de temiz çıkarsa ana kapıyı açacak. "
-"Bu sıra, 'heyecanla erken açanı' cezalandıran, 'sabırla hazırlananı' ödüllendiren bir düzendir; hata, ucuz olduğu aşamada yakalanır. "
+"Bu sıra, 'heyecanla erken açanı' cezalandıran, 'sabırla hazırlananı' ödüllendiren bir düzendir; hata, ucuz olduğu görevda yakalanır. "
 "Sıra bozulup açılış öne çekilirse herhangi bir sorun, kamunun önünde ve para riski altında öğrenilir; ve o ilk izlenim kötü olursa — ilk günü kaçıran müşteri gibi — bazı kullanıcılar bir daha asla geri dönmez. Sabır burada kusur değil, en değerli yatırımdır.")
 
 NTE2[73] = ("Bir emlakçının eve girip 'bu oda bitti, bu banyo dökülüyor, bu dolap sadece kartondan ama taşıyabilir' diye dürüst rapor tutması gibi: Budlum'da her parça 'bitmiş mi, bozuk mu, bilerek mi öyle bırakılmış' diye üç kovaya ayrıldı. "
@@ -17,7 +17,7 @@ NTE2[73] = ("Bir emlakçının eve girip 'bu oda bitti, bu banyo dökülüyor, b
 
 NTE2[74] = ("Bir kooperatifin ilk şubesinin kapılarını açması gibi: dosya emanet etme işinin temel binası dikildi; kayıt defteri, görevlendirmeler ve güvenlik kuralları yerinde; ilk müşteriler içeri alınıp sistem gerçek insanlarla sınandı. "
 "Bu kapı, 'bir gün yapacağız' sözünün 'yapıldı' kanıtına dönüştüğü andır; topluluk artık boş vaat değil, çalışan bir şey görüyor. "
-"Bu temel gecikseydi ya da çürük çıksaydı, üzerine inşa edilecek her kat — mobilya, tabela, ikinci şube — riske girerdi; en kötüsü de bu aşamada çürük çıkan temelin, ilerideki bir kriz anında, kimsenin tahmin edemediği bir biçimde sallanması ve yükünün artık hesaplanamayacağı bir noktada kırılması olurdu.")
+"Bu temel gecikseydi ya da çürük çıksaydı, üzerine inşa edilecek her kat — mobilya, tabela, ikinci şube — riske girerdi; en kötüsü de bu görevda çürük çıkan temelin, ilerideki bir kriz anında, kimsenin tahmin edemediği bir biçimde sallanması ve yükünün artık hesaplanamayacağı bir noktada kırılması olurdu.")
 
 NTE2[75] = ("Bir atölyede yıllardır kullanılan kritik bir makinenin 'deneysel' levhasının sökülmesi gibi: Budlum'un içindeki her temel hareket, 'tam üretim gücüyle hazır' olarak işaretlendi; hiçbir komut 'belki çalışır' sınıfına girmiyor. "
 "Bu işaretle birlikte, gerçek ağda çalıştırılabilecek ve çalıştırılamayacak iş listeleri kesin ayrılmış oldu; sınırlar biliniyor ve herkes aynı sayfada. "
@@ -63,8 +63,8 @@ NTE2[85] = ("Belediyeye bir usulsüzlüğü ihbar ederken küçük bir pul ücre
 "Bu kural iki işe birden yarar: boş ihbar yağmuru engellenir ve ciddi tanık, 'bana dokunmaz ki' demeden konuşmaya teşvik edilir. "
 "Bedel kalkarsa ihbar kapısı sıradan bir şikâyet kutusuna döner ve gerçek suçlar binlerce laf arasında kaybolur; bedel çok büyürse de sadece varlıklı kesimin sesi duyulur hale gelir — dengesi hayatidir ve bu soru tam da o dengeyi işaretliyor.")
 
-NTE2[86] = ("Bir otelin restoranının tüm menüsü hazır olmasına rağmen, bizotel gıda sertifikası gelmeden yemek satışı yapmaması gibi: Budlum'un depolama ekonomisinin tam mekanikleri yazılmış olmasına rağmen, paranın gerçekten basılıp yakıldığı aşama, emanet kasası hazır olana kadar tetiklenmiyor. "
-"Bu 'ekipte birikme ama sahada durdur' pozisyonu, hem hazırlıklı kalmayı hem de riski doğmadan öldürmeyi bilen bir sabırdır; sistem, eksik son parçayı beklemeden geçebileceği her aşamayı önceden bitirmiştir. "
+NTE2[86] = ("Bir otelin restoranının tüm menüsü hazır olmasına rağmen, bizotel gıda sertifikası gelmeden yemek satışı yapmaması gibi: Budlum'un depolama ekonomisinin tam mekanikleri yazılmış olmasına rağmen, paranın gerçekten basılıp yakıldığı görev, emanet kasası hazır olana kadar tetiklenmiyor. "
+"Bu 'ekipte birikme ama sahada durdur' pozisyonu, hem hazırlıklı kalmayı hem de riski doğmadan öldürmeyi bilen bir sabırdır; sistem, eksik son parçayı beklemeden geçebileceği her görevyı önceden bitirmiştir. "
 "Aceleye gelseydi ilk açıklıkta 'para kayboldu' ya da 'haksız basım oldu' haberi çıkardı; ekonomik bir sistemde bu iki haberden birinin çıkması, dinerini taşınmaz hale getirmek için yeterlidir ve tekrar güveni inşa etmek, çoğu zaman baştan inşadan uzun sürer.")
 
 NTE2[87] = ("Bir saatin iç çarklarını, dişli sayısını ve yün sayısını ölçüp 'her parça söz verilen ölçüde' diye raporlamak gibi: Budlum'un en derin makinesi — veriyi matematikle kanıtlayan çekirdek — dişli dişli sökülüp denetlendi ve sıfır yara iziyle çıktı. "
@@ -168,11 +168,11 @@ NTE2[111] = ("Bir kasabanın iki farklı mahallesinde aynı meyve bahçesinden g
 "Bu ayrımın iyi tarafı var: deneme ortamında kuruşlar yakılırken gerçek ortamda aynı paralar topluluğun fonu olur. "
 "Ama risk de var: ayar tek yerden okunacağı için gelecekte o ayar hangi rakamla yazıldı diye karışırsa — örneğin deneme ayarıyla gerçek ortam başlatılırsa — topluluğun kasasına akan paranın yıllarca 'görünmez olduğu' yaşanır ve bir gün bu sessizliği fark eden bir üye, 'kasanın tek kuruşu neden yok' diye sorduğunda cevap vermek çok zorlaşır. Ayar farkı teknik bir detay değil, yıllarca sürecek bir hazine güvenliği meselesidir.")
 
-NTE2[112] = ("Bir mahalle kahvesinde 'bir masada en fazla dört kişi olabilir, hesabı büyük müşteri küçük müşteriyi kovalar' kuralı gibi: Budlum'da da bir kişinin bekleme salonunda aynı anda en fazla yüz işi bekletebilir ve daha yüksek bedelli bir iş, düşük bedellinin yerini ancak belli bir farkla alabilir. "
+NTE2[112] = ("Bir mahalle kahvesinde 'bir masada en görevla dört kişi olabilir, hesabı büyük müşteri küçük müşteriyi kovalar' kuralı gibi: Budlum'da da bir kişinin bekleme salonunda aynı anda en görevla yüz işi bekletebilir ve daha yüksek bedelli bir iş, düşük bedellinin yerini ancak belli bir farkla alabilir. "
 "Bu kurallar sayesinde hiçbir müşteri salonu terk edemez hale getiremez ve küçük işlerin her zaman bir şansı olur. "
 "Bu kurallar gevşerse biri elindeki binlerce ufak işle salonu doldurur ve diğerlerinin masası sürekli boşaltılır; sıkışırsa da her küçük değişiklik için masraf çıkar ve o çıkan masraf, sonunda platformun gerçek kullanıcılarına döner. Salon yönetimi, her kahve içene değil, kahve mekânın sürekliliğine yazılmalıdır — bu kural, o dengenin kalbi.")
 
-NTE2[113] = ("Bir site yöneticisinin 'su deposunda sızıntı olursa 15 dakika içinde şu üç oyuna haber ver, birine ulaşamazsan direkt şirketi ara' felaket rehberi gibi: Budlum'da bir felaket tespit edilirse kimin, hangi kanaldan, kaç dakika içinde harekete geçeceği önceden yazılmış. "
+NTE2[113] = ("Bir site yöneticisinin 'su deposunda sızıntı olursa 15 dakika içinde şu üç oyuna haber ver, birine ulgörevzsan direkt şirketi ara' felaket rehberi gibi: Budlum'da bir felaket tespit edilirse kimin, hangi kanaldan, kaç dakika içinde harekete geçeceği önceden yazılmış. "
 "Bu rehberin en değerli olduğu an, herkesin en çok paniği yaşadığı andır: artık 'şaşırtıcı bir telefon' ile değil, önceden bilinen bir yoklamayla kurtarma başlar. "
 "Rehber olmazsa ilk gerçek felakette enerji, çözüme değil kime haber verileceğine harcanır; herkes birini arar, herkes başkasını bekler ve en kritik yarım saat 'ben değil sen ara' diyaloglarıyla geçer. Bir felakette yarım saatlik gecikme, haftalarca sürecek itibar kaybına dönüşebilir.")
 

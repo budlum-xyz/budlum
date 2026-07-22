@@ -1,4 +1,4 @@
-//! Phase 0.12 (security audit §4): `import_qc_blob` minimum imza sayısı
+//! Task 0.12 (security audit §4): `import_qc_blob` minimum imza sayısı
 //! (2/3 quorum) test'leri. Yeterli imza olmadan QcBlob insert
 //! edilmemeli; tam eşik kabul edilmeli; boş imza seti reddedilmeli.
 

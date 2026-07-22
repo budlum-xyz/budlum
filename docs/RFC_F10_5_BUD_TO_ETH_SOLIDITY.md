@@ -154,7 +154,7 @@ function claimUnlock(
 
 ## 6. Uygulama planı
 
-| Faz | Kapsam | Sorumlu | Kapı |
+| Görev | Kapsam | Sorumlu | Kapı |
 |---|---|---|---|
 | F10.5a | `BudToEthClaim` Rust payload (ship edildi, `bud_to_eth.rs`) | ARENA1 ✅ | unit test |
 | F10.5b | `BudlumLightClient.sol` iskelet (BLS verify stub) | ARENA1 / Solidity ekibi | foundry test |

@@ -21,7 +21,7 @@ pub struct PeerScore {
     pub score: i32,
     pub banned_until: Option<Instant>,
     /// Absolute ban expiry (unix seconds). Survives restart; `banned_until`
-    /// is recomputed from this on reload (Phase 0.334 / A4).
+    /// is recomputed from this on reload (Task 0.334 / A4).
     pub ban_expires_unix: Option<u64>,
     pub invalid_blocks: u32,
     pub invalid_txs: u32,
@@ -78,7 +78,7 @@ impl PeerScore {
         self.consume_token_with_rate(MSG_REFILL_RATE)
     }
 
-    /// Refill using an explicit tokens/sec rate (Phase 3 §3.4 network profile).
+    /// Refill using an explicit tokens/sec rate (Task 3 §3.4 network profile).
     pub fn consume_token_with_rate(&mut self, refill_rate: f64) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.rate_last_refill).as_secs_f64();
@@ -132,7 +132,7 @@ impl Default for PeerManager {
 }
 
 impl PeerManager {
-    /// Default burst refill (~5 msg/s) with 10k tracked-peer ceiling (Phase 3 §3.4).
+    /// Default burst refill (~5 msg/s) with 10k tracked-peer ceiling (Task 3 §3.4).
     pub fn new() -> Self {
         PeerManager {
             peers: HashMap::new(),
@@ -148,7 +148,7 @@ impl PeerManager {
         }
     }
 
-    /// Phase 3 §3.4: apply network security profile to P2P rate limiting.
+    /// Task 3 §3.4: apply network security profile to P2P rate limiting.
     /// `peer_rate_limit_per_minute` becomes tokens/second = limit/60.
     pub fn apply_security_config(&mut self, security: crate::core::chain_config::SecurityConfig) {
         let per_min = security.peer_rate_limit_per_minute.max(1);
@@ -278,7 +278,7 @@ impl PeerManager {
         self.peers.entry(*peer_id).or_default()
     }
     pub fn check_rate_limit(&mut self, peer_id: &PeerId) -> bool {
-        // Phase 3 §3.4: refuse to grow the score map without bound (memory DoS).
+        // Task 3 §3.4: refuse to grow the score map without bound (memory DoS).
         if !self.peers.contains_key(peer_id) && self.peers.len() >= self.max_tracked_peers {
             return false;
         }
@@ -457,7 +457,7 @@ impl PeerManager {
     }
 
     /// Snapshot of still-active bans with absolute expiry (unix seconds).
-    /// Phase 0.334 / A4: remaining duration is reconstructed on reload.
+    /// Task 0.334 / A4: remaining duration is reconstructed on reload.
     pub fn get_persisted_banned_peers(&self) -> Vec<PersistedBan> {
         let now = Instant::now();
         let now_unix = unix_now_secs();
@@ -502,7 +502,7 @@ impl PeerManager {
         }
     }
 
-    /// Legacy helper: reload peer IDs with a *full* ban window (pre-Phase 0.334 format).
+    /// Legacy helper: reload peer IDs with a *full* ban window (pre-Task 0.334 format).
     pub fn reload_banned_peers_legacy(&mut self, peer_ids: &[String]) {
         let bans: Vec<PersistedBan> = peer_ids
             .iter()
@@ -515,7 +515,7 @@ impl PeerManager {
     }
 }
 
-/// Durable ban record (Phase 0.334 / A4).
+/// Durable ban record (Task 0.334 / A4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedBan {
     pub peer_id: String,
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(manager.get_score(&peer), MAX_SCORE);
     }
 
-    /// Phase 0.334 / A4: reload uses absolute expiry, not a fresh full BAN_DURATION.
+    /// Task 0.334 / A4: reload uses absolute expiry, not a fresh full BAN_DURATION.
     #[test]
     fn tur117_ban_reload_preserves_remaining() {
         let mut manager = PeerManager::new();
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(persisted[0].expires_unix, expires);
     }
 
-    /// Phase 0.334 / A4: already-expired absolute timestamps are not re-banned.
+    /// Task 0.334 / A4: already-expired absolute timestamps are not re-banned.
     #[test]
     fn tur117_expired_ban_not_reloaded() {
         let mut manager = PeerManager::new();
@@ -627,9 +627,9 @@ mod tests {
         assert!(manager.get_persisted_banned_peers().is_empty());
     }
 
-    /// Phase 3 §3.4: SecurityConfig.peer_rate_limit_per_minute wires into refill rate.
+    /// Task 3 §3.4: SecurityConfig.peer_rate_limit_per_minute wires into refill rate.
     #[test]
-    fn phase3_peer_rate_limit_security_profile() {
+    fn task3_peer_rate_limit_security_profile() {
         use crate::core::chain_config::Network;
 
         let mut manager = PeerManager::new();
@@ -650,9 +650,9 @@ mod tests {
         assert_eq!(dev.max_peers_per_subnet(), 8);
     }
 
-    /// Phase 3 §3.4: tracked peer map has a hard ceiling (memory DoS guard).
+    /// Task 3 §3.4: tracked peer map has a hard ceiling (memory DoS guard).
     #[test]
-    fn phase3_peer_manager_tracked_peer_ceiling() {
+    fn task3_peer_manager_tracked_peer_ceiling() {
         let mut manager = PeerManager::new();
         manager.max_tracked_peers = 8;
 
@@ -678,9 +678,9 @@ mod tests {
         assert_eq!(manager.tracked_peer_count(), 8);
     }
 
-    /// Phase 3 §3.4: burst exhaustion then rejection (token bucket).
+    /// Task 3 §3.4: burst exhaustion then rejection (token bucket).
     #[test]
-    fn phase3_peer_rate_limit_burst_exhaustion() {
+    fn task3_peer_rate_limit_burst_exhaustion() {
         let mut manager = PeerManager::new();
         // Near-zero refill so burst cannot recover mid-test.
         manager.msg_refill_rate = 0.0;
@@ -697,11 +697,11 @@ mod tests {
         assert!(!manager.check_rate_limit(&peer));
     }
 
-    /// Phase 11.12 / H5.4: rate-limit exhaustion uses its own penalty category,
+    /// Task 11.12 / H5.4: rate-limit exhaustion uses its own penalty category,
     /// not the oversized-message category. Magnitude stays calibrated equal to
     /// the old value; the separation prevents audit/telemetry misclassification.
     #[test]
-    fn phase11_12_rate_limit_exhaustion_uses_dedicated_penalty() {
+    fn task11_12_rate_limit_exhaustion_uses_dedicated_penalty() {
         let mut manager = PeerManager::new();
         manager.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_12_repeated_rate_limit_exhaustion_bans_peer() {
+    fn task11_12_repeated_rate_limit_exhaustion_bans_peer() {
         let mut manager = PeerManager::new();
         manager.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -789,11 +789,11 @@ mod tests {
         assert_eq!(pm.subnet_connection_count(subnet), 0);
     }
 
-    /// Phase 11.12 chaos: network partition isolates peer groups by subnet.
+    /// Task 11.12 chaos: network partition isolates peer groups by subnet.
     /// Two groups on different /24 subnets cannot communicate through the
     /// PeerManager's subnet-bound admission.
     #[test]
-    fn phase11_12_chaos_network_partition_isolates_groups() {
+    fn task11_12_chaos_network_partition_isolates_groups() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
@@ -813,9 +813,9 @@ mod tests {
         assert!(pm.can_admit_subnet(Some(subnet_b)));
     }
 
-    /// Phase 11.12 chaos: byzantine peer sending invalid messages is rejected.
+    /// Task 11.12 chaos: byzantine peer sending invalid messages is rejected.
     #[test]
-    fn phase11_12_chaos_byzantine_block_rejected() {
+    fn task11_12_chaos_byzantine_block_rejected() {
         let mut pm = PeerManager::new();
         pm.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -834,10 +834,10 @@ mod tests {
         assert!(pm.is_banned(&peer), "byzantine peer must be banned");
     }
 
-    /// Phase 11.12 chaos: eclipse single-peer isolation — a peer that can only
+    /// Task 11.12 chaos: eclipse single-peer isolation — a peer that can only
     /// connect to one subnet is isolated from the broader network.
     #[test]
-    fn phase11_12_chaos_eclipse_single_peer_isolation() {
+    fn task11_12_chaos_eclipse_single_peer_isolation() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
@@ -855,9 +855,9 @@ mod tests {
         assert!(pm.can_admit_subnet(Some([192, 168, 2])));
     }
 
-    /// Phase 11.12 chaos: sybil attack from same /24 subnet is rejected.
+    /// Task 11.12 chaos: sybil attack from same /24 subnet is rejected.
     #[test]
-    fn phase11_12_chaos_sybil_subnet_bound_rejects_excess() {
+    fn task11_12_chaos_sybil_subnet_bound_rejects_excess() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
@@ -874,9 +874,9 @@ mod tests {
         assert!(!pm.can_admit_subnet(Some(subnet)));
     }
 
-    /// Phase 11.12 chaos: ban TTL allows reconnect after expiry.
+    /// Task 11.12 chaos: ban TTL allows reconnect after expiry.
     #[test]
-    fn phase11_12_chaos_ban_ttl_allows_reconnect_after_expiry() {
+    fn task11_12_chaos_ban_ttl_allows_reconnect_after_expiry() {
         let mut pm = PeerManager::new();
         pm.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -895,10 +895,10 @@ mod tests {
         assert!(!pm.is_banned(&peer));
     }
 
-    /// Phase 11.12 chaos: reputation fuzz decay — peer score decreases
+    /// Task 11.12 chaos: reputation fuzz decay — peer score decreases
     /// with repeated violations.
     #[test]
-    fn phase11_12_chaos_reputation_fuzz_decay() {
+    fn task11_12_chaos_reputation_fuzz_decay() {
         let mut pm = PeerManager::new();
         pm.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -920,13 +920,13 @@ mod tests {
         );
     }
 
-    /// Reputation invariant (Phase 11.12 / §3.4): score must stay within
+    /// Reputation invariant (Task 11.12 / §3.4): score must stay within
     /// `[MIN_SCORE, MAX_SCORE]` under any penalty sequence. The
     /// invalid-block / invalid-tx / oversized-message penalty paths clamp to
     /// `MIN_SCORE` (like `report_bad_behavior`) so `get_score()` never
     /// undershoots. Without the clamp these paths could return e.g. -105.
     #[test]
-    fn phase11_12_reputation_score_clamped_under_repeated_penalties() {
+    fn task11_12_reputation_score_clamped_under_repeated_penalties() {
         let mut pm = PeerManager::new();
 
         let pb = test_peer_id();

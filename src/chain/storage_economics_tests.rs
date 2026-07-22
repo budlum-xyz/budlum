@@ -6,7 +6,7 @@ mod tests {
 
     #[test]
     fn test_storage_maintenance_fail_closed_regression() {
-        // Phase 2: B.U.D. Faz 5 epoch regression & fail-closed E2E testleri
+        // Task 2: B.U.D. Görev 5 epoch regression & fail-closed E2E testleri
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 1337, None);
 

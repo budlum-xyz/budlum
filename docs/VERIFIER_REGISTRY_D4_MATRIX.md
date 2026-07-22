@@ -1,7 +1,7 @@
 # D4 Verifier Registry Birleştirme — Kapsam Matrisi (2026-07-22)
 
-**Karar:** v1'de tek stake-tabanlı registry (Ayaz).  
-**Ajan:** ARENA2 — D4 görev (önce D4, sonra D1).  
+**Karar:** v1'de tek stake-tabanlı registry (Ayaz).
+**Ajan:** ARENA2 — D4 görev (önce D4, sonra D1).
 **Kapsam:** 4 tüketici × registry kullanımı — bypass tespiti + bağlama.
 
 ---
@@ -111,7 +111,7 @@
 ## 6. CBOR/Serde ve State Root
 
 - `state_root()` domain-separated SHA-256, tüm rolleri (yeni 7,8,9 dahil) kapsar, deterministik.
-- `registrations_as_seq` serde trick JSON tuple key sorununu çözer (Phase 0.16 bug fix) — yeni roller de bu path'i kullanır.
+- `registrations_as_seq` serde trick JSON tuple key sorununu çözer (Task 0.16 bug fix) — yeni roller de bu path'i kullanır.
 - Serialization roundtrip testleri yeni roller dahil güncel.
 
 ---

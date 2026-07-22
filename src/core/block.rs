@@ -66,7 +66,7 @@ impl BlockHeader {
             .slashing_evidence
             .as_ref()
             .map(|e| {
-                // SECURITY (Phase 0.32): block hash input must not silently
+                // SECURITY (Task 0.32): block hash input must not silently
                 // hash empty bytes on serialize failure (collision risk).
                 bincode::serialize(e).expect("BUG: slashing evidence must serialize for block hash")
             })
@@ -228,7 +228,7 @@ impl Block {
             .slashing_evidence
             .as_ref()
             .map(|e| {
-                // SECURITY (Phase 0.32): block hash input must not silently
+                // SECURITY (Task 0.32): block hash input must not silently
                 // hash empty bytes on serialize failure (collision risk).
                 bincode::serialize(e).expect("BUG: slashing evidence must serialize for block hash")
             })

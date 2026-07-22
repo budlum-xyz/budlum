@@ -1,6 +1,6 @@
 # AI Inference Layer (modül README'si)
 
-**Bu dosya, Phase 10 Bölüm 4 modül-ayrımı kuralı gereği AI layer'ın kendi README'sidir.**
+**Bu dosya, Task 10 Bölüm 4 modül-ayrımı kuralı gereği AI layer'ın kendi README'sidir.**
 Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
 
 ## Durum
@@ -18,9 +18,9 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 
 ## Olgunluk uyarıları (Bölüm 4 kuralı)
 
-- ⚠️ **Attestation model (Faz-1).** On-chain AI inference = off-chain hesaplama +
+- ⚠️ **Attestation model (Görev-1).** On-chain AI inference = off-chain hesaplama +
   on-chain attestation (k-of-n verifier agreement). **zkML DEĞİL** — büyük modelleri
-  zincirde prove etmek 2026'da pratik değil (determinizm sorunu). Faz-2 kısıtlı
+  zincirde prove etmek 2026'da pratik değil (determinizm sorunu). Görev-2 kısıtlı
   model sınıfları için STARK-provable inference (BudZKVM).
 - ⚠️ **Determinizm riski.** Aynı model farklı donanımda farklı çıktı verebilir →
   `agreement_threshold` hiç sağlanmayabilir. "Bounded model class" whitelist veya
@@ -29,7 +29,7 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
   `input_ref` hâlâ legacy opak bytes olabilir; ancak Pollen `AiDataInputRef`
   prefix'i taşıyorsa executor geçerli `AccessGrant` olmadan request'i
   `ai_data_access_denied` ile reddeder. DAO/admin override yoktur. HPKE
-  hard-enforcement hâlâ Faz-2 encryption işidir.
+  hard-enforcement hâlâ Görev-2 encryption işidir.
 
 ## Güvenlik (P5 ship edildi)
 

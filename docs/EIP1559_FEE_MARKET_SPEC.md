@@ -1,6 +1,6 @@
 # EIP-1559 Fee Market — Teknik Spec
 
-**Durum:** Final v1 (Phase 11.6) → implementasyon Phase 11.8
+**Durum:** Final v1 (Task 11.6) → implementasyon Task 11.8
 **ADR:** [ADR-006](adr/ADR-006-eip1559-fee-market.md)
 **SPEC_REVIEW:** [EIP1559_FEE_MARKET_SPEC_REVIEW.md](spec-review/EIP1559_FEE_MARKET_SPEC_REVIEW.md)
 **INTERFACE_FROZEN:** true
@@ -8,9 +8,9 @@
 
 ---
 
-## 0. Interface Freeze (Phase 11.6)
+## 0. Interface Freeze (Task 11.6)
 
-Bu spec Phase 11.6 sonunda **interface-frozen** kabul edilir. Phase 11.8 implementasyonu aşağıdaki transaction alanlarını, fee hesap fonksiyonlarını ve invariant isimlerini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
+Bu spec Task 11.6 sonunda **interface-frozen** kabul edilir. Task 11.8 implementasyonu aşağıdaki transaction alanlarını, fee hesap fonksiyonlarını ve invariant isimlerini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
 
 ### 0.1 Transaction alanları
 
@@ -91,7 +91,7 @@ fn effective_fee(tx: &Transaction, block_base_fee: u64) -> Result<EffectiveFee, 
 
 - **Base fee:** yakılır (`AccountState::burn_from` veya dedicated burn path); validator'e gitmez.
 - **Priority fee:** blok üreticisine/validator'e gider.
-- **Toplam kullanıcı maliyeti:** `base_fee_burned + priority_fee_paid`, `max_fee` değerini aşamaz.
+- **Toplam kullanıcı maliyeti:** `base_fee_burned + priority_fee_paid`, `max_fee` değerini görevz.
 
 ## 5. Metabolic Burn ile Etkileşim
 
@@ -107,7 +107,7 @@ fn effective_fee(tx: &Transaction, block_base_fee: u64) -> Result<EffectiveFee, 
 1. `base_fee_change_bounded`: base fee blok başına max %12.5 değişir.
 2. `max_fee_below_base_fee_rejected`: base fee'yi karşılamayan tx reddedilir.
 3. `effective_tip_cannot_exceed_priority_fee`: validator'e giden ≤ priority_fee.
-4. `max_fee_respected`: kullanıcı max_fee'den fazla ödemez.
+4. `max_fee_respected`: kullanıcı max_fee'den görevla ödemez.
 5. `base_fee_burned_not_paid_to_validator`: base fee validator bakiyesine eklenmez.
 6. `total_supply_constant_with_burn`: base fee burn + metabolic burn arzı artırmaz.
 7. `legacy_tx_compatible`: `fee`-only tx migration ile kabul edilir.
@@ -115,9 +115,9 @@ fn effective_fee(tx: &Transaction, block_base_fee: u64) -> Result<EffectiveFee, 
 
 ## 7. CI Kapısı
 
-Phase 11.6 spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Phase 11.8 kod kapısı: Economy Invariants job'u random tx akışı + base fee + pool + burn invariant'larını koşar.
+Task 11.6 spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Task 11.8 kod kapısı: Economy Invariants job'u random tx akışı + base fee + pool + burn invariant'larını koşar.
 
-## 8. İlgili Kod (Phase 11.8)
+## 8. İlgili Kod (Task 11.8)
 
 - `src/chain/fee_market.rs` — base fee adjustment + effective fee.
 - `src/core/transaction.rs` — `max_fee`/`priority_fee` alanları + migration.

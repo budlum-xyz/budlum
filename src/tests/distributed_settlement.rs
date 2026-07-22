@@ -330,7 +330,7 @@ mod distributed_settlement_tests {
         let mut com2 =
             DomainCommitment::from_block(&pow_domain, &b, [0u8; 32], [0u8; 32], 2).unwrap();
         // Bound to the commitment so the rejection is specifically about depth
-        // ("not finalized"), not the head-hash binding (Phase 0.10).
+        // ("not finalized"), not the head-hash binding (Task 0.10).
         let proof2 = FinalityProof::PoW {
             confirmations: 1,
             total_work_hint: 1,
@@ -348,7 +348,7 @@ mod distributed_settlement_tests {
             .await;
         assert!(res2.is_err());
         let err2 = res2.unwrap_err();
-        // Phase 0.34: may fail on insufficient work, missing PoW bits, or not finalized.
+        // Task 0.34: may fail on insufficient work, missing PoW bits, or not finalized.
         assert!(
             err2.contains("not finalized")
                 || err2.contains("Rejected")

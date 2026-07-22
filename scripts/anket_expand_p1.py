@@ -7,7 +7,7 @@ import io, sys
 # ── Q1..Q120: uzun, teknik-kelimesiz, sonuç-odaklı açıklamalar ──────────────
 NTE = {}
 
-NTE[1] = ("Bir ekibin her şeye aynı adı vermesi gibi düşünün: biri 'tur' diyor, biri 'adım' diyor, biri 'faz' diyor; "
+NTE[1] = ("Bir ekibin her şeye aynı adı vermesi gibi düşünün: biri 'tur' diyor, biri 'adım' diyor, biri 'görev' diyor; "
 "yeni gelen biri hangisinin ne olduğunu şaşırır ve yanlış işi yanlış zamanda yapar. "
 "Bu karar tek isim kullanmayı seçiyor; doğruysa herkes aynı takvimi okur, raporlar birbiriyle konuşur, yeni katılan ekip üyeleri günler değil saatler içinde hızlanır. "
 "Yanlış seçilirse — yani iki isim birden yaşarsa — eski alışkanlık ölmez, bir süre sonra kimse hangi ismin güncel olduğundan emin olamaz; bu da aylar sonra 'o iş bitmişti sanıyordum' türünden pahalı yanlış anlamalara döner. "
@@ -54,12 +54,12 @@ NTE[10] = ("Eski model telefondaki rehberin yenisine taşınması gibi: Budlum'u
 "Köprü kaldırılırsa bir gün yapılacak mecburi yenilemede ya bazı kullanıcılar dışarıda kalır ya da ekip 'eskiyi kurtarma' paniğiyle aylar kaybeder; en kötü senaryoda kaybolan bir hesap için geri döndürülecek hiçbir yol kalmaz ve bu haber, Budlum'un teknik başarısından daha yüksek sesle konuşulur.")
 
 NTE[11] = ("Ev anahtarını paspasın altında bırakmakla kasada saklamak arasındaki fark gibi: Budlum'u yöneten en kritik anahtarlar yalnızca özel donanım kasasının içinde tutuluyor, sıradan bir dosya olarak bilgisayarda duramıyor. "
-"Böyle kalırsa sisteme sızan kötü biri bile anahtarı kopyalayıp götüremez; en fazla o anki oturuma zarar verebilir. "
+"Böyle kalırsa sisteme sızan kötü biri bile anahtarı kopyalayıp götüremez; en görevla o anki oturuma zarar verebilir. "
 "Gevşetilirse — 'geliştirme kolay olsun' diye taklidine ya da 'operatör isterse' diye sade dosyaya izin verilirse — bir gün tek bir sızıntı, tüm ağın imza yetkisini ele geçirir; bu noktadan sonra saldırgan Budlum adına her şeyi onaylayabilir ve böyle bir olayın itibar maliyeti, o ana kadarki tüm altyapı yatırımından büyük olur.")
 
 NTE[12] = ("Pahalı bir kasa alıp 'kendi özel açma şeklimizi' hiç tanımlamamak gibi olmasın diye: donanım kasasının özel imza yöntemi artık ayarlardan seçilebiliyor. "
 "Bu bağlantı sayesinde Budlum, anahtarını en üst düzeyde, üreticinin öngördüğü en güçlü yöntemle kullanabiliyor; yarın daha da güçlü bir yöntem çıkarsa sadece ayar değiştirmek yeterli. "
-"Bağlantı geri alınırsa donanım kasası sapasağlam rafta kalır ama hep bilinen sıradan yöntemle kullanılır; bu da ileride kasanın özel korumasına güvenerek plan yapan bir operatörün aslında o korumayı hiç yaşamadığını ancak bir sızıntı anında öğrenmesi riskini doğurur.")
+"Bağlantı geri alınırsa donanım kasası sapasağlam rafta kalır ama hep bilinen sıradan yöntemle kullanılır; bu da ileride kasanın özel korumasına güvenerek plan yapan bir operatörün aslında o korumayı hiç ygörevdığını ancak bir sızıntı anında öğrenmesi riskini doğurur.")
 
 NTE[13] = ("Vitrindeki fiyat etiketiyle depodaki sayım listesinin tutması gibi: Budlum'un giriş sayfasında yazan başarı sayısı ile arka planda gerçekten dönen sayı aynı olmalı. "
 "Rozet kendiliğinden güncelleniyor, metin elle tazeleniyor; doğru işletilirse ziyaretçi her zaman gerçek tabloyu görür ve ekip de yalan söylemiş durumuna düşmez. "
@@ -107,7 +107,7 @@ NTE[23] = ("Bir müteahhidin binayı bitirmesine rağmen yangın merdivenini 'ge
 
 NTE[24] = ("Bir lojistik şirketinde şoförlerin kazandığı primlerin ve yediği cezaların her gün deftere işlenmesi gibi: Budlum'da depo hizmeti verenlerin hak edişleri ve kabahatleri de otomatik olarak kayıt altına alınıyor. "
 "Bu defter sayesinde 'bana hakkım verilmedi' diyen biri elle tutulur kayda bakar; kimseye söz geçmez, kayıt konuşur. "
-"Kayıt tutulmazsa bir gün ödeme günü kavgaya döner: biri fazla iddia eder, biri eksik hissettiğini söyler, hakem yoktur; topluluk içinde ilk büyük kavga genellikle para dağıtımındandır ve Budlum gibi ortak mülkiyet rüyası gören bir proje, kendi içinde adaletsizlik dedikodusuyla yıpranmamalıdır.")
+"Kayıt tutulmazsa bir gün ödeme günü kavgaya döner: biri görevla iddia eder, biri eksik hissettiğini söyler, hakem yoktur; topluluk içinde ilk büyük kavga genellikle para dağıtımındandır ve Budlum gibi ortak mülkiyet rüyası gören bir proje, kendi içinde adaletsizlik dedikodusuyla yıpranmamalıdır.")
 
 NTE[25] = ("Bir mahalledeki duyuru panosuna asılan tartışmalı ilan için bütün mahallelinin oy kullanması gibi: Budlum'da sakıncalı bulunan içerik hakkında kararı tek bir şirket değil, topluluğun seçilmiş gözcüleri veriyor. "
 "Bu modelde hiçbir tek kişi kendi zevkine göre sansür yapamaz; kararın arkasında bir topluluk iradesi ve yorumlanabilir bir süreç vardır. "
@@ -179,7 +179,7 @@ NTE[41] = ("Bir kargo şirketinde paketi kapıdan kapıya taşıyan kuryenin her
 
 NTE[42] = ("Bir marangozun atölyesine gelen firmaya 'bu kapıyı istersen sana da yaparım, ücreti şu' diye fiyat listesi verebilmesi gibi: Budlum'da veri ve hizmetlerini yapay zekâ kullanıcılarına açmak isteyen kişiler, bunun iznini ve bedelini kendileri belirliyor. "
 "Bu düzen sayesinde emek sahibi sömürülmeden gelir kazanır; ilgilenen alıcı da karanlık kanallar yerine tek resmi pencereden adil fiyata ulaşır. "
-"İzin ve fiyat mekanizması olmasaydı iki yol kalırdı: ya herkesin verisi izinsiz kazınır ve topluluk 'bizi soydular' diye isyan eder; ya da kimsenin verisi hiçbir yere ulaşamaz ve Budlum'un en değerli bilgi zenginliği, hiçbir zaman gelire ve bilgiye dönüşemez.")
+"İzin ve fiyat mekanizması olmasaydı iki yol kalırdı: ya herkesin verisi izinsiz kazınır ve topluluk 'bizi soydular' diye isyan eder; ya da kimsenin verisi hiçbir yere ulgörevz ve Budlum'un en değerli bilgi zenginliği, hiçbir zaman gelire ve bilgiye dönüşemez.")
 
 NTE[43] = ("Evdeki buzdolabını prize takınca mutfağa katkı vermeye başlaması gibi: Budlum'da depolama cihazı alan biri, onu kutusundan çıkarıp bağladığı anda ağa hizmet sunmaya başlayabiliyor. "
 "Bu sayede ağ, sadece uzmanların kurabildiği soğuk bir makine değil, sokaktaki herkesin dahil olabileceği sıcak bir hizmet noktasına dönüşür. "
@@ -233,7 +233,7 @@ NTE[55] = ("Mezarlık nöbetçisinin 'bu dokuz mezar taşı silinirse hemen habe
 "Bu isim kilidi o özel testleri sıradan test kazasından ayırır; biri yanlışlıkla taşınırsa ya da yeniden adlandırılırsa sistem susmadan alarm verir. "
 "İsmi kilitli olmasaydı bir gün kritik bir teminat sessizce kaybolur ve kimse fark etmez — kontrol paneli hâlâ yeşildir, çünkü 'toplam sayı tutuyor'; ama sayı tutmak ile doğru şeylerin var olması aynı şey değildir ve fark, ancak gerçek felakette öğrenilir.")
 
-NTE[56] = ("Bir banka kasasının anahtarını birden fazla müdürün tutması gibi: Budlum'un en kritik kod bölgeleri için her değişiklikte, o bölgenin sorumlusu otomatik olarak onaylayıcı diye çağrılır. "
+NTE[56] = ("Bir banka kasasının anahtarını birden görevla müdürün tutması gibi: Budlum'un en kritik kod bölgeleri için her değişiklikte, o bölgenin sorumlusu otomatik olarak onaylayıcı diye çağrılır. "
 "Bu kural sayesinde hiçbir kritik karar, bir kişinin gece yarısı atacağı tek adımla yürümez; 'kim bakmalı' sorusu her zaman cevaplıdır. "
 "Sorumluluk listesi olmasa daha hızlı ilerlenir gibi görünür; ancak kritik dosyada bir gün yapılan hatalı değişiklik, 'kimse bakmadı mı' sorusuyla karşılaşır — ve bu soru, hatanın kendisinden daha çok yara açar.")
 
@@ -254,7 +254,7 @@ NTE[60] = ("Bir resmi kurumda gelen evrakların hem düzenlenişinin hem imzalar
 "Kontrolü tek kapıda toplasaydık bir türdeki hata gözden kaçardı; ve kaçışın fiyatı her zaman aynıdır: bir sabah 'nasıl olmuş da görülmemiş' sorusu ve topluluk önünde okunamayan sessizlik.")
 
 NTE[61] = ("Bir sitenin kapısına takılacak güvenlik camlarının kalınlığına karar verip, bu kalınlığı apartman yönetim defterine kalıcı yazmak gibi: Budlum'un en hassas doğrulama özelliğinin gerçek ağda devreye ne zaman gireceği ayarlardan okunuyor ve bu ayar törenle değiştirilebilir. "
-"Bu esneklik, keşif aşamasında sistemi hızlı tutarken açılış günü aynı pencereden 'şimdi geç' diyebilmeyi sağlar. "
+"Bu esneklik, keşif görevsında sistemi hızlı tutarken açılış günü aynı pencereden 'şimdi geç' diyebilmeyi sağlar. "
 "Karar koda gömülü olsaydı her durum değişikliği kod değişikliği gerektirirdi; ve açılış günü hiç uygun olmayan bir hata — 'hazır değildi ama kapıdaydı' — büyük günü gölgeleyebilirdi.")
 
 NTE[62] = ("Bir düğünün akşamında 'amcamın yüzüğü getirmesini unutmayın' diye listeye not düşmek gibi: Budlum'un açılış töreni kontrol listesine, bu çok kritik özelliğin o gün gerçekten açılıp açılmadığının işaretlenmesi eklendi. "
@@ -266,7 +266,7 @@ NTE[63] = ("Bir bankanın 'özel üretilmiş güvenlik kartı'nı alıp okuyucuy
 "Kayıt yapılmasaydı özel kutu rafta kalır, sistemin yeni güvenlik faydası lafta kalırdı; ve bir sonraki denetimde 'bu üreticinin özel mekanizmasından yararlanıyor musunuz' sorusuna verilecek tek cevap, utançla 'kağıtta var ama uygulamada yok' olurdu.")
 
 NTE[64] = ("Bir lojistik şirketinde bahşişin, en çok yol yapan sürücüye en çok gidecek şekilde dağıtılması gibi: Budlum'da öne çıkarma ücretlerinden depoculara düşen pay, herkesin o dönem ne kadar süre gerçekten çalıştığına oranla paylaştırılıyor; kalan kırıntılar da sistemli şekilde ilk sıradakine veriliyor. "
-"Bu yöntem hem adil hem de sızdırmazdır: ne bir fazla dağıtılır ne bir eksik kaybolur; kuruşun kuruşuna hesabı kapalıdır. "
+"Bu yöntem hem adil hem de sızdırmazdır: ne bir görevla dağıtılır ne bir eksik kaybolur; kuruşun kuruşuna hesabı kapalıdır. "
 "Düz dağıtımda az çalışan çok çalışanıyla aynı parayı alır ve bu his, zamanla sistemin en ciddi çalışanlarını bezdirebilir; bölünmemiş kalıntı birikirse bir yıl sonra 'nerede bu artanlar' sorusuna kimse cevap üretemez ve muhasebe anlaşmazlığı, iyi işleyen bir sistemin moral örseleyicisi olur.")
 
 NTE[65] = ("Bir kargo firmasının 'kutuyu teslim edemedik ama söylemedik' türünden hataları gizlememesi, çıkıp müşteriye haber vermesi gibi: Budlum'un kodunda, kalıcı kayda yazma işlemi başarısız olursa artık bu sessizce yutulmuyor, gürültülü bir alarm kaydı düşülüyor. "
@@ -282,7 +282,7 @@ NTE[67] = ("Bir kapıdaki güvenlik görevlisinin, elindeki listede yazan sahte 
 "Tek kollu test olsaydı bir gün compilasyonun derin köşesine gömülmüş bir 'örnek adres' kimsenin dikkatini çekmeden canlı ağda bulunurdu ve onu fark eden dış göz, 'demek ki kontroller yalnızca yüzeysel' sonucuna kolayca ulaşırdı.")
 
 NTE[68] = ("Bir mağazanın merkeziyle şubesi arasında bağlantı kopunca şubedeki 'merkezi onay' zorunluluğunun işlemleri kilitlediği gibi: Budlum'da da yan dalda çalışırken ana dalın referansı kaybolunca denetim haksız yere kızıyordu — bu düzeltildi. "
-"Bu düzeltme sayesinde hiçbir çalışan, ana merkezle anlık bağ kopunca 'her şey durdu' paniği yaşamaz; yan işler kendi ekseninde denetlenir, birleşince yekûn görünür. "
+"Bu düzeltme sayesinde hiçbir çalışan, ana merkezle anlık bağ kopunca 'her şey durdu' paniği ygörevz; yan işler kendi ekseninde denetlenir, birleşince yekûn görünür. "
 "Eski davranış kalsaydı, her yeni dalın ilk hamlesinde yaşanan anlamsız kırmızı, ekibe 'sistem şımarık' hissini öğretirdi; gerçek kırmızı geldiğinde de kimse durdurmaz — 'nasılsa yine şımarıyor' denecek kadar yorgun bir ekip, en ciddi alarmı da kaybeder.")
 
 NTE[69] = ("Bir antika masanın altındaki 'şu atölyede, şu yılda yapılmıştır' damgasının masa hakkındaki kitaba aynen yazılması ve her ikisinin birbirine eşliğinin test edilmesi gibi: Budlum'un ilk günkü kimlik işaretinin, dokümandaki resmi ifadeyle birebir aynı olduğu her derlemede kanıtlanıyor. "

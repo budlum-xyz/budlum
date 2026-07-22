@@ -12,7 +12,7 @@ use sled::Db;
 use std::str::from_utf8;
 use tracing::info;
 
-/// On-disk ConsensusDomain shape used before Phase 0.37 appended
+/// On-disk ConsensusDomain shape used before Task 0.37 appended
 /// `pow_parameters`. Bincode is positional, so serde defaults alone cannot
 /// recover an older record that ends before the new field.
 #[derive(serde::Deserialize)]
@@ -1017,14 +1017,14 @@ impl Storage {
     }
 
     /// Retrieve raw content bytes by ContentId.
-    /// Stub: content-addressed blob storage is not yet implemented (Phase 0.40 scope).
+    /// Stub: content-addressed blob storage is not yet implemented (Task 0.40 scope).
     pub fn get_content(
         &self,
         _cid: &crate::storage::content_id::ContentId,
     ) -> std::io::Result<Vec<u8>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "Content-addressed blob storage not yet implemented (Phase 0.40 scope)",
+            "Content-addressed blob storage not yet implemented (Task 0.40 scope)",
         ))
     }
 }

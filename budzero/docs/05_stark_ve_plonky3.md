@@ -8,7 +8,7 @@ Eskiden (örneğin Winterfell kullanırken) kısıt dereceleri (constraint degre
 
 ## AIR (Algebraic Intermediate Representation)
 
-Bir ZKVM'in kalbi AIR'dır. AIR, Execution Trace'in doğruluğunu kontrol eden **matematiksel kurallar bütünüdür**. 
+Bir ZKVM'in kalbi AIR'dır. AIR, Execution Trace'in doğruluğunu kontrol eden **matematiksel kurallar bütünüdür**.
 * Geleneksel programlamada doğruluğu `if (A + B == C)` ile kontrol ederiz.
 * AIR dünyasında ise bu denklemi sıfıra eşitlemek zorundayız: `(A + B) - C = 0`
 
@@ -64,7 +64,7 @@ Güncel BudZKVM ana trace matrisi **354 sütun** genişliğindedir. Sütun grupl
 Bunu polinom diliyle şu şekilde ifade ederiz:
 ```rust
 builder.when_transition().assert_zero(
-    r_active.clone() * nr_active.clone() * r_same.clone() * 
+    r_active.clone() * nr_active.clone() * r_same.clone() *
     (one.clone() - nr_write) * (nr_val - r_val)
 );
 ```
@@ -117,7 +117,7 @@ builder.assert_eq(x2, (state + RC) * (state + RC));
 builder.assert_eq(x4, x2 * x2);
 ```
 
-S-box intermediate değerleri trace'te 96 sütun kaplar (4 round × 8 element × 3 değer). Tam multi-round doğrulama Plonky3 constraint limitleri nedeniyle gelecek aşamaya bırakılmıştır.
+S-box intermediate değerleri trace'te 96 sütun kaplar (4 round × 8 element × 3 değer). Tam multi-round doğrulama Plonky3 constraint limitleri nedeniyle gelecek görevya bırakılmıştır.
 
 ## BudZKVM'de Güncel Prover Akışı
 

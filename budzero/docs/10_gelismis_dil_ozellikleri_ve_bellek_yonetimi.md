@@ -53,10 +53,10 @@ Bu sayede sadece 32 register ile sonsuz derinlikte fonksiyon çağrıları güve
 Sadece değişkenleri tutan bir derleyici çok tehlikelidir. Eğer kullanıcı `let x = true; let y = x + 5;` yazarsa, makine seviyesinde bu `1 + 5 = 6` olarak çalışır ve mantıksal bir hataya (Bug) dönüşür. ZK akıllı sözleşmelerinde buglar milyonlarca dolara mal olabilir.
 
 ### Semantic Analyzer (Semantik Analizör) Nedir?
-Derleme aşamasında kodun Parser (Sözdizimi) ağacını çıkarıldıktan sonra, makine koduna (Codegen) geçmeden önceki denetim aşamasıdır.
+Derleme görevsında kodun Parser (Sözdizimi) ağacını çıkarıldıktan sonra, makine koduna (Codegen) geçmeden önceki denetim görevsıdır.
 
 Semantik Analizör şu kuralları işletir:
-* **Tip Uyuşmazlığı:** `u64` beklenen bir yere `bool` veya `field` atanıyor mu? 
+* **Tip Uyuşmazlığı:** `u64` beklenen bir yere `bool` veya `field` atanıyor mu?
 * **Fonksiyon İmzaları:** `add_and_mul(1, 2, 42)` çağrısı tam olarak 3 adet `u64` parametre mi alıyor? Eğer parametre sayısı eksikse veya tipleri yanlışsa derleme anında durdurulur (`CompileError::TypeError`).
 * **Return Tipleri:** Eğer bir fonksiyon `-> u64` döndüreceğini belirtmişse, içindeki `return` ifadesi gerçekten bir `u64` üretiyor mu?
 * **Bilinmeyen Değişkenler:** Daha önce tanımlanmamış bir değişkene (`a = 5`) erişilmeye mi çalışılıyor?

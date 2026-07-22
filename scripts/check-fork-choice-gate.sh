@@ -2,14 +2,14 @@
 set -euo pipefail
 
 required_tests=(
-  phase11_8_pow_picks_highest_cumulative_work
-  phase11_8_pos_picks_highest_vote_weight
-  phase11_8_bft_conflicting_qc_is_rejected
-  phase11_8_poa_requires_authority_quorum
-  phase11_8_lifecycle_transitions_are_explicit
-  phase11_8_mixed_domain_candidates_rejected
-  phase11_8_domain_lifecycle_requires_freeze_before_retire
-  phase11_8_retired_domain_is_terminal
+  task11_8_pow_picks_highest_cumulative_work
+  task11_8_pos_picks_highest_vote_weight
+  task11_8_bft_conflicting_qc_is_rejected
+  task11_8_poa_requires_authority_quorum
+  task11_8_lifecycle_transitions_are_explicit
+  task11_8_mixed_domain_candidates_rejected
+  task11_8_domain_lifecycle_requires_freeze_before_retire
+  task11_8_retired_domain_is_terminal
 )
 
 fail() {

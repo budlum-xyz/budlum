@@ -33,7 +33,7 @@ pub trait ConsensusEngine: Send + Sync {
 | :--- | :--- | :--- | :--- |
 | `prepare_block` | **Madencilik yapar.** `nonce` dener, CPU yakar. | **Lider kontrolü yapar.** "Sıra bende mi?" diye bakar, imza atar. | **Yetki kontrolü.** "Listede adım var mı?" diye bakar. |
 | `validate_block`| **Hash kontrolü.** Hedef zorluğu tutturmuş mu? | **İmza kontrolü.** Blok üreticisi o slotun lideri mi? | **İmza kontrolü.** Yetkili listeden mi gelmiş? |
-| `fork_choice` | **En Zor Zincir.** Toplam zorluk (Difficulty) kimde fazlaysa o kazanır. | **En Ağır Zincir.** Toplam stake kimde fazlaysa (veya LMD-GHOST) o kazanır. | **En Uzun Zincir.** Blok sayısı kimde fazlaysa. |
+| `fork_choice` | **En Zor Zincir.** Toplam zorluk (Difficulty) kimde görevlaysa o kazanır. | **En Ağır Zincir.** Toplam stake kimde görevlaysa (veya LMD-GHOST) o kazanır. | **En Uzun Zincir.** Blok sayısı kimde görevlaysa. |
 
 ---
 

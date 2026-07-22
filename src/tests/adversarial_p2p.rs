@@ -61,7 +61,7 @@ async fn test_flood_protection_logic() {
 
 #[tokio::test]
 async fn test_p2p_topology_latency_drift_simulation() {
-    // Phase 9: Industry Standard Simulation.
+    // Task 9: Industry Standard Simulation.
     // Tests if the chain handles blocks with slightly future/past timestamps
     // which simulate network propagation delays (latency drift).
     let consensus = Arc::new(PoWEngine::new(0));

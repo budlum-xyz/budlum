@@ -1,4 +1,4 @@
-//! Phase 5 §5.5 AI Data Marketplace — satıcı-teklifi (DataOffer) ekonomisi.
+//! Task 5 §5.5 AI Data Marketplace — satıcı-teklifi (DataOffer) ekonomisi.
 //!
 //! ARENA4 ADIM 1: Data Rights/Pollen sertleştirmesi bu geçiş registry'sine
 //! `DataAsset` ve `AccessGrant` map'lerini ekler. Kural: AI, Pollen/B.U.D.
@@ -14,7 +14,7 @@ use super::{
     SaleAuthorization, SaleAuthorizationId,
 };
 
-/// Phase 5 §5.5: AI Data Marketplace — Economic layer for user-to-AI data sales.
+/// Task 5 §5.5: AI Data Marketplace — Economic layer for user-to-AI data sales.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataOffer {
     pub id: u64,

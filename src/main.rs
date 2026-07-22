@@ -232,9 +232,9 @@ async fn main() {
         return;
     }
 
-    // Phase 8.9 / Görev 7.1 tooling: `budlum-core keygen --type ed25519 --output <path>`
-    // Ceremony dokümanı Phase 1'deki adımın karşılığı (önceden dokümanda olan ama
-    // binary'de OLMAYAN bir komuttu — Phase 8.9 iddia-vs-kanıt matrisi kapanışı).
+    // Task 8.9 / Görev 7.1 tooling: `budlum-core keygen --type ed25519 --output <path>`
+    // Ceremony dokümanı Task 1'deki adımın karşılığı (önceden dokümanda olan ama
+    // binary'de OLMAYAN bir komuttu — Task 8.9 iddia-vs-kanıt matrisi kapanışı).
     if args.len() >= 2 && args[1] == "keygen" {
         let mut key_type = "ed25519".to_string();
         let mut output: Option<String> = None;
@@ -293,7 +293,7 @@ async fn main() {
             eprintln!("Error: cannot write public key file {pub_path}: {e}");
             std::process::exit(1);
         });
-        // NOT (Phase 0.17 §7 karşı-dengesi): node çalışırken pubkey stdout'a
+        // NOT (Task 0.17 §7 karşı-dengesi): node çalışırken pubkey stdout'a
         // yazılmaz; burada operatörün açıkça çağırdığı ayrı keygen CLI'si
         // sanctioned kanaldır — pubkey ve adres ceremony tabloları için
         // bilinçli yazdırılır. Secret key ve dosya yolu ASLA loglanmaz.
@@ -543,7 +543,7 @@ async fn main() {
                 epoch_length: network_params.epoch_len,
                 ..Default::default()
             };
-            // Phase 0.35 / B1: mainnet forbids disk-backed ValidatorKeys
+            // Task 0.35 / B1: mainnet forbids disk-backed ValidatorKeys
             // (BLS + Dilithium secrets stay plaintext on disk today).
             let keys = if config.network == budlum_core::core::chain_config::Network::Mainnet {
                 if config.validator_key_file.is_some() {
@@ -720,7 +720,7 @@ async fn main() {
         chain_actor.run().await;
     });
 
-    // Phase 9.x (2026-07-18, ARENA3): ölü `_keys` bootstrap'ı gerçeğe bağlandı —
+    // Task 9.x (2026-07-18, ARENA3): ölü `_keys` bootstrap'ı gerçeğe bağlandı —
     // yüklenen validator anahtarının ADRESİ producer-aday zincirine düşer.
     // Davranış değişikliği yalnızca şu: anahtar yüklemesi başarılıysa adresi
     // artık bir değişkende tutulur; imza/devnet'lik doğrulama kuralları aynı.
@@ -769,13 +769,13 @@ async fn main() {
             eprintln!("Set p2p.bootnodes in config/mainnet.toml or pass --bootstrap.");
             std::process::exit(1);
         }
-        // Phase 8.9 / Q5: genesis placeholder reddiyle (cli/commands.rs Rule 4)
+        // Task 8.9 / Q5: genesis placeholder reddiyle (cli/commands.rs Rule 4)
         // simetrik fail-closed — dummy/placeholder marker içeren peer mainnet'te
-        // DİAL EDİLMEZ. Phase 7.2 ceremony gerçek multiaddr'ları yazınca geçer.
+        // DİAL EDİLMEZ. Task 7.2 ceremony gerçek multiaddr'ları yazınca geçer.
         if let Some(bad) = budlum_core::core::chain_config::first_placeholder_peer(&bootstraps) {
             eprintln!("CRITICAL SECURITY FAILURE: Mainnet placeholder bootnode detected: {bad}");
             eprintln!(
-                "Dummy peer'lar production'da dial edilemez — Phase 7.2 ceremony ile gerçek multiaddr'lar yazılmalı."
+                "Dummy peer'lar production'da dial edilemez — Task 7.2 ceremony ile gerçek multiaddr'lar yazılmalı."
             );
             std::process::exit(1);
         }
@@ -788,7 +788,7 @@ async fn main() {
             budlum_core::core::chain_config::first_placeholder_peer(&effective_dns_seeds)
         {
             eprintln!("CRITICAL SECURITY FAILURE: Mainnet placeholder DNS seed detected: {bad}");
-            eprintln!("Phase 7.2 ceremony ile gerçek _dnsaddr kayıtları yayınlanmalı.");
+            eprintln!("Task 7.2 ceremony ile gerçek _dnsaddr kayıtları yayınlanmalı.");
             std::process::exit(1);
         }
     }
@@ -872,7 +872,7 @@ async fn main() {
             }
         };
 
-        // Phase 0.12 (security audit §5 wiring): emit a prominent startup
+        // Task 0.12 (security audit §5 wiring): emit a prominent startup
         // warning if the *resolved* `auth_required` is false. This block
         // runs regardless of which constructor
         // (`RpcSecurityConfig::default()`, `operator_default()`,
@@ -1017,7 +1017,7 @@ async fn main() {
         }
     });
 
-    // Start Relayer Worker if configured (Phase 5 §5.1)
+    // Start Relayer Worker if configured (Task 5 §5.1)
     if config.role == "relayer" || config.role == "validator" {
         let relayer_addr = cli_producer_address.unwrap_or(Address::zero());
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr);
@@ -1026,7 +1026,7 @@ async fn main() {
         });
     }
 
-    // Phase 9.x (2026-07-18, ARENA3): Daemon blok-üretim döngüsü (PoS + PoW).
+    // Task 9.x (2026-07-18, ARENA3): Daemon blok-üretim döngüsü (PoS + PoW).
     // Kök neden (CI kanıtlı, multinode smoke job 87990206239): binary yalnız
     // interaktif stdin "mine" komutuyla blok üretiyordu — daemon/compose
     // ağları genesis'te (height=0x0) donuyordu. Döngü, producer adresi

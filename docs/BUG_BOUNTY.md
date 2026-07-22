@@ -1,8 +1,8 @@
-# Budlum Bug Bounty Programı — Phase 2 Kararı (2.4=C)
+# Budlum Bug Bounty Programı — Task 2 Kararı (2.4=C)
 
-**Durum:** Taslak (Phase 2)  
-**Geçerlilik:** Mainnet v1 lansmanından itibaren  
-**Yöneten:** ARENA1 / AI Birliği koordinasyonu  
+**Durum:** Taslak (Task 2)
+**Geçerlilik:** Mainnet v1 lansmanından itibaren
+**Yöneten:** ARENA1 / AI Birliği koordinasyonu
 
 ---
 
@@ -37,13 +37,13 @@
 | **Orta** | Rate limit bypass, information leak, economic manipulation | $2,500–$5,000 |
 | **Düşük** | Best practice violation, documentation inconsistency | $500–$1,000 |
 
-> **Not:** Ödüller Phase 4'te bug bounty platformu (immunefi.com, Q6 kararı: bug_bounty) ile entegre edildiğinde kesinleşecek. Phase 3 10-soru anket Q6: bug_bounty seçildi (harici firma değil, immunefi tipi platform).
+> **Not:** Ödüller Task 4'te bug bounty platformu (immunefi.com, Q6 kararı: bug_bounty) ile entegre edildiğinde kesinleşecek. Task 3 10-soru anket Q6: bug_bounty seçildi (harici firma değil, immunefi tipi platform).
 
-**Güncelleme (Phase 4 Q6):** Immunefi entegrasyonu için `https://immunefi.com/bounty/budlum` taslak başvurusu hazırlanacak; kritik bulgular için $50k-$100k aralığı korunuyor. Mainnet self-audited olduğu için immunefi "medium" tier ile başlanacak, audit sonrası "high" tier'e yükseltilecek.
+**Güncelleme (Task 4 Q6):** Immunefi entegrasyonu için `https://immunefi.com/bounty/budlum` taslak başvurusu hazırlanacak; kritik bulgular için $50k-$100k aralığı korunuyor. Mainnet self-audited olduğu için immunefi "medium" tier ile başlanacak, audit sonrası "high" tier'e yükseltilecek.
 
 ## 4. Raporlama Süreci
 
-1. **Başvuru:** `security@budlum.network` (PGP key: `0xBUDLUM-SECURITY` — Phase 3'te yayınlanacak)
+1. **Başvuru:** `security@budlum.network` (PGP key: `0xBUDLUM-SECURITY` — Task 3'te yayınlanacak)
 2. **Triage:** 72 saat içinde ilk yanıt
 3. **Değerlendirme:** 14 gün içinde ön değerlendirme
 4. **Düzeltme:** Kritik bulgular 30 gün içinde patch
@@ -58,17 +58,17 @@
 
 ## 6. Dependency Policy
 
-`cargo audit` tarafından tespit edilen CVE'ler (örneğin `protobuf`, `pqcrypto-*`, `ring`) bu program kapsamında **değerlendirilmez** — bunlar ayrı bir dependency upgrade PHASE'inde ele alınır. Ancak, bir dependency CVE'sinin Budlum spesifik bir exploit chain'ine dönüştürülebildiği kanıtlanırsa, "Kritik" seviyede değerlendirilebilir.
+`cargo audit` tarafından tespit edilen CVE'ler (örneğin `protobuf`, `pqcrypto-*`, `ring`) bu program kapsamında **değerlendirilmez** — bunlar ayrı bir dependency upgrade TASK'inde ele alınır. Ancak, bir dependency CVE'sinin Budlum spesifik bir exploit chain'ine dönüştürülebildiği kanıtlanırsa, "Kritik" seviyede değerlendirilebilir.
 
 ---
 
-**Sonraki adım:** Phase 3'te immunefi.com veya benzeri bir platforma kayıt + PGP key yayınlama.
+**Sonraki adım:** Task 3'te immunefi.com veya benzeri bir platforma kayıt + PGP key yayınlama.
 
 ---
 
-## 7. Phase 10.5 Augmentation — F10 kapsam + safe harbor + immunefi (F29)
+## 7. Task 10.5 Augmentation — F10 kapsam + safe harbor + immunefi (F29)
 
-> **Kaynak:** Phase 10.5 F29 (🔴 mainnet-blocker, MR-8). Bu bölüm F29 kapanış
+> **Kaynak:** Task 10.5 F29 (🔴 mainnet-blocker, MR-8). Bu bölüm F29 kapanış
 > kriterlerini ekler. **Yazar:** ARENA1 (görev yöneticisi), 2026-07-18.
 
 ### 7.1 F10 EVM ChainAdapter kapsamı (PR #52 + #53 shipled)
@@ -113,7 +113,7 @@ bunlar program kapsamı dışı + yasal süreç konusu.
 
 ### 7.3 Immunefi başvuru durumu (netleştirme)
 
-- **Mevcut:** Immunefi taslak başvuru hazırlanmadı (Phase 4 Q6 = bug_bounty
+- **Mevcut:** Immunefi taslak başvuru hazırlanmadı (Task 4 Q6 = bug_bounty
   kararı var, başvuru bekliyor).
 - **Tier kararı:** Mainnet **self-audited** (external audit yok) → Immunefi
   **Medium tier** ile başlanır (kapsam: Kritik/Yüksek/Orta; max ödül Medium
@@ -130,7 +130,7 @@ MR-8 (external audit / bug bounty) kapanması için:
 - [ ] §7.1 F10 kapsamı review onayı (ARENA3 kripto domain)
 - [ ] §7.2 safe harbor yasal review (kullanıcı / counsel)
 - [ ] §7.3 Immunefi Medium tier başvurusu submitted (mainnet T+1d)
-- [ ] PGP key `security@budlum.network` yayınlanmış (Phase 3 debt)
+- [ ] PGP key `security@budlum.network` yayınlanmış (Task 3 debt)
 - [ ] (Opsiyonel) External audit firm seçimi + sözleşme (M7, High tier için)
 
 **Bu doküman hâlâ taslak** — Immunefi live olana kadar MR-8 🟡 kalır. F29 🔴 →
@@ -138,4 +138,4 @@ MR-8 kapanışıyla ✅ (bug bounty launch yeterli; firm opsiyonel).
 
 ---
 
-*Co-authored-by: ARENA1 <arena1@budlum.ai> (F29 augmentation, Phase 10.5)*
+*Co-authored-by: ARENA1 <arena1@budlum.ai> (F29 augmentation, Task 10.5)*

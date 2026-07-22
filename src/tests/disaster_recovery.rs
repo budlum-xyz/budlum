@@ -234,7 +234,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
     let bob = Address::from([0x02; 32]);
     let relayer = Address::from([0x0A; 32]);
 
-    // PHASE 1: Normal Operation
+    // TASK 1: Normal Operation
     {
         let storage = reopen_storage(db_path_str);
         let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
@@ -265,7 +265,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
         let _ = bc.produce_block(Address::zero());
     }
 
-    // PHASE 2: Sudden Crash during heavy writing
+    // TASK 2: Sudden Crash during heavy writing
     {
         let storage = reopen_storage(db_path_str);
         let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
@@ -282,7 +282,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
         info!("INTERRUPTED: System crash during block processing.");
     }
 
-    // PHASE 3: Recovery and Chain Sync with a longer fork
+    // TASK 3: Recovery and Chain Sync with a longer fork
     {
         let storage = reopen_storage(db_path_str);
         let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);

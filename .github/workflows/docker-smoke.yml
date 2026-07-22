@@ -1,4 +1,4 @@
-name: Docker Smoke (Phase 3 §3.2)
+name: Docker Smoke (Task 3 §3.2)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
       - 'Dockerfile'
       - 'config/mainnet.toml'
       - 'docker-compose.yml'
-      - 'scripts/phase3_smoke_rpc.sh'
+      - 'scripts/task3_smoke_rpc.sh'
       - 'scripts/docker-smoke-mainnet.sh'
       - 'scripts/devnet-multinode-smoke.sh'
       - 'src/**'
@@ -45,8 +45,8 @@ jobs:
           ignore-unfixed: true
       - name: Run RPC smoke (devnet)
         run: |
-          chmod +x scripts/phase3_smoke_rpc.sh
-          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18545 ./scripts/phase3_smoke_rpc.sh || (cat /tmp/budlum-phase3-smoke-db/node.log 2>/dev/null; exit 1)
+          chmod +x scripts/task3_smoke_rpc.sh
+          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18545 ./scripts/task3_smoke_rpc.sh || (cat /tmp/budlum-task3-smoke-db/node.log 2>/dev/null; exit 1)
       - name: Run Docker mainnet smoke
         run: |
           chmod +x scripts/docker-smoke-mainnet.sh

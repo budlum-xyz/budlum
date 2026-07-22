@@ -5,7 +5,7 @@ use crate::hub::types::{AppCategory, AppRecord, HubError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Phase 8.9 / M5: anti-sybil minimum app kayıt ücreti (BNS `base_cost` ile uyumlu).
+/// Task 8.9 / M5: anti-sybil minimum app kayıt ücreti (BNS `base_cost` ile uyumlu).
 /// Executor, `HubRegisterApp` tx'lerinde bu tutarı `tx.amount` üzerinden ZORUNLU
 /// tutar ve tam olarak bu kadarını düşer (H1 "exact cost" deseniyle simetrik).
 pub const HUB_REGISTER_MIN_FEE: u64 = 100;

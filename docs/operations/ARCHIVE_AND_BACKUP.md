@@ -1,4 +1,4 @@
-# Archive node and backup/restore runbook (Phase 0.37)
+# Archive node and backup/restore runbook (Task 0.37)
 
 ## Policy
 

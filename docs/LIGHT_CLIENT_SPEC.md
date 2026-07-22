@@ -61,11 +61,11 @@ trait LightClient {
 - **ZK light client:** BudZKVM ile "prove the state transition" → trustless
 - **Mobile/browser:** Wallet-core ile entegrasyon (BIP39 → light client sync)
 
-## 6. Önerilen Fazlar
+## 6. Önerilen Görevlar
 
-1. **Faz 1:** Header-chain sync + state proof query (RPC endpoint)
-2. **Faz 2:** Budlum sync-committee (BLS aggregate light client)
-3. **Faz 3:** ZK proof of state transition (BudZKVM)
+1. **Görev 1:** Header-chain sync + state proof query (RPC endpoint)
+2. **Görev 2:** Budlum sync-committee (BLS aggregate light client)
+3. **Görev 3:** ZK proof of state transition (BudZKVM)
 
 ---
 

@@ -24,11 +24,11 @@ The full list should be checked in `src/network/protocol.rs`.
 
 ## BLS Finality Protocol (v0.3-dev)
 
-The finality protocol operates in three phases at each checkpoint height (every 10 blocks):
+The finality protocol operates in three tasks at each checkpoint height (every 10 blocks):
 
-1. **Prevote Phase:** When a block is produced at a checkpoint height, the producing node automatically starts the prevote phase. Validators sign prevote messages with their BLS secret key (`sign_bls`) and broadcast them via GossipSub. The `FinalityAggregator` tracks votes and checks for 2/3 stake quorum.
+1. **Prevote Task:** When a block is produced at a checkpoint height, the producing node automatically starts the prevote task. Validators sign prevote messages with their BLS secret key (`sign_bls`) and broadcast them via GossipSub. The `FinalityAggregator` tracks votes and checks for 2/3 stake quorum.
 
-2. **Precommit Phase:** Once the prevote quorum is reached, validators automatically sign and broadcast BLS precommit messages. The periodic voting loop in `Node` checks `get_aggregator_state()` and triggers auto-precommit when prevote quorum is detected.
+2. **Precommit Task:** Once the prevote quorum is reached, validators automatically sign and broadcast BLS precommit messages. The periodic voting loop in `Node` checks `get_aggregator_state()` and triggers auto-precommit when prevote quorum is detected.
 
 3. **Certificate Production:** When the precommit quorum (2/3 stake) is reached, the aggregator produces a `FinalityCert` containing the aggregated BLS G1 signature, a signer bitmap, and the validator set hash. The cert is gossiped network-wide and verified via BLS pairing (`e(sig, -G2_gen) + e(H(msg), agg_pk) == 0`).
 

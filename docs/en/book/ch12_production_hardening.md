@@ -27,7 +27,7 @@ This chapter is the operational truth table for the current repository. Budlum C
 | RPC | Separate public/operator listeners, trusted-proxy validation, per-IP sliding-window quotas, a 10,000-client accounting ceiling, and operator-only guards for administrative mutation helpers. Health and node-info endpoints are live. |
 | Metrics | Prometheus descriptors and endpoint exist. Live collectors include chain/finality/mempool/P2P counters plus block-propagation, consensus-round and storage read/write histograms, settlement commitments and sealed global headers. Deployment SLOs and external dashboards remain operator work. |
 | Snapshot V2 | V2 is the canonical runtime format. `AccountState::from_snapshot_v2()` restores consensus metadata; P2P snapshot chunks bind `session_id`; replay equivalence is tested. Archive nodes now fail closed against pruning and require rotating backups. |
-| Storage | Durable block commit plus checksummed atomic database backup, retention, empty-target restore and integrity drill exist. Phase 2 adds a migration skeleton and `--migrate-v2` backup gate; future multi-step schema transforms remain release-audited work. |
+| Storage | Durable block commit plus checksummed atomic database backup, retention, empty-target restore and integrity drill exist. Task 2 adds a migration skeleton and `--migrate-v2` backup gate; future multi-step schema transforms remain release-audited work. |
 | Deployment | Docker/systemd/devnet/Prometheus packages plus production, PoA and archive runbooks exist. Signed release ceremony and full incident exercises remain. |
 
 ## 3. Explicit Mainnet Blockers
@@ -57,10 +57,10 @@ Current test count is tracked by CI; do not treat this document as an audited re
 ## 5. What Remains for Mainnet v1
 
 - External security audit
-- Future multi-step `ConsensusStateV2` transforms beyond the Phase 2 migration skeleton
+- Future multi-step `ConsensusStateV2` transforms beyond the Task 2 migration skeleton
 - Full incident-response exercises and signed release ceremony
 - BLS/PQ HSM policy gate beyond Ed25519 PKCS#11 is in place; vendor-native BLS/Dilithium mechanisms remain an audit item
 
-Phase 0.37 closed the archive/restore policy, baseline production/PoA runbook,
+Task 0.37 closed the archive/restore policy, baseline production/PoA runbook,
 bounded per-IP quota accounting, operator-only guards and live latency
 histograms. See `docs/operations/`.

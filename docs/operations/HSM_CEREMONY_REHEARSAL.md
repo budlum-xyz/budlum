@@ -1,9 +1,9 @@
-# HSM Ceremony Rehearsal — Phase 11.20
+# HSM Ceremony Rehearsal — Task 11.20
 
-**Status:** ADIM 2 rehearsal ledger.  
-**Hardware standard:** YubiHSM 2 (PKCS#11).  
-**Purpose:** Key ceremony dry-run kanıtı — mock geçmez, local disk geçmez, YubiHSM path geçer.  
-**Gate:** `Audit Prep (Phase 11.20)` CI job'u bu dosyanın markerlarını doğrular.  
+**Status:** ADIM 2 rehearsal ledger.
+**Hardware standard:** YubiHSM 2 (PKCS#11).
+**Purpose:** Key ceremony dry-run kanıtı — mock geçmez, local disk geçmez, YubiHSM path geçer.
+**Gate:** `Audit Prep (Task 11.20)` CI job'u bu dosyanın markerlarını doğrular.
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
@@ -40,7 +40,7 @@ match backend {
 }
 ```
 
-**Kanıt:** `phase11_20_mainnet_rejects_mock_and_disk_backends` testi
+**Kanıt:** `task11_20_mainnet_rejects_mock_and_disk_backends` testi
 (`src/crypto/mainnet_policy.rs`) — `hsm_mock`, `disk`, ve boş backend
 değerleri `MainnetKeyPolicyViolation` ile reddedilir.
 
@@ -77,7 +77,7 @@ değerleri `MainnetKeyPolicyViolation` ile reddedilir.
 
 - `src/crypto/pkcs11.rs` `Mechanism::VendorDefined` ile native BLS/PQ imza desteği.
 - Capability metadata, signer yapılandırmasına bağlanır.
-- `phase11_20_mainnet_rejects_unsupported_bls_pq_capability` testi ile doğrulandı.
+- `task11_20_mainnet_rejects_unsupported_bls_pq_capability` testi ile doğrulandı.
 
 ## 9. Rehearsal sonrası kontrol listesi
 
@@ -100,4 +100,4 @@ check_contains "$root/docs/operations/HSM_CEREMONY_REHEARSAL.md" "Mock geçmez k
 
 ---
 
-*Bu dosya, `Audit Prep (Phase 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*

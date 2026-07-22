@@ -1,4 +1,4 @@
-//! Phase 11.3 Task 6: Domain edge-case test suite'leri.
+//! Task 11.3 Task 6: Domain edge-case test suite'leri.
 //!
 //! BFT view-change/leader election, PoS slashing triggers, PoW difficulty
 //! adjustment için ayrı edge-case testleri.
@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn bft_leader_deterministic_selection() {
-        // BFT leader selection uses hash-mix (not pure round-robin, Phase 0.338).
+        // BFT leader selection uses hash-mix (not pure round-robin, Task 0.338).
         // Test: same inputs → same leader.
         let bc = setup_chain();
         let producer = addr(0x30);

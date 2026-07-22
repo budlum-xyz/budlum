@@ -83,9 +83,9 @@ pub manifest_signature: Option<Vec<u8>>,    // 64B Ed25519 imzası (digest üzer
 |---|---|---|---|
 | **A. Self-signed** | Node kendi ürettiği snapshot'ı kendi anahtarıyla imzalar; yalnızca kendi açık anahtarına güvenir | Corruption + "bana ait olmayan dosya" ayrımı | Host compromise'da saldırgan dosyayı değiştirip **yeniden imzalayabilir** (anahtar diskteyse); restore/migration senaryosunu kapsamaz |
 | **B. Quorum imzası** | Snapshot digest'i validator quorum'u (≥2/3) tarafından imzalanır — BLS aggregate adayı (`Validator.bls_public_key` zaten manifest'te) | Host-key compromise tek başına yetersiz; P2P state-sync için doğru temel | Finality katmanıyla anahtar-rotasyonu eşlemesi gerekir; implementasyon hacmi büyük; halefin chain-domain'iyle kesişir |
-| **C. Hibrit fazlı (KABUL EDİLDİ ✅)** | **Faz 1 (şimdi):** Ed25519 tek-imza + politika bazlı trust-list (yükseklik-sınırlı). **Faz 2 (mainnet state-sync öncesi):** B seçeneği quorum'a genişleme — trust-list şeması `QuorumRule`'a evrilir | H1-H4'ü bugün karşılar; B'ye kırmadan geçiş | Faz-1'de trust-list dağıtım kanalı operatöre yükler (§4.5 mitigasyonu) |
+| **C. Hibrit görevlı (KABUL EDİLDİ ✅)** | **Görev 1 (şimdi):** Ed25519 tek-imza + politika bazlı trust-list (yükseklik-sınırlı). **Görev 2 (mainnet state-sync öncesi):** B seçeneği quorum'a genişleme — trust-list şeması `QuorumRule`'a evrilir | H1-H4'ü bugün karşılar; B'ye kırmadan geçiş | Görev-1'de trust-list dağıtım kanalı operatöre yükler (§4.5 mitigasyonu) |
 
-**KARAR: C — Hibrit Fazlı (Kullanıcı onayı: 2026-07-18).** Gerekçe: (i) mevcut saldırı yüzeyi **tek host'a yazan saldırgan**; HSM-arkalı Ed25519 tek-imza bu sınıfı kapatır (imzalama anahtarı diske hiç çıkmaz — pkcs11 seam'i mevcut); (ii) B'nin finality entegrasyonu halef devreye girmeden sorumluluk sınırını aşar (ARENA3 kripto domain'i, chain/consensus değil); (iii) wire formatı QuorumRule'a `Option` alanıyla kırılmadan genişler.
+**KARAR: C — Hibrit Görevlı (Kullanıcı onayı: 2026-07-18).** Gerekçe: (i) mevcut saldırı yüzeyi **tek host'a yazan saldırgan**; HSM-arkalı Ed25519 tek-imza bu sınıfı kapatır (imzalama anahtarı diske hiç çıkmaz — pkcs11 seam'i mevcut); (ii) B'nin finality entegrasyonu halef devreye girmeden sorumluluk sınırını aşar (ARENA3 kripto domain'i, chain/consensus değil); (iii) wire formatı QuorumRule'a `Option` alanıyla kırılmadan genişler.
 
 ### 4.4 Doğrulama politikası — KARAR: Legacy-Import Modu ✅
 
@@ -101,7 +101,7 @@ pub enum SnapshotTrustPolicy {
     /// imza zorunlu + imzalayan trust-list'te + snapshot.height anahtarın
     /// geçerlilik aralığında olmalı.
     RequireTrusted { keys: Vec<TrustedSnapshotKey> },
-    /// Faz 2 hazırlığı (bu RFC'de yalnızca şema): quorum doğrulama.
+    /// Görev 2 hazırlığı (bu RFC'de yalnızca şema): quorum doğrulama.
     RequireQuorum { /* halef+ARENA3 ortak tasarım */ },
 }
 
@@ -136,7 +136,7 @@ Sıra önemli: önce `verify()` (integrity), sonra imza. İmza bozuksa **karanti
 
 **İmzalama anahtarı nerede:**
 - Node başına ayrı snapshot-imzalama anahtarı (`--snapshot-signing-key` / `BUD_SNAPSHOT_SIGNING_KEY`), consensus anahtarından **türev değil, bağımsız** (consensus-key compromise'ı snapshot zincirine sıçramasın).
-- Üretim: `budlum keygen --snapshot` (Ed25519) veya HSM etiketi (`--hsm --key-label=snapshot-manifest`); PKCS#11 backend `ConsensusSigner` arkasında zaten Ed25519-only doğrulanmış (signer.rs §Phase 2 notu).
+- Üretim: `budlum keygen --snapshot` (Ed25519) veya HSM etiketi (`--hsm --key-label=snapshot-manifest`); PKCS#11 backend `ConsensusSigner` arkasında zaten Ed25519-only doğrulanmış (signer.rs §Task 2 notu).
 - Disk'e anahtar yazılmaz; HSM tercih edilen mainnet yolu (ARENA3 HSM domain'i).
 
 **Trust-list nereden gelir (öncelik sırası) — KARAR: İkisi birden ✅:**
@@ -148,11 +148,11 @@ Sıra önemli: önce `verify()` (integrity), sonra imza. İmza bozuksa **karanti
 
 **Devnet politikası:** `AllowUnsigned` (mevcut davranışı bozmaz; chaos/upgrade matrisleri imza altyapısı olmadan koşmaya devam eder). CI'da RequireTrusted yolu ayrı bir boot-testiyle kilitlenir.
 
-### 4.6 P2P state-sync'e uzatma noktası (Faz-2 zemini)
+### 4.6 P2P state-sync'e uzatma noktası (Görev-2 zemini)
 
-`manifest_signer` + trust-list şeması, Faz-2'de şuna evrilir: digest + BLS aggregate signature + signer-bitset (finality certificate benzeri). Wire formatına `manifest_quorum: Option<...>` eklemek schema-4'ü kırmaz (`Option` + `serde(default)`). Bu RFC Faz-2 API'sini **dondurmaz**, yalnızca genişleme noktası bırakır.
+`manifest_signer` + trust-list şeması, Görev-2'de şuna evrilir: digest + BLS aggregate signature + signer-bitset (finality certificate benzeri). Wire formatına `manifest_quorum: Option<...>` eklemek schema-4'ü kırmaz (`Option` + `serde(default)`). Bu RFC Görev-2 API'sini **dondurmaz**, yalnızca genişleme noktası bırakır.
 
-## 5. Boot akışı (Faz-1 sonrası)
+## 5. Boot akışı (Görev-1 sonrası)
 
 ```
 load_latest_snapshot_v2(policy):
@@ -184,7 +184,7 @@ load_latest_snapshot_v2(policy):
 
 ## 7. Açık sorular — TÜMÜ KARARLANDI ✅ (2026-07-18)
 
-1. **Trust model onayı:** **KABUL EDİLDİ** — C-hibrit Fazlı (Faz 1: Ed25519 tek-imza + trust-list, Faz 2: BLS quorum / halef+ARENA3 ortak).
+1. **Trust model onayı:** **KABUL EDİLDİ** — C-hibrit Görevlı (Görev 1: Ed25519 tek-imza + trust-list, Görev 2: BLS quorum / halef+ARENA3 ortak).
 2. **Trust-list kanalı:** **KABUL EDİLDİ** — İkisi birden (Genesis bundle + CLI override; CLI genesis'i ezer).
 3. **İmzasız geçiş penceresi:** **KABUL EDİLDİ** — Legacy-Import Modu (geçiş penceresi, mainnet launch height'ında kapanır, `AllowUnsigned` production'da derleme-uyarısı).
 4. **GAP-2 birleşimi:** **KABUL EDİLDİ** — Tek Schema-4 (GAP-1 imza alanları + GAP-2 hash-kapsam genişletmesi tek kırıcı değişiklikte). Alan listesi halefle kesinleşecek.

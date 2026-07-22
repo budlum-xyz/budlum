@@ -1,7 +1,7 @@
 # B.U.D. Storage — Teknik Spec (Vision → Implementation)
 
 > **Yazar:** ARENA1 (görev yöneticisi), 2026-07-20.
-> **Durum:** Final v1 (Phase 11.6) → implementasyon Phase 11.10.
+> **Durum:** Final v1 (Task 11.6) → implementasyon Task 11.10.
 > **ADR:** [ADR-002](adr/ADR-002-storage-spec-first.md) + [ADR-003](adr/ADR-003-node-siniflandirma.md)
 > **SPEC_REVIEW:** [BUD_STORAGE_TECHNICAL_SPEC_REVIEW.md](spec-review/BUD_STORAGE_TECHNICAL_SPEC_REVIEW.md)
 > **INTERFACE_FROZEN:** true
@@ -9,13 +9,13 @@
 
 ---
 
-## 0. Interface Freeze (Phase 11.6)
+## 0. Interface Freeze (Task 11.6)
 
-Bu spec Phase 11.6 sonunda **interface-frozen** kabul edilir. Phase 11.10 kodu aşağıdaki trait imzalarını, state machine durumlarını, hata semantiğini ve CI spec-review kapısını değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
+Bu spec Task 11.6 sonunda **interface-frozen** kabul edilir. Task 11.10 kodu aşağıdaki trait imzalarını, state machine durumlarını, hata semantiğini ve CI spec-review kapısını değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
 
 ### 0.1 Donmuş storage provider trait
 
-Phase 11.10'da `src/storage/provider.rs` içinde aşağıdaki interface açılır. Bu trait on-chain state'i doğrudan değiştirmez; storage backend ve proof üretim/doğrulama adaptörü olarak çalışır.
+Task 11.10'da `src/storage/provider.rs` içinde aşağıdaki interface açılır. Bu trait on-chain state'i doğrudan değiştirmez; storage backend ve proof üretim/doğrulama adaptörü olarak çalışır.
 
 ```rust
 pub type DealId = [u8; 32];
@@ -70,50 +70,50 @@ Geçersiz geçişler reddedilir; özellikle `Settled/Slashed/Expired` terminaldi
 
 ### 0.3 CI spec-review kapısı
 
-Phase 11.6'da `scripts/check-spec-coverage.sh` bu dosyanın `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Phase 11.10'da aynı script `src/storage/provider.rs` içindeki trait adlarını (`put`, `get`, `prove`, `challenge`, `settle`) spec ile eşleştirecek şekilde genişletilir.
+Task 11.6'da `scripts/check-spec-coverage.sh` bu dosyanın `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Task 11.10'da aynı script `src/storage/provider.rs` içindeki trait adlarını (`put`, `get`, `prove`, `challenge`, `settle`) spec ile eşleştirecek şekilde genişletilir.
 
 ## 1. Mevcut Kod Haritası
 
-| Bileşen | Dosya | Durum | Faz |
+| Bileşen | Dosya | Durum | Görev |
 |---------|-------|-------|-----|
-| ContentId (32-byte hash) | `src/storage/content_id.rs` | ✅ | Faz 2 |
-| ContentManifest (shard list + owner) | `src/storage/manifest.rs` | ✅ | Faz 2 |
-| StorageDomainParams | `src/domain/storage_params.rs` | ✅ | Faz 1 |
-| StorageDeal + DealStatus | `src/domain/storage_deal.rs` | ✅ | Faz 5 |
-| RetrievalChallenge/Response/Outcome | `src/domain/storage_deal.rs` | ✅ interim | Faz 5 |
-| StorageRegistry (permissionless) | `src/domain/storage_deal.rs` | ✅ | Faz 5 |
-| StorageEconomicsParams | `src/domain/storage_deal.rs` | ✅ | Faz 5 |
-| Storage RPC uçları | `src/rpc/api.rs` + `server.rs` | ✅ | Faz 5 |
-| MerkleTrie (state tree) | `src/storage/merkle_trie.rs` | ✅ 256-bit | Faz 4 |
-| Storage pruning | `src/chain/blockchain.rs` | ✅ kısmi | Faz 5 |
-| VerifyMerkle | `budzero/bud-vm` / `budzero/bud-proof` | 🔒 production-gated | Faz 3 |
-| Real Proof-of-Storage | — | ❌ | Faz 3 |
+| ContentId (32-byte hash) | `src/storage/content_id.rs` | ✅ | Görev 2 |
+| ContentManifest (shard list + owner) | `src/storage/manifest.rs` | ✅ | Görev 2 |
+| StorageDomainParams | `src/domain/storage_params.rs` | ✅ | Görev 1 |
+| StorageDeal + DealStatus | `src/domain/storage_deal.rs` | ✅ | Görev 5 |
+| RetrievalChallenge/Response/Outcome | `src/domain/storage_deal.rs` | ✅ interim | Görev 5 |
+| StorageRegistry (permissionless) | `src/domain/storage_deal.rs` | ✅ | Görev 5 |
+| StorageEconomicsParams | `src/domain/storage_deal.rs` | ✅ | Görev 5 |
+| Storage RPC uçları | `src/rpc/api.rs` + `server.rs` | ✅ | Görev 5 |
+| MerkleTrie (state tree) | `src/storage/merkle_trie.rs` | ✅ 256-bit | Görev 4 |
+| Storage pruning | `src/chain/blockchain.rs` | ✅ kısmi | Görev 5 |
+| VerifyMerkle | `budzero/bud-vm` / `budzero/bud-proof` | 🔒 production-gated | Görev 3 |
+| Real Proof-of-Storage | — | ❌ | Görev 3 |
 | DataAsset/AccessGrant | `src/pollen/` | 🟡 gelişiyor | Marketplace |
-| BNS .bud | `src/bns/registry.rs` | ✅ iskelet | Faz 6 |
+| BNS .bud | `src/bns/registry.rs` | ✅ iskelet | Görev 6 |
 
-## 2. Faz Haritası (Vision → Kod)
+## 2. Görev Haritası (Vision → Kod)
 
-### Faz 1 — Domain Kaydı (✅ Tamam)
+### Görev 1 — Domain Kaydı (✅ Tamam)
 
 `ConsensusKind::StorageAttestation(StorageDomainParams)` ve permissionless `STORAGE_OPERATOR` rolü.
 
-### Faz 2 — Content Addressing (✅ Tamam)
+### Görev 2 — Content Addressing (✅ Tamam)
 
 `ContentId`, `ContentManifest`, `ShardRef`; parçalama off-chain, zincir manifest commitment tutar.
 
-### Faz 3 — Proof-of-Storage (🔒 Production-gated)
+### Görev 3 — Proof-of-Storage (🔒 Production-gated)
 
 Mevcut `RetrievalChallenge` interim byte-range mekanizmasıdır; gerçek PoS iddiası yapılmaz. VerifyMerkle production gate açılmadan slashing yalnız deadline/response discipline için kullanılabilir. V111 sınıfı 64-bit/256-bit path uyumsuzluğu çözülmeden "full cryptographic PoS" etiketi yasaktır.
 
-### Faz 4 — Block Header Integration (🟡 Kısmi)
+### Görev 4 — Block Header Integration (🟡 Kısmi)
 
-`GlobalBlockHeader.storage_root` ve storage commitment header binding'i Phase 11.10/sonrası uygulanır. State root kapsamı spec-review gate ile izlenir.
+`GlobalBlockHeader.storage_root` ve storage commitment header binding'i Task 11.10/sonrası uygulanır. State root kapsamı spec-review gate ile izlenir.
 
-### Faz 5 — Deal/Challenge Ekonomisi (✅ Temel Tamam)
+### Görev 5 — Deal/Challenge Ekonomisi (✅ Temel Tamam)
 
 `StorageDeal`, `RetrievalChallenge`, `ChallengeResult`, permissionless `open_deal/open_challenge`. Whitelist/admin/pause hook'u yoktur.
 
-### Faz 6 — BNS .bud Integration (✅ İskelet)
+### Görev 6 — BNS .bud Integration (✅ İskelet)
 
 `BnsRegistry` name → address/content resolution; storage content binding ileride AccessGrant/HPKE ile birleşir.
 
@@ -126,10 +126,10 @@ Mevcut `RetrievalChallenge` interim byte-range mekanizmasıdır; gerçek PoS idd
 | Deal marketplace | ✅ StorageDeal + RPC | Pollen payment/signature atomikliği ayrı |
 | Proof-of-Storage | 🔒 Interim | VerifyMerkle + path model |
 | Slashing | ✅ missed challenge | mismatched proof semantics sınırlı |
-| Pruning | ✅ kısmi | Full/archive split Phase 11.10 |
+| Pruning | ✅ kısmi | Full/archive split Task 11.10 |
 | Storage root in header | ❌ | Header binding |
 | Retrieval | ❌ | Off-chain, bu spec dışı |
-| Encryption | ❌ | Pollen/HPKE fazı |
+| Encryption | ❌ | Pollen/HPKE görevı |
 | Multi-replica deals | ✅ deals_for_manifest | replica quorum policy ileride |
 
 ## 4. Veri Egemenliği Kuralı
@@ -138,9 +138,9 @@ Hiçbir kritik fonksiyon Budlum ekibinin servisine bağımlı değildir. `open_d
 
 ## 5. Node Sınıflandırmasıyla Etkileşim
 
-ADR-003 uyarınca full node pruning default, archive node full history tutar. Storage proof/challenge kanıtı için finalized checkpoint snapshot'ları full node'da da korunur. Phase 11.10 pruning implementasyonu finalized storage commitments'ı silemez.
+ADR-003 uyarınca full node pruning default, archive node full history tutar. Storage proof/challenge kanıtı için finalized checkpoint snapshot'ları full node'da da korunur. Task 11.10 pruning implementasyonu finalized storage commitments'ı silemez.
 
-## 6. Kabul Kriterleri (Phase 11.10)
+## 6. Kabul Kriterleri (Task 11.10)
 
 1. `StorageProvider` trait + mock impl derlenir.
 2. Deal lifecycle geçersiz geçişleri reddeder.

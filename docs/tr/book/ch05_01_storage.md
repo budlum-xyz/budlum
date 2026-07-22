@@ -55,16 +55,16 @@ Değerler artık kompaktlık ve hız için binary serialization ile yazılır. G
 
 ### Fonksiyon: `commit_block` (Atomic Batching)
 
-Budlum Hardening aşamasında, blok yazma işlemi artık **atomik**tir. Bir blok yazılırken elektrik kesilirse, ne blok ne de onunla ilgili indexler (yükseklik, tx index) yarım yamalak yazılmaz.
+Budlum Hardening görevsında, blok yazma işlemi artık **atomik**tir. Bir blok yazılırken elektrik kesilirse, ne blok ne de onunla ilgili indexler (yükseklik, tx index) yarım yamalak yazılmaz.
 
 ```rust
 pub fn commit_block(&self, block: &Block, state_root: &str) -> io::Result<()> {
     let mut batch = sled::Batch::default();
-    
+
     // 1. Bloğu hazırla
     let serialized = bincode::serialize(block)?;
     batch.insert(block.hash.as_bytes(), serialized);
-    
+
     // 2. Yükseklik indexini hazırla
     batch.insert(format!("HEIGHT:{}", block.index), block.hash.as_bytes());
     batch.insert("LAST", block.hash.as_bytes());
@@ -111,10 +111,10 @@ pub fn load_chain(&self) -> Vec<Block> {
         loop {
             // Hash ile bloğu getir.
             let block = self.get_block(&current_hash).unwrap();
-            
+
             // Önceki hash'i kaydet.
             let prev_hash = block.previous_hash.clone();
-            
+
             // Zincire ekle.
             chain.push(block);
 
@@ -125,7 +125,7 @@ pub fn load_chain(&self) -> Vec<Block> {
             current_hash = prev_hash;
         }
     }
-    
+
     // 3. Tersten geldiğimiz için listeyi düzelt.
     chain.reverse();
     chain

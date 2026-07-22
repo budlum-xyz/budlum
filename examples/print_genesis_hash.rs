@@ -1,4 +1,4 @@
-//! Print canonical network genesis hashes (Phase 3 §3.1 operator helper).
+//! Print canonical network genesis hashes (Task 3 §3.1 operator helper).
 //!
 //! ```bash
 //! cargo run --example print_genesis_hash

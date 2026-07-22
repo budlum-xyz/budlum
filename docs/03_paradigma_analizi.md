@@ -300,4 +300,4 @@ aktığı, kimsenin kimseye güvenmek zorunda olmadığı bir dünya.
 * [`02_settlement_test_matrix.md`](02_settlement_test_matrix.md)
   — settlement test matrisi
 * [`03_post_quantum_security.md`](03_post_quantum_security.md)
-  — Phase 0.14 post-quantum güvenlik mimarisi
+  — Task 0.14 post-quantum güvenlik mimarisi

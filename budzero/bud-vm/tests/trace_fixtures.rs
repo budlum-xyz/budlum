@@ -224,7 +224,7 @@ fn control_flow_trace_fixture_stays_stable() {
                 dst_val: 0,
                 registers: &[(2, 22), (3, 0)],
             },
-            // Phase 0.30 (security audit Z-D): the Jmp at pc=4 jumps to pc=6,
+            // Task 0.30 (security audit Z-D): the Jmp at pc=4 jumps to pc=6,
             // which is past `program.len()`. `Vm::step` returns
             // `InvalidPc` without pushing a Step, so `run_receipt`
             // appends a synthetic Halt step (pc=6, next_pc=6) so the

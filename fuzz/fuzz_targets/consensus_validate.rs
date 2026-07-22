@@ -2,7 +2,7 @@
 
 // NOT: BlockHeader struct'ına yeni alan eklendiğinde bu hedef E0063 ile
 // derlenemez. Alanlar burada TAM olarak doldurulmalıdır — CI'daki
-// "Fuzz Quick (Phase 8.5)" kapısı bunu yakalar. (2026-07-16'da
+// "Fuzz Quick (Task 8.5)" kapısı bunu yakalar. (2026-07-16'da
 // chain_id/nonce/epoch/slot/vrf_* eklendiğinde hedef çürümüştü.)
 
 use budlum_core::core::address::Address;

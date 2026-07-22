@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Phase 11.2 Görev 3 — bridge lock/mint/burn/unlock + relayer ledger.
+//! Task 11.2 Görev 3 — bridge lock/mint/burn/unlock + relayer ledger.
 //!
 //! Oracle: panic freedom + fund/status conservation under adversarial
 //! operation sequences. Full lifecycle uses real Merkle proofs when the

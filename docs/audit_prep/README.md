@@ -1,32 +1,32 @@
-# Phase 11.20 Audit Prep Index
+# Task 11.20 Audit Prep Index
 
 **Status:** ADIM 1 — audit-prep evidence map created.
-**Scope:** independent auditor entry point for the pre-Phase12 mainnet-readiness workstream.
+**Scope:** independent auditor entry point for the pre-Task12 mainnet-readiness workstream.
 **Budlumdevnet:** read-only reference; this package does not require mutating it.
 
 ## Evidence map
 
 | Area | Primary evidence | CI gate |
 | --- | --- | --- |
-| Phase 11.20 threat model v2 | `docs/THREAT_MODEL.md` | `Audit Prep (Phase 11.20)` |
-| Phase 11.6 specs | `docs/spec-review/`, `scripts/check-spec-coverage.sh` | Repo Lint spec coverage gate |
-| Phase 11.8 economy | `src/chain/fee_market.rs`, `src/tokenomics/reward_pool.rs`, `scripts/check-economy-invariants.sh` | `Economy Invariants (Phase 11.8)` |
-| Phase 11.8 fork choice | `src/domain/fork_choice.rs`, `scripts/check-fork-choice-gate.sh` | `Fork-Choice Invariants (Phase 11.8)` |
-| Phase 11.10 storage | `src/storage/provider.rs`, `src/storage/lifecycle.rs`, `src/domain/storage_deal.rs` | `StorageProvider Gate (Phase 11.10)` |
-| Phase 11.10 node classification | `src/storage/pruning.rs`, `src/cli/commands.rs` | `Node Classification (Phase 11.10)` |
-| Phase 11.12 network hardening | `src/network/peer_manager.rs`, `scripts/check-network-hardening-gate.sh` | `Network Hardening (Phase 11.12)` |
-| Phase 11.14 wallet core | `wallet-core/src/lib.rs`, `scripts/check-wallet-core-gate.sh` | `Wallet Core (Phase 11.14)` |
-| Phase 11.16 governance | `src/core/governance.rs`, `scripts/check-governance-invariants.sh` | `Governance Invariants (Phase 11.16)` |
-| Phase 11.18 PoA compliance | `src/registry/poa_compliance.rs`, `scripts/check-poa-compliance-gate.sh` | `PoA Compliance Isolation (Phase 11.18)` |
-| Phase 11.20 validator keys | `docs/VALIDATOR_KEY_MANAGEMENT.md`, `docs/operations/HSM_BLS_PQ_POLICY.md` | `Audit Prep (Phase 11.20)` |\n| Phase 11.20 HSM ceremony | `docs/operations/HSM_CEREMONY_REHEARSAL.md` | `Audit Prep (Phase 11.20)` |\n| Phase 11.18 PoA compliance | `docs/operations/POA_COMPLIANCE_RUNBOOK.md` | `PoA Compliance Isolation (Phase 11.18)` |\n| Phase 11.20 external audit | `docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md` | `Audit Prep (Phase 11.20)` |\n| Phase 11.20 branch protection | `docs/audit_prep/BRANCH_PROTECTION_REVIEW.md` | `Audit Prep (Phase 11.20)` |
-| Phase 12 audit summary | `docs/ARENA4_AUDIT_HARDENING_SUMMARY.md` | `Audit Prep (Phase 11.20)` |
-| Phase 11.20 lockdown | `docs/MAINNET_LOCKDOWN_CHECKLIST.md` | `Audit Prep (Phase 11.20)` |
-| Phase 11.20 readiness review | `docs/audit_prep/MAINNET_READINESS_REVIEW.md` | `Audit Prep (Phase 11.20)` |\n| Phase 11.20 CI stability | `docs/audit_prep/CI_STABILITY_WINDOW.md` | `Audit Prep (Phase 11.20)` |
+| Task 11.20 threat model v2 | `docs/THREAT_MODEL.md` | `Audit Prep (Task 11.20)` |
+| Task 11.6 specs | `docs/spec-review/`, `scripts/check-spec-coverage.sh` | Repo Lint spec coverage gate |
+| Task 11.8 economy | `src/chain/fee_market.rs`, `src/tokenomics/reward_pool.rs`, `scripts/check-economy-invariants.sh` | `Economy Invariants (Task 11.8)` |
+| Task 11.8 fork choice | `src/domain/fork_choice.rs`, `scripts/check-fork-choice-gate.sh` | `Fork-Choice Invariants (Task 11.8)` |
+| Task 11.10 storage | `src/storage/provider.rs`, `src/storage/lifecycle.rs`, `src/domain/storage_deal.rs` | `StorageProvider Gate (Task 11.10)` |
+| Task 11.10 node classification | `src/storage/pruning.rs`, `src/cli/commands.rs` | `Node Classification (Task 11.10)` |
+| Task 11.12 network hardening | `src/network/peer_manager.rs`, `scripts/check-network-hardening-gate.sh` | `Network Hardening (Task 11.12)` |
+| Task 11.14 wallet core | `wallet-core/src/lib.rs`, `scripts/check-wallet-core-gate.sh` | `Wallet Core (Task 11.14)` |
+| Task 11.16 governance | `src/core/governance.rs`, `scripts/check-governance-invariants.sh` | `Governance Invariants (Task 11.16)` |
+| Task 11.18 PoA compliance | `src/registry/poa_compliance.rs`, `scripts/check-poa-compliance-gate.sh` | `PoA Compliance Isolation (Task 11.18)` |
+| Task 11.20 validator keys | `docs/VALIDATOR_KEY_MANAGEMENT.md`, `docs/operations/HSM_BLS_PQ_POLICY.md` | `Audit Prep (Task 11.20)` |\n| Task 11.20 HSM ceremony | `docs/operations/HSM_CEREMONY_REHEARSAL.md` | `Audit Prep (Task 11.20)` |\n| Task 11.18 PoA compliance | `docs/operations/POA_COMPLIANCE_RUNBOOK.md` | `PoA Compliance Isolation (Task 11.18)` |\n| Task 11.20 external audit | `docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md` | `Audit Prep (Task 11.20)` |\n| Task 11.20 branch protection | `docs/audit_prep/BRANCH_PROTECTION_REVIEW.md` | `Audit Prep (Task 11.20)` |
+| Task 12 audit summary | `docs/ARENA4_AUDIT_HARDENING_SUMMARY.md` | `Audit Prep (Task 11.20)` |
+| Task 11.20 lockdown | `docs/MAINNET_LOCKDOWN_CHECKLIST.md` | `Audit Prep (Task 11.20)` |
+| Task 11.20 readiness review | `docs/audit_prep/MAINNET_READINESS_REVIEW.md` | `Audit Prep (Task 11.20)` |\n| Task 11.20 CI stability | `docs/audit_prep/CI_STABILITY_WINDOW.md` | `Audit Prep (Task 11.20)` |
 | ADIM-1 CI hardening verification | `docs/audit_prep/CI_HARDENING_AUDIT_2026-07-21.md` | `Semver Check`, `Determinism`, `Miri UB Check` |
 
 ## Review order
 
-1. Start with `docs/PHASE11_6_MAINNET_YOL_HARITASI.md` for phase dependencies.
+1. Start with `docs/TASK11_6_MAINNET_YOL_HARITASI.md` for task dependencies.
 2. Read the frozen specs and their reviews under `docs/spec-review/`.
 3. Review the Rust modules in the same order as the evidence map.
 4. Confirm every named test listed by each `scripts/check-*-gate.sh` script exists and is run by CI.

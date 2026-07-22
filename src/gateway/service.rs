@@ -2,10 +2,10 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::storage::content_id::ContentId;
 use crate::storage::db::Storage;
 
-/// Phase 6 §6.1: B.U.D. Universal Gateway.
+/// Task 6 §6.1: B.U.D. Universal Gateway.
 /// Resolves a BNS name (.bud) to content stored in B.U.D.
 ///
-/// Phase 8.9 (C1 fix): Bitswap + ContentDiscovery P2P fetch entegre edildi.
+/// Task 8.9 (C1 fix): Bitswap + ContentDiscovery P2P fetch entegre edildi.
 
 pub struct BudGateway {
     chain: ChainHandle,
@@ -40,7 +40,7 @@ impl BudGateway {
         let cid = ContentId(storage_root);
 
         // 3. Local storage lookup (cached content). NOT: Storage::get_content
-        //    bugün stub (Phase 0.40 kapsamı: blob store henüz yok) — bu dal
+        //    bugün stub (Task 0.40 kapsamı: blob store henüz yok) — bu dal
         //    doğal olarak ıskalar, NotFound dönüşü P2P hatasına düşer.
         if let Some(ref storage) = self.storage {
             if let Ok(chunk) = storage.get_content(&cid) {
@@ -50,10 +50,10 @@ impl BudGateway {
 
         // 4. P2P Bitswap fetch — request from network peers.
         //    Full P2P swarm integration (ContentDiscovery + BudBitswap via
-        //    bud-node crate) pending Phase 9 when the monolithic Node wiring
+        //    bud-node crate) pending Task 9 when the monolithic Node wiring
         //    exposes Bitswap as a ChainHandle capability.
         Err(format!(
-            "Content {}:{} not available locally. P2P Bitswap fetch pending Node swarm integration (Phase 9).",
+            "Content {}:{} not available locally. P2P Bitswap fetch pending Node swarm integration (Task 9).",
             hex::encode(&storage_root[..8]),
             resolved
                 .content_id

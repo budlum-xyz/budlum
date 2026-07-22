@@ -14,7 +14,7 @@
 | Backup/restore script | `ops/backup_restore_drill.sh` | ✅ mevcut |
 | 4-node devnet smoke script | `scripts/devnet-multinode-smoke.sh` | ✅ mevcut |
 | Docker mainnet smoke script | `scripts/docker-smoke-mainnet.sh` | ✅ mevcut |
-| RPC smoke script | `scripts/phase3_smoke_rpc.sh` | ✅ mevcut |
+| RPC smoke script | `scripts/task3_smoke_rpc.sh` | ✅ mevcut |
 | Compose dosyası | `docker-compose.yml` | ✅ mevcut |
 | Archive şablonu | `config/archive.toml` | ✅ mevcut |
 | CI docker-smoke gate | `.github/workflows/docker-smoke.yml` | ✅ mevcut (2 job) |
@@ -26,7 +26,7 @@
 
 ## Drill A — Backup / Restore
 
-**Kaynak prosedür:** `docs/operations/ARCHIVE_AND_BACKUP.md` (Phase 0.37)
+**Kaynak prosedür:** `docs/operations/ARCHIVE_AND_BACKUP.md` (Task 0.37)
 
 ### A.1 Scheduled backup davranışı (kod kesinleşti)
 Archive node (`role = "archive"`) fail-closed: `pruning=false` + `backups_enabled=true` + `backup_dir` set + interval/retention nonzero olmadıkça açılmaz. Backup akışı: sled flush → `*.partial` + fsync → atomik rename → SHA-256 checksum + duplicate-key/schema kontrolü → `backup_retention_count` rotasyon.

@@ -44,7 +44,7 @@ pub enum Stmt {
     },
     Return(Option<Expr>),
     Emit(String, Vec<Expr>),
-    /// Phase 0.14: `match <scrutinee> { pattern => body, ... }` pattern
+    /// Task 0.14: `match <scrutinee> { pattern => body, ... }` pattern
     /// expression statement. The optional default arm (`_ =>`) is
     /// required by the semantic analyzer (every match must be
     /// exhaustive over the scrutinee's reachable value set), but
@@ -58,8 +58,8 @@ pub enum Stmt {
 }
 
 /// One arm of a `match` expression. The pattern is restricted to
-/// integer literals or a wildcard (`_`) in Phase 0.14 — full algebraic
-/// data type patterns (struct destructuring, ranges) are Phase 0.16+.
+/// integer literals or a wildcard (`_`) in Task 0.14 — full algebraic
+/// data type patterns (struct destructuring, ranges) are Task 0.16+.
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub pattern: MatchPattern,

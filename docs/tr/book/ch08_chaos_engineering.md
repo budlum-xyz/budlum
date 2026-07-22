@@ -7,7 +7,7 @@ Budlum, "her şeyin ters gidebileceği" varsayımı üzerine inşa edilmiştir. 
 | kategori | Dosya Yolu | Açıklama |
 | :--- | :--- | :--- |
 | **Unit Tests** | `src/**/*.rs` (iç içe) | Fonksiyon düzeyinde doğruluk testleri. |
-| **Integration Tests** | `src/tests/integration.rs` | Birden fazla modülün (Consensus + Storage + Executor) uyumu. |
+| **Integration Tests** | `src/tests/integration.rs` | Birden görevla modülün (Consensus + Storage + Executor) uyumu. |
 | **Chaos Tests** | `src/tests/chaos.rs` | Ağ kesintileri, geçersiz veri saldırıları, reorg senaryoları. |
 
 ## 2. Kaos Test Senaryoları

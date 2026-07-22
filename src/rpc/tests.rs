@@ -10,7 +10,7 @@ mod rpc_tests {
     use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
     use std::sync::Arc;
 
-    /// Phase 9 (Faz 3, `9d82f61`): format-gecerli test zarfi (durust marker).
+    /// Task 9 (Görev 3, `9d82f61`): format-gecerli test zarfi (durust marker).
     fn valid_merkle_proof() -> Vec<u8> {
         let envelope = bud_proof::ProofEnvelope {
             proof_format_version: 1,
@@ -303,7 +303,7 @@ mod rpc_tests {
             crate::domain::DomainCommitment::from_block(&domain, &block2, [4u8; 32], [5u8; 32], 1)
                 .unwrap();
         let mut new_commitment = new_commitment;
-        // Phase 0.34: PoW head must show difficulty bits; work floor is 1000/conf.
+        // Task 0.34: PoW head must show difficulty bits; work floor is 1000/conf.
         let mut pow_hash = [0u8; 32];
         pow_hash[1] = 0x0f;
         new_commitment.domain_block_hash = pow_hash;
@@ -421,7 +421,7 @@ mod rpc_tests {
         let bridge_registration = server.register_bridge_asset(asset_id, 1).await.unwrap();
         assert_eq!(bridge_registration["status"], "registered");
 
-        // Phase 0.10 (security audit §3): the bridge-lock → mint → burn → unlock
+        // Task 0.10 (security audit §3): the bridge-lock → mint → burn → unlock
         // happy path is exercised by `src/tests/bridge_lifecycle.rs` (an
         // integration test against the internal `Blockchain` API), not via
         // RPC. The RPC `bud_lockBridgeTransfer` is REMOVED because it
@@ -562,9 +562,9 @@ mod rpc_tests {
         assert!(events["events"].as_array().unwrap().is_empty());
     }
 
-    /// Phase 3 §0.3: empty registry → count 0, empty operators list.
+    /// Task 3 §0.3: empty registry → count 0, empty operators list.
     #[tokio::test]
-    async fn phase3_storage_active_operators_empty() {
+    async fn task3_storage_active_operators_empty() {
         let (server, _) = setup().await;
         let res = server.storage_active_operators().await.unwrap();
         assert_eq!(res["roleId"], serde_json::json!(5));
@@ -573,9 +573,9 @@ mod rpc_tests {
         assert!(res["operators"].as_array().unwrap().is_empty());
     }
 
-    /// Phase 3 §0.3: registered STORAGE_OPERATOR appears in RPC listing.
+    /// Task 3 §0.3: registered STORAGE_OPERATOR appears in RPC listing.
     #[tokio::test]
-    async fn phase3_storage_active_operators_lists_registered() {
+    async fn task3_storage_active_operators_lists_registered() {
         let (server, chain) = setup().await;
 
         let operator = Address::from_hex(&"0a".repeat(32)).unwrap();

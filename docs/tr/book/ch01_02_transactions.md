@@ -69,12 +69,12 @@ pub struct Transaction {
 
 ## 2. Dinamik Ücret Piyasası (Dynamic Fee Market)
 
-Budlum Hardening aşamasında, sabit ücret yerine **EIP-1559 benzeri** dinamik bir `base_fee` mekanizması getirilmiştir.
+Budlum Hardening görevsında, sabit ücret yerine **EIP-1559 benzeri** dinamik bir `base_fee` mekanizması getirilmiştir.
 
 ### Mekanizma:
 - **Base Fee:** Her blok için geçerli olan minimum ücrettir.
 - **Dinamik Ayar:** Her bloktan sonra ağdaki yoğunluğa (işlem sayısına) göre `base_fee` otomatik güncellenir.
-  - Eğer blokta 50'den (Hedef) fazla işlem varsa: `base_fee` bir sonraki blok için **%12.5 artar**.
+  - Eğer blokta 50'den (Hedef) görevla işlem varsa: `base_fee` bir sonraki blok için **%12.5 artar**.
   - Eğer blokta 50'den az işlem varsa: `base_fee` bir sonraki blok için **%12.5 azalır** (minimum 1).
 - **Spam Koruması:** Ağ saldırı altındayken ücretler hızla yükselerek saldırganın maliyetini katlar.
 
@@ -117,7 +117,7 @@ Bloklar ağdan alındığında, `blockchain.rs` içindeki `validate_and_add_bloc
 ### 2.4 ContractCall Bytecode Doğrulaması
 
 BudZKVM contract işlemleri için ek kurallar vardır:
-- `amount == 0` olmalıdır. Contract execution şu MVP aşamasında native value transfer yapmaz.
+- `amount == 0` olmalıdır. Contract execution şu MVP görevsında native value transfer yapmaz.
 - `data` boş olamaz.
 - `data.len() % 8 == 0` olmalıdır. Her instruction `bud-isa::Instruction::encode()` ile üretilmiş bir little-endian `u64` olarak taşınır.
 - İmza, nonce, chain ID ve fee kuralları normal işlemlerle aynıdır.
@@ -134,8 +134,8 @@ Bir evrağı imzalamadan önce, neyi imzaladığınızı sabitlemeniz gerekir. B
 pub fn signing_hash(&self) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     // 1. Domain Separation Tag: Karışıklığı önle.
-    hasher.update(b"BDLM_TX_V2"); 
-    
+    hasher.update(b"BDLM_TX_V2");
+
     // 2. Kritik alanları ekle (Binary Optimization).
     hasher.update(self.from.as_bytes());
     hasher.update(self.to.as_bytes());
@@ -145,7 +145,7 @@ pub fn signing_hash(&self) -> [u8; 32] {
     hasher.update(&self.data);
     hasher.update(self.timestamp.to_le_bytes());
     hasher.update(self.chain_id.to_le_bytes());
-    
+
     // 3. İmzayı EKLEME!
     // 4. İşlem tipi byte'ını ekle (ContractCall = 4 dahil).
     hasher.finalize().into()
@@ -177,10 +177,10 @@ pub fn sign(&mut self, keypair: &KeyPair) {
 
     // 2. İmzalanacak özeti çıkar.
     let hash = self.signing_hash();
-    
+
     // 3. Kriptografik imza üret (Ed25519).
     let signature = keypair.sign(&hash);
-    
+
     // 4. İmzayı işlem nesnesine yapıştır.
     self.signature = Some(signature);
 }

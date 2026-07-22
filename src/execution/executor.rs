@@ -230,7 +230,7 @@ impl Executor {
                             .marketplace
                             .validate_ai_read_ref(req.input_ref.as_slice(), &tx.from, current_block)
                             .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
-                        // V32 fix (Phase 11): sender must have sufficient balance
+                        // V32 fix (Task 11): sender must have sufficient balance
                         // for max_fee escrow BEFORE submitting. Without this, an
                         // account with 0 balance can submit requests (the
                         // saturating_sub silently keeps it at 0 — fee leak).
@@ -458,7 +458,7 @@ impl Executor {
                 tracing::info!(nft_id = %nft_id, creator_reward = %creator_share, bud_share = %bud_share, protocol_fee = %protocol_share, "SocialFi: Content Boosted");
             }
             TransactionType::NftUpdateLight { nft_id, delta_mcd } => {
-                // Phase 8.9 C3 fix: real luminance update with ownership check.
+                // Task 8.9 C3 fix: real luminance update with ownership check.
                 let nft = state
                     .nft_registry
                     .get_nft(*nft_id)
@@ -491,14 +491,14 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::RelayerResult(res) => {
-                // Phase 6 §6.2: Relayer EVM Proofs — cryptographic verification.
+                // Task 6 §6.2: Relayer EVM Proofs — cryptographic verification.
                 if res.receipt_proof.is_empty() {
                     return Err(BudlumError::validation(
                         "relayer_invalid_proof",
                         "Receipt proof cannot be empty",
                     ));
                 }
-                // Phase 8.9 C4 fix: verify external_state_root non-zero
+                // Task 8.9 C4 fix: verify external_state_root non-zero
                 // (zero root = no state commitment, can't verify anything).
                 if res.external_state_root == [0u8; 32] {
                     return Err(BudlumError::validation(
@@ -506,11 +506,11 @@ impl Executor {
                         "External state root cannot be zero",
                     ));
                 }
-                // Phase 8.9 / L1 fix: gerçek kriptografik doğrulama.
+                // Task 8.9 / L1 fix: gerçek kriptografik doğrulama.
                 // receipt_proof = bincode(MerkleProof); leaf'in
                 // BDLM_RELAYER_RESULT_V1 result-fact leaf'i olduğu ve path'in
                 // external_state_root'a çıktığı kanıtlanır. (Kökün harici
-                // finalize commitment'a anchor'ı = EVM light-client → Phase 9;
+                // finalize commitment'a anchor'ı = EVM light-client → Task 9;
                 // bu kapı kanıt zincirinin kendisini sound şekilde doğrular.)
                 let proof: crate::cross_domain::event_tree::MerkleProof =
                     bincode::deserialize(&res.receipt_proof).map_err(|e| {
@@ -538,7 +538,7 @@ impl Executor {
                     "Universal Relayer: External result verified and recorded"
                 );
 
-                // Phase 9: Bridge state transition from external result
+                // Task 9: Bridge state transition from external result
                 if let Some(ref msg) = res.message {
                     if res.success {
                         match msg.kind {
@@ -680,7 +680,7 @@ impl Executor {
                 website_url,
                 manifest_id,
             } => {
-                // Phase 8.9 / M5: anti-sybil kayıt ücreti. BNS kolundaki
+                // Task 8.9 / M5: anti-sybil kayıt ücreti. BNS kolundaki
                 // H1 deseniyle simetrik: tam minimum ücret zorunlu + tam düşüm.
                 if tx.amount < crate::hub::HUB_REGISTER_MIN_FEE {
                     return Err(BudlumError::validation(

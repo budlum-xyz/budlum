@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Phase 11.2 Görev 3 — ZK ProofEnvelope decode + verify robustness.
+//! Task 11.2 Görev 3 — ZK ProofEnvelope decode + verify robustness.
 //!
 //! Untrusted relayers/provers may submit arbitrary envelopes. Outcomes:
 //! `Ok(())` (valid) or `Err(VerifyError)` are fine. Panic/abort/sanitizer

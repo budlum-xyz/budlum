@@ -1,4 +1,4 @@
-# Genesis Flip Checklist (Phase 7.4 — Ceremony Sonrası Kod Çevirmeleri)
+# Genesis Flip Checklist (Task 7.4 — Ceremony Sonrası Kod Çevirmeleri)
 
 **Amaç:** Mainnet genesis ceremony'si (bkz. `docs/operations/MAINNET_GENESIS_CEREMONY.md`)
 tamamlandıktan sonra, **placeholder durumu bilinçli olarak kodlayan** noktaların
@@ -33,7 +33,7 @@ sonra ise hiçbir madde açık KALMAZ — açık madde = launch blokörü.
       `MAINNET_DNS_SEEDS` gerçek multiaddr/`_dnsaddr` kayıtlarıyla dolduruldu.
       **Q5 guard uyarısı:** `dummy`/`placeholder`/`203.0.113.`/`.example`
       marker'ı taşıyan herhangi bir kayıt kalırsa
-      `first_placeholder_peer` (Phase 8.9) mainnet boot'u CRITICAL exit 1 ile
+      `first_placeholder_peer` (Task 8.9) mainnet boot'u CRITICAL exit 1 ile
       bloklar — çevirme TAM olmalı (kısmi çevirme = boot bloklu).
 - [ ] **F2.3** `config/mainnet.toml` `[p2p] bootnodes` / `dns_seeds` gerçekleri
       yazıldı; `ceremony_status = "frozen"` olarak çevrildi.
@@ -75,4 +75,4 @@ sonra ise hiçbir madde açık KALMAZ — açık madde = launch blokörü.
 CI 8/8 yeşil + ceremony minutes (N-of-M imzalı) `docs/operations/` altında
 (tag'e bağlı) arşivli.
 
-*Yazıldı: Phase 8.9 Dalga 5, kullanıcı kararı Q-C(a), 2026-07-16 (ARENA2).*
+*Yazıldı: Task 8.9 Dalga 5, kullanıcı kararı Q-C(a), 2026-07-16 (ARENA2).*

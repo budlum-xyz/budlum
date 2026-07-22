@@ -1,4 +1,4 @@
-//! Mobile Self profile primitives (Phase 12 / ARENA4).
+//! Mobile Self profile primitives (Task 12 / ARENA4).
 //!
 //! Mobile devices may self-host B.U.D. data, but they must never be marketed as
 //! always-online storage. Critical data should use paid replicas.

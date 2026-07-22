@@ -24,7 +24,7 @@ use tracing::{info, warn};
 /// when gossipsub publish fails without a corresponding reset.
 const SYNC_TIMEOUT_SECS: u64 = 60;
 
-/// Phase 0.04 SECURITY FIX (Güvenlik Denetimi Madde 2):
+/// Task 0.04 SECURITY FIX (Güvenlik Denetimi Madde 2):
 /// SnapshotChunk mesajının `total` alanı için üst sınır. Saldırgan
 /// `total = u32::MAX` göndererek alıcı node'u sınırsız bellek ayırmaya
 /// zorlayabilir; bu da Rust'ın varsayılan abort davranışıyla süreci
@@ -34,7 +34,7 @@ const SYNC_TIMEOUT_SECS: u64 = 60;
 /// yok).
 pub const MAX_SNAPSHOT_CHUNKS: u32 = 4096;
 /// Maximum number of concurrent in-flight snapshot assembly sessions
-/// (Phase 0.10, security audit §2). Prevents a peer from forcing us to hold
+/// (Task 0.10, security audit §2). Prevents a peer from forcing us to hold
 /// unbounded `in_progress_snapshots` state by initiating many sessions.
 pub const MAX_CONCURRENT_SNAPSHOTS: usize = 10;
 /// Idle timeout for a snapshot assembly session: if no chunk arrives for
@@ -407,7 +407,7 @@ impl Node {
         })
     }
 
-    /// Phase 0.10 (security audit §2): drop snapshot sessions that have been
+    /// Task 0.10 (security audit §2): drop snapshot sessions that have been
     /// idle for longer than `SNAPSHOT_SESSION_TIMEOUT_SECS`. Prevents an
     /// attacker (or buggy peer) from accumulating per-height buffers
     /// forever by starting a session and then never completing it.
@@ -421,7 +421,7 @@ impl Node {
         before - self.in_progress_snapshots.len()
     }
 
-    /// Phase 0.10 (security audit §2): active session count — used by tests
+    /// Task 0.10 (security audit §2): active session count — used by tests
     /// and by the new `MAX_CONCURRENT_SNAPSHOTS` enforcement.
     pub fn active_snapshot_sessions(&self) -> usize {
         self.in_progress_snapshots.len()
@@ -438,7 +438,7 @@ impl Node {
         let security = network.security_config();
         self.max_peers = security.max_peers;
         self.mdns_enabled = security.mdns_enabled;
-        // Phase 3 §3.4: wire peer_rate_limit_per_minute into PeerManager token bucket.
+        // Task 3 §3.4: wire peer_rate_limit_per_minute into PeerManager token bucket.
         if let Ok(mut pm) = self.peer_manager.lock() {
             pm.apply_security_config(security);
         }
@@ -517,7 +517,7 @@ impl Node {
         };
         match std::fs::read_to_string(db_path) {
             Ok(data) => {
-                // Phase 0.334 / A4: prefer absolute-expiry records; accept legacy
+                // Task 0.334 / A4: prefer absolute-expiry records; accept legacy
                 // string-only lists for one-version migration.
                 #[derive(serde::Deserialize)]
                 struct BanListV2 {
@@ -576,7 +576,7 @@ impl Node {
         let json = serde_json::json!({ "banned_peers": banned_peers });
         if let Some(parent) = db_path.parent() {
             let _ = std::fs::create_dir_all(parent);
-            // Phase 0.32: serializing an already-built serde_json::Value cannot fail
+            // Task 0.32: serializing an already-built serde_json::Value cannot fail
             // in practice, but log if it ever does instead of writing empty.
             let json_str = serde_json::to_string_pretty(&json).unwrap_or_else(|e| {
                 warn!("Failed to serialize banned peers JSON: {}", e);
@@ -1333,7 +1333,7 @@ impl Node {
 
                                     NetworkMessage::GetStateSnapshot { height } => {
                                         info!("GetStateSnapshot request from {} (height: {})", peer_id, height);
-                                        // Phase 0.10 SECURITY FIX: cap concurrent snapshot sessions
+                                        // Task 0.10 SECURITY FIX: cap concurrent snapshot sessions
                                         // and evict stale ones before recording this new request.
                                         // Without this, a peer can initiate many sessions and
                                         // grow `in_progress_snapshots` without bound (audit §2).
@@ -1374,7 +1374,7 @@ impl Node {
                                     NetworkMessage::SnapshotChunk { height, index, total, data, session_id } => {
                                         info!("Received snapshot chunk {}/{} for height {} (session={})", index + 1, total, height, session_id);
 
-                                        // === Phase 0.04 SECURITY FIX (Güvenlik Denetimi Madde 2) ===
+                                        // === Task 0.04 SECURITY FIX (Güvenlik Denetimi Madde 2) ===
                                         // Kimliksiz uzaktan DoS saldırısını önle:
                                         // (a) Üst sınır kontrolü: total > MAX_SNAPSHOT_CHUNKS ise reddet.
                                         //     Saldırgan `total = 4_294_967_295` göndererek node'u
@@ -1405,12 +1405,12 @@ impl Node {
                                         // `in_progress_snapshots` entry'si yoksa, bu node
                                         // bu snapshot'ı talep etmemiş demektir — unsolicited
                                         // chunk'ı yoksay (allocation yok, side effect yok).
-                                        // Phase 0.10: Session'ı burada insert ediyoruz (eğer
+                                        // Task 0.10: Session'ı burada insert ediyoruz (eğer
                                         // yoksa), böylece alan tarafın GetStateSnapshot
                                         // request öncesi hand-shake'ine gerek kalmıyor —
                                         // ilk gelen chunk session'ı başlatır.
                                         let active_session = if let Some((s, ts, _)) = self.in_progress_snapshots.get(&height).cloned() {
-                                            // Phase 0.10: timeout kontrolü — stale session'ı düşür
+                                            // Task 0.10: timeout kontrolü — stale session'ı düşür
                                             if ts.elapsed().as_secs() > SNAPSHOT_SESSION_TIMEOUT_SECS {
                                                 warn!(
                                                     "Evicting stale snapshot session for height {} (idle >{}s)",
@@ -1423,7 +1423,7 @@ impl Node {
                                                 s
                                             }
                                         } else {
-                                            // Phase 0.10: ilk kez gelen chunk — yeni session başlat
+                                            // Task 0.10: ilk kez gelen chunk — yeni session başlat
                                             // (max concurrent kontrolü yukarıda yapıldı).
                                             0u64
                                         };
@@ -1443,7 +1443,7 @@ impl Node {
                                         // Toplam allocation `total * chunk_size` ile sınırlı
                                         // (her chunk 512KB; 4096 * 512KB = 2GB) — bu DoS sınırı
                                         // güvenlik denetimi gereksinimini karşılar.
-                                        // Phase 0.10: ayrıca bu height'ın session'ının son aktivite
+                                        // Task 0.10: ayrıca bu height'ın session'ının son aktivite
                                         // zamanını da yenilememiz gerek (timeout reset).
                                         let (_, last_active, chunk_buf) = self
                                             .in_progress_snapshots

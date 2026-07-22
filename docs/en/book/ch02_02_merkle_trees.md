@@ -24,7 +24,7 @@ A light client can:
 
 The client does not need the whole block or the whole chain.
 
-## 4. Hardening Phase 2: QC Blob and PQ Signatures
+## 4. Hardening Task 2: QC Blob and PQ Signatures
 
 Post-quantum signatures can be large. Putting every Dilithium signature directly into the block header would bloat blocks.
 

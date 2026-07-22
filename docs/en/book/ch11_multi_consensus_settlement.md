@@ -17,8 +17,8 @@ In Budlum, different consensus domains (PoW, PoS, etc.) act as concurrent data p
 
 The core mathematical rule ensuring security is the **Nonce Invariant**. Given a Global State $G$ and a Domain Commitment $C$, the state transition function $f(G, C) \to G'$ follows this rule:
 
-$$Account_{nonce}(G') = 
-\begin{cases} 
+$$Account_{nonce}(G') =
+\begin{cases}
 C_{nonce}, & \text{if } C_{nonce} > Account_{nonce}(G) \\
 \bot, & \text{otherwise: reject before settlement insertion}
 \end{cases}$$
@@ -38,7 +38,7 @@ pub fn submit_verified_domain_commitment(
     self.validate_domain_commitment_metadata(&commitment)?;
     self.verify_domain_commitment_finality(&commitment, &proof)?;
     self.validate_validator_set_hash(&commitment)?;
-    
+
     if let Some(existing) = self.domain_commitment_registry.find_by_height(
         commitment.domain_id,
         commitment.domain_height,
@@ -77,7 +77,7 @@ fn apply_pending_commitments(&mut self, domain_id: DomainId) -> Result<Vec<Conse
     loop {
         let last_height = self.domain_registry.get(domain_id).unwrap().last_committed_height;
         let next_height = last_height + 1;
-        
+
         if let Some(com) = self.domain_commitment_registry.find_by_height(domain_id, next_height) {
             for (addr, new_nonce) in &com.state_updates {
                 if *new_nonce <= self.state.get_nonce(addr) {
@@ -90,7 +90,7 @@ fn apply_pending_commitments(&mut self, domain_id: DomainId) -> Result<Vec<Conse
             // ... state application logic ...
             updated_domains.push(self.domain_registry.get(domain_id).unwrap().clone());
         } else {
-            break; 
+            break;
         }
     }
 
@@ -123,7 +123,7 @@ Domain registration now carries an operator address and minimum bond, creating a
 
 ## 4. Byzantine Chaos Matrix: Proving the Truth
 
-When writing a blockchain from scratch, the most critical phase is testing your code under "chaos." The Budlum Settlement Layer is tested with an **18-scenario Byzantine Chaos Matrix**, proving how the system survives in a faulty/adversarial network.
+When writing a blockchain from scratch, the most critical task is testing your code under "chaos." The Budlum Settlement Layer is tested with an **18-scenario Byzantine Chaos Matrix**, proving how the system survives in a faulty/adversarial network.
 
 ### Category 1: Convergence and Order Independence
 ### Byzantine Chaos Matrix (18 Scenarios)
@@ -136,7 +136,7 @@ The settlement layer remains deterministic across all of the following chaos sce
 4.  **Atomic Recovery:** Commitment insertions and domain height updates survive restart as one durable settlement transition.
 5.  **Verified Bridge Lifecycle:** Lock, mint, burn, and unlock are exercised through committed domain events and Merkle proofs.
 
-## Phase 3: Distributed Devnet Simulation (Distributed Test Harness)
+## Task 3: Distributed Devnet Simulation (Distributed Test Harness)
 
 The success of the system under real network conditions has been proven by the distributed test harness implemented in `src/tests/distributed_settlement.rs`.
 

@@ -1,5 +1,5 @@
 #![allow(warnings)]
-// Phase 8.3 (ADIM8): unsafe kilidi — src/ şu an 0 unsafe temiz taban;
+// Task 8.3 (ADIM8): unsafe kilidi — src/ şu an 0 unsafe temiz taban;
 // bir `unsafe` blok girdiği an derleme FAIL eder (regresyon kapısı).
 // Not: üstteki `#![allow(warnings)]` kullanıcı kararıyla korunur — forbid ayrı eksen.
 #![forbid(unsafe_code)]
@@ -42,7 +42,7 @@ pub use crate::core::transaction::Transaction;
 mod bls_keypair_integrity_test {
     use bls12_381::{G1Affine, G2Affine};
 
-    /// Phase 0.17 (security audit §5): confirm that the compressed
+    /// Task 0.17 (security audit §5): confirm that the compressed
     /// identity points are NOT accepted by `from_compressed` (so
     /// the BLS verifier is not vulnerable to a "zero public key"
     /// trivial forgery). BLS12-381 uses a special encoding for the

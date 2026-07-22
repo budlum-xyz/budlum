@@ -1,4 +1,4 @@
-// Phase 0.10: bridge lifecycle integration test (security audit §3). The
+// Task 0.10: bridge lifecycle integration test (security audit §3). The
 // `bud_lockBridgeTransfer` RPC is removed; the full lock → mint → burn →
 // unlock happy path is now exercised through the *internal*
 // `Blockchain::lock_bridge_transfer` system path, plus the
@@ -6,7 +6,7 @@
 #[cfg(test)]
 pub mod bridge_lifecycle;
 pub mod v95_v98_canaries;
-// Phase 0.12: QcBlob quorum-check unit tests (security audit §4). The
+// Task 0.12: QcBlob quorum-check unit tests (security audit §4). The
 // `import_qc_blob` minimum-signature count contract is verified by
 // replaying the same arithmetic the production code uses, against
 // 3-validator snapshots.
@@ -16,9 +16,9 @@ pub mod bench_performance;
 pub mod block_reward;
 #[cfg(test)]
 pub mod bns;
-// Phase 0.38, Faz 1-2 + Faz 5: B.U.D. E2E test + ekip-bağımsızlık invariantları.
+// Task 0.38, Görev 1-2 + Görev 5: B.U.D. E2E test + ekip-bağımsızlık invariantları.
 // 3-aktör (operatör A + operatör B + izleyici C) senaryosu + 9 adet
-// permissionless/whitelist/data-sovereignty invariantı (Phase 0.39 plan §0.5
+// permissionless/whitelist/data-sovereignty invariantı (Task 0.39 plan §0.5
 // + §4 kabul kriterleri).
 #[cfg(test)]
 pub mod bud_e2e;
@@ -30,10 +30,10 @@ pub mod chaos;
 pub mod distributed_settlement;
 #[cfg(test)]
 pub mod qcblob_quorum;
-// Phase 0.08: re-enabled (was `#![cfg(false)]`'d during Phase 0.02 ghost-hunting).
+// Task 0.08: re-enabled (was `#![cfg(false)]`'d during Task 0.02 ghost-hunting).
 // The permissionless-registry / liveness / invalid-vote state was reinstated
 // on `AccountState`, so these test files now exercise the real code paths
-// again. They were the regression tests for the Phase 0-19 patch series.
+// again. They were the regression tests for the Task 0-19 patch series.
 #[cfg(test)]
 pub mod disaster_recovery;
 #[cfg(test)]
@@ -62,7 +62,7 @@ pub mod pow_light_client;
 pub mod prover;
 #[cfg(test)]
 pub mod relayer_liveness;
-// Phase 8.9 / Dalga 5: L1 relayer proof kripto-doorulama + M5 hub fee + M4 BNS fee
+// Task 8.9 / Dalga 5: L1 relayer proof kripto-doorulama + M5 hub fee + M4 BNS fee
 // regresyon kapilari (kullanici karari Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;
@@ -73,11 +73,11 @@ pub mod tokenomics;
 pub mod tokenomics_proptest;
 #[cfg(test)]
 pub mod zkvm;
-// Phase 9 / F4 mühürü (ARENA3, 2026-07-17): SocialFi boost %4 B.U.D. operatör
+// Task 9 / F4 mühürü (ARENA3, 2026-07-17): SocialFi boost %4 B.U.D. operatör
 // dağıtımı + remainder determinizmi + operatörsüz burn fallback regresyonları.
 #[cfg(test)]
 pub mod adversarial_p2p;
-// Phase 9 / F1 mühürü (ARENA3, 2026-07-17): NftBurn -> storage manifest hard
+// Task 9 / F1 mühürü (ARENA3, 2026-07-17): NftBurn -> storage manifest hard
 // prune zincir-seviyesi regresyon kilidi (produce_block yolu).
 #[cfg(test)]
 pub mod bns_expanded;
@@ -110,7 +110,7 @@ pub mod bridge_negatives;
 pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod encryption_dao;
-// Phase 11.3 Görev 4: PoA katılımcı onboarding yaşam-döngüsü + whitelist
+// Task 11.3 Görev 4: PoA katılımcı onboarding yaşam-döngüsü + whitelist
 // zorunluluğu + KYC expiry test matrisi. İzolasyon mührü poa_isolation.rs'de.
 pub mod poa_onboarding_matrix;
 // P0 mainnet-gap 3/3 (ARENA3, 2026-07-19): snapshot-corruption +

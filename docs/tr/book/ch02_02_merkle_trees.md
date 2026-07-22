@@ -48,7 +48,7 @@ pub fn calculate_tx_root(&self) -> String {
         .collect();
 
     // 2. Boş Blok Kontrolü...
-    
+
     // 3. Ağacı yukarı doğru ör.
     while current_level.len() > 1 {
         let mut next_level = Vec::new();
@@ -90,7 +90,7 @@ Bu sayede 1 TB'lık blok zincirini indirmeden, işlemler kriptografik kesinlikle
 
 ---
 
-## 4. Hardening Phase 2: QC Blob ve PQ İmzaları
+## 4. Hardening Task 2: QC Blob ve PQ İmzaları
 
 Yeni eklenen Optimistic QC (Optimistik Çeyrek Sertifika) yapısında, Merkle ağaçları bu sefer kuantum sonrası (PQ) güvenliği optimize etmek için kullanılır.
 

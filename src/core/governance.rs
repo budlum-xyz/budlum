@@ -4,10 +4,10 @@ use crate::registry::params::RegistryParams;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Phase 11.16: accepted parameter proposals activate after this delay.
+/// Task 11.16: accepted parameter proposals activate after this delay.
 pub const GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS: u64 = 10;
 
-/// Phase 11.16: minimal on-chain governance is parameter-only and whitelist-bound.
+/// Task 11.16: minimal on-chain governance is parameter-only and whitelist-bound.
 pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "min_stake",
     "unbonding_epochs",
@@ -77,10 +77,10 @@ pub enum ProposalType {
     DewhitelistVerifier {
         address: Address,
     },
-    /// Phase 12: DAO-managed encryption parameters for Pollen/B.U.D.
+    /// Task 12: DAO-managed encryption parameters for Pollen/B.U.D.
     /// This is parameter-only governance: no decrypt/key/read override exists.
     SetEncryptionPolicy(crate::pollen::EncryptionPolicy),
-    /// Phase 12: Constitution Engine parameter update. Hard guardrails are
+    /// Task 12: Constitution Engine parameter update. Hard guardrails are
     /// validated fail-closed and cannot be weakened by governance.
     SetConstitutionParameter(ConstitutionParameter),
 }
@@ -104,10 +104,10 @@ pub struct Proposal {
     pub votes_against: u64, // Total stake voting AGAINST
     pub status: ProposalStatus,
     pub voters: HashMap<Address, bool>, // Address -> Vote (true = for)
-    /// Phase 11.16: vote-weight snapshot captured when each validator votes.
+    /// Task 11.16: vote-weight snapshot captured when each validator votes.
     #[serde(default)]
     pub voter_weights: HashMap<Address, u64>,
-    /// Phase 11.16: optional delayed activation epoch after a proposal passes.
+    /// Task 11.16: optional delayed activation epoch after a proposal passes.
     #[serde(default)]
     pub activation_epoch: Option<u64>,
 }
@@ -175,7 +175,7 @@ impl Proposal {
         self.voter_weights.get(voter).copied().unwrap_or(0)
     }
 
-    /// Phase 11.16: reduce only the stake weight originally snapshotted for a voter.
+    /// Task 11.16: reduce only the stake weight originally snapshotted for a voter.
     /// The address remains in `voters`, so moving/re-staking stake cannot vote twice.
     pub fn reduce_vote_weight(&mut self, voter: &Address, reduction: u64) {
         let Some(vote_for) = self.voters.get(voter).copied() else {
@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_16_governance_rejects_non_whitelisted_parameter_proposal() {
+    fn task11_16_governance_rejects_non_whitelisted_parameter_proposal() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let err = gov
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_16_governance_rejects_invalid_parameter_value() {
+    fn task11_16_governance_rejects_invalid_parameter_value() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let err = gov
@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_16_governance_sets_parameter_activation_timelock() {
+    fn task11_16_governance_sets_parameter_activation_timelock() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let id = gov
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_16_governance_records_vote_weight_snapshot() {
+    fn task11_16_governance_records_vote_weight_snapshot() {
         let proposer = Address::from([0x01; 32]);
         let voter = Address::from([0x02; 32]);
         let mut proposal = Proposal::new(
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_16_governance_stake_transfer_cannot_double_count_vote_weight() {
+    fn task11_16_governance_stake_transfer_cannot_double_count_vote_weight() {
         let proposer = Address::from([0x01; 32]);
         let voter = Address::from([0x02; 32]);
         let mut proposal = Proposal::new(

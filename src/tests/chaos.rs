@@ -739,7 +739,7 @@ mod chaos_tests {
         let mut pos_com =
             DomainCommitment::from_block(&pos_domain, &pos_block, [2u8; 32], [3u8; 32], 1).unwrap();
         pos_com.event_root = pos_event_tree.root();
-        // Phase 0.16 (security audit §9): capture the commitment block hash so the
+        // Task 0.16 (security audit §9): capture the commitment block hash so the
         // bridge-mint forgery gate has a concrete value to bind against.
         let pos_com_block_hash = pos_com.domain_block_hash;
 
@@ -864,7 +864,7 @@ mod chaos_tests {
     /// Chaos v2 (ARENA3 — mempool poison): spam flood'cu dürüst ücretliler
     /// tarafından tamamen evict edilmeli. Pool doluyken evict_lowest_fee
     /// (new.fee > lowest) çalışır; tüm spam'ler atılınca yeni düşük-fee tx
-    /// en düşük dürüst fee'yi aşamadığından PoolFull ile reddedilir.
+    /// en düşük dürüst fee'yi görevdığından PoolFull ile reddedilir.
     #[test]
     fn test_chaos_v2_mempool_poison_flooder_evicted_by_honest_fees() {
         use crate::mempool::pool::{Mempool, MempoolConfig};
@@ -921,7 +921,7 @@ mod chaos_tests {
         assert_eq!(pool.len(), 100);
     }
 
-    // ─── Phase 10.5 Chaos: double-lock, state determinism, genesis mismatch ───
+    // ─── Task 10.5 Chaos: double-lock, state determinism, genesis mismatch ───
 
     /// **Double-spend koruması:** Aynı asset iki kez lock edilemez. BridgeState
     /// `asset_locations` tek-durum haritası — ilk lock'tan sonra asset Active→Locked

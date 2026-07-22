@@ -1,4 +1,4 @@
-# Validator Key Management — Phase 11.20 Mainnet Policy
+# Validator Key Management — Task 11.20 Mainnet Policy
 
 **Status:** ADIM 1 policy baseline.
 **Hardware standard:** YubiHSM 2 compatible PKCS#11.
@@ -58,4 +58,4 @@ Auditors should cross-check this document with:
 - `docs/operations/HSM_VENDOR_NATIVE_GUIDE.md`
 - `src/crypto/mainnet_policy.rs`
 - `src/crypto/pkcs11.rs`
-- CI jobs: `Budlum Core`, `Miri UB Denetimi`, and `Audit Prep (Phase 11.20)`
+- CI jobs: `Budlum Core`, `Miri UB Denetimi`, and `Audit Prep (Task 11.20)`

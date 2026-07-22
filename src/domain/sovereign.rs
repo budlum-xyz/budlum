@@ -1,4 +1,4 @@
-//! Sovereign Domain Kit primitives (Phase 12 / ARENA4).
+//! Sovereign Domain Kit primitives (Task 12 / ARENA4).
 //!
 //! The kit helps CBDC, public-sector, enterprise PoA and consortium domains
 //! describe lifecycle and compliance evidence without leaking private KYC data

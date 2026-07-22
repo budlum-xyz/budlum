@@ -1,6 +1,6 @@
 name: Fuzz Nightly
 
-# Phase 8.5 (Faz 1): uzun fuzz koşuları. Her gece 03:17 UTC'de her target
+# Task 8.5 (Görev 1): uzun fuzz koşuları. Her gece 03:17 UTC'de her target
 # 4 saat fuzz'lanır; her target ayrı matrix job'ında koşar (GitHub job
 # üst sınırı 6 saat → tek job'da 5×4h imkânsızdır, matrix zorunludur).
 # Corpus her koşuda cache'lenir ve sonraki koşuda geri yüklenir (büyüyen

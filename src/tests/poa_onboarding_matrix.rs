@@ -1,4 +1,4 @@
-//! PoA katılımcı onboarding test matrisi — Phase 11.3 Görev 4.
+//! PoA katılımcı onboarding test matrisi — Task 11.3 Görev 4.
 //!
 //! [`crate::registry::poa_onboarding::PoAOnboarding`] modülünün tam yaşam
 //! döngüsünü, whitelist zorunluluğunu, KYC son kullanma (expiry) davranışını

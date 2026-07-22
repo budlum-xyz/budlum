@@ -1,6 +1,6 @@
 # Mainnet Genesis Ceremony — TR Özet ve Yönlendirme
 
-> **2026-07-16 konsolidasyonu (Phase 8.9, kullanıcı kararı Q2):** Tek kanonik
+> **2026-07-16 konsolidasyonu (Task 8.9, kullanıcı kararı Q2):** Tek kanonik
 > prosedür **`docs/operations/MAINNET_GENESIS_CEREMONY.md`** dosyasıdır.
 > Bu dosya yalnızca TR özet + JSON şablon annex'i taşır; prosedür metni,
 > tablolar ve doldurma alanları kanonik belgede yaşar. Güncelleme yaparken
@@ -20,9 +20,9 @@ geçişin yapıldığı törendir. Katılımcılar: kullanıcı (ceremony master
 doğrulama ekibi, validator operatörleri (N-of-M). Güvenlik kuralları:
 air-gap üretim, HSM (BLS/PQ dışarı çıkmaz), tercihan ≥2 gözlemci.
 
-## 2. Faz haritası (kanonik belgedeki karşılıklar)
+## 2. Görev haritası (kanonik belgedeki karşılıklar)
 
-| Faz | İçerik | Kanonik bölüm |
+| Görev | İçerik | Kanonik bölüm |
 |-----|--------|---------------|
 | Key üretimi (Ed25519 `keygen` CLI — binary'de mevcut) | §2.1 |
 | Treasury allocation (5 havuz, 100T BUD) | §3.1 |
@@ -36,10 +36,10 @@ air-gap üretim, HSM (BLS/PQ dışarı çıkmaz), tercihan ≥2 gözlemci.
 ## 3. Önkoşullar (özet)
 
 - `cargo test --lib` / `clippy -D warnings` / `fmt --check` yeşil.
-- M5 raporu (`docs/M5_VERIFYMERKLE_RAPOR_ARENA5.md`) ve Phase 7 planı
-  (`docs/PHASE7_CEREMONY_PLAN.md`) okunmuş.
+- M5 raporu (`docs/M5_VERIFYMERKLE_RAPOR_ARENA5.md`) ve Task 7 planı
+  (`docs/TASK7_CEREMONY_PLAN.md`) okunmuş.
 - HSM donanım kararı verilmiş (yoksa Ed25519-only launch, M6 borcu).
-- Koordinasyon checklist'i: `docs/PHASE7_CEREMONY_BIRLESTIRME_ARENA5_ARENA1.md`.
+- Koordinasyon checklist'i: `docs/TASK7_CEREMONY_BIRLESTIRME_ARENA5_ARENA1.md`.
 
 ---
 

@@ -1,6 +1,6 @@
 # SocialFi / NFT Registry (modül README'si)
 
-**Bu dosya, Phase 10 Bölüm 4 modül-ayrımı kuralı gereği SocialFi'nin kendi
+**Bu dosya, Task 10 Bölüm 4 modül-ayrımı kuralı gereği SocialFi'nin kendi
 README'sidir.** Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları
 burada yaşar.
 

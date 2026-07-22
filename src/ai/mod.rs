@@ -1,4 +1,4 @@
-//! Phase 10 (§1): AI Inference & Compute Layer.
+//! Task 10 (§1): AI Inference & Compute Layer.
 //!
 //! Provides deterministic model registration, request/result attestation tracking,
 //! and threshold consensus finalization (`AiVerifier`).
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_ai_soft_incentive_reward_distribution() {
-        // Phase 10 §1: Soft incentive verifies majority gets max_fee share
+        // Task 10 §1: Soft incentive verifies majority gets max_fee share
         // and minority verifiers get zero reward without stake slashing.
         let mut registry = AiRegistry::new();
         let owner =

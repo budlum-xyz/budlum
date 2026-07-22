@@ -1,4 +1,4 @@
-//! Faz A — SocialFi ↔ Lubot runtime entegrasyonu.
+//! Görev A — SocialFi ↔ Lubot runtime entegrasyonu.
 //!
 //! Lubot AI çıktısı SocialFi'da **gerçek NFT** olarak yayımlanır (`NftRegistry::mint`);
 //! sosyal NFT içeriği Lubot için kapalı-devre veri kaynağına dönüştürülür

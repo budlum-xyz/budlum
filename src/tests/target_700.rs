@@ -1,4 +1,4 @@
-//! Phase 9 audit autopsy (2026-07-18, ARENA3):
+//! Task 9 audit autopsy (2026-07-18, ARENA3):
 //! This file previously claimed "100+ unique tests" with 140 functions.
 //! Body-hash analysis showed only 6 unique behaviors: 80 literal
 //! `assert!(true);` calls, plus 5 behaviors copied 10-20 times with only

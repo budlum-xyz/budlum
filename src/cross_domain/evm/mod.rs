@@ -18,7 +18,7 @@
 //! Budlum verify eder (RFC Q1 = relayer_produces).
 //!
 //! **F10.1 kapsamı (bu modül setinin temeli):** RLP + MPT verifier + KAT vectors.
-//! Sonraki fazlar (F10.2+) bunun üstüne kurulur.
+//! Sonraki görevlar (F10.2+) bunun üstüne kurulur.
 
 pub mod adapter;
 pub mod bud_to_eth;

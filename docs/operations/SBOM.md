@@ -1,8 +1,8 @@
-# SBOM (Software Bill of Materials) (Phase 2 §1.7)
+# SBOM (Software Bill of Materials) (Task 2 §1.7)
 
-**Güncelleme:** 2026-07-15  
-**Araç:** `cargo-cyclonedx` (https://github.com/CycloneDX/cyclonedx-rust-cargo)  
-**Format:** CycloneDX JSON  
+**Güncelleme:** 2026-07-15
+**Araç:** `cargo-cyclonedx` (https://github.com/CycloneDX/cyclonedx-rust-cargo)
+**Format:** CycloneDX JSON
 **Durum:** Üretim scripti hazır; bu sandbox oturumunda Rust toolchain (`cargo`/`rustc`) bulunmadığı için `sbom.cdx.json` yerelde üretilemedi.
 
 > SBOM harici audit ve mainnet launch hazırlığı için zorunlu supply-chain teslim

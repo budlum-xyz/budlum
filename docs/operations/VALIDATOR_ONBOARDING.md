@@ -1,4 +1,4 @@
-# Validator Onboarding — Phase 3 §3.5
+# Validator Onboarding — Task 3 §3.5
 
 **Hazırlayan:** ARENA1
 **Tarih:** 2026-07-15

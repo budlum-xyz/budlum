@@ -87,7 +87,7 @@ pub struct RelayerExternalResult {
 }
 
 impl RelayerExternalResult {
-    /// Phase 8.9 / L1: result-fact leaf'i.
+    /// Task 8.9 / L1: result-fact leaf'i.
     pub fn result_leaf(&self) -> [u8; 32] {
         let chain_bytes = bincode::serialize(&self.chain).unwrap_or_default();
         let mut hasher = sha2::Sha256::new();
@@ -143,37 +143,37 @@ pub enum TransactionType {
         website_url: String,
         manifest_id: Option<crate::storage::content_id::ContentId>,
     },
-    /// Phase 10 (§1): Register AI model specification (`AiVerifier` attestation target).
+    /// Task 10 (§1): Register AI model specification (`AiVerifier` attestation target).
     AiModelRegister(crate::ai::types::AiModelSpec),
-    /// Phase 10 (§1): Submit AI inference attestation request.
+    /// Task 10 (§1): Submit AI inference attestation request.
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
-    /// Phase 10 (§1): Submit AI inference attestation result by an `AiVerifier`.
+    /// Task 10 (§1): Submit AI inference attestation result by an `AiVerifier`.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
-    /// Phase 10 (§1 P5): Reclaim escrowed max_fee for expired unfinalized AI request.
+    /// Task 10 (§1 P5): Reclaim escrowed max_fee for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
-    /// Phase 10 (§1 P5): Deactivate an AI model (owner-only, prevents new requests).
+    /// Task 10 (§1 P5): Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
-    /// Phase 10 (§1 P5 ADIM7): Reactivate a previously deactivated AI model.
+    /// Task 10 (§1 P5 ADIM7): Reactivate a previously deactivated AI model.
     AiModelReactivate(crate::ai::types::AiModelId),
-    /// Phase 10 (§1 P5 ADIM7): Cancel a pending AI inference request (requester-only).
+    /// Task 10 (§1 P5 ADIM7): Cancel a pending AI inference request (requester-only).
     /// Returns escrowed max_fee for refund by the executor layer.
     AiRequestCancel(crate::ai::types::AiRequestId),
-    /// Phase 12: Register a Pollen DataAsset (owner-submitted).
+    /// Task 12: Register a Pollen DataAsset (owner-submitted).
     PollenRegisterDataAsset(crate::pollen::DataAsset),
-    /// Phase 12: Register a seller/owner sale authorization for DataAsset pollen.
+    /// Task 12: Register a seller/owner sale authorization for DataAsset pollen.
     PollenAuthorizeSale(crate::pollen::SaleAuthorization),
-    /// Phase 12: Register an owner-submitted AccessGrant.
+    /// Task 12: Register an owner-submitted AccessGrant.
     PollenGrantAccess(crate::pollen::AccessGrant),
-    /// Phase 12: Revoke a Pollen AccessGrant by id (owner-only in executor).
+    /// Task 12: Revoke a Pollen AccessGrant by id (owner-only in executor).
     PollenRevokeGrant(crate::pollen::GrantId),
-    /// Phase 12: Revoke a Pollen DataAsset by id (owner-only in executor).
+    /// Task 12: Revoke a Pollen DataAsset by id (owner-only in executor).
     PollenRevokeDataAsset(crate::pollen::AssetId),
-    /// Phase 10 (§1 P5 ADIM8): Slash a verifier for equivocation.
+    /// Task 10 (§1 P5 ADIM8): Slash a verifier for equivocation.
     AiDisputeSlash {
         request_id: crate::ai::types::AiRequestId,
         verifier: crate::core::address::Address,
     },
-    /// Phase 10 (§1 P5 ADIM11): Agent-to-Agent payment in the Agentic Economy.
+    /// Task 10 (§1 P5 ADIM11): Agent-to-Agent payment in the Agentic Economy.
     /// Enables trustless value transfer between AI agents, with optional
     /// escrow gating by inference outcome finalization and execution proof.
     AiAgentPayment(crate::ai::types::AiAgentPayment),
@@ -1011,7 +1011,7 @@ mod v29_signing_tests {
     }
 
     #[test]
-    fn phase11_8_fee_field_tampering_invalidates_signature() {
+    fn task11_8_fee_field_tampering_invalidates_signature() {
         let mut tx = signed_variant(TransactionType::Transfer);
         tx.max_fee = tx.max_fee.saturating_add(1);
         assert!(!tx.verify(), "max_fee is execution-relevant and signed");

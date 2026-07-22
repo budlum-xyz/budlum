@@ -132,7 +132,7 @@ mesaj leak, log leak, error message leak) test ediliyor.
 yavaşlayabilir — mainnet'te bu kapasite planlamasını doğrudan
 etkiler.
 **Ne eklenecek:** `criterion` ile mevcut `benches/` altına baseline
-kıyaslama, her PR'da bir önceki main'e göre %X'ten fazla yavaşlama
+kıyaslama, her PR'da bir önceki main'e göre %X'ten görevla yavaşlama
 varsa uyarı/fail.
 **Nasıl:** `criterion` zaten Rust ekosisteminde standart; CI'da
 `cargo bench` sonrası sonuçları bir baseline dosyasıyla kıyaslayan

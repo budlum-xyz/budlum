@@ -1,16 +1,16 @@
 //! $BUD tokenomics: genesis supply, distribution, vesting and burn schedules.
 //!
-//! Scope (Phase 0.14): ONLY genesis supply, distribution, team vesting and the two
+//! Scope (Task 0.14): ONLY genesis supply, distribution, team vesting and the two
 //! burn mechanisms. PoSV consensus, $LUM, launchpad/presale are explicitly out
 //! of scope (separate future work).
 //!
-//! ## Key facts grounded in the existing codebase (Phase 0.14 research)
+//! ## Key facts grounded in the existing codebase (Task 0.14 research)
 //! - Balances are `u64` (`core::account::Account::balance`). With **6 decimals**
 //!   the total supply 100M × 10^6 = 10^14 fits comfortably (u64 max ≈ 1.8e19).
 //!   18 decimals would need 10^26 and would NOT fit u64 — hence 6 decimals.
 //! - There is **no `total_supply` field**; supply is the implicit sum of all
 //!   balances. Burns are real: fees are `saturating_sub`'d from a balance and
-//!   added nowhere (Phase 0.04 `slashing_report_fee`, Phase 0.06 `proof_submission_fee`).
+//!   added nowhere (Task 0.04 `slashing_report_fee`, Task 0.06 `proof_submission_fee`).
 //!   The timed reserve burn and the metabolic burn here reuse that same "reduce
 //!   a balance, credit nothing" model — no new mint path is introduced.
 //! - NOTE: block production still mints `block_reward` to the producer. That is
@@ -128,10 +128,10 @@ pub struct TokenomicsParams {
     pub tx_fee_burn_ratio_fixed: u64,
 
     /// Block reward (minted per block to the producer).
-    /// Constant emission, not bounded by the genesis supply. (Phase 0.58, DP3-A)
+    /// Constant emission, not bounded by the genesis supply. (Task 0.58, DP3-A)
     pub block_reward: u64,
 
-    // Phase 0.60: Stake Yield (Pasif Getiri)
+    // Task 0.60: Stake Yield (Pasif Getiri)
     // Removed hardcoded parameters in `advance_epoch` and brought them here for config-based governance.
     pub slot_duration_secs: u64,
     pub epoch_length_slots: u64,
@@ -162,7 +162,7 @@ impl Default for TokenomicsParams {
             // 50 BUD minted per block to the producer.
             block_reward: 50,
 
-            // Stake Yield Defaults (Phase 0.60)
+            // Stake Yield Defaults (Task 0.60)
             validator_annual_yield_ratio_fixed: (FIXED_POINT_SCALE * 5) / 100, // 5% APY
             slot_duration_secs: 10, // 10 seconds per slot
             epoch_length_slots: 32, // 32 slots per epoch
@@ -300,7 +300,7 @@ impl TokenomicsAddresses {
 /// Builds the $BUD genesis allocation set (address → base-unit amount) from the
 /// parameters and reserved addresses. The sum equals [`BUD_TOTAL_SUPPLY`].
 ///
-/// Genesis lock model (Phase 0.14 decision):
+/// Genesis lock model (Task 0.14 decision):
 /// - Liquidity + Community: immediately liquid at genesis.
 /// - Ecosystem: allocated to its account (treated as locked/governed off this
 ///   module's scope — held in a distinct account).
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(t.due_years(0, 3500, 1000), 3);
     }
 
-    // === Phase 0.60 ZORUNLU TESTLER ===
+    // === Task 0.60 ZORUNLU TESTLER ===
 
     #[test]
     fn calculate_epoch_reward_regression_equivalence() {

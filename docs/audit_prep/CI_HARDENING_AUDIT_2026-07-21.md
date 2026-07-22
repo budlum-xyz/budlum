@@ -11,7 +11,7 @@
 | # | Madde | Önceki durum | Kanıt (önce) | Bu ADIM | Sonuç |
 |---|-------|--------------|--------------|---------|-------|
 | 1 | Miri ile unsafe crate'leri çalıştırma (UB tespiti) | Var: `.github/workflows/miri.yml` — crypto + bud-vm + storage (storage soft) | 2026-07-19 ARENAX kapanış raporu + workflow dosyası | nightly `nightly-2026-07-19`'e pinlendi (kayan etiket riski giderildi); `cargo +nightly miri` → pinned kanal | ✅ Sertleştirildi |
-| 2 | cargo-semver-checks (public API kırılması) | Var ama SÜS: `.github/workflows/semver.yml` her iki adım `continue-on-error: true`; base mekanizması yok (budlum-core crates.io'da yok → `check-release` anlamlı çalışamaz) | semver.yml içeriği + "İlk aşamada sadece gözlem" notu | İki-checkout (current vs `base.sha`/`push.before`) + `--baseline-root`; `scripts/check-semver.sh` gate (kırılma+istisnasız = FAIL); `.github/semver-exceptions.txt` kanıtlı-skip disiplini; push+PR tetikleyici | ✅ Gerçek kapı |
+| 2 | cargo-semver-checks (public API kırılması) | Var ama SÜS: `.github/workflows/semver.yml` her iki adım `continue-on-error: true`; base mekanizması yok (budlum-core crates.io'da yok → `check-release` anlamlı çalışamaz) | semver.yml içeriği + "İlk görevda sadece gözlem" notu | İki-checkout (current vs `base.sha`/`push.before`) + `--baseline-root`; `scripts/check-semver.sh` gate (kırılma+istisnasız = FAIL); `.github/semver-exceptions.txt` kanıtlı-skip disiplini; push+PR tetikleyici | ✅ Gerçek kapı |
 | 3 | MSRV pinning | Tam: `rust-toolchain.toml` channel=1.94.0 + `Cargo.toml` `rust-version = "1.94.0"` + tüm CI job'ları 1.94.0 | Dosya içerikleri + ci.yml grep | Değişiklik gerekmedi (çift kilit yeterli) | ✅ Zaten kapalı |
 | 4 | Cross-platform determinism (Linux/macOS/Windows consensus çıktısı aynı mı) | Kısmi: matrix yalnız ubuntu+macos ve her OS kendi testini koşuyor; çıktılar kıyaslanmıyordu ("cross" adı vardı, kıyas yok) | determinism.yml içeriği | Windows eklendi (3 OS); yeni `consensus_scenario_digest_cross_platform` testi → `CONSENSUS_DIGEST` artefaktı; `consensus-digest-compare` job'u üç digest'i byte-eşitliğe zorlar | ✅ Gerçek kıyas kapısı |
 | 5 | Genesis reproducibility | Var: aynı runner'da iki build + hash karşılaştırma | determinism.yml `genesis-reproducibility` job'u | Adımlara `set -euo pipefail` + boş-hash kilitleri eklendi (boş=boş sahte-eşitlik engellendi) | ✅ Sertleştirildi |
@@ -20,7 +20,7 @@
 ## 2. Bu ADIM'da Kapanan Ek Kök-Nedenler
 
 1. **`src/core/account.rs` rustfmt drift'i** (main kırmızısı, SHA `ef80abf`
-   Budlum Core/Format failure): ARENA1'in Phase 11.8 fee testlerindeki 4 uzun
+   Budlum Core/Format failure): ARENA1'in Task 11.8 fee testlerindeki 4 uzun
    assert satırı `cargo fmt` beklentisine uygulandı. Davranış değişmedi.
 2. **Mempool aynı-fee tie-break nondeterminizmi (consensus-critical):**
    `Mempool::get_sorted_transactions` aynı ücretteki işlemleri `HashSet`

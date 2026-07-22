@@ -1,4 +1,4 @@
-# Production node / enterprise PoA runbook (Phase 0.37)
+# Production node / enterprise PoA runbook (Task 0.37)
 
 This runbook covers the shared Budlum binary for end-user RPC, developer and
 enterprise PoA deployments. It does **not** claim audited-mainnet readiness.
@@ -53,7 +53,7 @@ private deployment overlay. Inject the PIN through the service manager or a
 secret store; never place its value in Git, CLI arguments, logs or shell
 history.
 
-Phase 2 §1.1 policy/tooling: mainnet validators still require PKCS#11 and reject
+Task 2 §1.1 policy/tooling: mainnet validators still require PKCS#11 and reject
 disk-backed `ValidatorKeys`. The BLS/PQ `hsm_mock` backend exists for dev/test
 coverage only and is not a production secret-storage path. See
 `docs/operations/HSM_BLS_PQ_POLICY.md`.
@@ -92,7 +92,7 @@ keys.
 
 ---
 
-## 8. Mainnet genesis and seed inventory (Phase 3 section 3.1 / 3.3)
+## 8. Mainnet genesis and seed inventory (Task 3 section 3.1 / 3.3)
 
 Ceremony procedure (roles, offline build, hash freeze, minutes): `docs/operations/MAINNET_GENESIS_CEREMONY.md`.
 

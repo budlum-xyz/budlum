@@ -9,7 +9,7 @@
 //   cargo +nightly install cargo-fuzz
 //   cargo +nightly fuzz run fuzz_blockchain_serialize
 //
-// Kabul kriteri (Phase 0.40 §1.7):
+// Kabul kriteri (Task 0.40 §1.7):
 // - Build temiz (cargo check, nightly)
 // - Hedef fuzz edilebilir durumda (libfuzzer başlar)
 
@@ -19,7 +19,7 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Şu an minimal: veri'yi doğrudan ignore et, panic olmadığını kontrol et.
-    // Phase 0.42+'da gerçek roundtrip testleri (serde_json, prost, sled KVS)
+    // Task 0.42+'da gerçek roundtrip testleri (serde_json, prost, sled KVS)
     // buraya eklenecek.
 
     // Property 1: Veri 0'dan büyükse ilk byte en az 1 olmalı

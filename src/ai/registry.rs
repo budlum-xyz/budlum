@@ -1,4 +1,4 @@
-//! Canonical AI Registry & State Tracking (`Phase 10`, `Bölüm 1`).
+//! Canonical AI Registry & State Tracking (`Task 10`, `Bölüm 1`).
 //!
 //! Tracks active models, pending inference requests, accumulated verifier attestations,
 //! and finalized consensus outcomes. Provides deterministic `state_root()` calculation.
@@ -1023,7 +1023,7 @@ impl AiRegistry {
                 "Agent payment: amount must be greater than zero",
             ));
         }
-        // V85 fix (Phase 11): expiry_block must not be unreasonably far in the
+        // V85 fix (Task 11): expiry_block must not be unreasonably far in the
         // future. Without a maximum, an attacker can create payments with
         // expiry = u64::MAX, locking escrow forever. Cap at ~1 year (52560
         // epochs × 100 blocks/epoch ≈ 5_256_000 blocks from current_block).
@@ -1072,7 +1072,7 @@ impl AiRegistry {
         payment_id: &[u8; 32],
         current_block: u64,
     ) -> Result<Address, String> {
-        // Phase 1: Validate (immutable borrows)
+        // Task 1: Validate (immutable borrows)
         {
             let payment = self
                 .agent_payments
@@ -1105,7 +1105,7 @@ impl AiRegistry {
                 ));
             }
         }
-        // Phase 2: Remove live entry and archive settlement (V89 audit trail).
+        // Task 2: Remove live entry and archive settlement (V89 audit trail).
         let payment = self.agent_payments.remove(payment_id).unwrap();
         let to = payment.to_agent;
         self.archive_settled_payment(payment, current_block, AiPaymentEscrowStatus::Released);

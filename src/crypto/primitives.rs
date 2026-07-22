@@ -1,11 +1,11 @@
-// Phase 8.3 (CI sertleştirme): `pq-dilithium` ile `pq-ml-dsa` aynı inherent
+// Task 8.3 (CI sertleştirme): `pq-dilithium` ile `pq-ml-dsa` aynı inherent
 // metot setini (generate/from_bytes/sign/verify/…) expose eder; ikisi birden
 // açılırsa 22× E0592/E0034 ile derleme kırılır. Mutually exclusive BY DESIGN:
 // tam olarak bir PQ imza backend'i seçilir. CI feature-matrix her solo build'i,
 // kanarya adımı da bu guard'ın ateşlendiğini kanıtlar (vacuous gate yok).
 #[cfg(all(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
 compile_error!(
-    "features `pq-dilithium` and `pq-ml-dsa` are mutually exclusive; enable exactly one (Phase 8.3)"
+    "features `pq-dilithium` and `pq-ml-dsa` are mutually exclusive; enable exactly one (Task 8.3)"
 );
 
 use bls12_381::{G2Affine, G2Projective, Scalar};
@@ -82,7 +82,7 @@ impl std::fmt::Display for CryptoError {
             CryptoError::InvalidKey(s) => write!(f, "Invalid key: {}", s),
             CryptoError::PlaintextDiskKeysForbiddenOnMainnet => write!(
                 f,
-                "CRITICAL: loading plaintext BLS/PQ secret keys directly from disk is forbidden on Mainnet without HSM protection (Phase 0.378 / Paket C)"
+                "CRITICAL: loading plaintext BLS/PQ secret keys directly from disk is forbidden on Mainnet without HSM protection (Task 0.378 / Paket C)"
             ),
         }
     }
@@ -132,7 +132,7 @@ impl BlsKeypair {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        // Phase 0.34 / BUG #5: validate G2 encoding AND that pk matches sk.
+        // Task 0.34 / BUG #5: validate G2 encoding AND that pk matches sk.
         if bytes.len() < 32 + 96 {
             return Err(CryptoError::InvalidKey(
                 "Invalid BLS keypair bytes length".into(),
@@ -334,7 +334,7 @@ impl ValidatorKeys {
     /// Persist validator key material to disk.
     ///
     /// # Security
-    /// Phase 0.35 / B4: contents are **plaintext** (sig + VRF + optional PQ + BLS).
+    /// Task 0.35 / B4: contents are **plaintext** (sig + VRF + optional PQ + BLS).
     /// File mode is `0o600` on Unix, but there is no password/KDF/AEAD.
     /// **Do not use on mainnet** — `validate_strict_rules` rejects this path.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
@@ -351,7 +351,7 @@ impl ValidatorKeys {
         if let Some(bls_key) = &self.bls_key {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
-        // Phase 0.10 (security audit §6): create with strict 0o600 from the
+        // Task 0.10 (security audit §6): create with strict 0o600 from the
         // start. The previous `let _ = set_permissions` swallowed
         // permission-set errors on the most sensitive key on the node;
         // any failure is now propagated via `?` and surfaces to the
@@ -427,7 +427,7 @@ impl ValidatorKeys {
         })
     }
 
-    /// Phase 0.378 / Paket C (`tur15-pr-6`): Enforce that on `Mainnet`, `ValidatorKeys` loaded from disk
+    /// Task 0.378 / Paket C (`tur15-pr-6`): Enforce that on `Mainnet`, `ValidatorKeys` loaded from disk
     /// MUST NOT contain plaintext `bls_key` or `pq_key` secret key material unless an external HSM
     /// backend is explicitly bound or `allow_plaintext_bls_pq_for_testing` is set.
     pub fn validate_mainnet_disk_policy(&self, is_mainnet: bool) -> Result<(), CryptoError> {
@@ -442,7 +442,7 @@ impl KeyPair {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
         rand::rng().fill_bytes(&mut seed);
         let signing_key = SigningKey::from_bytes(&seed);
-        // Phase 0.17 (security audit §7): never `println!` keypair
+        // Task 0.17 (security audit §7): never `println!` keypair
         // material. The public key being written to stdout is a
         // soft info leak (operator's terminal scrollback, CI logs,
         // process accounting) — under default settings, every
@@ -483,7 +483,7 @@ impl KeyPair {
         Self::from_bytes(&bytes)
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
-        // Phase 0.10 (security audit §6): create the file with strict 0o600
+        // Task 0.10 (security audit §6): create the file with strict 0o600
         // permissions from the start (no create-then-chmod window).
         // On non-unix, the second branch falls back to a plain create
         // (no umask to manipulate on those platforms).
@@ -507,7 +507,7 @@ impl KeyPair {
             file.write_all(self.signing_key.as_bytes())
                 .map_err(|e| CryptoError::Io(e.to_string()))?;
         }
-        // Phase 0.17 (security audit §7): the file path of a
+        // Task 0.17 (security audit §7): the file path of a
         // freshly-saved keypair is a sensitive secret — an
         // attacker reading process stdout learns exactly where
         // to look on disk. The same `tracing::debug!` rationale as
@@ -626,7 +626,7 @@ mod tests {
     }
 }
 
-/// Phase 0.17 (security audit §7): the public-key hex must NOT
+/// Task 0.17 (security audit §7): the public-key hex must NOT
 /// be printed to stdout by `KeyPair::generate`. We can't
 /// directly observe `println!` from a unit test (it goes to
 /// the captured test stdout which cargo doesn't surface),

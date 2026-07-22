@@ -29,7 +29,7 @@ pub struct PoWConfig {
 | Alan Adı | Veri Tipi | Varsayılan (Budlum) | Ne İşe Yarar & Neden Gerekli? |
 | :--- | :--- | :--- | :--- |
 | `difficulty` | `usize` | `4` | **Zorluk.** Hash'in kaç tane "0" ile başlaması gerektiğini belirtir. Sayı arttıkça madencilik üstel olarak (exponentially) zorlaşır. |
-| `target_block_time` | `u64` | `10` sn | **Kalp Atışı.** Ağın ne kadar hızlı ilerlemesini istiyoruz? Çok hızlı olursa (1sn) çok fazla çatal (fork) oluşur. Çok yavaş olursa (10dk) kullanıcılar bekler. 10 saniye modern bir dengedir. |
+| `target_block_time` | `u64` | `10` sn | **Kalp Atışı.** Ağın ne kadar hızlı ilerlemesini istiyoruz? Çok hızlı olursa (1sn) çok görevla çatal (fork) oluşur. Çok yavaş olursa (10dk) kullanıcılar bekler. 10 saniye modern bir dengedir. |
 | `adjustment_interval`| `u64` | `100` blok | **Zorluk Ayar Dönemi.** Her blokta zorluk değiştirmek sistemi kararsız (volatile) yapar. Bitcoin'de bu 2016 bloktur. Biz 100 seçtik ki ağ gücü değişimlerine hızlı tepki versin. |
 
 ---
@@ -59,14 +59,14 @@ pub fn mine(&self, block: &mut Block) {
     // 1. Hedef String'i oluştur.
     // Eğer zorluk 4 ise target = "0000"
     let target = self.target();
-    
+
     println!("⛏️ Madencilik başladı! Hedef: {}...", target);
 
     // 2. Hash, hedefle başlayana kadar DÖN.
     while !block.hash.starts_with(&target) {
         // 3. Deneme sayacını artır.
         block.nonce += 1;
-        
+
         // 4. Hash'i tekrar hesapla.
         // change(nonce) -> change(header) -> change(hash)
         block.hash = block.calculate_hash();

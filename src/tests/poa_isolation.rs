@@ -233,7 +233,7 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Ek izolasyon mührü (Phase 11.3 Görev 4): PoA whitelist'i permissionless
+    /// Ek izolasyon mührü (Task 11.3 Görev 4): PoA whitelist'i permissionless
     /// stake'ten tamamen bağımsızdır. Stake ile permissionless validator olan
     /// hesap PoA whitelist'inde YOK; PoA whitelist üyeliği permissionless aktif
     /// statü VERMEZ. Bu test "PoA Isolation" CI kapısının (≥7) bir parçasıdır.

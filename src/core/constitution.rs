@@ -1,4 +1,4 @@
-//! Constitution Engine primitives (Phase 12 / ARENA4).
+//! Constitution Engine primitives (Task 12 / ARENA4).
 //!
 //! The constitution layer binds governance to user-sovereignty guardrails. DAO
 //! proposals may tune bounded operational parameters, but they must not weaken

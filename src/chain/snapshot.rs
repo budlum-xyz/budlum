@@ -87,7 +87,7 @@ impl StateSnapshot {
         self.snapshot_hash == self.calculate_hash()
     }
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Phase 0.32: fail-fast instead of silently serializing to empty bytes (a
+        // Task 0.32: fail-fast instead of silently serializing to empty bytes (a
         // corrupt persistence blob is worse than a panic). StateSnapshot is a
         // plain data type; a failure here is a deterministic bug.
         serde_json::to_vec(self).expect("BUG: StateSnapshot must serialize to_bytes")
@@ -338,7 +338,7 @@ fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
 pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Current durable snapshot schema emitted by this binary. This is the
-/// ConsensusStateV2 migration target for Phase 2 §1.4.
+/// ConsensusStateV2 migration target for Task 2 §1.4.
 pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,12 +376,12 @@ pub struct StateSnapshotV2 {
     pub settlement_root: [u8; 32],
     pub global_header_summary: [u8; 32],
 
-    // --- schema_version 3 (Phase 0.16): previously-unpersisted state. All
+    // --- schema_version 3 (Task 0.16): previously-unpersisted state. All
     // `#[serde(default)]` so schema-2 snapshots still deserialize (the fields
     // simply come back empty/None — meaning "this feature wasn't active when the
     // snapshot was taken", not data loss).
     //
-    // Phase 0.02 GHOST-HUNTING NOTE: `registry`, `liveness`, and `invalid_votes`
+    // Task 0.02 GHOST-HUNTING NOTE: `registry`, `liveness`, and `invalid_votes`
     // are NO LONGER persisted on `StateSnapshotV2` because the corresponding
     // fields were removed from `AccountState` (the permissionless-registry
     // feature is being unwound). They are intentionally NOT round-tripped:
@@ -405,14 +405,14 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub tokenomics_burn: Option<TokenomicsBurnSnapshot>,
 
-    // --- Phase 0.08: permissionless-registry persistence ---
+    // --- Task 0.08: permissionless-registry persistence ---
     //
-    // The Phase 0.02 ghost-hunting pass removed the `registry` / `liveness` /
+    // The Task 0.02 ghost-hunting pass removed the `registry` / `liveness` /
     // `invalid_votes` fields from `AccountState` and (briefly) from this
-    // snapshot. The Phase 0.08 redesign reinstates them on `AccountState` and
+    // snapshot. The Task 0.08 redesign reinstates them on `AccountState` and
     // also round-trips them through the V2 snapshot so that liveness
     // counters and registry membership survive a restart. `#[serde(default)]`
-    // keeps pre-Phase 0.08 V2 snapshots compatible: their `None` values get
+    // keeps pre-Task 0.08 V2 snapshots compatible: their `None` values get
     // materialized as the empty registry/tracker on load.
     #[serde(default)]
     pub registry: Option<crate::registry::PermissionlessRegistry>,
@@ -421,7 +421,7 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub invalid_votes: Option<crate::registry::InvalidVoteTracker>,
 
-    // --- Phase 6 BNS/NFT/Hub/Marketplace persistence (ARENA3 audit: Q check_snapshot)
+    // --- Task 6 BNS/NFT/Hub/Marketplace persistence (ARENA3 audit: Q check_snapshot)
     // BNS registry was previously NOT round-tripped, so names were lost on restart from snapshot.
     // Now persisted with #[serde(default)] for backwards compatibility (old snapshots -> empty).
     #[serde(default)]
@@ -444,8 +444,8 @@ pub struct StateSnapshotV2 {
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
 
-    // --- C4 GAP-1 (Phase 10.5 P2): manifest signature (schema-4 wire). ---
-    // RFC_GAP1 §7 (Faz 1: Ed25519 tek-imza + trust-list + AllowUnsigned geçişi).
+    // --- C4 GAP-1 (Task 10.5 P2): manifest signature (schema-4 wire). ---
+    // RFC_GAP1 §7 (Görev 1: Ed25519 tek-imza + trust-list + AllowUnsigned geçişi).
     // `#[serde(default)]` → legacy schema-3 snapshot'lar (alan yok) None ile yüklenir.
     /// Snapshot'ı imzalayan party'nin Ed25519 pubkey'i (trust-list'ten). None =
     /// AllowUnsigned (devnet / legacy-import geçiş penceresi).
@@ -462,7 +462,7 @@ pub struct StateSnapshotV2 {
     pub snapshot_hash: String,
 }
 
-/// C4 GAP-1 trust policy (RFC_GAP1 §7.1: C-hibrit Faz-1 trust modeli).
+/// C4 GAP-1 trust policy (RFC_GAP1 §7.1: C-hibrit Görev-1 trust modeli).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SnapshotTrustPolicy {
     /// İmza opsiyonel: digest eşleşiyorsa OK (devnet / legacy-import penceresi).
@@ -504,7 +504,7 @@ impl std::fmt::Display for SnapshotAuthError {
 
 impl std::error::Error for SnapshotAuthError {}
 
-/// Atomic tokenomics-burn restore block (Phase 0.16, Decision 2.3). These three
+/// Atomic tokenomics-burn restore block (Task 0.16, Decision 2.3). These three
 /// values are ALWAYS captured and restored together to avoid double-burning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenomicsBurnSnapshot {
@@ -554,7 +554,7 @@ impl StateSnapshotV2 {
         let validators = account_state.validators.clone().into_iter().collect();
         let unbonding_queue = account_state.unbonding_queue.clone();
 
-        // Capture the tokenomics burn block atomically (Phase 0.16).
+        // Capture the tokenomics burn block atomically (Task 0.16).
         let tokenomics_burn = Some(TokenomicsBurnSnapshot {
             timed_burn: account_state.timed_burn.clone(),
             burn_reserve_address: account_state.burn_reserve_address,
@@ -580,7 +580,7 @@ impl StateSnapshotV2 {
             base_fee: account_state.base_fee,
             // `block_reward` is read from the tokenomics module (the top-level
             // `state.block_reward` field no longer exists; see
-            // `genesis.rs::build_state` and the Phase 0.02 tokenomics refactor).
+            // `genesis.rs::build_state` and the Task 0.02 tokenomics refactor).
             // We mirror the value here for wire-compat with older consumers
             // that still expect a top-level `block_reward` field.
             block_reward: account_state.tokenomics.block_reward,
@@ -597,14 +597,14 @@ impl StateSnapshotV2 {
             bridge_state: Some(account_state.bridge_state.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
-            // Phase 0.02: `registry`, `liveness`, and `invalid_votes` are no longer
+            // Task 0.02: `registry`, `liveness`, and `invalid_votes` are no longer
             // fields on `AccountState` (ghost-hunted). The struct fields were
             // already removed above; the live state is recovered by routing
             // any registry-touching calls through their "removed" mocks in
             // `blockchain.rs` / `chain_actor.rs`.
             tokenomics: account_state.tokenomics,
             tokenomics_burn,
-            // Phase 0.08: round-trip the permissionless registry + liveness +
+            // Task 0.08: round-trip the permissionless registry + liveness +
             // invalid-vote tracker so that liveness counters and registered
             // members survive a snapshot/restore cycle.
             registry: Some(account_state.registry.clone()),
@@ -721,7 +721,7 @@ impl StateSnapshotV2 {
         self.snapshot_hash == self.calculate_hash()
     }
 
-    /// C4 GAP-1: manifest-authenticity doğrulaması (RFC_GAP1 §7.1 Faz-1).
+    /// C4 GAP-1: manifest-authenticity doğrulaması (RFC_GAP1 §7.1 Görev-1).
     ///
     /// - `AllowUnsigned` → `verify()` (digest) geçiyorsa OK (signer/sig yok kabul).
     /// - `RequireSigned` → `manifest_signer` set + `manifest_signature` geçerli
@@ -767,23 +767,23 @@ impl StateSnapshotV2 {
         }
     }
 
-    /// Fallible serialization for the durable snapshot-production path (Phase 0.32):
+    /// Fallible serialization for the durable snapshot-production path (Task 0.32):
     /// surfaces a serialization error to the caller instead of silently writing
     /// an empty/corrupt snapshot. This is the exact failure class that hid the
-    /// Phase 0.16 registry tuple-key bug.
+    /// Task 0.16 registry tuple-key bug.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(self).map_err(|e| format!("Failed to serialize snapshot V2: {e}"))
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Phase 0.32: fail-fast rather than silently produce empty bytes. StateSnapshotV2
-        // is a plain data type post-Phase 0.16 (no tuple-key maps), so failure is a bug.
+        // Task 0.32: fail-fast rather than silently produce empty bytes. StateSnapshotV2
+        // is a plain data type post-Task 0.16 (no tuple-key maps), so failure is a bug.
         self.try_to_bytes()
             .expect("BUG: StateSnapshotV2 must serialize to_bytes")
     }
 
     /// Produce the staged migration report used by the offline
-    /// `--migrate-v2` gate and by tests. Phase 2 §1.4 deliberately keeps this
+    /// `--migrate-v2` gate and by tests. Task 2 §1.4 deliberately keeps this
     /// as a *skeleton*: supported schema-2 snapshots deserialize through
     /// `#[serde(default)]` fields and are rewritten as schema 3 by
     /// `from_state`; unsupported versions fail closed instead of being guessed.
@@ -917,7 +917,7 @@ mod tests {
         assert_eq!(
             snapshot_v2.schema_version,
             CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
-        ); // Phase 0.16: bumped 2->3
+        ); // Task 0.16: bumped 2->3
         assert_eq!(snapshot_v2.height, 105);
         assert!(snapshot_v2.verify());
 
@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(
             deserialized.schema_version,
             CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
-        ); // Phase 0.16: bumped 2->3
+        ); // Task 0.16: bumped 2->3
         assert!(deserialized.verify());
 
         // Test numerical sorting helper

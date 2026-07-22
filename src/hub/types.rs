@@ -25,7 +25,7 @@ pub struct AppRecord {
     pub registered_at_epoch: u64,
     /// Developer self-attestation only (ownership proof). NOT third-party audit.
     pub developer_attested: bool,
-    /// DAO / governance-vetted flag (Phase 9+). Distinct from developer_attested.
+    /// DAO / governance-vetted flag (Task 9+). Distinct from developer_attested.
     pub verified: bool,
 }
 

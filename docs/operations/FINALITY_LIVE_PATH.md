@@ -1,7 +1,7 @@
-# Finality Live-Path Son Taraması (Phase 2 §1.3)
+# Finality Live-Path Son Taraması (Task 2 §1.3)
 
-**Tarih:** 2026-07-15  
-**Durum:** Kod kapsamı eklendi; CI doğrulaması PR üzerinde takip edilecek.  
+**Tarih:** 2026-07-15
+**Durum:** Kod kapsamı eklendi; CI doğrulaması PR üzerinde takip edilecek.
 **Kapsam dosyası:** `src/tests/finality_live_path.rs`
 
 > Bu belge harici audit için operasyonel kanıttır. `finality_adversarial.rs`
@@ -14,7 +14,7 @@
 |------|------|-----------------------------|
 | `live_path_epoch_change_isolates_votes` | Eski epoch oylarının yeni pencereye sızması | Her epoch kendi `FinalityAggregator` penceresinde izole kalır. |
 | `live_path_prevote_with_wrong_height_rejected` | Geç/yanlış height prevote kabulü | Aggregator’ın checkpoint height/hash bağlamı dışındaki imza reddedilir. |
-| `live_path_double_sign_window_is_tight` | Aynı validator’ın aynı epoch içinde birden fazla oy saydırması | İlk oy sayılır; duplicate reddedilir; çelişkili hash evidence üretir. |
+| `live_path_double_sign_window_is_tight` | Aynı validator’ın aynı epoch içinde birden görevla oy saydırması | İlk oy sayılır; duplicate reddedilir; çelişkili hash evidence üretir. |
 | `live_path_snapshot_hash_distinguishes_sets` | Validator set snapshot hash çakışması/regresyonu | Farklı set boyutu veya stake farklı hash üretir; aynı set deterministiktir. |
 
 ## Doğrulama komutları

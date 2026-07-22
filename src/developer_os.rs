@@ -1,4 +1,4 @@
-//! Developer OS / BudL SDK primitives (Phase 12 / ARENA4).
+//! Developer OS / BudL SDK primitives (Task 12 / ARENA4).
 //!
 //! This module defines deterministic project manifests and fixture bundles for
 //! local Budlum development. It does not start a network, call external APIs, or

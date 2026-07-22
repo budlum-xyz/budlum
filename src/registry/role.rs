@@ -72,7 +72,7 @@ pub mod roles {
     /// submission is fully permissionless (STARK proofs are self-verifying);
     /// registering as a PROVER is only required to be eligible for rewards.
     pub const PROVER: RoleId = RoleId(4);
-    /// B.U.D. storage operator (Phase 0.38, Faz 1).
+    /// B.U.D. storage operator (Task 0.38, Görev 1).
     ///
     /// Registration is OPTIONAL — opening a `StorageDeal` is itself
     /// permissionless (the deal's `operator_bond` is the only gate, see
@@ -80,7 +80,7 @@ pub mod roles {
     /// `STORAGE_OPERATOR` is only required to be eligible for the
     /// per-deal reward stream.
     ///
-    /// **Note (Phase 3 §0.3, fixed by ARENA3 2026-07-15):** `bud_storageActiveOperators`
+    /// **Note (Task 3 §0.3, fixed by ARENA3 2026-07-15):** `bud_storageActiveOperators`
     /// RPC is now implemented (`src/rpc/api.rs` + `server.rs`) — queries active
     /// `PermissionlessRegistry` members for `RoleId(5)`. Previously it was ghost
     /// docs only.
@@ -91,7 +91,7 @@ pub mod roles {
     /// (master context, CLAUDE.md §2).
     pub const STORAGE_OPERATOR: RoleId = RoleId(5);
 
-    /// AI Inference Verifier (Phase 10, §1).
+    /// AI Inference Verifier (Task 10, §1).
     ///
     /// Like every other role, registration is permissionless: any account can
     /// register by staking the `min_stake` floor from `PermissionlessRegistry::params`.

@@ -1,4 +1,4 @@
-//! Phase 0.16: state-persistence round-trip tests.
+//! Task 0.16: state-persistence round-trip tests.
 //!
 //! Verifies that the previously-unpersisted `AccountState` fields (permissionless
 //! registry, liveness tracker, and the atomic tokenomics burn block) survive a
@@ -63,7 +63,7 @@ fn registry_survives_snapshot_round_trip() {
     assert!(!restored.registry.is_active(&addr(9), roles::VALIDATOR));
 }
 
-// --- Phase 0.40: equivocation/slashing history round-trip -----------------------
+// --- Task 0.40: equivocation/slashing history round-trip -----------------------
 
 #[test]
 fn slashing_history_survives_snapshot_round_trip() {
@@ -277,12 +277,12 @@ fn schema_2_snapshot_without_new_fields_still_deserializes() {
     assert!(state.team_vesting.is_none());
 }
 
-// --- Phase 0.32: silent-error pattern hardening ---------------------------------
+// --- Task 0.32: silent-error pattern hardening ---------------------------------
 
 /// The persistence serialize path is now fallible (`try_to_bytes`) rather than
 /// silently returning empty bytes. For a real snapshot carrying a POPULATED
 /// registry (the exact data class that silently produced empty bytes before the
-/// Phase 0.16 fix), `try_to_bytes` must return `Ok` and round-trip losslessly.
+/// Task 0.16 fix), `try_to_bytes` must return `Ok` and round-trip losslessly.
 #[test]
 fn try_to_bytes_ok_and_roundtrips_with_populated_registry() {
     let mut state = AccountState::new();
@@ -294,7 +294,7 @@ fn try_to_bytes_ok_and_roundtrips_with_populated_registry() {
 
     let v2 = StateSnapshotV2::from_state(&state, snapshot_params());
     // Fallible path succeeds and is non-empty (would have been silently empty
-    // pre-Phase 0.16 due to the tuple-key map; try_to_bytes surfaces any failure).
+    // pre-Task 0.16 due to the tuple-key map; try_to_bytes surfaces any failure).
     let bytes = v2
         .try_to_bytes()
         .expect("try_to_bytes must succeed for valid snapshot");
@@ -308,7 +308,7 @@ fn try_to_bytes_ok_and_roundtrips_with_populated_registry() {
 }
 
 /// Documents the failure class the old `unwrap_or_default()` swallowed: serde_json
-/// genuinely fails on a non-string map key. Before Phase 0.32 such a failure became
+/// genuinely fails on a non-string map key. Before Task 0.32 such a failure became
 /// silent empty bytes; the hardened paths now either surface it (`try_to_bytes`
 /// -> Err / Result), fail-fast (`.expect` on hash paths), or log + degrade
 /// visibly (network). This test proves the underlying `to_vec` really can Err,

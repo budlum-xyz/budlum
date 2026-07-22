@@ -1,6 +1,6 @@
 # MAINNET HAZIRLIĞI — Talimat
 
-Bu doküman CI'ın yeşile dönmesinden **sonraki** aşamayı kapsar: Budlum'u
+Bu doküman CI'ın yeşile dönmesinden **sonraki** görevyı kapsar: Budlum'u
 devnet/testnet adayından gerçek mainnet adayına taşımak için kapatılması
 gereken açıklar. Kaynak: repo'nun kendi roadmap tablosu (README) + önceki
 strateji analizleri. Her madde için ne eksik, neden önemli, kabul kriteri
@@ -33,7 +33,7 @@ Bu bir kod görevi değil ama kod tarafında audit'i kolaylaştıracak şeyler
 
 ### 2. Z-B (BudZKVM VerifyMerkle) 64-depth soundness
 **Durum:** Kısmi düzeltmeler yapıldı ama **Production ISA'da hâlâ gate'li**
-— yani gerçek kullanılmıyor, kapalı tutuluyor. B.U.D. storage'ın Faz 3'ü
+— yani gerçek kullanılmıyor, kapalı tutuluyor. B.U.D. storage'ın Görev 3'ü
 (gerçek Proof-of-Storage) buna bağlı ve şu an "proof-of-storage" iddiası
 resmen yapılmıyor (sahte-yeşil yol riski, vision §9.1'de yazıyor).
 **Yapılacak:** 64-depth'te pozitif/negatif test setiyle tam soundness
@@ -139,7 +139,7 @@ komutu hâlâ eski `lubosruler/budlum`'a işaret ediyor.
 **Kabul kriteri:** README'de `lubosruler` geçen hiçbir link kalmadı.
 
 ### 13. Formal verification / Privacy / AI execution layer
-**Durum:** Üçü de resmen "araştırma" aşamasında, kod yok. Mainnet
+**Durum:** Üçü de resmen "araştırma" görevsında, kod yok. Mainnet
 blokeri değil ama yol haritasında büyük iddialar var — beklenti
 yönetimi gerekiyor.
 **Yapılacak:** Bu üç madde için "mainnet v1'de YOK, v2 planı" diye

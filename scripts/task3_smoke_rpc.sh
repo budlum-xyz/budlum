@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Phase 3 §3.2 smoke: start a short-lived node and probe JSON-RPC chain_id.
+# Task 3 §3.2 smoke: start a short-lived node and probe JSON-RPC chain_id.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 NETWORK="${SMOKE_NETWORK:-devnet}"
 RPC_PORT="${SMOKE_RPC_PORT:-18545}"
-DB_PATH="${SMOKE_DB_PATH:-/tmp/budlum-phase3-smoke-db}"
+DB_PATH="${SMOKE_DB_PATH:-/tmp/budlum-task3-smoke-db}"
 BIN="${SMOKE_BIN:-}"
 
 if [[ -z "$BIN" ]]; then

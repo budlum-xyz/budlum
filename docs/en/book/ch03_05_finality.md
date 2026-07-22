@@ -12,13 +12,13 @@ Core goals:
 -   **Security:** malicious validators can be slashed.
 -   **Immutability:** nodes do not reorganize behind finalized checkpoints.
 
-## 2. Two-Phase Voting Protocol
+## 2. Two-Task Voting Protocol
 
-### Phase 1: Prevote
+### Task 1: Prevote
 
-Validators inspect the checkpoint block and sign a BLS prevote if they consider it valid. When at least two thirds of the validator set prevotes, the first phase is complete.
+Validators inspect the checkpoint block and sign a BLS prevote if they consider it valid. When at least two thirds of the validator set prevotes, the first task is complete.
 
-### Phase 2: Precommit
+### Task 2: Precommit
 
 After prevote quorum, validators issue precommits. With two thirds precommit quorum, the checkpoint is marked finalized.
 

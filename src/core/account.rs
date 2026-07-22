@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 pub const MIN_TX_FEE: u64 = 1;
-/// Phase 0.334 / A8: protocol bounds for governance fee/reward proposals.
+/// Task 0.334 / A8: protocol bounds for governance fee/reward proposals.
 pub const MAX_BASE_FEE: u64 = 1_000_000;
 pub const MIN_BLOCK_REWARD: u64 = 0;
 pub const MAX_BLOCK_REWARD: u64 = 10_000 * crate::tokenomics::BUD_UNIT;
@@ -123,7 +123,7 @@ pub struct AccountState {
     storage: Option<Storage>,
     pub epoch_index: u64,
     pub last_epoch_time: u64,
-    /// V28 fix (Phase 11): gerçek blok yüksekliği. Eskiden executor
+    /// V28 fix (Task 11): gerçek blok yüksekliği. Eskiden executor
     /// `epoch_index * 100` approximation kullanıyordu (≤99 blok sapma).
     /// Blockchain produce/validate'da tx işleme öncesi set edilir.
     pub current_block_height: u64,
@@ -143,14 +143,14 @@ pub struct AccountState {
     pub message_root: [u8; 32],
     pub settlement_root: [u8; 32],
     pub global_header_summary: [u8; 32],
-    /// Permissionless registry (Phase 0.08): stake-based membership for
+    /// Permissionless registry (Task 0.08): stake-based membership for
     /// validator/relayer/prover roles. `PermissionlessRegistry::new()`
     /// gives a deterministic empty state for tests and fresh chains.
     pub registry: crate::registry::PermissionlessRegistry,
-    /// Liveness tracker (Phase 0.08): per-epoch participation counters used
+    /// Liveness tracker (Task 0.08): per-epoch participation counters used
     /// to detect absent validators and trigger liveness slashing.
     pub liveness: crate::registry::LivenessTracker,
-    /// Invalid-vote tracker (Phase 0.08): counts consensus-rule violations
+    /// Invalid-vote tracker (Task 0.08): counts consensus-rule violations
     /// per validator per epoch so we can slash or jail on spam.
     pub invalid_votes: crate::registry::InvalidVoteTracker,
     /// F4: Accumulated B.U.D. boost share pending distribution to storage operators.
@@ -307,11 +307,11 @@ impl AccountState {
         for (addr, v) in &snapshot.validators {
             validators.insert(*addr, v.clone());
         }
-        // Phase 0.16: restore previously-unpersisted state. The tokenomics burn block
+        // Task 0.16: restore previously-unpersisted state. The tokenomics burn block
         // (timed_burn + burn_reserve_address + team_vesting) is restored
         // ATOMICALLY from a single struct so the burn counter can never be
         // restored without its reserve address (which would risk double-burning).
-        // Snapshots taken before Phase 0.16 (or before Phase 0.08) leave the field as
+        // Snapshots taken before Task 0.16 (or before Task 0.08) leave the field as
         // `None`; in that case the burn block is initialised fresh and the
         // double-burn guard starts from zero years burned.
         let burn_block = snapshot.tokenomics_burn.clone();
@@ -361,7 +361,7 @@ impl AccountState {
             message_root: snapshot.message_root,
             settlement_root: snapshot.settlement_root,
             global_header_summary: snapshot.global_header_summary,
-            // Phase 0.08: restore permissionless registry + liveness + invalid-vote
+            // Task 0.08: restore permissionless registry + liveness + invalid-vote
             // tracker from snapshot when present, otherwise start empty (the
             // snapshot may pre-date the registry, e.g. v1 chains).
             registry: snapshot.registry.clone().unwrap_or_default(),
@@ -380,13 +380,13 @@ impl AccountState {
     pub fn add_validator(&mut self, address: Address, stake: u64) {
         let validator = Validator::new(address, stake);
         self.validators.insert(address, validator);
-        // Phase 0.08: every new validator is auto-registered in the permissionless
+        // Task 0.08: every new validator is auto-registered in the permissionless
         // registry. Staking == registration (no separate manual step).
         self.sync_validator_registration(&address);
         self.keys_dirty = true;
     }
 
-    /// Phase 0.08: keep the on-chain validator's bonded stake in lock-step with
+    /// Task 0.08: keep the on-chain validator's bonded stake in lock-step with
     /// its `PermissionlessRegistry` membership. Called from `add_validator`
     /// and from the `Stake` / `Unstake` transaction paths.
     pub fn sync_validator_registration(&mut self, address: &Address) {
@@ -399,7 +399,7 @@ impl AccountState {
         );
     }
 
-    /// Phase 0.08: bond `amount` from the account's spendable balance into the
+    /// Task 0.08: bond `amount` from the account's spendable balance into the
     /// relayer role. The bond remains locked but slashable until the relayer
     /// begins unbonding.
     pub fn bond_relayer(
@@ -435,7 +435,7 @@ impl AccountState {
         Ok(amount)
     }
 
-    /// Phase 0.08: bond `amount` from the account's spendable balance into the
+    /// Task 0.08: bond `amount` from the account's spendable balance into the
     /// prover role. Unlike the relayer role, prover registration is NOT a
     /// submission gate (proofs are self-verifying) — it only controls
     /// whether a successful proof earns its submitter a reward.
@@ -468,7 +468,7 @@ impl AccountState {
         Ok(amount)
     }
 
-    /// Phase 3 §0.3: bond `amount` into the STORAGE_OPERATOR role (permissionless).
+    /// Task 3 §0.3: bond `amount` into the STORAGE_OPERATOR role (permissionless).
     /// Used for B.U.D. operator reward eligibility and `bud_storageActiveOperators`.
     pub fn bond_storage_operator(
         &mut self,
@@ -499,7 +499,7 @@ impl AccountState {
         Ok(amount)
     }
 
-    /// Phase 0.08: run one epoch's liveness check on the state-level
+    /// Task 0.08: run one epoch's liveness check on the state-level
     /// `LivenessTracker`. Returns the canonical `SlashingReport`s produced
     /// this epoch. `participated` is the set of validators that showed the
     /// expected participation; everyone else in `validators` is treated as
@@ -629,7 +629,7 @@ impl AccountState {
         if tx.from == Address::zero() {
             return Ok(());
         }
-        // Phase 0.32 / A1: cheap checks before expensive signature verification (DoS).
+        // Task 0.32 / A1: cheap checks before expensive signature verification (DoS).
         if tx.nonce != expected_nonce {
             return Err(format!(
                 "Invalid nonce: expected {}, got {}",
@@ -748,12 +748,12 @@ impl AccountState {
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
 
-        // Phase 0.08: mirror the slash into the permissionless registry so the two
+        // Task 0.08: mirror the slash into the permissionless registry so the two
         // views stay consistent. The registry's `is_active` predicate is what
         // the rest of the node (consensus, RPC) checks, so an account that
         // was slashed at the account-state layer must also become inactive in
         // the registry — otherwise the same offence would be paid-for twice.
-        // Phase 0.34 / BUG #6: apply_slashing feeds double-sign evidence — label
+        // Task 0.34 / BUG #6: apply_slashing feeds double-sign evidence — label
         // the registry mirror as DoubleSign, not LivenessFault (audit trail).
         let _ = self.registry.slash(
             *address,
@@ -826,7 +826,7 @@ impl AccountState {
 
         self.process_unbonding();
 
-        // Process relayer escrow releases (Phase 0.52)
+        // Process relayer escrow releases (Task 0.52)
 
         // DP1: Distribute epoch-based stake yield to active non-jailed validators
         // We calculate and distribute rewards proportional to stake using `calculate_epoch_reward` from TokenomicsParams.
@@ -883,7 +883,7 @@ impl AccountState {
             }
         }
 
-        // $BUD timed reserve burn (Phase 0.14b): this is the canonical epoch-transition
+        // $BUD timed reserve burn (Task 0.14b): this is the canonical epoch-transition
         // point, so execute any due annual burns here. Idempotent per year and a
         // no-op unless a burn-reserve account is configured (tokenomics enabled).
         if let Some(reserve) = self.burn_reserve_address {
@@ -902,7 +902,7 @@ impl AccountState {
         use crate::core::governance::ProposalType;
         match &proposal.p_type {
             ProposalType::ChangeBaseFee(new_fee) => {
-                // Phase 0.334 / A8: clamp to protocol bounds (never accept unbounded fee).
+                // Task 0.334 / A8: clamp to protocol bounds (never accept unbounded fee).
                 if *new_fee < MIN_TX_FEE || *new_fee > MAX_BASE_FEE {
                     tracing::warn!(
                         "Rejecting ChangeBaseFee {}: outside [{}, {}]",
@@ -959,7 +959,7 @@ impl AccountState {
                 }
             }
             ProposalType::ParameterUpdate(key, value) => {
-                // Phase 0.334 / A8: wire ParameterUpdate into RegistryParams with bounds.
+                // Task 0.334 / A8: wire ParameterUpdate into RegistryParams with bounds.
                 match self.apply_registry_parameter_update(key, value) {
                     Ok(()) => tracing::info!(
                         "Executing Governance: Parameter {} updated to {}",
@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_legacy_fee_validation_uses_fee_market_gate() {
+    fn task11_8_legacy_fee_validation_uses_fee_market_gate() {
         let alice_kp = KeyPair::generate().unwrap();
         let alice = Address::from(alice_kp.public_key_bytes());
         let bob = Address::from([8u8; 32]);
@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_priority_fee_accepted_when_within_max_fee() {
+    fn task11_8_priority_fee_accepted_when_within_max_fee() {
         // ADIM G: priority_fee is now production-ready (no longer fail-closed).
         // This test verifies that priority_fee > 0 is accepted when max_fee
         // covers base_fee + priority_fee.
@@ -1568,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_max_fee_must_match_legacy_fee_during_migration() {
+    fn task11_8_max_fee_must_match_legacy_fee_during_migration() {
         // ADIM G: max_fee != fee is now production-ready (no longer fail-closed).
         // This test verifies that max_fee > fee is accepted when it covers
         // base_fee + priority_fee.
@@ -1600,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_fee_distribution_burns_base_fee_and_pays_proposer() {
+    fn task11_8_fee_distribution_burns_base_fee_and_pays_proposer() {
         let alice_kp = KeyPair::generate().unwrap();
         let alice = Address::from(alice_kp.public_key_bytes());
         let bob = Address::from([11u8; 32]);
@@ -1625,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_fee_distribution_proposer_receives_tip_in_block_finalization() {
+    fn task11_8_fee_distribution_proposer_receives_tip_in_block_finalization() {
         // Integration test: verify distribute_block_fees is called during
         // block finalization and proposer receives the tip.
         let alice_kp = KeyPair::generate().unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_total_bud_committed_counts_stake_and_unbonding() {
+    fn task11_8_total_bud_committed_counts_stake_and_unbonding() {
         let liquid = Address::from([11u8; 32]);
         let validator = Address::from([12u8; 32]);
         let unbonding = Address::from([13u8; 32]);
@@ -1714,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_supply_capacity_remaining_uses_committed_denominator() {
+    fn task11_8_supply_capacity_remaining_uses_committed_denominator() {
         let liquid = Address::from([21u8; 32]);
         let validator = Address::from([22u8; 32]);
         let mut state = AccountState::new();
@@ -1727,7 +1727,7 @@ mod tests {
         );
     }
 
-    // === Phase 0.60 SUPPLY-CAP INTEGER-ONLY TESTİ ===
+    // === Task 0.60 SUPPLY-CAP INTEGER-ONLY TESTİ ===
     #[test]
     fn supply_cap_scaling_is_integer_only_and_respects_limit() {
         let mut state = AccountState::new();
@@ -1762,7 +1762,7 @@ mod tests {
         }
     }
 
-    /// Phase 0.32 / A1: nonce mismatch must fail with a nonce error even when the
+    /// Task 0.32 / A1: nonce mismatch must fail with a nonce error even when the
     /// signature is valid — proves cheap checks still run and still gate.
     #[test]
     fn tur11_wrong_nonce_rejected_before_accepting_valid_sig() {
@@ -1782,7 +1782,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.32 / A1: invalid signature is still rejected after cheap checks pass.
+    /// Task 0.32 / A1: invalid signature is still rejected after cheap checks pass.
     #[test]
     fn tur11_invalid_signature_still_rejected() {
         let alice_kp = KeyPair::generate().unwrap();
@@ -1803,7 +1803,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.334 / A8: out-of-range base fee proposals are rejected.
+    /// Task 0.334 / A8: out-of-range base fee proposals are rejected.
     #[test]
     fn tur117_change_base_fee_bounds() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -1840,7 +1840,7 @@ mod tests {
         assert_eq!(state.base_fee, 42);
     }
 
-    /// Phase 0.334 / A8: ParameterUpdate binds to RegistryParams with validation.
+    /// Task 0.334 / A8: ParameterUpdate binds to RegistryParams with validation.
     #[test]
     fn tur117_parameter_update_registry_bounds() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -1882,7 +1882,7 @@ mod tests {
         assert_eq!(state.registry.params().unbonding_epochs, old_u);
     }
 
-    /// Phase 0.334 / A8: block reward cannot exceed protocol max.
+    /// Task 0.334 / A8: block reward cannot exceed protocol max.
     #[test]
     fn tur117_change_block_reward_bounds() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -1909,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_16_governance_parameter_update_waits_for_activation_epoch() {
+    fn task11_16_governance_parameter_update_waits_for_activation_epoch() {
         use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
 
         let mut state = AccountState::new();

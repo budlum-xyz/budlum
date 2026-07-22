@@ -1,4 +1,4 @@
-//! B.U.D. content manifest (Phase 0.39 §2.1, vision §8.2).
+//! B.U.D. content manifest (Task 0.39 §2.1, vision §8.2).
 //!
 //! A `ContentManifest` is the on-chain commitment to a sharded piece of
 //! content. The actual chunking algorithm (erasure coding, Reed-Solomon,
@@ -6,9 +6,9 @@
 //! per-shard `ContentId`s and a deterministic `manifest_id` derived from
 //! them. This matches the existing project rule "the chain carries the
 //! proof/address of data, not the data itself" (BudZKVM STARK proof
-//! analogy, Phase 0.38 plan §3.1).
+//! analogy, Task 0.38 plan §3.1).
 //!
-//! Per the data-sovereignty rule (Phase 0.39 plan §0.5): the manifest is
+//! Per the data-sovereignty rule (Task 0.39 plan §0.5): the manifest is
 //! fully reconstructable from public on-chain state by any independent
 //! node. No "Budlum Inc. indexer" service is required.
 
@@ -47,13 +47,13 @@ impl ShardRef {
 /// clients sharding the same content the same way always produce the
 /// same `manifest_id`.
 ///
-/// `owner` alanı F01 (Phase 10.5) ile eklendi — veri sahipliği zincir-üstü
+/// `owner` alanı F01 (Task 10.5) ile eklendi — veri sahipliği zincir-üstü
 /// kanıtlanabilir (Data Owner identity). `#[serde(default)]` ile eski
 /// snapshot'lar/JSON'lar backward-compat (owner = zero = "belirsiz").
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContentManifest {
     pub manifest_id: ContentId,
-    /// F01 (Phase 10.5): içerik sahibinin adresi. Zero-address = eski/pre-F01
+    /// F01 (Task 10.5): içerik sahibinin adresi. Zero-address = eski/pre-F01
     /// manifest (backward-compat); yeni manifest'ler gerçek owner taşır.
     #[serde(default)]
     pub owner: crate::core::address::Address,
@@ -99,7 +99,7 @@ impl ContentManifest {
     }
 
     /// F01: gerçek owner'ı set et (from_shards sonrası). `manifest_id` owner'a
-    /// bağlıysa yeniden hesaplanmalı; şimdilik manifest_id shards-only (F01 faz 2).
+    /// bağlıysa yeniden hesaplanmalı; şimdilik manifest_id shards-only (F01 görev 2).
     pub fn with_owner(mut self, owner: crate::core::address::Address) -> Self {
         self.owner = owner;
         self

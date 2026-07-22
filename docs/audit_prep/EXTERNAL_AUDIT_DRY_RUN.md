@@ -1,9 +1,9 @@
-# External Audit Dry-Run — Phase 11.20
+# External Audit Dry-Run — Task 11.20
 
-**Status:** ADIM 2 — audit prep evidence for independent review.  
-**Purpose:** Provide an independent auditor with a self-contained entry point  
-to compile, test, and review the codebase without prior context.  
-**Gate:** `Audit Prep (Phase 11.20)` CI job — `docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md`  
+**Status:** ADIM 2 — audit prep evidence for independent review.
+**Purpose:** Provide an independent auditor with a self-contained entry point
+to compile, test, and review the codebase without prior context.
+**Gate:** `Audit Prep (Task 11.20)` CI job — `docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md`
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
@@ -66,7 +66,7 @@ All 30 check-runs must be green on the target SHA.
 | 1 | Can clone + build from clean state | `cargo build --release` succeeds |
 | 2 | Can run all tests | `cargo test --lib` → 0 failures |
 | 3 | Can run gate self-tests | All `check-*-gate.sh --self-test` pass |
-| 4 | Can read all spec docs | `docs/spec-review/` + `docs/BUDLUM_PHASE11.md` |
+| 4 | Can read all spec docs | `docs/spec-review/` + `docs/BUDLUM_TASK11.md` |
 | 5 | Can verify audit prep index | `docs/audit_prep/README.md` evidence map |
 | 6 | Can check threat model | `docs/THREAT_MODEL.md` v2 closure matrix |
 | 7 | Can verify lockdown checklist | `docs/MAINNET_LOCKDOWN_CHECKLIST.md` |
@@ -125,4 +125,4 @@ check_contains "$root/docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md" "Auditor person
 
 ---
 
-*Bu dosya, `Audit Prep (Phase 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*
