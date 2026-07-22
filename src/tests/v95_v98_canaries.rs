@@ -4,8 +4,6 @@
 mod tests {
     use crate::consensus::pos::{PoSConfig, PoSEngine};
     use crate::domain::registry::ConsensusDomainRegistry;
-    use crate::domain::types::ConsensusDomain;
-    use crate::domain::DomainId;
 
     /// V95 canary: ConsensusDomainRegistry::new() boş başlar.
     /// try_reorg içinde domain_registry = ConsensusDomainRegistry::new()
@@ -14,9 +12,9 @@ mod tests {
     fn v95_domain_registry_new_is_empty_after_reorg_reset() {
         let registry = ConsensusDomainRegistry::new();
         // Kayıtlı domain yok → reorg sonrası stale kalmaz.
-        let domains: Vec<&ConsensusDomain> = registry.iter().collect();
+        // `iter()` metodu yok; mevcut `domains()` (Vec<ConsensusDomain>) kullanılır.
         assert!(
-            domains.is_empty(),
+            registry.domains().is_empty(),
             "V95: fresh ConsensusDomainRegistry must be empty"
         );
     }
