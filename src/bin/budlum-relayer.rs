@@ -184,7 +184,19 @@ fn main() -> ExitCode {
     };
     match run_relayer(&config) {
         Ok(()) => {
-            eprintln!("budlum-relayer: skeleton complete (no relay loop — mainnet sonrası)");
+            eprintln!("budlum-relayer: config valid, starting relay loop...");
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            rt.block_on(async {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                eprintln!("budlum-relayer: relay loop active (polling every 10s)");
+                loop {
+                    interval.tick().await;
+                    // TODO (v0.3): Poll Budlum RPC for new bridge burn events.
+                    // TODO (v0.3): Construct finality proof for each event.
+                    // TODO (v0.3): Submit to Ethereum bridge contract via web3 RPC.
+                    eprintln!("budlum-relayer: poll tick (RPC integration pending)");
+                }
+            });
             ExitCode::SUCCESS
         }
         Err(e) => {
