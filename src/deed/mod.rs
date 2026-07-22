@@ -162,14 +162,19 @@ mod tests {
         let encoded = serde_json::to_vec(&value).unwrap();
         let decoded: Manifest = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, value);
-        assert!(String::from_utf8(encoded).unwrap().contains("educator_only"));
+        assert!(String::from_utf8(encoded)
+            .unwrap()
+            .contains("educator_only"));
     }
 
     #[test]
     fn manifest_rejects_zero_identity_content_and_metadata() {
         let mut value = manifest();
         value.contributor = Address::zero();
-        assert_eq!(value.validate(), Err("DeEd contributor cannot be the zero address"));
+        assert_eq!(
+            value.validate(),
+            Err("DeEd contributor cannot be the zero address")
+        );
         value = manifest();
         value.content_id = ContentId([0u8; 32]);
         assert_eq!(value.validate(), Err("DeEd content_id cannot be zero"));
