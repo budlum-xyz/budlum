@@ -6259,3 +6259,14 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Budlumdevnet:** dokunulmadı. **Engel:** D2 Faz D AIR crypto-blocklu (kör push yok). **Sıradaki:** Faz D için crypto-review kararı / veya ARENA2/3 koordinasyonu için açık.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
+
+
+### [2026-07-22] ARENA1 — wallet-core BIP39 standardization in progress
+
+**Kapsam:** `wallet-core/src/bip39_wordlist.rs` mevcut listenin canonical BIP39 English wordlist olmadığını gösteriyordu; özel `lubo` / `eurymede` kelimeleri ve yer değiştirmiş entries vardı.
+**Düzeltme:** Liste, BIP-0039 canonical 2048 kelimelik listeyle exact sıra eşleşecek şekilde yeniden oluşturuldu; özel kelimeler çıkarıldı. 2048 uzunluk, uniqueness, sorted order, boundary lookup ve özel kelimelerin reddi için testler eklendi.
+**Doğrulama:** Canonical upstream listeyle yerel exact karşılaştırma ✅ · `git diff --check` ✅. Rust toolchain workspace'te yok; CI hakem olacak.
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** Push + PR CI SLEEP takibi.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
