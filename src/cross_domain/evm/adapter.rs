@@ -214,11 +214,7 @@ fn decode_header_or_err(raw: &[u8]) -> Result<EthHeader, VerifyError> {
 /// `ProofVerificationFailed` ile sonuçlanır. Aynı bağ cross-bridge proof
 /// kullanımını da engeller.
 fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {
-    hash_fields_bytes(&[
-        b"BDLM_EVM_RECEIPT_LEAF_V1",
-        tx_hash.as_bytes(),
-        bridge_address,
-    ])
+    hash_fields_bytes(&[b"BDLM_EVM_RECEIPT_LEAF_V1", tx_hash.as_bytes(), bridge_address])
 }
 
 #[cfg(test)]
