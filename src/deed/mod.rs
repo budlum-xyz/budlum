@@ -25,6 +25,7 @@ pub mod roles {
 /// DeEd artifact categories. The artifact bytes remain in B.U.D.; this enum
 /// is the domain-level meaning committed by the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Dataset,
     Research,
@@ -45,6 +46,7 @@ impl ArtifactKind {
 
 /// Visibility policy for student, educator, and peer sharing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Visibility {
     Public,
     EducatorOnly,
@@ -83,6 +85,9 @@ impl Manifest {
         }
         if self.metadata_hash == [0u8; 32] {
             return Err("DeEd metadata_hash cannot be zero");
+        }
+        if self.created_at == 0 {
+            return Err("DeEd created_at cannot be zero");
         }
         Ok(())
     }
@@ -123,6 +128,44 @@ mod tests {
     }
 
     #[test]
+    fn manifest_id_binds_every_security_relevant_field() {
+        let base = manifest();
+        let mut variants = Vec::new();
+
+        let mut value = base.clone();
+        value.contributor = Address::from([1u8; 32]);
+        variants.push(value);
+        let mut value = base.clone();
+        value.content_id = ContentId([2u8; 32]);
+        variants.push(value);
+        let mut value = base.clone();
+        value.artifact_kind = ArtifactKind::Dataset;
+        variants.push(value);
+        let mut value = base.clone();
+        value.visibility = Visibility::Public;
+        variants.push(value);
+        let mut value = base.clone();
+        value.metadata_hash = [3u8; 32];
+        variants.push(value);
+        let mut value = base;
+        value.created_at = 43;
+        variants.push(value);
+
+        for variant in variants {
+            assert_ne!(variant.id(), manifest().id());
+        }
+    }
+
+    #[test]
+    fn manifest_serde_round_trip_is_stable() {
+        let value = manifest();
+        let encoded = serde_json::to_vec(&value).unwrap();
+        let decoded: Manifest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, value);
+        assert!(String::from_utf8(encoded).unwrap().contains("educator_only"));
+    }
+
+    #[test]
     fn manifest_rejects_zero_identity_content_and_metadata() {
         let mut value = manifest();
         value.contributor = Address::zero();
@@ -133,6 +176,9 @@ mod tests {
         value = manifest();
         value.metadata_hash = [0u8; 32];
         assert_eq!(value.validate(), Err("DeEd metadata_hash cannot be zero"));
+        value = manifest();
+        value.created_at = 0;
+        assert_eq!(value.validate(), Err("DeEd created_at cannot be zero"));
     }
 
     #[test]
