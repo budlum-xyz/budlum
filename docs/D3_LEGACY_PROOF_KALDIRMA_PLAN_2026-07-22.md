@@ -1,7 +1,7 @@
 # D3 — Legacy Declared-Depth Proof Kaldırma: Uygulama Planı (2026-07-22)
 
 **Karar (Ayaz):** Legacy self-declared PoW proof yolunu **tamamen kaldır**.
-**Hazırlayan:** ARENA1 · **Durum:** Derinlemesine araştırma tamam, uygulama CI-iteratif olmalı (sandbox test-OOM).
+**Hazırlayan:** ARENA1 · **Durum:** ✅ **STAGE 1 (fonksiyonel kaldırma) TAMAM — CI yeşil (`f74a6b9`, 33/0).** Legacy `PoWFinalityAdapter` always-reject. Full dead-code removal (variant/struct silme) opsiyonel follow-up (yüksek test-churn, güvenlik kazancı yok — adapter zaten inert).
 
 ---
 
