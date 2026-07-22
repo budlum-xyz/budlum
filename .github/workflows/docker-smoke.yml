@@ -46,7 +46,7 @@ jobs:
       - name: Run RPC smoke (devnet)
         run: |
           chmod +x scripts/smoke_rpc.sh
-          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18545 ./scripts/smoke_rpc.sh || (cat /tmp/budlum-task3-smoke-db/node.log 2>/dev/null; exit 1)
+          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18545 ./scripts/smoke_rpc.sh || (cat /tmp/budlum-smoke-db/node.log 2>/dev/null; exit 1)
       - name: Run Docker mainnet smoke
         run: |
           chmod +x scripts/docker-smoke-mainnet.sh

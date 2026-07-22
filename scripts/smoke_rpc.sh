@@ -6,7 +6,7 @@ cd "$ROOT"
 
 NETWORK="${SMOKE_NETWORK:-devnet}"
 RPC_PORT="${SMOKE_RPC_PORT:-18545}"
-DB_PATH="${SMOKE_DB_PATH:-/tmp/budlum-task3-smoke-db}"
+DB_PATH="${SMOKE_DB_PATH:-/tmp/budlum-smoke-db}"
 BIN="${SMOKE_BIN:-}"
 
 if [[ -z "$BIN" ]]; then

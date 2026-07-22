@@ -405,8 +405,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --manifest-path wallet-core/Cargo.toml 2>&1 | tee /tmp/wallet-core-gate.txt
-          cargo test --manifest-path wallet-core/Cargo.toml --features uniffi --lib task11_14_binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
-          cargo test --manifest-path wallet-core/Cargo.toml --features wasm --lib task11_14_binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo test --manifest-path wallet-core/Cargo.toml --features uniffi --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo test --manifest-path wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
           bash ./scripts/check-wallet-core-gate.sh /tmp/wallet-core-gate.txt
 
   # ============================  / Bolum 4 (BNS gate) ============================
