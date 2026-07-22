@@ -1,9 +1,0 @@
-[package]
-name = "bud"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-description = "B.U.D. — Broad Universal Database (opsiyonel eklenti: storage, Pollen, BNS, SocialFi, Lubot). budlumCore'a bağımlı; ağ için şart DEĞİL."
-
-[dependencies]
-budlum-core = { path = "../budlumCore" }

@@ -1,6 +1,0 @@
-    NftBoost { nft_id: u64, amount: u64 },
-    /// B04: Update content light score (Luminance)
-    NftUpdateLight { nft_id: u64, delta_mcd: i64 },
-    /// Tag an NFT for categorization (#education, etc.)
-    NftTag { nft_id: u64, tag: String },
-    UniversalRelay(ExternalTransaction),
