@@ -1,4 +1,4 @@
-//! Phase 11.8 — genesis validation reward pool primitives.
+//! Task 11.8 — genesis validation reward pool primitives.
 //!
 //! Rewards are paid from a pre-allocated pool, not by minting new BUD. This
 //! module keeps the schedule pure/deterministic so economy invariant tests can
@@ -8,7 +8,7 @@ use crate::core::address::Address;
 use crate::tokenomics::{bud, BUD_TOTAL_SUPPLY};
 use serde::{Deserialize, Serialize};
 
-/// Default Phase 11.6 decision: 10% of the fixed 100M supply.
+/// Default Task 11.6 decision: 10% of the fixed 100M supply.
 pub const DEFAULT_VALIDATION_REWARD_POOL: u64 = bud(10_000_000);
 /// Default treasury side-pool (2%) tracked separately from validator rewards.
 pub const DEFAULT_TREASURY_POOL: u64 = bud(2_000_000);
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_default_schedule_valid() {
+    fn task11_8_reward_pool_default_schedule_valid() {
         let schedule = RewardPoolSchedule::default();
         assert!(schedule.validate().is_ok());
         assert_eq!(schedule.validation_reward_pool, bud(10_000_000));
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_rejects_zero_epochs() {
+    fn task11_8_reward_pool_rejects_zero_epochs() {
         let schedule = RewardPoolSchedule {
             validation_pool_epochs: 0,
             ..Default::default()
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_rejects_pool_over_fixed_supply() {
+    fn task11_8_reward_pool_rejects_pool_over_fixed_supply() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: BUD_TOTAL_SUPPLY,
             treasury_pool: 1,
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_conserves_budget() {
+    fn task11_8_reward_pool_conserves_budget() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 100,
             validation_pool_epochs: 10,
@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_rounding_remainder_deterministic() {
+    fn task11_8_reward_pool_rounding_remainder_deterministic() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 10,
             validation_pool_epochs: 10,
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_halts_before_start_or_empty() {
+    fn task11_8_reward_pool_halts_before_start_or_empty() {
         let schedule = RewardPoolSchedule {
             reward_pool_start_epoch: 10,
             ..Default::default()
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_reward_pool_ignores_zero_stake() {
+    fn task11_8_reward_pool_ignores_zero_stake() {
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 10,
             validation_pool_epochs: 10,

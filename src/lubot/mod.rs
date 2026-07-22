@@ -1,4 +1,4 @@
-//! # Lubot — Merkeziyetsiz Yapay Zeka Katmanı (Faz A: gerçek budlum-core wiring)
+//! # Lubot — Merkeziyetsiz Yapay Zeka Katmanı (Görev A: gerçek budlum-core wiring)
 //!
 //! Kapalı-devre, doğrulanabilir AI katmanı. Bu modül Lubot'u **gerçek**
 //! budlum-core primitive'lerine bağlar (mock yok):
@@ -265,7 +265,7 @@ mod tests {
 }
 
 // ============================================================
-// Faz A: Pollen grant runtime construction (kapalı-devre tam)
+// Görev A: Pollen grant runtime construction (kapalı-devre tam)
 // ============================================================
 
 /// Bir Lubot çıkarımı için kapalı-devre Pollen AccessGrant inşa et.

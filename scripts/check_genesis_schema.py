@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-check_genesis_schema.py — Phase 8.11 genesis JSON şema kapısı (vacuous-gate kanaryalı)
+check_genesis_schema.py — Task 8.11 genesis JSON şema kapısı (vacuous-gate kanaryalı)
 
 config/mainnet-genesis.json (ve gelecekteki genesis varyantları) için sıkı alan/tip
 kapısı. stdlib-only (CI'da ek paket yok).

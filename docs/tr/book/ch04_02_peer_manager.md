@@ -22,7 +22,7 @@ pub struct PeerScore {
     pub rate_last_refill: Instant, // Jetonların (Token) son yenilenme zamanı
     pub last_seen: Option<Instant>,// Son görülme
     pub handshaked: bool,          // Versiyon/Protokol doğrulaması yapıldı mı?
-    // --- Hardening Phase 2: Granüler Rate Limiting ---
+    // --- Hardening Task 2: Granüler Rate Limiting ---
     pub vote_tokens: f64,          // Finalite oyları için kota
     pub blob_tokens: f64,          // QC Blobları için kota
 }
@@ -70,7 +70,7 @@ pub fn check_rate_limit(&mut self, peer_id: &PeerId) -> bool {
     let score = self.get_or_create(peer_id);
     let now = Instant::now();
     let elapsed = now.duration_since(score.rate_last_refill).as_secs_f64();
-    
+
     // Geçen süreye göre jetonları yenile (refill)
     score.rate_tokens = (score.rate_tokens + elapsed * RATE_LIMIT_REFILL_RATE)
         .min(RATE_LIMIT_CAPACITY);
@@ -102,7 +102,7 @@ Bir eş, kurallara uymayan blok gönderdiğinde çağrılır.
 pub fn report_invalid_block(&mut self, peer_id: &PeerId) {
     // 1. Eşin karnesini getir (Yoksa oluştur).
     let score = self.get_or_create(peer_id);
-    
+
     // 2. Cezayı kes.
     score.score += INVALID_BLOCK_PENALTY; // -20
     score.invalid_blocks += 1;            // İstatistik tut.
@@ -126,7 +126,7 @@ Arka planda (Background Worker) çalışan Node döngüsü, her 60 saniyede bir 
 pub fn cleanup_expired_bans(&mut self) {
     let now = Instant::now();
     let old_count = self.peers.len();
-    
+
     // Yasak süresi (banned_until) dolan hesapları tespit edip haritadan (Hashmap) kalıcı olarak sil.
     self.peers.retain(|_, score| {
         if let Some(ban_until) = score.banned_until {
@@ -151,9 +151,9 @@ Bu sayede hem hak ihlali süreleri dolanlar affedilir, hem de `PeerManager` bell
 ```rust
 fn ban_peer(&mut self, peer_id: &PeerId) {
     let score = self.get_or_create(peer_id);
-    
+
     // 1 saat sonrasını hesapla.
-    let ban_duration = Duration::from_secs(3600); 
+    let ban_duration = Duration::from_secs(3600);
     score.banned_until = Some(Instant::now() + ban_duration);
 }
 ```

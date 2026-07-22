@@ -89,7 +89,7 @@ impl PoWEngine {
         new_diff.clamp(1, 32)
     }
 
-    /// Phase 0.16 (security audit §3): difficulty-adjustment driver invoked
+    /// Task 0.16 (security audit §3): difficulty-adjustment driver invoked
     /// from `blockchain.rs` after a block has been durably committed.
     /// Public so the blockchain can drive the adjustment with the full
     /// post-commit chain in hand. The previous design mutated
@@ -142,7 +142,7 @@ impl ConsensusEngine for PoWEngine {
             )));
         }
 
-        // Phase 0.16 (security audit §3): validation is now PURE. The previous
+        // Task 0.16 (security audit §3): validation is now PURE. The previous
         // implementation mutated `current_difficulty` from inside
         // `validate_block`, which had three problems:
         //   1. Validation is a read-only operation and must be idempotent.
@@ -178,7 +178,7 @@ impl ConsensusEngine for PoWEngine {
         _block: &Block,
         _storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
-        // Phase 0.16 (security audit §3): the trait `record_block` hook is
+        // Task 0.16 (security audit §3): the trait `record_block` hook is
         // intentionally a no-op for PoW. The actual difficulty
         // adjustment lives in `record_block_with_chain` (overridden
         // below), which is called from `blockchain.rs` after a block
@@ -262,7 +262,7 @@ mod tests {
         assert!(block2.hash.starts_with("00"));
     }
 
-    /// Phase 0.16 (security audit §3): `validate_block` must be PURE — calling
+    /// Task 0.16 (security audit §3): `validate_block` must be PURE — calling
     /// it twice on the same block must produce the same result AND
     /// must not mutate the engine's `current_difficulty`. The
     /// previous implementation mutated difficulty from inside
@@ -312,7 +312,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.16 (security audit §3): difficulty adjustment must fire
+    /// Task 0.16 (security audit §3): difficulty adjustment must fire
     /// from `record_block_with_chain`, NOT from `validate_block`.
     /// Here, an adjustment-boundary block is *validated* without a
     /// prior `record_block_with_chain` call, and the difficulty

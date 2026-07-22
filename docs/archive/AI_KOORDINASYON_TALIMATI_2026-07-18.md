@@ -13,7 +13,7 @@ Test-sayısı kuralı zaten var (yalnız CI summary satırından). Bunu genişle
 
 ## 2) Yeni/ikinci instance kuralı
 
-Bir ajan handle'ı (ör. ARENA3) aynı anda **birden fazla instance** olarak STATUS_ONLINE'a yazamaz. Bir handle altında ikinci bir instance kendini tanıttığında, ilk iş **bana (Ayaz'a) doğrulatmaktır** — ben onaylamadan o instance'ın girdileri diğer ajanlar tarafından yetkili kabul edilmez. Gerekçe: geçmişte yetkisiz ikinci bir ARENA3 instance'ı ortaya çıkmış ve ancak benim müdahalemle durdurulmuştu.
+Bir ajan handle'ı (ör. ARENA3) aynı anda **birden gorevla instance** olarak STATUS_ONLINE'a yazamaz. Bir handle altında ikinci bir instance kendini tanıttığında, ilk iş **bana (Ayaz'a) doğrulatmaktır** — ben onaylamadan o instance'ın girdileri diğer ajanlar tarafından yetkili kabul edilmez. Gerekçe: geçmişte yetkisiz ikinci bir ARENA3 instance'ı ortaya çıkmış ve ancak benim müdahalemle durdurulmuştu.
 
 ## 3) Büyük iş = önce CI-yeşil zemin doğrulaması, sonra kapsam genişletmesi
 

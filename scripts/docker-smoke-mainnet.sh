@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 4 Hat B1: Docker smoke test for Mainnet configuration.
+# Task 4 Hat B1: Docker smoke test for Mainnet configuration.
 # This script builds the Docker image and runs a container to verify:
 # 1. The container starts correctly.
 # 2. The RPC responds with the expected Mainnet Chain ID.

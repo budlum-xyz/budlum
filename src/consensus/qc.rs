@@ -294,7 +294,7 @@ impl QcBlob {
             }
         }
 
-        // Phase 0.16 (security audit §2): return the unique-verified
+        // Task 0.16 (security audit §2): return the unique-verified
         // signer set so callers can enforce a quorum against the
         // post-deduplication count. The previous design only
         // returned `()`; callers that wanted to count unique
@@ -810,7 +810,7 @@ mod tests {
         assert!(blob.verify_merkle_root());
     }
 
-    /// Phase 0.16 (security audit §2): `verify_against_snapshot` returns
+    /// Task 0.16 (security audit §2): `verify_against_snapshot` returns
     /// the set of unique verified signers, and rejects duplicate
     /// entries. Together these let the caller (e.g. `import_qc_blob`)
     /// enforce a BLS quorum against the *post-deduplication* count
@@ -858,12 +858,12 @@ mod tests {
         }
     }
 
-    /// Phase 0.17 (security audit §4): the QcFaultProof can be built
+    /// Task 0.17 (security audit §4): the QcFaultProof can be built
     /// from a real QcBlob and verified end-to-end. This is the
     /// proof surface that the new permissionless RPC endpoint
     /// `bud_submitQcFaultProof` exposes; the test pins that the
     /// construction and verification contract still works after
-    /// the Phase 0.17 changes.
+    /// the Task 0.17 changes.
     #[test]
     fn qc_fault_proof_construction_and_verification_e2e() {
         let (snapshot, keys) = make_snapshot_with_pq_keys(2);

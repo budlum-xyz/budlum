@@ -1,7 +1,7 @@
 [network]
 profile = "mainnet"
 chain_id = 1
-# Phase 3 section 3.1: file must exist; hash in docs/operations/PRODUCTION_RUNBOOK.md section 8.2
+# Task 3 section 3.1: file must exist; hash in docs/operations/PRODUCTION_RUNBOOK.md section 8.2
 # Genesis block hash (re-anchored 2026-07-21 — EIP-1559 tx fee fields changed genesis tx signing preimage): 5037adf4481f978b388c9f9e33bd1e36f945b5d7825515c65837e83826318e41
 genesis_file = "./config/mainnet-genesis.json"
 
@@ -19,7 +19,7 @@ backup_retention_count = 24
 
 [p2p]
 identity_file = "./secrets/mainnet-node-id.key"
-# Phase 9 Ceremony template (ARENA3, 2026-07-16)
+# Task 9 Ceremony template (ARENA3, 2026-07-16)
 # These are ceremony-ready bootstrap peers. Replace with actual operator
 # peer IDs and IPs during MAINNET_GENESIS_CEREMONY.
 # IPs use RFC 5737 TEST-NET-3 documentation range.

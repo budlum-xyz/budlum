@@ -1,6 +1,6 @@
 //! Budlum L1 CLI — işlem gönderme, state sorgulama, validator kılavuzu.
 //!
-//! Phase 11.3 Görev 5. Bu binary L1 çekirdeği (`budlum_core`) ile konuşur:
+//! Task 11.3 Görev 5. Bu binary L1 çekirdeği (`budlum_core`) ile konuşur:
 //! imzalı işlem oluştur + gönder (`tx send`), salt-okunur sorgu
 //! (`query balance`/`query block`/`query status`), validator çalıştırma
 //! kılavuzu (`validator run`).
@@ -281,7 +281,7 @@ fn run_query_status(rpc_url: &str) -> Result<(), String> {
 fn run_validator(config: Option<&str>) -> Result<(), String> {
     // Tam node runner (chain + consensus loop + RPC sunucu) paketli bir binary
     // değildir — `validator run` burada yapılandırma doğrulama + kılavuz verir.
-    // `RpcServer::run` + `NodeConfig` ile gerçek node başlatma gelecek faz.
+    // `RpcServer::run` + `NodeConfig` ile gerçek node başlatma gelecek görev.
     match config {
         Some(path) => {
             let content = std::fs::read_to_string(path)

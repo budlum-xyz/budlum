@@ -168,7 +168,7 @@ impl State {
     }
 
     /// Persist state to disk. Returns an error on I/O failure instead of panicking
-    /// (Phase 0.33 / A10 — disk full / permission errors must not abort the process).
+    /// (Task 0.33 / A10 — disk full / permission errors must not abort the process).
     pub fn save(&self) -> Result<(), String> {
         self.save_atomic()
     }
@@ -231,7 +231,7 @@ impl StateBackend for State {
     }
 
     fn begin_transaction(&mut self) {
-        // Phase 0.33 / A9: nested transactions via LIFO backup stack.
+        // Task 0.33 / A9: nested transactions via LIFO backup stack.
         // A second begin no longer clobbers the outer snapshot.
         self.backup_stack.push(self.accounts.clone());
     }
@@ -411,7 +411,7 @@ mod tests {
         ));
     }
 
-    /// Phase 0.33 / A9: nested begin/rollback must restore each frame independently.
+    /// Task 0.33 / A9: nested begin/rollback must restore each frame independently.
     #[test]
     fn tur115_nested_transaction_stack() {
         let temp_file = "test_state_nested.json";
@@ -493,7 +493,7 @@ mod tests {
         let _ = fs::remove_file(format!("{temp_file}.tmp"));
     }
 
-    /// Phase 0.33 / A10: save() returns Result; success path still works.
+    /// Task 0.33 / A10: save() returns Result; success path still works.
     #[test]
     fn tur115_save_returns_result_on_success() {
         let temp_file = "test_state_save_result.json";
@@ -514,7 +514,7 @@ mod tests {
         fs::remove_file(temp_file).unwrap();
     }
 
-    /// Phase 0.33 / A10: save() must not panic on I/O failure; it returns Err.
+    /// Task 0.33 / A10: save() must not panic on I/O failure; it returns Err.
     #[test]
     fn tur115_save_returns_err_on_unwritable_path() {
         // Point state path at a non-existent directory so rename/create fails.

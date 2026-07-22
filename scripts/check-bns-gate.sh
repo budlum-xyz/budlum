@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-bns-gate.sh — Phase 10 Bölüm 4: BNS test isim kanaryası
+# check-bns-gate.sh — Task 10 Bölüm 4: BNS test isim kanaryası
 #
 # `cargo test --lib bns` çıktısını alır ve 8 BNS testinin HER BİRİNİN
 # isim-isim "... ok" göründüğünü doğrular (scripts/check-bud-e2e.sh deseni).
@@ -16,7 +16,7 @@
 # ============================================================================
 set -euo pipefail
 
-# Phase 10 Bölüm 4 zorunlu listesi — 8 BNS testi (birebir isim kilidi)
+# Task 10 Bölüm 4 zorunlu listesi — 8 BNS testi (birebir isim kilidi)
 EXPECTED=(
   "test tests::bns::tests::test_bns_registration_and_resolution"
   "test tests::bns::tests::test_bns_expiration"

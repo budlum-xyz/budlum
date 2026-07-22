@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# scripts/check-timing-safe.sh — Phase 8.6 statik regresyon taraması
+# scripts/check-timing-safe.sh — Task 8.6 statik regresyon taraması
 #
 # src/rpc ve src/crypto'da gizli materyalin (API anahtarı, bearer token,
 # secret, credential vb.) ham `==` / `!=` ile karşılaştırılmasını YASAKLAR.
 # Bu tür karşılaştırmalar zamanlama yan-kanalı açar; doğrusu `subtle` /
-# `constant_time_eq_str` kullanımıdır (bkz. Phase 0.35 / B3 fix'i).
+# `constant_time_eq_str` kullanımıdır (bkz. Task 0.35 / B3 fix'i).
 #
 # Bu script dudect-tarzı istatistiksel testin (benches/micro/timing_safe.rs)
 # statik tamamlayıcısıdır; ikisi birlikte CI `timing-safe` job'ını oluşturur.
@@ -58,7 +58,7 @@ run_scan() {
         echo ""
         echo "[check-timing-safe] Gizli materyal ham == / != ile karşılaştırılamaz."
         echo "[check-timing-safe] Çözüm: subtle::ConstantTimeEq / constant_time_eq_str kullan"
-        echo "[check-timing-safe] (referans: src/rpc/server.rs, Phase 0.35 / B3)."
+        echo "[check-timing-safe] (referans: src/rpc/server.rs, Task 0.35 / B3)."
         return 1
     fi
     return 0

@@ -102,7 +102,7 @@ Güncellenmesi gereken dosyalar:
 - `docs/02_isa_ve_bytecode.md` — Opcode formatı, discriminant ve stabilite durumu.
 - `docs/vm_trace_schema.md` — Yeni trace sütunları eklendiyse.
 - `docs/03_virtual_machine.md` — VM semantiği değiştiyse.
-- `docs/09_faz0_stabilizasyon.md` — Yeni production opcode'u eklendiyse.
+- `docs/09_görev0_stabilizasyon.md` — Yeni production opcode'u eklendiyse.
 - `README.md` — Roadmap durumu.
 
 Değişikliği göndermeden önce `docs/development.md`'deki yerel CI eşdeğerini çalıştır:

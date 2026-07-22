@@ -1,8 +1,8 @@
-# Budlum Phase 12 — ARENA4 Onaylanan Sistemler ve Uygulama Planı
+# Budlum Task 12 — ARENA4 Onaylanan Sistemler ve Uygulama Planı
 
 > **Hazırlayan:** ARENA4  
 > **Kaynak karar:** Kullanıcı onayları, 2026-07-20  
-> **Amaç:** Budlum vizyonunu Data Rights, Pollen, AI veri erişim yasağı, Relayer Policy, D-Web Passport, Proof Verification Market, Sovereign Domain Kit, Budlum Atlas, Mobile Self, Encryption DAO, Governance/Constitution ve Developer OS başlıklarıyla Phase 12 altında bütünsel şekilde geliştirmek.  
+> **Amaç:** Budlum vizyonunu Data Rights, Pollen, AI veri erişim yasağı, Relayer Policy, D-Web Passport, Proof Verification Market, Sovereign Domain Kit, Budlum Atlas, Mobile Self, Encryption DAO, Governance/Constitution ve Developer OS başlıklarıyla Task 12 altında bütünsel şekilde geliştirmek.  
 > **Kural:** Bu belge “mainnet-ready” veya “audited” iddiası değildir. Tüm üretim işleri CI yeşili, regresyon kilidi ve `STATUS_ONLINE.md` koordinasyonu ile yürütülür.
 
 ---
@@ -27,9 +27,9 @@ Kullanıcı aşağıdaki sistemleri onayladı:
 
 ---
 
-## 1. Phase 12 ana ilkeleri
+## 1. Task 12 ana ilkeleri
 
-Phase 12, Budlum’ın yalnızca bir L1 settlement protokolü değil, kullanıcı verisi, kimliği, izni, AI ekonomisi, D-Web ve egemen domain’ler için bir **kanıtlı dijital egemenlik katmanı** haline gelmesini hedefler.
+Task 12, Budlum’ın yalnızca bir L1 settlement protokolü değil, kullanıcı verisi, kimliği, izni, AI ekonomisi, D-Web ve egemen domain’ler için bir **kanıtlı dijital egemenlik katmanı** haline gelmesini hedefler.
 
 Temel ilkeler:
 
@@ -91,12 +91,12 @@ Bu ADIM’de şu işler yapıldı:
   - `bud_pollenPrepareSaleAuthorization`
 - Yeni transaction/proto tipi açılmadı; ADIM güvenli prepare/query yüzeyiyle sınırlı tutuldu.
 
-Not: Son main push sonrası CI final durumu ARENA1 tarafından tekrar doğrulanmalıdır. ARENA4 tarafında en son main push SHA `09263fe` idi; kullanıcı isteğiyle dosya buradan gönderildiği için bu noktadan sonra Phase 12 kaydı ARENA1 tarafından sürdürülecektir.
+Not: Son main push sonrası CI final durumu ARENA1 tarafından tekrar doğrulanmalıdır. ARENA4 tarafında en son main push SHA `09263fe` idi; kullanıcı isteğiyle dosya buradan gönderildiği için bu noktadan sonra Task 12 kaydı ARENA1 tarafından sürdürülecektir.
 
 > **ARENA1 doğrulama notu (2026-07-20):** A4-1/A4-2 işleri `arena/arena4-pollen-ai-data-rights`
 > branch'inde (HEAD `7fd8c68`, CI 14/14 yeşil) idi, main'de değildi. Bu doküman yazıldığında
 > referans verilen `09263fe` artık geçersizdir (branch `7fd8c68`'e merge olmuştur). ARENA1,
-> pollen işini `arena/phase12-pollen-audit` branch'inde main (Task 4/5 dahil) ile merge etti
+> pollen işini `arena/task12-pollen-audit` branch'inde main (Task 4/5 dahil) ile merge etti
 > ve CI doğrulamasına soktu. "A4-1/A4-2 uygulandı" ifadesi, bu doğrulama sonrası main'e
 > girdiği anlamına gelir. Kod denetimi (kural 1): domain-separated hashing ✓, sentinel imza
 > reddi ✓, canonical preimage doğrulaması ✓, bounded reads + expiry ✓, AI read gate
@@ -104,7 +104,7 @@ Not: Son main push sonrası CI final durumu ARENA1 tarafından tekrar doğrulanm
 
 ---
 
-## 3. Phase 12 ADIM sırası
+## 3. Task 12 ADIM sırası
 
 | ADIM | Başlık | Öncelik | Durum |
 |---|---|---:|---|
@@ -167,7 +167,7 @@ DAO sadece parametre yönetir. DAO kullanıcı anahtarına, decrypt yetkisine ve
 
 ### Amaç
 
-Encryption Layer, Pollen ve B.U.D. verisinin hard-enforcement aşamasına geçebilmesi için DAO tarafından yönetilen ama kullanıcı egemenliğini bozmayan parametrelerle tanımlanır.
+Encryption Layer, Pollen ve B.U.D. verisinin hard-enforcement gorevsına geçebilmesi için DAO tarafından yönetilen ama kullanıcı egemenliğini bozmayan parametrelerle tanımlanır.
 
 ### DAO’nun yönetebileceği parametreler
 
@@ -273,7 +273,7 @@ SolverBid {
 - Relayer permissionless kalır.
 - Wallet içinde authorized relayer listesi olmaz.
 - Intent replay edilemez.
-- Fee max_fee’yi aşamaz.
+- Fee max_fee’yi gorevz.
 - Deadline sonrası execution reddedilir.
 - Solver proof vermezse slash edilebilir.
 - Critical action policy high-value işlemlerde multi-device/HSM isteyebilir.
@@ -601,7 +601,7 @@ Pollen satışında DataAsset sahipliği devredilmeden, seller authorization üz
 - `PollenPurchaseReceipt`: sale authorization + buyer + grant + payment commitment canonical receipt.
 - `MarketplaceRegistry.purchase_receipts` root kapsamı.
 - `issue_grant_from_sale_authorization(...)`: seller authorization limitleri içinde AccessGrant + receipt üretimi.
-- Grant expiry authorization expiry'yi aşamaz.
+- Grant expiry authorization expiry'yi gorevz.
 - Max grant limit exhaust olduğunda fail-closed.
 - Payment commitment zero ise fail-closed.
 
@@ -627,7 +627,7 @@ D-Web Passport profil endpoint'i kanıt iddialarını evidence-card olarak göst
 
 ---
 
-## 14. Phase 12 güvenlik ve CI kuralları
+## 14. Task 12 güvenlik ve CI kuralları
 
 Her ADIM için zorunlu:
 
@@ -661,7 +661,7 @@ ARENA4 önerisi:
 
 ## 16. ARENA koordinasyon notu
 
-- ARENA1 Phase 12 dosyasını kanonik plan olarak kaydedebilir.
+- ARENA1 Task 12 dosyasını kanonik plan olarak kaydedebilir.
 - ARENA2 proof/AI/verification tarafında API sınırlarını review etmelidir.
 - ARENA3 hardening/CI/fuzz/gate uyumunu denetlemelidir.
 - ARENAS/ARENAX açık bulgu taramasına devam etmelidir.

@@ -6,7 +6,7 @@
 //! devnet). A disk-backed implementation (`SledContentStore`) is
 //! planned for mainnet.
 //!
-//! # Data Sovereignty Rule (Phase 0.39 plan §0.5)
+//! # Data Sovereignty Rule (Task 0.39 plan §0.5)
 //!
 //! Any node can independently compute `ContentId` from raw chunk
 //! bytes. No "Budlum Inc. indexer" or centralized service is
@@ -80,7 +80,7 @@ pub trait ContentStore: Send + Sync {
     /// the chunk is not in the store.
     fn get(&self, id: &ContentId) -> Result<Vec<u8>, StoreError>;
 
-    /// Physically delete a chunk from the store (Phase 4 Phase 3 / Constitution).
+    /// Physically delete a chunk from the store (Task 4 Task 3 / Constitution).
     fn delete(&self, id: &ContentId) -> Result<(), StoreError>;
 
     /// Check if a chunk exists in the store.

@@ -61,12 +61,12 @@ snapshot'lar backward-compat).
 
 ## 2. GAP-1 — Manifest imza alanları (schema-4 wire)
 
-**Faz 1 (bu PR):** Ed25519 tek-imza + trust-list + AllowUnsigned geçişi.
+**Gorev 1 (bu PR):** Ed25519 tek-imza + trust-list + AllowUnsigned geçişi.
 
 **Yeni wire alanları (StateSnapshotV2, `#[serde(default)]`):**
 
 ```rust
-// --- schema_version 4 (GAP-1, Phase 10.5 P2): manifest signature ---
+// --- schema_version 4 (GAP-1, Task 10.5 P2): manifest signature ---
 /// Snapshot'ı imzalayan party'nin pubkey'i (trust-list'ten). None = AllowUnsigned.
 #[serde(default)]
 pub manifest_signer: Option<[u8; 32]>,
@@ -144,8 +144,8 @@ CI hakem, F10.1/F10.2/V17 dersleri). Merge öncesi tüm commit'ler yeşil.
 - B2 serde: `BTreeMap<AssetId,_>` JSON roundtrip (alias ile FAIL ederdi).
 - Schema-3 → 4 legacy-import: eski snapshot yüklenir (alanlar default), digest schema-3.
 
-**Chaos/rotation:** HSM-mock signer rotation (Faz 1 trust-list güncelleme); multisig
-placeholder (Faz 2).
+**Chaos/rotation:** HSM-mock signer rotation (Gorev 1 trust-list güncelleme); multisig
+placeholder (Gorev 2).
 
 ---
 
@@ -180,8 +180,8 @@ placeholder (Faz 2).
   desenleri). Yardımcı fonksiyonları önce düzeltmek çağrı yerlerini toplu onarır.
 - **GAP-2 digest değişimi** mevcut snapshot testlerini kırabilir (schema-3 digest
   bekleyenler) → legacy-import + cross-schema roundtrip testi mührü.
-- **HSM signer** mock (production HSM yok, M6 debt) → Faz 1 trust-list Ed25519 ile
-  sınırlı, BLS quorum Faz 2.
+- **HSM signer** mock (production HSM yok, M6 debt) → Gorev 1 trust-list Ed25519 ile
+  sınırlı, BLS quorum Gorev 2.
 
 ---
 

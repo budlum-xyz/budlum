@@ -1,4 +1,4 @@
-//! Faz A — Executor/Transaction entegrasyon.
+//! Görev A — Executor/Transaction entegrasyon.
 //!
 //! Lubot çıkarım talebi, `TransactionType::AiInferenceRequest` olarak executor'a
 //! taşınır. Executor (src/execution/executor.rs:723) zaten tam akışı işler:

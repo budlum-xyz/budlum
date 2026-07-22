@@ -19,15 +19,15 @@ Current production-readiness status:
 Specialised deep-dives:
 
 - [ARENA4 approved systems roadmap](ARENA4_APPROVED_SYSTEMS_ROADMAP_2026-07-20.md) — Pollen, AI read gate, D-Web Passport, Relayer Policy, Atlas ve onaylanan sistemlerin uygulama sırası
-- [Phase 0.37 implementation report](archive/PHASE0.37_RAPOR.md)
+- [Task 0.37 implementation report](archive/TASK0.37_RAPOR.md)
 - [Production / enterprise PoA runbook](operations/PRODUCTION_RUNBOOK.md)
 - [Archive backup/restore runbook](operations/ARCHIVE_AND_BACKUP.md)
-- [Post-quantum security architecture (Phase 0.14)](03_post_quantum_security.md) — Dilithium5 integration, hybrid roadmap, threat model
+- [Post-quantum security architecture (Task 0.14)](03_post_quantum_security.md) — Dilithium5 integration, hybrid roadmap, threat model
 - [Budlum'un Çözebileceği Paradigma Kaymaları](03_paradigma_analizi.md) — 7 yapısal sorun, 7 paradigma kayması, 2035 vizyonu (Türkçe)
 
 ## Integrated BudZKVM
 
 `budlum-core` consumes the ZK execution environment from the in-tree
 [`budzero/`](../budzero/README.md) workspace via path dependencies on
-`bud-isa`, `bud-vm`, and `bud-proof`. This Phase 0.37 monorepo layout makes one
+`bud-isa`, `bud-vm`, and `bud-proof`. This Task 0.37 monorepo layout makes one
 commit the compatibility boundary for settlement and proof verification.

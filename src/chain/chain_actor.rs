@@ -273,7 +273,7 @@ pub enum ChainCommand {
     },
     SealGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
     FlushStorage(oneshot::Sender<Result<usize, String>>),
-    /// B.U.D. Faz 5 (ARENA1): Open a storage deal with proper escrow locking.
+    /// B.U.D. Görev 5 (ARENA1): Open a storage deal with proper escrow locking.
     OpenStorageDeal {
         domain_id: u32,
         manifest: crate::storage::ContentManifest,
@@ -289,23 +289,23 @@ pub enum ChainCommand {
         storage_root: Option<crate::domain::Hash32>,
         response: oneshot::Sender<Result<u64, String>>,
     },
-    /// B.U.D. Faz 5 (ARENA2): Issue retrieval challenges for active storage
+    /// B.U.D. Görev 5 (ARENA2): Issue retrieval challenges for active storage
     /// deals whose challenge_interval has elapsed.
     IssueStorageChallenges(u64, oneshot::Sender<Result<u32, String>>),
-    /// B.U.D. Faz 5 (ARENA2): Finalize missed challenges and slash operators.
+    /// B.U.D. Görev 5 (ARENA2): Finalize missed challenges and slash operators.
     FinalizeMissedStorageChallenges(u64, oneshot::Sender<Result<(u32, u64), String>>),
-    /// B.U.D. Faz 5 (ARENA2): Submit a verified storage proof hash for
+    /// B.U.D. Görev 5 (ARENA2): Submit a verified storage proof hash for
     /// accumulation into pending_storage_root.
     SubmitStorageProof(crate::domain::Hash32, oneshot::Sender<Result<(), String>>),
-    /// B.U.D. Faz 5 (ARENA2): Query all active storage deals.
+    /// B.U.D. Görev 5 (ARENA2): Query all active storage deals.
     GetStorageDeals(oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>),
-    /// B.U.D. Faz 5 (ARENA3): Query storage economics event log.
+    /// B.U.D. Görev 5 (ARENA3): Query storage economics event log.
     GetStorageEconomicsEvents(
         oneshot::Sender<Vec<crate::chain::blockchain::StorageEconomicsEvent>>,
     ),
-    /// B.U.D. Faz 5 (ARENA3): Query storage economics accounting summary.
+    /// B.U.D. Görev 5 (ARENA3): Query storage economics accounting summary.
     GetStorageEconomicsSummary(oneshot::Sender<serde_json::Value>),
-    /// B.U.D. Faz 5 (ARENA2): Query all storage challenges.
+    /// B.U.D. Görev 5 (ARENA2): Query all storage challenges.
     GetStorageChallenges(oneshot::Sender<Vec<crate::domain::storage_deal::RetrievalChallenge>>),
     SignPrevote {
         epoch: u64,
@@ -982,7 +982,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Phase 3 §0.3: bond stake for STORAGE_OPERATOR (permissionless).
+    /// Task 3 §0.3: bond stake for STORAGE_OPERATOR (permissionless).
     pub async fn bond_storage_operator(
         &self,
         address: crate::core::address::Address,
@@ -1563,7 +1563,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    // ─── B.U.D. Faz 5 (ARENA2): Storage operations public API ─────
+    // ─── B.U.D. Görev 5 (ARENA2): Storage operations public API ─────
 
     /// Issue retrieval challenges for active deals at the given epoch.
     pub async fn issue_storage_challenges(&self, epoch: u64) -> Result<u32, String> {
@@ -1904,7 +1904,7 @@ impl ChainActor {
                     if let Some((ref b, ref cids)) = result {
                         self.run_storage_maintenance(b.index);
                         if crate::chain::finality::is_checkpoint_height(b.index) {
-                            self.blockchain.start_prevote_phase(b.index, b.hash.clone());
+                            self.blockchain.start_prevote_task(b.index, b.hash.clone());
                         }
                         if !cids.is_empty() {
                             tracing::info!(count = cids.len(), "NftBurn detected during production — notifying node for physical pruning");
@@ -2526,7 +2526,7 @@ impl ChainActor {
                         .unwrap_or(Ok(0));
                     let _ = res_tx.send(res);
                 }
-                // ─── B.U.D. Faz 5 (ARENA2): Storage operations ─────
+                // ─── B.U.D. Görev 5 (ARENA2): Storage operations ─────
                 ChainCommand::OpenStorageDeal {
                     domain_id,
                     manifest,

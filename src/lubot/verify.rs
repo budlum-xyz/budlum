@@ -1,4 +1,4 @@
-//! Faz A — gerçek STARK doğrulama + proof üretimi (bud-proof `DefaultAdapter`).
+//! Görev A — gerçek STARK doğrulama + proof üretimi (bud-proof `DefaultAdapter`).
 //!
 //! Lubot çıkarım kanıtı, gerçek plonky3 STARK ile doğrulanır VE üretilir.
 //! Bu, düny-ilk "doğrulanabilir çıkarım" iddiasının kriptografik çekirdeğidir.

@@ -1,4 +1,4 @@
-// Phase 8.9 / Dalga 5 (kullanıcı kararı Q-A 2026-07-16): L1 relayer proof
+// Task 8.9 / Dalga 5 (kullanıcı kararı Q-A 2026-07-16): L1 relayer proof
 // kriptografik doğrulama + M5 hub anti-sybil ücret + M4 BNS ücret regresyonu.
 //
 // Bu dosya, "boş kontrol yeterli" döneminin bittiğini kodlar:
@@ -177,7 +177,7 @@ fn test_hub_register_app_exact_min_fee_deducted_and_registered() {
     let tx = hub_tx(crate::hub::HUB_REGISTER_MIN_FEE, 1);
     Executor::apply_transaction(&mut state, &tx).expect("min fee must pass");
     assert_eq!(state.hub.apps.len(), 1, "app kaydedilmeli");
-    // H1 deseni: tam fee + tam registration cost, fazlası değil.
+    // H1 deseni: tam fee + tam registration cost, görevlası değil.
     let expected = 1_000 - 1 - crate::hub::HUB_REGISTER_MIN_FEE;
     assert_eq!(state.get_balance(&relayer_addr()), expected);
 }

@@ -1,4 +1,4 @@
-//! Canonical AI Inference Layer Types (`Phase 10`, `Bölüm 1`).
+//! Canonical AI Inference Layer Types (`Task 10`, `Bölüm 1`).
 //!
 //! Provides deterministic model registry specifications, bounded execution reference
 //! payloads, attestation request/result primitives, and consensus agreement outcomes.
@@ -327,7 +327,7 @@ pub struct AiVerifierStakeInfo {
 ///
 /// This is the "AI Execution Layer" that the whitepaper describes as mainnet
 /// blocker #5: "Primitiflerin ötesinde AI yürütme katmanı — araştırma/
-/// entegrasyon aşamasında."
+/// entegrasyon görevsında."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiExecutionProof {
     /// The model that produced this inference. The ZKVM program_hash must

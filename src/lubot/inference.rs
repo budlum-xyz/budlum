@@ -1,4 +1,4 @@
-//! Faz A runtime — Lubot çıkarım akışı (gerçek `AiRegistry` üzerinde).
+//! Görev A runtime — Lubot çıkarım akışı (gerçek `AiRegistry` üzerinde).
 //!
 //! Lubot sorgusunun gerçek budlum-core AI katmanında uçtan-uca akışı:
 //! model kaydı → operator compute-bond → kapalı-devre input_ref ile request

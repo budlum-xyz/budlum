@@ -1,7 +1,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=proto/budlum/network/protocol.proto");
 
-    // Phase 8.11: buf STANDARD PACKAGE_DIRECTORY_MATCH uyumu — dosya
+    // Task 8.11: buf STANDARD PACKAGE_DIRECTORY_MATCH uyumu — dosya
     // proto/budlum/network/ altina tasindi (package adi degismedi → wire
     // etkisiz; input include-root'a goreli verilir, prost konvansiyonu).
     prost_build::Config::new()

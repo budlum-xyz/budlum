@@ -25,7 +25,7 @@ pub trait ConsensusSigner: Send + Sync {
     }
     /// Public BLS key advertised by this signer, if the backend owns one.
     ///
-    /// Phase 2 §1.1: this lets mainnet policy and finality code distinguish
+    /// Task 2 §1.1: this lets mainnet policy and finality code distinguish
     /// “Ed25519-only PKCS#11” from a backend that can also serve BLS material,
     /// without exposing the BLS secret key to the consensus engine.
     fn bls_public_key(&self) -> Option<Vec<u8>> {

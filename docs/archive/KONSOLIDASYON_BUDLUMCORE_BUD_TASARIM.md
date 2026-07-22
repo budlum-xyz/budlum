@@ -52,19 +52,19 @@ Blockchain: `pub extension: Option<ExtensionBundle>` (B.U.D. eklentisi takılır
 
 **hub** → ayrı `budlum.xyz` repo'suna taşınacak (budlum'dan kaldırılır).
 
-## 5. Uygulama fazları (her biri CI-yeşil)
+## 5. Uygulama gorevları (her biri CI-yeşil)
 
-- **Faz 1:** budlumCore crate iskeleti — src/ → budlumCore/src/, root workspace, Cargo.toml + CI + script yol güncellemeleri. cargo check temiz.
-- **Faz 2:** Trait tanımları (StorageHooks/PollenHooks/SocialFiHooks/BnsHooks) budlumCore'da. Blockchain `extension: Option<...>` alanı.
-- **Faz 3:** B.U.D./ crate iskeleti (Cargo.toml depends budlumCore, boş lib.rs). cargo check (workspace).
-- **Faz 4:** storage modülü taşıma + StorageHooks impl. (en büyük — 55 ref).
-- **Faz 5:** pollen/bns/socialfi/lubot taşıma + impl'ler.
-- **Faz 6:** budlumCore'da concrete B.U.D. çağrıları → trait çağrılarına çevirme (47 nokta).
-- **Faz 7:** hub → budlum.xyz ayrı repo. CLAUDE.md güncelle (devnet artık referans değil). README'ler.
+- **Gorev 1:** budlumCore crate iskeleti — src/ → budlumCore/src/, root workspace, Cargo.toml + CI + script yol güncellemeleri. cargo check temiz.
+- **Gorev 2:** Trait tanımları (StorageHooks/PollenHooks/SocialFiHooks/BnsHooks) budlumCore'da. Blockchain `extension: Option<...>` alanı.
+- **Gorev 3:** B.U.D./ crate iskeleti (Cargo.toml depends budlumCore, boş lib.rs). cargo check (workspace).
+- **Gorev 4:** storage modülü taşıma + StorageHooks impl. (en büyük — 55 ref).
+- **Gorev 5:** pollen/bns/socialfi/lubot taşıma + impl'ler.
+- **Gorev 6:** budlumCore'da concrete B.U.D. çağrıları → trait çağrılarına çevirme (47 nokta).
+- **Gorev 7:** hub → budlum.xyz ayrı repo. CLAUDE.md güncelle (devnet artık referans değil). README'ler.
 
 ## 6. Riskler
 
-- 89K satır, derin coupling → her faz küçük staging commit, CI-iteratif.
+- 89K satır, derin coupling → her gorev küçük staging commit, CI-iteratif.
 - Sandbox `cargo check --lib` çalışır (~3dk) ama `cargo test` OOM → CI yegâne doğrulayıcı.
 - Trait inversion runtime davranışı değiştirebilir → regresyon testleri kritik (StorageProvider gate, B.U.D. E2E).
 - budlumdevnet artık referans değil (Ayaz kararı) — CLAUDE.md güncellenecek.
@@ -72,6 +72,6 @@ Blockchain: `pub extension: Option<ExtensionBundle>` (B.U.D. eklentisi takılır
 ## 7. Durum
 
 - budZero/ + budl/: ✅ TAMAM (bu branch).
-- Faz 1-7: 🔴 budlumCore/B.U.D. bölmesi — ARENA1'de, faz faz.
+- Gorev 1-7: 🔴 budlumCore/B.U.D. bölmesi — ARENA1'de, gorev gorev.
 
-*Bu blueprint rule 2/5 (derin analiz, kısayol yok) gereği yazıldı. Faz 1'den başlanır.*
+*Bu blueprint rule 2/5 (derin analiz, kısayol yok) gereği yazıldı. Gorev 1'den başlanır.*

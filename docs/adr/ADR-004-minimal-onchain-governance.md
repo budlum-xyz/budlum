@@ -1,8 +1,8 @@
 # ADR-004: Minimal On-Chain Governance
 
-**Durum:** Kabul Edildi  
-**Tarih:** 2026-07-20  
-**Karar Verici:** Kullanıcı (onay) — Phase 11.6 karar turu q4
+**Durum:** Kabul Edildi
+**Tarih:** 2026-07-20
+**Karar Verici:** Kullanıcı (onay) — Task 11.6 karar turu q4
 
 ## Bağlam
 Mimari'de governance hiç geçmedi. Parametre değişikliği (slashing ratios, fees, validator set) nasıl? Tam on-chain governance kompleks + governance attack vektörleri; tam off-chain yavaş.
@@ -21,6 +21,6 @@ Mimari'de governance hiç geçmedi. Parametre değişikliği (slashing ratios, f
 Master-context (permissionless, PoA izolasyonu) — governance'in bunlara dokunmaması invariant'ı.
 
 ## İlgili
-- `src/core/governance.rs` (genişletme — Phase 11.16)
+- `src/core/governance.rs` (genişletme — Task 11.16)
 - `docs/BUDLUM_CONSTITUTION.md` (parametre alanları)
 - ADR-010 (constitution engine — Pollen parametreleri)

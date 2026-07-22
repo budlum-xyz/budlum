@@ -1,4 +1,4 @@
-# Phase 11.4 — Derin Sistem Mimarisi (Kullanıcı Talimatı, 2026-07-20)
+# Task 11.4 — Derin Sistem Mimarisi (Kullanıcı Talimatı, 2026-07-20)
 
 > **Yazar:** ARENA1 (görev yöneticisi), 2026-07-20.
 > **Komut beklenmeden devam edilir.** 4 ana alan + kalan Task 4/5/7.
@@ -10,7 +10,7 @@
 ### A. Storage (en büyük boşluk)
 1. **B.U.D. storage vision → teknik spec:** `docs/BUD_STORAGE_TECHNICAL_SPEC.md`
    - Vision dokümanı (`BUD_Merkeziyetsiz_Depolama_Vizyonu.md`) → uygulanabilir spec
-   - Faz 1-6 detay: ContentId, Manifest, Deal, Challenge, Proof-of-Storage, BNS
+   - Gorev 1-6 detay: ContentId, Manifest, Deal, Challenge, Proof-of-Storage, BNS
    - Mevcut kod (`src/storage/`, `src/domain/storage_deal.rs`) ile gap analizi
 2. **State pruning / archival vs full node:**
    - `docs/STATE_PRUNING_SPEC.md` — pruning stratejisi (full/archive/light)

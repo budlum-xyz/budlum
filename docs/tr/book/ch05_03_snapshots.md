@@ -1,6 +1,6 @@
 # Bölüm 5.3: Snapshot ve Budama
 
-Snapshot ancak deterministik replay için yeterli konsensüs state'ini taşıyorsa değerlidir. Pruning ise yalnız güvenli recovery kanıtlandığında açılmalıdır. Bu nedenle Budlum snapshot ve budama özelliklerini Mainnet varsayılanı değil, aşamalı hardening işi olarak ele alır.
+Snapshot ancak deterministik replay için yeterli konsensüs state'ini taşıyorsa değerlidir. Pruning ise yalnız güvenli recovery kanıtlandığında açılmalıdır. Bu nedenle Budlum snapshot ve budama özelliklerini Mainnet varsayılanı değil, görevlı hardening işi olarak ele alır.
 
 ## 1. Güncel Runtime Yolu
 
@@ -25,4 +25,4 @@ V2 save/load yardımcıları vardır; ancak canlı node henüz V2'yi canonical r
 
 ## Özet
 
-Snapshot aşamalı bir recovery alt sistemidir. V2 restore yolu uçtan uca kanıtlanmadan Mainnet v1 için pruning kapalı kalmalıdır.
+Snapshot görevlı bir recovery alt sistemidir. V2 restore yolu uçtan uca kanıtlanmadan Mainnet v1 için pruning kapalı kalmalıdır.

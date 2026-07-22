@@ -41,7 +41,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
         Blockchain::new_with_genesis(consensus, Some(storage), 1337, None, Some(funded_genesis()));
     bc.mempool.set_min_fee(0);
 
-    println!("PHASE 1: Injecting 1000 transactions (10 senders x 100)...");
+    println!("TASK 1: Injecting 1000 transactions (10 senders x 100)...");
     for kp in &senders {
         let from = Address::from(kp.public_key_bytes());
         for i in 0..100 {
@@ -54,7 +54,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
 
     assert_eq!(bc.mempool.len(), 1000);
 
-    println!("PHASE 2: Producing blocks to clear mempool...");
+    println!("TASK 2: Producing blocks to clear mempool...");
     // Each block in devnet/test might have a tx limit, but produce_block
     // usually takes as many as possible or a default limit.
     let mut total_processed = 0;
@@ -75,7 +75,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     assert_eq!(total_processed, 1000);
     assert_eq!(bc.state.get_balance(&bob), 1000);
 
-    println!("PHASE 3: Verifying V3-Anchored state root determinism...");
+    println!("TASK 3: Verifying V3-Anchored state root determinism...");
     // Snapshot the live state before the restart; the map-level diff is
     // the diagnostic layer for any replay divergence.
     let live_state = bc.state.clone();

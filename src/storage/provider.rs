@@ -1,4 +1,4 @@
-//! Phase 11.10 — StorageProvider trait and deterministic mock implementation.
+//! Task 11.10 — StorageProvider trait and deterministic mock implementation.
 //!
 //! This is the spec-first boundary from `BUD_STORAGE_TECHNICAL_SPEC.md`:
 //! provider implementations move bytes/proofs off-chain, while consensus code
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_storage_provider_put_get_roundtrip() {
+    fn task11_10_storage_provider_put_get_roundtrip() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_storage_provider_rejects_invalid_range() {
+    fn task11_10_storage_provider_rejects_invalid_range() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_storage_provider_prove_settle_roundtrip() {
+    fn task11_10_storage_provider_prove_settle_roundtrip() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_storage_provider_rejects_forged_proof_range_hash() {
+    fn task11_10_storage_provider_rejects_forged_proof_range_hash() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();

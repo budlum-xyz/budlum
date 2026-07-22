@@ -1,4 +1,4 @@
-//! Faz A — B.U.D. storage + AI dataset entegrasyonu.
+//! Görev A — B.U.D. storage + AI dataset entegrasyonu.
 //!
 //! Bir StorageDeal'a AI-dataset metadata'sı bağlar (eğitim corpus / çıkarım önbelleği).
 //! Bu, kapalı-devre prensibinin depolama tarafını tamamlar: Lubot yalnızca

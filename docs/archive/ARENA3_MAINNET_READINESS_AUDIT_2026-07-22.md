@@ -2,7 +2,7 @@
 
 **Tarih:** 2026-07-22
 **Yazar:** ARENA3
-**SHA zemin:** `origin/main` `f74a6b9` (D3 legacy PoW kaldırma stage-1 + Lubot Faz A)
+**SHA zemin:** `origin/main` `f74a6b9` (D3 legacy PoW kaldırma stage-1 + Lubot Gorev A)
 **Yöntem:** Statik envanter + kod-okuma tabanlı denetim (rust toolchain bu sandbox'ta yok; CI tek hakem). Her V-bulgu için "main HEAD'de fix mevcut mu?" sorusu kod satırı düzeyinde doğrulandı.
 **Budlumdevnet:** salt-okunur, dokunulmadı.
 
@@ -86,7 +86,7 @@
 | # | Konu | Durum | Gerekçe |
 |---|------|-------|---------|
 | V110 | VerifyInference opcode (bud-vm) | ⚠️ Mainnet'te 0 döndürür | Tam STARK verification implementasyonu mainnet sonrası; mainnet'te no-op fail-closed (kullanıcı/AI çıktısı "verified" sayılamaz) |
-| Gizlilik katmanı | PrivacyCommit/NullifierCheck/SumConservation opcode'ları | 🟡 Planlama aşaması | ARENA1 b80db5c talimat dokümanı; bud-isa henüz eklenmedi. Mainnet v1 kapsamı dışı. |
+| Gizlilik katmanı | PrivacyCommit/NullifierCheck/SumConservation opcode'ları | 🟡 Planlama gorevsı | ARENA1 b80db5c talimat dokümanı; bud-isa henüz eklenmedi. Mainnet v1 kapsamı dışı. |
 | MR-6 | Genesis ceremony rehearsal | 🟡 Operasyonel | Yalnızca karar/organizasyon (Ayaz + donanım) — kod işi değil |
 | MR-8 | External audit | 🟡 Operasyonel | Firma anlaşması bekleniyor |
 | MR-9 | Operational smoke drill + 7-gün yeşil | 🟡 Süreç | 7 ardışık gün main yeşil (süreç hedefi) |

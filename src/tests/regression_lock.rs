@@ -5,11 +5,11 @@
 //! ilgili düzeltmenin bozulduğu anlamına gelir — yalnızca bilinçli bir
 //! kararla (ve bu dosyanın güncellenmesiyle) kaldırılabilir.
 //!
-//! ## Regresyon #1: ZK finality fail-open (Phase 0.358)
+//! ## Regresyon #1: ZK finality fail-open (Task 0.358)
 //!
 //! ZkFinalityAdapter'ın generic trait `verify_finality` metodu eskiden
 //! ProofClaimRegistry lookup'ı olmadan finalize edebiliyordu (fail-open).
-//! Phase 0.358'de düzeltildi: trait metodu her zaman `Rejected` döner,
+//! Task 0.358'de düzeltildi: trait metodu her zaman `Rejected` döner,
 //! gerçek doğrulama yalnızca `verify_finality_with_claim` üzerinden
 //! ProofClaimRegistry ile yapılır.
 //!
@@ -56,7 +56,7 @@ mod zk_finality_fail_open_regression {
         }
     }
 
-    /// REGRESYON KİLİDİ (Phase 0.358): `ZkFinalityAdapter::verify_finality`
+    /// REGRESYON KİLİDİ (Task 0.358): `ZkFinalityAdapter::verify_finality`
     /// (generic trait entry point) ASLA `Finalized` dönmemelidir.
     ///
     /// Bu metod eskiden ProofClaimRegistry lookup'ı olmadan finalize
@@ -84,7 +84,7 @@ mod zk_finality_fail_open_regression {
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
             "ZkFinalityAdapter::verify_finality must NEVER return Finalized or Pending. \
-             Got: {:?}. This is a Phase 0.358 regression — ZK finality must only \
+             Got: {:?}. This is a Task 0.358 regression — ZK finality must only \
              resolve via verify_finality_with_claim with ProofClaimRegistry.",
             result
         );
@@ -93,7 +93,7 @@ mod zk_finality_fail_open_regression {
     /// REGRESYON KİLİDİ: `verify_finality_with_claim` accepted_claim_root=None
     /// (registry'de claim yok) durumunda ASLA `Finalized` dönmemelidir.
     ///
-    /// Bu, Phase 0.08 audit'inde bulunan "missing binding" hatasının bir
+    /// Bu, Task 0.08 audit'inde bulunan "missing binding" hatasının bir
     /// tezahürü — claim yoksa finalize olmamalı.
     #[test]
     fn zk_verify_with_claim_rejects_missing_claim() {
@@ -120,7 +120,7 @@ mod zk_finality_fail_open_regression {
     /// REGRESYON KİLİDİ: `verify_finality_with_claim` claim root ile
     /// commitment state root eşleşmediğinde ASLA `Finalized` dönmemelidir.
     ///
-    /// Phase 0.08 audit: "binding the proof to the accepted claim" + "binding
+    /// Task 0.08 audit: "binding the proof to the accepted claim" + "binding
     /// the claim to THIS commitment" — ikisi de başarısız olursa finalize
     /// olmamalı.
     #[test]

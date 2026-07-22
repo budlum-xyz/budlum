@@ -214,9 +214,9 @@ pub const QC_BLOB_TTL_EPOCHS: u64 = 10;
 pub const MAX_QC_BLOB_BYTES: usize = 1_048_576;
 pub const MAX_VOTES_PER_MSG: usize = 128;
 
-// Phase 3: empty until MAINNET_GENESIS_CEREMONY fills multiaddrs (see docs/operations/MAINNET_GENESIS_CEREMONY.md §6).
+// Task 3: empty until MAINNET_GENESIS_CEREMONY fills multiaddrs (see docs/operations/MAINNET_GENESIS_CEREMONY.md §6).
 // Q7 dummy bootnodes (ARENA3) — NOT production; ceremony must replace.
-// Phase 9 Ceremony (ARENA3, 2026-07-16): ceremony-ready bootstrap peers.
+// Task 9 Ceremony (ARENA3, 2026-07-16): ceremony-ready bootstrap peers.
 // These use well-known placeholder peer IDs. During MAINNET_GENESIS_CEREMONY,
 // operators MUST replace these with their actual libp2p peer IDs.
 // The IP addresses are RFC 5737 TEST-NET-3 documentation ranges.
@@ -229,7 +229,7 @@ const TESTNET_BOOTNODES: &[&str] = &[];
 const DEVNET_BOOTNODES: &[&str] = &[];
 const MAINNET_FALLBACK_BOOTNODES: &[&str] = &[];
 const TESTNET_FALLBACK_BOOTNODES: &[&str] = &[];
-// // Phase 9 Ceremony (ARENA3, 2026-07-16): ceremony DNS seeds.
+// // Task 9 Ceremony (ARENA3, 2026-07-16): ceremony DNS seeds.
 // Replace with actual operator-published DNS TXT records during ceremony.
 // ARENA2 fail-closed onarimi (2026-07-17): hedef ceremony domain'leri
 // `_dnsaddr.bootstrap-{1,2}.mainnet.budlum.network` — operatorler ceremony'de
@@ -241,11 +241,11 @@ const MAINNET_DNS_SEEDS: &[&str] = &[
 ];
 const TESTNET_DNS_SEEDS: &[&str] = &[];
 
-// Phase 8.9 / Q5 (kullanıcı onayı 2026-07-16): mainnet placeholder peer
+// Task 8.9 / Q5 (kullanıcı onayı 2026-07-16): mainnet placeholder peer
 // fail-closed guard'ı. Genesis placeholder reddiyle (cli/commands.rs Rule 4)
 // simetrik: dummy/placeholder marker içeren bootnode veya dns seed
 // mainnet'te DIAL EDİLMEZ — süreç startup'ta CRITICAL exit 1 ile durur.
-// Phase 7.2 ceremony'si bu sabitleri gerçek multiaddr'lara çevirir.
+// Task 7.2 ceremony'si bu sabitleri gerçek multiaddr'lara çevirir.
 const PLACEHOLDER_PEER_MARKERS: &[&str] = &["dummy", "placeholder", "203.0.113.", ".example"];
 
 /// Girdi listesindeki placeholder/dummy marker içeren ilk kaydı döner
@@ -271,7 +271,7 @@ pub struct ConsensusParams {
     pub finality_quorum_numerator: u64,
     pub finality_quorum_denominator: u64,
     pub max_votes_per_msg: usize,
-    /// Phase 10 (§1.3 / P0 Transport v2): activation block height for fail-closed v2 wire transport.
+    /// Task 10 (§1.3 / P0 Transport v2): activation block height for fail-closed v2 wire transport.
     pub transport_v2_activation_height: u64,
 }
 
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(Network::Mainnet.default_port(), 4001);
     }
 
-    /// Phase 8.9 / Q5: dummy bootnode/dns-seed sabitleri guard tarafından
+    /// Task 8.9 / Q5: dummy bootnode/dns-seed sabitleri guard tarafından
     /// yakalanmalı (fail-closed), gerçek multiaddr'lar serbest kalmalı.
     /// F7 fix (ARENAX): guard test gücü artırıldı — derlenmiş mainnet sabitlerinin
     /// placeholder marker ile yakalandığını doğrular (c953049 regresyonu kapatıldı).
@@ -375,9 +375,9 @@ mod tests {
         assert!(first_placeholder_peer(&[]).is_none());
     }
 
-    /// Phase 3 §3.4: mainnet is the strictest security profile.
+    /// Task 3 §3.4: mainnet is the strictest security profile.
     #[test]
-    fn phase3_security_profiles() {
+    fn task3_security_profiles() {
         let m = Network::Mainnet.security_config();
         let t = Network::Testnet.security_config();
         let d = Network::Devnet.security_config();

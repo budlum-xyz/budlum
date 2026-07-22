@@ -1,6 +1,6 @@
 # B.U.D. — Broad Universal Database (modül README'si)
 
-**Bu dosya, Phase 10 Bölüm 4 modül-ayrımı kuralı gereği B.U.D.'un kendi README'sidir.**
+**Bu dosya, Task 10 Bölüm 4 modül-ayrımı kuralı gereği B.U.D.'un kendi README'sidir.**
 Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
 
 ## Durum
@@ -22,13 +22,13 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
    yalnız istenen byte-range'i saklayarak gate'i geçebilir. Tam kanıt BudZKVM
    `VerifyMerkle` 64-derinlik Production-gate'ine bağlıdır (kapalı).
 2. **İzin/consent katmanı yok:** manifest ve deal bilgisi tamamen açıktır;
-   `AccessGrant` kavramı Phase 10 Bölüm 2 kapsamında tasarlanacaktır
+   `AccessGrant` kavramı Task 10 Bölüm 2 kapsamında tasarlanacaktır
    (hard-enforcement hedefli — egemenlik kuralı soft enforcement'ı eler).
 3. **`ContentManifest` owner alanı içermez** (2026-07-18 kod doğrulaması:
    alanlar yalnız `manifest_id/total_size/shard_count/shards`). Sahiplik,
-   Phase 10 izin katmanında eklenecek.
+   Task 10 izin katmanında eklenecek.
 4. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
-   erişim için ödediği "tüketici erişim" ekonomisi Phase 10 Bölüm 2'de ayrı katman
+   erişim için ödediği "tüketici erişim" ekonomisi Task 10 Bölüm 2'de ayrı katman
    olarak tasarlanır.
 
 ## Test suite
@@ -43,9 +43,9 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 
 ## Yol haritası işaretleri
 
-- Phase 10 Bölüm 2: `AccessGrant` + `AccessRevocation` + sahip-imzalı provenance
-  (`StorageCommitment`) + Faz-2 key-wrapping (hard enforcement).
-- Phase 10 Bölüm 2 zorunlu entegrasyonu: `AiInferenceRequest.input_ref` bir
+- Task 10 Bölüm 2: `AccessGrant` + `AccessRevocation` + sahip-imzalı provenance
+  (`StorageCommitment`) + Görev-2 key-wrapping (hard enforcement).
+- Task 10 Bölüm 2 zorunlu entegrasyonu: `AiInferenceRequest.input_ref` bir
   `DataAsset`'e işaret ediyorsa AiVerifier grant kontrolü OLMADAN hesaplayamaz.
 - Tam-PoS (Merkle-64) gate'i kapanmadan "veri bütünlüğü kanıtlandı" iddiası
   kurulamaz — sahte-yeşil uyarısı o güne kadar bu README'de kalır.

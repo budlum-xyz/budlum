@@ -86,7 +86,7 @@ async fn test_state_bit_identical_after_reload() {
 
         // Overlay fields (bridge/message/settlement/global-header roots) are
         // commit-path projections not mirrored by the replay loop — normalize
-        // on both sides (see load_test.rs PHASE 3 for the full rationale) and
+        // on both sides (see load_test.rs TASK 3 for the full rationale) and
         // compare the executable consensus surface bit-for-bit.
         let mut state_reloaded_masked = bc_reloaded.state.clone();
         state_reloaded_masked.bridge_root = [0u8; 32];

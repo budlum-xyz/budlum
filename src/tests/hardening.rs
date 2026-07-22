@@ -151,9 +151,9 @@ mod hardening_tests {
         );
     }
 
-    // === Phase 0.04 SECURITY TESTS (Güvenlik Denetimi Madde 2 & 3) ===
+    // === Task 0.04 SECURITY TESTS (Güvenlik Denetimi Madde 2 & 3) ===
 
-    /// Phase 0.04 Görev 1 — SnapshotChunk DoS üst sınırı.
+    /// Task 0.04 Görev 1 — SnapshotChunk DoS üst sınırı.
     /// Güvenlik denetimi §2: saldirgan `total = u32::MAX` göndererek
     /// alıcı node'u sınırsız bellek ayırmaya zorlayabilir; bu da Rust'ın
     /// varsayılan abort davranışıyla süreci çökertir. Bu test, sabitin
@@ -175,7 +175,7 @@ mod hardening_tests {
         // runtime'da değer kontrolü yapılmıyor; sabit bir tanım.)
     }
 
-    /// Phase 0.04 Görev 2 — BLS PoP production çağrısı.
+    /// Task 0.04 Görev 2 — BLS PoP production çağrısı.
     /// Güvenlik denetimi §3: `verify_pop` daha önce yalnızca unit
     /// test'te çağrılıyordu; production'da hiçbir yerde çağrılmıyordu
     /// (rogue-key saldırısına açık). Bu test, public `verify_pop`
@@ -222,7 +222,7 @@ mod hardening_tests {
         ));
     }
 
-    // === Phase 0.10 SECURITY FIX (Güvenlik Denetimi §2) =========================
+    // === Task 0.10 SECURITY FIX (Güvenlik Denetimi §2) =========================
     // Snapshot session memory-bloat koruması: `in_progress_snapshots` map'i
     // aşağıdaki sabitlerle sınırlı, eski session'lar sweep ile düşürülüyor.
 
@@ -248,7 +248,7 @@ mod hardening_tests {
         const { assert!(SNAPSHOT_SESSION_TIMEOUT_SECS <= 3600) };
     }
 
-    // === Phase 0.10 SECURITY FIX (Güvenlik Denetimi §5) =========================
+    // === Task 0.10 SECURITY FIX (Güvenlik Denetimi §5) =========================
     // RPC kimlik doğrulaması varsayılan olarak AÇIK. Operatörün bilinçli
     // olarak devre dışı bırakması (`operator_default`) log uyarısı verir.
 
@@ -297,7 +297,7 @@ mod hardening_tests {
         );
     }
 
-    // === Phase 0.10 SECURITY FIX (Güvenlik Denetimi §6) =========================
+    // === Task 0.10 SECURITY FIX (Güvenlik Denetimi §6) =========================
     // KeyPair / ValidatorKeys `save` artık dosyayı doğrudan 0o600 ile
     // oluşturur (TOCTOU penceresi yok) ve izin hatalarını yutar (sessiz
     // hata yok). Aşağıdaki test'ler bu iki garantiyi sabitler.
@@ -344,20 +344,20 @@ mod hardening_tests {
         );
     }
 
-    // === Phase 0.12 SECURITY FIX (Güvenlik Denetimi §5 wiring) ==================
+    // === Task 0.12 SECURITY FIX (Güvenlik Denetimi §5 wiring) ==================
     // `NodeConfig::default()` artık `rpc_auth_required: true` (secure).
     // Bu test, default'un struct literal'ı üzerinden gerçekten `true`
-    // olduğunu sabitler. (Phase 0.10 sadece `RpcSecurityConfig::default()`'ı
+    // olduğunu sabitler. (Task 0.10 sadece `RpcSecurityConfig::default()`'ı
     // düzeltmişti; CLI'nin okuduğu `NodeConfig::default()`'a
     // dokunmamıştı — yani gerçek main başlangıcında hâlâ `false`
-    // kalıyordu. Phase 0.12 wiring gap'i kapatıyor.)
+    // kalıyordu. Task 0.12 wiring gap'i kapatıyor.)
     #[test]
     fn tur7_cli_config_default_has_rpc_auth_required_true() {
         use crate::cli::NodeConfig;
         let cfg = NodeConfig::default();
         assert!(
             cfg.rpc_auth_required,
-            "NodeConfig::default() must require RPC auth (was: false before Phase 0.12 wiring fix)"
+            "NodeConfig::default() must require RPC auth (was: false before Task 0.12 wiring fix)"
         );
         assert!(
             cfg.rpc_allowed_ips.contains(&"127.0.0.1".to_string()),
@@ -391,7 +391,7 @@ mod hardening_tests {
             auth_required: false,
             ..Default::default()
         };
-        // `from_default` artık `true` (Phase 0.10) → uyarı yok.
+        // `from_default` artık `true` (Task 0.10) → uyarı yok.
         assert!(from_default.auth_required);
         // `operator_default` kasıtlı olarak `false` → uyarı tetiklenir.
         assert!(!from_op.auth_required);

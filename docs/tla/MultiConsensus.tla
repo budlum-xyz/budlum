@@ -1,12 +1,12 @@
 ----------------------------- MODULE MultiConsensus -----------------------------
-(* Phase 9 — TLA+ iskeleti (ARENA3, 2026-07-16)                              *)
+(* Task 9 — TLA+ iskeleti (ARENA3, 2026-07-16)                              *)
 (* Budlum Universal Settlement Layer: çoklu-konsensüs domain'leri arası       *)
 (* atomik settlement'in safety + liveness özelliklerini modellemek için.       *)
 (*                                                                             *)
 (* Bu bir ISKELET modeldir — tam formal verification değildir.                 *)
 (* Gap: quorum-bound voting, BLS aggregate signatures, actual network delays,  *)
 (* Byzantium node davranışı, storage attestation adapter.                      *)
-(* Tam model harici audit firması tarafından yapılacaktır (Phase 5).           *)
+(* Tam model harici audit firması tarafından yapılacaktır (Task 5).           *)
 (******************************************************************************)
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
@@ -14,7 +14,7 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 (******************************************************************************
  * Constants: domain tipleri, validator kümesi eşikleri.
  ******************************************************************************)
-   
+
 CONSTANTS
   Domains,          \* {PoW, PoS, BFT, PoA} — konsensüs domain'leri
   Validators,       \* Tüm validator'ların kümesi

@@ -15,7 +15,7 @@ pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
 /// Set as the `ConsensusDomain::finality_adapter` value when registering a
 /// `StorageAttestation` domain. Distinct from the PoW header-chain adapter
 /// (`POW_HEADER_CHAIN_ADAPTER`) because storage finality is **not** the same
-/// shape as bounded-PoW header finality (Faz 3 will introduce
+/// shape as bounded-PoW header finality (Görev 3 will introduce
 /// `StorageFinalityAdapter`, vision §3 + §8.3).
 pub const STORAGE_ATTESTATION_ADAPTER: &str = "storage-attestation-v1";
 
@@ -27,12 +27,12 @@ pub enum ConsensusKind {
     Bft,
     Zk,
     Custom(String),
-    /// B.U.D. Storage ConsensusDomain (Phase 0.38, Faz 1, vision §8.1).
+    /// B.U.D. Storage ConsensusDomain (Task 0.38, Görev 1, vision §8.1).
     ///
     /// Carries the bounded `StorageDomainParams` so the type system forces
     /// every consumer to handle the storage-specific limits. We use a new
     /// enum variant (not `Custom("StorageProofOfReplication")`) because the
-    /// parameter bundle is part of the consensus surface — see Phase 0.38 plan
+    /// parameter bundle is part of the consensus surface — see Task 0.38 plan
     /// §3.1: "yeni bir hash fonksiyonu icat etme" / "yeni bir köprü protokolü
     /// icat etme" but it IS a new domain kind that needs its own typing.
     StorageAttestation(StorageDomainParams),

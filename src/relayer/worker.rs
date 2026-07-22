@@ -3,7 +3,7 @@ use crate::core::address::Address;
 use crate::core::transaction::{Transaction, TransactionType};
 use tracing::{info, warn};
 
-/// Phase 5 §5.1: Universal Relayer Worker.
+/// Task 5 §5.1: Universal Relayer Worker.
 /// Watches the Budlum chain for UniversalRelay transactions and
 /// "relays" them to external chains (EVM, Solana, etc.).
 
@@ -66,15 +66,15 @@ impl RelayerWorker {
         match ext_tx.chain {
             crate::core::transaction::ExternalChain::Ethereum => {
                 info!("Relaying to Ethereum...");
-                // Phase 8.9 / L1: gerçek kanıt üretimi — sonuç olgularının
+                // Task 8.9 / L1: gerçek kanıt üretimi — sonuç olgularının
                 // domain-separated leaf'i tek-yaprak ağacın kökü olur
                 // (executor kapısı aynı şemayla dogrular: MerkleProof {leaf, 0, []}).
-                // TODO(phase9): EVM light-client root anchor + cok-yaprakli
+                // TODO(task9): EVM light-client root anchor + cok-yaprakli
                 // aggregation (gercek Merkle-patricia receipt trie) ve
                 // external broadcast'tan gelen gercek tx_hash.
                 let mut result = crate::core::transaction::RelayerExternalResult {
                     chain: ext_tx.chain,
-                    tx_hash: "0x".to_string() + &hex::encode([0xEE; 32]), // TODO(phase9)
+                    tx_hash: "0x".to_string() + &hex::encode([0xEE; 32]), // TODO(task9)
                     success: true,
                     message: None,
                     receipt_proof: Vec::new(),
@@ -102,7 +102,7 @@ impl RelayerWorker {
                     self.chain.get_chain_id().await,
                     TransactionType::RelayerResult(result),
                 );
-                // TODO(phase9): sign with relayer key via Node signer
+                // TODO(task9): sign with relayer key via Node signer
                 // result_tx.signature = self.signer.sign(&result_tx.signing_hash());
 
                 let _ = self.chain.add_transaction(result_tx).await;

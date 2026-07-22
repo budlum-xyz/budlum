@@ -1,4 +1,4 @@
-//! Phase 11.8 — per-domain fork-choice and lifecycle primitives.
+//! Task 11.8 — per-domain fork-choice and lifecycle primitives.
 //!
 //! This module is deliberately pure: it resolves candidate heads without
 //! mutating chain state or performing network/RPC calls. Consensus engines can
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_pow_picks_highest_cumulative_work() {
+    fn task11_8_pow_picks_highest_cumulative_work() {
         let resolver = DomainForkChoice {
             domain_id: 1,
             kind: ConsensusKind::PoW,
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_pos_picks_highest_vote_weight() {
+    fn task11_8_pos_picks_highest_vote_weight() {
         let resolver = DomainForkChoice {
             domain_id: 2,
             kind: ConsensusKind::PoS,
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_bft_conflicting_qc_is_rejected() {
+    fn task11_8_bft_conflicting_qc_is_rejected() {
         let resolver = DomainForkChoice {
             domain_id: 3,
             kind: ConsensusKind::Bft,
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_poa_requires_authority_quorum() {
+    fn task11_8_poa_requires_authority_quorum() {
         let resolver = DomainForkChoice {
             domain_id: 4,
             kind: ConsensusKind::PoA,
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_lifecycle_transitions_are_explicit() {
+    fn task11_8_lifecycle_transitions_are_explicit() {
         assert!(DomainLifecycleStatus::Proposed.can_transition_to(DomainLifecycleStatus::Active));
         assert!(DomainLifecycleStatus::Active.can_transition_to(DomainLifecycleStatus::Paused));
         assert!(DomainLifecycleStatus::Paused.can_transition_to(DomainLifecycleStatus::Draining));
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_8_mixed_domain_candidates_rejected() {
+    fn task11_8_mixed_domain_candidates_rejected() {
         let resolver = DomainForkChoice {
             domain_id: 1,
             kind: ConsensusKind::PoW,

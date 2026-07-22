@@ -89,7 +89,7 @@ pub enum FinalityProof {
         total_work_hint: u128,
         /// The domain block hash this PoW finality claim refers to. Must equal
         /// `commitment.domain_block_hash` — binds the proof to THIS commitment
-        /// (Phase 0.10 hardening; previously the proof was unbound).
+        /// (Task 0.10 hardening; previously the proof was unbound).
         #[serde(default)]
         declared_head_hash: Hash32,
         /// Declared cumulative proof-of-work up to `declared_head_hash`. Checked
@@ -112,7 +112,7 @@ pub enum FinalityProof {
         /// Real ed25519 signatures over the commitment binding message, each by
         /// an authority (the authority's `Address` IS its ed25519 public key,
         /// per the chain-wide convention). Replaces the former self-reported
-        /// `signer_count`/`validator_count` (Phase 0.12 hardening).
+        /// `signer_count`/`validator_count` (Task 0.12 hardening).
         #[serde(default)]
         signatures: Vec<PoAAuthoritySignature>,
     },
@@ -121,15 +121,15 @@ pub enum FinalityProof {
         commit_hash: Hash32,
         /// Real BFT commit certificate (BLS aggregate over the validator set),
         /// verified cryptographically — replaces the former self-reported
-        /// `signer_count`/`total_validators` (Phase 0.10 hardening).
+        /// `signer_count`/`total_validators` (Task 0.10 hardening).
         cert: FinalityCert,
         validator_snapshot: ValidatorSetSnapshot,
     },
-    /// ZK finality (Phase 0.08, Option B): rather than carrying the raw STARK proof,
+    /// ZK finality (Task 0.08, Option B): rather than carrying the raw STARK proof,
     /// this references a proof already submitted to — and cryptographically
     /// verified by — the `ProofClaimRegistry` (via `submit_zk_proof`). This keeps
     /// a single source of truth for ZK verification and removes the two parallel
-    /// verification paths that the Phase 0.06/5 audit flagged.
+    /// verification paths that the Task 0.06/5 audit flagged.
     ///
     /// - `domain_id` / `target_height`: the `ProofClaimKey` to look up.
     /// - `final_state_root`: must match BOTH the accepted claim's root AND the
@@ -200,7 +200,7 @@ pub struct PoWFinalityAdapter {
     /// Minimum plausible proof-of-work attributed to a single confirmation.
     /// Used to (a) reject cumulative-work claims that are inconsistent with the
     /// declared confirmation depth and (b) enforce a minimum-work floor. This is
-    /// a config parameter, not a hard-coded constant (Phase 0.10).
+    /// a config parameter, not a hard-coded constant (Task 0.10).
     pub min_work_per_confirmation: u128,
 }
 
@@ -208,7 +208,7 @@ impl Default for PoWFinalityAdapter {
     fn default() -> Self {
         Self {
             default_min_confirmations: 64,
-            // Phase 0.34 / BUG #9: non-trivial floor so depth claims must be
+            // Task 0.34 / BUG #9: non-trivial floor so depth claims must be
             // backed by declared work (still not a full light-client).
             min_work_per_confirmation: 1_000,
         }
@@ -466,7 +466,7 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
 #[derive(Debug, Clone)]
 pub struct PoAFinalityAdapter {
     /// Count-based quorum numerator (PoA is equal-weight, NOT stake-weighted —
-    /// PoA deliberately has no stake concept, preserving Phase 0-2 isolation).
+    /// PoA deliberately has no stake concept, preserving Task 0-2 isolation).
     pub quorum_numerator: u64,
     /// Count-based quorum denominator.
     pub quorum_denominator: u64,
@@ -500,12 +500,12 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
-        // Phase 0.12: PoA finality now verifies REAL ed25519 signatures from the
+        // Task 0.12: PoA finality now verifies REAL ed25519 signatures from the
         // approved authority set (count-based quorum), instead of trusting a
         // self-reported signer_count. `domain` and `commitment` are genuinely
         // used. This does NOT touch the permissionless stake registry — PoA
         // keeps its own separate, stake-free authority/signature model
-        // (isolation from Phase 0-2 preserved).
+        // (isolation from Task 0-2 preserved).
         let FinalityProof::PoA {
             authorities,
             signatures,
@@ -570,7 +570,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
 
 #[derive(Debug, Clone)]
 pub struct BftFinalityAdapter {
-    /// Retained for API/config compatibility. NOTE (Phase 0.10): the effective quorum
+    /// Retained for API/config compatibility. NOTE (Task 0.10): the effective quorum
     /// is now enforced cryptographically inside `FinalityCert::verify` via
     /// `ValidatorSetSnapshot::quorum_stake()` (stake-weighted, using the global
     /// `FINALITY_QUORUM_*` constants), not by these fields.
@@ -598,7 +598,7 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
-        // Phase 0.10: BFT now verifies a REAL commit certificate (BLS aggregate over
+        // Task 0.10: BFT now verifies a REAL commit certificate (BLS aggregate over
         // the validator set) using the same primitive as PoS
         // (`FinalityCert::verify`), instead of trusting a self-reported
         // `signer_count`. `domain` and `commitment` are genuinely used.
@@ -677,7 +677,7 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
 pub struct ZkFinalityAdapter;
 
 impl ZkFinalityAdapter {
-    /// Verify ZK finality against an already-accepted proof claim (Phase 0.08,
+    /// Verify ZK finality against an already-accepted proof claim (Task 0.08,
     /// Option B).
     ///
     /// The raw STARK proof is NOT re-verified here — it was already
@@ -844,7 +844,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 cert,
                 validator_snapshot,
             } => {
-                // Phase 3 §0.1 (ARENA2): Real PoS verification — same checks as
+                // Task 3 §0.1 (ARENA2): Real PoS verification — same checks as
                 // PosFinalityAdapter (lines 470-525). Previously this branch only
                 // checked agg_sig_bls.is_empty() and height/hash match, which
                 // allowed a fake agg_sig_bls to pass if height/hash matched.
@@ -904,7 +904,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 cert,
                 validator_snapshot,
             } => {
-                // Phase 3 §0.1 (ARENA2): Real BFT verification — same checks as
+                // Task 3 §0.1 (ARENA2): Real BFT verification — same checks as
                 // BftFinalityAdapter (lines 665-730). Previously this branch only
                 // checked agg_sig_bls.is_empty() and height/hash match.
                 if validator_snapshot.validators.is_empty() {
@@ -970,7 +970,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
 }
 
 pub fn hash_finality_proof(proof: &FinalityProof) -> [u8; 32] {
-    // SECURITY (Phase 0.32): must not silently hash empty bytes on serialize failure
+    // SECURITY (Task 0.32): must not silently hash empty bytes on serialize failure
     // — two distinct proofs could collide. Fail-fast on the (deterministic,
     // non-attacker-triggerable) programming error instead.
     let encoded = bincode::serialize(proof)

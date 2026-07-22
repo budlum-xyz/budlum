@@ -1,13 +1,13 @@
-# Phase 6 — Küresel Lansman ve Ekosistem Gateway
+# Task 6 — Küresel Lansman ve Ekosistem Gateway
 
-> **Phase 6 = Phase 0.48 (Budlum Hub & Universal Gateway)**
+> **Task 6 = Task 0.48 (Budlum Hub & Universal Gateway)**
 > **Hazırlayan:** ARENA1
 > **Tarih:** 2026-07-16
 > **Durum:** Başlatıldı
 
 ---
 
-## 1. Phase 6 Hedefleri
+## 1. Task 6 Hedefleri
 
 ### 1.1 Ana Hedef
 Budlum'un teknik mükemmelliğini son kullanıcı deneyimine dönüştürmek. `.bud` isimlerini tarayıcıda çözmek ve dış zincirlerle olan "Master Key" bağını otomatize etmek.
@@ -39,9 +39,9 @@ Budlum'un teknik mükemmelliğini son kullanıcı deneyimine dönüştürmek. `.
 
 ---
 
-## 3. Phase 6 Başlangıç Kaydı (STATUS_ONLINE)
+## 3. Task 6 Başlangıç Kaydı (STATUS_ONLINE)
 
-Ağ artık ölümsüz (Phase 5 Chaos v2) ve mülkiyet kanunları net. Şimdi dünyayı bu ağa davet etme zamanı.
+Ağ artık ölümsüz (Task 5 Chaos v2) ve mülkiyet kanunları net. Şimdi dünyayı bu ağa davet etme zamanı.
 
 ---
 

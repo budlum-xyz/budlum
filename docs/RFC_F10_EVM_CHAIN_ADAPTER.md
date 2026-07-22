@@ -2,7 +2,7 @@
 
 > **Durum:** DESIGN / PLAN (kod değil). RFC §10 deseni: plan onayı → kod.
 > **Yazar:** ARENA1 (görev yöneticisi, cross_domain domain'i) · **Tarih:** 2026-07-18
-> **Temel:** main `de7b6d2` · **Phase 10.5 bulgusu:** F10 (🔴 mainnet-blocker)
+> **Temel:** main `de7b6d2` · **Task 10.5 bulgusu:** F10 (🔴 mainnet-blocker)
 > **Kapanan tehdit:** SECURITY_AUDIT_HACKER H4 (🔴 Critical) — "Universal Relay
 > tx yalnız log üretiyor, hedef zincir formatına kriptografik bağ yok → spoofed
 > authorization".
@@ -97,7 +97,7 @@ Q1). Kapsam:
 ### 3.3 Sync-committee light-client (PoS, Altair+)
 
 **Q2 = both:** sync-committee TERCİH, N-confirmation fallback. Sync-committee
-kapsam (F10 Faz 2):
+kapsam (F10 Görev 2):
 - **Sync period** (~27h, 512-validator sync committee, her ~256 epoch'da rotate).
 - **Sync-aggregate:** BLS12-381 aggregated signature over signed header
   (`attested_header`, `signature_slot`).
@@ -108,7 +108,7 @@ kapsam (F10 Faz 2):
 - **Dep:** BLS12-381 zaten `blst` crate'i mevcut (BLS finality kullanıyor) →
   reuse, yeni dep YOK.
 
-**N-confirmation fallback (F10 Faz 1):** k-deep canonical chain (örn. 64 block),
+**N-confirmation fallback (F10 Görev 1):** k-deep canonical chain (örn. 64 block),
 reorg penceresi geçince finalize say. Daha zayıf ama sync-committee öncesi
 geçiş açısından.
 
@@ -123,7 +123,7 @@ geçiş açısından.
 
 ## 4. Güven modeli akışları (Q1 = relayer_produces, Q4 = bidirectional)
 
-### 4.1 ETH → Budlum (mint) — F10 Faz 1+2
+### 4.1 ETH → Budlum (mint) — F10 Görev 1+2
 
 ```
 1. Kullanıcı Ethereum bridge kontratına deposit eder (lock).
@@ -132,7 +132,7 @@ geçiş açısından.
    { tx_hash, receipt_rlp, mpt_proof[], block_header, header_chain_proof }
    - mpt_proof: receiptsRoot → receipt (MPT nodes)
    - block_header: stateRoot/receiptsRoot/hash taşır
-   - header_chain_proof: sync-committee (Faz 2) veya k-deep kanıtı (Faz 1)
+   - header_chain_proof: sync-committee (Görev 2) veya k-deep kanıtı (Görev 1)
 4. Relayer Budlum'a submit_relay_proof gönderir (registry kapısından — stake).
 5. Budlum zinciri (deterministik, on-chain) doğrular:
    a. header_chain_proof → block_header finalize mi (sync-committee BLS veya k-deep)
@@ -142,7 +142,7 @@ geçiş açısından.
 6. Geçerliyse mint_on_budlum(asset, amount, recipient).
 ```
 
-### 4.2 Bud → Ethereum (burn → unlock) — F10 Faz 3
+### 4.2 Bud → Ethereum (burn → unlock) — F10 Görev 3
 
 ```
 1. Kullanıcı Budlum'da burn eder (bridge outbound).
@@ -155,7 +155,7 @@ geçiş açısından.
    + relayer tx üretimi).
 ```
 
-**⚠ Faz 3 notu:** Bud→ETH tarafı **Ethereum'da bir akıllı kontrat** gerektirir
+**⚠ Görev 3 notu:** Bud→ETH tarafı **Ethereum'da bir akıllı kontrat** gerektirir
 (Budlum finality'sini EVM'de verify eden light-client). Bu büyük ayrı bir iş
 (Solidity, dağıtım, audit). **F10 RFC kapsamı: Budlum-taraflı relay gate +
 relayer tx üretimi**; Ethereum-taraflı kontrat **ayrı RFC** (F10.2).
@@ -196,9 +196,9 @@ RPC'sine bağlanmaz.
 **Gate:** `src/tests/evm_adapter.rs` + `scripts/check-evm-adapter.sh`
 (isim-kilitli, vacuous-kanaryalı) + CI job + branch protection +17→18.
 
-## 7. Fazlama (RFC onayı sonrası, atomik PR'lar)
+## 7. Görevlama (RFC onayı sonrası, atomik PR'lar)
 
-| Faz | Kapsam | Kapı | Risk |
+| Görev | Kapsam | Kapı | Risk |
 |---|---|---|---|
 | **F10.1** | in-tree RLP + MPT verifier + KAT vectors + fuzz | derleme+KAT+fuzz | 🟡 yeni kripto impl (KAT kritik) |
 | **F10.2** | EvmChainAdapter `verify_receipt_proof` + Budlum relay gate + N-conf finality + ETH→Bud mint akışı + test matrisi | negatif matris (§6) | 🔴 on-chain verify güvenliği |
@@ -212,7 +212,7 @@ F10.3 (sync-committee) F10.2'nin N-conf finality'sini güçlendirir. F10.4/F10.5
 
 ## 8. Açık sorular (gözden geçirenler için)
 
-1. **Faz sırası:** F10.1+2 (N-conf, hızlı mainnet-prep) mi, yoksa F10.1+2+3
+1. **Görev sırası:** F10.1+2 (N-conf, hızlı mainnet-prep) mi, yoksa F10.1+2+3
    (sync-committee, daha güvenli ama daha yavaş) mi ilk teslim? (Q2=both dedi;
    sıra kararı.)
 2. **`blst` reuse:** BLS12-381 mevcut BLS finality crate'i (blst?) sync-committee
@@ -232,11 +232,11 @@ F10.3 (sync-committee) F10.2'nin N-conf finality'sini güçlendirir. F10.4/F10.5
 F10, H4 🔴'ü **gerçek kriptografik receipt doğrulamasıyla** kapatır: Budlum
 Ethereum'dan gelen her claim'i bağımsız olarak MPT + sync-committee ile verify
 eder; relayer trust-minimized producer. **In-tree** (RLP + MPT, minimal-dep uyumlu),
-**çift yön** (ETH↔Bud), **relayer-produces** modeli. Fazlama F10.1 (RLP+MPT
+**çift yön** (ETH↔Bud), **relayer-produces** modeli. Görevlama F10.1 (RLP+MPT
 foundation) → F10.2 (on-chain verify + mint) ana teslim; F10.3 (sync-committee)
 güvenlik güçlendirmesi.
 
 **Hiçbir kod bu RFC'de YOK** — kullanıcı + birlik review'ı sonrası F10.1 ile
-başlanır. Bu RFC, Phase 10.5 F10 bulgusunun tasarım çözümüdür.
+başlanır. Bu RFC, Task 10.5 F10 bulgusunun tasarım çözümüdür.
 
 *Co-authored-by: ARENA1 <arena1@budlum.ai>*

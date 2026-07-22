@@ -24,9 +24,9 @@ check_root() {
   [[ -f "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" ]] || fail "missing docs/audit_prep/CI_STABILITY_WINDOW.md"
 
   check_contains "$root/docs/THREAT_MODEL.md" "Threat Model v2"
-  check_contains "$root/docs/THREAT_MODEL.md" "Phase 11.20 Mitigation Closure Matrix"
+  check_contains "$root/docs/THREAT_MODEL.md" "Task 11.20 Mitigation Closure Matrix"
   check_contains "$root/docs/THREAT_MODEL.md" "Residual Risk Register"
-  check_contains "$root/docs/audit_prep/README.md" "Phase 11.20 Audit Prep Index"
+  check_contains "$root/docs/audit_prep/README.md" "Task 11.20 Audit Prep Index"
   check_contains "$root/docs/audit_prep/README.md" "threat model v2"
   check_contains "$root/docs/audit_prep/README.md" "Evidence map"
   check_contains "$root/docs/audit_prep/README.md" "Known limits"
@@ -52,7 +52,7 @@ check_root() {
   check_contains "$root/docs/audit_prep/BRANCH_PROTECTION_REVIEW.md" "Required checks list"
   check_contains "$root/docs/operations/GOVERNANCE_PARAMETER_RUNBOOK.md" "Governance Parameter Rollout"
   check_contains "$root/docs/operations/GOVERNANCE_PARAMETER_RUNBOOK.md" "Parameter whitelist"
-  check_contains "$root/docs/MAINNET_READINESS.md" "Phase 11.20 Snapshot"
+  check_contains "$root/docs/MAINNET_READINESS.md" "Task 11.20 Snapshot"
   check_contains "$root/docs/MAINNET_READINESS.md" "28/28 success"
   echo "Audit prep gate OK"
 }
@@ -64,11 +64,11 @@ self_test() {
   mkdir -p "$tmp/docs/audit_prep" "$tmp/docs/operations"
   cat > "$tmp/docs/THREAT_MODEL.md" <<'DOC'
 # Threat Model v2
-## Phase 11.20 Mitigation Closure Matrix
+## Task 11.20 Mitigation Closure Matrix
 ## Residual Risk Register
 DOC
   cat > "$tmp/docs/audit_prep/README.md" <<'DOC'
-# Phase 11.20 Audit Prep Index
+# Task 11.20 Audit Prep Index
 threat model v2
 ## Evidence map
 ## Known limits
@@ -98,7 +98,7 @@ DOC
   printf '# External Audit Dry-Run\nAuditor persona checklist\n' > "$tmp/docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md"
   printf '# Branch Protection Review\nRequired checks list\n' > "$tmp/docs/audit_prep/BRANCH_PROTECTION_REVIEW.md"
   printf '# Governance Parameter Rollout\nParameter whitelist\n' > "$tmp/docs/operations/GOVERNANCE_PARAMETER_RUNBOOK.md"
-  printf '# Mainnet Readiness\nPhase 11.20 Snapshot\n28/28 success\n' > "$tmp/docs/MAINNET_READINESS.md"
+  printf '# Mainnet Readiness\nTask 11.20 Snapshot\n28/28 success\n' > "$tmp/docs/MAINNET_READINESS.md"
   check_root "$tmp" >/dev/null
   rm "$tmp/docs/VALIDATOR_KEY_MANAGEMENT.md"
   if ( check_root "$tmp" ) >/dev/null 2>&1; then

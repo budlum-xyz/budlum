@@ -28,7 +28,7 @@ use tracing::info;
 /// rotating source addresses can turn rate limiting itself into a memory DoS.
 const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
 
-// Phase 0.10 (security audit §5): `auth_required` defaults to `true` (secure
+// Task 0.10 (security audit §5): `auth_required` defaults to `true` (secure
 // by default). Operators that explicitly want an unauthenticated RPC
 // must call [`RpcSecurityConfig::operator_default`], which logs a
 // prominent warning at server startup.
@@ -46,7 +46,7 @@ pub struct RpcSecurityConfig {
 
 impl Default for RpcSecurityConfig {
     fn default() -> Self {
-        // Phase 0.10 (security audit §5): secure default — auth ON, no API key
+        // Task 0.10 (security audit §5): secure default — auth ON, no API key
         // (caller must configure `api_key` before serving). This is what
         // [`Self::operator_default`] used to be (auth OFF); the prior
         // behaviour is preserved under that explicit name for trusted
@@ -66,7 +66,7 @@ impl Default for RpcSecurityConfig {
 
 impl RpcSecurityConfig {
     pub fn operator_default() -> Self {
-        // Phase 0.10 SECURITY WARNING: this constructor explicitly disables
+        // Task 0.10 SECURITY WARNING: this constructor explicitly disables
         // authentication. It is intended for trusted local / private
         // network deployments only. A loud, multi-line `warn!` is logged
         // at every server start so an operator cannot accidentally ship
@@ -231,7 +231,7 @@ pub struct RpcServer {
     node: NodeClient,
     security: RpcSecurityConfig,
     mode: RpcMode,
-    /// B.U.D. storage registry (Phase 0.38, Faz 5). Wrapped in `Arc<Mutex<_>>`
+    /// B.U.D. storage registry (Task 0.38, Görev 5). Wrapped in `Arc<Mutex<_>>`
     /// so the same registry is shared with future consensus-side
     /// producers. The public RPC surface mutates it; the chain layer reads
     /// from a snapshot at block-application time.
@@ -407,7 +407,7 @@ impl RpcServer {
             "replayNonceRoot": Self::bytes32_to_0x(h.replay_nonce_root),
             "proposer": h.proposer.map(|p| p.to_string()),
             "settlementFinalityRoot": Self::bytes32_to_0x(h.settlement_finality_root),
-            // B.U.D. Faz 4 (ARENA2): storage_root anchoring — null when no
+            // B.U.D. Görev 4 (ARENA2): storage_root anchoring — null when no
             // storage proofs in this block, 0x-prefixed hex when present.
             "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
         })
@@ -460,7 +460,7 @@ impl RpcServer {
     }
 }
 
-/// Phase 8.6: `benches/micro/timing_safe.rs` regresyon bench'i bu fonksiyona
+/// Task 8.6: `benches/micro/timing_safe.rs` regresyon bench'i bu fonksiyona
 /// erişir; bu yüzden `pub`'tır. Public API yüzeyinin parçası DEĞİLDİR
 /// (`#[doc(hidden)]`); dış kullanıcılar için stabilite garantisi yoktur.
 /// Değiştirilirse timing-safe CI kapısı (statik tarama + dudect-tarzı
@@ -488,7 +488,7 @@ fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
         return false;
     };
 
-    // Phase 0.35 / B3: constant-time compare of provided secret material.
+    // Task 0.35 / B3: constant-time compare of provided secret material.
     let api_ok = req
         .headers()
         .get("x-api-key")
@@ -525,7 +525,7 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
         }
     }
 
-    // Phase 0.35 / B2: X-Real-IP is client-spoofable unless the request
+    // Task 0.35 / B2: X-Real-IP is client-spoofable unless the request
     // actually came through a reverse proxy we trust. Only honor it when
     // `trusted_proxies` is non-empty (same gate as X-Forwarded-For).
     if !config.trusted_proxies.is_empty() {
@@ -1368,7 +1368,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         proof: crate::consensus::qc::QcFaultProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Phase 0.17 (security audit §4): permissionless entry-point.
+        // Task 0.17 (security audit §4): permissionless entry-point.
         // The proof's correctness is enforced by
         // `handle_qc_fault_proof` (merkle inclusion +
         // cryptographic dilithium verification), which is the
@@ -1427,11 +1427,11 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    // === Phase 0.38 — B.U.D. Storage RPC implementations ====================
+    // === Task 0.38 — B.U.D. Storage RPC implementations ====================
     // The chain layer does not yet own a storage registry; we hold one on
     // the RPC server (`Arc<Mutex<StorageRegistry>>`) and snapshot it for
-    // the chain-side accounting at block-application time (Faz 5 follow-up
-    // in Phase 0.40). For Phase 0.38 the registry is RPC-driven and survives only
+    // the chain-side accounting at block-application time (Görev 5 follow-up
+    // in Task 0.40). For Task 0.38 the registry is RPC-driven and survives only
     // for the life of the process — that is the documented scope of this
     // iskeleton's RPC surface (vision §8.1 "accounting only").
 
@@ -1669,9 +1669,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Phase 3 §0.2 + H1 fix (ARENA3 sürekli denetim): opener zorunlu ve non-zero olmalı
+        // Task 3 §0.2 + H1 fix (ARENA3 sürekli denetim): opener zorunlu ve non-zero olmalı
         let opener = request.opener.ok_or_else(|| {
-            ErrorObjectOwned::owned(-32602, "opener is required (Phase 3 §0.2 / H1)", None::<()>)
+            ErrorObjectOwned::owned(-32602, "opener is required (Task 3 §0.2 / H1)", None::<()>)
         })?;
         if opener == crate::core::address::Address::zero() {
             return Err(ErrorObjectOwned::owned(
@@ -1681,14 +1681,14 @@ impl BudlumApiServer for RpcServer {
             ));
         }
 
-        // Phase 3 §0.2: opener must cryptographically prove ownership of the
+        // Task 3 §0.2: opener must cryptographically prove ownership of the
         // declared address. Without this, any caller can self-report any
         // address as the opener, rendering the opener_bond anti-spam gate
         // economically meaningless.
         let opener_sig = request.opener_signature.as_deref().ok_or_else(|| {
             ErrorObjectOwned::owned(
                 -32602,
-                "opener_signature is required (Phase 3 §0.2)",
+                "opener_signature is required (Task 3 §0.2)",
                 None::<()>,
             )
         })?;
@@ -1745,13 +1745,13 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let responder = response.responder;
 
-        // Phase 3 §0.2: responder must cryptographically prove ownership of the
+        // Task 3 §0.2: responder must cryptographically prove ownership of the
         // declared address. Without this, any caller can set responder to the
         // deal's operator address and bypass the NotTheOperator registry check.
         let responder_sig = response.responder_signature.as_deref().ok_or_else(|| {
             ErrorObjectOwned::owned(
                 -32602,
-                "responder_signature is required (Phase 3 §0.2)",
+                "responder_signature is required (Task 3 §0.2)",
                 None::<()>,
             )
         })?;
@@ -1841,7 +1841,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Phase 3 §0.3: ghost RPC was documented but not implemented.
+        // Task 3 §0.3: ghost RPC was documented but not implemented.
         // Implementation: query PermissionlessRegistry active members for STORAGE_OPERATOR (RoleId 5).
         // No admin gate, no whitelist — permissionless read, same as bud_registryActiveMembers.
         let role = crate::registry::role::roles::STORAGE_OPERATOR;
@@ -2781,7 +2781,7 @@ impl BudlumApiServer for RpcServer {
         })
     }
 
-    // --- Phase 10 (§1): AI Inference & Verifier Layer ---
+    // --- Task 10 (§1): AI Inference & Verifier Layer ---
 
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_id = model_id.strip_prefix("0x").unwrap_or(&model_id);
@@ -3709,7 +3709,7 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    /// Phase 11.3 Task 1: Read-only status.
+    /// Task 11.3 Task 1: Read-only status.
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let height = self.chain.get_height().await;
         let chain_id = self.chain.get_chain_id().await;
@@ -3743,7 +3743,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Phase 11.3: slashing history RPC — ChainActor'e getSlashingHistory
+        // Task 11.3: slashing history RPC — ChainActor'e getSlashingHistory
         // komutu eklenene kadar minimal cevap.
         Ok(serde_json::json!({
             "history": [],

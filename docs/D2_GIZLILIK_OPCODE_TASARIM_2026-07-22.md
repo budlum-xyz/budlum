@@ -61,21 +61,21 @@ pub fn requires_mainnet_activation(&self) -> bool {
 
 Gizlilik opcode'ları YALNIZCA transfer ailesini kapsar. `NftRegistry`/`ContentId`, `Pollen AccessGrant`/`StorageRegistry` bu opcode'ları **çağırmaz** — ayrı state alanlarında yaşarlar.
 
-## 8. Implementation fazları (multi-session)
+## 8. Implementation görevları (multi-session)
 
-1. ✅ **Faz A:** 3 opcode (0x20-0x22) + decode + MainnetActivation gate (bud-isa). CI yeşil (`388f581`+).
-2. ✅ **Faz B:** Poseidon permutation ZATEN MEVCUT — `poseidon4_hash` (Goldilocks `2^64-2^32+1`, MDS 8x8, Plonky3 round sabitleri), opcode 0x19'a wired. Yeni opcode'lar bunu kullanabilir.
-3. ✅ **Faz C:** Note/UTXO registry (bud-state, paralel izole). CI yeşil (`574f79e`). PrivacyNote + NoteRegistry (insert/spend/is_spent, double-spend önleme).
-4. ⏳ **Faz D:** AIR constraint'ler (bud-proof, `plonky3_air.rs` 1519 satır). **Kriptografik tasarım gerekir:**
+1. ✅ **Görev A:** 3 opcode (0x20-0x22) + decode + MainnetActivation gate (bud-isa). CI yeşil (`388f581`+).
+2. ✅ **Görev B:** Poseidon permutation ZATEN MEVCUT — `poseidon4_hash` (Goldilocks `2^64-2^32+1`, MDS 8x8, Plonky3 round sabitleri), opcode 0x19'a wired. Yeni opcode'lar bunu kullanabilir.
+3. ✅ **Görev C:** Note/UTXO registry (bud-state, paralel izole). CI yeşil (`574f79e`). PrivacyNote + NoteRegistry (insert/spend/is_spent, double-spend önleme).
+4. ⏳ **Görev D:** AIR constraint'ler (bud-proof, `plonky3_air.rs` 1519 satır). **Kriptografik tasarım gerekir:**
    - PrivacyCommit: commitment = Poseidon(amount‖recipient‖blinding) eşitliği — mevcut Poseidon witness kolonlarını (COL_VM_MERKLE_CURRENT çevresi, 392+) genişlet.
    - NullifierCheck: nullifier = Poseidon(secret) + nullifier set membership (spent-nullifier constraint).
    - SumConservation: Σinput_commitments == Σoutput_commitments homomorfik (field addition constraint).
-   - **Risk:** sandbox proof-gen OOM → constraint soundness CI-iteratif doğrulanmalı, kör push yasak. Bu faz kriptografik review ister.
-5. ⏳ **Faz E:** TEE opt-in cüzdan toggle (Bölüm 10 #5) + view-key UX. Cüzdan katmanı.
-6. ⏳ **Faz F:** E2E gizli transfer testi (commit → nullifier → sum-conservation round-trip). Faz D sonrası.
+   - **Risk:** sandbox proof-gen OOM → constraint soundness CI-iteratif doğrulanmalı, kör push yasak. Bu görev kriptografik review ister.
+5. ⏳ **Görev E:** TEE opt-in cüzdan toggle (Bölüm 10 #5) + view-key UX. Cüzdan katmanı.
+6. ⏳ **Görev F:** E2E gizli transfer testi (commit → nullifier → sum-conservation round-trip). Görev D sonrası.
 
-**Durum (2026-07-22):** Faz A/B/C tamam + CI yeşil. Faz D-F çok-oturumlu (Faz D kriptografik review, Faz E cüzdan, Faz F integrasyon).
+**Durum (2026-07-22):** Görev A/B/C tamam + CI yeşil. Görev D-F çok-oturumlu (Görev D kriptografik review, Görev E cüzdan, Görev F integrasyon).
 
 ---
 
-*Tüm Bölüm 10 kararları çözüldü (MAINNET_KARARLAR D2). Bu doküman implementation'a köprü. Faz A en düşük riskli başlangıç.*
+*Tüm Bölüm 10 kararları çözüldü (MAINNET_KARARLAR D2). Bu doküman implementation'a köprü. Görev A en düşük riskli başlangıç.*

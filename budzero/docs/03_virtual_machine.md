@@ -38,7 +38,7 @@ pub fn step(&mut self, program: &[u64]) {
 
     // Her instruction gas tüketir.
     self.consume_gas(Self::gas_cost(inst.opcode));
-    
+
     // 2. Decode
     let src1_val = self.registers[inst.rs1 as usize];
     let src2_val = self.registers[inst.rs2 as usize];
@@ -102,7 +102,7 @@ Gas maliyetleri bilinçli olarak basit tutulmuştur:
 
 Limit aşılırsa VM `Out of gas` hatasıyla durur. Budlum L1 entegrasyonunda bu hata transaction failure'a çevrilir ve sender state'i atomik olarak değişmeden kalır.
 
-Phase 2 kapsamında gas davranışı testlerle sabitlendi. `Load + Push + Syscall + Halt` gibi küçük programlarda `gas_used` tam beklenen toplam maliyeti verir. Sonsuz döngü örneği olan `Jmp 0` ise limit aşıldığında `Out of gas` ile kesilir.
+Task 2 kapsamında gas davranışı testlerle sabitlendi. `Load + Push + Syscall + Halt` gibi küçük programlarda `gas_used` tam beklenen toplam maliyeti verir. Sonsuz döngü örneği olan `Jmp 0` ise limit aşıldığında `Out of gas` ile kesilir.
 
 ## Deterministik Hata ve Kenar Durumu Semantiği
 
@@ -193,7 +193,7 @@ bulunur. Ayrıntılı trace sözleşmesi için [BudVM Trace Schema](vm_trace_sch
 
 ## Trace Fixture Testleri
 
-Phase 2'de VM trace davranışını fixture testleriyle sabitledik. Bu testler `bud-vm/tests/trace_fixtures.rs` içinde durur ve üç ana akışı kapsar:
+Task 2'de VM trace davranışını fixture testleriyle sabitledik. Bu testler `bud-vm/tests/trace_fixtures.rs` içinde durur ve üç ana akışı kapsar:
 
 1. Aritmetik: `Load`, `Add`, `Sub`, `Mul`, `Halt`.
 2. Kontrol akışı: `Jnz`, `Jmp`, program dışına çıkınca deterministik halt.

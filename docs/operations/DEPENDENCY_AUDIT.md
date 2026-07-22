@@ -1,8 +1,8 @@
-# Dependency Audit Raporu (Phase 2 §1.7)
+# Dependency Audit Raporu (Task 2 §1.7)
 
-**Güncelleme:** 2026-07-15  
-**Araç:** `cargo-audit` (https://github.com/rustsec/rustsec)  
-**Repo:** `lubosruler/budlum`  
+**Güncelleme:** 2026-07-15
+**Araç:** `cargo-audit` (https://github.com/rustsec/rustsec)
+**Repo:** `lubosruler/budlum`
 **Durum:** Tooling hazır; bu sandbox oturumunda Rust toolchain (`cargo`/`rustc`) bulunmadığı için audit komutu yerelde koşturulamadı.
 
 > Bu dosya harici audit/supply-chain teslim paketinin parçasıdır. “Bilinen CVE yok”

@@ -1,4 +1,4 @@
-# Budlum — Phase10
+# Budlum — Task10
 ## AI Inference Layer + B.U.D. Veri Marketplace + Mevcut Kod Durumu Eksiklik Analizi
 
 **Repo:** github.com/budlum-xyz/budlum
@@ -24,8 +24,8 @@ pratikte imkansıza yakın — proving maliyeti, determinizm sorunu (aynı
 model farklı donanımda farklı çıktı verebilir, konsensüs için ölümcül).
 "On-chain AI inference" pazarlanan projelerin (Ritual, ORA, Modulus Labs)
 çoğu aslında **off-chain hesaplama + on-chain attestation/oracle**.
-Bu yüzden: **Faz 1 = attestation tabanlı AI Verifier ağı** (stake +
-slashing). **Faz 2 (ileride) = kısıtlı model sınıfları için BudZKVM
+Bu yüzden: **Gorev 1 = attestation tabanlı AI Verifier ağı** (stake +
+slashing). **Gorev 2 (ileride) = kısıtlı model sınıfları için BudZKVM
 STARK-provable inference.**
 
 ### 1.1 Yeni tipler
@@ -136,7 +136,7 @@ struct AccessGrant {
     owner_signature: Signature,
     grantee: RoleId,
     scope: GrantScope,        // ReadOnce | ReadUntilBlock(u64) | Perpetual
-    wrapped_key: Option<Vec<u8>>, // Faz 2'de dolu
+    wrapped_key: Option<Vec<u8>>, // Gorev 2'de dolu
     granted_at_block: u64,
 }
 
@@ -160,8 +160,8 @@ struct MarketplaceListing {
 2. Owner isterse `MarketplaceListing` ile listeler.
 3. AI consumer erişim talep eder / öder.
 4. Owner `AccessGrant` imzalar.
-5. **Faz 1:** storage node grant kontrolü yapar (soft enforcement).
-6. **Faz 2:** içerik şifreli, sadece `wrapped_key` sahibi çözebilir (hard
+5. **Gorev 1:** storage node grant kontrolü yapar (soft enforcement).
+6. **Gorev 2:** içerik şifreli, sadece `wrapped_key` sahibi çözebilir (hard
    enforcement).
 
 **AI Inference Layer entegrasyonu (zorunlu):** `AiInferenceRequest.input_ref`
@@ -176,7 +176,7 @@ bu hiçbir DRM benzeri sistemde mümkün değil.
 ### 2.4 Bu turda YAPILMAYACAKLAR
 
 B.U.D.'un depolama/replikasyon mekanizmasının kendisi (ayrı iş), şifreleme
-(Faz 2), marketplace ekonomi modeli detayları.
+(Gorev 2), marketplace ekonomi modeli detayları.
 
 ---
 
@@ -194,7 +194,7 @@ olarak bu dosyaların gerçek içeriğini gösterin ve doğrulatın.**
 
 ### 3.1 Mevcut durum (var olan)
 
-- **Tur 14 Faz 1-2 + Faz 5 iskeleti** kod tabanında:
+- **Tur 14 Gorev 1-2 + Gorev 5 iskeleti** kod tabanında:
   `ConsensusKind::StorageAttestation`, `STORAGE_OPERATOR = RoleId(5)`
   (permissionless), `ContentId` / `ContentManifest` / `StorageRegistry`
   (deal + challenge ekonomisi), 7 JSON-RPC uç noktası, 3-aktör E2E test +
@@ -212,7 +212,7 @@ olarak bu dosyaların gerçek içeriğini gösterin ve doğrulatın.**
    okuma, deal okuma dahil — herkese açık. `AccessGrant` kavramı hiç yok.
    Yani "içerik sahibinden izinsiz erişemez" hedefi şu an **hiç**
    karşılanmıyor: metadata ve deal bilgisi zaten tamamen açık.
-2. **Şifreleme/key-wrapping yok** (beklenen — Faz 2 hiç başlamamış).
+2. **Şifreleme/key-wrapping yok** (beklenen — Gorev 2 hiç başlamamış).
 3. **`RetrievalChallenge` gerçek Proof-of-Storage değil.** Ekibin kendi
    notu (Tur 14.5 plan §2.5): operatör sadece istenen byte-range'i
    saklayarak testi geçebilir. Tam kanıt, BudZKVM `VerifyMerkle`
@@ -232,25 +232,25 @@ olarak bu dosyaların gerçek içeriğini gösterin ve doğrulatın.**
 6. **`ContentManifest`'te "owner" alanı var mı belirsiz** — kaynak
    sınırlaması nedeniyle doğrulayamadım. Arena'nın ilk işi bu olmalı.
 
-### 3.3 Mimari kısıt keşfi — Faz 1/2 ayrımını etkiliyor
+### 3.3 Mimari kısıt keşfi — Gorev 1/2 ayrımını etkiliyor
 
 **"Veri egemenliği kuralı" (Tur 14.5 plan §0.5):** Hiçbir B.U.D.
 fonksiyonu Budlum ekibinin çalıştırdığı bir servise bağımlı olamaz;
 whitelist/admin/pause/freeze hook'u yasak; 7 RPC herhangi bir node
 tarafından sunulabiliyor.
 
-**Sonuç:** Bölüm 2'deki "Faz 1 = soft enforcement" planı bu kural altında
+**Sonuç:** Bölüm 2'deki "Gorev 1 = soft enforcement" planı bu kural altında
 zayıf kalıyor — merkezi bir izin-kontrol servisi olamayacağına göre, "stake'li
 node izin kontrolü yapar" modeli her node'un kuralı gönüllü uygulamasına
 dayanır, gerçek garanti değildir. **Bu proje için şifreleme tabanlı hard
-enforcement (Bölüm 2 Faz 2) "daha iyi" değil, mimari kısıt gereği
+enforcement (Bölüm 2 Gorev 2) "daha iyi" değil, mimari kısıt gereği
 gerçek bir izin garantisi isteniyorsa zorunlu.**
 
 ### 3.4 Öncelik sıralı sonraki adımlar
 
 1. Arena'ya `src/rpc/api.rs` + `ContentManifest`/`StorageRegistry` struct
    tanımlarını gösterip `owner` alanını doğrulat.
-2. `AccessGrant`'i Faz 1'den itibaren şifreleme temelli tasarla — soft
+2. `AccessGrant`'i Gorev 1'den itibaren şifreleme temelli tasarla — soft
    enforcement adımını atla (egemenlik kuralı zaten dayatıyor).
 3. `RoleId::AiVerifier` + AI Inference Layer'ı sıfırdan ekle (Bölüm 1).
 4. "`RetrievalChallenge` gerçek Proof-of-Storage değil" uyarısını AI/
@@ -303,7 +303,7 @@ sayıyı toplayan bir **index/dashboard** olur:
 | Budlum Core | 452 (`cargo test --lib`)       | v0.3-dev devnet candidate                 |
 | BudZero     | (kendi workspace testi)        | Z-B 64-derinlik Production-gated          |
 | B.U.D.      | (kendi e2e testi)              | Devnet-only; sahte-yeşil riski işaretli   |
-| BNS         | (kendi test suite'i)           | Henüz mimari yok — Faz başlamadı          |
+| BNS         | (kendi test suite'i)           | Henüz mimari yok — Gorev başlamadı          |
 | **TOPLAM**  | sum                            |                                            |
 
 Kural: **toplam satırı, hiçbir zaman altındaki uyarı satırlarının
@@ -329,12 +329,12 @@ bağımsız katman). Aynı kurala tabi:
 ### 4.4 Bu turda YAPILMAYACAKLAR
 
 BNS'in kendi veri modeli/RPC tasarımı bu bölümün kapsamında değil —
-sadece "ayrı modül olarak yaşamalı" kuralı burada net konuyor. BNS
+sadece "ayrı modül olarak ygorevlı" kuralı burada net konuyor. BNS
 mimarisi ayrı bir talimat turu.
 
 ---
 
-## CI ve standart kural hatırlatması (Phase10'un tamamı için geçerli)
+## CI ve standart kural hatırlatması (Task10'un tamamı için geçerli)
 
 `fmt + clippy -D warnings + test` tek gerçek denetleyici — **modül
 bazında**, tek bir toplam sayı üzerinden değil (Bölüm 4). Yeni

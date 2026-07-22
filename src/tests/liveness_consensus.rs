@@ -1,4 +1,4 @@
-//! Phase 0.30: liveness wired into the real epoch flow (observe mode).
+//! Task 0.30: liveness wired into the real epoch flow (observe mode).
 //!
 //! These tests drive real block production through `Blockchain::produce_block`
 //! (which commits blocks and, at epoch boundaries, runs
@@ -82,7 +82,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
     let mut bc = chain_with_validators(producer, absentee);
 
     // Lower the liveness threshold to 2 so we can cross it quickly.
-    // Phase 0.34: explicitly assert the observe-only (disabled) behavior — this is
+    // Task 0.34: explicitly assert the observe-only (disabled) behavior — this is
     // also the default, but we set it explicitly so the test documents intent
     // and stays correct even if the default ever changes.
     bc.state.registry.set_params(RegistryParams {
@@ -91,7 +91,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
         ..RegistryParams::default()
     });
     // `add_validator` already auto-registered the absentee in the registry
-    // (Phase 0.02 sync), so a slash WOULD have something to cut — proving the
+    // (Task 0.02 sync), so a slash WOULD have something to cut — proving the
     // no-slash property is meaningful, not vacuous.
     let stake_before = bc
         .state
@@ -136,7 +136,7 @@ fn observe_liveness_epoch_returns_reports_without_slashing() {
         liveness_max_missed_epochs: 1,
         ..RegistryParams::default()
     });
-    // absentee is already registered as a validator via add_validator (Phase 0.02 sync).
+    // absentee is already registered as a validator via add_validator (Task 0.02 sync).
 
     // Nobody participates -> absentee misses; threshold 1 => a report is produced.
     let empty: HashSet<Address> = HashSet::new();
@@ -197,7 +197,7 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
     assert!(!bc.state.validators.contains_key(&poa_member));
 }
 
-// --- Phase 0.34: real liveness slashing activation (default OFF) -----------------
+// --- Task 0.34: real liveness slashing activation (default OFF) -----------------
 
 /// With slashing ENABLED, crossing the miss threshold through the real epoch
 /// flow actually slashes the validator (stake cut AND jailed via slash()).
@@ -243,7 +243,7 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
 }
 
 /// The amount cut through the real epoch flow equals exactly the configured
-/// `liveness_slash_ratio_fixed` (default 1%) — same formula as the Phase 0.04 isolated
+/// `liveness_slash_ratio_fixed` (default 1%) — same formula as the Task 0.04 isolated
 /// test, but driven by the live epoch-close hook.
 #[test]
 fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {

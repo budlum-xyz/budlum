@@ -38,7 +38,7 @@ mod tests {
         // Expired at epoch 25
         assert_eq!(reg.resolve("expire.bud", 25), None);
 
-        // F14 (Phase 10.5): grace-period — expire (25) + GRACE_PERIOD (3000)
+        // F14 (Task 10.5): grace-period — expire (25) + GRACE_PERIOD (3000)
         // içinde 3. parti squat edemez. epoch 30 < 3025 → bob RED.
         let bob = Address::from([2u8; 32]);
         assert!(matches!(

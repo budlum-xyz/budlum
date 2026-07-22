@@ -1,6 +1,6 @@
 # Kalan İşler — Budlum
 
-**Güncelleme:** 2026-07-22 · Teknik kapanmamış işler (faz dili yok).
+**Güncelleme:** 2026-07-22 · Teknik kapanmamış işler (gorev dili yok).
 
 ---
 
@@ -8,7 +8,7 @@
 
 Zincir-üzeri AI çalıştırma katmanı tasarlanmadı. Lubot inference (model kayıt,
 attestation, soft incentive) var; ancak on-chain AI execution (modelin zincirde
-koşması + kanıtlanması) araştırma aşamasında — kod yok.
+koşması + kanıtlanması) araştırma gorevsında — kod yok.
 
 ## Z-B: BudZKVM VerifyMerkle 64-depth soundness
 

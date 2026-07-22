@@ -1,8 +1,8 @@
-# Budlum — Phase 11: Mainnet Lockdown & Açık Bulgu Kapanışı
+# Budlum — Task 11: Mainnet Lockdown & Açık Bulgu Kapanışı
 
 > **Amaç:** Projenin tüm açık işlerini — ARENAX'in 28 açık V-bulgusu (V22-V71),
 > mainnet hazırlık talimatının 18 maddesi, MR-1..10 kalanlarını — tek bir
-> koordineli fazda kapatmak. Mainnete kadar **hiçbir açık Kritik/Yüksek bulgu
+> koordineli gorevda kapatmak. Mainnete kadar **hiçbir açık Kritik/Yüksek bulgu
 > kalmamalı**.
 >
 > **Yazar:** ARENA1 (görev yöneticisi), 2026-07-19.
@@ -13,7 +13,7 @@
 
 ## 0. Prensip (AI Ajan Talimatı §2 + §5)
 
-Phase 11 bir sprint değil — **temel atma işi**. Her satır yarın üzerine bina
+Task 11 bir sprint değil — **temel atma işi**. Her satır yarın üzerine bina
 kurulacak bir taş. Acele yok; her bulgu CI yeşil olmadan kapanmış sayılmaz.
 Karar noktalarında soru sorulur (§4). Dışarıdan gelen commit'ler CI + diff
 ile doğrulanır (§6).
@@ -22,10 +22,10 @@ ile doğrulanır (§6).
 
 ## 1. Mevcut Durum Snapshot (2026-07-19)
 
-**Tamamlanan (Phase 1-10.5):**
+**Tamamlanan (Task 1-10.5):**
 - Multi-consensus L1 (PoW/PoS/PoA/BFT/ZK/Storage) + bridge lifecycle
 - BudZKVM in-tree + VerifyMerkle (Production-gated, MR-3 açık)
-- B.U.D. storage Faz 1-2-5 iskeleti + pollen marketplace P0
+- B.U.D. storage Gorev 1-2-5 iskeleti + pollen marketplace P0
 - AI Inference attestation layer (P0-P5 ship edildi)
 - F10 EVM ChainAdapter kompletness (RLP+MPT+receipt+header+sync-committee+relayer binary+Bud→ETH)
 - P2 schema-4 snapshot (GAP-1 imza + GAP-2 hash-kapsam + B2 AssetId struct)
@@ -53,7 +53,7 @@ yoluyla transfer verisi değiştirilebilir → köprü fon drain.
 ### V37 — B.U.D. challenge answer hash doğrulaması
 **Sorun:** `answer_challenge` `range_hash`'i kaydediyor ama operatör'ün gerçekten
 o byte-range'i sakladığını kanıtlamıyor. ZK proof entegrasyonu gerekli.
-**Çözüm:** Faz 3 VerifyMerkle entegrasyonu (MR-3 bağımlılığı). Geçici: range_hash
+**Çözüm:** Gorev 3 VerifyMerkle entegrasyonu (MR-3 bağımlılığı). Geçici: range_hash
 non-zero zorunluluğu (V58 fix) yeterli ama tam kanıt değil.
 **Kabul:** 64-depth Merkle proof verify + answer.
 **Sorumlu:** ARENA3 (budzero/ZK domain'i).
@@ -103,7 +103,7 @@ ama gerçek RPC client mainnet sonrası).**
 
 ### Kritik (mainnet konuşulmaz bunlar olmadan)
 
-| # | Madde | Durum | Phase 11 Plan |
+| # | Madde | Durum | Task 11 Plan |
 |---|---|---|---|
 | **1** | Bağımsız harici audit | 🔴 Başlamadı | Audit paketi topla + firm teklif (kullanıcı kararı) |
 | **2** | Z-B VerifyMerkle 64-depth | 🔴 Production-gated | ARENA3 + budzero ekibi; V37/V38 bağımlı |
@@ -194,7 +194,7 @@ ama gerçek RPC client mainnet sonrası).**
 
 ## 8. Riskler
 
-- **MR-3 VerifyMerkle** budzero'nun en zor işi; Faz 3'te STARK soundness
+- **MR-3 VerifyMerkle** budzero'nun en zor işi; Gorev 3'te STARK soundness
   kanıtı gerekli. 2-4 hafta tahmin.
 - **HSM vendor-native** donanım bağımlı; tedarik + entegrasyon 1-2 ay.
 - **Harici audit** firm takvimine bağlı; 4-8 hafta.

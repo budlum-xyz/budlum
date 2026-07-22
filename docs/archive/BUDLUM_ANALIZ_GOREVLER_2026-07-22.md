@@ -24,7 +24,7 @@
 | EIP-1559 üretimde bağlı değil | **Bağlandı** — blockchain.rs:2676 | CI green + semver exception |
 | Fee double-charge riski | **Çözüldü** — mint-only yaklaşım | blockchain.rs yorum |
 | Network reputation invariant | ARENA1 clamp + V119/V116 kanarya | CI green |
-| Lubot Faz A | 6 alt-modül gerçek wiring | CI green |
+| Lubot Gorev A | 6 alt-modül gerçek wiring | CI green |
 | LUBOT_OPERATOR | RoleId(8) eklendi | verifier-registry ✅ |
 
 ---
@@ -58,8 +58,8 @@
 |---|---|---|
 | **F1** | Reputation fuzz target | nightly + libp2p env gerektirir |
 | **F2** | V95/V98 regression canary | runtime env gerektirir |
-| **F3** | Lubot Phase 13 doc → budlum/lubot reposuna commit | docs |
-| **F4** | PHASE13_COMPREHENSIVE.md → Lubot repo commit | docs |
+| **F3** | Lubot Task 13 doc → budlum/lubot reposuna commit | docs |
+| **F4** | TASK13_COMPREHENSIVE.md → Lubot repo commit | docs |
 
 ---
 
@@ -73,10 +73,10 @@
 | **Ağ** | ✅ H5.1-5.6 | ✅ Network Hardening gate | — | H5.2/H5.7 |
 | **Storage** | ✅ V37-38 STARK | ✅ | AiDatasetStorageDeal ✅ | — |
 | **Kripto** | ✅ H4.1-4.6 | ✅ | — | vendor-native BLS/PQ (out-of-scope) |
-| **AI** | ✅ V89/V84 | ✅ | ✅ Faz A tam wiring (inference+STARK+social+storage+executor+operator) | proof generation |
+| **AI** | ✅ V89/V84 | ✅ | ✅ Gorev A tam wiring (inference+STARK+social+storage+executor+operator) | proof generation |
 | **Cüzdan** | ✅ BIP39 canonical (ARENA3) | ✅ | — | wallet-core clippy lints |
-| **Governance** | ✅ Phase 11.16 | ✅ | DisinfoDisqualification ✅ | — |
-| **PoA Compliance** | ✅ Phase 11.18 | ✅ | — | off-chain oracle |
+| **Governance** | ✅ Task 11.16 | ✅ | DisinfoDisqualification ✅ | — |
+| **PoA Compliance** | ✅ Task 11.18 | ✅ | — | off-chain oracle |
 | **Pollen** | ✅ AccessGrant | ✅ | ✅ validate_inference_grant + TrainingDataGrant | runtime grant construction |
 | **SocialFi** | ✅ NftRegistry | ✅ | ✅ lubot_output_to_nft + social_nft_to_data_ref | — |
 

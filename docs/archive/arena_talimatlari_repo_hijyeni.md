@@ -47,7 +47,7 @@ License badge zaten doğru (`budlum-xyz/budlum/blob/main/LICENSE`) — yani soru
 
 ## 3. PR #13 — Durumu Netleştir (Öncelik: Orta)
 
-**Durum:** `fix(ci): Phase 8 Faz 1 kirmizi CI kok-neden duzeltmesi (8.1 SBOM + 8.5 fuzz)` başlıklı PR #13, 16 Temmuz'dan beri açık. Aynı tarihten beri main'e çok sayıda doğrudan commit gitmiş (fmt fix'leri, storage fix'leri, ARENA2/ARENA3 merge'leri).
+**Durum:** `fix(ci): Task 8 Gorev 1 kirmizi CI kok-neden duzeltmesi (8.1 SBOM + 8.5 fuzz)` başlıklı PR #13, 16 Temmuz'dan beri açık. Aynı tarihten beri main'e çok sayıda doğrudan commit gitmiş (fmt fix'leri, storage fix'leri, ARENA2/ARENA3 merge'leri).
 
 **Risk:** PR-tabanlı workflow ile direct-push workflow paralel yürüyor. PR #13'ün çözdüğü kök neden main'de zaten başka commit'lerle kapatılmış olabilir — bu durumda PR stale ve yanıltıcı.
 

@@ -52,16 +52,16 @@ pub struct RegistryParams {
     pub prover_reward: u64,
     /// Maximum number of cryptographically-invalid finality votes a validator
     /// may send within a single epoch before an `InvalidSignatureSpam` fault is
-    /// raised (and slashed). Counted per-epoch and reset each epoch (Phase 0.40).
+    /// raised (and slashed). Counted per-epoch and reset each epoch (Task 0.40).
     /// Set to 0 to disable invalid-vote-spam slashing entirely.
     pub max_invalid_votes_per_epoch: u64,
     /// Whether the live epoch-close hook actually slashes validators for
-    /// liveness (downtime) faults (Phase 0.34).
+    /// liveness (downtime) faults (Task 0.34).
     ///
     /// DEFAULT: `false` (observe-only). Turning liveness slashing on is a
     /// deliberate, hard-to-reverse economic action: the underlying `slash()`
     /// jails a validator on ANY offence, so even a light (1%) liveness penalty
-    /// fully jails the offender. Per the Phase 0.30 decision ("observe first,
+    /// fully jails the offender. Per the Task 0.30 decision ("observe first,
     /// validate on live/testnet, then activate"), this stays OFF until an
     /// operator/governance explicitly enables it — the mechanism is fully wired
     /// and tested, but never auto-activates. Set to `true` to enable.
@@ -79,7 +79,7 @@ impl RegistryParams {
         }
     }
 
-    /// Phase 0.32: protocol-level bounds for governance-tunable registry params.
+    /// Task 0.32: protocol-level bounds for governance-tunable registry params.
     /// Prevents extreme values (e.g. zero unbonding, >100% slash ratios).
     pub fn validate(&self) -> Result<(), String> {
         if self.min_stake < 100 {
@@ -136,9 +136,9 @@ impl Default for RegistryParams {
             // registered provers to do useful proving work. Kept small for
             // devnet; production reward economics are out of scope this turn.
             prover_reward: 50,
-            // Phase 0.34: OFF by default. Real liveness slashing (which also jails,
+            // Task 0.34: OFF by default. Real liveness slashing (which also jails,
             // via slash()) must be explicitly enabled after live/testnet
-            // validation of the observe-mode signal (Phase 0.30/11).
+            // validation of the observe-mode signal (Task 0.30/11).
             // 20 invalid votes in a single epoch. Generous enough that a brief
             // software bug / desync producing a handful of malformed votes is
             // tolerated, low enough that sustained garbage-signature spam is

@@ -1,6 +1,6 @@
 name: CI
 
-# Phase 0.14.x: replaced the previous Nix/FlakeHub-based CI (which required
+# Task 0.14.x: replaced the previous Nix/FlakeHub-based CI (which required
 # FlakeHub authentication that we don't have) with a plain
 # Ubuntu + rustup setup. Mainnet-hazırlık sıkılığında üç kapı:
 #   1. cargo fmt --check         (whitespace tutarlılığı)
@@ -9,7 +9,7 @@ name: CI
 # The original `format` and `cargo deny` jobs were removed because
 # the upstream code is not yet rustfmt-clean under rust 1.97 and
 # the deny config requires a separate alignment sprint. Both are
-# tracked as Phase 0.16.x follow-up work.
+# tracked as Task 0.16.x follow-up work.
 
 on:
   push:

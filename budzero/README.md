@@ -66,20 +66,20 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-Aligned with [budlum-xyz/BudZero](https://github.com/budlum-xyz/BudZero) phases 0–12. Org README claims “all 31 opcodes production”; **this fork keeps `VerifyMerkle` experimental** until the 64-depth positive proof is green.
+Aligned with [budlum-xyz/BudZero](https://github.com/budlum-xyz/BudZero) tasks 0–12. Org README claims “all 31 opcodes production”; **this fork keeps `VerifyMerkle` experimental** until the 64-depth positive proof is green.
 
 | Item | Status |
 | --- | --- |
-| Public inputs (Z-A) | Bound (incl. event_digest Log fix Phase 0.358) |
-| `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; **Phase 0.36 partial**: pre-round currents, single-round path hash, original-only root check, expand gas |
+| Public inputs (Z-A) | Bound (incl. event_digest Log fix Task 0.358) |
+| `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; **Task 0.36 partial**: pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | **`#[ignore]`** — still `InvalidProof` (Commit 3.5 remaining) |
 | Production gate | `VerifyMerkle` **experimental** — off in Production decode |
-| Termination / halt (Z-C/D) | Landed Phase 0.30.zk |
+| Termination / halt (Z-C/D) | Landed Task 0.30.zk |
 | Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
-| Phase 10 performance benches | Planned Tur **13.5** |
-| Phase 11 external audit | Checklist Tur **13.9** (not claimed done) |
+| Task 10 performance benches | Planned Tur **13.5** |
+| Task 11 external audit | Checklist Tur **13.9** (not claimed done) |
 
-Until Z-B Commit 3.5 lands, do **not** treat Merkle membership inside STARK proofs as production-safe. **B.U.D.** proof-of-storage (org storage vision) is **Phase 0.38**, not this repo’s L1 host work.
+Until Z-B Commit 3.5 lands, do **not** treat Merkle membership inside STARK proofs as production-safe. **B.U.D.** proof-of-storage (org storage vision) is **Task 0.38**, not this repo’s L1 host work.
 
 ---
 
@@ -109,7 +109,7 @@ CI enforces:
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace` — **124 test geçerli sayım** (CI-kanıtlı, 2026-07-18)
 
-Modül-ayrımı kuralı (Phase 10 §4): bu sayı kök README'nin dashboard tablosunda
+Modül-ayrımı kuralı (Task 10 §4): bu sayı kök README'nin dashboard tablosunda
 kendi satırında raporlanır; toplam Core sayısına (755 lib) karışmaz.
 
 No `#[allow(clippy::…)]` as a substitute for fixing lints on new work.

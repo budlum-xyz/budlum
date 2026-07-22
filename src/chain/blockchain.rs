@@ -79,23 +79,23 @@ pub struct Blockchain {
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
     pub finality_aggregator: Option<FinalityAggregator>,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
-    /// Phase 0.08: accepted ZK proof claims (first-valid-wins policy). The
+    /// Task 0.08: accepted ZK proof claims (first-valid-wins policy). The
     /// `submit_zk_proof` path persists into this registry so a duplicate or
     /// conflicting claim is rejected deterministically.
     pub proof_claims: crate::prover::ProofClaimRegistry,
-    /// B.U.D. Faz 4 (ARENA2): aggregated Merkle root of verified storage
+    /// B.U.D. Görev 4 (ARENA2): aggregated Merkle root of verified storage
     /// proofs pending inclusion in the next `GlobalBlockHeader`. Reset to
     /// `None` after each header is sealed. Populated by
-    /// `apply_storage_proofs()` (Faz 3, gated on BudZero VerifyMerkle).
+    /// `apply_storage_proofs()` (Görev 3, gated on BudZero VerifyMerkle).
     pub pending_storage_root: Option<crate::domain::Hash32>,
-    /// B.U.D. Faz 5 (ARENA2): on-chain storage deal and challenge registry.
+    /// B.U.D. Görev 5 (ARENA2): on-chain storage deal and challenge registry.
     /// Mirrors the RPC-layer `StorageRegistry` but lives in the Blockchain
     pub storage_slashed_bond_total: u64,
-    /// B.U.D. Faz 5 economics ledger: total actually burned from operator
+    /// B.U.D. Görev 5 economics ledger: total actually burned from operator
     /// account balances when slashing was applied. May be lower than the
     /// declared slash if the operator account has insufficient liquid balance.
     pub storage_burned_bond_total: u64,
-    /// B.U.D. Faz 5 economics ledger: protocol reward accrual per operator.
+    /// B.U.D. Görev 5 economics ledger: protocol reward accrual per operator.
     pub storage_operator_rewards: BTreeMap<Address, u64>,
     /// Last epoch rewarded per deal, preventing duplicate reward accrual
     /// when maintenance runs multiple times at the same height.
@@ -930,7 +930,7 @@ impl Blockchain {
                 adapter.verify_finality(domain, commitment, proof)
             }
             ConsensusKind::Zk => {
-                // Phase 0.358: was calling trait verify_finality which ALWAYS
+                // Task 0.358: was calling trait verify_finality which ALWAYS
                 // Rejects (by design). That made Zk domains appear wired in
                 // tests/docs while never finalizing on the real path.
                 // Use the claim-bound verifier against ProofClaimRegistry.
@@ -959,7 +959,7 @@ impl Blockchain {
                 }
             }
             ConsensusKind::StorageAttestation(_) => {
-                // Phase 1: StorageAttestation domains now use StorageAttestationFinalityAdapter (implemented by ARENA3)
+                // Task 1: StorageAttestation domains now use StorageAttestationFinalityAdapter (implemented by ARENA3)
                 // D4 deep wiring: unified registry — attesters must be active in PermissionlessRegistry if registry has any ATTESTER stake.
                 let adapter = crate::domain::StorageAttestationFinalityAdapter;
                 self.ensure_adapter_name(domain, adapter.adapter_name())?;
@@ -1061,11 +1061,11 @@ impl Blockchain {
             merkle_root(&self.settlement_finality_hashes)
         };
 
-        // B.U.D. Faz 4 (ARENA2): storage_root is computed from any verified
+        // B.U.D. Görev 4 (ARENA2): storage_root is computed from any verified
         // StorageProofResponses accumulated in this block period. Currently
         // None (no proof aggregation pipeline wired yet — gated on BudZero
-        // VerifyMerkle Z-B gate, Faz 3). The field is set to None here and
-        // will be populated by `apply_storage_proofs()` once Faz 3 lands.
+        // VerifyMerkle Z-B gate, Görev 3). The field is set to None here and
+        // will be populated by `apply_storage_proofs()` once Görev 3 lands.
         let storage_root = self.pending_storage_root;
 
         GlobalBlockHeader {
@@ -1141,7 +1141,7 @@ impl Blockchain {
         proof: &MerkleProof,
         relayer: Address,
     ) -> Result<(), String> {
-        // Phase 0.16 (security audit §9): bridge mint REQUIRES an explicit
+        // Task 0.16 (security audit §9): bridge mint REQUIRES an explicit
         // `expected_block_hash`. Without it, an attacker who knows the
         // (domain, height, sequence) tuple could pick any matching
         // commitment from the registry — including stale, equivocated,
@@ -1154,7 +1154,7 @@ impl Blockchain {
             "Bridge mint requires explicit expected_block_hash (forgery gate)".to_string()
         })?;
 
-        // Phase 0.37: PoW mint is enabled only for domains whose commitments
+        // Task 0.37: PoW mint is enabled only for domains whose commitments
         // were verified by the bounded header-chain adapter. Legacy
         // self-declared PoW proofs remain readable for archival compatibility
         // but can never authorize supply creation.
@@ -1225,7 +1225,7 @@ impl Blockchain {
             .mint(&message)
             .map_err(|e| e.to_string())?;
 
-        // Phase 5 Q9: Deduct relayer fee from arriving asset if inbound to Budlum
+        // Task 5 Q9: Deduct relayer fee from arriving asset if inbound to Budlum
         let transfer = self
             .state
             .bridge_state
@@ -1239,7 +1239,7 @@ impl Blockchain {
         let fee = final_amount.saturating_mul(1) / 100;
         final_amount = final_amount.saturating_sub(fee);
 
-        // Phase 9 Security: Prevent u128 -> u64 truncation (AÇIK Fix)
+        // Task 9 Security: Prevent u128 -> u64 truncation (AÇIK Fix)
         // V124 fix: check BOTH final_amount AND fee for u64 overflow.
         if final_amount > u64::MAX as u128 {
             return Err(
@@ -1371,7 +1371,7 @@ impl Blockchain {
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
     ) -> Result<(), String> {
-        // Phase 11.3 Task 2: CrossDomainMessage sertleştirme.
+        // Task 11.3 Task 2: CrossDomainMessage sertleştirme.
         // 1. verify_id: message_id canonical preimage ile eşleşmeli (kanıt uydurma yüzeyi).
         if !message.verify_id() {
             return Err(
@@ -1465,7 +1465,7 @@ impl Blockchain {
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<(), String> {
-        // Phase 0.16 (security audit §9): bridge unlock requires an explicit
+        // Task 0.16 (security audit §9): bridge unlock requires an explicit
         // `expected_block_hash` for the same reason as `mint_*` above:
         // preventing replay / forgery attacks against the bridge state
         // machine. See the doc-comment in
@@ -1602,7 +1602,7 @@ impl Blockchain {
         Self::build_validator_snapshot_from_state(epoch, &self.state, self.chain_id)
     }
 
-    /// Phase 0.08: real ZK-proof submission with fee + reward + claim policy.
+    /// Task 0.08: real ZK-proof submission with fee + reward + claim policy.
     ///
     /// 1. Validate the message kind and binding hash.
     /// 2. Charge the submission fee (refunded below if the proof is
@@ -1713,7 +1713,7 @@ impl Blockchain {
         Ok(outcome)
     }
 
-    /// Phase 0.08: real-block-flow liveness hook. Called from
+    /// Task 0.08: real-block-flow liveness hook. Called from
     /// `produce_block` / `validate_and_add_block` at every epoch boundary. The
     /// "expected" set is the *current* active validator set (so PoA members,
     /// who never live in `AccountState.validators`, are correctly excluded).
@@ -1771,7 +1771,7 @@ impl Blockchain {
         count
     }
 
-    /// Phase 0.08: drive the liveness tracker over a synthetic epoch. Used by
+    /// Task 0.08: drive the liveness tracker over a synthetic epoch. Used by
     /// tests and by the OBSERVE-only public surface. `participated` is the set
     /// of validators that showed the expected participation; everyone else in
     /// `state.validators` is treated as an absentee. Returns the number of
@@ -1810,7 +1810,7 @@ impl Blockchain {
             .len()
     }
 
-    /// Phase 0.08: directly call `state.liveness.record_epoch` (exposed so tests
+    /// Task 0.08: directly call `state.liveness.record_epoch` (exposed so tests
     /// that want to exercise the tracker in isolation can do so without going
     /// through `maybe_observe_liveness_on_epoch_close`).
     pub fn record_liveness_epoch(
@@ -1846,7 +1846,7 @@ impl Blockchain {
         reports.len()
     }
 
-    /// Phase 0.08: permissionless entry-point for relayed cross-domain messages.
+    /// Task 0.08: permissionless entry-point for relayed cross-domain messages.
     ///
     /// The `CrossDomainMessageRegistry` itself accepts any message, but the
     /// permissionless submission RPC must gate on the sender being an active
@@ -1899,7 +1899,7 @@ impl Blockchain {
         let current_height = self.chain.len() as u64;
 
         // Authenticate the relay proof against the source domain's committed
-        // event root for the height at which the event was emitted (Phase 5 /
+        // event root for the height at which the event was emitted (Task 5 /
         // ADIM5 wiring). The relay-ledger root can never authenticate source
         // events: the ledger only records relays that already completed, so
         // the previous lookup made the positive path unverifiable by
@@ -1930,7 +1930,7 @@ impl Blockchain {
             .process_relay(message_id, relayer, proof, event_tree_root, current_height)
             .map_err(|e| e.to_string())?;
 
-        // Phase 5: Integrate BridgeState transition
+        // Task 5: Integrate BridgeState transition
         match message.kind {
             MessageKind::BridgeLock => {
                 self.state
@@ -1948,7 +1948,7 @@ impl Blockchain {
                 let fee = transfer.amount.saturating_mul(1) / 100;
                 let final_amount = transfer.amount.saturating_sub(fee);
 
-                // Phase 9 Security: Prevent u128 -> u64 truncation (AÇIK Fix)
+                // Task 9 Security: Prevent u128 -> u64 truncation (AÇIK Fix)
                 // V124 fix: check BOTH final_amount AND fee for u64 overflow.
                 if final_amount > u64::MAX as u128 {
                     return Err(format!(
@@ -2006,7 +2006,7 @@ impl Blockchain {
                 let fee = transfer.amount.saturating_mul(1) / 100;
                 let final_amount = transfer.amount.saturating_sub(fee);
 
-                // Phase 9 Security: Prevent u128 -> u64 truncation (AÇIK Fix)
+                // Task 9 Security: Prevent u128 -> u64 truncation (AÇIK Fix)
                 // V124 fix: check BOTH final_amount AND fee for u64 overflow.
                 if final_amount > u64::MAX as u128 {
                     return Err(format!(
@@ -2058,7 +2058,7 @@ impl Blockchain {
         self.universal_relayer.ledger_root()
     }
 
-    /// Phase 0.08: permissionless entry-point for slashing reports with an
+    /// Task 0.08: permissionless entry-point for slashing reports with an
     /// anti-spam fee.
     ///
     /// * `report.reporter` is the user submitting the report.
@@ -2179,7 +2179,7 @@ impl Blockchain {
 
     /// Post-import QC fault scan.
     ///
-    /// Phase 0.358 note: `detect_fault_proofs` only flags signatures that fail
+    /// Task 0.358 note: `detect_fault_proofs` only flags signatures that fail
     /// verification. Blobs that pass `import_qc_blob` have already had every
     /// signature verified, so this loop is empty by construction after a
     /// successful import. Real finality invalidation must come from an
@@ -2276,7 +2276,7 @@ impl Blockchain {
             let validator_address = Address::from_hex(&proof.validator_address)
                 .map_err(|e| format!("Invalid QC fault-proof validator address: {}", e))?;
 
-            // Phase 0.17 (security audit §8): the QC-fault slash
+            // Task 0.17 (security audit §8): the QC-fault slash
             // ratio is a critical security parameter and must
             // come from `RegistryParams` rather than a hardcoded
             // literal — a 50% literal scattered through the code
@@ -2328,12 +2328,12 @@ impl Blockchain {
         }
 
         let snapshot = self.validator_snapshot_for_epoch(blob.epoch);
-        // Phase 0.12 + Phase 0.16 (security audit §4, §2): enforce the BLS
+        // Task 0.12 + Task 0.16 (security audit §4, §2): enforce the BLS
         // finality quorum (2/3 of `snapshot.validators`) against the
         // POST-deduplication unique-signer count, not the raw
         // `pq_signatures.len()`.
         //
-        // The Phase 0.12 design used `pq_signatures.len() < min_signers`
+        // The Task 0.12 design used `pq_signatures.len() < min_signers`
         // which counted duplicate validator entries. An attacker
         // could spam the same validator's signature N times in a
         // single blob to push the raw count past the quorum
@@ -2567,7 +2567,7 @@ impl Blockchain {
 
     fn apply_system_effects(state: &mut AccountState, block: &Block) {
         if let Some(evidences) = &block.slashing_evidence {
-            // Phase 0.17 (security audit §8): the slashing ratio
+            // Task 0.17 (security audit §8): the slashing ratio
             // for on-chain `slashing_evidence` is a critical
             // security parameter and must come from
             // `RegistryParams` rather than a hardcoded literal.
@@ -2683,7 +2683,7 @@ impl Blockchain {
         .map_err(|e| format!("Failed to apply block: {}", e))?;
         Self::apply_system_effects(&mut next_state, block);
 
-        // Phase 11.8 (ADIM G): Distribute EIP-1559 fees to proposer + treasury.
+        // Task 11.8 (ADIM G): Distribute EIP-1559 fees to proposer + treasury.
         // The executor already deducted tx.fee from senders; this method only
         // mints the proposer tip and treasury cut (no double-charge).
         if let Some(producer) = block.producer.as_ref() {
@@ -2694,7 +2694,7 @@ impl Blockchain {
         Ok(next_state)
     }
 
-    /// Phase 0.10 (security audit §3): run the bridge-locks sweep at the
+    /// Task 0.10 (security audit §3): run the bridge-locks sweep at the
     /// canonical "this block just became final" point. Idempotent and
     /// cheap when no transfers are locked. Releases expired `Locked`
     /// transfers back to `Active` so an abandoned lock cannot
@@ -2798,7 +2798,7 @@ impl Blockchain {
             return None;
         }
 
-        // Phase 0.08: observe the liveness of the epoch that *just closed* (if any)
+        // Task 0.08: observe the liveness of the epoch that *just closed* (if any)
         // AFTER we have committed the new state. The producer of the closing
         // block is the one validator we know for sure participated; everyone
         // else in the active validator set is treated as a potential absentee.
@@ -2841,7 +2841,7 @@ impl Blockchain {
             );
         }
 
-        // Phase 0.10: bridge-locks sweep at block finalization. Cheap when
+        // Task 0.10: bridge-locks sweep at block finalization. Cheap when
         // there are no expired locks; an abandoned lock can no longer
         // permanently DoS the bridge.
         let _ = self.apply_bridge_sweep(block.index);
@@ -2852,7 +2852,7 @@ impl Blockchain {
         }
 
         if let Some(last_block) = self.chain.last() {
-            // Phase 0.16 (security audit §3): the trait-level `record_block`
+            // Task 0.16 (security audit §3): the trait-level `record_block`
             // no longer mutates PoW difficulty (validation is pure).
             // Instead, the chain-aware `record_block_with_chain` is
             // called here, AFTER the block has been durably committed
@@ -3036,7 +3036,7 @@ impl Blockchain {
         self.commit_block_durable(&block, &commit_state)
             .map_err(|e| format!("Failed to commit block {} durably: {}", block.index, e))?;
 
-        // Phase 0.08: same epoch-close liveness hook as `produce_block`. The block
+        // Task 0.08: same epoch-close liveness hook as `produce_block`. The block
         // we just accepted is the one that closes the epoch; its producer
         // counts as "participated". Without this, `validate_and_add_block`
         // would skip liveness accounting on a sync path.
@@ -3078,7 +3078,7 @@ impl Blockchain {
             );
         }
 
-        // Phase 0.10: bridge-locks sweep at block acceptance.
+        // Task 0.10: bridge-locks sweep at block acceptance.
         let _ = self.apply_bridge_sweep(block.index);
 
         self.chain.push(block);
@@ -3700,7 +3700,7 @@ impl Blockchain {
     }
 
     pub fn handle_prevote(&mut self, vote: Prevote) -> Result<(), String> {
-        // Phase 0.08: validate the BLS signature of the prevote against the
+        // Task 0.08: validate the BLS signature of the prevote against the
         // voter's registered BLS public key BEFORE ingesting it. An invalid
         // signature is a protocol violation: the vote never enters the
         // aggregator, and the validator's `invalid_votes` counter ticks up.
@@ -3745,7 +3745,7 @@ impl Blockchain {
     }
 
     pub fn handle_precommit(&mut self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
-        // Phase 0.08: same invalid-signature gate as `handle_prevote`.
+        // Task 0.08: same invalid-signature gate as `handle_prevote`.
         if let Some(v) = self.state.validators.get(&vote.voter_id) {
             if !v.bls_public_key.is_empty() {
                 let msg = crate::chain::finality::checkpoint_signing_message(
@@ -3871,14 +3871,14 @@ impl Blockchain {
         })
     }
 
-    pub fn start_prevote_phase(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
+    pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         let epoch = checkpoint_height / crate::core::chain_config::EPOCH_LEN;
         let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
         let snapshot = self.validator_snapshot_for_epoch(epoch);
         aggregator.set_validator_snapshot(snapshot);
         self.finality_aggregator = Some(aggregator);
         info!(
-            "Started prevote phase for checkpoint height={} (epoch={})",
+            "Started prevote task for checkpoint height={} (epoch={})",
             checkpoint_height, epoch
         );
     }
@@ -3894,7 +3894,7 @@ impl Blockchain {
         self.consensus.as_ref()
     }
 
-    // ─── B.U.D. Faz 5 (ARENA2): On-chain storage operations ────────────
+    // ─── B.U.D. Görev 5 (ARENA2): On-chain storage operations ────────────
 
     #[allow(clippy::too_many_arguments)]
     pub fn open_storage_deal_with_escrow(
@@ -3978,7 +3978,7 @@ impl Blockchain {
     }
 
     /// Accrue storage operator rewards up to `current_epoch`. This is the
-    /// canonical Faz 5 accounting path used by ChainActor maintenance ticks.
+    /// canonical Görev 5 accounting path used by ChainActor maintenance ticks.
     /// It credits the operator account and records an event, while avoiding
     /// double-accrual with `storage_last_reward_epoch`.
     pub fn accrue_storage_operator_rewards(&mut self, current_epoch: u64) -> (u32, u64) {
@@ -4021,11 +4021,11 @@ impl Blockchain {
                 continue;
             }
 
-            // FAZ 5 ESCROW: Payer already locked fee_per_epoch in blockchain state when deal was opened.
+            // TASK 5 ESCROW: Payer already locked fee_per_epoch in blockchain state when deal was opened.
             // We mint/add_balance back to operator from the virtual locked escrow.
             self.state.add_balance(&operator, amount);
             tracing::info!(
-                "Faz 5 Escrow: Accrued {} reward to operator {}",
+                "Görev 5 Escrow: Accrued {} reward to operator {}",
                 amount,
                 operator
             );
@@ -4204,7 +4204,7 @@ impl Blockchain {
 
                     // V43 fix: Enable real burn_from for slashed bond.
                     // Operator's liquid balance is slashed when challenge is missed.
-                    // Full escrow model deferred to Phase 10+.
+                    // Full escrow model deferred to Task 10+.
                     let burned = self.state.burn_from(&operator, result.slashed_bond);
                     if burned > 0 {
                         tracing::warn!(
@@ -4237,7 +4237,7 @@ impl Blockchain {
     ///
     /// This is called by `ChainCommand::SubmitStorageProof` after the proof
     /// has been verified (currently: signature check only; real STARK
-    /// verification gated on Faz 3 / BudZero VerifyMerkle).
+    /// verification gated on Görev 3 / BudZero VerifyMerkle).
     pub fn accumulate_storage_proof(&mut self, proof_hash: crate::domain::Hash32) {
         let new_root = match self.pending_storage_root {
             None => proof_hash,
@@ -4465,7 +4465,7 @@ mod tests {
         let signer_addr = Address::from(signer.public_key_bytes());
         let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), Some(signer)));
         let mut bc = Blockchain::new(consensus, None, 1337, None);
-        // Phase 0.338: hash-mix leader selection needs a controlled set — keep
+        // Task 0.338: hash-mix leader selection needs a controlled set — keep
         // only the PoA signer active so they are always the expected proposer.
         bc.state.validators.clear();
         bc.state.add_validator(signer_addr, 1);
@@ -4674,13 +4674,13 @@ mod tests {
     }
 
     #[test]
-    fn test_start_prevote_phase_creates_aggregator() {
+    fn test_start_prevote_task_creates_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 1337, None);
         let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
         let cp_hash = "a".repeat(64);
 
-        bc.start_prevote_phase(cp_height, cp_hash.clone());
+        bc.start_prevote_task(cp_height, cp_hash.clone());
 
         assert!(bc.finality_aggregator.is_some());
         let agg = bc.finality_aggregator.as_ref().unwrap();
@@ -4744,7 +4744,7 @@ mod tests {
     }
 }
 
-/// Phase 0.17 (security audit §8): the QC-fault verdict and the
+/// Task 0.17 (security audit §8): the QC-fault verdict and the
 /// on-chain `slashing_evidence` path now read the slash ratio
 /// from `RegistryParams` instead of using hardcoded literals.
 /// This test pins the contract by exercising the two paths

@@ -2,7 +2,7 @@
 
 > **Yazar:** ARENA1 (görev yöneticisi, kullanıcı emri 2026-07-18)
 > **Temel:** main `5638988` · 824 lib test · CI yeşil
-> **Kapsam:** Phase 10.5 🔴 bulgularının güncel durum denetimi + ARENA2/3'e
+> **Kapsam:** Task 10.5 🔴 bulgularının güncel durum denetimi + ARENA2/3'e
 > sahipli, koşul-bağlı, mainnet-prep odaklı iş dağıtımı.
 > **Metodoloji:** her talimat net görev + kabul kapısı + koordinasyon notu.
 > Hiçbir talimat "kullanıcı kararı beklemeden başla" demez — karar kapıları
@@ -26,12 +26,12 @@
 
 ---
 
-## 1. Eksiklik analizi — Phase 10.5 🔴'lerin GÜNCEL durumu
+## 1. Eksiklik analizi — Task 10.5 🔴'lerin GÜNCEL durumu
 
 | ID | Bulgı | Durum (güncel) | Kalan |
 |---|---|---|---|
 | **F01** 🔴 | ContentManifest'te `owner` YOK | ❌ **Hâlâ açık** — `src/storage/manifest.rs:50-55` alanlar yalnız `manifest_id/total_size/shard_count/shards`. Teyit: kod-okuma. | Owner backlink (manifest'te mi, ayrı registry'de mi — tasarım kararı) |
-| **F02** 🔴 | AccessGrant Faz-1 = soft-enforcement | ❌ **Açık** — HPKE Faz-2 bekleyen (RFC §8). Faz-1 dokümante ama hard enforcement mainnet-engeli olarak işaretlenmedi. | MR-benzeri kriter önerisi |
+| **F02** 🔴 | AccessGrant Gorev-1 = soft-enforcement | ❌ **Açık** — HPKE Gorev-2 bekleyen (RFC §8). Gorev-1 dokümante ama hard enforcement mainnet-engeli olarak işaretlenmedi. | MR-benzeri kriter önerisi |
 | **F06** 🔴 | AI dispute/timeout/slashing YOK | 🟡 **Largely closed** (ARENA2 P5) — deadline + equivocation + fee reclaim var. Kalan: disagreement "no-consensus outcome" + canlılık edge-case'leri. | Edge-case test matrisi |
 | **F10** 🔴 | Universal Relayer gerçek adapter YOK | 🔄 **İlerliyor** (ARENA1) — F10.1 (RLP+MPT) merged; F10.2 (receipt+header+adapter) WIP. | F10.2-F10.5 |
 | **F17** 🔴 | Governance README iddiası kodda yok | ✅ **Closed** — `src/core/governance.rs` MEVCUT + README crate linki eklendi. | — |

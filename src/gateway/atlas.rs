@@ -1,4 +1,4 @@
-//! Budlum Atlas / bud.scan evidence models (Phase 12 / ARENA4).
+//! Budlum Atlas / bud.scan evidence models (Task 12 / ARENA4).
 //!
 //! Atlas is read-only. It never mutates chain state and it never labels raw,
 //! unproven UI data as verified.

@@ -1,4 +1,4 @@
-//! benches/micro/timing_safe.rs — Phase 8.6 dudect-tarzı istatistiksel zamanlama regresyon testi.
+//! benches/micro/timing_safe.rs — Task 8.6 dudect-tarzı istatistiksel zamanlama regresyon testi.
 //!
 //! RPC kimlik doğrulamasındaki `constant_time_eq_str` karşılaştırmasının
 //! gerçekten sabit-zamanlı kaldığını istatistiksel olarak denetler:
@@ -191,7 +191,7 @@ fn main() -> ExitCode {
     );
     let t_ct = welch_t(&ct_a, &ct_b);
 
-    println!("=== Phase 8.6 timing-safe istatistiksel test (dudect-tarzı) ===");
+    println!("=== Task 8.6 timing-safe istatistiksel test (dudect-tarzı) ===");
     println!("batches={batches} iters/batch/sınıf={iters} eşik=|t|>={T_THRESHOLD}");
     println!(
         "kontrol (naif, SIZMALI): mean_first={:.2}ns mean_last={:.2}ns |t|={:.2}",

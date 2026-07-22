@@ -44,7 +44,7 @@ impl ZkVmExecutor {
         let program = decode_program(bytecode)?;
         let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
 
-        // Phase 0.358: use run_receipt so the trace matches prover/AIR assumptions
+        // Task 0.358: use run_receipt so the trace matches prover/AIR assumptions
         // (including Z-D terminal Halt row semantics).
         let receipt =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
@@ -119,11 +119,11 @@ fn build_public_inputs(
     vm: &Vm,
     receipt: &bud_vm::ExecutionReceipt,
 ) -> ExecutionPublicInputs {
-    // Phase 0.358: public inputs must match BudZero AIR bindings.
+    // Task 0.358: public inputs must match BudZero AIR bindings.
     // `event_digest` is NOT a keccak of events — the AIR binds an additive
     // Log accumulator packed as eight little-endian u32 limbs (limb 0 holds
     // the sum of Log values). Using keccak here made every prove/verify fail
-    // against BudZero main after Z-A phase2 (InvalidProof), forcing the CI pin.
+    // against BudZero main after Z-A task2 (InvalidProof), forcing the CI pin.
     ExecutionPublicInputs {
         chain_id: DEFAULT_CHAIN_ID,
         program_hash: hash_u64_words(program),
@@ -262,7 +262,7 @@ mod tests {
         assert!(receipt_mainnet.steps > 0);
     }
 
-    /// Phase 0.358: Log + prove/verify against BudZero main (event_digest AIR fixed).
+    /// Task 0.358: Log + prove/verify against BudZero main (event_digest AIR fixed).
     #[test]
     fn tur129_log_program_proves_against_budzero_main() {
         let program = vec![
@@ -311,7 +311,7 @@ mod tests {
     /// - Mainnet mode with full activation: VerifyInference is allowed
     ///
     /// The program loads model/input/output commitments and runs
-    /// VerifyInference (0x1F), which performs the 3-phase verification
+    /// VerifyInference (0x1F), which performs the 3-task verification
     /// (structure → binding → AIR) inside bud-vm.
     #[test]
     fn verify_inference_opcode_wired_in_zkvm_executor() {

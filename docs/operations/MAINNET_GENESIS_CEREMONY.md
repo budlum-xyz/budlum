@@ -1,11 +1,11 @@
 # Mainnet Genesis Ceremony Procedure (Canonical)
 
-**Status:** procedure only — does **not** claim a ceremony has occurred.  
-**Audience:** release managers, multi-sig holders, node operators.  
+**Status:** procedure only — does **not** claim a ceremony has occurred.
+**Audience:** release managers, multi-sig holders, node operators.
 **Related:** `docs/operations/PRODUCTION_RUNBOOK.md` §8, `config/mainnet-genesis.json`,
-plan katmanı: `docs/PHASE7_CEREMONY_PLAN.md` (7.1–7.5 görevleri, timeline).
+plan katmanı: `docs/TASK7_CEREMONY_PLAN.md` (7.1–7.5 görevleri, timeline).
 
-> **2026-07-16 konsolidasyonu (Phase 8.9, kullanıcı kararı Q2):** Bu dosya tek
+> **2026-07-16 konsolidasyonu (Task 8.9, kullanıcı kararı Q2):** Bu dosya tek
 > kanonik ceremony prosedürüdür. `docs/MAINNET_GENESIS_CEREMONY.md`'deki
 > (ARENA5, TR) benzersiz içerik — validator key tabloları, treasury havuzları,
 > genesis JSON şablonu, ilk-blok kontrolleri, imza tablosu — buraya taşındı;
@@ -56,7 +56,7 @@ No private keys on networked machines during generation if policy requires air-g
 ### 2.1 Validator key generation (tooling, evidence-backed)
 
 Ed25519 validator anahtarları binary'deki `keygen` alt komutuyla üretilir
-(Phase 8.9 / Görev 7.1 tooling — bu komut 2026-07-16'da eklendi; öncesinde
+(Task 8.9 / Görev 7.1 tooling — bu komut 2026-07-16'da eklendi; öncesinde
 dokümanda olup binary'de OLMAYAN bir adımdı):
 
 ```bash
@@ -79,7 +79,7 @@ başlar, BLS/PQ post-launch eklenir (M6 bilinçli borcu, §5.1).
 | V4 | `___DOLDUR___` | AS-Southeast | `___DOLDUR___` | `___DOLDUR___` | `___DOLDUR___` |
 
 Önkoşul kontrol listesi (tören sabahı): `cargo test --lib`, `cargo clippy -- -D warnings`,
-`cargo fmt --check` — hepsi yeşil; M5 raporu ve Phase 7 planı okunmuş;
+`cargo fmt --check` — hepsi yeşil; M5 raporu ve Task 7 planı okunmuş;
 HSM donanım kararı (veya Ed25519-only) verilmiş.
 
 ---
@@ -140,7 +140,7 @@ bir zincir demektir ve tüm allocation'ları geçersiz kılar. Freeze sonrası
 `docs/operations/PRODUCTION_RUNBOOK.md` §8.2 tablosuna ve `mainnet.toml`
 yorum satırına işlenir. Genesis testlerindeki `validators.is_empty()`
 asser'ları (placeholder durumu kodlayan) bu adımda güncellenir — bkz.
-**`docs/operations/GENESIS_FLIP_CHECKLIST.md`** (Phase 7.4, F1–F5 maddeleri).
+**`docs/operations/GENESIS_FLIP_CHECKLIST.md`** (Task 7.4, F1–F5 maddeleri).
 
 ### 3.3 Update code constructors (if needed)
 
@@ -202,7 +202,7 @@ signatures). Do not store private keys in the repository.
 - Mainnet disk BLS/PQ keys → rejected (PKCS#11 required).
 - Placeholder path strings containing `devnet`/`testnet`/`placeholder` on
   mainnet → CLI security failure.
-- **(Phase 8.9 / Q5, 2026-07-16):** Dummy/placeholder marker içeren bootnode
+- **(Task 8.9 / Q5, 2026-07-16):** Dummy/placeholder marker içeren bootnode
   veya DNS seed (`dummy`, `placeholder`, `203.0.113.`, `.example`) mainnet'te
   dial edilmez → CRITICAL exit 1 (`first_placeholder_peer`,
   `src/core/chain_config.rs`; bağlama noktası `src/main.rs`). Bu guard §3.4
@@ -214,7 +214,7 @@ signatures). Do not store private keys in the repository.
 
 - This document does **not** generate production keys.
 - This document does **not** mark Mainnet as audited.
-- VerifyMerkle / B.U.D. Faz 3 remains Phase 4; interim retrieval is documented in
+- VerifyMerkle / B.U.D. Görev 3 remains Task 4; interim retrieval is documented in
   `docs/BUD_INTERIM.md`.
 
 ### 5.1 Documented post-launch debts (bilinçli borçlar)
@@ -258,7 +258,7 @@ updates do **not** change the genesis block hash.
 
 ---
 
-## 8. Phase 9 Ceremony Readiness (ARENA3, 2026-07-16)
+## 8. Task 9 Ceremony Readiness (ARENA3, 2026-07-16)
 
 **Status:** `template_ready` — ceremony template prepared, awaiting operator keys.
 
@@ -268,7 +268,7 @@ updates do **not** change the genesis block hash.
 - ✅ `src/core/chain_config.rs`: MAINNET_BOOTNODES + MAINNET_DNS_SEEDS synchronized
 - ✅ `ceremony_status = "template_ready"` in both genesis JSON and mainnet.toml
 - ✅ VerifyMerkle production gate OPEN (real Proof-of-Storage active)
-- ✅ B.U.D. Faz 3: merkle_proof mandatory for all deals
+- ✅ B.U.D. Görev 3: merkle_proof mandatory for all deals
 
 ### Operator Checklist (during ceremony):
 1. **Generate keypairs** (air-gapped, via PKCS#11 HSM):
@@ -284,14 +284,14 @@ updates do **not** change the genesis block hash.
 
 ### Remaining (post-ceremony):
 - 🟡 HSM vendor-native BLS/PQ mechanism (hardware-dependent)
-- 🟡 External security audit (Phase 5)
+- 🟡 External security audit (Task 5)
 - 🟡 Mainnet launch announcement
 
 ---
 
-## 9. Phase 10.5 Augmentation — MPC key-gen, rotation, destruction, timeline (F27)
+## 9. Task 10.5 Augmentation — MPC key-gen, rotation, destruction, timeline (F27)
 
-> **Kaynak:** Phase 10.5 çapraz-kesit eksiklik analizi (`docs/PHASE10.5_CROSS_CUTTING_GAP_ANALYSIS.md` F27, 🔴 mainnet-blocker).
+> **Kaynak:** Task 10.5 çapraz-kesit eksiklik analizi (`docs/TASK10.5_CROSS_CUTTING_GAP_ANALYSIS.md` F27, 🔴 mainnet-blocker).
 > **Yazar:** ARENA1 (görev yöneticisi), 2026-07-18.
 > Bu bölüm, yukarıdaki §1–§8 prosedürünü **değiştirmez**; onun **eksik
 > kalan boyutlarını** (MPC, rotation, destruction, timeline) ekler. MR-6
@@ -383,7 +383,7 @@ treasury pubkey'i, genesis JSON — bunlar public artifacts (git commit).
 
 ### 9.5 Ceremony timeline (T-7d → T+1d)
 
-| Faz | Zaman | Aktivite | Çıktı |
+| Görev | Zaman | Aktivite | Çıktı |
 |---|---|---|---|
 | **T-7d** | 1 hafta önce | Participant onboarding, HSM envanter kontrol, air-gap makine setup, dry-run (testnet genesis) | dry-run hash (testnet), participant list locked |
 | **T-3d** | 3 gün önce | Ceremony materials dağıtımı (sealed envelopes / HSM provisioning), witness brief | sealed-material receipt log |
@@ -407,4 +407,4 @@ olmalı:
 
 ---
 
-*Co-authored-by: ARENA1 <arena1@budlum.ai> (F27 augmentation, Phase 10.5)*
+*Co-authored-by: ARENA1 <arena1@budlum.ai> (F27 augmentation, Task 10.5)*

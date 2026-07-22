@@ -1,30 +1,30 @@
-//! B.U.D. storage deals and retrieval challenges (Phase 0.39 §2.2 - §2.6,
+//! B.U.D. storage deals and retrieval challenges (Task 0.39 §2.2 - §2.6,
 //! vision §8.5).
 //!
-//! **Phase 9 (ARENA3, 2026-07-16): VerifyMerkle production gate AÇILDI.**
+//! **Task 9 (ARENA3, 2026-07-16): VerifyMerkle production gate AÇILDI.**
 //! The BudZKVM `VerifyMerkle` opcode passed all three positive STARK tests
-//! (1-depth, 2-depth, 64-depth). B.U.D. Faz 3 (real Proof-of-Storage) is now
+//! (1-depth, 2-depth, 64-depth). B.U.D. Görev 3 (real Proof-of-Storage) is now
 //! active: every `open_deal` requires a valid `merkle_proof` (serialized
 //! `ProofEnvelope`) and `storage_root`. The chain validates proof format
 //! at deal-open time; full STARK verification is performed by nodes with
 //! prover capability.
 //!
-//! **Phase 9 (ARENA3, 2026-07-16):** Two proof layers now coexist:
+//! **Task 9 (ARENA3, 2026-07-16):** Two proof layers now coexist:
 //!
-//! 1. **Merkle Proof (Faz 3):** Every `open_deal` requires a valid
+//! 1. **Merkle Proof (Görev 3):** Every `open_deal` requires a valid
 //!    `merkle_proof` and `storage_root`. The proof is format-validated at
 //!    deal-open time (ProofEnvelope deserialization). Full STARK
 //!    verification performed by prover-capable nodes.
 //!    This is the **real Proof-of-Storage** (vision §8.3).
 //!
-//! 2. **Retrieval Challenge (Faz 5):** The interim retrieval challenge
+//! 2. **Retrieval Challenge (Görev 5):** The interim retrieval challenge
 //!    remains as an anti-unresponsiveness mechanism. An operator can
 //!    pass by holding only the requested byte range — it does NOT prove
 //!    full storage. Treat slashing-from-missed-challenge as a
 //!    "this operator is unresponsive" signal, NOT as a "this operator
 //!    is destroying provable storage" signal.
 //!
-//! Data-sovereignty rule (Phase 0.39 plan §0.5): anyone (any account, no
+//! Data-sovereignty rule (Task 0.39 plan §0.5): anyone (any account, no
 //! role required) may open a `RetrievalChallenge` and may submit a
 //! `StorageDeal`. There is no team-gated "official monitor" role.
 
@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 /// from the caller's stake) from the request (which is the raw caller
 /// intent).
 ///
-/// **Security (Phase 3 §0.2):** `opener_signature` is mandatory on Mainnet.
+/// **Security (Task 3 §0.2):** `opener_signature` is mandatory on Mainnet.
 /// The RPC layer verifies that the `opener` address has signed the
 /// challenge intent; without this, any caller could self-report any
 /// address as the opener, making the `opener_bond` anti-spam gate
@@ -76,7 +76,7 @@ pub enum DealStatus {
     Active,
     /// Bond was slashed (challenge missed). The bond is *not* auto-burned
     /// in this layer — it is recorded in `Slashed` and handed to a
-    /// higher-level `Blockchain` accounting path (Faz 5, vision §8.5).
+    /// higher-level `Blockchain` accounting path (Görev 5, vision §8.5).
     /// This is the explicit "no admin hook, no silent burn" rule.
     Slashed,
     /// Deal reached `deal_end_epoch` and was finalized normally.
@@ -103,11 +103,11 @@ fn default_merkle_depth() -> u8 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StorageDeal {
-    // === B.U.D. Faz 3: Merkle Proof (Phase 4) ===
+    // === B.U.D. Görev 3: Merkle Proof (Task 4) ===
 
     // 64-depth Merkle proof serialized as [leaf || siblings || path_bits].
     // Present when `verify_merkle = Some(...)`.
-    // None = interim challenge mode (Faz 2 compatibility).
+    // None = interim challenge mode (Görev 2 compatibility).
     #[serde(default)]
     pub merkle_proof: Option<Vec<u8>>,
 
@@ -150,7 +150,7 @@ impl StorageDeal {
 /// account — no role required. `byte_start`/`byte_end` describe the
 /// sub-range of the shard the operator must hash to answer.
 ///
-/// **WARNING (Phase 0.39 §2.5):** answering this challenge only proves
+/// **WARNING (Task 0.39 §2.5):** answering this challenge only proves
 /// the operator holds the requested byte range, not the whole shard.
 /// See module-level docs and the README/CLAUDE.md cross-link.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,7 +176,7 @@ pub struct RetrievalChallenge {
 /// chain does not hold the shard bytes; verification is done by
 /// whoever inspects the response off-chain.
 ///
-/// **Security (Phase 3 §0.2):** `responder_signature` is mandatory on Mainnet.
+/// **Security (Task 3 §0.2):** `responder_signature` is mandatory on Mainnet.
 /// The RPC layer verifies that the `responder` (the deal's operator)
 /// has signed the response intent; without this, any caller could
 /// self-report the operator address and answer a challenge on their
@@ -197,7 +197,7 @@ pub struct RetrievalResponse {
 }
 
 /// The outcome of a finalized challenge. `Missed` is the only path that
-/// can transition a deal to `Slashed` (Phase 0.39 §2.5).
+/// can transition a deal to `Slashed` (Task 0.39 §2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChallengeOutcome {
     /// Operator answered on time with a hash that matches the requested
@@ -213,7 +213,7 @@ pub enum ChallengeOutcome {
 /// A finalized challenge with its outcome and the slash amount (if any)
 /// to make the economic accounting auditable. `slashed_bond` is a *record*
 /// — the actual burn is performed by the `Blockchain` accounting path
-/// (Faz 5), never silently in this layer.
+/// (Görev 5), never silently in this layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChallengeResult {
     pub challenge_id: u64,
@@ -290,10 +290,10 @@ pub enum StorageError {
     /// Manifest with the given `manifest_id` is not registered in the
     /// storage domain.
     UnknownManifest(ContentId),
-    /// B.U.D. Faz 3 (Phase 9): merkle_proof and storage_root are mandatory
+    /// B.U.D. Görev 3 (Task 9): merkle_proof and storage_root are mandatory
     /// now that VerifyMerkle production gate is open.
     MerkleProofRequired,
-    /// B.U.D. Faz 3 (Phase 9): the provided merkle proof failed format validation
+    /// B.U.D. Görev 3 (Task 9): the provided merkle proof failed format validation
     /// or STARK verification. The proof must be a valid ProofEnvelope.
     InvalidMerkleProof(String),
     /// V133 fix (ARENAS): Too many concurrent open challenges for a single deal.
@@ -336,10 +336,10 @@ impl std::fmt::Display for StorageError {
             StorageError::UnknownManifest(id) => write!(f, "unknown manifest {id}"),
             StorageError::MerkleProofRequired => write!(
                 f,
-                "B.U.D. Faz 3: merkle_proof and storage_root are mandatory (VerifyMerkle gate open)"
+                "B.U.D. Görev 3: merkle_proof and storage_root are mandatory (VerifyMerkle gate open)"
             ),
             StorageError::InvalidMerkleProof(ref reason) => {
-                write!(f, "B.U.D. Faz 3: invalid merkle proof — {reason}")
+                write!(f, "B.U.D. Görev 3: invalid merkle proof — {reason}")
             }
             StorageError::TooManyOpenChallenges { deal_id, max } => {
                 write!(f, "too many open challenges for deal {deal_id} (max {max})")
@@ -403,12 +403,12 @@ impl StorageRegistry {
         end_epoch: u64,
         economics: StorageEconomicsParams,
         domain_params: &StorageDomainParams,
-        // === B.U.D. Faz 3: Merkle Proof (Phase 4) ===
-        // Optional in Faz 2 (interim); required in Faz 3 once VerifyMerkle gate opens.
+        // === B.U.D. Görev 3: Merkle Proof (Task 4) ===
+        // Optional in Görev 2 (interim); required in Görev 3 once VerifyMerkle gate opens.
         merkle_proof: Option<Vec<u8>>,
         storage_root: Option<Hash32>,
     ) -> Result<u64, StorageError> {
-        // === B.U.D. Faz 3 (Phase 9): Merkle proof MANDATORY + VALIDATE ===
+        // === B.U.D. Görev 3 (Task 9): Merkle proof MANDATORY + VALIDATE ===
         // VerifyMerkle production gate AÇILDI (ARENA3, 2026-07-16).
         // All three positive STARK tests pass (1+2+64-depth).
         // Real Proof-of-Storage is now active — merkle_proof + storage_root required.
@@ -585,7 +585,7 @@ impl StorageRegistry {
             });
         }
 
-        // === B.U.D. Faz 3 / Phase 11.2 (V37 & V38): full STARK proof verification ===
+        // === B.U.D. Görev 3 / Task 11.2 (V37 & V38): full STARK proof verification ===
         if deal.storage_root.is_some() {
             if let Some(proof) = proof_bytes {
                 let root = deal.storage_root.unwrap();
@@ -608,7 +608,7 @@ impl StorageRegistry {
         Ok(result)
     }
 
-    /// B.U.D. Faz 3 / Phase 11.2 (V37 & V38): verify answer challenge ZK proof.
+    /// B.U.D. Görev 3 / Task 11.2 (V37 & V38): verify answer challenge ZK proof.
     /// Verifies the 64-depth VerifyMerkle STARK proof.
     pub fn verify_answer_challenge_zk_proof(
         storage_root: &Hash32,
@@ -749,7 +749,7 @@ impl StorageRegistry {
         }
     }
 
-    /// B.U.D. Faz 3 (Phase 9): validate merkle proof format.
+    /// B.U.D. Görev 3 (Task 9): validate merkle proof format.
     /// Checks that proof_bytes deserializes to a valid ProofEnvelope.
     /// Full STARK verification (Plonky3Adapter::verify) is deferred to
     /// nodes with the bud-proof crate and prover capability.
@@ -757,7 +757,7 @@ impl StorageRegistry {
         proof_bytes: &[u8],
         storage_root: &Hash32,
     ) -> Result<(), StorageError> {
-        // Phase 9 format validation: proof must be non-empty and at least
+        // Task 9 format validation: proof must be non-empty and at least
         // contain a minimal ProofEnvelope header (version + backend + proof_bytes).
         if proof_bytes.len() < 64 {
             return Err(StorageError::InvalidMerkleProof(
@@ -800,7 +800,7 @@ impl StorageRegistry {
         self.results.get(&challenge_id)
     }
 
-    /// Phase 11.10: read-only projection into the spec lifecycle state machine.
+    /// Task 11.10: read-only projection into the spec lifecycle state machine.
     ///
     /// This does not mutate existing deal/challenge accounting. It lets RPC,
     /// tests, and later pruning/archive logic reason about the richer lifecycle
@@ -944,7 +944,7 @@ mod tests {
         }
     }
 
-    /// Phase 9 (Faz 3, `9d82f61`): format-gecerli test zarfi (durust
+    /// Task 9 (Görev 3, `9d82f61`): format-gecerli test zarfi (durust
     /// marker — GERCEK STARK kaniti degil; bincode-deserialize olabilen minimal
     /// ProofEnvelope). NOT: a0671c4'teki inline 78-baytlık diziler tip hatasi
     /// (E0308) veriyordu ve niyeti gizliyordu; helper geri yuklendi.
@@ -1089,7 +1089,7 @@ mod tests {
             .unwrap();
         assert_ne!(id1, id2);
 
-        // Test with merkle proof (Faz 3 mode)
+        // Test with merkle proof (Görev 3 mode)
         let shard_id = m.shards[0].shard_id;
         let id3 = reg
             .open_deal(
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
-        // Faz 3 gate (9d82f61): None her zaman MerkleProofRequired vermeli.
+        // Görev 3 gate (9d82f61): None her zaman MerkleProofRequired vermeli.
         // REGRESYON KILIDI — a0671c4'te silinmisti, geri yuklendi; SILME.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -1319,7 +1319,7 @@ mod tests {
 
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
-        // Faz 3 format gate: deserialize edilemeyen blob InvalidMerkleProof vermeli.
+        // Görev 3 format gate: deserialize edilemeyen blob InvalidMerkleProof vermeli.
         // REGRESYON KILIDI — a0671c4'te silinmisti, geri yuklendi; SILME.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -1411,7 +1411,7 @@ mod tests {
     }
     /// REGRESSION V133: max concurrent open challenges per deal.
     #[test]
-    fn phase11_10_registry_lifecycle_projection_tracks_challenge_and_slash() {
+    fn task11_10_registry_lifecycle_projection_tracks_challenge_and_slash() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -1436,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_registry_lifecycle_projection_tracks_expiry() {
+    fn task11_10_registry_lifecycle_projection_tracks_expiry() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -1466,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn test_phase11_2_answer_challenge_with_zk_proof_happy_path() {
+    fn test_task11_2_answer_challenge_with_zk_proof_happy_path() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         // Open a production deal with a storage_root
@@ -1504,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn test_phase11_2_answer_challenge_missing_zk_proof_rejected() {
+    fn test_task11_2_answer_challenge_missing_zk_proof_rejected() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         // Open a production deal with a storage_root

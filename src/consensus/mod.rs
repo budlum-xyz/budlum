@@ -47,7 +47,7 @@ pub trait ConsensusEngine: Send + Sync {
         Ok(())
     }
 
-    /// Phase 0.16 (security audit §3): chain-aware variant of `record_block`.
+    /// Task 0.16 (security audit §3): chain-aware variant of `record_block`.
     /// Called from `blockchain.rs` AFTER a block has been durably
     /// committed and the chain is in its post-commit state. The
     /// default implementation is a no-op; engines that need access to
@@ -126,7 +126,7 @@ pub trait ConsensusEngine: Send + Sync {
                 block.transactions.len()
             )));
         }
-        // Phase 0.32: a silent empty serialization would let an oversized block pass
+        // Task 0.32: a silent empty serialization would let an oversized block pass
         // this size check. Surface the error instead of defaulting to empty.
         let serialized = serde_json::to_vec(block).map_err(|e| {
             ConsensusError(format!("Failed to serialize block for size check: {e}"))

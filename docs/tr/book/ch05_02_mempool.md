@@ -46,10 +46,10 @@ pub fn add_transaction(&mut self, tx: Transaction) -> Result<()> {
 
     // 2. Havuz dolu mu? (DDoS Koruması)
     if self.transactions.len() >= self.config.max_size {
-        // Havuz doluysa, gelen işlem mevcut en düşük ücretli işlemden 
+        // Havuz doluysa, gelen işlem mevcut en düşük ücretli işlemden
         // daha mı değerli?
         let min_fee = *self.by_fee.keys().next().unwrap();
-        
+
         if tx.fee > min_fee {
             // Evet daha değerli. Fakir olanı at, zengini al.
             self.evict_lowest_fee();
@@ -90,8 +90,8 @@ Bu tasarım sayesinde Budlum:
 Kullanıcı işleminin takıldığını görürse, aynı nonce ile **daha yüksek ücretli** yeni bir işlem gönderebilir.
 `add_transaction` içinde bunu kontrol ederiz:
 1.  Gönderenin aynı nonce'lu işlemi var mı?
-2.  Varsa, yenisinin ücreti eskisinden %10 fazla mı?
-3.  Fazlaysa eskisini sil, yenisini ekle.
+2.  Varsa, yenisinin ücreti eskisinden %10 görevla mı?
+3.  Görevlaysa eskisini sil, yenisini ekle.
 
 Bu mekanizma, "Takılan işlemi kurtarma" (Unsticking Transaction) olarak bilinir.
 
@@ -108,7 +108,7 @@ Mempool, yapılandırmasında (`MempoolConfig`) bir "Yaşam Süresi" (TTL) barı
 ```rust
 pub fn cleanup_expired(&mut self) -> usize {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    
+
     // Süresi dolan işlemlerin hash'lerini bul
     let mut expired = Vec::new();
     for (hash, entry) in self.transactions.iter() {
@@ -122,7 +122,7 @@ pub fn cleanup_expired(&mut self) -> usize {
     for hash in expired {
         self.remove_transaction(&hash);
     }
-    
+
     count // Temizlenen işlem sayısını döndür
 }
 ```
@@ -131,7 +131,7 @@ Bu periyodik temizleyici sayesinde ağ, kendi hafızasını (Mempool'u) otomatik
 
 ## 5. Mempool Persistence (Disk Yedeği) ve Dayanıklılık
 
-Normalde Mempool sadece RAM'dedir. Node kapandığında içindeki tüm bekleyen işlemler silinir. **Budlum Hardening Phase 2** ile birlikte artık tam kapsamlı **Mempool Persistence** ve hata denetimi (Error Handling) devrededir.
+Normalde Mempool sadece RAM'dedir. Node kapandığında içindeki tüm bekleyen işlemler silinir. **Budlum Hardening Task 2** ile birlikte artık tam kapsamlı **Mempool Persistence** ve hata denetimi (Error Handling) devrededir.
 
 ### Mekanizma:
 1. **Save-on-Arrival:** Bir işlem Mempool'a eklendiğinde aynı anda veritabanına da (`MEMPOOL:{hash}`) yazılır.

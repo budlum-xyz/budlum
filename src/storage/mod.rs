@@ -4,12 +4,12 @@
 //!
 //! * [`db`] / [`traits`] — the *node-local* key-value store (sled) that
 //!   holds chain state, accounts, blocks, etc. Pre-existing, not touched
-//!   by Phase 0.38.
+//!   by Task 0.38.
 //!
 //! * [`content_id`] / [`manifest`] — the *B.U.D. on-chain content-addressing
-//!   primitives* introduced by Phase 0.38 (Faz 2 + Phase 0.39 §2.1). These are
+//!   primitives* introduced by Task 0.38 (Görev 2 + Task 0.39 §2.1). These are
 //!   pure data shapes — no I/O, no admin hooks, no team-server dependency
-//!   (Phase 0.39 plan §0.5).
+//!   (Task 0.39 plan §0.5).
 //!
 //! The domain-level deal / challenge accounting lives in
 //! `crate::domain::storage_deal::StorageRegistry` (kept under

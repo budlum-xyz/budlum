@@ -1,6 +1,6 @@
-//! Phase 0.40 §1.3 — Finality live-path son taraması.
+//! Task 0.40 §1.3 — Finality live-path son taraması.
 //!
-//! Mevcut `finality_adversarial.rs` (12 test) Phase 0.36 + Phase 0.38 düzeltmelerini
+//! Mevcut `finality_adversarial.rs` (12 test) Task 0.36 + Task 0.38 düzeltmelerini
 //! (equivocation → slashing evidence, ingest-time imza doğrulama) kapsar.
 //! Bu dosya, **live-path pencerelerini** ve **dürüstlük sınırlarını** test
 //! eder — son taramada eksik kalan senaryolar.
@@ -20,11 +20,11 @@
 //! ## Yapmadıkları
 //!
 //! - Quorum / split-brain / byzantine gürültü: `finality_adversarial.rs`
-//!   bunları Phase 0.36'te kapsadı, regresyon DEĞİL.
+//!   bunları Task 0.36'te kapsadı, regresyon DEĞİL.
 //! - Snapshot roundtrip: `equivocation_slashing_record_survives_snapshot_roundtrip`
-//!   bunu Phase 0.40 Görev 1'de kapsadı.
+//!   bunu Task 0.40 Görev 1'de kapsadı.
 //! - Rate-limit invalid sig slashing: `repeated_invalid_signatures_trigger_slash`
-//!   Phase 0.40 Görev 2'de kapsadı.
+//!   Task 0.40 Görev 2'de kapsadı.
 
 #![allow(clippy::needless_range_loop)]
 

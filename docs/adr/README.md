@@ -5,9 +5,9 @@ Bu dizin, Budlum'un mimari kararlarının kalıcı kaydıdır. Her ADR tek bir k
 ## Şablon
 [ADR-000-template.md](./ADR-000-template.md)
 
-## Kabul Edilen ADR'ler (Phase 11.6, 2026-07-20)
+## Kabul Edilen ADR'ler (Task 11.6, 2026-07-20)
 
-| ADR | Başlık | Durum | İlgili Faz |
+| ADR | Başlık | Durum | İlgili Görev |
 |---|---|---|---|
 | [ADR-001](./ADR-001-genesis-reward-pool.md) | PoS Validator Ödülleri — Genesis Reward Pool | Kabul Edildi | 11.6 spec / 11.8 kod |
 | [ADR-002](./ADR-002-storage-spec-first.md) | B.U.D. Storage — Spec-First | Kabul Edildi | 11.6 spec / 11.10 kod |
@@ -21,7 +21,7 @@ Bu dizin, Budlum'un mimari kararlarının kalıcı kaydıdır. Her ADR tek bir k
 | [ADR-010](./ADR-010-security-audit-hsm.md) | Güvenlik — Threat Model + Audit + HSM | Kabul Edildi | 11.6 threat / 11.20 audit |
 
 ## Karar Kaynağı
-10 karar, Phase 11.6 karar turunda (2026-07-20) kullanıcı onayıyla alındı. Detaylı yol haritası: `docs/PHASE11_6_MAINNET_YOL_HARITASI.md`.
+10 karar, Task 11.6 karar turunda (2026-07-20) kullanıcı onayıyla alındı. Detaylı yol haritası: `docs/TASK11_6_MAINNET_YOL_HARITASI.md`.
 
 ## Durum Etiketleri
 - **Kabul Edildi** — karar yürürlükte.

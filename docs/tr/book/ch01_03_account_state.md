@@ -71,7 +71,7 @@ Blockchain'de milyonlarca hesap olabilir. Her blokta tüm hesapları baştan has
 
 ---
 
-**Budlum Hardening** aşamasında, `state_root` hesaplaması artık **Incremental Merkle Trie** yapısıdır.
+**Budlum Hardening** görevsında, `state_root` hesaplaması artık **Incremental Merkle Trie** yapısıdır.
 
 **Kod (Özet):**
 ```rust
@@ -236,7 +236,7 @@ Konsensüs motoru (PoS) bir suç tespit ettiğinde bu fonksiyonu çağırır. **
 pub fn apply_slashing(&mut self, evidences: &[SlashingEvidence], slash_ratio_scaled: u64) {
     for evidence in evidences {
         let producer = &evidence.header1.producer;
-        
+
         if let Some(validator) = self.validators.get_mut(producer) {
             if !validator.slashed {
                 // Fixed-point math: (stake * ratio) / SCALE
@@ -252,5 +252,5 @@ pub fn apply_slashing(&mut self, evidences: &[SlashingEvidence], slash_ratio_sca
 ```
 
 **Satır Satır:**
-- `saturating_sub`: Eğer ceza miktarı bakiyeden fazlaysa, sonuç eksiye düşmesin, 0 olsun diye kullanılır. Güvenli matematik işlemidir. Rust'ta *panic* (çökme) olmasını engeller.
+- `saturating_sub`: Eğer ceza miktarı bakiyeden görevlaysa, sonuç eksiye düşmesin, 0 olsun diye kullanılır. Güvenli matematik işlemidir. Rust'ta *panic* (çökme) olmasını engeller.
 - **Neden Stake Siliniyor?** Caydırıcılık. Eğer sadece sistemden atsaydık, paralarını çekip başka bir kimlikle geri gelirlerdi. Para kaybetmek en büyük korkudur.

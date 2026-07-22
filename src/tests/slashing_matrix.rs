@@ -1,4 +1,4 @@
-//! Phase 11.3 Task 3: Slashing test matrisi.
+//! Task 11.3 Task 3: Slashing test matrisi.
 //!
 //! Ayrı ayrı test senaryoları: double-sign, downtime/liveness, invalid
 //! attestation. Verifier Registry üstünde, her slashing koşulu için

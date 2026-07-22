@@ -126,7 +126,7 @@ pub fn checkpoint_signing_message(epoch: u64, height: u64, hash: &str) -> Vec<u8
     msg
 }
 
-/// Domain-separated BLS Proof-of-Possession message (Phase 0.334 / A7).
+/// Domain-separated BLS Proof-of-Possession message (Task 0.334 / A7).
 /// Includes `chain_id` so a PoP captured on testnet cannot be replayed on mainnet.
 pub fn pop_signing_message(chain_id: u64, address: &Address, bls_pk: &[u8]) -> Vec<u8> {
     let mut msg = Vec::new();
@@ -165,7 +165,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     }
     let pk_affine = pk_affine.unwrap();
 
-    // Phase 0.17 (security audit §5): enforce that the public key is
+    // Task 0.17 (security audit §5): enforce that the public key is
     // actually in the correct prime-order subgroup. Without this
     // check an attacker can supply a small-subgroup point as the
     // public key, which makes the pairing produce values in a
@@ -224,7 +224,7 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
         return false;
     }
     let pk_affine = pk_affine.unwrap();
-    // Phase 0.17 (security audit §5): subgroup check on the PoP
+    // Task 0.17 (security audit §5): subgroup check on the PoP
     // public key (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = pk_affine.is_torsion_free().into();
     if !is_on_curve {
@@ -241,7 +241,7 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
         return false;
     }
     let sig_affine = sig_affine.unwrap();
-    // Phase 0.17 (security audit §5): subgroup check on the PoP
+    // Task 0.17 (security audit §5): subgroup check on the PoP
     // signature (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = sig_affine.is_torsion_free().into();
     if !is_on_curve {
@@ -301,7 +301,7 @@ pub struct FinalityAggregator {
     pub precommit_quorum_reached: bool,
     /// Equivocation (double-sign) evidence detected while ingesting votes.
     ///
-    /// Phase 0.38 Fix 1: when a validly-signed vote conflicts with one we already
+    /// Task 0.38 Fix 1: when a validly-signed vote conflicts with one we already
     /// recorded from the same voter, we package both into a canonical
     /// [`SlashingReport`] here. The `Blockchain` drains this after each
     /// `add_prevote`/`add_precommit` and routes it through the SAME
@@ -354,7 +354,7 @@ impl FinalityAggregator {
             return Err("Prevote checkpoint height mismatch".into());
         }
 
-        // Membership + ingest-time BLS signature verification (Phase 0.38 Fix 2,
+        // Membership + ingest-time BLS signature verification (Task 0.38 Fix 2,
         // Option A). The signature is checked over the vote's OWN signing
         // message (which binds its own checkpoint_hash), so a conflicting-hash
         // vote is only ever treated as equivocation if it is itself validly
@@ -372,7 +372,7 @@ impl FinalityAggregator {
             .map_err(|e| format!("Invalid prevote signature: {e}"))?;
         }
 
-        // Equivocation detection (Phase 0.38 Fix 1). A validly-signed vote for a
+        // Equivocation detection (Task 0.38 Fix 1). A validly-signed vote for a
         // DIFFERENT checkpoint hash than one already seen from this voter is a
         // double-sign — record canonical evidence once (order-independent).
         self.detect_prevote_equivocation(&vote);
@@ -404,7 +404,7 @@ impl FinalityAggregator {
             return Err("Cannot precommit before prevote quorum".into());
         }
 
-        // Membership + ingest-time BLS signature verification (Phase 0.38 Fix 2).
+        // Membership + ingest-time BLS signature verification (Task 0.38 Fix 2).
         if let Some(ref snapshot) = self.validator_snapshot {
             let entry = snapshot
                 .find_validator(&vote.voter_id)
@@ -417,7 +417,7 @@ impl FinalityAggregator {
             .map_err(|e| format!("Invalid precommit signature: {e}"))?;
         }
 
-        // Equivocation detection (Phase 0.38 Fix 1).
+        // Equivocation detection (Task 0.38 Fix 1).
         self.detect_precommit_equivocation(&vote);
 
         if vote.checkpoint_hash != self.checkpoint_hash {
@@ -622,7 +622,7 @@ impl FinalityCert {
                     ));
                 }
                 let pk = pk.unwrap();
-                // Phase 0.17 (security audit §5): subgroup check on
+                // Task 0.17 (security audit §5): subgroup check on
                 // every bitmap-claimed signer (see `verify_bls_sig`
                 // for the full rationale). Without this, a
                 // malicious snapshot could insert a small-subgroup
@@ -815,7 +815,7 @@ mod tests {
         ));
     }
 
-    /// Phase 0.334 / A7: PoP signed under chain_id A must not verify under chain_id B.
+    /// Task 0.334 / A7: PoP signed under chain_id A must not verify under chain_id B.
     #[test]
     fn tur117_pop_chain_id_domain_separation() {
         let (snap, _) = make_snapshot_with_keys(1, 1000);
@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn test_aggregator_rejects_invalid_signature() {
-        // Phase 0.38 Fix 2 (Option A): a garbage signature is rejected AT INGEST and
+        // Task 0.38 Fix 2 (Option A): a garbage signature is rejected AT INGEST and
         // never enters the aggregate.
         let (snap, _) = make_snapshot_with_keys(4, 1000);
         let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into());
@@ -1008,7 +1008,7 @@ mod tests {
         assert!(result.unwrap_err().contains("set hash mismatch"));
     }
 
-    /// Phase 0.17 (security audit §5): `verify_bls_sig` must reject
+    /// Task 0.17 (security audit §5): `verify_bls_sig` must reject
     /// public keys and signatures that are not in the prime-order
     /// subgroup. Without the subgroup check an attacker can supply
     /// a small-subgroup point as the public key, which makes the
@@ -1043,7 +1043,7 @@ mod tests {
         );
     }
 
-    /// Phase 0.17 (security audit §5): `verify_pop` must reject PoP
+    /// Task 0.17 (security audit §5): `verify_pop` must reject PoP
     /// entries whose public key is not in the prime-order
     /// subgroup. The same subgroup check that protects
     /// `verify_bls_sig` must protect `verify_pop`, otherwise a

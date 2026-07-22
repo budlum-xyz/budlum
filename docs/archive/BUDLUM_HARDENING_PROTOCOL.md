@@ -3,7 +3,7 @@
 > **Durum:** Kanonik süreç belgesi (ARENA ajanları + insan operatör).  
 > **Yazar:** ARENA3 · **Tarih:** 2026-07-20 · **Temel SHA:** `8b66cd4` (güncellenir).  
 > **İlişki:** Bu belge `docs/mainnet-hazirligi-talimati.md`, `docs/MAINNET_READINESS.md` (MR-1..10),
-> `docs/THREAT_MODEL.md`, `docs/AUDIT_CHECKLIST.md`, `docs/BUDLUM_PHASE11.md`,
+> `docs/THREAT_MODEL.md`, `docs/AUDIT_CHECKLIST.md`, `docs/BUDLUM_TASK11.md`,
 > `docs/operations/*` ve `CLAUDE.md` ile birlikte okunur. **Çelişkide:**
 > (1) CLAUDE.md permissionless/PoA izolasyonu, (2) bu protokolün kapı kuralları,
 > (3) MR tablosu — bu sıra geçerlidir.
@@ -19,7 +19,7 @@
 | Terim | Anlam |
 |-------|--------|
 | **Sertleştirme (hardening)** | Bilinen bulgu kapanışı + saldırı yüzeyi daraltma + regresyon kilidi + operasyonel tatbikat. Kod yeşili ≠ sertleştirilmiş. |
-| **Kapı (gate)** | Bir sonraki faza geçmek için zorunlu kanıt demeti. Kapı kırmızıysa yeni kapsam **YASAK**. |
+| **Kapı (gate)** | Bir sonraki goreva geçmek için zorunlu kanıt demeti. Kapı kırmızıysa yeni kapsam **YASAK**. |
 | **Bulgu (V-ID)** | STATUS_ONLINE / denetim raporlarında numaralı güvenlik/davranış açığı. |
 | **Regresyon kilidi** | Bir fix'in bir daha sessizce bozulmasını engelleyen isimli test + mümkünse CI gate. |
 | **Sahte-yeşil** | Test/CI'nin fail'i gizlemesi (pipefail yok, stub "OK", `#[ignore]` ile "yeşil"). Protokol ihlali. |
@@ -100,11 +100,11 @@ ve kullanıcı (Ayaz) onayı ile kullanılabilir. Aksi halde bu ibare **yasak**.
 
 ---
 
-## 3. Protokol fazları (sıralı; atlama yok)
+## 3. Protokol gorevları (sıralı; atlama yok)
 
-Her fazın sonunda **Kapı Gx** vardır. Gx kırmızıysa G(x+1) başlamaz.
+Her gorevın sonunda **Kapı Gx** vardır. Gx kırmızıysa G(x+1) başlamaz.
 
-### Faz H0 — Yeşil zemin ve ölçüm (zorunlu önkoşul)
+### Gorev H0 — Yeşil zemin ve ölçüm (zorunlu önkoşul)
 
 **Amaç:** Sertleştirme işinin üzerine bina edileceği CI zemini.
 
@@ -119,7 +119,7 @@ Her fazın sonunda **Kapı Gx** vardır. Gx kırmızıysa G(x+1) başlamaz.
 
 ---
 
-### Faz H1 — Kritik bulgu imhası (🔴 = 0)
+### Gorev H1 — Kritik bulgu imhası (🔴 = 0)
 
 **Amaç:** Mainnet blocker sınıfı açıkların tamamını kapatmak.
 
@@ -164,7 +164,7 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 ---
 
-### Faz H2 — Yüksek bulgu ve invariantlar (🟡 → 0 veya bilinçli risk kaydı)
+### Gorev H2 — Yüksek bulgu ve invariantlar (🟡 → 0 veya bilinçli risk kaydı)
 
 **Amaç:** Yüksek önemdeki açıklar ya fix ya da **imzalı risk kabulü** (kullanıcı).
 
@@ -198,7 +198,7 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 ---
 
-### Faz H3 — Derin dinamik güvenlik (fuzz / chaos / property)
+### Gorev H3 — Derin dinamik güvenlik (fuzz / chaos / property)
 
 **Amaç:** Birim testin görmediği sınıfları zorlamak.
 
@@ -221,7 +221,7 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 |------|--------|
 | H3.1 Fuzz Quick 8 targets | CI job present (60s×8) |
 | H3.2 Fuzz Nightly matrix | 8 targets × 4h (incl. consensus/relayer/zk) |
-| H3.3–H5 Phase 11.2 targets | present + expanded seed corpus |
+| H3.3–H5 Task 11.2 targets | present + expanded seed corpus |
 | H3.6 deserialize targets | present |
 | H3.7 chaos suites | `chaos.rs`, `snapshot_chaos.rs` |
 | H3.8 proptest | `tokenomics_proptest`, `proptest_core` |
@@ -229,7 +229,7 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 ---
 
-### Faz H4 — Kriptografi ve anahtar koruma
+### Gorev H4 — Kriptografi ve anahtar koruma
 
 | # | İş | Kabul |
 |---|-----|--------|
@@ -255,7 +255,7 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 
 ---
 
-### Faz H5 — Ağ, RPC, eclipse, DoS
+### Gorev H5 — Ağ, RPC, eclipse, DoS
 
 Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`.
 
@@ -283,7 +283,7 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 ---
 
-### Faz H6 — Snapshot, genesis, migration, boot
+### Gorev H6 — Snapshot, genesis, migration, boot
 
 | # | İş | Kabul |
 |---|-----|--------|
@@ -307,7 +307,7 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 ---
 
-### Faz H7 — Supply chain ve CI sertliği
+### Gorev H7 — Supply chain ve CI sertliği
 
 | # | İş | Kabul |
 |---|-----|--------|
@@ -332,7 +332,7 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 ---
 
-### Faz H8 — Operasyon, tatbikat, dış denetim, bounty
+### Gorev H8 — Operasyon, tatbikat, dış denetim, bounty
 
 | # | İş | Kabul |
 |---|-----|--------|
@@ -356,7 +356,7 @@ Kaynak: `docs/NETWORK_HARDENING_SPEC.md`, `docs/operations/NETWORK_HARDENING.md`
 
 ---
 
-### Faz H9 — Sürekli sertleştirme (asla "bitti" sayılmaz)
+### Gorev H9 — Sürekli sertleştirme (asla "bitti" sayılmaz)
 
 Mainnet sonrası da yürür:
 
@@ -413,7 +413,7 @@ Her sertleştirme ADIM'ı STATUS_ONLINE'da şu formatta açılır/kapanır:
 
 ```markdown
 ### [TS] ARENAx — HARDEN ADIM-N: <başlık>
-**Faz:** H1..H9
+**Gorev:** H1..H9
 **Kapsam:** <dosya/modül>
 **Bulgu ID:** Vxx / yeniyse NEW-...
 1. Ne bitti: <davranış>
@@ -544,9 +544,9 @@ Hepsi ✅ olmadan ibare kullanılmaz:
 
 ## 13. İlk 10 ADIM (hemen uygulanacak sıra)
 
-> Phase 11.2 tamam iddiası sonrası pratik kuyruk. ARENA3 önerisi.
+> Task 11.2 tamam iddiası sonrası pratik kuyruk. ARENA3 önerisi.
 
-| ADIM | Faz | İş | Çıktı |
+| ADIM | Gorev | İş | Çıktı |
 |------|-----|-----|--------|
 | **S0** | H0 | Main CI yeşil teyit + bu protokolü merge | G0 |
 | **S1** | H1 | V89 kararı uygula + regresyon kilidi | 🔴-1 |
@@ -579,7 +579,7 @@ Hepsi ✅ olmadan ibare kullanılmaz:
 
 ## 15. Belge bakımı
 
-- Bu dosya **her faz kapısında** revize edilir (tarih + SHA).
+- Bu dosya **her gorev kapısında** revize edilir (tarih + SHA).
 - Yeni V-ID sınıfları §2 haritasına bağlanır.
 - Protokol ihlali STATUS'ta `HARDEN-INCIDENT` olarak işlenir; silinmez.
 
@@ -594,7 +594,7 @@ Hepsi ✅ olmadan ibare kullanılmaz:
 | `docs/MAINNET_READINESS.md` | MR-1..10 |
 | `docs/THREAT_MODEL.md` | Tehdit modeli |
 | `docs/AUDIT_CHECKLIST.md` | Dış audit paketi |
-| `docs/BUDLUM_PHASE11.md` | V-bulgu sprint planı |
+| `docs/BUDLUM_TASK11.md` | V-bulgu sprint planı |
 | `docs/NETWORK_HARDENING_SPEC.md` | Ağ |
 | `docs/operations/*` | Runbook, HSM, ceremony |
 | `SECURITY.md` / `docs/BUG_BOUNTY.md` | Raporlama / bounty |

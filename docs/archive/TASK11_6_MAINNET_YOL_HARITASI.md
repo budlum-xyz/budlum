@@ -1,21 +1,21 @@
-# BUDLUM MAINNET YOL HARİTASI — Phase 11.6 → 11.20
+# BUDLUM MAINNET YOL HARİTASI — Task 11.6 → 11.20
 
 **Tarih:** 2026-07-20
 **Yazar:** ARENA1 (görev yöneticisi)
-**Durum:** 10 mimari karar onaylı → 8 faza dönüştürüldü
-**Prensip:** Mainnet tarihine bol zaman var → **en sıkı sistemi kur**: spec-first, her fazda CI kapısı + kabul kriteri + fuzz/security gate, kısayol yok.
+**Durum:** 10 mimari karar onaylı → 8 goreva dönüştürüldü
+**Prensip:** Mainnet tarihine bol zaman var → **en sıkı sistemi kur**: spec-first, her gorevda CI kapısı + kabul kriteri + fuzz/security gate, kısayol yok.
 
 ---
 
 ## 0. Mimari Karar Kayıtları (ADR)
 
-Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. ADR'ler geriye dönük olarak değiştirilemez — yeni karar yeni ADR. Bu, mimari kararların izini sürülebilir kılar (q10 threat model için de gerekli).
+Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. ADR'ler geriye dönük olarak değiştirilemez — yeni karar yeni ADR. Bu, mimari kararların izini sürülebilir kılar (q10 threat model için de gerekli).
 
 ---
 
-## Karar → Faz Eşlemesi
+## Karar → Gorev Eşlemesi
 
-| Karar | Faz |
+| Karar | Gorev |
 |---|---|
 | q1 Genesis pool | 11.6 (spec) + 11.8 (kod) |
 | q2 Storage spec-first | 11.6 (spec finalize) + 11.10 (kod) |
@@ -30,9 +30,9 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.6 — MİMARİ TEMEL & SPEC FİNALİZASYONU
+## TASK 11.6 — MİMARİ TEMEL & SPEC FİNALİZASYONU
 
-**Hedef:** Tüm kodlama fazlarının temelini atan spec'leri + karar kayıtlarını + tehdit modelini kur. Kod yazmak YOK — bu faz pure spec + review.
+**Hedef:** Tüm kodlama gorevlarının temelini atan spec'leri + karar kayıtlarını + tehdit modelini kur. Kod yazmak YOK — bu gorev pure spec + review.
 
 **Bağımlılık:** Hiçbiri (her şeyin temeli).
 
@@ -42,10 +42,10 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
    - Pre-allocation oranı (%8-12), dağıtım schedule'ı (epoch-bazlı).
    - Slash/penalty etkileşimi, treasury governance interface'i.
    - Sabit 100M arzla tutarlılık kanıtı (emisyon hesabı).
-3. **`BUD_STORAGE_TECHNICAL_SPEC.md` finalize** (Phase 11.4 spec'i):
+3. **`BUD_STORAGE_TECHNICAL_SPEC.md` finalize** (Task 11.4 spec'i):
    - Storage provider trait interface'i (imzalar net).
    - Deal lifecycle state machine (open → prove → challenge → settle).
-   - CI spec-review kapısı tanımı (sonraki faz için).
+   - CI spec-review kapısı tanımı (sonraki gorev için).
 4. **`DOMAIN_FORK_CHOICE_SPEC.md` finalize**:
    - `ConsensusDomain::fork_choice()` trait method imzası.
    - Per-domain kurallar (PoW longest-chain, PoS LMD-GHOST, BFT instant finality, PoA round-robin).
@@ -57,7 +57,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 6. **Threat model dokümanı v1** (`docs/THREAT_MODEL.md`):
    - STRIDE kategorileri başına senaryolar (consensus, p2p, wallet, bridge).
    - Eclipse/sybil/long-range/nothing-at-stake analizleri.
-   - Her fazın güvenlik kabul kriterleri için temel.
+   - Her gorevın güvenlik kabul kriterleri için temel.
 
 ### Kabul Kriterleri
 - [ ] 10 ADR yazıldı, PR ile review edildi.
@@ -67,7 +67,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.8 — KONSENSÜS ÇEKİRDEĞİ: EKONOMİ + FORK-CHOICE
+## TASK 11.8 — KONSENSÜS ÇEKİRDEĞİ: EKONOMİ + FORK-CHOICE
 
 **Hedef:** Konsensüs ve ekonomiyi değiştiren 3 kod akışı (konsensüs-kritik, en erken yapılmalı çünkü state machine'i değiştirir).
 
@@ -99,7 +99,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.10 — STORAGE LAYER + NODE SINIFLANDIRMASI
+## TASK 11.10 — STORAGE LAYER + NODE SINIFLANDIRMASI
 
 **Hedef:** En büyük boşluk — B.U.D. storage layer'ı spec'ten koda. + Full/Archive node ayrımı.
 
@@ -130,7 +130,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.12 — AĞ SERTLEŞTİRME (TAM)
+## TASK 11.12 — AĞ SERTLEŞTİRME (TAM)
 
 **Hedef:** q7 — full network hardening v1'de. Eclipse/sybil'e karşı dayanıklı p2p katmanı.
 
@@ -159,7 +159,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.14 — HESAP KATMANI: MULTISIG + SOCIAL RECOVERY
+## TASK 11.14 — HESAP KATMANI: MULTISIG + SOCIAL RECOVERY
 
 **Hedef:** q5 — multisig/social recovery mainnet v1'de. wallet-core genişletme.
 
@@ -178,7 +178,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
    - wallet-core test matrisi (M-of-N combinations).
 4. **Mobile/browser binding** (q5延伸):
    - uniffi (Kotlin/Swift) + wasm-bindgen (JS/TS) interface tanımı.
-   - Bu fazda sadece binding stub'ları (UI sonraki faz).
+   - Bu gorevda sadece binding stub'ları (UI sonraki gorev).
 
 ### Kabul Kriterleri
 - [ ] Multisig: M-of-N tüm kombinasyonlar test matrisi (3-of-5, 2-of-3, vb.).
@@ -189,7 +189,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.16 — ON-CHAIN GOVERNANCE (MİNİMAL)
+## TASK 11.16 — ON-CHAIN GOVERNANCE (MİNİMAL)
 
 **Hedef:** q4 — minimal on-chain parametre değişikliği. Sadece güvenlik-kritik parametreler (slash ratios, min stake). Kod upgrade'leri hard fork ile off-chain.
 
@@ -215,7 +215,7 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.18 — UYUM: MASAK PoA DOMAIN
+## TASK 11.18 — UYUM: MASAK PoA DOMAIN
 
 **Hedef:** q8 — MASAK AML hook'ları + audit trail, **sadece PoA domain'e izole** (permissionless'e dokunmaz — izolasyon ilkesiyle tutarlı).
 
@@ -241,15 +241,15 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## PHASE 11.20 — GÜVENLİK & AUDIT + MAINNET LOCKDOWN
+## TASK 11.20 — GÜVENLİK & AUDIT + MAINNET LOCKDOWN
 
 **Hedef:** q10 — threat model finalize + audit prep paketi + HSM policy. Mainnet readiness final review.
 
-**Bağımlılık:** 11.6 (threat model v1) + tüm fazlar (11.8-11.18).
+**Bağımlılık:** 11.6 (threat model v1) + tüm gorevlar (11.8-11.18).
 
 ### Görevler
 1. **Threat model finalize** (`docs/THREAT_MODEL.md` v2):
-   - 11.6'daki v1'i tüm fazların gerçekleşmiş azaltmalarıyla güncelle.
+   - 11.6'daki v1'i tüm gorevların gerçekleşmiş azaltmalarıyla güncelle.
    - Kalan açık riskler + mainnet sonrası takip listesi.
 2. **Audit prep paketi** (`docs/audit_prep/`):
    - Spec/test/fuzz evidence derlemi (her modül için).
@@ -260,24 +260,24 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
    - Soft launch → HSM migration yolu.
    - Anahtar rotasyonu, yedekleme, kayıp senaryosu.
 4. **Mainnet readiness review** (MR-1..10 + yeni kriterler):
-   - Tüm fazların kabul kriterleri işaretli.
+   - Tüm gorevların kabul kriterleri işaretli.
    - Bug bounty + V-bulgu süreci özeti (kapanan/açık).
-   - Final integration test (tüm fazlar birlikte).
+   - Final integration test (tüm gorevlar birlikte).
 5. **Mainnet lockdown:**
    - Tüm güvenlik-kritik parametreler locked (governance sonrası).
    - Emergency procedures (halt, rollback, communication).
    - Launch runbook.
 
 ### Kabul Kriterleri
-- [ ] Threat model v2: her fazın azaltmaları gerçekleşmiş, açık risk listeli.
+- [ ] Threat model v2: her gorevın azaltmaları gerçekleşmiş, açık risk listeli.
 - [ ] Audit prep paketi: bağımsız auditör tarafından okunabilir (dry-run review).
 - [ ] HSM policy: validator operatör dokümanı complete.
-- [ ] Mainnet readiness: MR-1..10 + 8 fazın tüm kriterleri yeşil.
-- [ ] **CI kapısı:** tüm fazların CI job'ları main şubesinde yeşil, 7 gün stabil.
+- [ ] Mainnet readiness: MR-1..10 + 8 gorevın tüm kriterleri yeşil.
+- [ ] **CI kapısı:** tüm gorevların CI job'ları main şubesinde yeşil, 7 gün stabil.
 
 ---
 
-## Faz Bağımlılık Grafiği
+## Gorev Bağımlılık Grafiği
 
 ```
 11.6 (Temel: spec + ADR + threat)
@@ -301,21 +301,21 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ---
 
-## En Sıkı Sistemin Kuralları (tüm fazlar)
+## En Sıkı Sistemin Kuralları (tüm gorevlar)
 
-1. **Spec-first:** Hiçbir faz spec'siz kod yazmaz. Spec finalize → CI spec-review kapısı → kod.
-2. **CI tek otorite:** Lokal toolchain yok, CI her fazın kabulünü belirler. Kısayol/allow/ignore YASAK.
-3. **Her fazda fuzz + security gate:** Konsensüs-kritik fazlar (11.8, 11.16) ekstra fuzz target ekler.
-4. **İzolasyon mührü:** PoA↔permissionless izolasyonu her fazda test-pinned (özellikle 11.18 MASAK).
+1. **Spec-first:** Hiçbir gorev spec'siz kod yazmaz. Spec finalize → CI spec-review kapısı → kod.
+2. **CI tek otorite:** Lokal toolchain yok, CI her gorevın kabulünü belirler. Kısayol/allow/ignore YASAK.
+3. **Her gorevda fuzz + security gate:** Konsensüs-kritik gorevlar (11.8, 11.16) ekstra fuzz target ekler.
+4. **İzolasyon mührü:** PoA↔permissionless izolasyonu her gorevda test-pinned (özellikle 11.18 MASAK).
 5. **ADR izi:** Her mimari karar ADR olarak kalıcı. Spec drift = yeni ADR.
-6. **Branch protection:** Her faz `arena/phase-NN-X` branch'leri, PR ile merge, main her zaman yeşil.
+6. **Branch protection:** Her gorev `arena/task-NN-X` branch'leri, PR ile merge, main her zaman yeşil.
 7. **Görev yöneticisi (ARENA1):** Ekip CI kalıntılarını izler, main RED olursa öncelikli düzeltir (bu oturumda 5+ kez yapılan rol).
 
 ---
 
 ## Mainnet'e Kadar Toplam Tahmini Yük
 
-| Faz | Tahmini PR | CI kapısı |
+| Gorev | Tahmini PR | CI kapısı |
 |---|---|---|
 | 11.6 | 6 (spec'ler + ADR + threat) | spec-coverage |
 | 11.8 | 4-5 (pool, fee, fork-choice, lifecycle) | economy invariants + fork fuzz |
@@ -331,4 +331,4 @@ Her faz kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. AD
 
 ## Sonraki Adım
 
-Bu yol haritası onaylanırsa, **Phase 11.6** başlatılır: ADR-000 şablonu + ilk 10 ADR + 4 spec finalize + threat model v1. Kod yazılmadan, pure spec — geri dönüş maliyeti en düşük aşama.
+Bu yol haritası onaylanırsa, **Task 11.6** başlatılır: ADR-000 şablonu + ilk 10 ADR + 4 spec finalize + threat model v1. Kod yazılmadan, pure spec — geri dönüş maliyeti en düşük gorev.

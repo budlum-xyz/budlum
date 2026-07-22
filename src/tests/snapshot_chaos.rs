@@ -4,9 +4,9 @@
 //! GAP-3 (boot sessiz-yutma) ve GAP-4 (çapraz-şema gölgeleme) 2026-07-19'da
 //! KAPANDI (ARENA3, a3_all emri): loader'lar karantina-sonrası eski adaya düşer,
 //! v1 probe'u v2 dosyasını ISKART eder (karantinasız), boot Err'de fail-loud
-//! loglar. Kalan GAP pinleri: GAP-1 (authenticity — imza fazi) +
+//! loglar. Kalan GAP pinleri: GAP-1 (authenticity — imza görevi) +
 //! GAP-2 (hash kapsamı — versiyonlu genişletme, halefle koordineli);
-//! `_gap` testleri o fazlarda TERS ÇEVRİLİR.
+//! `_gap` testleri o görevlarda TERS ÇEVRİLİR.
 
 #[cfg(test)]
 mod tests {
@@ -100,7 +100,7 @@ mod tests {
 
     // ── 2) UNHASHED alan sahtesi (GAP) — bns_registry hash kapsamı dışında ─
     // calculate_hash yalnız çekirdek konsensus alanlarını kapsıyor; schema-3
-    // ve Phase-0.08+ ile eklenen alanlar (bns/nft/registry/bridge_state/…)
+    // ve Task-0.08+ ile eklenen alanlar (bns/nft/registry/bridge_state/…)
     // kapsam dışı. Sonuç: bu alanlara yapılan sahtecilik verify()'ı GEÇER.
     #[test]
     fn test_snapshot_v2_unhashed_field_forgery_gap() {

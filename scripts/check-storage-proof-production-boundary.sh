@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # check-storage-proof-production-boundary.sh
-# Phase 11.10 / V37-V38: Verify storage proof production boundary.
+# Task 11.10 / V37-V38: Verify storage proof production boundary.
 #
 # Production storage challenge paths must require a real ProofEnvelope.
 # test-mock-proof must only be accepted via cfg!(test) guard.

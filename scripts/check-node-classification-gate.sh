@@ -2,12 +2,12 @@
 set -euo pipefail
 
 required_tests=(
-  phase11_10_node_mode_maps_roles
-  phase11_10_node_archive_rejects_pruning
-  phase11_10_node_archive_requires_backups
-  phase11_10_node_full_pruning_requires_finalized_snapshot_retention
-  phase11_10_node_full_pruning_requires_nonzero_retention
-  phase11_10_node_prune_decision_distinguishes_full_and_archive
+  task11_10_node_mode_maps_roles
+  task11_10_node_archive_rejects_pruning
+  task11_10_node_archive_requires_backups
+  task11_10_node_full_pruning_requires_finalized_snapshot_retention
+  task11_10_node_full_pruning_requires_nonzero_retention
+  task11_10_node_prune_decision_distinguishes_full_and_archive
 )
 
 fail() {

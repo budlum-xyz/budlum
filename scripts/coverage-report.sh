@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Module-level coverage report (Phase 12.9 S10 / Phase 13 C6).
+# Module-level coverage report (Task 12.9 S10 / Task 13 C6).
 # Usage: bash scripts/coverage-report.sh
 # CI'da çalıştırılır; consensus/cross_domain/crypto modül bazında % raporlar.
 set -euo pipefail

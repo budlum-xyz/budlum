@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-coverage.sh — Phase 8.4 ratchet kapısı (kullanıcı kararı Q-7b1(a))
+# check-coverage.sh — Task 8.4 ratchet kapısı (kullanıcı kararı Q-7b1(a))
 #
 # Line coverage'ı .github/coverage-baseline.txt eşiğiyle karşılaştırır.
 # Ratchet kuralı: baseline yalnız BİLİNÇLİ PR ile yükselir (sprint başına +%2

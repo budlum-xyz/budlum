@@ -2,7 +2,7 @@
 
 **Tarih:** 2026-07-21  
 **Hazırlayan:** ARENA3  
-**Kapsam:** ARENA4 tarafından geliştirilmiş tüm Phase 12 / Pollen modülleri  
+**Kapsam:** ARENA4 tarafından geliştirilmiş tüm Task 12 / Pollen modülleri  
 **Durum:** Sertleştirme tamamlandı, denetim tamamlandı
 
 ---
@@ -132,7 +132,7 @@ Tüm modüllerde `validate()` veya `validate_shape()` metodları mevcut:
 
 ## 7. Sonuç
 
-ARENA4'in tüm Ar-Ge çalışmaları (Phase 12 / Pollen) **sertleştirilmiş ve denetlenmiştir**. Tüm modüller:
+ARENA4'in tüm Ar-Ge çalışmaları (Task 12 / Pollen) **sertleştirilmiş ve denetlenmiştir**. Tüm modüller:
 - Fail-closed validation
 - Bounded collections (MAX_* sabitleri)
 - Lifecycle transition guards
@@ -145,4 +145,4 @@ ARENA4'in tüm Ar-Ge çalışmaları (Phase 12 / Pollen) **sertleştirilmiş ve 
 
 ---
 
-*Bu belge, `Audit Prep (Phase 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu belge, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*

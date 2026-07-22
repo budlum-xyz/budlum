@@ -1,19 +1,19 @@
 # AI Birliği — Budlum L1 + B.U.D. ortak çalışma şeması
 
-**Güncelleme:** 2026-07-14 (Phase 1 / eski adı Phase 0.38 geçişi)
+**Güncelleme:** 2026-07-14 (Task 1 / eski adı Task 0.38 geçişi)
 **Önceki adı:** `docs/DEVIR_RAPORU.md` (tek-ajan devir notu — 2026-07-14'te bu şemaya evrildi)
-**Sabit çalışma dalı:** `arena/019f5f77-budlum` (`main` HEAD `39e30c7` üzerine kurulu Phase 1)
-**Aktif Aşama:** **Phase 1** (eski adı: Phase 0.38 & Phase 0.39 `B.U.D. Broad Universal Database` Sunucu Sistemi)
+**Sabit çalışma dalı:** `arena/019f5f77-budlum` (`main` HEAD `39e30c7` üzerine kurulu Task 1)
+**Aktif Gorev:** **Task 1** (eski adı: Task 0.38 & Task 0.39 `B.U.D. Broad Universal Database` Sunucu Sistemi)
 
 > **⚠️ KRİTİK TERMİNOLOJİ VE YOL HARİTASI DEĞİŞİKLİĞİ (2026-07-14):**
-> **📌 TERMİNOLOJİ KANONİK KURAL (2026-07-16, kullanıcı çapalarıyla):** İsimlendirme **Phase** sistemine sabitlendi. `ADIM1 = Phase 1` (ADIM serisi birebir: Phase 1..8, Phase 8.5, Phase 8.9...). Tur serisi, kullanıcının verdiği beş çapa noktasını (Tur1 = Phase 0, Tur2 = Phase 0.02; Tur10 = Phase 0.30, Tur11 = Phase 0.32, Tur12 = Phase 0.34) aynı anda karşılayan **parçalı formülle** taşındı: `t < 10 → Phase = 0.02 × (t − 1)` (Tur9 = 0.16, Tur9.5 = 0.17); `t ≥ 10 → Phase = 0.30 + 0.02 × (t − 10)` (Tur13.9 = 0.378, Tur15 = 0.40, Tur25 = 0.60). Yarım adımlar aradaki ondalıklara serilir. Muafiyet: küçük harf "tur" (raunt anlamı) ve backtick içindeki tarihsel branch adları (`tur15-pr-5` vb.). Uygulama: ARENA2 repo-genel rename (dc91e31) + tamamlama düzeltmeleri (yetim numaralandırma listeleri + bu not).
-> 1. **"Tur" Söyleminin Kaldırılması:** Kullanıcı talimatı ile projedeki tüm yeni çalışma aşamaları artık "Tur" (`Phase 0.38`, `Phase 0.40` vb.) değil, **"PHASE"** olarak adlandırılacaktır. Bu kapsamda ilk ana adımımız **Phase 1** (`Phase 1 = eski Phase 0.38 + Phase 0.39 B.U.D. Server Sistemi iskeleti + 7 RPC + 3-aktör E2E`) olarak tanımlanmıştır.
+> **📌 TERMİNOLOJİ KANONİK KURAL (2026-07-16, kullanıcı çapalarıyla):** İsimlendirme **Task** sistemine sabitlendi. `ADIM1 = Task 1` (ADIM serisi birebir: Task 1..8, Task 8.5, Task 8.9...). Tur serisi, kullanıcının verdiği beş çapa noktasını (Tur1 = Task 0, Tur2 = Task 0.02; Tur10 = Task 0.30, Tur11 = Task 0.32, Tur12 = Task 0.34) aynı anda karşılayan **parçalı formülle** taşındı: `t < 10 → Task = 0.02 × (t − 1)` (Tur9 = 0.16, Tur9.5 = 0.17); `t ≥ 10 → Task = 0.30 + 0.02 × (t − 10)` (Tur13.9 = 0.378, Tur15 = 0.40, Tur25 = 0.60). Yarım adımlar aradaki ondalıklara serilir. Muafiyet: küçük harf "tur" (raunt anlamı) ve backtick içindeki tarihsel branch adları (`tur15-pr-5` vb.). Uygulama: ARENA2 repo-genel rename (dc91e31) + tamamlama düzeltmeleri (yetim numaralandırma listeleri + bu not).
+> 1. **"Tur" Söyleminin Kaldırılması:** Kullanıcı talimatı ile projedeki tüm yeni çalışma gorevları artık "Tur" (`Task 0.38`, `Task 0.40` vb.) değil, **"TASK"** olarak adlandırılacaktır. Bu kapsamda ilk ana adımımız **Task 1** (`Task 1 = eski Task 0.38 + Task 0.39 B.U.D. Server Sistemi iskeleti + 7 RPC + 3-aktör E2E`) olarak tanımlanmıştır.
 > 2. **`budlum-xyz` Organizasyon Yol Haritası Senkronizasyonu:** Eski temel kodlamamız olan `github.com/budlum-xyz` organizasyonundaki depolarda (`Budlum`, `BudZero`, `B.U.D.`, `budlum.com`) yer alan yol haritası tam olarak kapsanmaktadır:
->    - **`budlum-xyz/B.U.D.`** vizyonu (`BUD_Merkeziyetsiz_Depolama_Vizyonu.md`) kapsamındaki Faz 1 (ConsensusKind::StorageAttestation), Faz 2 (ContentId & ContentManifest), ve Faz 5 (StorageDeal, RetrievalChallenge, StorageRegistry) **Phase 1** olarak `src/domain/` ve `src/storage/` altında kodlanmış ve `main` branch HEAD (`39e30c7`) commitine sabitlenmiştir.
+>    - **`budlum-xyz/B.U.D.`** vizyonu (`BUD_Merkeziyetsiz_Depolama_Vizyonu.md`) kapsamındaki Gorev 1 (ConsensusKind::StorageAttestation), Gorev 2 (ContentId & ContentManifest), ve Gorev 5 (StorageDeal, RetrievalChallenge, StorageRegistry) **Task 1** olarak `src/domain/` ve `src/storage/` altında kodlanmış ve `main` branch HEAD (`39e30c7`) commitine sabitlenmiştir.
 
 > **Bu dosya üç şeyi birden taşır:**
 > 1. **AI üyeleri tablosu** — kim var, kimin rolü ne, boş slotlar.
-> 2. **Tarihsel Tur/Adım özetleri** — Phase 0.36 / 0.37 / 0.38 / 0.39 / 0.398 (DEVIR_RAPORU'nun
+> 2. **Tarihsel Tur/Adım özetleri** — Task 0.36 / 0.37 / 0.38 / 0.39 / 0.398 (DEVIR_RAPORU'nun
 >    tamamı, hiçbir şey atlanmadan).
 > 3. **Aktif iş akışı** — kim neyi yazar, kim onaylar, kim denetler.
 >
@@ -32,11 +32,11 @@ Bu tablo **N AI'lı** çalışmayı destekler. Yeni AI eklendikçe satır ekleni
 
 | # | Handle (GitHub) | Tip | Birincil rol | Sorumluluk | İletişim kanalı | Durum |
 |---|-----------------|-----|--------------|------------|------------------|-------|
-| 1 | `arena-agent[bot]` (`ARENA1`) | Arena AI (Claude Fable 5 / Arena 5) | **Kod Yazarı & Phase 1 Altyapısı**. PR #6 (`arena/019f5f77-budlum`) ve PR #9 (`arena/phase1-sync`) kod stabilizasyonu. | Rust kodu (`budlum-core`), RPC, E2E invariantları ve `finality_live_path.rs` test seti bakımı. | `STATUS_ONLINE.md`, `ARENA_AI.md`, `CLAUDE.md` | 🟢 aktif |
-| 2 | `ARENA2` | Arena AI (Arena 5) | **Denetçi & Roadmap Doğrulayıcı**. Phase 1 (eski Phase 0.38) kapanış denetimi ve kayıp iş tespiti. | `ORG_ROADMAP_AUDIT.md` doğrulama, commit history takibi (`git log`), borç/eksik iş tespiti. | `STATUS_ONLINE.md`, `ORG_ROADMAP_AUDIT.md` | 🟢 aktif |
-| 3 | `ARENA3` (me) | Arena AI (Arena 5) | **Kayıp/Uçmuş Commit Geri Getirici & Çekirdek Kodlayıcı**. Force-push veya revert ile kaybolan/boşalan commit'leri (`tur15-pr-5 ConsensusStateV2`, `pr-6 BLS/PQ HSM`, vb.) sırayla hayata getirmek ve kodlamak. | `ARENA1` ve `ARENA2` ile görev dağılımı yaparak ortak commit (`Co-authored-by`) oluşturmak, Phase 0.36/0.38/0.40 kayıp paketlerini sırayla kodlamak + `STATUS_ONLINE.md` müzakeresi. | `STATUS_ONLINE.md` (`main` branşı), `ARENA_AI.md`, `CLAUDE.md` | 🟢 aktif |
-| 4 | `ARENAX` | Arena AI (Arena 5) | **Bağımsız Denetçi — Rapor ↔ Vizyon ↔ Kod çelişki denetimi, boş/ölü kod envanteri, vaad-edilen işlem gerçekleşebilirliği, budlumdevnet bütünlük gözcüsü** (kullanıcı ataması, 2026-07-17). | Claim-vs-evidence matrisi (`PHASE9_VIZYON_KOD_CELISKI_DENETIM_ARENAX_2026-07-17.md`), dead-code scan, süreç kullanılabilirlik denetimi; kod yazmaz, acil kırmızı-fix istisnası (kural 3). | `STATUS_ONLINE.md` | 🟢 aktif |
-| 5 | (gelecek) | (TBD) | **Kullanıcı kararına göre** — örn. harici audit reviewer, Phase 2 (eski Phase 0.40) release manager, BNS/.bud uzmanı. | (TBD) | (TBD) | ⏳ boş slot |
+| 1 | `arena-agent[bot]` (`ARENA1`) | Arena AI (Claude Fable 5 / Arena 5) | **Kod Yazarı & Task 1 Altyapısı**. PR #6 (`arena/019f5f77-budlum`) ve PR #9 (`arena/task1-sync`) kod stabilizasyonu. | Rust kodu (`budlum-core`), RPC, E2E invariantları ve `finality_live_path.rs` test seti bakımı. | `STATUS_ONLINE.md`, `ARENA_AI.md`, `CLAUDE.md` | 🟢 aktif |
+| 2 | `ARENA2` | Arena AI (Arena 5) | **Denetçi & Roadmap Doğrulayıcı**. Task 1 (eski Task 0.38) kapanış denetimi ve kayıp iş tespiti. | `ORG_ROADMAP_AUDIT.md` doğrulama, commit history takibi (`git log`), borç/eksik iş tespiti. | `STATUS_ONLINE.md`, `ORG_ROADMAP_AUDIT.md` | 🟢 aktif |
+| 3 | `ARENA3` (me) | Arena AI (Arena 5) | **Kayıp/Uçmuş Commit Geri Getirici & Çekirdek Kodlayıcı**. Force-push veya revert ile kaybolan/boşalan commit'leri (`tur15-pr-5 ConsensusStateV2`, `pr-6 BLS/PQ HSM`, vb.) sırayla hayata getirmek ve kodlamak. | `ARENA1` ve `ARENA2` ile görev dağılımı yaparak ortak commit (`Co-authored-by`) oluşturmak, Task 0.36/0.38/0.40 kayıp paketlerini sırayla kodlamak + `STATUS_ONLINE.md` müzakeresi. | `STATUS_ONLINE.md` (`main` branşı), `ARENA_AI.md`, `CLAUDE.md` | 🟢 aktif |
+| 4 | `ARENAX` | Arena AI (Arena 5) | **Bağımsız Denetçi — Rapor ↔ Vizyon ↔ Kod çelişki denetimi, boş/ölü kod envanteri, vaad-edilen işlem gerçekleşebilirliği, budlumdevnet bütünlük gözcüsü** (kullanıcı ataması, 2026-07-17). | Claim-vs-evidence matrisi (`TASK9_VIZYON_KOD_CELISKI_DENETIM_ARENAX_2026-07-17.md`), dead-code scan, süreç kullanılabilirlik denetimi; kod yazmaz, acil kırmızı-fix istisnası (kural 3). | `STATUS_ONLINE.md` | 🟢 aktif |
+| 5 | (gelecek) | (TBD) | **Kullanıcı kararına göre** — örn. harici audit reviewer, Task 2 (eski Task 0.40) release manager, BNS/.bud uzmanı. | (TBD) | (TBD) | ⏳ boş slot |
 
 **Handle listesi (PR yorumlarından / commit co-author'dan kanıtlanır):**
 
@@ -98,7 +98,7 @@ Bu tablo **N AI'lı** çalışmayı destekler. Yeni AI eklendikçe satır ekleni
 |-------|------------------|-----------------|
 | Vizyon §3 vs §8.1 (Custom vs StorageAttestation) | Kullanıcı (zaten seçti: **StorageAttestation**) | `STATUS.md` §5 + `AI_BIRLIGI.md` §5 |
 | BLS/PQ HSM kapsamı (mock vs tam) | Kullanıcı (son karar: **sadece gerçek PKCS#11 HSM**, mock kaldırıldı — ARENA2 doğrulama 2026-07-15) | `AI_BIRLIGI.md` §5 |
-| B.U.D. mainnet launch'a dahil mi | Kullanıcı (Phase 0.40 §1.2 sonunda değerlendirilecek) | `STATUS.md` §5 |
+| B.U.D. mainnet launch'a dahil mi | Kullanıcı (Task 0.40 §1.2 sonunda değerlendirilecek) | `STATUS.md` §5 |
 | Force-push? | **KESIN YASAK** — her iki AI uyar (STATUS.md §4.2) | `STATUS.md` §4.2 + `AI_BIRLIGI.md` §6 |
 | Workflow dosyası push? | **YAPMA** — bot token kısıtı (`workflows: write` permission YOK) | `STATUS.md` §4.3 + `AI_BIRLIGI.md` §6 |
 
@@ -116,21 +116,21 @@ Budlum L1 ile BudZero/BudZKVM artık tek repository'de çalışır. Kanonik yol:
 
 - L1: repository root (`budlum-core`)
 - ZK workspace: `budzero/`
-- B.U.D.: Phase 0.38; Phase 0.36 serisine kod olarak karıştırılmayacak
+- B.U.D.: Task 0.38; Task 0.36 serisine kod olarak karıştırılmayacak
 
 Eski `lubosruler/BudZero` yalnız tarihsel kaynak kabul edilir. Yeni ajan sibling
 checkout veya commit pin'i geri getirmemelidir.
 
-### 4.2 Phase 0.36 özeti (devralınan)
+### 4.2 Task 0.36 özeti (devralınan)
 
 - User / developer / enterprise PoA persona config'leri.
-- Org roadmap denetimi ve B.U.D. Phase 0.38 ayrımı.
+- Org roadmap denetimi ve B.U.D. Task 0.38 ayrımı.
 - BudZero Z-B ilerlemesi; `VerifyMerkle` Production gate **açılmadı** çünkü
   pozitif 64-depth proof hâlâ yeşil değil.
 
-### 4.3 Phase 0.37 özeti
+### 4.3 Task 0.37 özeti
 
-Ayrıntı: [`PHASE0.37_RAPOR.md`](archive/PHASE0.37_RAPOR.md).
+Ayrıntı: [`TASK0.37_RAPOR.md`](archive/TASK0.37_RAPOR.md).
 
 - BudZero tam kaynak ağacı `budzero/` altına taşındı; CI/Docker tek checkout.
 - Gerçek bounded PoW header-chain adapter'ı; legacy declared proof mint-gated.
@@ -150,9 +150,9 @@ Ayrıntı: [`PHASE0.37_RAPOR.md`](archive/PHASE0.37_RAPOR.md).
 4. Mainnet disk `ValidatorKeys` yasağını BLS/PQ HSM yolu gerçekten gelmeden
    kaldırma.
 5. Harici audit yapılmadan README'de "audited/mainnet ready" yazma.
-6. B.U.D. storage fazlarını Phase 0.378'a çekme; Phase 0.38 kararı sabit.
+6. B.U.D. storage gorevlarını Task 0.378'a çekme; Task 0.38 kararı sabit.
 
-### 4.5 Sonraki tur: 13.9 (Phase 0.40'te kapatılacak)
+### 4.5 Sonraki tur: 13.9 (Task 0.40'te kapatılacak)
 
 1. BLS/PQ anahtar capability/policy ve mümkün HSM abstraction.
 2. Prevote/precommit/cert/QC live coordinator son taraması + negatif testler.
@@ -161,14 +161,14 @@ Ayrıntı: [`PHASE0.37_RAPOR.md`](archive/PHASE0.37_RAPOR.md).
 5. Org Budlum+BudZero roadmap kapanış matrisi; araştırma satırları dürüstçe açık.
 6. Bu dosyayı test/CI/commit/PR sonuçlarıyla güncelle.
 
-### 4.6 Phase 0.38 özeti (B.U.D. Faz 1-2 + Faz 5 iskeleti) — 2026-07-14 PR #6
+### 4.6 Task 0.38 özeti (B.U.D. Gorev 1-2 + Gorev 5 iskeleti) — 2026-07-14 PR #6
 
 **Sabit çalışma dalı:** `arena/019f5f77-budlum`
 **PR:** #6 (açık, CI yeşil — `gh pr checks 6` 2026-07-14)
-**Kaynak planlar:** `the-plan/PHASE0.38_PLAN.md` (129 satır), `the-plan/PHASE0.39_PLAN.md` (267 satır)
+**Kaynak planlar:** `the-plan/TASK0.38_PLAN.md` (129 satır), `the-plan/TASK0.39_PLAN.md` (267 satır)
 **Kaynak vizyon:** `budlum-xyz/B.U.D./BUD_Merkeziyetsiz_Depolama_Vizyonu.md`
-(495 satır, 12 bölüm — Phase 0.38 planı yazılırken vizyon **mevcut değildi**;
-Phase 0.38 Rust kodu yazılırken vizyon **referans alındı** — mod-level docs + CLAUDE.md §4 + README.md "B.U.D. — Phase 0.38" bölümü).
+(495 satır, 12 bölüm — Task 0.38 planı yazılırken vizyon **mevcut değildi**;
+Task 0.38 Rust kodu yazılırken vizyon **referans alındı** — mod-level docs + CLAUDE.md §4 + README.md "B.U.D. — Task 0.38" bölümü).
 
 **PR #6 kapsamı (gerçek, HEAD `39e30c7`):**
 
@@ -184,12 +184,12 @@ Phase 0.38 Rust kodu yazılırken vizyon **referans alındı** — mod-level doc
 **Vizyonun karar noktaları (seçildi):**
 
 - §3 vs §8.1: **`StorageAttestation(StorageDomainParams)` yeni varyant** (vizyon §8.1, `Custom("...")` DEĞİL).
-- Faz 1 = muhasebe (kanıt yok), Faz 3 = `VerifyMerkle` Z-B gate'ine bağımlı,
-  Faz 4 = `GlobalBlockHeader.storage_root`, Faz 5 = ekonomi (kod bu turda var), Faz 6 = BNS/.bud.
+- Gorev 1 = muhasebe (kanıt yok), Gorev 3 = `VerifyMerkle` Z-B gate'ine bağımlı,
+  Gorev 4 = `GlobalBlockHeader.storage_root`, Gorev 5 = ekonomi (kod bu turda var), Gorev 6 = BNS/.bud.
 
-### 4.7 Phase 0.39 özeti (Depolama pazarı: shard + deal + retrieval)
+### 4.7 Task 0.39 özeti (Depolama pazarı: shard + deal + retrieval)
 
-**Plan:** `the-plan/PHASE0.39_PLAN.md` (267 satır, referans).
+**Plan:** `the-plan/TASK0.39_PLAN.md` (267 satır, referans).
 **Kod:** PR #6'ya eklendi (HEAD `39e30c7`).
 
 - `ContentManifest` + `ShardRef` (`src/storage/manifest.rs`) — çok-parçalı
@@ -205,12 +205,12 @@ Phase 0.38 Rust kodu yazılırken vizyon **referans alındı** — mod-level doc
   `bud_storageGetOutcome`).
 - 3-aktör E2E testi (`src/tests/bud_e2e.rs`) + 9 ekip-bağımsızlık invariant.
 
-**Veri egemenliği kuralı (Phase 0.39 plan §0.5):** hiçbir kritik fonksiyon
+**Veri egemenliği kuralı (Task 0.39 plan §0.5):** hiçbir kritik fonksiyon
 "Budlum ekibinin servisi"ne bağımlı değil. `open_deal` ve `open_challenge`
 permissionless; opener_bond > 0 anti-spam; admin/pause/freeze/force hook'u
 kod incelemesiyle YOK (kanıt: `grep -n 'fn admin_\|fn pause_\|fn force_\|fn owner_\|fn freeze_' src/domain/storage_deal.rs` → boş).
 
-### 4.8 Phase 0.398 özeti (denetim turu) — kapatılan bulgular
+### 4.8 Task 0.398 özeti (denetim turu) — kapatılan bulgular
 
 **Kapsam:** kod yazıldı, denetim yapıldı, 17 maddelik tablo `docs/ORG_ROADMAP_AUDIT.md` §4a'da güncel.
 
@@ -218,7 +218,7 @@ kod incelemesiyle YOK (kanıt: `grep -n 'fn admin_\|fn pause_\|fn force_\|fn own
 
 - PR #6 CI yeşil (`gh pr checks 6`).
 - `budlum-xyz/B.U.D.` vizyon dokümanı paylaşılmış (495 satır, referans alındı).
-- Phase 0.38 Rust kodu yazıldı; mod-level docs vizyon §8.1/§8.5/§0.5/§9.1'i referans alıyor.
+- Task 0.38 Rust kodu yazıldı; mod-level docs vizyon §8.1/§8.5/§0.5/§9.1'i referans alıyor.
 - `permissionless.rs` PoA izolasyon testi sağlam (88-104).
 - `budlum.com` URL koda girmedi (`grep -rn 'budlum\.com' src/` → boş).
 - StorageRegistry admin/pause/freeze/force/owner hook'u YOK (kod incelemesi).
@@ -226,14 +226,14 @@ kod incelemesiyle YOK (kanıt: `grep -n 'fn admin_\|fn pause_\|fn force_\|fn own
 - 3-aktör E2E + 9 ekip-bağımsızlık invariant (`src/tests/bud_e2e.rs`).
 - PoA izolasyonu bozulmadı: `STORAGE_OPERATOR` `PermissionlessRegistry` primitive'ini paylaşıyor; `PoaMembershipRegistry`'ye dokunulmadı.
 
-**Açık kalan bulgular (Phase 0.40'e devredildi):**
+**Açık kalan bulgular (Task 0.40'e devredildi):**
 
-1. Phase 0.378 borçları (BLS/PQ HSM, finality live-path, ConsensusStateV2,
+1. Task 0.378 borçları (BLS/PQ HSM, finality live-path, ConsensusStateV2,
    harici audit, README roadmap, fuzzing/audit/SBOM).
-2. B.U.D. Faz 3 (gerçek Proof-of-Storage) — Z-B gate kapanana kadar yazılmaz.
-3. B.U.D. Faz 4 (`GlobalBlockHeader.storage_root` alanı) — Faz 3'e bağımlı.
-4. B.U.D. Faz 6 (BNS/.bud) — ayrı tur.
-5. B.U.D. mainnet launch kararı — Phase 0.40 §1.2 sonunda değerlendirilecek.
+2. B.U.D. Gorev 3 (gerçek Proof-of-Storage) — Z-B gate kapanana kadar yazılmaz.
+3. B.U.D. Gorev 4 (`GlobalBlockHeader.storage_root` alanı) — Gorev 3'e bağımlı.
+4. B.U.D. Gorev 6 (BNS/.bud) — ayrı tur.
+5. B.U.D. mainnet launch kararı — Task 0.40 §1.2 sonunda değerlendirilecek.
 
 ### 4.9 Doğrulama komutları (her oturum başında)
 
@@ -267,11 +267,11 @@ git ls-tree -r HEAD -- src/ | grep -E 'storage_deal|content_id|manifest|bud_e2e'
 
 | Karar | § | Seçildi mi? | Kaynak |
 |-------|---|--------------|--------|
-| Vizyon §3 vs §8.1 (Custom vs StorageAttestation) | Phase 0.38 Faz 1 | ✅ **StorageAttestation** (yeni enum varyantı) | `STATUS.md` §5 + `AI_BIRLIGI.md` §4.6 |
-| BLS/PQ HSM kapsamı (tam vs mock) | Phase 2 §2.2 | ✅ **Sadece gerçek PKCS#11 HSM** — mock kaldırıldı | `git log --oneline -- src/crypto/hsm_mock.rs` (ARENA2 doğrulama, 2026-07-15) |
-| B.U.D. mainnet launch'a dahil mi | Phase 0.40 §1.2 sonu | ⏳ değerlendirilecek | `STATUS.md` §5 |
+| Vizyon §3 vs §8.1 (Custom vs StorageAttestation) | Task 0.38 Gorev 1 | ✅ **StorageAttestation** (yeni enum varyantı) | `STATUS.md` §5 + `AI_BIRLIGI.md` §4.6 |
+| BLS/PQ HSM kapsamı (tam vs mock) | Task 2 §2.2 | ✅ **Sadece gerçek PKCS#11 HSM** — mock kaldırıldı | `git log --oneline -- src/crypto/hsm_mock.rs` (ARENA2 doğrulama, 2026-07-15) |
+| B.U.D. mainnet launch'a dahil mi | Task 0.40 §1.2 sonu | ⏳ değerlendirilecek | `STATUS.md` §5 |
 
-> **🔒 SON KARAR — Mock HSM (Phase 3 §0.4, ARENA2 doğrulama 2026-07-15):**
+> **🔒 SON KARAR — Mock HSM (Task 3 §0.4, ARENA2 doğrulama 2026-07-15):**
 >
 > Mock HSM backend (`src/crypto/hsm_mock.rs`) **kesin olarak kaldırılmıştır.**
 > Tarihçe: `d8db94b` (ARENA3 ekledi) → `5e9bdef` (ARENA1 kaldırdı) → `5efdec1` (ARENA3 geri getirdi) → `a9321f5` (ARENA1 tekrar kaldırdı).
@@ -285,11 +285,11 @@ git ls-tree -r HEAD -- src/ | grep -E 'storage_deal|content_id|manifest|bud_e2e'
 
 1. **Force-push YASAK** — `git push --force`, `--force-with-lease`, `git push -f` HİÇBİR DURUMDA. Conflict durumunda `git pull --rebase` + normal push.
 2. **Workflow dosyası push YASAK** — bot token `workflows: write` permission YOK; CI'da `dependency-audit`, `sbom`, `fuzz-build` job'ları kullanıcı tarafından manuel eklenir. `docs/operations/DEPENDENCY_AUDIT.md` + `scripts/audit-deps.sh` zaten PR'da; CI entegrasyonu kullanıcıya bırakıldı.
-3. **Kanıtlanmamış bilgi yasak** — her commit referansı `git cat-file -t <sha>` ile doğrulanmadan audit'e yazılmaz. "Phase 0.38 sıfırdan başlatılmalı" gibi yorumlar kanıtlanmamış commit'lere dayanmamalı.
+3. **Kanıtlanmamış bilgi yasak** — her commit referansı `git cat-file -t <sha>` ile doğrulanmadan audit'e yazılmaz. "Task 0.38 sıfırdan başlatılmalı" gibi yorumlar kanıtlanmamış commit'lere dayanmamalı.
 4. **Hata kabulü** — bir önceki AI'nın özetini sorgulamadan kabul etme (bugün 9 yanlış referans audit'e yazıldı, `STATUS.md` §4.1).
 5. **Bilgi kaynakları sırası** — yeni bir AI oturum başında: (1) `AI_BIRLIGI.md` (şema + tarih), (2) `STATUS.md` (statik denetim), (3) `STATUS_ONLINE.md` (aktif kanal), (4) `ARENA_AI.md` (master context), (5) `CLAUDE.md` (budlum-spesifik). Bu sırayla oku.
 6. **PoA izolasyonu** — `STORAGE_OPERATOR` permissionless `PermissionlessRegistry` ile kayıt, ama `PoaMembershipRegistry`'ye ASLA dokunma. İkisi ayrı veri yapısı, ayrı izin modeli (master context, CLAUDE.md §2).
-7. **Whitelist YOK** — B.U.D. deal/challenge permissionless; "Budlum ekibi servisi" bağımlılığı YOK (data-sovereignty, Phase 0.39 plan §0.5).
+7. **Whitelist YOK** — B.U.D. deal/challenge permissionless; "Budlum ekibi servisi" bağımlılığı YOK (data-sovereignty, Task 0.39 plan §0.5).
 8. **PR'ları ayrı ayrı at, soru sorma** — kullanıcı 2026-07-14 18:30 civarında netleştirdi: PR'lar tek tek push'lanır, her push sonrası `STATUS_ONLINE.md`'de "PR #N push'landı" entry'si yazılır.
 
 ---
@@ -301,10 +301,10 @@ git ls-tree -r HEAD -- src/ | grep -E 'storage_deal|content_id|manifest|bud_e2e'
 3. `budlum/STATUS_ONLINE.md` — aktif iletişim kanalı (anlık handoff, karar talepleri).
 4. `budlum/ARENA_AI.md` (3853 satır) — Arena AI master context.
 5. `budlum/CLAUDE.md` (296+ satır) — budlum-spesifik mimari kurallar.
-6. `budlum/docs/ORG_ROADMAP_AUDIT.md` §4a — Phase 0.398 denetim tablosu (güncel, kanıtlanmış).
-7. `budlum/docs/PHASE0.42_PLAN.md` (~112 satır) — Phase 0.42 master plan.
+6. `budlum/docs/ORG_ROADMAP_AUDIT.md` §4a — Task 0.398 denetim tablosu (güncel, kanıtlanmış).
+7. `budlum/docs/TASK0.42_PLAN.md` (~112 satır) — Task 0.42 master plan.
 8. `budlum/docs/operations/DEPENDENCY_AUDIT.md` + `SBOM.md` — CI entegrasyon prosedürü.
-9. `the-plan/PHASE0.38_PLAN.md` (129 satır) + `PHASE0.39_PLAN.md` (267 satır) — referans planlar.
+9. `the-plan/TASK0.38_PLAN.md` (129 satır) + `TASK0.39_PLAN.md` (267 satır) — referans planlar.
 10. `the-plan/claude-fable-5.md` (3825 satır) — ARENA_AI.md kökeni.
 11. `budlum-xyz/B.U.D./BUD_Merkeziyetsiz_Depolama_Vizyonu.md` (495 satır, 12 bölüm) — B.U.D. vizyonu.
 
@@ -314,4 +314,4 @@ git ls-tree -r HEAD -- src/ | grep -E 'storage_deal|content_id|manifest|bud_e2e'
 
 ## 8. Sonraki adım
 
-PR #4 (Phase 0.40 §1.3 Finality live-path test genişletmesi) → §1.4 ConsensusStateV2 → §1.1 BLS/PQ HSM → §1.2 B.U.D. Faz 1-2 (zaten Phase 0.38'te tamamlandı, referans). Phase 0.40 planına geçmeden önce `STATUS_ONLINE.md` üzerinden diğer AI ile handoff yapılacak.
+PR #4 (Task 0.40 §1.3 Finality live-path test genişletmesi) → §1.4 ConsensusStateV2 → §1.1 BLS/PQ HSM → §1.2 B.U.D. Gorev 1-2 (zaten Task 0.38'te tamamlandı, referans). Task 0.40 planına geçmeden önce `STATUS_ONLINE.md` üzerinden diğer AI ile handoff yapılacak.

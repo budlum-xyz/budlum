@@ -72,7 +72,7 @@ Mevcut BudZKVM/Lubot doğrulama tasarımı **bütünlük (integrity)** kanıtlı
 1. **Poseidon mu Rescue mu?** — hangi field-native hash, mevcut Plonky3 yığınıyla uyumluluk testiyle netleşecek.
 2. **Note/UTXO modeli** mevcut account-model ile nasıl bir arada yaşayacak — hibrit mi, tamamen paralel mi?
 3. **View-key mekanizması** — üretim, saklama, ibraz koşulları netleşmemiş.
-4. **Zamanlama** — bu katman mainnet launch'a dahil mi, yoksa mevcut direct-testnet stratejisinden sonraki bir faz mı?
+4. **Zamanlama** — bu katman mainnet launch'a dahil mi, yoksa mevcut direct-testnet stratejisinden sonraki bir gorev mı?
 5. **Execution-time confidentiality** (operatör bile veri görmesin) ayrı bir istekse, TEE/FHE/MPC entegrasyonu ayrı bir araştırma hattı olarak mı açılacak?
 
 ## 11. Sonraki Adım

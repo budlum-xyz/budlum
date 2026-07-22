@@ -312,7 +312,7 @@ mod integration_tests {
         let bls_pk = bls_pk_point.to_compressed().to_vec();
 
         validator.bls_public_key = bls_pk.clone();
-        // Phase 0.04: gerçek bir BLS PoP üret (önceden sahte sıfır vektör
+        // Task 0.04: gerçek bir BLS PoP üret (önceden sahte sıfır vektör
         // kullanılıyordu — bu, güvenlik denetimi Madde 3 kapsamında
         // kapatılan rogue-key saldırısına açıktı). PoP = sk · H(msg)
         // where msg = "BUDLUM_BLS_POP" || address || bls_pk.
@@ -514,7 +514,7 @@ mod integration_tests {
         let bls_sk = bls12_381::Scalar::from_bytes_wide(&sk_bytes);
         let bls_pk_point = bls12_381::G2Affine::from(bls12_381::G2Projective::generator() * bls_sk);
         validator.bls_public_key = bls_pk_point.to_compressed().to_vec();
-        // Phase 0.04: gerçek BLS PoP üret (önceden sahte sıfır vektör).
+        // Task 0.04: gerçek BLS PoP üret (önceden sahte sıfır vektör).
         let pop_msg = crate::chain::finality::pop_signing_message(
             crate::core::transaction::DEFAULT_CHAIN_ID,
             &pubkey,
@@ -625,7 +625,7 @@ mod integration_tests {
         let keypair = KeyPair::generate().unwrap();
         let validator_addr = Address::from(keypair.public_key_bytes());
 
-        // Phase 0.38 Fix 2: votes now carry a real BLS signature verified at ingest,
+        // Task 0.38 Fix 2: votes now carry a real BLS signature verified at ingest,
         // so the validator must have a registered BLS public key.
         let mut sk_bytes = [0u8; 64];
         sk_bytes[0] = 7;
@@ -655,7 +655,7 @@ mod integration_tests {
         assert_eq!(block.index, cp_height);
         assert!(is_checkpoint_height(block.index));
 
-        bc.start_prevote_phase(block.index, block.hash.clone());
+        bc.start_prevote_task(block.index, block.hash.clone());
         assert!(bc.finality_aggregator.is_some());
 
         let epoch = block.epoch;
@@ -711,10 +711,10 @@ mod integration_tests {
         }
         let _block = bc.produce_block(v_addr).unwrap();
 
-        bc.start_prevote_phase(cp_height, "correct_hash".to_string());
+        bc.start_prevote_task(cp_height, "correct_hash".to_string());
 
         // Validly signed over the WRONG hash: passes ingest signature check, then
-        // is rejected for hash mismatch (Phase 0.38: sig verified before hash check).
+        // is rejected for hash mismatch (Task 0.38: sig verified before hash check).
         let mut wrong_vote = Prevote {
             epoch: 0,
             checkpoint_height: cp_height,
@@ -1256,7 +1256,7 @@ mod integration_tests {
         };
 
         let v2 = StateSnapshotV2::from_state(&state, params);
-        assert_eq!(v2.schema_version, 4); // Phase 10.5 P2: bumped 3->4 (GAP-1+GAP-2)
+        assert_eq!(v2.schema_version, 4); // Task 10.5 P2: bumped 3->4 (GAP-1+GAP-2)
         assert_eq!(v2.height, 200);
         assert_eq!(v2.epoch_index, 42);
         assert_eq!(v2.base_fee, 15);
@@ -1276,7 +1276,7 @@ mod integration_tests {
         original.add_balance(&addr, 10000);
         original.epoch_index = 10;
         original.base_fee = 20;
-        // Phase 0.02: `block_reward` is no longer a top-level `AccountState` field;
+        // Task 0.02: `block_reward` is no longer a top-level `AccountState` field;
         // it now lives on `state.tokenomics`.
         original.tokenomics.block_reward = 75;
         original
@@ -1302,7 +1302,7 @@ mod integration_tests {
 
         assert_eq!(restored.epoch_index, original.epoch_index);
         assert_eq!(restored.base_fee, original.base_fee);
-        // Phase 0.02: `block_reward` is mirrored on `state.tokenomics` in the live
+        // Task 0.02: `block_reward` is mirrored on `state.tokenomics` in the live
         // state. The V2 snapshot still carries a top-level `block_reward`
         // field for wire-compat (see `StateSnapshotV2::from_state`), and
         // `from_snapshot_v2` writes it back into `tokenomics.block_reward`.
@@ -1361,7 +1361,7 @@ mod integration_tests {
         let v2 = StateSnapshotV2::from_state(&state, params);
         let bytes = v2.to_bytes();
         let parsed = StateSnapshotV2::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.schema_version, 4); // Phase 10.5 P2: bumped 3->4
+        assert_eq!(parsed.schema_version, 4); // Task 10.5 P2: bumped 3->4
         assert_eq!(parsed.height, 300);
         assert_eq!(parsed.chain_id, 42);
         assert!(parsed.verify());
@@ -1413,7 +1413,7 @@ mod integration_tests {
         assert_eq!(operator_default.max_connections, Some(10));
         assert!(operator_default.max_request_body_size.is_some());
 
-        // Phase 0.10 (security audit §5): public/Default config is now
+        // Task 0.10 (security audit §5): public/Default config is now
         // auth-required out of the box. Operators that want an
         // unauthenticated RPC must opt in via `operator_default` (which
         // also emits a loud startup warning).

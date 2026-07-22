@@ -113,7 +113,7 @@ impl ChainAdapter for EvmChainAdapter {
     /// Header chain + sync-committee proof caller (`verify_evm_receipt`)
     /// tarafından sağlanır.
     ///
-    /// **V30 tam fix:** İki aşamalı doğrulama —
+    /// **V30 tam fix:** İki görevlı doğrulama —
     /// 1) `proof.verify(external_state_root)` — Merkle self-consistency.
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` —
     ///    kriptografik leaf bağı. Saldırgan farklı bir tx_hash ile aynı

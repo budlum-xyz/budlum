@@ -8,7 +8,7 @@ Kaynak Dosyalar: `src/chain/finality.rs`, `src/chain/blockchain.rs`
 
 ## 1. Neden Finalite Katmanı?
 
-Standart PoS veya PoW sistemlerinde bir bloğun "kesinleşmesi" için üzerine belirli sayıda blok eklenmesi beklenir (Örn. Bitcoin için 6 blok, Ethereum için 2 epoch). Budlum, **Hardening Phase 2** ile bu bekleme süresini optimize etmek ve güvenliği artırmak için ek bir oylama katmanı sunar.
+Standart PoS veya PoW sistemlerinde bir bloğun "kesinleşmesi" için üzerine belirli sayıda blok eklenmesi beklenir (Örn. Bitcoin için 6 blok, Ethereum için 2 epoch). Budlum, **Hardening Task 2** ile bu bekleme süresini optimize etmek ve güvenliği artırmak için ek bir oylama katmanı sunar.
 
 ### Temel Hedefler:
 - **Hız:** 100 blokta bir (Checkpoint) anında kesinlik sağlar.
@@ -18,16 +18,16 @@ Standart PoS veya PoW sistemlerinde bir bloğun "kesinleşmesi" için üzerine b
 
 ---
 
-## 2. İki Aşamalı Oylama Protokolü
+## 2. İki Görevlı Oylama Protokolü
 
-Finalite süreci, periyodik olarak (her 100 blokta bir) tetiklenir ve iki aşamadan oluşur:
+Finalite süreci, periyodik olarak (her 100 blokta bir) tetiklenir ve iki görevdan oluşur:
 
-### Aşama 1: Prevote
+### Görev 1: Prevote
 Validatörler, mevcut epoch'un son bloğunu (Checkpoint) inceler ve "Bu blok benim için geçerlidir" diyerek bir **BLS Prevote** imzası atar.
-- **Kural:** Validatör setinin en az 2/3'ü Prevote verirse 1. aşama tamamlanır.
+- **Kural:** Validatör setinin en az 2/3'ü Prevote verirse 1. görev tamamlanır.
 
-### Aşama 2: Precommit
-Prevote çoğunluğu sağlandığında, validatörler ikinci bir onay oyu verir: **Precommit**. 
+### Görev 2: Precommit
+Prevote çoğunluğu sağlandığında, validatörler ikinci bir onay oyu verir: **Precommit**.
 - **Kural:** En az 2/3 çoğunluk Precommit verirse, bu checkpoint blok zinciri tarihinde "Kalıcı" (Finalized) olarak işaretlenir.
 
 ---
@@ -99,7 +99,7 @@ Finality katmanı artık sadece BLS double-vote suçlarını değil, checkpoint'
 Blockchain motoruna eklenen yeni kural şudur:
 > **Hiçbir düğüm, finalize edilmiş bir checkpoint bloğunun gerisindeki bir çatala geçiş yapamaz.**
 
-- Eğer finalize edilmiş yükseklik 500 ise ve ağda 490. bloktan başlayan yeni bir çatal oluşursa, düğüm bu çatalın uzunluğu ne olursa olsun onu reddeder. 
+- Eğer finalize edilmiş yükseklik 500 ise ve ağda 490. bloktan başlayan yeni bir çatal oluşursa, düğüm bu çatalın uzunluğu ne olursa olsun onu reddeder.
 - Bu sayede kullanıcılar, "Finalized" damgası yemiş bir işlemin asla geri alınmayacağından %100 emin olur (Immutability).
 
 ---

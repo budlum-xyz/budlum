@@ -119,7 +119,7 @@ pub struct BridgeTransfer {
     pub amount: u128,
     pub status: BridgeStatus,
     pub source_event_hash: Hash32,
-    /// Phase 0.10 (security audit §3): height at which this lock expires.
+    /// Task 0.10 (security audit §3): height at which this lock expires.
     /// `BridgeState::sweep_expired_locks(current_height)` returns
     /// `Locked` transfers to `Active` once `current_height >= expiry_height`,
     /// preventing permanent DoS via a forgotten/abandoned lock.
@@ -143,7 +143,7 @@ pub struct BridgeState {
     asset_locations: BTreeMap<AssetId, BridgeStatus>,
     transfers: BTreeMap<MessageId, BridgeTransfer>,
     /// Expiry queue: expiry_height -> [message_id]
-    /// Phase 9 (ARENA2): Fix O(N) sweep DoS by indexing by height.
+    /// Task 9 (ARENA2): Fix O(N) sweep DoS by indexing by height.
     expiry_queue: BTreeMap<u64, Vec<MessageId>>,
     pub replay: ReplayNonceStore,
 }
@@ -372,7 +372,7 @@ impl BridgeState {
                 "Transfer is not burned on target domain".into(),
             ));
         }
-        // V17 fix (ARENAX Phase 10.5 denetimi, ARENA1 cross_domain): unlock
+        // V17 fix (ARENAX Task 10.5 denetimi, ARENA1 cross_domain): unlock
         // mesajı **burn domain'inden** (transfer.target_domain) gelir. Önceki
         // kod `transfer.source_domain != source_domain` kontrol ediyordu;
         // production'da `executor.rs` `msg.source_domain` (= burn domain =
@@ -398,7 +398,7 @@ impl BridgeState {
     }
 
     pub fn root(&self) -> Hash32 {
-        // V24 fix (Phase 11): root() eskiden yalnızca asset_locations'ı
+        // V24 fix (Task 11): root() eskiden yalnızca asset_locations'ı
         // hash'liyordu — transfers (owner/recipient/amount/status) kapsam
         // dışındaydı. Artık transfer metadata da digest'e girer.
         let mut leaves: Vec<Hash32> = self
@@ -442,7 +442,7 @@ impl BridgeState {
         self.transfers.get(message_id)
     }
 
-    /// Phase 0.10 (security audit §3): sweep all `Locked` transfers whose
+    /// Task 0.10 (security audit §3): sweep all `Locked` transfers whose
     /// `expiry_height` is below `current_height`, returning their
     /// `asset_id` back to `Active` so a forgotten/abandoned lock can
     /// never permanently DoS the bridge. Returns the (asset_id, amount)
@@ -455,7 +455,7 @@ impl BridgeState {
     pub fn sweep_expired_locks(&mut self, current_height: u64) -> Vec<(Address, u128)> {
         let mut released = Vec::new();
 
-        // Phase 9 (ARENA2): O(log N) sweep using the expiry queue.
+        // Task 9 (ARENA2): O(log N) sweep using the expiry queue.
         let heights: Vec<u64> = self
             .expiry_queue
             .range(..=current_height)

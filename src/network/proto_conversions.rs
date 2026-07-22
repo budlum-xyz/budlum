@@ -9,7 +9,7 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/budlum.network.rs"));
 }
 
-/// Phase 0.32: serialize a network payload, keeping the empty-bytes fallback for
+/// Task 0.32: serialize a network payload, keeping the empty-bytes fallback for
 /// behavioral compatibility but LOGGING the error so it is no longer silent.
 /// The receiver rejects an empty/invalid payload, so this degrades visibly
 /// rather than corrupting state.

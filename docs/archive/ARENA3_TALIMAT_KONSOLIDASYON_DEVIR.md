@@ -26,7 +26,7 @@ budlum/                          (workspace root, [workspace] members)
 ├── B.U.D./                      OPSİYONEL eklenti (ağ için şart DEĞİL — Ayaz)
 │   ├── Cargo.toml               (package "bud", depends budlum-core)
 │   ├── README.md                (validator 2/3 + Pollen + BNS .bud + SocialFi + Lubot)
-│   └── src/                     (storage, pollen, bns, socialfi, lubot — Faz 4-6'da gelir)
+│   └── src/                     (storage, pollen, bns, socialfi, lubot — Gorev 4-6'da gelir)
 └── wallet-core/ config/ docs/ fuzz/ ops/ scripts/
 ```
 
@@ -50,14 +50,14 @@ ARENA1 şunları yaptı + doğruladı (cargo check temiz):
 
 - ✅ **budzero/ → budZero/** rename (path dep'ler, CI, dependabot, script'ler güncellendi).
 - ✅ **budZero/budl/** klasörü + README (Budlum dili). [.bud örnekleri budZero/ kökünde — budl/examples/'a taşınmalı: ARENA3'ün budl/ görevi.]
-- ✅ **Faz 1 — budlumCore/:** src/, benches/, examples/, Cargo.toml, build.rs, proto/ → budlumCore/'a taşındı. Root `[workspace]` (members=[budlumCore], exclude=[budZero,wallet-core,fuzz]). budZero path dep'leri `../budZero/`. **cargo check -p budlum-core TEMİZ.**
-- ✅ **Faz 3 — B.U.D./ iskeleti:** package "bud", budlum-core'a bağımlı. **cargo check -p bud TEMİZ.**
+- ✅ **Gorev 1 — budlumCore/:** src/, benches/, examples/, Cargo.toml, build.rs, proto/ → budlumCore/'a taşındı. Root `[workspace]` (members=[budlumCore], exclude=[budZero,wallet-core,fuzz]). budZero path dep'leri `../budZero/`. **cargo check -p budlum-core TEMİZ.**
+- ✅ **Gorev 3 — B.U.D./ iskeleti:** package "bud", budlum-core'a bağımlı. **cargo check -p bud TEMİZ.**
 - ✅ Blueprint: `docs/KONSOLIDASYON_BUDLUMCORE_BUD_TASARIM.md` (trait inversion detayı).
 
 ## 4. KALAN İŞ (ARENA3 yapar)
 
-### Faz 4-6: modül taşıma + trait inversion (EN BÜYÜK, derin)
-budlumCore/src/ hâlâ storage/pollen/bns/socialfi/lubot içeriyor (Faz 1 hepsini taşıdı). Bunlar B.U.D.'ye trait inversion ile ayrılır.
+### Gorev 4-6: modül taşıma + trait inversion (EN BÜYÜK, derin)
+budlumCore/src/ hâlâ storage/pollen/bns/socialfi/lubot içeriyor (Gorev 1 hepsini taşıdı). Bunlar B.U.D.'ye trait inversion ile ayrılır.
 
 **Döngüsel bağımlılık (KRİTİK):** chain↔storage↔domain döngüsü.
 - core→B.U.D.: 47 referans (chain/execution/settlement → storage_registry×18, storage::db×10, StorageDeal×8, pollen×6, socialfi×7, bns×3).
@@ -83,7 +83,7 @@ budlumCore/src/ hâlâ storage/pollen/bns/socialfi/lubot içeriyor (Faz 1 hepsin
 
 **Sıra (en basitten — proof-of-concept):** bns (3 core ref) → socialfi (7) → pollen (6) → lubot → storage (47, en büyük). Her modül: trait tanımı + taşıma + impl + core çağrılarını trait'e çevir + cargo check.
 
-### Faz 7: diğer
+### Gorev 7: diğer
 - **CI path güncellemeleri:** workflow/script'lerde `src/` → `budlumCore/src/`, `benches/` → `budlumCore/benches/`, `examples/` → `budlumCore/examples/`, `proto/` → `budlumCore/proto/` (branch CI yeşil için).
 - **hub → budlum.xyz:** `budlumCore/src/hub` ayrı repo `budlum.xyz`'e taşınır, budlum'dan kaldırılır.
 - **CLAUDE.md güncelle:** budlumdevnet artık referans değil (K2); budlumCore/budZero/B.U.D. yapısı.
@@ -98,12 +98,12 @@ budlumCore/src/ hâlâ storage/pollen/bns/socialfi/lubot içeriyor (Faz 1 hepsin
 - rust-toolchain.toml 1.94.0.
 - Token: session'a özel (push formatı `git push "https://x-access-token:${TOKEN}@github.com/budlum-xyz/budlum.git" <branch>`).
 
-## 6. Kabul kriterleri (her faz)
+## 6. Kabul kriterleri (her gorev)
 
 - `cargo check -p budlum-core -j 1` TEMİZ (essential ağ derleniyor).
 - `cargo check -p bud -j 1` TEMİZ (B.U.D. derleniyor).
 - Branch CI yeşil (CI path güncellemeleri sonrası).
-- Her faz küçük staging commit; döngüsel bağımlılık KIRILDI (B.U.D. → budlumCore tek yön, budlumCore → B.U.D. YOK).
+- Her gorev küçük staging commit; döngüsel bağımlılık KIRILDI (B.U.D. → budlumCore tek yön, budlumCore → B.U.D. YOK).
 - budlumdevnet DOKUNULMADI (arşiv Ayaz'ın).
 - Commit hash + CI linki STATUS_ONLINE.md'ye.
 
@@ -114,7 +114,7 @@ budlumCore/src/ hâlâ storage/pollen/bns/socialfi/lubot içeriyor (Faz 1 hepsin
 
 ## 8. Raporlama
 
-Her faz bitince STATUS_ONLINE.md'ye timestamp'li entry + commit hash + CI linki. Karar noktasında Ayaz'a sor (ask_user). budlumdevnet'e DOKUNMA.
+Her gorev bitince STATUS_ONLINE.md'ye timestamp'li entry + commit hash + CI linki. Karar noktasında Ayaz'a sor (ask_user). budlumdevnet'e DOKUNMA.
 
 ---
 *Tüm konsolidasyon ARENA3'e devredildi (ARENA1 → ARENA3, 2026-07-22). Ayaz ARENA3'e iletir. ARENA1 başka işe geçer.*

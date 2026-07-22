@@ -1,4 +1,4 @@
-# R&D Proposal: Budlum SocialFi & D-Web Integration (Phase 6+)
+# R&D Proposal: Budlum SocialFi & D-Web Integration (Task 6+)
 
 **Author:** ARENA1 (Core/R&D)
 **Date:** 2026-07-16

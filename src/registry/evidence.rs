@@ -64,7 +64,7 @@ pub enum SlashingProof {
     /// A domain-defined proof the core does not model; carried opaquely so
     /// other domains can reuse the same envelope.
     Other { tag: String, data: Vec<u8> },
-    /// Repeated invalid-signature votes within a single epoch (Phase 0.40).
+    /// Repeated invalid-signature votes within a single epoch (Task 0.40).
     ///
     /// The consensus layer rejects each cryptographically-invalid vote at
     /// ingest; this proof attests that a validator crossed the per-epoch
@@ -85,7 +85,7 @@ impl SlashingProof {
             SlashingProof::Liveness { .. } => SlashingCondition::LivenessFault,
             SlashingProof::Other { .. } => SlashingCondition::MaliciousBehaviour,
             // Repeated invalid-signature spam is treated as provable malicious
-            // behaviour (Phase 0.40, approved severity decision: reuse the existing
+            // behaviour (Task 0.40, approved severity decision: reuse the existing
             // MaliciousBehaviour ratio rather than adding a new one).
             SlashingProof::InvalidSignatureSpam { .. } => SlashingCondition::MaliciousBehaviour,
         }
@@ -221,7 +221,7 @@ impl SlashingReport {
         )
     }
 
-    /// Convenience: a consensus-verified invalid-signature-spam fault (Phase 0.40).
+    /// Convenience: a consensus-verified invalid-signature-spam fault (Task 0.40).
     ///
     /// Provenance is `ConsensusVerified` because the node's own consensus layer
     /// cryptographically rejected every one of the `count` votes at ingest — the
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
     }
 
-    /// Phase 0.17 (security audit §6): pin the invariant that
+    /// Task 0.17 (security audit §6): pin the invariant that
     /// `SlashingProof::DoubleSign` is labeled as
     /// `SlashingCondition::DoubleSign` and `SlashingProof::Liveness`
     /// is labeled as `SlashingCondition::LivenessFault`, and that

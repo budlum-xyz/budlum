@@ -318,15 +318,15 @@ Yinelemeli sertleştirme ( → 12.5), seçilmiş öne çıkanlar:
 
 ## 15. Yol Haritası & Mainnet Engelleyicileri
 
-**Tamamlananlar (kanıtla kapatılmış):** çok-konsensüslü alanlar; BLS+Dilithium hibrit finalite; BLS finalite protokolü prevote/precommit; doğrulanmış dönüş yolu ve PoW mint kapıları dahil köprü yaşam döngüsü; settlement atomikliği; senkronizasyon sertleştirmesi; PKCS#11 Ed25519 imzalayıcı; RPC çift dinleyici; P2P sertleştirmesi; Snapshot V2 + arşiv politikası; Prometheus gözlemlenebilirliği; docker/systemd dağıtımı; ConsensusStateV2 migrasyon iskeleti (fail-closed); fuzz/bağımlılık-denetimi/SBOM araç seti; denetim kontrol listesi; persona'lar (kullanıcı/geliştirici/kurumsal-PoA); ağ içi BudZero + performans taban çizgisi çerçevesi; B.U.D. Faz 1–2 + iskelet 5 (devnet); BNS iskeleti; TLA+ iskeleti; AI çıkarım doğrulayıcı primitifleri.
+**Tamamlananlar (kanıtla kapatılmış):** çok-konsensüslü alanlar; BLS+Dilithium hibrit finalite; BLS finalite protokolü prevote/precommit; doğrulanmış dönüş yolu ve PoW mint kapıları dahil köprü yaşam döngüsü; settlement atomikliği; senkronizasyon sertleştirmesi; PKCS#11 Ed25519 imzalayıcı; RPC çift dinleyici; P2P sertleştirmesi; Snapshot V2 + arşiv politikası; Prometheus gözlemlenebilirliği; docker/systemd dağıtımı; ConsensusStateV2 migrasyon iskeleti (fail-closed); fuzz/bağımlılık-denetimi/SBOM araç seti; denetim kontrol listesi; persona'lar (kullanıcı/geliştirici/kurumsal-PoA); ağ içi BudZero + performans taban çizgisi çerçevesi; B.U.D. Gorev 1–2 + iskelet 5 (devnet); BNS iskeleti; TLA+ iskeleti; AI çıkarım doğrulayıcı primitifleri.
 
 **Açık mainnet engelleyicileri (beyan edilmiş, iddia edilmemiş):**
 
 1. **Bağımsız harici güvenlik denetimi** — kontrol listesi hazır; *denetim yapılmamıştır*.
 2. **Üreticiye özgü BLS/PQ HSM mekanizma doğrulaması.**
-3. **Z-B 64-derinlik Merkle soundness** — `VerifyMerkle` ve dolayısıyla B.U.D. gerçek Proof-of-Storage (Faz 3+) için production kapısı.
-4. **Gizlilik (Privacy) katmanı** — araştırma aşamasında.
-5. **Primitiflerin ötesinde AI yürütme katmanı** — araştırma/entegrasyon aşamasında.
+3. **Z-B 64-derinlik Merkle soundness** — `VerifyMerkle` ve dolayısıyla B.U.D. gerçek Proof-of-Storage (Gorev 3+) için production kapısı.
+4. **Gizlilik (Privacy) katmanı** — araştırma gorevsında.
+5. **Primitiflerin ötesinde AI yürütme katmanı** — araştırma/entegrasyon gorevsında.
 6. TLA+ iskeletinin ötesinde tam biçimsel doğrulama.
 
 **Aktivasyon yolu:** B.U.D. mainnet dahiliyeti, hazırlık adımı kapandıktan sonra değerlendirilir; genesis tarafı özellik değişimleri (ör. `verify_merkle=true`) kontrol listesi doğrulamalı (`GENESIS_FLIP_CHECKLIST`), yapılandırma-tahrikli tören kararlarıdır.
@@ -336,7 +336,7 @@ Yinelemeli sertleştirme ( → 12.5), seçilmiş öne çıkanlar:
 ## 16. Risk Faktörleri & Bildirimler
 
 - **Denetim öncesi yazılım.** Budlum kontrollü bir kamu devnet adayıdır. Gerçek-değer taşıyan üretim trafiği için **kullanmayın**.
-- **Araştırma aşaması bileşenler.** AI katmanı, gizlilik katmanı ve B.U.D. Faz 3+, önemli uygulama riski taşıyan ileriye dönük ifadelerdir.
+- **Araştırma gorevsı bileşenler.** AI katmanı, gizlilik katmanı ve B.U.D. Gorev 3+, önemli uygulama riski taşıyan ileriye dönük ifadelerdir.
 - **Kurtarmasız anahtar modeli.** Maksimum-güvenlik, sıfır-kurtarma duruşu, anahtar kaybı riskini tamamen sahibine devreder. Önemli bakiyeler için çok-cihazlı/HSM pratikleri zorunludur.
 - **Parametre bekliyor.** Parasal parametreler genesis törenine kadar mühürsüzdür; bir "arz"dan bahseden herhangi bir üçüncü taraf yetkisiz sayılmalıdır.
 - **Düzenleyici yüzey.** Egemen alanların settlement'ı (CBDC kullanım durumu) ve ücretli AI veri pazarları gelişen düzenlemelere dokunur; dağıtımlar yargı bölgesine özgü uyumluluğu değerlendirmelidir.

@@ -41,12 +41,12 @@ jobs:
           bash ./scripts/check-clippy-extra.sh --self-test
           cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
           bash ./scripts/check-clippy-extra.sh /tmp/clippy-extra.json
-      - name: Feature matrix — pq-ml-dsa solo (Phase 8.3)
+      - name: Feature matrix — pq-ml-dsa solo (Task 8.3)
         run: |
           set -euo pipefail
           cargo check --no-default-features --features pq-ml-dsa
           cargo clippy --no-default-features --features pq-ml-dsa --all-targets -- -D warnings
-      - name: Feature canary — --all-features REDDEDILMELI (Phase 8.3)
+      - name: Feature canary — --all-features REDDEDILMELI (Task 8.3)
         run: |
           set -euo pipefail
           if cargo check --all-features 2>/dev/null; then
@@ -66,7 +66,7 @@ jobs:
           set -euo pipefail
           RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features pq-dilithium 2>&1 | tee /tmp/doc.log
           echo "cargo doc: warnings as errors — passed"
-      - name: Test rozeti tazeleme — main push + sayi degisimi (Phase 8.4/Q5)
+      - name: Test rozeti tazeleme — main push + sayi degisimi (Task 8.4/Q5)
         # Loop guard ×3 + KIRMIZI KORUMASI: success() AÇIK zorunlu — step-level `if:`
         # default success() kosulunu EZER (CI kanit: run a601dcf — ea27afd'nin KIRMIzI
         # test koşusundan 519 rozeti yazdı; step-level if success() ezmeseydi atlanırdı).
@@ -181,7 +181,7 @@ jobs:
     # G14 (ADIM8.5 §4): 9 ekip-bağımsızlık invariant'ı isimlendirilmiş ZORUNLU
     # job. İsim kanaryası: bir invariant silinir/yeniden adlandırılırsa kapı
     # `cargo test` yeşil kalsa bile FAIL olur (vacuous-gate koruması, kanaryalı).
-    name: B.U.D. E2E Invariants (9/9 isim-kilitli) (Phase 8.5)
+    name: B.U.D. E2E Invariants (9/9 isim-kilitli) (Task 8.5)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -202,9 +202,9 @@ jobs:
           bash ./scripts/check-bud-e2e.sh /tmp/bud-e2e.txt
 
   economy-invariants:
-    # Phase 11.8: EIP-1559 + reward-pool + committed-supply denominator locks.
+    # Task 11.8: EIP-1559 + reward-pool + committed-supply denominator locks.
     # Name canary prevents a vacuous green if tests are renamed/deleted.
-    name: Economy Invariants (Phase 11.8)
+    name: Economy Invariants (Task 11.8)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -219,16 +219,16 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Economy invariant gate canary
         run: bash ./scripts/check-economy-invariants.sh --self-test
-      - name: Phase 11.8 named invariant tests
+      - name: Task 11.8 named invariant tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_8 2>&1 | tee /tmp/economy-invariants.txt
+          cargo test --lib task11_8 2>&1 | tee /tmp/economy-invariants.txt
           bash ./scripts/check-economy-invariants.sh /tmp/economy-invariants.txt
 
   fork-choice-gate:
-    # Phase 11.8: per-domain fork-choice/lifecycle named tests.
+    # Task 11.8: per-domain fork-choice/lifecycle named tests.
     # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
-    name: Fork-Choice Invariants (Phase 11.8)
+    name: Fork-Choice Invariants (Task 11.8)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -243,15 +243,15 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Fork-choice gate canary
         run: bash ./scripts/check-fork-choice-gate.sh --self-test
-      - name: Phase 11.8 fork-choice tests
+      - name: Task 11.8 fork-choice tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_8 2>&1 | tee /tmp/fork-choice-gate.txt
+          cargo test --lib task11_8 2>&1 | tee /tmp/fork-choice-gate.txt
           bash ./scripts/check-fork-choice-gate.sh /tmp/fork-choice-gate.txt
 
   storage-provider-gate:
-    # Phase 11.10: StorageProvider trait + mock implementation named tests.
-    name: StorageProvider Gate (Phase 11.10)
+    # Task 11.10: StorageProvider trait + mock implementation named tests.
+    name: StorageProvider Gate (Task 11.10)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -266,16 +266,16 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: StorageProvider gate canary
         run: bash ./scripts/check-storage-provider-gate.sh --self-test
-      - name: Phase 11.10 StorageProvider tests
+      - name: Task 11.10 StorageProvider tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_10 2>&1 | tee /tmp/storage-provider-gate.txt
+          cargo test --lib task11_10 2>&1 | tee /tmp/storage-provider-gate.txt
           bash ./scripts/check-storage-provider-gate.sh /tmp/storage-provider-gate.txt
 
   node-classification-gate:
-    # Phase 11.10: full/archive node classification + pruning policy named tests.
+    # Task 11.10: full/archive node classification + pruning policy named tests.
     # Name canary prevents a vacuous green if classification tests are renamed/deleted.
-    name: Node Classification (Phase 11.10)
+    name: Node Classification (Task 11.10)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -290,16 +290,16 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Node classification gate canary
         run: bash ./scripts/check-node-classification-gate.sh --self-test
-      - name: Phase 11.10 node classification tests
+      - name: Task 11.10 node classification tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_10_node 2>&1 | tee /tmp/node-classification-gate.txt
+          cargo test --lib task11_10_node 2>&1 | tee /tmp/node-classification-gate.txt
           bash ./scripts/check-node-classification-gate.sh /tmp/node-classification-gate.txt
 
   network-hardening-gate:
-    # Phase 11.12: network hardening named tests.
+    # Task 11.12: network hardening named tests.
     # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
-    name: Network Hardening (Phase 11.12)
+    name: Network Hardening (Task 11.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -314,11 +314,11 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Network hardening gate canary
         run: bash ./scripts/check-network-hardening-gate.sh --self-test
-      - name: Phase 11.12 network hardening tests
+      - name: Task 11.12 network hardening tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_12 2>&1 | tee /tmp/network-hardening-gate.txt
-          cargo test --lib phase3_peer_rate_limit_security_profile 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          cargo test --lib task11_12 2>&1 | tee /tmp/network-hardening-gate.txt
+          cargo test --lib task3_peer_rate_limit_security_profile 2>&1 | tee -a /tmp/network-hardening-gate.txt
           cargo test --lib h5_ 2>&1 | tee -a /tmp/network-hardening-gate.txt
           bash ./scripts/check-network-hardening-gate.sh /tmp/network-hardening-gate.txt
 
@@ -326,8 +326,8 @@ jobs:
 
 
   audit-prep-gate:
-    # Phase 11.20: audit prep index + validator key-management evidence gate.
-    name: Audit Prep (Phase 11.20)
+    # Task 11.20: audit prep index + validator key-management evidence gate.
+    name: Audit Prep (Task 11.20)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -335,12 +335,12 @@ jobs:
           persist-credentials: false
       - name: Audit prep gate self-test
         run: bash ./scripts/check-audit-prep-gate.sh --self-test
-      - name: Phase 11.20 audit prep evidence check
+      - name: Task 11.20 audit prep evidence check
         run: bash ./scripts/check-audit-prep-gate.sh .
 
   poa-compliance-gate:
-    # Phase 11.18: MASAK/AML hooks are isolated to PoA domains only.
-    name: PoA Compliance Isolation (Phase 11.18)
+    # Task 11.18: MASAK/AML hooks are isolated to PoA domains only.
+    name: PoA Compliance Isolation (Task 11.18)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -355,15 +355,15 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: PoA compliance gate self-test
         run: bash ./scripts/check-poa-compliance-gate.sh --self-test
-      - name: Phase 11.18 PoA compliance tests
+      - name: Task 11.18 PoA compliance tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_18_poa_compliance 2>&1 | tee /tmp/poa-compliance-gate.txt
+          cargo test --lib task11_18_poa_compliance 2>&1 | tee /tmp/poa-compliance-gate.txt
           bash ./scripts/check-poa-compliance-gate.sh /tmp/poa-compliance-gate.txt
 
   governance-invariants:
-    # Phase 11.16: minimal on-chain governance parameter whitelist + activation timelock.
-    name: Governance Invariants (Phase 11.16)
+    # Task 11.16: minimal on-chain governance parameter whitelist + activation timelock.
+    name: Governance Invariants (Task 11.16)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -378,15 +378,15 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Governance invariant gate self-test
         run: bash ./scripts/check-governance-invariants.sh --self-test
-      - name: Phase 11.16 governance invariant tests
+      - name: Task 11.16 governance invariant tests
         run: |
           set -euo pipefail
-          cargo test --lib phase11_16_governance 2>&1 | tee /tmp/governance-invariants-gate.txt
+          cargo test --lib task11_16_governance 2>&1 | tee /tmp/governance-invariants-gate.txt
           bash ./scripts/check-governance-invariants.sh /tmp/governance-invariants-gate.txt
 
   wallet-core-gate:
-    # Phase 11.14: wallet-core multisig/social recovery primitives.
-    name: Wallet Core (Phase 11.14)
+    # Task 11.14: wallet-core multisig/social recovery primitives.
+    name: Wallet Core (Task 11.14)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -405,15 +405,15 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --manifest-path wallet-core/Cargo.toml 2>&1 | tee /tmp/wallet-core-gate.txt
-          cargo test --manifest-path wallet-core/Cargo.toml --features uniffi --lib phase11_14_binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
-          cargo test --manifest-path wallet-core/Cargo.toml --features wasm --lib phase11_14_binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo test --manifest-path wallet-core/Cargo.toml --features uniffi --lib task11_14_binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo test --manifest-path wallet-core/Cargo.toml --features wasm --lib task11_14_binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
           bash ./scripts/check-wallet-core-gate.sh /tmp/wallet-core-gate.txt
 
-  # ============================ Phase 10 / Bolum 4 (BNS gate) ============================
+  # ============================ Task 10 / Bolum 4 (BNS gate) ============================
   bns-gate:
-    # Phase 10 Bolum 4 modul-ayrimi: BNS'in kendi CI gate'i (B.U.D. kapi deseni).
+    # Task 10 Bolum 4 modul-ayrimi: BNS'in kendi CI gate'i (B.U.D. kapi deseni).
     # Isim kanaryasi: bir test silinir/yeniden adlandirilirsa kapi FAIL olur.
-    name: BNS Name Registry (8/8 isim-kilitli) (Phase 10)
+    name: BNS Name Registry (8/8 isim-kilitli) (Task 10)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -433,8 +433,8 @@ jobs:
           cargo test --lib bns 2>&1 | tee /tmp/bns-gate.txt
           bash ./scripts/check-bns-gate.sh /tmp/bns-gate.txt
 
-  # ============================ Phase 8 / Faz 1 (P0) ============================
-  # Strict mod: aşağıdaki tüm job'lar ilk günden FAIL kapısıdır (Phase 8.5 ruhu).
+  # ============================ Task 8 / Görev 1 (P0) ============================
+  # Strict mod: aşağıdaki tüm job'lar ilk günden FAIL kapısıdır (Task 8.5 ruhu).
   # Kapıların "boş" (vacuous) olmadığı kanarya testleriyle her koşuda kanıtlanır.
 
   poa-isolation:
@@ -464,8 +464,8 @@ jobs:
           fi
 
   dependency-audit:
-    # Phase 8.1: cargo audit + SBOM üretimi + SBOM artifact.
-    name: Dependency Audit + SBOM (Phase 8.1)
+    # Task 8.1: cargo audit + SBOM üretimi + SBOM artifact.
+    name: Dependency Audit + SBOM (Task 8.1)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -489,8 +489,8 @@ jobs:
           retention-days: 90
 
   cargo-deny:
-    # Phase 8.2: root ve budzero grafikleri ayrı matrix adımlarında denetlenir.
-    name: Cargo Deny (${{ matrix.name }}) (Phase 8.2)
+    # Task 8.2: root ve budzero grafikleri ayrı matrix adımlarında denetlenir.
+    name: Cargo Deny (${{ matrix.name }}) (Task 8.2)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -510,10 +510,10 @@ jobs:
           command: check
 
   fuzz-quick:
-    # Phase 8.5 + Phase 11.2: mevcut target'lar + 3 yeni (consensus/relayer/zk).
+    # Task 8.5 + Task 11.2: mevcut target'lar + 3 yeni (consensus/relayer/zk).
     # Uzun koşular fuzz-nightly.yml (schedule, 4h/target, corpus cache) işler.
     # Quick: 60s/target (10 target × 60s ≈ 10dk + build; timeout-minutes 60).
-    name: Fuzz Quick (60s × 10 target) (Phase 8.5/11.2)
+    name: Fuzz Quick (60s × 10 target) (Task 8.5/11.2)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -549,7 +549,7 @@ jobs:
             zk_verifier
           )
           # Note: evm_rlp_decode + evm_mpt_verify remain nightly/manual (F10.1);
-          # quick gate covers deserialize + Phase 11.2 state/relayer/zk.
+          # quick gate covers deserialize + Task 11.2 state/relayer/zk.
           for t in "${targets[@]}"; do
             echo "=== fuzz-quick: $t (60s) ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
@@ -565,13 +565,13 @@ jobs:
           retention-days: 30
 
   secret-scan:
-    # Phase 8.7: TAM git geçmişinde secret taraması (fetch-depth: 0).
+    # Task 8.7: TAM git geçmişinde secret taraması (fetch-depth: 0).
     # gitleaks OSS binary'yi kullanıyoruz: resmi GitHub Action, organizasyon
     # repolarında GITLEAKS_LICENSE (dış kayıt) ister; binary aynı motoru
     # lisanssız çalıştırır. Sürüm + sha256 pinlidir. Resmi action'a geçiş,
     # lisans anahtarı temin edildiğinde değerlendirilebilir (güvenlik çıktısı
     # birebir aynıdır).
-    name: Secret Scan (gitleaks, tam geçmiş) (Phase 8.7)
+    name: Secret Scan (gitleaks, tam geçmiş) (Task 8.7)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -611,9 +611,9 @@ jobs:
         run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
 
   timing-safe:
-    # Phase 8.6: RPC/crypto'da ham-eşitlik statik taraması + dudect-tarzı
+    # Task 8.6: RPC/crypto'da ham-eşitlik statik taraması + dudect-tarzı
     # istatistiksel zamanlama regresyon testi (cargo bench).
-    name: Timing-Safe Regression (Phase 8.6)
+    name: Timing-Safe Regression (Task 8.6)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -635,11 +635,11 @@ jobs:
         run: cargo bench --bench timing_safe
 
   docker-security:
-    # Phase 8.9: Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
+    # Task 8.9: Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
     # hadolint binary surum+sha256 pinli (gitleaks deseni). DL3008 (apt surum
     # pinleme) warning seviyesinde birakilir: bookworm apt churn'une karsi
     # bilincli kalibrasyon — failure-threshold: error ile yalniz error+ FAIL.
-    name: Docker Security (trivy + hadolint) (Phase 8.9)
+    name: Docker Security (trivy + hadolint) (Task 8.9)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -667,10 +667,10 @@ jobs:
           ignore-unfixed: true
 
   coverage:
-    # Phase 8.4: nextest + llvm-cov, ratchet kapisi (Q-7b1(a)).
+    # Task 8.4: nextest + llvm-cov, ratchet kapisi (Q-7b1(a)).
     # Basline kaniti 2026-07-17: lines 64.15% (14493/22594), 531/531 PASS.
     # Araclar surum+sha256 pinli (nextest resmi .sha256 asset ile birebir dogrulanmis).
-    name: Coverage (nextest + llvm-cov, ratchet) (Phase 8.4)
+    name: Coverage (nextest + llvm-cov, ratchet) (Task 8.4)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -725,11 +725,11 @@ jobs:
           retention-days: 30
 
   repo-lint:
-    # Phase 8.10/8.11: actionlint + buf + genesis schema (tek birlesik statik kapi).
+    # Task 8.10/8.11: actionlint + buf + genesis schema (tek birlesik statik kapi).
     # Araclar surum+sha256 pinli. buf breaking, main'de buf.yaml bulundugunda
     # aktiflesir (baseline bu dalgayla kuruluyor — ilk kosuda SKIP dürüst marker).
     # G27: zizmor workflow güvenlik lint'i de bu job'da (kanaryalı, 0-bulgu politikası).
-    name: Repo Lint (actionlint + buf + genesis + zizmor) (Phase 8.10/8.11 + G27)
+    name: Repo Lint (actionlint + buf + genesis + zizmor) (Task 8.10/8.11 + G27)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -766,7 +766,7 @@ jobs:
           set -o pipefail
           buf build
           buf lint
-      - name: buf breaking — baseline varsa aktif (Phase 8.11)
+      - name: buf breaking — baseline varsa aktif (Task 8.11)
         run: |
           set -euo pipefail
           # main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;
@@ -783,7 +783,7 @@ jobs:
         run: |
           python3 ./scripts/check_genesis_schema.py --self-test
           python3 ./scripts/check_genesis_schema.py config/mainnet-genesis.json
-      - name: Phase 11.6 spec coverage kapisi + kanarya
+      - name: Task 11.6 spec coverage kapisi + kanarya
         run: |
           bash ./scripts/check-spec-coverage.sh --self-test
           bash ./scripts/check-spec-coverage.sh

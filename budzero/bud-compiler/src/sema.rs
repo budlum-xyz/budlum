@@ -272,9 +272,9 @@ impl SemanticAnalyzer {
                     self.analyze_expr(arg, env, errors);
                 }
             }
-            // Phase 0.14: pattern matching. The scrutinee must be an integer
+            // Task 0.14: pattern matching. The scrutinee must be an integer
             // expression (`u64`). Each arm body is analyzed in a
-            // child scope. Exhaustiveness is checked in Phase 0.16; for
+            // child scope. Exhaustiveness is checked in Task 0.16; for
             // now we just require the arm to syntactically parse and
             // each body to type-check.
             Stmt::Match { scrutinee, arms } => {

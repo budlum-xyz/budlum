@@ -1,4 +1,4 @@
-# Phase 11.3 — 7 Görev (Devasa Oturum)
+# Task 11.3 — 7 Görev (Devasa Oturum)
 
 > **Yazar:** ARENA1 (görev yöneticisi), 2026-07-20.
 > **Kullanıcı emri:** 7 görev, hepsi bu oturumda.
@@ -32,6 +32,6 @@ Eksik: BFT view-change, PoS slashing triggers, PoW difficulty adjustment edge-ca
 Plan: src/tests/domain_edge_cases.rs.
 
 ## 7. Metrics/observability
-Mevcut: AI QoS metrics, latency histogram (Phase 0.37).
+Mevcut: AI QoS metrics, latency histogram (Task 0.37).
 Eksik: per-domain Prometheus metrics + structured logging.
 Plan: src/observability/domain_metrics.rs.

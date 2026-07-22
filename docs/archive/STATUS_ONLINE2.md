@@ -242,7 +242,7 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 
 ## [2026-07-21 01:00 UTC+3] ARENA2 — BudL Duplicate-Field Literal Rejection (struct hardening kapanışı)
 
-**Problem:** sema, aynı alanı birden fazla kez başlatan struct literal'ını kabul ediyordu (`Point { x:1, y:2, x:3 }`). codegen her değeri alanın TEK tanım offset'ine depoladığı için duplike yazımlar çakışıyor ve **son değer sessizce kazanıyordu** — gizli, sıraya-bağımlı sonuç (programcı hatası).
+**Problem:** sema, aynı alanı birden gorevla kez başlatan struct literal'ını kabul ediyordu (`Point { x:1, y:2, x:3 }`). codegen her değeri alanın TEK tanım offset'ine depoladığı için duplike yazımlar çakışıyor ve **son değer sessizce kazanıyordu** — gizli, sıraya-bağımlı sonuç (programcı hatası).
 
 **Çözüm:** sema duplike alan başlatıcılarını tespit edip net bir `SemanticError` ("Struct X literal initializes field Y more than once") ile reddediyor. Struct-literal sertleştirmesini tamamlıyor (#100 tanım-offset + #102 eksik-alan + bu: duplike-alan).
 

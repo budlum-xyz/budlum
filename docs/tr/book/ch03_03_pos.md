@@ -22,11 +22,11 @@ pub struct PoSConfig {
 
 pub struct PoSEngine {
     config: PoSConfig,
-    seen_blocks: RwLock<HashMap<(String, u64), String>>, 
-    slashing_evidence: RwLock<Vec<SlashingEvidence>>,    
-    epoch_seed: RwLock<[u8; 32]>,                        
+    seen_blocks: RwLock<HashMap<(String, u64), String>>,
+    slashing_evidence: RwLock<Vec<SlashingEvidence>>,
+    epoch_seed: RwLock<[u8; 32]>,
     storage: Option<Storage>,                            // Kalıcılık için disk bağlantısı
-    keypair: Option<KeyPair>,                            
+    keypair: Option<KeyPair>,
 }
 ```
 
@@ -39,14 +39,14 @@ pub struct PoSEngine {
 
 ### Fonksiyon: `expected_proposer` (VRF Lider Seçimi)
 
-Her slot için kimin blok üreteceğini belirleyen "Kriptografik Piyango" fonksiyonudur. Eski RANDAO yapısı, **Hardening Phase 2** ile VRF tabanlı bir sisteme dönüştürülmüştür.
+Her slot için kimin blok üreteceğini belirleyen "Kriptografik Piyango" fonksiyonudur. Eski RANDAO yapısı, **Hardening Task 2** ile VRF tabanlı bir sisteme dönüştürülmüştür.
 
 ```rust
 pub fn expected_proposer(&self, slot: u64, validators: &[Validator]) -> Option<Validator> {
     // 1. Rastgeleliği Kanıtla (VRF)
-    // Lider, kendi Private Key'i ve Slot numarasını kullanarak 
+    // Lider, kendi Private Key'i ve Slot numarasını kullanarak
     // bir VRF çıktısı (output) ve kanıtı (proof) üretir.
-    
+
     // 2. Eşik Değeri (Threshold) Hesabı
     // Threshold = 2^256 * (Hisse / Toplam_Hisse)
     let threshold = self.calculate_vrf_threshold(validator_stake, total_stake);
@@ -100,20 +100,20 @@ Bir liderin aynı slot içinde iki farklı blok üretip imzalamasıdır. Bu, zin
 
 ### Fonksiyon: `record_block` (Kalıcılık ve Dedektiflik)
 
-Ağa gelen her bloğu kaydeder. Güncel hardening aşamasında canonical değişiklikler kalıcı storage yoluna yazılır; bunun Mainnet operasyonlarına hazır sayılması için restore ve fault-injection çalışmaları ayrıca tamamlanmalıdır.
+Ağa gelen her bloğu kaydeder. Güncel hardening görevsında canonical değişiklikler kalıcı storage yoluna yazılır; bunun Mainnet operasyonlarına hazır sayılması için restore ve fault-injection çalışmaları ayrıca tamamlanmalıdır.
 
 ```rust
 pub fn record_block(&self, block: &Block) {
     // 1. Double-Sign Tespiti
     // 2. Eğer geçerliyse, konsensüs durumunu (seen_blocks, seed) diske kaydet.
     if let Some(ref storage) = self.storage {
-        storage.save_consensus_state(&self.get_state()); 
+        storage.save_consensus_state(&self.get_state());
     }
 }
 ```
 
 **Neden RANDAO (XOR-Mix)?**
-Eski yapıda `previous_hash` kullanılıyordu. Bir düğüm çıkaracağı bloğu manipüle edip ufak TX değişiklikleri ile hash'i değiştirerek "sıradaki bloğu da" kendine düşürebilirdi. 
+Eski yapıda `previous_hash` kullanılıyordu. Bir düğüm çıkaracağı bloğu manipüle edip ufak TX değişiklikleri ile hash'i değiştirerek "sıradaki bloğu da" kendine düşürebilirdi.
 RANDAO ile, tüm blokların hash'leri ardışık olarak (`XOR` işlemi) birbirine karıştırılır. Epoch bitene kadar hiçkimse tam teşekküllü Epoch Tohumu'nun ne olacağını %100 kestiremez ve oyun oynayamaz (Bias-Resistance).
 
 ---
@@ -129,7 +129,7 @@ fn prepare_block(&self, block: &mut Block, state: &AccountState) {
         let mut evidence_pool = self.slashing_evidence.write().unwrap();
         if !evidence_pool.is_empty() {
             block.slashing_evidence = Some(evidence_pool.clone());
-            evidence_pool.clear(); 
+            evidence_pool.clear();
         }
     }
 

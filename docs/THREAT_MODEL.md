@@ -1,6 +1,6 @@
-# Budlum Threat Model v2 (Phase 11.20)
+# Budlum Threat Model v2 (Task 11.20)
 
-**Durum:** Final v2 (Phase 11.20) — Phase 11.8 → 11.18 azaltmaları CI-gated olarak işlenmiştir
+**Durum:** Final v2 (Task 11.20) — Task 11.8 → 11.18 azaltmaları CI-gated olarak işlenmiştir
 **ADR:** [ADR-010](adr/ADR-010-security-audit-hsm.md)
 **Metodoloji:** STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege)
 **Tehdit sınıflandırması:** 🔴 Kritik / 🟠 Yüksek / 🟡 Orta / 🔵 Düşük
@@ -95,13 +95,13 @@
 
 | # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
 |---|---|---|---|---|---|
-| S1 | Forged storage proof (sahte depolama kanıtı) | Tampering | 🔴 | Storage challenge + proof (spec Phase 11.6) | ADR-002 impl |
+| S1 | Forged storage proof (sahte depolama kanıtı) | Tampering | 🔴 | Storage challenge + proof (spec Task 11.6) | ADR-002 impl |
 | S2 | Storage node plaintext zorunlu kılma | EoP | 🔴 | Encryption policy (P12-4, DAO dokunamaz) | P12-4 |
 | S3 | Pruning ile finalized state kaybı | Tampering | 🟠 | Snapshot retantion (ADR-003) | ADR-003 impl |
 
-## 10. Phase 11.20 Mitigation Closure Matrix
+## 10. Task 11.20 Mitigation Closure Matrix
 
-| Faz | Kapatılan risk sınıfı | Gerçekleşmiş azaltma | CI kanıtı | Kalan risk |
+| Görev | Kapatılan risk sınıfı | Gerçekleşmiş azaltma | CI kanıtı | Kalan risk |
 |---|---|---|---|---|
 | 11.6 | Spec drift / audit blind spot | Frozen specs + spec-review checklist | Repo Lint spec coverage | Yeni spec değişiklikleri aynı gate'e bağlanmalı |
 | 11.8 | Economy cap / fee-market / fork-choice tampering | Committed supply denominator, EIP-1559 fail-closed migration, domain fork-choice primitives, lifecycle guards | `Economy Invariants`, `Fork-Choice Invariants` | Fee distribution full wiring sonraki ekonomi ADIM'i |
@@ -114,14 +114,14 @@
 
 ## 11. Residual Risk Register (mainnet sonrası takip)
 
-**🔴 Kritik:** Bu v2 snapshot itibarıyla pre-Phase12 kapsamda CI-gated ve açık kritik kod riski bırakılmaması hedeflenmiştir. Kritik sınıf yeniden açılırsa yeni ADIM kırmızı kabul edilir ve yeni scope durdurulur.
+**🔴 Kritik:** Bu v2 snapshot itibarıyla pre-Task12 kapsamda CI-gated ve açık kritik kod riski bırakılmaması hedeflenmiştir. Kritik sınıf yeniden açılırsa yeni ADIM kırmızı kabul edilir ve yeni scope durdurulur.
 
 **🟠 Yüksek / operasyonel:**
 - R1 — Long-range / checkpoint operations: validator onboarding ve genesis ceremony prosedürleri HSM policy ile birlikte dry-run edilmelidir.
 - R2 — Hardware signer rollout: YubiHSM 2 / PKCS#11 cihaz envanteri, PIN custody ve backup quorum bağımsız audit tarafından örneklenmelidir.
 - R3 — Network chaos tuning: Eclipse/rate-limit kapıları yeşil olsa da multi-node partition/Byzantine chaos senaryoları mainnet öncesi soak ister.
 - R4 — Storage proof economics: Proof verification strict; incentive and slashing parameter calibration uzun devnet gözlemi gerektirir.
-- R5 — Wallet UX: wallet-core primitive'leri hazır; kullanıcı-facing recovery/multisig UX sonraki ürün fazında yanlış kullanım riskini azaltmalıdır.
+- R5 — Wallet UX: wallet-core primitive'leri hazır; kullanıcı-facing recovery/multisig UX sonraki ürün görevında yanlış kullanım riskini azaltmalıdır.
 - R6 — PoA oracle/regulator data: On-chain hash kayıtları PoA'ya izole; off-chain oracle doğruluğu ve veri saklama politikası ayrı audit alanıdır.
 - R7 — CI stability: Launch lock için tüm required + extended gates en az 7 gün kırmızısız izlenmelidir.
 
@@ -130,4 +130,4 @@
 - `docs/SECURITY_AUDIT_HACKER.md` — V17-V7 bulguları (geçmiş tehdit denetimi)
 - `SECURITY.md`, `docs/BUG_BOUNTY.md` — sürekli tehdit tespiti
 - 10 ADR (`docs/adr/`) — her tehdit için azaltma kararı
-- Phase 11.6-11.20 yol haritası — azaltmaların implementasyon fazları
+- Task 11.6-11.20 yol haritası — azaltmaların implementasyon görevları

@@ -96,7 +96,7 @@ Mevcut repo kontrollü bir public devnet için uygundur; fakat audited mainnet d
 - **Operasyonel Sertleştirme:** RPC rate limiting/auth, Docker/systemd paketleme, health check, fuzzing ve tam clippy temizliği hâlâ açıktır.
 - **Error Refactor:** Yapılandırılmış `BudlumError` vardır ve kritik execution path'leri bunu kullanır; ancak bazı public API'ler geriye dönük uyumluluk için hâlâ `Result<T, String>` wrapper'ları sunar.
 - **Formal Verification:** Matematiksel invaryantlar henüz TLA+ veya benzeri araçlarla resmi olarak doğrulanmamıştır.
-- **Erken Aşama Adapterlar:** PoA/BFT adapterları hâlâ üst düzey quorum sayaçları kullanır; PoS artık certificate'i validator snapshot ve validator-set hash ankrajlarına karşı doğrular, ancak audit seviyesinde entegrasyon incelemesi gerekir.
+- **Erken Görev Adapterlar:** PoA/BFT adapterları hâlâ üst düzey quorum sayaçları kullanır; PoS artık certificate'i validator snapshot ve validator-set hash ankrajlarına karşı doğrular, ancak audit seviyesinde entegrasyon incelemesi gerekir.
 
 ## 13. Test Kapsamı
 Katman, aşağıdakileri içeren bir **Bizans Kaos Matrisi** ile doğrulanmıştır:

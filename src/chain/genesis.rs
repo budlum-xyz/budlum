@@ -14,7 +14,7 @@ pub const GENESIS_ALLOCATION: u64 = 1_000_000_000;
 
 pub const GENESIS_TIMESTAMP: u128 = 0;
 
-/// Phase 11.2: Genesis'te bootstrap edilecek domain konfigürasyonu.
+/// Task 11.2: Genesis'te bootstrap edilecek domain konfigürasyonu.
 /// Serialization-safe (serde), ceremony'de placeholder adreslerle başlar.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BootstrapDomainConfig {
@@ -99,14 +99,14 @@ pub struct GenesisConfig {
 
     pub timestamp: u128,
 
-    /// Optional $BUD tokenomics (Phase 0.14/8b). When `Some`, genesis additionally
+    /// Optional $BUD tokenomics (Task 0.14/8b). When `Some`, genesis additionally
     /// seeds the $BUD distribution accounts (Community/Liquidity/Ecosystem/Team/
     /// BurnReserve) and configures the on-chain burn-reserve address + team
     /// vesting schedule. Default `None` — plain genesis is unchanged.
     #[serde(default)]
     pub bud_tokenomics: Option<crate::tokenomics::TokenomicsParams>,
 
-    /// Phase 11.2: Bootstrap domain listesi. Her domain genesis'te otomatik
+    /// Task 11.2: Bootstrap domain listesi. Her domain genesis'te otomatik
     /// register edilir (storage boşsa = yeni chain). PoW/PoS/BFT/PoA 4 domain
     /// mainnet için varsayılan. Default boş (devnet/testnet backward-compat).
     #[serde(default)]
@@ -150,7 +150,7 @@ impl GenesisConfig {
         self
     }
 
-    /// Enable $BUD tokenomics for this genesis (Phase 0.14b): the $BUD distribution
+    /// Enable $BUD tokenomics for this genesis (Task 0.14b): the $BUD distribution
     /// accounts are seeded and the burn-reserve address + team vesting are
     /// configured on the resulting state. Uses reserved tokenomics addresses.
     /// Default genesis is unchanged unless this is explicitly called.
@@ -206,7 +206,7 @@ impl GenesisConfig {
     pub fn build_state(&self) -> AccountState {
         let mut state = AccountState::new();
         state.base_fee = self.base_fee;
-        // `block_reward` now lives under `state.tokenomics` (Phase 0.02 tokenomics
+        // `block_reward` now lives under `state.tokenomics` (Task 0.02 tokenomics
         // refactor). The top-level `state.block_reward` field was removed.
         state.tokenomics.block_reward = self.block_reward;
 
@@ -219,7 +219,7 @@ impl GenesisConfig {
             state.add_validator(*validator, validator_stake);
         }
 
-        // $BUD tokenomics (Phase 0.14b): seed the distribution accounts and configure
+        // $BUD tokenomics (Task 0.14b): seed the distribution accounts and configure
         // the on-chain burn-reserve address + team vesting so the timed burn and
         // vesting enforcement operate on the real chain state.
         if let Some(params) = &self.bud_tokenomics {
@@ -263,7 +263,7 @@ fn address(byte: u8) -> Address {
     Address::from([byte; 32])
 }
 
-// === MAINNET GENESIS — Phase 3 §3.1 ===
+// === MAINNET GENESIS — Task 3 §3.1 ===
 
 /// Mainnet genesis configuration.
 ///
@@ -336,7 +336,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
         // Full tokenomics active
         bud_tokenomics: Some(tokenomics),
 
-        // Phase 11.2: 4 domain bootstrap (PoW/PoS/BFT/PoA).
+        // Task 11.2: 4 domain bootstrap (PoW/PoS/BFT/PoA).
         // PoA: placeholder authorities (ceremony'de gerçek adreslere dönüşür).
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
     }
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_mainnet_genesis_deterministic() {
-        // Phase 3 §3.1: mainnet genesis must be deterministic — same config → same hash
+        // Task 3 §3.1: mainnet genesis must be deterministic — same config → same hash
         let cfg = GenesisConfig::for_network(Network::Mainnet);
         let g1 = cfg.build_genesis_block();
         let g2 = cfg.build_genesis_block();
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_mainnet_genesis_hash_distinct_from_testnet_devnet() {
-        // Phase 3 §3.1: distinct networks must produce distinct genesis hashes
+        // Task 3 §3.1: distinct networks must produce distinct genesis hashes
         let mainnet = GenesisConfig::for_network(Network::Mainnet).build_genesis_block();
         let testnet = GenesisConfig::for_network(Network::Testnet).build_genesis_block();
         let devnet = GenesisConfig::for_network(Network::Devnet).build_genesis_block();
@@ -478,7 +478,7 @@ mod tests {
         assert_ne!(testnet.hash, devnet.hash);
     }
 
-    /// Load a checked-in network genesis JSON (Phase 3 §3.1).
+    /// Load a checked-in network genesis JSON (Task 3 §3.1).
     fn load_genesis_json(relative: &str) -> GenesisConfig {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
         let data = std::fs::read_to_string(&path)
@@ -564,7 +564,7 @@ mod tests {
     }
 }
 
-// === MAINNET GENESIS TESTS — Phase 3 §3.1 ===
+// === MAINNET GENESIS TESTS — Task 3 §3.1 ===
 
 #[cfg(test)]
 mod mainnet_genesis_tests {

@@ -1,4 +1,4 @@
-//! Relayer Policy Layer primitives (Phase 12 / ARENA4).
+//! Relayer Policy Layer primitives (Task 12 / ARENA4).
 //!
 //! This module models user intents and solver bids without introducing a
 //! whitelist. Relayers remain permissionless; safety comes from signed intent

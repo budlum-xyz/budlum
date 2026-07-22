@@ -48,7 +48,7 @@ message ProtoTransaction {
     uint64 fee = 4;
     uint64 nonce = 5;
     bytes data = 6;
-    string timestamp = 7; 
+    string timestamp = 7;
     string hash = 8;
     bytes signature = 9;
     uint64 chain_id = 10;
@@ -229,7 +229,7 @@ message ProtoSlashingEvidence {
 
 message ProtoBlockHeader {
     uint64 index = 1;
-    string timestamp = 2; 
+    string timestamp = 2;
     string previous_hash = 3;
     string hash = 4;
     string producer = 5;
@@ -247,7 +247,7 @@ message ProtoBlockHeader {
 
 message ProtoBlock {
     uint64 index = 1;
-    string timestamp = 2; 
+    string timestamp = 2;
     string previous_hash = 3;
     string hash = 4;
     repeated ProtoTransaction transactions = 5;
@@ -267,7 +267,7 @@ message ProtoBlock {
 
 
 
-// Phase 12 Pollen transaction payloads. Data is bincode-encoded canonical Rust
+// Task 12 Pollen transaction payloads. Data is bincode-encoded canonical Rust
 // struct payload; V4 signing still uses explicit field encoding in Rust.
 message ProtoPollenDataAsset {
     bytes data = 1;
@@ -343,7 +343,7 @@ message ProtoHeaders {
 }
 
 message ProtoGetBlocksRange {
-    uint64 from_index = 1; 
+    uint64 from_index = 1;
     uint64 to_index = 2;
 }
 

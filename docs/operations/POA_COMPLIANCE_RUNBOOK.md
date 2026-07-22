@@ -1,8 +1,8 @@
-# PoA Compliance Runbook — Phase 11.18
+# PoA Compliance Runbook — Task 11.18
 
-**Status:** ADIM 6 — operational runbook.  
-**Scope:** MASAK/AML compliance hooks for PoA domain only.  
-**Gate:** `scripts/check-poa-compliance-gate.sh` — yeni marker.  
+**Status:** ADIM 6 — operational runbook.
+**Scope:** MASAK/AML compliance hooks for PoA domain only.
+**Gate:** `scripts/check-poa-compliance-gate.sh` — yeni marker.
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
@@ -56,4 +56,4 @@ check_contains "$root/docs/operations/POA_COMPLIANCE_RUNBOOK.md" "off-chain orac
 
 ---
 
-*Bu dosya, `PoA Compliance Isolation (Phase 11.18)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `PoA Compliance Isolation (Task 11.18)` CI gate'i tarafından doğrulanır.*

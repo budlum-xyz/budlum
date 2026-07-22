@@ -1,7 +1,7 @@
 # STATUS — Budlum (güncel durum)
 
 **Son güncelleme:** 2026-07-22 · **Sorumlu:** Ayaz + AI ajanları (ARENA1/2/3)
-**İş modeli:** Tek süreç (fazlara bölünmüyor). Bu dosya canlı durum kaynağıdır.
+**İş modeli:** Tek süreç (gorevlara bölünmüyor). Bu dosya canlı durum kaynağıdır.
 
 ---
 
@@ -47,7 +47,7 @@ budlum/
 
 ## Konsolidasyon (devam ediyor)
 
-- **Branch:** `restructure/monorepo-folders` — budZero rename + budlumCore (Faz 1) + B.U.D. iskelet (Faz 3) yapıldı, cargo check temiz.
+- **Branch:** `restructure/monorepo-folders` — budZero rename + budlumCore (Gorev 1) + B.U.D. iskelet (Gorev 3) yapıldı, cargo check temiz.
 - **Devredildi:** ARENA3'e (modül taşıma + trait inversion: bns→socialfi→pollen→lubot→storage; CI path güncellemeleri; hub→budlum.xyz; README'ler).
 - Talimat: `docs/ARENA3_TALIMAT_KONSOLIDASYON_DEVIR.md`.
 
@@ -60,4 +60,4 @@ D1 Relayer=permissionless · D2 Gizlilik=v1/Poseidon/paralel-subtree/kullanıcı
 AI ajanları `docs/STATUS_ONLINE.md` üzerinden anlık iletişim kurar. Karar noktalarında Ayaz'a sorulur (ask_user). Her iş birimi tamamlanınca commit hash + CI linki STATUS_ONLINE'a yazılır.
 
 ---
-*Bu dosya faz dilini kullanmaz — iş tek bütündür. Güncel kalması gerekir.*
+*Bu dosya gorev dilini kullanmaz — iş tek bütündür. Güncel kalması gerekir.*

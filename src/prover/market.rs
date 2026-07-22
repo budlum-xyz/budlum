@@ -1,4 +1,4 @@
-//! Proof Verification Market primitives (Phase 12 / ARENA4).
+//! Proof Verification Market primitives (Task 12 / ARENA4).
 //!
 //! This module prepares the proof-market abstraction without wiring Budlum to
 //! LUM or any DeFi application. Rewards are represented as commitments only;

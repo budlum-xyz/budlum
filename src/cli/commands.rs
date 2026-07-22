@@ -221,10 +221,10 @@ pub struct NodeConfig {
     #[arg(long, default_value = "./data/hsm/socket.sock")]
     pub hsm_socket_path: String,
 
-    /// Phase 9 (ARENA3): Vendor-native BLS mechanism ID for PKCS#11.
+    /// Task 9 (ARENA3): Vendor-native BLS mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_bls_mechanism: Option<String>,
-    /// Phase 9 (ARENA3): Vendor-native PQ mechanism ID for PKCS#11.
+    /// Task 9 (ARENA3): Vendor-native PQ mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
 
@@ -240,7 +240,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub features_verify_merkle: bool,
 
-    // Storage Node Config (B.U.D. Faz 3)
+    // Storage Node Config (B.U.D. Görev 3)
     #[arg(long, default_value = "true")]
     pub storage_enabled: bool,
 
@@ -275,7 +275,7 @@ impl Default for NodeConfig {
             config: None,
             metrics_port: 9090,
             rpc_enabled: true,
-            // Phase 0.12 (security audit §5 wiring): secure-by-default for
+            // Task 0.12 (security audit §5 wiring): secure-by-default for
             // NodeConfig::default(). The previous `false` here meant
             // `main.rs:557`'s `RpcSecurityConfig::from_env(config.rpc_auth_required, ...)`
             // silently opened a public, unauthenticated RPC at startup
@@ -364,7 +364,7 @@ pub struct NetworkSection {
 #[serde(deny_unknown_fields)]
 pub struct NodeSection {
     pub role: Option<String>, // validator | sentry | seed | rpc | archive
-    /// Phase 11.10 alias: full | archive. `archive` normalizes to role=archive;
+    /// Task 11.10 alias: full | archive. `archive` normalizes to role=archive;
     /// `full` is compatible with validator/sentry/seed/rpc but not archive.
     pub mode: Option<String>,
     pub dial: Option<String>,
@@ -439,7 +439,7 @@ pub struct Pkcs11Section {
     pub module_path: Option<String>,
     pub slot_id: Option<u64>,
     pub token_pin_env: Option<String>,
-    /// Phase 9 (ARENA3, 2026-07-16): Vendor-native BLS mechanism ID.
+    /// Task 9 (ARENA3, 2026-07-16): Vendor-native BLS mechanism ID.
     /// Hex or decimal string (e.g. "0x80000001" or "2147483649").
     /// If absent, BLS signing falls back to software (data object).
     pub bls_mechanism: Option<String>,
@@ -455,7 +455,7 @@ pub struct FeaturesSection {
     pub pruning: Option<bool>,
     /// F2 config-driven (ARENAX Q-X2): VerifyMerkle staged rollout gate controlled via config
     /// true = gate open (MainnetActivation::full()), false = gate closed (default reject)
-    /// Default: true (gate opened in Phase 9, 4e2b920)
+    /// Default: true (gate opened in Task 9, 4e2b920)
     pub verify_merkle: Option<bool>,
     /// ADIM 5 §5.2: Mobile mode (lightweight P2P/sharding)
     pub mobile_mode: Option<bool>,
@@ -716,7 +716,7 @@ impl NodeConfig {
                     if self.pkcs11_token_pin_env.is_none() {
                         self.pkcs11_token_pin_env = pkcs11.token_pin_env;
                     }
-                    // Phase 9: vendor-native BLS/PQ mechanism IDs
+                    // Task 9: vendor-native BLS/PQ mechanism IDs
                     if self.pkcs11_bls_mechanism.is_none() {
                         self.pkcs11_bls_mechanism = pkcs11.bls_mechanism;
                     }
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_cli_pruning_policy_archive_rejects_pruning() {
+    fn task11_10_cli_pruning_policy_archive_rejects_pruning() {
         let mut cfg = NodeConfig {
             role: "archive".into(),
             features_pruning: true,
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_cli_pruning_policy_unknown_role_rejected() {
+    fn task11_10_cli_pruning_policy_unknown_role_rejected() {
         let cfg = NodeConfig {
             role: "unknown".into(),
             ..Default::default()
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_cli_node_mode_archive_normalizes_role() {
+    fn task11_10_cli_node_mode_archive_normalizes_role() {
         let mut cfg = NodeConfig::default();
         cfg.apply_file_config(FileConfig {
             node: Some(NodeSection {
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn phase11_10_cli_node_mode_full_keeps_validator_role() {
+    fn task11_10_cli_node_mode_full_keeps_validator_role() {
         let mut cfg = NodeConfig::default();
         cfg.apply_file_config(FileConfig {
             node: Some(NodeSection {

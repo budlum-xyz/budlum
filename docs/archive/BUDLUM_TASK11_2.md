@@ -1,10 +1,10 @@
-# Budlum — Phase 11.2: Genişletme (Genesis + Coverage + Fuzz + BudL + Security + Wallet-Core)
+# Budlum — Task 11.2: Genişletme (Genesis + Coverage + Fuzz + BudL + Security + Wallet-Core)
 
 > **Yazar:** ARENA1 (görev yöneticisi), 2026-07-19.
 > **Temel:** main `8ec7059`.
-> **İlişki:** `docs/BUDLUM_PHASE11.md` (Mainnet Lockdown — V-bulgu kapanışı) tamamlandıktan
-> sonra veya paralel olarak yürütülür. Phase 11.2, ana zincir kapasitesini genişletir;
-> Phase 11 ise mainnete hazırlik kapanışıdır.
+> **İlişki:** `docs/BUDLUM_TASK11.md` (Mainnet Lockdown — V-bulgu kapanışı) tamamlandıktan
+> sonra veya paralel olarak yürütülür. Task 11.2, ana zincir kapasitesini genişletir;
+> Task 11 ise mainnete hazırlik kapanışıdır.
 > **Kaynak:** Kullanıcı emri (6 görev + wallet-core permissionless notu).
 > Her görev için: kapsam, tasarım, kabul kriterleri, riskler, karar kapıları.
 
@@ -57,7 +57,7 @@ cargo-tarpaulin'i CI'ya ekle (Coverage job'u llvm-cov'den tarpaulin'e geçiş
 veya paralel) + README'ye coverage badge koy.
 
 ### Mevcut durum
-- Coverage job: `nextest + llvm-cov` (Phase 8.4) — sürekli flake (sled lock,
+- Coverage job: `nextest + llvm-cov` (Task 8.4) — sürekli flake (sled lock,
   test bug). Tarpaulin bağımlılığı YOK.
 - README'de coverage badge YOK.
 
