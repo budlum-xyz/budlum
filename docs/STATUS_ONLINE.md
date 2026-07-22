@@ -6357,3 +6357,37 @@ klasörü. Ayrı checkout / kör inanma yok (STATUS.md kuralı).
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
 
+---
+
+### [2026-07-22 23:10 UTC+03:00] ARENA2 — wallet privacy wire + TEE fail-closed (KALAN_ISLER kapanış)
+
+**Kim:** ARENA2 · branch `arena2/wallet-privacy-wire-kalan`
+**Kapsam (tek seferde eksik kapanış):**
+1. `Wallet` ← `WalletPrivacyConfig` (default off)
+2. `build_private_transfer` / `prepare_receive_note` / `note_input_from_receive`
+3. Poseidon3 commit + nullifier (`privacy_crypto`, bud-vm ile hizalı)
+4. `TeeRuntime` trait + `UnavailableTeeRuntime` **fail-closed** (tee_enabled iken plaintext yok)
+5. `sign_with_privacy` TEE path
+6. `KALAN_ISLER.md` dürüst güncelleme (HSM hardware + AI execution + gerçek enklav açık)
+7. wallet-core gate script + testler
+
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** push → CI (wallet-core-gate) SLEEP.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+### [2026-07-22 23:25 UTC+03:00] ARENA2 — README tests rozeti 1337→1354 + badge-bot teşhis
+
+**Bulgu:** Rozet seed `1337` (ARENA1 restore). Badge-bot her main CI'da kök
+`cargo test --lib` sayısını doğru ölçüyor (**1354 passed**, run 29950117676 /
+29951473420 / 29953010174) ama `BADGE_PUSH_TOKEN` ile push 3× soft-fail → README
+güncellenmiyordu (MR-1 kozmetik soft-fail).
+
+**Fix:** README `tests-1354%20lib` (CI kanıtlı). Bot push stderr log'u eklendi.
+**Kapsam notu:** Rozet yalnız kök `cargo test --lib` (budlum-core); wallet-core /
+budzero ayrı job — rozete dahil değil (tasarım).
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
+

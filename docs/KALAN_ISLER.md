@@ -15,41 +15,42 @@ hâlâ araştırma. Lubot attestation / AiRegistry / soft-incentive **mevcut**.
 
 ## Z-B: BudZKVM VerifyMerkle 64-depth soundness
 
-✅ **KAPANDI (kod + test):** `proves_verify_merkle_valid_64_depth` ve
-`task4_diagnose_verify_merkle_matrix_chain` yeşil. Opcode ISA'da experimental
-değil; **mainnet kapısı** `MainnetActivation::verify_merkle_enabled` (default
-off, ceremony sonrası açılır). Proof-of-storage ürün iddiası hâlâ B.U.D.
-entegrasyonuna bağlı — L1 primitive hazır.
+✅ **KAPANDI (kod + test + CI):** `proves_verify_merkle_valid_64_depth` yeşil.
+**Mainnet kapısı** `MainnetActivation::verify_merkle_enabled` default off
+(ceremony). Proof-of-storage ürünleştirmesi B.U.D. entegrasyonuna bağlı.
 
 ## BLS/PQ HSM vendor-native
 
-Kısmen kapandı:
+Kısmen kapandı (kod ajanı donanımı kapatamaz):
 
 - ✅ Ed25519 PKCS#11 native
 - ✅ Vendor mechanism parse + `CKM_VENDOR_DEFINED` altı fail-closed
-  (`Pkcs11Signer::validate_vendor_mechanism_id`)
-- ✅ `Pkcs11VendorCapabilities` (vendor vs software-fallback advertisement)
-- ⏳ Gerçek vendor HSM'de non-extractable BLS/Dilithium keygen + harici audit
-  (donanım + Ayaz tedarik; kod ajanı tek başına kapatamaz)
+- ✅ `Pkcs11VendorCapabilities` advertisement
+- ⏳ Gerçek vendor HSM non-extractable BLS/Dilithium keygen + harici audit
+  (**Ayaz tedarik / donanım**)
 
-## Gizlilik katmanı — AIR constraint'leri
+## Gizlilik katmanı — AIR + E2E + cüzdan wire
 
-✅ **KAPANDI (D2 Görev D):**
+✅ **KAPANDI:**
 
-- Selector kolonları 370–372 (`COL_IS_PRIVACY_*`)
-- Paylaşılan Poseidon gadget: Poseidon / PrivacyCommit (3-absorb) / NullifierCheck
-- SumConservation equality gate (amount witness; commitment satırlarıyla bağ)
-- VM gerçek semantik + gas=10 + DOMAIN_NULLIFIER
-- Prove/verify: `d2_proves_privacy_commit`, `d2_proves_nullifier_*`,
-  `d2_proves_sum_conservation`, `d2_proves_private_transfer_e2e`
+| Parça | Kanıt |
+|---|---|
+| AIR selectors + Poseidon gadget | `bud-proof` `d2_proves_*` |
+| VM semantik | `bud-vm` privacy opcodes |
+| Note registry | `bud-state` |
+| Cüzdan opt-in config | `WalletPrivacyConfig` |
+| **Wallet-bound wire** | `Wallet::{set_privacy_config, build_private_transfer, sign_with_privacy}` |
+| TEE fail-closed | `TeeRuntime` + `UnavailableTeeRuntime` (enklav yokken plaintext yok) |
+| View-key | `ensure_view_key` / disclosure export |
+| Private transfer intent | `PrivateTransferIntent` (relayer'a imzalı public half) |
 
-## Gizlilik katmanı — E2E test
+⏳ **Operasyonel kalan (kod dışı / ayrı hat):**
 
-✅ **KAPANDI (D2 Görev F):** commit → nullifier → sum-conservation STARK
-round-trip (`d2_proves_private_transfer_e2e`). NoteRegistry field-element
-köprüsü + cüzdan view-key / note-privacy toggle tamam.
+- Gerçek SGX/Nitro `TeeRuntime` implementasyonu (SDK + cihaz)
+- Relayer/mempool'un `PrivateTransferIntent` → zincir tx montajı
+- MainnetActivation privacy opcode flip (ceremony)
 
 ---
 
-*Mainnet kapılarının (MainnetActivation, HSM policy) ceremony/operasyon tarafı
-Ayaz + donanım; bu dosya yalnızca teknik kod kapanışını izler.*
+*Mainnet kapıları (MainnetActivation, HSM hardware, TEE enclave) Ayaz +
+donanım/operasyon. Bu dosya teknik kod kapanışını izler.*

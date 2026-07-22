@@ -118,12 +118,23 @@ jobs:
               # http.extraheader ile zorlar ve URL-embedded PAT'i ezer (kanit:
               # 00f618a badge run — admin-PAT kanali acikken bile 'hook declined').
               # Tek komutluk derogasyon: extraheader'i temizle, URL PAT'i kullan.
-              if { [ -n "$PUSH_URL" ] && git -c "http.https://github.com/.extraheader=" push "$PUSH_URL" HEAD:main; } || { [ -z "$PUSH_URL" ] && git push; }; then
+              set +e
+              if [ -n "$PUSH_URL" ]; then
+                PUSH_ERR=$(git -c "http.https://github.com/.extraheader=" push "$PUSH_URL" HEAD:main 2>&1)
+                PUSH_RC=$?
+              else
+                PUSH_ERR=$(git push 2>&1)
+                PUSH_RC=$?
+              fi
+              set -e
+              if [ "$PUSH_RC" = "0" ]; then
                 PUSH_OK=1
                 echo "rozet push'landi: $N (deneme $attempt)"
                 break
               fi
-              echo "push reddedildi (deneme $attempt) — yeni basta yeniden hesaplanacak"
+              echo "push reddedildi (deneme $attempt, rc=$PUSH_RC):"
+              echo "$PUSH_ERR" | tail -20
+              echo "— yeni basta yeniden hesaplanacak"
               git fetch origin main
               git reset --hard origin/main
               sed -i -E "s/tests-[0-9]+%20lib/tests-${N}%20lib/" README.md

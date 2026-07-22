@@ -23,6 +23,21 @@ required_tests=(
   recovery_proposal_digest_binds_target_and_timelock
   recovery_proposal_requires_quorum_and_timelock
   recovery_proposal_rejects_same_owner_or_overflow
+  d2_privacy_config_defaults_off
+  d2_privacy_config_user_opt_in_client_first
+  d2_privacy_config_server_backend_fallback
+  d2_note_privacy_only_keeps_tee_off
+  d2_view_key_derive_export_roundtrip
+  d2_view_key_rotation_changes_key
+  d2_view_key_rejects_malformed_hex
+  d2_wallet_defaults_privacy_off
+  d2_wallet_private_transfer_requires_note_privacy
+  d2_wallet_private_transfer_1in_1out_signs
+  d2_wallet_private_transfer_with_change
+  d2_wallet_tee_enabled_fail_closed_without_runtime
+  d2_wallet_tee_ready_mock_allows_sign
+  d2_wallet_view_key_bound_to_seed
+  d2_wallet_overspend_rejected
 )
 
 fail() {

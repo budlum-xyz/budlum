@@ -8,7 +8,7 @@
 //! ## Kullanım
 //!
 //! ```rust,ignore
-//! use budlum_wallet_core::Wallet;
+//! use budlum_wallet_core::{Wallet, WalletPrivacyConfig};
 //!
 //! // Yeni wallet oluştur (12 kelime mnemonic)
 //! let wallet = Wallet::generate(12).unwrap();
@@ -17,9 +17,32 @@
 //!
 //! // Transaction imzala
 //! let sig = wallet.sign(b"message to sign");
+//!
+//! // Opt-in note privacy (ağ seçeneği) — TEE kapalı
+//! let mut w = Wallet::from_entropy(&[1u8; 16]).unwrap();
+//! w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
 //! ```
+//!
+//! ## Gizlilik (D2)
+//!
+//! - `note_privacy_enabled`: gizli transfer intent üretir (PrivacyCommit yolu).
+//! - `tee_enabled`: execution-time confidentiality — **fail-closed** without a
+//!   linked SGX/Nitro runtime (no silent plaintext fallback).
 
 mod bip39_wordlist;
+mod privacy_crypto;
+mod privacy_transfer;
+mod tee;
+
+pub use privacy_crypto::{
+    address_to_recipient_tag, field_from_hash, hash_from_field, poseidon4_hash, poseidon4_hash3,
+    privacy_commit, privacy_nullifier, DOMAIN_NULLIFIER,
+};
+pub use privacy_transfer::{
+    derive_blinding, derive_spend_secret, PrivateNoteInput, PrivateNoteOutput,
+    PrivateTransferIntent, PrivateTransferRequest,
+};
+pub use tee::{TeeBackendKind, TeeRuntime, TeeRuntimeStatus, UnavailableTeeRuntime};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -42,6 +65,12 @@ pub enum WalletError {
     InvalidRecoveryProposal(String),
     /// Production entropy (CSPRNG) kullanılamıyor — fail-closed.
     ProductionEntropyUnavailable(String),
+    /// Note privacy / private transfer builder hatası.
+    InvalidPrivateTransfer(String),
+    /// TEE opt-in açık ama runtime yok — fail-closed (sessiz plaintext yok).
+    TeeUnavailable(String),
+    /// Note privacy kapalıyken private transfer istendi.
+    NotePrivacyDisabled,
 }
 
 impl std::fmt::Display for WalletError {
@@ -60,6 +89,14 @@ impl std::fmt::Display for WalletError {
             WalletError::ProductionEntropyUnavailable(m) => {
                 write!(f, "production entropy unavailable: {m}")
             }
+            WalletError::InvalidPrivateTransfer(m) => {
+                write!(f, "invalid private transfer: {m}")
+            }
+            WalletError::TeeUnavailable(m) => write!(f, "TEE unavailable: {m}"),
+            WalletError::NotePrivacyDisabled => write!(
+                f,
+                "note privacy disabled — enable WalletPrivacyConfig::note_privacy_enabled"
+            ),
         }
     }
 }
@@ -355,10 +392,14 @@ impl SocialRecoveryPolicy {
 }
 
 /// Budlum wallet: BIP39 mnemonic → SLIP-0010 Ed25519 → Address + Signing.
+///
+/// Privacy is **opt-in** via [`WalletPrivacyConfig`] (default all-off).
 pub struct Wallet {
     mnemonic: String,
     seed: [u8; 32],
     signing_key: SigningKey,
+    /// Per-wallet privacy preferences (note path + TEE toggle + view-key).
+    privacy: WalletPrivacyConfig,
 }
 
 /// Budlum Address = Ed25519 pubkey'nin SHA3-256 hash'i (32 byte).
@@ -722,6 +763,7 @@ impl Wallet {
             mnemonic,
             seed,
             signing_key,
+            privacy: WalletPrivacyConfig::default(),
         })
     }
 
@@ -745,6 +787,7 @@ impl Wallet {
             mnemonic: mnemonic.to_string(),
             seed,
             signing_key,
+            privacy: WalletPrivacyConfig::default(),
         })
     }
 
@@ -813,6 +856,199 @@ impl Wallet {
     #[must_use]
     pub fn seed(&self) -> &[u8; 32] {
         &self.seed
+    }
+
+    // ----- D2 privacy surface (wallet-bound) -----
+
+    /// Current privacy config (borrow).
+    #[must_use]
+    pub fn privacy_config(&self) -> &WalletPrivacyConfig {
+        &self.privacy
+    }
+
+    /// Replace privacy config (opt-in toggles + view-key state).
+    pub fn set_privacy_config(&mut self, cfg: WalletPrivacyConfig) {
+        self.privacy = cfg;
+    }
+
+    /// Enable/disable note privacy only (TEE unchanged).
+    pub fn set_note_privacy_enabled(&mut self, enable: bool) {
+        self.privacy.note_privacy_enabled = enable;
+    }
+
+    /// TEE toggle. When `true`, private transfer / sensitive paths require a
+    /// live [`TeeRuntime`] — default is fail-closed.
+    pub fn set_tee_enabled(&mut self, enable: bool) {
+        self.privacy.tee_enabled = enable;
+    }
+
+    /// Client-side TEE preferred? (`false` → server Nitro preference).
+    pub fn set_prefer_client_side_tee(&mut self, prefer: bool) {
+        self.privacy.prefer_client_side_tee = prefer;
+    }
+
+    /// Ensure view-key exists (derived from wallet seed). Returns the key.
+    pub fn ensure_view_key(&mut self) -> [u8; 32] {
+        self.privacy.ensure_view_key(&self.seed)
+    }
+
+    /// Rotate view-key with counter (old key invalidated for new disclosures).
+    pub fn rotate_view_key(&mut self, rotation_counter: u64) -> [u8; 32] {
+        self.privacy.rotate_view_key(&self.seed, rotation_counter)
+    }
+
+    /// Export view-key disclosure package (manual share with regulator).
+    #[must_use]
+    pub fn export_view_key_for_disclosure(&self) -> Option<ViewKeyDisclosure> {
+        self.privacy.export_view_key_for_disclosure()
+    }
+
+    /// Map privacy config → TEE backend kind.
+    #[must_use]
+    pub fn tee_backend_kind(&self) -> TeeBackendKind {
+        if !self.privacy.tee_enabled {
+            TeeBackendKind::None
+        } else if self.privacy.prefer_client_side_tee {
+            TeeBackendKind::ClientSgx
+        } else {
+            TeeBackendKind::ServerNitro
+        }
+    }
+
+    /// Default (unavailable) TEE runtime for this wallet's preference.
+    #[must_use]
+    pub fn default_tee_runtime(&self) -> UnavailableTeeRuntime {
+        UnavailableTeeRuntime::for_backend(self.tee_backend_kind())
+    }
+
+    /// Probe TEE. If `tee_enabled` and runtime missing → `TeeUnavailable`.
+    pub fn require_tee_ready(
+        &self,
+        runtime: &dyn TeeRuntime,
+    ) -> Result<TeeRuntimeStatus, WalletError> {
+        if !self.privacy.tee_enabled {
+            return Ok(TeeRuntimeStatus {
+                kind: TeeBackendKind::None,
+                available: true,
+                detail: "TEE opt-in off".into(),
+            });
+        }
+        let st = runtime.status();
+        if !st.available {
+            return Err(WalletError::TeeUnavailable(st.detail));
+        }
+        Ok(st)
+    }
+
+    /// Sign a message. If TEE is enabled, requires a live runtime and seals
+    /// the message before signing the seal digest (fail-closed otherwise).
+    ///
+    /// Without TEE, identical to classic Ed25519 `sign`.
+    pub fn sign_with_privacy(
+        &self,
+        message: &[u8],
+        runtime: &dyn TeeRuntime,
+    ) -> Result<[u8; 64], WalletError> {
+        if self.privacy.tee_enabled {
+            let _ = self.require_tee_ready(runtime)?;
+            let sealed = runtime.seal_private_intent(message)?;
+            Ok(self.sign(&sealed))
+        } else {
+            Ok(self.sign(message))
+        }
+    }
+
+    /// Build a private transfer intent (note privacy path).
+    ///
+    /// Requires `note_privacy_enabled`. If `tee_enabled`, requires a live
+    /// [`TeeRuntime`] and refuses to return plaintext witnesses without it.
+    pub fn build_private_transfer(
+        &self,
+        req: PrivateTransferRequest,
+        runtime: &dyn TeeRuntime,
+    ) -> Result<PrivateTransferIntent, WalletError> {
+        if !self.privacy.note_privacy_enabled {
+            return Err(WalletError::NotePrivacyDisabled);
+        }
+        // TEE fail-closed: do not emit plaintext note witnesses if user asked for TEE.
+        if self.privacy.tee_enabled {
+            let _ = self.require_tee_ready(runtime)?;
+            // Seal a domain-tagged summary so enclave path is exercised.
+            let mut probe = Vec::new();
+            probe.extend_from_slice(b"BUDLUM_TEE_PRIVATE_TRANSFER");
+            probe.extend_from_slice(&req.send_amount.to_le_bytes());
+            let _sealed = runtime.seal_private_intent(&probe)?;
+        }
+
+        let outputs = privacy_transfer::build_outputs(&req)?;
+        let nullifier_fe = req.input.nullifier();
+        let nullifiers = vec![hash_from_field(nullifier_fe)];
+        let output_commitments: Vec<[u8; 32]> = outputs
+            .iter()
+            .map(|o| hash_from_field(o.commitment()))
+            .collect();
+        let sum_in = req.input.amount;
+        let sum_out: u64 = outputs.iter().map(|o| o.amount).sum();
+        if sum_in != sum_out {
+            return Err(WalletError::InvalidPrivateTransfer(format!(
+                "sum conservation broken: in={sum_in} out={sum_out}"
+            )));
+        }
+        let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
+        let authorization_sig = self.sign(&digest);
+
+        Ok(PrivateTransferIntent {
+            output_commitments,
+            nullifiers,
+            sum_in,
+            sum_out,
+            inputs: vec![req.input],
+            outputs,
+            public_digest: digest,
+            authorization_sig,
+        })
+    }
+
+    /// Convenience: create a fresh output note commitment for receiving funds
+    /// (wallet is recipient). Returns (blinding, commitment_fe, commitment_hash).
+    pub fn prepare_receive_note(
+        &self,
+        amount: u64,
+        blinding_counter: u64,
+    ) -> Result<(u64, u64, [u8; 32]), WalletError> {
+        if !self.privacy.note_privacy_enabled {
+            return Err(WalletError::NotePrivacyDisabled);
+        }
+        if amount == 0 {
+            return Err(WalletError::InvalidPrivateTransfer(
+                "amount must be > 0".into(),
+            ));
+        }
+        let blinding = derive_blinding(&self.seed, blinding_counter);
+        let tag = address_to_recipient_tag(&self.address());
+        let commitment = privacy_commit(amount, tag, blinding);
+        Ok((blinding, commitment, hash_from_field(commitment)))
+    }
+
+    /// Build an input witness for a note this wallet previously received
+    /// (spend_secret derived from seed ∥ commitment).
+    pub fn note_input_from_receive(
+        &self,
+        amount: u64,
+        blinding: u64,
+    ) -> Result<PrivateNoteInput, WalletError> {
+        if !self.privacy.note_privacy_enabled {
+            return Err(WalletError::NotePrivacyDisabled);
+        }
+        let tag = address_to_recipient_tag(&self.address());
+        let commitment = privacy_commit(amount, tag, blinding);
+        let spend_secret = derive_spend_secret(&self.seed, commitment);
+        Ok(PrivateNoteInput {
+            amount,
+            recipient_tag: tag,
+            blinding,
+            spend_secret,
+        })
     }
 }
 
@@ -1492,5 +1728,165 @@ mod tests {
         assert!(ViewKeyDisclosure::from_hex("not-a-key").is_none());
         assert!(ViewKeyDisclosure::from_hex("vk1:2:00").is_none()); // bad version
         assert!(ViewKeyDisclosure::from_hex("vk1:1:abcd").is_none()); // short
+    }
+
+    // ===== D2 wallet-bound privacy wire =====
+
+    #[test]
+    fn d2_wallet_defaults_privacy_off() {
+        let w = Wallet::from_entropy(&[0x11u8; 16]).unwrap();
+        assert!(!w.privacy_config().is_note_privacy_active());
+        assert!(!w.privacy_config().is_privacy_active());
+        assert_eq!(w.tee_backend_kind(), TeeBackendKind::None);
+    }
+
+    #[test]
+    fn d2_wallet_private_transfer_requires_note_privacy() {
+        let w = Wallet::from_entropy(&[0x22u8; 16]).unwrap();
+        let inp = PrivateNoteInput {
+            amount: 100,
+            recipient_tag: 1,
+            blinding: 2,
+            spend_secret: 3,
+        };
+        let req = PrivateTransferRequest {
+            input: inp,
+            to: [9u8; 32],
+            send_amount: 100,
+            output_blinding: 5,
+            change_recipient_tag: None,
+            change_blinding: None,
+        };
+        let rt = w.default_tee_runtime();
+        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        assert!(matches!(err, WalletError::NotePrivacyDisabled));
+    }
+
+    #[test]
+    fn d2_wallet_private_transfer_1in_1out_signs() {
+        let mut w = Wallet::from_entropy(&[0x33u8; 16]).unwrap();
+        w.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
+        let (blinding, _c, _) = w.prepare_receive_note(100, 0).unwrap();
+        let input = w.note_input_from_receive(100, blinding).unwrap();
+        let req = PrivateTransferRequest {
+            input,
+            to: [0xABu8; 32],
+            send_amount: 100,
+            output_blinding: derive_blinding(w.seed(), 1),
+            change_recipient_tag: None,
+            change_blinding: None,
+        };
+        let rt = w.default_tee_runtime();
+        let intent = w.build_private_transfer(req, &rt).unwrap();
+        assert_eq!(intent.sum_in, intent.sum_out);
+        assert_eq!(intent.sum_in, 100);
+        assert_eq!(intent.nullifiers.len(), 1);
+        assert_eq!(intent.output_commitments.len(), 1);
+        assert!(Wallet::verify(
+            &w.public_key(),
+            &intent.public_digest,
+            &intent.authorization_sig
+        ));
+    }
+
+    #[test]
+    fn d2_wallet_private_transfer_with_change() {
+        let mut w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let (blinding, _, _) = w.prepare_receive_note(100, 0).unwrap();
+        let input = w.note_input_from_receive(100, blinding).unwrap();
+        let change_tag = address_to_recipient_tag(&w.address());
+        let req = PrivateTransferRequest {
+            input,
+            to: [0xCDu8; 32],
+            send_amount: 60,
+            output_blinding: 11,
+            change_recipient_tag: Some(change_tag),
+            change_blinding: Some(12),
+        };
+        let intent = w
+            .build_private_transfer(req, &w.default_tee_runtime())
+            .unwrap();
+        assert_eq!(intent.output_commitments.len(), 2);
+        assert_eq!(intent.sum_out, 100);
+    }
+
+    #[test]
+    fn d2_wallet_tee_enabled_fail_closed_without_runtime() {
+        let mut w = Wallet::from_entropy(&[0x55u8; 16]).unwrap();
+        w.set_privacy_config(WalletPrivacyConfig::from_user_opt_in(true));
+        assert!(w.privacy_config().tee_enabled);
+        let rt = w.default_tee_runtime();
+        let err = w.sign_with_privacy(b"hello", &rt).unwrap_err();
+        assert!(matches!(err, WalletError::TeeUnavailable(_)));
+
+        let (blinding, _, _) = w.prepare_receive_note(10, 0).unwrap();
+        let input = w.note_input_from_receive(10, blinding).unwrap();
+        let req = PrivateTransferRequest {
+            input,
+            to: [1u8; 32],
+            send_amount: 10,
+            output_blinding: 1,
+            change_recipient_tag: None,
+            change_blinding: None,
+        };
+        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        assert!(matches!(err, WalletError::TeeUnavailable(_)));
+    }
+
+    #[test]
+    fn d2_wallet_tee_ready_mock_allows_sign() {
+        struct MockTee;
+        impl TeeRuntime for MockTee {
+            fn status(&self) -> TeeRuntimeStatus {
+                TeeRuntimeStatus {
+                    kind: TeeBackendKind::ClientSgx,
+                    available: true,
+                    detail: "mock".into(),
+                }
+            }
+            fn seal_private_intent(&self, plaintext: &[u8]) -> Result<Vec<u8>, WalletError> {
+                let mut out = b"SEAL:".to_vec();
+                out.extend_from_slice(plaintext);
+                Ok(out)
+            }
+        }
+        let mut w = Wallet::from_entropy(&[0x66u8; 16]).unwrap();
+        w.set_tee_enabled(true);
+        let sig = w.sign_with_privacy(b"hello", &MockTee).unwrap();
+        // Signature is over sealed bytes, not raw message.
+        assert!(!Wallet::verify(&w.public_key(), b"hello", &sig));
+        let sealed = MockTee.seal_private_intent(b"hello").unwrap();
+        assert!(Wallet::verify(&w.public_key(), &sealed, &sig));
+    }
+
+    #[test]
+    fn d2_wallet_view_key_bound_to_seed() {
+        let mut w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let vk = w.ensure_view_key();
+        let again = w.ensure_view_key();
+        assert_eq!(vk, again);
+        let disc = w.export_view_key_for_disclosure().unwrap();
+        assert_eq!(disc.view_key, vk);
+    }
+
+    #[test]
+    fn d2_wallet_overspend_rejected() {
+        let mut w = Wallet::from_entropy(&[0x88u8; 16]).unwrap();
+        w.set_note_privacy_enabled(true);
+        let (blinding, _, _) = w.prepare_receive_note(50, 0).unwrap();
+        let input = w.note_input_from_receive(50, blinding).unwrap();
+        let req = PrivateTransferRequest {
+            input,
+            to: [2u8; 32],
+            send_amount: 51,
+            output_blinding: 1,
+            change_recipient_tag: None,
+            change_blinding: None,
+        };
+        let err = w
+            .build_private_transfer(req, &w.default_tee_runtime())
+            .unwrap_err();
+        assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }
 }
