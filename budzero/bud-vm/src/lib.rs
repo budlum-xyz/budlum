@@ -619,6 +619,22 @@ impl Vm {
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
+            // Gizlilik katmanı ZKVM opcode'ları (Phase 13.5+ talimat, ARENA1
+            // b80db5c). Implementasyon follow-up; mainnet öncesi TODO. Şimdilik
+            // no-op: register 0 + pc+=1. Bu arm'lar `cargo check` non-exhaustive
+            // hatasını giderir; semantic davranış sonraki sprint'te.
+            Opcode::PrivacyCommit | Opcode::NullifierCheck | Opcode::SumConservation => {
+                // No-op placeholder (gizlilik katmanı follow-up). Operands
+                // intentionally unread; result 0; pc ilerler.
+                let _ = src1_val;
+                let _ = src2_val;
+                let result = 0u64;
+                if dst_idx as usize > 0 {
+                    self.registers[dst_idx as usize] = result;
+                }
+                self.pc += 1;
+                (result, cur_pc + 1)
+            }
         };
 
         self.registers[0] = 0; // Enforce r0 is always 0
