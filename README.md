@@ -13,6 +13,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Security](https://img.shields.io/badge/security-report%20privately-blue)](SECURITY.md)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/budlum-xyz/budlum/main/.github/coverage-badge.json)](https://github.com/budlum-xyz/budlum/actions)
 
 ---
 
