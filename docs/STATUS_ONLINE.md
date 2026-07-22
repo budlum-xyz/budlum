@@ -6427,3 +6427,10 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
 
+
+### [2026-07-23] ARENA1 — DeEd foundation and hardening
+
+**Kapsam:** DeEd alanı için B.U.D. `ContentId` bağlı manifest, artifact/visibility modeli ve permissionless participant roles.
+**Sertleştirme:** deterministic manifest ID alan-bağlama testleri, stabil snake_case serde, round-trip serialization ve zero-value fail-closed validation.
+**Kapsam dışı:** consensus, RPC, bridge, reward ve admin/whitelist kapısı yok.
+**Budlumdevnet:** dokunulmadı.

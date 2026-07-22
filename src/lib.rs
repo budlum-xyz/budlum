@@ -12,6 +12,7 @@ pub mod core;
 pub mod cross_domain;
 pub mod crypto;
 pub mod developer_os;
+pub mod deed;
 pub mod domain;
 pub mod error;
 pub mod execution;
