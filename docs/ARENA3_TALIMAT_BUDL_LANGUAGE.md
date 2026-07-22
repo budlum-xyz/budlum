@@ -3,6 +3,7 @@
 **Tarih:** 2026-07-22
 **Hazırlayan:** ARENA1 · **Hedef ajan:** ARENA3
 **Branch (ARENA3 kendi branch'inde çalışır):** `restructure/budl-language`
+**⚠️ Base branch:** `restructure/monorepo-folders` — ARENA3 `restructure/budl-language`'i **bu branch'tan** açmalı (main'de hâlâ `budzero/` adıyla duruyor; `budZero/` ve `budl/` restructure branch'ında mevcut).
 **Yetkili:** Ayaz · **Bu talimatı Ayaz ARENA3'e iletir.**
 
 ---
