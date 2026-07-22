@@ -148,12 +148,12 @@ jobs:
             fi
           fi
 
-  budzero:
+  budZero:
     name: BudZero / BudZKVM
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: budzero
+        working-directory: budZero
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -167,7 +167,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          workspaces: budzero
+          workspaces: budZero
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
@@ -498,7 +498,7 @@ jobs:
       matrix:
         include:
           - { name: root, manifest: "./Cargo.toml" }
-          - { name: budzero, manifest: "budzero/Cargo.toml" }
+          - { name: budZero, manifest: "budZero/Cargo.toml" }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -713,7 +713,7 @@ jobs:
         run: python3 ./scripts/check_module_coverage.py coverage/cov.json
       - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
         run: |
-          cd budzero
+          cd budZero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
       - name: G4 modül coverage raporu — budzero (rapor modu)
         run: python3 ./scripts/check_module_coverage.py coverage/budzero-cov.json

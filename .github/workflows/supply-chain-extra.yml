@@ -6,10 +6,10 @@ on:
     paths:
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'budzero/Cargo.toml'
-      - 'budzero/Cargo.lock'
+      - 'budZero/Cargo.toml'
+      - 'budZero/Cargo.lock'
       - 'src/**'
-      - 'budzero/**'
+      - 'budZero/**'
       - '.github/workflows/supply-chain-extra.yml'
       - '.github/udeps-baseline.txt'
   schedule:

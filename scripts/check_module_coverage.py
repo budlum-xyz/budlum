@@ -39,20 +39,20 @@ MODULE_PREFIXES = [
     ("budlum:node_di", "src/node_di/"),
     ("budlum:cli", "src/cli/"),
     ("budlum:docs", "src/docs/"),
-    ("budzero:vm", "budzero/src/"),
-    ("budzero:proof", "budzero/bud-proof/src/"),
-    ("budzero:isa", "budzero/bud-isa/src/"),
-    ("budzero:node", "budzero/bud-node/src/"),
-    ("budzero:compiler", "budzero/bud-compiler/src/"),
+    ("budzero:vm", "budZero/src/"),
+    ("budzero:proof", "budZero/bud-proof/src/"),
+    ("budzero:isa", "budZero/bud-isa/src/"),
+    ("budzero:node", "budZero/bud-node/src/"),
+    ("budzero:compiler", "budZero/bud-compiler/src/"),
 ]
 
 
 def normalize(path: str) -> str:
     """llvm-cov dosya yollarını repo-göreli hale getir."""
     p = path.replace("\\", "/")
-    for anchor in ("/budlum/", "/budzero/"):
+    for anchor in ("/budlum/", "/budZero/"):
         if anchor in p:
-            return p.split(anchor, 1)[1] if anchor == "/budlum/" else p[p.index("budzero/"):]
+            return p.split(anchor, 1)[1] if anchor == "/budlum/" else p[p.index("budZero/"):]
     return p
 
 
@@ -115,7 +115,7 @@ def self_test() -> int:
                  "summary": {"lines": {"count": 100, "covered": 50}}},
                 {"filename": "/x/budlum/src/crypto/hash.rs",
                  "summary": {"lines": {"count": 100, "covered": 90}}},
-                {"filename": "/x/budlum/budzero/src/lib.rs",
+                {"filename": "/x/budlum/budZero/src/lib.rs",
                  "summary": {"lines": {"count": 10, "covered": 8}}},
             ]
         }]

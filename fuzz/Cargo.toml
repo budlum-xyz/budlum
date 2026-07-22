@@ -19,7 +19,7 @@ members = ["."]
 bincode = "1.3"
 budlum-core = { path = ".." }
 # Phase 11.2: zk_verifier target needs ProofEnvelope + DefaultAdapter.
-bud-proof = { path = "../budzero/bud-proof" }
+bud-proof = { path = "../budZero/bud-proof" }
 libfuzzer-sys = "0.4"
 libp2p = "0.56"
 

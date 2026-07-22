@@ -2,7 +2,7 @@
 #
 # Bu dosya `cargo deny check` ile CI'da zorunlu kapıdır (strict mod:
 # ilk günden fail kapısı; gevşetme YOK). BudZero tarafındaki karşılığı
-# budzero/deny.toml'dur; iki graf ayrı matrix adımında denetlenir.
+# budZero/deny.toml'dur; iki graf ayrı matrix adımında denetlenir.
 #
 # Şema: cargo-deny 0.20+ (eski anahtarlar PR #611 ile kaldırıldı).
 # Modern semantikte `allow` listesinde OLMAYAN her lisans otomatik FAIL'dir

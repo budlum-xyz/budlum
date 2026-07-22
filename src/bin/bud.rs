@@ -5,7 +5,7 @@
 //! (`query balance`/`query block`/`query status`), validator çalıştırma
 //! kılavuzu (`validator run`).
 //!
-//! BudZKVM toolchain (`budzero/bud-cli`) ayrı bir workspace'tir; bu binary
+//! BudZKVM toolchain (`budZero/bud-cli`) ayrı bir workspace'tir; bu binary
 //! L1 zincir etkileşimi içindir ve doğrudan çekirdek tiplerini kullanır.
 //!
 //! # Tasarım

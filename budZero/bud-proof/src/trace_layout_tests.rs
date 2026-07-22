@@ -1,4 +1,4 @@
-//! Trace layout boundary tests for `budzero/bud-proof`.
+//! Trace layout boundary tests for `budZero/bud-proof`.
 //!
 //! These tests lock in the column budget documented in
 //! `docs/BUDZKVM_TRACE_LAYOUT.md`. Any new column must update both the

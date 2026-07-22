@@ -54,7 +54,7 @@ impl std::fmt::Display for RoleId {
 ///
 /// D4 (2026-07-22): Unified stake-based registry for v1 — master verifiers (DeEd),
 /// SocialFi content validator, relayer, supply-chain attester all share the
-/// same primitive. RoleIds 1-8 are pinned from budzero/verifier-registry crate
+/// same primitive. RoleIds 1-8 are pinned from budZero/verifier-registry crate
 /// for consistency; 9 is new for SocialFi content validator.
 pub mod roles {
     use super::RoleId;

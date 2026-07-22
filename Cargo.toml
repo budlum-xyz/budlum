@@ -72,12 +72,12 @@ async-trait = "0.1"
 thiserror = "2"
 rayon = "1.10"
 # BudZero/BudZKVM is part of this repository as of Phase 0.37. Keeping the
-# crates under `budzero/` preserves their own workspace while removing the
+# crates under `budZero/` preserves their own workspace while removing the
 # fragile sibling-checkout/pinned-repository requirement.
-bud-isa = { path = "budzero/bud-isa" }
-bud-vm = { path = "budzero/bud-vm" }
-bud-proof = { path = "budzero/bud-proof" }
-bud-node = { path = "budzero/bud-node" }
+bud-isa = { path = "budZero/bud-isa" }
+bud-vm = { path = "budZero/bud-vm" }
+bud-proof = { path = "budZero/bud-proof" }
+bud-node = { path = "budZero/bud-node" }
 
 [build-dependencies]
 prost-build = "0.14.3"

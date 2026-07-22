@@ -76,7 +76,7 @@ unused dependencies:
      ├─── "chrono"
      └─── "group"
 Note: They might be false-positive.
-`bud-node v0.1.0 (/x/budzero/bud-node)`
+`bud-node v0.1.0 (/x/budZero/bud-node)`
 └─── dependencies
      └─── "serde_json"
 T

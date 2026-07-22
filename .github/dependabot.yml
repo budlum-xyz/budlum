@@ -1,6 +1,6 @@
 # Phase 8.8 (supply-chain): haftalik bagimlilik gozetimi.
 # github-actions: SHA-pinli action'larin guncellemelerini PR olarak acar.
-# cargo: root + budzero + fuzz manifest'leri. docker: Dockerfile digest pinleri.
+# cargo: root + budZero + fuzz manifest'leri. docker: Dockerfile digest pinleri.
 #
 # Gruplama (2026-07-22, ARENA1): minor+patch cargo güncellemeleri tek PR'da
 # toplanır → PR backlog azalır (eski "7 açık dependabot PR" durumunu önler).
@@ -32,7 +32,7 @@ updates:
       rust-minor-patch:
         update-types: ["minor", "patch"]
   - package-ecosystem: "cargo"
-    directory: "/budzero"
+    directory: "/budZero"
     schedule:
       interval: "weekly"
       day: "monday"
