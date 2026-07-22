@@ -1,6 +1,24 @@
-# Budlum Core
+# Budlum — Blockchain + Decentralized AI (Lubot)
 
-**Universal Settlement Layer** for a post-quantum, multi-consensus world.
+**Universal Settlement Layer** for a post-quantum, multi-consensus world + **Lubot** decentralized AI layer.
+
+> **Repo yapısı:**
+> | Repo | İçerik |
+> |---|---|
+> | `budlum` (bu repo) | Blockchain + Lubot AI (kapsamlı şemsiye) |
+> | `budlum-core` | Sadece blockchain ağı |
+> | `Lubot` | Standalone AI crate |
+> | `BudZero` | ZK VM + STARK |
+> | `B.U.D.` | Depolama katmanı |
+
+## Lubot AI Layer (`src/lubot/`)
+
+Merkeziyetsiz yapay zeka katmanı — 8 alt-modül:
+`mod` (foundation + operator bond), `inference` (AiRegistry), `social` (NftRegistry),
+`verify` (plonky3 STARK prove+verify), `storage` (B.U.D. AI dataset),
+`executor` (TransactionType wiring), `metrics`, `query` (RPC API).
+
+RPC: `bud_lubotStats` ile sorgulanabilir.
 
 Budlum is a research-grade Layer-1 that does **not** replace other chains. It **settles** them: each domain keeps its own consensus (PoW, PoS, PoA, BFT, ZK, or custom); Budlum verifies finality proofs and records cross-domain value transfer as cryptographic fact.
 
