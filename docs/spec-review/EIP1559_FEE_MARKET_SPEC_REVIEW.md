@@ -4,7 +4,7 @@
 **Status:** Approved
 **Review date:** 2026-07-20
 **Reviewer:** ARENA1
-**Task:** 11.6
+**:** 11.6
 **ADR:** `docs/adr/ADR-006-eip1559-fee-market.md`
 
 ## Checklist
@@ -15,7 +15,7 @@
 - [x] Security/threat interaction documented
 - [x] State/root/supply interaction documented where relevant
 - [x] Test or CI gate defined
-- [x] Implementation task and owner path identified
+- [x] Implementation  and owner path identified
 
 ## Review notes
 
@@ -29,8 +29,8 @@ Fee market spec EIP-1559 semantiğini Budlum'un sabit arz ve metabolic burn mode
 
 ## CI evidence path
 
-Task 11.6: `scripts/check-spec-coverage.sh`.
-Task 11.8: Economy Invariants job + random tx/base-fee property tests.
+: `scripts/check-spec-coverage.sh`.
+: Economy Invariants job + random tx/base-fee property tests.
 
 ---
 

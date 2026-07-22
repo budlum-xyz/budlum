@@ -32,7 +32,7 @@ Bir **Konsensüs Domaini**, kendi kurallarına sahip bağımsız bir blokzinciri
 - `validator_set_hash`: Taahhüdü kayıtlı domain ve finality proof ile bağlayan validator-set ankrajı.
 
 ## 5. Yerleşim Katmanı (Settlement Layer)
-Yerleşim Katmanı, Budlum ekosisteminin "Yüksek Mahkemesi" olarak görev yapar. İşlemleri yürütmez; **taahhütleri (commitments)** doğrular.
+Yerleşim Katmanı, Budlum ekosisteminin "Yüksek Mahkemesi" olarak  yapar. İşlemleri yürütmez; **taahhütleri (commitments)** doğrular.
 - Tüm doğrulanmış domain taahhütlerinin Merkle toplamı olan bir `GlobalBlockHeader` tutar.
 - Domainlerin küresel kaydını (Global Registry) ve durumlarını (Aktif, Dondurulmuş, Emekli) yönetir.
 - `GlobalBlockHeader` timestamp'i settlement header builder içinde deterministiktir; aynı state üzerinden tekrar build edilen header aynı hash'i üretir.
@@ -96,7 +96,7 @@ Mevcut repo kontrollü bir public devnet için uygundur; fakat audited mainnet d
 - **Operasyonel Sertleştirme:** RPC rate limiting/auth, Docker/systemd paketleme, health check, fuzzing ve tam clippy temizliği hâlâ açıktır.
 - **Error Refactor:** Yapılandırılmış `BudlumError` vardır ve kritik execution path'leri bunu kullanır; ancak bazı public API'ler geriye dönük uyumluluk için hâlâ `Result<T, String>` wrapper'ları sunar.
 - **Formal Verification:** Matematiksel invaryantlar henüz TLA+ veya benzeri araçlarla resmi olarak doğrulanmamıştır.
-- **Erken Görev Adapterlar:** PoA/BFT adapterları hâlâ üst düzey quorum sayaçları kullanır; PoS artık certificate'i validator snapshot ve validator-set hash ankrajlarına karşı doğrular, ancak audit seviyesinde entegrasyon incelemesi gerekir.
+- **Erken  Adapterlar:** PoA/BFT adapterları hâlâ üst düzey quorum sayaçları kullanır; PoS artık certificate'i validator snapshot ve validator-set hash ankrajlarına karşı doğrular, ancak audit seviyesinde entegrasyon incelemesi gerekir.
 
 ## 13. Test Kapsamı
 Katman, aşağıdakileri içeren bir **Bizans Kaos Matrisi** ile doğrulanmıştır:

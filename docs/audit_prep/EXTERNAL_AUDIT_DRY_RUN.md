@@ -1,9 +1,9 @@
-# External Audit Dry-Run — Task 11.20
+# External Audit Dry-Run —
 
 **Status:** ADIM 2 — audit prep evidence for independent review.
 **Purpose:** Provide an independent auditor with a self-contained entry point
 to compile, test, and review the codebase without prior context.
-**Gate:** `Audit Prep (Task 11.20)` CI job — `docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md`
+**Gate:** `Audit Prep ()` CI job — `docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md`
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
@@ -125,4 +125,4 @@ check_contains "$root/docs/audit_prep/EXTERNAL_AUDIT_DRY_RUN.md" "Auditor person
 
 ---
 
-*Bu dosya, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Audit Prep ()` CI gate'i tarafından doğrulanır.*

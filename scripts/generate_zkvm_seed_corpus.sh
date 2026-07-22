@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Task 0.414 / MAINNET_READINESS §2.7 (Ayaz Karar = Seçenek A: İsteğe Bağlı Kabuk Betiği):
+#  / MAINNET_READINESS §2.7 (Ayaz Karar = Seçenek A: İsteğe Bağlı Kabuk Betiği):
 # Generate/refresh synthetic binary seed corpus files for BudZero ZKVM and STARK AIR fuzzing.
 #
 # Usage:
@@ -22,7 +22,7 @@ echo "  [+] $OUT_DIR/01_simple_add.bud (Simple Add + Halt)"
 printf "\x0a\x01\x02\x03\x05\x00\x00\x00\x12\x00\x00\x00\x00\x00\x00\x00" > "$OUT_DIR/02_branch_loop.bud"
 echo "  [+] $OUT_DIR/02_branch_loop.bud (Branching Loop)"
 
-# 3. VerifyMerkle (0x1E) path verification seed (Task 0.36 Z-B Commit 3.5 / Task 0.31 selector check)
+# 3. VerifyMerkle (0x1E) path verification seed ( Z-B Commit 3.5 /  selector check)
 printf "\x1e\x01\x02\x03\x00\x01\x00\x00" > "$OUT_DIR/03_verify_merkle_0x1E.bud"
 echo "  [+] $OUT_DIR/03_verify_merkle_0x1E.bud (VerifyMerkle 0x1E Opcode)"
 

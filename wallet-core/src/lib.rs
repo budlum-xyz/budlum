@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_entropy_size_preserves_mnemonic_word_count() {
+    fn entropy_size_preserves_mnemonic_word_count() {
         let short = Wallet::from_entropy(&[0u8; 16]).unwrap();
         let long = Wallet::from_entropy(&[0u8; 32]).unwrap();
         assert_eq!(short.mnemonic().split_whitespace().count(), 12);
@@ -916,7 +916,7 @@ mod tests {
     /// without the `production` feature to prevent deterministic/placeholder
     /// entropy from reaching production.
     #[test]
-    fn task11_14_wallet_generate_rejects_placeholder_entropy_in_production() {
+    fn wallet_generate_rejects_placeholder_entropy_in_production() {
         // Without --features production, Wallet::generate must fail-closed
         let result = Wallet::generate(12);
         #[cfg(not(feature = "production"))]
@@ -947,7 +947,7 @@ mod tests {
 
     /// BIP39 checksum validation: invalid mnemonic must be rejected.
     #[test]
-    fn task11_14_mnemonic_checksum_validation_rejects_invalid() {
+    fn mnemonic_checksum_validation_rejects_invalid() {
         // Valid 12-word mnemonic from from_entropy (deterministic)
         let wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
         let valid_mnemonic = wallet.mnemonic().to_string();
@@ -983,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_binding_capabilities_include_mobile_and_browser_stubs() {
+    fn binding_capabilities_include_mobile_and_browser_stubs() {
         let caps = WalletBindingCapabilities::current();
         assert_eq!(caps.stub_version, WALLET_BINDING_STUB_VERSION);
         assert!(caps.uniffi_mobile);
@@ -992,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_binding_export_redacts_seed_and_counts_words() {
+    fn binding_export_redacts_seed_and_counts_words() {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let export = wallet.binding_export();
         assert_eq!(export.address_hex, wallet.address_hex());
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[cfg(feature = "uniffi")]
     #[test]
-    fn task11_14_binding_uniffi_feature_stub_exports_capabilities() {
+    fn binding_uniffi_feature_stub_exports_capabilities() {
         let caps = uniffi_bindings::binding_capabilities();
         assert!(caps.uniffi_mobile);
         assert!(!caps.exports_seed_material);
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[cfg(feature = "wasm")]
     #[test]
-    fn task11_14_binding_wasm_feature_stub_exports_capabilities() {
+    fn binding_wasm_feature_stub_exports_capabilities() {
         let caps = wasm_bindings::binding_capabilities();
         assert!(caps.wasm_browser);
         assert!(!caps.exports_seed_material);
@@ -1046,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_multisig_policy_validates_threshold() {
+    fn multisig_policy_validates_threshold() {
         let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let policy = MultisigPolicy::new(vec![w1.public_key(), w2.public_key()], 2).unwrap();
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_multisig_requires_distinct_valid_owner_signatures() {
+    fn multisig_requires_distinct_valid_owner_signatures() {
         let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let w3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_multisig_rejects_wrong_message_or_non_owner() {
+    fn multisig_rejects_wrong_message_or_non_owner() {
         let w1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let w2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_multisig_accepts_all_two_of_three_combinations() {
+    fn multisig_accepts_all_two_of_three_combinations() {
         let wallets = (0u8..3)
             .map(|i| Wallet::from_entropy(&[10u8 + i; 16]).unwrap())
             .collect::<Vec<_>>();
@@ -1152,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_multisig_enforces_three_of_five_combinations() {
+    fn multisig_enforces_three_of_five_combinations() {
         let wallets = (0u8..5)
             .map(|i| Wallet::from_entropy(&[20u8 + i; 16]).unwrap())
             .collect::<Vec<_>>();
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_social_recovery_policy_validates_threshold_and_timelock() {
+    fn social_recovery_policy_validates_threshold_and_timelock() {
         let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let policy =
@@ -1183,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_social_recovery_requires_distinct_guardian_signatures() {
+    fn social_recovery_requires_distinct_guardian_signatures() {
         let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
@@ -1219,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_social_recovery_rejects_non_guardian_or_wrong_digest() {
+    fn social_recovery_rejects_non_guardian_or_wrong_digest() {
         let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let outsider = Wallet::from_entropy(&[9u8; 16]).unwrap();
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_social_recovery_rotates_compromised_guardian() {
+    fn social_recovery_rotates_compromised_guardian() {
         let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
@@ -1289,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_social_recovery_removal_preserves_threshold_safety() {
+    fn social_recovery_removal_preserves_threshold_safety() {
         let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let g2 = Wallet::from_entropy(&[2u8; 16]).unwrap();
         let g3 = Wallet::from_entropy(&[3u8; 16]).unwrap();
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_recovery_proposal_sets_timelock_and_addresses() {
+    fn recovery_proposal_sets_timelock_and_addresses() {
         let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
@@ -1329,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_recovery_proposal_digest_binds_target_and_timelock() {
+    fn recovery_proposal_digest_binds_target_and_timelock() {
         let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
@@ -1353,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_recovery_proposal_requires_quorum_and_timelock() {
+    fn recovery_proposal_requires_quorum_and_timelock() {
         let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let g1 = Wallet::from_entropy(&[1u8; 16]).unwrap();
@@ -1402,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_14_recovery_proposal_rejects_same_owner_or_overflow() {
+    fn recovery_proposal_rejects_same_owner_or_overflow() {
         let owner = Wallet::from_entropy(&[7u8; 16]).unwrap();
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();

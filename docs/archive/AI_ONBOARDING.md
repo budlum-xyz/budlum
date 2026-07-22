@@ -1,12 +1,12 @@
 # AI Onboarding — Birliğe Yeni Katılanlar İçin START-HERE
 
-> **Standing rule (kullanıcı emri, 2026-07-18):** Bu dosya **her task'de güncellenir.**
-> Task açılışında "Bugün neredeyiz" (§5) ve görev tablosu (§2) tazelenir; task
+> **Standing rule (kullanıcı emri, 2026-07-18):** Bu dosya **her 'de güncellenir.**
+>  açılışında "Bugün neredeyiz" (§5) ve  tablosu (§2) tazelenir;
 > kapanışında mühür satırı işlenir. Güncellemeyi unutan, dosyanın başındaki bu
 > notla kendini ele verir — STATUS_ONLINE'da da aynı kural kayıtlıdır.
 
 **Hedef kitle:** ARENA1 (cross_domain) · ARENA2-halef (chain/snapshot/rpc) · yeni katılan herhangi bir AI.
-**Hazırlayan:** ARENA3 · **Tarih:** 2026-07-18 · **Durum:** Task 9.5 mühürlü, Task 10 Sprint-1 kapalı, Sprint-2 sürüyor.
+**Hazırlayan:** ARENA3 · **Tarih:** 2026-07-18 · **Durum:**  mühürlü,  Sprint-1 kapalı, Sprint-2 sürüyor.
 
 ---
 
@@ -16,14 +16,14 @@
 2. **`docs/STATUS_ONLINE.md` — son 4 girdi** (aktif iletişim kanalı; burada timestamp'li girdi AÇMADAN kod yazma):
    - P10 açılış + kod doğrulama raporu (RPC 7→9, ContentManifest owner YOK, RoleId deseni)
    - Sprint-1 kapanışı (modül dashboard + BNS gate + 16 zorunlu check)
-   - Task 9.5 mühür envanteri
+   -  mühür envanteri
    - HALEF EL KİTABI bölümü (ARENA2'ye özel devir notları)
 3. **`docs/ARENA3_BACKLOG_2026-07-18.md`** — bekleyen işler (her satır sahip+koşul etiketli; kendi kalemini buradan sahiplen).
 4. **`docs/BUDLUM_TASK10.md`** — mevcut gorevın talimat dokümanı (4 bölüm). **Bölüm 3.0 dürüstlük notunu oku:** doküman README bazlı; benim kaynak-doğrulamam STATUS_ONLINE'daki P10 girdisinde (9 RPC, owner YOK, 755 lib — dokümandaki 452 güncel değil).
 5. **`docs/RFC_GAP1_SNAPSHOT_MANIFEST_SIGNATURE.md`** — açık RFC (Sprint-2'de AccessGrant RFC ile birleşik revize edilecek).
-6. **`docs/ARENA_GOREV_DAGILIMI_2026-07-17.md`** — orijinal görev dağılımı (hâlâ geçerli temel; aşağıdaki güncellemelerle birlikte oku).
+6. **`docs/ARENA_GOREV_DAGILIMI_2026-07-17.md`** — orijinal  dağılımı (hâlâ geçerli temel; aşağıdaki güncellemelerle birlikte oku).
 
-## 2. Görev sınırları (güncel)
+## 2.  sınırları (güncel)
 
 | AI | Domain | Not |
 |---|---|---|
@@ -52,7 +52,7 @@ Kritik modüllere (`consensus/`, `bridge.rs`, `cross_domain/`, `execution/`, `cr
 ## 3A. Ayaz koordinasyon ve kanıt protokolü — zorunlu (2026-07-18)
 
 > **Yetkili kaynak:** `docs/AI_KOORDINASYON_TALIMATI_2026-07-18.md` (`2a3a6aa`).
-> Bu bölüm tüm task ve tüm ajan instance’ları için geçerlidir; mevcut başka
+> Bu bölüm tüm  ve tüm ajan instance’ları için geçerlidir; mevcut başka
 > bir metinle çelişirse bu kural seti uygulanır.
 
 1. **Kanıtsız süreç beyanı yok.** `STATUS_ONLINE.md`deki “main yeşil”,
@@ -86,8 +86,8 @@ Kritik modüllere (`consensus/`, `bridge.rs`, `cross_domain/`, `execution/`, `cr
 
 ## 5. Bugün neredeyiz
 
-- **Task 9.5 KAPALI** (mühür listesi STATUS'ta) — o iş kalemlerine yeni satır açma.
-- **Task 10 Sprint-1 KAPALI** (Bölüm 4 modül ayrımı: dashboard + modül README'leri + BNS gate 8/8 + protection 16 check).
+- ** KAPALI** (mühür listesi STATUS'ta) — o iş kalemlerine yeni satır açma.
+- ** Sprint-1 KAPALI** (Bölüm 4 modül ayrımı: dashboard + modül README'leri + BNS gate 8/8 + protection 16 check).
 - **Sprint-2 AÇIK:** AccessGrant RFC taslağı (ARENA3) → major PR triyajı (#36-#45; #45 toml YEŞİL aday, diğerleri KIRMIZI değerlendirme) → AI Inference layer tipleri (BÖLÜM 1, halef adaylığı).
 - **Açık alert: 0** · main tam yeşil (`dd7d865`).
 

@@ -1,11 +1,11 @@
-# Mainnet Hazırlık Raporu — Task 2+ Planı
+# Mainnet Hazırlık Raporu — + Planı
 
 > **Sertleştirme rejimi:** Yaşayan süreç ve kapı kuralları için bkz. [`docs/BUDLUM_HARDENING_PROTOCOL.md`](BUDLUM_HARDENING_PROTOCOL.md) (H0–H9 + MR hizası).
-> **2026-07-16 tazeleme (Task 8.9 Dalga 5):** Bu belgenin plan bölümleri 2026-07-15 tarihli an kaydıdır (korunur). Yaşayan durum tablosu (§1) güncel sayılara tazelendi: `cargo test --lib` → **563 passed** (belge içi eski 510/513 çelişkisi giderildi). Güncel anlık durum için ayrıca: `docs/TASK8.9_ANALIZ_A1.md` + `docs/STATUS_ONLINE.md`.
+> **2026-07-16 tazeleme ( Dalga 5):** Bu belgenin plan bölümleri 2026-07-15 tarihli an kaydıdır (korunur). Yaşayan durum tablosu (§1) güncel sayılara tazelendi: `cargo test --lib` → **563 passed** (belge içi eski 510/513 çelişkisi giderildi). Güncel anlık durum için ayrıca: `docs/TASK8.9_ANALIZ_A1.md` + `docs/STATUS_ONLINE.md`.
 
-> **2026-07-21 Task 11.20 snapshot (güncel):** Aşağıdaki §7 tablosu, 2026-07-21 itibarıyla `origin/main` `77ea61c` üzerindeki gerçek CI durumuna göre güncellenmiştir. Eski Task 2/3/4 plan bölümleri (§2–§6) tarihsel kayıt olarak korunmaktadır. Güncel durum için §7 ve `docs/audit_prep/` paketine bakın.
+> **2026-07-21  snapshot (güncel):** Aşağıdaki §7 tablosu, 2026-07-21 itibarıyla `origin/main` `77ea61c` üzerindeki gerçek CI durumuna göre güncellenmiştir. Eski  plan bölümleri (§2–§6) tarihsel kayıt olarak korunmaktadır. Güncel durum için §7 ve `docs/audit_prep/` paketine bakın.
 
-## 7. Task 11.20 Snapshot — 2026-07-21 (Güncel)
+## 7.  Snapshot — 2026-07-21 (Güncel)
 
 **Zemin:** `origin/main` `77ea61c` — CI **28/28 success**, 0 failure, 0 cancelled.
 **Test sayısı:** 1129 lib test (README rozet).
@@ -14,7 +14,7 @@
 | ID | Criterion (EN canonical) | Proof source | Status (2026-07-21) |
 |----|---|---|---|
 | MR-1 | **CI fully green:** all gates green on `main`. | GitHub check-runs (`77ea61c`) | ✅ 28/28 success |
-| MR-2 | **Task 11.6 specs frozen + review.** | `docs/spec-review/`, `scripts/check-spec-coverage.sh` | ✅ `INTERFACE_FROZEN` marker'ları; Repo Lint gate yeşil |
+| MR-2 | ** specs frozen + review.** | `docs/spec-review/`, `scripts/check-spec-coverage.sh` | ✅ `INTERFACE_FROZEN` marker'ları; Repo Lint gate yeşil |
 | MR-3 | **ZK proof chain:** VerifyMerkle 64-depth STARK proof mandatory. | `src/domain/storage_deal.rs`, `src/storage/provider.rs` | ✅ V37/V38 entegre; `test_task11_2_answer_challenge_with_zk_proof_happy_path` |
 | MR-4 | **Claim-hygiene:** zero open rows in audit matrix. | `docs/ARENA3_SECURITY_VERIFICATION_AUDIT_2026-07-20.md` | ✅ 164 bulgu → 105 kapatıldı |
 | MR-5 | **Coverage:** ratchet gate yeşil. | `Coverage (nextest + llvm-cov, ratchet)` | ✅ CI yeşil |
@@ -24,7 +24,7 @@
 | MR-9 | **Operational smoke:** runbook rehearsal + backup/restore drill. | `docs/operations/PRODUCTION_RUNBOOK.md` | 🟡 Docker smoke ✅; ceremony rehearsal devam ediyor |
 | MR-10 | **Announcement discipline:** MR-1..9 all ✅ + owner sign-off. | Bu tablo | 🟢 Kural aktif |
 
-### Task 11.20 operasyonel kanıtları
+###  operasyonel kanıtları
 
 | ADIM | Dosya | Durum |
 |---|---|---|
@@ -45,11 +45,11 @@
 **Hazırlayan:** ARENA1
 **Tarih:** 2026-07-15 00:20 UTC+3
 **Temel commit:** `ee95ef0` (main) — 510 test passed, 0 failed
-**Durum:** Task 1 (B.U.D. iskeleti + L1 stabilizasyon) tamamlandı. Mainnet önkoşulları analiz edildi.
+**Durum:**  (B.U.D. iskeleti + L1 stabilizasyon) tamamlandı. Mainnet önkoşulları analiz edildi.
 
 ---
 
-## 1. Mevcut Durum Özeti (Task 1 Sonrası)
+## 1. Mevcut Durum Özeti ( Sonrası)
 
 | Bileşen | Test | Clippy | Fmt | Durum |
 |---------|------|--------|-----|-------|
@@ -58,9 +58,9 @@
 | `fuzz/` | Build kontrolü tamam | — | — | ✅ Setup tamam |
 | `docs/operations/` | Runbook, SBOM, audit script mevcut | — | — | ✅ Dokümantasyon tamam |
 
-**Task 1'de tamamlananlar:**
-- B.U.D. Görev 1-2 + Görev 5 iskeleti (`StorageAttestation`, `ContentId`, `StorageDeal`, 7 RPC, E2E)
-- **UYARI:** Görev 5 (Ekonomi Katmanı) mainnet için **fail-closed** durumundadır. Payer/Escrow ve bond escrow yapısı hazır olana kadar token basımı/yakımı devre dışı bırakılmıştır.
+**'de tamamlananlar:**
+- B.U.D. -2 +  iskeleti (`StorageAttestation`, `ContentId`, `StorageDeal`, 7 RPC, E2E)
+- **UYARI:**  (Ekonomi Katmanı) mainnet için **fail-closed** durumundadır. Payer/Escrow ve bond escrow yapısı hazır olana kadar token basımı/yakımı devre dışı bırakılmıştır.
 - `finality_live_path.rs` (4 test) — hatalı revert düzeltildi
 - `chain_actor.rs` stub'ları → gerçek entegrasyon (ARENA3, `e5fd27f`)
 - 18 derleme hatası + 5 clippy hatası sıfırlandı
@@ -75,13 +75,13 @@
 
 ### 2.1 VerifyMerkle Z-B Gate (BudZero) — EN KRİTİK
 
-**Durum:** `budzero/bud-proof/src/plonky3_prover.rs:1711` — "Path verification (still TODO, Task 0.312)."
+**Durum:** `budzero/bud-proof/src/plonky3_prover.rs:1711` — "Path verification (still TODO, )."
 `budzero/bud-isa/src/lib.rs:39-43` — `VerifyMerkle` production'da **disabled**.
 `proves_verify_merkle_valid_64_depth` testi `#[ignore]` ile işaretli.
 
-**Etki:** B.U.D. Görev 3 (gerçek Proof-of-Storage) bu gate'e bağlı.
+**Etki:** B.U.D.  (gerçek Proof-of-Storage) bu gate'e bağlı.
 
-**✅ Karar: B — Task 2'de Z-B Commit 3.5'i tamamlayıp gate'i aç.**
+**✅ Karar: B — 'de Z-B Commit 3.5'i tamamlayıp gate'i aç.**
 64-depth Poseidon path + final root check AIR constraint'leri tamamlanacak. Tahmini süre: 2-3 hafta.
 
 ---
@@ -93,18 +93,18 @@
 **Etki:** Mainnet'te validator BLS/PQ key'leri diskte saklanırsa `AI_BIRLIGI.md` §4.4 ihlal edilir.
 
 **✅ Karar: B — Mevcut `pkcs11.rs`'ye BLS12-381 ve Dilithium mekanizmaları eklenecek.**
-HSM vendor desteği sınırlıysa fallback stratejisi Task 2'de belirlenecek.
+HSM vendor desteği sınırlıysa fallback stratejisi 'de belirlenecek.
 
 ---
 
 ### 2.3 B.U.D. Mainnet'e Dahil mi?
 
-**Durum:** Task 1'de B.U.D. Görev 1-2 tamamlandı. Görev 5 kısmi ve mainnet için fail-closed'dur (gerçek token transferi escrow/payer entegrasyonu tamamlanana kadar devre dışı). Görev 3 (gerçek PoS) kapalı.
+**Durum:** 'de B.U.D. -2 tamamlandı.  kısmi ve mainnet için fail-closed'dur (gerçek token transferi escrow/payer entegrasyonu tamamlanana kadar devre dışı).  (gerçek PoS) kapalı.
 
 **Etki:** B.U.D. mainnet'e girerse operatörler `StorageDeal` açabilir ama kriptografik depolama kanıtı yok.
 
 **✅ Karar: A — Evet, dahil et. Interim retrieval challenge ile başla.**
-Görev 3 (gerçek PoS) Task 4'te açılacak. Kullanıcı beklentisi yönetimi dokümantasyonda netleştirilecek.
+ (gerçek PoS) 'te açılacak. Kullanıcı beklentisi yönetimi dokümantasyonda netleştirilecek.
 
 ---
 
@@ -115,20 +115,20 @@ Görev 3 (gerçek PoS) Task 4'te açılacak. Kullanıcı beklentisi yönetimi do
 **Etki:** Mainnet lansmanı "self-audited" olarak değerlendirilir.
 
 **✅ Karar: C — Bug bounty programı ile başla (immunefi.com benzeri).**
-Harici firma denetimi Task 5'te değerlendirilecek.
+Harici firma denetimi 'te değerlendirilecek.
 
 ---
 
-## 3. TASK Planı (Kullanıcı Kararlarına Göre Güncellendi)
+## 3.  Planı (Kullanıcı Kararlarına Göre Güncellendi)
 
 **Karar özeti:** 2.1=B, 2.2=B, 2.3=A, 2.4=C
 **Branch:** `main` (yeni branch açılmayacak, `AI_BIRLIGI.md` §6.1 force-push yasağı geçerli).
 
-### Task 2 — Mainnet Önkoşulları (Tahmini: 2-3 hafta)
+###  — Mainnet Önkoşulları (Tahmini: 2-3 hafta)
 
 **Hedef:** `VerifyMerkle` gate açılışı + BLS/PQ HSM genişletmesi + B.U.D. interim stabilizasyon.
 
-| # | Görev | Dosya/Hedef | Test Kriteri | Sahip |
+| # |  | Dosya/Hedef | Test Kriteri | Sahip |
 |---|-------|-------------|--------------|-------|
 | 2.1 | `VerifyMerkle` 64-depth path + AIR constraint'leri tamamla | `budzero/bud-proof/src/plonky3_prover.rs` | `proves_verify_merkle_valid_64_depth` `#[ignore]`'den çıkar, test geçer | ARENA3 |
 | 2.2 | BLS/PQ HSM: `pkcs11.rs`'ye BLS12-381 + Dilithium mekanizmaları ekle | `src/crypto/pkcs11.rs` | BLS/PQ imza üretimi HSM üzerinden test edilir | ARENA1 |
@@ -144,11 +144,11 @@ Harici firma denetimi Task 5'te değerlendirilecek.
 
 ---
 
-### Task 3 — Mainnet v1 Lansman Hazırlığı (Tahmini: 1 hafta)
+###  — Mainnet v1 Lansman Hazırlığı (Tahmini: 1 hafta)
 
-**Hedef:** Genesis config, node dağıtım, operatör onboarding. B.U.D. Görev 1-2-5 dahil (Görev 3 hâlâ kapalı).
+**Hedef:** Genesis config, node dağıtım, operatör onboarding. B.U.D. -2-5 dahil ( hâlâ kapalı).
 
-| # | Görev | Dosya/Hedef | Test Kriteri |
+| # |  | Dosya/Hedef | Test Kriteri |
 |---|-------|-------------|--------------|
 | 3.1 | Mainnet genesis config oluştur | `src/chain/genesis.rs` | `test_genesis_deterministic` + yeni mainnet config testi |
 | 3.2 | Docker image + systemd unit güncelle | `Dockerfile`, `docs/operations/` | Container başlar, RPC yanıt verir |
@@ -159,42 +159,42 @@ Harici firma denetimi Task 5'te değerlendirilecek.
 
 ---
 
-### Task 4 — B.U.D. Görev 3 (VerifyMerkle Production Açılışı) (Tahmini: 2-4 hafta)
+###  — B.U.D.  (VerifyMerkle Production Açılışı) (Tahmini: 2-4 hafta)
 
-**Hedef:** Gerçek kriptografik Proof-of-Storage. Task 2'deki 2.1 tamamlandıktan sonra gate açılır.
+**Hedef:** Gerçek kriptografik Proof-of-Storage. 'deki 2.1 tamamlandıktan sonra gate açılır.
 
-| # | Görev | Dosya/Hedef | Test Kriteri |
+| # |  | Dosya/Hedef | Test Kriteri |
 |---|-------|-------------|--------------|
 | 4.1 | `proves_verify_merkle_valid_64_depth` testi `#[ignore]`'den çıkar | `budzero/bud-proof/src/plonky3_prover.rs` | Test geçer, proof üretir ve verify eder |
 | 4.2 | `VerifyMerkle` production gate aç | `budzero/bud-isa/src/lib.rs` | `tur119_verify_merkle_disabled_in_production` testi kaldır veya güncelle |
-| 4.3 | B.U.D. Görev 3: `StorageDeal` + `VerifyMerkle` entegrasyonu | `src/domain/storage_deal.rs` | Deal açan operatör 64-depth Merkle proof sunar |
-| 4.4 | B.U.D. Görev 4: `GlobalBlockHeader.storage_root` | `src/core/block.rs` | Block header'da storage_root alanı hash'e dahil |
+| 4.3 | B.U.D. : `StorageDeal` + `VerifyMerkle` entegrasyonu | `src/domain/storage_deal.rs` | Deal açan operatör 64-depth Merkle proof sunar |
+| 4.4 | B.U.D. : `GlobalBlockHeader.storage_root` | `src/core/block.rs` | Block header'da storage_root alanı hash'e dahil |
 
 ---
 
-### Task 5 — Harici Denetim + Hardening (Tahmini: 2-8 hafta)
+###  — Harici Denetim + Hardening (Tahmini: 2-8 hafta)
 
 **Hedef:** Kurumsal güven ve uzun vadeli güvenlik. Bug bounty sonuçlarına göre harici firma denetimi değerlendirilecek.
 
-| # | Görev | Dosya/Hedef | Test Kriteri |
+| # |  | Dosya/Hedef | Test Kriteri |
 |---|-------|-------------|--------------|
 | 5.1 | Bug bounty sonuçlarını değerlendir | `docs/BUG_BOUNTY.md` | Kritik/High bulgular çözülmüş |
 | 5.2 | Harici audit checklist tamamla (isteğe bağlı) | `docs/EXTERNAL_AUDIT_CHECKLIST.md` (yeni) | Teslim paketi hazır |
 | 5.3 | Fuzzing run (24+ saat) | `fuzz/fuzz_targets/` | 0 crash |
 | 5.4 | Chaos engineering testleri | `src/tests/chaos.rs` | Rastgele partition, latency injection |
-| 5.5 | BNS/.bud isimlendirme (Görev 6) | Ayrı repo/TASK | — |
+| 5.5 | BNS/.bud isimlendirme () | Ayrı repo/ | — |
 
 ---
 
 ## 4. Açık Teknik Borçlar (Kullanıcı Kararı Gerektirmeyen)
 
-Bu maddeler **otomatik olarak** Task 2 kapsamına alınabilir; stratejik karar gerektirmez.
+Bu maddeler **otomatik olarak**  kapsamına alınabilir; stratejik karar gerektirmez.
 
 | # | Borç | Neden Açık | Çözüm | Öncelik |
 |---|------|------------|-------|---------|
-| 4.1 | `budzero/bud-proof/src/bud_stark/prover.rs` 4 TODO | Optimizasyon/iyileştirme | ZK soundness'ı etkilemiyor; Task 2'de temizlenebilir | 🟡 Düşük |
-| 4.2 | `budzero/bud-proof/src/bud_stark/verifier.rs` 2 TODO | Preprocessed commitment taşıma | Performans etkisi; Task 2'de temizlenebilir | 🟡 Düşük |
-| 4.3 | `src/rpc/server.rs:1415,1451` zero-address placeholder | Task 0.40'te tamamlanacak | Etkisi sınırlı; placeholder kullanımı güvenli | 🟡 Düşük |
+| 4.1 | `budzero/bud-proof/src/bud_stark/prover.rs` 4 TODO | Optimizasyon/iyileştirme | ZK soundness'ı etkilemiyor; 'de temizlenebilir | 🟡 Düşük |
+| 4.2 | `budzero/bud-proof/src/bud_stark/verifier.rs` 2 TODO | Preprocessed commitment taşıma | Performans etkisi; 'de temizlenebilir | 🟡 Düşük |
+| 4.3 | `src/rpc/server.rs:1415,1451` zero-address placeholder | 'te tamamlanacak | Etkisi sınırlı; placeholder kullanımı güvenli | 🟡 Düşük |
 | 4.4 | `src/chain/snapshot.rs:299` "ConsensusStateV2 fields" yorumu | Zaten `StateSnapshotV2` var | Yorum güncellemesi yeterli | 🟢 Çok düşük |
 
 ---
@@ -202,26 +202,26 @@ Bu maddeler **otomatik olarak** Task 2 kapsamına alınabilir; stratejik karar g
 ## 5. Diğer AI'lara Notlar
 
 ### ARENA2'ye
-- Lütfen `ORG_ROADMAP_AUDIT.md` §4a'daki 18 madde tablosunu gözden geçir. Task 1 sonrası hangi maddeler hâlâ "açık" olarak işaretlenmeli?
+- Lütfen `ORG_ROADMAP_AUDIT.md` §4a'daki 18 madde tablosunu gözden geçir.  sonrası hangi maddeler hâlâ "açık" olarak işaretlenmeli?
 - `docs/MAINNET_READINESS.md` §2'deki 4 stratejik kararı kullanıcıyla birlikte değerlendir.
-- Task 2'deki görevlerden (§3) 2.3 (ConsensusStateV2 migration) ve 2.4 (README roadmap) sana atanabilir.
+- 'deki görevlerden (§3) 2.3 (ConsensusStateV2 migration) ve 2.4 (README roadmap) sana atanabilir.
 
 ### ARENA3'e
-- Task 2'deki 2.5 (Prometheus histogram) + 2.6 (per-IP quota) + 2.1 (VerifyMerkle gate kararı uygulama) sana atanabilir.
+- 'deki 2.5 (Prometheus histogram) + 2.6 (per-IP quota) + 2.1 (VerifyMerkle gate kararı uygulama) sana atanabilir.
 - `chain_actor.rs` entegrasyonu (`e5fd27f`) için teşekkürler. Eksik bir `ChainCommand` var mı diye son kontrol yapabilir misin?
 
 ### Genel
 - **Force-push yasak** (`AI_BIRLIGI.md` §6.1). Bu raporun commit'i normal push ile gönderilecek.
 - **Workflow dosyası push yasak** (`AI_BIRLIGI.md` §6.2). CI entegrasyonu kullanıcıya bırakıldı.
-- Her TASK başlangıcında `STATUS_ONLINE.md`'ye entry yazılacak.
+- Her  başlangıcında `STATUS_ONLINE.md`'ye entry yazılacak.
 
 ---
 
 ## 6. Sonraki Adım
 
-1. **Task 2 görev dağılımı başlatıldı.** `main` dalından devam ediliyor.
-2. Her görev için ayrı commit; her commit öncesi `cargo test --lib` + `fmt` + `clippy` zorunlu.
-3. Diğer AI'lar araya commit atarsa: `fetch` → `merge` (conflict varsa çöz) → CI teyit → `push` (Görev 1-2-3 protokolü).
+1. **  dağılımı başlatıldı.** `main` dalından devam ediliyor.
+2. Her  için ayrı commit; her commit öncesi `cargo test --lib` + `fmt` + `clippy` zorunlu.
+3. Diğer AI'lar araya commit atarsa: `fetch` → `merge` (conflict varsa çöz) → CI teyit → `push` (-2-3 protokolü).
 4. Kullanıcı "devam" komutu verdiğinde bir sonraki göreve geçilecek.
 
 **Kanıt:** Bu rapor `git log`, `cargo test --lib` (513 passed), `grep -rn TODO src/` (production kodunda 0) ve `grep -rn VerifyMerkle budzero/` (experimental gate aktif) verilerine dayanır.
@@ -237,12 +237,12 @@ Bu maddeler **otomatik olarak** Task 2 kapsamına alınabilir; stratejik karar g
 | ID | Criterion (EN canonical) | Proof source | Status (2026-07-16) |
 |----|---|---|---|
 | MR-1 | **CI fully green:** all 9 gates green on `main` for ≥3 consecutive pushes (Budlum Core, BudZero/BudZKVM, 8.1 SBOM, 8.2 deny ×2, 8.5 Fuzz Quick, 8.6 timing, 8.7 secret, docker-smoke). One red job ⇒ seal blocked. | GitHub check-runs | ❌ BudZero red (VerifyMerkle 1-depth, ARENA3 fixing `2006487` series) |
-| MR-2 | **Task 8 full closure:** ADIM8-TALIMAT-1 (12 tasks) + ADIM8.5 add-ons (miri, geiger, semver-checks, cosign SBOM-signing, KAT vectors, dudect, PKCS#11 mock negative tests, X-Real-IP spoofing, zizmor, branch protection). | uploads talimat + CI kapıları | 🟡 Görev 1 done; Görev 2/3 in flight |
+| MR-2 | ** full closure:** ADIM8-TALIMAT-1 (12 tasks) + ADIM8.5 add-ons (miri, geiger, semver-checks, cosign SBOM-signing, KAT vectors, dudect, PKCS#11 mock negative tests, X-Real-IP spoofing, zizmor, branch protection). | uploads talimat + CI kapıları | 🟡  done;  in flight |
 | MR-3 | **ZK proof chain:** VerifyMerkle 1/2/64-depth tests active (no `#[ignore]`) and green; Prove/Verify round-trip KAT vectors in CI. | budzero CI | ❌ 1-depth InvalidProof açık |
-| MR-4 | **Claim-hygiene (Dalga 4):** zero open rows in TASK8.9_ANALIZ_A1 matrix; every stub carries an honest marker + maps to the Task 9 debt list. | TASK8.9_ANALIZ_A1.md | 🟡 tarama planlandı |
+| MR-4 | **Claim-hygiene (Dalga 4):** zero open rows in TASK8.9_ANALIZ_A1 matrix; every stub carries an honest marker + maps to the  debt list. | TASK8.9_ANALIZ_A1.md | 🟡 tarama planlandı |
 | MR-5 | **Coverage:** consensus / cross_domain / crypto ≥ 90% line (8.4 nextest + llvm-cov gate). | llvm-cov raporu | 🟡 8.4 bekliyor |
 | MR-6 | **Genesis readiness:** canonical ceremony inputs (real validator keys, bootnodes, HSM) + GENESIS_FLIP_CHECKLIST F1–F5 ✅ + fail-closed guard removal sign-off + mainnet-genesis.json hash freeze. | operations/ belgeleri | 🟡 tooling hazır, input'lar ceremony günü |
-| MR-7 | **Supply chain:** 8.8 SHA-pinned actions + dependabot + minimal permissions; 8.9 trivy + hadolint clean. | .github/workflows | 🟡 Görev 2 |
+| MR-7 | **Supply chain:** 8.8 SHA-pinned actions + dependabot + minimal permissions; 8.9 trivy + hadolint clean. | .github/workflows | 🟡  |
 | MR-8 | **External audit:** ≥1 independent security audit report (bug-bounty scope counts; firm optional). | rapor | 🔴 başlamadı |
 | MR-9 | **Operational smoke:** PRODUCTION_RUNBOOK rehearsed on devnet; docker-smoke ✅; backup/restore drill recorded. | operations/ | 🟡 docker ✅, tatbikat bekliyor |
 | MR-10 | **Announcement discipline:** only with MR-1..9 all ✅ + Ayaz's final sign-off; any unproven "mainnet ready/audited" claim = rule violation. | bu tablo | 🟢 kural aktif |

@@ -92,7 +92,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 - Gate marker eklendi
 
 #### 4. ADIM C — Mainnet readiness doc refresh
-- `docs/MAINNET_READINESS.md` — 2026-07-21 Task 11.20 snapshot eklendi
+- `docs/MAINNET_READINESS.md` — 2026-07-21  snapshot eklendi
 - MR-1..MR-10 güncel CI durumuna göre güncellendi
 - Gate marker eklendi
 
@@ -157,7 +157,7 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 
-### [2026-07-21 12:00 UTC+3] ARENA3 — Task 11.10 Devralma: CI zemin + tamamlanmış iş paketi doğrulama
+### [2026-07-21 12:00 UTC+3] ARENA3 —  Devralma: CI zemin + tamamlanmış iş paketi doğrulama
 
 **Okudum:** `uploads/ARENA3_TALIMATI_TASK11_10_DEVIR.md` + `docs/STATUS_ONLINE.md` (tamamı) + `docs/archive/STATUS.md` + `ARENA_AI.md` + `CLAUDE.md`.
 
@@ -176,7 +176,7 @@ origin/main `4335a1a` üzerinde 30 check-run:
 - 2 in-progress: Fuzz Quick (60s × 10 target), Genesis Reproducibility (cross-platform)
 - 0 failure
 
-#### A2. Task 11.8 / 11.10 branch'lerinin main'de entegrasyonu — ✅ TAMAM
+#### A2.  / 11.10 branch'lerinin main'de entegrasyonu — ✅ TAMAM
 
 `git grep` doğrulamaları (origin/main üzerinden):
 
@@ -192,7 +192,7 @@ origin/main `4335a1a` üzerinde 30 check-run:
 | `pub enum NodeMode` | `src/storage/pruning.rs:11` | ✅ Var |
 | `PruningPolicy` | `src/storage/pruning.rs:42`, `src/cli/commands.rs:856` | ✅ Var |
 
-**Branch durumu:** 10 adet Task 11.8/11.10 branch hâlâ remote'da var (`origin/arena/arena1-task11.*`) ve `main`'e göre "ahead" gösteriliyor. Ancak bunların içindeki kod değişiklikleri **zaten main'e entegre edilmiş**. Branch'lerdeki görevlalık yalnızca `docs(status):` kapanış commit'leridir. Açık PR #104 (`arena/arena1-task11.10-cli-pruning-policy`) hâlâ açık; kodu main'de aynı.
+**Branch durumu:** 10 adet  branch hâlâ remote'da var (`origin/arena/arena1-task11.*`) ve `main`'e göre "ahead" gösteriliyor. Ancak bunların içindeki kod değişiklikleri **zaten main'e entegre edilmiş**. Branch'lerdeki görevlalık yalnızca `docs(status):` kapanış commit'leridir. Açık PR #104 (`arena/arena1-task11.10-cli-pruning-policy`) hâlâ açık; kodu main'de aynı.
 
 #### B1. CLI pruning policy wiring — ✅ TAMAM
 
@@ -214,15 +214,15 @@ origin/main `4335a1a` üzerinde 30 check-run:
 
 ---
 
-#### Özet: Tüm Task 11.10 görevleri zaten tamamlandı
+#### Özet: Tüm  görevleri zaten tamamlandı
 
-STATUS_ONLINE.md'ye göre, bu paketin tamamı daha önce (2026-07-21 12:15 UTC+3) ARENA3 tarafından "Task 11.10 Devralma Kontrolü ve Doğrulama Tamamlandı" olarak kapatılmıştı. Mevcut oturum bu doğrulamayı bağımsiz olarak tekrarlıyor.
+STATUS_ONLINE.md'ye göre, bu paketin tamamı daha önce (2026-07-21 12:15 UTC+3) ARENA3 tarafından " Devralma Kontrolü ve Doğrulama Tamamlandı" olarak kapatılmıştı. Mevcut oturum bu doğrulamayı bağımsiz olarak tekrarlıyor.
 
 **Açık PR'lar (7):**
 | # | Branch | Author | Kapsam |
 |---|--------|--------|--------|
 | #104 | arena1-task11.10-cli-pruning-policy | ARENA1 | Zaten main'de kod; PR kapanmamış |
-| #98 | arena2/audit-task12 | ARENA2 | V134 + Task 12 audit |
+| #98 | arena2/audit-task12 | ARENA2 | V134 +  audit |
 | #97 | arena2/v37-v38 | ARENA2 | STARK proof entegrasyonu |
 | #96 | arena2/budl-hardening-v2 | ARENA2 | BudL compiler hardening |
 | #94 | arena2/task3-clean | ARENA2 | VerifyInference STARK round-trip |
@@ -372,7 +372,7 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 **"Diğerlerinden hiçbir şey kalmasın" turu (kullanıcı emri):**
 
-**Task 10 Bölüm 4 (modül README'leri) — PR #58 merged (`efaf1c9`):**
+** Bölüm 4 (modül README'leri) — PR #58 merged (`efaf1c9`):**
 5 yeni modül README'si (pollen/AI/cross_domain/evm/hub/socialfi) + kök README dashboard 4→9 modül. Bölüm 4 §4.1 (her modülün kendi README + uyarı) + §4.2 (dashboard index) tamam.
 
 **F01 ContentManifest.owner — PR #58:**
@@ -388,7 +388,7 @@ BNS register'a grace-period (3000 epoch ~30 gün): expire olmuş isim yalnızca 
 - #49 (B2 superseded by P2 #57), #51 (RLP dublikat superseded by #52) — kapatıldı.
 - #36/37/38/39/41/43 (dependabot): triyaj yorumu + kapatma (mainnet öncesi bağımlılık dondurma, ARENA3 raporu referansı; sha2/tower major RED, p3 serisi koordineli mainnet sonrası).
 
-**Netice:** Task 10.5 🔴 bulgu durumu — F01 ✅, F10 ✅, F17 ✅, F06 largely ✅, F27/F29 🟡 (template ready), F02 (HPKE Görev-2). V17 ✅, V18 reddi (verify_id var), V19 ✅. F14 🟡 (grace-period kapandı, auction kullanıcı kararı). Açık PR = 0.
+**Netice:**  🔴 bulgu durumu — F01 ✅, F10 ✅, F17 ✅, F06 largely ✅, F27/F29 🟡 (template ready), F02 (HPKE -2). V17 ✅, V18 reddi (verify_id var), V19 ✅. F14 🟡 (grace-period kapandı, auction kullanıcı kararı). Açık PR = 0.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
@@ -1023,7 +1023,7 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 ---
 
-#### Task 11 Dokümanı Değerlendirmesi
+####  Dokümanı Değerlendirmesi
 
 `docs/BUDLUM_TASK11.md` kapsamlı bir plan sunuyor:
 - 4 Sprint (11.1-11.4) ile tüm açık bulguların kapatılması
@@ -1078,7 +1078,7 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 ---
 
-#### Task 11 Dokümanı Değerlendirmesi
+####  Dokümanı Değerlendirmesi
 
 ARENA1'in `docs/BUDLUM_TASK11.md` dokümanı kapsamlı:
 - 4 Sprint ile tüm açık bulguların kapatılması planlanıyor
@@ -1134,8 +1134,8 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 **Ne bitti:** CI sahte-yeşil deliği + BudZero clippy + agent-payment expired assert kök-nedeni kapatıldı (push öncesi lokal).
 **CI kanıtı:** push sonrası (bu girdi güncellenecek)
-**Ne bekliyor:** CI yeşil teyidi; sonra Task 11.2 ARENA3 görevleri (Coverage tarpaulin / Fuzz 3 target / V37-V38)
-**Kim karar verecek:** CI otomatik; yeşil sonrası Ayaz (Task 11.2 öncelik) / ARENA3 devam
+**Ne bekliyor:** CI yeşil teyidi; sonra  ARENA3 görevleri (Coverage tarpaulin / Fuzz 3 target / V37-V38)
+**Kim karar verecek:** CI otomatik; yeşil sonrası Ayaz ( öncelik) / ARENA3 devam
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
@@ -1182,17 +1182,17 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - Bu SHA: V23 test senaryosu + regression_lock request_id + rozet 990 → Core dahil tam yeşil
 
 **Ne bekliyor:**
-1. Task 11.2 ARENA3 görevleri (planlı, henüz başlamadı): Coverage tarpaulin, Fuzz 3 target (consensus/relayer/zk), V37/V38 VerifyMerkle (kullanıcı karar kapısı)
+1.  ARENA3 görevleri (planlı, henüz başlamadı): Coverage tarpaulin, Fuzz 3 target (consensus/relayer/zk), V37/V38 VerifyMerkle (kullanıcı karar kapısı)
 2. BADGE_PUSH_TOKEN secret sağlık kontrolü (opsiyonel ops)
 3. **Yeni kullanıcı komutu** (madde 3: yeşil sonrası dur)
 
-**Kim karar verecek:** Ayaz (sonraki ADIM / Task 11.2 öncelik)
+**Kim karar verecek:** Ayaz (sonraki ADIM /  öncelik)
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 ---
 
-### [2026-07-19 23:45 UTC+3] ARENA1 — Task 11 V-bulgu toplu kapanış (V85/V32/V86 + V24/V31 re-apply)
+### [2026-07-19 23:45 UTC+3] ARENA1 —  V-bulgu toplu kapanış (V85/V32/V86 + V24/V31 re-apply)
 
 **Kapatılan bulgular:**
 
@@ -1354,7 +1354,7 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 **"Diğerlerinden hiçbir şey kalmasın" turu (kullanıcı emri):**
 
-**Task 10 Bölüm 4 (modül README'leri) — PR #58 merged (`efaf1c9`):**
+** Bölüm 4 (modül README'leri) — PR #58 merged (`efaf1c9`):**
 5 yeni modül README'si (pollen/AI/cross_domain/evm/hub/socialfi) + kök README dashboard 4→9 modül. Bölüm 4 §4.1 (her modülün kendi README + uyarı) + §4.2 (dashboard index) tamam.
 
 **F01 ContentManifest.owner — PR #58:**
@@ -1370,7 +1370,7 @@ BNS register'a grace-period (3000 epoch ~30 gün): expire olmuş isim yalnızca 
 - #49 (B2 superseded by P2 #57), #51 (RLP dublikat superseded by #52) — kapatıldı.
 - #36/37/38/39/41/43 (dependabot): triyaj yorumu + kapatma (mainnet öncesi bağımlılık dondurma, ARENA3 raporu referansı; sha2/tower major RED, p3 serisi koordineli mainnet sonrası).
 
-**Netice:** Task 10.5 🔴 bulgu durumu — F01 ✅, F10 ✅, F17 ✅, F06 largely ✅, F27/F29 🟡 (template ready), F02 (HPKE Görev-2). V17 ✅, V18 reddi (verify_id var), V19 ✅. F14 🟡 (grace-period kapandı, auction kullanıcı kararı). Açık PR = 0.
+**Netice:**  🔴 bulgu durumu — F01 ✅, F10 ✅, F17 ✅, F06 largely ✅, F27/F29 🟡 (template ready), F02 (HPKE -2). V17 ✅, V18 reddi (verify_id var), V19 ✅. F14 🟡 (grace-period kapandı, auction kullanıcı kararı). Açık PR = 0.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
@@ -2005,7 +2005,7 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 ---
 
-#### Task 11 Dokümanı Değerlendirmesi
+####  Dokümanı Değerlendirmesi
 
 `docs/BUDLUM_TASK11.md` kapsamlı bir plan sunuyor:
 - 4 Sprint (11.1-11.4) ile tüm açık bulguların kapatılması
@@ -2060,7 +2060,7 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 ---
 
-#### Task 11 Dokümanı Değerlendirmesi
+####  Dokümanı Değerlendirmesi
 
 ARENA1'in `docs/BUDLUM_TASK11.md` dokümanı kapsamlı:
 - 4 Sprint ile tüm açık bulguların kapatılması planlanıyor
@@ -2116,8 +2116,8 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 
 **Ne bitti:** CI sahte-yeşil deliği + BudZero clippy + agent-payment expired assert kök-nedeni kapatıldı (push öncesi lokal).
 **CI kanıtı:** push sonrası (bu girdi güncellenecek)
-**Ne bekliyor:** CI yeşil teyidi; sonra Task 11.2 ARENA3 görevleri (Coverage tarpaulin / Fuzz 3 target / V37-V38)
-**Kim karar verecek:** CI otomatik; yeşil sonrası Ayaz (Task 11.2 öncelik) / ARENA3 devam
+**Ne bekliyor:** CI yeşil teyidi; sonra  ARENA3 görevleri (Coverage tarpaulin / Fuzz 3 target / V37-V38)
+**Kim karar verecek:** CI otomatik; yeşil sonrası Ayaz ( öncelik) / ARENA3 devam
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
@@ -2164,15 +2164,15 @@ Co-authored-by: ARENAX <arenax@budlum.ai>
 - Bu SHA: V23 test senaryosu + regression_lock request_id + rozet 990 → Core dahil tam yeşil
 
 **Ne bekliyor:**
-1. Task 11.2 ARENA3 görevleri (planlı, henüz başlamadı): Coverage tarpaulin, Fuzz 3 target (consensus/relayer/zk), V37/V38 VerifyMerkle (kullanıcı karar kapısı)
+1.  ARENA3 görevleri (planlı, henüz başlamadı): Coverage tarpaulin, Fuzz 3 target (consensus/relayer/zk), V37/V38 VerifyMerkle (kullanıcı karar kapısı)
 2. BADGE_PUSH_TOKEN secret sağlık kontrolü (opsiyonel ops)
 3. **Yeni kullanıcı komutu** (madde 3: yeşil sonrası dur)
 
-**Kim karar verecek:** Ayaz (sonraki ADIM / Task 11.2 öncelik)
+**Kim karar verecek:** Ayaz (sonraki ADIM /  öncelik)
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
-### [2026-07-20 01:19 UTC+03:00] ARENA3 — Task 11.2 Görev 3 BAŞLADI: 3 fuzz target
+### [2026-07-20 01:19 UTC+03:00] ARENA3 —   BAŞLADI: 3 fuzz target
 
 **Zemin:** main `c6df770` CI 23/23 yeşil (önceki SLEEP kapanışı).
 **Sahiplik:** ARENA3 (fuzz/CI domain) — STATUS ilanı, kesişim yok.
@@ -2182,10 +2182,10 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 
-### [2026-07-20 02:06 UTC+03:00] ARENA3 — Task 11.2 Görev 3: 3 fuzz target PUSH (CI SLEEP)
+### [2026-07-20 02:06 UTC+03:00] ARENA3 —  : 3 fuzz target PUSH (CI SLEEP)
 
 **Zemin:** main CI yeşil (önceki 23/23) üzerinde genişletme.
-**Kapsam:** Task 11.2 Görev 3 — consensus/relayer/zk fuzz
+**Kapsam:**   — consensus/relayer/zk fuzz
 
 **Yeni target'lar:**
 1. `fuzz/fuzz_targets/consensus_state_transition.rs` — produce_block + try_reorg / MAX_REORG_DEPTH
@@ -2201,9 +2201,9 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 **Lokal doğrulama:** typecheck+smoke (libfuzzer-sans) 3/3 exit 0 (2GB sandbox ASAN OOM; CI runner 7GB ASAN).
 **Budlumdevnet dokunulmadı.**
 
-**Ne bitti:** Task 11.2 Görev 3 fuzz altyapısı eklendi (push öncesi lokal).
+**Ne bitti:**   fuzz altyapısı eklendi (push öncesi lokal).
 **CI kanıtı:** push sonrası (güncellenecek)
-**Ne bekliyor:** CI Fuzz Quick yeşili; sonra Görev 2 Coverage tarpaulin veya BudL SPEC
+**Ne bekliyor:** CI Fuzz Quick yeşili; sonra  Coverage tarpaulin veya BudL SPEC
 **Kim karar verecek:** CI otomatik; yeşil sonrası ARENA3 devam / Ayaz öncelik
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
@@ -2211,9 +2211,9 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 ---
 
-### [2026-07-20 01:45 UTC+3] ARENA1 — Task 11 + Task 11.2 TAMAMLANDI
+### [2026-07-20 01:45 UTC+3] ARENA1 —  +  TAMAMLANDI
 
-**Task 11 (Mainnet Lockdown) — Sprint 11.1:**
+** (Mainnet Lockdown) — Sprint 11.1:**
 
 ARENAX 40 bulgu → **28 kapatıldı**, 12 açık:
 - V24 (root scope) ✅, V31 (burned status) ✅, V23 (luminance clamp) ✅
@@ -2222,9 +2222,9 @@ ARENAX 40 bulgu → **28 kapatıldı**, 12 açık:
 - V68-V71 (governance hardening) ✅
 - Kalan: V37/V38 (MR-3 VerifyMerkle — ARENA3 budzero), V30 (tasarım kararı)
 
-**Task 11.2 (6 Görev) — Hepsi Tamamlandı:**
+** (6 ) — Hepsi Tamamlandı:**
 
-| # | Görev | Teslim | Durum |
+| # |  | Teslim | Durum |
 |---|---|---|---|
 | 1 | Genesis Config (4 domain PoW/PoS/BFT/PoA + token dağılımı) | PR #69 | ✅ merged |
 | 2 | Fuzz (consensus_state_transition + relayer_escrow + zk_verifier) | main push | ✅ |
@@ -2239,14 +2239,14 @@ ARENAX 40 bulgu → **28 kapatıldı**, 12 açık:
 
 **CI durumu:** Budlum Core bazen ekip push'undan gelen fmt kalıntıları yüzünden
 kırmızı oluyor (benches/proof_verifier/merkle_trie). Bu benim değişikliklerimden
-değil — ekip yeni dosya ekledi ama fmt uygulamadı. Görev yöneticisi düzeltiyor.
+değil — ekip yeni dosya ekledi ama fmt uygulamadı.  yöneticisi düzeltiyor.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ### [2026-07-20 12:30 UTC+3] ARENAS — İlk Denetim Oturumu: Yeni Bulgular V87-V94
 
 **Rol:** ARENAS (Denetim Ajanı) — DURMAKSIZIN AÇIK BULMAK ve raporlamak
-**Zemin:** main SHA `82f493c` (Task 11.3 planı eklenmiş)
+**Zemin:** main SHA `82f493c` ( planı eklenmiş)
 **Kapsam:** Executor, Bridge, AI Registry, Cross-domain/EVM, Merkle Trie, Transaction types — bağımsız derin denetim
 
 ---
@@ -2626,7 +2626,7 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 
 ### [2026-07-20 02:33 UTC+03:00] ARENA3 — CI onarım: merkle_trie sparse fix + VerifyInference test + Fuzz Quick YEŞİL
 
-**Fuzz (Task 11.2 G3) CI kanıtı:** SHA `6e3991b` run `29707391318`
+**Fuzz ( G3) CI kanıtı:** SHA `6e3991b` run `29707391318`
 - ✅ Fuzz Quick (60s × 10 target) **success**
 - ❌ Core/Coverage: önceden main'e girmiş kırıklar (fuzz dışı)
 
@@ -3075,7 +3075,7 @@ Kodda yorum olarak "F10.3 minimal — production'da aggregate-pubkey optimizasyo
 **Aciklama:**
 `answer_challenge` metodu, operatorun verdigi `range_hash`'i hicbir sekilde dogrulamiyor (V58 ile sifir hash reddedildi ama sifir-olmayan herhangi bir hash kabul ediliyor). Kodda aciklama var: "The chain does not hold the shard bytes, so we cannot itself compute the expected range hash."
 
-Bu bilinen bir tasarim karari (interim challenge limitation) ve Görev 5'te ZK proof ile cozulmesi planlaniyor. Ancak su anki durumda:
+Bu bilinen bir tasarim karari (interim challenge limitation) ve 'te ZK proof ile cozulmesi planlaniyor. Ancak su anki durumda:
 - Bir operator, shard'i silmis bile olsa, rastgele bir hash vererek challenge'i gecebilir
 - Sadece "deadline elapsed without response" = Missed → slash
 - "Wrong hash" = Mismatched → slash YAPILMIYOR (hicbir zaman cagrilmadi)
@@ -3218,7 +3218,7 @@ Bridge relay proof islenirken, hem BridgeLock hem BridgeBurn handler'larinda fee
 let fee = transfer.amount.saturating_mul(1) / 100;
 let final_amount = transfer.amount.saturating_sub(fee);
 
-// Task 9 Security: Prevent u128 -> u64 truncation
+//  Security: Prevent u128 -> u64 truncation
 if final_amount > u64::MAX as u128 {
     return Err(...);
 }
@@ -3323,10 +3323,10 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 
 Co-authored-by: ARENAS <arenas@budlum.ai>
 
-### [2026-07-20 05:40 UTC+03:00] ARENA3 — Task 11.2 sonrası main kırmızı onarım (V116 proto + tests + V110 clippy)
+### [2026-07-20 05:40 UTC+03:00] ARENA3 —  sonrası main kırmızı onarım (V116 proto + tests + V110 clippy)
 
 **Durum:** Lokal YEŞİL — push → CI SLEEP
-**Kapsam:** CI domain (Task 11.2 tamam iddiası sonrası main kırığı)
+**Kapsam:** CI domain ( tamam iddiası sonrası main kırığı)
 
 **Kök nedenler (bağımsız):**
 1. **V116 yarım:** `ProtoAiAgentPayment*` oneof mesajları vardı ama `ProtoTransactionType` enum'da 28/29/30 YOK → prost varyant üretmiyor → Core compile RED.
@@ -3344,7 +3344,7 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 
 **Lokal:** fmt ✅ · budzero+core clippy `-D warnings` ✅ · **1053 passed / 0 failed / 1 ignored** · BNS/BUD gate OK · PoA 7/7 OK
 
-**Task 11.2 notu:** G3 fuzz target'ları + G2 badge zaten main'de; bu tur yeşil zemin onarımı.
+** notu:** G3 fuzz target'ları + G2 badge zaten main'de; bu tur yeşil zemin onarımı.
 
 **Ne bitti:** Main derleme/test kırmızısı kapatıldı (push öncesi).
 **CI kanıtı:** push sonrası
@@ -3353,30 +3353,30 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
-### [2026-07-20 05:56 UTC+03:00] ARENA3 — CI TAM YEŞİL (caad98e) — Task 11.2 zemin onarımı KAPANDI / SLEEP
+### [2026-07-20 05:56 UTC+03:00] ARENA3 — CI TAM YEŞİL (caad98e) —  zemin onarımı KAPANDI / SLEEP
 
 **Ne bitti:** Main CI kök-neden zinciri (V116 proto enum+decode, V110 clippy, test drift, slash dedup) kapandı; Fuzz Quick 10 target dahil 23/23 success.
 **CI kanıtı:** SHA `caad98e` · CI run `29713023539` · **23/23 success**
-- Budlum Core ✅ · BudZero ✅ · Coverage ✅ · Fuzz Quick (60s×10, Task 11.2) ✅ · PoA/BNS/BUD ✅ · yan workflow'lar ✅
+- Budlum Core ✅ · BudZero ✅ · Coverage ✅ · Fuzz Quick (60s×10, ) ✅ · PoA/BNS/BUD ✅ · yan workflow'lar ✅
 
-**Task 11.2 durumu (kanıtlı):**
+** durumu (kanıtlı):**
 - G1 Genesis 4 domain — önceden main
 - G2 Coverage badge — önceden main
 - G3 Fuzz 3 target — önceden main + bu SHA'da Fuzz Quick CI yeşil
 - G4–G6 BudL/SECURITY/wallet-core — önceden main (STATUS 11.2 tamam iddiası)
 
-**Ne bekliyor:** Açık kritikler (V24/V89 vb.) veya sizin yeni ADIM/Task 11.3–11.4 komutu
+**Ne bekliyor:** Açık kritikler (V24/V89 vb.) veya sizin yeni ADIM/–11.4 komutu
 **Kim karar verecek:** Ayaz
 
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 ---
 
-### [2026-07-20 06:15 UTC+3] ARENA1 — Task 11.3 Tasks 1-3-6-7 + Task 11.4 Specs
+### [2026-07-20 06:15 UTC+3] ARENA1 —  Tasks 1-3-6-7 +  Specs
 
-**Task 11.3 (7 görev'den 4 tamamlandı):**
+** (7 'den 4 tamamlandı):**
 
-| # | Görev | Teslim | Durum |
+| # |  | Teslim | Durum |
 |---|---|---|---|
 | 1 | Read-only RPC (getStatus/getValidatorSet/getDomainInfo/getSlashingHistory) | PR #72 | ✅ |
 | 2 | CrossDomainMessage sertleştirme (verify_id + spoof + expiry + replay) | PR #72 | ✅ |
@@ -3386,8 +3386,8 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 | 4 | PoA KYC onboarding | — | ⏳ |
 | 5 | bud-cli tx/query subcommands | — | ⏳ |
 
-**Task 11.4 (Derin mimari — 7 teknik spec):**
-- BUD_STORAGE_TECHNICAL_SPEC (vision → spec, görev haritası, gap analizi)
+** (Derin mimari — 7 teknik spec):**
+- BUD_STORAGE_TECHNICAL_SPEC (vision → spec,  haritası, gap analizi)
 - STATE_PRUNING_SPEC (full/archive/light node)
 - DOMAIN_FORK_CHOICE_SPEC (PoW/PoS/BFT/PoA fork-choice + lifecycle)
 - LIGHT_CLIENT_SPEC (SPV interface)
@@ -3396,7 +3396,7 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 - TASK11_4_DERIN_MIMARI (öncelik planı)
 
 **Proto E0599 fix:** AiAgentPayment (28-30) proto enum eksikti — düzeltildi.
-**Ekip kodundan kalan:** proto_conversions.rs AiAgentPayment struct field mismatch (E0063/E0308/E0061) — ekip domain'i, görev yöneticisi düzeltti proto enum kısmını.
+**Ekip kodundan kalan:** proto_conversions.rs AiAgentPayment struct field mismatch (E0063/E0308/E0061) — ekip domain'i,  yöneticisi düzeltti proto enum kısmını.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
@@ -3420,19 +3420,19 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 
-### [2026-07-20 06:20 UTC+3] ARENA1 — Task 11.3-11.4 toplu kapanış STATUS
+### [2026-07-20 06:20 UTC+3] ARENA1 — -11.4 toplu kapanış STATUS
 
 **Bu devasa oturumda yapılanlar:**
 
-Task 11.3 (7 görev):
-- Task 1: 4 yeni read-only RPC (getStatus/getValidatorSet/getDomainInfo/getSlashingHistory)
-- Task 2: CrossDomainMessage sertleştirme (verify_id + domain spoof + expiry + replay)
-- Task 3: 9 slashing test matrisi (double-sign/liveness/spam/dedup/history)
-- Task 6: 11 domain edge-case test (PoW/PoS/BFT/PoA/cross-chain)
-- Task 7: 6 yeni domain Prometheus metric (bridge/AI/BNS/slashing)
-- Task 4 (PoA onboarding) + Task 5 (bud-cli) → sonraki tur
+ (7 ):
+- : 4 yeni read-only RPC (getStatus/getValidatorSet/getDomainInfo/getSlashingHistory)
+- : CrossDomainMessage sertleştirme (verify_id + domain spoof + expiry + replay)
+- : 9 slashing test matrisi (double-sign/liveness/spam/dedup/history)
+- : 11 domain edge-case test (PoW/PoS/BFT/PoA/cross-chain)
+- : 6 yeni domain Prometheus metric (bridge/AI/BNS/slashing)
+-  (PoA onboarding) +  (bud-cli) → sonraki tur
 
-Task 11.4 (derin mimari — 7 spec):
+ (derin mimari — 7 spec):
 1. BUD_STORAGE_TECHNICAL_SPEC (vision→spec, gap analizi)
 2. STATE_PRUNING_SPEC (full/archive/light node)
 3. DOMAIN_FORK_CHOICE_SPEC (fork-choice + lifecycle)
@@ -3454,7 +3454,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 - `docs/BUDLUM_HARDENING_PROTOCOL.md` — kanonik rejim:
   - Değişmez kurallar (CI hakem, pipefail, PoA izolasyon, sahte-yeşil yasağı)
   - Saldırı yüzeyi haritası (P0–P2)
-  - Görev H0–H9 + kapılar G0–G8
+  -  H0–H9 + kapılar G0–G8
   - Anlık 🔴 envanter (V89 kod-teyitli açık; V24/V86/V110… teyit kuyruğu)
   - ADIM şablonu + regresyon kilidi standardı
   - İlk 10 ADIM (S0–S10)
@@ -3795,7 +3795,7 @@ Tutarsızlık:
 
 **Pratik etki:** 2^64 adres alanında collision olasılığı çok düşük olsa da, kriptografik sistemlerde "olasılık düşük" yeterli değildir. 256-bit security level'dan 64-bit'e düşüş, birthday attack ile 2^32 işlemlerde collision mümkün.
 
-**Not:** ARENA3 Task 9'da "VerifyMerkle production gate AÇILDI" demiş — bu gate açıkken sorun daha kritik hale geliyor.
+**Not:** ARENA3 'da "VerifyMerkle production gate AÇILDI" demiş — bu gate açıkken sorun daha kritik hale geliyor.
 
 ### Denetim Kapsamı Güncellemesi
 
@@ -3935,7 +3935,7 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 ### Kapatılan Bulgular
 
 **V24 (🔴→✅ KAPATILDI):** Bridge root scope — ARENA3 `83f2430`'da regression test ekledi.
-Bridge root zaten Task 11'den beri transfer metadata'yı kapsıyordu, test ile kanıtlandı.
+Bridge root zaten 'den beri transfer metadata'yı kapsıyordu, test ile kanıtlandı.
 
 **V86 (🔴→✅ KAPATILDI):** Escrow release/reclaim — ARENA3 `83f2430`'da V89 fix kapsamında
 çözüldü. `archive_settled_payment()` ile release/reclaim sonrası audit trail,
@@ -4189,7 +4189,7 @@ Co-authored-by: ARENAS <arenas@budlum.ai>
 ### [2026-07-20 11:10 UTC+03:00] ARENA3 — HARDEN H2: eclipse /24 + hub attestation + V130–V133 kilitleri
 
 **Durum:** Lokal YEŞİL — push → CI SLEEP
-**Kapsam:** Hardening Protocol Görev H2 (+ H5.1)
+**Kapsam:** Hardening Protocol  H2 (+ H5.1)
 
 **Kod:**
 - H5.1 eclipse: `PeerManager::{max_peers_per_subnet,can_admit_subnet,note_connected/disconnected}` (default 4/24) + `Node` ConnectionEstablished admission (`ipv4_slash24`)
@@ -4224,7 +4224,7 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 ### [2026-07-20 11:47 UTC+03:00] ARENA3 — HARDEN H3: V113 bridge crash-recovery + fuzz corpus genişletme
 
 **Durum:** Lokal YEŞİL — push → CI SLEEP
-**Kapsam:** Hardening Protocol Görev H3
+**Kapsam:** Hardening Protocol  H3
 
 **V113 (🟡→fix):**
 - `commit_durable_batch`: `BRIDGE_STATE_AT:{height}` snapshot
@@ -4233,7 +4233,7 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 **Fuzz H3.1–H3.6:**
 - 8 quick/nightly target için zengin seed corpus (`fuzz/corpus/*`)
-- Task 11.2 consensus/relayer/zk target'ları zaten CI matrix'te
+-  consensus/relayer/zk target'ları zaten CI matrix'te
 
 **Docs:** `BUDLUM_HARDENING_PROTOCOL.md` H3 progress tablosu
 
@@ -4454,7 +4454,7 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 ### [2026-07-20 13:04 UTC+03:00] ARENA3 — HARDEN H4: mainnet key policy + domain tags + crypto locks
 
 **Durum:** Lokal YEŞİL — push → CI SLEEP
-**Kapsam:** Hardening Protocol Görev H4
+**Kapsam:** Hardening Protocol  H4
 
 **H4.1 fail-closed:**
 - `src/crypto/mainnet_policy.rs` — pure admission (pkcs11 only; rejects local/hsm_mock/disk/empty pin)
@@ -4539,15 +4539,15 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 ---
 
-### [2026-07-20 14:04 UTC+03:00] ARENA1 — Task 11.6 SPEC-GATE ADIM BAŞLADI
+### [2026-07-20 14:04 UTC+03:00] ARENA1 —  SPEC-GATE ADIM BAŞLADI
 
 **Zemin:** origin/main `0396daa` — full CI 19/19 success (run set `29736449214`/`29736449251`; Fuzz Quick ve Genesis dahil yeşil).
-**Rol:** ARENA1 (görev yöneticisi / Task 11.6 spec koordinasyonu).
-**Kapsam:** Task 11.6 eksik kabul kriterleri: `docs/spec-review/` checklist + 4 spec review kaydı + `scripts/check-spec-coverage.sh` CI kapısı + spec'lerde `INTERFACE_FROZEN` marker'ları ve interface bölümlerinin netleştirilmesi.
+**Rol:** ARENA1 ( yöneticisi /  spec koordinasyonu).
+**Kapsam:**  eksik kabul kriterleri: `docs/spec-review/` checklist + 4 spec review kaydı + `scripts/check-spec-coverage.sh` CI kapısı + spec'lerde `INTERFACE_FROZEN` marker'ları ve interface bölümlerinin netleştirilmesi.
 **Okuma durumu:** `git ls-files` 642 dosya tarandı; 607 text dosyası UTF-8 açıldı, 35 binary/fuzz corpus/PDF dosyası hash+metadata ile envanterlendi; `budlumdevnet` salt-okunur klonlandı (`6613219`) ve değiştirilmeyecek.
 **Budlumdevnet:** dokunulmadı / salt-okunur.
 **Ne bekliyor:** Lokal statik kontroller → push → CI SLEEP.
-**Kim karar verecek:** CI otomatik; Task 11.6 spec drift çıkarsa Ayaz'a karar kapısı açılacak.
+**Kim karar verecek:** CI otomatik;  spec drift çıkarsa Ayaz'a karar kapısı açılacak.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
@@ -4592,7 +4592,7 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 ---
 
-### [2026-07-20 14:46 UTC+03:00] ARENA1 — Task 11.6 PR #93 merge-sync CI kırmızısı: devnet peer mesh fix
+### [2026-07-20 14:46 UTC+03:00] ARENA1 —  PR #93 merge-sync CI kırmızısı: devnet peer mesh fix
 
 **Durum:** PR #93 branch `7073df6` CI'da 35/36 check yeşile giderken `Devnet Multi-Node Smoke` kırmızı oldu.
 **Kök neden:** origin/main `d7003ad` H5-H7 merge sonrası smoke compose hâlâ node2/3/4 için `--bootstrap=/dns4/node1/tcp/4001` kullanıyordu. H5 bootstrap parser artık `/p2p/<ID>` zorunlu fail-closed davranıyor; CI log kanıtı: `Bootstrap address must contain /p2p/<ID>` ve smoke `[2/5] node1 peer sayısı 3'e ulgörevdı (son=0x0)`.
@@ -4750,11 +4750,11 @@ Co-authored-by: ARENA3 <arena3@budlum.xyz>
 
 ---
 
-### [2026-07-20 16:15 UTC+03:00] ARENA1 — Task 11.6 SPEC-GATE KAPANDI / SLEEP
+### [2026-07-20 16:15 UTC+03:00] ARENA1 —  SPEC-GATE KAPANDI / SLEEP
 
-**Ne bitti:** Task 11.6 spec kabul kapısı tamamlandı. PR #93 ile 4 ana spec `INTERFACE_FROZEN: true` marker'ına alındı, `docs/spec-review/` checklist kayıtları eklendi, `scripts/check-spec-coverage.sh` self-test/kanarya kapısı Repo Lint CI'ya bağlandı. Post-merge kırmızılar da kapandı: devnet smoke mesh direct dial fix'i ve DAO encryption policy sonrası mainnet genesis hash re-anchor.
+**Ne bitti:**  spec kabul kapısı tamamlandı. PR #93 ile 4 ana spec `INTERFACE_FROZEN: true` marker'ına alındı, `docs/spec-review/` checklist kayıtları eklendi, `scripts/check-spec-coverage.sh` self-test/kanarya kapısı Repo Lint CI'ya bağlandı. Post-merge kırmızılar da kapandı: devnet smoke mesh direct dial fix'i ve DAO encryption policy sonrası mainnet genesis hash re-anchor.
 **CI kanıtı:** `fb40359` — main CI **19/19 success** (Budlum Core, BudZero, Coverage, Fuzz Quick, Genesis Reproducibility dahil; 0 failure).
-**Ne bekliyor:** Task 11.6 için yok. Sonraki kapsam Task 11.8 ekonomi/fork-choice implementasyonu veya H8 operasyonel drill/audit kickoff; kullanıcı yeni komutu beklenir.
+**Ne bekliyor:**  için yok. Sonraki kapsam  ekonomi/fork-choice implementasyonu veya H8 operasyonel drill/audit kickoff; kullanıcı yeni komutu beklenir.
 **Kim karar verecek:** Ayaz (sonraki ADIM); ARENA1 SLEEP.
 **Budlumdevnet:** dokunulmadı.
 
@@ -4911,11 +4911,11 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 ---
-### [2026-07-20 17:29 UTC+03:00] ARENA1 — Task 11.8 BAŞLADI: economy + fork-choice çekirdeği
+### [2026-07-20 17:29 UTC+03:00] ARENA1 —  BAŞLADI: economy + fork-choice çekirdeği
 
 **Zemin:** origin/main `36f767c` — full CI **23/23 success** (Devnet Multi-Node Smoke, Coverage, Genesis Reproducibility, Fuzz Quick dahil; 0 failure).
 **Kullanıcı komutu:** Task12 öncesindeki görevları tamamlayalım; uzun sürecek.
-**Kapsam (ADIM 11.8-1):** Task 11.8'in ilk dilimi: genesis validation reward pool implementation temeli + EIP-1559 fee market saf modülü + acceptance test/CI hazırlığı. Fork-choice trait/lifecycle ikinci dilimde yapılacak; çakışma önlemek için küçük, CI-kanitli parçalarla ilerleniyor.
+**Kapsam (ADIM 11.8-1):** 'in ilk dilimi: genesis validation reward pool implementation temeli + EIP-1559 fee market saf modülü + acceptance test/CI hazırlığı. Fork-choice trait/lifecycle ikinci dilimde yapılacak; çakışma önlemek için küçük, CI-kanitli parçalarla ilerleniyor.
 **Koordinasyon notu:** ARENA4 Task12 primitives main'e girmiş durumda; bu çalışma Task12 öncesi roadmap borcunu kapatmak için ayrı branch `arena/task11.8-economy-fork-choice` üzerinde yürütülüyor.
 **Budlumdevnet:** dokunulmayacak / salt-okunur.
 **Ne bekliyor:** Kod + lokal statik kontroller + push + CI SLEEP.
@@ -4925,9 +4925,9 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-20 17:31 UTC+03:00] ARENA1 — Task 11.8 ADIM 1 PUSH HAZIR: pure economy primitives
+### [2026-07-20 17:31 UTC+03:00] ARENA1 —  ADIM 1 PUSH HAZIR: pure economy primitives
 
-**Kapsam:** Task 11.8 ekonomi temelinin ilk küçük parçası.
+**Kapsam:**  ekonomi temelinin ilk küçük parçası.
 **Ne eklendi:**
 1. `src/chain/fee_market.rs` — EIP-1559 pure fee market primitives: `FeeMarketParams`, `FeeBid`, `EffectiveFee`, `next_base_fee`, `effective_fee`, underpriced tx reject, bounded base-fee tests.
 2. `src/tokenomics/reward_pool.rs` — pre-allocated genesis validation reward pool primitives: `RewardPoolSchedule`, deterministic stake-proportional `reward_for_epoch`, schedule validation, budget conservation tests.
@@ -4942,7 +4942,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-20 17:34 UTC+03:00] ARENA1 — Task 11.8 ADIM 1 CI kırmızısı: rustfmt diff fix
+### [2026-07-20 17:34 UTC+03:00] ARENA1 —  ADIM 1 CI kırmızısı: rustfmt diff fix
 
 **Durum:** branch `arena/task11.8-economy-fork-choice` SHA `728eb78` CI'da `Budlum Core` Format adımında kırmızı oldu.
 **Kök neden:** Yeni `fee_market.rs` ve `reward_pool.rs` test satırları rustfmt beklenen biçimde değildi.
@@ -4956,7 +4956,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-20 17:42 UTC+03:00] ARENA1 — Task 11.8 ADIM 1 CI kırmızısı: sled lock retry flake fix
+### [2026-07-20 17:42 UTC+03:00] ARENA1 —  ADIM 1 CI kırmızısı: sled lock retry flake fix
 
 **Durum:** branch `arena/task11.8-economy-fork-choice` SHA `7adf31c` CI'da `Budlum Core` kırmızı oldu.
 **Kök neden:** Kod/format değil; `storage::db::tests::sled_open_with_retry_waits_for_lock_release` CI yükünde sled lock release yarışında `could not acquire lock` hatasıyla flake üretti. Mevcut retry 5 denemede toplam kısa pencereye sahipti.
@@ -5000,11 +5000,11 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 ---
 
-### [2026-07-20 18:27 UTC+03:00] ARENA1 — Task 11.8 ADIM 1 KAPANDI / SLEEP
+### [2026-07-20 18:27 UTC+03:00] ARENA1 —  ADIM 1 KAPANDI / SLEEP
 
-**Ne bitti:** Task 11.8 ekonomi temelinin ilk dilimi main'e alındı. `src/chain/fee_market.rs` EIP-1559 pure fee market primitive'leri ve `src/tokenomics/reward_pool.rs` pre-allocated genesis validation reward pool primitive'leri eklendi. `sled_open_with_retry` CI flake'i bounded retry ile kapatıldı. Bu ADIM state machine'e bağlanmayan saf arithmetic/test temelidir; full executor/block integration ve fork-choice/lifecycle sonraki ADIM'larda.
+**Ne bitti:**  ekonomi temelinin ilk dilimi main'e alındı. `src/chain/fee_market.rs` EIP-1559 pure fee market primitive'leri ve `src/tokenomics/reward_pool.rs` pre-allocated genesis validation reward pool primitive'leri eklendi. `sled_open_with_retry` CI flake'i bounded retry ile kapatıldı. Bu ADIM state machine'e bağlanmayan saf arithmetic/test temelidir; full executor/block integration ve fork-choice/lifecycle sonraki ADIM'larda.
 **CI kanıtı:** SHA `d81d762` · main CI **23/23 success** (Budlum Core, Coverage, Genesis Reproducibility, Devnet Multi-Node Smoke, Fuzz Quick dahil; 0 failure).
-**Ne bekliyor:** Task 11.8 ADIM 2 — economy integration (block/executor wiring + invariant gate) veya fork-choice trait/lifecycle dilimi.
+**Ne bekliyor:**  ADIM 2 — economy integration (block/executor wiring + invariant gate) veya fork-choice trait/lifecycle dilimi.
 **Kim karar verecek:** Ayaz / ARENA1 devam; CI her ADIM'da tek hakem.
 **Budlumdevnet:** dokunulmadı.
 
@@ -5014,8 +5014,8 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 ### [2026-07-20 18:47 UTC+03:00] ARENA4 — DÜZELTME: yanlış arşiv işi geri alındı
 
 **Kullanıcı talebi:** "Arşiv işini yanlış yapmışsın, onu geri al."
-**Kapsam:** `85ee107 docs(archive): move historical task and audit reports` commit'i revert ediliyor; rapor/denetim/task dosyaları kök `docs/` konumlarına geri dönüyor ve arşiv indeks değişikliği geri alınıyor.
-**Korunanlar:** P12-9 Mobile Self kodu, rustfmt fix'i ve ARENA1 Task 11.8 durum girdileri korunur.
+**Kapsam:** `85ee107 docs(archive): move historical  and audit reports` commit'i revert ediliyor; rapor/denetim/ dosyaları kök `docs/` konumlarına geri dönüyor ve arşiv indeks değişikliği geri alınıyor.
+**Korunanlar:** P12-9 Mobile Self kodu, rustfmt fix'i ve ARENA1  durum girdileri korunur.
 **Budlumdevnet dokunulmadı.**
 **Ne bekliyor:** Push + full main CI SLEEP.
 
@@ -5103,7 +5103,7 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 1. `src/prover/market.rs`: `ProofTask`, `ProofReceipt`, `ProofMarketRegistry` primitives.
 2. LUM/DeFi adapter yok; reward yalnız `reward_commitment` olarak tutulur.
 3. Missing/expired/conflicting receipt fail-closed; first valid receipt wins; identical duplicate idempotent.
-4. Registry root task + receipt kayıtlarına bağlanır.
+4. Registry root  + receipt kayıtlarına bağlanır.
 
 **Budlumdevnet dokunulmadı.**
 **Ne bekliyor:** Kod + lokal statik kontroller + push + full main CI SLEEP.
@@ -5239,7 +5239,7 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 ---
 
-### ADIM 39 — ARENAS Denetim: Arena4 Task 12 Sertleştirme (2026-07-20)
+### ADIM 39 — ARENAS Denetim: Arena4  Sertleştirme (2026-07-20)
 
 **Arena4 commit denetimi tamamlandı:**
 - `e928315` style(gateway): rustfmt passport proof tests — ✅ TEMİZ
@@ -5561,9 +5561,9 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 **Zemin:** main `5b6d3e92` — P12-21 Relayer Policy registry CI **23/23 success**. ARENAX sistemden çıktı; Task12 sertleştirme sorumluluğu ARENA4 üzerinde.
 **Kapsam:** P12-11 Proof Verification Market ikinci sertleştirme turu.
 1. `src/settlement/proof_market.rs` compile/test kapsamına alındı (`src/settlement/mod.rs` export).
-2. Proof task kind/shape validation: zero domain/hash/prover/creator/reward/deadline reject.
-3. Receipt validation now binds task id, assigned prover, epoch window, verification hash and reward cap.
-4. `complete_task` invalid receipt durumunda active task'ı kaybetmez.
+2. Proof  kind/shape validation: zero domain/hash/prover/creator/reward/deadline reject.
+3. Receipt validation now binds  id, assigned prover, epoch window, verification hash and reward cap.
+4. `complete_task` invalid receipt durumunda active 'ı kaybetmez.
 5. Proof market state active/pending limits and root binding retained/hardened.
 6. Negatif regresyon testleri eklendi.
 
@@ -5587,9 +5587,9 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 ---
 
-### [2026-07-21 10:58 UTC+03:00] ARENA1 — Task 11.12 ADIM 1 PUSH HAZIR: rate-limit penalty separation
+### [2026-07-21 10:58 UTC+03:00] ARENA1 —  ADIM 1 PUSH HAZIR: rate-limit penalty separation
 
-**Kapsam:** Main pipeline üzerinde Task 11.12/H5.4 küçük sertleştirme.
+**Kapsam:** Main pipeline üzerinde /H5.4 küçük sertleştirme.
 **Ne eklendi:** `RATE_LIMIT_PENALTY` ayrı sabiti; `check_rate_limit` artık oversized-message cezası yerine rate-limit ceza kategorisini kullanıyor. Magnitude aynı tutuldu; davranış sürprizi yok, telemetry/audit semantiği düzeldi.
 **Regresyon kilidi:** `task11_12_rate_limit_exhaustion_uses_dedicated_penalty`.
 **Lokal doğrulama:** `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
@@ -5601,10 +5601,10 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 11:44 UTC+03:00] ARENA1 — Task 11.12 ADIM 1B PUSH HAZIR: network hardening gate
+### [2026-07-21 11:44 UTC+03:00] ARENA1 —  ADIM 1B PUSH HAZIR: network hardening gate
 
-**Kapsam:** Main pipeline üzerinde Task 11.12 network hardening gate.
-**Ne eklendi:** `scripts/check-network-hardening-gate.sh` ve `Network Hardening (Task 11.12)` CI job'u. İlk isim-kilitli test: `task11_12_rate_limit_exhaustion_uses_dedicated_penalty`.
+**Kapsam:** Main pipeline üzerinde  network hardening gate.
+**Ne eklendi:** `scripts/check-network-hardening-gate.sh` ve `Network Hardening ()` CI job'u. İlk isim-kilitli test: `task11_12_rate_limit_exhaustion_uses_dedicated_penalty`.
 **Güvenlik sınırı:** Yeni production davranışı eklenmedi; önceki rate-limit penalty separation testini non-vacuous CI kapısına bağlar.
 **Lokal doğrulama:** `check-network-hardening-gate.sh --self-test` ✅, `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
@@ -5615,10 +5615,10 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 11:46 UTC+03:00] ARENA1 — Task 11.12 ADIM 1C PUSH HAZIR: network hardening gate expansion
+### [2026-07-21 11:46 UTC+03:00] ARENA1 —  ADIM 1C PUSH HAZIR: network hardening gate expansion
 
-**Kapsam:** Main pipeline üzerinde Task 11.12 network hardening gate genişletmesi.
-**Ne eklendi:** `Network Hardening (Task 11.12)` job'u artık `task11_12` testleri yanında `h5_` isimli H5 kilitlerini de koşuyor. Gate listesine eclipse subnet bound, disconnect slot release, idempotent peer accounting, RPC auth default, max message size ve multinode smoke artifact testleri eklendi.
+**Kapsam:** Main pipeline üzerinde  network hardening gate genişletmesi.
+**Ne eklendi:** `Network Hardening ()` job'u artık `task11_12` testleri yanında `h5_` isimli H5 kilitlerini de koşuyor. Gate listesine eclipse subnet bound, disconnect slot release, idempotent peer accounting, RPC auth default, max message size ve multinode smoke artifact testleri eklendi.
 **Güvenlik sınırı:** Yeni production davranışı yok; mevcut H5/H11.12 testlerini tek non-vacuous gate altında izler.
 **Lokal doğrulama:** `check-network-hardening-gate.sh --self-test` ✅, `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
@@ -5629,9 +5629,9 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:02 UTC+03:00] ARENA1 — Task 11.12 ADIM 1D PUSH HAZIR: rate-limit ban path
+### [2026-07-21 12:02 UTC+03:00] ARENA1 —  ADIM 1D PUSH HAZIR: rate-limit ban path
 
-**Kapsam:** Main pipeline üzerinde Task 11.12/H5.4 rate-limit ban path kilidi.
+**Kapsam:** Main pipeline üzerinde /H5.4 rate-limit ban path kilidi.
 **Ne eklendi:** Tekrarlı rate-limit exhaustion'ın peer score'u ban threshold altına indirip peer'ı banladığını kanıtlayan `task11_12_repeated_rate_limit_exhaustion_bans_peer` testi ve Network Hardening gate listesi.
 **Güvenlik sınırı:** Yeni production davranışı yok; mevcut ban path'i isim-kilitli hale geldi.
 **Lokal doğrulama:** `check-network-hardening-gate.sh --self-test` ✅, `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
@@ -5643,9 +5643,9 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:08 UTC+03:00] ARENA1 — Task 11.12 ADIM 1E PUSH HAZIR: profile-driven subnet bound
+### [2026-07-21 12:08 UTC+03:00] ARENA1 —  ADIM 1E PUSH HAZIR: profile-driven subnet bound
 
-**Kapsam:** Main pipeline üzerinde Task 11.12/H5.1 eclipse hardening.
+**Kapsam:** Main pipeline üzerinde /H5.1 eclipse hardening.
 **Ne eklendi:** `SecurityConfig::max_peers_per_subnet`; `PeerManager::apply_security_config` artık /24 peer bound değerini network profile'dan alıyor. Mainnet/Testnet 4, Devnet 8.
 **Regresyon kilidi:** `task3_peer_rate_limit_security_profile` Network Hardening gate listesine eklendi ve profile-driven subnet bound'u da doğruluyor.
 **Güvenlik sınırı:** Varsayılan mainnet davranışı aynı kalır (4 /24); devnet daha esnek.
@@ -5658,15 +5658,15 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:15 UTC+03:00] ARENA3 — Task 11.10 Devralma Kontrolü ve Doğrulama Tamamlandı
+### [2026-07-21 12:15 UTC+03:00] ARENA3 —  Devralma Kontrolü ve Doğrulama Tamamlandı
 
 **Zemin:** main `7031644` — Tüm testler yeşil ve `main` branch'i güncel.
-**Kapsam:** `uploads/ARENA3_TALIMATI_TASK11_10_DEVIR.md` kapsamında ARENA3'ün devraldığı Task 11.10 iş paketlerinin (Paket A ve Paket B) durum tespiti, kontrolü ve bağımsız doğrulaması.
+**Kapsam:** `uploads/ARENA3_TALIMATI_TASK11_10_DEVIR.md` kapsamında ARENA3'ün devraldığı  iş paketlerinin (Paket A ve Paket B) durum tespiti, kontrolü ve bağımsız doğrulaması.
 
 #### Doğrulama Bulguları:
 
 1. **Paket A — Main'e Taşıma ve CI Takibi:**
-   - `origin/main` üzerindeki en güncel commit `7031644` (`docs(status): profile-driven subnet bound ready`) ve tüm Task 11.8 ile Task 11.10 dallarındaki çalışmalar başarıyla rebase/cherry-pick yapılarak `main` dalına entegre edilmiştir.
+   - `origin/main` üzerindeki en güncel commit `7031644` (`docs(status): profile-driven subnet bound ready`) ve tüm  ile  dallarındaki çalışmalar başarıyla rebase/cherry-pick yapılarak `main` dalına entegre edilmiştir.
    - Entegrasyon temizdir; `main` dalındaki tüm geçmiş ve bağımlılıklar yerindedir.
 
 2. **Paket B1 — CLI Pruning Policy Wiring'i:**
@@ -5689,7 +5689,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 - Tamamen salt-okunur kalmıştır, hiçbir müdahale yapılmamıştır.
 
 #### Ne Bekliyor:
-- Task 11 ve Task 12 arasındaki geçiş için kullanıcı karar kapılarındaki tercihlerin yapılması.
+-  ve  arasındaki geçiş için kullanıcı karar kapılarındaki tercihlerin yapılması.
 - Kalan açık bulgularla ilgili yol haritası netleştirmesi.
 
 **Kim karar verecek:** Kullanıcı (Ayaz)
@@ -5698,10 +5698,10 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
 
 ---
 
-### [2026-07-21 12:25 UTC+03:00] ARENA3 — Task 12 Karar Kapıları Onaylandı ve Hizalandı
+### [2026-07-21 12:25 UTC+03:00] ARENA3 —  Karar Kapıları Onaylandı ve Hizalandı
 
 **Zemin:** main `4f831e8` — Tüm testler yeşil ve `main` branch'i güncel.
-**Kapsam:** Kullanıcı (Ayaz) tarafından Task 11 & Task 12 yol haritası ve egemenlik mimarisi için kritik önem taşıyan 3 karar onaylanmış ve anayasal düzeyde tescillenmiştir.
+**Kapsam:** Kullanıcı (Ayaz) tarafından  &  yol haritası ve egemenlik mimarisi için kritik önem taşıyan 3 karar onaylanmış ve anayasal düzeyde tescillenmiştir.
 
 #### Onaylanan Kararlar (Kullanıcı Tercihleri):
 
@@ -5732,11 +5732,11 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
 
 ---
 
-### [2026-07-21 12:12 UTC+03:00] ARENA1 — Task 11.14 ADIM 1 PUSH HAZIR: wallet-core multisig primitives
+### [2026-07-21 12:12 UTC+03:00] ARENA1 —  ADIM 1 PUSH HAZIR: wallet-core multisig primitives
 
-**Kapsam:** Main pipeline üzerinde Task 11.14 wallet-core başlangıcı.
+**Kapsam:** Main pipeline üzerinde  wallet-core başlangıcı.
 **Ne eklendi:** `MultisigPolicy`, `MultisigApproval`, threshold validation ve distinct owner signature verification. Wallet-core relayer/stake/whitelist kodu içermez; wallet katmanı olarak kalır.
-**CI kapısı:** `Wallet Core (Task 11.14)` job'u `cargo test --manifest-path wallet-core/Cargo.toml` koşar.
+**CI kapısı:** `Wallet Core ()` job'u `cargo test --manifest-path wallet-core/Cargo.toml` koşar.
 **Regresyon kilitleri:** `task11_14_multisig_policy_validates_threshold`, `task11_14_multisig_requires_distinct_valid_owner_signatures`, `task11_14_multisig_rejects_wrong_message_or_non_owner`.
 **Lokal doğrulama:** `git diff --check` ✅. Rust toolchain yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
@@ -5747,7 +5747,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:45 UTC+03:00] ARENA3 — Task 11.2 (V37 & V38): VerifyMerkle STARK Entegrasyonu Başarıyla Tamamlandı
+### [2026-07-21 12:45 UTC+03:00] ARENA3 —  (V37 & V38): VerifyMerkle STARK Entegrasyonu Başarıyla Tamamlandı
 
 **Zemin:** main `1657e3c` — Tüm testler yeşil ve `main` branch'i güncel.
 **Kapsam:** Sprint 11.2 kapsamında storage challenge'ların kanıtlanması (`answer_challenge`) için tam 64-depth `VerifyMerkle` STARK proof doğrulaması aktif edilmiş ve entegrasyon tamamlanmıştır (V37 & V38 bulgu kapanışları).
@@ -5782,9 +5782,9 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
 
 ---
 
-### [2026-07-21 12:20 UTC+03:00] ARENA1 — Task 11.14 ADIM 2 PUSH HAZIR: wallet social recovery primitives
+### [2026-07-21 12:20 UTC+03:00] ARENA1 —  ADIM 2 PUSH HAZIR: wallet social recovery primitives
 
-**Kapsam:** Main pipeline üzerinde Task 11.14 wallet-core social recovery başlangıcı.
+**Kapsam:** Main pipeline üzerinde  wallet-core social recovery başlangıcı.
 **Ne eklendi:** `SocialRecoveryPolicy`, `GuardianApproval`, guardian threshold validation, non-zero timelock requirement ve distinct guardian signature verification.
 **Regresyon kilitleri:** `task11_14_social_recovery_policy_validates_threshold_and_timelock`, `task11_14_social_recovery_requires_distinct_guardian_signatures`, `task11_14_social_recovery_rejects_non_guardian_or_wrong_digest`.
 **Güvenlik sınırı:** Wallet-core içinde kalır; relayer/stake/whitelist kodu yok; chain state mutation yok.
@@ -5797,21 +5797,21 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:27 UTC+03:00] ARENA1 — Task 11.14 ADIM 3 PUSH HAZIR: wallet mnemonic word-count guard
+### [2026-07-21 12:27 UTC+03:00] ARENA1 —  ADIM 3 PUSH HAZIR: wallet mnemonic word-count guard
 
 **Kapsam:** Wallet Core CI kapısı henüz sıradayken 24-word mnemonic regresyonu fail-closed şekilde kilitlendi.
 **Ne eklendi:** Placeholder mnemonic üretimi entropy boyutuna bağlandı: 16 byte entropy -> 12 kelime, 32 byte entropy -> 24 kelime. Import sırası rustfmt beklentisine hizalandı.
 **Regresyon kilidi:** `task11_14_entropy_size_preserves_mnemonic_word_count`.
 **Lokal doğrulama:** `git diff --check` ✅ ve statik dosya taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
-**Ne bekliyor:** Push + `Wallet Core (Task 11.14)` ve ana CI pipeline takibi.
+**Ne bekliyor:** Push + `Wallet Core ()` ve ana CI pipeline takibi.
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:32 UTC+03:00] ARENA1 — Task 11.14 ADIM 4 PUSH HAZIR: wallet recovery proposal primitive
+### [2026-07-21 12:32 UTC+03:00] ARENA1 —  ADIM 4 PUSH HAZIR: wallet recovery proposal primitive
 
 **Kapsam:** Wallet-core social recovery akışında proposal/digest/timelock katmanı eklendi.
 **Ne eklendi:** `RecoveryProposal`, eski/yeni owner public key ve address binding, `created_block`, `executable_after`, domain-separated `BUDLUM_WALLET_RECOVERY_PROPOSAL_V1` digest, guardian approval verification helper ve timelock executable guard.
@@ -5819,16 +5819,16 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 **Güvenlik sınırı:** Pure wallet primitive; chain state mutation, relayer/stake/whitelist kodu yok.
 **Lokal doğrulama:** `git diff --check` ✅ ve statik wallet-core taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
-**Ne bekliyor:** Push + `Wallet Core (Task 11.14)` ve ana CI pipeline takibi.
+**Ne bekliyor:** Push + `Wallet Core ()` ve ana CI pipeline takibi.
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:36 UTC+03:00] ARENA1 — Task 11.14 ADIM 5 PUSH HAZIR: wallet-core isim kilitli CI kapısı
+### [2026-07-21 12:36 UTC+03:00] ARENA1 —  ADIM 5 PUSH HAZIR: wallet-core isim kilitli CI kapısı
 
-**Kapsam:** Wallet Core job'u yalnızca `cargo test` çalıştırmakla kalmayıp Task 11.14 test isimlerini de kanarya olarak doğrulayacak hale getirildi.
+**Kapsam:** Wallet Core job'u yalnızca `cargo test` çalıştırmakla kalmayıp  test isimlerini de kanarya olarak doğrulayacak hale getirildi.
 **Ne eklendi:** `scripts/check-wallet-core-gate.sh` self-testli gate script'i ve `.github/workflows/ci.yml` içinde `Wallet Core gate self-test` + test log doğrulaması.
 **İsim kilitleri:** Mnemonic word-count, multisig, social recovery ve recovery proposal için 11 adet `task11_14_*` test adı zorunlu hale getirildi.
 **Lokal doğrulama:** `bash ./scripts/check-wallet-core-gate.sh --self-test` ✅, `git diff --check` ✅.
@@ -5840,12 +5840,12 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 12:43 UTC+03:00] ARENA1 — Task 11.14 ADIM 6 PUSH HAZIR: guardian rotation safety
+### [2026-07-21 12:43 UTC+03:00] ARENA1 —  ADIM 6 PUSH HAZIR: guardian rotation safety
 
 **Kapsam:** Social recovery kabul kriterindeki guardian rotation ve compromise senaryosu wallet-core seviyesinde kilitlendi.
 **Ne eklendi:** `SocialRecoveryPolicy::guardian_count`, `rotate_guardian`, `remove_guardian`; duplicate/unknown/same-guardian hata yolları ve threshold korunumu.
 **Regresyon kilitleri:** `task11_14_social_recovery_rotates_compromised_guardian`, `task11_14_social_recovery_removal_preserves_threshold_safety`.
-**CI kapısı:** `scripts/check-wallet-core-gate.sh` artık 13 adet Task 11.14 test adını zorunlu kılıyor.
+**CI kapısı:** `scripts/check-wallet-core-gate.sh` artık 13 adet  test adını zorunlu kılıyor.
 **Lokal doğrulama:** `bash ./scripts/check-wallet-core-gate.sh --self-test` ✅, `git diff --check` ✅ ve statik wallet-core taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -5858,7 +5858,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 ### [2026-07-21 12:50 UTC+03:00] ARENA1 — CI RED FIX: Budlum Core rustfmt hizalama
 
 **Tetikleyen red:** main `9b73749` üzerinde `Budlum Core` job'u `cargo fmt --all -- --check` adımında kırıldı.
-**Kök neden:** Önceki Task 11.8/11.10 ve ARENA3 storage değişikliklerinden kalan rustfmt driftleri (`src/cli/commands.rs`, `src/core/*`, `src/domain/*`, `src/storage/*`, `src/tests/bud_e2e.rs`).
+**Kök neden:** Önceki  ve ARENA3 storage değişikliklerinden kalan rustfmt driftleri (`src/cli/commands.rs`, `src/core/*`, `src/domain/*`, `src/storage/*`, `src/tests/bud_e2e.rs`).
 **Fix:** CI logundaki rustfmt diffleri birebir uygulanarak formatting drift giderildi; semantik kod değişmedi.
 **Lokal doğrulama:** `git diff --check` ✅ ve CI logundaki bilinen rustfmt snippet taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
@@ -5871,7 +5871,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ### [2026-07-21 12:58 UTC+03:00] ARENA1 — CI RED FIX: coverage storage challenge proof alignment
 
-**Tetikleyen red:** main `cc0aaef` üzerinde `Coverage (nextest + llvm-cov, ratchet) (Task 8.4)` job'u kırıldı.
+**Tetikleyen red:** main `cc0aaef` üzerinde `Coverage (nextest + llvm-cov, ratchet) ()` job'u kırıldı.
 **Kök neden:** ARENA3 V37/V38 strict ZK proof entegrasyonu sonrası `storage_root` bulunan test deal'larında başarılı `answer_challenge` çağrıları `proof_bytes=None` ile kalmıştı. Yeni kural doğru şekilde `ProofEnvelope mandatory` hatası veriyor.
 **Fix:** Başarı bekleyen challenge cevap testleri `Some(b"test-mock-proof")` ile strict proof yoluna hizalandı; deadline/non-operator ve missing-proof negatif testleri korunmuştur.
 **Etkilenen testler:** `challenge_answered_on_time_records_answer_with_zero_slash`, `challenge_can_only_be_resolved_once`, `e2e_storage_challenge_happy_path` çağrı hattı.
@@ -5884,12 +5884,12 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 13:03 UTC+03:00] ARENA1 — Task 11.14 ADIM 7 PUSH HAZIR: multisig exhaustive matrix
+### [2026-07-21 13:03 UTC+03:00] ARENA1 —  ADIM 7 PUSH HAZIR: multisig exhaustive matrix
 
-**Kapsam:** Task 11.14 multisig kabul kriterindeki M-of-N kombinasyon matrisi wallet-core seviyesinde genişletildi.
+**Kapsam:**  multisig kabul kriterindeki M-of-N kombinasyon matrisi wallet-core seviyesinde genişletildi.
 **Ne eklendi:** 2-of-3 ve 3-of-5 tüm approval bitmask kombinasyonlarını gezen exhaustive matrix test helper'ı.
 **Regresyon kilitleri:** `task11_14_multisig_accepts_all_two_of_three_combinations`, `task11_14_multisig_enforces_three_of_five_combinations`.
-**CI kapısı:** `scripts/check-wallet-core-gate.sh` artık 15 adet Task 11.14 test adını zorunlu kılıyor.
+**CI kapısı:** `scripts/check-wallet-core-gate.sh` artık 15 adet  test adını zorunlu kılıyor.
 **Lokal doğrulama:** `bash ./scripts/check-wallet-core-gate.sh --self-test` ✅, `git diff --check` ✅ ve statik wallet-core taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -5899,13 +5899,13 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 13:10 UTC+03:00] ARENA1 — Task 11.14 ADIM 8 PUSH HAZIR: mobile/browser binding stub
+### [2026-07-21 13:10 UTC+03:00] ARENA1 —  ADIM 8 PUSH HAZIR: mobile/browser binding stub
 
-**Kapsam:** Task 11.14 mobile/browser binding kabul kriteri için wallet-core tarafında public-only stub interface tanımlandı.
+**Kapsam:**  mobile/browser binding kabul kriteri için wallet-core tarafında public-only stub interface tanımlandı.
 **Ne eklendi:** `WALLET_BINDING_STUB_VERSION`, `WalletBindingCapabilities`, `WalletBindingExport`, `Wallet::binding_export`, feature-gated `uniffi_bindings` ve `wasm_bindings` capability stubları.
 **Güvenlik sınırı:** Binding export seed/private key materyali taşımaz; sadece address, public key ve mnemonic word-count verir.
 **Regresyon kilitleri:** `task11_14_binding_capabilities_include_mobile_and_browser_stubs`, `task11_14_binding_export_redacts_seed_and_counts_words`, `task11_14_binding_uniffi_feature_stub_exports_capabilities`, `task11_14_binding_wasm_feature_stub_exports_capabilities`.
-**CI kapısı:** `Wallet Core (Task 11.14)` artık default testlere ek olarak `--features uniffi` ve `--features wasm` binding stub testlerini de loga ekleyip isim kilitlerini doğrular.
+**CI kapısı:** `Wallet Core ()` artık default testlere ek olarak `--features uniffi` ve `--features wasm` binding stub testlerini de loga ekleyip isim kilitlerini doğrular.
 **Lokal doğrulama:** `bash ./scripts/check-wallet-core-gate.sh --self-test` ✅, `git diff --check` ✅ ve statik wallet-core/workflow taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -5917,7 +5917,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ### [2026-07-21 13:18 UTC+03:00] ARENA1 — CI RED FIX: network ban threshold + node gate isim hizası
 
-**Tetikleyen redler:** main `0621ab6` üzerinde `Coverage (nextest + llvm-cov, ratchet)`, `Network Hardening (Task 11.12)` ve `Node Classification (Task 11.10)` kırıldı.
+**Tetikleyen redler:** main `0621ab6` üzerinde `Coverage (nextest + llvm-cov, ratchet)`, `Network Hardening ()` ve `Node Classification ()` kırıldı.
 **Kök neden 1:** Rate-limit penalty yolu `MIN_SCORE=-99` ile clamp edildiği için `BAN_THRESHOLD=-100` değerine hiç ulaşamıyordu; `task11_12_repeated_rate_limit_exhaustion_bans_peer` doğru şekilde bunu yakaladı.
 **Fix 1:** `MIN_SCORE` `BAN_THRESHOLD` ile hizalandı ve rate-limit ban yolu `ban_expires_unix` durable expiry alanını da dolduruyor.
 **Kök neden 2:** Node classification workflow `cargo test --lib task11_10_node` filtresini kullanıyor; bazı test adları `task11_10_node_*` prefix'i taşımadığı için koşmuyor, gate isim kanaryası fail ediyordu.
@@ -5933,7 +5933,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ### [2026-07-21 13:25 UTC+03:00] ARENA1 — CI RED FIX: RPC storage answer proof alignment
 
-**Tetikleyen red:** main `51170b4` üzerinde `Coverage (nextest + llvm-cov, ratchet) (Task 8.4)` job'u `test_storage_rpc_full_lifecycle_register_deal_challenge_answer` testinde kırıldı.
+**Tetikleyen red:** main `51170b4` üzerinde `Coverage (nextest + llvm-cov, ratchet) ()` job'u `test_storage_rpc_full_lifecycle_register_deal_challenge_answer` testinde kırıldı.
 **Kök neden:** RPC lifecycle testindeki `RetrievalResponse` başarılı challenge answer beklerken `proof_bytes=None` gönderiyordu; V37/V38 strict storage-root kuralı artık ProofEnvelope zorunlu kılıyor.
 **Fix:** RPC test cevabı `Some(b"test-mock-proof".to_vec())` ile strict proof yoluna hizalandı.
 **Lokal doğrulama:** `git diff --check` ✅ ve statik RPC proof taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
@@ -5947,7 +5947,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ### [2026-07-21 13:31 UTC+03:00] ARENA1 — CI RED FIX: network gate task3 test filter
 
-**Tetikleyen red:** main `315f60b` üzerinde `Network Hardening (Task 11.12)` job'u isim kanaryasında kırıldı.
+**Tetikleyen red:** main `315f60b` üzerinde `Network Hardening ()` job'u isim kanaryasında kırıldı.
 **Kök neden:** `scripts/check-network-hardening-gate.sh` `task3_peer_rate_limit_security_profile` testini zorunlu tutuyor; workflow ise yalnızca `task11_12` ve `h5_` filtrelerini koşturduğu için test loga düşmüyordu.
 **Fix:** Network hardening workflow'a `cargo test --lib task3_peer_rate_limit_security_profile` satırı eklendi ve aynı gate loguna append edildi.
 **Lokal doğrulama:** `bash ./scripts/check-network-hardening-gate.sh --self-test` ✅, `git diff --check` ✅ ve workflow statik filtre taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
@@ -5959,13 +5959,13 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 13:42 UTC+03:00] ARENA1 — Task 11.16 ADIM 1 PUSH HAZIR: governance invariant gate
+### [2026-07-21 13:42 UTC+03:00] ARENA1 —  ADIM 1 PUSH HAZIR: governance invariant gate
 
 **Kapsam:** Minimal on-chain governance için parameter-only whitelist ve activation timelock çekirdeği başlatıldı.
 **Ne eklendi:** `GOVERNANCE_PARAMETER_WHITELIST`, `validate_governance_parameter_update`, parameter proposal activation delay (`GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS`) ve `Proposal::activation_ready`.
 **Executor hizası:** `AccountState::advance_epoch` artık `Passed` proposal'ları yalnızca `activation_epoch` geldiğinde yürütür; legacy proposal'lar `end_epoch` semantiğini korur.
 **Regresyon kilitleri:** `task11_16_governance_rejects_non_whitelisted_parameter_proposal`, `task11_16_governance_rejects_invalid_parameter_value`, `task11_16_governance_sets_parameter_activation_timelock`, `task11_16_governance_parameter_update_waits_for_activation_epoch`.
-**CI kapısı:** `Governance Invariants (Task 11.16)` job'u ve `scripts/check-governance-invariants.sh` isim kanaryası eklendi.
+**CI kapısı:** `Governance Invariants ()` job'u ve `scripts/check-governance-invariants.sh` isim kanaryası eklendi.
 **Lokal doğrulama:** `bash ./scripts/check-governance-invariants.sh --self-test` ✅, `git diff --check` ✅ ve statik governance/workflow taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -5978,7 +5978,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 ### [2026-07-21 13:48 UTC+03:00] ARENA1 — CI RED FIX: governance ADIM rustfmt hizalama
 
 **Tetikleyen red:** main `69cc962` üzerinde `Budlum Core` job'u `cargo fmt --all -- --check` adımında kırıldı.
-**Kök neden:** Task 11.16 account testindeki son `assert_eq!` rustfmt çok satırlı biçim bekliyordu.
+**Kök neden:**  account testindeki son `assert_eq!` rustfmt çok satırlı biçim bekliyordu.
 **Fix:** CI rustfmt diff'i birebir uygulandı; semantik değişmedi.
 **Lokal doğrulama:** `git diff --check` ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
@@ -6033,7 +6033,7 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
    - `src/crypto/mainnet_policy.rs` altındaki key policy kuralları tamamen fail-closed çalışmaktadır.
    - Mainnet üzerinde `hsm_mock` veya yerel disk-backed `ValidatorKeys` kullanımı kesinlikle engellenerek sürecin donanımsal YubiHSM 2 / PKCS#11 katmanına zorlanması (strict H4 key policy) doğrulanmıştır.
 
-3. **PRODUCTION_RUNBOOK (Task 0.37):**
+3. **PRODUCTION_RUNBOOK ():**
    - `docs/operations/PRODUCTION_RUNBOOK.md` ve `docs/operations/HSM_BLS_PQ_POLICY.md` operasyon rehberleri taranmış ve YubiHSM 2 standardıyla tam uyumlu hale getirilmiştir.
 
 #### Budlumdevnet:
@@ -6065,14 +6065,14 @@ Co-authored-by: ARENA3 <arena3@budlum.ai>
 
 ---
 
-### [2026-07-21 14:05 UTC+03:00] ARENA1 — Task 11.16 ADIM 2 PUSH HAZIR: governance vote-weight snapshot
+### [2026-07-21 14:05 UTC+03:00] ARENA1 —  ADIM 2 PUSH HAZIR: governance vote-weight snapshot
 
 **Kapsam:** Minimal governance vote manipülasyonu koruması güçlendirildi.
 **Ne eklendi:** `Proposal::voter_weights`, `vote_weight_of`, `reduce_vote_weight`; vote ağırlığı oy anında snapshot edilir ve unstake sonrası yalnızca snapshot edilmiş ağırlık azaltılır.
 **Güvenlik sınırı:** Voter adresi `voters` içinde kalır; stake taşınıp/yeniden stake edilse bile aynı adres aynı proposal'da tekrar oy veremez ve vote weight double-count edilemez.
 **Executor hizası:** `TransactionType::Unstake` artık aktif proposal vote ağırlığını manuel saturating subtract yerine `proposal.reduce_vote_weight(...)` ile düşürür.
 **Regresyon kilitleri:** `task11_16_governance_records_vote_weight_snapshot`, `task11_16_governance_stake_transfer_cannot_double_count_vote_weight`.
-**CI kapısı:** `scripts/check-governance-invariants.sh` bu iki yeni Task 11.16 isim kilidini zorunlu tutar.
+**CI kapısı:** `scripts/check-governance-invariants.sh` bu iki yeni  isim kilidini zorunlu tutar.
 **Lokal doğrulama:** `bash ./scripts/check-governance-invariants.sh --self-test` ✅, `git diff --check` ✅ ve statik governance/executor taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -6082,13 +6082,13 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 14:18 UTC+03:00] ARENA1 — Task 11.18 ADIM 1 PUSH HAZIR: PoA compliance isolation primitive
+### [2026-07-21 14:18 UTC+03:00] ARENA1 —  ADIM 1 PUSH HAZIR: PoA compliance isolation primitive
 
 **Kapsam:** MASAK/AML uyum hook'larının sadece PoA domain'de çalışacağı ilk saf registry primitive'i eklendi.
 **Ne eklendi:** `src/registry/poa_compliance.rs`, `PoaComplianceRegistry`, `ComplianceDomainKind`, screening kayıtları, freeze kayıtları ve append-only audit event listesi.
 **İzolasyon sınırı:** `screen_address` ve `freeze_suspicious` permissionless domain'de fail-closed döner; `is_frozen(Permissionless, addr)` PoA freeze state'ini asla yansıtmaz.
 **Regresyon kilitleri:** `task11_18_poa_compliance_rejects_permissionless_screening`, `task11_18_poa_compliance_screening_updates_status`, `task11_18_poa_compliance_requires_admin_for_freeze`, `task11_18_poa_compliance_freeze_is_poa_only`, `task11_18_poa_compliance_audit_log_is_append_only`, `task11_18_poa_compliance_rejects_zero_evidence_hashes`.
-**CI kapısı:** `PoA Compliance Isolation (Task 11.18)` job'u ve `scripts/check-poa-compliance-gate.sh` isim kanaryası eklendi.
+**CI kapısı:** `PoA Compliance Isolation ()` job'u ve `scripts/check-poa-compliance-gate.sh` isim kanaryası eklendi.
 **Lokal doğrulama:** `bash ./scripts/check-poa-compliance-gate.sh --self-test` ✅, `git diff --check` ✅ ve statik module/workflow taraması ✅. Rust toolchain sandbox'ta yok; CI tek hakem.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -6134,7 +6134,7 @@ Co-authored-by: ARENA4 <arena4@budlum.ai>
 
 ---
 
-### [2026-07-21 14:42 UTC+03:00] ARENA1 — Task 11.18 ADIM 2 PUSH HAZIR: PoA audit export helpers
+### [2026-07-21 14:42 UTC+03:00] ARENA1 —  ADIM 2 PUSH HAZIR: PoA audit export helpers
 
 **Kapsam:** PoA compliance audit trail için raporlama/export helper'ları eklendi.
 **Ne eklendi:** `PoaComplianceRegistry::export_audit_csv` ve `export_audit_json`; append-only audit event listesi CSV/JSON raporlanabilir hale geldi.
@@ -6149,7 +6149,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 14:55 UTC+03:00] ARENA1 — Task 11.18 ADIM 3 PUSH HAZIR: PoA travel-rule metadata hash
+### [2026-07-21 14:55 UTC+03:00] ARENA1 —  ADIM 3 PUSH HAZIR: PoA travel-rule metadata hash
 
 **Kapsam:** PoA compliance modülüne travel-rule metadata hash-on-chain primitive'i eklendi.
 **Ne eklendi:** `TravelRuleRecord`, `record_travel_rule_metadata`, `travel_rule` query helper'ı ve `TravelRuleMetadataRecorded` audit action.
@@ -6179,11 +6179,11 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 15:10 UTC+03:00] ARENA1 — Task 11.20 ADIM 1 PUSH HAZIR: audit prep + validator key policy gate
+### [2026-07-21 15:10 UTC+03:00] ARENA1 —  ADIM 1 PUSH HAZIR: audit prep + validator key policy gate
 
-**Kapsam:** Mainnet lockdown/audit hazırlığı için ilk Task 11.20 evidence paketi oluşturuldu.
+**Kapsam:** Mainnet lockdown/audit hazırlığı için ilk  evidence paketi oluşturuldu.
 **Ne eklendi:** `docs/audit_prep/README.md` audit evidence map'i, `docs/VALIDATOR_KEY_MANAGEMENT.md` YubiHSM 2 / PKCS#11 validator key policy baseline'ı ve `scripts/check-audit-prep-gate.sh`.
-**CI kapısı:** `Audit Prep (Task 11.20)` job'u; audit-prep index, validator key-management, HSM policy ve production runbook varlığını/markerlarını doğrular.
+**CI kapısı:** `Audit Prep ()` job'u; audit-prep index, validator key-management, HSM policy ve production runbook varlığını/markerlarını doğrular.
 **Lokal doğrulama:** `bash ./scripts/check-audit-prep-gate.sh --self-test` ✅, `bash ./scripts/check-audit-prep-gate.sh .` ✅, `git diff --check` ✅.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -6193,11 +6193,11 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 15:18 UTC+03:00] ARENA1 — Task 11.20 ADIM 2 PUSH HAZIR: threat model v2 closure matrix
+### [2026-07-21 15:18 UTC+03:00] ARENA1 —  ADIM 2 PUSH HAZIR: threat model v2 closure matrix
 
-**Kapsam:** `docs/THREAT_MODEL.md` Task 11.20 v2 seviyesine yükseltildi.
-**Ne eklendi:** Task 11.20 mitigation closure matrix, residual risk register ve CI-yargıcı notu. Audit-prep evidence map artık threat model v2 satırını içeriyor.
-**CI kapısı:** `scripts/check-audit-prep-gate.sh` artık `Threat Model v2`, `Task 11.20 Mitigation Closure Matrix` ve `Residual Risk Register` markerlarını zorunlu kılar.
+**Kapsam:** `docs/THREAT_MODEL.md`  v2 seviyesine yükseltildi.
+**Ne eklendi:**  mitigation closure matrix, residual risk register ve CI-yargıcı notu. Audit-prep evidence map artık threat model v2 satırını içeriyor.
+**CI kapısı:** `scripts/check-audit-prep-gate.sh` artık `Threat Model v2`, ` Mitigation Closure Matrix` ve `Residual Risk Register` markerlarını zorunlu kılar.
 **Lokal doğrulama:** `bash ./scripts/check-audit-prep-gate.sh --self-test` ✅, `bash ./scripts/check-audit-prep-gate.sh .` ✅, `git diff --check` ✅.
 **Budlumdevnet:** dokunulmadı.
 **Ne bekliyor:** Push + ana CI pipeline takibi.
@@ -6207,7 +6207,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 15:24 UTC+03:00] ARENA1 — Task 11.20 ADIM 3 PUSH HAZIR: mainnet lockdown checklist
+### [2026-07-21 15:24 UTC+03:00] ARENA1 —  ADIM 3 PUSH HAZIR: mainnet lockdown checklist
 
 **Kapsam:** Launch-lock için elle denetlenecek ana checklist ve waiver policy oluşturuldu.
 **Ne eklendi:** `docs/MAINNET_LOCKDOWN_CHECKLIST.md`; lock criteria, manual launch-lock review, emergency procedures, waiver policy ve lock output formatı.
@@ -6221,9 +6221,9 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-21 15:32 UTC+03:00] ARENA1 — Task 11.20 ADIM 4 PUSH HAZIR: mainnet readiness review ledger
+### [2026-07-21 15:32 UTC+03:00] ARENA1 —  ADIM 4 PUSH HAZIR: mainnet readiness review ledger
 
-**Kapsam:** MR-1..MR-10 ana karar seti için Task 11.20 audit-prep review ledger eklendi.
+**Kapsam:** MR-1..MR-10 ana karar seti için  audit-prep review ledger eklendi.
 **Ne eklendi:** `docs/audit_prep/MAINNET_READINESS_REVIEW.md`; MR-1..MR-10 review ledger, launch-lock sign-off listesi, evidence bundle ve review conclusion template.
 **CI kapısı:** `scripts/check-audit-prep-gate.sh` readiness review dosyasını ve markerlarını zorunlu tutar; audit-prep evidence map'e readiness review satırı eklendi.
 **Lokal doğrulama:** `bash ./scripts/check-audit-prep-gate.sh --self-test` ✅, `bash ./scripts/check-audit-prep-gate.sh .` ✅, `git diff --check` ✅.
@@ -6235,7 +6235,7 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 ---
 
-### [2026-07-22 15:30 UTC+03:00] ARENA1 — Task 13.5 oturumu: karar görevı + D3 + D2 Görev A/B/C/E + budlum-core fix
+### [2026-07-22 15:30 UTC+03:00] ARENA1 —  oturumu: karar görevı + D3 + D2  A/B/C/E + budlum-core fix
 
 **Karar görevı (ask_user, Ayaz onayı) — 9 karar kayıt altında (`docs/MAINNET_KARARLAR_2026-07-22.md`):**
 - D1 Relayer = PERMISSIONLESS · D2 Gizlilik = v1/Poseidon/paralel-subtree/kullanıcı-view-key/TEE-opt-in · D3 Legacy proof = kaldır · D4 Registry = v1 birleştir
@@ -6245,18 +6245,18 @@ Co-authored-by: ARENA1 <arena1@budlum.ai>
 
 **D3 (legacy PoW functional removal) — TAMAM, CI yeşil:** `PoWFinalityAdapter` always-reject (`f40bc84`), mint-gating zaten karşılanmıştı (`blockchain.rs:1151`), 2 kırılan test düzeltildi (`f74a6b9`).
 
-**D2 gizlilik katmanı — Görev A/B/C/E TAMAM, CI yeşil:**
-- Görev A: 3 opcode (0x20-0x22 PrivacyCommit/NullifierCheck/SumConservation) + MainnetActivation gate (`388f581`→`64b6d9c`)
-- Görev B: Poseidon ZATEN mevcut (`poseidon4_hash`, Goldilocks) — keşif
-- Görev C: note/UTXO registry (bud-state, izole, double-spend önleme) (`574f79e`)
-- Görev E: cüzdan TEE opt-in toggle (wallet-core, Bölüm 10 #5) (`ca4329b`)
-- Görev D (AIR constraints) **kriptografik tasarım spec'i olarak dokümante** (`9cc226f`) — plonky3_air.rs 1519 satır, sandbox proof-gen OOM → kör push reddedildi, crypto review gerekir.
+**D2 gizlilik katmanı —  A/B/C/E TAMAM, CI yeşil:**
+-  A: 3 opcode (0x20-0x22 PrivacyCommit/NullifierCheck/SumConservation) + MainnetActivation gate (`388f581`→`64b6d9c`)
+-  B: Poseidon ZATEN mevcut (`poseidon4_hash`, Goldilocks) — keşif
+-  C: note/UTXO registry (bud-state, izole, double-spend önleme) (`574f79e`)
+-  E: cüzdan TEE opt-in toggle (wallet-core, Bölüm 10 #5) (`ca4329b`)
+-  D (AIR constraints) **kriptografik tasarım spec'i olarak dokümante** (`9cc226f`) — plonky3_air.rs 1519 satır, sandbox proof-gen OOM → kör push reddedildi, crypto review gerekir.
 
 **budlum-core (ayrı repo) build fix:** `h7_supply_chain_gate_files_present` ci.yml'de gitleaks/deny/coverage olmamasından düşüyordu → 3 supply-chain job'u eklendi (`7deb46e`).
 
 **Koordinasyon:** ARENA2'nin D4 (registry unification, `7abea47`) + fuzz fix (`db44fd4`) integre edildi (talimatımı uygulamış — teşekkür). Modüller bağımsız (ben: proof/bud-isa/vm/state/wallet; ARENA2: registry/blockchain), çakışma yok.
 
-**Budlumdevnet:** dokunulmadı. **Engel:** D2 Görev D AIR crypto-blocklu (kör push yok). **Sıradaki:** Görev D için crypto-review kararı / veya ARENA2/3 koordinasyonu için açık.
+**Budlumdevnet:** dokunulmadı. **Engel:** D2  D AIR crypto-blocklu (kör push yok). **Sıradaki:**  D için crypto-review kararı / veya ARENA2/3 koordinasyonu için açık.
 
 Co-authored-by: ARENA1 <arena1@budlum.ai>
 

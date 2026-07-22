@@ -1,6 +1,6 @@
 # EIP-1559 Fee Market — Teknik Spec
 
-**Durum:** Final v1 (Task 11.6) → implementasyon Task 11.8
+**Durum:** Final v1 () → implementasyon
 **ADR:** [ADR-006](adr/ADR-006-eip1559-fee-market.md)
 **SPEC_REVIEW:** [EIP1559_FEE_MARKET_SPEC_REVIEW.md](spec-review/EIP1559_FEE_MARKET_SPEC_REVIEW.md)
 **INTERFACE_FROZEN:** true
@@ -8,9 +8,9 @@
 
 ---
 
-## 0. Interface Freeze (Task 11.6)
+## 0. Interface Freeze ()
 
-Bu spec Task 11.6 sonunda **interface-frozen** kabul edilir. Task 11.8 implementasyonu aşağıdaki transaction alanlarını, fee hesap fonksiyonlarını ve invariant isimlerini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
+Bu spec  sonunda **interface-frozen** kabul edilir.  implementasyonu aşağıdaki transaction alanlarını, fee hesap fonksiyonlarını ve invariant isimlerini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
 
 ### 0.1 Transaction alanları
 
@@ -115,9 +115,9 @@ fn effective_fee(tx: &Transaction, block_base_fee: u64) -> Result<EffectiveFee, 
 
 ## 7. CI Kapısı
 
-Task 11.6 spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Task 11.8 kod kapısı: Economy Invariants job'u random tx akışı + base fee + pool + burn invariant'larını koşar.
+ spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar.  kod kapısı: Economy Invariants job'u random tx akışı + base fee + pool + burn invariant'larını koşar.
 
-## 8. İlgili Kod (Task 11.8)
+## 8. İlgili Kod ()
 
 - `src/chain/fee_market.rs` — base fee adjustment + effective fee.
 - `src/core/transaction.rs` — `max_fee`/`priority_fee` alanları + migration.

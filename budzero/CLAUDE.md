@@ -44,7 +44,7 @@ izinli kurallarını diğer domain'lere sızdırma veya tersini yapma.
 
 ```
 KAPSAM: ZK-STARK sanal makine, Plonky3 0.5.2 üzerine.
-MEVCUT DURUM: Task 0 tamam (31 opcode, 51 test). Task 1'e geçiliyor.
+MEVCUT DURUM:  tamam (31 opcode, 51 test). 'e geçiliyor.
 
 - BudL_SPEC.md dosyası YOKSA önce onu üret (syntax, tip sistemi, opcode
   eşlemesi) ve bunu onaylat — spec olmadan derleyici genişletme yaptırma.
@@ -83,12 +83,12 @@ KABUL KRİTERLERİ:
 
 ## 4. Notlar
 
-- Task 0.37 monorepo düzeninde bu workspace `budlum-core` tarafından `bud-isa`,
+-  monorepo düzeninde bu workspace `budlum-core` tarafından `bud-isa`,
   `bud-vm`, `bud-proof` in-tree path crate'leri olarak tüketilir. Harici
   sibling checkout veya commit pin'i kullanma.
 - `budlum-core` tarafında permissionless registry ve kanonik `SlashingReport`
   evidence formatı uygulanmıştır (bkz. `budlum-core/src/registry/`).
-- **Permissionless prover entegrasyonu TAMAMLANDI** (Task 0.06, bkz.
+- **Permissionless prover entegrasyonu TAMAMLANDI** (, bkz.
   `budlum-core/src/prover/mod.rs`): Model B (tam açık gönderim). Kanıt
   `CrossDomainMessage` (kind=Custom("zk-proof")) ile core'a gider; core `bud_proof`
   ile NATIVE STARK doğrular; kayıt (`roles::PROVER`) sadece ödül için opsiyonel.

@@ -39,7 +39,7 @@
 ### H4: Relayer Skeleton Authorization
 **Vulnerability:** The `UniversalRelay` transaction currently only logs a message. It does not cryptographically link the Budlum signature to the external chain's transaction format (EVM RLP, Solana Compact, etc.).
 **Hacker Trick:** "I'll spoof these logs to make it look like I authorized a master key transaction when I didn't."
-**Action:** Required real cryptographic adapters for each chain in Task 5.
+**Action:** Required real cryptographic adapters for each chain in .
 
 ### H5: Gossip Pruning Poisoning
 **Vulnerability:** If the `StoragePrune` command could be triggered via P2P (Gossip), a hacker could send fake prune commands for CIDs they don't own to delete the network's data.

@@ -63,7 +63,7 @@ NTE2[85] = ("Belediyeye bir usulsüzlüğü ihbar ederken küçük bir pul ücre
 "Bu kural iki işe birden yarar: boş ihbar yağmuru engellenir ve ciddi tanık, 'bana dokunmaz ki' demeden konuşmaya teşvik edilir. "
 "Bedel kalkarsa ihbar kapısı sıradan bir şikâyet kutusuna döner ve gerçek suçlar binlerce laf arasında kaybolur; bedel çok büyürse de sadece varlıklı kesimin sesi duyulur hale gelir — dengesi hayatidir ve bu soru tam da o dengeyi işaretliyor.")
 
-NTE2[86] = ("Bir otelin restoranının tüm menüsü hazır olmasına rağmen, bizotel gıda sertifikası gelmeden yemek satışı yapmaması gibi: Budlum'un depolama ekonomisinin tam mekanikleri yazılmış olmasına rağmen, paranın gerçekten basılıp yakıldığı görev, emanet kasası hazır olana kadar tetiklenmiyor. "
+NTE2[86] = ("Bir otelin restoranının tüm menüsü hazır olmasına rağmen, bizotel gıda sertifikası gelmeden yemek satışı yapmaması gibi: Budlum'un depolama ekonomisinin tam mekanikleri yazılmış olmasına rağmen, paranın gerçekten basılıp yakıldığı , emanet kasası hazır olana kadar tetiklenmiyor. "
 "Bu 'ekipte birikme ama sahada durdur' pozisyonu, hem hazırlıklı kalmayı hem de riski doğmadan öldürmeyi bilen bir sabırdır; sistem, eksik son parçayı beklemeden geçebileceği her görevyı önceden bitirmiştir. "
 "Aceleye gelseydi ilk açıklıkta 'para kayboldu' ya da 'haksız basım oldu' haberi çıkardı; ekonomik bir sistemde bu iki haberden birinin çıkması, dinerini taşınmaz hale getirmek için yeterlidir ve tekrar güveni inşa etmek, çoğu zaman baştan inşadan uzun sürer.")
 
@@ -111,7 +111,7 @@ NTE2[97] = ("Bir belediye binasının danışma masası gibi: vatandaş gelir, i
 "Budlum'da da dış dünyanın sisteme konuştuğu resmi pencereler bu masada toplanmıştır: dosya kaydı, anlaşma başlatma, kontrol takibi, isim sorgulama, köprü hazırlığı. Bu masalar kapanırsa kasabaya dışarıdan ulaşmak imkânsızlaşır; ve her yeni istek, tek tek yazılmış özel mektuplara döner. "
 "Masadan hiç mahrum kalmayacak şekilde işletilen bu hizmet yapısı, topluluğun dış dünyayla kurduğu asıl sözleşmedir; burada yapılan her kesinti ya da keyfi kısıtlama, ilk gün olmasa da ileride mutlaka bir 'kamu masasının herkese eşit açık olmadığı' feryadıyla karşılaşır.")
 
-NTE2[98] = ("Bir hastane ameliyathanesinde 'cerrah kim, anestezi kim, hemşire kim — kimse kimin işine karışmaz ama herkes kimin ne yaptığını bilir' listesi gibi: Budlum'u geliştiren zekalar arasında da görev, zamanlama ve teslim raporu paylaşımı kuralları var. "
+NTE2[98] = ("Bir hastane ameliyathanesinde 'cerrah kim, anestezi kim, hemşire kim — kimse kimin işine karışmaz ama herkes kimin ne yaptığını bilir' listesi gibi: Budlum'u geliştiren zekalar arasında da , zamanlama ve teslim raporu paylaşımı kuralları var. "
 "Bu düzen sayesinde iki zihin aynı tezgâhta çakışmadan çalışır; biri 'bu bende' diyebilir, diğeri o dosyaya girmeden raporunu okuyup ilerler. "
 "Kural olmasa iki zekâ aynı odada birbirinin işini ezer; ve bundan doğan küslük, hem zaman hem de kaliteyi yer — ortak emek ortak değer üretmek yerine ortak gürültüye döner. Bu disiplin mekanik bir kural değil, ekip içi saygının rezervuarıdır.")
 

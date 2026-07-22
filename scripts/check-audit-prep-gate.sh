@@ -24,9 +24,9 @@ check_root() {
   [[ -f "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" ]] || fail "missing docs/audit_prep/CI_STABILITY_WINDOW.md"
 
   check_contains "$root/docs/THREAT_MODEL.md" "Threat Model v2"
-  check_contains "$root/docs/THREAT_MODEL.md" "Task 11.20 Mitigation Closure Matrix"
+  check_contains "$root/docs/THREAT_MODEL.md" " Mitigation Closure Matrix"
   check_contains "$root/docs/THREAT_MODEL.md" "Residual Risk Register"
-  check_contains "$root/docs/audit_prep/README.md" "Task 11.20 Audit Prep Index"
+  check_contains "$root/docs/audit_prep/README.md" " Audit Prep Index"
   check_contains "$root/docs/audit_prep/README.md" "threat model v2"
   check_contains "$root/docs/audit_prep/README.md" "Evidence map"
   check_contains "$root/docs/audit_prep/README.md" "Known limits"
@@ -52,7 +52,7 @@ check_root() {
   check_contains "$root/docs/audit_prep/BRANCH_PROTECTION_REVIEW.md" "Required checks list"
   check_contains "$root/docs/operations/GOVERNANCE_PARAMETER_RUNBOOK.md" "Governance Parameter Rollout"
   check_contains "$root/docs/operations/GOVERNANCE_PARAMETER_RUNBOOK.md" "Parameter whitelist"
-  check_contains "$root/docs/MAINNET_READINESS.md" "Task 11.20 Snapshot"
+  check_contains "$root/docs/MAINNET_READINESS.md" " Snapshot"
   check_contains "$root/docs/MAINNET_READINESS.md" "28/28 success"
   echo "Audit prep gate OK"
 }
@@ -64,11 +64,11 @@ self_test() {
   mkdir -p "$tmp/docs/audit_prep" "$tmp/docs/operations"
   cat > "$tmp/docs/THREAT_MODEL.md" <<'DOC'
 # Threat Model v2
-## Task 11.20 Mitigation Closure Matrix
+##  Mitigation Closure Matrix
 ## Residual Risk Register
 DOC
   cat > "$tmp/docs/audit_prep/README.md" <<'DOC'
-# Task 11.20 Audit Prep Index
+#  Audit Prep Index
 threat model v2
 ## Evidence map
 ## Known limits

@@ -1,16 +1,16 @@
-# Budlum — Task 11.2: Genişletme (Genesis + Coverage + Fuzz + BudL + Security + Wallet-Core)
+# Budlum — : Genişletme (Genesis + Coverage + Fuzz + BudL + Security + Wallet-Core)
 
-> **Yazar:** ARENA1 (görev yöneticisi), 2026-07-19.
+> **Yazar:** ARENA1 ( yöneticisi), 2026-07-19.
 > **Temel:** main `8ec7059`.
 > **İlişki:** `docs/BUDLUM_TASK11.md` (Mainnet Lockdown — V-bulgu kapanışı) tamamlandıktan
-> sonra veya paralel olarak yürütülür. Task 11.2, ana zincir kapasitesini genişletir;
-> Task 11 ise mainnete hazırlik kapanışıdır.
-> **Kaynak:** Kullanıcı emri (6 görev + wallet-core permissionless notu).
-> Her görev için: kapsam, tasarım, kabul kriterleri, riskler, karar kapıları.
+> sonra veya paralel olarak yürütülür. , ana zincir kapasitesini genişletir;
+>  ise mainnete hazırlik kapanışıdır.
+> **Kaynak:** Kullanıcı emri (6  + wallet-core permissionless notu).
+> Her  için: kapsam, tasarım, kabul kriterleri, riskler, karar kapıları.
 
 ---
 
-## Görev 1: Genesis Config — 4 Domain Bootstrap + İlk Token Dağılımı
+## : Genesis Config — 4 Domain Bootstrap + İlk Token Dağılımı
 
 ### Kapsam
 `config/mainnet-genesis.json` + `src/chain/genesis.rs::mainnet_genesis()` içinde
@@ -50,14 +50,14 @@ Community/Liquidity/Ecosystem/Team/Burn Reserve, toplam 100T $BUD).
 
 ---
 
-## Görev 2: Coverage — cargo-tarpaulin CI + README Badge
+## : Coverage — cargo-tarpaulin CI + README Badge
 
 ### Kapsam
 cargo-tarpaulin'i CI'ya ekle (Coverage job'u llvm-cov'den tarpaulin'e geçiş
 veya paralel) + README'ye coverage badge koy.
 
 ### Mevcut durum
-- Coverage job: `nextest + llvm-cov` (Task 8.4) — sürekli flake (sled lock,
+- Coverage job: `nextest + llvm-cov` () — sürekli flake (sled lock,
   test bug). Tarpaulin bağımlılığı YOK.
 - README'de coverage badge YOK.
 
@@ -81,7 +81,7 @@ veya paralel) + README'ye coverage badge koy.
 
 ---
 
-## Görev 3: Fuzz Altyapısı — Consensus + Relayer + ZK Target'ları
+## : Fuzz Altyapısı — Consensus + Relayer + ZK Target'ları
 
 ### Kapsam
 cargo-fuzz target'ları: consensus state transition, relayer escrow, ZK verifier
@@ -115,7 +115,7 @@ giriş noktaları.
 
 ---
 
-## Görev 4: BudL Dil Spesifikasyonu — SPEC.md + Struct/Stdlib Compiler Desteği
+## : BudL Dil Spesifikasyonu — SPEC.md + Struct/Stdlib Compiler Desteği
 
 ### Kapsam
 BudZKVM içinde `BudL_SPEC.md` yaz (dil grameri + tipler + opcode'lar),
@@ -156,7 +156,7 @@ ardından struct + stdlib desteğini compiler'a (`budzero/bud-compiler/`) ekle.
 
 ---
 
-## Görev 5: (Düşük Öncelik) SECURITY.md / Bug Bounty Taslağı
+## : (Düşük Öncelik) SECURITY.md / Bug Bounty Taslağı
 
 ### Kapsam
 SECURITY.md'yi bug bounty planı ile güncelle: 4 severity tier, 90 gün embargo,
@@ -186,7 +186,7 @@ Discord/Telegram triage süreci.
 
 ---
 
-## Görev 6: Wallet-Core — BIP39+SLIP-0010, UniFFI+WASM Bindings (Permissionless Relayer)
+## : Wallet-Core — BIP39+SLIP-0010, UniFFI+WASM Bindings (Permissionless Relayer)
 
 ### Kapsam
 Kullanıcı tarafı wallet kütüphanesi: BIP39 mnemonic + SLIP-0010 ed25519
@@ -257,7 +257,7 @@ bir relayer (stake ile) taşır. Wallet-core'da:
 
 ## Öncelik Matrisi
 
-| Sıra | Görev | Tip | Risk | Mainnet-engeli? |
+| Sıra |  | Tip | Risk | Mainnet-engeli? |
 |---|---|---|---|---|
 | 1 | **Genesis Config** (4 domain + token) | kod | 🟡 genesis hash değişimi | 🔴 EVET (MR-6) |
 | 2 | **Fuzz Altyapısı** (3 target) | fuzz | 🟡 karmaşık | 🟡 mainnet-prep |
@@ -268,9 +268,9 @@ bir relayer (stake ile) taşır. Wallet-core'da:
 
 ---
 
-## Koordinasyon (Görev Yöneticisi)
+## Koordinasyon ( Yöneticisi)
 
-| Görev | Domain | Sorumlu |
+|  | Domain | Sorumlu |
 |---|---|---|
 | Genesis Config | `src/chain/genesis.rs` | ARENA2 (chain) + ARENA1 review |
 | Coverage | `.github/workflows/` | ARENA3 (CI/fuzz domain) |

@@ -21,7 +21,7 @@ This document tracks the verification status of the Multi-Consensus Settlement L
 | `test_start_prevote_task_creates_aggregator` | `start_prevote_task()` creates `FinalityAggregator` | ✅ Passed |
 | `test_handle_prevote_rejects_when_no_aggregator` | Prevote rejected before aggregator setup | ✅ Passed |
 | `test_handle_precommit_rejects_when_no_aggregator` | Precommit rejected before aggregator setup | ✅ Passed |
-| `test_actor_produce_block_starts_prevote_task_on_checkpoint` | `ChainActor` auto-starts prevote task at checkpoint | ✅ Passed |
+| `test_actor_produce_block_starts_prevote_task_on_checkpoint` | `ChainActor` auto-starts prevote  at checkpoint | ✅ Passed |
 | `test_actor_prevote_accepted_after_produce_checkpoint` | Prevote accepted after producing checkpoint block | ✅ Passed |
 | `test_sign_with_signer` | `sign_with_signer()` via `ConsensusSigner` trait | ✅ Passed |
 

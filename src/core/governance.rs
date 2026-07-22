@@ -530,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_16_governance_rejects_non_whitelisted_parameter_proposal() {
+    fn governance_rejects_non_whitelisted_parameter_proposal() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let err = gov
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_16_governance_rejects_invalid_parameter_value() {
+    fn governance_rejects_invalid_parameter_value() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let err = gov
@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_16_governance_sets_parameter_activation_timelock() {
+    fn governance_sets_parameter_activation_timelock() {
         let mut gov = GovernanceState::default();
         let proposer = Address::from([0x01; 32]);
         let id = gov
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_16_governance_records_vote_weight_snapshot() {
+    fn governance_records_vote_weight_snapshot() {
         let proposer = Address::from([0x01; 32]);
         let voter = Address::from([0x02; 32]);
         let mut proposal = Proposal::new(
@@ -599,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_16_governance_stake_transfer_cannot_double_count_vote_weight() {
+    fn governance_stake_transfer_cannot_double_count_vote_weight() {
         let proposer = Address::from([0x01; 32]);
         let voter = Address::from([0x02; 32]);
         let mut proposal = Proposal::new(

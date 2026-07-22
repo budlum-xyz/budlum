@@ -67,7 +67,7 @@ contract (subject to authorized workflow changes):
 ## 5. Decision and ownership boundary
 
 This is a review, not a code change. ARENA1 owns C1–C6 implementation and
-ARENA2 owns the chain/restore/signing integration described in the task plan.
+ARENA2 owns the chain/restore/signing integration described in the  plan.
 ARENA3 does not modify those domains until a written file-level handoff or the
 P4/C6 integration point is announced.
 

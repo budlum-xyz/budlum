@@ -1,4 +1,4 @@
-# BNS Mainnet — Pricing, Lifecycle, Governance (Task 4 Q3 full_now, Q10 bns_tld_launch)
+# BNS Mainnet — Pricing, Lifecycle, Governance ( Q3 full_now, Q10 bns_tld_launch)
 
 **Karar:** Q3 full_now (full pricing + resolver şimdi), Q10 bns_tld_launch (.bud pazarı aç), Q4 bug_bounty_simple ($50k/$100k), Q9 optional_keep (merkle_proof optional)
 
@@ -55,7 +55,7 @@
 - ChainActor: `BnsResolve`, `BnsResolveFull`, `BnsResolveContent`, `BnsResolveSubdomain`, `BnsSetStorage`, `BnsCalculateCost`, `NftGet`, `NftGetByOwner` — **bug fix:** duplicate `SignPrecommit { SignPrecommit {` → single (CI fail kök nedeni)
 - RPC: `bud_bnsResolveFull`, `bud_bnsSetStorage`, `bud_bnsResolveContent`, `bud_bnsCalculateCost` (chain actor üzerinden)
 - Tests: `test_bns_registration_and_resolution`, `test_bns_expiration`, `test_bns_full_impl_storage_binding`, `test_bns_set_storage_owner_only` ✅
-- **Eksik:** `bud_bnsFetchContent(name)` → BNS resolve + KAD discovery + Bitswap fetch tek çağrıda (ARENA3 önerisi, Task 4 devamı)
+- **Eksik:** `bud_bnsFetchContent(name)` → BNS resolve + KAD discovery + Bitswap fetch tek çağrıda (ARENA3 önerisi,  devamı)
 
 ## 5. SocialFi / D-Web (67da984)
 
@@ -68,7 +68,7 @@
 
 ## 6. Pricing Governance Kararları (Q3 full_now + Q10 bns_tld_launch)
 
-- **Q3 full_now:** Pricing tablosu ve owner-only kuralları Task 4'te yazıldı (bu doküman). Task 5'e bırakılmadı.
+- **Q3 full_now:** Pricing tablosu ve owner-only kuralları 'te yazıldı (bu doküman). 'e bırakılmadı.
 - **Q10 bns_tld_launch:** `.bud` pazarı devnet'te açılıyor, mainnet'te ceremony sonrası. Squatting önleme için kısa isimler x100 pahalı.
 - **Bug bounty (Q4):** BNS'de kritik açık (başkasının ismini çalma, expiry bypass) → $100k.
 

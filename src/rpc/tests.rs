@@ -564,7 +564,7 @@ mod rpc_tests {
 
     /// Task 3 §0.3: empty registry → count 0, empty operators list.
     #[tokio::test]
-    async fn task3_storage_active_operators_empty() {
+    async fn storage_active_operators_empty() {
         let (server, _) = setup().await;
         let res = server.storage_active_operators().await.unwrap();
         assert_eq!(res["roleId"], serde_json::json!(5));
@@ -575,7 +575,7 @@ mod rpc_tests {
 
     /// Task 3 §0.3: registered STORAGE_OPERATOR appears in RPC listing.
     #[tokio::test]
-    async fn task3_storage_active_operators_lists_registered() {
+    async fn storage_active_operators_lists_registered() {
         let (server, chain) = setup().await;
 
         let operator = Address::from_hex(&"0a".repeat(32)).unwrap();

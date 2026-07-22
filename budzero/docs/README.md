@@ -20,7 +20,7 @@ BudZKVM, modüler bir yaklaşımla tasarlanmıştır. Kitap boyunca aşağıdaki
 
 ## Güncel Durum Notu
 
-BudZKVM artık 31 opcode'luk **tamamen production-ready** bir ZKVM'dir. Tüm opcode'ların AIR constraint'leri tamamlanmış, 51 test (36 proof + 6 negatif dahil) başarıyla geçmektedir. Görev 0 stabilizasyonu tamamlanmıştır.
+BudZKVM artık 31 opcode'luk **tamamen production-ready** bir ZKVM'dir. Tüm opcode'ların AIR constraint'leri tamamlanmış, 51 test (36 proof + 6 negatif dahil) başarıyla geçmektedir.  stabilizasyonu tamamlanmıştır.
 
 ## İçindekiler
 
@@ -33,7 +33,7 @@ BudZKVM artık 31 opcode'luk **tamamen production-ready** bir ZKVM'dir. Tüm opc
 6. [Bölüm 6: Derleyici ve Ekosistem (bud-compiler & bud-cli)](06_compiler_ve_ekosistem.md)
 7. [Bölüm 7: Prover Stabilizasyonu ve Testler](07_prover_stabilizasyonu_ve_testler.md)
 8. [Bölüm 8: Üretime Hazırlık, Soundness ve Güvenlik Sertleştirmesi](08_production_hardening_ve_soundness.md)
-9. [Bölüm 9: Görev 0 — Stabilizasyon, Soundness ve Üretime Geçiş](09_görev0_stabilizasyon.md)
+9. [Bölüm 9:  — Stabilizasyon, Soundness ve Üretime Geçiş](09_görev0_stabilizasyon.md)
 
 ## Geliştirici Dokümantasyonu
 

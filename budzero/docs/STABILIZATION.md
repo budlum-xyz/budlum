@@ -1,12 +1,12 @@
-# Bölüm 9: Görev 0 — Stabilizasyon, Soundness ve Üretime Geçiş
+# Bölüm 9:  — Stabilizasyon, Soundness ve Üretime Geçiş
 
 > **"Bir ZKVM'in matematiksel olarak güvenli (sound) olduğunu nasıl anlarsınız? Sadece doğru girdiye doğru çıktı vermesi yetmez. Kötü niyetli bir kanıtlayıcının (malicious prover) her türlü tahrifatını reddetmesi gerekir."**
 
-Bu bölüm, BudZKVM'in Görev 0 (Stabilizasyon) görevsında yapılan 5 kritik iyileştirmeyi adım adım anlatır. Her bir adım, bir ZKVM tasarlarken karşılaşacağınız gerçek problemleri, çözüm yöntemlerini ve "neden böyle yaptık" sorularının cevaplarını içerir.
+Bu bölüm, BudZKVM'in  (Stabilizasyon) görevsında yapılan 5 kritik iyileştirmeyi adım adım anlatır. Her bir adım, bir ZKVM tasarlarken karşılaşacağınız gerçek problemleri, çözüm yöntemlerini ve "neden böyle yaptık" sorularının cevaplarını içerir.
 
 ---
 
-## Task 0.1: Bağımlılık Yönetimi ve Serileştirme (Bincode → Postcard)
+## : Bağımlılık Yönetimi ve Serileştirme (Bincode → Postcard)
 
 ### Problem
 
@@ -36,7 +36,7 @@ ZKVM'lerde proof taşıma katmanı matematiksel güvenlik kadar önemlidir. Seri
 
 ---
 
-## Task 0.2: Comparison (Karşılaştırma) Opcode'ları için AIR Constraint'leri
+## : Comparison (Karşılaştırma) Opcode'ları için AIR Constraint'leri
 
 ### Problem
 
@@ -72,7 +72,7 @@ Sonlu cisimler üzerinde inequality (eşitsizlik) kontrolü her zaman bit decomp
 
 ---
 
-## Task 0.3: Bitwise Opcode'ları için AIR Constraint'leri
+## : Bitwise Opcode'ları için AIR Constraint'leri
 
 ### Problem
 
@@ -96,7 +96,7 @@ Bitwise işlemler için en verimli yaklaşım, operand'ların bit decomposition'
 
 ---
 
-## Task 0.4: Poseidon Hash Implementasyonu
+## : Poseidon Hash Implementasyonu
 
 ### Problem
 
@@ -138,7 +138,7 @@ ZK dostu hash fonksiyonu seçerken:
 
 ---
 
-## Task 0.5: Storage (SRead/SWrite) için Soundness
+## : Storage (SRead/SWrite) için Soundness
 
 ### Problem
 
@@ -191,7 +191,7 @@ avantajları sağlar.
 | Deprem hata mesajları | Span bilgisi yok | `miette` entegrasyonu |
 | Debug modu | Step-by-step debugger yok | `bud-cli debug` komutu |
 
-### Görev 0 Sonrası Opcode Durumu
+###  Sonrası Opcode Durumu
 
 ```
 Production (31 opcode):  Halt, Add, Sub, Mul, Div, Inv, And, Or, Xor, Not,
@@ -202,7 +202,7 @@ Production (31 opcode):  Halt, Add, Sub, Mul, Div, Inv, And, Or, Xor, Not,
 Experimental (0 opcode): (yok — tüm opcode'lar production)
 ```
 
-### Test Kapsamı (Görev 0 Sonu)
+### Test Kapsamı ( Sonu)
 
 ```
 bud-proof: 36 unit test + 1 integration test
@@ -227,7 +227,7 @@ Toplam: 51 test, 0 failure
 
 ---
 
-## Task 0.6: VerifyMerkle Opcode'u için Gerçek Implementasyon
+## : VerifyMerkle Opcode'u için Gerçek Implementasyon
 
 ### Problem
 
@@ -257,9 +257,9 @@ builder.when(is_verify_merkle).assert_bool(rd_val_new);
 
 ---
 
-## Özet: Görev 0'un ZKVM Tasarımına Katkıları
+## Özet: 'un ZKVM Tasarımına Katkıları
 
-Görev 0 boyunca yaptığımız her değişiklik, bir ZKVM'in "çalışan VM" olmaktan "güvenilir ZKVM" olmaya geçişindeki kritik adımları temsil eder:
+ boyunca yaptığımız her değişiklik, bir ZKVM'in "çalışan VM" olmaktan "güvenilir ZKVM" olmaya geçişindeki kritik adımları temsil eder:
 
 1. **Bağımlılık hijyeni:** Güvenlik açığı olan kütüphaneleri temizlemek, production ortamının ilk kuralıdır.
 2. **Karşılaştırma soundness:** Sonlu cisimlerde inequality, bit decomposition olmadan imkansızdır.

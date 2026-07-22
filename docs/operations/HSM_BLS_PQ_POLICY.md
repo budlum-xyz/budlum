@@ -1,4 +1,4 @@
-# BLS/PQ HSM Policy (Task 2 §1.1)
+# BLS/PQ HSM Policy ()
 
 **Tarih:** 2026-07-15
 **Durum:** PKCS#11 Ed25519 yolu + BLS/PQ mock backend main kod tabanında mevcut; mainnet disk-key yasağı fail-closed kalır. Vendor-native non-extractable BLS/Dilithium HSM mekanizmaları hâlâ ayrı audit/entegrasyon maddesidir.
@@ -91,5 +91,5 @@ Bu Arena sandbox’ında `cargo`/`rustc` yoksa PR CI zorunlu kanıt kabul edilir
 
 - Harici audit yapılmadı.
 - BLS/Dilithium için vendor-specific native PKCS#11 mechanism desteği iddia edilmez.
-- B.U.D. Proof-of-Storage Görev 3 ile ilişkili değildir.
+- B.U.D. Proof-of-Storage  ile ilişkili değildir.
 - Bu policy, `VerifyMerkle` Z-B gate’ini açmaz.

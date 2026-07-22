@@ -65,7 +65,7 @@ NEW = [
  ["A) NftBurn worker'ından otomatik tetik (executor→StoragePrune→gossip, tam zincir)",
   "B) RPC ile manuel tetik (operatör komutu), otomasyon yok",
   "C) Gossip aktif + executor sonrası verified burn şartı ikisi birden",
-  "D) Prune tetikleyicisi Görev-sonrasına ertele"]),
+  "D) Prune tetikleyicisi -sonrasına ertele"]),
 
 ("Q108 — Zincir tam-geçmiş export/import tooling (zincir-fork-tam-gecmis-spec.md)",
  "`docs/zincir-fork-tam-gecmis-spec.md` ile zincirin tam geçmişinin dışa/içe aktarımı spec'lendi: fork senaryolarında geçmiş kaybı olmadan taşıma. Implementasyon kapsamı kararı gerekli. (yeni ADIM adayı, user upload)",
@@ -131,7 +131,7 @@ NEW = [
   "D) Topluluk oylamasıyla karar verilsin"]),
 
 ("Q117 — Harici audit firması seçim kriterleri (M7)",
- "Task 0.43'te audit firması seçimi + kickoff var ama kriter/kapsam matrisi yok: kaç firma, hangi kapsam (kripto+consensus+ekonomi?), kim seçer. (TASK0.42_PLAN boşluğu)",
+ "'te audit firması seçimi + kickoff var ama kriter/kapsam matrisi yok: kaç firma, hangi kapsam (kripto+consensus+ekonomi?), kim seçer. (TASK0.42_PLAN boşluğu)",
  ["A) Çift audit: biri kripto/konsensus, biri ekonomi/mantık; ekip önerir, kullanıcı onaylar",
   "B) Tek firma tam kapsam, teklif+röportajla seçim",
   "C) Bug bounty yeterli, formal audit ertele",

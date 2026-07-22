@@ -22,7 +22,7 @@ pub struct PeerScore {
     pub rate_last_refill: Instant, // Jetonların (Token) son yenilenme zamanı
     pub last_seen: Option<Instant>,// Son görülme
     pub handshaked: bool,          // Versiyon/Protokol doğrulaması yapıldı mı?
-    // --- Hardening Task 2: Granüler Rate Limiting ---
+    // --- Hardening : Granüler Rate Limiting ---
     pub vote_tokens: f64,          // Finalite oyları için kota
     pub blob_tokens: f64,          // QC Blobları için kota
 }

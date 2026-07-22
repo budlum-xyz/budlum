@@ -1,6 +1,6 @@
 # Hub Registry (modül README'si)
 
-**Bu dosya, Task 10 Bölüm 4 modül-ayrımı kuralı gereği Hub'ın kendi README'sidir.**
+**Bu dosya,  Bölüm 4 modül-ayrımı kuralı gereği Hub'ın kendi README'sidir.**
 Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
 
 ## Durum
@@ -14,7 +14,7 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 ## Olgunluk uyarıları (Bölüm 4 kuralı)
 
 - ⚠️ **Mainnet v1 kapsam dışı.** Hub (uygulama registry'si — DeEd/SocialFi/dApp
-  listesi) Task 10 §4.4 gereği post-launch. Mainnet'te boş kalır, governance
+  listesi)  gereği post-launch. Mainnet'te boş kalır, governance
   activation sonrası.
 - ⚠️ **Ekonomi modeli yok.** Listing fee / curation / slashing mainnet sonrası
   tasarım.

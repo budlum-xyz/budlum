@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task11_10_lifecycle_happy_path_settled() {
+    fn lifecycle_happy_path_settled() {
         let state =
             transition(StorageLifecycleState::Open, StorageLifecycleState::Proving).unwrap();
         let state = transition(state, StorageLifecycleState::Challenged).unwrap();
@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_lifecycle_challenge_can_miss_or_slash() {
+    fn lifecycle_challenge_can_miss_or_slash() {
         assert_eq!(
             transition(
                 StorageLifecycleState::Challenged,
@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_lifecycle_rejects_skip_open_to_settled() {
+    fn lifecycle_rejects_skip_open_to_settled() {
         let err =
             transition(StorageLifecycleState::Open, StorageLifecycleState::Settled).unwrap_err();
         assert_eq!(
@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_lifecycle_terminal_states_are_final() {
+    fn lifecycle_terminal_states_are_final() {
         for terminal in [
             StorageLifecycleState::Settled,
             StorageLifecycleState::Missed,

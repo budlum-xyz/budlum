@@ -31,7 +31,7 @@
     "epoch_length_slots": 32
   },
   "ceremony_status": "template_ready",
-  "ceremony_note": "Task 9 Ceremony Template. Genesis otoritesi mainnet_genesis() (kod) ile bu dosya test_mainnet_genesis_json_matches_code kilidiyle esit tutulur. *_plan listeleri hash'e GIRMEZ; ceremony'de gercek keypair'ler uretilince allocations/validators HEM kod HEM dosya senkron guncellenir.",
+  "ceremony_note": " Ceremony Template. Genesis otoritesi mainnet_genesis() (kod) ile bu dosya test_mainnet_genesis_json_matches_code kilidiyle esit tutulur. *_plan listeleri hash'e GIRMEZ; ceremony'de gercek keypair'ler uretilince allocations/validators HEM kod HEM dosya senkron guncellenir.",
   "ceremony_allocations_plan": [
     {
       "address": "0x0000000000000000000000000000000000000000000000000000000000000001",

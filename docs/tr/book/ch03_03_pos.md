@@ -39,7 +39,7 @@ pub struct PoSEngine {
 
 ### Fonksiyon: `expected_proposer` (VRF Lider Seçimi)
 
-Her slot için kimin blok üreteceğini belirleyen "Kriptografik Piyango" fonksiyonudur. Eski RANDAO yapısı, **Hardening Task 2** ile VRF tabanlı bir sisteme dönüştürülmüştür.
+Her slot için kimin blok üreteceğini belirleyen "Kriptografik Piyango" fonksiyonudur. Eski RANDAO yapısı, **Hardening ** ile VRF tabanlı bir sisteme dönüştürülmüştür.
 
 ```rust
 pub fn expected_proposer(&self, slot: u64, validators: &[Validator]) -> Option<Validator> {

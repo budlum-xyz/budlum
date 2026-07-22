@@ -377,7 +377,7 @@ mod tests {
 
     /// Task 3 §3.4: mainnet is the strictest security profile.
     #[test]
-    fn task3_security_profiles() {
+    fn security_profiles() {
         let m = Network::Mainnet.security_config();
         let t = Network::Testnet.security_config();
         let d = Network::Devnet.security_config();

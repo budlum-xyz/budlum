@@ -1,4 +1,4 @@
-# .cargo/audit.toml — cargo-audit yapılandırması (Task 8.1 / Görev 1)
+# .cargo/audit.toml — cargo-audit yapılandırması ( / )
 #
 # Cargo.lock'taki BİLİNEN danışmaların kanıtlı skip-listesi. cargo-deny
 # tarafındaki karşılık ve tam kanıt zinciri: deny.toml [advisories]

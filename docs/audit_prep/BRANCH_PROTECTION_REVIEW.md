@@ -1,8 +1,8 @@
-# Branch Protection Review — Task 11.20
+# Branch Protection Review —
 
 **Status:** ADIM 4 — branch protection verification.
 **Purpose:** Verify that all required CI checks are enforced on `main` branch.
-**Gate:** `Audit Prep (Task 11.20)` CI job — `docs/audit_prep/BRANCH_PROTECTION_REVIEW.md`
+**Gate:** `Audit Prep ()` CI job — `docs/audit_prep/BRANCH_PROTECTION_REVIEW.md`
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
@@ -70,4 +70,4 @@ check_contains "$root/docs/audit_prep/BRANCH_PROTECTION_REVIEW.md" "Required che
 
 ---
 
-*Bu dosya, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Audit Prep ()` CI gate'i tarafından doğrulanır.*

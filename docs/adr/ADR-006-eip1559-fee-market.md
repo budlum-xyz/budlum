@@ -2,7 +2,7 @@
 
 **Durum:** Kabul Edildi
 **Tarih:** 2026-07-20
-**Karar Verici:** Kullanıcı (onay) — Task 11.6 karar turu q9
+**Karar Verici:** Kullanıcı (onay) —  karar turu q9
 
 ## Bağlam
 ADR-001 (genesis pool) validator temel ödülünü netleştirdi. Tx fee pricing + dağıtım ayrı: sabit fee (basit ama spam), metabolic burn extension (kompleks), EIP-1559 (base fee burn + priority fee validator).
@@ -23,7 +23,7 @@ ADR-001 (genesis pool) validator temel ödülünü netleştirdi. Tx fee pricing 
 Sabit arz + ADR-001 (pool) ile tutarlı (base fee burn arzı düşürür, pool ödülü sabit).
 
 ## İlgili
-- `docs/EIP1559_FEE_MARKET_SPEC.md` (detaylı spec — Task 11.6)
-- `src/chain/fee_market.rs` (implementasyon — Task 11.8)
+- `docs/EIP1559_FEE_MARKET_SPEC.md` (detaylı spec — )
+- `src/chain/fee_market.rs` (implementasyon — )
 - ADR-001 (genesis pool — validator ödül complement)
 - `bud_estimateGas` RPC (zaten var, EIP-1559'a bağlanır)

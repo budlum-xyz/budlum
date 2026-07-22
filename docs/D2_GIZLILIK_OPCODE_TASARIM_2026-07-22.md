@@ -63,21 +63,21 @@ Gizlilik opcode'ları YALNIZCA transfer ailesini kapsar. `NftRegistry`/`ContentI
 
 ## 8. Implementation görevları (multi-session)
 
-1. ✅ **Görev A:** 3 opcode (0x20-0x22) + decode + MainnetActivation gate (bud-isa). CI yeşil (`388f581`+).
-2. ✅ **Görev B:** Poseidon permutation ZATEN MEVCUT — `poseidon4_hash` (Goldilocks `2^64-2^32+1`, MDS 8x8, Plonky3 round sabitleri), opcode 0x19'a wired. Yeni opcode'lar bunu kullanabilir.
-3. ✅ **Görev C:** Note/UTXO registry (bud-state, paralel izole). CI yeşil (`574f79e`). PrivacyNote + NoteRegistry (insert/spend/is_spent, double-spend önleme).
-4. ✅ **Görev D:** AIR constraint'ler (ARENA2, 2026-07-22). Selector 370–372;
+1. ✅ ** A:** 3 opcode (0x20-0x22) + decode + MainnetActivation gate (bud-isa). CI yeşil (`388f581`+).
+2. ✅ ** B:** Poseidon permutation ZATEN MEVCUT — `poseidon4_hash` (Goldilocks `2^64-2^32+1`, MDS 8x8, Plonky3 round sabitleri), opcode 0x19'a wired. Yeni opcode'lar bunu kullanabilir.
+3. ✅ ** C:** Note/UTXO registry (bud-state, paralel izole). CI yeşil (`574f79e`). PrivacyNote + NoteRegistry (insert/spend/is_spent, double-spend önleme).
+4. ✅ ** D:** AIR constraint'ler (ARENA2, 2026-07-22). Selector 370–372;
    paylaşılan Poseidon gadget (PrivacyCommit = 3-absorb Poseidon3; NullifierCheck
    = Poseidon(secret, DOMAIN_NULLIFIER) + equality; SumConservation = amount
    equality witness — Poseidon homomorfik değil, commitment satırlarıyla bağ).
    Prove/verify testleri yeşil (OOM yok, ~2–10s/test).
-5. ✅ **Görev E:** TEE opt-in + **note_privacy** toggle + **view-key** türetim/ibraz
+5. ✅ ** E:** TEE opt-in + **note_privacy** toggle + **view-key** türetim/ibraz
    (`WalletPrivacyConfig`, `ViewKeyDisclosure`) — wallet-core.
-6. ✅ **Görev F:** E2E `d2_proves_private_transfer_e2e` (commit→nullifier→sum).
+6. ✅ ** F:** E2E `d2_proves_private_transfer_e2e` (commit→nullifier→sum).
 
-**Durum (2026-07-22 ARENA2):** Görev A–F tamam (lokal prove yeşil). Mainnet kapısı
+**Durum (2026-07-22 ARENA2):**  A–F tamam (lokal prove yeşil). Mainnet kapısı
 hâlâ default off. CI tek hakem.
 
 ---
 
-*Tüm Bölüm 10 kararları çözüldü (MAINNET_KARARLAR D2). Bu doküman implementation'a köprü. Görev A en düşük riskli başlangıç.*
+*Tüm Bölüm 10 kararları çözüldü (MAINNET_KARARLAR D2). Bu doküman implementation'a köprü.  A en düşük riskli başlangıç.*

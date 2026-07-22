@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_domain_lifecycle_requires_freeze_before_retire() {
+    fn domain_lifecycle_requires_freeze_before_retire() {
         let domain = default_domain(7, ConsensusKind::PoS, 1337, "pos", 0);
         let mut registry = ConsensusDomainRegistry::new();
         registry.register(domain).unwrap();
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_retired_domain_is_terminal() {
+    fn retired_domain_is_terminal() {
         let domain = default_domain(8, ConsensusKind::Bft, 1337, "bft", 0);
         let mut registry = ConsensusDomainRegistry::new();
         registry.register(domain).unwrap();

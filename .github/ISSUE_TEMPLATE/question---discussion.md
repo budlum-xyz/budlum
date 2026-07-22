@@ -4,7 +4,7 @@ about: Ask a question or start a technical discussion about Budlum.
 title: "[Question]:"
 labels: discussion, question
 assignees: ''
-type: Task
+type:
 
 ---
 

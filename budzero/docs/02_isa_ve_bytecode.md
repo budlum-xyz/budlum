@@ -44,7 +44,7 @@ Bu sayede her instruction 8 byte'lık sabit boyutlu bir kelimedir — bu, L1 ent
 
 BudZKVM ISA'sı **Production** ve **Experimental** olarak iki profile ayrılır. Production profilinde yalnızca AIR constraint'leri tamamlanmış, matematiksel olarak sound opcode'lar kullanılabilir. Experimental opcode'lar geliştirme görevsındadır ve `cfg(feature = "experimental")` olmadan derleme veya çalışma zamanında reddedilir.
 
-### ✅ Production Opcode'lar (Güncel: Görev 0 sonrası)
+### ✅ Production Opcode'lar (Güncel:  sonrası)
 
 | Opcode | Hex | Açıklama |
 |--------|-----|----------|
@@ -80,7 +80,7 @@ BudZKVM ISA'sı **Production** ve **Experimental** olarak iki profile ayrılır.
 | `Syscall` | 0x1D | `rd = sistem_çağrısı(imm)` |
 | `VerifyMerkle` | 0x1E | `rd = MerkleDoğrula(root, leaf, path)` | Poseidon4 tabanlı 64-depth |
 
-> **Görev 0 Sonrası:** Tüm 31 opcode production seviyesindedir. Experimental opcode kalmamıştır. Her opcode'un VM implementasyonu ve AIR constraint'i tamamlanmıştır.
+> ** Sonrası:** Tüm 31 opcode production seviyesindedir. Experimental opcode kalmamıştır. Her opcode'un VM implementasyonu ve AIR constraint'i tamamlanmıştır.
 
 ## Bytecode Formatı ve L1 Entegrasyonu
 

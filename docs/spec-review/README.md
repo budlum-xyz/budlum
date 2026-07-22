@@ -1,6 +1,6 @@
-# Task 11.6 Spec Review Checklist
+#  Spec Review Checklist
 
-**Durum:** Task 11.6 kabul kapısı
+**Durum:**  kabul kapısı
 **Amaç:** Kod yazmadan önce ana mainnet spec'lerinin interface freeze, ADR bağı, güvenlik kabul kriteri ve CI kapısı bakımından gözden geçirildiğini kanıtlamak.
 
 Her spec review dosyası aşağıdaki checklist'i eksiksiz taşır:
@@ -11,11 +11,11 @@ Her spec review dosyası aşağıdaki checklist'i eksiksiz taşır:
 - [x] Security/threat interaction documented
 - [x] State/root/supply interaction documented where relevant
 - [x] Test or CI gate defined
-- [x] Implementation task and owner path identified
+- [x] Implementation  and owner path identified
 
 `./scripts/check-spec-coverage.sh` bu klasördeki zorunlu review kayıtlarının varlığını ve checklist satırlarını CI'da doğrular.
 
-## Task 11.6 review kayıtları
+##  review kayıtları
 
 | Spec | Review | Durum |
 |---|---|---|

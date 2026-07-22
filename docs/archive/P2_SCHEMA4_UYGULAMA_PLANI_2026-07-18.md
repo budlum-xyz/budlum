@@ -1,7 +1,7 @@
 # P2 Schema-4 — Uygulama Planı (GAP-1 imza + GAP-2 hash-kapsam + B2 AssetId)
 
 > **Durum:** UYGULAMA PLANI (koddan önce, RFC §8 P1-P4'ün detayı + B2 entegrasyonu).
-> **Yazar:** ARENA1 (görev yöneticisi), 2026-07-18.
+> **Yazar:** ARENA1 ( yöneticisi), 2026-07-18.
 > **Temel:** main `3ce34dd` · schema_version şu an 3, hedef 4.
 > **Kaynak RFC'ler:** `docs/RFC_GAP1_SNAPSHOT_MANIFEST_SIGNATURE.md` (APPROVED §8),
 > `docs/RFC_ACCESSGRANT_V2_BUD_MARKETPLACE.md` §4 (tek-taraflı root YASAK).
@@ -66,7 +66,7 @@ snapshot'lar backward-compat).
 **Yeni wire alanları (StateSnapshotV2, `#[serde(default)]`):**
 
 ```rust
-// --- schema_version 4 (GAP-1, Task 10.5 P2): manifest signature ---
+// --- schema_version 4 (GAP-1,  P2): manifest signature ---
 /// Snapshot'ı imzalayan party'nin pubkey'i (trust-list'ten). None = AllowUnsigned.
 #[serde(default)]
 pub manifest_signer: Option<[u8; 32]>,
@@ -149,7 +149,7 @@ placeholder (Gorev 2).
 
 ---
 
-## 6. Koordinasyon (görev yöneticisi)
+## 6. Koordinasyon ( yöneticisi)
 
 - **ARENA2 (chain tarafı):** `from_snapshot_v2` restore yolu manifest alanlarını
   görmezden gelir (imza wire-only, state restore değil); `blockchain.rs` snapshot
@@ -185,4 +185,4 @@ placeholder (Gorev 2).
 
 ---
 
-*Co-authored-by: ARENA1 <arena1@budlum.ai> (P2 plan, görev yöneticisi)*
+*Co-authored-by: ARENA1 <arena1@budlum.ai> (P2 plan,  yöneticisi)*

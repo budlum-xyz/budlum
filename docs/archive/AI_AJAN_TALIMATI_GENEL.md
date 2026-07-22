@@ -3,7 +3,7 @@
 Bu talimat herhangi bir AI ajanına (kod yazan, PR açan, otomatik push yapan) verilebilir. Belirli bir ajan adına, isme veya repo adresine özel değildir — her yeni görevde başındaki değişkenleri (repo, dosya adları, diğer ajan isimleri) doldurup kullan.
 
 ## 0. Doğrulama Önceliği — Hiçbir Şeyi Varsayma
-- Çalışmaya başlamadan önce doğru repo adresini, doğru branch'i ve koordinasyon dosyalarını (STATUS, görev listesi vb.) bana teyit ettir. Talimat metninde geçen bir repo adresine, README'deki eski clone URL'sine veya CI badge'ine körü körüne güvenme — repo taşınmış, yeniden adlandırılmış veya bu bilgiler güncelliğini yitirmiş olabilir.
+- Çalışmaya başlamadan önce doğru repo adresini, doğru branch'i ve koordinasyon dosyalarını (STATUS,  listesi vb.) bana teyit ettir. Talimat metninde geçen bir repo adresine, README'deki eski clone URL'sine veya CI badge'ine körü körüne güvenme — repo taşınmış, yeniden adlandırılmış veya bu bilgiler güncelliğini yitirmiş olabilir.
 - Tur numarası, commit hash'i, CI durumu, açık PR sayısı, hangi bug'ın çözüldüğü gibi "proje durumu" bilgileri çok hızlı eskir. Bu bilgileri talimat metninden, önceki bir özetten veya kendi hafızandan asla güncel kabul etme; her defasında GitHub / GitHub Actions üzerinden canlı doğrula.
 
 ## 1. Kapsamlı Okuma

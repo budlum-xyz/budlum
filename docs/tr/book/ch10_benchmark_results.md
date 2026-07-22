@@ -28,7 +28,7 @@ Bu metrikler, ağ gecikmesi ve serileştirme yükünü devre dışı bırakarak 
 Mempool işlem kabulü şu an için `ChainActor` döngüsünün tek iş parçacıklı yapısı ve katı nonce doğrulaması ile sınırlıdır. 9k TPS yüksek bir değer olsa da, çoklu doğrulayıcı (multi-validator) kurulumlarına ölçeklenirken kabul hattının optimize edilmesi gerekecektir.
 
 ### 2. State Root Güncellemeleri
-Merkle güncellemelerindeki 1.4k/sn limiti, state büyüdükçe ve çok sayıda benzersiz hesaba dokunuldukça blok üretim sürelerinin doğrusal olarak artacağını göstermektedir. Task 3 için **Sparse Merkle Trees** veya **Paralel Hashing** gibi optimizasyon stratejileri değerlendirilmelidir.
+Merkle güncellemelerindeki 1.4k/sn limiti, state büyüdükçe ve çok sayıda benzersiz hesaba dokunuldukça blok üretim sürelerinin doğrusal olarak artacağını göstermektedir.  için **Sparse Merkle Trees** veya **Paralel Hashing** gibi optimizasyon stratejileri değerlendirilmelidir.
 
 ### 3. Yürütme Gücü (Execution Power)
 15k TPS yürütme hızı, çekirdek Rust işlem mantığının son derece verimli olduğunu kanıtlamaktadır. Yürütme Katmanı'nın (EVM/WASM) getireceği ek yük bir sonraki görevda ölçülecektir.

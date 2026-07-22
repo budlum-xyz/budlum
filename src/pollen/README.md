@@ -1,6 +1,6 @@
 # Pollen — B.U.D. Veri Marketplace (modül README'si)
 
-**Bu dosya, Task 10 Bölüm 4 modül-ayrımı kuralı gereği Pollen'ın kendi README'sidir.**
+**Bu dosya,  Bölüm 4 modül-ayrımı kuralı gereği Pollen'ın kendi README'sidir.**
 Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
 
 ## Durum
@@ -19,15 +19,15 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 
 - `docs/RFC_ACCESSGRANT_V2_BUD_MARKETPLACE.md` — v2 APPROVED (K1-K6 kullanıcı
   kararları: Address-bağlı grant · değişmez kapsam · ayrı-ödeme · zincir-üstü ReadOnce ·
-  tek-buyer · SaleAuthorization). Görev-1 soft-enforcement + Görev-2 HPKE hard-enforcement.
+  tek-buyer · SaleAuthorization). -1 soft-enforcement + -2 HPKE hard-enforcement.
 
 ## Olgunluk uyarıları (Bölüm 4 kuralı: toplamın altında kaybolmaz)
 
-- ⚠️ **Görev-1 = protocol admission enforcement.** AI inference request, Pollen
+- ⚠️ **-1 = protocol admission enforcement.** AI inference request, Pollen
   `AiDataInputRef` taşıyorsa geçerli `AccessGrant` olmadan kabul edilmez.
   Bu güçlü bir on-chain okuma yasağıdır; fakat storage node plaintext görüyorsa
   kriptografik gizlilik garanti etmez. Hard enforcement (HPKE key-wrapping)
-  Görev-2'de (HSM/encryption domain'i).
+  -2'de (HSM/encryption domain'i).
 - ✅ **P0/P1 temel tipler mevcut** (`AssetId` JSON-safe, `Signature64`
   sentinel-default, `DataAsset`, `AccessGrant`, `AiDataInputRef`).
   Sıradaki genişleme: HPKE key-wrapping, DAO encryption parametreleri ve
@@ -36,7 +36,7 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 ## Veri egemenliği
 
 Honest-storage-node varsayımı. Storage node kötü-niyetli olduğunda yalnızca
-ekonomik yaptırım (Görev-1). HPKE (Görev-2) → storage node plaintext'i ASLA görmez.
+ekonomik yaptırım (-1). HPKE (-2) → storage node plaintext'i ASLA görmez.
 
 ## Sıradaki (P1)
 

@@ -18,7 +18,7 @@ required_review_lines=(
   "- [x] Security/threat interaction documented"
   "- [x] State/root/supply interaction documented where relevant"
   "- [x] Test or CI gate defined"
-  "- [x] Implementation task and owner path identified"
+  "- [x] Implementation  and owner path identified"
 )
 
 fail() {
@@ -69,7 +69,7 @@ run_check() {
     check_one "$spec" "$review" "$label"
   done
 
-  echo "Spec coverage gate OK: ${#required_specs[@]} Task 11.6 specs are interface-frozen and reviewed."
+  echo "Spec coverage gate OK: ${#required_specs[@]}  specs are interface-frozen and reviewed."
 }
 
 self_test() {
@@ -104,7 +104,7 @@ EOF_SPEC
 - [x] Security/threat interaction documented
 - [x] State/root/supply interaction documented where relevant
 - [x] Test or CI gate defined
-- [x] Implementation task and owner path identified
+- [x] Implementation  and owner path identified
 EOF_REVIEW
     cp "$tmp/good/$spec" "$tmp/bad/$spec"
     cp "$tmp/good/$review" "$tmp/bad/$review"

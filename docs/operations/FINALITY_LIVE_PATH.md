@@ -1,4 +1,4 @@
-# Finality Live-Path Son Taraması (Task 2 §1.3)
+# Finality Live-Path Son Taraması ()
 
 **Tarih:** 2026-07-15
 **Durum:** Kod kapsamı eklendi; CI doğrulaması PR üzerinde takip edilecek.

@@ -1,6 +1,6 @@
 # CI Hardening Audit — 2026-07-21 (ARENA2 / ADIM-1)
 
-> **Bağlam:** Kullanıcı (Ayaz) 2026-07-21 görev seti, ilk madde: "CI
+> **Bağlam:** Kullanıcı (Ayaz) 2026-07-21  seti, ilk madde: "CI
 > sertleştirme — bunlar aslında geçmişte bir talimat setinde vardı, repo'ya
 > işlenmiş mi emin değilim — önce kontrol et". Bu doküman altı maddenin
 > repoya işlenme durumunun kanıtlı doğrulamasını, bulunan boşlukları ve bu
@@ -20,7 +20,7 @@
 ## 2. Bu ADIM'da Kapanan Ek Kök-Nedenler
 
 1. **`src/core/account.rs` rustfmt drift'i** (main kırmızısı, SHA `ef80abf`
-   Budlum Core/Format failure): ARENA1'in Task 11.8 fee testlerindeki 4 uzun
+   Budlum Core/Format failure): ARENA1'in  fee testlerindeki 4 uzun
    assert satırı `cargo fmt` beklentisine uygulandı. Davranış değişmedi.
 2. **Mempool aynı-fee tie-break nondeterminizmi (consensus-critical):**
    `Mempool::get_sorted_transactions` aynı ücretteki işlemleri `HashSet`
@@ -49,7 +49,7 @@
 - **Miri storage adımı** hâlâ `continue-on-error: true` (sled↔Miri
   uyumsuzluğu; bilinen, kayıtlı sınırlama).
 - **Mempool derin tasarımı** (fee-based önceliklendirme matrisi, spam/DoS
-  sınıflandırması, admission-time imza kontrolü) ayrı ADIM (kullanıcı görev
+  sınıflandırması, admission-time imza kontrolü) ayrı ADIM (kullanıcı
   listesi "Protokol" maddesi) olarak devam ediyor — bu push'taki tie-break/RBF
   yamaları yalnızca determinizm kök-nedenleridir.
 

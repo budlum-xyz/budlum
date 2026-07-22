@@ -63,9 +63,9 @@ trait LightClient {
 
 ## 6. Önerilen Görevlar
 
-1. **Görev 1:** Header-chain sync + state proof query (RPC endpoint)
-2. **Görev 2:** Budlum sync-committee (BLS aggregate light client)
-3. **Görev 3:** ZK proof of state transition (BudZKVM)
+1. **:** Header-chain sync + state proof query (RPC endpoint)
+2. **:** Budlum sync-committee (BLS aggregate light client)
+3. **:** ZK proof of state transition (BudZKVM)
 
 ---
 

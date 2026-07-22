@@ -17,7 +17,7 @@
 
 ---
 
-## 1. Genel kurallar (her görev için geçerli)
+## 1. Genel kurallar (her  için geçerli)
 
 1. **CI yegâne yargıçtır.** Başarı iddiası ancak CI yeşil ile yapılır. Rapor metni kanıt sayılmaz.
 2. **Kritik/yüksek madde açıkken yeni kapsam açma.** D4/D1 bitmeden yeni özellik spec'i/doküman commit etme.
@@ -28,7 +28,7 @@
 7. **`budlumdevnet` salt-okunur referanstır — asla değiştirme.** Üretilmiş secret commit edilmez.
 8. Semver gate çalışıyor — public API değişikliği kırıcıysa dikkat. (EIP-1559 gibi istisnalar zaten eklendi.)
 9. Token'u persistent dokümana/dosyaya **yazma** — session bağlamından al (bkz. §9).
-10. Tüm kurallar her görev için geçerli.
+10. Tüm kurallar her  için geçerli.
 
 ---
 
@@ -200,7 +200,7 @@ D4 (kapsam doğrulama → wire) ──► D1 (relayer production + slashing)
 
 ## 10. Raporlama formatı
 
-Her görev kapanışında:
+Her  kapanışında:
 1. **Commit hash** + etkilenen dosyalar.
 2. **CI run linki** (yeşil teyit).
 3. D4 için: **4 tüketici × registry matrisi** (kapsadı/bypass/bağlandı).

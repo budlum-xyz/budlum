@@ -2,7 +2,7 @@
 
 **Durum:** Kabul Edildi
 **Tarih:** 2026-07-20
-**Karar Verici:** Kullanıcı (onay) — Task 11.6 karar turu q7
+**Karar Verici:** Kullanıcı (onay) —  karar turu q7
 
 ## Bağlam
 p2p katmanı libp2p üzerinden (kad/identify/gossipsub) ama reputation, eclipse bound, NAT traversal derin değil. Eclipse/sybil saldırılarına karşı dayanıklılık belirsiz.
@@ -24,7 +24,7 @@ p2p katmanı libp2p üzerinden (kad/identify/gossipsub) ama reputation, eclipse 
 Master-context nötr (p2p katmanı).
 
 ## İlgili
-- `docs/NETWORK_HARDENING_SPEC.md` (Task 11.4 — finalize Task 11.12)
-- `src/network/reputation.rs` (implementasyon — Task 11.12)
-- `src/tests/network_chaos.rs` (chaos suite — Task 11.12)
+- `docs/NETWORK_HARDENING_SPEC.md` ( — finalize )
+- `src/network/reputation.rs` (implementasyon — )
+- `src/tests/network_chaos.rs` (chaos suite — )
 - H2 hardening (ekip 261df88) — temel alınır

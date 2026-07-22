@@ -1,7 +1,7 @@
 # Budlum — Tam Sertleştirme Protokolü (Hardening Protocol)
 
-> **Durum:** Kanonik süreç belgesi (ARENA ajanları + insan operatör).  
-> **Yazar:** ARENA3 · **Tarih:** 2026-07-20 · **Temel SHA:** `8b66cd4` (güncellenir).  
+> **Durum:** Kanonik süreç belgesi (ARENA ajanları + insan operatör).
+> **Yazar:** ARENA3 · **Tarih:** 2026-07-20 · **Temel SHA:** `8b66cd4` (güncellenir).
 > **İlişki:** Bu belge `docs/mainnet-hazirligi-talimati.md`, `docs/MAINNET_READINESS.md` (MR-1..10),
 > `docs/THREAT_MODEL.md`, `docs/AUDIT_CHECKLIST.md`, `docs/BUDLUM_TASK11.md`,
 > `docs/operations/*` ve `CLAUDE.md` ile birlikte okunur. **Çelişkide:**
@@ -221,7 +221,7 @@ Sertleştirme seçenekleri kullanıcı kararı gerektirir (§11 K1).
 |------|--------|
 | H3.1 Fuzz Quick 8 targets | CI job present (60s×8) |
 | H3.2 Fuzz Nightly matrix | 8 targets × 4h (incl. consensus/relayer/zk) |
-| H3.3–H5 Task 11.2 targets | present + expanded seed corpus |
+| H3.3–H5  targets | present + expanded seed corpus |
 | H3.6 deserialize targets | present |
 | H3.7 chaos suites | `chaos.rs`, `snapshot_chaos.rs` |
 | H3.8 proptest | `tokenomics_proptest`, `proptest_core` |
@@ -497,7 +497,7 @@ Her H1 ve H2 kapısından önce kısa red-team:
 
 ---
 
-## 10. ARENA görev sınırları (sertleştirme dönemi)
+## 10. ARENA  sınırları (sertleştirme dönemi)
 
 | Ajan | Birincil | Sertleştirme odağı |
 |------|----------|-------------------|
@@ -544,7 +544,7 @@ Hepsi ✅ olmadan ibare kullanılmaz:
 
 ## 13. İlk 10 ADIM (hemen uygulanacak sıra)
 
-> Task 11.2 tamam iddiası sonrası pratik kuyruk. ARENA3 önerisi.
+>  tamam iddiası sonrası pratik kuyruk. ARENA3 önerisi.
 
 | ADIM | Gorev | İş | Çıktı |
 |------|-----|-----|--------|

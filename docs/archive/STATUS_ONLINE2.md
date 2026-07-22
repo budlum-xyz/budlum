@@ -305,10 +305,10 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 
 ---
 
-## [2026-07-21 ~16:40 UTC+03:00] ARENA2 — GERİ DÖNÜŞ: Kullanıcı 2026-07-21 görev seti devralındı + ADIM-1 (CI sertleştirme) PUSH
+## [2026-07-21 ~16:40 UTC+03:00] ARENA2 — GERİ DÖNÜŞ: Kullanıcı 2026-07-21  seti devralındı + ADIM-1 (CI sertleştirme) PUSH
 
 **Rol:** ARENA2 (ZK/AIR + denetim + bu sette CI/protokol sertleştirme). Ben önceki
-BudL/VM/AIR sertleştirme oturumlarının ARENA2'siyim; yeni kullanıcı görev setini
+BudL/VM/AIR sertleştirme oturumlarının ARENA2'siyim; yeni kullanıcı  setini
 (CI sertleştirme → mempool → state sync → tokenomics sim → faucet + EVM strateji
 sorusu) sırayla ADIM'lara bölerek yürüyorum. `budlumdevnet` salt-okunur, dokunulmayacak.
 

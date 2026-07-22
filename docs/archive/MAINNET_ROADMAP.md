@@ -1,7 +1,7 @@
-# BUDLUM MAINNET YOL HARİTASI — Task 11.6 → 11.20
+# BUDLUM MAINNET YOL HARİTASI —  → 11.20
 
 **Tarih:** 2026-07-20
-**Yazar:** ARENA1 (görev yöneticisi)
+**Yazar:** ARENA1 ( yöneticisi)
 **Durum:** 10 mimari karar onaylı → 8 goreva dönüştürüldü
 **Prensip:** Mainnet tarihine bol zaman var → **en sıkı sistemi kur**: spec-first, her gorevda CI kapısı + kabul kriteri + fuzz/security gate, kısayol yok.
 
@@ -30,7 +30,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.6 — MİMARİ TEMEL & SPEC FİNALİZASYONU
+##  — MİMARİ TEMEL & SPEC FİNALİZASYONU
 
 **Hedef:** Tüm kodlama gorevlarının temelini atan spec'leri + karar kayıtlarını + tehdit modelini kur. Kod yazmak YOK — bu gorev pure spec + review.
 
@@ -42,7 +42,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
    - Pre-allocation oranı (%8-12), dağıtım schedule'ı (epoch-bazlı).
    - Slash/penalty etkileşimi, treasury governance interface'i.
    - Sabit 100M arzla tutarlılık kanıtı (emisyon hesabı).
-3. **`BUD_STORAGE_TECHNICAL_SPEC.md` finalize** (Task 11.4 spec'i):
+3. **`BUD_STORAGE_TECHNICAL_SPEC.md` finalize** ( spec'i):
    - Storage provider trait interface'i (imzalar net).
    - Deal lifecycle state machine (open → prove → challenge → settle).
    - CI spec-review kapısı tanımı (sonraki gorev için).
@@ -67,7 +67,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.8 — KONSENSÜS ÇEKİRDEĞİ: EKONOMİ + FORK-CHOICE
+##  — KONSENSÜS ÇEKİRDEĞİ: EKONOMİ + FORK-CHOICE
 
 **Hedef:** Konsensüs ve ekonomiyi değiştiren 3 kod akışı (konsensüs-kritik, en erken yapılmalı çünkü state machine'i değiştirir).
 
@@ -99,7 +99,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.10 — STORAGE LAYER + NODE SINIFLANDIRMASI
+##  — STORAGE LAYER + NODE SINIFLANDIRMASI
 
 **Hedef:** En büyük boşluk — B.U.D. storage layer'ı spec'ten koda. + Full/Archive node ayrımı.
 
@@ -130,7 +130,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.12 — AĞ SERTLEŞTİRME (TAM)
+##  — AĞ SERTLEŞTİRME (TAM)
 
 **Hedef:** q7 — full network hardening v1'de. Eclipse/sybil'e karşı dayanıklı p2p katmanı.
 
@@ -159,7 +159,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.14 — HESAP KATMANI: MULTISIG + SOCIAL RECOVERY
+##  — HESAP KATMANI: MULTISIG + SOCIAL RECOVERY
 
 **Hedef:** q5 — multisig/social recovery mainnet v1'de. wallet-core genişletme.
 
@@ -189,7 +189,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.16 — ON-CHAIN GOVERNANCE (MİNİMAL)
+##  — ON-CHAIN GOVERNANCE (MİNİMAL)
 
 **Hedef:** q4 — minimal on-chain parametre değişikliği. Sadece güvenlik-kritik parametreler (slash ratios, min stake). Kod upgrade'leri hard fork ile off-chain.
 
@@ -215,7 +215,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.18 — UYUM: MASAK PoA DOMAIN
+##  — UYUM: MASAK PoA DOMAIN
 
 **Hedef:** q8 — MASAK AML hook'ları + audit trail, **sadece PoA domain'e izole** (permissionless'e dokunmaz — izolasyon ilkesiyle tutarlı).
 
@@ -241,7 +241,7 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ---
 
-## TASK 11.20 — GÜVENLİK & AUDIT + MAINNET LOCKDOWN
+##  — GÜVENLİK & AUDIT + MAINNET LOCKDOWN
 
 **Hedef:** q10 — threat model finalize + audit prep paketi + HSM policy. Mainnet readiness final review.
 
@@ -308,8 +308,8 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 3. **Her gorevda fuzz + security gate:** Konsensüs-kritik gorevlar (11.8, 11.16) ekstra fuzz target ekler.
 4. **İzolasyon mührü:** PoA↔permissionless izolasyonu her gorevda test-pinned (özellikle 11.18 MASAK).
 5. **ADR izi:** Her mimari karar ADR olarak kalıcı. Spec drift = yeni ADR.
-6. **Branch protection:** Her gorev `arena/task-NN-X` branch'leri, PR ile merge, main her zaman yeşil.
-7. **Görev yöneticisi (ARENA1):** Ekip CI kalıntılarını izler, main RED olursa öncelikli düzeltir (bu oturumda 5+ kez yapılan rol).
+6. **Branch protection:** Her gorev `arena/-NN-X` branch'leri, PR ile merge, main her zaman yeşil.
+7. ** yöneticisi (ARENA1):** Ekip CI kalıntılarını izler, main RED olursa öncelikli düzeltir (bu oturumda 5+ kez yapılan rol).
 
 ---
 
@@ -331,4 +331,4 @@ Her gorev kendi kararlarını `docs/adr/ADR-NNN-<başlık>.md` olarak kaydeder. 
 
 ## Sonraki Adım
 
-Bu yol haritası onaylanırsa, **Task 11.6** başlatılır: ADR-000 şablonu + ilk 10 ADR + 4 spec finalize + threat model v1. Kod yazılmadan, pure spec — geri dönüş maliyeti en düşük gorev.
+Bu yol haritası onaylanırsa, **** başlatılır: ADR-000 şablonu + ilk 10 ADR + 4 spec finalize + threat model v1. Kod yazılmadan, pure spec — geri dönüş maliyeti en düşük gorev.

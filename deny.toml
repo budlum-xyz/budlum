@@ -1,4 +1,4 @@
-# deny.toml — Budlum Core supply-chain kapısı (Task 8.2 / Görev 1)
+# deny.toml — Budlum Core supply-chain kapısı ( / )
 #
 # Bu dosya `cargo deny check` ile CI'da zorunlu kapıdır (strict mod:
 # ilk günden fail kapısı; gevşetme YOK). BudZero tarafındaki karşılığı
@@ -26,7 +26,7 @@ allow = [
     "ISC",
     "OpenSSL",
     "Zlib",
-    # Gerekçeli ekleme (Görev 1 ilk koşu, kanıtlı): icu_* crate ailesi
+    # Gerekçeli ekleme ( ilk koşu, kanıtlı): icu_* crate ailesi
     # (idna_adapter ← url ← libp2p zinciri) Unicode-3.0 lisanslı.
     # Unicode-3.0 OSI-onaylı permissive lisanstır (kopyalayaz DEĞİL);
     # SPDX: Unicode-3.0. Yerel cargo-deny 0.20.2 koşusunda 19 reddin

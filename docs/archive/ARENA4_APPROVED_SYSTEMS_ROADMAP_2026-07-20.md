@@ -40,7 +40,7 @@ Bu ayrım üç güvenlik ilkesini doğurur:
 | A4-7 | Budlum Atlas | read-only evidence cards, context maps, domain health proof model | Bu ADIM başladı |
 | A4-8 | Mobile Self | mobile self-hosting profile, QoS metadata, B.U.D. node policy | Uygulandı / CI yeşil |
 | A4-9 | Governance/Constitution Engine | constitution parameter registry, DAO halt guardrails | Uygulandı / CI yeşil |
-| A4-10 | Proof Verification Market | proof task/receipt abstraction, no LUM adapter yet | Uygulandı / CI yeşil |
+| A4-10 | Proof Verification Market | proof /receipt abstraction, no LUM adapter yet | Uygulandı / CI yeşil |
 | A4-11 | Developer OS / BudL SDK | devnet template, package layout, proof fixtures, SDK docs | Uygulandı / CI yeşil |
 | A4-12 | Pollen sale settlement primitives | authorization-backed grant + purchase receipt, no DeFi adapter | Uygulandı / CI yeşil |
 | A4-13 | D-Web Passport proof bundle | evidence-only deterministic bundle root for budlum.xyz | Bu ADIM başladı |

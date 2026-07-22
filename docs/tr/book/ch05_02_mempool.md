@@ -131,7 +131,7 @@ Bu periyodik temizleyici sayesinde ağ, kendi hafızasını (Mempool'u) otomatik
 
 ## 5. Mempool Persistence (Disk Yedeği) ve Dayanıklılık
 
-Normalde Mempool sadece RAM'dedir. Node kapandığında içindeki tüm bekleyen işlemler silinir. **Budlum Hardening Task 2** ile birlikte artık tam kapsamlı **Mempool Persistence** ve hata denetimi (Error Handling) devrededir.
+Normalde Mempool sadece RAM'dedir. Node kapandığında içindeki tüm bekleyen işlemler silinir. **Budlum Hardening ** ile birlikte artık tam kapsamlı **Mempool Persistence** ve hata denetimi (Error Handling) devrededir.
 
 ### Mekanizma:
 1. **Save-on-Arrival:** Bir işlem Mempool'a eklendiğinde aynı anda veritabanına da (`MEMPOOL:{hash}`) yazılır.

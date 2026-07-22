@@ -1,16 +1,16 @@
 # Domain Fork-Choice & Lifecycle Spec
 
 > **Yazar:** ARENA1, 2026-07-20.
-> **Durum:** Final v1 (Task 11.6) → implementasyon Task 11.8.
+> **Durum:** Final v1 () → implementasyon .
 > **ADR:** [ADR-007](adr/ADR-007-per-domain-fork-choice.md)
 > **SPEC_REVIEW:** [DOMAIN_FORK_CHOICE_SPEC_REVIEW.md](spec-review/DOMAIN_FORK_CHOICE_SPEC_REVIEW.md)
 > **INTERFACE_FROZEN:** true
 
 ---
 
-## 0. Interface Freeze (Task 11.6)
+## 0. Interface Freeze ()
 
-Bu spec Task 11.6 sonunda **interface-frozen** kabul edilir. Task 11.8 implementasyonu aşağıdaki trait imzasını, domain kural adlarını ve lifecycle state'lerini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
+Bu spec  sonunda **interface-frozen** kabul edilir.  implementasyonu aşağıdaki trait imzasını, domain kural adlarını ve lifecycle state'lerini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
 
 ### 0.1 Donmuş trait imzası
 
@@ -125,7 +125,7 @@ pub enum DomainLifecycleStatus {
 
 ## 4. Gap Analizi
 
-| Gap | Risk | Task |
+| Gap | Risk |  |
 |-----|------|-------|
 | `ConsensusDomainForkChoice` trait kodda yok | domain-specific fork-choice dağınık kalır | 11.8 |
 | PoS LMD-GHOST implementation yok | PoS fork-choice finality-only kalabilir | 11.8 |
@@ -133,7 +133,7 @@ pub enum DomainLifecycleStatus {
 | Domain pause/drain/retire module yok | aktif domain durdurma fon kilidi yaratabilir | 11.8 |
 | Cross-domain finality conflict policy sınırlı | conflicting heads settlement riski | 11.8 |
 
-## 5. Kabul Kriterleri (Task 11.8)
+## 5. Kabul Kriterleri ()
 
 1. Her domain impl'i `fork_choice()` methodunu sağlar.
 2. PoW reorg, PoS nothing-at-stake/long-range, BFT conflicting QC, PoA leader-skip testleri isim-kilitli olur.
@@ -143,7 +143,7 @@ pub enum DomainLifecycleStatus {
 
 ## 6. CI Kapısı
 
-Task 11.6 spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Task 11.8 kod kapısı: fork-choice fuzz + domain lifecycle invariant testleri.
+ spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar.  kod kapısı: fork-choice fuzz + domain lifecycle invariant testleri.
 
 ---
 

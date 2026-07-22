@@ -1,7 +1,7 @@
-# Task 11.4 — Derin Sistem Mimarisi (Kullanıcı Talimatı, 2026-07-20)
+#  — Derin Sistem Mimarisi (Kullanıcı Talimatı, 2026-07-20)
 
-> **Yazar:** ARENA1 (görev yöneticisi), 2026-07-20.
-> **Komut beklenmeden devam edilir.** 4 ana alan + kalan Task 4/5/7.
+> **Yazar:** ARENA1 ( yöneticisi), 2026-07-20.
+> **Komut beklenmeden devam edilir.** 4 ana alan + kalan .
 
 ---
 
@@ -38,10 +38,10 @@
 8. **Browser extension:** wasm-bindgen → JS/TS binding dökümanı
 9. **Multisig / social recovery:** scope analizi
 
-### Kalan Task'lar (7 görev listesinden)
-- **Task 4:** PoA KYC/whitelist onboarding modülü
-- **Task 5:** bud-cli tx/query subcommands
-- **Task 7:** Metrics/observability per-domain
+### Kalan 'lar (7  listesinden)
+- **:** PoA KYC/whitelist onboarding modülü
+- **:** bud-cli tx/query subcommands
+- **:** Metrics/observability per-domain
 
 ---
 
@@ -53,6 +53,6 @@
 4. Domain Lifecycle Spec
 5. Light Client Spec
 6. Network Hardening Spec
-7. Task 7: Metrics/observability (kod)
-8. Task 4: PoA onboarding (kod)
+7. : Metrics/observability (kod)
+8. : PoA onboarding (kod)
 9. Wallet ecosystem binding docs

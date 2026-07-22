@@ -629,7 +629,7 @@ mod tests {
 
     /// Task 3 §3.4: SecurityConfig.peer_rate_limit_per_minute wires into refill rate.
     #[test]
-    fn task3_peer_rate_limit_security_profile() {
+    fn peer_rate_limit_security_profile() {
         use crate::core::chain_config::Network;
 
         let mut manager = PeerManager::new();
@@ -652,7 +652,7 @@ mod tests {
 
     /// Task 3 §3.4: tracked peer map has a hard ceiling (memory DoS guard).
     #[test]
-    fn task3_peer_manager_tracked_peer_ceiling() {
+    fn peer_manager_tracked_peer_ceiling() {
         let mut manager = PeerManager::new();
         manager.max_tracked_peers = 8;
 
@@ -680,7 +680,7 @@ mod tests {
 
     /// Task 3 §3.4: burst exhaustion then rejection (token bucket).
     #[test]
-    fn task3_peer_rate_limit_burst_exhaustion() {
+    fn peer_rate_limit_burst_exhaustion() {
         let mut manager = PeerManager::new();
         // Near-zero refill so burst cannot recover mid-test.
         manager.msg_refill_rate = 0.0;
@@ -701,7 +701,7 @@ mod tests {
     /// not the oversized-message category. Magnitude stays calibrated equal to
     /// the old value; the separation prevents audit/telemetry misclassification.
     #[test]
-    fn task11_12_rate_limit_exhaustion_uses_dedicated_penalty() {
+    fn rate_limit_exhaustion_uses_dedicated_penalty() {
         let mut manager = PeerManager::new();
         manager.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_12_repeated_rate_limit_exhaustion_bans_peer() {
+    fn repeated_rate_limit_exhaustion_bans_peer() {
         let mut manager = PeerManager::new();
         manager.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -793,7 +793,7 @@ mod tests {
     /// Two groups on different /24 subnets cannot communicate through the
     /// PeerManager's subnet-bound admission.
     #[test]
-    fn task11_12_chaos_network_partition_isolates_groups() {
+    fn chaos_network_partition_isolates_groups() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
@@ -815,7 +815,7 @@ mod tests {
 
     /// Task 11.12 chaos: byzantine peer sending invalid messages is rejected.
     #[test]
-    fn task11_12_chaos_byzantine_block_rejected() {
+    fn chaos_byzantine_block_rejected() {
         let mut pm = PeerManager::new();
         pm.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -837,7 +837,7 @@ mod tests {
     /// Task 11.12 chaos: eclipse single-peer isolation — a peer that can only
     /// connect to one subnet is isolated from the broader network.
     #[test]
-    fn task11_12_chaos_eclipse_single_peer_isolation() {
+    fn chaos_eclipse_single_peer_isolation() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
@@ -857,7 +857,7 @@ mod tests {
 
     /// Task 11.12 chaos: sybil attack from same /24 subnet is rejected.
     #[test]
-    fn task11_12_chaos_sybil_subnet_bound_rejects_excess() {
+    fn chaos_sybil_subnet_bound_rejects_excess() {
         let mut pm = PeerManager::new();
         pm.set_max_peers_per_subnet(4);
 
@@ -876,7 +876,7 @@ mod tests {
 
     /// Task 11.12 chaos: ban TTL allows reconnect after expiry.
     #[test]
-    fn task11_12_chaos_ban_ttl_allows_reconnect_after_expiry() {
+    fn chaos_ban_ttl_allows_reconnect_after_expiry() {
         let mut pm = PeerManager::new();
         pm.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -898,7 +898,7 @@ mod tests {
     /// Task 11.12 chaos: reputation fuzz decay — peer score decreases
     /// with repeated violations.
     #[test]
-    fn task11_12_chaos_reputation_fuzz_decay() {
+    fn chaos_reputation_fuzz_decay() {
         let mut pm = PeerManager::new();
         pm.msg_refill_rate = 0.0;
         let peer = test_peer_id();
@@ -926,7 +926,7 @@ mod tests {
     /// `MIN_SCORE` (like `report_bad_behavior`) so `get_score()` never
     /// undershoots. Without the clamp these paths could return e.g. -105.
     #[test]
-    fn task11_12_reputation_score_clamped_under_repeated_penalties() {
+    fn reputation_score_clamped_under_repeated_penalties() {
         let mut pm = PeerManager::new();
 
         let pb = test_peer_id();

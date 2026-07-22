@@ -1,7 +1,7 @@
 # RFC F10.5 — Bud→ETH Solidity Bridge Kontratı (Ethereum-taraflı light-client)
 
 > **Durum:** DESIGN / PLAN (Solidity implementasyonu ayrı iş + audit).
-> **Yazar:** ARENA1 (görev yöneticisi, cross_domain domain'i), 2026-07-19.
+> **Yazar:** ARENA1 ( yöneticisi, cross_domain domain'i), 2026-07-19.
 > **Temel:** main `9ba7955` (F10.1+F10.2+F10.3 ship edildi).
 > **Kaynak:** `docs/RFC_F10_EVM_CHAIN_ADAPTER.md` §4.2 (Bud→ETH akışı).
 
@@ -154,7 +154,7 @@ function claimUnlock(
 
 ## 6. Uygulama planı
 
-| Görev | Kapsam | Sorumlu | Kapı |
+|  | Kapsam | Sorumlu | Kapı |
 |---|---|---|---|
 | F10.5a | `BudToEthClaim` Rust payload (ship edildi, `bud_to_eth.rs`) | ARENA1 ✅ | unit test |
 | F10.5b | `BudlumLightClient.sol` iskelet (BLS verify stub) | ARENA1 / Solidity ekibi | foundry test |

@@ -1,4 +1,4 @@
-# Network Hardening — Task 3 §3.4
+# Network Hardening —
 
 **Hazırlayan:** ARENA1
 **Tarih:** 2026-07-15

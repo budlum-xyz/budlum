@@ -1,4 +1,4 @@
-# Budlum personas (Task 0.36)
+# Budlum personas ()
 
 Same binary, three operator shapes. Configs are Strict Config V2 (`deny_unknown_fields`).
 
@@ -20,7 +20,7 @@ Same binary, three operator shapes. Configs are Strict Config V2 (`deny_unknown_
 | Bridge mint (non-PoW domains) | — | if features on | policy + `bridge_enabled` |
 | Bridge mint from **PoW** domains | `pow-header-chain-v1` only; legacy proofs gated | same | same |
 | `VerifyMerkle` inside STARK | Production-gated (Z-B 3.5) | Testing/experimental | Production-gated |
-| B.U.D. storage network | — | — | — | **Task 0.38 only** |
+| B.U.D. storage network | — | — | — | ** only** |
 
 ## Run
 

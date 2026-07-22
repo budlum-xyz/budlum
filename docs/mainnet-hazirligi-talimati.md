@@ -33,7 +33,7 @@ Bu bir kod görevi değil ama kod tarafında audit'i kolaylaştıracak şeyler
 
 ### 2. Z-B (BudZKVM VerifyMerkle) 64-depth soundness
 **Durum:** Kısmi düzeltmeler yapıldı ama **Production ISA'da hâlâ gate'li**
-— yani gerçek kullanılmıyor, kapalı tutuluyor. B.U.D. storage'ın Görev 3'ü
+— yani gerçek kullanılmıyor, kapalı tutuluyor. B.U.D. storage'ın 'ü
 (gerçek Proof-of-Storage) buna bağlı ve şu an "proof-of-storage" iddiası
 resmen yapılmıyor (sahte-yeşil yol riski, vision §9.1'de yazıyor).
 **Yapılacak:** 64-depth'te pozitif/negatif test setiyle tam soundness
@@ -151,7 +151,7 @@ kullanıcı karşısında netlik için).
 **Durum:** ARENA1/ARENA2/ARENA3/ARENAX gibi paralel instance'lar aynı
 fix'i tekrar üretip merge conflict yaratıyor.
 **Yapılacak:** Mainnet'e yakın dönemde tek seferde tek instance/tek
-görev kuralı — paralel çalışma sadece birbirinden bağımsız modüllerde.
+ kuralı — paralel çalışma sadece birbirinden bağımsız modüllerde.
 **Kabul kriteri:** Commit geçmişinde "ayni hunk" / "merge(arena3)" tipi
 çakışma commit'leri mainnet öncesi son 2 haftada görülmüyor.
 
@@ -161,7 +161,7 @@ yeni bir özellik spec'i ("zincir fork / tam geçmiş migration") merge
 edildi. Bu tek seferlik değil, tekrar eden bir davranış kalıbı —
 Arena aktif bir hata açıkken yeni iş planlamaya başlıyor.
 **Yapılacak:** "Aktif kritik/yüksek madde varken yeni spec/döküman
-commit'i yok" kuralını Arena'nın görev tanımına açıkça yaz (Genel
+commit'i yok" kuralını Arena'nın  tanımına açıkça yaz (Genel
 kurallar #2 ile aynı, burada ayrı madde olarak takip edilsin çünkü
 tekrarlanan bir desen).
 **Kabul kriteri:** Son 2 haftada, açık bir kritik/yüksek madde varken
@@ -200,7 +200,7 @@ Celestia/EigenLayer'ın unbundling (parçalara ayırma) tezi arasında bir
 gerilim var. Bu bir kod sorunu değil ama yatırımcı/kullanıcı
 konuşmalarında "neden monolitik, neden şimdi" sorusuna net bir cevap
 olmadan mainnet lansmanı zayıf kalır.
-**Yapılacak:** Bu, Arena'ya değil Ayaz'a düşen bir görev — pozisyonlama
+**Yapılacak:** Bu, Arena'ya değil Ayaz'a düşen bir  — pozisyonlama
 netleşmeden mainnet lansman metni yazılmasın.
 **Kabul kriteri:** Yok — bu madde takip listesinde kalsın, kod
 tarafını etkilemez ama unutulmasın diye burada duruyor.

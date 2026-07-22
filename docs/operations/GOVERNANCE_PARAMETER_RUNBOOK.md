@@ -1,4 +1,4 @@
-# Governance Parameter Rollout — Task 11.16
+# Governance Parameter Rollout —
 
 **Status:** ADIM 5 — operational runbook.
 **Purpose:** Parameter change rollout, voter education, emergency procedures.
@@ -9,7 +9,7 @@
 
 ## 1. Giriş
 
-Task 11.16 governance: whitelist-bound parameter proposals + activation timelock.
+ governance: whitelist-bound parameter proposals + activation timelock.
 Bu belge, parametre değişikliği rollout adımlarını, voter eğitimini ve acil
 durum prosedürlerini tanımlar.
 
@@ -64,4 +64,4 @@ check_contains "$root/docs/operations/GOVERNANCE_PARAMETER_RUNBOOK.md" "Paramete
 
 ---
 
-*Bu dosya, `Governance Invariants (Task 11.16)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Governance Invariants ()` CI gate'i tarafından doğrulanır.*

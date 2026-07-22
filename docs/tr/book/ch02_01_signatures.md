@@ -130,7 +130,7 @@ Budlum projesinde adres olarak doğrudan `Public Key`in Hex hali kullanılır.
 
 ---
 
-## 3. Hardening Task 2: Yeni Kriptografik Şemalar
+## 3. Hardening : Yeni Kriptografik Şemalar
 
 Projenin güvenlik seviyesini artırmak için klasik Ed25519 imzalarının yanına iki yeni şema eklenmiştir: **BLS** (Finalite için) ve **Dilithium** (Kuantum Sonrası Güvenlik için).
 

@@ -1,16 +1,16 @@
-# Budlum Task 12.5 — Kalan İşler ve Sertleştirme Raporu
+# Budlum  — Kalan İşler ve Sertleştirme Raporu
 
 > **Hazırlayan:** ARENA4
 > **Tarih:** 2026-07-21 14:00 UTC+03:00
 > **Zemin:** `main` — son doğrulanan zemin `5120f440` (`31/31` CI green).
-> **Durum:** Task 12 ana primitive/API/spec turu tamamlandı; Task 12.5 entegrasyon, RPC, state-root, cryptographic verification ve mainnet-hardening turu olarak yürütülür.
+> **Durum:**  ana primitive/API/spec turu tamamlandı;  entegrasyon, RPC, state-root, cryptographic verification ve mainnet-hardening turu olarak yürütülür.
 > **Kural:** Bundan sonra çalışma yalnız `main` üzerinde yapılır. Feature branch açılmaz. Her push sonrası CI SLEEP zorunludur.
 
 ---
 
 ## 0. Kısa özet
 
-Task 12'de onaylanan ana sistemlerin tamamına ilk kod katmanı girildi:
+'de onaylanan ana sistemlerin tamamına ilk kod katmanı girildi:
 
 - Pollen / Data Rights
 - AI read-denial hardening
@@ -24,7 +24,7 @@ Task 12'de onaylanan ana sistemlerin tamamına ilk kod katmanı girildi:
 - Proof Verification Market / LUM hazırlığı
 - Developer OS / BudL SDK
 
-Task 12.5'in amacı bu sistemleri **mainnet hazırlığına yaklaştırmak** için şu eksenlerde derinleştirmektir:
+'in amacı bu sistemleri **mainnet hazırlığına yaklaştırmak** için şu eksenlerde derinleştirmektir:
 
 1. RPC/query/transaction yüzeylerinin tamamlanması.
 2. Gerçek kriptografik doğrulama ve payment/escrow bağlarının eklenmesi.
@@ -49,7 +49,7 @@ Task 12.5'in amacı bu sistemleri **mainnet hazırlığına yaklaştırmak** iç
 
 ---
 
-## 2. Tamamlanmış Task 12 / erken Task 12.5 zemini
+## 2. Tamamlanmış  / erken  zemini
 
 ### 2.1 Pollen / Data Rights
 
@@ -77,7 +77,7 @@ Güvenlik durumu:
 - AI Pollen data-ref, geçerli AccessGrant olmadan kabul edilmez.
 - Purchase RPC prepare-only çalışır; LUM/DeFi/payment adapter state mutation yapmaz.
 
-Kalanlar Task 12.5 içinde aşağıda listelendi.
+Kalanlar  içinde aşağıda listelendi.
 
 ### 2.2 Encryption DAO
 
@@ -207,7 +207,7 @@ Tamamlananlar:
 - Prover-side proof market primitive.
 - Settlement-side `ProofTask`, `ProofReceipt`, `ProofMarketState` hardening.
 - Receipt validation binds assigned prover, epoch window, reward cap, verification hash.
-- Invalid receipt does not drop active task.
+- Invalid receipt does not drop active .
 - Root binding over counters/tasks/receipts.
 
 Kalanlar:
@@ -238,7 +238,7 @@ Kalanlar:
 
 ---
 
-## 3. Task 12.5 kalan işler — sıralı ADIM listesi
+## 3.  kalan işler — sıralı ADIM listesi
 
 ### P12.5-2 — Pollen cryptographic authorization verification
 
@@ -426,7 +426,7 @@ Kabul kriterleri:
 
 Amaç:
 
-Proof market task/receipt modelini gerçek proof sources ile bağlamak.
+Proof market /receipt modelini gerçek proof sources ile bağlamak.
 
 Kapsam:
 
@@ -439,8 +439,8 @@ Kapsam:
 Kabul kriterleri:
 
 - Invalid proof fail-closed.
-- Receipt cannot pay without valid assigned task.
-- Invalid receipt task kaybettirmez.
+- Receipt cannot pay without valid assigned .
+- Invalid receipt  kaybettirmez.
 - Reward cap enforced.
 - LUM adapter live bağlantısı yok.
 
@@ -471,11 +471,11 @@ Kabul kriterleri:
 
 ---
 
-### P12.5-11 — Task 11.x main integration review
+### P12.5-11 — .x main integration review
 
 Amaç:
 
-ARENA1/ARENA2/ARENA3 tarafından main'e taşınan Task 11.8–11.18 işleriyle Task 12 sistemlerinin çakışmadığından emin olmak.
+ARENA1/ARENA2/ARENA3 tarafından main'e taşınan –11.18 işleriyle  sistemlerinin çakışmadığından emin olmak.
 
 İncelenecek ana hatlar:
 
@@ -492,7 +492,7 @@ ARENA1/ARENA2/ARENA3 tarafından main'e taşınan Task 11.8–11.18 işleriyle T
 
 Kabul kriterleri:
 
-- Task 12 Pollen/payment logic fee market ile uyumlu.
+-  Pollen/payment logic fee market ile uyumlu.
 - Relayer policy settlement fee market ile çakışmaz.
 - Sovereign PoA isolation compliance registry ile çakışmaz.
 - Wallet binding Developer OS ile belgelenir.
@@ -504,7 +504,7 @@ Kabul kriterleri:
 
 Amaç:
 
-Task 12 modüllerinin uzun çalışan node'larda sınırsız büyüme oluşturmamasını sağlamak.
+ modüllerinin uzun çalışan node'larda sınırsız büyüme oluşturmamasını sağlamak.
 
 Kapsam:
 
@@ -612,7 +612,7 @@ Sıradaki uygulama sırası:
 7. **P12.5-8:** Mobile Self RPC / Atlas / Passport integration.
 8. **P12.5-9:** Proof Verification Market adapters.
 9. **P12.5-10:** Developer OS / BudL SDK practical workflow.
-10. **P12.5-11:** Task 11.x main integration review.
+10. **P12.5-11:** .x main integration review.
 11. **P12.5-12:** Bounded-state and pruning audit pass.
 
 Bu sıra CI kırmızı olmadığı sürece uygulanır. CI kırmızı olursa sıra durur ve önce kırmızı sebep düzeltilir.
@@ -621,6 +621,6 @@ Bu sıra CI kırmızı olmadığı sürece uygulanır. CI kırmızı olursa sır
 
 ## 6. Son söz
 
-Task 12 ana sistemleri kod tabanına girdi. Task 12.5 artık bir "vizyon ekleme" turu değil, **mainnet hazırlık sertleştirme turu**dur. Bu rapordaki işler tamamlanmadan Task 12 kapsamı production-ready veya audited sayılmaz.
+ ana sistemleri kod tabanına girdi.  artık bir "vizyon ekleme" turu değil, **mainnet hazırlık sertleştirme turu**dur. Bu rapordaki işler tamamlanmadan  kapsamı production-ready veya audited sayılmaz.
 
 Co-authored-by: ARENA4 <arena4@budlum.ai>

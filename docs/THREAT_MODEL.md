@@ -1,6 +1,6 @@
-# Budlum Threat Model v2 (Task 11.20)
+# Budlum Threat Model v2 ()
 
-**Durum:** Final v2 (Task 11.20) — Task 11.8 → 11.18 azaltmaları CI-gated olarak işlenmiştir
+**Durum:** Final v2 () —  → 11.18 azaltmaları CI-gated olarak işlenmiştir
 **ADR:** [ADR-010](adr/ADR-010-security-audit-hsm.md)
 **Metodoloji:** STRIDE (Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege)
 **Tehdit sınıflandırması:** 🔴 Kritik / 🟠 Yüksek / 🟡 Orta / 🔵 Düşük
@@ -41,7 +41,7 @@
 |---|---|---|---|---|---|
 | B1 | Forged EVM receipt proof (sahte deposit) | Tampering | 🔴 | EvmChainAdapter Merkle verify (V30) + verify_evm_receipt | ✅ V30 |
 | B2 | Replay attack (aynı mesaj tekrar) | Tampering | 🔴 | BridgeState.replay.mark_processed (V24) | ✅ V24 |
-| B3 | Domain spoofing (source≠target bypass) | Tampering | 🟠 | submit_cross_domain_message spoof check (Görev 2) | ✅ Görev 2 |
+| B3 | Domain spoofing (source≠target bypass) | Tampering | 🟠 | submit_cross_domain_message spoof check () | ✅  |
 | B4 | Anchor substitution (sahte finalize anchor) | Tampering | 🟠 | bridge_negatives testleri (P0 gap) | ✅ |
 | B5 | Inactive relayer submits stale message | DoS | 🟡 | relayer active check (relayer_liveness) | ✅ |
 | B6 | Bridge unlock without burn (double-spend) | Tampering | 🔴 | V17 unlock fix + V24 lock | ✅ V17 |
@@ -78,7 +78,7 @@
 
 | # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
 |---|---|---|---|---|---|
-| P1 | PoA rules permissionless'e sızma | EoP | 🔴 | PoA Isolation (CI Madde 9, 8 test) | ✅ Görev 4 mührü |
+| P1 | PoA rules permissionless'e sızma | EoP | 🔴 | PoA Isolation (CI Madde 9, 8 test) | ✅  mührü |
 | P2 | PoA admin freeze abuse | DoS | 🟠 | admin rotation + audit (ADR-009) | ADR-009 impl |
 | P3 | KYC metadata leak (cross-domain) | Info Disclosure | 🟠 | CrossDomainMessage KYC taşımaz (P0 gap test) | ✅ |
 
@@ -95,13 +95,13 @@
 
 | # | Tehdit | Sınıf | Etki | Mevcut Azaltma | Kalan Risk |
 |---|---|---|---|---|---|
-| S1 | Forged storage proof (sahte depolama kanıtı) | Tampering | 🔴 | Storage challenge + proof (spec Task 11.6) | ADR-002 impl |
+| S1 | Forged storage proof (sahte depolama kanıtı) | Tampering | 🔴 | Storage challenge + proof (spec ) | ADR-002 impl |
 | S2 | Storage node plaintext zorunlu kılma | EoP | 🔴 | Encryption policy (P12-4, DAO dokunamaz) | P12-4 |
 | S3 | Pruning ile finalized state kaybı | Tampering | 🟠 | Snapshot retantion (ADR-003) | ADR-003 impl |
 
-## 10. Task 11.20 Mitigation Closure Matrix
+## 10.  Mitigation Closure Matrix
 
-| Görev | Kapatılan risk sınıfı | Gerçekleşmiş azaltma | CI kanıtı | Kalan risk |
+|  | Kapatılan risk sınıfı | Gerçekleşmiş azaltma | CI kanıtı | Kalan risk |
 |---|---|---|---|---|
 | 11.6 | Spec drift / audit blind spot | Frozen specs + spec-review checklist | Repo Lint spec coverage | Yeni spec değişiklikleri aynı gate'e bağlanmalı |
 | 11.8 | Economy cap / fee-market / fork-choice tampering | Committed supply denominator, EIP-1559 fail-closed migration, domain fork-choice primitives, lifecycle guards | `Economy Invariants`, `Fork-Choice Invariants` | Fee distribution full wiring sonraki ekonomi ADIM'i |
@@ -130,4 +130,4 @@
 - `docs/SECURITY_AUDIT_HACKER.md` — V17-V7 bulguları (geçmiş tehdit denetimi)
 - `SECURITY.md`, `docs/BUG_BOUNTY.md` — sürekli tehdit tespiti
 - 10 ADR (`docs/adr/`) — her tehdit için azaltma kararı
-- Task 11.6-11.20 yol haritası — azaltmaların implementasyon görevları
+- -11.20 yol haritası — azaltmaların implementasyon görevları

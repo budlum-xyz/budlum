@@ -70,19 +70,19 @@ Aligned with [budlum-xyz/BudZero](https://github.com/budlum-xyz/BudZero) tasks 0
 
 | Item | Status |
 | --- | --- |
-| Public inputs (Z-A) | Bound (incl. event_digest Log fix Task 0.358) |
+| Public inputs (Z-A) | Bound (incl. event_digest Log fix ) |
 | `VerifyMerkle` path AIR (Z-B) | Expansion + Poseidon round checks; pre-round currents, single-round path hash, original-only root check, expand gas |
 | Valid 64-depth prove | ✅ `proves_verify_merkle_valid_64_depth` green (matrix chain + full prove/verify) |
 | Production gate | `MainnetActivation` default **off** (staged ceremony rollout); ISA `is_experimental()==false` |
-| Termination / halt (Z-C/D) | Landed Task 0.30.zk |
+| Termination / halt (Z-C/D) | Landed .zk |
 | Storage gas (SRead/SWrite) | Higher than Load/Store; AIR aligned |
-| Task 10 performance benches | Planned Tur **13.5** |
-| Task 11 external audit | Checklist Tur **13.9** (not claimed done) |
+|  performance benches | Planned Tur **13.5** |
+|  external audit | Checklist Tur **13.9** (not claimed done) |
 
 Z-B 64-depth soundness proof is green. Merkle membership inside STARK proofs is
 cryptographically constrained; mainnet still requires `MainnetActivation` flip
 post-ceremony. **B.U.D.** proof-of-storage productization remains a separate
-integration task on top of this L1 primitive.
+integration  on top of this L1 primitive.
 
 ---
 
@@ -112,7 +112,7 @@ CI enforces:
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo test --workspace` — **124 test geçerli sayım** (CI-kanıtlı, 2026-07-18)
 
-Modül-ayrımı kuralı (Task 10 §4): bu sayı kök README'nin dashboard tablosunda
+Modül-ayrımı kuralı (): bu sayı kök README'nin dashboard tablosunda
 kendi satırında raporlanır; toplam Core sayısına (755 lib) karışmaz.
 
 No `#[allow(clippy::…)]` as a substitute for fixing lints on new work.

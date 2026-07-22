@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Task 3 §3.2 smoke: start a short-lived node and probe JSON-RPC chain_id.
+#  smoke: start a short-lived node and probe JSON-RPC chain_id.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

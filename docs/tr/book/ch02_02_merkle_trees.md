@@ -90,7 +90,7 @@ Bu sayede 1 TB'lık blok zincirini indirmeden, işlemler kriptografik kesinlikle
 
 ---
 
-## 4. Hardening Task 2: QC Blob ve PQ İmzaları
+## 4. Hardening : QC Blob ve PQ İmzaları
 
 Yeni eklenen Optimistic QC (Optimistik Çeyrek Sertifika) yapısında, Merkle ağaçları bu sefer kuantum sonrası (PQ) güvenliği optimize etmek için kullanılır.
 

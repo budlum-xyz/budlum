@@ -1,4 +1,4 @@
-# Budlum Test Inventory — Comprehensive Seal Registry (Task 9)
+# Budlum Test Inventory — Comprehensive Seal Registry ()
 
 > **TR Özet:** Bu dosya Budlum ağındaki tüm test kategorilerini, mühür sayılarını ve kapsamlarını listeleyen ana indekstir.
 >

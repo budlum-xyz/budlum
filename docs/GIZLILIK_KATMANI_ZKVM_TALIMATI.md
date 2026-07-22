@@ -2,7 +2,7 @@
 
 *Budlum / BudZKVM (Plonky3) — Arena'ya yönelik mimari talimat*
 
-- **Durum:** Kararlar çözüldü + D2 Görev A–F kodlandı (ARENA2 2026-07-22). Mainnet gate default off.
+- **Durum:** Kararlar çözüldü + D2  A–F kodlandı (ARENA2 2026-07-22). Mainnet gate default off.
 - **Bağımlılık:** BudZKVM (Plonky3 STARK), PoA/kurumsal domain (BDDK/KYC katılım bankacılığı pilotu).
 - **Tarih:** 22 Temmuz 2026.
 

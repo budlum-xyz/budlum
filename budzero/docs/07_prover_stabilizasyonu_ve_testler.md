@@ -36,7 +36,7 @@ Prover tarafını okurken şu dosyaları birlikte düşünmek gerekir:
 
 Bu ayrım önemlidir. `plonky3_air.rs` VM'in neyi kanıtladığını söyler. `bud_stark` altındaki dosyalar ise bu kuralların STARK kanıtına nasıl dönüştürüldüğünü yönetir.
 
-## Görev 1: Tip Sistemi ve Konfigürasyon
+## : Tip Sistemi ve Konfigürasyon
 
 Plonky3 0.5.2 ile çalışırken en kritik konu, generic tiplerin tek bir yerde ve tutarlı biçimde tanımlanmasıdır. Eğer `Val<SC>`, `Challenge`, `Domain`, `Pcs` ve `Challenger` sınırları farklı dosyalarda farklı şekillerde kurulursa Rust derleyicisi çok uzun type inference hataları üretir.
 
@@ -61,7 +61,7 @@ BudZKVM'de çözüm, serde sınırlarını açık yazmaktır. Proof şu mantıkl
 
 Bu yaklaşım `postcard` desteğini getirir ve CLI/L1 entegrasyonu için gereken proof taşıma katmanını sadeleştirir. Proof formatının daha sonra kalıcı bir wire format haline gelmesi istenirse bu dosya doğal sınır noktasıdır.
 
-## Görev 2: Ana Trace ve Yardımcı Trace
+## : Ana Trace ve Yardımcı Trace
 
 BudZKVM prover mimarisi iki görevlıdır:
 
@@ -154,7 +154,7 @@ Bu testler matematiksel güvenliği tek başına kanıtlamaz, ama prover entegra
 
 ## Bugün Stabil Olan Parçalar
 
-Görev 0 stabilizasyonu sonrası mevcut durum:
+ stabilizasyonu sonrası mevcut durum:
 
 * `cargo check --workspace --all-targets` temiz.
 * `cargo clippy --workspace --all-targets -- -D warnings` temiz.
@@ -182,11 +182,11 @@ Bu noktadan sonra yapılacak işler:
 
 ## Sıradaki Sertleştirme Adımları
 
-Görev 0 sonrası sıradaki adımlar:
+ sonrası sıradaki adımlar:
 
-* VerifyMerkle opcode'unu production'a taşımak (Task 0.6).
-* Tracing/logging altyapısını tüm pipeline'a entegre etmek (Task 0.7).
-* Kapsamlı negatif test suite ve CI genişletme (Task 0.8).
+* VerifyMerkle opcode'unu production'a taşımak ().
+* Tracing/logging altyapısını tüm pipeline'a entegre etmek ().
+* Kapsamlı negatif test suite ve CI genişletme ().
 * Poseidon'un tüm round'ları için AIR doğrulaması.
 * Public input bağlamını netleştirmek: program hash, başlangıç state'i ve final state proof'a bağlanmalı.
 * Proof formatını uzun vadeli uyumluluk için versiyonlamak.

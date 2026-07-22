@@ -1,8 +1,8 @@
 # ARENA4 Ar-Ge Çalışmaları Sertleştirme ve Denetim Özeti
 
-**Tarih:** 2026-07-21  
-**Hazırlayan:** ARENA3  
-**Kapsam:** ARENA4 tarafından geliştirilmiş tüm Task 12 / Pollen modülleri  
+**Tarih:** 2026-07-21
+**Hazırlayan:** ARENA3
+**Kapsam:** ARENA4 tarafından geliştirilmiş tüm  / Pollen modülleri
 **Durum:** Sertleştirme tamamlandı, denetim tamamlandı
 
 ---
@@ -58,14 +58,14 @@ Tüm modüllerde `validate()` veya `validate_shape()` metodları mevcut:
 - **MAX_RELAYER_INTENTS = 10_000** — relayer intent limiti
 - **MAX_RELAYER_BIDS_PER_INTENT = 64** — bid limiti
 - **MAX_RELAYER_SETTLEMENTS = 10_000** — settlement limiti
-- **MAX_PROOF_MARKET_ACTIVE_TASKS = 10_000** — aktif proof task limiti
+- **MAX_PROOF_MARKET_ACTIVE_TASKS = 10_000** — aktif proof  limiti
 - **MAX_PROOF_MARKET_PENDING_RECEIPTS = 10_000** — pending receipt limiti
 - **MAX_PASSPORT_EVIDENCE_ITEMS** — passport evidence limiti
 - **max_grants / max_grants_per_asset** — Pollen grant limitleri
 
 ### 2.4 Pruning (budama)
 - `RelayerPolicyRegistry::prune_expired()` — süresi dolmuş intent/bid/settlement
-- `ProofMarketState::prune_expired()` — süresi dolmuş task
+- `ProofMarketState::prune_expired()` — süresi dolmuş
 - `ProofMarketState::prune_paid_receipts()` — ödenmiş receipt
 - `ProofMarketState::enforce_max_sizes()` — limit aşımı durumunda budama
 
@@ -132,7 +132,7 @@ Tüm modüllerde `validate()` veya `validate_shape()` metodları mevcut:
 
 ## 7. Sonuç
 
-ARENA4'in tüm Ar-Ge çalışmaları (Task 12 / Pollen) **sertleştirilmiş ve denetlenmiştir**. Tüm modüller:
+ARENA4'in tüm Ar-Ge çalışmaları ( / Pollen) **sertleştirilmiş ve denetlenmiştir**. Tüm modüller:
 - Fail-closed validation
 - Bounded collections (MAX_* sabitleri)
 - Lifecycle transition guards
@@ -145,4 +145,4 @@ ARENA4'in tüm Ar-Ge çalışmaları (Task 12 / Pollen) **sertleştirilmiş ve d
 
 ---
 
-*Bu belge, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu belge, `Audit Prep ()` CI gate'i tarafından doğrulanır.*

@@ -4,7 +4,7 @@
 
 | Metadata | Değer |
 |---|---|
-| Task | Task X.Y (boşluklu, kanonik kural) |
+|  |  X.Y (boşluklu, kanonik kural) |
 | Tarih | YYYY-MM-DD HH:MM UTC+3 |
 | HEAD SHA | `abcdef1` (**yalnızca `git cat-file -t` ile doğrulanmış SHA**) |
 | Yazar | ARENAn |
@@ -33,9 +33,9 @@
 Her iddia için: çalıştırılan komut + özet çıktı + SHA. CI hakemdir:
 `cargo fmt --all -- --check`, `cargo clippy --lib --tests -- -D warnings`, `cargo test --lib` (+ BudZero karşılıkları).
 
-## 5. Debts → next task
+## 5. Debts → next
 
-(Dürüst borç listesi — stub/TODO/ignore nedeni ve hedef Task. "Kanıtsız mainnet-ready/audited ibaresi yasak" kuralı geçerli.)
+(Dürüst borç listesi — stub/TODO/ignore nedeni ve hedef . "Kanıtsız mainnet-ready/audited ibaresi yasak" kuralı geçerli.)
 
 ## 6. Decisions (user)
 

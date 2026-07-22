@@ -50,9 +50,9 @@ The finality protocol uses BLS12-381 signatures for aggregated threshold verific
 #### 3.2.3 Protocol Tasks
 At each checkpoint height (`FINALITY_CHECKPOINT_INTERVAL = 10`):
 
-1. **Prevote Task**: Started automatically when a node produces a checkpoint block. Validators sign prevotes with their BLS secret key via `Blockchain::sign_prevote()`. Votes are broadcast via GossipSub.
+1. **Prevote **: Started automatically when a node produces a checkpoint block. Validators sign prevotes with their BLS secret key via `Blockchain::sign_prevote()`. Votes are broadcast via GossipSub.
 
-2. **Precommit Task**: The periodic voting loop polls `get_aggregator_state()`. When prevote quorum (2/3 stake) is detected, validators automatically sign and broadcast precommits via `Blockchain::sign_precommit()`.
+2. **Precommit **: The periodic voting loop polls `get_aggregator_state()`. When prevote quorum (2/3 stake) is detected, validators automatically sign and broadcast precommits via `Blockchain::sign_precommit()`.
 
 3. **Certificate Production**: Once precommit quorum is reached, `FinalityAggregator::try_produce_cert()` aggregates all G1 precommit signatures, produces a signer bitmap, and creates a `FinalityCert`. The cert is gossiped network-wide.
 

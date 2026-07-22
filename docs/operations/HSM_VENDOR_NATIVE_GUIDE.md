@@ -1,4 +1,4 @@
-# BLS/PQ HSM Vendor-Native Entegrasyon Rehberi (Task 4, Q: add_doc)
+# BLS/PQ HSM Vendor-Native Entegrasyon Rehberi (, Q: add_doc)
 
 **Durum:** Taslak, 2026-07-16
 **Karar:** Q hsm_next = keep_real_only (sadece gerçek PKCS#11), mock yok. Vendor-native audit item.

@@ -1,13 +1,13 @@
-# Task 5 — Evrensel Mutabakat ve Teknik Olgunlaşma
+#  — Evrensel Mutabakat ve Teknik Olgunlaşma
 
-> **Task 5 = Task 0.46 (Budlum Evrensel Geçiş Kapısı)**
+> ** =  (Budlum Evrensel Geçiş Kapısı)**
 > **Hazırlayan:** ARENA1
 > **Tarih:** 2026-07-16
 > **Durum:** Aktif Geliştirme (Kullanıcı Olumlu Feedback'i ile Başlatıldı)
 
 ---
 
-## 1. Task 5 Hedefleri
+## 1.  Hedefleri
 
 ### 1.1 Ana Hedef
 Budlum'un **"Evrensel Mutabakat Katmanı"** kimliğini teknik olarak tamamlamak; dış zincirler (EVM, Solana vb.) ile olan bağı kurmak ve mobil cihazların ağdaki egemenliğini pekiştirmek.
@@ -24,9 +24,9 @@ Budlum'un **"Evrensel Mutabakat Katmanı"** kimliğini teknik olarak tamamlamak;
 
 ---
 
-## 2. Görev Detayları
+## 2.  Detayları
 
-### 2.1 Görev 5.1: Universal Relayer - Master Key
+### 2.1 : Universal Relayer - Master Key
 **Dosya:** `src/core/transaction.rs`, `src/cross_domain/`
 
 **Yapılacaklar:**
@@ -34,14 +34,14 @@ Budlum'un **"Evrensel Mutabakat Katmanı"** kimliğini teknik olarak tamamlamak;
 2. `ExternalTransaction` yapısı oluştur: Budlum cüzdanı ile imzalanan, relayer tarafından dış zincire basılan payload.
 3. RPC metodu: `bud_relayerPrepareExternalTx`.
 
-### 2.2 Görev 5.2: Mobil B.U.D. Light Node
+### 2.2 : Mobil B.U.D. Light Node
 **Dosya:** `budzero/bud-node/src/sharding.rs`
 
 **Yapılacaklar:**
 1. `MobileConfig` ile batarya ve Wi-Fi dostu depolama limitleri getir.
 2. `ShardManager`'da "Kendi Verim" (Self-Host) önceliğini kodla.
 
-### 2.3 Görev 5.3: SocialFi Hard Pruning Worker
+### 2.3 : SocialFi Hard Pruning Worker
 **Dosya:** `src/network/node.rs`
 
 **Yapılacaklar:**
@@ -50,11 +50,11 @@ Budlum'un **"Evrensel Mutabakat Katmanı"** kimliğini teknik olarak tamamlamak;
 
 ---
 
-## 3. Task 5 Başlangıç Kaydı (STATUS_ONLINE)
+## 3.  Başlangıç Kaydı (STATUS_ONLINE)
 
-Ajanlar Task 5 görev dağılımına göre çalışmaya başlamıştır. Kullanıcı onayı (olumlu feedback) kesintisiz ilerleme için temel alınmıştır.
+Ajanlar   dağılımına göre çalışmaya başlamıştır. Kullanıcı onayı (olumlu feedback) kesintisiz ilerleme için temel alınmıştır.
 
 ---
 
-**Not:** Bu belge Task 5 sürecinin yol haritasıdır.
+**Not:** Bu belge  sürecinin yol haritasıdır.
 Force-push YASAK.

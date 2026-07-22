@@ -1,6 +1,6 @@
 # Genesis Validation Reward Pool — Teknik Spec
 
-**Durum:** Final v1 (Task 11.6) → implementasyon Task 11.8
+**Durum:** Final v1 () → implementasyon
 **ADR:** [ADR-001](adr/ADR-001-genesis-reward-pool.md)
 **SPEC_REVIEW:** [GENESIS_REWARD_POOL_SPEC_REVIEW.md](spec-review/GENESIS_REWARD_POOL_SPEC_REVIEW.md)
 **INTERFACE_FROZEN:** true
@@ -8,9 +8,9 @@
 
 ---
 
-## 0. Interface Freeze (Task 11.6)
+## 0. Interface Freeze ()
 
-Bu spec Task 11.6 sonunda **interface-frozen** kabul edilir. Task 11.8 implementasyonu aşağıdaki alan adlarını, invariant isimlerini ve dağıtım semantiğini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
+Bu spec  sonunda **interface-frozen** kabul edilir.  implementasyonu aşağıdaki alan adlarını, invariant isimlerini ve dağıtım semantiğini değiştiremez; değişiklik gerekiyorsa yeni ADR açılır.
 
 ### 0.1 Genesis config alanları
 
@@ -28,7 +28,7 @@ Bu spec Task 11.6 sonunda **interface-frozen** kabul edilir. Task 11.8 implement
 }
 ```
 
-**Donmuş alanlar:** `validation_reward_pool`, `validation_pool_epochs`, `treasury_pool`, `reward_pool_start_epoch`. Mevcut Task 11.2 `bud_tokenomics` alanları geriye uyumlu kalır; migration yoksa alanlar explicit default ile okunur.
+**Donmuş alanlar:** `validation_reward_pool`, `validation_pool_epochs`, `treasury_pool`, `reward_pool_start_epoch`. Mevcut  `bud_tokenomics` alanları geriye uyumlu kalır; migration yoksa alanlar explicit default ile okunur.
 
 ### 0.2 Runtime interface
 
@@ -94,7 +94,7 @@ fn reward_for_epoch(schedule, epoch, active_validator_stakes) -> Vec<(Address, u
 - Slashed validator epoch reward listesine dahil edilmez.
 - O epoch'ta dağıtılmayan pay pool'da kalır; yakılmaz.
 - Slash miktarı validator stake'inden düşülür; reward pool'dan düşülmez.
-- Slashed stake'in yakım/treasury akışı Task 11.8 economy invariant testinde ayrıca kanıtlanır.
+- Slashed stake'in yakım/treasury akışı  economy invariant testinde ayrıca kanıtlanır.
 
 ## 5. Treasury Governance Interface
 
@@ -118,9 +118,9 @@ Treasury pool yalnız minimal on-chain governance ile parametrelenir (ADR-004). 
 
 ## 8. CI Kapısı
 
-Task 11.6 spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar. Task 11.8 kod kapısı: Economy Invariants job'u 10K epoch simülasyonu + random stake/slash property testlerini koşar.
+ spec kapısı: `scripts/check-spec-coverage.sh` bu dosyada `INTERFACE_FROZEN: true` marker'ını ve review kaydını zorunlu tutar.  kod kapısı: Economy Invariants job'u 10K epoch simülasyonu + random stake/slash property testlerini koşar.
 
-## 9. İlgili Kod (Task 11.8)
+## 9. İlgili Kod ()
 
 - `src/tokenomics/reward_pool.rs` — dağıtım schedule'ı.
 - `config/mainnet-genesis.json` — pre-allocation.

@@ -2,7 +2,7 @@
 
 **Durum:** Kabul Edildi
 **Tarih:** 2026-07-20
-**Karar Verici:** Kullanıcı (onay) — Task 11.6 karar turu q5
+**Karar Verici:** Kullanıcı (onay) —  karar turu q5
 
 ## Bağlam
 Cüzdan güvenliği için multisig/social recovery kritik (anahtar kaybı = fon kaybı). Özellikle PoA domain banka pilotu kurumsal kullanıcılar için. Soru: mainnet v1 scope'a giriyor mu?
@@ -19,6 +19,6 @@ Cüzdan güvenliği için multisig/social recovery kritik (anahtar kaybı = fon 
 Master-context nötr (wallet layer, konsensüsü değiştirmez).
 
 ## İlgili
-- `src/wallet/multisig.rs`, `src/wallet/social_recovery.rs` (implementasyon — Task 11.14)
+- `src/wallet/multisig.rs`, `src/wallet/social_recovery.rs` (implementasyon — )
 - `wallet-core/` crate (genişletme)
 - ADR-010 (constitution — multisig parametreleri)

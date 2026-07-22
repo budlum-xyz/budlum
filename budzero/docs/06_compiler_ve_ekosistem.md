@@ -27,7 +27,7 @@ Projemizdeki `bud-compiler` crate'i, Bud adını verdiğimiz yüksek seviyeli ve
    Bu sayede `(2 + 3) * 4` gibi gruplamalar ve `2 + 3 * 4` gibi öncelikli işlemler matematiksel kurallara tam uyumlu şekilde derlenir.
 
    #### Paniksiz Hata Yönetimi (Result-Based Parsing)
-   Erken görev derleyici tasarımlarında parser, karşılaştığı herhangi bir sözdizimi hatasında `panic!()` fırlatıyor ve derleyici sınırı `std::panic::catch_unwind` ile bu panikleri yakalıyordu. Bu yaklaşım hem kırılgandır hem de Rust dilinin güvenlik felsefesine aykırıdır.
+   Erken  derleyici tasarımlarında parser, karşılaştığı herhangi bir sözdizimi hatasında `panic!()` fırlatıyor ve derleyici sınırı `std::panic::catch_unwind` ile bu panikleri yakalıyordu. Bu yaklaşım hem kırılgandır hem de Rust dilinin güvenlik felsefesine aykırıdır.
 
    Parser mimarisini tamamen **Result-based** olacak şekilde yeniden tasarladık:
    * Tüm parse metotları artık `Result<ASTNode, CompileError>` döner.
@@ -118,24 +118,24 @@ Bu sayede CLI'da üretilen bytecode ile L1 transaction payload formatı aynı ka
 
 Tebrikler! Sifirdan baslayarak, kendi komut setini tanimlayan, kodu calistiran ve sonucun dogrulugunu kriptografik olarak kanitlayan tam tesekkullu bir ZKVM tasarladiniz.
 
-**Görev 0 Tamamlandi (31/31 opcode production, 51 test, 0 failure):**
+** Tamamlandi (31/31 opcode production, 51 test, 0 failure):**
 * Tum opcode'larin AIR constraint'leri tamamlandi (Comparison 64-bit decomposition, Bitwise cebirsel esdegerlik, Poseidon4 hash, Storage STORAGE_BASE memory LogUp, VerifyMerkle poseidon4 tabanli).
 * `postcard` serilestirme (bounded, DoS korumali).
 * `RUST_LOG=info` ile tum pipeline'da structured tracing.
 * 8 negatif test (tampered comparison, bitwise, poseidon S-box, storage, PC, public inputs, program, proof bytes).
 * CI: fmt + check + clippy + test + docs link check + cargo deny.
 
-**Sırada Ne Var? (Görev 1: Performans)**
+**Sırada Ne Var? (: Performans)**
 * Benchmark suite (criterion), proving/verification time olcumleri.
 * Prover paralellestirme optimizasyonu (Rayon).
 * Proof boyut optimizasyonu (FRI parametre tuning).
 
-**Sırada Ne Var? (Görev 2: Dil ve Compiler)**
+**Sırada Ne Var? (: Dil ve Compiler)**
 * Struct/Kayit destegi, Mapping (Map<K,V>), Standart kutuphane.
 * Hata mesajlari ve source span iyilestirmesi (miette).
 * Debug modu ve step-by-step interactive debugger.
 
-**Sırada Ne Var? (Görev 3: ZK Gelistirmeler)**
+**Sırada Ne Var? (: ZK Gelistirmeler)**
 * Recursive proof aggregation (coklu transaction -> tek block proof).
 * ZK mode (zero-knowledge), Verifier WASM/ EVM target.
 * Poseidon multi-round tam AIR dogrulamasi.

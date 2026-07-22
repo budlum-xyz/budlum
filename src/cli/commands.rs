@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_cli_pruning_policy_archive_rejects_pruning() {
+    fn cli_pruning_policy_archive_rejects_pruning() {
         let mut cfg = NodeConfig {
             role: "archive".into(),
             features_pruning: true,
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_cli_pruning_policy_unknown_role_rejected() {
+    fn cli_pruning_policy_unknown_role_rejected() {
         let cfg = NodeConfig {
             role: "unknown".into(),
             ..Default::default()
@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_cli_node_mode_archive_normalizes_role() {
+    fn cli_node_mode_archive_normalizes_role() {
         let mut cfg = NodeConfig::default();
         cfg.apply_file_config(FileConfig {
             node: Some(NodeSection {
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_cli_node_mode_full_keeps_validator_role() {
+    fn cli_node_mode_full_keeps_validator_role() {
         let mut cfg = NodeConfig::default();
         cfg.apply_file_config(FileConfig {
             node: Some(NodeSection {

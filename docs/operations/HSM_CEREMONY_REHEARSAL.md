@@ -1,9 +1,9 @@
-# HSM Ceremony Rehearsal — Task 11.20
+# HSM Ceremony Rehearsal —
 
 **Status:** ADIM 2 rehearsal ledger.
 **Hardware standard:** YubiHSM 2 (PKCS#11).
 **Purpose:** Key ceremony dry-run kanıtı — mock geçmez, local disk geçmez, YubiHSM path geçer.
-**Gate:** `Audit Prep (Task 11.20)` CI job'u bu dosyanın markerlarını doğrular.
+**Gate:** `Audit Prep ()` CI job'u bu dosyanın markerlarını doğrular.
 **Budlumdevnet:** salt-okunur; dokunulmadı.
 
 ---
@@ -100,4 +100,4 @@ check_contains "$root/docs/operations/HSM_CEREMONY_REHEARSAL.md" "Mock geçmez k
 
 ---
 
-*Bu dosya, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Audit Prep ()` CI gate'i tarafından doğrulanır.*

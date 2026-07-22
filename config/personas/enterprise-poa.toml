@@ -34,7 +34,7 @@ auth_required = true
 api_key_env = "BUDLUM_RPC_API_KEY"
 # Prefer firewall; empty allowed_ips = app-layer allow-all (still need API key).
 allowed_ips = []
-# If behind reverse proxy, list proxy IPs. X-Real-IP only honored then (Task 0.35 B2).
+# If behind reverse proxy, list proxy IPs. X-Real-IP only honored then ( B2).
 trusted_proxies = []
 
 [metrics]
@@ -42,7 +42,7 @@ listener = "0.0.0.0:9090"
 
 [validator]
 backend = "pkcs11"
-# DO NOT set key_file on mainnet — process exits (Task 0.35 B1).
+# DO NOT set key_file on mainnet — process exits ( B1).
 
 [validator.signer]
 backend = "pkcs11"

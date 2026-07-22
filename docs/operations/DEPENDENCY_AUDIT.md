@@ -1,4 +1,4 @@
-# Dependency Audit Raporu (Task 2 §1.7)
+# Dependency Audit Raporu ()
 
 **Güncelleme:** 2026-07-15
 **Araç:** `cargo-audit` (https://github.com/rustsec/rustsec)

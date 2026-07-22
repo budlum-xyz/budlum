@@ -1,7 +1,7 @@
-# CI Stability Window — Task 11.20 Launch Lock
+# CI Stability Window —  Launch Lock
 
 **Purpose:** 7 günlük launch-lock stabilite penceresi için günlük kayıt.
-**Gate:** `Audit Prep (Task 11.20)` CI job'u bu dosyanın markerlarını doğrular.
+**Gate:** `Audit Prep ()` CI job'u bu dosyanın markerlarını doğrular.
 **Kural:** CI tek hakemdir. Lokal kontrol yalnızca ön doğrulama sayılır.
 **Budlumdevnet:** salt-okunur; bu pencere dışındaki tüm değişikliklerden etkilenmez.
 
@@ -68,9 +68,9 @@ check_contains "$root/docs/audit_prep/CI_STABILITY_WINDOW.md" "7 günlük launch
 - **Gün 2 (2026-07-21):** `813b65d` — 30/30 success, 0 failure ✅ (EIP-1559 fixes)
 - **Gün 3 (2026-07-21):** `fee3687` — 30/30 success, 0 failure ✅ (ARENA4 audit summary)
 - **Hedef gün:** 2026-07-28 (7. gün)
-- **Gün 2 (2026-07-22):** `95fb473` — 35/35 success, 0 failure ✅ (Lubot Görev A wiring + H5.2/H5.7 SecurityConfig)
+- **Gün 2 (2026-07-22):** `95fb473` — 35/35 success, 0 failure ✅ (Lubot  A wiring + H5.2/H5.7 SecurityConfig)
 - **Durum:** 🟢 Gün 1-4 yeşil (calendar day 2/7)
 
 ---
 
-*Bu dosya `docs/audit_prep/` altında, `Audit Prep (Task 11.20)` CI gate'i tarafından doğrulanır.*
+*Bu dosya `docs/audit_prep/` altında, `Audit Prep ()` CI gate'i tarafından doğrulanır.*

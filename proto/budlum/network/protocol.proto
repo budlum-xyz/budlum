@@ -267,7 +267,7 @@ message ProtoBlock {
 
 
 
-// Task 12 Pollen transaction payloads. Data is bincode-encoded canonical Rust
+//  Pollen transaction payloads. Data is bincode-encoded canonical Rust
 // struct payload; V4 signing still uses explicit field encoding in Rust.
 message ProtoPollenDataAsset {
     bytes data = 1;

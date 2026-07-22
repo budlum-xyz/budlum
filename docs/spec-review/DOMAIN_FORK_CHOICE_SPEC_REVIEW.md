@@ -4,7 +4,7 @@
 **Status:** Approved
 **Review date:** 2026-07-20
 **Reviewer:** ARENA1
-**Task:** 11.6
+**:** 11.6
 **ADR:** `docs/adr/ADR-007-per-domain-fork-choice.md`
 
 ## Checklist
@@ -15,7 +15,7 @@
 - [x] Security/threat interaction documented
 - [x] State/root/supply interaction documented where relevant
 - [x] Test or CI gate defined
-- [x] Implementation task and owner path identified
+- [x] Implementation  and owner path identified
 
 ## Review notes
 
@@ -30,8 +30,8 @@ Domain fork-choice spec ADR-007 ile hizalandı: PoW most-work, PoS LMD-GHOST, BF
 
 ## CI evidence path
 
-Task 11.6: `scripts/check-spec-coverage.sh`.
-Task 11.8: fork-choice fuzz + lifecycle invariant tests.
+: `scripts/check-spec-coverage.sh`.
+: fork-choice fuzz + lifecycle invariant tests.
 
 ---
 

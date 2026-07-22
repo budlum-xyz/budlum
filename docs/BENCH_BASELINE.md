@@ -1,4 +1,4 @@
-# Bench Baseline — Task 8.12 (çatı, dürüst marker'lı)
+# Bench Baseline —  (çatı, dürüst marker'lı)
 
 > **TR Özet:** Bu belge bench baseline altyapısının çatısıdır (Dalga 8).
 > İlk SAYISAL tablo CI artifact'lerinden alınıp **Dalga 9'da** bu dosyaya

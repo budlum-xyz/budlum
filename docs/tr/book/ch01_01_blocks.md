@@ -27,7 +27,7 @@ pub struct BlockHeader {
     pub tx_root: String,
     pub slashing_evidence: Option<Vec<SlashingEvidence>>,
     pub nonce: u64,
-    // --- Hardening Task 2: VRF & Finalite ---
+    // --- Hardening : VRF & Finalite ---
     pub epoch: u64,
     pub slot: u64,
     pub proposer_pubkey: Option<String>,
@@ -174,7 +174,7 @@ pub fn verify_signature(&self) -> bool {
     // 3. HEX formatındaki anahtarı byte dizisine çevir.
     let public_key = hex::decode(producer_hex)...;
 
-    // 4. KRİTİK TASK: Bloğun hash'ini elindeki verilerle YENİDEN HESAPLA.
+    // 4. KRİTİK : Bloğun hash'ini elindeki verilerle YENİDEN HESAPLA.
     // Asla blok üzerinde yazan 'self.hash'e güvenme, hileli olabilir.
     let calculated_hash = self.calculate_hash();
     if calculated_hash != self.hash { return false; } // Veri bütünlüğü bozuk!

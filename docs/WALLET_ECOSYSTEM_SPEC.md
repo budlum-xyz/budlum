@@ -64,9 +64,9 @@ wallet-core (Rust → wasm32)
 | **Threshold (FROST)** | Threshold Ed25519 (DKG) | Yüksek |
 
 ### Öneri
-- **Görev 1:** Native multisig (AccountState'e `multisig_config` alanı)
-- **Görev 2:** Social recovery (guardian set + recovery flow)
-- **Görev 3:** Threshold Ed25519 (SLIP-0010 + FROST)
+- **:** Native multisig (AccountState'e `multisig_config` alanı)
+- **:** Social recovery (guardian set + recovery flow)
+- **:** Threshold Ed25519 (SLIP-0010 + FROST)
 
 ### Permissionless Kural
 - Multisig hesaplar permissionless — herkes oluşturabilir

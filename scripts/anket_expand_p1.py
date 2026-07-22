@@ -7,7 +7,7 @@ import io, sys
 # ── Q1..Q120: uzun, teknik-kelimesiz, sonuç-odaklı açıklamalar ──────────────
 NTE = {}
 
-NTE[1] = ("Bir ekibin her şeye aynı adı vermesi gibi düşünün: biri 'tur' diyor, biri 'adım' diyor, biri 'görev' diyor; "
+NTE[1] = ("Bir ekibin her şeye aynı adı vermesi gibi düşünün: biri 'tur' diyor, biri 'adım' diyor, biri '' diyor; "
 "yeni gelen biri hangisinin ne olduğunu şaşırır ve yanlış işi yanlış zamanda yapar. "
 "Bu karar tek isim kullanmayı seçiyor; doğruysa herkes aynı takvimi okur, raporlar birbiriyle konuşur, yeni katılan ekip üyeleri günler değil saatler içinde hızlanır. "
 "Yanlış seçilirse — yani iki isim birden yaşarsa — eski alışkanlık ölmez, bir süre sonra kimse hangi ismin güncel olduğundan emin olamaz; bu da aylar sonra 'o iş bitmişti sanıyordum' türünden pahalı yanlış anlamalara döner. "
@@ -97,7 +97,7 @@ NTE[21] = ("Bir sitenin kapısına hem kamera hem turnike hem de tanımadık ara
 "Bu sayede kabaca doldurma, oyalama ve kandırma taktikleriyle gelen saldırılar daha kapıda boşa çıkar; ağın gerçek işi sakin sakin yürür. "
 "Sertleştirme olmadan internet açık denizdir: ilk ciddi fırtınada kapılar kapanır, kullanıcılar dışarıda kalır ve 'güvenliği sonra yaparız' diyen erteleme kararının faturası, sistemin tam da büyümeye başladığı haftada kesilir.")
 
-NTE[22] = ("Bir kooperatife üye olmak gibi: isteyen herkes teminatını yatırır ve otomatik olarak Budlum'un işleyişinde görev almaya hak kazanır; ne mülakat ne torpil ne bekleme listesi var. "
+NTE[22] = ("Bir kooperatife üye olmak gibi: isteyen herkes teminatını yatırır ve otomatik olarak Budlum'un işleyişinde  almaya hak kazanır; ne mülakat ne torpil ne bekleme listesi var. "
 "Bu akış sayesinde ağ büyüdükçe yönetim de doğal büyür; yeni güç, eskilerin izni olmadan sisteme katılır ve tekelleşme engellenir. "
 "Kayıt kapı elle tutulursa ilk başta kalite kontrol gibi görünür; fakat zamanla 'kim girer' kararını veren küçük grup fiili bir yönetim kuruluna dönüşür ve Budlum'un en büyük vaadi olan kimsesiz-izinsiz katılım sessizce ölür — bunu fark eden dış dünya projeyi bir daha aynı gözle görmez.")
 

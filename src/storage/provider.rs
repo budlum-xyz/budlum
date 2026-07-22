@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_storage_provider_put_get_roundtrip() {
+    fn storage_provider_put_get_roundtrip() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_storage_provider_rejects_invalid_range() {
+    fn storage_provider_rejects_invalid_range() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_storage_provider_prove_settle_roundtrip() {
+    fn storage_provider_prove_settle_roundtrip() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_storage_provider_rejects_forged_proof_range_hash() {
+    fn storage_provider_rejects_forged_proof_range_hash() {
         let (manifest, bytes) = manifest_and_bytes();
         let mut provider = InMemoryStorageProvider::new();
         let receipt = provider.put(&manifest, &bytes).unwrap();

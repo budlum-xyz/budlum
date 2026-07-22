@@ -123,7 +123,7 @@ Domain registration now carries an operator address and minimum bond, creating a
 
 ## 4. Byzantine Chaos Matrix: Proving the Truth
 
-When writing a blockchain from scratch, the most critical task is testing your code under "chaos." The Budlum Settlement Layer is tested with an **18-scenario Byzantine Chaos Matrix**, proving how the system survives in a faulty/adversarial network.
+When writing a blockchain from scratch, the most critical  is testing your code under "chaos." The Budlum Settlement Layer is tested with an **18-scenario Byzantine Chaos Matrix**, proving how the system survives in a faulty/adversarial network.
 
 ### Category 1: Convergence and Order Independence
 ### Byzantine Chaos Matrix (18 Scenarios)
@@ -136,7 +136,7 @@ The settlement layer remains deterministic across all of the following chaos sce
 4.  **Atomic Recovery:** Commitment insertions and domain height updates survive restart as one durable settlement transition.
 5.  **Verified Bridge Lifecycle:** Lock, mint, burn, and unlock are exercised through committed domain events and Merkle proofs.
 
-## Task 3: Distributed Devnet Simulation (Distributed Test Harness)
+## : Distributed Devnet Simulation (Distributed Test Harness)
 
 The success of the system under real network conditions has been proven by the distributed test harness implemented in `src/tests/distributed_settlement.rs`.
 

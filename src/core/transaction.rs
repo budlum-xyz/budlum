@@ -1011,7 +1011,7 @@ mod v29_signing_tests {
     }
 
     #[test]
-    fn task11_8_fee_field_tampering_invalidates_signature() {
+    fn fee_field_tampering_invalidates_signature() {
         let mut tx = signed_variant(TransactionType::Transfer);
         tx.max_fee = tx.max_fee.saturating_add(1);
         assert!(!tx.verify(), "max_fee is execution-relevant and signed");

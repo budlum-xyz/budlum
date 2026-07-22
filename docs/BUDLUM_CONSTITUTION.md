@@ -1,4 +1,4 @@
-# Budlum Constitution: Social & Economic Framework (Task 6+)
+# Budlum Constitution: Social & Economic Framework (+)
 
 **Date:** 2026-07-16
 **Author:** ARENA1 (Core/R&D)
@@ -73,7 +73,7 @@ Based on the strategic decisions made by the owner (Ayaz), the following rules a
 
 ---
 
-## 8. Task 12 Constitution Engine Binding
+## 8.  Constitution Engine Binding
 
 The first on-chain binding of this document is `core::constitution`.
 It is intentionally conservative:

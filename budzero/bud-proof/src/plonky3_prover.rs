@@ -2157,7 +2157,7 @@ mod tests {
     /// ARENA2 diagnostic: check expansion Poseidon chain + leaf bind on matrix
     /// without running the full STARK (isolates witness vs AIR constraint bugs).
     #[test]
-    fn task4_diagnose_verify_merkle_matrix_chain() {
+    fn diagnose_verify_merkle_matrix_chain() {
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
             inst(Opcode::Halt, 0, 0, 0, 0),

@@ -1,4 +1,4 @@
-# Görev: Zincir Fork / Tam Geçmiş Klonlama (Chain Fork — Full History Migration)
+# : Zincir Fork / Tam Geçmiş Klonlama (Chain Fork — Full History Migration)
 
 ## Bağlam ve Amaç
 
@@ -22,7 +22,7 @@ Arena/geliştirici tarafından Budlum'un mevcut kod yapısına göre belirlenmel
    göre yeniden oynatılabilir (replay edilebilir) olduğunun testi.
 
 ### Kapsam Dışı (bu görevde YOK)
-- Olayı otomatik tespit eden izleme/alert sistemi (ayrı görev).
+- Olayı otomatik tespit eden izleme/alert sistemi (ayrı ).
 - Fork noktasının "hangi blok temiz" olduğuna karar veren otomasyon — bu insan kararı
   olarak kalıyor, komut sadece "şu yükseklikte fork et" parametresini alır.
 - Mainnet'e özel governance/oylama mekanizması (şimdilik sadece testnet senaryosu).

@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_rejects_permissionless_screening() {
+    fn poa_compliance_rejects_permissionless_screening() {
         let mut registry = PoaComplianceRegistry::new();
         let err = registry
             .screen_address(
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_screening_updates_status() {
+    fn poa_compliance_screening_updates_status() {
         let mut registry = PoaComplianceRegistry::new();
         registry
             .screen_address(
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_requires_admin_for_freeze() {
+    fn poa_compliance_requires_admin_for_freeze() {
         let mut registry = PoaComplianceRegistry::new();
         let err = registry
             .freeze_suspicious(ComplianceDomainKind::PoA, false, addr(3), hash(3), 12)
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_freeze_is_poa_only() {
+    fn poa_compliance_freeze_is_poa_only() {
         let mut registry = PoaComplianceRegistry::new();
         registry
             .freeze_suspicious(ComplianceDomainKind::PoA, true, addr(4), hash(4), 13)
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_audit_log_is_append_only() {
+    fn poa_compliance_audit_log_is_append_only() {
         let mut registry = PoaComplianceRegistry::new();
         registry
             .screen_address(
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_rejects_zero_evidence_hashes() {
+    fn poa_compliance_rejects_zero_evidence_hashes() {
         let mut registry = PoaComplianceRegistry::new();
         assert_eq!(
             registry
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_records_travel_rule_metadata_hash() {
+    fn poa_compliance_records_travel_rule_metadata_hash() {
         let mut registry = PoaComplianceRegistry::new();
         registry
             .record_travel_rule_metadata(ComplianceDomainKind::PoA, hash(9), addr(9), hash(10), 42)
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_rejects_permissionless_travel_rule_metadata() {
+    fn poa_compliance_rejects_permissionless_travel_rule_metadata() {
         let mut registry = PoaComplianceRegistry::new();
         let err = registry
             .record_travel_rule_metadata(
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_exports_audit_csv() {
+    fn poa_compliance_exports_audit_csv() {
         let mut registry = PoaComplianceRegistry::new();
         registry
             .screen_address(
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_18_poa_compliance_exports_audit_json() {
+    fn poa_compliance_exports_audit_json() {
         let mut registry = PoaComplianceRegistry::new();
         registry
             .freeze_suspicious(ComplianceDomainKind::PoA, true, addr(8), hash(8), 41)

@@ -252,4 +252,4 @@ BudZKVM'i sıfırdan inşa ederken ve üretime hazırlarken uyguladığımız bu
 10. **[x] Storage Soundness:** STORAGE_BASE adresleme ile memory LogUp'a dahil edilmis storage consistency.
 11. **[x] Merkle Soundness:** poseidon4_hash tabanli 64-depth Merkle dogrulama, boolean output constraint.
 
-> **Görev 0 Tamamlandi (2026):** Tum checklist maddeleri karsilanmistir. 31 opcode production-ready, 51 test (8 negatif dahil). Detayli dokumantasyon icin [Bolum 9: Görev 0 Stabilizasyonu](09_görev0_stabilizasyon.md).
+> ** Tamamlandi (2026):** Tum checklist maddeleri karsilanmistir. 31 opcode production-ready, 51 test (8 negatif dahil). Detayli dokumantasyon icin [Bolum 9:  Stabilizasyonu](09_görev0_stabilizasyon.md).

@@ -1,6 +1,6 @@
 # EVM ChainAdapter (modül README'si) — F10 H4 Kapanması
 
-**Bu dosya, Task 10 Bölüm 4 modül-ayrımı kuralı gereği EVM adapter'ın kendi
+**Bu dosya,  Bölüm 4 modül-ayrımı kuralı gereği EVM adapter'ın kendi
 README'sidir.** Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları
 burada yaşar.
 
@@ -23,7 +23,7 @@ burada yaşar.
 
 ## Olgunluk uyarıları (Bölüm 4 kuralı)
 
-- ⚠️ **N-confirmation finality (Görev-1).** Şu an `verify_chain` k-deep canonical
+- ⚠️ **N-confirmation finality (-1).** Şu an `verify_chain` k-deep canonical
   chain ile çalışır (reorg penceresi). **PoS sync-committee light-client (F10.3)
   YOK** — 512-validator BLS aggregate verify. F10.3 N-conf'u güçlendirir ama
   F10.2 N-conf ile bridge canlı.

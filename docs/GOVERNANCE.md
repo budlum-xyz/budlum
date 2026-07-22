@@ -148,7 +148,7 @@
 
 ## 8. Doküman Güncelleme Politikası
 
-- Bu doküman her task açılışında güncellenir.
+- Bu doküman her  açılışında güncellenir.
 - Parametre değişiklikleri bu dokümanda kaydedilir.
 - Acil durum prosedürleri ayrı `docs/EMERGENCY.md`'de tutulur (henüz yok).
 

@@ -1,10 +1,10 @@
-# Budlum Developer OS / BudL SDK — Task 12 Skeleton
+# Budlum Developer OS / BudL SDK —  Skeleton
 
 > **TR Özet:** Bu belge P12-12 Developer OS / BudL SDK ilk iskeletini tarif eder. Amaç; lokal devnet, BudL paket fixture'ı, proof fixture'ları, Pollen grant akışı ve relayer policy fixture'larını tek deterministik manifest altında toplamak. Bu belge mainnet-ready veya external SDK release iddiası değildir.
 
 ## Scope
 
-The first Task 12 Developer OS step is a pure manifest/fixture layer in `src/developer_os.rs`.
+The first  Developer OS step is a pure manifest/fixture layer in `src/developer_os.rs`.
 It does not start a network, call external APIs, or depend on `budlumdevnet`.
 
 The manifest binds:

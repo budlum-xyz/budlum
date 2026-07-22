@@ -1,4 +1,4 @@
-# Network Chaos — Task 11.12 Extension
+# Network Chaos —  Extension
 
 **Status:** ADIM 5 — chaos scenario artifacts.
 **Purpose:** partition, byzantine, eclipse, sybil smoke/chaos kanıtları.
@@ -9,7 +9,7 @@
 
 ## 1. Giriş
 
-Network hardening gate (Task 11.12) unit/invariant testlerini kapsar. Bu belge,
+Network hardening gate () unit/invariant testlerini kapsar. Bu belge,
 **chaos scenario** testlerini tanımlar: multi-node partition, byzantine, eclipse,
 sybil, ban TTL ve disconnect/reconnect long-run soak.
 
@@ -51,4 +51,4 @@ check_contains "$root/docs/operations/NETWORK_CHAOS.md" "chaos scenario"
 
 ---
 
-*Bu dosya, `Network Hardening (Task 11.12)` CI gate'i tarafından doğrulanır.*
+*Bu dosya, `Network Hardening ()` CI gate'i tarafından doğrulanır.*

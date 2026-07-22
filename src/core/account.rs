@@ -1516,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_legacy_fee_validation_uses_fee_market_gate() {
+    fn legacy_fee_validation_uses_fee_market_gate() {
         let alice_kp = KeyPair::generate().unwrap();
         let alice = Address::from(alice_kp.public_key_bytes());
         let bob = Address::from([8u8; 32]);
@@ -1537,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_priority_fee_accepted_when_within_max_fee() {
+    fn priority_fee_accepted_when_within_max_fee() {
         // ADIM G: priority_fee is now production-ready (no longer fail-closed).
         // This test verifies that priority_fee > 0 is accepted when max_fee
         // covers base_fee + priority_fee.
@@ -1568,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_max_fee_must_match_legacy_fee_during_migration() {
+    fn max_fee_must_match_legacy_fee_during_migration() {
         // ADIM G: max_fee != fee is now production-ready (no longer fail-closed).
         // This test verifies that max_fee > fee is accepted when it covers
         // base_fee + priority_fee.
@@ -1600,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_fee_distribution_burns_base_fee_and_pays_proposer() {
+    fn fee_distribution_burns_base_fee_and_pays_proposer() {
         let alice_kp = KeyPair::generate().unwrap();
         let alice = Address::from(alice_kp.public_key_bytes());
         let bob = Address::from([11u8; 32]);
@@ -1625,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_fee_distribution_proposer_receives_tip_in_block_finalization() {
+    fn fee_distribution_proposer_receives_tip_in_block_finalization() {
         // Integration test: verify distribute_block_fees is called during
         // block finalization and proposer receives the tip.
         let alice_kp = KeyPair::generate().unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_total_bud_committed_counts_stake_and_unbonding() {
+    fn total_bud_committed_counts_stake_and_unbonding() {
         let liquid = Address::from([11u8; 32]);
         let validator = Address::from([12u8; 32]);
         let unbonding = Address::from([13u8; 32]);
@@ -1714,7 +1714,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_8_supply_capacity_remaining_uses_committed_denominator() {
+    fn supply_capacity_remaining_uses_committed_denominator() {
         let liquid = Address::from([21u8; 32]);
         let validator = Address::from([22u8; 32]);
         let mut state = AccountState::new();
@@ -1909,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_16_governance_parameter_update_waits_for_activation_epoch() {
+    fn governance_parameter_update_waits_for_activation_epoch() {
         use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
 
         let mut state = AccountState::new();

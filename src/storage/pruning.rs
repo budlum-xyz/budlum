@@ -98,7 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task11_10_node_mode_maps_roles() {
+    fn node_mode_maps_roles() {
         assert_eq!(NodeMode::from_role("archive"), Some(NodeMode::Archive));
         assert_eq!(NodeMode::from_role("validator"), Some(NodeMode::Full));
         assert_eq!(NodeMode::from_role("rpc"), Some(NodeMode::Full));
@@ -106,14 +106,14 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_node_archive_rejects_pruning() {
+    fn node_archive_rejects_pruning() {
         let mut policy = PruningPolicy::archive_node_default();
         policy.pruning_enabled = true;
         assert!(policy.validate().unwrap_err().contains("archive nodes"));
     }
 
     #[test]
-    fn task11_10_node_archive_requires_backups() {
+    fn node_archive_requires_backups() {
         let mut policy = PruningPolicy::archive_node_default();
         policy.backups_enabled = false;
         assert!(policy.validate().unwrap_err().contains("backup"));
@@ -124,21 +124,21 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_node_full_pruning_requires_finalized_snapshot_retention() {
+    fn node_full_pruning_requires_finalized_snapshot_retention() {
         let mut policy = PruningPolicy::full_node_default();
         policy.finalized_snapshot_retention = false;
         assert!(policy.validate().unwrap_err().contains("finalized"));
     }
 
     #[test]
-    fn task11_10_node_full_pruning_requires_nonzero_retention() {
+    fn node_full_pruning_requires_nonzero_retention() {
         let mut policy = PruningPolicy::full_node_default();
         policy.retention_blocks = 0;
         assert!(policy.validate().unwrap_err().contains("non-zero"));
     }
 
     #[test]
-    fn task11_10_node_prune_decision_distinguishes_full_and_archive() {
+    fn node_prune_decision_distinguishes_full_and_archive() {
         assert!(PruningPolicy::full_node_default().should_prune_historical_state());
         assert!(!PruningPolicy::archive_node_default().should_prune_historical_state());
     }

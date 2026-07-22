@@ -23,7 +23,7 @@ Settlement layer, aşağıdaki kaos senaryolarının tamamında deterministik ka
 4.  **Atomic Recovery:** Commitment insert ve domain height update işlemlerinin yeniden başlatma sonrası tek kalıcı settlement geçişi olarak görülmesi.
 5.  **Verified Bridge Lifecycle:** Lock, mint, burn ve unlock akışlarının commit edilmiş domain event'leri ve Merkle proof'lar üzerinden çalışması.
 
-## Görev 3: Dağıtık Devnet Simülasyonu (Distributed Test Harness)
+## : Dağıtık Devnet Simülasyonu (Distributed Test Harness)
 
 Sistemin gerçek ağ koşullarındaki başarısı, `src/tests/distributed_settlement.rs` altında kurgulanan dağıtık test harness ile kanıtlanmıştır.
 
@@ -57,7 +57,7 @@ Bu formül, **"Sadece ileriye dönük ve daha büyük nonce"** kuralını işlet
 
 ## 3. Pratik Uygulama: Settlement Motorunu Kodlamak
 
-### Task 1: Taahhüt Kabulü, Equivocation Kontrolü ve Atomik Kalıcılık
+### : Taahhüt Kabulü, Equivocation Kontrolü ve Atomik Kalıcılık
 
 ```rust
 pub fn submit_verified_domain_commitment(
@@ -98,7 +98,7 @@ pub fn submit_verified_domain_commitment(
 }
 ```
 
-### Task 2: Asenkron Tamponlama (Apply Loop)
+### : Asenkron Tamponlama (Apply Loop)
 
 ```rust
 fn apply_pending_commitments(&mut self, domain_id: DomainId) -> Result<Vec<ConsensusDomain>, String> {
@@ -136,7 +136,7 @@ Buradaki kritik production-hardening noktaları şunlardır:
 
 Node yeniden başlatıldığında "commitment var ama height ilerlememiş" gibi yarım kalıcı durum görülmemelidir.
 
-### Task 3: Doğrulanmış Cross-Domain Bridge Dönüş Yolu
+### : Doğrulanmış Cross-Domain Bridge Dönüş Yolu
 
 Bridge artık raw burn/unlock geçişlerini settlement otoritesi olarak kabul etmez. Dönüş transferi hedef domain üzerinde commit edilmiş event ile kanıtlanmalıdır:
 
@@ -147,13 +147,13 @@ Bridge artık raw burn/unlock geçişlerini settlement otoritesi olarak kabul et
 
 RPC istemcileri burn event üretmek için `bud_burnBridgeTransferWithEvent`, doğrulanmış `BridgeBurned` event proof üzerinden unlock etmek için `bud_unlockBridgeTransferVerified` kullanır.
 
-### Task 4: Domain Operatörleri ve Slashing Evidence Gossip
+### : Domain Operatörleri ve Slashing Evidence Gossip
 
 Domain registration artık operatör adresi ve minimum bond taşır; bu da frozen domain'ler için ekonomik ceza bağlantısını kurar. Validator seviyesinde double-sign ise ayrı akar: PoS motoru `SlashingEvidence` üretir, node bunu `NetworkMessage::SlashingEvidence` olarak gossip eder, blok üreticileri bekleyen kanıtları bloğa koyar ve execution katmanı stake slashing'i deterministik uygular.
 
 ## 4. Bizans Kaos Matrisi: Gerçeği İspatlamak
 
-Sıfırdan blokzinciri yazarken en kritik görev, kodunuzu "kaos" altında test etmektir. Budlum Settlement Layer, **18 senaryoluk bir Bizans Kaos Matrisi** ile test edilir. Bu testlerin her biri, sistemin bir Bizans (hatalı/kötü niyetli) ağda nasıl ayakta kaldığını kanıtlar.
+Sıfırdan blokzinciri yazarken en kritik , kodunuzu "kaos" altında test etmektir. Budlum Settlement Layer, **18 senaryoluk bir Bizans Kaos Matrisi** ile test edilir. Bu testlerin her biri, sistemin bir Bizans (hatalı/kötü niyetli) ağda nasıl ayakta kaldığını kanıtlar.
 
 ### Kategori 1: Konverjans ve Sıralama Bağımsızlığı (Convergence)
 Gerçek dünyada ağ paketleri sırasız gelir.
@@ -169,7 +169,7 @@ Gerçek dünyada ağ paketleri sırasız gelir.
 *   **İspat:** Sistem bunu anında algılar, ikinci commitment'ı reddeder ve domain'i sonsuza kadar "Frozen" durumuna alarak ana settlement root'undan çıkartır.
 
 ### Kategori 4: Eşzamanlılık ve Yarış Koşulları (Concurrency)
-*   **Senaryo:** 100 farklı Tokio task'ı aynı anda `submit_domain_commitment` çağrısı yapar.
+*   **Senaryo:** 100 farklı Tokio 'ı aynı anda `submit_domain_commitment` çağrısı yapar.
 *   **İspat:** `RwLock` ve atomik operasyonlar sayesinde, hiçbir yarış koşulu (race condition) oluşmaz ve durum bütünlüğü korunur.
 
 ### Örnek Test Kodu: Sıralama Bağımsızlığı

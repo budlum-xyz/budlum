@@ -1,8 +1,8 @@
-# Budlum Task 12 — ARENA4 Onaylanan Sistemler ve Uygulama Planı
+# Budlum  — ARENA4 Onaylanan Sistemler ve Uygulama Planı
 
 > **Hazırlayan:** ARENA4  
 > **Kaynak karar:** Kullanıcı onayları, 2026-07-20  
-> **Amaç:** Budlum vizyonunu Data Rights, Pollen, AI veri erişim yasağı, Relayer Policy, D-Web Passport, Proof Verification Market, Sovereign Domain Kit, Budlum Atlas, Mobile Self, Encryption DAO, Governance/Constitution ve Developer OS başlıklarıyla Task 12 altında bütünsel şekilde geliştirmek.  
+> **Amaç:** Budlum vizyonunu Data Rights, Pollen, AI veri erişim yasağı, Relayer Policy, D-Web Passport, Proof Verification Market, Sovereign Domain Kit, Budlum Atlas, Mobile Self, Encryption DAO, Governance/Constitution ve Developer OS başlıklarıyla  altında bütünsel şekilde geliştirmek.  
 > **Kural:** Bu belge “mainnet-ready” veya “audited” iddiası değildir. Tüm üretim işleri CI yeşili, regresyon kilidi ve `STATUS_ONLINE.md` koordinasyonu ile yürütülür.
 
 ---
@@ -27,9 +27,9 @@ Kullanıcı aşağıdaki sistemleri onayladı:
 
 ---
 
-## 1. Task 12 ana ilkeleri
+## 1.  ana ilkeleri
 
-Task 12, Budlum’ın yalnızca bir L1 settlement protokolü değil, kullanıcı verisi, kimliği, izni, AI ekonomisi, D-Web ve egemen domain’ler için bir **kanıtlı dijital egemenlik katmanı** haline gelmesini hedefler.
+, Budlum’ın yalnızca bir L1 settlement protokolü değil, kullanıcı verisi, kimliği, izni, AI ekonomisi, D-Web ve egemen domain’ler için bir **kanıtlı dijital egemenlik katmanı** haline gelmesini hedefler.
 
 Temel ilkeler:
 
@@ -91,12 +91,12 @@ Bu ADIM’de şu işler yapıldı:
   - `bud_pollenPrepareSaleAuthorization`
 - Yeni transaction/proto tipi açılmadı; ADIM güvenli prepare/query yüzeyiyle sınırlı tutuldu.
 
-Not: Son main push sonrası CI final durumu ARENA1 tarafından tekrar doğrulanmalıdır. ARENA4 tarafında en son main push SHA `09263fe` idi; kullanıcı isteğiyle dosya buradan gönderildiği için bu noktadan sonra Task 12 kaydı ARENA1 tarafından sürdürülecektir.
+Not: Son main push sonrası CI final durumu ARENA1 tarafından tekrar doğrulanmalıdır. ARENA4 tarafında en son main push SHA `09263fe` idi; kullanıcı isteğiyle dosya buradan gönderildiği için bu noktadan sonra  kaydı ARENA1 tarafından sürdürülecektir.
 
 > **ARENA1 doğrulama notu (2026-07-20):** A4-1/A4-2 işleri `arena/arena4-pollen-ai-data-rights`
 > branch'inde (HEAD `7fd8c68`, CI 14/14 yeşil) idi, main'de değildi. Bu doküman yazıldığında
 > referans verilen `09263fe` artık geçersizdir (branch `7fd8c68`'e merge olmuştur). ARENA1,
-> pollen işini `arena/task12-pollen-audit` branch'inde main (Task 4/5 dahil) ile merge etti
+> pollen işini `arena/task12-pollen-audit` branch'inde main ( dahil) ile merge etti
 > ve CI doğrulamasına soktu. "A4-1/A4-2 uygulandı" ifadesi, bu doğrulama sonrası main'e
 > girdiği anlamına gelir. Kod denetimi (kural 1): domain-separated hashing ✓, sentinel imza
 > reddi ✓, canonical preimage doğrulaması ✓, bounded reads + expiry ✓, AI read gate
@@ -104,7 +104,7 @@ Not: Son main push sonrası CI final durumu ARENA1 tarafından tekrar doğrulanm
 
 ---
 
-## 3. Task 12 ADIM sırası
+## 3.  ADIM sırası
 
 | ADIM | Başlık | Öncelik | Durum |
 |---|---|---:|---|
@@ -531,11 +531,11 @@ ProofReceipt {
 ### P12-11 ilk uygulama kapsamı
 
 - `src/prover/market.rs`: `ProofTask`, `ProofReceipt`, `ProofMarketRegistry`.
-- Task kind kapsamı: ZKVM execution, settlement event, storage challenge, AI inference attestation, bridge receipt.
+-  kind kapsamı: ZKVM execution, settlement event, storage challenge, AI inference attestation, bridge receipt.
 - Reward sadece `reward_commitment` olarak tutulur; LUM/DeFi adapter veya token bağlantısı kurulmaz.
 - Missing/expired/conflicting receipt fail-closed.
 - First valid receipt wins; identical duplicate idempotent.
-- Registry root task + receipt kayıtlarına bağlanır.
+- Registry root  + receipt kayıtlarına bağlanır.
 
 ### ARENA2/ARENAS koordinasyon notu
 
@@ -627,7 +627,7 @@ D-Web Passport profil endpoint'i kanıt iddialarını evidence-card olarak göst
 
 ---
 
-## 14. Task 12 güvenlik ve CI kuralları
+## 14.  güvenlik ve CI kuralları
 
 Her ADIM için zorunlu:
 
@@ -661,7 +661,7 @@ ARENA4 önerisi:
 
 ## 16. ARENA koordinasyon notu
 
-- ARENA1 Task 12 dosyasını kanonik plan olarak kaydedebilir.
+- ARENA1  dosyasını kanonik plan olarak kaydedebilir.
 - ARENA2 proof/AI/verification tarafında API sınırlarını review etmelidir.
 - ARENA3 hardening/CI/fuzz/gate uyumunu denetlemelidir.
 - ARENAS/ARENAX açık bulgu taramasına devam etmelidir.

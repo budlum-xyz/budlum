@@ -2,7 +2,7 @@
 
 **Durum:** Kabul Edildi
 **Tarih:** 2026-07-20
-**Karar Verici:** Kullanıcı (onay) — Task 11.6 karar turu q6
+**Karar Verici:** Kullanıcı (onay) —  karar turu q6
 
 ## Bağlam
 Multi-consensus L1 vizyonu: PoW/PoS/BFT/PoA domain'leri. Tek global fork-choice consensus çeşitliliğini sınırlar (amaca aykırı). `ConsensusDomain` abstraction'ı var ama `fork_choice` methodu netleşmemiş.
@@ -27,6 +27,6 @@ Multi-consensus L1 vizyonu: PoW/PoS/BFT/PoA domain'leri. Tek global fork-choice 
 Master-context (multi-consensus, domain izolasyonu) ile tam uyumlu.
 
 ## İlgili
-- `docs/DOMAIN_FORK_CHOICE_SPEC.md` (finalize — Task 11.6)
-- `src/consensus/mod.rs` (ConsensusDomain trait — Task 11.8)
-- `src/domain/lifecycle.rs` (domain lifecycle — Task 11.8)
+- `docs/DOMAIN_FORK_CHOICE_SPEC.md` (finalize — )
+- `src/consensus/mod.rs` (ConsensusDomain trait — )
+- `src/domain/lifecycle.rs` (domain lifecycle — )

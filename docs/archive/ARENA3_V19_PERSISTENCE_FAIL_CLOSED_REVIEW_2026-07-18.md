@@ -101,7 +101,7 @@ storage test double that proves:
 1. **Production failure response:** fail-stop process exit, read-only/degraded
    node mode, or a separately designed operator recovery loop.
 2. **Scope boundary:** include bridge + QC + finality in one durability project,
-   or task bridge first while blocking finality changes until its batch design
+   or  bridge first while blocking finality changes until its batch design
    is ready.
 3. **Dev/test policy:** whether in-memory/no-storage operation remains allowed
    only under explicit non-production configuration.

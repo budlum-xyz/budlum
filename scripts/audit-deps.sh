@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/audit-deps.sh — Rust dependency audit (Task 0.40 §1.7)
+# scripts/audit-deps.sh — Rust dependency audit ()
 #
 # Bu script `cargo audit` aracını çalıştırır ve bilinen güvenlik
 # açıklarına karşı bağımlılıkları kontrol eder. ch12 §3.7 mainnet
@@ -69,7 +69,7 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo "güvenlik açığı (CVE) tespit edilirse job fail eder.** Unmaintained"
     echo "warning'leri warning olarak raporlanır (fail etmez)."
     echo ""
-    echo "Bu rapor Task 0.40 §1.7 kapsamında otomatik üretilir."
+    echo "Bu rapor  kapsamında otomatik üretilir."
 } > "$REPORT"
 
 echo "[audit-deps] Rapor: $REPORT"

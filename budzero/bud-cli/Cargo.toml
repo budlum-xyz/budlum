@@ -2,7 +2,7 @@
 name = "bud-cli"
 version = "0.1.0"
 edition = "2021"
-# Task 8.2: cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
+# : cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
 license.workspace = true
 
 [dependencies]

@@ -1411,7 +1411,7 @@ mod tests {
     }
     /// REGRESSION V133: max concurrent open challenges per deal.
     #[test]
-    fn task11_10_registry_lifecycle_projection_tracks_challenge_and_slash() {
+    fn registry_lifecycle_projection_tracks_challenge_and_slash() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
@@ -1436,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn task11_10_registry_lifecycle_projection_tracks_expiry() {
+    fn registry_lifecycle_projection_tracks_expiry() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);

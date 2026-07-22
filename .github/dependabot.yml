@@ -1,4 +1,4 @@
-# Task 8.8 (supply-chain): haftalik bagimlilik gozetimi.
+#  (supply-chain): haftalik bagimlilik gozetimi.
 # github-actions: SHA-pinli action'larin guncellemelerini PR olarak acar.
 # cargo: root + budzero + fuzz manifest'leri. docker: Dockerfile digest pinleri.
 #

@@ -4,7 +4,7 @@ about: Report missing, unclear, outdated, or incorrect documentation
 title: "[Docs]:"
 labels: documentation, triage
 assignees: Radeonares32
-type: Task
+type:
 
 ---
 
