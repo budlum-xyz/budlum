@@ -164,6 +164,10 @@ mod tests {
             reg.attest_app_as_developer(id, &other),
             Err(HubError::NotDeveloper)
         ));
+        // authorized_governors is empty → anyone can verify.
+        // Add a different governor so dev is NOT authorized.
+        let gov = Address::from([7u8; 32]);
+        reg.authorized_governors.insert(gov);
         assert!(matches!(
             reg.mark_verified_by_governance(id, &dev),
             Err(HubError::NotAuthorized)

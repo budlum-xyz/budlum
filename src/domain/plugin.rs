@@ -236,11 +236,12 @@ pub fn default_domain(
         operator[0] = 1;
     }
 
-    // PoW domains require bounded PoW header-chain parameters. Emit always-valid
-    // defaults so the many `default_domain` call sites (production + tests) get a
-    // registered, finalizable PoW domain instead of failing registration with
-    // "uses the PoW header adapter without pow_parameters".
-    let pow_parameters = if kind == ConsensusKind::PoW {
+    // PoW domains with the bounded header-chain adapter require pow_parameters.
+    // Only emit defaults when the adapter is the recognized PoW header-chain
+    // adapter — short names like "pow" are test-only and must not carry
+    // pow_parameters (registry rejects "pow_parameters for incompatible adapter").
+    let adapter_str: String = finality_adapter.into();
+    let pow_parameters = if adapter_str == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
         Some(PoWDomainParameters {
             min_difficulty_bits: 1,
             max_difficulty_bits: 120,
@@ -251,7 +252,7 @@ pub fn default_domain(
         None
     };
     // A PoW domain needs at least one confirmation.
-    let min_confirmations = if kind == ConsensusKind::PoW && min_confirmations == 0 {
+    let min_confirmations = if pow_parameters.is_some() && min_confirmations == 0 {
         1
     } else {
         min_confirmations
@@ -266,7 +267,7 @@ pub fn default_domain(
         operator_bond: crate::domain::registry::MIN_DOMAIN_OPERATOR_BOND,
         config_hash,
         validator_set_hash: [0u8; 32],
-        finality_adapter: finality_adapter.into(),
+        finality_adapter: adapter_str,
         min_confirmations,
         pow_parameters,
         bridge_enabled: true,
