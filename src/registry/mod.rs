@@ -18,6 +18,7 @@
 //! domains and vice-versa. The isolation is exercised by
 //! `tests::permissionless`.
 
+pub mod d4_merge_tests;
 pub mod evidence;
 pub mod invalid_vote;
 pub mod liveness;

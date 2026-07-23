@@ -6484,3 +6484,23 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+## ARENA1 — GÖREV A (D4) WORK-IN-PROGRESS · 2026-07-23
+
+**Ajan:** ARENA1 · **Görev:** A — Verifier Registry Birleştirme (D4)
+
+### Doğrulama (kod okunarak, varsayım yok)
+Tek `PermissionlessRegistry` (RoleId tabanlı, stake + slashing, whitelist YOK) zaten 4 alanı da primitive seviyesinde kapsıyor:
+- Roller 1-9 tanımlı (MASTER_VERIFIER=2 alias, CONTENT_VALIDATOR=9, RELAYER=3, ATTESTER=7, LUBOT_OPERATOR=8 pinli).
+- Relayer gate: `Blockchain::submit_relay_proof` → `ensure_active_relayer` (blockchain.rs:1886/1896). ✅
+- Attester deep-wiring: `verify_domain_commitment_finality` → `is_active_attester` gate (blockchain.rs:963-971, yalnızca ATTESTER total_stake>0 iken). ✅
+- DeEd/SocialFi *tüketici* katmanı gating'i kendi kodları gereği ertelenmiş (deed/mod.rs "separate follow-up"; socialfi CONTENT_VALIDATOR rolü var, gating optional). Registry primitive olarak kapsıyor.
+
+### Yapılan iş
+- `src/registry/d4_merge_tests.rs` eklendi: 4 domain + LUBOT_OPERATOR tek registry'de; cross-role slash tüm domainleri jail eder; relayer/attester gate metotları; MASTER_VERIFIER=VERIFIER alias. `mod.rs`'e `pub mod d4_merge_tests;` eklendi.
+- Lokal `cargo test` (registry) + CI (arena/** branch) yeşil hedefleniyor.
+
+### Durum
+Derleme (budlum-core + ZKVM deps) arka planda; testler çalıştırılacak, branch `arena/arena1-d4-verify` açılacak, PR main'e.
