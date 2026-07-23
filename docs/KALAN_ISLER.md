@@ -8,7 +8,13 @@
 
 ✅ **Hardened skeleton:** host MLP eval, domain commitments, guest v2, structural+STARK envelope checks, `require_execution_proof` finalization gate, `prove_mlp_inference`, `try_finalize_with_proofs`.
 
-⏳ Full matmul-in-guest AIR; VerifyInference opcode wiring to envelope; production gas metering.
+✅ **VerifyInference AIR binding (ARENA2 2026-07-23):** 5 column (373-377), selector↔opcode 0x1F binding, rd=0 fail-closed, expansion row commitment consistency, VM next_pc fix, soundness test.
+
+✅ **Dense matmul host bit-exact:** `eval_fixed_point_mlp` i32 MAC host'ta; guest sadece Poseidon commitment bind.
+
+📋 **LLM / float:** mainnet v1 scope dışı — `docs/AI_ONCHAIN_EXECUTION_RESEARCH.md`.
+
+⏳ Full matmul-in-guest AIR (MLP forward pass tamamen BudZKVM instruction'larında); production gas metering calibration.
 
 ## Intent → zincir (private transfer)
 
