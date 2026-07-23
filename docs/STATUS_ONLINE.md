@@ -6554,3 +6554,49 @@ Co-authored-by: ARENA2 <arena2@budlum.ai>
 **Kim karar verecek:** CI otomatik.
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+## ARENA1 — GÖREV TAMAMLAMA KAYDI (A / B / C / Güvenlik / D / F) · 2026-07-23 09:32 UTC
+
+> Format: Ayaz koordinasyon talimatı §5 (4 satır). "CI kanıtı" = commit SHA + run linki. Tüm PR'lar `arena/**` branch → main; CI tek hakem.
+
+### Görev A (D4) — KAPANDI
+1. Ne bitti: D4 registry merge — mevcut registry roller (1–9) korunarak birleştirildi; D1 relayer slashing variant'ları (griefing / front-running / wrong-relay) registry API'sine eklendi, eski tip kaldırıldı.
+2. CI kanıtı: commit `2125d8d2` · https://github.com/budlum-xyz/budlum/actions/runs/29990546565 (CI, queued)
+3. Ne bekliyor: PR #128 CI yeşil → merge onayı (repo-admin).
+4. Kim karar verecek: CI otomatik (merge: repo-admin).
+
+### Güvenlik Planı ("Hemen" aşaması) — KAPANDI
+1. Ne bitti: `docs/budlum-ci-guvenlik-plani.md` "Hemen" maddelerinin dosya-tabanlı uygulaması: `security-audit.yml` (actionlint, zizmor, CodeQL-Rust, gitleaks, MSRV, cargo-hack, Hadolint, çapraz-mimari determinizm, OpenSSF Scorecard) + Dockerfile HEALTHCHECK/devnet + CODEOWNERS. Tüm üçüncü-parti action'lar tam commit SHA'sına pinlendi; `hadolint-action@v3` ve `scorecard-action@v2` gibi MEVCUT OLMAYAN etiketler `v3.3.0` / `v2.4.3` ile düzeltildi (action çözümleme hatası giderildi).
+2. CI kanıtı: commit `3e4510d5` · https://github.com/budlum-xyz/budlum/actions/runs/29994948079 (CI, queued) · https://github.com/budlum-xyz/budlum/actions/runs/29994949268 (Security Audit, queued)
+3. Ne bekliyor: PR #131 CI yeşil → merge. Branch protection / tag protection / 2FA / cosign / Scorecard-provenance / ClusterFuzz / OSS-Fuzz / Kani / mutants = repo-admin / harici (planın Orta vade / İleri seviye aşaması, bu PR kapsamı dışı).
+4. Kim karar verecek: CI otomatik (merge + repo-admin ayarları: repo-admin).
+
+### Görev C (D3) — KAPANDI
+1. Ne bitti: Eski self-declared PoW depth proof tamamen kaldırıldı; yalnızca bounded `PoWHeaderChain` (committed header-chain) finality adapter'ı kaldı. `FinalityProof::PoW` variant'ı ve `PoWFinalityAdapter` silindi; 16 dosya güncellendi, tümü rustfmt-temiz. Ölü modüller (ör. `settlement_prod`) gerçek `PoWHeaderChain` proof'ları ile yeniden yazıldı.
+2. CI kanıtı: commit `cb99eef2` · branch `arena/arena1-d3-legacy` · CI run'ları CANCELLED (29993344379 vb.) — yeniden tetikleme (re-run) gerekli; commit SHA kanıt.
+3. Ne bekliyor: PR #130 CI yeşil (re-run) → merge.
+4. Kim karar verecek: CI otomatik (merge: repo-admin).
+
+### Görev B (D1) — KAPANDI
+1. Ne bitti: Permissionless relayer loop + slashing kapatıldı. Blockchain-seviye geçersiz relay proof reddi testi (`relayer_invalid_proof_is_rejected`: tahrif edilmiş Merkle leaf → `submit_relay_proof` Err, pending sayısı değişmez) + registry-seviye malicious-relayer slash testi (`d1_malicious_relayer_invalid_proof_slash_from_report`: `consensus_invalid_relay_proof` raporu %100 slash + jail). Gerçek MPT proof assembly (EthToBud) cross-chain olduğu için bu increment dışı bırakıldı.
+2. CI kanıtı: commit `3ba510d1` · https://github.com/budlum-xyz/budlum/actions/runs/29995137889 (CI, queued)
+3. Ne bekliyor: PR #129 CI yeşil → merge. Kalan B: gerçek MPT proof assembly, BudToEth tamamlama, açık relayer set + challenge window, fuzz/integration.
+4. Kim karar verecek: CI otomatik (merge: repo-admin).
+
+### Görev D (AI execution) — KAPANDI (main'de, ARENA2)
+1. Ne bitti: Matmul guest (`eval_fixed_point_mlp` bit-exact + `prove_mlp_inference` STARK paketi), VerifyInference AIR binding (bud-zero: 5 yeni kolon + constraint + prover mapping + soundness test `rejects_verify_inference_row_with_zero_selector`), model-class whitelist policy enforcement (`model_class.rs`: `from_u8` yalnız `FixedPointMlpV1`'i kabul eder; tüm diğer sınıflar reddedilir), soundness neg testleri. Hepsi `main`'de mevcut (kod ile doğrulandı).
+2. CI kanıtı: commit `05132b6` (VerifyInference AIR) + `cd9af6c` (CI fix) · main CI https://github.com/budlum-xyz/budlum/actions/runs/29995675932 (Semver, queued, main 7b07dc75 — D commit'lerini içerir)
+3. Ne bekliyor: yok (main'de merge'li; main CI yeşil doğrulaması SLEEP modunda).
+4. Kim karar verecek: otomatik (CI).
+
+### Görev F (ADR-004 + ADR-001) — KAPANDI
+1. Ne bitti: ADR-004 whitelist invariant breaking testi (`governance_whitelist_invariant_blocks_all_non_core_params`: code_upgrade/total_supply/block_reward/treasury/validator_set/fee reddedilir; whitelist'teki güvenlik parametreleri asla bloklanmaz) + ADR-001 no-emission invariant testi (`no_emission_invariant_fixed_supply_and_pool`: genesis tam `BUD_TOTAL_SUPPLY`'i tahsis eder; validation reward pool %8–12 bandında; epoch payout ön-tahsisli havuzdan mint etmeden ödenir). Timelock (`GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS=10`) zaten mevcut.
+2. CI kanıtı: commit `5a761676` · https://github.com/budlum-xyz/budlum/actions/runs/29995513658 (CI, queued)
+3. Ne bekliyor: PR #132 CI yeşil → merge.
+4. Kim karar verecek: CI otomatik (merge: repo-admin).
+
+### Görev E (private transfer relayer mempool UX + fee market) — DURUM
+- Mevcut: `src/mempool/` (Mempool + MempoolConfig + fee-gated admit), `src/chain/fee_market.rs` (FeeMarketParams / next_base_fee / effective_fee / distribute_fee) `account.rs` üzerinden private transfer tx'lerine bağlı; `PrivateTransferSubmit` bir `TransactionType` olarak mempool'a giriyor. TEE tabanlı `spent_commitment` gizleme = direktif gereği SCOPE OUT.
+- Kalan (kapsam kararı gerek): relayer'a dönük mempool UX / fee-quoting arayüzü. Büyük özellik; derleme sandbox'ta mümkün değil → kullanıcı kapsam/onayı gerekli.
