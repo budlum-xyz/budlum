@@ -92,7 +92,7 @@ pub enum Token {
     #[regex("0x[0-9a-fA-F]+", |lex| lex.slice().to_string())]
     Hex(String),
 
-    #[regex(r"//[^\n]*", logos::skip)]
+    #[regex(r"//[^\n]*", logos::skip, allow_greedy = true)]
     #[regex(r"/\*([^*]|\*[^/])*\*/", logos::skip)]
     #[regex(r"[ \t\n\f]+", logos::skip)]
     Error,

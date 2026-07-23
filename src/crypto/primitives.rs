@@ -19,7 +19,7 @@ use pqcrypto_traits::sign::{
     DetachedSignature as PqDetachedSignatureTrait, PublicKey as PqPublicKeyTrait,
     SecretKey as PqSecretKeyTrait,
 };
-use rand::RngCore;
+use rand::Rng;
 use sha3::{Digest, Sha3_256};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -103,7 +103,7 @@ pub struct BlsKeypair {
 
 impl BlsKeypair {
     pub fn generate() -> Result<Self, CryptoError> {
-        use rand::RngCore;
+        use rand::Rng;
         let mut seed = [0u8; 64];
         rand::rng().fill_bytes(&mut seed);
         let sk = Scalar::from_bytes_wide(&seed);
