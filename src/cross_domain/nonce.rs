@@ -119,3 +119,30 @@ mod tests {
         assert!(store.mark_processed(id).is_err()); // duplicate rejected
     }
 }
+
+#[cfg(test)]
+mod audit_replay_regression {
+    use super::*;
+
+    #[test]
+    fn replay_store_rejects_duplicate_and_tracks_count() {
+        let mut s = ReplayNonceStore::new();
+        let id = [7u8; 32];
+        assert!(s.mark_processed(id).is_ok());
+        assert!(s.is_processed(&id));
+        assert_eq!(s.processed_count(), 1);
+        assert!(s.mark_processed(id).is_err());
+        let _ = s.root();
+    }
+
+    #[test]
+    fn replay_store_distinct_ids_independent() {
+        let mut s = ReplayNonceStore::new();
+        s.mark_processed([1u8; 32]).unwrap();
+        s.mark_processed([2u8; 32]).unwrap();
+        assert_eq!(s.processed_count(), 2);
+        assert!(s.is_processed(&[1u8; 32]));
+        assert!(s.is_processed(&[2u8; 32]));
+        assert!(!s.is_processed(&[3u8; 32]));
+    }
+}
