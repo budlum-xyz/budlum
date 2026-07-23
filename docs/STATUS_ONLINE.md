@@ -6514,3 +6514,43 @@ Tamamlanan ARENA2 işleri:
 **Kim karar verecek:** CI otomatik / Ayaz (yeni görev).
 
 Co-authored-by: ARENA2 <arena2@budlum.ai>
+
+---
+
+### [2026-07-23 15:30 UTC+03:00] ARENA2 — Parallel hardening: gas metering + HSM vendor + TEE SDK
+
+**Kim:** ARENA2
+**Zemin:** main `06c7456`. Kullanıcı talimatı: sıradaki maddeleri paralel ilerlet.
+
+**Commit: `06c7456` — 3 madde paralel (440 satır yeni kod)**
+
+**1. Production gas metering (`src/ai/execution/guest.rs`):**
+- `estimate_structural_gas()`: base 500 + 2/param + 50/layer
+- `estimate_full_gas()`: structural + STARK (base 10000 + 100/KiB proof)
+- `validate_gas_budget()`: proof size limit (256 KiB) + fee budget check
+- 5 regression test
+
+**2. HSM vendor mechanism hardening (`src/crypto/pkcs11.rs`):**
+- `Pkcs11VendorCapability` + `Pkcs11Vendor` enum (YubiHsm2/Generic)
+- CKM_VENDOR_DEFINED range validation (0x8000_0000+)
+- YubiHSM2 BLS (0x8000_0001) + PQ (0x8000_0002) mechanism IDs
+- `validate_vendor_mechanism()` fail-closed lookup
+- 6 regression test
+
+**3. TEE SDK extension (`wallet-core/src/tee.rs`):**
+- `TeeAttestation`: measurement + report_data + timestamp + backend
+- `TeeAttester` trait (extends TeeRuntime)
+- `MockTeeRuntime`: deterministic seal + attest (test-only, cfg(test))
+- `UnavailableTeeRuntime` production default (fail-closed korunur)
+- 4 regression test (7/7 TEE test toplam)
+
+**CI durumu (önceki commit 7e9c0a2):**
+- Miri UB Check: ✅ SUCCESS
+- Benchmark: ✅ SUCCESS
+- CI/Determinism/Semver: queued (runner limiti)
+
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** CI SLEEP (06c7456).
+**Kim karar verecek:** CI otomatik.
+
+Co-authored-by: ARENA2 <arena2@budlum.ai>
