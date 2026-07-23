@@ -39,7 +39,7 @@
 - ⏳ E1 (kalan ~100 saturating instance): kademeli checked arithmetic geçişi
 - ⏳ S6: Syscall result AIR constraint (public input binding)
 - ⏳ C1: BLS hash_to_g1 RFC 9380 (kripto değişiklik)
-- ⏳ C3: Validator VRF/BLS key mandatory on Stake (mimari değişiklik)
+✅ **C3 (KISMİ):** Validator consensus key readiness check + warning log + 4 test
 - ⏳ H1: PKCS#11 BLS/PQ non-extractable (donanım/audit)
 
 ## Intent → zincir (private transfer)
