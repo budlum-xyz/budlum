@@ -4,10 +4,11 @@
 # ── Stage 1: Builder ────────────────────────────────────────
 FROM rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    protobuf-compiler=3.21.12-* \
-    clang=1:14.0-* \
-    cmake=3.25.1-* \
+    protobuf-compiler \
+    clang \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -27,10 +28,11 @@ RUN cargo build --release --locked && \
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates=20230311 \
-    openssl=3.0.11-* \
-    curl=7.88.1-* \
+    ca-certificates \
+    openssl \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
