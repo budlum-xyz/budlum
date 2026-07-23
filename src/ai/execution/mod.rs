@@ -12,11 +12,12 @@ mod model_class;
 mod verify;
 
 pub use guest::{
-    build_fixed_point_mlp_guest, estimate_full_gas, estimate_structural_gas, eval_fixed_point_mlp,
-    input_commitment, output_commitment, program_hash_from_words, prove_mlp_inference,
-    validate_gas_budget, weights_digest, words_to_bytecode, FixedPointMlpSpec, GAS_BASE_STARK,
-    GAS_BASE_STRUCTURAL, GAS_PER_KIB_PROOF, GAS_PER_LAYER, GAS_PER_PARAM, MAX_PROOF_BYTES,
-    MLP_GUEST_VERSION,
+    build_fixed_point_mlp_guest, build_matmul_guest_program, estimate_full_gas,
+    estimate_guest_instruction_count, estimate_structural_gas, eval_fixed_point_mlp,
+    input_commitment, matmul_program_hash, output_commitment, program_hash_from_words,
+    prove_mlp_inference, validate_gas_budget, weights_digest, words_to_bytecode, FixedPointMlpSpec,
+    GAS_BASE_STARK, GAS_BASE_STRUCTURAL, GAS_PER_KIB_PROOF, GAS_PER_LAYER, GAS_PER_PARAM,
+    MAX_GUEST_OPS, MAX_PROOF_BYTES, MLP_GUEST_VERSION,
 };
 pub use model_class::{
     AiExecutionModelClass, ModelClassLimits, DEFAULT_EXECUTION_CLASS, MAX_MLP_LAYERS,

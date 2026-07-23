@@ -1,0 +1,13 @@
+# cargo-vet audits — kademeli olarak doldurulacak.
+# İlk hedef: FFI/unsafe barındıran crate'ler (pqcrypto-*, cryptoki, ring)
+
+[criteria]
+# Özel kriterler gerekirse buraya eklenecek.
+
+[audits]
+# Örnek:
+# [audits.pqcrypto-dilithium]
+# version = "0.4"
+# criteria = "safe-to-deploy"
+# who = "ARENA2 <arena2@budlum.ai>"
+# notes = "Reviewed FFI bindings, no unsafe in Rust layer"

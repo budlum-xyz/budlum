@@ -1,0 +1,43 @@
+# CodeQL analysis for Rust — CI güvenlik planı §3.3
+# CodeQL for Rust GA (Ekim 2025+); stable Rust hedefli.
+# Bilgilendirici: PR bloklamıyor, scheduled + push-to-main.
+name: "CodeQL"
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 6 * * 1"  # Pazartesi 06:30 UTC
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: CodeQL Rust Analysis
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+          queries: security-extended
+
+      - name: Install Rust + protoc
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.94.0"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:rust"

@@ -1191,6 +1191,33 @@ impl Executor {
                         "execution proof_bytes exceed MAX_PROOF_BYTES",
                     ));
                 }
+                // ARENA2 (2026-07-23): Production gas metering — validate
+                // proof size against the execution class limits before
+                // deserializing the full envelope.
+                if let Some(ref model_spec) = model {
+                    if model_spec.execution_class != 0 {
+                        let class = crate::ai::execution::AiExecutionModelClass::from_u8(
+                            model_spec.execution_class,
+                        );
+                        if let Some(cls) = class {
+                            let limits = cls.limits();
+                            // Proof size heuristic: bound by max_params * 64 bytes
+                            // (each param contributes ~64 bytes to the STARK trace).
+                            let max_proof = limits.max_params.saturating_mul(64);
+                            if proof.proof_bytes.len() > max_proof {
+                                return Err(BudlumError::validation(
+                                    "ai_exec_gas_exceeded",
+                                    format!(
+                                        "proof size {} exceeds class limit {} (class={})",
+                                        proof.proof_bytes.len(),
+                                        max_proof,
+                                        cls.as_str()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
                 if let Ok(envelope) =
                     postcard::from_bytes::<bud_proof::ProofEnvelope>(&proof.proof_bytes)
                 {

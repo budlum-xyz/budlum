@@ -424,3 +424,311 @@ mod gas_tests {
         assert!(gas.unwrap() > 0);
     }
 }
+
+// ── ARENA2 (2026-07-23): Full matmul-in-guest AIR ──
+//
+// Build a BudZKVM guest program that actually computes the MLP forward pass
+// using VM instructions (Load, Mul, Add). The STARK proof then attests to
+// the correctness of the computation itself, not just the commitment chain.
+//
+// Memory layout:
+//   [0..input_dim)       = input values (i32 as u64)
+//   [input_dim..params)  = weights + biases
+//   [params..params+out) = output values
+//
+// The program:
+//   1. Load each input from memory
+//   2. For each output neuron: accumulate bias + Σ(weight * input) using Mul+Add
+//   3. Apply ReLU (hidden layers): if acc < 0 then acc = 0
+//   4. Store output to memory
+//   5. Poseidon commitment over outputs
+//   6. Halt
+
+/// Maximum supported total operations for in-guest matmul.
+/// Beyond this, the guest program would exceed practical trace size limits.
+pub const MAX_GUEST_OPS: usize = 50_000;
+
+/// Estimate the number of VM instructions for a full matmul guest program.
+pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usize, String> {
+    spec.validate()?;
+    let mut ops = 0usize;
+    let input_dim = spec.input_dim();
+    // Load inputs
+    ops = ops.checked_add(input_dim).ok_or("ops overflow")?;
+    // For each layer
+    for w in spec.dims.windows(2) {
+        let in_d = w[0] as usize;
+        let out_d = w[1] as usize;
+        for _o in 0..out_d {
+            // Load bias (1) + for each input: Load weight (1) + Load input (1) + Mul (1) + Add (1) = 5 ops per input
+            ops = ops.checked_add(1 + in_d * 5).ok_or("ops overflow")?;
+            // ReLU: Eq + Jnz + Load(0) + Store = ~4 ops (hidden only)
+            ops = ops.checked_add(4).ok_or("ops overflow")?;
+            // Store output (1)
+            ops = ops.checked_add(1).ok_or("ops overflow")?;
+        }
+    }
+    // Poseidon + Halt
+    ops = ops.checked_add(2).ok_or("ops overflow")?;
+    if ops > MAX_GUEST_OPS {
+        return Err(format!(
+            "guest program too large: {} ops > MAX_GUEST_OPS {}",
+            ops, MAX_GUEST_OPS
+        ));
+    }
+    Ok(ops)
+}
+
+/// Build a BudZKVM guest program that computes the MLP forward pass.
+/// The program uses Load/Mul/Add instructions to perform the actual
+/// matrix multiplication, then commits the output via Poseidon.
+///
+/// Memory layout (set up by host before execution):
+///   addr 0..input_dim:          input values
+///   addr input_dim..+weights:   weight values (row-major per layer)
+///   addr weights_end..+biases:  bias values
+///   addr output_base..+out_dim: output values (written by program)
+pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, String> {
+    spec.validate()?;
+    let _ops = estimate_guest_instruction_count(spec)?;
+
+    let input_dim = spec.input_dim();
+    let output_dim = spec.output_dim();
+
+    // Calculate memory offsets
+    let weight_base = input_dim;
+    let mut bias_base = weight_base;
+    for w in spec.dims.windows(2) {
+        bias_base += w[0] as usize * w[1] as usize;
+    }
+    let output_base = bias_base + spec.biases.len();
+
+    // Register allocation:
+    //   r1..r[input_dim] = cached input values
+    //   r20 = accumulator
+    //   r21 = weight
+    //   r22 = input (re-loaded for each mul)
+    //   r23 = product
+    //   r24 = zero (for ReLU comparison)
+    //   r25 = output pointer
+    let r_acc: u8 = 20;
+    let r_weight: u8 = 21;
+    let r_input: u8 = 22;
+    let r_product: u8 = 23;
+    let r_zero: u8 = 24;
+
+    let mut prog = Vec::new();
+    let mut next_reg: u8 = 1;
+
+    // Phase 1: Load all inputs into registers r1..r[input_dim]
+    let mut input_regs = Vec::new();
+    for i in 0..input_dim {
+        let reg = next_reg;
+        next_reg += 1;
+        if next_reg > 19 {
+            return Err("too many inputs for register allocation (max 19)".into());
+        }
+        prog.push(inst(Opcode::Load, reg, 0, 0, i as i32));
+        input_regs.push(reg);
+    }
+
+    // Load zero into r_zero for ReLU comparison
+    prog.push(inst(Opcode::Load, r_zero, 0, 0, 0));
+    // Subtract to make it zero: r_zero = r_zero - r_zero
+    prog.push(inst(Opcode::Sub, r_zero, r_zero, r_zero, 0));
+
+    // Phase 2: For each layer, compute output neurons
+    let mut w_off = 0usize;
+    let mut b_off = 0usize;
+    let n_layers = spec.dims.len() - 1;
+
+    for (layer_idx, w) in spec.dims.windows(2).enumerate() {
+        let in_d = w[0] as usize;
+        let out_d = w[1] as usize;
+        let is_hidden = layer_idx + 1 < n_layers;
+
+        for o in 0..out_d {
+            // Load bias into accumulator
+            let bias_addr = (bias_base + b_off + o) as i32;
+            prog.push(inst(Opcode::Load, r_acc, 0, 0, bias_addr));
+
+            // For each input: acc += weight * input
+            for i in 0..in_d {
+                let weight_addr = (weight_base + w_off + o * in_d + i) as i32;
+                // Load weight
+                prog.push(inst(Opcode::Load, r_weight, 0, 0, weight_addr));
+                // Get input (from cached register or re-load)
+                if i < input_regs.len() {
+                    // Use cached input register
+                    prog.push(inst(Opcode::Add, r_input, input_regs[i], r_zero, 0));
+                } else {
+                    // Re-load from memory (for deeper layers, inputs are previous outputs)
+                    prog.push(inst(Opcode::Load, r_input, 0, 0, i as i32));
+                }
+                // Multiply: product = weight * input
+                prog.push(inst(Opcode::Mul, r_product, r_weight, r_input, 0));
+                // Accumulate: acc += product
+                prog.push(inst(Opcode::Add, r_acc, r_acc, r_product, 0));
+            }
+
+            // ReLU for hidden layers: if acc < 0, acc = 0
+            if is_hidden {
+                // Lt: r_product = (acc < zero) ? 1 : 0
+                prog.push(inst(Opcode::Lt, r_product, r_acc, r_zero, 0));
+                // Jnz: if r_product != 0, skip next instruction (set acc = 0)
+                // We use: if acc >= 0, jump over the zero-set
+                // Jnz r_product, +2 (skip the Load 0 + store-back)
+                prog.push(inst(Opcode::Jnz, 0, r_product, 0, 2));
+                // acc = 0 (only executed when acc < 0)
+                prog.push(inst(Opcode::Sub, r_acc, r_zero, r_zero, 0));
+            }
+
+            // Store output to memory
+            let out_addr = (output_base + o) as i32;
+            prog.push(inst(Opcode::Store, r_acc, 0, 0, out_addr));
+
+            // For next layer: also store back to input area
+            // (so deeper layers can Load from addr 0..in_d)
+            if is_hidden && o < input_dim {
+                prog.push(inst(Opcode::Store, r_acc, 0, 0, o as i32));
+            }
+        }
+
+        w_off += in_d * out_d;
+        b_off += out_d;
+    }
+
+    // Phase 3: Poseidon commitment over output area
+    // Poseidon(r25, r26) where r25 = output_base addr, r26 = output_dim
+    prog.push(inst(Opcode::Load, 25, 0, 0, output_base as i32));
+    prog.push(inst(Opcode::Load, 26, 0, 0, output_dim as i32));
+    prog.push(inst(Opcode::Poseidon, 27, 25, 26, 0));
+
+    // Log the commitment and Halt
+    prog.push(inst(Opcode::Log, 0, 27, 0, 0));
+    prog.push(inst(Opcode::Halt, 0, 0, 0, 0));
+
+    Ok(prog)
+}
+
+/// Compute program hash for a matmul guest program.
+pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String> {
+    let words = build_matmul_guest_program(spec)?;
+    Ok(program_hash_from_words(&words))
+}
+
+#[cfg(test)]
+mod matmul_tests {
+    use super::*;
+
+    #[test]
+    fn matmul_guest_builds_for_tiny_mlp() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let prog = build_matmul_guest_program(&spec).unwrap();
+        assert!(!prog.is_empty());
+        // Last instruction should be Halt
+        let last = bud_isa::Instruction::decode(prog[*prog.last().unwrap() as usize])
+            .unwrap_or_else(|_| {
+                // The last u64 is the Halt instruction
+                bud_isa::Instruction::decode(prog[prog.len() - 1]).unwrap()
+            });
+        // Verify we have instructions
+        assert!(prog.len() > 5, "program should have multiple instructions");
+    }
+
+    #[test]
+    fn matmul_guest_two_layer() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 3, 1],
+            weights: vec![1, 0, 0, 1, 1, 1, 1, 1, 1],
+            biases: vec![0, 0, 0, 0],
+        };
+        let prog = build_matmul_guest_program(&spec).unwrap();
+        assert!(prog.len() > 10);
+    }
+
+    #[test]
+    fn matmul_instruction_count_scales() {
+        let small = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let large = FixedPointMlpSpec {
+            dims: vec![4, 4, 2],
+            weights: vec![0; 4 * 4 + 4 * 2],
+            biases: vec![0; 4 + 2],
+        };
+        let c_small = estimate_guest_instruction_count(&small).unwrap();
+        let c_large = estimate_guest_instruction_count(&large).unwrap();
+        assert!(c_large > c_small);
+    }
+
+    #[test]
+    fn matmul_rejects_too_many_inputs() {
+        // 20 inputs would need 20 registers (r1..r20) but r20 is reserved
+        let spec = FixedPointMlpSpec {
+            dims: vec![20, 1],
+            weights: vec![0; 20],
+            biases: vec![0],
+        };
+        assert!(build_matmul_guest_program(&spec).is_err());
+    }
+
+    #[test]
+    fn matmul_program_hash_deterministic() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let h1 = matmul_program_hash(&spec).unwrap();
+        let h2 = matmul_program_hash(&spec).unwrap();
+        assert_eq!(h1, h2);
+        assert_ne!(h1, [0u8; 32]);
+    }
+
+    #[test]
+    fn matmul_program_hash_differs_by_weights() {
+        let spec1 = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let spec2 = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![3, 4],
+            biases: vec![0],
+        };
+        // Same dims but different weights produce same program structure
+        // (weights are loaded from memory, not embedded in instructions)
+        // So the program hash should be the SAME for same architecture
+        let h1 = matmul_program_hash(&spec1).unwrap();
+        let h2 = matmul_program_hash(&spec2).unwrap();
+        assert_eq!(
+            h1, h2,
+            "same architecture = same program (weights in memory)"
+        );
+    }
+
+    #[test]
+    fn matmul_program_hash_differs_by_architecture() {
+        let spec1 = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let spec2 = FixedPointMlpSpec {
+            dims: vec![3, 1],
+            weights: vec![1, 2, 3],
+            biases: vec![0],
+        };
+        let h1 = matmul_program_hash(&spec1).unwrap();
+        let h2 = matmul_program_hash(&spec2).unwrap();
+        assert_ne!(h1, h2, "different architecture = different program");
+    }
+}

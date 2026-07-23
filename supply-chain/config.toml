@@ -1,0 +1,21 @@
+# cargo-vet configuration — CI güvenlik planı §3.2
+# Tedarik zinciri güven denetimi (FFI/unsafe crate'ler için).
+# Kademeli benimseme: önce bilgilendirici, sonra PR kapısı.
+
+[cargo-vet]
+version = "0.9"
+
+[policy]
+# Audit kriterleri: FFI/unsafe barındıran kritik crate'ler
+# pqcrypto-*, cryptoki, bls12_381, ring
+audit-compatible-output = true
+
+[imports]
+# Güvenilir denetim kaynakları
+# ISRG (Let's Encrypt), Fermyon, Bytecode Alliance
+# Bu kademeli olarak genişletilecek.
+
+[default-criteria]
+# Varsayılan: "safe-to-run" (CI'da çalıştırılabilir)
+# Kritik crate'ler için "audited" zorunlu olacak
+safe-to-run = true
