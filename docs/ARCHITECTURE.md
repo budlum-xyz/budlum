@@ -45,14 +45,14 @@ sequenceDiagram
   participant R as RPC / P2P decoder
   participant M as Mempool
   participant E as Executor
-  C->>C: Canonical V4 payload + signature
-  C->>R: Transaction
-  R->>R: signature_version == V4?
-  R->>R: canonical hash + signature verify
-  R->>M: admitted transaction
-  M->>E: selected block transaction
-  E->>E: nonce / balance / type rules
-  E-->>C: state transition or typed rejection
+  C ->> C: Canonical V4 payload + signature
+  C ->> R: Transaction
+  R ->> R: signature_version == V4?
+  R ->> R: canonical hash + signature verify
+  R ->> M: admitted transaction
+  M ->> E: selected block transaction
+  E ->> E: nonce / balance / type rules
+  E -->> C: state transition or typed rejection
 ```
 
 ## 4. Cross-domain bridge lifecycle
