@@ -188,7 +188,8 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  subgraph Admission["RPC / P2P Admission"]
+  subgraph sg1[RPC / P2P Admission]
+
     Raw[Raw tx bytes] --> Decode["Transaction::decode V4"]
     Decode --> SigCheck["canonical_signing_hash + ed25519 verify"]
     SigCheck -->|fail| RejectSig[REJECT: invalid_signature]
@@ -197,7 +198,8 @@ flowchart TD
     Nonce -->|pass| Pool[Mempool admission]
   end
 
-  subgraph Execution["apply_transaction_checked"]
+  subgraph sg2[apply_transaction_checked]
+
     Pool --> Type{TransactionType?}
     Type -->|Transfer| T1[sender.balance.checked_sub total_cost]
     T1 --> T2[receiver.balance.checked_add amount]
@@ -228,7 +230,8 @@ flowchart TD
     NB3 --> NB4[treasury.checked_add protocol_share 80%]
   end
 
-  subgraph FeeDeduction["Fee deduction (all tx types)"]
+  subgraph sg3[Fee deduction -all tx types]
+
     T3 --> Fee[sender.balance.saturating_sub tx.fee]
     Fee --> NonceInc[sender.nonce.saturating_add 1]
   end
@@ -238,14 +241,16 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Wallet["Wallet-side key derivation"]
+  subgraph sg4[Wallet-side key derivation]
+
     Seed[wallet_seed 32 bytes] --> DS[derive_spend_secret SHA3-256 seed // commitment -> u64]
     Seed --> DB[derive_blinding SHA3-256 seed // counter -> u64]
     Seed --> DV[derive_view_key SHA3-256 seed // 0xVIEW -> 32 bytes]
     Addr[address] --> Tag[address_to_recipient_tag SHA3-256 -> u64]
   end
 
-  subgraph Commitment["PrivacyCommit opcode (0x20)"]
+  subgraph sg5[PrivacyCommit opcode -0x20]
+
     Amount[rs1 = amount u64] --> PC[Poseidon4_hash3 amount blinding recipient_tag]
     Blinding[rs2 = blinding u64 full] --> PC
     RecipTag[imm = recipient_tag i32] --> PC
@@ -254,7 +259,8 @@ flowchart TD
     Insert --> LiveSet[live_commitments BTreeSet]
   end
 
-  subgraph Nullifier["NullifierCheck opcode (0x21)"]
+  subgraph sg6[NullifierCheck opcode -0x21]
+
     Secret[rs2 = spend_secret] --> NC[Poseidon4_hash secret DOMAIN_NULLIFIER]
     NC --> NullOut[derived_nullifier u64]
     Claimed[rs1 = claimed_nullifier] --> EqCheck{derived == claimed?}
@@ -266,14 +272,16 @@ flowchart TD
     DoubleSpend -->|yes| Reject[REJECT: double-spend]
   end
 
-  subgraph Conservation["SumConservation opcode (0x22)"]
+  subgraph sg7[SumConservation opcode -0x22]
+
     SumIn[rs1 = Sum input amounts] --> SC{sum_in == sum_out AND both < P}
     SumOut[rs2 = Sum output amounts] --> SC
     SC -->|yes| Rd1c[rd = 1 balanced]
     SC -->|no| Rd0c[rd = 0 unbalanced]
   end
 
-  subgraph AIR["AIR constraints (plonky3_air.rs)"]
+  subgraph sg8[AIR constraints -plonky3_air]
+
     Selector[is_privacy_commit selector -> opcode 0x20]
     PoseidonState[s0=rs1 s1=rs2 blinding s2=imm recipient s3..7=0]
     NullSelector[is_nullifier_check -> opcode 0x21]
@@ -288,13 +296,15 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Source["Source domain (e.g. Ethereum)"]
+  subgraph sg9[Source domain -e.g. Ethereum]
+
     Tx[Lock transaction] --> Event[Emitted lock event]
     Event --> Block[Block with receipts_root]
     Block --> Confirm[N confirmation blocks]
   end
 
-  subgraph Relayer["Relayer proof construction"]
+  subgraph sg10[Relayer proof construction]
+
     Confirm --> Header["Target header + confirmation chain"]
     Header --> Receipt[Receipt envelope bytes]
     Receipt --> MPTProof["MPT proof nodes + receipt key"]
@@ -304,7 +314,8 @@ flowchart TD
     CrossMsg --> Correlation[correlation_id for burn->unlock]
   end
 
-  subgraph Verification["Budlum verification pipeline"]
+  subgraph sg11[Budlum verification pipeline]
+
     MsgId --> VerifyId[message.verify_id hash check]
     VerifyId -->|fail| Reject1[REJECT: invalid_message_id]
     VerifyId -->|pass| ParentCheck["parent_hash + height checks"]
@@ -323,7 +334,8 @@ flowchart TD
     Kind -->|BridgeBurn| Unlock[bridge_state.unlock -> refund owner]
   end
 
-  subgraph Safety["Safety gates"]
+  subgraph sg12[Safety gates]
+
     Expiry[expiry_height check] --> Mint
     Correlation2[correlation_id mandatory for burn] --> Unlock
     AmountCheck["amount <= u64::MAX"] --> Mint
@@ -336,7 +348,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Registration["Model registration"]
+  subgraph sg13[Model registration]
+
     Owner[Model owner address] --> Spec["AiModelSpec: model_hash + version + thresholds"]
     Spec --> Class[execution_class: FixedPointMlpV1 = 1]
     Class --> ProgHash[execution_program_hash = matmul_program_hash spec]
@@ -345,7 +358,8 @@ flowchart TD
     Reg --> ModelRoot[ai_root -> AccountState.calculate_state_root]
   end
 
-  subgraph Request["Inference request"]
+  subgraph sg14[Inference request]
+
     User[Requester] --> Req["AiInferenceRequest: model_id + input_commitment + max_fee"]
     Req --> Balance2["sender.balance >= max_fee + tx.fee"]
     Balance -->|fail| Reject1[REJECT: insufficient_balance]
@@ -354,7 +368,8 @@ flowchart TD
     Submit --> ReqId[request_id = calculate_id canonical hash]
   end
 
-  subgraph Verification["Verifier responses"]
+  subgraph sg15[Verifier responses]
+
     Req --> V1[Verifier 1: compute output -> sign result]
     Req --> V2[Verifier 2: compute output -> sign result]
     Req --> VN[Verifier N: compute output -> sign result]
@@ -363,7 +378,8 @@ flowchart TD
     VN --> RN["AiInferenceResult: output_commitment + signature"]
   end
 
-  subgraph Threshold["Agreement threshold"]
+  subgraph sg16[Agreement threshold]
+
     R1 --> Agree[agreeing_verifiers: same output_commitment]
     R2 --> Agree
     RN --> Agree
@@ -375,7 +391,8 @@ flowchart TD
     Deadline -->|no| Wait
   end
 
-  subgraph Execution["Execution proof pipeline"]
+  subgraph sg17[Execution proof pipeline]
+
     Model2["FixedPointMlpSpec dims+weights+biases"] --> Host[eval_fixed_point_mlp i32 MAC host]
     Host --> Output[output limbs i32 vec]
     Model2 --> Guest["build_matmul_guest_program: Load+Mul+Add+ReLU+Poseidon+Halt"]
@@ -387,7 +404,8 @@ flowchart TD
     Envelope --> Proof["AiExecutionProof: commitments + hash + proof"]
   end
 
-  subgraph Attach["Proof attachment + finalization"]
+  subgraph sg18[Proof attachment + finalization]
+
     Proof --> AttachTx[AiAttachExecutionProof tx]
     AttachTx --> StructVerify[verify_execution_proof_structural_with_model]
     StructVerify --> CommitCheck["commitments_match request+result"]
@@ -406,7 +424,8 @@ flowchart TD
     RequireCheck -->|no| AttestOnly[attestation sufficient]
   end
 
-  subgraph Gas["Gas metering"]
+  subgraph sg19[Gas metering]
+
     GasEst[estimate_full_gas spec proof_bytes_len]
     GasEst --> Structural["GAS_BASE_STRUCTURAL 500 + 2/param + 50/layer"]
     GasEst --> Stark["GAS_BASE_STARK 10000 + 100/KiB proof"]
@@ -419,7 +438,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph PoW["PoW domain adapter"]
+  subgraph sg20[PoW domain adapter]
+
     PowCommit["DomainCommitment: domain_block_hash + cumulative_work"]
     PowProof["FinalityProof::PoW: nonce + extra_nonce"]
     PowVerify["verify: declared_head_hash == commitment.domain_block_hash"]
@@ -427,7 +447,8 @@ flowchart TD
     WorkCheck --> MinWork[min_work threshold check]
   end
 
-  subgraph PoS["PoS domain adapter"]
+  subgraph sg21[PoS domain adapter]
+
     PosCommit["DomainCommitment: validators_root + epoch"]
     PosProof["FinalityProof::PoS: BLS certificate"]
     PosVerify[verify: cert.verify BLS aggregate signature]
@@ -437,14 +458,16 @@ flowchart TD
     PosVRF --> SeedRisk[C2: poison fallback -> predictable seed]
   end
 
-  subgraph BFT["BFT domain adapter"]
+  subgraph sg22[BFT domain adapter]
+
     BftCommit["DomainCommitment: round + state_hash"]
     BftProof["FinalityProof::BFT: BLS certificate"]
     BftVerify[verify: BLS cert with signer_count]
     BftVerify --> QuorumCheck[quorum threshold met]
   end
 
-  subgraph ZK["ZK domain adapter"]
+  subgraph sg23[ZK domain adapter]
+
     ZkCommit["DomainCommitment: proof_hash + program_hash"]
     ZkProof["FinalityProof::ZK: STARK ProofEnvelope"]
     ZkVerify[verify: ProofClaimRegistry first-valid-wins]
@@ -452,7 +475,8 @@ flowchart TD
     StarkCheck --> PublicInputs[public_inputs_hash match]
   end
 
-  subgraph PoA["PoA domain adapter (isolated)"]
+  subgraph sg24[PoA domain adapter -isolated]
+
     PoaCommit["DomainCommitment: authorities_root + round"]
     PoaProof["FinalityProof::PoA: authorities + signatures vec"]
     PoaVerify[verify: ed25519 signature set]
@@ -462,7 +486,8 @@ flowchart TD
     PoaIsolation --> SeparateReg[PoaMembershipRegistry KYC-only]
   end
 
-  subgraph Settlement["Global settlement"]
+  subgraph sg25[Global settlement]
+
     PowVerify --> Global["GlobalBlockHeader 12+ roots"]
     PosVerify --> Global
     BftVerify --> Global
@@ -511,7 +536,8 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-  subgraph KeyDerivation["Key derivation"]
+  subgraph sg26[Key derivation]
+
     Entropy[CSPRNG 16/32 bytes getrandom] --> Mnemonic[BIP39 2048-word English wordlist]
     Mnemonic --> Checksum[checksum verify: SHA256 first N bits]
     Mnemonic --> Seed[PBKDF2-HMAC-SHA512 2048 iterations -> 32 bytes]
@@ -521,7 +547,8 @@ flowchart TD
     VerifyingKey --> Address[SHA3-256 -> BudlumAddress]
   end
 
-  subgraph Signing["V4 transaction signing"]
+  subgraph sg27[V4 transaction signing]
+
     Payload[Transaction payload] --> Canonical[canonical_signing_hash V4]
     Canonical --> Fields["chain_id + nonce + to + amount + fee + data + type"]
     Fields --> Preimage[SHA3-256 domain-separated preimage]
@@ -530,7 +557,8 @@ flowchart TD
     Signature --> Tx["Transaction: payload + signature + V4 marker"]
   end
 
-  subgraph Privacy["Privacy key derivation"]
+  subgraph sg28[Privacy key derivation]
+
     Seed --> SpendSecret[derive_spend_secret seed // commitment -> u64]
     Seed --> Blinding[derive_blinding seed // counter -> u64]
     Seed --> ViewKey[derive_view_key seed // 0xVIEW -> 32 bytes]
@@ -538,7 +566,8 @@ flowchart TD
     Blinding --> Commit[Poseidon3 amount blinding recipient_tag]
   end
 
-  subgraph TEE["TEE execution-time confidentiality"]
+  subgraph sg29[TEE execution-time confidentiality]
+
     TeeConfig[TeeBackendKind: None/ClientSgx/ServerNitro]
     TeeConfig -->|None| NoTee[Plaintext signing path]
     TeeConfig -->|Sgx/Nitro| TeeRuntime[TeeRuntime.seal_private_intent]
@@ -546,13 +575,15 @@ flowchart TD
     TeeRuntime -->|unavailable| FailClosed[FAIL-CLOSED: refuse plaintext]
   end
 
-  subgraph Cleanup["Memory safety"]
+  subgraph sg30[Memory safety]
+
     Drop["Wallet::drop"] --> ZeroizeMnemonic[mnemonic.zeroize]
     Drop --> ZeroizeSeed[seed.zeroize]
     Drop --> ZeroizeKey[signing_key zeroize internal]
   end
 
-  subgraph Recovery["Social recovery"]
+  subgraph sg31[Social recovery]
+
     Guardians["GuardianApproval: threshold + timelock"] --> Proposal[RecoveryProposal]
     Proposal --> Digest[BDLM_WALLET_RECOVERY_PROPOSAL_V1 domain-separated]
     Proposal --> Timelock["executable_after = created_block + timelock"]
@@ -564,7 +595,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Bytecode["Guest program construction"]
+  subgraph sg32[Guest program construction]
+
     Spec[FixedPointMlpSpec] --> Guest[build_matmul_guest_program]
     Guest --> Load["Load instructions: weights + inputs from memory"]
     Guest --> Mul[Mul instructions: weight x input]
@@ -576,7 +608,8 @@ flowchart TD
     Words --> ProgHash[program_hash_from_words SHA3-256]
   end
 
-  subgraph VM["bud-vm execution"]
+  subgraph sg33[bud-vm execution]
+
     Words --> Decode[decode_instruction raw u64 -> Instruction]
     Decode --> MainnetGate["MainnetActivation: VerifyMerkle + VerifyInference gates"]
     MainnetGate --> S5[S5: env var gate REMOVED - always full activation]
@@ -588,7 +621,8 @@ flowchart TD
     Trace --> GasUsed[gas_used accumulation per opcode cost]
   end
 
-  subgraph AIR["bud-proof AIR constraints (plonky3_air.rs)"]
+  subgraph sg34[bud-proof AIR constraints -plonky3_air]
+
     Trace --> Matrix[RowMajorMatrix TRACE_WIDTH=414 columns]
     Matrix --> Selectors["38 opcode selectors boolean + exclusive sum"]
     Matrix --> RegBus[Register bus LogUp argument]
@@ -603,7 +637,8 @@ flowchart TD
     Matrix --> PublicInputs[48 public values: chain_id roots gas exit_code trace_len event_digest]
   end
 
-  subgraph Prover["Plonky3 STARK prover"]
+  subgraph sg35[Plonky3 STARK prover]
+
     Matrix --> Commit1[Commit phase 1: main trace Merkle]
     Commit1 --> Commit2[Commit phase 2: auxiliary trace LogUp]
     Commit2 --> FRI[FRI folding: degree reduction]
@@ -613,7 +648,8 @@ flowchart TD
     Envelope --> Postcard[postcard serialize]
   end
 
-  subgraph Verifier["Verifier"]
+  subgraph sg36[Verifier]
+
     Postcard --> Deserialize[postcard deserialize ProofEnvelope]
     Deserialize --> PUBHash[public_inputs_hash match]
     Deserialize --> DegreeCheck["degree_bits <= MAX_DEGREE_BITS"]
@@ -629,7 +665,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Proposal["Proposal creation"]
+  subgraph sg37[Proposal creation]
+
     Proposer[Proposer address] --> Type{ProposalType?}
     Type -->|ChangeBlockReward| P1[value: new reward amount]
     Type -->|ChangeFeeParams| P2[value: new fee parameters]
@@ -643,7 +680,8 @@ flowchart TD
     Gov --> Activation[activation_epoch timelock]
   end
 
-  subgraph Voting["Voting period"]
+  subgraph sg38[Voting period]
+
     Epoch --> Active[Active status]
     Active --> Vote[Voter: stake-weighted]
     Vote --> For["votes_for += voter.stake"]
@@ -653,7 +691,8 @@ flowchart TD
     Active --> Cancel[cancel_proposal owner-only]
   end
 
-  subgraph Finalization["Epoch advance -> finalize"]
+  subgraph sg39[Epoch advance - finalize]
+
     EndEpoch["current_epoch >= end_epoch"] --> Finalize[proposal.finalize]
     Finalize --> TotalStake[total_stake = get_total_stake]
     TotalStake --> Quorum[quorum_pct = 33%]
@@ -662,7 +701,8 @@ flowchart TD
     Check -->|no| Rejected[Status: Rejected]
   end
 
-  subgraph Execution["Activation -> execute"]
+  subgraph sg40[Activation - execute]
+
     Passed --> ActCheck["current_epoch >= activation_epoch?"]
     ActCheck -->|yes| Execute[execute_proposal]
     ActCheck -->|no| Wait[Wait for activation]
@@ -679,7 +719,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Genesis["Genesis allocation (100M BUD, 6 decimals)"]
+  subgraph sg41[Genesis allocation -100M BUD, 6 decimals]
+
     Total[100_000_000 x BUD_UNIT] --> Community[10M -> community accounts]
     Total --> Liquidity[10M -> liquidity accounts]
     Total --> Ecosystem[20M -> ecosystem accounts]
@@ -687,7 +728,8 @@ flowchart TD
     Total --> BurnReserve[40M -> burn_reserve_address]
   end
 
-  subgraph TimedBurn["process_timed_burn (epoch-triggered)"]
+  subgraph sg42[process_timed_burn -epoch-triggered]
+
     Epoch[advance_epoch] --> Trigger[process_timed_burn called]
     Trigger --> Rate[annual_burn_rate x BUD_UNIT / epochs_per_year]
     Rate --> BurnFrom[burn_from burn_reserve_address amount]
@@ -697,14 +739,16 @@ flowchart TD
     Exhausted -->|no| Continue[Continue next epoch]
   end
 
-  subgraph FeeBurn["Metabolic tx-fee burn"]
+  subgraph sg43[Metabolic tx-fee burn]
+
     Tx[Transaction applied] --> Fee[tx.fee collected]
     Fee --> Ratio[tx_fee_burn_ratio x fee]
     Ratio --> BurnFee[burn_from sender amount]
     Fee --> Remainder[remainder -> proposer/treasury]
   end
 
-  subgraph Vesting["Team vesting (cliff + linear)"]
+  subgraph sg44[Team vesting -cliff + linear]
+
     TeamAlloc[20M team allocation] --> Cliff[cliff_epochs: no unlock]
     Cliff --> Linear[linear unlock per epoch after cliff]
     Linear --> Spendable["spendable_balance = balance - locked_at epoch"]
@@ -713,7 +757,8 @@ flowchart TD
     Transfer -->|no| RejectVest[REJECT: vesting_locked]
   end
 
-  subgraph Cap["Supply cap enforcement (V144)"]
+  subgraph sg45[Supply cap enforcement -V144]
+
     BlockReward[block_reward mint] --> CapCheck["total_bud_committed <= 100M?"]
     CapCheck -->|yes| Mint[Allow mint]
     CapCheck -->|no| CapReject[REJECT: supply_cap_exceeded]
@@ -721,7 +766,8 @@ flowchart TD
     TotalBud --> CapCheck
   end
 
-  subgraph EIP1559["Fee market (EIP-1559)"]
+  subgraph sg46[Fee market -EIP-1559]
+
     BaseFee[block N-1 base_fee] --> Adjust[±12.5% based on gas usage]
     Adjust --> NewBase[block N base_fee]
     Tx2[Transaction] --> Effective["effective_fee = min max_fee base_fee+priority"]
@@ -734,7 +780,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Transport["Transport layer"]
+  subgraph sg47[Transport layer]
+
     TCP[TCP /ip4/0.0.0.0/tcp/4001]
     QUIC[QUIC /ip4/0.0.0.0/udp/4001/quic-v1]
     Identity[Ed25519 PeerId identity key]
@@ -743,7 +790,8 @@ flowchart TD
     Identity --> Libp2p
   end
 
-  subgraph Discovery["Peer discovery"]
+  subgraph sg48[Peer discovery]
+
     Kademlia[Kademlia DHT]
     Bootstrap[Bootstrap nodes from config]
     DNS[Dns seed resolution]
@@ -752,7 +800,8 @@ flowchart TD
     DNS --> Bootstrap
   end
 
-  subgraph Gossipsub["Gossipsub messaging"]
+  subgraph sg49[Gossipsub messaging]
+
     Topics[Topic: blocks txs finality snapshots]
     MsgIn[Incoming message] --> Dedup[MessageId dedup SipHash]
     Dedup --> Validate[Message validation]
@@ -764,7 +813,8 @@ flowchart TD
     Dispatch --> FinalityHandler[finality cert -> apply_qc_fault_verdict]
   end
 
-  subgraph PeerScoring["Reputation scoring"]
+  subgraph sg50[Reputation scoring]
+
     Score[PeerScore: -100 to 100]
     Score --> Good["Valid block/tx relay: +reward"]
     Score --> Bad1[Invalid block: report_invalid_block penalty]
@@ -778,7 +828,8 @@ flowchart TD
     Eclipse --> Idempotent[note_connected/disconnected idempotent]
   end
 
-  subgraph SnapshotSync["Snapshot synchronization"]
+  subgraph sg51[Snapshot synchronization]
+
     SnapReq[Snapshot request] --> Chunks[MAX_SNAPSHOT_CHUNKS = 4096]
     Chunks --> Concurrent[MAX_CONCURRENT_SNAPSHOTS = 10]
     Chunks --> Verify["Schema-4 digest + field manifest verify"]
@@ -791,13 +842,15 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Asset["DataAsset registration"]
+  subgraph sg52[DataAsset registration]
+
     Owner[Data owner address] --> Asset["DataAsset: asset_id + metadata"]
     Asset --> Registry[MarketplaceRegistry.data_assets.insert]
     Asset --> Root1[data_assets_root -> Pollen root -> state_root]
   end
 
-  subgraph Grant["AccessGrant lifecycle"]
+  subgraph sg53[AccessGrant lifecycle]
+
     Asset --> Grant["AccessGrant: grant_id + grantee + scope + expiry + max_reads"]
     Grant --> GrantReg[MarketplaceRegistry.access_grants.insert]
     Grant --> Root2[access_grants_root -> Pollen root]
@@ -806,7 +859,8 @@ flowchart TD
     Grant --> Exhaust[max_reads reached -> exhausted]
   end
 
-  subgraph Sale["SaleAuthorization + purchase"]
+  subgraph sg54[SaleAuthorization + purchase]
+
     Asset --> Sale["SaleAuthorization: seller + buyer + price + duration"]
     Sale --> SaleReg[MarketplaceRegistry.sale_authorizations.insert]
     Sale --> Purchase["PollenPurchaseReceipt: seller auth + buyer + grant + payment"]
@@ -815,7 +869,8 @@ flowchart TD
     Purchase --> ReceiptReg[purchase_receipts.insert -> root]
   end
 
-  subgraph Encryption["EncryptionPolicy (DAO-managed)"]
+  subgraph sg55[EncryptionPolicy -DAO-managed]
+
     DAO[Governance proposal] --> SetPolicy[SetEncryptionPolicy action]
     SetPolicy --> Policy["EncryptionPolicy: version + hpke_suite + min_key + max_duration"]
     Policy --> PolicyReg[MarketplaceRegistry.encryption_policies.insert]
@@ -825,7 +880,8 @@ flowchart TD
     Validate --> RejectNone["EncryptionAlgorithm::None REJECTED"]
   end
 
-  subgraph AIGate["AI inference data gate"]
+  subgraph sg56[AI inference data gate]
+
     Req[AiInferenceRequest] --> InputRef["input_ref: Pollen data reference?"]
     InputRef -->|no poll| Legacy[Legacy opaque path - no grant needed]
     InputRef -->|yes poll| GrantCheck{valid AccessGrant exists?}
@@ -839,7 +895,8 @@ flowchart TD
     Consume --> FailCheck[Failed request does NOT consume grant]
   end
 
-  subgraph Passport["D-Web Passport evidence"]
+  subgraph sg57[D-Web Passport evidence]
+
     BNSName[BNS name] --> Profile[DwebPassportProfile]
     Profile --> Evidence[EvidenceCard: BNS verified/expired]
     Profile --> PollenSummary[Pollen lineage counts]
@@ -854,7 +911,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  subgraph Header["Target chain header validation"]
+  subgraph sg58[Target chain header validation]
+
     BlockNum[block_number] --> Height["source_height >= deployment_height"]
     ParentHash[parent_hash] --> Chain[chain continuity check]
     Confirm[N confirmations] --> Depth["depth >= min_confirmations"]
@@ -862,7 +920,8 @@ flowchart TD
     StateRoot[state_root] --> AccRoot[account state verification]
   end
 
-  subgraph RLP["Strict RLP decoding"]
+  subgraph sg59[Strict RLP decoding]
+
     Bytes[Receipt envelope bytes] --> Prefix[RLP prefix byte]
     Prefix -->|0xf7..0xff| List[RLP list header]
     Prefix -->|0x80..0xb7| String[RLP string]
@@ -873,7 +932,8 @@ flowchart TD
     Logs --> Data[Data: payload bytes]
   end
 
-  subgraph MPT["Merkle-Patricia trie verification"]
+  subgraph sg60[Merkle-Patricia trie verification]
+
     Key[RLP encode receipt index] --> Nibble[Convert to nibbles]
     Nibble --> Root[Start at receipts_root]
     Root --> Node{Node type?}
@@ -888,7 +948,8 @@ flowchart TD
     Remain --> Value[Extract leaf value = receipt bytes]
   end
 
-  subgraph Payload["Payload verification"]
+  subgraph sg61[Payload verification]
+
     Value --> DecodeReceipt[Decode receipt bytes]
     DecodeReceipt --> StatusCheck{status == 0x1 success?}
     StatusCheck -->|no| Reject1[REJECT: transaction_failed]
