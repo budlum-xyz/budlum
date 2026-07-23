@@ -429,7 +429,10 @@ impl Executor {
                 booster.nonce = booster.nonce.saturating_add(1);
 
                 let creator = state.get_or_create(&nft.owner);
-                creator.balance = creator.balance.saturating_add(creator_share);
+                // E1 fix: checked add for creator share credit
+                creator.balance = creator.balance.checked_add(creator_share).ok_or_else(|| {
+                    BudlumError::validation("balance_overflow", "NFT boost creator share overflow")
+                })?;
 
                 // F4 (Constitution §3): route 4% B.U.D. share to storage operator pool.
                 // Distributed by blockchain after block commit via distribute_bud_boost_share.
@@ -447,7 +450,16 @@ impl Executor {
                 if protocol_share > 0 {
                     if let Some(treasury_addr) = state.burn_reserve_address {
                         let treasury = state.get_or_create(&treasury_addr);
-                        treasury.balance = treasury.balance.saturating_add(protocol_share);
+                        // E1 fix: checked add for treasury credit
+                        treasury.balance = treasury
+                            .balance
+                            .checked_add(protocol_share)
+                            .ok_or_else(|| {
+                                BudlumError::validation(
+                                    "balance_overflow",
+                                    "Protocol treasury share overflow",
+                                )
+                            })?;
                         tracing::info!(
                             nft_id = %nft_id,
                             protocol_treasury = %treasury_addr,
@@ -687,7 +699,10 @@ impl Executor {
                 buyer.nonce = buyer.nonce.saturating_add(1);
 
                 let seller = state.get_or_create(&offer.seller);
-                seller.balance = seller.balance.saturating_add(offer.price);
+                // E1 fix: checked add for seller credit
+                seller.balance = seller.balance.checked_add(offer.price).ok_or_else(|| {
+                    BudlumError::validation("balance_overflow", "Marketplace sale credit overflow")
+                })?;
             }
             TransactionType::HubRegisterApp {
                 name,
@@ -831,8 +846,14 @@ impl Executor {
                             {
                                 let acc = state.get_or_create(verifier_addr);
                                 let extra = if (i as u64) < remainder { 1 } else { 0 };
-                                acc.balance =
-                                    acc.balance.saturating_add(reward_per_verifier + extra);
+                                // E1 fix: checked add for verifier reward
+                                let reward = reward_per_verifier + extra;
+                                acc.balance = acc.balance.checked_add(reward).ok_or_else(|| {
+                                    BudlumError::validation(
+                                        "balance_overflow",
+                                        "AI verifier reward overflow",
+                                    )
+                                })?;
                             }
                         }
                     }
@@ -864,7 +885,10 @@ impl Executor {
                 // value is the canonical pattern and prevents future regressions if the
                 // auth check changes. Same for sender below.
                 let requester_acc = state.get_or_create(&requester);
-                requester_acc.balance = requester_acc.balance.saturating_add(max_fee);
+                requester_acc.balance =
+                    requester_acc.balance.checked_add(max_fee).ok_or_else(|| {
+                        BudlumError::validation("balance_overflow", "AI fee reclaim overflow")
+                    })?;
 
                 let sender = state.get_or_create(&requester);
                 sender.balance = sender.balance.saturating_sub(tx.fee);
@@ -905,7 +929,10 @@ impl Executor {
 
                 // Refund escrowed max_fee to the requester
                 let requester_acc = state.get_or_create(&requester);
-                requester_acc.balance = requester_acc.balance.saturating_add(max_fee);
+                requester_acc.balance =
+                    requester_acc.balance.checked_add(max_fee).ok_or_else(|| {
+                        BudlumError::validation("balance_overflow", "AI fee reclaim overflow")
+                    })?;
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.saturating_sub(tx.fee);
@@ -1046,7 +1073,16 @@ impl Executor {
                 // settlement receipt (V89) — never drop payment_id without trail.
                 if !payment.is_escrowed() {
                     let recipient = state.get_or_create(&payment.to_agent);
-                    recipient.balance = recipient.balance.saturating_add(payment.amount);
+                    recipient.balance =
+                        recipient
+                            .balance
+                            .checked_add(payment.amount)
+                            .ok_or_else(|| {
+                                BudlumError::validation(
+                                    "balance_overflow",
+                                    "Agent payment credit overflow",
+                                )
+                            })?;
                     state
                         .ai_registry
                         .settle_agent_payment_immediate(&payment.payment_id, current_block)
@@ -1079,7 +1115,15 @@ impl Executor {
                     .map_err(|e| BudlumError::validation("ai_payment_release_failed", e))?;
                 // Credit recipient
                 let recipient_acc = state.get_or_create(&recipient);
-                recipient_acc.balance = recipient_acc.balance.saturating_add(payment_amount);
+                recipient_acc.balance = recipient_acc
+                    .balance
+                    .checked_add(payment_amount)
+                    .ok_or_else(|| {
+                        BudlumError::validation(
+                            "balance_overflow",
+                            "Agent payment release overflow",
+                        )
+                    })?;
                 // Deduct fee from sender
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.saturating_sub(tx.fee);
@@ -1108,8 +1152,19 @@ impl Executor {
                     }
                 }
                 // Refund to sender and deduct fee atomically
+                // E1 fix: checked add + sub for reclaim + fee
                 let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.saturating_add(amount).saturating_sub(tx.fee);
+                let new_balance = sender
+                    .balance
+                    .checked_add(amount)
+                    .and_then(|b| b.checked_sub(tx.fee))
+                    .ok_or_else(|| {
+                        BudlumError::validation(
+                            "balance_arithmetic_overflow",
+                            "AI payment reclaim + fee arithmetic overflow",
+                        )
+                    })?;
+                sender.balance = new_balance;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::PrivacyNoteInsert(commitment) => {
