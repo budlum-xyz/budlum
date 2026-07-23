@@ -1,7 +1,7 @@
 //! D2 private transfer submit + AI execution guest skeleton tests.
 
 use crate::ai::execution::{
-    build_fixed_point_mlp_guest, program_hash_from_words, FixedPointMlpSpec,
+    build_fixed_point_mlp_guest, input_commitment, program_hash_from_words, FixedPointMlpSpec,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -138,7 +138,8 @@ fn ai_mlp_guest_program_hash_stable() {
         weights: vec![1, 0, 0, 1, 1, 1],
         biases: vec![0, 0, 0],
     };
-    let w = build_fixed_point_mlp_guest(&spec).unwrap();
+    let ic = input_commitment(&[1, 2]);
+    let w = build_fixed_point_mlp_guest(&spec, &ic).unwrap();
     let h1 = program_hash_from_words(&w);
     let h2 = program_hash_from_words(&w);
     assert_eq!(h1, h2);
