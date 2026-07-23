@@ -1989,3 +1989,54 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod c3_validator_readiness_tests {
+    use super::*;
+
+    fn test_addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    #[test]
+    fn c3_new_validator_has_no_consensus_keys() {
+        let v = Validator::new(test_addr(1), 1000);
+        assert!(!v.has_consensus_keys());
+        let missing = v.missing_consensus_keys();
+        assert_eq!(missing.len(), 3);
+        assert!(missing.contains(&"vrf_public_key"));
+        assert!(missing.contains(&"bls_public_key"));
+        assert!(missing.contains(&"pop_signature"));
+    }
+
+    #[test]
+    fn c3_validator_with_vrf_and_bls_has_consensus_keys() {
+        let mut v = Validator::new(test_addr(2), 2000);
+        v.vrf_public_key = vec![1, 2, 3, 4];
+        v.bls_public_key = vec![5, 6, 7, 8];
+        assert!(v.has_consensus_keys());
+        // pop_signature is still missing but has_consensus_keys only
+        // checks VRF + BLS (minimum for block production + finality)
+    }
+
+    #[test]
+    fn c3_validator_missing_only_bls() {
+        let mut v = Validator::new(test_addr(3), 3000);
+        v.vrf_public_key = vec![1, 2, 3];
+        assert!(!v.has_consensus_keys());
+        let missing = v.missing_consensus_keys();
+        assert_eq!(missing.len(), 2);
+        assert!(missing.contains(&"bls_public_key"));
+        assert!(missing.contains(&"pop_signature"));
+    }
+
+    #[test]
+    fn c3_fully_ready_validator() {
+        let mut v = Validator::new(test_addr(4), 4000);
+        v.vrf_public_key = vec![1; 32];
+        v.bls_public_key = vec![2; 48];
+        v.pop_signature = vec![3; 64];
+        assert!(v.has_consensus_keys());
+        assert!(v.missing_consensus_keys().is_empty());
+    }
+}
