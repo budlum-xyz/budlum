@@ -295,3 +295,132 @@ mod tests {
         assert!(bad.validate().is_err());
     }
 }
+
+// ── ARENA2 (2026-07-23): Production gas metering for AI execution proofs ──
+//
+// Dynamic gas model for L1 verification of AI execution proofs.
+// The VM opcode gas (flat 10) covers the instruction execution; this
+// covers the L1 structural + STARK verification cost which scales with
+// model complexity and proof size.
+
+/// Base gas cost for structural verification (commitment checks, model binding).
+pub const GAS_BASE_STRUCTURAL: u64 = 500;
+
+/// Per-parameter gas cost (weights + biases) for MLP execution verification.
+pub const GAS_PER_PARAM: u64 = 2;
+
+/// Per-layer gas cost for MLP forward pass commitment chain.
+pub const GAS_PER_LAYER: u64 = 50;
+
+/// Base gas cost for STARK proof verification (deserialize + FRI check).
+pub const GAS_BASE_STARK: u64 = 10_000;
+
+/// Per-KiB gas cost for proof_bytes (STARK proof size).
+pub const GAS_PER_KIB_PROOF: u64 = 100;
+
+/// Maximum allowed proof_bytes size (256 KiB).
+pub const MAX_PROOF_BYTES: usize = 256 * 1024;
+
+/// Estimated gas for structural verification of an AI execution proof.
+pub fn estimate_structural_gas(spec: &FixedPointMlpSpec) -> u64 {
+    let total_params = spec.weights.len().saturating_add(spec.biases.len()) as u64;
+    let n_layers = spec.dims.len().saturating_sub(1) as u64;
+    GAS_BASE_STRUCTURAL
+        .saturating_add(GAS_PER_PARAM.saturating_mul(total_params))
+        .saturating_add(GAS_PER_LAYER.saturating_mul(n_layers))
+}
+
+/// Estimated gas for full verification (structural + STARK).
+/// `proof_bytes_len` is the size of the serialized ProofEnvelope.
+pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u64 {
+    let structural = estimate_structural_gas(spec);
+    let proof_kib = (proof_bytes_len as u64).saturating_add(1023) / 1024;
+    let stark = GAS_BASE_STARK.saturating_add(GAS_PER_KIB_PROOF.saturating_mul(proof_kib));
+    structural.saturating_add(stark)
+}
+
+/// Validate that a proof's gas cost is within the request's max_fee budget.
+/// Returns `Ok(estimated_gas)` or `Err` if the proof is oversized.
+pub fn validate_gas_budget(
+    spec: &FixedPointMlpSpec,
+    proof_bytes_len: usize,
+    max_fee: u64,
+) -> Result<u64, String> {
+    if proof_bytes_len > MAX_PROOF_BYTES {
+        return Err(format!(
+            "proof_bytes {} exceeds MAX_PROOF_BYTES {}",
+            proof_bytes_len, MAX_PROOF_BYTES
+        ));
+    }
+    let gas = estimate_full_gas(spec, proof_bytes_len);
+    if gas > max_fee {
+        return Err(format!("estimated gas {} exceeds max_fee {}", gas, max_fee));
+    }
+    Ok(gas)
+}
+
+#[cfg(test)]
+mod gas_tests {
+    use super::*;
+
+    #[test]
+    fn gas_scales_with_model_size() {
+        let small = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let large = FixedPointMlpSpec {
+            dims: vec![32, 16, 8],
+            weights: vec![0; 32 * 16 + 16 * 8],
+            biases: vec![0; 16 + 8],
+        };
+        let g_small = estimate_structural_gas(&small);
+        let g_large = estimate_structural_gas(&large);
+        assert!(g_large > g_small, "larger model must cost more gas");
+    }
+
+    #[test]
+    fn gas_stark_dominates_structural() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![4, 2],
+            weights: vec![0; 8],
+            biases: vec![0; 2],
+        };
+        let structural = estimate_structural_gas(&spec);
+        let full = estimate_full_gas(&spec, 50_000); // ~50 KiB proof
+        assert!(full > structural * 5, "STARK cost should dominate");
+    }
+
+    #[test]
+    fn gas_budget_rejects_oversized_proof() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn gas_budget_rejects_insufficient_fee() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        assert!(validate_gas_budget(&spec, 10_000, 1).is_err());
+    }
+
+    #[test]
+    fn gas_budget_accepts_sufficient_fee() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let gas = validate_gas_budget(&spec, 10_000, 1_000_000);
+        assert!(gas.is_ok());
+        assert!(gas.unwrap() > 0);
+    }
+}

@@ -554,3 +554,175 @@ mod tests {
         assert!(!empty.pq_signing_available());
     }
 }
+
+// ── ARENA2 (2026-07-23): HSM vendor mechanism validation hardening ──
+//
+// YubiHSM 2 and other PKCS#11 tokens support vendor-defined mechanisms
+// for native BLS/PQ signing. These must be validated before use to prevent
+// invalid mechanism IDs from causing undefined behavior in the HSM firmware.
+
+/// Known vendor-defined mechanism ID ranges for supported HSMs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pkcs11Vendor {
+    /// YubiHSM 2: vendor mechanisms in 0x8000_0000..0x8000_FFFF range.
+    YubiHsm2,
+    /// Generic PKCS#11 vendor-defined range (CKM_VENDOR_DEFINED = 0x8000_0000).
+    Generic,
+}
+
+/// Vendor mechanism capability descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pkcs11VendorCapability {
+    /// Vendor identifier.
+    pub vendor: Pkcs11Vendor,
+    /// Mechanism ID (must be >= CKM_VENDOR_DEFINED = 0x8000_0000).
+    pub mechanism_id: u64,
+    /// Human-readable name.
+    pub name: String,
+    /// Whether this mechanism is allowed for mainnet signing.
+    pub mainnet_allowed: bool,
+}
+
+/// CKM_VENDOR_DEFINED constant from PKCS#11 spec.
+pub const CKM_VENDOR_DEFINED: u64 = 0x8000_0000;
+
+/// Known YubiHSM 2 vendor mechanism IDs for BLS signing.
+pub const YUBIHSM2_CKM_BLS_SIGN: u64 = 0x8000_0001;
+/// Known YubiHSM 2 vendor mechanism IDs for PQ (Dilithium) signing.
+pub const YUBIHSM2_CKM_PQ_SIGN: u64 = 0x8000_0002;
+
+impl Pkcs11VendorCapability {
+    /// Validate that the mechanism ID is in the vendor-defined range.
+    pub fn validate_mechanism_id(&self) -> Result<(), String> {
+        if self.mechanism_id < CKM_VENDOR_DEFINED {
+            return Err(format!(
+                "mechanism_id 0x{:08X} is below CKM_VENDOR_DEFINED (0x{:08X})",
+                self.mechanism_id, CKM_VENDOR_DEFINED
+            ));
+        }
+        match self.vendor {
+            Pkcs11Vendor::YubiHsm2 => {
+                if self.mechanism_id > 0x8000_FFFF {
+                    return Err(format!(
+                        "YubiHSM2 mechanism 0x{:08X} exceeds vendor range 0x8000_FFFF",
+                        self.mechanism_id
+                    ));
+                }
+            }
+            Pkcs11Vendor::Generic => {}
+        }
+        Ok(())
+    }
+
+    /// Check if this capability is suitable for mainnet use.
+    pub fn check_mainnet_policy(&self) -> Result<(), String> {
+        self.validate_mechanism_id()?;
+        if !self.mainnet_allowed {
+            return Err(format!(
+                "vendor mechanism '{}' (0x{:08X}) is not allowed for mainnet",
+                self.name, self.mechanism_id
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Build the default set of known vendor capabilities for YubiHSM 2.
+pub fn yubihsm2_default_capabilities() -> Vec<Pkcs11VendorCapability> {
+    vec![
+        Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: YUBIHSM2_CKM_BLS_SIGN,
+            name: "YubiHSM2-BLS-Sign".into(),
+            mainnet_allowed: true,
+        },
+        Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: YUBIHSM2_CKM_PQ_SIGN,
+            name: "YubiHSM2-PQ-Sign".into(),
+            mainnet_allowed: true,
+        },
+    ]
+}
+
+/// Validate a mechanism ID against a set of known capabilities.
+/// Returns the matching capability or an error if unknown/invalid.
+pub fn validate_vendor_mechanism(
+    mechanism_id: u64,
+    capabilities: &[Pkcs11VendorCapability],
+) -> Result<&Pkcs11VendorCapability, String> {
+    if mechanism_id < CKM_VENDOR_DEFINED {
+        return Err(format!(
+            "mechanism 0x{:08X} is not vendor-defined",
+            mechanism_id
+        ));
+    }
+    capabilities
+        .iter()
+        .find(|c| c.mechanism_id == mechanism_id)
+        .ok_or_else(|| format!("unknown vendor mechanism 0x{:08X}", mechanism_id))
+}
+
+#[cfg(test)]
+mod vendor_tests {
+    use super::*;
+
+    #[test]
+    fn valid_yubihsm2_mechanism() {
+        let cap = Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: YUBIHSM2_CKM_BLS_SIGN,
+            name: "test".into(),
+            mainnet_allowed: true,
+        };
+        assert!(cap.validate_mechanism_id().is_ok());
+        assert!(cap.check_mainnet_policy().is_ok());
+    }
+
+    #[test]
+    fn reject_below_vendor_defined() {
+        let cap = Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: 0x1234,
+            name: "bad".into(),
+            mainnet_allowed: true,
+        };
+        assert!(cap.validate_mechanism_id().is_err());
+    }
+
+    #[test]
+    fn reject_above_yubihsm2_range() {
+        let cap = Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: 0x8001_0000,
+            name: "bad".into(),
+            mainnet_allowed: true,
+        };
+        assert!(cap.validate_mechanism_id().is_err());
+    }
+
+    #[test]
+    fn reject_mainnet_disallowed() {
+        let cap = Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: YUBIHSM2_CKM_BLS_SIGN,
+            name: "test".into(),
+            mainnet_allowed: false,
+        };
+        assert!(cap.check_mainnet_policy().is_err());
+    }
+
+    #[test]
+    fn validate_known_mechanism() {
+        let caps = yubihsm2_default_capabilities();
+        assert!(validate_vendor_mechanism(YUBIHSM2_CKM_BLS_SIGN, &caps).is_ok());
+        assert!(validate_vendor_mechanism(YUBIHSM2_CKM_PQ_SIGN, &caps).is_ok());
+        assert!(validate_vendor_mechanism(0x8000_9999, &caps).is_err());
+    }
+
+    #[test]
+    fn reject_non_vendor_mechanism() {
+        let caps = yubihsm2_default_capabilities();
+        assert!(validate_vendor_mechanism(0x0001, &caps).is_err());
+    }
+}
