@@ -114,6 +114,80 @@ fn enqueue_bridge_relay_increments_pending() {
 }
 
 #[test]
+fn lock_bridge_transfer_auto_enqueues_pending_relay() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("auto_enqueue_lock.db");
+    let storage = Storage::new(db.to_str().unwrap()).unwrap();
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+
+    for id in [1u32, 2u32] {
+        let mut d = crate::domain::default_domain(
+            id,
+            crate::domain::ConsensusKind::PoW,
+            1337,
+            "pow-header-chain-v1",
+            1,
+        );
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).unwrap();
+    }
+
+    let a = asset(1);
+    bc.register_bridge_asset(a, 1).unwrap();
+    bc.state.add_balance(&owner(), 1_000);
+
+    assert_eq!(bc.pending_relay_count(), 0);
+    let (_transfer, event) = bc
+        .lock_bridge_transfer(1, 2, 10, 0, a, owner(), recipient(), 100, 1_000)
+        .unwrap();
+    let message_id = event.message.unwrap().message_id;
+
+    assert_eq!(bc.pending_relay_count(), 1);
+    assert!(bc.universal_relayer.pending_relay(&message_id).is_some());
+}
+
+#[test]
+fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("auto_enqueue_burn.db");
+    let storage = Storage::new(db.to_str().unwrap()).unwrap();
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+
+    for id in [1u32, 2u32] {
+        let mut d = crate::domain::default_domain(
+            id,
+            crate::domain::ConsensusKind::PoW,
+            1337,
+            "pow-header-chain-v1",
+            1,
+        );
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).unwrap();
+    }
+
+    let a = asset(1);
+    bc.register_bridge_asset(a, 1).unwrap();
+    bc.state.add_balance(&owner(), 1_000);
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 10, 0, a, owner(), recipient(), 100, 1_000)
+        .unwrap();
+    let lock_message = lock_event.message.unwrap();
+    bc.state.bridge_state.mint(&lock_message).unwrap();
+
+    let burn_event = bc
+        .burn_bridge_transfer_with_event(lock_message.message_id, 2, 20, 0, 1_000)
+        .unwrap();
+    let burn_message_id = burn_event.message.unwrap().message_id;
+
+    assert!(bc
+        .universal_relayer
+        .pending_relay(&burn_message_id)
+        .is_some());
+}
+
+#[test]
 fn relay_ledger_root_changes_with_relays() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("root_change.db");

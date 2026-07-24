@@ -179,6 +179,18 @@ impl Blockchain {
                 .map(GenesisConfig::for_network)
                 .unwrap_or_else(|| GenesisConfig::new(chain_id))
         });
+        let bootstrap_domains = resolved_genesis_config
+            .bootstrap_consensus_domains()
+            .unwrap_or_else(|e| {
+                error!(
+                    "CRITICAL ERROR: invalid genesis bootstrap domain configuration: {}",
+                    e
+                );
+                #[cfg(not(test))]
+                std::process::exit(1);
+                #[cfg(test)]
+                panic!("Invalid genesis bootstrap domain configuration: {e}");
+            });
 
         let mut state = resolved_genesis_config.build_state();
 
@@ -393,7 +405,52 @@ impl Blockchain {
                     }
                 }
             }
+        }
 
+        for domain in &bootstrap_domains {
+            if domain_registry.get(domain.id).is_none() {
+                if let Err(e) = Self::validate_consensus_domain_registration(domain) {
+                    error!(
+                        "CRITICAL ERROR: invalid genesis bootstrap domain {}: {}",
+                        domain.id, e
+                    );
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!("Invalid genesis bootstrap domain {}: {}", domain.id, e);
+                }
+                if let Err(e) = domain_registry.register(domain.clone()) {
+                    error!(
+                        "CRITICAL ERROR: failed to register genesis bootstrap domain {}: {}",
+                        domain.id, e
+                    );
+                    #[cfg(not(test))]
+                    std::process::exit(1);
+                    #[cfg(test)]
+                    panic!(
+                        "Failed to register genesis bootstrap domain {}: {}",
+                        domain.id, e
+                    );
+                }
+                if let Some(store) = storage.as_ref() {
+                    if let Err(e) = store.save_consensus_domain(domain) {
+                        error!(
+                            "CRITICAL ERROR: failed to persist genesis bootstrap domain {}: {}",
+                            domain.id, e
+                        );
+                        #[cfg(not(test))]
+                        std::process::exit(1);
+                        #[cfg(test)]
+                        panic!(
+                            "Failed to persist genesis bootstrap domain {}: {}",
+                            domain.id, e
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(ref store) = storage {
             if let Ok(commitments) = store.load_domain_commitments() {
                 for commitment in commitments {
                     if let Err(e) = Self::validate_stored_domain_commitment_metadata(
@@ -475,6 +532,12 @@ impl Blockchain {
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis())
                 .unwrap_or_default();
+        }
+
+        if let Some(store) = bc.storage.as_ref() {
+            if let Err(e) = bc.consensus.load_state(store) {
+                tracing::error!(error = %e, "Failed to load consensus state from store during startup");
+            }
         }
 
         bc
@@ -1350,7 +1413,8 @@ impl Blockchain {
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         if let Some(message) = result.1.message.clone() {
-            self.submit_cross_domain_message(message)?;
+            self.submit_cross_domain_message(message.clone())?;
+            self.enqueue_bridge_relay(result.1.clone(), &message);
         }
         Ok(result)
     }
@@ -1430,7 +1494,8 @@ impl Blockchain {
                 .map_err(|e| format!("Failed to persist bridge state: {}", e))?;
         }
         if let Some(message) = event.message.clone() {
-            self.submit_cross_domain_message(message)?;
+            self.submit_cross_domain_message(message.clone())?;
+            self.enqueue_bridge_relay(event.clone(), &message);
         }
         Ok(event)
     }
@@ -4290,7 +4355,95 @@ mod tests {
     use crate::consensus::PoWEngine;
     use crate::crypto::primitives::KeyPair;
     use crate::storage::db::Storage;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
+
+    struct LoadStateProbeEngine {
+        loaded: Arc<AtomicBool>,
+    }
+
+    impl ConsensusEngine for LoadStateProbeEngine {
+        fn prepare_block(
+            &self,
+            block: &mut Block,
+            _state: &AccountState,
+        ) -> Result<(), crate::consensus::ConsensusError> {
+            block.hash = block.calculate_hash();
+            Ok(())
+        }
+
+        fn validate_block(
+            &self,
+            _block: &Block,
+            _chain: &[Block],
+            _state: &AccountState,
+        ) -> Result<(), crate::consensus::ConsensusError> {
+            Ok(())
+        }
+
+        fn load_state(
+            &self,
+            _storage: &crate::storage::db::Storage,
+        ) -> Result<(), crate::consensus::ConsensusError> {
+            self.loaded.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn consensus_type(&self) -> &'static str {
+            "Probe"
+        }
+
+        fn info(&self) -> String {
+            "probe".to_string()
+        }
+    }
+
+    #[test]
+    fn startup_loads_consensus_state_from_storage() {
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("probe.db");
+        let db_path = db_path.to_string_lossy().to_string();
+        let storage = Storage::new(&db_path).unwrap();
+        let loaded = Arc::new(AtomicBool::new(false));
+        let consensus = Arc::new(LoadStateProbeEngine {
+            loaded: loaded.clone(),
+        });
+
+        let _blockchain = Blockchain::new(consensus, Some(storage), 1337, None);
+
+        assert!(
+            loaded.load(Ordering::SeqCst),
+            "startup path must call consensus.load_state(store)"
+        );
+    }
+
+    #[test]
+    fn startup_registers_genesis_bootstrap_domains() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new_with_genesis(
+            consensus,
+            None,
+            Network::Mainnet.chain_id().value(),
+            None,
+            Some(crate::chain::genesis::mainnet_genesis()),
+        );
+
+        for domain_id in 1..=4 {
+            assert!(
+                blockchain.domain_registry.get(domain_id).is_some(),
+                "bootstrap domain {} must be registered during startup",
+                domain_id
+            );
+        }
+        assert_eq!(
+            blockchain
+                .domain_registry
+                .get(3)
+                .expect("bft bootstrap domain")
+                .finality_adapter,
+            "bft-quorum-commit"
+        );
+    }
 
     #[test]
     fn test_blockchain_with_pow() {

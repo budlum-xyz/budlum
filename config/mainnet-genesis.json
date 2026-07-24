@@ -76,5 +76,43 @@
       "address": "0x1000000000000000000000000000000000000000000000000000000000000004",
       "stake": 500000000000
     }
+  ],
+  "bootstrap_domains": [
+    {
+      "id": 1,
+      "kind": "pow",
+      "finality_adapter": "pow-header-chain-v1",
+      "bridge_enabled": true,
+      "min_confirmations": 6,
+      "poa_authorities": []
+    },
+    {
+      "id": 2,
+      "kind": "pos",
+      "finality_adapter": "pos-qc-finality",
+      "bridge_enabled": true,
+      "min_confirmations": 1,
+      "poa_authorities": []
+    },
+    {
+      "id": 3,
+      "kind": "bft",
+      "finality_adapter": "bft-quorum-commit",
+      "bridge_enabled": true,
+      "min_confirmations": 1,
+      "poa_authorities": []
+    },
+    {
+      "id": 4,
+      "kind": "poa",
+      "finality_adapter": "poa-authority-quorum",
+      "bridge_enabled": false,
+      "min_confirmations": 1,
+      "poa_authorities": [
+        "0x0000000000000000000000000000000000000000000000000000000000000AA1",
+        "0x0000000000000000000000000000000000000000000000000000000000000AA2",
+        "0x0000000000000000000000000000000000000000000000000000000000000AA3"
+      ]
+    }
   ]
 }

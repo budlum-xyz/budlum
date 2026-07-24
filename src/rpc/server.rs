@@ -1452,15 +1452,17 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let manifest_id = manifest.manifest_id;
-        let mut reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        reg.register_manifest(&manifest);
+        let manifest_id = self
+            .chain
+            .register_storage_manifest(manifest.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("register_manifest failed: {e}"),
+                    None::<()>,
+                )
+            })?;
         Ok(serde_json::json!({
             "manifestId": format!("0x{}", hex::encode(manifest_id.0)),
             "totalSize": manifest.total_size,
@@ -1527,34 +1529,6 @@ impl BudlumApiServer for RpcServer {
                 ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
             })?;
 
-        // Sync the deal to the RPC server's local StorageRegistry so that
-        // subsequent storage_open_challenge / storage_answer_challenge calls
-        // (which use self.storage) can find the deal.
-        // TODO(ARENA2): unify the two registries into a single source of truth.
-        {
-            let mut reg = self.storage.lock().map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("storage registry lock poisoned: {e}"),
-                    None::<()>,
-                )
-            })?;
-            reg.register_manifest(&manifest);
-            let _ = reg.open_deal(
-                domain_id,
-                &manifest,
-                s_id,
-                op_addr,
-                replica_index,
-                start_epoch,
-                end_epoch,
-                economics,
-                &crate::domain::storage_params::StorageDomainParams::default(),
-                merkle_proof,
-                storage_root,
-            );
-        }
-
         Ok(serde_json::json!({
             "dealId": deal_id,
             "status": "Active",
@@ -1566,31 +1540,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let clean = manifest_id.strip_prefix("0x").unwrap_or(&manifest_id);
-        let bytes = hex::decode(clean).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid manifest_id hex: {e}"), None::<()>)
-        })?;
-        if bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "manifest_id must be 32 bytes",
-                None::<()>,
-            ));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        let id = ContentId(arr);
-        // Look across deals for the (manifest, shard) pairs to reconstruct
-        // the original manifest from per-shard deals (since the registry
-        // itself does not duplicate manifest bytes).
-        let reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        if let Some(manifest) = reg.get_manifest(&id) {
+        let id = parse_content_id(&manifest_id)?;
+        if let Some(manifest) = self.chain.get_storage_manifest(id).await {
             let shards: Vec<serde_json::Value> = manifest
                 .shards
                 .iter()
@@ -1609,8 +1560,9 @@ impl BudlumApiServer for RpcServer {
                 "shards": shards,
             }));
         }
-        let shards: Vec<serde_json::Value> = reg
-            .deals_for_manifest(&id)
+
+        let deals = self.chain.get_storage_deals_by_manifest(id).await;
+        let shards: Vec<serde_json::Value> = deals
             .iter()
             .map(|d| {
                 serde_json::json!({
@@ -1632,17 +1584,10 @@ impl BudlumApiServer for RpcServer {
         manifest_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let id = parse_content_id(&manifest_id)?;
-        let reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        let deals: Vec<serde_json::Value> = reg
-            .deals_for_manifest(&id)
+        let deals_raw = self.chain.get_storage_deals_by_manifest(id).await;
+        let deals: Vec<serde_json::Value> = deals_raw
             .into_iter()
-            .map(storage_deal_to_json)
+            .map(|deal| storage_deal_to_json(&deal))
             .collect();
         Ok(serde_json::json!({
             "manifestId": format!("0x{}", hex::encode(id.0)),
@@ -1658,17 +1603,10 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let mid = parse_content_id(&manifest_id)?;
         let sid = parse_content_id(&shard_id)?;
-        let reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        let deals: Vec<serde_json::Value> = reg
-            .deals_for_shard(&mid, &sid)
+        let deals_raw = self.chain.get_storage_deals_by_shard(mid, sid).await;
+        let deals: Vec<serde_json::Value> = deals_raw
             .into_iter()
-            .map(storage_deal_to_json)
+            .map(|deal| storage_deal_to_json(&deal))
             .collect();
         Ok(serde_json::json!({
             "manifestId": format!("0x{}", hex::encode(mid.0)),
@@ -1725,27 +1663,20 @@ impl BudlumApiServer for RpcServer {
             },
         )?;
 
-        let mut reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        let challenge_id = reg
-            .open_challenge(
-                request.deal_id,
-                request.byte_start,
-                request.byte_end,
-                request.challenge_epoch,
-                request.deadline_epoch,
-                opener,
-                request.opener_bond,
-            )
+        let challenge_id = self
+            .chain
+            .open_storage_challenge(request)
+            .await
             .map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid challenge: {e}"), None::<()>)
             })?;
-        let challenge = reg.get_challenge(challenge_id).cloned();
+        let challenge = self
+            .chain
+            .get_storage_challenges()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
+            .into_iter()
+            .find(|challenge| challenge.challenge_id == challenge_id);
         Ok(serde_json::json!({
             "challengeId": challenge_id,
             "challenge": challenge.as_ref().map(retrieval_challenge_to_json),
@@ -1784,21 +1715,10 @@ impl BudlumApiServer for RpcServer {
                 )
             })?;
 
-        let mut reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        let result = reg
-            .answer_challenge(
-                response.challenge_id,
-                response._range_hash,
-                responder,
-                response.response_epoch,
-                response.proof_bytes.as_deref(),
-            )
+        let result = self
+            .chain
+            .answer_storage_challenge(response)
+            .await
             .map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid response: {e}"), None::<()>)
             })?;
@@ -1834,14 +1754,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         challenge_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let reg = self.storage.lock().map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("storage registry lock poisoned: {e}"),
-                None::<()>,
-            )
-        })?;
-        match reg.get_result(challenge_id) {
+        match self.chain.get_storage_outcome(challenge_id).await {
             Some(r) => Ok(serde_json::json!({
                 "challengeId": r.challenge_id,
                 "dealId": r.deal_id,
@@ -2680,14 +2593,7 @@ impl BudlumApiServer for RpcServer {
                 .or(r.storage_root.map(crate::storage::ContentId))
         });
         let manifest = if let Some(id) = manifest_id {
-            let reg = self.storage.lock().map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("storage registry lock poisoned: {e}"),
-                    None::<()>,
-                )
-            })?;
-            reg.get_manifest(&id).cloned()
+            self.chain.get_storage_manifest(id).await
         } else {
             None
         };
@@ -2724,14 +2630,7 @@ impl BudlumApiServer for RpcServer {
                 .or(r.storage_root.map(crate::storage::ContentId))
         });
         let manifest = if let Some(id) = manifest_id {
-            let reg = self.storage.lock().map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("storage registry lock poisoned: {e}"),
-                    None::<()>,
-                )
-            })?;
-            reg.get_manifest(&id).cloned()
+            self.chain.get_storage_manifest(id).await
         } else {
             None
         };

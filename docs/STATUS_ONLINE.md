@@ -1,4 +1,30 @@
 
+### [2026-07-24 16:20 UTC+03:00] ARENA1 — pre-mortem kararları alındı, kritik wiring/persistence fix turu başladı
+
+**Zemin:** workspace audit raporu + kullanıcı kararları kesinleşti.
+**Kullanıcı kararları (ask_user ile alındı):**
+1. Validator onboarding = `bonded_inactive` (key'siz stake kabul, aktif/quorum değil)
+2. Mainnet HSM = `strict_vendor_native` (vendor-native BLS+PQ zorunlu, software fallback yasak)
+3. Hibrit konsensüs = `wire_all_domains` (PoW/PoS/BFT/PoA gerçek wiring)
+4. Storage RPC = `single_source_chain_actor` (tek source-of-truth)
+
+**Bu turdaki fiili düzeltmeler:**
+- `src/chain/genesis.rs`: `bootstrap_consensus_domains()` eklendi; mainnet bootstrap domain listesi somut `ConsensusDomain` kayıtlarına çevriliyor.
+- `src/chain/genesis.rs`: BFT bootstrap adapter ismi `bft-aggregate-sig` → `bft-quorum-commit` hizalandı.
+- `config/mainnet-genesis.json`: bootstrap domain listesi (PoW/PoS/BFT/PoA) gerçek dosyaya işlendi.
+- `src/chain/blockchain.rs`: startup path artık genesis bootstrap domain'lerini register+persist ediyor.
+- `src/chain/blockchain.rs`: startup path artık `consensus.load_state(store)` çağırıyor (PoS restart hafızası wiring).
+- `src/chain/blockchain.rs`: `lock_bridge_transfer` ve `burn_bridge_transfer_with_event` artık `enqueue_bridge_relay(...)` ile pending relay kuyruğunu production path'te dolduruyor.
+- Yeni testler: startup consensus-load probe, bootstrap domain registration/materialization, auto-enqueue relay testleri.
+
+**Lokal doğrulama:** `cargo fmt --all -- --check` ✅ · `cargo check --locked --lib` ✅. Hedeflenmiş `cargo test --lib` koşuları sandbox derleme süresi nedeniyle tamamlanmadı; CI hakem olacak.
+**Rapor çıktısı:** `BUDLUM_L1_PREMORTEM_AUDIT_REPORT_TR_KARARLANDIRILMIS.md`
+**Budlumdevnet:** dokunulmadı.
+**Ne bekliyor:** aynı karar hattıyla C-03 (RPC auth/IP), H-05 (storage split-brain) ve kalan hibrit wiring kapatmaları.
+**Kim karar verecek:** Şimdilik yeni karar gerekmiyor; yeni mimari çatışma çıkarsa Ayaz.
+
+Co-authored-by: ARENA1 <arena1@budlum.ai>
+
 ### [2026-07-21 16:30 UTC+3] ARENA3 — EIP-1559 ARENA1 verification fixes + CI 30/30
 
 **Zemin:** origin/main `813b65d` — CI **30/30 success**, 0 failure.

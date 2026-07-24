@@ -289,6 +289,35 @@ pub enum ChainCommand {
         storage_root: Option<crate::domain::Hash32>,
         response: oneshot::Sender<Result<u64, String>>,
     },
+    RegisterStorageManifest {
+        manifest: crate::storage::ContentManifest,
+        response: oneshot::Sender<Result<crate::storage::ContentId, String>>,
+    },
+    OpenStorageChallenge {
+        request: crate::domain::storage_deal::RetrievalChallengeRequest,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    AnswerStorageChallenge {
+        response_data: crate::domain::storage_deal::RetrievalResponse,
+        response: oneshot::Sender<Result<crate::domain::storage_deal::ChallengeResult, String>>,
+    },
+    GetStorageManifest {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::storage::ContentManifest>>,
+    },
+    GetStorageDealsByManifest {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>,
+    },
+    GetStorageDealsByShard {
+        manifest_id: crate::storage::ContentId,
+        shard_id: crate::storage::ContentId,
+        response: oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>,
+    },
+    GetStorageOutcome {
+        challenge_id: u64,
+        response: oneshot::Sender<Option<crate::domain::storage_deal::ChallengeResult>>,
+    },
     /// B.U.D. Görev 5 (ARENA2): Issue retrieval challenges for active storage
     /// deals whose challenge_interval has elapsed.
     IssueStorageChallenges(u64, oneshot::Sender<Result<u32, String>>),
@@ -730,6 +759,116 @@ impl ChainHandle {
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn register_storage_manifest(
+        &self,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<crate::storage::ContentId, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterStorageManifest {
+                manifest,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn open_storage_challenge(
+        &self,
+        request: crate::domain::storage_deal::RetrievalChallengeRequest,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::OpenStorageChallenge {
+                request,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn answer_storage_challenge(
+        &self,
+        response_data: crate::domain::storage_deal::RetrievalResponse,
+    ) -> Result<crate::domain::storage_deal::ChallengeResult, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AnswerStorageChallenge {
+                response_data,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_storage_manifest(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Option<crate::storage::ContentManifest> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageManifest {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_storage_deals_by_manifest(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Vec<crate::domain::storage_deal::StorageDeal> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageDealsByManifest {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_storage_deals_by_shard(
+        &self,
+        manifest_id: crate::storage::ContentId,
+        shard_id: crate::storage::ContentId,
+    ) -> Vec<crate::domain::storage_deal::StorageDeal> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageDealsByShard {
+                manifest_id,
+                shard_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_storage_outcome(
+        &self,
+        challenge_id: u64,
+    ) -> Option<crate::domain::storage_deal::ChallengeResult> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageOutcome {
+                challenge_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
     }
 
     pub async fn get_locator(&self) -> Vec<String> {
@@ -2556,6 +2695,104 @@ impl ChainActor {
                         merkle_proof,
                         storage_root,
                     ));
+                }
+                ChainCommand::RegisterStorageManifest { manifest, response } => {
+                    let manifest_id = manifest.manifest_id;
+                    self.blockchain
+                        .state
+                        .storage_registry
+                        .register_manifest(&manifest);
+                    let _ = response.send(Ok(manifest_id));
+                }
+                ChainCommand::OpenStorageChallenge { request, response } => {
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .open_challenge(
+                            request.deal_id,
+                            request.byte_start,
+                            request.byte_end,
+                            request.challenge_epoch,
+                            request.deadline_epoch,
+                            request
+                                .opener
+                                .unwrap_or(crate::core::address::Address::zero()),
+                            request.opener_bond,
+                        )
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::AnswerStorageChallenge {
+                    response_data,
+                    response,
+                } => {
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .answer_challenge(
+                            response_data.challenge_id,
+                            response_data._range_hash,
+                            response_data.responder,
+                            response_data.response_epoch,
+                            response_data.proof_bytes.as_deref(),
+                        )
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::GetStorageManifest {
+                    manifest_id,
+                    response,
+                } => {
+                    let manifest = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_manifest(&manifest_id)
+                        .cloned();
+                    let _ = response.send(manifest);
+                }
+                ChainCommand::GetStorageDealsByManifest {
+                    manifest_id,
+                    response,
+                } => {
+                    let deals = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_manifest(&manifest_id)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(deals);
+                }
+                ChainCommand::GetStorageDealsByShard {
+                    manifest_id,
+                    shard_id,
+                    response,
+                } => {
+                    let deals = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_shard(&manifest_id, &shard_id)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(deals);
+                }
+                ChainCommand::GetStorageOutcome {
+                    challenge_id,
+                    response,
+                } => {
+                    let outcome = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_result(challenge_id)
+                        .cloned();
+                    let _ = response.send(outcome);
                 }
                 ChainCommand::IssueStorageChallenges(epoch, res_tx) => {
                     let res = self.blockchain.issue_storage_challenges(epoch);

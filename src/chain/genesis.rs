@@ -57,7 +57,7 @@ impl BootstrapDomainConfig {
             Self {
                 id: 3,
                 kind: "bft".to_string(),
-                finality_adapter: "bft-aggregate-sig".to_string(),
+                finality_adapter: "bft-quorum-commit".to_string(),
                 bridge_enabled: true,
                 min_confirmations: 1,
                 poa_authorities: vec![],
@@ -171,6 +171,72 @@ impl GenesisConfig {
     pub fn with_validator(mut self, address: Address) -> Self {
         self.validators.push(address);
         self
+    }
+
+    /// Materialize the declarative `bootstrap_domains` list into concrete
+    /// `ConsensusDomain` records that the runtime can register on startup.
+    ///
+    /// This keeps the ceremony-facing genesis JSON as the single source of truth
+    /// for the hybrid-domain topology. Invalid bootstrap entries fail closed so
+    /// a node cannot silently start with a partial domain set.
+    pub fn bootstrap_consensus_domains(
+        &self,
+    ) -> Result<Vec<crate::domain::ConsensusDomain>, String> {
+        self.bootstrap_domains
+            .iter()
+            .map(|cfg| {
+                let kind = match cfg.kind.as_str() {
+                    "pow" => crate::domain::ConsensusKind::PoW,
+                    "pos" => crate::domain::ConsensusKind::PoS,
+                    "poa" => crate::domain::ConsensusKind::PoA,
+                    "bft" => crate::domain::ConsensusKind::Bft,
+                    other => {
+                        return Err(format!(
+                            "Unsupported bootstrap domain kind '{}' for domain {}",
+                            other, cfg.id
+                        ))
+                    }
+                };
+
+                let mut domain = crate::domain::default_domain(
+                    cfg.id,
+                    kind,
+                    self.chain_id,
+                    cfg.finality_adapter.clone(),
+                    cfg.min_confirmations,
+                );
+                domain.bridge_enabled = cfg.bridge_enabled;
+
+                if matches!(domain.kind, crate::domain::ConsensusKind::PoA)
+                    && !cfg.poa_authorities.is_empty()
+                {
+                    let mut entries = Vec::with_capacity(cfg.poa_authorities.len());
+                    for authority in &cfg.poa_authorities {
+                        let address = Address::from_hex(authority).map_err(|e| {
+                            format!(
+                                "Invalid PoA authority '{}' in bootstrap domain {}: {}",
+                                authority, cfg.id, e
+                            )
+                        })?;
+                        entries.push(ValidatorEntry {
+                            address,
+                            stake: 1,
+                            bls_public_key: Vec::new(),
+                            pop_signature: Vec::new(),
+                            pq_public_key: Vec::new(),
+                        });
+                    }
+                    domain.validator_set_hash = crate::domain::normalize_hash32(
+                        b"bootstrap_validator_set_hash",
+                        cfg.id,
+                        &crate::domain::RootScheme::Sha3_256,
+                        ValidatorSetSnapshot::compute_hash(&entries).as_bytes(),
+                    )?;
+                }
+
+                Ok(domain)
+            })
+            .collect()
     }
 
     pub fn build_genesis_block(&self) -> Block {
@@ -500,6 +566,25 @@ mod tests {
         assert!(config.bud_tokenomics.is_some());
         assert!(config.bud_tokenomics.unwrap().is_balanced());
         assert_eq!(config.timestamp, 0);
+    }
+
+    #[test]
+    fn test_mainnet_bootstrap_domains_materialize_and_validate() {
+        let config = mainnet_genesis();
+        let domains = config.bootstrap_consensus_domains().unwrap();
+        assert_eq!(domains.len(), 4);
+
+        let mut registry = crate::domain::ConsensusDomainRegistry::new();
+        for domain in domains {
+            registry.register(domain).unwrap();
+        }
+
+        assert!(registry.get(1).is_some());
+        assert!(registry.get(2).is_some());
+        assert!(registry.get(3).is_some());
+        let poa = registry.get(4).expect("poa bootstrap domain");
+        assert!(!poa.bridge_enabled);
+        assert_ne!(poa.validator_set_hash, [0u8; 32]);
     }
 
     #[test]
