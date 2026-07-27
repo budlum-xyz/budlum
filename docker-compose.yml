@@ -2,9 +2,20 @@
 # 4-node devnet with PoS consensus, metrics, and RPC
 #
 # Usage:
-#   Docker compose up -d
-#   Docker compose logs -f node1
-#   Curl http://localhost:8545 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"bud_blockNumber","params":[],"id":1}'
+#   docker compose up -d
+#   docker compose logs -f node1
+#
+# RPC authentication is ON here and the public RPC port is NOT published to the
+# host. Reach it from inside the network, or publish it yourself once you have
+# set BUDLUM_RPC_API_KEY.
+#
+# The CI smoke harness needs an unauthenticated listener; those settings are in
+# docker-compose.ci.yml and have to be asked for by name:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#
+# They are kept out of this file because this is the one the README points at,
+# and a default that is only safe while nobody copies it is not a default.
 
 version: "3.9"
 
@@ -14,19 +25,19 @@ services:
     image: budlum-core:devnet
     container_name: budlum-node1
     ports:
+      # 8545 (public RPC) is deliberately not published. docker-compose.ci.yml
+      # adds it for the smoke harness.
       - "4001:4001"
-      - "8545:8545"
       - "9090:9090"
     volumes:
       - node1_data:/home/budlum/data
       - node1_secrets:/home/budlum/secrets
     environment:
       - RUST_LOG=info
-      # Devnet smoke exposes node1 public RPC only inside the CI test harness.
-      # Production/default runtime stays secure-by-default; the smoke script
-      # Probes unauthenticated JSON-RPC without custom headers.
-      - BUDLUM_RPC_AUTH_REQUIRED=0
-      - BUDLUM_RPC_ALLOWED_IPS=
+      # Authenticated by default. Set BUDLUM_RPC_API_KEY before exposing this
+      # listener anywhere; leaving auth off with an empty IP allow-list means
+      # an open JSON-RPC endpoint to whoever can route to the host.
+      - BUDLUM_RPC_AUTH_REQUIRED=1
     command:
       - "--network=devnet"
       - "--port=4001"

@@ -196,7 +196,16 @@ impl PoSEngine {
         checkpoints.push(checkpoint.clone());
 
         if let Some(store) = storage {
-            let _ = store.save_checkpoint(&checkpoint);
+            // Not `let _ =`: a checkpoint that fails to persist is not a
+            // cosmetic loss. On restart the node would not know the block was
+            // checkpointed and would accept a reorg below it, so the failure
+            // has to surface instead of being swallowed.
+            store.save_checkpoint(&checkpoint).map_err(|error| {
+                ConsensusError(format!(
+                    "failed to persist checkpoint at height {}: {error}",
+                    checkpoint.block_index
+                ))
+            })?;
         }
         Ok(())
     }

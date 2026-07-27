@@ -974,6 +974,13 @@ impl Storage {
         let key = format!("CP:{}", checkpoint.block_index);
         let val = encode(checkpoint)?;
         self.db.insert(key.as_bytes(), val)?;
+        // Checkpoints gate `is_before_checkpoint`, which decides whether a
+        // block may still be reorged. sled only fsyncs on its own schedule
+        // (~500ms by default), so without this a crash can lose the most
+        // recent checkpoint and let the node accept a reorg it had already
+        // ruled out. Consensus-visible state is flushed on write here, as the
+        // finality-cert and QC-blob paths already do.
+        self.db.flush()?;
         Ok(())
     }
     pub fn load_checkpoints(&self) -> std::io::Result<Vec<crate::consensus::pos::Checkpoint>> {

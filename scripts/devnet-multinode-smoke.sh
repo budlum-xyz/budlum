@@ -23,7 +23,11 @@ rpc() {
 }
 
 echo "== [0/5] compose up (4 node + prometheus) =="
-docker compose -p "$PROJECT" up -d || fail "docker compose up"
+# The CI overlay is what turns off RPC auth and publishes 8545. The base file
+# stays authenticated so it is safe to copy; the smoke probes need the
+# unauthenticated listener, so they ask for it explicitly.
+COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.ci.yml)
+docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" up -d || fail "docker compose up"
 
 echo "== [1/5] RPC hazırlığı: bud_netListening (maks 120 sn) =="
 ready=0

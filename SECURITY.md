@@ -74,6 +74,39 @@ Out of scope:
 
 ---
 
+## Operator deployment notes
+
+Two assumptions the node makes about its environment. Both hold on an ordinary
+host and can be broken by how you deploy it.
+
+**The operator RPC trusts loopback.** `--rpc-operator-listener` refuses to bind
+to anything other than a loopback address, and the node will not start if you
+try. It carries no authentication of its own, because reaching `127.0.0.1` is
+treated as proof of local access.
+
+That assumption breaks wherever the loopback interface is shared. The case to
+watch is a Kubernetes pod: every container in a pod shares a network namespace,
+so a sidecar — a log shipper, a service mesh proxy, anything pulled in by a
+mutating webhook — can reach the operator RPC as if it were the node itself.
+The same applies to `docker run --network=container:...` and to any process
+running directly on the host.
+
+If the node shares a namespace with workloads you would not hand admin access
+to, do not rely on the loopback bind alone. Run the node in its own pod, or
+place the operator listener behind an authenticated proxy.
+
+**The default compose file is authenticated; the CI overlay is not.**
+`docker-compose.yml` keeps `BUDLUM_RPC_AUTH_REQUIRED=1` and does not publish
+the public RPC port. The smoke harness needs an open listener, so those
+settings live in `docker-compose.ci.yml` and have to be requested explicitly:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+```
+
+Never use that overlay on a host with a routable address. It disables RPC
+authentication and empties the IP allow-list.
+
 ## Security Expectations for Contributors
 
 When changing protocol-sensitive code:

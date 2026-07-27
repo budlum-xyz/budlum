@@ -7,6 +7,7 @@ on:
       - 'Dockerfile'
       - 'config/mainnet.toml'
       - 'docker-compose.yml'
+      - 'docker-compose.ci.yml'
       - 'scripts/smoke_rpc.sh'
       - 'scripts/docker-smoke-mainnet.sh'
       - 'scripts/devnet-multinode-smoke.sh'
@@ -90,7 +91,7 @@ jobs:
       - name: 4-node compose smoke (mesh/liveness/metrics/RPC-izolasyon)
         run: |
           chmod +x scripts/devnet-multinode-smoke.sh
-          ./scripts/devnet-multinode-smoke.sh || { docker compose -p budlum-multinode-smoke ps || true; docker compose -p budlum-multinode-smoke logs --tail=150 || true; exit 1; }
+          ./scripts/devnet-multinode-smoke.sh || { docker compose -f docker-compose.yml -f docker-compose.ci.yml -p budlum-multinode-smoke ps || true; docker compose -f docker-compose.yml -f docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150 || true; exit 1; }
       - name: Teardown (her durumda)
         if: always()
-        run: docker compose -p budlum-multinode-smoke down -v --remove-orphans || true
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml -p budlum-multinode-smoke down -v --remove-orphans || true

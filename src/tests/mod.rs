@@ -129,8 +129,12 @@ pub mod snapshot_chaos;
 // Relayer escrow silent-failure CI kırıcı güvenlik mühürleri.
 // Reachability premises behind the accepted dependency advisories. These fail
 // when a routine dependency change makes a carried CVE live again.
+// External review pass: locks for the findings that were real, plus the ones
+// that were already handled and should not have to be re-derived.
 #[cfg(test)]
 pub mod advisory_reachability;
+#[cfg(test)]
+pub mod audit_findings_locks;
 #[cfg(test)]
 pub mod hardening_h2_locks;
 #[cfg(test)]
