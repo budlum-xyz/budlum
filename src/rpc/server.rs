@@ -289,21 +289,29 @@ impl RpcServer {
 
     pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use jsonrpsee::core::server::Methods;
-        use jsonrpsee::server::{serve_with_graceful_shutdown, stop_channel, ServerBuilder};
+        use jsonrpsee::server::{
+            serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig,
+        };
 
         validate_rpc_security_config(&self.security)?;
         let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
         ));
-        let mut builder = ServerBuilder::default().set_http_middleware(http_middleware);
 
+        // jsonrpsee 0.26 moved the transport limits off the server builder and
+        // onto `ServerConfig`; the defaults are unchanged, so only the values
+        // this node explicitly overrides are set here.
+        let mut config = ServerConfig::builder();
         if let Some(limit) = self.security.max_request_body_size {
-            builder = builder.max_request_body_size(limit);
+            config = config.max_request_body_size(limit);
         }
         if let Some(limit) = self.security.max_connections {
-            builder = builder.max_connections(limit);
+            config = config.max_connections(limit);
         }
+        let builder = ServerBuilder::default()
+            .set_config(config.build())
+            .set_http_middleware(http_middleware);
 
         let mode_label = match self.mode {
             RpcMode::Public => "public",
