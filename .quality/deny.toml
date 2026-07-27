@@ -37,6 +37,26 @@ allow = [
     # Gerekçe: webpki-roots Mozilla CA bundle data'sı için CDLA-Permissive-2.0 kullanır, permissive.
     "CDLA-Permissive-2.0",
 ]
+
+# On copyleft (GPL / AGPL / LGPL / SSPL): there is deliberately no `deny`
+# list here. cargo-deny removed `[licenses] deny` in 0.20 (PR #611) because
+# the allow-list above is already closed — anything absent from it is
+# refused, so a separate deny list would be a second spelling of the same
+# rule and, worse, a place where someone could later "fix" a failure by
+# quietly editing one list while the other still passed.
+#
+# Verified rather than assumed (cargo-deny 0.20.2, 2026-07-27): a crate
+# declaring `GPL-3.0` against this exact config fails with
+#   error[rejected]: license is not explicitly allowed
+#   licenses FAILED   (exit 4)
+# The CI job carries a canary that re-proves the gate can reject, so a green
+# result cannot come from the check silently doing nothing.
+#
+# A dual-licensed crate is a different case and is accepted through its
+# permissive arm: r-efi is `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and
+# cargo-deny evaluates the SPDX expression, not the individual identifiers.
+# It is also only reachable on `target_os = "uefi"`, which Budlum never
+# builds for.
 confidence-threshold = 0.8
 
 [bans]
