@@ -3,15 +3,13 @@ name: Supply Chain Extra (udeps + geiger)
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'budzero/Cargo.toml'
-      - 'budzero/Cargo.lock'
-      - 'src/**'
-      - 'budzero/**'
-      - '.github/workflows/supply-chain-extra.yml'
-      - '.github/udeps-baseline.txt'
+  # Both jobs here are required checks on main. A required check that never
+  # runs on a pull request leaves every PR permanently "expected" and
+  # unmergeable, so this has to fire on PRs too. The path filter is gone for
+  # the same reason: a filtered-out run reports nothing rather than success,
+  # which branch protection reads as still-waiting.
+  pull_request:
+    branches: [ main ]
   schedule:
     # Haftalık hijyen taraması (cargo update etkileri + yeni dep'ler)
     - cron: '17 4 * * 1'
