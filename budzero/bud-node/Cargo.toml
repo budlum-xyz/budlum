@@ -22,7 +22,7 @@ libp2p = { version = "0.56", features = [
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-bincode = "1"
+bincode = "3"
 
 # Logging
 tracing = "0.1"
