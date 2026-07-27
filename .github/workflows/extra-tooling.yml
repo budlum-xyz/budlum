@@ -108,27 +108,21 @@ jobs:
         run: cargo audit
 
   # ── 2. Kullanılmayan bağımlılıklar ──────────────────────────────────────────
-  # RAPOR — kapı DEĞİL, ve bu bilinçli bir karar.
+  # KAPI. Daha önce rapor modundaydı çünkü machete bu ağaçta 9 aday veriyordu
+  # ve bunların bir kısmı (chrono, group) makro/trait dolaylılığı yüzünden
+  # yanlış pozitifti — o hâlde FAIL yapmak ya CI'ı gevşetmeye ya da kullanılan
+  # bağımlılıkları ignore listesine doldurup kapıyı içi boş bırakmaya zorlardı.
   #
-  # Cargo-machete bu ağaçta 9 bulgu veriyor ve doğrulandığında karışık çıkıyor:
-  # `bitvec`, `prost-types` (budlum-core) ve `tokio` (bud-node) gerçekten
-  # Kullanılmıyor, ama `chrono` (2 dosya) ve `group` (4 dosya) kullanılıyor —
-  # Machete bunları makro/trait dolaylı kullanımı yüzünden göremiyor. Yani
-  # Bugün FAIL yapılsa kapı, gerçek bulguların yanında yanlış pozitiflerle
-  # Birlikte kırmızı kalırdı; tek çıkış yolu ya CI'ı gevşetmek ya da
-  # Kullanılan bağımlılıkları ignore listesine doldurup kapıyı içi boş hale
-  # Getirmek olurdu. İkisi de direktifin yasakladığı şey.
+  # O borç kapandı: gerçek ölü bağımlılıklar temizlendi, yanlış pozitifler
+  # gerekçeli `[package.metadata.cargo-machete] ignored` kayıtlarına alındı.
+  # Ölçüm (2026-07-27): root, budzero, fuzz ve wallet-core ağaçlarının
+  # dördünde de "didn't find any unused dependencies". Sıfır bulgu artık
+  # kalibrasyonsuzluk değil gerçek durum olduğu için kapı kapatılabilir.
   #
-  # Doğru sıra: önce 9 bulgu tek tek doğrulanıp gerçek olanlar temizlenir ve
-  # Yanlış pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
-  # Kaydına alınır; ancak ondan sonra bu job kapıya çevrilir. O iş bu commit'in
-  # Kapsamı dışında ve STATUS'ta takip maddesi olarak açıldı.
-  #
-  # Bu commit'te sadece kanıtlanmış üç ölü bağımlılık kaldırıldı
-  # (verifier-registry dev-dep serde_json, wallet-core serde) ve wasm-bindgen
-  # Feature-gated olduğu için gerekçeli ignore'a alındı.
+  # Kanarya aşağıda: sentetik bir crate'te kullanılmayan `libc` yakalanmazsa
+  # job kendini güvenilmez sayıp düşer, yani "0 bulgu" boş geçemez.
   dead-deps:
-    name: Dead Deps (machete + shear — rapor)
+    name: Dead Deps (machete + shear)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -172,20 +166,22 @@ jobs:
           fi
           echo "Kanarya yakalandı → machete alarmı çalışıyor."
 
-      # Rapor (kapi degil — yukaridaki gerekceye bakin). Cikti PR ozetine
-      # Yazilir ki borc gorunur olsun ve kalibrasyon isi takip edilebilsin.
-      - name: Machete raporu (PR özetine)
+      # Kapı: her workspace ayrı taranır. cargo-machete bulgu bulduğunda
+      # sıfırdan farklı çıkar, `set -e` altında job orada düşer. Yanlış
+      # pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
+      # kaydına alınır — ignore etmek serbest değil, gerekçe commit'te durur.
+      - name: Machete kapısı — root + budzero + fuzz + wallet-core
         run: |
           set -euo pipefail
-          {
-            echo "### cargo-machete — kullanılmayan bağımlılık adayları"
-            echo ""
-            echo "Kapı değil: bulguların bir kısmı makro/trait dolaylı kullanımı"
-            echo "yüzünden yanlış pozitif. Kalibrasyon sonrası kapıya çevrilecek."
-            echo '```'
-            cargo machete 2>&1 | tail -40 || true
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          fail=0
+          for dir in . budzero fuzz wallet-core; do
+            echo "── cargo machete: $dir ──"
+            if ! (cd "$dir" && cargo machete); then
+              echo "FAIL: $dir içinde kullanılmayan bağımlılık var." >&2
+              fail=1
+            fi
+          done
+          exit "$fail"
 
       - name: Shear raporu (ikinci sezgi)
         continue-on-error: true

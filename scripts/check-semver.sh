@@ -13,7 +13,7 @@
 #   * exit != 0 (kırılma raporu VEYA altyapı hatası) →
 #     `.github/semver-exceptions.txt` içinde yorum-olmayan en az bir satır
 #     Varsa PASS-İSTİSNA (kanıtlı kabul — her satır gerekçe taşır, kullanıcı
-#     Onayı gerekir; deny.toml [advisories] ignore disipliniyle aynı ruh),
+#     Onayı gerekir; .quality/deny.toml [advisories] ignore disipliniyle aynı ruh),
 #     Yoksa FAIL.
 #
 # Kullanım:

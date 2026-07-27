@@ -30,6 +30,6 @@ jobs:
           # PR diff'inde tanıtılan moderate+ zaafiyetli bağımlılık → fail.
           # (low = yalnızca uyarı; high/critical çok geç kalır; moderate denge.)
           fail-on-severity: moderate
-          # Lisans reddi listesi deny.toml [licenses] içinde yönetilir; burada
+          # Lisans reddi listesi .quality/deny.toml [licenses] içinde yönetilir; burada
           # Yalnızca advisory odaklı. comment-summary-in-pr opsiyonel.
           comment-summary-in-pr: always
