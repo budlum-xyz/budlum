@@ -81,11 +81,31 @@ unmaintained = "none"
 # unsound: doğrudan bağımlılıklarımızda unsound danışması = FAIL (sıkı).
 unsound = "workspace"
 ignore = [
-    # hickory-proto 0.25 is resolved only through libp2p's optional mDNS
-    # feature. Budlum's production/default graph no longer enables that feature
-    # and therefore cannot construct the vulnerable parser/socket surface.
-    # `p2p-mdns` is an explicit devnet-only build capability; remove these
-    # temporary exceptions once upstream libp2p-mdns supports hickory >=0.26.
-    { id = "RUSTSEC-2026-0118", reason = "NSEC3 DoS is unreachable in production/default builds: p2p-mdns is disabled, and Budlum does not use DnssecDnsHandle. Exposure is limited to explicit devnet builds using --features p2p-mdns." },
-    { id = "RUSTSEC-2026-0119", reason = "The vulnerable hickory name-compression parser is absent from production/default builds because p2p-mdns is disabled. Exposure is limited to explicit devnet builds using --features p2p-mdns until upstream hickory >=0.26 support lands." },
+    # hickory-proto 0.25.2: the vulnerable code is DNSSEC validation, which is
+    # not compiled into this build.
+    #
+    # Measured 2026-07-27 with
+    #   cargo tree -e features -i hickory-proto --target all
+    # The only active hickory-proto features are `std`, `tokio` and
+    # `futures-io`. Neither `dnssec` nor `mdns` is enabled, and no DNSSEC
+    # implementation appears anywhere in Cargo.lock.
+    #
+    # Correction: these entries previously argued that hickory was reachable
+    # only through the optional `p2p-mdns` feature and therefore absent from
+    # production builds. That is no longer true. Enabling libp2p's `dns`
+    # feature — needed so /dns4 and /dnsaddr multiaddrs are dialable — pulls
+    # hickory into the default graph through libp2p-dns. The advisories are
+    # still unreachable, but for a different reason, and leaving the old text
+    # in place would have been a false assurance rather than a stale one.
+    #
+    # The premise is pinned by src/tests/advisory_reachability.rs, which fails
+    # if DNSSEC ever enters the graph, so the exception cannot quietly become
+    # untrue.
+    #
+    # Upgrading is blocked upstream, not by choice: libp2p-dns and libp2p-mdns
+    # both require hickory ^0.25.2, so `cargo update -p hickory-proto
+    # --precise 0.26.1` is rejected by the resolver. Remove these entries once
+    # libp2p supports hickory >= 0.26.1.
+    { id = "RUSTSEC-2026-0118", reason = "NSEC3 closest-encloser validation loop. Unreachable: hickory is built without the `dnssec` feature (active features are std/tokio/futures-io only), so the validation code does not exist in this binary. Pinned by src/tests/advisory_reachability.rs." },
+    { id = "RUSTSEC-2026-0119", reason = "Name-compression parser. Same measurement as RUSTSEC-2026-0118: the affected path is not compiled without `dnssec`. Pinned by the same test." },
 ]

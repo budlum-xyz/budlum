@@ -37,20 +37,53 @@ geçersizdir — o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0118"   # hickory-proto NSEC3 DoS
 reason = """
-deny.toml'daki aynı gerekçenin OSV tarafındaki karşılığı (tek kaynak: oradaki
-kayıt). hickory yalnız libp2p'nin opsiyonel mDNS özelliğiyle çözülür;
-production/default derlemede `p2p-mdns` kapalıdır ve Budlum DnssecDnsHandle
-kullanmaz, dolayısıyla savunmasız ayrıştırıcı/socket yüzeyi kurulamaz. Maruziyet
-yalnız açıkça `--features p2p-mdns` ile yapılan devnet derlemeleriyle sınırlı.
-Upstream libp2p-mdns hickory >=0.26'yı desteklediğinde kaldırılacak.
+NSEC3 closest-encloser proof doğrulamasında sınırsız döngü. Bu kod yalnız
+hickory `dnssec` özelliğiyle derlendiğinde var olur; bizde derlenmiyor.
+
+ÖLÇÜM (2026-07-27, `cargo tree -e features -i hickory-proto --target all`):
+aktif hickory-proto özellikleri yalnızca `std`, `tokio`, `futures-io`. `dnssec`
+YOK, `mdns` YOK. Cargo.lock'ta dnssec uygulayan hiçbir crate bulunmuyor.
+
+DÜZELTME: bu kaydın önceki gerekçesi "hickory yalnız opsiyonel p2p-mdns ile
+çözülür, production'da kapalı" diyordu. Bu artık DOĞRU DEĞİL — libp2p `dns`
+özelliği /dns4 ve /dnsaddr multiaddr'ları çözebilmek için açıldığından hickory
+`libp2p-dns` üzerinden default derlemeye giriyor. Zafiyet hâlâ erişilemez, ama
+sebebi farklı; eski metin bırakılsaydı yanlış bir güvence olurdu.
+
+Premis `src/tests/advisory_reachability.rs::dnssec_validation_is_not_compiled_in`
+ile kilitli: DNSSEC ağaca girerse test düşer ve bu istisna yeniden savunulmak
+zorunda kalır.
+
+Takip: libp2p-dns/libp2p-mdns hickory >=0.26.1'i desteklediğinde yükseltilip
+kayıt silinir. Şu an upstream `^0.25.2`'ye pinli (kanıt: `cargo update -p
+hickory-proto --precise 0.26.1` -> "candidate versions found which didn't
+match", libp2p-mdns 0.48.0 gereksinimi).
 """
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0119"   # hickory-proto name-compression parser
 reason = """
-RUSTSEC-2026-0118 ile aynı gerekçe ve aynı takip maddesi: savunmasız
-name-compression ayrıştırıcısı production/default derlemede bulunmuyor
-(p2p-mdns kapalı).
+RUSTSEC-2026-0118 ile aynı ölçüm ve aynı takip maddesi: savunmasız
+ayrıştırıcı `dnssec` özelliği olmadan derlenmiyor (aktif özellikler yalnız
+std/tokio/futures-io). Aynı düzeltme notu geçerlidir: hickory artık p2p-mdns
+üzerinden değil, libp2p `dns` özelliği üzerinden default derlemede bulunur.
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
+reason = """
+DNS mesajı ÜRETİRKEN quadratic CPU tüketimi. Tetiklenmesi için yanıt encode
+edilmesi gerekir — bu sunucu tarafı bir iştir.
+
+Budlum DNS SUNMUYOR, yalnız çözümlüyor: libp2p-dns, TCP transport'unu istemci
+tarafı bir resolver ile sarar (sorgu gönderir, gelen yanıtı okur). Ağaçta
+hickory-server bağımlılığı yok ve ServerFuture kullanan hiçbir kod yok.
+
+Premis `src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree` ile
+kilitli: ağaca DNS sunucu yüzeyi girerse test düşer.
+
+Yamalı sürüm 0.26.1; libp2p-dns/libp2p-mdns ^0.25.2'ye pinli olduğundan
+yükseltme upstream'i bekliyor.
 """
 
 # ── "unmaintained" sınıfı bilgilendirici kayıtlar ────────────────────────────
