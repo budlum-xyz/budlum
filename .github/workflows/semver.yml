@@ -23,7 +23,7 @@ jobs:
     #   * Gate: `scripts/check-semver.sh` — kırılma varsa ve
     #     `.github/semver-exceptions.txt` boşsa FAIL. İstisna satırları
     #     Kullanıcı onaylı, gerekçeli "kanıtlı skip-list" desenindedir
-    #     (deny.toml [advisories] ile aynı disiplin).
+    #     (.quality/deny.toml [advisories] ile aynı disiplin).
     name: Semver Check (Madde 5 — public API breakage gate)
     runs-on: ubuntu-latest
     timeout-minutes: 40

@@ -108,6 +108,27 @@ jobs:
           toolchain: "1.94.0"
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Toolchain pins agree across workspaces
+        # budzero/ is a separate workspace and can be built on its own, so it
+        # carries its own pin. Two pins can drift; if they ever disagree the
+        # prover would be built by a different compiler than the chain that
+        # consumes its proofs. Compare them instead of trusting they match.
+        run: |
+          set -euo pipefail
+          root=$(grep -E '^channel' rust-toolchain.toml | cut -d'"' -f2)
+          bz=$(grep -E '^channel' budzero/rust-toolchain.toml | cut -d'"' -f2)
+          echo "root=$root budzero=$bz"
+          if [ "$root" != "$bz" ]; then
+            echo "FAIL: toolchain pins differ (root=$root, budzero=$bz)" >&2
+            exit 1
+          fi
+          # Canary: the comparison must be able to fail, otherwise this step
+          # would pass even if it were comparing nothing at all.
+          if [ "$root" = "definitely-not-a-channel" ]; then
+            echo "FAIL: canary sentinel matched a real value" >&2
+            exit 1
+          fi
+          echo "Toolchain pins agree: $root"
       - name: cargo check (MSRV, locked)
         run: cargo check --locked --lib
 

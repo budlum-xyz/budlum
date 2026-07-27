@@ -543,8 +543,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: root, manifest: "./Cargo.toml" }
-          - { name: budzero, manifest: "budzero/Cargo.toml" }
+          # The root policy moved to .quality/deny.toml, so it has to be named
+          # explicitly; budzero keeps its own deny.toml next to its manifest,
+          # which cargo-deny discovers on its own.
+          - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -553,6 +556,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           manifest-path: ${{ matrix.manifest }}
+          arguments: --all-features ${{ matrix.config }}
           command: check
 
   fuzz-quick:

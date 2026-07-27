@@ -6,7 +6,7 @@
 # Gerçekten yakalandı.
 #
 # İki dillilik: repo kodu İngilizce, dokümantasyonu ağırlıkla Türkçedir.
-# Kalibrasyon `_typos.toml`dadır (Türkçe kelime listesi). Kalibrasyon
+# Kalibrasyon `.quality/typos.toml`dadır (Türkçe kelime listesi). Kalibrasyon
 # Gevşetme değildir: liste dışındaki her bulgu FAIL'dir ve düzeltilir,
 # Ignore edilmez. Yeni Türkçe kelime eklenirken gerekçe commit mesajına yazılır.
 #
@@ -60,7 +60,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/typos-canary
-          # `recieve` typos sözlüğünde kesin bir hatadır ve _typos.toml
+          # `recieve` typos sözlüğünde kesin bir hatadır ve .quality/typos.toml
           # Allow-listesinde yoktur; yakalanmaması taramanın çalışmadığını gösterir.
           printf 'fn main() { let _recieve = 1; }\n' > /tmp/typos-canary/canary.rs
           if typos --isolated /tmp/typos-canary; then
@@ -70,4 +70,4 @@ jobs:
           echo "Kanarya yakalandı → typos alarmı çalışıyor."
 
       - name: Repo taraması (bulgu = fail)
-        run: typos --format long
+        run: typos --config .quality/typos.toml --format long

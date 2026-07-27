@@ -16,7 +16,7 @@
 #      Değil. Grype bu boşluğu kapatıyor.
 #
 # Kapı politikası: high ve üzeri FAIL (`continue-on-error` YOK). İstisnalar
-# .grype.yaml içinde ve osv-scanner.toml'daki gerekçelerin birebir aynısı —
+# .quality/grype.yaml içinde ve .quality/osv-scanner.toml'daki gerekçelerin birebir aynısı —
 # Iki tarayıcının aynı bulguda çelişmesi kapının güvenilirliğini aşındırır.
 #
 # Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
@@ -69,7 +69,7 @@ jobs:
       # Gösterebilir. Kanarya, bilinen savunmasız bir sürüm içeren sentetik bir
       # Lockfile üretip tarayıcının onu YAKALADIĞINI kanıtlar. Repo config'i
       # Bilinçli olarak devre dışı (--config ile boş dosya), aksi halde
-      # .grype.yaml'daki yamux istisnası kanaryayı da susturur ve kapı kendi
+      # .quality/grype.yaml'daki yamux istisnası kanaryayı da susturur ve kapı kendi
       # Kendini kandırır.
       - name: Kanarya — Grype alarmının çalıştığının kanıtı
         run: |
@@ -96,7 +96,7 @@ jobs:
           echo "Kanarya yakalandı → Grype alarmı çalışıyor."
 
       - name: Tarama — SARIF üret
-        run: grype dir:. -o sarif --file grype.sarif
+        run: grype dir:. --config .quality/grype.yaml -o sarif --file grype.sarif
 
       - name: SARIF yükle (Security sekmesi)
         if: always()
@@ -108,4 +108,4 @@ jobs:
       # SARIF yüklendikten SONRA kapı: yükleme adımı atlanmadan bulgular
       # Security sekmesine düşsün, ardından job kırmızıya dönsün.
       - name: Kapı — high ve üzeri bulgu = fail
-        run: grype dir:. --fail-on high -o table
+        run: grype dir:. --config .quality/grype.yaml --fail-on high -o table

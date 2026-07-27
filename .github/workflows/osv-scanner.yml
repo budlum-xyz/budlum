@@ -12,7 +12,7 @@
 # Multiplexer'ında bu, cargo-audit'in yapısal olarak göremeyeceği bir sınıf.
 #
 # Kapı politikası: bulgu = FAIL (`continue-on-error` YOK). İstisnalar
-# Osv-scanner.toml ve budzero/osv-scanner.toml içinde, her biri kodda neden
+# .quality/osv-scanner.toml ve budzero/osv-scanner.toml içinde, her biri kodda neden
 # ERİŞİLEMEZ olduğunun kanıtıyla (VEX mantığı) yazılır. Erişilebilir bir bulgu
 # Ignore edilmez, bağımlılık yükseltilir.
 #
@@ -87,5 +87,6 @@ jobs:
         run: |
           set -euo pipefail
           osv-scanner scan source \
+            --config=.quality/osv-scanner.toml \
             --lockfile=Cargo.lock \
             --lockfile=budzero/Cargo.lock

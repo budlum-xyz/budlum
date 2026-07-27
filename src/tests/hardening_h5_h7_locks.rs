@@ -144,16 +144,59 @@ mod tests {
         assert!(Path::new("config/mainnet-genesis.json").is_file());
     }
 
-    /// Supply-chain gate files present.
+    /// Supply-chain policies exist *and* CI still points at them.
+    ///
+    /// The paths matter as a pair: a policy file that no workflow names is
+    /// decoration, and a workflow flag pointing at a missing file fails only
+    /// at runtime. Both directions are checked so moving a config without
+    /// updating its caller (or the reverse) fails here instead of silently
+    /// disabling a gate.
     #[test]
-    fn supply_chain_gate_files_present() {
-        assert!(Path::new("deny.toml").is_file());
-        assert!(Path::new(".gitleaks.toml").is_file());
-        assert!(Path::new(".github/coverage-baseline.txt").is_file());
+    fn supply_chain_policies_are_wired_into_ci() {
+        for path in [
+            ".quality/deny.toml",
+            ".quality/typos.toml",
+            ".quality/grype.yaml",
+            ".quality/osv-scanner.toml",
+            ".gitleaks.toml",
+            ".github/coverage-baseline.txt",
+        ] {
+            assert!(Path::new(path).is_file(), "missing policy file: {path}");
+        }
+
         let ci = include_str!("../../.github/workflows/ci.yml");
-        assert!(ci.contains("gitleaks") || ci.contains("secret-scan"));
-        assert!(ci.contains("deny") || ci.contains("cargo-deny") || ci.contains("Cargo Deny"));
+        assert!(
+            ci.contains(".gitleaks.toml"),
+            "CI must name the gitleaks config"
+        );
+        assert!(
+            ci.contains(".quality/deny.toml"),
+            "CI must name the relocated cargo-deny config"
+        );
         assert!(ci.contains("coverage") || ci.contains("llvm-cov"));
+
+        // Each scanner workflow has to pass its own relocated config; without
+        // the flag the tool would silently fall back to built-in defaults and
+        // every reasoned exception in these files would stop applying.
+        for (wf, cfg) in [
+            (
+                include_str!("../../.github/workflows/typos.yml"),
+                ".quality/typos.toml",
+            ),
+            (
+                include_str!("../../.github/workflows/grype.yml"),
+                ".quality/grype.yaml",
+            ),
+            (
+                include_str!("../../.github/workflows/osv-scanner.yml"),
+                ".quality/osv-scanner.toml",
+            ),
+        ] {
+            assert!(
+                wf.contains(&format!("--config {cfg}")) || wf.contains(&format!("--config={cfg}")),
+                "workflow does not pass {cfg} explicitly"
+            );
+        }
     }
 
     /// Coverage baseline is a finite ratchet value.

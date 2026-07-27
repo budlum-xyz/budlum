@@ -1,7 +1,7 @@
 # .cargo/audit.toml — cargo-audit yapılandırması ( / )
 #
 # Cargo.lock'taki BİLİNEN danışmaların kanıtlı skip-listesi. cargo-deny
-# tarafındaki karşılık ve tam kanıt zinciri: deny.toml [advisories]
+# tarafındaki karşılık ve tam kanıt zinciri: .quality/deny.toml [advisories]
 # bölümü. Burada listelenmeyen herhangi bir YENİ CVE job'u FAIL eder
 # (kural: unmaintained yalnız uyarır, vulnerability fail eder).
 
