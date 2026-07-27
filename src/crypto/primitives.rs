@@ -226,6 +226,55 @@ pub struct PqKeyPair {
     secret_key: Vec<u8>,
 }
 
+/// Wire identifier of the post-quantum signature scheme this binary speaks.
+///
+/// The PQ backend is selected at compile time, but the public key it produces
+/// is consensus data: it is folded into the consensus-key registration digest
+/// and its length is enforced by `validate_public_key` on the validation path.
+/// Dilithium5 keys are 2592 bytes, ML-DSA-65 keys are 1952. A node built with
+/// one backend therefore *rejects* validator registrations produced by the
+/// other — not as a signature failure, but as a malformed key.
+///
+/// That is a network split with no error message pointing at its cause, so the
+/// scheme is named here, pinned in genesis, and checked at startup rather than
+/// left implicit in whichever `--features` flag an operator happened to use.
+pub const PQ_SCHEME_ID: &str = pq_scheme_id();
+
+#[cfg(feature = "pq-dilithium")]
+const fn pq_scheme_id() -> &'static str {
+    "dilithium5"
+}
+
+#[cfg(feature = "pq-ml-dsa")]
+const fn pq_scheme_id() -> &'static str {
+    "ml-dsa-65"
+}
+
+#[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
+const fn pq_scheme_id() -> &'static str {
+    "none"
+}
+
+/// Public key length this build accepts, in bytes.
+///
+/// Exposed so the genesis check can explain a mismatch in terms an operator
+/// can act on ("this build wants 2592-byte keys, the chain uses 1952") instead
+/// of only reporting that a key failed to parse.
+pub const fn pq_public_key_len() -> usize {
+    #[cfg(feature = "pq-dilithium")]
+    {
+        2592
+    }
+    #[cfg(feature = "pq-ml-dsa")]
+    {
+        1952
+    }
+    #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
+    {
+        0
+    }
+}
+
 #[cfg(feature = "pq-dilithium")]
 impl PqKeyPair {
     pub fn generate() -> Self {

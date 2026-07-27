@@ -1,5 +1,6 @@
 {
   "chain_id": 1,
+  "pq_scheme": "dilithium5",
   "allocations": [],
   "validators": [],
   "block_reward": 50,

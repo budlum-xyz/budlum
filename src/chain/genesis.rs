@@ -123,6 +123,22 @@ pub struct GenesisConfig {
     #[serde(default)]
     pub tokenomics_addresses: Option<crate::tokenomics::TokenomicsAddresses>,
 
+    /// Post-quantum signature scheme this chain was launched with.
+    ///
+    /// The PQ backend is a compile-time feature, but the public key it emits is
+    /// consensus data — its length is enforced on the validation path, and
+    /// Dilithium5 (2592 bytes) and ML-DSA-65 (1952) disagree. Two nodes built
+    /// with different features would reject each other's validator
+    /// registrations as malformed keys and split the network with no error
+    /// naming the cause.
+    ///
+    /// Recording the scheme in genesis turns that into a startup failure: a
+    /// node whose build does not match the chain refuses to run instead of
+    /// joining and diverging. `None` means a chain launched before this field
+    /// existed; the check is skipped rather than guessing.
+    #[serde(default)]
+    pub pq_scheme: Option<String>,
+
     /// Bootstrap domain listesi. Her domain genesis'te otomatik
     /// Register edilir (storage boşsa = yeni chain). PoW/PoS/BFT/PoA 4 domain
     /// Mainnet için varsayılan. Default boş (devnet/testnet backward-compat).
@@ -143,6 +159,7 @@ impl Default for GenesisConfig {
             timestamp: GENESIS_TIMESTAMP,
             bud_tokenomics: None,
             tokenomics_addresses: None,
+            pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
             bootstrap_domains: vec![],
         }
     }
@@ -258,7 +275,34 @@ impl GenesisConfig {
             .collect()
     }
 
+    /// Refuse to run when this binary's PQ backend is not the one the chain
+    /// was launched with.
+    ///
+    /// Deliberately fail-closed. The alternative — starting anyway — produces a
+    /// node that accepts blocks but rejects every validator registration from
+    /// its peers, which looks like a peering problem rather than a build
+    /// problem and costs an operator hours to diagnose.
+    pub fn validate_pq_scheme(&self) -> Result<(), String> {
+        let Some(chain_scheme) = self.pq_scheme.as_deref() else {
+            // Chain predates the field. Nothing to compare against; the
+            // operator gets no false assurance either way.
+            return Ok(());
+        };
+        let build_scheme = crate::crypto::primitives::PQ_SCHEME_ID;
+        if chain_scheme != build_scheme {
+            return Err(format!(
+                "post-quantum backend mismatch: this binary was built for `{build_scheme}` \
+                 (public keys {} bytes) but the chain genesis declares `{chain_scheme}`. \
+                 Rebuild with the matching feature — running anyway would reject every \
+                 validator registration on this chain as a malformed key.",
+                crate::crypto::primitives::pq_public_key_len()
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
+        self.validate_pq_scheme()?;
         if self.chain_id != network.chain_id().value() {
             return Err(format!(
                 "Genesis chain ID {} does not match {} profile chain ID {}",
@@ -568,6 +612,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
 
         // 4 domain bootstrap (PoW/PoS/BFT/PoA).
         // PoA: placeholder authorities (ceremony'de gerçek adreslere dönüşür).
+        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
     }
 }
@@ -587,6 +632,7 @@ pub fn testnet_genesis() -> GenesisConfig {
         timestamp: 1_735_689_600_000,
         bud_tokenomics: None,
         tokenomics_addresses: None,
+        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
         bootstrap_domains: vec![],
     }
 }
@@ -603,6 +649,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         timestamp: GENESIS_TIMESTAMP,
         bud_tokenomics: None,
         tokenomics_addresses: None,
+        pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
         bootstrap_domains: vec![],
     }
 }

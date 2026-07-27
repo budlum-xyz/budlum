@@ -236,6 +236,10 @@ async fn main() {
             timestamp: network_defaults.timestamp,
             bud_tokenomics: network_defaults.bud_tokenomics,
             tokenomics_addresses: network_defaults.tokenomics_addresses,
+            // Record which PQ backend produced this file, so a node built with
+            // the other one refuses the chain at startup instead of joining it
+            // and rejecting every peer's validator registration.
+            pq_scheme: network_defaults.pq_scheme.clone(),
             bootstrap_domains: network_defaults.bootstrap_domains.clone(),
         };
 
