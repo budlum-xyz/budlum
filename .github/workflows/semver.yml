@@ -34,6 +34,16 @@ jobs:
           path: current
           persist-credentials: false
       - name: Checkout (baseline = merge base)
+        # Skipped when there is no baseline to compare against: on the very
+        # first push to a branch `github.event.before` is the all-zero SHA, and
+        # asking the remote for that ref fails with "not our ref". The gate
+        # step below already treats a missing base as "nothing to compare" and
+        # passes with an explicit log line, so the run stays honest rather than
+        # red for a reason that has nothing to do with the public API.
+        if: >-
+          github.event.pull_request.base.sha != '' ||
+          (github.event.before != '' &&
+           github.event.before != '0000000000000000000000000000000000000000')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: baseline
