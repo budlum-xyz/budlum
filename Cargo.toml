@@ -145,3 +145,27 @@ harness = false
 [profile.release]
 overflow-checks = true
 panic = "abort"
+
+# Vendored patches for vulnerable transitive dependencies.
+#
+# libp2p 0.56.0 is the newest release and pins hickory to ^0.25.2, a version
+# carrying GHSA-3v94-mw7p-v465 (NSEC3 validation loop, never fixed upstream)
+# and GHSA-q2qq-hmj6-3wpp (quadratic message encoding, fixed in 0.26.1). The
+# pin cannot be lifted by upgrading libp2p because no newer libp2p exists.
+#
+# hickory 0.26 is a breaking release — it removed ResolveError, the typed
+# Ipv4Lookup/Ipv6Lookup/TxtLookup wrappers, and renamed TokioConnectionProvider
+# — which is why libp2p has not moved. third_party/ therefore carries the
+# 0.26.1 sources plus a libp2p-dns adapted to the new API. The hickory crates
+# are byte-identical to the published 0.26.1 apart from their declared version,
+# which is set to 0.25.2 so the existing requirement resolves against them.
+#
+# Delete this block and third_party/ once libp2p ships a release built on
+# hickory >= 0.26.1.
+[patch.crates-io]
+hickory-proto = { path = "third_party/hickory-proto" }
+hickory-resolver = { path = "third_party/hickory-resolver" }
+hickory-net = { path = "third_party/hickory-net" }
+libp2p-dns = { path = "third_party/libp2p-dns" }
+libp2p-mdns = { path = "third_party/libp2p-mdns" }
+libp2p-yamux = { path = "third_party/libp2p-yamux" }
