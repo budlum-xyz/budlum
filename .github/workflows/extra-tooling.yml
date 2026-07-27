@@ -1,0 +1,268 @@
+name: Extra Tooling (security + quality)
+#
+# Bu workflow, ana CI'ın kapsamadığı ek araçları çalıştırır.
+#
+# 2026-07-27 onarımı — workflow HİÇ ÇALIŞMIYORDU:
+# `slsa-provenance` job'ı bir reusable workflow'u (`.github/workflows/*.yml@ref`)
+# `steps[].uses` içinde çağırıyordu. Reusable workflow yalnız job seviyesinde
+# (`jobs.<id>.uses`) geçerlidir; adım içinde kullanılınca GitHub dosyanın
+# Tamamını reddeder. Sonuç: her koşu 0 job ile anında "failure" — diğer beş
+# Job da hiç çalışmıyordu. actionlint bunu yakalamıyor (yerelde temiz geçiyor),
+# Bu yüzden hata gözden kaçmıştı.
+#
+# SLSA job'ı kaldırıldı, taklidi bırakılmadı. Doğru kurulum ayrı bir release
+# Workflow'u ister (job seviyesinde `uses:` + `permissions: id-token: write` +
+# Gerçek base64-subjects üretimi). `hashFiles` zaten SLSA'nın beklediği
+# Base64 digest formatını üretmez, yani mevcut haliyle çalışsa bile geçersiz
+# Provenance üretirdi. Bu, sahte bir tedarik-zinciri garantisi olurdu.
+#
+# Ayrıca `|| true` / `|| echo` maskeleri kaldırıldı: direktifin standing rule'u
+# Gereği merge'ü bloke etmeyen check dekoratiftir. Hangi kapının gerçekten
+# Bloke ettiği her job'ın başında yazılıdır.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1" # haftalık Pazartesi 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extra-tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 1. cargo-auditable + cargo-audit ────────────────────────────────────────
+  # KAPI: cargo audit bulgusu = FAIL.
+  # Cargo-auditable bağımlılık listesini binary'nin içine gömer, böylece
+  # Dağıtılmış bir ikili dosya kaynak ağacı olmadan da denetlenebilir
+  # (`cargo audit bin`). Bir L1 için operatörün elindeki binary'nin hangi
+  # Crate sürümlerinden derlendiğini kanıtlayabilmek gerçek bir ihtiyaç.
+  auditable-audit:
+    name: Auditable + Audit (binary SBOM + CVE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-auditable + cargo-audit (sürüm pinli)
+        run: |
+          set -euo pipefail
+          cargo install cargo-auditable --version 0.7.5 --locked
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo auditable --version
+          cargo audit --version
+
+      # Vacuous-gate koruması: cargo audit "0 vulnerabilities" hem temiz bir
+      # Ağacı hem de advisory veritabanını indirememiş bir koşuyu gösterebilir.
+      # Kanarya, bilinen savunmasız bir sürüm içeren sentetik lockfile üretip
+      # Aracın onu YAKALADIĞINI kanıtlar.
+      - name: Kanarya — cargo audit alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/audit-canary
+          cat > /tmp/audit-canary/Cargo.lock <<'CANARY'
+          version = 3
+
+          [[package]]
+          name = "canary-app"
+          version = "0.1.0"
+          dependencies = ["time"]
+
+          [[package]]
+          name = "time"
+          version = "0.1.44"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          CANARY
+          if cargo audit --file /tmp/audit-canary/Cargo.lock; then
+            echo "HATA: cargo audit kanaryayı (time 0.1.44 / RUSTSEC-2020-0071) yakalayamadı → vacuous gate!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → cargo audit alarmı çalışıyor."
+
+      - name: Build with auditable (binary'ye bağımlılık listesi göm)
+        run: cargo auditable build --lib --locked
+
+      # NOT: `--locked` cargo audit'in bayragi DEGILDIR (cargo install'un
+      # Bayragidir); onceki halinde buradaydi ve komut "unexpected argument"
+      # Ile aninda dusuyordu. Ayrica surum 0.21.2 -> 0.22.2'ye cekildi: 0.21.2
+      # Advisory veritabanindaki CVSS 4.0 kayitlarini parse edemiyor ve
+      # "unsupported CVSS version: 4.0" ile hata veriyor, yani kapi kodla
+      # Ilgisiz bir nedenle kalici kirmizi olurdu.
+      - name: cargo audit kapısı (bulgu = fail)
+        run: cargo audit
+
+  # ── 2. Kullanılmayan bağımlılıklar ──────────────────────────────────────────
+  # RAPOR — kapı DEĞİL, ve bu bilinçli bir karar.
+  #
+  # Cargo-machete bu ağaçta 9 bulgu veriyor ve doğrulandığında karışık çıkıyor:
+  # `bitvec`, `prost-types` (budlum-core) ve `tokio` (bud-node) gerçekten
+  # Kullanılmıyor, ama `chrono` (2 dosya) ve `group` (4 dosya) kullanılıyor —
+  # Machete bunları makro/trait dolaylı kullanımı yüzünden göremiyor. Yani
+  # Bugün FAIL yapılsa kapı, gerçek bulguların yanında yanlış pozitiflerle
+  # Birlikte kırmızı kalırdı; tek çıkış yolu ya CI'ı gevşetmek ya da
+  # Kullanılan bağımlılıkları ignore listesine doldurup kapıyı içi boş hale
+  # Getirmek olurdu. İkisi de direktifin yasakladığı şey.
+  #
+  # Doğru sıra: önce 9 bulgu tek tek doğrulanıp gerçek olanlar temizlenir ve
+  # Yanlış pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
+  # Kaydına alınır; ancak ondan sonra bu job kapıya çevrilir. O iş bu commit'in
+  # Kapsamı dışında ve STATUS'ta takip maddesi olarak açıldı.
+  #
+  # Bu commit'te sadece kanıtlanmış üç ölü bağımlılık kaldırıldı
+  # (verifier-registry dev-dep serde_json, wallet-core serde) ve wasm-bindgen
+  # Feature-gated olduğu için gerekçeli ignore'a alındı.
+  dead-deps:
+    name: Dead Deps (machete + shear — rapor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-machete + cargo-shear (sürüm pinli)
+        run: |
+          set -euo pipefail
+          cargo install cargo-machete --version 0.8.0 --locked
+          cargo install cargo-shear --version 1.4.1 --locked
+
+      # Kanarya: rapor modunda bile aracin gercekten calistigini dogrular.
+      # Bilerek kullanilmayan bir bagimlilik iceren sentetik crate uretip
+      # Machete'nin onu yakaladigini kanitlar; yakalayamazsa asagidaki rapor
+      # "0 bulgu" ile bos gecer ve kimse fark etmez.
+      - name: Kanarya — machete alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/machete-canary/src
+          cat > /tmp/machete-canary/Cargo.toml <<'CANARY'
+          [package]
+          name = "machete-canary"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          libc = "0.2"
+          CANARY
+          echo 'fn main() {}' > /tmp/machete-canary/src/main.rs
+          if cargo machete /tmp/machete-canary; then
+            echo "HATA: machete kullanılmayan 'libc' bağımlılığını yakalayamadı → vacuous gate!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → machete alarmı çalışıyor."
+
+      # Rapor (kapi degil — yukaridaki gerekceye bakin). Cikti PR ozetine
+      # Yazilir ki borc gorunur olsun ve kalibrasyon isi takip edilebilsin.
+      - name: Machete raporu (PR özetine)
+        run: |
+          set -euo pipefail
+          {
+            echo "### cargo-machete — kullanılmayan bağımlılık adayları"
+            echo ""
+            echo "Kapı değil: bulguların bir kısmı makro/trait dolaylı kullanımı"
+            echo "yüzünden yanlış pozitif. Kalibrasyon sonrası kapıya çevrilecek."
+            echo '```'
+            cargo machete 2>&1 | tail -40 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Shear raporu (ikinci sezgi)
+        continue-on-error: true
+        run: cargo shear
+
+  # ── 3. Binary boyut görünürlüğü ─────────────────────────────────────────────
+  # RAPOR: kapı değil. Boyut eşiği kalibre edilmeden FAIL yapmak keyfi olurdu;
+  # Önce birkaç koşuluk gerçek veri toplanmalı. Rapor PR özetine yazılır.
+  binary-size:
+    name: Binary Size (rapor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-bloat (sürüm pinli)
+        run: cargo install cargo-bloat --version 0.12.1 --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Boyut + en büyük crate'ler (PR özetine)
+        run: |
+          set -euo pipefail
+          {
+            echo "### Binary size"
+            echo '```'
+            ls -lh target/release/budlum-core target/release/libbudlum_core.rlib 2>/dev/null || true
+            echo '```'
+            echo "### En çok yer kaplayan crate'ler"
+            echo '```'
+            cargo bloat --release --crates -n 20 2>/dev/null || echo "(cargo bloat calistirilamadi)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 4. TOML biçim/lint ──────────────────────────────────────────────────────
+  # KAPI: taplo lint + format --check = FAIL.
+  # Cargo.toml/deny.toml/config gibi dosyalarda biçim kayması, elle düzenlenen
+  # Supply-chain politikalarında diff gürültüsü üretir ve gerçek değişikliği
+  # Gizler.
+  config-lint:
+    name: Config Lint (taplo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install taplo (sürüm pinli)
+        run: cargo install taplo-cli --version 0.9.3 --locked
+
+      # Kanarya: bozuk bir TOML üretip taplo'nun yakaladığını doğrular.
+      - name: Kanarya — taplo alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/taplo-canary
+          printf '[package\nname = "broken"\n' > /tmp/taplo-canary/broken.toml
+          if taplo lint /tmp/taplo-canary/broken.toml; then
+            echo "HATA: taplo bozuk TOML'u yakalayamadı → vacuous gate!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → taplo alarmı çalışıyor."
+
+      - name: taplo lint kapısı
+        run: taplo lint

@@ -1,0 +1,105 @@
+# Security Hardening — Ek denetimler
+#
+# Eksik denetimler:
+#   - cargo machete (kullanılmayan bağımlılıklar)
+#   - cargo mutants (mutation testing)
+#   - cargo-supply-chain (yayıncı görünürlüğü)
+#   - ThreadSanitizer (data race tespiti)
+#   - RUSTFLAGS overflow-checks doğrulaması
+#
+# Bu workflow haftalık çalışır (yoğun/yavaş denetimler).
+# PR'larda tetiklenmez — sadece schedule + workflow_dispatch.
+
+name: Security Hardening
+
+on:
+  schedule:
+    - cron: "30 5 * * 1"   # haftalık, Pazartesi 05:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  machete:
+    name: cargo machete (unused deps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo install cargo-machete
+        run: cargo install cargo-machete --locked
+      - name: cargo machete (root)
+        run: cargo machete --with-metadata || true
+      - name: cargo machete (budzero)
+        run: cd budzero && cargo machete --with-metadata; true
+
+  mutants:
+    name: cargo mutants (mutation testing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo install cargo-mutants
+        run: cargo install cargo-mutants --locked
+      - name: cargo mutants (bilgilendirici, 5 dk timeout)
+        run: cargo mutants --in-place --test-timeout 300 -- --lib || true
+
+  supply-chain:
+    name: cargo-supply-chain (publisher visibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo install cargo-supply-chain
+        run: cargo install cargo-supply-chain --locked
+      - name: cargo supply-chain publishers
+        run: cargo supply-chain publishers || true
+      - name: cargo supply-chain crates
+        run: cargo supply-chain crates || true
+
+  tsan:
+    name: ThreadSanitizer (data race detection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly for TSan)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: nightly
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: RUSTFLAGS -Zsanitizer=thread
+        run: |
+          export RUSTFLAGS="-Zsanitizer=thread"
+          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1 || true

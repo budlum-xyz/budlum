@@ -1,0 +1,81 @@
+# (supply-chain): haftalik bagimlilik gozetimi.
+# Github-actions: SHA-pinli action'larin guncellemelerini PR olarak acar.
+# Cargo: root + budzero + fuzz manifest'leri. docker: Dockerfile digest pinleri.
+#
+# Gruplama (2026-07-22,): minor+patch cargo güncellemeleri tek PR'da
+# Toplanır → PR backlog azalır (eski "7 açık dependabot PR" durumunu önler).
+# Major güncellemeler ayrı PR olarak kalır (dikkatli review ister — örn. bincode
+# 1→3 gibi breaking change).
+# Cooldown (zizmor: dependabot-cooldown): 7 gun minimum, supply-chain mitigasyon.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      # Minor+patch Rust dep'leri tek PR'da topla; major ayrı kalır.
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/budzero"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    groups:
+      rust-minor-patch:
+        update-types: ["minor", "patch"]
+    ignore:
+      # Hickory-proto 0.25 remains only in the explicit devnet `p2p-mdns`
+      # Feature graph. Production/default builds do not compile or construct the
+      # MDNS behaviour. Keep the advisory visible until upstream libp2p-mdns is
+      # Compatible with hickory >=0.26; unlike the former list, already-patched
+      # Lru/gossipsub/yamux dependencies are NOT hidden from Dependabot.
+      - dependency-name: "hickory-proto"
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Istanbul"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7

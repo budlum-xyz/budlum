@@ -1,0 +1,72 @@
+[network]
+profile = "mainnet"
+chain_id = 1
+# The genesis file must exist and its hash must match the launch record.
+# This checked-in genesis is an unlaunchable ceremony template. Freeze and record
+# the launch hash only after validator keys and tokenomics destinations are final.
+genesis_file = "./config/mainnet-genesis.json"
+
+[node]
+mode = "full"
+role = "validator"
+
+[storage]
+data_dir = "./data/mainnet/budlum.db"
+snapshot_dir = "./data/mainnet/snapshots"
+backup_dir = "./data/mainnet/backups"
+backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/mainnet-node-id.key"
+#  Ceremony template (2026-07-16)
+# These are ceremony-ready bootstrap peers. Replace with actual operator
+# peer IDs and IPs during MAINNET_GENESIS_CEREMONY.
+# IPs use RFC 5737 TEST-NET-3 documentation range.
+bootnodes = [
+  "/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWCeremonyBootstrap1BudlumMainnetNod0001",
+  "/ip4/203.0.113.11/tcp/4001/p2p/12D3KooWCeremonyBootstrap2BudlumMainnetNod0002",
+  "/ip4/203.0.113.12/tcp/4001/p2p/12D3KooWCeremonyBootstrap3BudlumMainnetNod0003"
+]
+# chain_config.rs MAINNET_DNS_SEEDS ile senkron: gercek TXT publish edilene
+# kadar "placeholder" marker'i bilincli (fail-closed guard aktif).
+dns_seeds = [
+  "_dnsaddr.placeholder-seed-1.mainnet.budlum.network",
+  "_dnsaddr.placeholder-seed-2.mainnet.budlum.network"
+]
+ceremony_status = "template_ready"  # flip to "frozen" after N-of-M ceremony
+max_peers = 100
+banned_peer_db = "./data/mainnet/banned-peers.json"
+mdns_enabled = false
+
+[rpc]
+public_listener = "0.0.0.0:8545"
+operator_listener = "127.0.0.1:8546"
+trusted_proxies = []
+enabled = true
+
+[metrics]
+listener = "0.0.0.0:9090"
+
+[validator]
+backend = "pkcs11"
+
+[validator.signer]
+backend = "pkcs11"
+
+# Add a deployment-specific PKCS#11 section outside source control.
+# Mainnet validators must expose Ed25519 plus BLS (`BUD_BLS_KEY`) and
+# Dilithium/PQ (`BUD_PQ_KEY`) material through the token; Ed25519-only HSM
+# backends fail closed at startup.
+# [validator.signer.pkcs11]
+# module_path = "/path/to/vendor-pkcs11.so"
+# slot_id = 0
+# token_pin_env = "BUDLUM_PKCS11_TOKEN_PIN"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false
+# F2 config-driven: VerifyMerkle gate (true = open via MainnetActivation::full(), false = closed)
+verify_merkle = true

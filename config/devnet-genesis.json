@@ -1,0 +1,25 @@
+{
+  "chain_id": 1337,
+  "allocations": [
+    [
+      "0101010101010101010101010101010101010101010101010101010101010101",
+      1000000000
+    ]
+  ],
+  "validators": [
+    "0202020202020202020202020202020202020202020202020202020202020202"
+  ],
+  "block_reward": 50,
+  "base_fee": 1,
+  "gas_schedule": {
+    "base_fee": 1,
+    "gas_per_byte": 1,
+    "gas_per_signature": 100,
+    "transfer_gas": 1000,
+    "stake_gas": 2000,
+    "vote_gas": 1500,
+    "contract_call_gas": 5000
+  },
+  "timestamp": 0,
+  "bud_tokenomics": null
+}

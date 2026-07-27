@@ -1,0 +1,165 @@
+name: Determinism
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  genesis-reproducibility:
+    # CI Genişletme Madde 1: Genesis reproducibility check.
+    # İki kez build, aynı genesis hash'i üretmeli.
+    name: Genesis Reproducibility (Madde 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Build (run 1)
+        run: cargo build --release 2>&1 | tail -5
+      - name: Genesis hash (run 1)
+        run: |
+          set -euo pipefail
+          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run1.txt
+          HASH1=$(grep "GENESIS_HASH=" /tmp/genesis_run1.txt | tail -1 | cut -d= -f2)
+          echo "Run 1 hash: ${HASH1}"
+          test -n "${HASH1}"
+          echo "HASH1=${HASH1}" >> "$GITHUB_ENV"
+      - name: Clean build cache
+        run: cargo clean 2>&1 | tail -3
+      - name: Build (run 2)
+        run: cargo build --release 2>&1 | tail -5
+      - name: Genesis hash (run 2)
+        run: |
+          set -euo pipefail
+          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run2.txt
+          HASH2=$(grep "GENESIS_HASH=" /tmp/genesis_run2.txt | tail -1 | cut -d= -f2)
+          echo "Run 2 hash: ${HASH2}"
+          test -n "${HASH2}"
+          echo "HASH2=${HASH2}" >> "$GITHUB_ENV"
+      - name: Compare hashes
+        run: |
+          set -euo pipefail
+          echo "Hash 1: ${HASH1}"
+          echo "Hash 2: ${HASH2}"
+          if [ "${HASH1}" != "${HASH2}" ]; then
+            echo "FAIL: Genesis hashes differ!"
+            exit 1
+          fi
+          echo "OK: Genesis hashes match."
+
+  cross-platform-determinism:
+    # CI Genişletme Madde 2: Cross-platform determinism matrix.
+    #
+    # Sertleştirme (2026-07-21):
+    #   * Matrise Windows eklendi (öncesi: yalnız Ubuntu + macOS — kullanıcı
+    #     Maddesi "Linux/macOS/Windows"u üçlü ister).
+    #   * Gerçek "cross" kapandı: eskiden her OS kendi testini koşup geçiyordu
+    #     Ama ÇIKTILAR karşılaştırılmıyordu → aynı isteğin farklı platformda
+    #     Farklı consensus sonucu üretmesi (ör. pointer-width, float, HashMap
+    #     Iteration sızıntısı) bu kapıdan kaçabilirdi. Artık her OS
+    #     `consensus_scenario_digest_cross_platform` testinin ürettiği
+    #     CONSENSUS_DIGEST değerini artefakt olarak yüklüyor ve
+    #     `consensus-digest-compare` job'u üç platformun digest'ini BYTE
+    #     EŞİTLİĞİNE tabi tutuyor. Sapmışsa FAIL (kullanıcı maddesi:
+    #     "consensus çıktısı birebir aynı mı").
+    name: Cross-Platform Digest (${{ matrix.os }}) (Madde 2)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+      - name: Determinism testleri (mevcut suite)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
+          N=$(grep -c "^test.*ok$" det-${{ matrix.os }}.txt || true)
+          echo "Determinism test count (${{ matrix.os }}): $N"
+      - name: Consensus digest üret
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release -- consensus_scenario_digest --nocapture 2>&1 | tee digest-${{ matrix.os }}.txt
+          grep -E "^CONSENSUS_DIGEST=[0-9a-f]{64}$" digest-${{ matrix.os }}.txt \
+            | tail -1 | cut -d= -f2 > digest-${{ matrix.os }}.hex
+          test -s digest-${{ matrix.os }}.hex
+          D=$(cat digest-${{ matrix.os }}.hex)
+          echo "CONSENSUS_DIGEST (${{ matrix.os }}): $D"
+          # Sahte-yeşil kilidi: digest 64 hex karakter olmalı.
+          test "${#D}" -eq 64
+      - name: Digest artefakt yükle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: consensus-digest-${{ matrix.os }}
+          path: digest-${{ matrix.os }}.hex
+          if-no-files-found: error
+          retention-days: 30
+
+  consensus-digest-compare:
+    # Madde 2 tamamlayıcısı: üç platform digest'i byte-eşit olmalı.
+    name: Consensus Digest Compare (Linux = macOS = Windows)
+    needs: cross-platform-determinism
+    runs-on: ubuntu-latest
+    steps:
+      - name: Digest artefaktlarını topla
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: consensus-digest-*
+          merge-multiple: true
+          path: digests
+      - name: Byte-eşitlik gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l digests/
+          U="digests/digest-ubuntu-latest.hex"
+          M="digests/digest-macos-latest.hex"
+          W="digests/digest-windows-latest.hex"
+          for f in "$U" "$M" "$W"; do
+            if [ ! -s "$f" ]; then
+              echo "FAIL: eksik digest artefaktı: $f"
+              exit 1
+            fi
+          done
+          DU=$(cat "$U"); DM=$(cat "$M"); DW=$(cat "$W")
+          echo "ubuntu:  $DU"
+          echo "macos:   $DM"
+          echo "windows: $DW"
+          if [ "$DU" != "$DM" ] || [ "$DU" != "$DW" ]; then
+            echo "FAIL: platformlar arası consensus digest'i farklı!"
+            echo "Bu, Linux/macOS/Windows arasında consensus çıktısı ayrışması"
+            echo "demektir (consensus-critical nondeterminizm)."
+            exit 1
+          fi
+          echo "OK: üç platformda consensus çıktısı BYTE-EŞİT."

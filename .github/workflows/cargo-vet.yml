@@ -1,0 +1,88 @@
+# Cargo-vet — tedarik zinciri güven denetimi (ratchet kapısı)
+#
+# NEDEN AYRI BİR KAPI: cargo-audit/cargo-deny/OSV "bu bağımlılıkta BİLİNEN bir
+# Açık var mı?" sorusunu yanıtlar — hepsi bir advisory yayınlanmasını bekler.
+# Cargo-vet farklı bir soruyu sorar: "bu kodu hiç kimse okudu mu?" Kaynağı
+# Güvenilir bir denetim kaydına bağlar (Mozilla, Google, Bytecode Alliance,
+# ISRG, Embark, Zcash import'ları). Bir bağımlılık ele geçirilip zararlı sürüm
+# Yayınlandığında advisory günler/aylar sonra çıkar; denetim kaydının yokluğu
+# Ise ilk dakikadan görünür. Bir L1 zincirin kripto/FFI yüzeyi için bu boşluk
+# Kapatılmalı.
+#
+# ÖNEMLİ — bu "mevcut aracı CI'a bağlamak" değil, ARACI İLK KEZ ÇALIŞTIRMAK:
+# Supply-chain/config.toml depoda duruyordu ama cargo-vet şemasında olmayan
+# Uydurma anahtarlarla yazılmıştı (`audit-compatible-output`,
+# `[default-criteria] safe-to-run`) ve araç parse hatasıyla düşüyordu. Hiçbir
+# Workflow da onu çağırmıyordu. Dosyanın varlığı denetim yapıldığı izlenimi
+# Veriyordu; gerçekte tek bir bağımlılık bile denetlenmemişti.
+#
+# KAPI POLİTİKASI — ratchet, tam-yeşil değil: ilk gerçek ölçüm 437 denetimsiz
+# Bağımlılık (~6.7M satır backlog). Gün-1 `cargo vet check` zorunlu kılınsaydı
+# Kapı kalıcı kırmızı kalır ve ilk sıkışmada gevşetilirdi. Repo'nun diğer kapılarında
+# Zaten kullandığı desen uygulanıyor: sayı ARTAMAZ, düşmesi serbesttir.
+# Bugünden sonra denetimsiz yeni bağımlılık eklemek CI'ı kırar.
+
+name: Cargo Vet
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * 2" # haftalık: import edilen denetim kaynakları güncellenir
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-vet-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet:
+    name: Cargo Vet (supply-chain trust, ratchet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: cargo-vet kur (--locked, sürüm sabit)
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.10.2 cargo-vet
+          cargo vet --version
+
+      # Vacuous-gate koruması: ratchet sayacı gerçekten cargo-vet çıktısını mı
+      # Okuyor, yoksa her koşuda sessizce 0 mı dönüyor? Kanarya sentetik
+      # Çıktılarla parse'ı doğrular; bozuksa job burada kırılır.
+      - name: Kanarya — ratchet sayacının çalıştığının kanıtı
+        run: bash ./scripts/check-cargo-vet.sh --self-test
+
+      - name: Ratchet kapısı (denetimsiz bağımlılık sayısı artamaz)
+        run: bash ./scripts/check-cargo-vet.sh
+
+      # Bilgilendirici: denetim borcunu hangi crate'lerin taşıdığını PR
+      # Özetinde görünür kılar, böylece borç eritme hedefli yapılabilir.
+      - name: Denetim borcu özeti (bilgilendirici)
+        if: always()
+        run: |
+          {
+            echo "### cargo-vet denetim borcu"
+            echo '```'
+            cargo vet suggest 2>/dev/null | tail -40 || echo "(suggest çalıştırılamadı)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

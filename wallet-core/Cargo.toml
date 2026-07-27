@@ -1,0 +1,49 @@
+[package]
+name = "budlum-wallet-core"
+version = "0.1.0"
+edition = "2021"
+description = "Budlum wallet core — BIP39 mnemonic, SLIP-0010 Ed25519 key derivation, transaction signing"
+license = "Apache-2.0"
+
+[lib]
+name = "budlum_wallet_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ed25519-dalek = "2.2"
+sha3 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+
+# BIP39 mnemonic generation (minimal in-tree impl — no external dep for entropy→mnemonic)
+# SLIP-0010: Ed25519 HD derivation (hardened-only per RFC 8032)
+
+[package.metadata.cargo-machete]
+# wasm-bindgen `wasm` feature'i ile aktiflesen opsiyonel bir bagimliliktir
+# (asagidaki [features] bolumune bakin). cargo-machete feature-gated opsiyonel
+# dep'leri varsayilan derlemede goremedigi icin "kullanilmiyor" sanir; bu bir
+# yanlis pozitiftir, bagimlilik `--features wasm` ile derlendiginde kullanilir.
+ignored = ["wasm-bindgen"]
+
+[features]
+default = []
+# Production wallet generation: enables real OS CSPRNG (getrandom) for entropy.
+# WITHOUT this feature, Wallet::generate fails-closed to prevent
+# deterministic/placeholder entropy from reaching production.
+production = ["dep:getrandom"]
+# UniFFI bindings (mobile: Kotlin/Swift)
+uniffi = []
+# WASM bindings (browser)
+wasm = ["wasm-bindgen"]
+
+[dependencies.getrandom]
+version = "0.2"
+optional = true
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

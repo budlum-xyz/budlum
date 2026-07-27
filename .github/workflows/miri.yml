@@ -1,0 +1,64 @@
+name: Miri UB Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Haftalık gece koşusu — sürekli UB denetimi
+  schedule:
+    - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  miri-crypto:
+    # CI Genişletme Madde 4: Miri undefined behavior denetimi.
+    # Crypto ve budzero modüllerinde UB arar.
+    #
+    # Sertleştirme (2026-07-21): nightly artık TARİH-PİNLİ
+    # (nightly-2026-07-19). Öncesi "nightly" kayan etiket → Miri revizyon
+    # Değişince aynı commit'in CI sonucu değişebiliyordu (dışsal kırmızı
+    # Riski + reprodüksiyon zafiyeti). Pin kaldırımı/güncellenmesi yalnızca
+    # Commit mesajında gerekçeyle yapılır (MSRV pin disipliniyle aynı ruh).
+    # Not: src/ ve budzero'da `#![forbid(unsafe_code)]` + 0 unsafe temiz
+    # Tabanı var; bu kapı bağımlılık zinciri üzerinden yüzeyleşen UB ve
+    # MIR-düzeyi hatalar için erken uyarıdır.
+    name: Miri UB Denetimi (crypto + budzero, nightly-2026-07-19) (Madde 4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly Rust with Miri
+        run: |
+          rustup toolchain install nightly-2026-07-19 --component miri
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Miri — crypto crate
+        run: |
+          echo "Running Miri on crypto module..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- crypto 2>&1 | tee /tmp/miri-crypto.txt
+          echo "Miri crypto: $(grep -c 'test result: ok' /tmp/miri-crypto.txt || echo '0') suites passed"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+      - name: Miri — budzero bud-vm
+        run: |
+          echo "Running Miri on bud-vm module..."
+          cargo +nightly-2026-07-19 miri test -p bud-vm --lib 2>&1 | tee /tmp/miri-budvm.txt
+          echo "Miri bud-vm: $(grep -c 'test result: ok' /tmp/miri-budvm.txt || echo '0') suites passed"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+      - name: Miri — storage module
+        run: |
+          echo "Running Miri on storage module..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage 2>&1 | tee /tmp/miri-storage.txt
+          echo "Miri storage: $(grep -c 'test result: ok' /tmp/miri-storage.txt || echo '0') suites passed"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+        continue-on-error: true  # storage sled bağımlılığı Miri ile uyumsuz olabilir

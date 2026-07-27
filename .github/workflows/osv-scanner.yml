@@ -1,0 +1,91 @@
+# OSV-Scanner — RustSec dışı zafiyet kaynaklarını kapatan tarama
+#
+# NEDEN cargo-audit/cargo-deny YETMİYOR: her ikisi de yalnız RustSec advisory
+# Veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
+# RustSec'te karşılığı olmayan kayıtları da görür.
+#
+# Bu somut olarak kanıtlandı: bu workflow eklenirken yapılan ilk tarama
+# CVE-2026-32314 / GHSA-vxx9-2994-q338'i yakaladı — yamux'ta kimlik doğrulaması
+# GEREKTİRMEYEN, uzaktan tetiklenebilir panic (DoS), CVSS 8.7. Aynı ağaçta
+# `cargo audit` "0 vulnerabilities found" diyordu, çünkü bu kaydın RustSec
+# Karşılığı yok (rustsec/advisory-db/crates/yamux → 404). Bir L1 node'un P2P
+# Multiplexer'ında bu, cargo-audit'in yapısal olarak göremeyeceği bir sınıf.
+#
+# Kapı politikası: bulgu = FAIL (`continue-on-error` YOK). İstisnalar
+# Osv-scanner.toml ve budzero/osv-scanner.toml içinde, her biri kodda neden
+# ERİŞİLEMEZ olduğunun kanıtıyla (VEX mantığı) yazılır. Erişilebilir bir bulgu
+# Ignore edilmez, bağımlılık yükseltilir.
+#
+# Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
+
+name: OSV Scanner
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Haftalık: yeni advisory kod değişmeden de yayınlanabilir.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osv-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  osv-scan:
+    name: OSV Scanner (OSV.dev = RustSec + GHSA + NVD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: osv-scanner v2.4.0 kur (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/osv-scanner \
+            https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64
+          echo "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0  /tmp/osv-scanner" | sha256sum -c -
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      # Vacuous-gate koruması: "No issues found" hem temiz bir ağacı hem de hiç
+      # Çalışmamış/ağa ulaşamamış bir taramayı gösterebilir. Kanarya, bilinen
+      # Savunmasız bir sürümü içeren sentetik bir lockfile üretip tarayıcının
+      # Onu YAKALADIĞINI kanıtlar; yakalayamazsa kapı güvenilmezdir.
+      - name: Kanarya — OSV alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/osv-canary
+          cat > /tmp/osv-canary/Cargo.lock <<'CANARY'
+          version = 3
+
+          [[package]]
+          name = "canary-app"
+          version = "0.1.0"
+          dependencies = ["yamux"]
+
+          [[package]]
+          name = "yamux"
+          version = "0.12.1"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          CANARY
+          if osv-scanner scan source --lockfile=/tmp/osv-canary/Cargo.lock; then
+            echo "HATA: OSV kanaryayı (yamux 0.12.1 / GHSA-vxx9-2994-q338) yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → OSV alarmı çalışıyor."
+
+      - name: Tarama — root + budzero lockfile (bulgu = fail)
+        run: |
+          set -euo pipefail
+          osv-scanner scan source \
+            --lockfile=Cargo.lock \
+            --lockfile=budzero/Cargo.lock

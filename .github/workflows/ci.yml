@@ -1,0 +1,880 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  budlum:
+    name: Budlum Core
+    runs-on: ubuntu-latest
+    # Rozet self-commit'i (Q5, loop guard'lı) yalnız bu job'da write ister;
+    # Diğer tüm job'lar global minimalde (contents: read) kalır.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0  # zizmor: ignore[artipacked] rozet botu self-commit icin GITHUB_TOKEN kasitli
+        with:
+          persist-credentials: true
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+          components: clippy, rustfmt
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy pedantic/nursery ratchet (izleme modu)
+        # Uyarı gorunurlugu + sayi-artisina karsi ratchet (baseline 191,
+        # Kanit .github/clippy-extra-baseline.txt). Sifira indirme kademeli/azimli.
+        run: |
+          set -euo pipefail
+          bash ./scripts/check-clippy-extra.sh --self-test
+          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
+          bash ./scripts/check-clippy-extra.sh /tmp/clippy-extra.json
+      - name: Feature matrix — pq-ml-dsa solo ()
+        run: |
+          set -euo pipefail
+          cargo check --no-default-features --features pq-ml-dsa
+          cargo clippy --no-default-features --features pq-ml-dsa --all-targets -- -D warnings
+      - name: Feature canary — --all-features REDDEDILMELI ()
+        run: |
+          set -euo pipefail
+          if cargo check --all-features 2>/dev/null; then
+            echo "HATA: --all-features derlendi -> compile_error guard yok (vacuous gate!)"
+            exit 1
+          fi
+          echo "Kanarya OK: --all-features beklendigi gibi compile_error ile rededildi (PQ backend'ler mutually exclusive)."
+      - name: Test
+        # Pipefail zorunlu: tee tek başına exit 0 döner; aksi halde test fail
+        # Core job'ı sahte-yeşil yapar (kanıt: d815561 Test=success, 1 fail gizli;
+        # Coverage nextest aynı fail ile kırmızı — 2026-07-19).
+        run: |
+          set -euo pipefail
+          cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: cargo doc (Madde 6 — public API dokümantasyon)
+        run: |
+          set -euo pipefail
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features pq-dilithium 2>&1 | tee /tmp/doc.log
+          echo "cargo doc: warnings as errors — passed"
+      - name: Test rozeti tazeleme — main push + sayi degisimi (/Q5)
+        # Loop guard ×3 + KIRMIZI KORUMASI: success AÇIK zorunlu — step-level `if:`
+        # Default success kosulunu EZER (CI kanit: run a601dcf — ea27afd'nin KIRMIzI
+        # Test koşusundan 519 rozeti yazdı; step-level if success ezmeseydi atlanırdı).
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          BADGE_PUSH_TOKEN: ${{ secrets.BADGE_PUSH_TOKEN }}
+          # Fallback kanali icin gerekli: job zaten `contents: write` ile kosuyor.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Çift koruma: logda failure izi varsa rozet yazma (success pratikte engeller).
+          if grep -qE '[1-9][0-9]* failed' /tmp/libtests.log; then
+            echo "FAIL: test koşusunda failure varken rozet güncellenmez"
+            exit 1
+          fi
+          N=$(grep -oE '[0-9]+ passed' /tmp/libtests.log | tail -1 | grep -oE '^[0-9]+')
+          [ -n "$N" ] || { echo "FAIL: test sayisi parse edilemedi (kapi guvenilmez)"; exit 1; }
+          CUR=$(grep -oE 'tests-[0-9]+%20lib' README.md | head -1 || true)
+          echo "rozet: $CUR -> tests-${N}%20lib"
+          if [ "$CUR" = "tests-${N}%20lib" ]; then
+            echo "ROZET GUNCEL — push yok (loop guard calisti)"
+            exit 0
+          fi
+          sed -i -E "s/tests-[0-9]+%20lib/tests-${N}%20lib/" README.md
+          if ! git diff --quiet README.md; then
+            git config user.name "budlum-ci[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "chore(badge): tests rozeti -> ${N} lib (CI kanitli, ${GITHUB_SHA:0:7})"
+            # B-RACE fix (2026-07-17): koşu başladıktan sonra main'e inen
+            # Herhangi bir commit push'u non-fast-forward reddettiriyor ve job
+            # SAHTE-kırmızı oluyordu (kanıt: aa9cfcd — 546/546 yeşil test, yalnız
+            # Rozet push reddi). Bounded retry: her denemede yeni başa reset +
+            # Rozeti yeniden hesapla. Rozet sed'i idempotent: araya giren başka
+            # Bir badge commit'i aynı sayıyı yazdıysa diff boş kalır ve push
+            # "Everything up-to-date" ile temiz geçer.
+            PUSH_OK=0
+            # Branch-protection day-1 entegrasyonu (2026-07-18): main'e 15/15
+            # Zorunlu kontrol gelince GITHUB_TOKEN bypass edemiyor (kanit: rozet
+            # Commit 801d246 push reddi). Rozet yalniz CI-kanitli sayiyi yazar
+            # (guvenilir), bu yuzden ona push icin admin-PAT secret'i verildi.
+            PUSH_URL=""
+            if [ -n "${BADGE_PUSH_TOKEN:-}" ]; then
+              PUSH_URL="https://x-access-token:${BADGE_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+              echo "rozet push: admin-PAT kanali (branch-protection bypass)"
+            else
+              echo "UYARI: BADGE_PUSH_TOKEN yok — GITHUB_TOKEN denecek (protected main'de red beklenir)"
+            fi
+            # Fallback kanali: bu job zaten `contents: write` ile calisiyor, ve
+            # Main'de zorunlu status check yok / required_approving_review_count=0.
+            # BADGE_PUSH_TOKEN gecersizse (suresi dolmus PAT ->
+            # "Invalid username or token") GITHUB_TOKEN ile ikinci bir deneme
+            # Yapilir; boylece rozet tek bir secret'in omrune bagli kalmaz.
+            FALLBACK_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            for attempt in 1 2 3; do
+              # Extraheader gotcha: checkout persist-credentials GITHUB_TOKEN'i
+              # Http.extraheader ile zorlar ve URL-embedded PAT'i ezer (kanit:
+              # 00f618a badge run — admin-PAT kanali acikken bile 'hook declined').
+              # Tek komutluk derogasyon: extraheader'i temizle, URL PAT'i kullan.
+              set +e
+              if [ -n "$PUSH_URL" ]; then
+                PUSH_ERR=$(git -c "http.https://github.com/.extraheader=" push "$PUSH_URL" HEAD:main 2>&1)
+                PUSH_RC=$?
+                if [ "$PUSH_RC" != "0" ]; then
+                  echo "PAT kanali basarisiz (rc=$PUSH_RC), GITHUB_TOKEN fallback deneniyor"
+                  PUSH_ERR2=$(git -c "http.https://github.com/.extraheader=" push "$FALLBACK_URL" HEAD:main 2>&1)
+                  PUSH_RC2=$?
+                  if [ "$PUSH_RC2" = "0" ]; then
+                    PUSH_ERR="$PUSH_ERR2"; PUSH_RC=0
+                  else
+                    PUSH_ERR="$PUSH_ERR"$'\n'"[fallback] $PUSH_ERR2"
+                  fi
+                fi
+              else
+                PUSH_ERR=$(git -c "http.https://github.com/.extraheader=" push "$FALLBACK_URL" HEAD:main 2>&1)
+                PUSH_RC=$?
+              fi
+              set -e
+              if [ "$PUSH_RC" = "0" ]; then
+                PUSH_OK=1
+                echo "rozet push'landi: $N (deneme $attempt)"
+                break
+              fi
+              echo "push reddedildi (deneme $attempt, rc=$PUSH_RC):"
+              echo "$PUSH_ERR" | tail -20
+              echo "— yeni basta yeniden hesaplanacak"
+              git fetch origin main
+              git reset --hard origin/main
+              sed -i -E "s/tests-[0-9]+%20lib/tests-${N}%20lib/" README.md
+              if ! git diff --quiet README.md; then
+                git add README.md
+                git commit -m "chore(badge): tests rozeti -> ${N} lib (CI kanitli, ${GITHUB_SHA:0:7}, race-taze)"
+              fi
+              sleep 2
+            done
+            # False-red fix (2026-07-20): rozet KOZMETİK'tir.
+            # BADGE_PUSH_TOKEN eksik/kesintili + protected main → push red gelmesi
+            # Tüm Budlum Core job'unu yanıltıcı-kırmızı yapıyordu (kanıt: 21ea24e
+            # Step 13 fail; tekrar 13:18). Yukarıdaki test-failure gardı
+            # ('grep failed → exit 1') ve parse-failure gardı AYNEN korunur;
+            # Yalnızca rozet-PUSH başarısızlığı artık job'u kırmızı yapmaz. Rozet
+            # BADGE_PUSH_TOKEN mevcutken otomatik pushlanmaya devam eder.
+            if [ "$PUSH_OK" = "1" ]; then
+              echo "rozet push OK"
+            else
+              # Gorunurluk (2026-07-26): soft-fail SESSIZ kalinca rozet aylarca
+              # 1423'te dondu ve kimse fark etmedi. Job hala kirmizi yapilmaz,
+              # Ama Actions ozetinde ve annotation olarak acikca raporlanir.
+              echo "::warning title=Test rozeti guncellenemedi::Rozet ${N} olmali ama push 3/3 denemede reddedildi. BADGE_PUSH_TOKEN gecersiz/suresi dolmus olabilir. README elle guncellenmeli veya secret yenilenmeli."
+              {
+                echo "### :warning: Test rozeti guncellenemedi"
+                echo ""
+                echo "- Hesaplanan test sayisi: **${N}**"
+                echo "- README'deki mevcut deger: \`${CUR}\`"
+                echo "- Push 3/3 denemede reddedildi (PAT + GITHUB_TOKEN fallback)."
+                echo "- Muhtemel sebep: \`BADGE_PUSH_TOKEN\` gecersiz/suresi dolmus."
+                echo ""
+                echo "Son push hatasi:"
+                echo '```'
+                echo "$PUSH_ERR" | tail -5
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "UYARI (soft-fail): rozet 3 denemede pushlanamadi. Cekirdek testler gecti; rozet kozmetiktir, is kirmizi yapilmaz."
+              exit 0
+            fi
+          fi
+
+  budzero:
+    name: BudZero / BudZKVM
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: budzero
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        # NOT: master 2026-07-16+ `toolchain` input'unu ZORUNLU kiliyor
+        # (CI kanit: job 87741629986 — "'toolchain' is a required input").
+        with:
+          toolchain: "1.94.0"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: budzero
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  bud-e2e-invariants:
+    # 9 modül-bağımsızlık invariant'ı isimlendirilmiş ZORUNLU
+    # Job. İsim kanaryası: bir invariant silinir/yeniden adlandırılırsa kapı
+    # `cargo test` yeşil kalsa bile FAIL olur (vacuous-gate koruması, kanaryalı).
+    name: B.U.D. E2E Invariants (9/9 isim-kilitli) ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Kapı kanaryası (vacuous değil kanıtı)
+        run: bash ./scripts/check-bud-e2e.sh --self-test
+      - name: bud_e2e — 9 invariant + 3 e2e (isim kanaryalı)
+        run: |
+          cargo test --lib bud_e2e 2>&1 | tee /tmp/bud-e2e.txt
+          bash ./scripts/check-bud-e2e.sh /tmp/bud-e2e.txt
+
+  economy-invariants:
+    # : EIP-1559 + reward-pool + committed-supply denominator locks.
+    # Name canary prevents a vacuous green if tests are renamed/deleted.
+    name: Economy Invariants ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Economy invariant gate canary
+        run: bash ./scripts/check-economy-invariants.sh --self-test
+      - name:  named invariant tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/economy-invariants.txt
+          bash ./scripts/check-economy-invariants.sh /tmp/economy-invariants.txt
+
+  fork-choice-gate:
+    # : per-domain fork-choice/lifecycle named tests.
+    # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
+    name: Fork-Choice Invariants ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Fork-choice gate canary
+        run: bash ./scripts/check-fork-choice-gate.sh --self-test
+      - name:  fork-choice tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/fork-choice-gate.txt
+          bash ./scripts/check-fork-choice-gate.sh /tmp/fork-choice-gate.txt
+
+  storage-provider-gate:
+    # : StorageProvider trait + mock implementation named tests.
+    name: StorageProvider Gate ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: StorageProvider gate canary
+        run: bash ./scripts/check-storage-provider-gate.sh --self-test
+      - name:  StorageProvider tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/storage-provider-gate.txt
+          bash ./scripts/check-storage-provider-gate.sh /tmp/storage-provider-gate.txt
+
+  node-classification-gate:
+    # : full/archive node classification + pruning policy named tests.
+    # Name canary prevents a vacuous green if classification tests are renamed/deleted.
+    name: Node Classification ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Node classification gate canary
+        run: bash ./scripts/check-node-classification-gate.sh --self-test
+      - name:  node classification tests
+        run: |
+          set -euo pipefail
+          cargo test --lib node 2>&1 | tee /tmp/node-classification-gate.txt
+          bash ./scripts/check-node-classification-gate.sh /tmp/node-classification-gate.txt
+
+  network-hardening-gate:
+    # : network hardening named tests.
+    # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
+    name: Network Hardening ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Network hardening gate canary
+        run: bash ./scripts/check-network-hardening-gate.sh --self-test
+      - name:  network hardening tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/network-hardening-gate.txt
+          cargo test --lib peer_rate_limit_security_profile 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          cargo test --lib h5_ 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          bash ./scripts/check-network-hardening-gate.sh /tmp/network-hardening-gate.txt
+
+
+
+
+  domain-tag-gate:
+    # The cryptographic domain-separation inventory must match the source tree.
+    name: Domain Tag Inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gate self-test (canary)
+        run: bash ./scripts/check-domain-tags.sh --self-test
+      - name: Inventory matches code
+        run: bash ./scripts/check-domain-tags.sh .
+
+  poa-compliance-gate:
+    # : MASAK/AML hooks are isolated to PoA domains only.
+    name: PoA Compliance Isolation ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PoA compliance gate self-test
+        run: bash ./scripts/check-poa-compliance-gate.sh --self-test
+      - name:  PoA compliance tests
+        run: |
+          set -euo pipefail
+          cargo test --lib poa_compliance 2>&1 | tee /tmp/poa-compliance-gate.txt
+          bash ./scripts/check-poa-compliance-gate.sh /tmp/poa-compliance-gate.txt
+
+  governance-invariants:
+    # : minimal on-chain governance parameter whitelist + activation timelock.
+    name: Governance Invariants ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Governance invariant gate self-test
+        run: bash ./scripts/check-governance-invariants.sh --self-test
+      - name:  governance invariant tests
+        run: |
+          set -euo pipefail
+          cargo test --lib governance 2>&1 | tee /tmp/governance-invariants-gate.txt
+          bash ./scripts/check-governance-invariants.sh /tmp/governance-invariants-gate.txt
+
+  wallet-core-gate:
+    # : wallet-core multisig/social recovery primitives.
+    name: Wallet Core ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: wallet-core
+      - name: Wallet Core gate self-test
+        run: bash ./scripts/check-wallet-core-gate.sh --self-test
+      - name: wallet-core tests
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path wallet-core/Cargo.toml 2>&1 | tee /tmp/wallet-core-gate.txt
+          cargo test --manifest-path wallet-core/Cargo.toml --features uniffi --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo test --manifest-path wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          bash ./scripts/check-wallet-core-gate.sh /tmp/wallet-core-gate.txt
+
+  # ============================  / Bolum 4 (BNS gate) ============================
+  bns-gate:
+    #  Bolum 4 modul-ayrimi: BNS'in kendi CI gate'i (B.U.D. kapi deseni).
+    # Isim kanaryasi: bir test silinir/yeniden adlandirilirsa kapi FAIL olur.
+    name: BNS Name Registry (8/8 isim-kilitli) ()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Kapi kanaryasi (vacuous degil kaniti)
+        run: bash ./scripts/check-bns-gate.sh --self-test
+      - name: bns — 8 test (isim kanaryali)
+        run: |
+          cargo test --lib bns 2>&1 | tee /tmp/bns-gate.txt
+          bash ./scripts/check-bns-gate.sh /tmp/bns-gate.txt
+
+  # ============================  /  (P0) ============================
+  # Strict mod: aşağıdaki tüm job'lar ilk günden FAIL kapısıdır (ruhu).
+  # Kapıların "boş" (vacuous) olmadığı kanarya testleriyle her koşuda kanıtlanır.
+
+  poa-isolation:
+    # CI Genişletme Madde 9: PoA/Permissionless izolasyon test seti.
+    # 5 farklı sızma senaryosu + 2 ek invariant testi.
+    name: PoA Isolation (7/7 sızma-kilitli) (CI Madde 9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PoA izolasyon testleri (7 test, 5 sızma senaryosu)
+        run: |
+          cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
+          N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
+          echo "PoA izolasyon test sayısı: $N"
+          if [ "$N" -lt 7 ]; then
+            echo "FAIL: PoA izolasyon test sayısı 7'den az ($N)"
+            exit 1
+          fi
+
+  dependency-audit:
+    # : cargo audit + SBOM üretimi + SBOM artifact.
+    name: Dependency Audit + SBOM ()
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo audit (CVE = fail)
+        run: bash ./scripts/audit-deps.sh
+      - name: SBOM üret (CycloneDX)
+        run: bash ./scripts/generate-sbom.sh
+      - name: SBOM artifact yükle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90
+
+  cargo-deny:
+    # : root ve budzero grafikleri ayrı matrix adımlarında denetlenir.
+    name: Cargo Deny (${{ matrix.name }}) ()
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: root, manifest: "./Cargo.toml" }
+          - { name: budzero, manifest: "budzero/Cargo.toml" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo deny check (advisories, bans, licenses, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          command: check
+
+  fuzz-quick:
+    #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
+    # Uzun koşular fuzz-nightly.yml (schedule, 4h/target, corpus cache) işler.
+    # Quick: 60s/target (10 target × 60s ≈ 10dk + build; timeout-minutes 60).
+    name: Fuzz Quick (60s × 10 target) ()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly — cargo-fuzz gereksinimi)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: nightly
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - name: Install cargo-fuzz
+        run: cargo +nightly install --locked cargo-fuzz
+      - name: Her target 90 saniye fuzz
+        # Cargo-fuzz, fuzz/Cargo.toml'u MEVCUT crate köküne göre çözer;
+        # Repo kökünden çalıştırılmalı (fuzz/ altından çağrı = fuzz/fuzz hatası).
+        run: |
+          set -euo pipefail
+          targets=(
+            block_deserialize
+            consensus_validate
+            fuzz_blockchain_serialize
+            snapshot_deserialize
+            transaction_deserialize
+            consensus_state_transition
+            reputation
+            relayer_escrow
+            zk_verifier
+          )
+          # Note: evm_rlp_decode + evm_mpt_verify remain nightly/manual (F10.1);
+          # Quick gate covers deserialize +  state/relayer/zk.
+          for t in "${targets[@]}"; do
+            echo "=== fuzz-quick: $t (60s) ==="
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
+          done
+          echo "Tüm fuzz target'ları temiz."
+      - name: Crash artifact (varsa)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-quick-crashes-${{ github.sha }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  secret-scan:
+    # : TAM git geçmişinde secret taraması (fetch-depth: 0).
+    # Gitleaks OSS binary'yi kullanıyoruz: resmi GitHub Action, organizasyon
+    # Repolarında GITLEAKS_LICENSE (dış kayıt) ister; binary aynı motoru
+    # Lisanssız çalıştırır. Sürüm + sha256 pinlidir. Resmi action'a geçiş,
+    # Lisans anahtarı temin edildiğinde değerlendirilebilir (güvenlik çıktısı
+    # Birebir aynıdır).
+    name: Secret Scan (gitleaks, tam geçmiş) ()
+    runs-on: ubuntu-latest
+    # Security-events: write — gitleaks bulgularinin Security sekmesine SARIF
+    # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
+    # Yukseltme yalniz bu job'a verilir.
+    permissions:
+      contents: read
+      security-events: write
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: gitleaks v8.30.1 kur (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Kanarya — gitleaks alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          # DİKKAT: Sahte token asla tek parça olarak bu dosyaya yazılmaz;
+          # Parçalar çalışma zamanında birleştirilir. Aksi halde repo'nun
+          # Kendi geçmiş taraması bu kalıbı sızıntı sanıp FAIL eder.
+          PFX="gh""p_"
+          S1="xK9mQ2vR7pL4nT8w"
+          S2="Y3zB6cF1hJ5sD0gE42uI"
+          mkdir -p /tmp/gitleaks-canary
+          cd /tmp/gitleaks-canary
+          git init -q .
+          printf 'example_key = "%s%s%s"\n' "$PFX" "$S1" "$S2" > canary.txt
+          git add .
+          git -c user.email=ci@budlum.xyz -c user.name=ci commit -qm canary
+          if gitleaks detect --source . --redact --no-banner; then
+            echo "HATA: gitleaks kanaryayı yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → gitleaks alarmı çalışıyor."
+      # Iki adimli: once SARIF uret (--exit-code 0 -> bulgu olsa da adim
+      # Dusmez), sonra Security sekmesine yukle, en son kapiyi calistir.
+      # Tek adimda hem rapor hem fail istenirse bulgu bulundugunda adim orada
+      # Olur ve upload hic calismaz; yani gorulmesi en kritik olan bulgular
+      # Security sekmesine hic dusmez.
+      - name: Tam geçmiş taraması — SARIF üret (raporlama, kapı değil)
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml --redact \
+            --report-format sarif --report-path gitleaks.sarif --exit-code 0
+      - name: gitleaks SARIF yükle (Security sekmesi)
+        if: always()
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+      - name: Tam geçmiş taraması (bulgu = fail)
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
+
+  timing-safe:
+    # : RPC/crypto'da ham-eşitlik statik taraması + dudect-tarzı
+    # Istatistiksel zamanlama regresyon testi (cargo bench).
+    name: Timing-Safe Regression ()
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Statik tarama + kanarya
+        run: |
+          bash ./scripts/check-timing-safe.sh
+          bash ./scripts/check-timing-safe.sh --self-test
+      - name: Dudect-tarzı istatistiksel zamanlama testi
+        run: cargo bench --bench timing_safe
+
+  docker-security:
+    # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
+    # Hadolint binary surum+sha256 pinli (gitleaks deseni). DL3008 (apt surum
+    # Pinleme) warning seviyesinde birakilir: bookworm apt churn'une karsi
+    # Bilincli kalibrasyon — failure-threshold: error ile yalniz error+ FAIL.
+    name: Docker Security (trivy + hadolint) ()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Security-events: write — Trivy bulgularinin Security sekmesine SARIF
+    # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
+    # Yukseltme yalniz bu job'a verilir.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: hadolint v2.14.0 kur (surum + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  /tmp/hadolint" | sha256sum -c -
+          sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
+          hadolint --version
+      - name: Dockerfile lint (failure-threshold=error)
+        run: hadolint --failure-threshold error Dockerfile
+      # Iki adimli: once SARIF uret (exit-code 0 -> adim job'i kirmaz), sonra
+      # Security sekmesine yukle, en son kapiyi calistir. Tek adimda hem SARIF
+      # Hem exit-code 1 verilirse bulgu bulundugunda adim orada olur ve upload
+      # Hic calismaz; bulgular Security sekmesine dusmez. Bu sirayla bulgu
+      # Gorunur olur VE job yine kirmiziya doner.
+      - name: Trivy fs taramasi — SARIF uret (raporlama, kapi degil)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: "0"
+          ignore-unfixed: true
+      - name: Trivy SARIF yukle (Security sekmesi)
+        if: always()
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Trivy fs kapisi (secret + misconfig; CRITICAL/HIGH = fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  coverage:
+    # : nextest + llvm-cov, ratchet kapisi (Q-7b1(a)).
+    # Basline kaniti 2026-07-17: lines 64.15% (14493/22594), 531/531 PASS.
+    # Araclar surum+sha256 pinli (nextest resmi .sha256 asset ile birebir dogrulanmis).
+    name: Coverage (nextest + llvm-cov, ratchet) ()
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+          components: llvm-tools-preview
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: cargo-llvm-cov v0.8.7 + nextest 0.9.140 kur (sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/clcov.tar.gz \
+            https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
+          echo "9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168  /tmp/clcov.tar.gz" | sha256sum -c -
+          cd /tmp
+          curl -sSfLO https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
+          curl -sSfLO https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.sha256
+          sha256sum -c cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.sha256
+          cd -
+          mkdir -p ~/.cargo/bin
+          tar -xzf /tmp/clcov.tar.gz -C ~/.cargo/bin/
+          tar -xzf /tmp/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz -C ~/.cargo/bin/
+          cargo llvm-cov --version && cargo nextest --version
+      - name: Kapi kanaryasi (vacuous-gate korumasi)
+        run: bash ./scripts/check-coverage.sh --self-test
+      - name: Olcum + ratchet kapisi
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
+          bash ./scripts/check-coverage.sh coverage/cov.json
+      - name: Modül analizi kanaryası (vacuous değil)
+        run: python3 ./scripts/check_module_coverage.py --self-test
+      - name: Modül coverage raporu — budlum (baselines 2. adımda, vacuous-gate YOK)
+        run: python3 ./scripts/check_module_coverage.py coverage/cov.json
+      - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
+        run: |
+          cd budzero
+          cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
+      - name: Modül coverage raporu — budzero (rapor modu)
+        run: python3 ./scripts/check_module_coverage.py coverage/budzero-cov.json
+      - name: Coverage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/   # cov.json + budzero-cov.json (modul tabanlari bu artifact'ten)
+          retention-days: 30
+
+  repo-lint:
+    # : actionlint + buf + genesis schema (tek birlesik statik kapi).
+    # Araclar surum+sha256 pinli. buf breaking, main'de buf.yaml bulundugunda
+    # Aktiflesir (baseline bu dalgayla kuruluyor — ilk kosuda SKIP dürüst marker).
+    # zizmor workflow güvenlik lint'i de bu job'da (kanaryalı, 0-bulgu politikası).
+    name: Repo Lint (actionlint + buf + genesis + zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: actionlint v1.7.12 kur (sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+      - name: actionlint kapisi + kanarya
+        run: |
+          bash ./scripts/check-actionlint.sh --self-test
+          bash ./scripts/check-actionlint.sh
+      - name: zizmor kapisi + kanarya
+        run: |
+          bash ./scripts/check-zizmor.sh --self-test
+          bash ./scripts/check-zizmor.sh
+      - name: buf v1.71.0 kur (sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/buf \
+            https://github.com/bufbuild/buf/releases/download/v1.71.0/buf-Linux-x86_64
+          echo "d3de2838c68a5759ca276884254bc70df4e4ad185d6ed5f65f327b6ce6363eab  /tmp/buf" | sha256sum -c -
+          sudo install -m 0755 /tmp/buf /usr/local/bin/buf
+          buf --version
+      - name: buf build + lint
+        run: |
+          set -o pipefail
+          buf build
+          buf lint
+      - name: buf breaking — baseline varsa aktif ()
+        run: |
+          set -euo pipefail
+          # Main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;
+          # Baseline bu push'la kurulur → durust SKIP marker.
+          # Non-main branch'lerde 'branch=main' ref yok → Repo Lint kırmızı.
+          # Doğrusu 'origin/main' (GitHub docs: .git#branch=<remote>/<branch>).
+          if git cat-file -e origin/main:buf.yaml 2>/dev/null; then
+            buf breaking --against '.git#branch=origin/main'
+            echo "buf breaking: main'e karsi temiz."
+          else
+            echo "SKIP (durust marker): main'de buf.yaml henuz yok — baseline bu dalgayla kuruluyor."
+          fi
+      - name: genesis schema kapisi + kanarya
+        run: |
+          python3 ./scripts/check_genesis_schema.py --self-test
+          python3 ./scripts/check_genesis_schema.py config/mainnet-genesis.json

@@ -1,0 +1,80 @@
+name: Fuzz Nightly
+
+#  : uzun fuzz koşuları. Her gece 03:17 UTC'de her target
+# 4 saat fuzz'lanır; her target ayrı matrix job'ında koşar (GitHub job
+# Üst sınırı 6 saat → tek job'da 5×4h imkânsızdır, matrix zorunludur).
+# Corpus her koşuda cache'lenir ve sonraki koşuda geri yüklenir (büyüyen
+# Corpus = derinleşen kapsam). Crash bulunursa artifact olarak yüklenir
+# Ve job FAIL eder.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-deep:
+    name: Fuzz Deep — ${{ matrix.target }} (4h)
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - block_deserialize
+          - consensus_validate
+          - fuzz_blockchain_serialize
+          - snapshot_deserialize
+          - transaction_deserialize
+          - consensus_state_transition
+          - relayer_escrow
+          - zk_verifier
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly — cargo-fuzz gereksinimi)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: nightly
+      - name: Override rust-toolchain.toml pin (nightly zorunlu)
+        run: rustup override set nightly
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "29.x"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Corpus cache (target bazlı, yuvarlanan)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz 4 saat — ${{ matrix.target }}
+        # Cargo-fuzz repo kökünden çalışır (bkz. ci.yml fuzz-quick notu).
+        run: |
+          set -euo pipefail
+          cargo fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=14400 \
+            -timeout=25 \
+            -print_final_stats=1
+      - name: Crash artifact (varsa)
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-nightly-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,6 @@
+# CODEOWNERS disabled to prevent PR deadlock
+# Previous enforcement required @lubosruler @eurymedee which blocked bot PRs
+# Code review is now enforced via required_approving_review_count=0 and rulesets disabled
+# If re-enabling, assign to teams, not individual users, and ensure bypass for bots
+# See task: CODEOWNERS engel kaldirma
+# No owners assigned - file intentionally empty

@@ -1,0 +1,17 @@
+# udeps baseline (G3 / ADIM8 §3.3) — izin verilen kullanılmayan-bağımlılık bulguları
+# Format: <cargo-paket-adı>:<bağımlılık-adı> (tam satır eşleşmesi, grep -qxF)
+#
+# İlk ölçüm: supply-chain-extra.yml udeps job'ı, commit e937a1c CI koşusu (kanıtlı).
+# DÖRDÜ DE kod tabanında SIFIR kullanımla doğrulanmış GERÇEK bulgudur
+# (grep: chrono/group → src/, benches/, tests/ 0 hit; serde_json → bud-node/src 0 hit;
+#  p3_uni_stark → bud-proof/src 0 hit). Doc-test false-positive'i DEĞİLLER.
+#
+# POLİTİKA: Bu satırlar kalıcı izin DEĞİL, kaldırma geçiş köprüsüdür.
+# Diğer AI ajanların in-flight branch'lerini kırmamak için kaldırma
+# (Cargo.toml satırı + Cargo.lock prune) ayrı bir dalgada, STATUS_ONLINE
+# duyurusuyla yapılacaktır (Dalga 14 duyurusu). Bu dosya o ana kadar
+# ratchet görevi görür: LİSTEYE YENİ SATIR EKLENMESİ = gate FAIL.
+budlum-core:chrono
+budlum-core:group
+bud-node:serde_json
+bud-proof:p3-uni-stark

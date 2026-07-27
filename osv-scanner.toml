@@ -1,0 +1,92 @@
+# osv-scanner.toml — OSV.dev tabanlı zafiyet taraması için gerekçeli istisnalar
+#
+# NEDEN AYRI BİR TARAYICI: cargo-audit ve cargo-deny yalnız RustSec advisory
+# veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
+# RustSec'te KARŞILIĞI OLMAYAN kayıtları da görür. Bu teorik bir fark değil:
+# ilk koşuda CVE-2026-32314 / GHSA-vxx9-2994-q338 (yamux, CVSS 8.7) yakalandı,
+# aynı ağaçta `cargo audit` "0 vulnerabilities found" diyordu çünkü bu kaydın
+# RustSec karşılığı yok (rustsec/advisory-db/crates/yamux → 404).
+#
+# POLİTİKA: burada listelenmeyen her bulgu FAIL'dir. Her istisna, kodda
+# neden ERİŞİLEMEZ olduğunun kanıtıyla yazılır (VEX mantığı); "gürültü" ya da
+# "şimdilik" gerekçesi kabul edilmez. Erişilebilir bir bulgu ignore edilmez,
+# bağımlılık yükseltilir.
+
+[[IgnoredVulns]]
+id = "GHSA-vxx9-2994-q338"   # CVE-2026-32314 — yamux remote panic (DoS), CVSS 8.7
+reason = """
+Erişilemez: yamalı kod yolu kullanılıyor, yamasız olan yalnız derleniyor.
+
+libp2p-yamux 0.47.0 iki yamux sürümünü birden bağımlılık olarak çeker
+(yamux012 = 0.12.1, yamux013 = 0.13.10) ve hangisinin çalışacağını Config
+seçer. Upstream kaynağında `impl Default for Config` -> `Config013`, yani
+`yamux::Config::default()` 0.13.10 bağlantısını kurar. Budlum swarm'ı
+src/network/node.rs içinde tam olarak `yamux::Config::default` veriyor;
+depoda 0.12 yoluna geçiren tek API olan `WindowUpdateMode` / `client()` /
+`server()` çağrısı hiç yok (grep ile doğrulandı).
+
+Advisory'nin düzeltilmiş sürümü 0.13.10'dur ve çalıştırdığımız sürüm zaten
+0.13.10'dur. Savunmasız 0.12.1 grafikte yalnızca libp2p-yamux'un ikili-sürüm
+tasarımı yüzünden duruyor; hiçbir bağlantı onun üzerinden kurulmuyor.
+
+Takip: libp2p-yamux 0.12 desteğini düşürdüğünde bu istisna silinir. Eğer
+node.rs'te yamux yapılandırması değişir ve 0.12 yoluna geçilirse bu gerekçe
+geçersizdir — o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
+"""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0118"   # hickory-proto NSEC3 DoS
+reason = """
+deny.toml'daki aynı gerekçenin OSV tarafındaki karşılığı (tek kaynak: oradaki
+kayıt). hickory yalnız libp2p'nin opsiyonel mDNS özelliğiyle çözülür;
+production/default derlemede `p2p-mdns` kapalıdır ve Budlum DnssecDnsHandle
+kullanmaz, dolayısıyla savunmasız ayrıştırıcı/socket yüzeyi kurulamaz. Maruziyet
+yalnız açıkça `--features p2p-mdns` ile yapılan devnet derlemeleriyle sınırlı.
+Upstream libp2p-mdns hickory >=0.26'yı desteklediğinde kaldırılacak.
+"""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0119"   # hickory-proto name-compression parser
+reason = """
+RUSTSEC-2026-0118 ile aynı gerekçe ve aynı takip maddesi: savunmasız
+name-compression ayrıştırıcısı production/default derlemede bulunmuyor
+(p2p-mdns kapalı).
+"""
+
+# ── "unmaintained" sınıfı bilgilendirici kayıtlar ────────────────────────────
+# Aşağıdakiler zafiyet değil, bakım durumu uyarısıdır (RUSTSEC-*-XXXX
+# "unmaintained"). Repo politikası bunları deny.toml'da `unmaintained = "none"`
+# ile FAIL saymaz; görünürlük CI'daki cargo audit raporundan sağlanır ve
+# org roadmap'te izlenir. OSV bunları da zafiyet gibi döndürdüğü için burada
+# aynı politikayı yansıtıyoruz — aksi halde iki araç birbiriyle çelişirdi.
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0089"
+reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) — deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+reason = "bincode 1.x unmaintained — org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+reason = "fxhash unmaintained (bakım uyarısı, zafiyet değil)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+reason = "instant unmaintained (bakım uyarısı); transitif, doğrudan bağımlılık değil."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste unmaintained (bakım uyarısı, zafiyet değil); proc-macro, runtime yüzeyi yok."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0380"
+reason = "pqcrypto-dilithium → pqcrypto-mldsa ile değiştirildi; PQ backend geçişi konsensus-kritik imza formatını etkiler, ayrı planlı görev (pq-ml-dsa feature'ı mevcut)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0163"
+reason = "pqcrypto-internals unmaintained (upstream PQClean arşivleniyor) — PQ backend geçiş görevinde birlikte ele alınacak."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0162"
+reason = "pqcrypto-traits unmaintained (upstream PQClean arşivleniyor) — PQ backend geçiş görevinde birlikte ele alınacak."

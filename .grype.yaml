@@ -1,0 +1,49 @@
+# .grype.yaml — Grype (Anchore) zafiyet tarayıcısı yapılandırması
+#
+# NEDEN OSV-Scanner'IN YANINDA: Grype farklı bir veritabanı setinden besleniyor
+# (NVD + GHSA + distro feed'leri) ve her bulguya EPSS skoru ekliyor. EPSS,
+# "bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir cevabıdır ve ne
+# RustSec'te ne OSV.dev'de var. Bir L1 için önceliklendirme farkı yaratır:
+# CVSS 8.7 ama EPSS %0.5 olan bir bulgu ile CVSS 7.0 / EPSS %40 olan bir bulgu
+# aynı aciliyette değildir.
+#
+# Ayrıca Grype SARIF üretir; bulgular Security sekmesine düşer. Repodaki
+# Trivy fs taraması bunu yapmıyor (yalnız exit-code ile job'ı kırıyor), yani
+# bulguları tek bir yerden izlemek şu an mümkün değil.
+#
+# POLİTİKA: aşağıdaki istisnalar osv-scanner.toml'daki gerekçelerin birebir
+# aynısıdır. İki tarayıcının aynı bulgu için çelişmesi kapının güvenilirliğini
+# aşındırır; biri güncellenirse diğeri de güncellenmelidir. Listede olmayan
+# her bulgu FAIL'dir.
+
+# Yalnız düzeltmesi olan bulgular değil, hepsi raporlansın.
+ignore-wontfix: ''
+
+# Eşik: high ve üzeri job'ı kırar. Aşağısı raporlanır ama bloke etmez —
+# Grype'ın distro/NVD kaynakları düşük şiddetli gürültü üretebiliyor ve bu
+# kapının amacı OSV/cargo-deny'nin üstüne EK sinyal koymak, onları
+# tekrarlamak değil.
+fail-on-severity: high
+
+ignore:
+  # ── yamux 0.12.1 — CVE-2026-32314 / GHSA-vxx9-2994-q338 (CVSS 8.7) ────────
+  # Erişilemez: libp2p-yamux 0.47.0 hem 0.12.1 hem 0.13.10'u bağlar, seçimi
+  # Config yapar. Upstream `impl Default for Config` -> Config013 ve
+  # src/network/node.rs tam olarak `yamux::Config::default` veriyor; 0.12
+  # yoluna geçiren tek API (WindowUpdateMode/client()/server()) repoda yok.
+  # Advisory'nin fixed sürümü 0.13.10 ve çalışan sürüm zaten 0.13.10.
+  # Takip: libp2p-yamux 0.12 desteğini düşürdüğünde bu istisna silinir.
+  - vulnerability: GHSA-vxx9-2994-q338
+  - vulnerability: CVE-2026-32314
+
+  # ── hickory-proto 0.25.2 — mDNS-only ──────────────────────────────────────
+  # hickory yalnız libp2p'nin opsiyonel mDNS özelliğiyle çözülür;
+  # production/default derlemede `p2p-mdns` kapalıdır ve Budlum
+  # DnssecDnsHandle kullanmaz, dolayısıyla savunmasız ayrıştırıcı/socket
+  # yüzeyi kurulamaz. Maruziyet yalnız açıkça `--features p2p-mdns` ile
+  # yapılan devnet derlemeleriyle sınırlı. deny.toml ve osv-scanner.toml'da
+  # aynı gerekçe kayıtlı.
+  - vulnerability: GHSA-3v94-mw7p-v465
+  - vulnerability: RUSTSEC-2026-0118
+  - vulnerability: GHSA-q2qq-hmj6-3wpp
+  - vulnerability: RUSTSEC-2026-0119

@@ -1,0 +1,55 @@
+# Persona: protocol developer — full local stack on devnet.
+# Disk validator keys allowed ONLY on devnet (mainnet refuses them).
+
+[network]
+profile = "devnet"
+chain_id = 1337
+genesis_file = "./config/devnet-genesis.json"
+
+[node]
+role = "validator"
+
+[storage]
+data_dir = "./data/developer/budlum.db"
+snapshot_dir = "./data/developer/snapshots"
+backup_dir = "./data/developer/backups"
+backups_enabled = false
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/developer-node-id.key"
+bootnodes = []
+dns_seeds = []
+max_peers = 25
+banned_peer_db = "./data/developer/banned-peers.json"
+mdns_enabled = true
+
+[rpc]
+public_listener = "127.0.0.1:8545"
+operator_listener = "127.0.0.1:8546"
+enabled = true
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+allowed_ips = ["127.0.0.1", "::1"]
+trusted_proxies = ["127.0.0.1"]
+
+[metrics]
+listener = "127.0.0.1:9090"
+
+[validator]
+key_file = "./secrets/devnet-validator.key"
+backend = "local"
+
+[validator.signer]
+backend = "local"
+
+[consensus]
+type = "poa"
+min_stake = 1000
+
+[features]
+# Enable for local experiments; keep false for mainnet-shaped dress rehearsals.
+governance = true
+zkvm_contracts = true
+pruning = false

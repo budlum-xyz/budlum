@@ -1,0 +1,101 @@
+[package]
+name = "budlum-fuzz"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+# Fuzz harness'leri. CI'da uzun fuzz run çalıştırılmaz;  sadece
+# setup/build edilebilir target setini teslim eder.
+# Manuel run: `cargo +nightly fuzz run <target>`.
+
+[dependencies]
+bincode = "1.3"
+budlum-core = { path = ".." }
+# : zk_verifier target needs ProofEnvelope + DefaultAdapter.
+bud-proof = { path = "../budzero/bud-proof" }
+libfuzzer-sys = "0.4"
+libp2p = "0.56"
+
+[[bin]]
+name = "block_deserialize"
+path = "fuzz_targets/block_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "consensus_validate"
+path = "fuzz_targets/consensus_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_blockchain_serialize"
+path = "fuzz_targets/fuzz_blockchain_serialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_deserialize"
+path = "fuzz_targets/snapshot_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transaction_deserialize"
+path = "fuzz_targets/transaction_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evm_rlp_decode"
+path = "fuzz_targets/evm_rlp_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "evm_mpt_verify"
+path = "fuzz_targets/evm_mpt_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "consensus_state_transition"
+path = "fuzz_targets/consensus_state_transition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relayer_escrow"
+path = "fuzz_targets/relayer_escrow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zk_verifier"
+path = "fuzz_targets/zk_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reputation"
+path = "fuzz_targets/reputation.rs"
+test = false
+doc = false
+bench = false

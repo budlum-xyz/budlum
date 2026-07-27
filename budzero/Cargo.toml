@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "bud-compiler",
+    "bud-vm",
+    "bud-isa",
+    "bud-state",
+    "bud-proof",
+    "bud-node",
+    "bud-cli",
+    "verifier-registry",
+]
+resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"

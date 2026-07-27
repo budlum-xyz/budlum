@@ -1,0 +1,71 @@
+# deny.toml — Budlum Core supply-chain kapısı ( / )
+#
+# Bu dosya `cargo deny check` ile CI'da zorunlu kapıdır (strict mod:
+# ilk günden fail kapısı; gevşetme YOK). BudZero tarafındaki karşılığı
+# budzero/deny.toml'dur; iki graf ayrı matrix adımında denetlenir.
+#
+# Şema: cargo-deny 0.20+ (eski anahtarlar PR #611 ile kaldırıldı).
+# Modern semantikte `allow` listesinde OLMAYAN her lisans otomatik FAIL'dir
+# (eski `unlicensed = "deny"` + copyleft yasağı davranışı böylece korunur;
+# GPL/AGPL ailesi allow'da olmadığından reddedilir).
+#
+# Lisans eklemeleri KANITSIZ yapılmaz: CI kırmızı verirse yalnızca permissive
+# lisanslı (OSI/FSF-free) crate'ler için, gerekçesi commit mesajında yazılarak
+# allow listesi genişletilir (ratchet ruhu).
+
+[graph]
+targets = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "OpenSSL",
+    "Zlib",
+    # Gerekçeli ekleme ( ilk koşu, kanıtlı): icu_* crate ailesi
+    # (idna_adapter ← url ← libp2p zinciri) Unicode-3.0 lisanslı.
+    # Unicode-3.0 OSI-onaylı permissive lisanstır (kopyalayaz DEĞİL);
+    # SPDX: Unicode-3.0. Yerel cargo-deny 0.20.2 koşusunda 19 reddin
+    # tamamının tek sebebi bu lisanstı (başka lisans ihlali yok).
+    "Unicode-3.0",
+    # D1 relayer için reqwest → webpki-roots 1.0.9 CDLA-Permissive-2.0 lisanslı.
+    # CDLA-Permissive-2.0 OSI-onaylı değil ama permissive, data license; reqwest zinciri için gerekli.
+    # Gerekçe: webpki-roots Mozilla CA bundle data'sı için CDLA-Permissive-2.0 kullanır, permissive.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[advisories]
+# unmaintained = "none": eski davranışla aynı ("warn, fail yok"). Uyarı
+# görünürlüğü kaybolmuyor: CI dependency-audit job'ındaki cargo audit her
+# koşuda unmaintained uyarılarını raporlar. Bincode/pqcrypto-* gibi bilinen
+# öğeler org roadmap'te izleniyor; doğrudan kaynaklı yeni unmaintained
+# keşiflerde bu karar yeniden gözden geçirilir.
+unmaintained = "none"
+# unsound: doğrudan bağımlılıklarımızda unsound danışması = FAIL (sıkı).
+unsound = "workspace"
+ignore = [
+    # hickory-proto 0.25 is resolved only through libp2p's optional mDNS
+    # feature. Budlum's production/default graph no longer enables that feature
+    # and therefore cannot construct the vulnerable parser/socket surface.
+    # `p2p-mdns` is an explicit devnet-only build capability; remove these
+    # temporary exceptions once upstream libp2p-mdns supports hickory >=0.26.
+    { id = "RUSTSEC-2026-0118", reason = "NSEC3 DoS is unreachable in production/default builds: p2p-mdns is disabled, and Budlum does not use DnssecDnsHandle. Exposure is limited to explicit devnet builds using --features p2p-mdns." },
+    { id = "RUSTSEC-2026-0119", reason = "The vulnerable hickory name-compression parser is absent from production/default builds because p2p-mdns is disabled. Exposure is limited to explicit devnet builds using --features p2p-mdns until upstream hickory >=0.26 support lands." },
+]

@@ -1,0 +1,106 @@
+# Semgrep — kural tabanlı SAST (budlum-ek-security-workflows.md ÖNCELİK 2, madde 3)
+#
+# CodeQL ile örtüşmez, tamamlar: CodeQL veri-akışı (taint) analizi yapar,
+# Semgrep sözdizimsel desen eşleştirir. p/rust + p/security-audit + p/secrets
+# Kural setleri, CodeQL'in Rust sorgu kütüphanesinin kapsamadığı deseneleri
+# (tehlikeli API çağrıları, sabit kodlanmış kimlik bilgisi kalıpları) yakalar.
+#
+# Kapı politikası: bulgu = FAIL. Direktifin standing rule'u gereği "çalışıp
+# Yeşil dönmesi yetmez, merge'ü gerçekten bloke etmelidir" — bu yüzden
+# `continue-on-error` KULLANILMAZ. SARIF yine de Security sekmesine yüklenir
+# (`if: always`), böylece FAIL durumunda bulgular UI'da görünür.
+#
+# Konteyner imajı sürüm + digest ile pinlidir (Güvenlik Planı §3.1 supply-chain
+# Disiplini; repo genelinde action'lar tam SHA'ya pinlendiği gibi).
+
+name: Semgrep
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1" # haftalık, Pazartesi 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: Semgrep (p/rust + p/security-audit + p/secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      # Semgrep/semgrep:1.171.0 — digest pinli (tag mutable, digest değil).
+      image: semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sürüm kanıtı
+        run: semgrep --version
+
+      # Vacuous-gate koruması: repo'da hiç bulgu olmaması ile taramanın hiç
+      # Çalışmaması aynı çıktıyı (0 bulgu) verir. Kanarya, bilerek güvensiz bir
+      # Dosya üretip Semgrep'in onu YAKALADIĞINI kanıtlar; yakalayamazsa kapı
+      # Güvenilmezdir ve job burada kırılır.
+      - name: Kanarya — Semgrep alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/semgrep-canary
+          cat > /tmp/semgrep-canary/canary.py <<'CANARY'
+          import subprocess
+
+
+          def run(user_input):
+              # Kasıtlı güvensiz: shell=True + kullanıcı girdisi (p/security-audit).
+              subprocess.run("echo " + user_input, shell=True)
+          CANARY
+          if semgrep --config=p/security-audit --error --quiet /tmp/semgrep-canary; then
+            echo "HATA: Semgrep kanaryayı yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → Semgrep alarmı çalışıyor."
+
+      # --exclude-rule rust.lang.security.args.args:
+      # Kural argv[0]'in bir guvenlik kararina dayanak yapilmasini hedefler.
+      # Iki isabet var (src/main.rs, src/bin/budlum-relayer.rs) ve ikisi de
+      # Argv[0]'i HIC okumuyor: ayristirma sirasiyla index 1 ve 3'ten basliyor,
+      # Hicbir yetki/kimlik karari bu vektore bagli degil. Satir ici
+      # `nosemgrep` marker'lari eklenmisti ve Semgrep bunlari dogru uyguluyor —
+      # Ama SARIF'e `suppressions: [{kind: inSource}]` ile YINE yaziyor ve
+      # GitHub bastirilmis sonuclari acik alert olarak listeliyor. Sonuc:
+      # Security sekmesinde kalici iki sahte alert. Kurali tarama duzeyinde
+      # Disarida birakmak SARIF'i temiz tutar; marker'lar kaynakta gerekce
+      # Olarak kaliyor.
+      - name: Semgrep taraması (bulgu = fail)
+        run: |
+          set -euo pipefail
+          semgrep scan \
+            --config=p/rust \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --exclude-rule=rust.lang.security.args.args \
+            --sarif --output=semgrep.sarif \
+            --error \
+            --metrics=off \
+            --exclude=target \
+            --exclude=budzero/target \
+            .
+
+      - name: SARIF yükle (FAIL olsa da bulgular Security sekmesinde görünsün)
+        if: always()
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

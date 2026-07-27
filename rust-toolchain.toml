@@ -1,0 +1,5 @@
+# CI Genişletme Madde 7: MSRV pin kontrolü.
+# Bu dosya CI ve geliştirici ortamlarında kullanılacak Rust sürümünü sabitler.
+[toolchain]
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]

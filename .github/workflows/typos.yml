@@ -1,0 +1,73 @@
+# Typos — yazım denetimi (budlum-ek-security-workflows.md ÖNCELİK 3, madde 9)
+#
+# Neden kalite kapısı: yazım hatası kozmetik görünür ama bu repoda somut risk
+# Taşır — yanlış yazılmış bir identifier, config anahtarı veya RPC metot adı
+# Derlenir ama çalışmaz. `Toplogy`/`compromize` gibi bulgular ilk koşuda
+# Gerçekten yakalandı.
+#
+# İki dillilik: repo kodu İngilizce, dokümantasyonu ağırlıkla Türkçedir.
+# Kalibrasyon `_typos.toml`dadır (Türkçe kelime listesi). Kalibrasyon
+# Gevşetme değildir: liste dışındaki her bulgu FAIL'dir ve düzeltilir,
+# Ignore edilmez. Yeni Türkçe kelime eklenirken gerekçe commit mesajına yazılır.
+#
+# Araç sürüm + sha256 pinlidir (repo genelindeki gitleaks/hadolint/actionlint
+# Deseniyle aynı supply-chain disiplini).
+
+name: Typos
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typos:
+    name: Typos (yazım denetimi, TR kalibreli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: typos v1.48.0 kur (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/typos.tar.gz \
+            https://github.com/crate-ci/typos/releases/download/v1.48.0/typos-v1.48.0-x86_64-unknown-linux-musl.tar.gz
+          echo "72a930c9a94fc3914aa56835c5b859c892a797d40c1c42638b98d93f16ff519c  /tmp/typos.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/typos-bin
+          # Arşivdeki üyeler './' önekiyle kayıtlıdır (`./typos`), bu yüzden
+          # Üye adı olarak düz `typos` verilirse tar "Not found in archive"
+          # Ile çıkar. Öneki koruyarak çıkarıyoruz.
+          tar -xzf /tmp/typos.tar.gz -C /tmp/typos-bin ./typos
+          sudo install -m 0755 /tmp/typos-bin/typos /usr/local/bin/typos
+          typos --version
+
+      # Vacuous-gate koruması: "0 bulgu" hem temiz repoyu hem de hiç çalışmamış
+      # Taramayı gösterebilir. Kanarya, bilerek yanlış yazılmış bir kelime
+      # Üretip typos'un onu YAKALADIĞINI kanıtlar.
+      - name: Kanarya — typos alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/typos-canary
+          # `recieve` typos sözlüğünde kesin bir hatadır ve _typos.toml
+          # Allow-listesinde yoktur; yakalanmaması taramanın çalışmadığını gösterir.
+          printf 'fn main() { let _recieve = 1; }\n' > /tmp/typos-canary/canary.rs
+          if typos --isolated /tmp/typos-canary; then
+            echo "HATA: typos kanaryayı yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → typos alarmı çalışıyor."
+
+      - name: Repo taraması (bulgu = fail)
+        run: typos --format long

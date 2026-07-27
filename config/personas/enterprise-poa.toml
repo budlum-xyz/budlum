@@ -1,0 +1,64 @@
+# Persona: institutional / enterprise PoA operator.
+# Mainnet-shaped security: PKCS#11 required, no disk ValidatorKeys, no mDNS.
+
+[network]
+profile = "mainnet"
+chain_id = 1
+genesis_file = "./config/mainnet-genesis.json"
+
+[node]
+role = "validator"
+
+[storage]
+data_dir = "./data/mainnet/budlum.db"
+snapshot_dir = "./data/mainnet/snapshots"
+backup_dir = "./data/mainnet/backups"
+backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/mainnet-node-id.key"
+# Populate at release ceremony:
+bootnodes = []
+dns_seeds = []
+max_peers = 100
+banned_peer_db = "./data/mainnet/banned-peers.json"
+mdns_enabled = false
+
+[rpc]
+public_listener = "0.0.0.0:8545"
+operator_listener = "127.0.0.1:8546"
+enabled = true
+auth_required = true
+api_key_env = "BUDLUM_RPC_API_KEY"
+# Prefer firewall; empty allowed_ips = app-layer allow-all (still need API key).
+allowed_ips = []
+# If behind reverse proxy, list proxy IPs. X-Real-IP only honored then ( B2).
+trusted_proxies = []
+
+[metrics]
+listener = "0.0.0.0:9090"
+
+[validator]
+backend = "pkcs11"
+# DO NOT set key_file on mainnet — process exits ( B1).
+
+[validator.signer]
+backend = "pkcs11"
+
+# Deployment-specific (do not commit real paths/pins):
+# [validator.signer.pkcs11]
+# module_path = "/usr/lib/softhsm/libsofthsm2.so"
+# slot_id = 0
+# token_pin_env = "BUDLUM_PKCS11_TOKEN_PIN"
+
+[consensus]
+type = "poa"
+min_stake = 1000
+
+[features]
+# Org mainnet v1 policy: keep off until separately reviewed (ch12 blocker 6).
+governance = false
+zkvm_contracts = false
+pruning = false

@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "label": "coverage",
+  "message": "nextest+llvm-cov",
+  "color": "green"
+}

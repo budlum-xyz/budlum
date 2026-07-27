@@ -1,0 +1,118 @@
+{
+  "chain_id": 1,
+  "allocations": [],
+  "validators": [],
+  "block_reward": 50,
+  "base_fee": 10,
+  "gas_schedule": {
+    "base_fee": 10,
+    "gas_per_byte": 2,
+    "gas_per_signature": 1000,
+    "transfer_gas": 21000,
+    "stake_gas": 45000,
+    "vote_gas": 35000,
+    "contract_call_gas": 50000
+  },
+  "timestamp": 0,
+  "bud_tokenomics": {
+    "community": 10000000000000,
+    "liquidity": 10000000000000,
+    "ecosystem": 20000000000000,
+    "team": 20000000000000,
+    "burn_reserve": 40000000000000,
+    "epochs_per_year": 52560,
+    "annual_burn_ratio_fixed": 100000,
+    "team_cliff_epochs": 52560,
+    "team_vesting_epochs": 210240,
+    "tx_fee_burn_ratio_fixed": 10000,
+    "block_reward": 50,
+    "validator_annual_yield_ratio_fixed": 50000,
+    "slot_duration_secs": 10,
+    "epoch_length_slots": 32
+  },
+  "ceremony_status": "template_ready",
+  "ceremony_note": " Ceremony Template. Genesis otoritesi mainnet_genesis() (kod) ile bu dosya test_mainnet_genesis_json_matches_code kilidiyle esit tutulur. *_plan listeleri hash'e GIRMEZ; ceremony'de gercek keypair'ler uretilince allocations/validators HEM kod HEM dosya senkron guncellenir.",
+  "ceremony_allocations_plan": [
+    {
+      "address": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "amount": 10000000000000,
+      "label": "Treasury Reserve (multi-sig)"
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "amount": 10000000000000,
+      "label": "Community Pool"
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "amount": 20000000000000,
+      "label": "Ecosystem Grants"
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "amount": 20000000000000,
+      "label": "Team Vesting (1yr cliff, 4yr linear)"
+    },
+    {
+      "address": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "amount": 40000000000000,
+      "label": "Burn Reserve"
+    }
+  ],
+  "ceremony_validators_plan": [
+    {
+      "address": "0x1000000000000000000000000000000000000000000000000000000000000001",
+      "stake": 500000000000
+    },
+    {
+      "address": "0x1000000000000000000000000000000000000000000000000000000000000002",
+      "stake": 500000000000
+    },
+    {
+      "address": "0x1000000000000000000000000000000000000000000000000000000000000003",
+      "stake": 500000000000
+    },
+    {
+      "address": "0x1000000000000000000000000000000000000000000000000000000000000004",
+      "stake": 500000000000
+    }
+  ],
+  "bootstrap_domains": [
+    {
+      "id": 1,
+      "kind": "pow",
+      "finality_adapter": "pow-header-chain-v1",
+      "bridge_enabled": true,
+      "min_confirmations": 6,
+      "poa_authorities": []
+    },
+    {
+      "id": 2,
+      "kind": "pos",
+      "finality_adapter": "pos-qc-finality",
+      "bridge_enabled": true,
+      "min_confirmations": 1,
+      "poa_authorities": []
+    },
+    {
+      "id": 3,
+      "kind": "bft",
+      "finality_adapter": "bft-quorum-commit",
+      "bridge_enabled": true,
+      "min_confirmations": 1,
+      "poa_authorities": []
+    },
+    {
+      "id": 4,
+      "kind": "poa",
+      "finality_adapter": "poa-authority-quorum",
+      "bridge_enabled": false,
+      "min_confirmations": 1,
+      "poa_authorities": [
+        "0x0000000000000000000000000000000000000000000000000000000000000AA1",
+        "0x0000000000000000000000000000000000000000000000000000000000000AA2",
+        "0x0000000000000000000000000000000000000000000000000000000000000AA3"
+      ]
+    }
+  ]
+}
