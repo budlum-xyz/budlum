@@ -36,6 +36,15 @@ updates:
       # Minor+patch Rust dep'leri tek PR'da topla; major ayrı kalır.
       rust-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # bincode is pinned to 1.x on purpose, not by neglect. Its output feeds
+      # `Block::calculate_hash` (slashing evidence) and the account state root
+      # (tokenomics, timed_burn, burn_reserve), so the encoding IS consensus.
+      # A major bump that changes a single byte would make old and new nodes
+      # derive different hashes from identical state and fork the chain.
+      # Revisit only together with a coordinated wire-format migration.
+      - dependency-name: "bincode"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "cargo"
     directory: "/budzero"
     schedule:
@@ -49,6 +58,15 @@ updates:
     groups:
       rust-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # bincode is pinned to 1.x on purpose, not by neglect. Its output feeds
+      # `Block::calculate_hash` (slashing evidence) and the account state root
+      # (tokenomics, timed_burn, burn_reserve), so the encoding IS consensus.
+      # A major bump that changes a single byte would make old and new nodes
+      # derive different hashes from identical state and fork the chain.
+      # Revisit only together with a coordinated wire-format migration.
+      - dependency-name: "bincode"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "cargo"
     directory: "/fuzz"
     schedule:
@@ -63,6 +81,11 @@ updates:
       rust-minor-patch:
         update-types: ["minor", "patch"]
     ignore:
+      # Same consensus reasoning as the root manifest: the fuzz targets encode
+      # the very types whose bincode bytes are hashed, so they must stay on the
+      # same major as the crate they exercise.
+      - dependency-name: "bincode"
+        update-types: ["version-update:semver-major"]
       # Hickory-proto 0.25 remains only in the explicit devnet `p2p-mdns`
       # Feature graph. Production/default builds do not compile or construct the
       # MDNS behaviour. Keep the advisory visible until upstream libp2p-mdns is

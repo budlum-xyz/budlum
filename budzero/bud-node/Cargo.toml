@@ -22,6 +22,8 @@ libp2p = { version = "0.56", features = [
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
+# Bitswap wire codec; pinned to the same major as the L1 crate so a node can
+# speak to peers built from either tree.
 bincode = "1"
 
 # Logging
