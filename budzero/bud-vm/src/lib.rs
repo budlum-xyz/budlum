@@ -1047,6 +1047,32 @@ pub const POSEIDON_MDS: [[u64; 8]; 8] = [
 
 /// Round constants: first 4 rounds from Plonky3 Poseidon1 Goldilocks width-8.
 /// Module-level const so lock test can access.
+/// Round constants for the 4-round Poseidon permutation.
+///
+/// # This permutation is not cryptographically sound
+///
+/// Four full rounds with `alpha = 7` and no partial rounds leaves the whole
+/// permutation at algebraic degree `7^4 = 2401`. A system of that degree is
+/// invertible in practice by interpolation or a Gröbner-basis attack, and the
+/// function is cheap enough that a generic birthday collision search (~2^32
+/// evaluations) is hours of GPU time rather than a theoretical bound.
+///
+/// For `PrivacyCommit` that means an observer can recover
+/// `(amount, blinding, recipient_tag)` from a published commitment — hiding is
+/// gone — and can find a second opening for the same commitment or nullifier —
+/// binding is gone.
+///
+/// These are the *first four rounds* of Plonky3's Goldilocks width-8 Poseidon1
+/// instance. Real parameters for this width need roughly 8 full plus 22 partial
+/// rounds; this is a truncation of a safe set, not a design.
+///
+/// The AIR is not the problem: it constrains all four rounds faithfully, so the
+/// proof system honestly proves that this weak function was evaluated
+/// correctly.
+///
+/// The opcodes that depend on it are disabled by default in `MainnetActivation`
+/// and `bud-isa` carries a test that fails if that changes while the round
+/// count is still four. Fix the parameters before enabling them.
 pub const POSEIDON_RC: [[u64; 8]; 4] = [
     [
         0xdd5743e7f2a5a5d9,
