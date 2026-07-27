@@ -75,7 +75,7 @@ toml = "1.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
-tower = "0.4"
+tower = "0.5"
 cryptoki = "0.12"
 secrecy = "0.10"
 subtle = "2"
