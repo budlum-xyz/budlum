@@ -127,6 +127,10 @@ pub mod poa_onboarding_matrix;
 pub mod snapshot_chaos;
 // P5 regresyon kilidi (2026-07-19): ZK finality fail-open +
 // Relayer escrow silent-failure CI kırıcı güvenlik mühürleri.
+// Reachability premises behind the accepted dependency advisories. These fail
+// when a routine dependency change makes a carried CVE live again.
+#[cfg(test)]
+pub mod advisory_reachability;
 #[cfg(test)]
 pub mod hardening_h2_locks;
 #[cfg(test)]

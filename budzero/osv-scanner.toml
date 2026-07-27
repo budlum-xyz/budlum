@@ -42,20 +42,34 @@ geçersizdir — o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0118"   # hickory-proto NSEC3 DoS
 reason = """
-deny.toml'daki aynı gerekçenin OSV tarafındaki karşılığı (tek kaynak: oradaki
-kayıt). hickory yalnız libp2p'nin opsiyonel mDNS özelliğiyle çözülür;
-production/default derlemede `p2p-mdns` kapalıdır ve Budlum DnssecDnsHandle
-kullanmaz, dolayısıyla savunmasız ayrıştırıcı/socket yüzeyi kurulamaz. Maruziyet
-yalnız açıkça `--features p2p-mdns` ile yapılan devnet derlemeleriyle sınırlı.
-Upstream libp2p-mdns hickory >=0.26'yı desteklediğinde kaldırılacak.
+Kök .quality/osv-scanner.toml ile aynı kayıt; gerekçe orada tam haliyle durur.
+
+NSEC3 doğrulama döngüsü yalnız hickory `dnssec` özelliğiyle derlendiğinde var
+olur. Ölçüm (2026-07-27): aktif hickory-proto özellikleri std/tokio/futures-io;
+dnssec YOK, mdns YOK.
+
+DÜZELTME: eski gerekçe "yalnız opsiyonel p2p-mdns ile çözülür" diyordu; libp2p
+`dns` özelliği açıldığından beri yanlış — hickory libp2p-dns üzerinden default
+derlemede. Erişilemezlik sürüyor, sebebi DNSSEC'in derlenmemesi.
+
+Premis src/tests/advisory_reachability.rs ile kilitli.
 """
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0119"   # hickory-proto name-compression parser
 reason = """
-RUSTSEC-2026-0118 ile aynı gerekçe ve aynı takip maddesi: savunmasız
-name-compression ayrıştırıcısı production/default derlemede bulunmuyor
-(p2p-mdns kapalı).
+RUSTSEC-2026-0118 ile aynı ölçüm: savunmasız ayrıştırıcı `dnssec` olmadan
+derlenmiyor. Aynı düzeltme notu geçerli.
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
+reason = """
+DNS mesajı üretirken quadratic CPU tüketimi — tetiklemek için yanıt encode
+etmek, yani DNS SUNMAK gerekir. Budlum yalnız çözümlüyor (libp2p-dns istemci
+tarafı resolver); ağaçta hickory-server yok. Premis
+src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree ile kilitli.
+Yamalı sürüm 0.26.1, libp2p ^0.25.2'ye pinli olduğu için upstream bekleniyor.
 """
 
 # ── "unmaintained" sınıfı bilgilendirici kayıtlar ────────────────────────────
