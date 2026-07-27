@@ -468,4 +468,75 @@ mod tests {
             assert_eq!(inst.opcode, op);
         }
     }
+
+    /// The privacy opcodes must stay off by default while Poseidon is weak.
+    ///
+    /// `PrivacyCommit`, `NullifierCheck` and `SumConservation` all hash through
+    /// the 4-round Poseidon in `bud-vm`. Four full rounds at alpha = 7 leave the
+    /// permutation at algebraic degree 2401 — low enough to invert by
+    /// interpolation, cheap enough to collide by brute force. Enabling them
+    /// would ship a privacy layer whose commitments neither hide nor bind.
+    ///
+    /// A staged rollout only protects anything while the default stays closed,
+    /// and a default is one edit away from flipping. This test is the alarm on
+    /// that edit: it fails the moment the flags default to enabled, so the
+    /// round count has to be fixed first rather than discovered afterwards.
+    #[test]
+    fn privacy_opcodes_stay_disabled_until_poseidon_is_fixed() {
+        let default = MainnetActivation::default();
+
+        for (opcode, enabled) in [
+            (Opcode::PrivacyCommit, default.privacy_commit_enabled),
+            (Opcode::NullifierCheck, default.nullifier_check_enabled),
+            (Opcode::SumConservation, default.sum_conservation_enabled),
+        ] {
+            assert!(
+                !enabled,
+                "{opcode:?} is enabled by default, but the Poseidon permutation \
+                 behind it is still 4 rounds (degree 2401) and provides neither \
+                 hiding nor binding. See budzero/docs/STABILIZATION.md."
+            );
+            assert!(
+                !default.allows(opcode),
+                "{opcode:?} is permitted under the default activation state"
+            );
+        }
+    }
+
+    /// The round count itself is the premise the test above rests on.
+    ///
+    /// If someone lengthens the permutation, the gate can be reconsidered — but
+    /// deliberately, by updating this expectation, not by noticing later.
+    #[test]
+    fn poseidon_round_count_is_still_the_weak_one() {
+        assert_eq!(
+            bud_vm_round_count(),
+            4,
+            "the Poseidon round count changed; re-derive the security argument \
+             in budzero/docs/STABILIZATION.md and revisit the privacy gate"
+        );
+    }
+
+    /// Reads the round count from the constant `bud-vm` exposes.
+    ///
+    /// Kept as a helper so the assertion above names what it checks rather than
+    /// hiding a magic number behind an array length.
+    fn bud_vm_round_count() -> usize {
+        // bud-isa must not depend on bud-vm (it sits below it in the graph), so
+        // the count is read from the source rather than imported.
+        let src = include_str!("../../bud-vm/src/lib.rs");
+        let marker = "pub const POSEIDON_RC: [[u64; 8]; ";
+        let start = src
+            .find(marker)
+            .expect("POSEIDON_RC declaration not found in bud-vm")
+            + marker.len();
+        let end = start
+            + src[start..]
+                .find(']')
+                .expect("malformed POSEIDON_RC declaration");
+        src[start..end]
+            .trim()
+            .parse()
+            .expect("POSEIDON_RC round count is not a number")
+    }
 }

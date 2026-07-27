@@ -102,7 +102,35 @@ Bitwise işlemler için en verimli yaklaşım, operand'ların bit decomposition'
 
 `Poseidon` opcode'u `src1*31 + src2 + 0x1337` gibi kriptografik olarak anlamsız bir placeholder ile çalışıyordu. Gerçek bir ZKVM'de hash fonksiyonu, Merkle proof doğrulama, state commitment ve rastgelelik üretimi için kritik öneme sahiptir.
 
-### Çözüm: 4-Round Poseidon (alpha=7, width=8)
+### 4-Round Poseidon (alpha=7, width=8) — ÜRETİME HAZIR DEĞİL
+
+> **⚠️ GÜVENLİK UYARISI.** Aşağıdaki parametre seti kriptografik olarak
+> **yetersizdir**. Gizlilik katmanı bu haliyle mainnet'te açılmamalıdır.
+>
+> R_F=4, R_P=0, α=7 ile permütasyonun cebirsel derecesi yalnızca 7⁴ = 2401.
+> Bu derecede bir çok değişkenli sistem interpolasyon veya Gröbner-basis ile
+> pratikte tersine çevrilebilir; ayrıca fonksiyon o kadar ucuz ki genel doğum
+> günü çakışma araması (~2³²) tek GPU ile saatler içinde erişilebilir.
+>
+> Somut sonuç: `PrivacyCommit` commitment'ından `(amount, blinding,
+> recipient_tag)` geri çıkarılabilir — **gizleme yok**. Aynı commitment veya
+> nullifier için ikinci bir açılım bulunabilir — **bağlayıcılık yok**.
+>
+> Buradaki sabitler Plonky3'ün Goldilocks width-8 Poseidon1 örneğinin **ilk
+> dört round'u**. Bu genişlik için gerçek parametreler kabaca 8 tam + 22 kısmi
+> round ister; elimizdeki, güvenli bir setten kesilmiş bir alt küme — kendi
+> başına bir tasarım değil.
+>
+> STARK tarafı dürüst: AIR dört round'un tamamını kısıtlıyor, yani kanıt
+> sistemi bu (zayıf) fonksiyonun doğru çalıştırıldığını doğru kanıtlıyor.
+> Sorun kanıtlanan fonksiyonun kendisinde.
+>
+> Bu yüzden `privacy_commit_enabled`, `nullifier_check_enabled` ve
+> `sum_conservation_enabled` bayrakları `MainnetActivation::default()` ile
+> **kapalıdır** ve round sayısı düzeltilmeden açılmamalıdır. Kilit:
+> `bud-isa` içindeki `privacy_opcodes_stay_disabled_until_poseidon_is_fixed`.
+
+### Uygulanan parametreler
 
 Plonky3'ün `p3-goldilocks` crate'i, Goldilocks cismi için optimize edilmiş bir Poseidon1 implementasyonu içeriyor. Biz bu implementasyonun parametrelerini kullanarak kendi 4-round versiyonumuzu yazdık:
 
