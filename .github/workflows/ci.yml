@@ -559,6 +559,67 @@ jobs:
           arguments: --all-features ${{ matrix.config }}
           command: check
 
+  license-compliance:
+    # Dependency licence compatibility, kept as its own job on purpose.
+    #
+    # `cargo-deny check` (the job above) already covers licences as one of its
+    # four sections, but a failure there surfaces as one red "Cargo Deny" check
+    # and the reason has to be dug out of the log. Licence compatibility is a
+    # legal-exposure question rather than a hygiene one, so it gets a check
+    # that says in its own name what broke.
+    #
+    # This does not replace or weaken the combined run: both stay required.
+    name: License Compliance (dependency licences)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny (pinned)
+        run: cargo install --locked --version 0.20.2 cargo-deny
+
+      # Canary: prove the licence gate can reject something before trusting a
+      # green result. A tree checked against an empty allow-list must fail; if
+      # it passes, the gate is not evaluating licences at all.
+      - name: Gate canary (an empty allow-list must fail)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lic-canary
+          printf '[licenses]\nallow = []\nconfidence-threshold = 0.8\n' > /tmp/lic-canary/deny.toml
+          if cargo deny --manifest-path "${{ matrix.manifest }}" \
+               --config /tmp/lic-canary/deny.toml check licenses >/dev/null 2>&1; then
+            echo "FAIL: an empty allow-list was accepted - the licence gate is vacuous." >&2
+            exit 1
+          fi
+          echo "Canary rejected as expected; the gate evaluates licences."
+
+      - name: cargo deny check licenses
+        run: |
+          set -euo pipefail
+          cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
+            ${{ matrix.config }} check licenses
+
+      # Inventory for the audit trail: what each dependency is licensed under,
+      # not merely whether the run passed.
+      - name: Licence inventory (summary)
+        if: always()
+        run: |
+          {
+            echo "### Dependency licences - ${{ matrix.name }}"
+            echo ""
+            echo '```'
+            cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
+              ${{ matrix.config }} list 2>/dev/null | cut -c1-200 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   fuzz-quick:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
     # Uzun koşular fuzz-nightly.yml (schedule, 4h/target, corpus cache) işler.
