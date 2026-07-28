@@ -134,6 +134,7 @@ pub mod snapshot_chaos;
 #[cfg(test)]
 pub mod advisory_reachability;
 #[cfg(test)]
+pub mod ai_verification_status_locks;
 pub mod audit_findings_locks;
 #[cfg(test)]
 pub mod hardening_h2_locks;
