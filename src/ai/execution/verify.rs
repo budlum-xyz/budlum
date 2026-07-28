@@ -10,6 +10,13 @@ pub struct ExecutionVerifyReport {
     pub has_proof_bytes: bool,
     pub program_hash_nonzero: bool,
     pub program_hash_matches_model: bool,
+    /// The proof carries the weights digest the model registered.
+    ///
+    /// `program_hash_matches_model` only binds the guest program, which for
+    /// the fixed-point MLP depends on the architecture alone — the weights
+    /// live in a memory image the STARK does not constrain. Without this
+    /// field a prover could run the registered program over any weights.
+    pub weights_bound: bool,
     pub stark_ok: Option<bool>,
 }
 
@@ -20,6 +27,7 @@ impl ExecutionVerifyReport {
             && self.has_proof_bytes
             && self.program_hash_nonzero
             && self.program_hash_matches_model
+            && self.weights_bound
     }
 
     /// Structural + STARK (when attempted).
@@ -50,12 +58,22 @@ pub fn verify_execution_proof_structural_with_model(
         // When require_execution_proof is false or no model registered.
         None => model.is_none_or(|m| !m.require_execution_proof),
     };
+    // The weights digest is checked on the same terms as the program hash: if
+    // the model registered one, the proof has to carry exactly that value; if
+    // it did not, only a model that does not require an execution proof may
+    // pass. Two models with the same architecture share a program hash, so
+    // without this a proof for one of them verifies against the other.
+    let weights_bound = match model.and_then(|m| m.execution_weights_digest) {
+        Some(expected) => proof.weights_digest == Some(expected),
+        None => model.is_none_or(|m| !m.require_execution_proof),
+    };
     ExecutionVerifyReport {
         commitments_ok: proof.commitments_match(request, result),
         model_bound: proof.model_id == request.model_id,
         has_proof_bytes: !proof.proof_bytes.is_empty(),
         program_hash_nonzero: proof.program_hash != [0u8; 32],
         program_hash_matches_model,
+        weights_bound,
         stark_ok: None,
     }
 }
@@ -145,6 +163,7 @@ mod tests {
             proof_bytes: vec![],
             steps: 0,
             gas_used: 0,
+            weights_digest: None,
         };
         let rep = verify_execution_proof_structural(&proof, &req, &res);
         assert!(!rep.is_structurally_valid());
@@ -168,6 +187,7 @@ mod tests {
             require_execution_proof: true,
             execution_program_hash: Some([7u8; 32]),
             execution_class: 1,
+            execution_weights_digest: None,
         };
         let proof = AiExecutionProof {
             model_id: mid,
@@ -177,6 +197,7 @@ mod tests {
             proof_bytes: vec![1, 2, 3],
             steps: 1,
             gas_used: 1,
+            weights_digest: None,
         };
         let rep = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
         assert!(!rep.program_hash_matches_model);
@@ -184,5 +205,236 @@ mod tests {
         spec.execution_program_hash = Some(proof.program_hash);
         let rep2 = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
         assert!(rep2.program_hash_matches_model);
+    }
+
+    /// The finding this field exists for: two models with the same layer shape
+    /// compile to the same guest program, because the fixed-point MLP guest
+    /// reads its weights from memory rather than baking them into immediates.
+    /// The STARK does not bind that memory either. So without a weights digest
+    /// a proof produced for one model verifies against the other.
+    #[test]
+    fn program_hash_alone_does_not_separate_two_models_of_the_same_shape() {
+        use crate::ai::execution::{matmul_program_hash, weights_digest, FixedPointMlpSpec};
+
+        let honest = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![0],
+        };
+        let swapped = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![9, -9],
+            biases: vec![0],
+        };
+
+        assert_eq!(
+            matmul_program_hash(&honest).unwrap(),
+            matmul_program_hash(&swapped).unwrap(),
+            "same architecture must produce the same program — this is the gap"
+        );
+        assert_ne!(
+            weights_digest(&honest),
+            weights_digest(&swapped),
+            "the weights digest is what tells them apart"
+        );
+    }
+
+    /// A registered model must reject a proof carrying a different weights
+    /// digest, even when every other structural check passes.
+    #[test]
+    fn structural_check_rejects_a_proof_for_different_weights() {
+        use crate::ai::execution::{weights_digest, FixedPointMlpSpec};
+
+        let honest = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![0],
+        };
+        let swapped = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![9, -9],
+            biases: vec![0],
+        };
+
+        let (req, res, mid) = sample_req_res();
+        let spec = AiModelSpec {
+            model_id: mid,
+            model_hash: [9u8; 32],
+            owner: req.requester,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some([5u8; 32]),
+            execution_class: 1,
+            execution_weights_digest: Some(weights_digest(&honest)),
+        };
+
+        // A proof that is correct in every other respect but claims the
+        // swapped weights.
+        let attacker = AiExecutionProof {
+            model_id: mid,
+            input_commitment: req.input_commitment,
+            output_commitment: res.output_commitment,
+            program_hash: [5u8; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 1,
+            gas_used: 1,
+            weights_digest: Some(weights_digest(&swapped)),
+        };
+        let rep = verify_execution_proof_structural_with_model(&attacker, &req, &res, Some(&spec));
+        assert!(
+            rep.program_hash_matches_model,
+            "the program hash still matches — that is exactly why it is not enough"
+        );
+        assert!(!rep.weights_bound, "the weights digest must not match");
+        assert!(!rep.is_structurally_valid());
+
+        // The same proof with the registered digest passes.
+        let honest_proof = AiExecutionProof {
+            weights_digest: Some(weights_digest(&honest)),
+            ..attacker.clone()
+        };
+        let rep =
+            verify_execution_proof_structural_with_model(&honest_proof, &req, &res, Some(&spec));
+        assert!(rep.weights_bound);
+        assert!(
+            rep.is_structurally_valid(),
+            "the honest proof must still pass — the gate cannot just reject everything"
+        );
+    }
+
+    /// A proof-required model that registered a digest must not accept a proof
+    /// that simply omits one.
+    #[test]
+    fn missing_weights_digest_does_not_bypass_a_registered_one() {
+        use crate::ai::execution::{weights_digest, FixedPointMlpSpec};
+
+        let honest = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![0],
+        };
+        let (req, res, mid) = sample_req_res();
+        let spec = AiModelSpec {
+            model_id: mid,
+            model_hash: [9u8; 32],
+            owner: req.requester,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some([5u8; 32]),
+            execution_class: 1,
+            execution_weights_digest: Some(weights_digest(&honest)),
+        };
+        let proof = AiExecutionProof {
+            model_id: mid,
+            input_commitment: req.input_commitment,
+            output_commitment: res.output_commitment,
+            program_hash: [5u8; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 1,
+            gas_used: 1,
+            weights_digest: None,
+        };
+        let rep = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
+        assert!(!rep.weights_bound, "omitting the digest must not bypass it");
+        assert!(!rep.is_structurally_valid());
+    }
+
+    /// A model that does not require an execution proof keeps working without
+    /// a digest — the binding is a requirement of the proof path, not a new
+    /// obligation on every model.
+    #[test]
+    fn attestation_only_models_are_unaffected() {
+        let (req, res, mid) = sample_req_res();
+        let spec = AiModelSpec {
+            model_id: mid,
+            model_hash: [9u8; 32],
+            owner: req.requester,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+        };
+        let proof = AiExecutionProof {
+            model_id: mid,
+            input_commitment: req.input_commitment,
+            output_commitment: res.output_commitment,
+            program_hash: [5u8; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 1,
+            gas_used: 1,
+            weights_digest: None,
+        };
+        let rep = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
+        assert!(rep.weights_bound);
+        assert!(rep.is_structurally_valid());
+    }
+
+    /// The digest must survive a round trip through the wire format,
+    /// otherwise the check silently degrades to "absent" on every relayed
+    /// transaction.
+    #[test]
+    fn weights_digest_survives_proto_round_trip() {
+        use crate::ai::execution::{weights_digest, FixedPointMlpSpec};
+        use crate::core::transaction::{Transaction, TransactionType};
+        use crate::network::proto_conversions::pb;
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![0],
+        };
+        let digest = weights_digest(&spec);
+        let (req, res, mid) = sample_req_res();
+
+        let proof = AiExecutionProof {
+            model_id: mid,
+            input_commitment: req.input_commitment,
+            output_commitment: res.output_commitment,
+            program_hash: [5u8; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 1,
+            gas_used: 1,
+            weights_digest: Some(digest),
+        };
+        let mut tx = Transaction::new(req.requester, req.requester, 0, Vec::new());
+        tx.tx_type = TransactionType::AiAttachExecutionProof {
+            request_id: res.request_id,
+            proof: proof.clone(),
+        };
+        let proto = pb::ProtoTransaction::from(&tx);
+        let back = Transaction::try_from(proto).expect("round trip");
+        match back.tx_type {
+            TransactionType::AiAttachExecutionProof { proof: p, .. } => {
+                assert_eq!(
+                    p.weights_digest,
+                    Some(digest),
+                    "the digest must survive encoding; losing it turns the \
+                     check into a no-op for every relayed proof"
+                );
+            }
+            other => panic!("wrong tx type: {other:?}"),
+        }
     }
 }

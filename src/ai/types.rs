@@ -128,6 +128,27 @@ pub struct AiModelSpec {
     /// Whitelisted execution class id (1 = FixedPointMlpV1). 0 = none.
     #[serde(default)]
     pub execution_class: u8,
+    /// Digest of the model's weights and biases, as produced by
+    /// `crate::ai::execution::weights_digest`.
+    ///
+    /// `execution_program_hash` binds the guest *program*, and for the
+    /// fixed-point MLP guest the program depends only on the architecture:
+    /// two models with the same layer shape and completely different weights
+    /// compile to the same instructions, because the weights are read from
+    /// memory rather than baked into immediates.
+    ///
+    /// The STARK does not bind that memory either — the AIR constrains the
+    /// program, the gas counters, the exit code, the trace length and the
+    /// event accumulator, but not the image the program starts from. So a
+    /// prover can run the registered program over a *different* weight matrix
+    /// and produce an equally valid proof.
+    ///
+    /// Registering the digest closes that gap from outside the proof system:
+    /// the verifier re-derives it from the spec it already holds and refuses
+    /// a proof that does not carry the same value. See
+    /// `docs/AI_VERIFICATION_STATUS.md`.
+    #[serde(default)]
+    pub execution_weights_digest: Option<[u8; 32]>,
 }
 
 impl AiModelSpec {
@@ -172,6 +193,13 @@ impl AiModelSpec {
         hasher.update([u8::from(self.active)]);
         hasher.update([u8::from(self.require_execution_proof)]);
         hasher.update([self.execution_class]);
+        match &self.execution_weights_digest {
+            Some(d) => {
+                hasher.update([1u8]);
+                hasher.update(d);
+            }
+            None => hasher.update([0u8]),
+        }
         match &self.execution_program_hash {
             Some(ph) => {
                 hasher.update([1u8]);
@@ -357,6 +385,18 @@ pub struct AiExecutionProof {
     pub steps: u64,
     /// Gas used during ZKVM execution.
     pub gas_used: u64,
+    /// Digest of the weights the prover claims to have run.
+    ///
+    /// The guest reads its weights from a memory image that the STARK does
+    /// not bind, so `program_hash` alone cannot distinguish two models with
+    /// the same architecture. The verifier compares this against the digest
+    /// registered in `AiModelSpec::execution_weights_digest`.
+    ///
+    /// This is a claim, not a proof: it tells the verifier *which* weights the
+    /// prover says it used, and the registry says which ones it was allowed to
+    /// use. Binding it inside the AIR is the remaining work.
+    #[serde(default)]
+    pub weights_digest: Option<[u8; 32]>,
 }
 
 impl AiExecutionProof {

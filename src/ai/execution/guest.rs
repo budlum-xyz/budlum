@@ -318,6 +318,10 @@ pub fn prove_mlp_inference(
         // count; the AIR-bound row count lives in the public inputs.
         steps: pi.trace_len,
         gas_used: pi.gas_used,
+        // States which weights were run. The guest reads them from a memory
+        // image the AIR does not constrain, so `program_hash` — which depends
+        // on the architecture alone — cannot carry this.
+        weights_digest: Some(weights_digest(spec)),
     };
     Ok((proof, host_output))
 }

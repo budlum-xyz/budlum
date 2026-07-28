@@ -52,6 +52,7 @@ mod tests {
             require_execution_proof: false,
             execution_program_hash: None,
             execution_class: 0,
+            execution_weights_digest: None,
         };
 
         assert!(registry.register_model(spec.clone()).is_ok());
@@ -81,6 +82,7 @@ mod tests {
             require_execution_proof: false,
             execution_program_hash: None,
             execution_class: 0,
+            execution_weights_digest: None,
         };
         registry.register_model(spec).unwrap();
 
@@ -163,6 +165,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -268,6 +271,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -318,6 +322,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -386,6 +391,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -455,6 +461,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -537,6 +544,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -619,6 +627,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -666,6 +675,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -740,6 +750,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -791,6 +802,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -879,6 +891,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -934,6 +947,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1000,6 +1014,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1049,6 +1064,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1101,6 +1117,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1132,6 +1149,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1182,6 +1200,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1266,6 +1285,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1348,6 +1368,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1395,6 +1416,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1429,6 +1451,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1468,6 +1491,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1519,6 +1543,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1565,6 +1590,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1663,6 +1689,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1682,6 +1709,7 @@ mod tests {
             require_execution_proof: false,
             execution_program_hash: None,
             execution_class: 0,
+            execution_weights_digest: None,
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already registered"));
@@ -1711,6 +1739,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1743,6 +1772,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
 
@@ -1779,6 +1809,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             })
             .unwrap();
         (registry, model_id, owner)
@@ -3461,6 +3492,7 @@ mod tests {
             proof_bytes: vec![1, 2, 3, 4],
             steps: 100,
             gas_used: 50000,
+            weights_digest: None,
         };
 
         // Attach proof successfully
@@ -3492,6 +3524,7 @@ mod tests {
             proof_bytes: vec![],
             steps: 100,
             gas_used: 50000,
+            weights_digest: None,
         };
 
         let result = registry.attach_execution_proof(&req_id, &v1, proof);
@@ -3517,6 +3550,7 @@ mod tests {
             proof_bytes: vec![],
             steps: 100,
             gas_used: 50000,
+            weights_digest: None,
         };
 
         let result = registry.attach_execution_proof(&req_id, &v1, proof);
@@ -3617,6 +3651,7 @@ mod tests {
             proof_bytes: vec![1, 2, 3],
             steps: 100,
             gas_used: 50000,
+            weights_digest: None,
         };
         registry
             .attach_execution_proof(&req_id, &v1, proof)

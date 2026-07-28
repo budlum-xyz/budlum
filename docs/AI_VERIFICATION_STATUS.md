@@ -12,6 +12,7 @@ feature, while the code deliberately refuses to perform it.
 | Structural checks on an execution proof (commitments, model binding, program-hash match) | working | `verify_execution_proof_structural_with_model` |
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
 | Initial guest memory (weights, biases, input) bound by the AIR | **not bound** | `prove_bytecode_with_memory` |
+| Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
 | STARK verification of an inference proof on the transaction path | **not wired** | `src/execution/executor.rs` |
 | `VerifyInference` opcode (0x1F) inside the zkVM | **always returns 0** | `budzero/bud-vm/src/lib.rs` |
 
@@ -51,12 +52,32 @@ not bind the memory a program starts from. A prover can therefore run the same
 program words over a different weight matrix and produce an equally valid
 proof.
 
-For AI execution the binding has to come from outside the STARK:
-`weights_digest(spec)` must be registered in `AiModelSpec` and re-derived by
-the verifier, exactly the way `execution_program_hash` already is. Until that
-is wired, `matmul_program_hash` binds the model *architecture* only — two
-models with the same shape and different weights share a program hash, which
-`matmul_program_hash_does_not_bind_weights` records deliberately.
+For AI execution the binding therefore comes from outside the STARK, and it is
+now wired: `AiModelSpec::execution_weights_digest` holds
+`weights_digest(spec)`, `AiExecutionProof::weights_digest` carries what the
+prover claims to have run, and
+`verify_execution_proof_structural_with_model` refuses a proof whose digest is
+absent or different. Both fields travel over the wire
+(`ProtoAiModelRegister.execution_weights_digest` field 12,
+`ProtoAiAttachExecutionProof.weights_digest` field 9) and
+`weights_digest_survives_proto_round_trip` pins that, because a digest lost in
+encoding would silently turn the check into a no-op on every relayed
+transaction.
+
+`matmul_program_hash` still binds the model *architecture* only — two models
+with the same shape share a program hash, which
+`program_hash_alone_does_not_separate_two_models_of_the_same_shape` records
+deliberately. That is exactly why the digest exists.
+
+**What this is and is not.** The digest is a *claim* checked against a
+*registration*: it tells the verifier which weights the prover says it used,
+and the registry says which ones it was allowed to use. A prover that lies
+about the digest is caught; a prover that reports the registered digest while
+running different weights in memory is not, because the AIR still does not
+constrain the initial image. Closing that last step means an initial-memory
+commitment column in the AIR, or having the verifier rebuild the image and
+re-derive the trace itself. Until then the digest narrows the gap from "any
+weights" to "the registered weights, on the prover's word".
 
 ## Why the transaction path fails closed
 
@@ -98,10 +119,11 @@ default.
 
 1. Store the guest program words (or a commitment plus a retrievable blob) in
    `AiModelSpec` at registration time.
-2. Bind the initial memory image. Either extend the AIR with an initial-memory
-   commitment column, or register `weights_digest` in `AiModelSpec` and have
-   the verifier rebuild the memory image itself before checking the proof.
-   Without this a valid proof says nothing about *which* weights ran.
+2. Bind the initial memory image *inside* the proof. The registry-side half of
+   this is done (`execution_weights_digest`), so a proof can no longer claim
+   arbitrary weights — but the claim is not yet enforced by the AIR. Extend it
+   with an initial-memory commitment column, or have the verifier rebuild the
+   image and re-derive the trace.
 3. Re-derive `ExecutionPublicInputs` on the transaction path from the request,
    the result and the registered program.
 4. Call `verify_execution_proof_full` with that bundle and treat

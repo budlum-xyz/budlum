@@ -164,6 +164,10 @@ impl From<&Transaction> for pb::ProtoTransaction {
                         result_deadline_blocks: spec.result_deadline_blocks,
                         version: spec.version,
                         active: spec.active,
+                        execution_weights_digest: spec
+                            .execution_weights_digest
+                            .map(|d| d.to_vec())
+                            .unwrap_or_default(),
                     },
                 )),
             ),
@@ -364,6 +368,10 @@ impl From<&Transaction> for pb::ProtoTransaction {
                         proof_bytes: proof.proof_bytes.clone(),
                         steps: proof.steps,
                         gas_used: proof.gas_used,
+                        weights_digest: proof
+                            .weights_digest
+                            .map(|d| d.to_vec())
+                            .unwrap_or_default(),
                     },
                 )),
             ),
@@ -893,6 +901,18 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     result_deadline_blocks: payload.result_deadline_blocks,
                     version: payload.version,
                     active: payload.active,
+                    execution_weights_digest: if payload.execution_weights_digest.is_empty() {
+                        None
+                    } else {
+                        if payload.execution_weights_digest.len() != 32 {
+                            return Err(
+                                "AiModelRegister execution_weights_digest must be 32 bytes".into(),
+                            );
+                        }
+                        let mut d = [0u8; 32];
+                        d.copy_from_slice(&payload.execution_weights_digest);
+                        Some(d)
+                    },
                     require_execution_proof: false,
                     execution_program_hash: None,
                     execution_class: 0,
@@ -1220,6 +1240,11 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         proof_bytes: payload.proof_bytes,
                         steps: payload.steps,
                         gas_used: payload.gas_used,
+                        weights_digest: if payload.weights_digest.is_empty() {
+                            None
+                        } else {
+                            Some(to32(&payload.weights_digest, "weights_digest")?)
+                        },
                     },
                 }
             }
@@ -1919,6 +1944,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_weights_digest: None,
             }),
             TransactionType::AiInferenceRequest(crate::ai::types::AiInferenceRequest {
                 request_id: crate::ai::types::AiRequestId([3u8; 32]),
