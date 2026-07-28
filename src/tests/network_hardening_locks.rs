@@ -142,32 +142,65 @@ mod tests {
         );
     }
 
-    /// Peer scoring is **not** enabled, and that is the current accepted state.
+    /// Peer scoring must stay enabled, with the thresholds that were chosen.
     ///
-    /// Without it, gossipsub's IHAVE/IWANT accounting has no consequence: a
-    /// peer that floods IHAVE announcements and never delivers on IWANT is
-    /// throttled by the per-heartbeat caps but is never penalised or pruned.
-    /// The repo compensates with its own `PeerManager` rate limiting and ban
-    /// list, which is why this is accepted rather than fixed.
-    ///
-    /// This test exists so the gap stays visible. If peer scoring is turned
-    /// on, this test fails and the comment above has to be rewritten into a
-    /// description of the parameters that were chosen.
+    /// Without it gossipsub counts misbehaviour and then discards the count:
+    /// a peer that floods IHAVE and never answers the resulting IWANT is
+    /// capped per heartbeat but never penalised, never gossip-suppressed and
+    /// never pruned. The router already tracks this (P7 in the scoring spec);
+    /// enabling scoring is what makes the tracking matter.
     #[test]
-    fn gossipsub_peer_scoring_gap_is_recorded() {
-        let enabled = NODE_RS.contains("with_peer_score") || NODE_RS.contains("PeerScoreParams");
+    fn gossipsub_peer_scoring_is_enabled_with_pinned_parameters() {
         assert!(
-            !enabled,
-            "gossipsub peer scoring was enabled — good, but this lock recorded \
-             its absence as an accepted gap. Replace this test with one that \
-             pins the score thresholds that were chosen."
+            NODE_RS.contains("with_peer_score("),
+            "gossipsub peer scoring was turned off; IHAVE floods would go \
+             unpenalised again"
         );
-        // The compensating control must exist while scoring does not.
+        assert!(
+            NODE_RS.contains("behaviour_penalty_threshold: 6.0"),
+            "the behaviour penalty threshold moved. It is deliberately above \
+             libp2p's default of 0 so genuine message loss does not cost \
+             score; changing it is a policy decision that belongs in the \
+             commit that makes it"
+        );
+        assert!(
+            NODE_RS.contains("ip_colocation_factor_threshold: 4.0"),
+            "the IP colocation threshold moved. libp2p defaults to 10, which \
+             suits consumer nodes behind shared NATs; a validator set with ten \
+             peers on one address is usually one machine claiming to be ten"
+        );
+        // The compensating control predates scoring and must not be dropped
+        // now that scoring exists — they cover different things: PeerManager
+        // bans on protocol violations, scoring degrades on mesh behaviour.
         assert!(
             NODE_RS.contains("check_rate_limit"),
-            "PeerManager rate limiting is the compensating control for the \
-             missing gossipsub peer scoring; it must not disappear silently"
+            "PeerManager rate limiting must stay alongside peer scoring"
         );
+    }
+
+    /// The topics this node publishes on must be registered with the scorer.
+    ///
+    /// A topic with no entry contributes nothing to a peer's score, so only
+    /// the global penalties apply and per-topic delivery accounting is lost.
+    #[test]
+    fn scored_topics_cover_what_the_node_publishes() {
+        let at = NODE_RS
+            .find("for topic in [\"blocks\", \"transactions\"]")
+            .expect("the scored topic list must exist");
+        let window = &NODE_RS[at..(at + 400).min(NODE_RS.len())];
+        assert!(
+            window.contains("score_params.topics.insert"),
+            "the topic loop must register each topic with the scorer"
+        );
+        // Every topic the node actually publishes on has to be in that list.
+        for topic in ["blocks", "transactions"] {
+            let published = NODE_RS.contains(&format!("IdentTopic::new(\"{topic}\")"));
+            assert!(
+                published,
+                "{topic} is registered for scoring but never published on; \
+                 either the list or the publisher drifted"
+            );
+        }
     }
 
     /// Canary for the comment stripper: a mention inside a comment must not
