@@ -121,12 +121,20 @@ enum Commands {
         about = "Verify a generated STARK proof envelope against public inputs and program bytecode"
     )]
     Verify {
-        #[arg(short, long, help = "Path to the STARK proof envelope JSON file")]
+        // Short flags are assigned explicitly: clap derives `-p` for both
+        // `proof_file` and `public_inputs_file`, and its duplicate-short
+        // assertion aborts the process before any argument is parsed, so
+        // `verify` (including `verify --help`) always panicked.
+        #[arg(short = 'f', long, help = "Path to the STARK proof envelope JSON file")]
         proof_file: String,
-        #[arg(short, long, help = "Path to the execution public inputs JSON file")]
+        #[arg(
+            short = 'i',
+            long,
+            help = "Path to the execution public inputs JSON file"
+        )]
         public_inputs_file: String,
         #[arg(
-            short,
+            short = 'b',
             long,
             help = "Path to the compiled program bytecode (.budc or hex bytes)"
         )]
@@ -177,7 +185,7 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
     let pre_root = state.root();
 
-    let mut vm = Vm::new(1024);
+    let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     if let Some(s) = config.sender {
         vm.context.sender = s;
         let acc = match state.get_account(s) {
@@ -245,12 +253,10 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         .collect();
     let prog_hash = compute_keccak256(&bytecode_bytes);
 
-    let event_bytes: Vec<u8> = receipt
-        .events
-        .iter()
-        .flat_map(|&e| e.to_le_bytes().to_vec())
-        .collect();
-    let event_digest = compute_keccak256(&event_bytes);
+    // The AIR binds an additive u32-limb accumulator, not a hash of the event
+    // list. Hashing here produced proofs that always failed verification with
+    // OodEvaluationMismatch, which made `prove` and `run` unusable.
+    let event_digest = bud_proof::event_digest_from_events(&receipt.events);
 
     let pi = ExecutionPublicInputs {
         chain_id: config.chain_id,
@@ -562,7 +568,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Test => {
-            let mut vm = Vm::new(1024);
+            let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
             let prog = vec![
                 Instruction {
                     opcode: Opcode::Add,

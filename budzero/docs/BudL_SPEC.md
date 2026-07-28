@@ -29,12 +29,12 @@ akıllı kontrat dilidir. Özellikleri:
 contract     := 'contract' ident '{' contract_body '}'
 contract_body := (struct_decl | fn_decl | storage_decl)*
 
-struct_decl  := 'struct' ident '{' (field_decl)* '}'
-field_decl   := type ident ('=' expr)? ';'
+struct_decl  := 'struct' ident '{' (field_decl)+ '}'
+field_decl   := ident ':' type ','          // trailing comma zorunlu
 
 fn_decl      := 'pub'? 'fn' ident '(' params? ')' ('->' type)? block
 params       := param (',' param)*
-param        := type ident
+param        := ident ':' type
 
 storage_decl := 'storage' '{' (field_decl)* '}'
 
@@ -263,5 +263,95 @@ contract SimpleToken {
 - **Codegen:** `budzero/bud-compiler/src/codegen.rs`
 
 Derlenen bytecode BudZKVM'de çalışır → execution trace → Plonky3 STARK proof.
+
+---
+## 9. Kanıtlanabilirlik Sınırı — Dallanan Programlar
+
+`bud-proof` içindeki AIR, bir Program CTL (LogUp) ile her CPU satırını tam
+olarak bir ön-işlenmiş program satırıyla eşler (`plonky3_air.rs`,
+`preprocessed_trace()` ve Program CTL bloğu). Bu eşleme **her komutun en az bir
+kez çalıştırılmasını** gerektirir.
+
+Sonuç: yürütülmeyen bir komut bırakan program STARK doğrulamasında
+`OodEvaluationMismatch` ile reddedilir. BudL'de `if`, `while` ve `for`
+alınmayan dalı atlayan `Jmp`/`Jnz` üretir, dolayısıyla **dallanan sözleşmeler
+şu an kanıtlanamaz.**
+
+| Program şekli | Derleme | Yürütme | Kanıt | Doğrulama |
+|---|---|---|---|---|
+| Düz kod, `emit` dahil | ✅ | ✅ | ✅ | ✅ |
+| Her komutu çalıştıran sıçrama (`Jmp +1`) | ✅ | ✅ | ✅ | ✅ |
+| Komut atlayan dal (`if`/`while`/`for`) | ✅ | ✅ | ✅ | ❌ |
+
+Ölçüm: `Jmp +1` (hiçbir komut atlamaz) doğrulanır; `Jmp +2` (bir komut atlar)
+`OodEvaluationMismatch` verir. Sıçramanın kendisi değil, **atlanan komut**
+sorundur.
+
+Sınır `budzero/bud-cli/tests/toolchain_end_to_end.rs` ve
+`plonky3_prover.rs` kanaryalarıyla kilitlidir. Program CTL satır-başına çokluk
+(multiplicity) taşıyacak şekilde genişletildiğinde bu testler kırmızıya döner ve
+bu bölümün güncellenmesini zorlar.
+
+**Üretim etkisi:** BudL sözleşme yürütme katmanı mainnet'te açık değildir; bu
+sınır kapatılmadan dallanan sözleşmeler zincir üzerinde kanıtlanamaz.
+
+---
+
+## 10. Genel Girdi Sözleşmesi — `event_digest`
+
+`ExecutionPublicInputs::event_digest` bir **hash değildir.** AIR, sekiz adet
+küçük-endian `u32` limb taşıyan toplamsal bir akümülatör bağlar
+(`COL_EVENT_DIGEST_0..8`): her `Log` satırı `rs1` işleneninin düşük 32 bitini
+limb 0'a ekler, limb 1..8 sıfır kalır.
+
+Bu alanı `bud_proof::event_digest_from_events()` ile üretin. `keccak256(events)`
+yazmak, doğrulaması her zaman `OodEvaluationMismatch` ile başarısız olan bir
+kanıt üretir — `bud-cli` tam olarak bunu yapıyordu ve `prove`/`run` komutları
+hiç çalışmıyordu.
+
+---
+## 11. Struct Bellek Yerleşimi ve Host Bellek Tabanı
+
+Derleyici prologu heap işaretçisini (`r31`) `bud_compiler::HEAP_BASE`
+(**4096**) adresine kurar; struct literal'leri bu adresin üzerine tahsis edilir.
+
+Bu yüzden BudZKVM'i barındıran her host, VM belleğini en az
+`bud_compiler::MIN_VM_MEMORY_BYTES` (**8192**) olarak açmalıdır. Daha küçük bir
+bellek, struct kullanan **her** sözleşmede ilk tahsiste `InvalidMemoryAccess`
+verir.
+
+`bud-cli` bu değeri `1024` olarak kullanıyordu; derleyicinin kendi testleri
+`8192` kullandığı için hata yalnızca CLI üzerinden görülüyordu. Üretim yolu
+(`src/execution/zkvm.rs`) zaten `8192` kullanıyor.
+
+Sınır `bud-cli/tests/toolchain_end_to_end.rs` içindeki üç testle kilitlidir:
+struct sözleşmesi derlenip **çalıştırılır** (doğru sonucu üretir), taban
+ilişkisi (`MIN > HEAP_BASE`) doğrulanır ve `1024` baytlık bir VM'in hâlâ hata
+vermesi kanarya olarak tutulur.
+
+**Not:** bellek düzeltmesi çalıştırmayı mümkün kılar, kanıtlamayı değil. Struct
+kullanan sözleşmeler bir yardımcı fonksiyon + prolog üretir; `Call`/`Ret` şekli
+en az bir komutu yürütülmeden bırakır, dolayısıyla §9'daki Program CTL sınırına
+takılır. Test bunu koşullu doğrular: doğrulama **tam olarak** her komut
+çalıştığında başarılı olmalıdır.
+
+---
+## 12. AIR Kanıt Kapsamı — Opcode Matrisi
+
+`bud-proof` içindeki AIR tüm opcode'ları kısıtlar, ancak **kısıtlanmış olmak
+kanıtlanmış olmak değildir.** Ölçüm sırasında dört opcode'un hiçbir prover
+testinde geçmediği bulundu:
+
+| Opcode | Önceki durum | Neden önemli |
+|---|---|---|
+| `Store` (0x15) | kanıt testi yok | struct alan yazımı buraya iner |
+| `Assert` (0x18) | kanıt testi yok | `constrain(...)` buraya iner |
+| `Jmp` (0x10) | kanıt testi yok | tüm kontrol akışının temeli |
+| `Syscall` (0x1D) | kanıt testi yok | `caller()`, `block_height()` buraya iner |
+
+Dördü de artık `plonky3_prover.rs` içinde prove→verify round-trip ile
+kapsanmıştır. Yeni bir opcode eklendiğinde aynı şey yapılmalıdır: AIR kısıtı
+yazmak yeterli değil, o opcode'u içeren bir programın kanıtı üretilip
+doğrulanmalıdır.
 
 ---
