@@ -76,6 +76,49 @@ impl ContentId {
         ]))
     }
 
+    /// Content id of a byte range **as stored by one specific operator**.
+    ///
+    /// [`Self::of_subrange`] hashes the bytes and nothing else, so every
+    /// operator holding a replica of the same shard answers a challenge with
+    /// the same value. That makes two attacks free, both named in the SoK on
+    /// decentralized storage networks:
+    ///
+    /// * **outsourcing** — several operators keep one physical copy between
+    ///   them and collect a payment each, because any of them can produce the
+    ///   answer the others would have produced;
+    /// * **Sybil** — one machine registers N identities, claims N replicas and
+    ///   stores one.
+    ///
+    /// Binding the answer to `(operator, deal_id, manifest_id)` means a
+    /// challenge can only be answered by whoever holds *that deal's* copy.
+    /// Sharing bytes no longer shares answers.
+    ///
+    /// This is a *binding*, not a proof of distinct storage. Filecoin's PoRep
+    /// goes further and makes each replica physically different and
+    /// incompressible by encoding it under a per-replica key, so the bytes
+    /// themselves cannot be shared. That is a format change to what an
+    /// operator writes to disk; this is a change to what a challenge accepts,
+    /// and it removes the free version of the attack: colluding operators now
+    /// have to relay each other's live challenges rather than precompute one
+    /// answer set. See `docs/BUD_STORAGE_ROADMAP.md` Gap 2.
+    pub fn of_subrange_for_deal(
+        chunk: &[u8],
+        start: u64,
+        end: u64,
+        operator: &[u8; 32],
+        deal_id: u64,
+        manifest_id: &Hash32,
+    ) -> Self {
+        let base = Self::of_subrange(chunk, start, end);
+        ContentId(hash_fields_bytes(&[
+            b"BDLM_CONTENT_SUBRANGE_DEAL_V1",
+            base.as_bytes(),
+            operator,
+            &deal_id.to_le_bytes(),
+            manifest_id,
+        ]))
+    }
+
     pub fn as_bytes(&self) -> &Hash32 {
         &self.0
     }
