@@ -189,16 +189,27 @@ mod tests {
     /// allow-listed explicitly and by host, not switched off wholesale.
     #[test]
     fn git_source_policy_stays_closed_except_for_libp2p() {
-        let deny = include_str!("../../.quality/deny.toml");
-        assert!(
-            deny.contains("unknown-git = \"deny\""),
-            "cargo-deny must keep denying unknown git sources"
-        );
-        assert!(
-            deny.contains("allow-git = [\"https://github.com/libp2p/rust-libp2p\"]"),
-            "the rust-libp2p host must be the only allowed git source; a \
-             broader allow-list would let any git dependency through"
-        );
+        // Both cargo-deny configs, not just the root one: budzero keeps its own
+        // next to its manifest and CI runs the two as separate jobs, so a
+        // policy that lands in only one of them leaves the other gate red.
+        for (name, deny) in [
+            (
+                ".quality/deny.toml",
+                include_str!("../../.quality/deny.toml"),
+            ),
+            ("budzero/deny.toml", include_str!("../../budzero/deny.toml")),
+        ] {
+            assert!(
+                deny.contains("unknown-git = \"deny\""),
+                "{name}: cargo-deny must keep denying unknown git sources"
+            );
+            assert!(
+                deny.contains("allow-git = [\"https://github.com/libp2p/rust-libp2p\"]"),
+                "{name}: the rust-libp2p host must be the only allowed git \
+                 source; a broader allow-list would let any git dependency \
+                 through"
+            );
+        }
     }
 
     /// The patch that delivers those versions has to stay, and it has to stay

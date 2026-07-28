@@ -404,7 +404,6 @@ version = "0.1.0"
 name = "bud-node"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bincode",
  "futures",
  "hex",
