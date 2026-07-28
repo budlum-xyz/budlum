@@ -19,14 +19,25 @@
 
 #[cfg(test)]
 mod tests {
-    const LOCK: &str = include_str!("../../Cargo.lock");
+    /// All three lockfiles. They are separate workspaces that resolve
+    /// independently, and Dependabot reports each one separately — three
+    /// advisories times three lockfiles is where the nine alerts came from.
+    /// Fixing only the root would leave six of them open.
+    const LOCKFILES: [(&str, &str); 3] = [
+        ("Cargo.lock", include_str!("../../Cargo.lock")),
+        (
+            "budzero/Cargo.lock",
+            include_str!("../../budzero/Cargo.lock"),
+        ),
+        ("fuzz/Cargo.lock", include_str!("../../fuzz/Cargo.lock")),
+    ];
 
-    /// Every `name = "<crate>"` block in Cargo.lock, as (name, version) pairs.
-    fn locked_versions(crate_name: &str) -> Vec<String> {
+    /// Versions of `crate_name` recorded in one lockfile.
+    fn locked_versions_in(lock: &str, crate_name: &str) -> Vec<String> {
         let needle = format!("name = \"{crate_name}\"\n");
-        LOCK.match_indices(&needle)
+        lock.match_indices(&needle)
             .filter_map(|(at, _)| {
-                let rest = &LOCK[at + needle.len()..];
+                let rest = &lock[at + needle.len()..];
                 let line = rest.lines().next()?;
                 line.strip_prefix("version = \"")
                     .and_then(|v| v.strip_suffix('"'))
@@ -66,20 +77,23 @@ mod tests {
     /// entirely and moves to 0.14.
     #[test]
     fn yamux_is_patched_and_single_version() {
-        let versions = locked_versions("yamux");
-        assert!(!versions.is_empty(), "yamux must be in the graph");
-        assert_eq!(
-            versions.len(),
-            1,
-            "yamux resolves to {versions:?}; libp2p-yamux 0.47 linked two \
-             versions at once and one of them (0.12.x) is vulnerable to \
-             GHSA-vxx9-2994-q338"
-        );
-        assert!(
-            version_at_least(&versions[0], "0.13.10"),
-            "yamux {} is below the patched 0.13.10 (GHSA-vxx9-2994-q338)",
-            versions[0]
-        );
+        for (name, lock) in LOCKFILES {
+            let versions = locked_versions_in(lock, "yamux");
+            assert!(!versions.is_empty(), "{name}: yamux must be in the graph");
+            assert_eq!(
+                versions.len(),
+                1,
+                "{name}: yamux resolves to {versions:?}; libp2p-yamux 0.47 \
+                 linked two versions at once and one of them (0.12.x) is \
+                 vulnerable to GHSA-vxx9-2994-q338"
+            );
+            assert!(
+                version_at_least(&versions[0], "0.13.10"),
+                "{name}: yamux {} is below the patched 0.13.10 \
+                 (GHSA-vxx9-2994-q338)",
+                versions[0]
+            );
+        }
     }
 
     /// GHSA-3v94-mw7p-v465 has no patched 0.25.x release, and
@@ -87,21 +101,67 @@ mod tests {
     /// whole hickory family to 0.26.1.
     #[test]
     fn hickory_is_patched() {
-        for crate_name in ["hickory-proto", "hickory-resolver"] {
-            let versions = locked_versions(crate_name);
-            assert!(
-                !versions.is_empty(),
-                "{crate_name} must be in the graph (libp2p `dns` feature)"
-            );
-            for v in &versions {
+        for (name, lock) in LOCKFILES {
+            for crate_name in ["hickory-proto", "hickory-resolver"] {
+                let versions = locked_versions_in(lock, crate_name);
                 assert!(
-                    version_at_least(v, "0.26.1"),
-                    "{crate_name} {v} is below the patched 0.26.1 \
-                     (GHSA-3v94-mw7p-v465 has no 0.25.x fix, \
-                     GHSA-q2qq-hmj6-3wpp is fixed in 0.26.1)"
+                    !versions.is_empty(),
+                    "{name}: {crate_name} must be in the graph \
+                     (libp2p `dns` feature)"
                 );
+                for v in &versions {
+                    assert!(
+                        version_at_least(v, "0.26.1"),
+                        "{name}: {crate_name} {v} is below the patched 0.26.1 \
+                         (GHSA-3v94-mw7p-v465 has no 0.25.x fix, \
+                         GHSA-q2qq-hmj6-3wpp is fixed in 0.26.1)"
+                    );
+                }
             }
         }
+    }
+
+    /// Every workspace that depends on libp2p needs its own patch entry.
+    ///
+    /// They resolve independently: patching only the root leaves
+    /// budzero/Cargo.lock and fuzz/Cargo.lock on the vulnerable versions,
+    /// which is six of the nine Dependabot alerts.
+    #[test]
+    fn every_workspace_manifest_carries_the_patch() {
+        for (name, manifest) in [
+            ("Cargo.toml", include_str!("../../Cargo.toml")),
+            (
+                "budzero/Cargo.toml",
+                include_str!("../../budzero/Cargo.toml"),
+            ),
+            ("fuzz/Cargo.toml", include_str!("../../fuzz/Cargo.toml")),
+        ] {
+            assert!(
+                manifest.contains("[patch.crates-io]"),
+                "{name} has no [patch.crates-io]; its lockfile will resolve \
+                 libp2p from crates.io and keep the vulnerable yamux/hickory"
+            );
+            assert!(
+                manifest.contains("rust-libp2p"),
+                "{name}: the patch must point at the rust-libp2p tree"
+            );
+        }
+    }
+
+    /// cargo-deny denies unknown git sources, so the one exception has to be
+    /// allow-listed explicitly and by host, not switched off wholesale.
+    #[test]
+    fn git_source_policy_stays_closed_except_for_libp2p() {
+        let deny = include_str!("../../.quality/deny.toml");
+        assert!(
+            deny.contains("unknown-git = \"deny\""),
+            "cargo-deny must keep denying unknown git sources"
+        );
+        assert!(
+            deny.contains("allow-git = [\"https://github.com/libp2p/rust-libp2p\"]"),
+            "the rust-libp2p host must be the only allowed git source; a \
+             broader allow-list would let any git dependency through"
+        );
     }
 
     /// The patch that delivers those versions has to stay, and it has to stay

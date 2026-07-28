@@ -99,17 +99,57 @@ expressible: when live shards for a manifest drop below `k + margin`, open a
 repair deal. Without erasure coding there is nothing to reconstruct from, so
 this depends on Gap 3.
 
-## Gap 5 — challenge economics are unmeasured
+## Gap 5 — challenge economics — **measured and partly closed**
 
-Anyone may open a challenge and posts a bond to do so. Whether that bond exceeds
-the I/O the operator must spend to answer has not been calculated. If it does
-not, repeated challenges are a cheap way to grief an operator — Immunefi
-classifies griefing as its own impact category precisely because there is no
-profit motive to deter it.
+### What the measurement showed
 
-**Direction for B.U.D.** Measure the answer cost for the largest permitted range
-and set the opener bond above it, or rate-limit challenges per (opener, deal)
-pair per epoch.
+The opener bond was checked only for being non-zero, so one unit bought any
+challenge. Answer cost for the operator, on commodity NVMe (~2 GB/s read,
+~1.5 GB/s SHA-256):
+
+| challenged range | read | hash | total |
+|---|---|---|---|
+| 256 KiB (default chunk) | 0.13 ms | 0.17 ms | **0.31 ms** |
+| 16 MiB (`MAX_CHUNK_SIZE`) | 8.39 ms | 11.18 ms | **19.57 ms** |
+
+The rate limit is keyed on `(operator, manifest)` with
+`MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS = 4`, so it scales with the number of
+manifests an operator serves rather than capping the operator's total load:
+
+| manifests held | challenges/epoch | operator I/O per epoch |
+|---|---|---|
+| 1 | 0.25 | 4.9 ms |
+| 10 | 2.5 | 48.9 ms |
+| 100 | 25 | 489 ms |
+| 1000 | 250 | **4.9 s** |
+
+And the attacker's cost was **zero**: the bond is refunded whenever the
+operator answers correctly, which is exactly the case a griefer wants — the
+goal is to burn disk bandwidth, not to win a slash.
+
+### What changed
+
+`opener_bond` now has to cover the range being challenged:
+
+```
+required = max(MIN_OPENER_BOND, ceil(range_len / 1024) * OPENER_BOND_PER_KIB)
+```
+
+A 16 MiB challenge needs 16384 units instead of 1. Rounding is up, so the last
+partial KiB is not free.
+
+This does not make griefing *expensive* — the capital still comes back — but it
+makes it **capital-bound**: sustaining the attack means locking stake
+proportional to the damage, in parallel, for the whole challenge window. That
+is the same shape as the operator bond, so the two scale together.
+
+### What is still open
+
+`OPENER_BOND_PER_KIB = 1` is a unit, not a calibrated price. Setting it against
+real hardware and the token's value is a governance parameter question, and it
+belongs with the rest of the storage economics rather than being guessed here.
+The rate limit is also still per `(operator, manifest)`; a per-operator ceiling
+would bound total load directly and is the better long-term shape.
 
 ## Suggested order
 
@@ -117,7 +157,9 @@ pair per epoch.
 2. **Gap 3** (erasure coding) — changes the manifest shape; Gap 4 depends on it.
 3. **Gap 1** (real storage proof) — blocked on `VerifyMerkle`.
 4. **Gap 4** (repair) — needs Gap 3.
-5. **Gap 5** (bond calibration) — independent, cheap, can happen any time.
+5. **Gap 5** (bond calibration) — measured; the range-proportional bond has
+   landed, calibrating `OPENER_BOND_PER_KIB` and moving the rate limit to a
+   per-operator ceiling remain.
 
 Gaps 1, 2 and 3 all change on-disk or on-chain formats. Doing them before B.U.D.
 is included in mainnet avoids a migration; doing them after does not.

@@ -395,6 +395,18 @@ pub enum StorageError {
     },
     /// Opener bond is 0 (would let anyone spam challenges for free).
     ZeroOpenerBond,
+    /// Opener bond does not cover the I/O the operator must spend to answer.
+    ///
+    /// The bond is refunded when the operator answers correctly, so an
+    /// attacker who only wants to burn the operator's disk bandwidth pays
+    /// nothing. Requiring the bond to scale with the challenged range makes
+    /// the griefer's capital scale with the damage, even though it is
+    /// eventually returned.
+    OpenerBondBelowRangeCost {
+        range_len: u64,
+        required: u64,
+        provided: u64,
+    },
     /// Caller referenced a deal that does not exist.
     UnknownDeal(u64),
     /// Caller referenced a challenge that does not exist.
@@ -457,6 +469,15 @@ impl std::fmt::Display for StorageError {
                 write!(f, "operator bond {provided} below required {required}")
             }
             StorageError::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
+            StorageError::OpenerBondBelowRangeCost {
+                range_len,
+                required,
+                provided,
+            } => write!(
+                f,
+                "opener_bond {provided} below {required} required for a \
+                 {range_len}-byte challenge range"
+            ),
             StorageError::UnknownDeal(id) => write!(f, "unknown deal {id}"),
             StorageError::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
             StorageError::DealNotActive(id) => write!(f, "deal {id} is not Active"),
@@ -691,6 +712,34 @@ impl StorageRegistry {
     /// Prevents spam attacks where a single deal gets unlimited challenges,
     /// Growing the StorageRegistry's challenge BTreeMap without bound.
     const MAX_OPEN_CHALLENGES_PER_DEAL: usize = 10;
+
+    /// Opener bond charged per KiB of the challenged byte range.
+    ///
+    /// A challenge costs the operator a read plus a hash over the range. On
+    /// commodity NVMe that is roughly 20 ms for the 16 MiB maximum chunk and
+    /// 0.3 ms for the 256 KiB default — small individually, but the rate limit
+    /// is keyed on `(operator, manifest)`, so an operator serving 1000
+    /// manifests can be made to spend seconds of I/O per epoch by an attacker
+    /// who pays nothing: the bond is refunded whenever the operator answers.
+    ///
+    /// Tying the bond to the range does not make griefing expensive in the
+    /// long run — the capital comes back — but it makes it *capital-bound*:
+    /// sustaining the attack requires locking stake proportional to the
+    /// damage, in parallel, for the whole challenge window.
+    pub const OPENER_BOND_PER_KIB: u64 = 1;
+
+    /// Floor applied on top of `OPENER_BOND_PER_KIB` so sub-KiB ranges are
+    /// not free.
+    pub const MIN_OPENER_BOND: u64 = 1;
+
+    /// Bond required to challenge `range_len` bytes.
+    ///
+    /// Rounds the range up to whole KiB so a 1-byte challenge costs the same
+    /// as a 1 KiB one; the operator's seek dominates at that size anyway.
+    pub fn required_opener_bond(range_len: u64) -> u64 {
+        let kib = range_len.div_ceil(1024);
+        Self::MIN_OPENER_BOND.max(kib.saturating_mul(Self::OPENER_BOND_PER_KIB))
+    }
     /// Devnet hardening policy selected for Tur 14.5: a given operator and
     /// Manifest can receive at most one retrieval challenge every four
     /// Canonical epochs, including challenges opened through distinct deals.
@@ -802,6 +851,18 @@ impl StorageRegistry {
             return Err(StorageError::InvalidEpochRange {
                 start: byte_start,
                 end: byte_end,
+            });
+        }
+        // The bond must scale with the work the operator is being asked to do.
+        // Without this a 1-unit bond buys a 16 MiB read-and-hash, and the bond
+        // comes back when the operator answers.
+        let range_len = byte_end - byte_start;
+        let required = Self::required_opener_bond(range_len);
+        if opener_bond < required {
+            return Err(StorageError::OpenerBondBelowRangeCost {
+                range_len,
+                required,
+                provided: opener_bond,
             });
         }
         if challenge_epoch >= deadline_epoch {
@@ -2327,5 +2388,111 @@ mod tests {
         reg.open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
         assert_ne!(root_after_deal, reg.root());
+    }
+
+    /// The bond must grow with the range, otherwise a 1-unit bond buys a
+    /// 16 MiB read-and-hash and is refunded afterwards.
+    #[test]
+    fn required_bond_scales_with_the_challenged_range() {
+        let small = StorageRegistry::required_opener_bond(1024);
+        let big = StorageRegistry::required_opener_bond(16 * 1024 * 1024);
+        assert!(big > small, "bond must scale: {small} -> {big}");
+        assert_eq!(big, 16 * 1024, "16 MiB is 16384 KiB at 1 unit per KiB");
+    }
+
+    /// Sub-KiB ranges must not be free.
+    #[test]
+    fn tiny_ranges_still_cost_the_floor() {
+        assert_eq!(
+            StorageRegistry::required_opener_bond(1),
+            StorageRegistry::MIN_OPENER_BOND
+        );
+        assert_eq!(
+            StorageRegistry::required_opener_bond(1024),
+            StorageRegistry::MIN_OPENER_BOND
+        );
+        // 1025 bytes rounds up to 2 KiB.
+        assert_eq!(StorageRegistry::required_opener_bond(1025), 2);
+    }
+
+    /// The rounding must be up, not down: rounding down would make the last
+    /// partial KiB free and let an attacker shave the bond.
+    #[test]
+    fn range_length_rounds_up_to_whole_kib() {
+        for len in [1u64, 2, 1023, 1024] {
+            assert_eq!(StorageRegistry::required_opener_bond(len), 1, "len {len}");
+        }
+        for len in [1025u64, 2047, 2048] {
+            assert_eq!(StorageRegistry::required_opener_bond(len), 2, "len {len}");
+        }
+    }
+
+    /// No overflow on a hostile range length.
+    #[test]
+    fn required_bond_saturates_instead_of_overflowing() {
+        let b = StorageRegistry::required_opener_bond(u64::MAX);
+        assert!(b > 0, "must not wrap to zero");
+    }
+
+    /// The gate must actually reject an underpaid challenge, and the error
+    /// has to name the numbers so the caller can fix it.
+    #[test]
+    fn open_challenge_rejects_a_bond_below_the_range_cost() {
+        let manifest = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &manifest);
+
+        // A 64 KiB range needs 64 units; offer 1.
+        let range_len = 64 * 1024u64;
+        let err = reg
+            .open_challenge(deal_id, 0, range_len, 100, 110, Address::from([9u8; 32]), 1)
+            .expect_err("an underpaid challenge must be rejected");
+        match err {
+            StorageError::OpenerBondBelowRangeCost {
+                range_len: rl,
+                required,
+                provided,
+            } => {
+                assert_eq!(rl, range_len);
+                assert_eq!(required, 64);
+                assert_eq!(provided, 1);
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    /// And it must accept the challenge once the bond covers the range —
+    /// the canary that proves the gate is not simply rejecting everything.
+    #[test]
+    fn open_challenge_accepts_a_bond_that_covers_the_range() {
+        let manifest = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &manifest);
+
+        let range_len = 64 * 1024u64;
+        let required = StorageRegistry::required_opener_bond(range_len);
+        reg.open_challenge(
+            deal_id,
+            0,
+            range_len,
+            100,
+            110,
+            Address::from([9u8; 32]),
+            required,
+        )
+        .expect("a fully funded challenge must be accepted");
+    }
+
+    /// A zero bond keeps its own dedicated error rather than being folded
+    /// into the new one; the two are different mistakes.
+    #[test]
+    fn zero_bond_still_reports_zero_bond() {
+        let manifest = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &manifest);
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4096, 100, 110, Address::from([9u8; 32]), 0),
+            Err(StorageError::ZeroOpenerBond)
+        ));
     }
 }

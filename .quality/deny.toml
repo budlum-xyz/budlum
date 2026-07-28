@@ -69,7 +69,19 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Exactly one git source is allowed: the rust-libp2p tree, pinned by revision
+# in every workspace manifest that depends on it.
+#
+# libp2p 0.57.0 is tagged upstream but unpublished, and it is the only build
+# that closes GHSA-vxx9-2994-q338 (yamux 0.12/0.13) plus GHSA-3v94-mw7p-v465
+# and GHSA-q2qq-hmj6-3wpp (hickory-proto 0.25.2). The alternative was to keep
+# ignoring three advisories, which this policy forbids.
+#
+# `unknown-git = "deny"` still holds: any other git dependency fails the gate,
+# and the pin is by full revision hash, so the source cannot move under us.
+# Delete this entry together with the [patch.crates-io] blocks once 0.57.0 is
+# on crates.io.
+allow-git = ["https://github.com/libp2p/rust-libp2p"]
 
 [advisories]
 # unmaintained = "none": eski davranışla aynı ("warn, fail yok"). Uyarı
