@@ -89,10 +89,44 @@ pub fn prove_bytecode_mainnet(
     prove_bytecode_inner(bytecode, gas_limit, true)
 }
 
+/// Prove bytecode that reads a host-published memory image.
+///
+/// Programs whose inputs live in memory (the AI matmul guest, for example)
+/// need that memory written before the first instruction executes. `setup`
+/// receives the VM's memory buffer and must populate it; everything else
+/// matches [`prove_bytecode`].
+///
+/// The initial memory image is *not* bound by the current public inputs, so a
+/// proof produced here attests that *some* memory image drove the trace, not
+/// that it was this one. Callers must bind the image out of band — for AI
+/// execution that is `weights_digest` plus `input_commitment` on the
+/// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
+pub fn prove_bytecode_with_memory<F>(
+    bytecode: &[u8],
+    gas_limit: u64,
+    setup: F,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String>
+where
+    F: FnOnce(&mut [u8]) -> Result<(), String>,
+{
+    prove_bytecode_inner_with_memory(bytecode, gas_limit, false, Some(Box::new(setup)))
+}
+
 fn prove_bytecode_inner(
     bytecode: &[u8],
     gas_limit: u64,
     mainnet: bool,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String> {
+    prove_bytecode_inner_with_memory(bytecode, gas_limit, mainnet, None)
+}
+
+type MemorySetup<'a> = Box<dyn FnOnce(&mut [u8]) -> Result<(), String> + 'a>;
+
+fn prove_bytecode_inner_with_memory(
+    bytecode: &[u8],
+    gas_limit: u64,
+    mainnet: bool,
+    setup: Option<MemorySetup<'_>>,
 ) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), String> {
     if bytecode.is_empty() {
         return Err("Empty BudZKVM bytecode".into());
@@ -102,6 +136,9 @@ fn prove_bytecode_inner(
     }
     let program = decode_program(bytecode)?;
     let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
+    if let Some(setup) = setup {
+        setup(&mut vm.memory)?;
+    }
     let receipt =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
             .map_err(|_| "BudZKVM execution failed".to_string())?;

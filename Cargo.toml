@@ -29,7 +29,31 @@ sled = "0.34"
 
 # P2P Networking
 tokio = { version = "1", features = ["full"] }
-libp2p = { version = "0.56", features = [
+# libp2p is taken from the rust-libp2p tree rather than crates.io.
+#
+# 0.57.0 is tagged upstream but unpublished, and it is the only build that
+# closes three advisories:
+#
+#   GHSA-vxx9-2994-q338  yamux < 0.13.10            (libp2p-yamux 0.47 linked
+#                                                    0.12.1 *and* 0.13.10)
+#   GHSA-3v94-mw7p-v465  hickory-proto <= 0.25.2    (no patched 0.25.x exists)
+#   GHSA-q2qq-hmj6-3wpp  hickory-proto <= 0.26.0    (fixed in 0.26.1)
+#
+# Neither dependency is optional: `dns` is what makes /dns4 bootstrap
+# multiaddrs dialable, and yamux is the muxer. libp2p-yamux 0.48.0 drops the
+# 0.12 path for yamux 0.14; libp2p-dns 0.45.0 moves to hickory 0.26.
+#
+# This is a direct git dependency rather than [patch.crates-io] on purpose:
+# tools that re-resolve the manifest in a scratch directory (cargo-semver-checks
+# among them) do not carry the patch table across, and then fail to select a
+# version for a requirement crates.io cannot satisfy.
+#
+# Pinned by full revision so the source cannot move. cargo-deny keeps
+# `unknown-git = "deny"` and allow-lists only this host.
+#
+# Revisit when 0.57.0 is published: swap back to a plain version requirement.
+# `advisory_reachability` pins the reason so the pin cannot be forgotten.
+libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd", features = [
     "tokio",
     "tcp",
     # `dns` wraps the TCP transport in a resolving layer so that /dns4, /dns6
@@ -145,3 +169,4 @@ harness = false
 [profile.release]
 overflow-checks = true
 panic = "abort"
+

@@ -952,7 +952,26 @@ impl Node {
                                     }
                                     Err(_) => {
                                         // 2. Fetch from remote P2P peers
-                                        let peers = self.peer_manager.lock().unwrap().connected_peers();
+                                        // A poisoned PeerManager mutex must not
+                                        // take the node down over a content
+                                        // fetch. Every other lock site here
+                                        // either matches on the result or exits
+                                        // deliberately; this one used a bare
+                                        // unwrap, so one panic while the lock
+                                        // was held turned an optional Bitswap
+                                        // fetch into a node-wide crash.
+                                        let peers = match self.peer_manager.lock() {
+                                            Ok(pm) => pm.connected_peers(),
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "PeerManager lock poisoned during remote content fetch: {e}"
+                                                );
+                                                let _ = response.send(Err(
+                                                    "peer manager unavailable".into(),
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                         if peers.is_empty() {
                                             let _ = response.send(Err("No connected peers for P2P fetch".into()));
                                         } else {

@@ -3,10 +3,19 @@
 use serde::{Deserialize, Serialize};
 
 /// Maximum linear layer width (neurons) for v1 fixed-point MLP.
+///
+/// This is a per-dimension ceiling, not a shape that is always reachable:
+/// guest memory binds first. A `[64, 1]` model fits comfortably, a `[64, 64]`
+/// one does not. `FixedPointMlpSpec::validate` rejects the difference instead
+/// of letting it surface as a truncated forward pass.
 pub const MAX_MLP_WIDTH: usize = 64;
 /// Maximum number of dense layers (including output).
 pub const MAX_MLP_LAYERS: usize = 4;
 /// Maximum total weight parameters (weights + biases).
+///
+/// Rarely the binding limit. The guest memory image (8 KiB) caps a square
+/// hidden layer at roughly 28 neurons, well below the 4096-parameter budget,
+/// so a spec can be within this constant and still be rejected.
 pub const MAX_MLP_PARAMS: usize = 4096;
 
 /// Which guest programs may be proven on L1 (whitelist).
@@ -65,5 +74,45 @@ mod tests {
         assert!(AiExecutionModelClass::from_u8(99).is_none());
         let lim = DEFAULT_EXECUTION_CLASS.limits();
         assert!(lim.max_params <= 4096);
+    }
+
+    /// The class advertises a width; at least one shape at that width must be
+    /// buildable, otherwise the constant is decoration.
+    #[test]
+    fn max_width_is_reachable_in_at_least_one_shape() {
+        use crate::ai::execution::FixedPointMlpSpec;
+        let spec = FixedPointMlpSpec {
+            dims: vec![MAX_MLP_WIDTH as u16, 1],
+            weights: vec![1; MAX_MLP_WIDTH],
+            biases: vec![0],
+        };
+        assert!(
+            spec.validate().is_ok(),
+            "MAX_MLP_WIDTH must be usable in some valid model"
+        );
+    }
+
+    /// And a shape that the parameter budget allows but guest memory does not
+    /// must be rejected up front, not truncated at run time.
+    #[test]
+    fn memory_binds_before_the_parameter_budget() {
+        use crate::ai::execution::FixedPointMlpSpec;
+        let n = 32usize;
+        let spec = FixedPointMlpSpec {
+            dims: vec![n as u16, n as u16],
+            weights: vec![1; n * n],
+            biases: vec![0; n],
+        };
+        assert!(
+            spec.weights.len() + spec.biases.len() <= MAX_MLP_PARAMS,
+            "this shape is within the parameter budget"
+        );
+        let err = spec
+            .validate()
+            .expect_err("but guest memory cannot hold it");
+        assert!(
+            err.contains("guest memory"),
+            "rejection must name the real limit, got: {err}"
+        );
     }
 }
