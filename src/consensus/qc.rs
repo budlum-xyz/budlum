@@ -228,6 +228,37 @@ impl QcBlob {
                 ));
             }
         }
+        // Bound the entry count against the validator set *before* paying for
+        // anything that scales with it.
+        //
+        // `validate_size` caps the blob in bytes, not in entries, and the
+        // per-entry overhead is small: with a 1-byte signature an entry costs
+        // about 50 bytes, so roughly 20 000 of them fit under
+        // `MAX_QC_BLOB_BYTES`. Every one of those is hashed by
+        // `verify_merkle_root` before the loop below reaches its first
+        // signature and rejects the blob. Measured on a four-validator
+        // snapshot (debug build):
+        //
+        //     entries    merkle      total
+        //         100     5.9 ms     6.3 ms
+        //       1 000    64.7 ms    63.6 ms
+        //      10 000     582 ms     604 ms
+        //
+        // A legitimate blob for that snapshot holds at most four entries. The
+        // duplicate check further down already makes more than one entry per
+        // validator useless, so anything above the validator count is provably
+        // unusable and can be refused in O(1).
+        //
+        // `check_blob_rate_limit` throttles how often a peer may send these,
+        // but it cannot make an individual message cheap; this check does.
+        if self.pq_signatures.len() > snapshot.validators.len() {
+            return Err(format!(
+                "QcBlob carries {} signature entries for a validator set of {} \
+                 (duplicates are rejected, so the extra entries cannot verify)",
+                self.pq_signatures.len(),
+                snapshot.validators.len()
+            ));
+        }
         self.validate_size()?;
         if !self.verify_merkle_root() {
             return Err("QcBlob merkle root mismatch".into());
@@ -837,11 +868,21 @@ mod tests {
         let (snapshot, keys) = make_snapshot_with_pq_keys(4);
         let mut entries = make_signed_entries(&snapshot, &keys, "cp");
 
-        // Append a duplicate of validator 0's entry. The duplicate
-        // Has the same validator_index, address, and signature as
-        // Entries[0]. It will verify cryptographically but must
-        // Trigger the deduplication error.
-        entries.push(entries[0].clone());
+        // Replace validator 3's entry with a second copy of validator 0's.
+        // The duplicate has the same validator_index, address and signature
+        // as entries[0], so it verifies cryptographically and must be caught
+        // by the deduplication check instead.
+        //
+        // The entry *count* stays at four deliberately. Appending a fifth
+        // would now be refused earlier by the entry-count bound, which is a
+        // different rejection: this test is about deduplication, so it has to
+        // reach that code path.
+        entries[3] = entries[0].clone();
+        assert_eq!(
+            entries.len(),
+            snapshot.validators.len(),
+            "the count bound must not be what rejects this blob"
+        );
         let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
 
         let result = blob.verify_against_snapshot(&snapshot, None, Some(snapshot.epoch));
@@ -901,5 +942,145 @@ mod tests {
         assert_eq!(verdict.invalidate_from_height, Some(100));
         // Invalid Dilithium fault is slashable.
         assert!(verdict.slash_validator);
+    }
+
+    /// A blob may not carry more signature entries than the validator set has
+    /// members, and the check must happen before anything that scales with the
+    /// entry count.
+    ///
+    /// `validate_size` bounds the blob in bytes, not entries. With a one-byte
+    /// signature an entry costs about 50 bytes, so roughly 20 000 fit under
+    /// `MAX_QC_BLOB_BYTES` — and every one of them used to be hashed by
+    /// `verify_merkle_root` before the verification loop rejected the first
+    /// one. Measured on this four-validator snapshot (debug build), 10 000
+    /// entries cost 604 ms of CPU for a blob that can never verify.
+    #[test]
+    fn rejects_more_signature_entries_than_validators() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let valid = make_signed_entries(&snapshot, &keys, "cp");
+
+        let mut entries = valid.clone();
+        // One extra entry is enough to be unusable: the duplicate check below
+        // would reject it anyway, so there is no reason to hash it first.
+        entries.push(valid[0].clone());
+
+        let blob = QcBlob {
+            epoch: snapshot.epoch,
+            checkpoint_height: 100,
+            checkpoint_hash: "cp".into(),
+            merkle_root: QcBlob::compute_merkle_root(&entries),
+            pq_signatures: entries,
+            created_epoch: snapshot.epoch,
+        };
+
+        let err = blob
+            .verify_against_snapshot(&snapshot, None, None)
+            .expect_err("more entries than validators must be refused");
+        assert!(
+            err.contains("signature entries for a validator set of"),
+            "rejection must name the count mismatch, got: {err}"
+        );
+    }
+
+    /// The expensive-path canary: a blob stuffed with entries must be refused
+    /// without the cost growing with the entry count.
+    ///
+    /// If the bound is ever removed this test still passes on correctness but
+    /// the timing assertion fails, which is the point — the finding was a CPU
+    /// exhaustion, not a wrong answer.
+    #[test]
+    fn oversized_blob_is_refused_in_constant_time() {
+        let (snapshot, _keys) = make_snapshot_with_pq_keys(4);
+
+        let build = |n: usize| -> QcBlob {
+            let entries: Vec<PqSignatureEntry> = (0..n)
+                .map(|i| PqSignatureEntry {
+                    validator_index: (i % 4) as u32,
+                    validator_address: snapshot.validators[i % 4].address.to_string(),
+                    dilithium_signature: vec![0u8; 1],
+                })
+                .collect();
+            QcBlob {
+                epoch: snapshot.epoch,
+                checkpoint_height: 100,
+                checkpoint_hash: "cp".into(),
+                // Deliberately not the real root: the entry-count check must
+                // fire before the merkle root is even computed.
+                merkle_root: String::new(),
+                pq_signatures: entries,
+                created_epoch: snapshot.epoch,
+            }
+        };
+
+        let small = build(100);
+        let large = build(10_000);
+
+        let t = std::time::Instant::now();
+        assert!(small
+            .verify_against_snapshot(&snapshot, None, None)
+            .is_err());
+        let small_us = t.elapsed().as_micros().max(1);
+
+        let t = std::time::Instant::now();
+        assert!(large
+            .verify_against_snapshot(&snapshot, None, None)
+            .is_err());
+        let large_us = t.elapsed().as_micros().max(1);
+
+        // Before the fix this ratio tracked the entry count (100x more
+        // entries cost about 100x more time). A generous ceiling still
+        // catches a regression to per-entry work.
+        assert!(
+            large_us < small_us.saturating_mul(20) + 5_000,
+            "rejecting 10000 entries took {large_us}us against {small_us}us for \
+             100 — the cost is scaling with the entry count again, so the \
+             bound is no longer running before verify_merkle_root"
+        );
+    }
+
+    /// The bound must not reject a legitimate blob: exactly one entry per
+    /// validator has to keep working.
+    #[test]
+    fn full_validator_set_still_verifies() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        assert_eq!(entries.len(), snapshot.validators.len());
+
+        let blob = QcBlob {
+            epoch: snapshot.epoch,
+            checkpoint_height: 100,
+            checkpoint_hash: "cp".into(),
+            merkle_root: QcBlob::compute_merkle_root(&entries),
+            pq_signatures: entries,
+            created_epoch: snapshot.epoch,
+        };
+
+        let verified = blob
+            .verify_against_snapshot(&snapshot, None, None)
+            .expect("a blob with one entry per validator must verify");
+        assert_eq!(verified.len(), 4);
+    }
+
+    /// A partial quorum (fewer entries than validators) must also still pass
+    /// structural verification — the bound is an upper limit, not an equality.
+    #[test]
+    fn partial_signature_set_still_verifies() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let mut entries = make_signed_entries(&snapshot, &keys, "cp");
+        entries.truncate(3);
+
+        let blob = QcBlob {
+            epoch: snapshot.epoch,
+            checkpoint_height: 100,
+            checkpoint_hash: "cp".into(),
+            merkle_root: QcBlob::compute_merkle_root(&entries),
+            pq_signatures: entries,
+            created_epoch: snapshot.epoch,
+        };
+
+        let verified = blob
+            .verify_against_snapshot(&snapshot, None, None)
+            .expect("a partial but honest signature set must verify");
+        assert_eq!(verified.len(), 3);
     }
 }
