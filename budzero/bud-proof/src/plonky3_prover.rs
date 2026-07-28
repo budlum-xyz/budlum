@@ -262,10 +262,17 @@ fn trace_matrix(
             };
         }
         if op == 0x1A {
-            // Log opcode: accumulate the lower 32 bits of rs1_val into
-            // Limb 0 of the event digest.
-            let log_val = step.src1_val & 0xFFFF_FFFF;
-            values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(log_val);
+            // Log opcode: accumulate rs1 into limb 0 of the event digest.
+            //
+            // The whole value, in the field — not the low 32 bits. The AIR
+            // constrains `nxt_event_0 - cur_event_0 - is_log * nxt_rs1 == 0`
+            // and `nxt_rs1` is the full register, so masking here made the
+            // witness disagree with the constraint for any logged value at or
+            // above 2^32. Small values matched by accident, which is why the
+            // mismatch survived: every test logged a small constant, and the
+            // one caller that logged a Poseidon output never verified its own
+            // proof.
+            values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(step.src1_val);
         }
         values[row_start + COL_RD_IDX] = Goldilocks::new(step.dst_idx as u64);
         values[row_start + COL_RS1_IDX] = Goldilocks::new(step.src1_idx as u64);
@@ -1122,10 +1129,23 @@ fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     vals.push(Goldilocks::from_u64(pi.trace_len & 0xFFFF_FFFF));
     vals.push(Goldilocks::from_u64(pi.trace_len >> 32));
 
-    for chunk in pi.event_digest.chunks_exact(4) {
+    // Limb 0 is a full Goldilocks element, not a u32.
+    //
+    // The AIR compares `COL_EVENT_DIGEST_0` against `public_inputs[40]`, and
+    // that column accumulates each `Log` row's whole `rs1`. Reading limb 0 as
+    // four bytes truncated it, so the comparison held only while every logged
+    // value stayed below 2^32 — which every test did, and which a Poseidon
+    // output never does.
+    vals.push(Goldilocks::from_u64(u64::from_le_bytes(
+        pi.event_digest[0..8].try_into().unwrap(),
+    )));
+    // Limbs 1..8 are reserved; they are packed as u32 and asserted zero.
+    for chunk in pi.event_digest[8..32].chunks_exact(4) {
         let val = u32::from_le_bytes(chunk.try_into().unwrap());
         vals.push(Goldilocks::from_u64(val as u64));
     }
+    // One more slot so the vector length stays at 48.
+    vals.push(Goldilocks::from_u64(0));
 
     vals
 }

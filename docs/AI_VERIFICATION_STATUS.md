@@ -11,7 +11,7 @@ feature, while the code deliberately refuses to perform it.
 | Model registry, operator compute-bond, Pollen-gated data access | working | `src/lubot/`, `src/ai/registry.rs` |
 | Structural checks on an execution proof (commitments, model binding, program-hash match) | working | `verify_execution_proof_structural_with_model` |
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
-| Initial guest memory (weights, biases, input) bound by the AIR | **not bound** | `prove_bytecode_with_memory` |
+| Initial guest memory (weights, biases, input) bound by the AIR | **rejected outright** | `prove_bytecode_with_memory` |
 | Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
 | STARK verification of an inference proof on the transaction path | **not wired** | `src/execution/executor.rs` |
 | `VerifyInference` opcode (0x1F) inside the zkVM | **always returns 0** | `budzero/bud-vm/src/lib.rs` |
@@ -43,6 +43,31 @@ Three things were wrong before and are fixed:
 own outputs are folded into a Poseidon chain that is logged, but the AIR binds
 the event accumulator as a sum of low 32-bit limbs, so that log is a
 consistency signal, not a binding commitment.
+
+## The matmul guest cannot currently be proven at all
+
+`prove_bytecode` now verifies the proof it just produced, and that made two
+things visible that had been silent.
+
+**The AIR requires the first access to any address to read zero.** It is right
+to: without a committed initial image, a prover that could claim arbitrary
+starting memory could claim arbitrary weights. The matmul guest reads weights
+the host wrote before execution, so its first memory event is a non-zero read
+and the constraint rejects it. `prove_mlp_inference` therefore fails, loudly,
+and `prove_mlp_inference_reports_the_air_rejection_instead_of_hiding_it` pins
+that it fails rather than returning an envelope nobody can verify.
+
+This is the honest state: **the guest computes the right answer and cannot yet
+be proven doing it.** Closing it means giving the AIR a committed initial
+memory image — a `mem_init` commitment bound as a public input, with the
+first-read rule relaxed to "reads that value" instead of "reads zero".
+
+**A second bug was hiding behind the missing verification.** The AIR
+accumulates each `Log` row's whole `rs1` into the event digest; the prover and
+the host both summed only its low 32 bits. Small values matched by accident, so
+every test passed, but a Poseidon output never fits in 32 bits — which meant
+the commitment-only guest had never produced a verifiable proof either. Fixed:
+all three now sum the full value in the field.
 
 ## What the STARK does not cover
 

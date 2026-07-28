@@ -1343,4 +1343,92 @@ mod matmul_tests {
                 > estimate_guest_instruction_count(&small).unwrap()
         );
     }
+
+    /// `prove_mlp_inference` must produce a proof that actually verifies.
+    ///
+    /// It never did. `Prover::prove` succeeds whenever it can build a trace —
+    /// it does not check the trace against the AIR — and `prove_bytecode` did
+    /// not verify what it produced, so the function returned an envelope no
+    /// verifier would accept.
+    ///
+    /// The AIR requires the first access to any address to read zero
+    /// (`plonky3_air.rs`, "first-read default zero in memory"). The matmul
+    /// guest reads weights the host wrote before execution, so its very first
+    /// memory event is a non-zero read and the constraint rejects it. Nothing
+    /// noticed, because nobody verified.
+    ///
+    /// This test is the thing that would have noticed. It is `#[ignore]`-free
+    /// and expected to fail until the AIR models a committed initial memory
+    /// image — see `docs/AI_VERIFICATION_STATUS.md`.
+    #[test]
+    fn prove_mlp_inference_reports_the_air_rejection_instead_of_hiding_it() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let owner = crate::core::address::Address::from([1u8; 32]);
+        let model_id = crate::ai::types::AiModelId::of(&owner, &[9u8; 32], 1);
+
+        let err = prove_mlp_inference(&spec, model_id, &[4, 5], 10_000_000)
+            .expect_err("the AIR rejects a host-seeded memory image, so this must fail");
+        assert!(
+            err.contains("cannot verify"),
+            "the failure must name the verification step rather than surfacing \
+             as a successful proof: {err}"
+        );
+    }
+
+    /// The commitment-only guest must produce a proof that verifies.
+    ///
+    /// It did not, for a reason that had nothing to do with memory: the AIR
+    /// accumulates each `Log` row's whole `rs1` into the event digest, while
+    /// the prover and the host both summed only its low 32 bits. Every test
+    /// logged a small constant, so the two agreed by accident; a Poseidon
+    /// output never fits in 32 bits, so the one guest that logged one produced
+    /// an envelope no verifier would accept — and nothing checked, because
+    /// `prove_bytecode` did not verify its own output.
+    #[test]
+    fn commitment_guest_proof_verifies() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let ic = input_commitment(&[4, 5]);
+        let words = build_fixed_point_mlp_guest(&spec, &ic).unwrap();
+        let bytecode = words_to_bytecode(&words);
+        crate::execution::zkvm::prove_bytecode(&bytecode, 10_000_000)
+            .expect("a guest that logs a Poseidon output must still verify");
+    }
+
+    /// Logging a value above 2^32 must not break proving. This is the
+    /// regression in its smallest form.
+    #[test]
+    fn logging_a_value_above_2_32_still_verifies() {
+        let big = (1i64 << 40) as i32; // truncates, so build it in-guest
+        let _ = big;
+        let prog = vec![
+            inst(Opcode::Load, 1, 0, 0, i32::MAX),
+            inst(Opcode::Load, 2, 0, 0, 1),
+            inst(Opcode::Add, 1, 1, 2, 0),
+            inst(Opcode::Mul, 1, 1, 1, 0), // (2^31)^2 = 2^62, well above 2^32
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        crate::execution::zkvm::prove_bytecode(&words_to_bytecode(&prog), 1_000_000)
+            .expect("a large logged value must verify");
+    }
+
+    /// And a small one keeps working, so the fix is not a one-way swap.
+    #[test]
+    fn logging_a_small_value_still_verifies() {
+        let prog = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        crate::execution::zkvm::prove_bytecode(&words_to_bytecode(&prog), 1_000_000)
+            .expect("a small logged value must still verify");
+    }
 }
