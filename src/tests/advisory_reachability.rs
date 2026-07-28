@@ -1,149 +1,192 @@
-//! Locks the reachability arguments used to accept open advisories.
+//! Locks the resolved versions of dependencies that used to carry advisories.
 //!
-//! Three advisories are currently carried rather than patched, each because the
-//! vulnerable code path is not reachable from this build. That argument is only
-//! worth anything while it stays true, and every one of them depends on a fact
-//! that a routine dependency change can silently flip:
+//! Three advisories were carried for weeks as "unreachable" exceptions:
 //!
-//!   * GHSA-vxx9-2994-q338 (yamux panic) rests on `libp2p-yamux` selecting the
-//!     patched 0.13 backend for `Config::default()`.
-//!   * GHSA-3v94-mw7p-v465 (hickory NSEC3 loop) rests on DNSSEC validation not
-//!     being compiled in.
-//!   * GHSA-q2qq-hmj6-3wpp (hickory O(n²) encoding) rests on this node never
-//!     serving DNS, only resolving as a client.
+//!   * GHSA-vxx9-2994-q338 — yamux remote panic (CVSS 8.7)
+//!   * GHSA-3v94-mw7p-v465 / RUSTSEC-2026-0118 — hickory NSEC3 validation loop
+//!   * GHSA-q2qq-hmj6-3wpp — hickory O(n²) message encoding
 //!
-//! These tests fail when the premise stops holding, so the exception has to be
-//! re-argued instead of quietly becoming false. They are deliberately about the
-//! *reason* for the exception, not about the advisory being listed somewhere.
+//! Each exception rested on a fact a routine dependency change could silently
+//! flip (the muxer picking the patched backend, DNSSEC not being compiled in,
+//! the node never serving DNS). None of that is needed any more: libp2p 0.56
+//! pinned the vulnerable versions, and pinning the 0.57.0 tree moves the graph
+//! to yamux 0.14.0 and hickory 0.26.1, so the findings are **fixed** rather
+//! than argued away.
+//!
+//! These tests now guard the fix instead of the excuse. They fail if the graph
+//! slides back to a vulnerable version, and they fail if the scanner ignore
+//! lists grow the old entries back.
 
 #[cfg(test)]
 mod tests {
-    /// yamux: the default multiplexer config must resolve to the patched 0.13
-    /// backend, and the 0.12 backend must stay unreachable from our code.
-    ///
-    /// `libp2p-yamux` 0.47 links both yamux 0.12.1 (vulnerable) and 0.13.10
-    /// (fixed) and picks between them at construction time. `impl Default for
-    /// Config` returns the 0.13 variant, and `src/network/node.rs` passes
-    /// exactly `yamux::Config::default`. The 0.12 path is only reachable
-    /// through APIs this repo never calls.
-    ///
-    /// Checked by source inspection rather than reflection: the crate exposes
-    /// no way to ask a `Config` which backend it holds, so the guarantee is
-    /// that the call site keeps using the default constructor.
-    #[test]
-    fn yamux_uses_the_default_config_constructor() {
-        let node_rs = include_str!("../network/node.rs");
+    const LOCK: &str = include_str!("../../Cargo.lock");
 
-        assert!(
-            node_rs.contains("yamux::Config::default"),
-            "node.rs no longer builds the muxer with yamux::Config::default; \
-             the GHSA-vxx9-2994-q338 exception assumed the patched 0.13 \
-             backend, which only the default constructor selects"
+    /// Every `name = "<crate>"` block in Cargo.lock, as (name, version) pairs.
+    fn locked_versions(crate_name: &str) -> Vec<String> {
+        let needle = format!("name = \"{crate_name}\"\n");
+        LOCK.match_indices(&needle)
+            .filter_map(|(at, _)| {
+                let rest = &LOCK[at + needle.len()..];
+                let line = rest.lines().next()?;
+                line.strip_prefix("version = \"")
+                    .and_then(|v| v.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// Compare dotted numeric versions without pulling in a semver crate.
+    fn version_at_least(have: &str, want: &str) -> bool {
+        let parse = |v: &str| -> Vec<u64> {
+            v.split(['-', '+'])
+                .next()
+                .unwrap_or(v)
+                .split('.')
+                .map(|p| p.parse::<u64>().unwrap_or(0))
+                .collect()
+        };
+        let (a, b) = (parse(have), parse(want));
+        for i in 0..a.len().max(b.len()) {
+            let (x, y) = (
+                a.get(i).copied().unwrap_or(0),
+                b.get(i).copied().unwrap_or(0),
+            );
+            if x != y {
+                return x > y;
+            }
+        }
+        true
+    }
+
+    /// GHSA-vxx9-2994-q338: a remote peer could panic the node through yamux.
+    ///
+    /// libp2p-yamux 0.47 linked yamux 0.12.1 *and* 0.13.10 and chose between
+    /// them at construction time, so the vulnerable crate was in the graph no
+    /// matter what the call site did. libp2p-yamux 0.48 drops the 0.12 path
+    /// entirely and moves to 0.14.
+    #[test]
+    fn yamux_is_patched_and_single_version() {
+        let versions = locked_versions("yamux");
+        assert!(!versions.is_empty(), "yamux must be in the graph");
+        assert_eq!(
+            versions.len(),
+            1,
+            "yamux resolves to {versions:?}; libp2p-yamux 0.47 linked two \
+             versions at once and one of them (0.12.x) is vulnerable to \
+             GHSA-vxx9-2994-q338"
         );
-
-        // The three APIs that select the legacy 0.12 backend in
-        // libp2p-yamux 0.47. If any of them appears, the exception's premise
-        // is gone and the advisory becomes live.
-        for legacy in ["WindowUpdateMode", "Config::client(", "Config::server("] {
-            assert!(
-                !node_rs.contains(legacy),
-                "node.rs uses `{legacy}`, which selects the vulnerable \
-                 yamux 0.12 backend; GHSA-vxx9-2994-q338 is no longer \
-                 unreachable and the exception must be removed"
-            );
-        }
+        assert!(
+            version_at_least(&versions[0], "0.13.10"),
+            "yamux {} is below the patched 0.13.10 (GHSA-vxx9-2994-q338)",
+            versions[0]
+        );
     }
 
-    /// hickory: DNSSEC validation must not be compiled in.
-    ///
-    /// GHSA-3v94-mw7p-v465 is an unbounded loop in NSEC3 closest-encloser proof
-    /// validation. That code only exists when hickory is built with its
-    /// `dnssec` feature. Measured on the resolved graph (2026-07-27): the only
-    /// active hickory-proto features are `std`, `tokio` and `futures-io`.
-    ///
-    /// Note this is *not* the argument the exception originally carried. The
-    /// earlier text claimed hickory was reachable only through the optional
-    /// `p2p-mdns` feature. That stopped being true when the libp2p `dns`
-    /// feature was enabled to make `/dns4` multiaddrs dialable: hickory now
-    /// ships in default builds via `libp2p-dns`. The advisory is still not
-    /// reachable, but for a different reason, and the note was corrected.
+    /// GHSA-3v94-mw7p-v465 has no patched 0.25.x release, and
+    /// GHSA-q2qq-hmj6-3wpp is fixed in 0.26.1. Both are closed by moving the
+    /// whole hickory family to 0.26.1.
     #[test]
-    fn dnssec_validation_is_not_compiled_in() {
-        // `cfg(feature = ...)` cannot see a dependency's features, so this is
-        // asserted against the lockfile: enabling DNSSEC would pull in the
-        // crates that implement it.
-        let lock = include_str!("../../Cargo.lock");
-
-        for dnssec_only in ["\"hickory-dnssec\"", "name = \"dnssec\""] {
+    fn hickory_is_patched() {
+        for crate_name in ["hickory-proto", "hickory-resolver"] {
+            let versions = locked_versions(crate_name);
             assert!(
-                !lock.contains(dnssec_only),
-                "Cargo.lock contains {dnssec_only}: DNSSEC support appears to \
-                 be compiled in, which makes GHSA-3v94-mw7p-v465 reachable"
+                !versions.is_empty(),
+                "{crate_name} must be in the graph (libp2p `dns` feature)"
             );
-        }
-    }
-
-    /// hickory: this node resolves names, it never serves DNS.
-    ///
-    /// GHSA-q2qq-hmj6-3wpp is quadratic behaviour while *encoding* a DNS
-    /// message — it is triggered by producing responses, which is a server-side
-    /// operation. `libp2p-dns` wraps the TCP transport in a client-side
-    /// resolver: it issues queries and reads answers. Nothing in this tree
-    /// constructs a DNS server or encodes a `Message` for transmission.
-    #[test]
-    fn no_dns_server_surface_in_tree() {
-        // Walk the crate's own sources; a DNS server would have to name one of
-        // these types to exist at all.
-        let sources: &[&str] = &[
-            include_str!("../network/node.rs"),
-            include_str!("../main.rs"),
-        ];
-
-        for src in sources {
-            for server_api in ["ServerFuture", "hickory_server", "hickory-server"] {
+            for v in &versions {
                 assert!(
-                    !src.contains(server_api),
-                    "found `{server_api}`: this tree appears to serve DNS, \
-                     which makes the encoding path of GHSA-q2qq-hmj6-3wpp \
-                     reachable"
+                    version_at_least(v, "0.26.1"),
+                    "{crate_name} {v} is below the patched 0.26.1 \
+                     (GHSA-3v94-mw7p-v465 has no 0.25.x fix, \
+                     GHSA-q2qq-hmj6-3wpp is fixed in 0.26.1)"
                 );
             }
         }
-
-        let lock = include_str!("../../Cargo.lock");
-        assert!(
-            !lock.contains("name = \"hickory-server\""),
-            "hickory-server is in the dependency graph; the \
-             GHSA-q2qq-hmj6-3wpp exception assumed client-only DNS use"
-        );
     }
 
-    /// The exceptions must stay written down where the scanners read them.
-    ///
-    /// Guards against the opposite failure: someone removes an advisory from
-    /// one scanner's ignore list but not the others, leaving the gates
-    /// disagreeing about what is accepted.
+    /// The patch that delivers those versions has to stay, and it has to stay
+    /// explained. A bare `[patch.crates-io]` entry with no reason is how a
+    /// temporary pin becomes permanent.
     #[test]
-    fn advisory_exceptions_are_recorded_for_every_scanner() {
-        let grype = include_str!("../../.quality/grype.yaml");
-        let osv = include_str!("../../.quality/osv-scanner.toml");
-
-        // The two scanners key the same finding by different identifiers:
-        // grype reports GHSA ids, osv-scanner reports the RustSec alias.
-        // Each entry is (grype id, osv-scanner id) for one advisory.
-        for (ghsa, rustsec) in [
-            ("GHSA-vxx9-2994-q338", "GHSA-vxx9-2994-q338"),
-            ("GHSA-3v94-mw7p-v465", "RUSTSEC-2026-0118"),
+    fn libp2p_patch_records_why_it_exists() {
+        let manifest = include_str!("../../Cargo.toml");
+        assert!(
+            manifest.contains("[patch.crates-io]"),
+            "the libp2p patch is gone; if 0.57.0 was published, drop the patch \
+             *and* this test together, after checking the lockfile still \
+             resolves yamux >= 0.13.10 and hickory >= 0.26.1"
+        );
+        for advisory in [
+            "GHSA-vxx9-2994-q338",
+            "GHSA-3v94-mw7p-v465",
+            "GHSA-q2qq-hmj6-3wpp",
         ] {
             assert!(
-                grype.contains(ghsa),
-                ".quality/grype.yaml no longer records {ghsa}"
-            );
-            assert!(
-                osv.contains(rustsec),
-                ".quality/osv-scanner.toml no longer records {rustsec} \
-                 (the RustSec alias of {ghsa})"
+                manifest.contains(advisory),
+                "Cargo.toml must keep naming {advisory} as a reason for the \
+                 libp2p patch, otherwise the pin looks arbitrary"
             );
         }
+    }
+
+    /// The three advisories must not reappear in any scanner's ignore list.
+    ///
+    /// This is the canary for the whole change: they are patched, so ignoring
+    /// them would be silencing a finding that is already fixed — and would
+    /// hide a regression if the graph ever slid back.
+    #[test]
+    fn patched_advisories_are_not_ignored_anywhere() {
+        let configs: [(&str, &str); 3] = [
+            (
+                ".quality/deny.toml",
+                include_str!("../../.quality/deny.toml"),
+            ),
+            (
+                ".quality/osv-scanner.toml",
+                include_str!("../../.quality/osv-scanner.toml"),
+            ),
+            (
+                ".quality/grype.yaml",
+                include_str!("../../.quality/grype.yaml"),
+            ),
+        ];
+
+        // Only lines that actually suppress a finding count; the files explain
+        // the history in comments and that has to stay allowed.
+        for (name, body) in configs {
+            for line in body.lines() {
+                let code = line.split('#').next().unwrap_or("").trim();
+                if code.is_empty() {
+                    continue;
+                }
+                for advisory in [
+                    "GHSA-vxx9-2994-q338",
+                    "CVE-2026-32314",
+                    "GHSA-3v94-mw7p-v465",
+                    "GHSA-q2qq-hmj6-3wpp",
+                    "RUSTSEC-2026-0118",
+                    "RUSTSEC-2026-0119",
+                ] {
+                    assert!(
+                        !code.contains(advisory),
+                        "{name} suppresses {advisory}, but it is patched \
+                         (yamux 0.14 / hickory 0.26.1). Remove the entry — an \
+                         ignore rule over a fixed finding hides the regression \
+                         if the graph slides back.\nline: {code}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The version comparison above is the load-bearing part of these locks,
+    /// so it gets its own canary.
+    #[test]
+    fn version_comparison_is_not_lexicographic() {
+        assert!(version_at_least("0.13.10", "0.13.9"), "10 > 9 numerically");
+        assert!(version_at_least("0.26.1", "0.26.1"), "equal passes");
+        assert!(!version_at_least("0.25.2", "0.26.1"));
+        assert!(!version_at_least("0.12.1", "0.13.10"));
+        assert!(version_at_least("0.14.0", "0.13.10"));
     }
 }

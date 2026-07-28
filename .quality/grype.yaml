@@ -11,10 +11,10 @@
 # Trivy fs taraması bunu yapmıyor (yalnız exit-code ile job'ı kırıyor), yani
 # bulguları tek bir yerden izlemek şu an mümkün değil.
 #
-# POLİTİKA: aşağıdaki istisnalar osv-scanner.toml'daki gerekçelerin birebir
-# aynısıdır. İki tarayıcının aynı bulgu için çelişmesi kapının güvenilirliğini
-# aşındırır; biri güncellenirse diğeri de güncellenmelidir. Listede olmayan
-# her bulgu FAIL'dir.
+# POLİTİKA: istisna listesi osv-scanner.toml ile birebir aynı olmalıdır. İki
+# tarayıcının aynı bulgu için çelişmesi kapının güvenilirliğini aşındırır;
+# biri güncellenirse diğeri de güncellenmelidir. Listede olmayan her bulgu
+# FAIL'dir. Şu an liste boş — taşınan hiçbir zafiyet yok.
 
 # Yalnız düzeltmesi olan bulgular değil, hepsi raporlansın.
 ignore-wontfix: ''
@@ -26,40 +26,16 @@ ignore-wontfix: ''
 fail-on-severity: high
 
 ignore:
-  # ── yamux 0.12.1 — CVE-2026-32314 / GHSA-vxx9-2994-q338 (CVSS 8.7) ────────
-  # Erişilemez: libp2p-yamux 0.47.0 hem 0.12.1 hem 0.13.10'u bağlar, seçimi
-  # Config yapar. Upstream `impl Default for Config` -> Config013 ve
-  # src/network/node.rs tam olarak `yamux::Config::default` veriyor; 0.12
-  # yoluna geçiren tek API (WindowUpdateMode/client()/server()) repoda yok.
-  # Advisory'nin fixed sürümü 0.13.10 ve çalışan sürüm zaten 0.13.10.
-  # Takip: libp2p-yamux 0.12 desteğini düşürdüğünde bu istisna silinir.
-  - vulnerability: GHSA-vxx9-2994-q338
-  - vulnerability: CVE-2026-32314
-
-  # ── hickory-proto 0.25.2 — DNSSEC derlenmiyor ─────────────────────────────
-  # NSEC3 doğrulama döngüsü yalnız hickory `dnssec` özelliğiyle derlendiğinde
-  # var olur. Ölçüm (2026-07-27, `cargo tree -e features -i hickory-proto`):
-  # aktif özellikler yalnızca std / tokio / futures-io — dnssec YOK, mdns YOK.
+  # Bu liste ŞU AN BOŞ ve öyle kalmalı.
   #
-  # DÜZELTME: bu kaydın eski gerekçesi "yalnız opsiyonel p2p-mdns ile çözülür"
-  # diyordu; libp2p `dns` özelliği açıldığından beri YANLIŞ. hickory artık
-  # libp2p-dns üzerinden default derlemeye giriyor. Erişilemezlik sürüyor ama
-  # sebebi DNSSEC'in derlenmemesi. Premis
-  # src/tests/advisory_reachability.rs ile kilitli.
-  - vulnerability: GHSA-3v94-mw7p-v465
-  - vulnerability: RUSTSEC-2026-0118
-  - vulnerability: RUSTSEC-2026-0119
-
-  # ── hickory-proto — GHSA-q2qq-hmj6-3wpp (O(n^2) message ENCODING) ─────────
-  # Ayrı bir zafiyet: DNS mesajı ÜRETİRKEN quadratic davranış. Tetiklemek için
-  # yanıt encode etmek gerekir; bu sunucu tarafı bir iştir.
+  # 2026-07-28'e kadar burada üç kayıt vardı (yamux GHSA-vxx9-2994-q338,
+  # hickory GHSA-3v94-mw7p-v465 ve GHSA-q2qq-hmj6-3wpp). Hepsi "erişilemez"
+  # gerekçesiyle taşınıyordu çünkü libp2p 0.56 yamalı sürümlere geçmemişti.
+  # Artık geçti: kök Cargo.toml libp2p'yi 0.57.0 ağacına sabitliyor, bu da
+  # yamux 0.14.0 ve hickory 0.26.1 getiriyor. Üç bulgu da YAMALANDI, yani
+  # istisnaya gerek kalmadı.
   #
-  # Budlum DNS sunmuyor, yalnız çözümlüyor: libp2p-dns TCP transport'unu
-  # istemci tarafı bir resolver ile sarar (sorgu gönderir, yanıt okur).
-  # Ağaçta hickory-server yok, ServerFuture kullanan kod yok.
-  # Premis src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree
-  # ile kilitli.
-  #
-  # Yamalı sürüm 0.26.1 ama libp2p ^0.25.2'ye pinli olduğu için yükseltme
-  # upstream'i bekliyor (kanıt: cargo update --precise 0.26.1 reddediliyor).
-  - vulnerability: GHSA-q2qq-hmj6-3wpp
+  # Yeni bir istisna eklemeden önce: bağımlılığı yükseltmeyi dene. Erişilebilir
+  # bir bulgu ignore edilmez. Erişilemezlik iddiası ediliyorsa kanıtı
+  # src/tests/advisory_reachability.rs içinde bir testle kilitlenmelidir.
+  []

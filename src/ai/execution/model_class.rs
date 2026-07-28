@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is a per-dimension ceiling, not a shape that is always reachable:
 /// guest memory binds first. A `[64, 1]` model fits comfortably, a `[64, 64]`
-/// one does not. See [`FixedPointMlpSpec::validate`], which rejects the
-/// difference instead of letting it surface as a truncated forward pass.
+/// one does not. `FixedPointMlpSpec::validate` rejects the difference instead
+/// of letting it surface as a truncated forward pass.
 pub const MAX_MLP_WIDTH: usize = 64;
 /// Maximum number of dense layers (including output).
 pub const MAX_MLP_LAYERS: usize = 4;

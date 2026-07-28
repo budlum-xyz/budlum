@@ -9,7 +9,7 @@ license.workspace = true
 futures = { version = "0.3", features = ["std"] }
 async-trait = "0.1"
 # Async runtime
-libp2p = { version = "0.56", features = [
+libp2p = { version = "0.57", features = [
     "tokio",
     "tcp",
     "noise",

@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use futures::prelude::*;
 use libp2p::request_response;
 use libp2p::StreamProtocol;
@@ -6,7 +5,9 @@ use libp2p::StreamProtocol;
 #[derive(Debug, Clone, Default)]
 pub struct SyncCodec;
 
-#[async_trait]
+// `request_response::Codec` used to be an `#[async_trait]` trait; upstream
+// moved it to native `-> impl Future + Send` methods, so the attribute now
+// conflicts with the declaration (E0195: lifetime bounds do not match).
 impl request_response::Codec for SyncCodec {
     type Protocol = StreamProtocol;
     type Request = Vec<u8>;

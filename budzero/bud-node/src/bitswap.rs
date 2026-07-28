@@ -53,7 +53,9 @@ pub struct BitswapResponse {
 #[derive(Debug, Clone, Default)]
 pub struct BitswapCodec;
 
-#[async_trait::async_trait]
+// `request_response::Codec` used to be an `#[async_trait]` trait; upstream
+// moved it to native `-> impl Future + Send` methods, so the attribute now
+// conflicts with the declaration (E0195: lifetime bounds do not match).
 impl libp2p::request_response::Codec for BitswapCodec {
     type Protocol = libp2p::StreamProtocol;
     type Request = BitswapRequest;

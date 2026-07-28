@@ -11,80 +11,12 @@
 # neden ERİŞİLEMEZ olduğunun kanıtıyla yazılır (VEX mantığı); "gürültü" ya da
 # "şimdilik" gerekçesi kabul edilmez. Erişilebilir bir bulgu ignore edilmez,
 # bağımlılık yükseltilir.
-
-[[IgnoredVulns]]
-id = "GHSA-vxx9-2994-q338"   # CVE-2026-32314 — yamux remote panic (DoS), CVSS 8.7
-reason = """
-Erişilemez: yamalı kod yolu kullanılıyor, yamasız olan yalnız derleniyor.
-
-libp2p-yamux 0.47.0 iki yamux sürümünü birden bağımlılık olarak çeker
-(yamux012 = 0.12.1, yamux013 = 0.13.10) ve hangisinin çalışacağını Config
-seçer. Upstream kaynağında `impl Default for Config` -> `Config013`, yani
-`yamux::Config::default()` 0.13.10 bağlantısını kurar. Budlum swarm'ı
-src/network/node.rs içinde tam olarak `yamux::Config::default` veriyor;
-depoda 0.12 yoluna geçiren tek API olan `WindowUpdateMode` / `client()` /
-`server()` çağrısı hiç yok (grep ile doğrulandı).
-
-Advisory'nin düzeltilmiş sürümü 0.13.10'dur ve çalıştırdığımız sürüm zaten
-0.13.10'dur. Savunmasız 0.12.1 grafikte yalnızca libp2p-yamux'un ikili-sürüm
-tasarımı yüzünden duruyor; hiçbir bağlantı onun üzerinden kurulmuyor.
-
-Takip: libp2p-yamux 0.12 desteğini düşürdüğünde bu istisna silinir. Eğer
-node.rs'te yamux yapılandırması değişir ve 0.12 yoluna geçilirse bu gerekçe
-geçersizdir — o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
-"""
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0118"   # hickory-proto NSEC3 DoS
-reason = """
-NSEC3 closest-encloser proof doğrulamasında sınırsız döngü. Bu kod yalnız
-hickory `dnssec` özelliğiyle derlendiğinde var olur; bizde derlenmiyor.
-
-ÖLÇÜM (2026-07-27, `cargo tree -e features -i hickory-proto --target all`):
-aktif hickory-proto özellikleri yalnızca `std`, `tokio`, `futures-io`. `dnssec`
-YOK, `mdns` YOK. Cargo.lock'ta dnssec uygulayan hiçbir crate bulunmuyor.
-
-DÜZELTME: bu kaydın önceki gerekçesi "hickory yalnız opsiyonel p2p-mdns ile
-çözülür, production'da kapalı" diyordu. Bu artık DOĞRU DEĞİL — libp2p `dns`
-özelliği /dns4 ve /dnsaddr multiaddr'ları çözebilmek için açıldığından hickory
-`libp2p-dns` üzerinden default derlemeye giriyor. Zafiyet hâlâ erişilemez, ama
-sebebi farklı; eski metin bırakılsaydı yanlış bir güvence olurdu.
-
-Premis `src/tests/advisory_reachability.rs::dnssec_validation_is_not_compiled_in`
-ile kilitli: DNSSEC ağaca girerse test düşer ve bu istisna yeniden savunulmak
-zorunda kalır.
-
-Takip: libp2p-dns/libp2p-mdns hickory >=0.26.1'i desteklediğinde yükseltilip
-kayıt silinir. Şu an upstream `^0.25.2`'ye pinli (kanıt: `cargo update -p
-hickory-proto --precise 0.26.1` -> "candidate versions found which didn't
-match", libp2p-mdns 0.48.0 gereksinimi).
-"""
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0119"   # hickory-proto name-compression parser
-reason = """
-RUSTSEC-2026-0118 ile aynı ölçüm ve aynı takip maddesi: savunmasız
-ayrıştırıcı `dnssec` özelliği olmadan derlenmiyor (aktif özellikler yalnız
-std/tokio/futures-io). Aynı düzeltme notu geçerlidir: hickory artık p2p-mdns
-üzerinden değil, libp2p `dns` özelliği üzerinden default derlemede bulunur.
-"""
-
-[[IgnoredVulns]]
-id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
-reason = """
-DNS mesajı ÜRETİRKEN quadratic CPU tüketimi. Tetiklenmesi için yanıt encode
-edilmesi gerekir — bu sunucu tarafı bir iştir.
-
-Budlum DNS SUNMUYOR, yalnız çözümlüyor: libp2p-dns, TCP transport'unu istemci
-tarafı bir resolver ile sarar (sorgu gönderir, gelen yanıtı okur). Ağaçta
-hickory-server bağımlılığı yok ve ServerFuture kullanan hiçbir kod yok.
-
-Premis `src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree` ile
-kilitli: ağaca DNS sunucu yüzeyi girerse test düşer.
-
-Yamalı sürüm 0.26.1; libp2p-dns/libp2p-mdns ^0.25.2'ye pinli olduğundan
-yükseltme upstream'i bekliyor.
-"""
+#
+# 2026-07-28: üç zafiyet kaydı (yamux GHSA-vxx9-2994-q338, hickory
+# RUSTSEC-2026-0118 / RUSTSEC-2026-0119 / GHSA-q2qq-hmj6-3wpp) SİLİNDİ çünkü
+# yamalandılar — politikanın istediği şey buydu. Kök Cargo.toml libp2p'yi
+# 0.57.0 ağacına sabitliyor; bu yamux 0.14.0 ve hickory 0.26.1 getiriyor.
+# Aşağıda yalnız "unmaintained" bakım uyarıları kaldı; bunlar zafiyet değil.
 
 # ── "unmaintained" sınıfı bilgilendirici kayıtlar ────────────────────────────
 # Aşağıdakiler zafiyet değil, bakım durumu uyarısıdır (RUSTSEC-*-XXXX
