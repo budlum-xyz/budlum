@@ -9,7 +9,7 @@ license.workspace = true
 futures = { version = "0.3", features = ["std"] }
 async-trait = "0.1"
 # Async runtime
-libp2p = { version = "0.57", features = [
+libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd", features = [
     "tokio",
     "tcp",
     "noise",

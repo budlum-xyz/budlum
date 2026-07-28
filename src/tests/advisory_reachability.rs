@@ -121,13 +121,51 @@ mod tests {
         }
     }
 
-    /// Every workspace that depends on libp2p needs its own patch entry.
+    /// Every manifest that depends on libp2p must take it from the pinned
+    /// tree, and must pin it by full revision.
     ///
-    /// They resolve independently: patching only the root leaves
-    /// budzero/Cargo.lock and fuzz/Cargo.lock on the vulnerable versions,
-    /// which is six of the nine Dependabot alerts.
+    /// The three workspaces resolve independently, so a crates.io requirement
+    /// left in any one of them puts the vulnerable yamux/hickory back into
+    /// that lockfile — six of the original nine Dependabot alerts.
+    ///
+    /// A direct git dependency is used rather than `[patch.crates-io]`
+    /// because tools that re-resolve the manifest in a scratch directory
+    /// (cargo-semver-checks among them) do not carry the patch table across,
+    /// and then cannot select a version at all.
     #[test]
-    fn every_workspace_manifest_carries_the_patch() {
+    fn every_libp2p_dependency_is_pinned_to_the_tree() {
+        const REV: &str = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd";
+        for (name, manifest) in [
+            ("Cargo.toml", include_str!("../../Cargo.toml")),
+            (
+                "budzero/bud-node/Cargo.toml",
+                include_str!("../../budzero/bud-node/Cargo.toml"),
+            ),
+            ("fuzz/Cargo.toml", include_str!("../../fuzz/Cargo.toml")),
+        ] {
+            let dep = manifest
+                .lines()
+                .find(|l| l.trim_start().starts_with("libp2p = "))
+                .unwrap_or_else(|| panic!("{name}: no libp2p dependency line"));
+            assert!(
+                dep.contains("git = \"https://github.com/libp2p/rust-libp2p\""),
+                "{name}: libp2p must come from the pinned tree, got: {dep}"
+            );
+            assert!(
+                dep.contains(REV),
+                "{name}: libp2p must be pinned by full revision, got: {dep}"
+            );
+            assert!(
+                !dep.contains("branch =") && !dep.contains("tag ="),
+                "{name}: a branch or tag can move; pin by revision only"
+            );
+        }
+    }
+
+    /// No `[patch.crates-io]` may remain. It is what broke cargo-semver-checks,
+    /// and keeping both it and the git pin would be two sources of truth.
+    #[test]
+    fn no_patch_table_shadows_the_git_pin() {
         for (name, manifest) in [
             ("Cargo.toml", include_str!("../../Cargo.toml")),
             (
@@ -136,15 +174,14 @@ mod tests {
             ),
             ("fuzz/Cargo.toml", include_str!("../../fuzz/Cargo.toml")),
         ] {
-            assert!(
-                manifest.contains("[patch.crates-io]"),
-                "{name} has no [patch.crates-io]; its lockfile will resolve \
-                 libp2p from crates.io and keep the vulnerable yamux/hickory"
-            );
-            assert!(
-                manifest.contains("rust-libp2p"),
-                "{name}: the patch must point at the rust-libp2p tree"
-            );
+            for line in manifest.lines() {
+                let code = line.split('#').next().unwrap_or("").trim();
+                assert_ne!(
+                    code, "[patch.crates-io]",
+                    "{name} still carries a patch table; the git pin on the \
+                     dependency line is the single source of truth"
+                );
+            }
         }
     }
 
@@ -171,8 +208,8 @@ mod tests {
     fn libp2p_patch_records_why_it_exists() {
         let manifest = include_str!("../../Cargo.toml");
         assert!(
-            manifest.contains("[patch.crates-io]"),
-            "the libp2p patch is gone; if 0.57.0 was published, drop the patch \
+            manifest.contains("rust-libp2p"),
+            "the libp2p git pin is gone; if 0.57.0 was published, drop the pin \
              *and* this test together, after checking the lockfile still \
              resolves yamux >= 0.13.10 and hickory >= 0.26.1"
         );

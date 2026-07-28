@@ -23,7 +23,7 @@ budlum-core = { path = ".." }
 # : zk_verifier target needs ProofEnvelope + DefaultAdapter.
 bud-proof = { path = "../budzero/bud-proof" }
 libfuzzer-sys = "0.4"
-libp2p = "0.57"
+libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd" }
 
 [[bin]]
 name = "block_deserialize"
@@ -109,13 +109,3 @@ bench = false
 [profile.release]
 overflow-checks = true
 
-# See the root Cargo.toml for the full rationale. libp2p 0.57.0 is tagged in
-# the rust-libp2p tree but not yet on crates.io, and pinning it closes three
-# advisories that no published release can: GHSA-vxx9-2994-q338 (yamux),
-# GHSA-3v94-mw7p-v465 and GHSA-q2qq-hmj6-3wpp (hickory-proto).
-#
-# This workspace resolves independently of the root, so it needs its own copy
-# of the patch — otherwise its Cargo.lock keeps the vulnerable versions and
-# the scanners report them against this manifest.
-[patch.crates-io]
-libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd" }
