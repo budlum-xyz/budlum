@@ -215,6 +215,15 @@ message ProtoAiModelRegister {
     uint64 result_deadline_blocks = 9;
     uint32 version = 10;
     bool active = 11;
+    // Digest of the model's weights, empty when not registered.
+    //
+    // The guest program for a fixed-point MLP depends on the architecture
+    // only — the weights are read from a memory image the STARK does not
+    // bind — so program_hash cannot distinguish two models with the same
+    // layer shape. This is what a verifier compares an execution proof
+    // against. Optional: an empty value means the model did not register one,
+    // which is only allowed when it does not require execution proofs.
+    bytes execution_weights_digest = 12;
 }
 
 message ProtoAiInferenceRequest {
@@ -522,4 +531,7 @@ message ProtoAiAttachExecutionProof {
     bytes proof_bytes = 6;
     uint64 steps = 7;
     uint64 gas_used = 8;
+    // Digest of the weights the prover claims to have run. Compared against
+    // ProtoAiModelRegister.execution_weights_digest. Empty when absent.
+    bytes weights_digest = 9;
 }

@@ -2902,6 +2902,7 @@ impl BudlumApiServer for RpcServer {
             require_execution_proof: false,
             execution_program_hash: None,
             execution_class: 0,
+            execution_weights_digest: None,
         };
 
         let tx = crate::core::transaction::Transaction {

@@ -207,6 +207,49 @@ fn memory_seeded_prover_carries_its_soundness_warning() {
     );
 }
 
+/// The weights binding must stay wired on both sides and on the wire.
+///
+/// The registry half of the memory-image gap is closed by comparing a
+/// registered digest against the one a proof carries. If either field is
+/// dropped, or the wire format stops carrying it, the check degrades to
+/// "absent" and a proof for one model verifies against another of the same
+/// shape.
+#[test]
+fn weights_digest_binding_stays_wired() {
+    let types = read("src/ai/types.rs");
+    assert!(
+        types.contains("pub execution_weights_digest: Option<[u8; 32]>"),
+        "AiModelSpec lost execution_weights_digest; program_hash binds the \
+         architecture only, so nothing would separate two models of the same \
+         shape"
+    );
+    assert!(
+        types.contains("pub weights_digest: Option<[u8; 32]>"),
+        "AiExecutionProof lost weights_digest"
+    );
+
+    let verify = read("src/ai/execution/verify.rs");
+    assert!(
+        verify.contains("weights_bound"),
+        "the structural report no longer checks the weights digest"
+    );
+    assert!(
+        squash(&verify).contains("self.program_hash_matches_model && self.weights_bound"),
+        "is_structurally_valid must require weights_bound, otherwise the \
+         field is computed and ignored"
+    );
+
+    let proto = read("proto/budlum/network/protocol.proto");
+    assert!(
+        proto.contains("bytes execution_weights_digest = 12;"),
+        "the registered digest must keep its wire field"
+    );
+    assert!(
+        proto.contains("bytes weights_digest = 9;"),
+        "the proof digest must keep its wire field"
+    );
+}
+
 /// Collapse every run of whitespace to a single space so a doc-comment or a
 /// Markdown paragraph can be re-wrapped without silently disarming a lock.
 fn squash(body: &str) -> String {
