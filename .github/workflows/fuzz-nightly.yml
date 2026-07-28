@@ -42,10 +42,16 @@ jobs:
           toolchain: nightly
       - name: Override rust-toolchain.toml pin (nightly zorunlu)
         run: rustup override set nightly
+      # Install protoc from the runner's package index rather than
+      # arduino/setup-protoc. That action resolves the release through an
+      # unauthenticated GitHub API call and the nightly matrix runs eight jobs
+      # at once from one runner IP, which exhausted the anonymous rate limit:
+      # "API rate limit exceeded for 68.220.60.145" made the zk_verifier job
+      # fail before it fuzzed anything. Every other workflow in this repo
+      # already installs protoc this way, so this also removes the last
+      # inconsistency.
       - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          version: "29.x"
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
