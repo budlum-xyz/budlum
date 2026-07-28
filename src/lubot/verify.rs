@@ -1,8 +1,21 @@
-//! Gerçek STARK doğrulama + proof üretimi (bud-proof `DefaultAdapter`).
+//! STARK doğrulama + proof üretimi yardımcıları (bud-proof `DefaultAdapter`).
 //!
-//! Lubot çıkarım kanıtı, gerçek plonky3 STARK ile doğrulanır VE üretilir.
-//! Bu, düny-ilk "doğrulanabilir çıkarım" iddiasının kriptografik çekirdeğidir.
-//! Hem prove hem verify çalışır — tam round-trip.
+//! **Bu modül hiçbir üretim yolundan çağrılmıyor.** Şu an yalnızca bu
+//! dosyadaki testler `verify_inference_stark` / `generate_and_verify_proof`
+//! fonksiyonlarını kullanır; zincir üzerindeki çıkarım doğrulaması bu koddan
+//! geçmez.
+//!
+//! Gerçek işlem yolu `src/execution/executor.rs` içindedir ve orada
+//! `require_execution_proof` isteyen modeller **fail-closed** reddedilir
+//! (`ai_exec_verifier_unavailable`), çünkü işlem yolunda doğrulayıcıya
+//! verilecek guest program + kanonik public-input paketi yoktur. Yapısal
+//! kontroller (`verify_execution_proof_structural_with_model`) çalışır,
+//! STARK doğrulaması çalışmaz.
+//!
+//! Dolayısıyla "doğrulanabilir çıkarım" bugün **kanıtlanmış bir özellik
+//! değildir**; bu modül o özellik bağlandığında kullanılacak iskelettir.
+//! Bağlanması için gereken: model kaydında guest program sözcüklerinin
+//! saklanması ve işlem yolunda `ExecutionPublicInputs`'in yeniden türetilmesi.
 
 use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_vm::Vm;

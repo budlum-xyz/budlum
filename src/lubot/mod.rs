@@ -1,7 +1,13 @@
 //! # Lubot — Merkeziyetsiz Yapay Zeka Katmanı (: gerçek budlum-core wiring)
 //!
-//! Kapalı-devre, doğrulanabilir AI katmanı. Bu modül Lubot'u **gerçek**
-//! Budlum-core primitive'lerine bağlar (mock yok):
+//! Kapalı-devre AI katmanı. Bu modül Lubot'u gerçek budlum-core
+//! Primitive'lerine bağlar (mock yok):
+//!
+//! **Kapsam sınırı:** buradaki "doğrulanabilir" erişim ve bond kontrollerini
+//! Anlatır, çıkarımın kriptografik doğrulamasını değil. Zincir üzerindeki
+//! Çıkarım kanıtı bugün doğrulanmıyor; işlem yolu `require_execution_proof`
+//! İsteyen modelleri fail-closed reddeder. Ayrıntı: `docs/AI_VERIFICATION_STATUS.md`.
+//!
 //! - **Operator compute-bond** = `AiRegistry` verifier stake (AI-layer-first kararı).
 //! - **Kapalı-devre veri** = gerçek `Pollen` `AccessGrant` doğrulaması.
 //! - **Sertleştirme tipleri:** training-data grant (Pollen), AI-dataset metadata
