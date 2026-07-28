@@ -104,31 +104,23 @@ Bitwise işlemler için en verimli yaklaşım, operand'ların bit decomposition'
 
 ### 4-Round Poseidon (alpha=7, width=8) — ÜRETİME HAZIR DEĞİL
 
-> **⚠️ GÜVENLİK UYARISI.** Aşağıdaki parametre seti kriptografik olarak
-> **yetersizdir**. Gizlilik katmanı bu haliyle mainnet'te açılmamalıdır.
+> **✅ ÇÖZÜLDÜ (2026-07-28).** Aşağıdaki bölüm 4-round parametre setini ve
+> neden yetersiz olduğunu anlatıyor; **artık kullanılmıyor**. VM ve AIR tam
+> 30-round permütasyona (R_F=8, R_P=22) taşındı, gizlilik opcode'ları açıldı.
+> Metin, hangi sorunun çözüldüğünü kaydettiği için duruyor.
 >
-> R_F=4, R_P=0, α=7 ile permütasyonun cebirsel derecesi yalnızca 7⁴ = 2401.
-> Bu derecede bir çok değişkenli sistem interpolasyon veya Gröbner-basis ile
-> pratikte tersine çevrilebilir; ayrıca fonksiyon o kadar ucuz ki genel doğum
-> günü çakışma araması (~2³²) tek GPU ile saatler içinde erişilebilir.
+> Neydi: R_F=4, R_P=0, α=7 ile cebirsel derece yalnızca 7⁴ = 2401. Bu derecede
+> bir sistem interpolasyon veya Gröbner-basis ile pratikte tersine çevrilebilir;
+> ayrıca fonksiyon o kadar ucuz ki genel doğum günü çakışma araması (~2³²) tek
+> GPU ile saatler içinde erişilebilir.
 >
-> Somut sonuç: `PrivacyCommit` commitment'ından `(amount, blinding,
-> recipient_tag)` geri çıkarılabilir — **gizleme yok**. Aynı commitment veya
-> nullifier için ikinci bir açılım bulunabilir — **bağlayıcılık yok**.
+> Somut sonucu: `PrivacyCommit` commitment'ından `(amount, blinding,
+> recipient_tag)` geri çıkarılabilirdi — gizleme yok. Aynı commitment veya
+> nullifier için ikinci bir açılım bulunabilirdi — bağlayıcılık yok.
 >
-> Buradaki sabitler Plonky3'ün Goldilocks width-8 Poseidon1 örneğinin **ilk
-> dört round'u**. Bu genişlik için gerçek parametreler kabaca 8 tam + 22 kısmi
-> round ister; elimizdeki, güvenli bir setten kesilmiş bir alt küme — kendi
-> başına bir tasarım değil.
->
-> STARK tarafı dürüst: AIR dört round'un tamamını kısıtlıyor, yani kanıt
-> sistemi bu (zayıf) fonksiyonun doğru çalıştırıldığını doğru kanıtlıyor.
-> Sorun kanıtlanan fonksiyonun kendisinde.
->
-> Bu yüzden `privacy_commit_enabled`, `nullifier_check_enabled` ve
-> `sum_conservation_enabled` bayrakları `MainnetActivation::default()` ile
-> **kapalıdır** ve round sayısı düzeltilmeden açılmamalıdır. Kilit:
-> `bud-isa` içindeki `privacy_opcodes_stay_disabled_until_poseidon_is_fixed`.
+> STARK tarafı o zaman da dürüsttü: AIR dört round'un tamamını kısıtlıyordu,
+> yani kanıt sistemi zayıf fonksiyonun doğru çalıştırıldığını doğru
+> kanıtlıyordu. Sorun kanıtlanan fonksiyonun kendisindeydi.
 
 ### Hedef parametreler türetildi (2026-07-28)
 
@@ -174,12 +166,46 @@ gelir — zayıf hash'ten kesinlikle daha kötü bir soundness kırılması. Bu 
 - `vm_hash_still_matches_the_air_round_count`, VM tek taraflı değişirse düşer
   ve AIR'ın aynı değişiklikte taşınmasını zorlar.
 
-**Kalan iş:** `plonky3_air.rs` içindeki Poseidon gadget'ını 30 round'a
-genişletmek (kısmi round'larda S-box yalnız 0. şeride uygulanır — asimetri
-kısıtların da asimetrik olmasını gerektirir), trace sütunlarını buna göre
-büyütmek, sonra VM'i çevirip gizlilik bayraklarını açmak. O ana kadar
-`privacy_commit_enabled`, `nullifier_check_enabled` ve
-`sum_conservation_enabled` kapalı kalır.
+### Uygulandı (2026-07-28)
+
+Üçü birden aynı değişiklikte taşındı — tek taraflı taşımak, kanıtın VM'in
+çalıştırdığından başka bir fonksiyonu doğrulaması demek olurdu:
+
+| bileşen | ne yapıldı |
+|---|---|
+| `bud-vm` | `poseidon4_hash_state` → `poseidon_full_hash_state`'e yönlendirildi |
+| `plonky3_air.rs` | gadget 30 round'a genişletildi, kısmi round'larda S-box yalnız 0. şeritte |
+| `plonky3_prover.rs` | tanık sütunları aynı şemayla dolduruluyor |
+
+**Sütun bütçesi.** Trace `414 → 730` sütun. Kısmi round'lar tam bedel ödemiyor:
+
+```
+state: 30 * 8                       = 240 sütun
+x2:    8 * 8 (tam) + 22 * 1 (kısmi) =  86 sütun
+x4:    aynı şekil                   =  86 sütun
+```
+
+Naif genişletme (her round'da 8 şerit) 720 sütun isterdi; asimetri 308 sütun
+kazandırıyor. Ölçülen prover süresi: **0.17 s → 4.75 s** (release, 71 test).
+
+**RC/MDS artık tek kaynakta.** Önceden AIR, prover ve VM'in her biri kendi
+4-round kopyasını taşıyordu. Üçü de `bud_vm::POSEIDON_RC_FULL` ve
+`bud_vm::POSEIDON_MDS` okuyor.
+
+**Yol boyunca bulunan ikinci hata.** `NullifierCheck`'in eşitlik tanığı
+prover'da `wrapping_sub` ile hesaplanıyordu; AIR alan çıkarması yapıyor. İkisi
+yalnızca `poseidon_out >= claimed` iken uyuşuyor. 4 round'da tesadüfen hiç
+tetiklenmemiş, 30 round'da hemen düştü. `field_sub_goldilocks` ile düzeltildi.
+
+**Gizlilik bayrakları açıldı.** `privacy_commit_enabled`,
+`nullifier_check_enabled` ve `sum_conservation_enabled` artık
+`MainnetActivation::default()` ile **AÇIK**. Kapının gerekçesi kalktığı için
+kapı kalktı. `verify_merkle_enabled` ve `verify_inference_enabled` kendi
+sebepleriyle kapalı kalmaya devam ediyor (bitmemiş yol doğrulaması; devrede
+olmayan doğrulama devresi).
+
+Kilit: `privacy_opcodes_are_open_only_while_poseidon_is_strong` round sayısı
+30'dan düşerse düşüyor — açık kapı, güçlü permütasyon varsayımına bağlı.
 
 ### Uygulanan parametreler
 

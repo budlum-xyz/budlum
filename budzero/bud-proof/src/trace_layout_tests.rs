@@ -4,7 +4,10 @@
 //! This module; otherwise CI will fail with an overlap or out-of-bounds
 //! Error.
 
-use crate::plonky3_air::TRACE_WIDTH;
+use crate::plonky3_air::{
+    COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE,
+    TRACE_WIDTH,
+};
 
 struct ColRange {
     name: &'static str,
@@ -71,96 +74,102 @@ fn all_ranges() -> Vec<ColRange> {
             start: 257,
             end: 258,
         },
-        // Poseidon opcode witnesses
+        // Poseidon opcode witnesses.
+        //
+        // Derived from the AIR constants rather than written out, because the
+        // block is no longer a flat `rounds * 8`: partial rounds record a
+        // single S-box lane, so the x2/x4 blocks are shorter than the state
+        // block. Hard-coding the numbers here would mean two places to update
+        // and one of them eventually missed.
         ColRange {
             name: "poseidon_state",
-            start: 258,
-            end: 290,
+            start: COL_POSEIDON_STATE_BASE,
+            end: COL_POSEIDON_X2_BASE,
         },
         ColRange {
             name: "poseidon_x2",
-            start: 290,
-            end: 322,
+            start: COL_POSEIDON_X2_BASE,
+            end: COL_POSEIDON_X4_BASE,
         },
         ColRange {
             name: "poseidon_x4",
-            start: 322,
-            end: 354,
+            start: COL_POSEIDON_X4_BASE,
+            end: COL_POSEIDON_END,
         },
         // Public-input bindings
         ColRange {
             name: "final_root",
-            start: 354,
-            end: 362,
+            start: 670,
+            end: 678,
         },
         ColRange {
             name: "init_root",
-            start: 362,
-            end: 370,
+            start: 678,
+            end: 686,
         },
         // Privacy opcode selectors (consumed from former reserved gap)
         ColRange {
             name: "privacy_selectors",
-            start: 370,
-            end: 373,
+            start: 686,
+            end: 689,
         },
         // VerifyInference AIR binding columns
         // (consumed remaining reserved gap 373..378)
         ColRange {
             name: "verify_inference",
-            start: 373,
-            end: 378,
+            start: 689,
+            end: 694,
         },
         ColRange {
             name: "trace_len_ctr",
-            start: 378,
-            end: 379,
+            start: 694,
+            end: 695,
         },
         ColRange {
             name: "gas_limit",
-            start: 379,
-            end: 380,
+            start: 695,
+            end: 696,
         },
         ColRange {
             name: "event_digest",
-            start: 380,
-            end: 388,
+            start: 696,
+            end: 704,
         },
         ColRange {
             name: "exit_code",
-            start: 388,
-            end: 389,
+            start: 704,
+            end: 705,
         },
         ColRange {
             name: "chain_id",
-            start: 389,
-            end: 390,
+            start: 705,
+            end: 706,
         },
         // VerifyMerkle path expansion
         ColRange {
             name: "verify_merkle",
-            start: 390,
-            end: 396,
+            start: 706,
+            end: 712,
         },
         ColRange {
             name: "merkle_poseidon_x2",
-            start: 396,
-            end: 404,
+            start: 712,
+            end: 720,
         },
         ColRange {
             name: "merkle_poseidon_x4",
-            start: 404,
-            end: 412,
+            start: 720,
+            end: 728,
         },
         ColRange {
             name: "merkle_diff_inv",
-            start: 412,
-            end: 413,
+            start: 728,
+            end: 729,
         },
         ColRange {
             name: "merkle_final_flag",
-            start: 413,
-            end: 414,
+            start: 729,
+            end: 730,
         },
     ]
 }
@@ -211,19 +220,94 @@ fn trace_layout_no_overlap_and_within_bounds() {
 
 #[test]
 fn trace_layout_reserved_gap_is_documented() {
-    // Consumed 370..373 for privacy selectors; consumed 373..378
-    // For VerifyInference AIR binding. No reserved gap remains.
+    // The point of this test is that no reserved gap remains: the privacy
+    // selectors and the VerifyInference binding sit back to back, immediately
+    // after the Poseidon witness block.
+    //
+    // It used to assert absolute indices (370..373, 373..378). That made it
+    // fail for the right reason but with the wrong message when the Poseidon
+    // block grew from 4 rounds to 30 and pushed everything after it along —
+    // nothing about the adjacency it exists to check had changed. The
+    // assertions are now relative, so the test still catches a gap or an
+    // overlap but does not need editing every time an earlier block resizes.
     let ranges = all_ranges();
     let privacy = ranges
         .iter()
         .find(|r| r.name == "privacy_selectors")
         .expect("privacy_selectors range must be documented");
-    assert_eq!(privacy.start, 370);
-    assert_eq!(privacy.end, 373);
     let vi = ranges
         .iter()
         .find(|r| r.name == "verify_inference")
         .expect("verify_inference range must be documented");
-    assert_eq!(vi.start, 373, "verify_inference must start at 373 after D2");
-    assert_eq!(vi.end, 378, "verify_inference must end at 378");
+
+    assert_eq!(
+        privacy.end - privacy.start,
+        3,
+        "privacy selectors are PrivacyCommit, NullifierCheck and SumConservation"
+    );
+    assert_eq!(
+        vi.end - vi.start,
+        5,
+        "VerifyInference binds a selector, an expansion flag and three commitments"
+    );
+    assert_eq!(
+        vi.start, privacy.end,
+        "VerifyInference must start where the privacy selectors end; a gap here \
+         is a wasted column and an overlap is a soundness bug"
+    );
+    assert!(
+        privacy.start >= COL_POSEIDON_END,
+        "the privacy selectors must sit past the Poseidon witness block \
+         (starts at {}, block ends at {})",
+        privacy.start,
+        COL_POSEIDON_END
+    );
+}
+
+/// The Poseidon block has to match the round schedule the AIR constrains.
+///
+/// The x2/x4 blocks are deliberately shorter than the state block: partial
+/// rounds record one S-box lane, not eight. If that shape drifts the AIR reads
+/// witness columns belonging to a different round.
+#[test]
+fn poseidon_block_matches_the_round_schedule() {
+    use crate::plonky3_air::{
+        poseidon_sbox_lanes, POSEIDON_FULL_ROUNDS, POSEIDON_PARTIAL_ROUNDS, POSEIDON_ROUNDS,
+        POSEIDON_SBOX_SLOTS,
+    };
+
+    assert_eq!(
+        POSEIDON_FULL_ROUNDS + POSEIDON_PARTIAL_ROUNDS,
+        POSEIDON_ROUNDS,
+        "8 full + 22 partial must be the 30 rounds the AIR loops over"
+    );
+
+    let expected_slots: usize = (0..POSEIDON_ROUNDS).map(poseidon_sbox_lanes).sum();
+    assert_eq!(POSEIDON_SBOX_SLOTS, expected_slots);
+    assert_eq!(
+        expected_slots,
+        POSEIDON_FULL_ROUNDS * 8 + POSEIDON_PARTIAL_ROUNDS,
+        "full rounds squash eight lanes, partial rounds one"
+    );
+
+    // State is one row of eight per round; x2 and x4 are one slot per S-box.
+    assert_eq!(
+        COL_POSEIDON_X2_BASE - COL_POSEIDON_STATE_BASE,
+        POSEIDON_ROUNDS * 8
+    );
+    assert_eq!(
+        COL_POSEIDON_X4_BASE - COL_POSEIDON_X2_BASE,
+        POSEIDON_SBOX_SLOTS
+    );
+    assert_eq!(COL_POSEIDON_END - COL_POSEIDON_X4_BASE, POSEIDON_SBOX_SLOTS);
+
+    // A partial round must be cheaper than a full one, otherwise the whole
+    // point of the schedule is lost.
+    assert_eq!(poseidon_sbox_lanes(0), 8, "round 0 is a leading full round");
+    assert_eq!(poseidon_sbox_lanes(4), 1, "round 4 is partial");
+    assert_eq!(
+        poseidon_sbox_lanes(POSEIDON_ROUNDS - 1),
+        8,
+        "the last round is a trailing full round"
+    );
 }

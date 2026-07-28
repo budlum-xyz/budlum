@@ -1429,10 +1429,10 @@ pub const POSEIDON_PARTIAL_ROUNDS: usize = 22;
 pub const POSEIDON_ALPHA: u64 = 7;
 
 /// Rounds actually evaluated by [`poseidon4_hash_state`], and constrained by
-/// the AIR. Deliberately named so the gap between it and
-/// `POSEIDON_FULL_ROUNDS + POSEIDON_PARTIAL_ROUNDS` is visible at the call
-/// site.
-pub const POSEIDON_ROUNDS_IN_USE: usize = 4;
+/// the AIR. It now equals the full schedule; the constant is kept because
+/// `vm_hash_still_matches_the_air_round_count` asserts the VM and the AIR
+/// agree, and that check is the thing keeping them from drifting apart again.
+pub const POSEIDON_ROUNDS_IN_USE: usize = POSEIDON_FULL_ROUNDS + POSEIDON_PARTIAL_ROUNDS;
 
 /// Reference implementation of the **full** 30-round permutation.
 ///
@@ -1479,7 +1479,15 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
 
 /// Round constants for the 4-round Poseidon permutation.
 ///
-/// # This permutation is not cryptographically sound
+/// # Superseded — kept only as the AIR's historical prefix
+///
+/// `poseidon4_hash_state` no longer uses these. It runs the full 30-round
+/// permutation ([`POSEIDON_RC_FULL`]), which the AIR now constrains in full.
+/// The four-round set below is retained because
+/// `four_round_set_is_a_prefix_of_full` checks it against the full table, and
+/// because the security note is worth keeping next to the numbers it is about.
+///
+/// What was wrong with it:
 ///
 /// Four full rounds with `alpha = 7` and no partial rounds leaves the whole
 /// permutation at algebraic degree `7^4 = 2401`. A system of that degree is
@@ -1549,31 +1557,12 @@ pub const POSEIDON_RC: [[u64; 8]; 4] = [
 /// 4-round Poseidon over Goldilocks with an arbitrary 8-element initial state
 /// (alpha=7, width=8, full rounds only). Shared by `poseidon4_hash`,
 /// `poseidon4_hash3` and the AIR Poseidon gadget.
-pub fn poseidon4_hash_state(mut s: [u64; 8]) -> u64 {
-    const P: u64 = 18446744069414584321;
-
-    for round_rc in POSEIDON_RC.iter() {
-        for i in 0..8 {
-            s[i] = ((s[i] as u128 + round_rc[i] as u128) % P as u128) as u64;
-        }
-        let mut sbox: [u64; 8] = [0; 8];
-        for i in 0..8 {
-            let x = s[i];
-            let x2 = ((x as u128 * x as u128) % P as u128) as u64;
-            let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
-            sbox[i] = (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64;
-        }
-        let mut next: [u64; 8] = [0; 8];
-        for i in 0..8 {
-            let mut sum: u128 = 0;
-            for j in 0..8 {
-                sum = (sum + POSEIDON_MDS[i][j] as u128 * sbox[j] as u128) % P as u128;
-            }
-            next[i] = sum as u64;
-        }
-        s = next;
-    }
-    s[0]
+pub fn poseidon4_hash_state(s: [u64; 8]) -> u64 {
+    // Kept under its historical name so call sites do not churn, but this is
+    // the full 30-round permutation now: `R_F = 8`, `R_P = 22`, `alpha = 7`.
+    // The AIR in `bud-proof` constrains exactly these rounds and the prover
+    // fills exactly these witness columns, so all three move together.
+    poseidon_full_hash_state(s)
 }
 
 /// 4-round Poseidon over Goldilocks with 3 absorbed field elements
@@ -1984,7 +1973,11 @@ mod poseidon_parameter_tests {
     /// so check it.
     #[test]
     fn four_round_set_is_a_prefix_of_full() {
-        assert_eq!(POSEIDON_RC.len(), POSEIDON_ROUNDS_IN_USE);
+        assert_eq!(
+            POSEIDON_RC.len(),
+            4,
+            "the historical prefix stays four rounds"
+        );
         for (r, row) in POSEIDON_RC.iter().enumerate() {
             assert_eq!(
                 row, &POSEIDON_RC_FULL[r],
@@ -2042,26 +2035,76 @@ mod poseidon_parameter_tests {
         );
     }
 
-    /// The two permutations must be genuinely different functions. If they
-    /// agreed, the full parameter set would be decoration.
+    /// The VM's hash *is* the full permutation now.
+    ///
+    /// This test used to assert the opposite: that the 30-round reference and
+    /// the 4-round permutation the VM ran were different functions, so the
+    /// derived parameters could not quietly become decoration. They are the
+    /// same function today because the VM was moved onto them, and the AIR
+    /// moved with it.
+    ///
+    /// What it guards now is the reverse: if `poseidon4_hash_state` is ever
+    /// pointed back at a truncated schedule, this fails.
     #[test]
-    fn full_permutation_differs_from_truncated_one() {
+    fn vm_hash_is_the_full_permutation() {
+        for a in [0u64, 1, 2, 12345, GOLDILOCKS_P - 1] {
+            for b in [0u64, 7, 999, GOLDILOCKS_P - 2] {
+                let state = [a, b, 0, 0, 0, 0, 0, 0];
+                assert_eq!(
+                    poseidon4_hash_state(state),
+                    poseidon_full_hash_state(state),
+                    "the VM must compute the 30-round permutation the AIR \
+                     constrains; a mismatch means proofs attest to a different \
+                     function than the VM ran"
+                );
+            }
+        }
+    }
+
+    /// The truncated schedule is still a different function, which is what
+    /// made moving off it worth doing.
+    #[test]
+    fn truncated_schedule_differs_from_the_full_one() {
+        const P: u64 = GOLDILOCKS_P;
+        // Reproduce the old four-round behaviour locally rather than keeping a
+        // second implementation in the crate.
+        let truncated = |mut s: [u64; 8]| -> u64 {
+            let sbox = |x: u64| -> u64 {
+                let x2 = ((x as u128 * x as u128) % P as u128) as u64;
+                let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
+                (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64
+            };
+            for rc in POSEIDON_RC.iter() {
+                for i in 0..8 {
+                    s[i] = ((s[i] as u128 + rc[i] as u128) % P as u128) as u64;
+                }
+                let sb: Vec<u64> = s.iter().map(|x| sbox(*x)).collect();
+                let mut next = [0u64; 8];
+                for i in 0..8 {
+                    let mut sum: u128 = 0;
+                    for j in 0..8 {
+                        sum = (sum + POSEIDON_MDS[i][j] as u128 * sb[j] as u128) % P as u128;
+                    }
+                    next[i] = sum as u64;
+                }
+                s = next;
+            }
+            s[0]
+        };
+
         let mut differing = 0;
         for a in [0u64, 1, 2, 12345, GOLDILOCKS_P - 1] {
             for b in [0u64, 7, 999, GOLDILOCKS_P - 2] {
                 let state = [a, b, 0, 0, 0, 0, 0, 0];
-                let weak = poseidon4_hash_state(state);
-                let strong = poseidon_full_hash_state(state);
-                assert!(weak < GOLDILOCKS_P && strong < GOLDILOCKS_P);
-                if weak != strong {
+                if truncated(state) != poseidon_full_hash_state(state) {
                     differing += 1;
                 }
             }
         }
         assert_eq!(
             differing, 20,
-            "the 30-round permutation must differ from the 4-round one on \
-             every sampled input; if they agree, the wiring is wrong"
+            "every sampled input must separate the two schedules; if they \
+             agreed, lengthening the permutation would have changed nothing"
         );
     }
 
@@ -2086,15 +2129,15 @@ mod poseidon_parameter_tests {
     fn vm_hash_still_matches_the_air_round_count() {
         assert_eq!(
             POSEIDON_ROUNDS_IN_USE,
-            POSEIDON_RC.len(),
+            POSEIDON_RC_FULL.len(),
             "the in-use round count and the in-use constants must agree"
         );
-        assert_ne!(
+        assert_eq!(
             POSEIDON_ROUNDS_IN_USE,
             POSEIDON_FULL_ROUNDS + POSEIDON_PARTIAL_ROUNDS,
-            "if the VM moved to the full permutation, the AIR in \
-             bud-proof/src/plonky3_air.rs must move with it in the same change \
-             — and this test has to be rewritten to assert they agree"
+            "the VM and the AIR both run the full 30-round schedule now; if \
+             one is cut back the other must be cut back in the same change, \
+             or the proof attests to a different function than the VM ran"
         );
     }
 
@@ -2102,12 +2145,21 @@ mod poseidon_parameter_tests {
     /// in the tree rather than only in prose.
     #[test]
     fn truncated_permutation_degree_is_far_below_the_field() {
-        let degree = POSEIDON_ALPHA.pow(POSEIDON_ROUNDS_IN_USE as u32);
-        assert_eq!(degree, 2401);
+        // The truncated permutation's degree is what made it unsound; keep
+        // the number in the tree next to the schedule that replaced it.
+        let truncated = POSEIDON_ALPHA.pow(4);
+        assert_eq!(truncated, 2401);
         assert!(
-            degree < 1u64 << 32,
-            "a degree this far below the field size is interpolable in \
-             practice, which is the finding"
+            truncated < 1u64 << 32,
+            "2401 is far below the field size — interpolable in practice, \
+             which is why four rounds was not enough"
+        );
+        // Eight full rounds alone already exceed it by orders of magnitude,
+        // and the 22 partial rounds continue to raise it one lane at a time.
+        let full_only = POSEIDON_ALPHA.pow(POSEIDON_FULL_ROUNDS as u32);
+        assert!(
+            full_only > truncated * 1000,
+            "the full-round half alone must dwarf the truncated degree"
         );
     }
 }

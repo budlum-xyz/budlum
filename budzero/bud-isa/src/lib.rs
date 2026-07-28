@@ -90,7 +90,7 @@ pub enum IsaProfile {
 /// Are active on mainnet. Default: VerifyMerkle and VerifyInference NOT
 /// Active on mainnet (staged rollout). After ceremony completion, flip
 /// The corresponding flags to true.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
     /// False = mainnet'te KAPALI (staged rollout) — bool::default ile aynı,
     /// clippy::derivable_impls nedeniyle derive'a indirildi.
@@ -104,6 +104,35 @@ pub struct MainnetActivation {
     pub privacy_commit_enabled: bool,
     pub nullifier_check_enabled: bool,
     pub sum_conservation_enabled: bool,
+}
+
+impl Default for MainnetActivation {
+    /// Privacy opcodes are on; Merkle and inference verification are not.
+    ///
+    /// The privacy three (`PrivacyCommit`, `NullifierCheck`,
+    /// `SumConservation`) were held closed because they hash through a
+    /// Poseidon permutation truncated to four rounds. At `alpha = 7` that
+    /// leaves algebraic degree 2401 — low enough to invert by interpolation
+    /// and cheap enough to collide by brute force — so the commitments
+    /// neither hid nor bound.
+    ///
+    /// The permutation is now the full Goldilocks width-8 instance: `R_F = 8`,
+    /// `R_P = 22`, 30 rounds, and the AIR constrains every one of them. The
+    /// reason for the gate is gone, so the gate is gone.
+    ///
+    /// `VerifyMerkle` and `VerifyInference` stay closed for reasons that have
+    /// nothing to do with Poseidon: the first has an unfinished path
+    /// verification, the second has no verification circuit behind it at all
+    /// and returns a hard-coded zero. See `docs/AI_VERIFICATION_STATUS.md`.
+    fn default() -> Self {
+        Self {
+            verify_merkle_enabled: false,
+            verify_inference_enabled: false,
+            privacy_commit_enabled: true,
+            nullifier_check_enabled: true,
+            sum_conservation_enabled: true,
+        }
+    }
 }
 
 impl MainnetActivation {
@@ -424,8 +453,14 @@ mod tests {
         }
     }
 
+    /// The privacy opcodes decode under the default activation now that the
+    /// permutation behind them is the full 30-round instance.
+    ///
+    /// This test used to assert the opposite. The gate existed because a
+    /// four-round Poseidon at degree 2401 made the commitments neither hiding
+    /// nor binding; with 8 full + 22 partial rounds that reason is gone.
     #[test]
-    fn d2_mainnet_activation_default_rejects_privacy_opcodes() {
+    fn d2_mainnet_activation_default_allows_privacy_opcodes() {
         for op in [
             Opcode::PrivacyCommit,
             Opcode::NullifierCheck,
@@ -439,11 +474,31 @@ mod tests {
                 imm: 0,
             }
             .encode();
+            let inst = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
+                .unwrap_or_else(|e| panic!("{op:?} must decode by default, got {e:?}"));
+            assert_eq!(inst.opcode, op);
+        }
+    }
+
+    /// The two opcodes that are still gated must keep failing closed, and for
+    /// their own reasons — an unfinished Merkle path check and a
+    /// VerifyInference that has no circuit behind it.
+    #[test]
+    fn d2_mainnet_activation_default_still_rejects_merkle_and_inference() {
+        for op in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let raw = Instruction {
+                opcode: op,
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+                imm: 0,
+            }
+            .encode();
             let err = Instruction::decode_for_mainnet(raw, MainnetActivation::default())
-                .expect_err("privacy opcode blocked on mainnet by default");
+                .expect_err("must stay blocked on mainnet by default");
             assert!(
                 matches!(err, DecodeError::MainnetActivationRequired(_)),
-                "D2: {op:?} must require mainnet activation"
+                "{op:?} must require mainnet activation"
             );
         }
     }
@@ -469,52 +524,59 @@ mod tests {
         }
     }
 
-    /// The privacy opcodes must stay off by default while Poseidon is weak.
+    /// The privacy opcodes are open, and the permutation behind them has to
+    /// stay strong enough to justify that.
     ///
-    /// `PrivacyCommit`, `NullifierCheck` and `SumConservation` all hash through
-    /// the 4-round Poseidon in `bud-vm`. Four full rounds at alpha = 7 leave the
-    /// permutation at algebraic degree 2401 — low enough to invert by
-    /// interpolation, cheap enough to collide by brute force. Enabling them
-    /// would ship a privacy layer whose commitments neither hide nor bind.
+    /// They were closed while Poseidon was truncated to four rounds: at
+    /// `alpha = 7` the permutation sat at algebraic degree 2401, invertible by
+    /// interpolation and collidable by brute force, so `PrivacyCommit` hid
+    /// nothing and `NullifierCheck` bound nothing. The permutation is now the
+    /// full 30-round instance, so the gate came off.
     ///
-    /// A staged rollout only protects anything while the default stays closed,
-    /// and a default is one edit away from flipping. This test is the alarm on
-    /// that edit: it fails the moment the flags default to enabled, so the
-    /// round count has to be fixed first rather than discovered afterwards.
+    /// This test is the alarm on the reverse edit: if the round count is ever
+    /// cut back down, the privacy layer is unsound again and the flags must
+    /// close in the same change.
     #[test]
-    fn privacy_opcodes_stay_disabled_until_poseidon_is_fixed() {
-        let default = MainnetActivation::default();
+    fn privacy_opcodes_are_open_only_while_poseidon_is_strong() {
+        let rounds = bud_vm_round_count();
+        assert_eq!(
+            rounds, 30,
+            "the Poseidon round count changed to {rounds}; the privacy gate is \
+             open on the assumption of 8 full + 22 partial rounds. Re-derive \
+             the security argument in budzero/docs/STABILIZATION.md and close \
+             the flags in the same change."
+        );
 
+        let default = MainnetActivation::default();
         for (opcode, enabled) in [
             (Opcode::PrivacyCommit, default.privacy_commit_enabled),
             (Opcode::NullifierCheck, default.nullifier_check_enabled),
             (Opcode::SumConservation, default.sum_conservation_enabled),
         ] {
+            assert!(enabled, "{opcode:?} should be enabled by default");
             assert!(
-                !enabled,
-                "{opcode:?} is enabled by default, but the Poseidon permutation \
-                 behind it is still 4 rounds (degree 2401) and provides neither \
-                 hiding nor binding. See budzero/docs/STABILIZATION.md."
-            );
-            assert!(
-                !default.allows(opcode),
-                "{opcode:?} is permitted under the default activation state"
+                default.allows(opcode),
+                "{opcode:?} must be permitted under the default activation state"
             );
         }
     }
 
-    /// The round count itself is the premise the test above rests on.
-    ///
-    /// If someone lengthens the permutation, the gate can be reconsidered — but
-    /// deliberately, by updating this expectation, not by noticing later.
+    /// The two opcodes still gated are gated for their own reasons, not
+    /// Poseidon's, so lengthening the permutation must not have opened them.
     #[test]
-    fn poseidon_round_count_is_still_the_weak_one() {
-        assert_eq!(
-            bud_vm_round_count(),
-            4,
-            "the Poseidon round count changed; re-derive the security argument \
-             in budzero/docs/STABILIZATION.md and revisit the privacy gate"
+    fn merkle_and_inference_stay_gated_by_default() {
+        let default = MainnetActivation::default();
+        assert!(
+            !default.verify_merkle_enabled,
+            "VerifyMerkle path verification is still unfinished"
         );
+        assert!(
+            !default.verify_inference_enabled,
+            "VerifyInference has no verification circuit; it returns a \
+             hard-coded zero. See docs/AI_VERIFICATION_STATUS.md"
+        );
+        assert!(!default.allows(Opcode::VerifyMerkle));
+        assert!(!default.allows(Opcode::VerifyInference));
     }
 
     /// Reads the round count from the constant `bud-vm` exposes.
@@ -525,15 +587,15 @@ mod tests {
         // bud-isa must not depend on bud-vm (it sits below it in the graph), so
         // the count is read from the source rather than imported.
         let src = include_str!("../../bud-vm/src/lib.rs");
-        let marker = "pub const POSEIDON_RC: [[u64; 8]; ";
+        let marker = "pub const POSEIDON_RC_FULL: [[u64; 8]; ";
         let start = src
             .find(marker)
-            .expect("POSEIDON_RC declaration not found in bud-vm")
+            .expect("POSEIDON_RC_FULL declaration not found in bud-vm")
             + marker.len();
         let end = start
             + src[start..]
                 .find(']')
-                .expect("malformed POSEIDON_RC declaration");
+                .expect("malformed POSEIDON_RC_FULL declaration");
         src[start..end]
             .trim()
             .parse()
