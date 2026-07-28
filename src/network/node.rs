@@ -374,10 +374,56 @@ impl Node {
             .max_transmit_size(crate::network::protocol::MAX_MESSAGE_SIZE)
             .build()
             .map_err(std::io::Error::other)?;
-        let gossipsub = gossipsub::Behaviour::new(
+        let mut gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(local_key.clone()),
             gossipsub_config,
         )?;
+        // Turn on peer scoring.
+        //
+        // Without it gossipsub's own misbehaviour accounting has no
+        // consequence: a peer that floods IHAVE announcements and never
+        // answers the resulting IWANT is capped at
+        // `max_ihave_messages_heartbeat` per heartbeat, but is never
+        // penalised, never gossip-suppressed and never pruned from the mesh.
+        // The router already *counts* that behaviour — P7 in the scoring
+        // spec — and the count was simply being discarded.
+        //
+        // The parameters are libp2p's defaults with two changes, both about
+        // making the penalties bite sooner than they do on a public
+        // best-effort mesh:
+        //
+        //   * `behaviour_penalty_threshold` drops from 0 to 6. The penalty is
+        //     the square of the counter above the threshold, so a threshold of
+        //     0 means the very first IWANT that goes unanswered starts costing
+        //     score. Six leaves room for genuine loss (a peer that advertised
+        //     a message and lost it before we asked) before the curve starts.
+        //
+        //   * `ip_colocation_factor_threshold` drops from 10 to 4. Ten peers
+        //     per address is reasonable for a network of consumer nodes behind
+        //     shared NATs; for a validator set it mostly describes one machine
+        //     pretending to be ten.
+        //
+        // Thresholds stay at the defaults. They are negative scores, so a peer
+        // has to actually misbehave to reach them, and an honest peer sits
+        // comfortably above zero.
+        let mut score_params = gossipsub::PeerScoreParams {
+            behaviour_penalty_threshold: 6.0,
+            ip_colocation_factor_threshold: 4.0,
+            ..Default::default()
+        };
+        // The topics this node publishes on. Registering them keeps the
+        // per-topic score caps meaningful; without an entry a topic
+        // contributes nothing and only the global penalties apply.
+        for topic in ["blocks", "transactions"] {
+            score_params.topics.insert(
+                gossipsub::IdentTopic::new(topic).hash(),
+                gossipsub::TopicScoreParams::default(),
+            );
+        }
+        let score_thresholds = gossipsub::PeerScoreThresholds::default();
+        gossipsub
+            .with_peer_score(score_params, score_thresholds)
+            .map_err(std::io::Error::other)?;
         let swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
             .with_tcp(
