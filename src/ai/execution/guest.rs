@@ -62,7 +62,38 @@ impl FixedPointMlpSpec {
         if self.weights.len() + self.biases.len() > MAX_MLP_PARAMS {
             return Err("total params exceed MAX_MLP_PARAMS".into());
         }
+        // The class limits (width, layers, params) are not the binding
+        // constraint — guest memory is, and it bites much earlier. A 32x32
+        // layer is 1056 params (well under MAX_MLP_PARAMS) but needs 9984
+        // bytes of guest memory against the VM's 8192. Rejecting here means a
+        // spec that validates can always be built and run; otherwise the
+        // failure surfaced later as a truncated or zero-filled forward pass.
+        let words = self.guest_memory_words()?;
+        if words * WORD_BYTES > GUEST_MEMORY_BYTES {
+            return Err(format!(
+                "model needs {} bytes of guest memory > GUEST_MEMORY_BYTES {} \
+                 (params {} are within MAX_MLP_PARAMS {}, memory is the binding limit)",
+                words * WORD_BYTES,
+                GUEST_MEMORY_BYTES,
+                self.weights.len() + self.biases.len(),
+                MAX_MLP_PARAMS
+            ));
+        }
         Ok(())
+    }
+
+    /// Total guest memory words this model needs, in the layout
+    /// [`GuestMemoryLayout`] publishes. Shape-only: callable before the rest
+    /// of `validate` has run.
+    fn guest_memory_words(&self) -> Result<usize, String> {
+        let input = self.input_dim();
+        let output = self.output_dim();
+        input
+            .checked_add(self.weights.len())
+            .and_then(|v| v.checked_add(self.biases.len()))
+            .and_then(|v| v.checked_add(2 * MAX_MLP_WIDTH))
+            .and_then(|v| v.checked_add(output))
+            .ok_or_else(|| "guest memory word count overflow".to_string())
     }
 
     pub fn model_class(&self) -> AiExecutionModelClass {
@@ -593,6 +624,9 @@ impl GuestMemoryLayout {
         let act_out_base = act_in_base + MAX_MLP_WIDTH;
         let output_base = act_out_base + MAX_MLP_WIDTH;
         let total_words = output_base + spec.output_dim();
+        // `spec.validate()` above already rejects anything that does not fit;
+        // this is the belt to that braces, so a layout can never hand out an
+        // address past the end of guest memory.
         if total_words * WORD_BYTES > GUEST_MEMORY_BYTES {
             return Err(format!(
                 "guest memory layout needs {} bytes > GUEST_MEMORY_BYTES {}",
@@ -1180,17 +1214,53 @@ mod matmul_tests {
     }
 
     #[test]
-    fn layout_rejects_models_that_do_not_fit_in_guest_memory() {
-        // 4096 params + 2 * 64 scratch words would exceed 8 KiB of memory.
+    fn validate_rejects_models_that_do_not_fit_in_guest_memory() {
+        // A 32x32 layer is 1056 params — a quarter of MAX_MLP_PARAMS — and
+        // still needs 9984 bytes against the VM's 8192. Guest memory, not the
+        // parameter budget, is what actually caps model size.
+        let n = 32usize;
         let spec = FixedPointMlpSpec {
-            dims: vec![64, 64, 8],
-            weights: vec![1; 64 * 64 + 64 * 8],
-            biases: vec![0; 64 + 8],
+            dims: vec![n as u16, n as u16],
+            weights: vec![1; n * n],
+            biases: vec![0; n],
         };
-        // Either the class limit or the memory limit must reject it — never
-        // silent truncation.
-        let rejected = spec.validate().is_err() || GuestMemoryLayout::for_spec(&spec).is_err();
-        assert!(rejected, "oversized model must be rejected, not truncated");
+        assert!(spec.weights.len() + spec.biases.len() <= MAX_MLP_PARAMS);
+        let err = spec.validate().unwrap_err();
+        assert!(err.contains("guest memory"), "got: {err}");
+        assert!(
+            GuestMemoryLayout::for_spec(&spec).is_err(),
+            "the layout must refuse it too"
+        );
+    }
+
+    /// Anything `validate` accepts must be buildable and runnable — no shape
+    /// may pass validation and then fail inside the guest.
+    #[test]
+    fn every_valid_shape_can_be_built_and_run() {
+        for dims in [
+            vec![1u16, 1],
+            vec![8, 8, 8],
+            vec![20, 20, 20],
+            vec![28, 28],
+            vec![64, 1],
+        ] {
+            let w: usize = dims.windows(2).map(|d| d[0] as usize * d[1] as usize).sum();
+            let b: usize = dims[1..].iter().map(|d| *d as usize).sum();
+            let spec = FixedPointMlpSpec {
+                dims: dims.clone(),
+                weights: (0..w).map(|i| ((i % 5) as i32) - 2).collect(),
+                biases: (0..b).map(|i| ((i % 3) as i32) - 1).collect(),
+            };
+            spec.validate()
+                .unwrap_or_else(|e| panic!("shape {dims:?} must validate: {e}"));
+            let input: Vec<i32> = (0..spec.input_dim())
+                .map(|i| ((i % 7) as i32) - 3)
+                .collect();
+            let host = eval_fixed_point_mlp(&spec, &input).unwrap();
+            let (guest, _) = run_matmul_guest(&spec, &input, 50_000_000)
+                .unwrap_or_else(|e| panic!("validated shape {dims:?} failed to run: {e}"));
+            assert_eq!(guest, host, "shape {dims:?}");
+        }
     }
 
     #[test]
