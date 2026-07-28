@@ -123,6 +123,96 @@ fn status_document_lists_the_unreachable_helpers() {
     }
 }
 
+/// The guest must keep computing the forward pass in the VM. If
+/// `prove_mlp_inference` goes back to proving a commitment stub, the status
+/// document's "working" row becomes a lie.
+#[test]
+fn prove_mlp_inference_proves_the_matmul_guest() {
+    let src = read("src/ai/execution/guest.rs");
+    assert!(
+        src.contains("let (guest_output, _receipt) = run_matmul_guest(spec, input, gas_limit)?;"),
+        "prove_mlp_inference must run the matmul guest and compare it with the host"
+    );
+    assert!(
+        src.contains("let words = build_matmul_guest_program(spec)?;"),
+        "prove_mlp_inference must package the matmul guest, not the commitment stub"
+    );
+}
+
+/// The ReLU sign test must stay signed. `Lt` is unsigned in the VM, so
+/// `Lt(acc, zero)` is vacuous and lets negative activations through.
+#[test]
+fn guest_relu_uses_the_signed_field_threshold() {
+    let src = read("src/ai/execution/guest.rs");
+    assert!(
+        src.contains("Opcode::Gt, R_SEL, R_ACC, R_HALF"),
+        "hidden-layer ReLU must compare the accumulator against (P-1)/2"
+    );
+    assert!(
+        !src.contains("Opcode::Lt, r_product, r_acc, r_zero"),
+        "the unsigned Lt(acc, 0) sign test must not come back — it never fires"
+    );
+}
+
+/// The Program CTL argument (BudL_SPEC §9) models a straight-line fetch, so
+/// the guest builder must not emit control flow.
+#[test]
+fn guest_builder_emits_no_branches() {
+    let src = read("src/ai/execution/guest.rs");
+    let builder_start = src
+        .find("pub fn build_matmul_guest_program")
+        .expect("builder must exist");
+    let builder_end = src[builder_start..]
+        .find("\npub fn matmul_program_hash")
+        .map(|o| builder_start + o)
+        .unwrap_or(src.len());
+    let body = &src[builder_start..builder_end];
+    for branch in ["Opcode::Jnz", "Opcode::Jmp", "Opcode::Call", "Opcode::Ret"] {
+        assert!(
+            !body.contains(branch),
+            "matmul guest emits {branch}; the Program CTL wall in BudL_SPEC §9 \
+             does not model a skipped instruction"
+        );
+    }
+}
+
+/// The status document must keep admitting that the STARK does not bind the
+/// initial memory image, because that is what a proof over prover-chosen
+/// weights would exploit.
+#[test]
+fn status_document_records_the_unbound_memory_image() {
+    // Line wrapping in the document must not decide whether the lock holds.
+    let doc = squash(&read("docs/AI_VERIFICATION_STATUS.md"));
+    for needle in [
+        "initial memory image is witness data",
+        "weights_digest",
+        "does not bind the memory a program starts from",
+    ] {
+        assert!(
+            doc.contains(needle),
+            "AI_VERIFICATION_STATUS.md must keep documenting the memory binding gap ({needle})"
+        );
+    }
+}
+
+/// `prove_bytecode_with_memory` hands the prover an unbound witness, so its
+/// warning has to stay attached to it.
+#[test]
+fn memory_seeded_prover_carries_its_soundness_warning() {
+    let src = squash(&read("src/execution/zkvm.rs"));
+    assert!(
+        src.contains("initial memory image is *not* bound by the current public inputs"),
+        "prove_bytecode_with_memory must keep documenting that the initial \
+         memory image is unbound witness data"
+    );
+}
+
+/// Collapse every run of whitespace to a single space so a doc-comment or a
+/// Markdown paragraph can be re-wrapped without silently disarming a lock.
+fn squash(body: &str) -> String {
+    body.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn walk(dir: &Path, f: &mut impl FnMut(&Path, &str)) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;

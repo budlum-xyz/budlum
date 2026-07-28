@@ -3,7 +3,8 @@
 //! Hardening goals:
 //! - Bit-exact host forward pass (i32 MAC, ReLU)
 //! - Domain-separated input/output commitments
-//! - Guest bytecode commits to weights (program_hash) and binds input limb
+//! - Guest bytecode computes the forward pass in-VM over a host-published
+//!   memory image, and its result is checked against the host evaluator
 //! - Optional STARK prove/verify via ZkVmExecutor / DefaultAdapter
 
 use super::model_class::{AiExecutionModelClass, MAX_MLP_LAYERS, MAX_MLP_PARAMS, MAX_MLP_WIDTH};
@@ -172,10 +173,15 @@ pub fn weights_digest(spec: &FixedPointMlpSpec) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Guest binds weights_digest and input_commitment into the execution trace
-/// Via Poseidon, then Halts. Full dense matmul stays on host (gas); the STARK
-/// Attests the guest program (weight commitment) ran — L1 binds host
-/// Input/output commitments structurally + optional STARK of this guest.
+/// Commitment-only guest: binds `weights_digest` and `input_commitment` into
+/// the execution trace via Poseidon, then halts. It does **not** compute the
+/// forward pass — [`build_matmul_guest_program`] does that.
+///
+/// A digest limb is 64 bits and `imm` is 32, so each limb is loaded in two
+/// halves and recombined (`hi * 2^32 + lo`). The previous version masked each
+/// limb down to its low 31 bits, which left ~31 bits of the commitment bound
+/// instead of 64 and put a birthday collision within reach of roughly 2^15.5
+/// attempts.
 pub fn build_fixed_point_mlp_guest(
     spec: &FixedPointMlpSpec,
     input_commit: &[u8; 32],
@@ -185,19 +191,43 @@ pub fn build_fixed_point_mlp_guest(
     // Pack first 8 bytes of each digest as u64 LE field elements for Poseidon.
     let w_limb = u64::from_le_bytes(wdig[0..8].try_into().unwrap());
     let i_limb = u64::from_le_bytes(input_commit[0..8].try_into().unwrap());
-    // Clamp to imm i32 for Load path: use low 31 bits positive
-    let w_imm = (w_limb & 0x7fff_ffff) as i32;
-    let i_imm = (i_limb & 0x7fff_ffff) as i32;
 
-    // R1 = weights limb, r2 = input limb, r3 = Poseidon(r1,r2), Log r3, Halt
-    let prog = vec![
-        inst(Opcode::Load, 1, 0, 0, w_imm),
-        inst(Opcode::Load, 2, 0, 0, i_imm),
-        inst(Opcode::Poseidon, 3, 1, 2, 0),
-        inst(Opcode::Log, 0, 3, 0, 0),
-        inst(Opcode::Halt, 0, 0, 0, 0),
-    ];
+    let mut prog = Vec::with_capacity(16);
+    // r10 = 2^32, the shift used to rebuild a 64-bit limb from two halves.
+    prog.push(inst(Opcode::Load, 10, 0, 0, i32::MAX));
+    prog.push(inst(Opcode::Load, 11, 0, 0, 1));
+    prog.push(inst(Opcode::Add, 10, 10, 11, 0)); // 2^31
+    prog.push(inst(Opcode::Add, 10, 10, 10, 0)); // 2^32
+    emit_load_u64_limb(&mut prog, 1, w_limb);
+    emit_load_u64_limb(&mut prog, 2, i_limb);
+    prog.push(inst(Opcode::Poseidon, 3, 1, 2, 0));
+    prog.push(inst(Opcode::Log, 0, 3, 0, 0));
+    prog.push(inst(Opcode::Halt, 0, 0, 0, 0));
     Ok(prog)
+}
+
+/// Emit `dst = value` for a full 64-bit `value`, using r10 = 2^32 and r11 as
+/// scratch. Both halves are loaded as non-negative 32-bit chunks so the
+/// two's-complement / field-encoding mismatch cannot appear.
+fn emit_load_u64_limb(prog: &mut Vec<u64>, dst: u8, value: u64) {
+    let hi = (value >> 32) as u32;
+    let lo = (value & 0xffff_ffff) as u32;
+    let split = |half: u32, prog: &mut Vec<u64>, reg: u8| {
+        // A u32 does not fit in i32 when its top bit is set, so load it as
+        // (half - 2^31) + 2^31 when needed.
+        if half <= i32::MAX as u32 {
+            prog.push(inst(Opcode::Load, reg, 0, 0, half as i32));
+        } else {
+            prog.push(inst(Opcode::Load, reg, 0, 0, (half - (1 << 31)) as i32));
+            prog.push(inst(Opcode::Load, 12, 0, 0, i32::MAX));
+            prog.push(inst(Opcode::Add, 12, 12, 11, 0));
+            prog.push(inst(Opcode::Add, reg, reg, 12, 0));
+        }
+    };
+    split(hi, prog, dst);
+    prog.push(inst(Opcode::Mul, dst, dst, 10, 0));
+    split(lo, prog, 13);
+    prog.push(inst(Opcode::Add, dst, dst, 13, 0));
 }
 
 pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
@@ -221,14 +251,29 @@ pub fn prove_mlp_inference(
     input: &[i32],
     gas_limit: u64,
 ) -> Result<(crate::ai::types::AiExecutionProof, Vec<i32>), String> {
-    let output = eval_fixed_point_mlp(spec, input)?;
+    let host_output = eval_fixed_point_mlp(spec, input)?;
+
+    // Prove the forward pass itself, not a commitment stub. The guest is run
+    // over the host-populated memory image and its result is compared with the
+    // host evaluator before anything is packaged: a mismatch means the proof
+    // would attest to a different computation than the one being claimed.
+    let (guest_output, _receipt) = run_matmul_guest(spec, input, gas_limit)?;
+    if guest_output != host_output {
+        return Err(format!(
+            "guest output {guest_output:?} != host output {host_output:?}"
+        ));
+    }
+
     let in_c = input_commitment(input);
-    let out_c = output_commitment(&output);
-    let words = build_fixed_point_mlp_guest(spec, &in_c)?;
+    let out_c = output_commitment(&host_output);
+    let words = build_matmul_guest_program(spec)?;
     let program_hash = program_hash_from_words(&words);
     let bytecode = words_to_bytecode(&words);
 
-    let (envelope, _pi, _prog) = crate::execution::zkvm::prove_bytecode(&bytecode, gas_limit)?;
+    let (envelope, pi, _prog) =
+        crate::execution::zkvm::prove_bytecode_with_memory(&bytecode, gas_limit, |memory| {
+            setup_guest_memory(memory, spec, input).map(|_| ())
+        })?;
     let proof_bytes =
         postcard::to_allocvec(&envelope).map_err(|e| format!("postcard serialize proof: {e}"))?;
 
@@ -238,10 +283,12 @@ pub fn prove_mlp_inference(
         output_commitment: out_c,
         program_hash,
         proof_bytes,
-        steps: envelope.degree_bits as u64, // coarse; real steps in PI
-        gas_used: _pi.gas_used,
+        // `degree_bits` is the log2 of the padded trace domain, not a step
+        // count; the AIR-bound row count lives in the public inputs.
+        steps: pi.trace_len,
+        gas_used: pi.gas_used,
     };
-    Ok((proof, output))
+    Ok((proof, host_output))
 }
 
 #[cfg(test)]
@@ -432,119 +479,310 @@ mod gas_tests {
     }
 }
 
-// ── (2026-07-23): Full matmul-in-guest AIR ──
+// ── Full matmul-in-guest ──
 //
 // Build a BudZKVM guest program that actually computes the MLP forward pass
-// Using VM instructions (Load, Mul, Add). The STARK proof then attests to
-// The correctness of the computation itself, not just the commitment chain.
+// using VM instructions (Load, Mul, Add). The STARK proof then attests to
+// the correctness of the computation itself, not just the commitment chain.
 //
-// Memory layout:
-//   [0..input_dim)       = input values (i32 as u64)
-//   [input_dim..params)  = weights + biases
-//   [params..params+out) = output values
+// Field encoding. The VM's Add/Sub/Mul are Goldilocks field operations
+// (`GOLDILOCKS_P = 2^64 - 2^32 + 1`), so a negative i32 `v` is represented as
+// the field element `P + v`, **not** as `v as u64` (two's complement). Those
+// two differ: `(-5i32) as u64` is `2^64 - 5`, while the field's `-5` is
+// `P - 5 = 2^64 - 2^32 - 4`. Every value the host writes into guest memory,
+// and every immediate the guest loads, goes through [`i32_to_field`].
 //
-// The program:
-//   1. Load each input from memory
-//   2. For each output neuron: accumulate bias + Σ(weight * input) using Mul+Add
-//   3. Apply ReLU (hidden layers): if acc < 0 then acc = 0
-//   4. Store output to memory
-//   5. Poseidon commitment over outputs
-//   6. Halt
+// Sign test. Field elements have no order, so `Lt(acc, 0)` is vacuous: no
+// u64 is less than 0, and the old guest's ReLU therefore never fired. A field
+// element is treated as negative when it is greater than `HALF = (P-1)/2`,
+// which is the standard signed embedding for prime fields. `HALF` does not
+// fit in the 32-bit `imm`, so the guest materialises it arithmetically (see
+// [`emit_load_half`]).
+//
+// Branchless ReLU. `Jnz` skipped an instruction, which the Program CTL
+// argument in BudL_SPEC §9 does not model (every fetched row must be the
+// row the program table holds at that pc). ReLU is therefore computed as a
+// multiplication by a selector bit — no control flow at all:
+//
+//     is_neg = Gt(acc, HALF)      // 1 when acc encodes a negative value
+//     keep   = Sub(one, is_neg)   // 1 when acc is non-negative
+//     acc    = Mul(acc, keep)
+//
+// Memory layout (word-addressed; the VM's Load/Store take **byte** offsets,
+// so every index below is multiplied by 8 when emitted):
+//   word [0 .. input_dim)                      input values
+//   word [weight_base .. weight_base+W)        weights, row-major per layer
+//   word [bias_base .. bias_base+B)            biases
+//   word [act_base .. act_base+MAX_WIDTH)      layer input scratch (ping)
+//   word [act_base+MAX_WIDTH .. +2*MAX_WIDTH)  layer output scratch (pong)
+//   word [output_base .. output_base+out_dim)  final outputs
+//
+// The host must publish that layout with [`setup_guest_memory`] before the
+// program runs; the previous guest read from all-zero memory because nothing
+// ever wrote the weights in.
 
 /// Maximum supported total operations for in-guest matmul.
 /// Beyond this, the guest program would exceed practical trace size limits.
 pub const MAX_GUEST_OPS: usize = 50_000;
 
+/// Bytes per VM memory word. `Load`/`Store` address memory in bytes and read
+/// or write eight bytes at a time, so word `i` lives at byte `i * WORD_BYTES`.
+pub const WORD_BYTES: usize = 8;
+
+/// Guest memory size in bytes, matching `Vm::with_gas_limit(8192, ..)` used by
+/// `crate::execution::zkvm::prove_bytecode`.
+pub const GUEST_MEMORY_BYTES: usize = 8192;
+
+/// Goldilocks modulus used by the VM's field arithmetic.
+pub const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
+
+/// Values above this encode negative integers in the signed field embedding.
+pub const FIELD_HALF: u64 = (GOLDILOCKS_P - 1) / 2;
+
+/// Encode an i32 as a Goldilocks field element (`v >= 0 ? v : P + v`).
+///
+/// This is **not** `v as u64`: two's complement and the field representation
+/// disagree for negative values, and mixing them silently corrupts every
+/// downstream Add/Mul.
+pub fn i32_to_field(v: i32) -> u64 {
+    if v >= 0 {
+        v as u64
+    } else {
+        GOLDILOCKS_P - (v.unsigned_abs() as u64)
+    }
+}
+
+/// Decode a Goldilocks field element back to i32, rejecting anything that is
+/// not a faithful i32 in the signed embedding.
+pub fn field_to_i32(f: u64) -> Result<i32, String> {
+    if f >= GOLDILOCKS_P {
+        return Err(format!("field element {f} is not canonical"));
+    }
+    if f <= FIELD_HALF {
+        i32::try_from(f).map_err(|_| format!("field element {f} exceeds i32::MAX"))
+    } else {
+        let neg = GOLDILOCKS_P - f;
+        if neg > (i32::MAX as u64) + 1 {
+            return Err(format!("field element {f} is below i32::MIN"));
+        }
+        Ok((neg as i64).wrapping_neg() as i32)
+    }
+}
+
+/// Word offsets of every region the guest touches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestMemoryLayout {
+    pub input_base: usize,
+    pub weight_base: usize,
+    pub bias_base: usize,
+    /// Scratch for the current layer's input activations.
+    pub act_in_base: usize,
+    /// Scratch for the current layer's output activations.
+    pub act_out_base: usize,
+    pub output_base: usize,
+    pub total_words: usize,
+}
+
+impl GuestMemoryLayout {
+    pub fn for_spec(spec: &FixedPointMlpSpec) -> Result<Self, String> {
+        spec.validate()?;
+        let input_base = 0usize;
+        let weight_base = input_base + spec.input_dim();
+        let bias_base = weight_base + spec.weights.len();
+        let act_in_base = bias_base + spec.biases.len();
+        let act_out_base = act_in_base + MAX_MLP_WIDTH;
+        let output_base = act_out_base + MAX_MLP_WIDTH;
+        let total_words = output_base + spec.output_dim();
+        if total_words * WORD_BYTES > GUEST_MEMORY_BYTES {
+            return Err(format!(
+                "guest memory layout needs {} bytes > GUEST_MEMORY_BYTES {}",
+                total_words * WORD_BYTES,
+                GUEST_MEMORY_BYTES
+            ));
+        }
+        Ok(Self {
+            input_base,
+            weight_base,
+            bias_base,
+            act_in_base,
+            act_out_base,
+            output_base,
+            total_words,
+        })
+    }
+
+    /// Byte address of a word index, as the `imm` operand of Load/Store.
+    fn byte_addr(&self, word: usize) -> Result<i32, String> {
+        let addr = word
+            .checked_mul(WORD_BYTES)
+            .ok_or("guest address overflow")?;
+        if addr + WORD_BYTES > GUEST_MEMORY_BYTES {
+            return Err(format!("guest address {addr} out of memory"));
+        }
+        i32::try_from(addr).map_err(|_| "guest address exceeds i32".to_string())
+    }
+}
+
+/// Write the weights, biases and input into a VM's memory in the layout the
+/// guest program expects.
+///
+/// Without this the guest reads zeroes: the previous version documented a
+/// layout that nothing ever populated, so every proof attested to a forward
+/// pass over an all-zero model.
+pub fn setup_guest_memory(
+    memory: &mut [u8],
+    spec: &FixedPointMlpSpec,
+    input: &[i32],
+) -> Result<GuestMemoryLayout, String> {
+    let layout = GuestMemoryLayout::for_spec(spec)?;
+    if input.len() != spec.input_dim() {
+        return Err(format!(
+            "input len {} != expected {}",
+            input.len(),
+            spec.input_dim()
+        ));
+    }
+    if memory.len() < layout.total_words * WORD_BYTES {
+        return Err(format!(
+            "vm memory {} bytes < required {}",
+            memory.len(),
+            layout.total_words * WORD_BYTES
+        ));
+    }
+    let mut put = |word: usize, value: u64| {
+        let at = word * WORD_BYTES;
+        memory[at..at + WORD_BYTES].copy_from_slice(&value.to_le_bytes());
+    };
+    for (i, v) in input.iter().enumerate() {
+        put(layout.input_base + i, i32_to_field(*v));
+        // The first layer reads its activations from the scratch area, so seed
+        // it with the input as well.
+        put(layout.act_in_base + i, i32_to_field(*v));
+    }
+    for (i, w) in spec.weights.iter().enumerate() {
+        put(layout.weight_base + i, i32_to_field(*w));
+    }
+    for (i, b) in spec.biases.iter().enumerate() {
+        put(layout.bias_base + i, i32_to_field(*b));
+    }
+    Ok(layout)
+}
+
+/// Read the guest's output words back as i32.
+pub fn read_guest_output(
+    memory: &[u8],
+    layout: &GuestMemoryLayout,
+    output_dim: usize,
+) -> Result<Vec<i32>, String> {
+    let mut out = Vec::with_capacity(output_dim);
+    for o in 0..output_dim {
+        let at = (layout.output_base + o) * WORD_BYTES;
+        if at + WORD_BYTES > memory.len() {
+            return Err("output word out of memory".into());
+        }
+        let mut b = [0u8; WORD_BYTES];
+        b.copy_from_slice(&memory[at..at + WORD_BYTES]);
+        out.push(field_to_i32(u64::from_le_bytes(b))?);
+    }
+    Ok(out)
+}
+
+// Register allocation. Everything is loaded from memory, so no register is
+// tied to an input index and the old "max 19 inputs" ceiling disappears.
+const R_ZERO: u8 = 1; // constant 0
+const R_ONE: u8 = 2; // constant 1
+const R_HALF: u8 = 3; // (P-1)/2, the sign threshold
+const R_ACC: u8 = 4; // accumulator
+const R_W: u8 = 5; // weight
+const R_X: u8 = 6; // activation
+const R_T: u8 = 7; // product / temporary
+const R_SEL: u8 = 8; // ReLU selector bit
+const R_HASH: u8 = 9; // rolling Poseidon commitment over outputs
+
+/// Emit the instruction sequence that materialises `FIELD_HALF` in `R_HALF`.
+///
+/// `(P-1)/2 = 2^63 - 2^31`, and `imm` is only 32 bits wide, so the constant is
+/// built from `2^30`: square it to get `2^60`, multiply by 8 for `2^63`, then
+/// subtract `2^31`.
+fn emit_load_half(prog: &mut Vec<u64>) {
+    const POW30: i32 = 1 << 30;
+    prog.push(inst(Opcode::Load, R_HALF, 0, 0, POW30)); // 2^30
+    prog.push(inst(Opcode::Mul, R_HALF, R_HALF, R_HALF, 0)); // 2^60
+    prog.push(inst(Opcode::Load, R_T, 0, 0, 8));
+    prog.push(inst(Opcode::Mul, R_HALF, R_HALF, R_T, 0)); // 2^63
+    prog.push(inst(Opcode::Load, R_T, 0, 0, i32::MAX)); // 2^31 - 1
+    prog.push(inst(Opcode::Add, R_T, R_T, R_ONE, 0)); // 2^31
+    prog.push(inst(Opcode::Sub, R_HALF, R_HALF, R_T, 0)); // 2^63 - 2^31
+}
+
 /// Estimate the number of VM instructions for a full matmul guest program.
+///
+/// Kept exact: [`build_matmul_guest_program`] asserts the emitted length
+/// equals this estimate, so the two cannot drift apart.
 pub fn estimate_guest_instruction_count(spec: &FixedPointMlpSpec) -> Result<usize, String> {
     spec.validate()?;
-    let mut ops = 0usize;
-    let input_dim = spec.input_dim();
-    // Load inputs
-    ops = ops.checked_add(input_dim).ok_or("ops overflow")?;
-    // For each layer
-    for w in spec.dims.windows(2) {
+    // Prologue: Load 0, Sub->zero, Load 1, 7 rows for FIELD_HALF, 1 row to
+    // zero the rolling commitment.
+    let mut ops = 3usize + 7 + 1;
+    let n_layers = spec.dims.len() - 1;
+    for (layer_idx, w) in spec.dims.windows(2).enumerate() {
         let in_d = w[0] as usize;
         let out_d = w[1] as usize;
+        let is_hidden = layer_idx + 1 < n_layers;
         for _o in 0..out_d {
-            // Load bias (1) + for each input: Load weight (1) + Load input (1) + Mul (1) + Add (1) = 5 ops per input
-            ops = ops.checked_add(1 + in_d * 5).ok_or("ops overflow")?;
-            // ReLU: Eq + Jnz + Load(0) + Store = ~4 ops (hidden only)
-            ops = ops.checked_add(4).ok_or("ops overflow")?;
-            // Store output (1)
+            // Load bias, then per input: Load w, Load x, Mul, Add.
+            ops = ops
+                .checked_add(1 + in_d.checked_mul(4).ok_or("ops overflow")?)
+                .ok_or("ops overflow")?;
+            if is_hidden {
+                // Branchless ReLU: Gt, Sub, Mul.
+                ops = ops.checked_add(3).ok_or("ops overflow")?;
+            }
+            // Store into the next layer's scratch.
             ops = ops.checked_add(1).ok_or("ops overflow")?;
+            if !is_hidden {
+                // Final layer also stores into the output region and folds the
+                // value into the rolling commitment.
+                ops = ops.checked_add(2).ok_or("ops overflow")?;
+            }
+        }
+        if is_hidden {
+            // Copy pong -> ping for the next layer: Load + Store per neuron.
+            ops = ops
+                .checked_add(out_d.checked_mul(2).ok_or("ops overflow")?)
+                .ok_or("ops overflow")?;
         }
     }
-    // Poseidon + Halt
+    // Log + Halt.
     ops = ops.checked_add(2).ok_or("ops overflow")?;
     if ops > MAX_GUEST_OPS {
         return Err(format!(
-            "guest program too large: {} ops > MAX_GUEST_OPS {}",
-            ops, MAX_GUEST_OPS
+            "guest program too large: {ops} ops > MAX_GUEST_OPS {MAX_GUEST_OPS}"
         ));
     }
     Ok(ops)
 }
 
 /// Build a BudZKVM guest program that computes the MLP forward pass.
-/// The program uses Load/Mul/Add instructions to perform the actual
-/// Matrix multiplication, then commits the output via Poseidon.
 ///
-/// Memory layout (set up by host before execution):
-///   Addr 0..input_dim:          input values
-///   Addr input_dim..+weights:   weight values (row-major per layer)
-///   Addr weights_end..+biases:  bias values
-///   Addr output_base..+out_dim: output values (written by program)
+/// The program reads weights, biases and inputs from the memory image that
+/// [`setup_guest_memory`] writes, accumulates each neuron in the Goldilocks
+/// field, applies a branchless ReLU on hidden layers, stores the outputs and
+/// folds them into a Poseidon commitment that is logged before `Halt`.
 pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, String> {
-    spec.validate()?;
-    let _ops = estimate_guest_instruction_count(spec)?;
+    let expected_ops = estimate_guest_instruction_count(spec)?;
+    let layout = GuestMemoryLayout::for_spec(spec)?;
 
-    let input_dim = spec.input_dim();
-    let output_dim = spec.output_dim();
+    let mut prog: Vec<u64> = Vec::with_capacity(expected_ops);
 
-    // Calculate memory offsets
-    let weight_base = input_dim;
-    let mut bias_base = weight_base;
-    for w in spec.dims.windows(2) {
-        bias_base += w[0] as usize * w[1] as usize;
-    }
-    let output_base = bias_base + spec.biases.len();
+    // Prologue: constants.
+    prog.push(inst(Opcode::Load, R_ZERO, 0, 0, 0));
+    prog.push(inst(Opcode::Sub, R_ZERO, R_ZERO, R_ZERO, 0));
+    prog.push(inst(Opcode::Load, R_ONE, 0, 0, 1));
+    emit_load_half(&mut prog);
+    // The rolling commitment starts at zero.
+    prog.push(inst(Opcode::Add, R_HASH, R_ZERO, R_ZERO, 0));
 
-    // Register allocation:
-    //   R1..r[input_dim] = cached input values
-    //   R20 = accumulator
-    //   R21 = weight
-    //   R22 = input (re-loaded for each mul)
-    //   R23 = product
-    //   R24 = zero (for ReLU comparison)
-    //   R25 = output pointer
-    let r_acc: u8 = 20;
-    let r_weight: u8 = 21;
-    let r_input: u8 = 22;
-    let r_product: u8 = 23;
-    let r_zero: u8 = 24;
-
-    let mut prog = Vec::new();
-    let mut next_reg: u8 = 1;
-
-    // Phase 1: Load all inputs into registers r1..r[input_dim]
-    let mut input_regs = Vec::new();
-    for i in 0..input_dim {
-        let reg = next_reg;
-        next_reg += 1;
-        if next_reg > 19 {
-            return Err("too many inputs for register allocation (max 19)".into());
-        }
-        prog.push(inst(Opcode::Load, reg, 0, 0, i as i32));
-        input_regs.push(reg);
-    }
-
-    // Load zero into r_zero for ReLU comparison
-    prog.push(inst(Opcode::Load, r_zero, 0, 0, 0));
-    // Subtract to make it zero: r_zero = r_zero - r_zero
-    prog.push(inst(Opcode::Sub, r_zero, r_zero, r_zero, 0));
-
-    // Phase 2: For each layer, compute output neurons
     let mut w_off = 0usize;
     let mut b_off = 0usize;
     let n_layers = spec.dims.len() - 1;
@@ -555,49 +793,46 @@ pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, 
         let is_hidden = layer_idx + 1 < n_layers;
 
         for o in 0..out_d {
-            // Load bias into accumulator
-            let bias_addr = (bias_base + b_off + o) as i32;
-            prog.push(inst(Opcode::Load, r_acc, 0, 0, bias_addr));
+            // acc = bias[o]
+            let bias_addr = layout.byte_addr(layout.bias_base + b_off + o)?;
+            prog.push(inst(Opcode::Load, R_ACC, R_ZERO, 0, bias_addr));
 
-            // For each input: acc += weight * input
             for i in 0..in_d {
-                let weight_addr = (weight_base + w_off + o * in_d + i) as i32;
-                // Load weight
-                prog.push(inst(Opcode::Load, r_weight, 0, 0, weight_addr));
-                // Get input (from cached register or re-load)
-                if i < input_regs.len() {
-                    // Use cached input register
-                    prog.push(inst(Opcode::Add, r_input, input_regs[i], r_zero, 0));
-                } else {
-                    // Re-load from memory (for deeper layers, inputs are previous outputs)
-                    prog.push(inst(Opcode::Load, r_input, 0, 0, i as i32));
-                }
-                // Multiply: product = weight * input
-                prog.push(inst(Opcode::Mul, r_product, r_weight, r_input, 0));
-                // Accumulate: acc += product
-                prog.push(inst(Opcode::Add, r_acc, r_acc, r_product, 0));
+                let w_addr = layout.byte_addr(layout.weight_base + w_off + o * in_d + i)?;
+                let x_addr = layout.byte_addr(layout.act_in_base + i)?;
+                prog.push(inst(Opcode::Load, R_W, R_ZERO, 0, w_addr));
+                prog.push(inst(Opcode::Load, R_X, R_ZERO, 0, x_addr));
+                prog.push(inst(Opcode::Mul, R_T, R_W, R_X, 0));
+                prog.push(inst(Opcode::Add, R_ACC, R_ACC, R_T, 0));
             }
 
-            // ReLU for hidden layers: if acc < 0, acc = 0
             if is_hidden {
-                // Lt: r_product = (acc < zero) ? 1 : 0
-                prog.push(inst(Opcode::Lt, r_product, r_acc, r_zero, 0));
-                // Jnz: if r_product != 0, skip next instruction (set acc = 0)
-                // We use: if acc >= 0, jump over the zero-set
-                // Jnz r_product, +2 (skip the Load 0 + store-back)
-                prog.push(inst(Opcode::Jnz, 0, r_product, 0, 2));
-                // Acc = 0 (only executed when acc < 0)
-                prog.push(inst(Opcode::Sub, r_acc, r_zero, r_zero, 0));
+                // Branchless ReLU: acc *= (1 - (acc > HALF)).
+                prog.push(inst(Opcode::Gt, R_SEL, R_ACC, R_HALF, 0));
+                prog.push(inst(Opcode::Sub, R_SEL, R_ONE, R_SEL, 0));
+                prog.push(inst(Opcode::Mul, R_ACC, R_ACC, R_SEL, 0));
             }
 
-            // Store output to memory
-            let out_addr = (output_base + o) as i32;
-            prog.push(inst(Opcode::Store, r_acc, 0, 0, out_addr));
+            // Store the neuron into the next layer's scratch.
+            let dst = layout.byte_addr(layout.act_out_base + o)?;
+            prog.push(inst(Opcode::Store, 0, R_ZERO, R_ACC, dst));
 
-            // For next layer: also store back to input area
-            // (so deeper layers can Load from addr 0..in_d)
-            if is_hidden && o < input_dim {
-                prog.push(inst(Opcode::Store, r_acc, 0, 0, o as i32));
+            if !is_hidden {
+                let out_addr = layout.byte_addr(layout.output_base + o)?;
+                prog.push(inst(Opcode::Store, 0, R_ZERO, R_ACC, out_addr));
+                // Fold the output into the rolling Poseidon commitment so the
+                // logged value depends on every output, not on a pointer.
+                prog.push(inst(Opcode::Poseidon, R_HASH, R_HASH, R_ACC, 0));
+            }
+        }
+
+        if is_hidden {
+            // pong -> ping, so the next layer reads from act_in_base.
+            for o in 0..out_d {
+                let src = layout.byte_addr(layout.act_out_base + o)?;
+                let dst = layout.byte_addr(layout.act_in_base + o)?;
+                prog.push(inst(Opcode::Load, R_T, R_ZERO, 0, src));
+                prog.push(inst(Opcode::Store, 0, R_ZERO, R_T, dst));
             }
         }
 
@@ -605,16 +840,15 @@ pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, 
         b_off += out_d;
     }
 
-    // Phase 3: Poseidon commitment over output area
-    // Poseidon(r25, r26) where r25 = output_base addr, r26 = output_dim
-    prog.push(inst(Opcode::Load, 25, 0, 0, output_base as i32));
-    prog.push(inst(Opcode::Load, 26, 0, 0, output_dim as i32));
-    prog.push(inst(Opcode::Poseidon, 27, 25, 26, 0));
-
-    // Log the commitment and Halt
-    prog.push(inst(Opcode::Log, 0, 27, 0, 0));
+    prog.push(inst(Opcode::Log, 0, R_HASH, 0, 0));
     prog.push(inst(Opcode::Halt, 0, 0, 0, 0));
 
+    let emitted = prog.len();
+    if emitted != expected_ops {
+        return Err(format!(
+            "guest instruction estimate {expected_ops} != emitted {emitted}"
+        ));
+    }
     Ok(prog)
 }
 
@@ -624,66 +858,339 @@ pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String>
     Ok(program_hash_from_words(&words))
 }
 
+/// Run the matmul guest inside the VM over a host-populated memory image and
+/// return the outputs the guest actually wrote.
+///
+/// This is the bridge that was missing: the guest program, the memory layout
+/// and the host evaluator are now checked against each other instead of each
+/// being tested in isolation.
+pub fn run_matmul_guest(
+    spec: &FixedPointMlpSpec,
+    input: &[i32],
+    gas_limit: u64,
+) -> Result<(Vec<i32>, bud_vm::ExecutionReceipt), String> {
+    let prog = build_matmul_guest_program(spec)?;
+    let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, gas_limit);
+    let layout = setup_guest_memory(&mut vm.memory, spec, input)?;
+    let receipt = vm.run_receipt(&prog);
+    if !receipt.success {
+        return Err(format!("guest execution failed: {:?}", receipt.error));
+    }
+    let out = read_guest_output(&vm.memory, &layout, spec.output_dim())?;
+    Ok((out, receipt))
+}
+
 #[cfg(test)]
 mod matmul_tests {
     use super::*;
 
+    /// The whole point of the guest: what the VM computes must equal what the
+    /// host evaluator computes, for the same weights and the same input.
+    fn assert_guest_matches_host(spec: &FixedPointMlpSpec, input: &[i32]) {
+        let host = eval_fixed_point_mlp(spec, input).expect("host eval");
+        let (guest, receipt) = run_matmul_guest(spec, input, 10_000_000).expect("guest run");
+        assert_eq!(
+            guest, host,
+            "guest output {guest:?} != host output {host:?} for input {input:?}"
+        );
+        assert!(receipt.success);
+        assert_eq!(
+            receipt.trace_len as usize,
+            build_matmul_guest_program(spec).unwrap().len(),
+            "every emitted instruction must execute exactly once (no branches)"
+        );
+    }
+
     #[test]
-    fn matmul_guest_builds_for_tiny_mlp() {
+    fn guest_matches_host_single_linear_layer() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        assert_guest_matches_host(&spec, &[4, 5]);
+    }
+
+    /// Regression for the ReLU that never fired. `Lt` is unsigned, so
+    /// `Lt(acc, 0)` was always 0 and hidden-layer negatives passed through.
+    /// Layer 1 raw output is `[-5, 5]`; with ReLU the result is 5, without it
+    /// the negative branch cancels and the result is 0.
+    #[test]
+    fn guest_relu_actually_clamps_negative_activations() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 2, 1],
+            weights: vec![1, -1, -1, 1, 1, 1],
+            biases: vec![0, 0, 0],
+        };
+        let input = [5i32, 10i32];
+        let host = eval_fixed_point_mlp(&spec, &input).unwrap();
+        assert_eq!(host, vec![5], "host ReLU clamps -5 to 0");
+        let (guest, _) = run_matmul_guest(&spec, &input, 10_000_000).unwrap();
+        assert_eq!(
+            guest, host,
+            "guest ReLU must clamp the negative activation the same way"
+        );
+        assert_ne!(
+            guest,
+            vec![0],
+            "0 is the answer a guest without a working ReLU produces"
+        );
+    }
+
+    #[test]
+    fn guest_matches_host_on_negative_weights_and_inputs() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![3, 3, 2],
+            weights: vec![
+                1, -2, 3, -4, 5, -6, 7, -8, 9, // layer 1 (3x3)
+                -1, 2, -3, 4, -5, 6, // layer 2 (2x3)
+            ],
+            biases: vec![-1, 0, 2, 5, -7],
+        };
+        for input in [
+            [0, 0, 0],
+            [1, 2, 3],
+            [-1, -2, -3],
+            [7, -11, 13],
+            [-100, 250, -3],
+        ] {
+            assert_guest_matches_host(&spec, &input);
+        }
+    }
+
+    #[test]
+    fn guest_matches_host_three_layers() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 4, 3, 1],
+            weights: vec![
+                1, -1, 2, -2, 3, -3, 4, -4, // 4x2
+                1, 0, -1, 2, 0, 1, 1, -1, 2, -2, 0, 1, // 3x4
+                1, -1, 1, // 1x3
+            ],
+            biases: vec![0, 1, -1, 2, 0, -3, 1, 4],
+        };
+        assert_guest_matches_host(&spec, &[6, -9]);
+    }
+
+    /// The old guest allocated one register per input and refused anything
+    /// wider than 19. Weights and activations now live in memory, so the
+    /// class limit (`MAX_MLP_WIDTH`) is the only ceiling.
+    #[test]
+    fn guest_accepts_inputs_beyond_the_old_register_ceiling() {
+        let in_d = 24usize;
+        let spec = FixedPointMlpSpec {
+            dims: vec![in_d as u16, 1],
+            weights: (0..in_d).map(|i| (i as i32) - 12).collect(),
+            biases: vec![3],
+        };
+        let input: Vec<i32> = (0..in_d).map(|i| (i as i32) - 5).collect();
+        assert_guest_matches_host(&spec, &input);
+    }
+
+    /// The guest must run at the widest shape the model class advertises,
+    /// otherwise `MAX_MLP_WIDTH` is a promise the prover cannot keep.
+    #[test]
+    fn guest_runs_at_max_model_class_width() {
+        let w = MAX_MLP_WIDTH;
+        let spec = FixedPointMlpSpec {
+            dims: vec![w as u16, 1],
+            weights: (0..w).map(|i| ((i % 7) as i32) - 3).collect(),
+            biases: vec![1],
+        };
+        let input: Vec<i32> = (0..w).map(|i| ((i % 11) as i32) - 5).collect();
+        assert_guest_matches_host(&spec, &input);
+    }
+
+    #[test]
+    fn field_encoding_round_trips() {
+        for v in [
+            i32::MIN,
+            i32::MIN + 1,
+            -70_000,
+            -1,
+            0,
+            1,
+            70_000,
+            i32::MAX - 1,
+            i32::MAX,
+        ] {
+            let f = i32_to_field(v);
+            assert!(f < GOLDILOCKS_P, "encoding must stay canonical for {v}");
+            assert_eq!(field_to_i32(f).unwrap(), v, "round trip failed for {v}");
+        }
+    }
+
+    /// Two's complement is not the field encoding. Conflating them is what
+    /// made the old sign test meaningless.
+    #[test]
+    fn field_encoding_differs_from_twos_complement() {
+        assert_ne!(i32_to_field(-5), (-5i32) as u64);
+        assert_eq!(i32_to_field(-5), GOLDILOCKS_P - 5);
+    }
+
+    #[test]
+    fn field_half_is_the_sign_threshold() {
+        assert_eq!(FIELD_HALF, (GOLDILOCKS_P - 1) / 2);
+        assert!(i32_to_field(-1) > FIELD_HALF);
+        assert!(i32_to_field(i32::MIN) > FIELD_HALF);
+        assert!(i32_to_field(i32::MAX) <= FIELD_HALF);
+        assert!(i32_to_field(0) <= FIELD_HALF);
+    }
+
+    /// `FIELD_HALF` does not fit in a 32-bit immediate, so the guest builds it
+    /// arithmetically. If that sequence drifts, every ReLU silently breaks.
+    #[test]
+    fn guest_materialises_field_half_exactly() {
+        let mut prog = vec![
+            inst(Opcode::Load, R_ZERO, 0, 0, 0),
+            inst(Opcode::Sub, R_ZERO, R_ZERO, R_ZERO, 0),
+            inst(Opcode::Load, R_ONE, 0, 0, 1),
+        ];
+        emit_load_half(&mut prog);
+        prog.push(inst(Opcode::Halt, 0, 0, 0, 0));
+        let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, 1_000_000);
+        let receipt = vm.run_receipt(&prog);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[R_HALF as usize], FIELD_HALF,
+            "guest-materialised threshold must equal (P-1)/2"
+        );
+    }
+
+    /// The instruction estimate is the gas/limit input, so it must be exact.
+    #[test]
+    fn instruction_estimate_matches_emitted_length() {
+        for spec in [
+            FixedPointMlpSpec {
+                dims: vec![2, 1],
+                weights: vec![1, 2],
+                biases: vec![0],
+            },
+            FixedPointMlpSpec {
+                dims: vec![4, 4, 2],
+                weights: vec![1; 4 * 4 + 4 * 2],
+                biases: vec![0; 4 + 2],
+            },
+            FixedPointMlpSpec {
+                dims: vec![3, 5, 4, 2],
+                weights: vec![1; 3 * 5 + 5 * 4 + 4 * 2],
+                biases: vec![0; 5 + 4 + 2],
+            },
+        ] {
+            let est = estimate_guest_instruction_count(&spec).unwrap();
+            let prog = build_matmul_guest_program(&spec).unwrap();
+            assert_eq!(est, prog.len(), "estimate must equal emitted length");
+        }
+    }
+
+    /// No `Jnz`/`Jmp`: the Program CTL argument (BudL_SPEC §9) models a
+    /// straight-line fetch, and the old ReLU jumped over an instruction.
+    #[test]
+    fn guest_program_is_branchless() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![3, 3, 2],
+            weights: vec![1; 3 * 3 + 3 * 2],
+            biases: vec![0; 3 + 2],
+        };
+        let prog = build_matmul_guest_program(&spec).unwrap();
+        for (i, word) in prog.iter().enumerate() {
+            let d = Instruction::decode(*word).unwrap();
+            assert!(
+                !matches!(
+                    d.opcode,
+                    Opcode::Jmp | Opcode::Jnz | Opcode::Call | Opcode::Ret
+                ),
+                "instruction {i} is a branch ({:?}); the guest must stay straight-line",
+                d.opcode
+            );
+        }
+    }
+
+    /// The logged commitment must depend on the outputs. The old guest logged
+    /// `Poseidon(output_base_pointer, output_dim)` — the same value for two
+    /// models with the same shape and completely different results.
+    #[test]
+    fn logged_commitment_depends_on_the_outputs() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![0],
+        };
+        let prog = build_matmul_guest_program(&spec).unwrap();
+
+        let run = |input: &[i32]| -> Vec<u64> {
+            let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, 10_000_000);
+            setup_guest_memory(&mut vm.memory, &spec, input).unwrap();
+            let receipt = vm.run_receipt(&prog);
+            assert!(receipt.success);
+            receipt.events
+        };
+
+        let a = run(&[1, 1]);
+        let b = run(&[7, 9]);
+        assert!(!a.is_empty(), "guest must log its commitment");
+        assert_ne!(
+            a, b,
+            "different outputs must produce a different logged commitment"
+        );
+    }
+
+    /// The memory image is what the guest reads; if the host does not write
+    /// it, the guest proves a forward pass over an all-zero model.
+    #[test]
+    fn guest_without_host_memory_setup_computes_zero() {
         let spec = FixedPointMlpSpec {
             dims: vec![2, 1],
             weights: vec![2, 3],
             biases: vec![1],
         };
         let prog = build_matmul_guest_program(&spec).unwrap();
-        assert!(!prog.is_empty());
-        // Last instruction should be Halt
-        let _last = bud_isa::Instruction::decode(prog[*prog.last().unwrap() as usize])
-            .unwrap_or_else(|_| {
-                // The last u64 is the Halt instruction
-                bud_isa::Instruction::decode(prog[prog.len() - 1]).unwrap()
-            });
-        // Verify we have instructions
-        assert!(prog.len() > 5, "program should have multiple instructions");
+        let layout = GuestMemoryLayout::for_spec(&spec).unwrap();
+        let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, 10_000_000);
+        // Deliberately skip setup_guest_memory.
+        let receipt = vm.run_receipt(&prog);
+        assert!(receipt.success);
+        let out = read_guest_output(&vm.memory, &layout, spec.output_dim()).unwrap();
+        assert_eq!(
+            out,
+            vec![0],
+            "an unpopulated memory image yields zeros, not the model's output"
+        );
+        assert_ne!(
+            out,
+            eval_fixed_point_mlp(&spec, &[4, 5]).unwrap(),
+            "which is exactly why setup_guest_memory has to run"
+        );
     }
 
     #[test]
-    fn matmul_guest_two_layer() {
+    fn memory_layout_regions_do_not_overlap() {
         let spec = FixedPointMlpSpec {
-            dims: vec![2, 3, 1],
-            weights: vec![1, 0, 0, 1, 1, 1, 1, 1, 1],
-            biases: vec![0, 0, 0, 0],
-        };
-        let prog = build_matmul_guest_program(&spec).unwrap();
-        assert!(prog.len() > 10);
-    }
-
-    #[test]
-    fn matmul_instruction_count_scales() {
-        let small = FixedPointMlpSpec {
-            dims: vec![2, 1],
-            weights: vec![1, 2],
-            biases: vec![0],
-        };
-        let large = FixedPointMlpSpec {
             dims: vec![4, 4, 2],
-            weights: vec![0; 4 * 4 + 4 * 2],
+            weights: vec![1; 4 * 4 + 4 * 2],
             biases: vec![0; 4 + 2],
         };
-        let c_small = estimate_guest_instruction_count(&small).unwrap();
-        let c_large = estimate_guest_instruction_count(&large).unwrap();
-        assert!(c_large > c_small);
+        let l = GuestMemoryLayout::for_spec(&spec).unwrap();
+        assert!(l.weight_base >= l.input_base + spec.input_dim());
+        assert!(l.bias_base >= l.weight_base + spec.weights.len());
+        assert!(l.act_in_base >= l.bias_base + spec.biases.len());
+        assert_eq!(l.act_out_base, l.act_in_base + MAX_MLP_WIDTH);
+        assert_eq!(l.output_base, l.act_out_base + MAX_MLP_WIDTH);
+        assert!(l.total_words * WORD_BYTES <= GUEST_MEMORY_BYTES);
     }
 
     #[test]
-    fn matmul_rejects_too_many_inputs() {
-        // 20 inputs would need 20 registers (r1..r20) but r20 is reserved
+    fn layout_rejects_models_that_do_not_fit_in_guest_memory() {
+        // 4096 params + 2 * 64 scratch words would exceed 8 KiB of memory.
         let spec = FixedPointMlpSpec {
-            dims: vec![20, 1],
-            weights: vec![0; 20],
-            biases: vec![0],
+            dims: vec![64, 64, 8],
+            weights: vec![1; 64 * 64 + 64 * 8],
+            biases: vec![0; 64 + 8],
         };
-        assert!(build_matmul_guest_program(&spec).is_err());
+        // Either the class limit or the memory limit must reject it — never
+        // silent truncation.
+        let rejected = spec.validate().is_err() || GuestMemoryLayout::for_spec(&spec).is_err();
+        assert!(rejected, "oversized model must be rejected, not truncated");
     }
 
     #[test]
@@ -700,29 +1207,6 @@ mod matmul_tests {
     }
 
     #[test]
-    fn matmul_program_hash_differs_by_weights() {
-        let spec1 = FixedPointMlpSpec {
-            dims: vec![2, 1],
-            weights: vec![1, 2],
-            biases: vec![0],
-        };
-        let spec2 = FixedPointMlpSpec {
-            dims: vec![2, 1],
-            weights: vec![3, 4],
-            biases: vec![0],
-        };
-        // Same dims but different weights produce same program structure
-        // (weights are loaded from memory, not embedded in instructions)
-        // So the program hash should be the SAME for same architecture
-        let h1 = matmul_program_hash(&spec1).unwrap();
-        let h2 = matmul_program_hash(&spec2).unwrap();
-        assert_eq!(
-            h1, h2,
-            "same architecture = same program (weights in memory)"
-        );
-    }
-
-    #[test]
     fn matmul_program_hash_differs_by_architecture() {
         let spec1 = FixedPointMlpSpec {
             dims: vec![2, 1],
@@ -734,8 +1218,55 @@ mod matmul_tests {
             weights: vec![1, 2, 3],
             biases: vec![0],
         };
-        let h1 = matmul_program_hash(&spec1).unwrap();
-        let h2 = matmul_program_hash(&spec2).unwrap();
-        assert_ne!(h1, h2, "different architecture = different program");
+        assert_ne!(
+            matmul_program_hash(&spec1).unwrap(),
+            matmul_program_hash(&spec2).unwrap(),
+            "different architecture = different program"
+        );
+    }
+
+    /// Weights live in memory, so the program hash alone cannot bind them.
+    /// This is a documented property, not an accident: `weights_digest` is the
+    /// binding, and `prove_mlp_inference` commits to it separately.
+    #[test]
+    fn matmul_program_hash_does_not_bind_weights() {
+        let spec1 = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let spec2 = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![3, 4],
+            biases: vec![0],
+        };
+        assert_eq!(
+            matmul_program_hash(&spec1).unwrap(),
+            matmul_program_hash(&spec2).unwrap(),
+            "same architecture = same program words"
+        );
+        assert_ne!(
+            weights_digest(&spec1),
+            weights_digest(&spec2),
+            "weights must be bound by weights_digest instead"
+        );
+    }
+
+    #[test]
+    fn instruction_count_scales_with_model_size() {
+        let small = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![1, 2],
+            biases: vec![0],
+        };
+        let large = FixedPointMlpSpec {
+            dims: vec![4, 4, 2],
+            weights: vec![0; 4 * 4 + 4 * 2],
+            biases: vec![0; 4 + 2],
+        };
+        assert!(
+            estimate_guest_instruction_count(&large).unwrap()
+                > estimate_guest_instruction_count(&small).unwrap()
+        );
     }
 }
