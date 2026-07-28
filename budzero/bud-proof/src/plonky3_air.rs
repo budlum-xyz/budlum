@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 414;
+pub const TRACE_WIDTH: usize = 730;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -81,10 +81,61 @@ pub const COL_CMP_RS2_BASE: usize = 129; // 129..192 — rs2 bit decomposition
 pub const COL_CMP_EQ_BASE: usize = 193; // 193..256 — equality prefix flags eq_0..eq_63
 pub const COL_CMP_LT_RAW: usize = 257; // raw less-than result computed from bits
 
-// Poseidon witness columns (4-round, width=8, alpha=7, all full rounds)
-pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..289 — state[r][i] at round entry (r=0..3, i=0..7)
-pub const COL_POSEIDON_X2_BASE: usize = 290; // 290..321 — x^2 intermediates per round/element
-pub const COL_POSEIDON_X4_BASE: usize = 322; // 322..353 — x^4 intermediates per round/element
+// Poseidon witness columns.
+//
+// The permutation is the Goldilocks width-8 Poseidon1 instance:
+// `R_F = 8` full rounds (4 leading + 4 trailing), `R_P = 22` partial rounds,
+// `alpha = 7`, 30 rounds total. The round constants and the MDS matrix are
+// taken from `bud_vm` so the AIR, the prover's witness generator and the VM
+// cannot drift apart — previously all three carried their own copy of a
+// 4-round prefix.
+//
+// Layout. Every round records its entry state (8 columns). The S-box
+// intermediates are only recorded where an S-box actually runs: full rounds
+// touch all eight lanes, partial rounds only lane 0. That asymmetry is the
+// point of partial rounds — they raise the algebraic degree at a fraction of
+// the width — so the trace must not pay for lanes that are never squared.
+//
+//   state: 30 * 8                       = 240 columns
+//   x2:    8 * 8 (full) + 22 * 1 (part) =  86 columns
+//   x4:    same shape                   =  86 columns
+//
+// The first 258..353 block is kept where it was so the surrounding column
+// indices do not move; the remainder is appended past the end of the old
+// layout.
+pub const POSEIDON_ROUNDS: usize = 30;
+pub const POSEIDON_FULL_ROUNDS: usize = 8;
+pub const POSEIDON_PARTIAL_ROUNDS: usize = 22;
+pub const POSEIDON_HALF_FULL: usize = POSEIDON_FULL_ROUNDS / 2;
+
+/// Number of S-box lanes in round `r`: all eight in a full round, one in a
+/// partial round.
+pub const fn poseidon_sbox_lanes(round: usize) -> usize {
+    if round < POSEIDON_HALF_FULL || round >= POSEIDON_ROUNDS - POSEIDON_HALF_FULL {
+        8
+    } else {
+        1
+    }
+}
+
+/// Offset of round `r`'s S-box intermediates within the x2/x4 blocks.
+pub const fn poseidon_sbox_offset(round: usize) -> usize {
+    let mut off = 0;
+    let mut r = 0;
+    while r < round {
+        off += poseidon_sbox_lanes(r);
+        r += 1;
+    }
+    off
+}
+
+/// Total S-box intermediates per block (x2 and x4 each need this many).
+pub const POSEIDON_SBOX_SLOTS: usize = poseidon_sbox_offset(POSEIDON_ROUNDS);
+
+pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..497 — state[r][i] at round entry
+pub const COL_POSEIDON_X2_BASE: usize = COL_POSEIDON_STATE_BASE + POSEIDON_ROUNDS * 8;
+pub const COL_POSEIDON_X4_BASE: usize = COL_POSEIDON_X2_BASE + POSEIDON_SBOX_SLOTS;
+pub const COL_POSEIDON_END: usize = COL_POSEIDON_X4_BASE + POSEIDON_SBOX_SLOTS;
 
 // (security audit) public-input binding witness columns.
 //
@@ -96,14 +147,14 @@ pub const COL_POSEIDON_X4_BASE: usize = 322; // 322..353 — x^4 intermediates p
 // State root are bound at the first row; final_state_root, gas_used,
 // Exit_code, trace_len, event_digest are bound at the last real step
 // (cpu_active=1, is_halt=1).
-pub const COL_FINAL_ROOT_0: usize = 354; // 354..361 — final state root (8 × u32 limbs)
-pub const COL_INIT_ROOT_0: usize = 362; // 362..369 — initial state root (8 × u32 limbs)
+pub const COL_FINAL_ROOT_0: usize = 670; // 354..361 — final state root (8 × u32 limbs)
+pub const COL_INIT_ROOT_0: usize = 678; // 362..369 — initial state root (8 × u32 limbs)
 
 // (2026-07-22) privacy-layer opcode selectors.
 // Consumes 3 columns from the intentional reserved gap (was 370..378).
-pub const COL_IS_PRIVACY_COMMIT: usize = 370;
-pub const COL_IS_NULLIFIER_CHECK: usize = 371;
-pub const COL_IS_SUM_CONSERVATION: usize = 372;
+pub const COL_IS_PRIVACY_COMMIT: usize = 686;
+pub const COL_IS_NULLIFIER_CHECK: usize = 687;
+pub const COL_IS_SUM_CONSERVATION: usize = 688;
 
 // VerifyInference AIR binding.
 // Opcode 0x1F selector + expansion row witness columns.
@@ -112,17 +163,17 @@ pub const COL_IS_SUM_CONSERVATION: usize = 372;
 // The opcode is properly constrained in the AIR: the selector is bound
 // To opcode 0x1F, the result is always 0, and expansion rows carry
 // Consistent commitment chain witnesses.
-pub const COL_IS_VERIFY_INFERENCE: usize = 373;
-pub const COL_INFERENCE_IS_EXPAND: usize = 374; // 1 on expansion rows (8 follow-up rows)
-pub const COL_INFERENCE_MODEL_COMMIT: usize = 375; // model commitment limb (u64 → Goldilocks)
-pub const COL_INFERENCE_INPUT_COMMIT: usize = 376; // input commitment limb
-pub const COL_INFERENCE_OUTPUT_COMMIT: usize = 377; // output commitment limb
+pub const COL_IS_VERIFY_INFERENCE: usize = 689;
+pub const COL_INFERENCE_IS_EXPAND: usize = 690; // 1 on expansion rows (8 follow-up rows)
+pub const COL_INFERENCE_MODEL_COMMIT: usize = 691; // model commitment limb (u64 → Goldilocks)
+pub const COL_INFERENCE_INPUT_COMMIT: usize = 692; // input commitment limb
+pub const COL_INFERENCE_OUTPUT_COMMIT: usize = 693; // output commitment limb
 
-pub const COL_TRACE_LEN_CTR: usize = 378; // 1 column — running count of cpu_active=1 rows
-pub const COL_GAS_LIMIT: usize = 379; // 1 column — vm.gas_limit, first row
-pub const COL_EVENT_DIGEST_0: usize = 380; // 380..387 — event_digest accumulator (8 × u32 limbs, additive)
-pub const COL_EXIT_CODE: usize = 388; // 1 column — 0=normal Halt, 1=error (set on Halt row)
-pub const COL_CHAIN_ID: usize = 389; // 1 column — vm.gas_limit sibling; chain_id is bound via first-row public input
+pub const COL_TRACE_LEN_CTR: usize = 694; // 1 column — running count of cpu_active=1 rows
+pub const COL_GAS_LIMIT: usize = 695; // 1 column — vm.gas_limit, first row
+pub const COL_EVENT_DIGEST_0: usize = 696; // 380..387 — event_digest accumulator (8 × u32 limbs, additive)
+pub const COL_EXIT_CODE: usize = 704; // 1 column — 0=normal Halt, 1=error (set on Halt row)
+pub const COL_CHAIN_ID: usize = 705; // 1 column — vm.gas_limit sibling; chain_id is bound via first-row public input
 
 // (security audit) Merkle path verification columns.
 //
@@ -135,22 +186,22 @@ pub const COL_CHAIN_ID: usize = 389; // 1 column — vm.gas_limit sibling; chain
 // `merkle_is_expand` is false, and `merkle_current` is unused on
 // That row (it gets populated on the first expansion row from the
 // Leaf value via the AIR transition below).
-pub const COL_VM_MERKLE_KEY: usize = 390; // 1 column — path key (constant across the 64 expansion rows)
-pub const COL_VM_MERKLE_BIT: usize = 391; // 1 column — (key >> round) & 1
-pub const COL_VM_MERKLE_CURRENT: usize = 392; // 1 column — Poseidon accumulator entering this round
-pub const COL_VM_MERKLE_SIBLING: usize = 393; // 1 column — sibling hash for this round
-pub const COL_VM_MERKLE_ROUND: usize = 394; // 1 column — 0..63
-pub const COL_VM_MERKLE_IS_EXPAND: usize = 395; // 1 column — 1 on rows 1..64 of a VerifyMerkle expansion
+pub const COL_VM_MERKLE_KEY: usize = 706; // 1 column — path key (constant across the 64 expansion rows)
+pub const COL_VM_MERKLE_BIT: usize = 707; // 1 column — (key >> round) & 1
+pub const COL_VM_MERKLE_CURRENT: usize = 708; // 1 column — Poseidon accumulator entering this round
+pub const COL_VM_MERKLE_SIBLING: usize = 709; // 1 column — sibling hash for this round
+pub const COL_VM_MERKLE_ROUND: usize = 710; // 1 column — 0..63
+pub const COL_VM_MERKLE_IS_EXPAND: usize = 711; // 1 column — 1 on rows 1..64 of a VerifyMerkle expansion
                                                 // Poseidon 1-round witnesses (re-used from the existing Poseidon
                                                 // Opcode columns; these are *expansion-only* and only meaningful
                                                 // On rows where merkle_is_expand=1).
-pub const COL_MERKLE_POSEIDON_X2_0: usize = 396; // 396..403 — x^2 intermediate per element (8 columns)
-pub const COL_MERKLE_POSEIDON_X4_0: usize = 404; // 404..411 — x^4 intermediate per element (8 columns)
+pub const COL_MERKLE_POSEIDON_X2_0: usize = 712; // 396..403 — x^2 intermediate per element (8 columns)
+pub const COL_MERKLE_POSEIDON_X4_0: usize = 720; // 404..411 — x^4 intermediate per element (8 columns)
 
 // (security audit) final root check
 // Witnesses.
-pub const COL_MERKLE_DIFF_INV: usize = 412; // 1 column — diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
-pub const COL_MERKLE_FINAL_FLAG: usize = 413; // 1 column — 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
+pub const COL_MERKLE_DIFF_INV: usize = 728; // 1 column — diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
+pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column — 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -1580,83 +1631,45 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                     .assert_zero(cur[COL_POSEIDON_STATE_BASE + i]);
             }
 
-            const MDS: [[u64; 8]; 8] = [
-                [7, 1, 3, 8, 8, 3, 4, 9],
-                [9, 7, 1, 3, 8, 8, 3, 4],
-                [4, 9, 7, 1, 3, 8, 8, 3],
-                [3, 4, 9, 7, 1, 3, 8, 8],
-                [8, 3, 4, 9, 7, 1, 3, 8],
-                [8, 8, 3, 4, 9, 7, 1, 3],
-                [3, 8, 8, 3, 4, 9, 7, 1],
-                [1, 3, 8, 8, 3, 4, 9, 7],
-            ];
-
-            const RC: [[u64; 8]; 4] = [
-                [
-                    0xdd5743e7f2a5a5d9,
-                    0xcb3a864e58ada44b,
-                    0xffa2449ed32f8cdc,
-                    0x42025f65d6bd13ee,
-                    0x7889175e25506323,
-                    0x34b98bb03d24b737,
-                    0xbdcc535ecc4faa2a,
-                    0x5b20ad869fc0d033,
-                ],
-                [
-                    0xf1dda5b9259dfcb4,
-                    0x27515210be112d59,
-                    0x4227d1718c766c3f,
-                    0x26d333161a5bd794,
-                    0x49b938957bf4b026,
-                    0x4a56b5938b213669,
-                    0x1120426b48c8353d,
-                    0x6b323c3f10a56cad,
-                ],
-                [
-                    0xce57d6245ddca6b2,
-                    0xb1fc8d402bba1eb1,
-                    0xb5c5096ca959bd04,
-                    0x6db55cd306d31f7f,
-                    0xc49d293a81cb9641,
-                    0x1ce55a4fe979719f,
-                    0xa92e60a9d178a4d1,
-                    0x002cc64973bcfd8c,
-                ],
-                [
-                    0xcea721cce82fb11b,
-                    0xe5b55eb8098ece81,
-                    0x4e30525c6f1ddd66,
-                    0x43c6702827070987,
-                    0xaca68430a7b5762a,
-                    0x3674238634df9c93,
-                    0x88cee1c825e33433,
-                    0xde99ae8d74b57176,
-                ],
-            ];
+            // Single source of truth: the VM computes what the AIR checks, so
+            // both read the same constants. All three used to carry their own
+            // copy of a 4-round prefix.
+            use bud_vm::{POSEIDON_MDS as MDS, POSEIDON_RC_FULL as RC};
 
             // Running expression for the final Poseidon output (MDS row 0 of last round).
             let mut poseidon_out: AB::Expr = AB::Expr::ZERO;
 
-            for r in 0..4 {
+            for r in 0..POSEIDON_ROUNDS {
+                let lanes = poseidon_sbox_lanes(r);
+                let sbox_off = poseidon_sbox_offset(r);
                 let mut sbox_out = vec![AB::Expr::ZERO; 8];
 
                 for i in 0..8 {
                     let s: AB::Expr = cur[COL_POSEIDON_STATE_BASE + r * 8 + i].into()
                         + AB::Expr::from(AB::F::from_u64(RC[r][i]));
-                    let x2: AB::Expr = cur[COL_POSEIDON_X2_BASE + r * 8 + i].into();
-                    let x4: AB::Expr = cur[COL_POSEIDON_X4_BASE + r * 8 + i].into();
 
-                    builder
-                        .when(p.clone())
-                        .assert_eq(x2.clone(), s.clone() * s.clone());
-                    builder
-                        .when(p.clone())
-                        .assert_eq(x4.clone(), x2.clone() * x2.clone());
-
-                    sbox_out[i] = x4 * x2 * s;
+                    if i < lanes {
+                        // S-box lane: constrain x^2 and x^4 against witness
+                        // columns, then build x^7 = x^4 * x^2 * x.
+                        let x2: AB::Expr = cur[COL_POSEIDON_X2_BASE + sbox_off + i].into();
+                        let x4: AB::Expr = cur[COL_POSEIDON_X4_BASE + sbox_off + i].into();
+                        builder
+                            .when(p.clone())
+                            .assert_eq(x2.clone(), s.clone() * s.clone());
+                        builder
+                            .when(p.clone())
+                            .assert_eq(x4.clone(), x2.clone() * x2.clone());
+                        sbox_out[i] = x4 * x2 * s;
+                    } else {
+                        // Partial round, lane above 0: the round constant is
+                        // still added but the S-box is skipped, so the value
+                        // passes through linearly. No witness column is spent
+                        // and no constraint is needed beyond this identity.
+                        sbox_out[i] = s;
+                    }
                 }
 
-                if r < 3 {
+                if r + 1 < POSEIDON_ROUNDS {
                     for i in 0..8 {
                         let mut sum: AB::Expr = AB::Expr::ZERO;
                         for j in 0..8 {

@@ -473,79 +473,39 @@ fn trace_matrix(
 
         if let Some(init_state) = poseidon_init {
             const P: u64 = 18446744069414584321;
-            let mds: [[u64; 8]; 8] = [
-                [7, 1, 3, 8, 8, 3, 4, 9],
-                [9, 7, 1, 3, 8, 8, 3, 4],
-                [4, 9, 7, 1, 3, 8, 8, 3],
-                [3, 4, 9, 7, 1, 3, 8, 8],
-                [8, 3, 4, 9, 7, 1, 3, 8],
-                [8, 8, 3, 4, 9, 7, 1, 3],
-                [3, 8, 8, 3, 4, 9, 7, 1],
-                [1, 3, 8, 8, 3, 4, 9, 7],
-            ];
-            let rc: [[u64; 8]; 4] = [
-                [
-                    0xdd5743e7f2a5a5d9,
-                    0xcb3a864e58ada44b,
-                    0xffa2449ed32f8cdc,
-                    0x42025f65d6bd13ee,
-                    0x7889175e25506323,
-                    0x34b98bb03d24b737,
-                    0xbdcc535ecc4faa2a,
-                    0x5b20ad869fc0d033,
-                ],
-                [
-                    0xf1dda5b9259dfcb4,
-                    0x27515210be112d59,
-                    0x4227d1718c766c3f,
-                    0x26d333161a5bd794,
-                    0x49b938957bf4b026,
-                    0x4a56b5938b213669,
-                    0x1120426b48c8353d,
-                    0x6b323c3f10a56cad,
-                ],
-                [
-                    0xce57d6245ddca6b2,
-                    0xb1fc8d402bba1eb1,
-                    0xb5c5096ca959bd04,
-                    0x6db55cd306d31f7f,
-                    0xc49d293a81cb9641,
-                    0x1ce55a4fe979719f,
-                    0xa92e60a9d178a4d1,
-                    0x002cc64973bcfd8c,
-                ],
-                [
-                    0xcea721cce82fb11b,
-                    0xe5b55eb8098ece81,
-                    0x4e30525c6f1ddd66,
-                    0x43c6702827070987,
-                    0xaca68430a7b5762a,
-                    0x3674238634df9c93,
-                    0x88cee1c825e33433,
-                    0xde99ae8d74b57176,
-                ],
-            ];
+            // Same constants the AIR reads; see plonky3_air.rs.
+            use bud_vm::{POSEIDON_MDS as mds, POSEIDON_RC_FULL as rc};
 
             let mut s: [u64; 8] = init_state;
             let mut poseidon_out = 0u64;
 
-            for r in 0..4 {
+            for r in 0..POSEIDON_ROUNDS {
                 for i in 0..8 {
                     values[row_start + COL_POSEIDON_STATE_BASE + r * 8 + i] = Goldilocks::new(s[i]);
                 }
 
+                let lanes = poseidon_sbox_lanes(r);
+                let sbox_off = poseidon_sbox_offset(r);
                 let mut sbox: [u64; 8] = [0; 8];
                 for i in 0..8 {
                     let s_rc = ((s[i] as u128 + rc[r][i] as u128) % P as u128) as u64;
-                    let x2 = ((s_rc as u128 * s_rc as u128) % P as u128) as u64;
-                    let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
-                    values[row_start + COL_POSEIDON_X2_BASE + r * 8 + i] = Goldilocks::new(x2);
-                    values[row_start + COL_POSEIDON_X4_BASE + r * 8 + i] = Goldilocks::new(x4);
-                    sbox[i] =
-                        (((x4 as u128 * x2 as u128) % P as u128 * s_rc as u128) % P as u128) as u64;
+                    if i < lanes {
+                        let x2 = ((s_rc as u128 * s_rc as u128) % P as u128) as u64;
+                        let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
+                        values[row_start + COL_POSEIDON_X2_BASE + sbox_off + i] =
+                            Goldilocks::new(x2);
+                        values[row_start + COL_POSEIDON_X4_BASE + sbox_off + i] =
+                            Goldilocks::new(x4);
+                        sbox[i] = (((x4 as u128 * x2 as u128) % P as u128 * s_rc as u128)
+                            % P as u128) as u64;
+                    } else {
+                        // Partial round: no S-box above lane 0, the value
+                        // carries through with only the round constant added.
+                        sbox[i] = s_rc;
+                    }
                 }
 
-                if r < 3 {
+                if r + 1 < POSEIDON_ROUNDS {
                     let mut next: [u64; 8] = [0; 8];
                     for i in 0..8 {
                         let mut sum: u128 = 0;
@@ -568,7 +528,14 @@ fn trace_matrix(
             // NullifierCheck: equality witness for (poseidon_out - claimed_nullifier).
             if opcode == bud_isa::Opcode::NullifierCheck {
                 let claimed = step.src1_val;
-                let diff = poseidon_out.wrapping_sub(claimed);
+                // Field subtraction, not `wrapping_sub`: the AIR computes
+                // `poseidon_out - rs1` in Goldilocks, so the inverse witness
+                // has to be the inverse of the *field* difference. The two
+                // agree only when `poseidon_out >= claimed`; otherwise
+                // `wrapping_sub` produces `2^64 - d`, whose field
+                // representative is `2^64 - d - P`, and the constraint
+                // `diff * (1 - diff*inv) == 0` fails.
+                let diff = bud_vm::field_sub_goldilocks(poseidon_out, claimed);
                 let inv = if diff != 0 {
                     bud_vm::field_inverse_goldilocks(diff)
                 } else {
