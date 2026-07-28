@@ -49,6 +49,9 @@ struct MemEvent {
     addr: u64,
     val: u64,
     is_write: bool,
+    /// This row describes memory as the host left it before execution, not
+    /// something the program did. See `COL_MEM_IS_INIT`.
+    is_init: bool,
 }
 
 const STACK_BASE: u64 = 1 << 60;
@@ -117,6 +120,13 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
     events
 }
 
+/// Build the memory event list, marking the rows that describe pre-execution
+/// state.
+///
+/// A read is "initial" when it is the first event at its address and returns a
+/// non-zero value: nothing in the trace wrote it, so it came from the image the
+/// host placed in memory. Those rows are exempt from the AIR's first-read-zero
+/// rule and are folded into the commitment the verifier checks instead.
 fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
     let mut events = Vec::new();
     for (i, step) in trace.iter().enumerate() {
@@ -127,6 +137,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                 addr: addr as u64,
                 val: step.memory_val.unwrap_or(0),
                 is_write: step.is_memory_write,
+                is_init: false,
             });
         }
 
@@ -138,6 +149,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                     addr: STACK_BASE + step.stack_pointer as u64 - 1,
                     val: step.src1_val,
                     is_write: true,
+                    is_init: false,
                 });
             }
             bud_isa::Opcode::Pop => {
@@ -146,6 +158,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                     addr: STACK_BASE + step.stack_pointer as u64,
                     val: step.dst_val,
                     is_write: false,
+                    is_init: false,
                 });
             }
             bud_isa::Opcode::Call => {
@@ -154,6 +167,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                     addr: STACK_BASE + step.stack_pointer as u64 - 1,
                     val: step.pc as u64 + 1,
                     is_write: true,
+                    is_init: false,
                 });
             }
             bud_isa::Opcode::Ret => {
@@ -162,6 +176,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                     addr: STACK_BASE + step.stack_pointer as u64,
                     val: step.dst_val,
                     is_write: false,
+                    is_init: false,
                 });
             }
             bud_isa::Opcode::SRead => {
@@ -175,6 +190,7 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                     addr: STORAGE_BASE + slot as u64,
                     val: step.dst_val,
                     is_write: false,
+                    is_init: false,
                 });
             }
             bud_isa::Opcode::SWrite => {
@@ -188,13 +204,34 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                     addr: STORAGE_BASE + slot as u64,
                     val: step.src1_val,
                     is_write: true,
+                    is_init: false,
                 });
             }
             _ => {}
         }
     }
     events.sort_by_key(|e| (e.addr, e.clk));
+    // Mark the pre-execution rows now that the events are grouped by address.
+    let mut prev_addr: Option<u64> = None;
+    for e in events.iter_mut() {
+        let first_at_addr = prev_addr != Some(e.addr);
+        prev_addr = Some(e.addr);
+        e.is_init = first_at_addr && !e.is_write && e.val != 0;
+    }
     events
+}
+
+/// The seeded reads a trace performs, in the order the AIR folds them.
+///
+/// Callers need this to compute `initial_state_root`: the commitment covers
+/// exactly the pre-written words the program read, and getting the set or the
+/// order wrong produces a proof the AIR rejects.
+pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
+    memory_events(trace)
+        .into_iter()
+        .filter(|e| e.is_init)
+        .map(|e| (e.addr, e.val))
+        .collect()
 }
 
 fn trace_matrix(
@@ -790,9 +827,28 @@ fn trace_matrix(
             Goldilocks::new(0)
         };
         values[row_start + COL_MEM_ACTIVE] = Goldilocks::new(1);
+        values[row_start + COL_MEM_IS_INIT] = Goldilocks::new(u64::from(e.is_init));
 
         if i < n_mem - 1 && mem_events[i + 1].addr == e.addr {
             values[row_start + COL_MEM_SAME] = Goldilocks::new(1);
+        }
+    }
+
+    // Fold the initial-image rows, then hold the final value on every
+    // remaining row so the last real row carries the whole commitment.
+    {
+        let beta = Goldilocks::new(MEM_INIT_BETA);
+        let gamma = Goldilocks::new(MEM_INIT_GAMMA);
+        let mut acc = Goldilocks::ZERO;
+        for (i, e) in mem_events.iter().enumerate() {
+            if e.is_init {
+                let term = Goldilocks::new(e.addr) * gamma + Goldilocks::new(e.val);
+                acc = if i == 0 { term } else { acc * beta + term };
+            }
+            values[i * TRACE_WIDTH + COL_MEM_INIT_ACC] = acc;
+        }
+        for r in mem_events.len()..num_rows {
+            values[r * TRACE_WIDTH + COL_MEM_INIT_ACC] = acc;
         }
     }
 

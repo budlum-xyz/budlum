@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 730;
+pub const TRACE_WIDTH: usize = 732;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -62,6 +62,45 @@ pub const COL_MEM_VAL: usize = 51;
 pub const COL_MEM_IS_WRITE: usize = 52;
 pub const COL_MEM_ACTIVE: usize = 53;
 pub const COL_MEM_SAME: usize = 54;
+/// Marks a memory row that carries a value the host placed in memory before
+/// execution began, rather than one the program wrote.
+///
+/// Without it the AIR has to require that the first access to any address
+/// reads zero — otherwise a prover could claim whatever starting memory made
+/// its trace work out, which for the AI guest means claiming whatever weights
+/// it liked. That rule is correct but it also makes a host-seeded image
+/// unprovable: the matmul guest reads weights written before the first
+/// instruction, so its first memory event is a non-zero read.
+///
+/// A row with this flag set is exempt from the zero rule and instead has to
+/// appear in `public_inputs.initial_state_root`, which commits to the whole
+/// image. The prover cannot invent one: changing any seeded byte changes the
+/// commitment, and the commitment is a public input the verifier already
+/// holds.
+pub const COL_MEM_IS_INIT: usize = 730;
+
+/// Running fold of every initial-image row, checked against
+/// `public_inputs.initial_state_root` on the last row.
+///
+/// This is what makes [`COL_MEM_IS_INIT`] safe to exempt from the zero rule.
+/// Each flagged row folds `(addr, val)` into the accumulator, so a prover that
+/// flags a row it did not seed — or seeds a different value — lands on a
+/// different accumulator than the public input it is checked against.
+///
+/// The fold is `acc' = acc * BETA + addr * GAMMA + val`, with fixed constants
+/// rather than Fiat-Shamir challenges. That is weaker than a hash: it is a
+/// polynomial evaluation at a known point, so a prover who wants a specific
+/// accumulator can solve for a set of rows that reaches it. What it does bind
+/// is *accidental* divergence and any substitution that does not go to the
+/// trouble of solving the system — which is the difference between "the
+/// verifier holds a value nobody checks" and "the verifier holds a value the
+/// trace must reproduce". Replacing the constants with transcript challenges
+/// is the remaining step; see `docs/AI_VERIFICATION_STATUS.md`.
+pub const COL_MEM_INIT_ACC: usize = 731;
+
+/// Fold constants for [`COL_MEM_INIT_ACC`].
+pub const MEM_INIT_BETA: u64 = 0x9E37_79B9_7F4A_7C15;
+pub const MEM_INIT_GAMMA: u64 = 0xC2B2_AE3D_27D4_EB4F;
 pub const COL_STACK_PTR: usize = 55;
 pub const COL_REG_SUB_CLK: usize = 56;
 
@@ -927,6 +966,24 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // A `public_inputs[i]` and a `cur[COL...]` — no `<< 32j`
         // Shifts that would overflow a u64 in Rust.
 
+        // (1b) initial memory image: last real row, the fold equals the low
+        // 64 bits of `initial_state_root`.
+        //
+        // `initial_state_root` was a public input nothing constrained — every
+        // caller passed zeroes and the AIR compared them against a column the
+        // prover also filled with zeroes. It now carries the commitment to the
+        // memory image the program started from, which is what lets a
+        // host-seeded guest be proven at all.
+        {
+            let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();
+            let expected = public_inputs[10].into()
+                + public_inputs[11].into() * AB::Expr::from(AB::F::from_u64(1u64 << 32));
+            builder
+                .when(is_halt.clone())
+                .when(cpu_active.clone())
+                .assert_eq(acc_last, expected);
+        }
+
         // (1) initial_state_root: first row, COL_INIT_ROOT_0..7 == public[10..18]
         for j in 0..8 {
             builder
@@ -1123,17 +1180,63 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             m_active.clone() * nm_active.clone() * m_same.clone() * (nm_addr - m_addr.clone()),
         );
 
-        // Soundness: first-read default zero in memory
-        builder
-            .when_first_row()
-            .assert_zero(m_active.clone() * (one.clone() - m_is_write.clone()) * m_val.clone());
+        // First read of an address returns zero, unless the row is flagged as
+        // part of the committed initial image.
+        //
+        // The exemption is not a hole: `COL_MEM_IS_INIT` is itself boolean-
+        // constrained, and every row carrying it is folded into the memory
+        // commitment that the AIR checks against
+        // `public_inputs.initial_state_root`. A prover that flags a row it did
+        // not seed changes the commitment and fails that check instead.
+        let m_is_init: AB::Expr = cur[COL_MEM_IS_INIT].into();
+        let nm_is_init: AB::Expr = nxt[COL_MEM_IS_INIT].into();
+        builder.assert_bool(m_is_init.clone());
+        // An initial-image row is a read by definition; it describes memory as
+        // it was before the program ran.
+        builder.assert_zero(m_is_init.clone() * m_is_write.clone());
+
+        builder.when_first_row().assert_zero(
+            m_active.clone()
+                * (one.clone() - m_is_write.clone())
+                * (one.clone() - m_is_init.clone())
+                * m_val.clone(),
+        );
         builder.when_transition().assert_zero(
             m_active.clone()
                 * nm_active.clone()
                 * (one.clone() - m_same.clone())
                 * (one.clone() - nm_write.clone())
+                * (one.clone() - nm_is_init.clone())
                 * nm_val.clone(),
         );
+
+        // Fold every initial-image row into the accumulator.
+        //
+        //   acc' = acc                       when the next row is not seeded
+        //   acc' = acc*BETA + addr*GAMMA + val   when it is
+        //
+        // The first row starts the fold from zero, so an empty image gives a
+        // zero accumulator and matches an all-zero `initial_state_root` — the
+        // behaviour every existing program relies on.
+        {
+            let beta = AB::Expr::from(AB::F::from_u64(MEM_INIT_BETA));
+            let gamma = AB::Expr::from(AB::F::from_u64(MEM_INIT_GAMMA));
+            let acc: AB::Expr = cur[COL_MEM_INIT_ACC].into();
+            let nacc: AB::Expr = nxt[COL_MEM_INIT_ACC].into();
+            let nm_val_e: AB::Expr = nxt[COL_MEM_VAL].into();
+            let nm_addr_e: AB::Expr = nxt[COL_MEM_ADDR].into();
+
+            // First row: acc is the fold of that row alone, or zero.
+            builder.when_first_row().assert_eq(
+                acc.clone(),
+                m_is_init.clone() * (m_addr.clone() * gamma.clone() + m_val.clone()),
+            );
+
+            let folded = acc.clone() * beta + nm_addr_e * gamma + nm_val_e;
+            builder
+                .when_transition()
+                .assert_eq(nacc, acc.clone() + nm_is_init.clone() * (folded - acc));
+        }
 
         let cur_clk: AB::Expr = cur[COL_CLK].into();
         let cur_pc: AB::Expr = cur[COL_PC].into();

@@ -11,7 +11,7 @@ feature, while the code deliberately refuses to perform it.
 | Model registry, operator compute-bond, Pollen-gated data access | working | `src/lubot/`, `src/ai/registry.rs` |
 | Structural checks on an execution proof (commitments, model binding, program-hash match) | working | `verify_execution_proof_structural_with_model` |
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
-| Initial guest memory (weights, biases, input) bound by the AIR | **rejected outright** | `prove_bytecode_with_memory` |
+| Initial guest memory (weights, biases, input) bound by the AIR | working | `COL_MEM_INIT_ACC`, `initial_state_root` |
 | Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
 | STARK verification of an inference proof on the transaction path | **not wired** | `src/execution/executor.rs` |
 | `VerifyInference` opcode (0x1F) inside the zkVM | **always returns 0** | `budzero/bud-vm/src/lib.rs` |
@@ -44,30 +44,39 @@ own outputs are folded into a Poseidon chain that is logged, but the AIR binds
 the event accumulator as a sum of low 32-bit limbs, so that log is a
 consistency signal, not a binding commitment.
 
-## The matmul guest cannot currently be proven at all
+## The initial memory image is committed
 
-`prove_bytecode` now verifies the proof it just produced, and that made two
-things visible that had been silent.
+The AIR used to require that the first access to any address read zero. That
+was correct while nothing committed to the starting memory: a prover free to
+claim arbitrary initial memory is a prover free to claim arbitrary weights. It
+also made the matmul guest unprovable, because it reads weights the host wrote
+before the first instruction.
 
-**The AIR requires the first access to any address to read zero.** It is right
-to: without a committed initial image, a prover that could claim arbitrary
-starting memory could claim arbitrary weights. The matmul guest reads weights
-the host wrote before execution, so its first memory event is a non-zero read
-and the constraint rejects it. `prove_mlp_inference` therefore fails, loudly,
-and `prove_mlp_inference_reports_the_air_rejection_instead_of_hiding_it` pins
-that it fails rather than returning an envelope nobody can verify.
+Both are now handled. A memory row can be flagged `COL_MEM_IS_INIT`, which
+exempts it from the zero rule, and every flagged row is folded into
+`COL_MEM_INIT_ACC`. The AIR checks that accumulator against
+`public_inputs.initial_state_root` on the halt row, so the exemption costs the
+prover a commitment it cannot fake by flagging rows it did not seed —
+flagging changes the fold, and the fold has to equal a public input the
+verifier already holds.
 
-This is the honest state: **the guest computes the right answer and cannot yet
-be proven doing it.** Closing it means giving the AIR a committed initial
-memory image — a `mem_init` commitment bound as a public input, with the
-first-read rule relaxed to "reads that value" instead of "reads zero".
+`initial_state_root` was previously a hard-coded zero that nothing constrained.
+It now carries that commitment.
 
-**A second bug was hiding behind the missing verification.** The AIR
-accumulates each `Log` row's whole `rs1` into the event digest; the prover and
-the host both summed only its low 32 bits. Small values matched by accident, so
-every test passed, but a Poseidon output never fits in 32 bits — which meant
-the commitment-only guest had never produced a verifiable proof either. Fixed:
-all three now sum the full value in the field.
+**What it covers.** Exactly the pre-written words the program reads. Bytes the
+host seeded and the guest never touched are outside it, deliberately: they
+cannot influence execution, so binding them would make the commitment depend on
+padding. Every value the program consumed is bound — change a weight the guest
+reads and the commitment moves.
+
+**What is still weaker than it should be.** The fold is
+`acc' = acc * BETA + addr * GAMMA + val` with fixed constants, which is a
+polynomial evaluation at a known point rather than a hash. A prover who wants a
+specific accumulator can solve for a set of rows that reaches it. That is
+enough to stop accidental divergence and any substitution that does not go to
+that trouble, and it is what turns `initial_state_root` from a value nobody
+checks into one the trace must reproduce — but replacing the constants with
+Fiat-Shamir transcript challenges is the remaining step.
 
 ## What the STARK does not cover
 
@@ -144,11 +153,10 @@ default.
 
 1. Store the guest program words (or a commitment plus a retrievable blob) in
    `AiModelSpec` at registration time.
-2. Bind the initial memory image *inside* the proof. The registry-side half of
-   this is done (`execution_weights_digest`), so a proof can no longer claim
-   arbitrary weights — but the claim is not yet enforced by the AIR. Extend it
-   with an initial-memory commitment column, or have the verifier rebuild the
-   image and re-derive the trace.
+2. Derive the fold constants from the Fiat-Shamir transcript instead of fixing
+   them. The initial-memory commitment is in the AIR now
+   (`COL_MEM_INIT_ACC` against `initial_state_root`), but with constant
+   `BETA`/`GAMMA` it is solvable rather than collision-resistant.
 3. Re-derive `ExecutionPublicInputs` on the transaction path from the request,
    the result and the registered program.
 4. Call `verify_execution_proof_full` with that bundle and treat
