@@ -82,11 +82,32 @@ pub trait StorageProvider {
 pub struct InMemoryStorageProvider {
     chunks: BTreeMap<ContentId, Vec<u8>>,
     challenges: BTreeMap<ChallengeId, (DealId, RetrievalChallenge)>,
+    /// Identity this provider answers challenges as.
+    ///
+    /// Challenge answers are bound to it, so two operators holding the same
+    /// bytes produce different answers and neither can respond on the other's
+    /// behalf. `Default` leaves it zeroed, which is fine for a single-provider
+    /// test but means every default-constructed provider shares an identity —
+    /// use [`Self::with_operator`] wherever more than one exists.
+    operator: [u8; 32],
 }
 
 impl InMemoryStorageProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Provider that answers as `operator`.
+    pub fn with_operator(operator: [u8; 32]) -> Self {
+        Self {
+            operator,
+            ..Default::default()
+        }
+    }
+
+    /// The identity this provider's challenge answers are bound to.
+    pub fn operator(&self) -> &[u8; 32] {
+        &self.operator
     }
 
     pub fn contains(&self, content_id: &ContentId) -> bool {
@@ -154,7 +175,18 @@ impl StorageProvider for InMemoryStorageProvider {
             });
         }
         let challenge_id = provider_challenge_id(deal_id, challenge);
-        let range_hash = ContentId::of_subrange(bytes, challenge.byte_start, challenge.byte_end);
+        // Bound to this deal, not just to the bytes. A plain content hash is
+        // identical for every operator holding a replica of the same shard,
+        // so one of them could answer for all of them — the outsourcing and
+        // Sybil cases in docs/BUD_STORAGE_ROADMAP.md Gap 2.
+        let range_hash = ContentId::of_subrange_for_deal(
+            bytes,
+            challenge.byte_start,
+            challenge.byte_end,
+            &self.operator,
+            challenge.deal_id,
+            challenge.shard_id.as_bytes(),
+        );
         Ok(StorageProof {
             deal_id,
             challenge_id,
@@ -196,7 +228,14 @@ impl StorageProvider for InMemoryStorageProvider {
             .chunks
             .get(&challenge.shard_id)
             .ok_or(StorageProviderError::MissingContent(challenge.shard_id))?;
-        let expected = ContentId::of_subrange(bytes, challenge.byte_start, challenge.byte_end);
+        let expected = ContentId::of_subrange_for_deal(
+            bytes,
+            challenge.byte_start,
+            challenge.byte_end,
+            &self.operator,
+            challenge.deal_id,
+            challenge.shard_id.as_bytes(),
+        );
         if proof.range_hash != expected {
             return Err(StorageProviderError::ProofRangeMismatch);
         }
@@ -298,5 +337,144 @@ mod tests {
         proof.range_hash = ContentId::of(b"forged");
         let err = provider.settle(challenge_id, proof).unwrap_err();
         assert_eq!(err, StorageProviderError::ProofRangeMismatch);
+    }
+
+    /// The finding this binding exists for: a plain content hash is the same
+    /// for every operator holding the same bytes, so any of them can answer a
+    /// challenge addressed to another. Two operators, one shard, one copy
+    /// between them, N payments.
+    #[test]
+    fn two_operators_holding_the_same_bytes_produce_different_answers() {
+        let bytes = b"the same shard, stored twice";
+        let shard = ContentId::of(bytes);
+
+        let plain_a = ContentId::of_subrange(bytes, 0, 8);
+        let plain_b = ContentId::of_subrange(bytes, 0, 8);
+        assert_eq!(
+            plain_a, plain_b,
+            "the unbound hash is identical — this is the gap"
+        );
+
+        let bound_a = ContentId::of_subrange_for_deal(bytes, 0, 8, &[1u8; 32], 7, shard.as_bytes());
+        let bound_b = ContentId::of_subrange_for_deal(bytes, 0, 8, &[2u8; 32], 7, shard.as_bytes());
+        assert_ne!(
+            bound_a, bound_b,
+            "two operators must not be able to answer for each other"
+        );
+    }
+
+    /// The same operator on two different deals for the same shard must also
+    /// be distinguishable, otherwise one answer covers both payments.
+    #[test]
+    fn one_operator_two_deals_produce_different_answers() {
+        let bytes = b"one shard, two deals";
+        let shard = ContentId::of(bytes);
+        let a = ContentId::of_subrange_for_deal(bytes, 0, 8, &[1u8; 32], 1, shard.as_bytes());
+        let b = ContentId::of_subrange_for_deal(bytes, 0, 8, &[1u8; 32], 2, shard.as_bytes());
+        assert_ne!(a, b, "deal_id must be part of the binding");
+    }
+
+    /// And the bytes still matter: the binding must not swallow the content.
+    #[test]
+    fn binding_does_not_replace_the_content_hash() {
+        let shard = ContentId::of(b"anything");
+        let a = ContentId::of_subrange_for_deal(
+            b"first content",
+            0,
+            5,
+            &[1u8; 32],
+            1,
+            shard.as_bytes(),
+        );
+        let b = ContentId::of_subrange_for_deal(
+            b"other content",
+            0,
+            5,
+            &[1u8; 32],
+            1,
+            shard.as_bytes(),
+        );
+        assert_ne!(a, b, "different bytes must still give different answers");
+
+        // Same everything = same answer, so an honest operator can reproduce
+        // its own proof.
+        let c = ContentId::of_subrange_for_deal(
+            b"first content",
+            0,
+            5,
+            &[1u8; 32],
+            1,
+            shard.as_bytes(),
+        );
+        assert_eq!(a, c, "the answer must be deterministic");
+    }
+
+    /// End to end: a proof produced by one provider must not settle a
+    /// challenge held by another, even with identical stored bytes.
+    #[test]
+    fn a_proof_from_another_operator_does_not_settle() {
+        let data = b"shard bytes that both operators hold";
+        let manifest = ContentManifest::from_bytes_sliced(data, 64).unwrap();
+        let shard = manifest.shards[0].shard_id;
+
+        let mut honest = InMemoryStorageProvider::with_operator([1u8; 32]);
+        let mut freeloader = InMemoryStorageProvider::with_operator([2u8; 32]);
+        honest.put(&manifest, data).unwrap();
+        freeloader.put(&manifest, data).unwrap();
+
+        let ch = RetrievalChallenge {
+            challenge_id: 1,
+            deal_id: 42,
+            shard_id: shard,
+            byte_start: 0,
+            byte_end: 8,
+            challenge_epoch: 1,
+            deadline_epoch: 2,
+            opener: crate::core::address::Address::from([9u8; 32]),
+            opener_bond: 64,
+        };
+
+        let cid = honest.challenge(deal_id(42), ch.clone()).unwrap();
+        // The freeloader has the bytes and produces a proof for the same deal.
+        let stolen = freeloader.prove(deal_id(42), &ch).unwrap();
+        assert_eq!(stolen.challenge_id, cid, "same deal, same challenge id");
+
+        let err = honest
+            .settle(cid, stolen)
+            .expect_err("an answer computed by another operator must not settle");
+        assert!(
+            matches!(err, StorageProviderError::ProofRangeMismatch),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// The honest path must keep working — the gate cannot pass by rejecting
+    /// everything.
+    #[test]
+    fn the_holder_of_the_deal_still_settles() {
+        let data = b"shard bytes held by exactly one operator";
+        let manifest = ContentManifest::from_bytes_sliced(data, 64).unwrap();
+        let shard = manifest.shards[0].shard_id;
+
+        let mut provider = InMemoryStorageProvider::with_operator([1u8; 32]);
+        provider.put(&manifest, data).unwrap();
+
+        let ch = RetrievalChallenge {
+            challenge_id: 1,
+            deal_id: 42,
+            shard_id: shard,
+            byte_start: 0,
+            byte_end: 8,
+            challenge_epoch: 1,
+            deadline_epoch: 2,
+            opener: crate::core::address::Address::from([9u8; 32]),
+            opener_bond: 64,
+        };
+        let cid = provider.challenge(deal_id(42), ch.clone()).unwrap();
+        let proof = provider.prove(deal_id(42), &ch).unwrap();
+        let result = provider
+            .settle(cid, proof)
+            .expect("the operator that holds the deal must be able to answer");
+        assert_eq!(result.outcome, ChallengeOutcome::Answered);
     }
 }

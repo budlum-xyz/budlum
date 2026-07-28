@@ -47,25 +47,46 @@ BudZKVM `VerifyMerkle` 64-depth gate, which is currently closed and whose path
 verification is a known TODO. Sequencing: finish `VerifyMerkle`, then require
 `proof_bytes`, then retire the `interim_availability_only` label.
 
-## Gap 2 — replicas are indistinguishable
+## Gap 2 — replica answers — **closed at the challenge layer**
 
-`ContentId` is a plain content hash, so N operators storing the same shard hold
-byte-identical data. Two consequences, both documented in the SoK on
-decentralized storage networks:
+### What was wrong
 
-- **outsourcing**: several operators share one physical copy and collect N
-  payments;
-- **Sybil**: one machine registers N identities and claims N replicas.
+`ContentId::of_subrange` hashed the bytes and nothing else, so every operator
+holding a replica of the same shard produced the *same* answer to a challenge.
+Two attacks came free, both named in the SoK on decentralized storage networks:
 
-**How other networks close it.** Filecoin's Proof-of-Replication encodes each
-replica under a distinct key derived from the provider id, sector id and content
-commitment, so every replica is physically different and incompressible.
+- **outsourcing** — several operators keep one physical copy between them and
+  collect a payment each, because any of them can produce the answer the others
+  would have produced;
+- **Sybil** — one machine registers N identities, claims N replicas, stores one.
 
-**Direction for B.U.D.** A per-deal encoding key derived from
-`(operator, deal_id, manifest_id)` would make each operator's bytes unique, and
-challenges would then be answerable only by whoever actually performed the
-encoding. This changes what an operator stores, so it is a format change, not a
-patch — it belongs before mainnet inclusion, not after.
+### What changed
+
+`ContentId::of_subrange_for_deal` binds the answer to
+`(operator, deal_id, shard_id)`, and the provider's `prove`/`settle` path uses
+it. A challenge can now only be answered by whoever holds *that deal's* copy.
+
+Five tests cover it. Two state the gap directly: the unbound hash really is
+identical across operators, and the bound one really is not. One checks the
+same operator on two deals for the same shard still gets different answers, so
+one response cannot cover two payments. One is end to end — a proof computed by
+a second provider holding identical bytes fails to settle the first provider's
+challenge with `ProofRangeMismatch`. The last is the canary: the operator that
+actually holds the deal still settles, so the check is not passing by rejecting
+everything.
+
+### What is still open
+
+This binds *answers*, not *bytes*. Filecoin's PoRep goes further: each replica
+is encoded under a per-replica key, so the stored data is physically different
+and incompressible and the copies cannot be shared at all. That is a change to
+what an operator writes to disk.
+
+What this removes is the free version of the attack. Colluding operators can no
+longer precompute one answer set and split the payments — they have to relay
+each other's live challenges in real time, within the deadline, for every
+challenge. That is a running cost and a detectable pattern rather than a
+one-off setup.
 
 ## Gap 3 — redundancy is replication, not erasure coding
 
@@ -153,7 +174,8 @@ would bound total load directly and is the better long-term shape.
 
 ## Suggested order
 
-1. **Gap 2** (replica encoding) — changes the stored format, so earliest.
+1. **Gap 2** (replica encoding) — the challenge-layer half has landed;
+   per-replica byte encoding remains and still changes the stored format.
 2. **Gap 3** (erasure coding) — changes the manifest shape; Gap 4 depends on it.
 3. **Gap 1** (real storage proof) — blocked on `VerifyMerkle`.
 4. **Gap 4** (repair) — needs Gap 3.
