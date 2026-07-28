@@ -265,3 +265,48 @@ contract SimpleToken {
 Derlenen bytecode BudZKVM'de çalışır → execution trace → Plonky3 STARK proof.
 
 ---
+## 9. Kanıtlanabilirlik Sınırı — Dallanan Programlar
+
+`bud-proof` içindeki AIR, bir Program CTL (LogUp) ile her CPU satırını tam
+olarak bir ön-işlenmiş program satırıyla eşler (`plonky3_air.rs`,
+`preprocessed_trace()` ve Program CTL bloğu). Bu eşleme **her komutun en az bir
+kez çalıştırılmasını** gerektirir.
+
+Sonuç: yürütülmeyen bir komut bırakan program STARK doğrulamasında
+`OodEvaluationMismatch` ile reddedilir. BudL'de `if`, `while` ve `for`
+alınmayan dalı atlayan `Jmp`/`Jnz` üretir, dolayısıyla **dallanan sözleşmeler
+şu an kanıtlanamaz.**
+
+| Program şekli | Derleme | Yürütme | Kanıt | Doğrulama |
+|---|---|---|---|---|
+| Düz kod, `emit` dahil | ✅ | ✅ | ✅ | ✅ |
+| Her komutu çalıştıran sıçrama (`Jmp +1`) | ✅ | ✅ | ✅ | ✅ |
+| Komut atlayan dal (`if`/`while`/`for`) | ✅ | ✅ | ✅ | ❌ |
+
+Ölçüm: `Jmp +1` (hiçbir komut atlamaz) doğrulanır; `Jmp +2` (bir komut atlar)
+`OodEvaluationMismatch` verir. Sıçramanın kendisi değil, **atlanan komut**
+sorundur.
+
+Sınır `budzero/bud-cli/tests/toolchain_end_to_end.rs` ve
+`plonky3_prover.rs` kanaryalarıyla kilitlidir. Program CTL satır-başına çokluk
+(multiplicity) taşıyacak şekilde genişletildiğinde bu testler kırmızıya döner ve
+bu bölümün güncellenmesini zorlar.
+
+**Üretim etkisi:** BudL sözleşme yürütme katmanı mainnet'te açık değildir; bu
+sınır kapatılmadan dallanan sözleşmeler zincir üzerinde kanıtlanamaz.
+
+---
+
+## 10. Genel Girdi Sözleşmesi — `event_digest`
+
+`ExecutionPublicInputs::event_digest` bir **hash değildir.** AIR, sekiz adet
+küçük-endian `u32` limb taşıyan toplamsal bir akümülatör bağlar
+(`COL_EVENT_DIGEST_0..8`): her `Log` satırı `rs1` işleneninin düşük 32 bitini
+limb 0'a ekler, limb 1..8 sıfır kalır.
+
+Bu alanı `bud_proof::event_digest_from_events()` ile üretin. `keccak256(events)`
+yazmak, doğrulaması her zaman `OodEvaluationMismatch` ile başarısız olan bir
+kanıt üretir — `bud-cli` tam olarak bunu yapıyordu ve `prove`/`run` komutları
+hiç çalışmıyordu.
+
+---

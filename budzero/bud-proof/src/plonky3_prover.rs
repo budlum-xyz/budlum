@@ -1403,6 +1403,115 @@ mod tests {
         );
     }
 
+    /// Public inputs built by the shared helper must verify — this is the path
+    /// every caller outside this crate takes.
+    ///
+    /// The in-crate `prove_and_verify` helper hard-codes
+    /// `event_digest: [0u8; 32]`, which is only correct for programs that emit
+    /// nothing. That blind spot let `bud-cli` ship a keccak-based digest that
+    /// made every proof it generated fail verification.
+    #[test]
+    fn helper_built_event_digest_verifies_for_a_logging_program() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Load, 2, 0, 0, 5),
+            inst(Opcode::Log, 0, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(receipt.events, vec![7, 5]);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "helper-built event_digest must satisfy the AIR binding"
+        );
+    }
+
+    /// Canary: hashing the event list instead of accumulating it must stay
+    /// rejected, so the mistake cannot come back unnoticed.
+    #[test]
+    fn keccak_style_event_digest_is_rejected_by_the_air() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let event_bytes: Vec<u8> = receipt
+            .events
+            .iter()
+            .flat_map(|&e| e.to_le_bytes().to_vec())
+            .collect();
+        let mut eh = Keccak::v256();
+        eh.update(&event_bytes);
+        let mut hashed_digest = [0u8; 32];
+        eh.finalize(&mut hashed_digest);
+        assert_ne!(
+            hashed_digest,
+            crate::event_digest_from_events(&receipt.events),
+            "the two encodings must differ for this canary to bite"
+        );
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: hashed_digest,
+        };
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a hashed event digest must not satisfy the accumulator binding"
+        );
+    }
+
     /// Log updates event_digest; public inputs must carry limb0=sum.
     #[test]
     fn proves_log_event_digest() {
