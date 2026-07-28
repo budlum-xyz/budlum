@@ -95,7 +95,7 @@ pub fn build_lubot_result(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{operator_bond, operator_eligible, register_operator};
+    use super::super::{operator_bond, operator_eligible, register_operator, MIN_OPERATOR_BOND};
     use super::*;
 
     fn addr(b: u8) -> Address {
@@ -116,9 +116,9 @@ mod tests {
             register_lubot_model(&mut registry, owner, model_hash).expect("model register");
 
         // (2) Operator compute-bond (AI-layer-first).
-        register_operator(&mut registry, &operator, 500).expect("operator bond");
+        register_operator(&mut registry, &operator, MIN_OPERATOR_BOND).expect("operator bond");
         assert!(operator_eligible(&registry, &operator));
-        assert_eq!(operator_bond(&registry, &operator), 500);
+        assert_eq!(operator_bond(&registry, &operator), MIN_OPERATOR_BOND);
 
         // (3) Kapalı-devre request inşa + submit.
         let req = build_lubot_request(requester, model_id, b"lubot-input".to_vec(), 1, 1, 1000)

@@ -43,7 +43,7 @@ integrations of the layers below, so the whole stack builds and tests as one.
 | **budlum-core** | [budlum-xyz/budlum-core](https://github.com/budlum-xyz/budlum-core) | `src/` (root crate) | The blockchain network: multi-consensus engines (PoW/PoS/BFT/PoA), execution, chain, permissionless validator/relayer registry with stake + slashing |
 | **BudZero** | [budlum-xyz/BudZero](https://github.com/budlum-xyz/BudZero) | `budzero/` | ZK-native virtual machine (zkVM) + STARK prover — verifiable execution for AI inference and private computation |
 | **B.U.D.** | [budlum-xyz/B.U.D.](https://github.com/budlum-xyz/B.U.D.) | `src/storage/` | Broad Universal Database — decentralized, data-sovereign storage (content addressing, deals, challenges) |
-| **Lubot** | [budlum-xyz/Lubot](https://github.com/budlum-xyz/Lubot) | `src/lubot/` | Data-sovereign, closed-circuit AI layer: model registry, operator compute-bond and Pollen-gated data access. On-chain inference proofs are **not yet verified** — the transaction path fails closed for proof-required models (see `docs/AI_VERIFICATION_STATUS.md`) |
+| **Lubot** | [budlum-xyz/Lubot](https://github.com/budlum-xyz/Lubot) | `src/lubot/` | Data-sovereign, closed-circuit AI layer: model registry, operator compute-bond, effort tiers (`0.5x`–`10x`, see `src/lubot/effort.rs`) and Pollen-gated data access. On-chain inference proofs are **not yet verified** — the transaction path fails closed for proof-required models (see `docs/AI_VERIFICATION_STATUS.md`) |
 | **budlum.com** | [budlum-xyz/budlum.com](https://github.com/budlum-xyz/budlum.com) | — | Project website |
 
 > **Data-sovereignty invariant:** no critical function in the network depends on a

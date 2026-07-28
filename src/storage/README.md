@@ -26,13 +26,29 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 2. **İzin/consent katmanı yok:** manifest ve deal bilgisi tamamen açıktır;
    `AccessGrant` kavramı izin katmanında tasarlanacaktır
    (hard-enforcement hedefli — egemenlik kuralı soft enforcement'ı eler).
-3. **`ContentManifest` owner alanı içermez** (2026-07-18 kod doğrulaması:
-   alanlar yalnız `manifest_id/total_size/shard_count/shards`). Sahiplik,
-   izin katmanında eklenecek.
-4. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
+3. **`ContentManifest` owner taşır, ama zorunlu değil.** F01 ile `owner` alanı
+   eklendi ve `manifest_id` hesabı owner'ı kapsıyor (alanlar:
+   `manifest_id/owner/total_size/shard_count/shards`). Ancak `from_shards()`
+   owner'ı zero-address ile başlatır ve gerçek sahip `with_owner()` ile ayrıca
+   set edilir. Bu çağrı atlanırsa manifest "sahipsiz" olarak kaydedilir ve aynı
+   içeriği yükleyen iki farklı kullanıcı aynı `manifest_id`'yi üretir. Kayıt
+   yolunda owner'ın zorunlu kılınması izin katmanının işi.
+4. **Replikalar ayırt edilemez (outsourcing/Sybil).** `ContentId` düz içerik
+   hash'i olduğu için aynı shard'ı saklayan N operatör bayt-bayt aynı veriyi
+   tutar. Tek fiziksel kopya N deal'i karşılayabilir ve tek makine N kimlikle
+   N ödül toplayabilir. Filecoin'in PoRep'i bunu replika-başına kodlama ile
+   çözer; B.U.D.'da böyle bir kodlama **yok**. Ayrıntı ve yol haritası:
+   `docs/BUD_STORAGE_ROADMAP.md`.
+
+5. **Yedeklilik erasure coding değil, replikasyon.** `ShardRef` yalnız
+   `(index, shard_id, size)` taşır; parity shard kavramı yok. Dayanıklılık
+   replika başına tam kopya maliyetiyle geliyor ve bir operatör slash
+   edildiğinde kaybolan yedekliliği onaran bir yol tanımlı değil.
+
+6. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
    erişim için ödediği "tüketici erişim" ekonomisi ayrı bir katman
    olarak tasarlanır.
-5. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
+7. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
    `slashedBondDisposition = "burn_from_operator_liquid_balance_best_effort"`
    olarak RPC'de görünür; bu final mainnet tokenomics kararı değildir.
 
