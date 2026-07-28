@@ -148,6 +148,20 @@ fn prove_bytecode_inner_with_memory(
     let public_inputs = build_public_inputs(&program, &vm, &receipt);
     let proof = Prover::prove(&vm.trace, &public_inputs, &program)
         .map_err(|err| format!("BudZKVM proof generation failed: {err:?}"))?;
+    // Verify what we just produced.
+    //
+    // `Prover::prove` succeeds whenever it can build a trace; it does not
+    // check that the trace satisfies the AIR. So a program the constraints
+    // reject still yields an envelope here, and the caller has no way to tell
+    // the difference until someone downstream tries to verify it — which, for
+    // a proof that is attached to a transaction and only checked much later,
+    // can be a long way from the code that caused it.
+    //
+    // `ZkVmExecutor::execute_bytecode` has always done this. `prove_bytecode`
+    // did not, and that gap is how a guest reading a host-seeded memory image
+    // produced an "ok" envelope that no verifier would accept.
+    Prover::verify(&proof, &public_inputs, &program)
+        .map_err(|err| format!("BudZKVM produced a proof it cannot verify: {err:?}"))?;
     Ok((proof, public_inputs, program))
 }
 
@@ -180,15 +194,14 @@ fn build_public_inputs(
 /// Pack Log-event accumulator the way `bud-proof` trace_matrix + AIR expect:
 /// Limb 0 = sum of (event & 0xFFFF_FFFF) as a u32 LE in bytes[0..4]; other limbs 0.
 fn event_digest_air_limbs(events: &[u64]) -> [u8; 32] {
-    let mut acc: u64 = 0;
-    for e in events {
-        acc = acc.wrapping_add(e & 0xFFFF_FFFF);
-    }
-    let mut out = [0u8; 32];
-    out[0..4].copy_from_slice(&(acc as u32).to_le_bytes());
-    // If the field accumulator exceeds 2^32 (many logs), higher bits are lost
-    // In the public-input packing (also u32 limbs). Matches current AIR.
-    out
+    // Delegate to the one implementation the AIR agrees with.
+    //
+    // This used to sum the low 32 bits of each event and pack the result as a
+    // u32, while the AIR added each `Log` row's whole `rs1` in the field. The
+    // two matched only while every logged value stayed under 2^32; a Poseidon
+    // output is always larger, so any guest that logged one produced a proof
+    // that could not verify.
+    bud_proof::event_digest_from_events(events)
 }
 
 fn hash_u64_words(words: &[u64]) -> [u8; 32] {

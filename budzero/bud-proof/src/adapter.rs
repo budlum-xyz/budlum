@@ -36,12 +36,22 @@ pub struct ExecutionPublicInputs {
 /// the wrapping `u32` sum of the low 32 bits of every logged value, the
 /// remaining limbs stay zero.
 pub fn event_digest_from_events(events: &[u64]) -> [u8; 32] {
-    let mut limb0: u32 = 0;
+    // Sum in the field, then pack the canonical representative as eight u32
+    // limbs. The AIR adds each `Log` row's full `rs1` into limb 0, so anything
+    // narrower here disagrees with it as soon as a logged value reaches 2^32 —
+    // and a Poseidon output always does.
+    const P: u128 = 18_446_744_069_414_584_321;
+    let mut acc: u128 = 0;
     for &e in events {
-        limb0 = limb0.wrapping_add((e & 0xFFFF_FFFF) as u32);
+        acc = (acc + e as u128) % P;
     }
+    // Limb 0 carries the whole field element. The AIR compares
+    // `COL_EVENT_DIGEST_0` against `public_inputs[40]` directly, and that
+    // column holds a full Goldilocks value, so splitting the sum across two
+    // u32 limbs here would compare a truncated number against an untruncated
+    // one. Limbs 1..8 stay zero and are asserted so by the AIR.
     let mut digest = [0u8; 32];
-    digest[0..4].copy_from_slice(&limb0.to_le_bytes());
+    digest[0..8].copy_from_slice(&(acc as u64).to_le_bytes());
     digest
 }
 
@@ -127,20 +137,58 @@ mod event_digest_tests {
     #[test]
     fn single_event_lands_in_limb_zero_little_endian() {
         let d = event_digest_from_events(&[7]);
-        assert_eq!(&d[0..4], &7u32.to_le_bytes());
-        assert!(d[4..].iter().all(|&b| b == 0), "limbs 1..8 must stay zero");
+        assert_eq!(&d[0..8], &7u64.to_le_bytes());
+        assert!(d[8..].iter().all(|&b| b == 0), "limbs 1..8 must stay zero");
     }
 
+    /// The accumulator carries the whole logged value, not its low 32 bits.
+    ///
+    /// The AIR constrains `nxt_event_0 - cur_event_0 - is_log * nxt_rs1 == 0`
+    /// and `nxt_rs1` is the full register. Masking here agreed with that only
+    /// while every logged value stayed under 2^32.
     #[test]
-    fn events_accumulate_additively_over_low_32_bits() {
+    fn events_accumulate_over_the_whole_value() {
         let d = event_digest_from_events(&[1, 2, (1u64 << 32) | 3]);
-        assert_eq!(&d[0..4], &6u32.to_le_bytes());
-        assert!(d[4..].iter().all(|&b| b == 0));
+        let expected = 1u64 + 2 + ((1u64 << 32) | 3);
+        assert_eq!(&d[0..8], &expected.to_le_bytes());
+        assert!(d[8..].iter().all(|&b| b == 0));
     }
 
+    /// A Poseidon output is the case that exposed the mismatch: always above
+    /// 2^32, so truncation and the AIR disagree on every one of them.
     #[test]
-    fn accumulator_wraps_instead_of_overflowing() {
-        let d = event_digest_from_events(&[u32::MAX as u64, 1]);
-        assert_eq!(&d[0..4], &0u32.to_le_bytes());
+    fn a_large_event_is_not_truncated() {
+        let big = 13_669_935_575_198_700_787u64;
+        assert!(big > u32::MAX as u64);
+        let d = event_digest_from_events(&[big]);
+        assert_eq!(&d[0..8], &big.to_le_bytes());
+        // The old implementation kept only the low 32 bits, so bytes 4..8
+        // were zero. They are not any more, and that is the whole difference.
+        assert_ne!(
+            &d[4..8],
+            &[0u8; 4],
+            "the high half must survive; zeroing it is what the AIR rejected"
+        );
+    }
+
+    /// Summation is modulo the field, not modulo 2^32 and not saturating.
+    #[test]
+    fn accumulator_reduces_in_the_field() {
+        const P: u64 = 18_446_744_069_414_584_321;
+        let d = event_digest_from_events(&[P - 1, 2]);
+        assert_eq!(&d[0..8], &1u64.to_le_bytes(), "(P-1) + 2 == 1 mod P");
+    }
+
+    /// Every value the accumulator produces has to be a canonical field
+    /// element, otherwise the public input cannot equal the trace column.
+    #[test]
+    fn accumulator_stays_canonical() {
+        const P: u64 = 18_446_744_069_414_584_321;
+        let d = event_digest_from_events(&[u64::MAX, u64::MAX, u64::MAX]);
+        let acc = u64::from_le_bytes(d[0..8].try_into().unwrap());
+        assert!(
+            acc < P,
+            "accumulator {acc} is not a canonical field element"
+        );
     }
 }
