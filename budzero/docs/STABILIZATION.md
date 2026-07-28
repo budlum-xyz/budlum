@@ -130,6 +130,57 @@ Bitwise işlemler için en verimli yaklaşım, operand'ların bit decomposition'
 > **kapalıdır** ve round sayısı düzeltilmeden açılmamalıdır. Kilit:
 > `bud-isa` içindeki `privacy_opcodes_stay_disabled_until_poseidon_is_fixed`.
 
+### Hedef parametreler türetildi (2026-07-28)
+
+Yukarıdaki uyarı "gerçek parametreler kabaca 8 tam + 22 kısmi round ister"
+diyordu. "Kabaca" kalktı; set türetildi, koda kondu ve kilitlendi.
+
+| | değer | nereden |
+|---|---|---|
+| R_F (tam round) | 8 | 4 baş + 4 son, Poseidon2 makalesinin +2 marjıyla |
+| R_P (kısmi round) | 22 | interpolasyon sınırı + %7.5 marj (aşağıda) |
+| α (S-box) | 7 | `gcd(7, P−1) = 1`, testle doğrulanmış |
+| toplam round | 30 | `POSEIDON_RC_FULL` |
+| toplam S-box | 86 | `t·R_F + R_P = 8·8 + 22` |
+
+R_P bir tercih değil, Poseidon makalesinin interpolasyon sınırından (Eq. 3)
+çıkıyor:
+
+```
+R_interp ≥ ⌈min(κ,n) / log₂(α)⌉ + ⌈log_α(t)⌉ − 5
+         = ⌈64 / log₂(7)⌉ + ⌈log₇(8)⌉ − 5
+         = 23 + 2 − 5 = 20
+⌈1.075 × 20⌉ = 22
+```
+
+Bu hesap `partial_round_count_matches_the_interpolation_bound` testinde
+yeniden yapılıyor; sabit elle değiştirilirse test düşer.
+
+**Şu an kullanılan set gerçekten bir kesittir.** Bu artık folklor değil:
+`four_round_set_is_a_prefix_of_full` testi `POSEIDON_RC`'nin
+`POSEIDON_RC_FULL`'un ilk dört satırıyla byte-byte aynı olduğunu doğruluyor.
+
+**Neden hâlâ dört round çalışıyor?** Çünkü AIR dört round kısıtlıyor
+(`plonky3_air.rs`, `for r in 0..4`). VM'i tek başına 30 round'a çevirmek,
+kanıtın VM'in çalıştırdığından **başka** bir fonksiyonu doğruladığı anlamına
+gelir — zayıf hash'ten kesinlikle daha kötü bir soundness kırılması. Bu yüzden:
+
+- `POSEIDON_RC_FULL`, `POSEIDON_FULL_ROUNDS`, `POSEIDON_PARTIAL_ROUNDS`,
+  `POSEIDON_ALPHA` eklendi — AIR çalışmasının nişan alacağı kesin hedef.
+- `poseidon_full_hash_state` referans uygulaması eklendi; AIR bunun karşısında
+  doğrulanabilir. `full_permutation_differs_from_truncated_one` iki fonksiyonun
+  gerçekten farklı olduğunu örneklenen her girdide gösteriyor (yoksa hedef
+  dekorasyon olurdu).
+- `vm_hash_still_matches_the_air_round_count`, VM tek taraflı değişirse düşer
+  ve AIR'ın aynı değişiklikte taşınmasını zorlar.
+
+**Kalan iş:** `plonky3_air.rs` içindeki Poseidon gadget'ını 30 round'a
+genişletmek (kısmi round'larda S-box yalnız 0. şeride uygulanır — asimetri
+kısıtların da asimetrik olmasını gerektirir), trace sütunlarını buna göre
+büyütmek, sonra VM'i çevirip gizlilik bayraklarını açmak. O ana kadar
+`privacy_commit_enabled`, `nullifier_check_enabled` ve
+`sum_conservation_enabled` kapalı kalır.
+
 ### Uygulanan parametreler
 
 Plonky3'ün `p3-goldilocks` crate'i, Goldilocks cismi için optimize edilmiş bir Poseidon1 implementasyonu içeriyor. Biz bu implementasyonun parametrelerini kullanarak kendi 4-round versiyonumuzu yazdık:
