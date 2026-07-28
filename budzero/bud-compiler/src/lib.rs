@@ -36,6 +36,22 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+/// Byte offset where the generated prologue points the heap pointer (`r31`).
+///
+/// Struct literals allocate above this address, so a VM whose memory is
+/// smaller than this cannot run any program that uses a struct — it faults
+/// with `InvalidMemoryAccess` on the first allocation. Hosts must size their
+/// `Vm` with at least [`MIN_VM_MEMORY_BYTES`].
+pub const HEAP_BASE: i32 = 4096;
+
+/// Smallest `Vm` memory size that can run compiler output.
+///
+/// The prologue sets the heap pointer to [`HEAP_BASE`]; anything at or below
+/// that leaves no allocatable space. `bud-cli` used to build `Vm::new(1024)`,
+/// which made every struct-using contract fail at runtime while the compiler's
+/// own tests passed because they sized their VM at 8192.
+pub const MIN_VM_MEMORY_BYTES: usize = 8192;
+
 pub fn compile(source: &str, profile: IsaProfile) -> Result<Vec<u64>, CompileError> {
     debug!(profile = ?profile, source_len = source.len(), "Starting compilation");
 

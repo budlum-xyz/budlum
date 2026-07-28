@@ -71,7 +71,7 @@ impl Codegen {
             self.struct_layouts.insert(s.name.clone(), fields);
         }
 
-        self.emit(Opcode::Load, 31, 0, 0, 4096); // Initialize heap ptr!
+        self.emit(Opcode::Load, 31, 0, 0, crate::HEAP_BASE); // Initialize heap ptr!
         let jump_to_main_idx = self.instructions.len();
         self.emit(Opcode::Call, 0, 0, 0, 0);
         self.emit(Opcode::Halt, 0, 0, 0, 0);

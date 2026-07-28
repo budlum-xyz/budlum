@@ -1403,6 +1403,61 @@ mod tests {
         );
     }
 
+    /// `Syscall` had no prover coverage. It is constrained in the AIR (selector
+    /// booleanity, exclusivity, a gas cost of 5) and reads context values, so a
+    /// proof over it must close.
+    #[test]
+    fn proves_syscall_reading_context() {
+        let program = vec![
+            inst(Opcode::Syscall, 1, 0, 0, 1), // r1 = sender
+            inst(Opcode::Syscall, 2, 0, 0, 2), // r2 = block_height
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_and_verify(program, |_| {});
+    }
+
+    /// `Jmp` had no prover coverage. A jump that lands on the next instruction
+    /// executes every program row, so it is provable and pins the
+    /// `next_pc = pc + imm` constraint.
+    #[test]
+    fn proves_jump_that_skips_nothing() {
+        let program = vec![
+            inst(Opcode::Jmp, 0, 0, 0, 1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_and_verify(program, |_| {});
+    }
+
+    /// `Store` had no prover coverage at all: it is constrained in the AIR and
+    /// wired into the memory CTL, but no test ever proved a program using it.
+    /// Struct-using BudL contracts lower into Store/Load pairs, so the gap was
+    /// load-bearing.
+    #[test]
+    fn proves_store_then_load_roundtrip() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 0),  // r1 = 0 (address)
+            inst(Opcode::Load, 2, 0, 0, 42), // r2 = 42 (value)
+            inst(Opcode::Store, 0, 1, 2, 0), // mem[r1] = r2
+            inst(Opcode::Load, 3, 1, 0, 0),  // r3 = mem[r1]
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_and_verify(program, |_| {});
+    }
+
+    /// `Assert` had no prover coverage either, and BudL's `constrain(...)`
+    /// lowers straight to it.
+    #[test]
+    fn proves_assert_on_a_true_condition() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Eq, 3, 1, 2, 0),
+            inst(Opcode::Assert, 0, 3, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_and_verify(program, |_| {});
+    }
+
     /// Public inputs built by the shared helper must verify — this is the path
     /// every caller outside this crate takes.
     ///

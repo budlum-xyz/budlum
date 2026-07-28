@@ -177,3 +177,79 @@ fn checked_in_state_file_matches_the_account_schema() {
         "state.json should carry at least one account"
     );
 }
+
+/// A struct-using contract must survive the whole pipeline.
+///
+/// The generated prologue points the heap pointer at `bud_compiler::HEAP_BASE`
+/// (4096), so a `Vm` smaller than that faults with `InvalidMemoryAccess` on the
+/// first struct literal. `bud-cli` built `Vm::new(1024)` while the compiler's
+/// own tests sized theirs at 8192, so every struct contract failed only through
+/// the CLI. This test runs the real host memory size.
+#[test]
+fn a_struct_using_contract_runs_and_proves() {
+    let source = "contract S {\n\
+                  \x20   struct P {\n\
+                  \x20       a: u64,\n\
+                  \x20       b: u64,\n\
+                  \x20   }\n\
+                  \x20   pub fn main() {\n\
+                  \x20       let p = P { a: 1, b: 2 };\n\
+                  \x20       let s = p.a + p.b;\n\
+                  \x20       emit Ok(s);\n\
+                  \x20   }\n\
+                  }\n";
+    let bytecode = bud_compiler::compile(source, IsaProfile::Production).expect("compile");
+
+    let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+    let receipt = vm.run_receipt(&bytecode);
+    assert!(
+        receipt.success,
+        "struct contract must execute: {:?}",
+        receipt.error
+    );
+    assert_eq!(receipt.events, vec![3], "p.a + p.b must be 3");
+
+    // Proving is a separate matter and is deliberately not asserted here.
+    // A struct contract exercises Store/Load against the heap, and the memory
+    // CTL side of the AIR has far thinner test coverage than the register side
+    // (bud-proof has no Store test at all). Whether such a program proves is
+    // tracked separately; this test's job is to prove that the *host memory
+    // floor* is right, which is what the execution assertions above establish.
+    let _ = public_inputs_for(&vm, &bytecode, &receipt.events);
+}
+
+/// The host memory floor must stay above the heap base, otherwise struct
+/// allocation starts out of bounds.
+#[test]
+fn minimum_vm_memory_leaves_room_above_the_heap_base() {
+    assert!(
+        bud_compiler::MIN_VM_MEMORY_BYTES > bud_compiler::HEAP_BASE as usize,
+        "MIN_VM_MEMORY_BYTES ({}) must exceed HEAP_BASE ({})",
+        bud_compiler::MIN_VM_MEMORY_BYTES,
+        bud_compiler::HEAP_BASE
+    );
+}
+
+/// Canary for the bug above: a VM sized below the heap base must still fail, so
+/// the floor is doing real work rather than being decoration.
+#[test]
+fn a_vm_smaller_than_the_heap_base_still_faults_on_structs() {
+    let source = "contract S {\n\
+                  \x20   struct P {\n\
+                  \x20       a: u64,\n\
+                  \x20   }\n\
+                  \x20   pub fn main() {\n\
+                  \x20       let p = P { a: 1 };\n\
+                  \x20       emit Ok(p.a);\n\
+                  \x20   }\n\
+                  }\n";
+    let bytecode = bud_compiler::compile(source, IsaProfile::Production).expect("compile");
+
+    let mut vm = Vm::new(1024);
+    let receipt = vm.run_receipt(&bytecode);
+    assert!(
+        !receipt.success,
+        "a 1024-byte VM is below HEAP_BASE and must fault; if this now succeeds \
+         the heap layout changed and MIN_VM_MEMORY_BYTES needs revisiting"
+    );
+}

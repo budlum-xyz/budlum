@@ -185,7 +185,7 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
     let pre_root = state.root();
 
-    let mut vm = Vm::new(1024);
+    let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     if let Some(s) = config.sender {
         vm.context.sender = s;
         let acc = match state.get_account(s) {
@@ -568,7 +568,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Test => {
-            let mut vm = Vm::new(1024);
+            let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
             let prog = vec![
                 Instruction {
                     opcode: Opcode::Add,
