@@ -44,6 +44,14 @@ pub mod verify;
 /// which a bond stops being skin in the game. Governance can raise it.
 pub const MIN_OPERATOR_BOND: u64 = 1_000;
 
+/// The floor has to be stricter than the zero-check `lock_verifier_stake`
+/// already performs, otherwise it adds nothing. Checked at compile time, so a
+/// future edit that weakens it fails the build rather than a test run.
+const _: () = assert!(
+    MIN_OPERATOR_BOND > 1,
+    "MIN_OPERATOR_BOND must exceed the zero-check it replaces"
+);
+
 /// Lubot operator'ü kaydet: compute-bond = AiRegistry verifier stake.
 /// PoS validator'dan bağımsız; aynı aktör beide olabilir (composable).
 ///
@@ -327,16 +335,6 @@ mod tests {
         assert!(
             super::register_operator(&mut registry, &operator, MIN_OPERATOR_BOND).is_ok(),
             "the floor itself must be accepted"
-        );
-    }
-
-    /// Canary: the floor has to be above the zero-check that
-    /// `lock_verifier_stake` already performs, otherwise it adds nothing.
-    #[test]
-    fn the_bond_floor_is_stricter_than_a_zero_check() {
-        assert!(
-            MIN_OPERATOR_BOND > 1,
-            "MIN_OPERATOR_BOND must exceed 1 or it is decorative"
         );
     }
 }
