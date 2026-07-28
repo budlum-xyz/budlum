@@ -101,3 +101,10 @@ path = "fuzz_targets/reputation.rs"
 test = false
 doc = false
 bench = false
+
+# The fuzz workspace does not inherit the root profile. Overflow checks are
+# enabled so the fuzzer reports arithmetic wraps as findings instead of letting
+# them pass silently. `panic = "abort"` is deliberately omitted: libfuzzer needs
+# unwinding to catch and report a panic.
+[profile.release]
+overflow-checks = true

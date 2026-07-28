@@ -47,3 +47,10 @@ optional = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+
+# wallet-core is a separate workspace and does not inherit the root manifest's
+# profile. It handles balances and amounts, where a silent release-mode wrap is
+# worse than a crash. Mirrors the root Cargo.toml.
+[profile.release]
+overflow-checks = true
+panic = "abort"

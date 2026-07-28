@@ -21,6 +21,7 @@ use crate::ai::AiRegistry;
 use crate::core::address::Address;
 use crate::pollen::data_rights::{AccessGrant, AccessGrantStatus};
 
+pub mod effort;
 pub mod executor;
 pub mod inference;
 pub mod metrics;
@@ -31,13 +32,41 @@ pub mod verify;
 
 // Operator (validator hardening: ayrı compute-bond rolü)
 
+/// Smallest compute-bond a Lubot operator may register with.
+///
+/// `lock_verifier_stake` only rejects a zero bond, so without a floor a single
+/// actor could register many addresses at one unit each and fill
+/// `agreement_threshold` alone — the threshold counts addresses, not stake.
+/// The floor makes that attack cost `threshold × MIN_OPERATOR_BOND` instead of
+/// `threshold × 1`.
+///
+/// The value is a protocol parameter, not a market price: it is the point below
+/// which a bond stops being skin in the game. Governance can raise it.
+pub const MIN_OPERATOR_BOND: u64 = 1_000;
+
+/// The floor has to be stricter than the zero-check `lock_verifier_stake`
+/// already performs, otherwise it adds nothing. Checked at compile time, so a
+/// future edit that weakens it fails the build rather than a test run.
+const _: () = assert!(
+    MIN_OPERATOR_BOND > 1,
+    "MIN_OPERATOR_BOND must exceed the zero-check it replaces"
+);
+
 /// Lubot operator'ü kaydet: compute-bond = AiRegistry verifier stake.
 /// PoS validator'dan bağımsız; aynı aktör beide olabilir (composable).
+///
+/// Bonds below [`MIN_OPERATOR_BOND`] are rejected rather than accepted at face
+/// value, so Sybil registration has a floor cost.
 pub fn register_operator(
     registry: &mut AiRegistry,
     operator: &Address,
     bond: u64,
 ) -> Result<u64, String> {
+    if bond < MIN_OPERATOR_BOND {
+        return Err(format!(
+            "Lubot: compute-bond {bond} is below the minimum {MIN_OPERATOR_BOND}"
+        ));
+    }
     registry.lock_verifier_stake(operator, bond)
 }
 
@@ -262,8 +291,9 @@ mod tests {
             .expect("model register");
 
         // Operator bond.
-        let bond = super::register_operator(&mut registry, &operator, 500).expect("operator bond");
-        assert_eq!(bond, 500);
+        let bond = super::register_operator(&mut registry, &operator, MIN_OPERATOR_BOND)
+            .expect("operator bond");
+        assert_eq!(bond, MIN_OPERATOR_BOND);
         assert!(super::operator_eligible(&registry, &operator));
 
         // Lubot transaction inşa et.
@@ -285,6 +315,26 @@ mod tests {
         assert!(
             matches!(tx.tx_type, TransactionType::AiInferenceRequest(_)),
             "tx must be AiInferenceRequest"
+        );
+    }
+
+    /// A bond below the floor is refused, so filling `agreement_threshold`
+    /// with throwaway addresses costs real stake.
+    #[test]
+    fn compute_bond_below_the_floor_is_rejected() {
+        let mut registry = AiRegistry::new();
+        let operator = Address([7u8; 32]);
+        assert!(
+            super::register_operator(&mut registry, &operator, MIN_OPERATOR_BOND - 1).is_err(),
+            "a bond one unit under the floor must be refused"
+        );
+        assert!(
+            super::register_operator(&mut registry, &operator, 1).is_err(),
+            "a one-unit bond must be refused"
+        );
+        assert!(
+            super::register_operator(&mut registry, &operator, MIN_OPERATOR_BOND).is_ok(),
+            "the floor itself must be accepted"
         );
     }
 }
