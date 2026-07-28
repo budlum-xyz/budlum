@@ -1357,11 +1357,10 @@ mod matmul_tests {
     /// memory event is a non-zero read and the constraint rejects it. Nothing
     /// noticed, because nobody verified.
     ///
-    /// This test is the thing that would have noticed. It is `#[ignore]`-free
-    /// and expected to fail until the AIR models a committed initial memory
-    /// image — see `docs/AI_VERIFICATION_STATUS.md`.
+    /// The AIR now commits to the initial memory image, so a guest that reads
+    /// host-written weights can be proven — and the proof verifies.
     #[test]
-    fn prove_mlp_inference_reports_the_air_rejection_instead_of_hiding_it() {
+    fn prove_mlp_inference_produces_a_verifiable_proof() {
         let spec = FixedPointMlpSpec {
             dims: vec![2, 1],
             weights: vec![2, 3],
@@ -1370,12 +1369,59 @@ mod matmul_tests {
         let owner = crate::core::address::Address::from([1u8; 32]);
         let model_id = crate::ai::types::AiModelId::of(&owner, &[9u8; 32], 1);
 
-        let err = prove_mlp_inference(&spec, model_id, &[4, 5], 10_000_000)
-            .expect_err("the AIR rejects a host-seeded memory image, so this must fail");
-        assert!(
-            err.contains("cannot verify"),
-            "the failure must name the verification step rather than surfacing \
-             as a successful proof: {err}"
+        let (proof, output) = prove_mlp_inference(&spec, model_id, &[4, 5], 10_000_000)
+            .expect("a host-seeded guest must now prove and verify");
+        assert_eq!(output, eval_fixed_point_mlp(&spec, &[4, 5]).unwrap());
+        assert!(!proof.proof_bytes.is_empty());
+        assert_eq!(proof.weights_digest, Some(weights_digest(&spec)));
+    }
+
+    /// The commitment is what makes the exemption safe: seeding different
+    /// weights must land on a different `initial_state_root`, so a proof for
+    /// one image cannot be presented as a proof for another.
+    #[test]
+    fn different_weights_commit_to_different_memory_images() {
+        let a = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let b = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![9, -9],
+            biases: vec![1],
+        };
+        let commit = |spec: &FixedPointMlpSpec| {
+            let prog = build_matmul_guest_program(spec).unwrap();
+            let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, 10_000_000);
+            setup_guest_memory(&mut vm.memory, spec, &[4, 5]).unwrap();
+            assert!(vm.run_receipt(&prog).success);
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace))
+        };
+        assert_ne!(
+            commit(&a),
+            commit(&b),
+            "two weight sets must not share a memory commitment"
+        );
+    }
+
+    /// An untouched image still commits to zero, so every program that seeds
+    /// nothing keeps the behaviour it had.
+    #[test]
+    fn a_program_that_reads_no_seeded_memory_commits_to_zero() {
+        let prog = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, 1_000_000);
+        assert!(vm.run_receipt(&prog).success);
+        assert_eq!(
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                &vm.trace
+            )),
+            [0u8; 32],
+            "nothing pre-written was read, so the commitment stays zero"
         );
     }
 

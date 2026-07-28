@@ -5,8 +5,8 @@
 //! Error.
 
 use crate::plonky3_air::{
-    COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE,
-    TRACE_WIDTH,
+    COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE,
+    COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -170,6 +170,18 @@ fn all_ranges() -> Vec<ColRange> {
             name: "merkle_final_flag",
             start: 729,
             end: 730,
+        },
+        // Initial-memory commitment. Appended past the old end of the
+        // layout so the columns before it did not have to move again.
+        ColRange {
+            name: "mem_is_init",
+            start: COL_MEM_IS_INIT,
+            end: COL_MEM_IS_INIT + 1,
+        },
+        ColRange {
+            name: "mem_init_acc",
+            start: COL_MEM_INIT_ACC,
+            end: COL_MEM_INIT_ACC + 1,
         },
     ]
 }

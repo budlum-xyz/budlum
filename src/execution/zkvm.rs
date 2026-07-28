@@ -170,6 +170,15 @@ fn build_public_inputs(
     vm: &Vm,
     receipt: &bud_vm::ExecutionReceipt,
 ) -> ExecutionPublicInputs {
+    // `initial_state_root` commits to the memory image the program started
+    // from. It used to be a hard-coded zero that nothing checked; the AIR now
+    // folds every pre-seeded word into a trace column and compares the two, so
+    // a guest that reads host-written weights can be proven — and cannot claim
+    // to have read different ones.
+    //
+    // Programs that seed nothing fold to zero and keep the old value.
+    let initial_state_root =
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace));
     // Public inputs must match BudZero AIR bindings.
     // `event_digest` is NOT a keccak of events — the AIR binds an additive
     // Log accumulator packed as eight little-endian u32 limbs (limb 0 holds
@@ -178,7 +187,7 @@ fn build_public_inputs(
     ExecutionPublicInputs {
         chain_id: DEFAULT_CHAIN_ID,
         program_hash: hash_u64_words(program),
-        initial_state_root: [0u8; 32],
+        initial_state_root,
         final_state_root: receipt.state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,

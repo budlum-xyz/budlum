@@ -55,6 +55,43 @@ pub fn event_digest_from_events(events: &[u64]) -> [u8; 32] {
     digest
 }
 
+/// Commitment to the parts of the initial memory image a program actually
+/// reads.
+///
+/// Folds `(addr, value)` for each seeded word the trace reads before anything
+/// writes it, in ascending address order, matching `COL_MEM_INIT_ACC` in the
+/// AIR. An image nothing reads folds to zero, so programs that seed nothing
+/// keep an all-zero `initial_state_root` and are unaffected.
+///
+/// **It commits to what was read, not to the whole image.** Bytes the host
+/// wrote and the program never touched are outside it — they cannot influence
+/// the execution, so binding them would only make the commitment depend on
+/// padding. What it does bind is every value the program consumed: change a
+/// weight the guest reads and the commitment moves, so a proof produced for
+/// one set of weights cannot be presented as a proof for another.
+///
+/// Callers hand it the addresses the trace read; see
+/// [`ProverAdapter::initial_memory_commitment`].
+pub fn memory_image_commitment_of_reads(reads: &[(u64, u64)]) -> [u8; 32] {
+    const P: u128 = 18_446_744_069_414_584_321;
+    const BETA: u128 = 0x9E37_79B9_7F4A_7C15;
+    const GAMMA: u128 = 0xC2B2_AE3D_27D4_EB4F;
+
+    let mut acc: u128 = 0;
+    for (i, (addr, val)) in reads.iter().enumerate() {
+        let term = ((*addr as u128) * GAMMA + *val as u128) % P;
+        acc = if i == 0 {
+            term
+        } else {
+            (acc * BETA + term) % P
+        };
+    }
+
+    let mut out = [0u8; 32];
+    out[0..8].copy_from_slice(&(acc as u64).to_le_bytes());
+    out
+}
+
 impl ExecutionPublicInputs {
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(176);
