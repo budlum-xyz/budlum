@@ -1064,7 +1064,16 @@ fn aux_trace_generator(
                 };
             let is_stack_op = is_push + is_pop + is_call + is_ret;
             let is_storage_op = is_sread + is_swrite;
-            let is_any_mem_op = is_real_mem_op + is_stack_op + is_storage_op;
+            // Merkle path reads join the demand side: an expansion row reads
+            // one sibling, the original step reads the key. The memory table
+            // already supplies those rows, and a supply without a matching
+            // demand unbalances the LogUp.
+            let is_verify_merkle_row = row[COL_IS_VERIFY_MERKLE];
+            let is_merkle_expand_mem = row[COL_VM_MERKLE_IS_EXPAND];
+            let is_merkle_key_read =
+                is_verify_merkle_row * (Goldilocks::ONE - is_merkle_expand_mem);
+            let is_merkle_mem_op = is_merkle_expand_mem + is_merkle_key_read;
+            let is_any_mem_op = is_real_mem_op + is_stack_op + is_storage_op + is_merkle_mem_op;
 
             let stack_ptr = row[COL_STACK_PTR];
             let stack_base = Goldilocks::from_u64(STACK_BASE);
@@ -1074,9 +1083,14 @@ fn aux_trace_generator(
                 + (is_pop + is_ret) * (stack_ptr - Goldilocks::ONE);
             let storage_addr = storage_base + row[COL_IMM];
 
+            let merkle_path_addr = row[COL_IMM];
+            let eight = Goldilocks::from_u64(8);
+            let merkle_sibling_addr = merkle_path_addr + eight + eight * row[COL_VM_MERKLE_ROUND];
             let final_mem_addr = is_real_mem_op * (row[COL_RS1_VAL] + row[COL_IMM])
                 + is_stack_op * stack_addr
-                + is_storage_op * storage_addr;
+                + is_storage_op * storage_addr
+                + is_merkle_expand_mem * merkle_sibling_addr
+                + is_merkle_key_read * merkle_path_addr;
 
             let is_write = is_store + is_push + is_call + is_swrite;
             let cpu_mem_val = is_load * row[COL_RD_VAL_NEW]
@@ -1086,7 +1100,9 @@ fn aux_trace_generator(
                 + is_call * (row[COL_PC] + Goldilocks::ONE)
                 + is_ret * row[COL_NEXT_PC]
                 + is_sread * row[COL_RD_VAL_NEW]
-                + is_swrite * row[COL_RS1_VAL];
+                + is_swrite * row[COL_RS1_VAL]
+                + is_merkle_expand_mem * row[COL_VM_MERKLE_SIBLING]
+                + is_merkle_key_read * row[COL_VM_MERKLE_KEY];
 
             let c_cpu_mem = register_term(
                 alpha,
@@ -2462,6 +2478,154 @@ mod tests {
     ///   `is_expand * is_expand * (nxt_round - round - 1) = 0`
     /// Forces the round index to increment by exactly 1 on every
     /// Active transition, so this tampering is detected.
+    /// A sibling the program never read must not verify.
+    ///
+    /// `merkle_sibling` used to be a free witness column: the AIR consumed it
+    /// as a Poseidon input and nothing tied it to the bytes at
+    /// `path_addr + 8 + 8 * round`. Measured before the fix — 64 expansion
+    /// rows, 0 carrying a `memory_addr`, and 0 of the 65 path words present in
+    /// the memory argument — so a prover could walk a path that was never
+    /// written and still produce a verifying proof.
+    ///
+    /// The expansion rows now emit their reads, and the LogUp demands them at
+    /// the address the instruction's immediate implies, so swapping a sibling
+    /// for one the memory table does not supply leaves the argument
+    /// unbalanced.
+    #[test]
+    fn rejects_verify_merkle_with_a_sibling_not_in_memory() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        vm.memory[256..264].copy_from_slice(&0u64.to_le_bytes());
+        for i in 0..64 {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&((1000 + i) as u64).to_le_bytes());
+        }
+        let _ = vm.run_receipt(&program);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
+                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        // Replace round 0's sibling with a value the program never read, and
+        // rebuild the Poseidon chain from it so the trace stays internally
+        // consistent everywhere except the memory argument.
+        let row1 = TRACE_WIDTH;
+        let cur0 = matrix.values[row1 + COL_VM_MERKLE_CURRENT].as_canonical_u64();
+        let bit0 = matrix.values[row1 + COL_VM_MERKLE_BIT].as_canonical_u64();
+        let forged_sibling = 424_242u64;
+        matrix.values[row1 + COL_VM_MERKLE_SIBLING] = Goldilocks::new(forged_sibling);
+
+        let (f0, f1) = if bit0 == 0 {
+            (cur0, forged_sibling)
+        } else {
+            (forged_sibling, cur0)
+        };
+        for (i, v) in [f0, f1, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+            let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
+            let x2 = x * x;
+            matrix.values[row1 + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
+            matrix.values[row1 + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
+        }
+        let mut running = bud_vm::merkle_poseidon_round(f0, f1);
+        for round in 1..64usize {
+            let base = (1 + round) * TRACE_WIDTH;
+            matrix.values[base + COL_VM_MERKLE_CURRENT] = Goldilocks::new(running);
+            let b = matrix.values[base + COL_VM_MERKLE_BIT].as_canonical_u64();
+            let sib = matrix.values[base + COL_VM_MERKLE_SIBLING].as_canonical_u64();
+            let (s0, s1) = if b == 0 {
+                (running, sib)
+            } else {
+                (sib, running)
+            };
+            for (i, v) in [s0, s1, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+                let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
+                let x2 = x * x;
+                matrix.values[base + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
+                matrix.values[base + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
+            }
+            running = bud_vm::merkle_poseidon_round(s0, s1);
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_with_preprocessed(
+                &config,
+                &air,
+                matrix.clone(),
+                Some(crate::plonky3_prover::aux_trace_generator(
+                    matrix.clone(),
+                    n_cpu,
+                    program.clone(),
+                )),
+                &public_values,
+                preprocessed_ref,
+            )
+        }));
+
+        let rejected_at_proving = attempted.is_err();
+        let rejected_at_verification = match attempted {
+            Err(_) => false,
+            Ok(p3_proof) => {
+                let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+                let envelope = ProofEnvelope {
+                    proof_format_version: 1,
+                    backend: "Plonky3-Keccak-Goldilocks".to_string(),
+                    p3_version: "0.5.2".to_string(),
+                    fri_params_id: "test_fri_params".to_string(),
+                    public_inputs_hash: pi.hash(),
+                    proof_bytes,
+                    degree_bits: degree_bits as u32,
+                };
+                Plonky3Adapter::verify(&envelope, &pi, &program).is_err()
+            }
+        };
+
+        assert!(
+            rejected_at_proving || rejected_at_verification,
+            "a sibling that memory never supplied produced a verifying proof: \
+             the path would prove membership under values the program never \
+             read. proving_rejected={rejected_at_proving}, \
+             verification_rejected={rejected_at_verification}"
+        );
+    }
+
     #[test]
     fn rejects_verify_merkle_with_skipped_round() {
         let program = vec![
@@ -2726,7 +2890,14 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            // The VerifyMerkle path words are read from memory, so they are
+            // now part of the initial-memory commitment. Derive it rather
+            // than asserting a zero root: a hard-coded value here would have
+            // to be updated by hand every time the path changes, and getting
+            // it wrong looks exactly like a soundness failure.
+            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
+                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -2789,7 +2960,14 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            // The VerifyMerkle path words are read from memory, so they are
+            // now part of the initial-memory commitment. Derive it rather
+            // than asserting a zero root: a hard-coded value here would have
+            // to be updated by hand every time the path changes, and getting
+            // it wrong looks exactly like a soundness failure.
+            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
+                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -2852,7 +3030,14 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            // The VerifyMerkle path words are read from memory, so they are
+            // now part of the initial-memory commitment. Derive it rather
+            // than asserting a zero root: a hard-coded value here would have
+            // to be updated by hand every time the path changes, and getting
+            // it wrong looks exactly like a soundness failure.
+            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
+                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -3506,7 +3691,14 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash: real_program_hash,
-            initial_state_root: [0u8; 32],
+            // The VerifyMerkle path words are read from memory, so they are
+            // now part of the initial-memory commitment. Derive it rather
+            // than asserting a zero root: a hard-coded value here would have
+            // to be updated by hand every time the path changes, and getting
+            // it wrong looks exactly like a soundness failure.
+            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
+                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,

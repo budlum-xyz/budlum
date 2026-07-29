@@ -395,15 +395,43 @@ the previous constraints assumed without checking.
 `rejects_verify_merkle_with_flipped_direction_bit` pins this, and it fails when
 the remainder chain is removed.
 
-**Still open: the witness is not bound to memory.** Two columns remain free:
+**Closed: the witness is bound to memory.** `COL_VM_MERKLE_SIBLING` and
+`COL_VM_MERKLE_KEY` used to be free witness columns — the AIR consumed them as
+Poseidon inputs and nothing tied them to the bytes at `path_addr`. Measured:
 
-- `COL_VM_MERKLE_SIBLING` is consumed as a Poseidon input, with nothing tying it
-  to the bytes at `path_addr + 8 + i * 8`.
-- `COL_VM_MERKLE_KEY` is constrained only for continuity across rows, not
-  against the word at `path_addr`.
+```text
+expansion rows              = 64
+rows carrying memory_addr   =  0
+path words in the argument  =  0  (of 65)
+```
 
-The VM reads all 65 words (`bud-vm/src/lib.rs`), but those reads do not enter
-the memory argument (`COL_MEM_ADDR` / `COL_MEM_VAL`), so a prover can supply a
-path that was never in memory. Until that is closed, a proof shows only that
-*some* consistent path exists, not that it is the one the program read —
-`verify_merkle_enabled` stays false.
+The VM reads all 65 words, but those reads never entered the memory argument,
+so a prover could supply a path that was never written.
+
+Each expansion row now emits its sibling read and the original step emits the
+key read, and both appear on the *demand* side of the memory LogUp at an
+address the AIR derives rather than the prover chooses:
+
+```text
+key:      addr = imm
+round r:  addr = imm + 8 + 8 * r
+```
+
+Two details made this work. A row that supplies a memory entry without a
+matching demand unbalances the LogUp, so adding the reads to the table alone
+turned every proof into `InvalidProof` until the demand side was extended in
+the same shape. And the expansion rows carried a synthetic instruction with
+`imm: 0`, so the derived addresses landed near zero while the table supplied
+the real ones — measured as a 7-of-8 mismatch across the first rows. The
+expansion rows carry the real immediate now.
+
+`rejects_verify_merkle_with_a_sibling_not_in_memory` pins it, and removing the
+Merkle terms from the demand side drops four Merkle tests.
+
+**What remains before the gate can open.** The path is now sound in the STARK:
+direction bits are bound to the key, the key and siblings are bound to memory,
+the Poseidon chain and the final root are constrained. What has not happened
+is an external review of the whole opcode against a real sparse-Merkle-tree
+deployment, which is what `MainnetActivation` is for. `verify_merkle_enabled`
+stays false until then, but it is now a process gate rather than a known
+soundness hole.
