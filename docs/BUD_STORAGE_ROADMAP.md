@@ -88,37 +88,56 @@ each other's live challenges in real time, within the deadline, for every
 challenge. That is a running cost and a detectable pattern rather than a
 one-off setup.
 
-## Gap 3 — redundancy is replication, not erasure coding
+## Gap 3 — erasure coding — **schema landed, coder pending**
 
-`ShardRef` is `(index, shard_id, size)`; there are no parity shards, and
-`manifest.rs` says the chunking algorithm is left to the caller. Durability
-therefore costs one full copy per replica.
+`ShardRef` now carries a `kind` (`Data` or `Parity`) and `ContentManifest`
+carries an `ErasureScheme { k, n }`: any `k` of the `n` shards reconstruct the
+object.
 
-**What the numbers look like elsewhere.** Storj's own analysis shows erasure
-codes reach higher durability at lower overhead than full replication, and the
-saving flows to operators because the same payment covers less stored data.
-Walrus reports a 4.5× replication factor with two-dimensional coding and
-self-healing recovery — recovery bandwidth proportional to the data actually
-lost, rather than to the whole blob. CrustChain reports roughly 82% cost
-reduction from combining Reed-Solomon with network coding.
+The saving is the point of the gap. For the same loss tolerance:
 
-**Direction for B.U.D.** Add parity shards to `ContentManifest` as an explicit
-`(k, n)` scheme: any `k` of `n` shards reconstruct the object. `ShardRef` would
-gain a kind discriminator (data or parity). The manifest already validates that
-shard indices are unique and sizes are non-zero, which is the right place to
-also validate `k <= n`.
+| scheme | tolerates | stored per byte |
+|---|---|---|
+| replication ×3 | 2 losses | **3.0×** |
+| `(k=4, n=6)` code | 2 losses | **1.5×** |
 
-## Gap 4 — recovery has no defined path
+`with_erasure` refuses a scheme the shard list cannot deliver — `n` has to
+equal `shard_count`, `k` has to equal the data shards present, and the
+difference has to equal the parity shards present. A manifest claiming
+tolerance it does not have is worse than one claiming none, because a repair
+trigger reads the claim and concludes the object is safe.
 
-When an operator is slashed for a missed challenge, nothing repairs the lost
-redundancy. Storj triggers repair when available pieces fall below a safety
-threshold; Walrus's self-healing recovers a lost sliver using bandwidth
-proportional to that sliver.
+Manifests written before this deserialize to `ShardKind::Data` and
+`ErasureScheme::default()`, which is replication — exactly what they were.
+`legacy_json_deserialises_without_the_new_fields` pins that.
 
-**Direction for B.U.D.** With erasure coding in place, a repair trigger becomes
-expressible: when live shards for a manifest drop below `k + margin`, open a
-repair deal. Without erasure coding there is nothing to reconstruct from, so
-this depends on Gap 3.
+**Still open:** the coder itself. Nothing computes parity shards or
+reconstructs from them yet; the schema describes redundancy that an off-chain
+chunker has to produce. `reed-solomon-erasure` (GF(2^8) or GF(2^16)) is the
+obvious dependency when that lands.
+
+## Gap 4 — repair trigger — **expressible now**
+
+With `k` known, "how much redundancy is left" is a number, and repair becomes a
+condition rather than a wish:
+
+```rust
+manifest.is_recoverable(live)        // live >= k
+manifest.needs_repair(live, margin)  // k <= live < k + margin
+```
+
+Repair fires with headroom, not at the edge. Waiting until `live == k` means
+the next loss is fatal with nothing in flight — Storj triggers on a safety
+threshold above `k` for the same reason.
+
+`needs_repair` returns false once the object is already unrecoverable: there is
+nothing to reconstruct from, and a repair deal opened then would only burn an
+operator bond. Both directions are pinned by tests.
+
+**Still open:** wiring the trigger to the deal lifecycle. `needs_repair` is a
+predicate; nobody calls it on a slash yet, and nothing opens the replacement
+deal. That work depends on the coder, since a repair with no parity to rebuild
+from is just a re-upload.
 
 ## Gap 5 — challenge economics — **measured and partly closed**
 
@@ -176,9 +195,10 @@ would bound total load directly and is the better long-term shape.
 
 1. **Gap 2** (replica encoding) — the challenge-layer half has landed;
    per-replica byte encoding remains and still changes the stored format.
-2. **Gap 3** (erasure coding) — changes the manifest shape; Gap 4 depends on it.
+2. **Gap 3** (erasure coding) — schema landed; the Reed-Solomon coder remains.
 3. **Gap 1** (real storage proof) — blocked on `VerifyMerkle`.
-4. **Gap 4** (repair) — needs Gap 3.
+4. **Gap 4** (repair) — predicates landed; wiring them to the deal lifecycle
+   needs the coder from Gap 3.
 5. **Gap 5** (bond calibration) — measured; the range-proportional bond has
    landed, calibrating `OPENER_BOND_PER_KIB` and moving the rate limit to a
    per-operator ceiling remain.
