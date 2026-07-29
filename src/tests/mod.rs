@@ -31,6 +31,8 @@ pub mod chaos;
 #[cfg(test)]
 pub mod distributed_settlement;
 #[cfg(test)]
+pub mod manifest_commitment_locks;
+#[cfg(test)]
 pub mod qcblob_quorum;
 // Re-enabled (was `#![cfg(false)]`'d ghost-hunting).
 // The permissionless-registry / liveness / invalid-vote state was reinstated

@@ -2763,6 +2763,16 @@ impl ChainActor {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
                     }
+                    // The manifest arrives from an RPC caller with its
+                    // `manifest_id` already filled in, and that id is the key
+                    // every deal, challenge and repair indexes by. Nothing
+                    // recomputed it, so a caller could register content under
+                    // any id it chose. Derive it from the contents and refuse
+                    // the mismatch.
+                    if let Err(e) = manifest.validate_untrusted() {
+                        let _ = response.send(Err(format!("invalid manifest: {e}")));
+                        continue;
+                    }
                     let manifest_id = manifest.manifest_id;
                     self.blockchain
                         .state

@@ -148,6 +148,22 @@ pub struct ContentManifest {
     /// those deserialize to replication and behave exactly as they did.
     #[serde(default)]
     pub erasure: ErasureScheme,
+    /// Length of the *object*, as opposed to `total_size`, which is the sum
+    /// of the stored shard sizes.
+    ///
+    /// Under replication the two are the same number and nothing needed to
+    /// tell them apart. Erasure coding separates them twice over: parity
+    /// shards are stored bytes that are not object bytes, and the last data
+    /// stripe is zero-padded to keep the shards equal-length, which
+    /// Reed-Solomon requires. A reconstructor holds only the manifest, so
+    /// without this field it cannot know where the object ends and the
+    /// padding begins — it would hand back trailing zeroes as content.
+    ///
+    /// Zero means "not recorded", which is how every manifest written before
+    /// this field deserializes; [`ContentManifest::content_size`] reads it as
+    /// `total_size` in that case, which is what those manifests meant.
+    #[serde(default)]
+    pub content_size: u64,
 }
 
 impl ContentManifest {
@@ -176,15 +192,137 @@ impl ContentManifest {
         }
         let shard_count = shards.len() as u32;
         let owner = crate::core::address::Address::zero();
-        let manifest_id = manifest_id_from_shards(&shards);
+        let erasure = ErasureScheme::replication(shard_count);
+        let manifest_id = manifest_id_from_parts(&shards, &erasure);
         Ok(ContentManifest {
             manifest_id,
             owner,
             total_size: total,
             shard_count,
-            erasure: ErasureScheme::replication(shard_count),
+            erasure,
+            content_size: total,
             shards,
         })
+    }
+
+    /// The object's byte length.
+    ///
+    /// Falls back to `total_size` for manifests written before
+    /// `content_size` existed. Those were replication-only, where the two are
+    /// the same number, so the fallback is their actual meaning rather than a
+    /// guess.
+    pub fn content_size(&self) -> u64 {
+        if self.content_size == 0 {
+            self.total_size
+        } else {
+            self.content_size
+        }
+    }
+
+    /// Record the object's byte length, for manifests whose stored bytes
+    /// exceed their content (erasure coding, or a padded tail stripe).
+    ///
+    /// Refuses a length larger than the stored bytes: an object cannot be
+    /// bigger than the shards holding it, and a reconstructor trusting such a
+    /// claim would read past the data it recovered.
+    pub fn with_content_size(mut self, content_size: u64) -> Result<Self, String> {
+        if content_size == 0 {
+            return Err("content_size must be greater than zero".into());
+        }
+        if content_size > self.total_size {
+            return Err(format!(
+                "content_size {content_size} exceeds the {} bytes stored across shards",
+                self.total_size
+            ));
+        }
+        self.content_size = content_size;
+        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure);
+        Ok(self)
+    }
+
+    /// Recompute the canonical id and check it against the one carried.
+    ///
+    /// `manifest_id` is the key every registry, deal and challenge indexes
+    /// by, and it arrives over RPC inside a caller-supplied struct. Nothing
+    /// recomputed it, so a caller could register a manifest under any id it
+    /// liked — including one already meaningful to someone else, or one
+    /// chosen so a later honest registration of the real content collides
+    /// with a squatted entry that `register_manifest` would then keep,
+    /// because registration is idempotent and first-writer-wins.
+    pub fn verify_id(&self) -> Result<(), String> {
+        let expected = manifest_id_from_parts(&self.shards, &self.erasure);
+        if expected != self.manifest_id {
+            return Err(format!(
+                "manifest_id {} does not match the {} its contents derive",
+                hex::encode(self.manifest_id.0),
+                hex::encode(expected.0)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Full structural check: the id matches, the shard list is coherent, and
+    /// the declared erasure scheme is one the shard list can deliver.
+    ///
+    /// This is what an untrusted manifest has to pass before the chain stores
+    /// it. The individual checks already existed on the construction paths;
+    /// what was missing was anything applying them to a manifest that arrived
+    /// fully formed instead of being built locally.
+    pub fn validate_untrusted(&self) -> Result<(), String> {
+        if self.shards.is_empty() {
+            return Err("ContentManifest must have at least one shard".into());
+        }
+        if self.shards.len() as u32 != self.shard_count {
+            return Err(format!(
+                "shard_count {} does not match the {} shards present",
+                self.shard_count,
+                self.shards.len()
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total: u64 = 0;
+        for s in &self.shards {
+            if s.size == 0 {
+                return Err(format!("Shard {} has size 0", s.index));
+            }
+            if !seen.insert(s.index) {
+                return Err(format!("Duplicate shard index {}", s.index));
+            }
+            total = total
+                .checked_add(s.size as u64)
+                .ok_or_else(|| "ContentManifest total size overflow".to_string())?;
+        }
+        if total != self.total_size {
+            return Err(format!(
+                "total_size {} does not match the {total} bytes the shards sum to",
+                self.total_size
+            ));
+        }
+        if self.content_size > self.total_size {
+            return Err(format!(
+                "content_size {} exceeds the {} bytes stored across shards",
+                self.content_size, self.total_size
+            ));
+        }
+        self.erasure.validate()?;
+        if self.erasure.n != self.shard_count {
+            return Err(format!(
+                "erasure n {} does not match shard_count {}",
+                self.erasure.n, self.shard_count
+            ));
+        }
+        let data = self
+            .shards
+            .iter()
+            .filter(|s| s.kind == ShardKind::Data)
+            .count() as u32;
+        if data != self.erasure.k {
+            return Err(format!(
+                "erasure k {} does not match the {data} data shards present",
+                self.erasure.k
+            ));
+        }
+        self.verify_id()
     }
 
     /// Attach an erasure scheme, validating it against the shard list.
@@ -225,6 +363,7 @@ impl ContentManifest {
             ));
         }
         self.erasure = erasure;
+        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure);
         Ok(self)
     }
 
@@ -291,6 +430,10 @@ impl ContentManifest {
 /// Canonical, deterministic manifest id. Domain-tagged so a manifest id
 /// Can never collide with a chunk `ContentId` (which uses a different
 /// Tag).
+///
+/// Kept for manifests that predate erasure coding, where every shard was
+/// data and the scheme was replication. New code should call
+/// [`manifest_id_from_parts`], which also binds the redundancy claim.
 pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
     let mut buf = Vec::with_capacity(8 + shards.len() * (4 + 32 + 4));
     buf.extend_from_slice(b"BDLM_MANIFEST_V1");
@@ -301,6 +444,41 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
         buf.extend_from_slice(&s.size.to_le_bytes());
     }
     ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V1", &buf]))
+}
+
+/// Canonical manifest id covering the redundancy claim as well as the shards.
+///
+/// V1 hashed `(index, shard_id, size)` per shard and nothing else. That was
+/// complete while replication was the only scheme, but erasure coding added
+/// two fields that change what the manifest *means* without changing any
+/// byte V1 hashed:
+///
+/// * `kind` — relabelling a data shard as parity, or the reverse, alters
+///   which shards a reconstructor treats as content and which it treats as
+///   redundancy.
+/// * `erasure` — `k` is the number a repair trigger compares against. A
+///   manifest claiming `k = 1` when four shards are needed reads as safe at
+///   one surviving shard, so no repair opens and the object is lost quietly.
+///
+/// Both were outside the commitment, so two manifests with the same id could
+/// disagree about them, and whichever registered first would define the
+/// entry. Binding them makes the id mean the whole claim.
+pub fn manifest_id_from_parts(shards: &[ShardRef], erasure: &ErasureScheme) -> ContentId {
+    let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
+    buf.extend_from_slice(b"BDLM_MANIFEST_V2");
+    buf.extend_from_slice(&(shards.len() as u32).to_le_bytes());
+    for s in shards {
+        buf.extend_from_slice(&s.index.to_le_bytes());
+        buf.extend_from_slice(&s.shard_id.0);
+        buf.extend_from_slice(&s.size.to_le_bytes());
+        buf.push(match s.kind {
+            ShardKind::Data => 0u8,
+            ShardKind::Parity => 1u8,
+        });
+    }
+    buf.extend_from_slice(&erasure.k.to_le_bytes());
+    buf.extend_from_slice(&erasure.n.to_le_bytes());
+    ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V2", &buf]))
 }
 
 #[cfg(test)]
