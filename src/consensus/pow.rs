@@ -19,8 +19,8 @@ pub struct U256 {
 }
 
 impl U256 {
-    pub const ZERO: U256 = U256 { limbs: [0; 4] };
-    pub const MAX: U256 = U256 {
+    pub const ZERO: Self = Self { limbs: [0; 4] };
+    pub const MAX: Self = Self {
         limbs: [u64::MAX; 4],
     };
 
@@ -28,34 +28,36 @@ impl U256 {
     ///
     /// Wrapping here would be the same class of bug this type exists to fix:
     /// a huge amount of work would score as a small one.
-    pub fn pow2(exponent: u32) -> U256 {
+    #[must_use]
+    pub const fn pow2(exponent: u32) -> Self {
         if exponent >= 256 {
-            return U256::MAX;
+            return Self::MAX;
         }
         let limb = (exponent / 64) as usize;
         let bit = exponent % 64;
         let mut limbs = [0u64; 4];
         limbs[limb] = 1u64 << bit;
-        U256 { limbs }
+        Self { limbs }
     }
 
-    pub fn saturating_add(self, other: U256) -> U256 {
+    #[must_use]
+    pub const fn saturating_add(self, other: Self) -> Self {
         let mut limbs = [0u64; 4];
         let mut carry = 0u64;
-        for ((out, lhs), rhs) in limbs
-            .iter_mut()
-            .zip(self.limbs.iter())
-            .zip(other.limbs.iter())
-        {
-            let (sum, c1) = lhs.overflowing_add(*rhs);
+        // Indexed rather than iterated: `const fn` has no iterators, and the
+        // carry chain is inherently sequential across limbs anyway.
+        let mut i = 0;
+        while i < 4 {
+            let (sum, c1) = self.limbs[i].overflowing_add(other.limbs[i]);
             let (sum, c2) = sum.overflowing_add(carry);
-            *out = sum;
-            carry = u64::from(c1) + u64::from(c2);
+            limbs[i] = sum;
+            carry = c1 as u64 + c2 as u64; // bool as u64: const fn, From unavailable
+            i += 1;
         }
         if carry > 0 {
-            U256::MAX
+            Self::MAX
         } else {
-            U256 { limbs }
+            Self { limbs }
         }
     }
 
@@ -63,7 +65,8 @@ impl U256 {
     ///
     /// Only for reporting. A saturating value cannot order two chains, which
     /// is why `is_better_chain` compares `U256` directly.
-    pub fn saturating_to_u128(self) -> u128 {
+    #[must_use]
+    pub const fn saturating_to_u128(self) -> u128 {
         if self.limbs[2] != 0 || self.limbs[3] != 0 {
             return u128::MAX;
         }
@@ -73,10 +76,11 @@ impl U256 {
 
 impl Ord for U256 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Most significant limb first.
-        for i in (0..4).rev() {
-            match self.limbs[i].cmp(&other.limbs[i]) {
-                std::cmp::Ordering::Equal => continue,
+        // Most significant limb first, so ordering follows magnitude rather
+        // than the little-endian storage order.
+        for (lhs, rhs) in self.limbs.iter().rev().zip(other.limbs.iter().rev()) {
+            match lhs.cmp(rhs) {
+                std::cmp::Ordering::Equal => (),
                 non_equal => return non_equal,
             }
         }
@@ -157,13 +161,18 @@ impl PoWEngine {
     /// the top but destroy it at the bottom — devnet runs at difficulty 1 or 2,
     /// and a shift large enough to save difficulty 32 flattens those to zero.
     /// Bitcoin carries chainwork in 256 bits for this reason, so this does too.
+    #[must_use]
     pub fn accumulated_work(&self, chain: &[Block]) -> U256 {
         let mut score = U256::ZERO;
         for index in 1..chain.len() {
             let difficulty = self.difficulty_for_next_block(&chain[..index]);
             // 16^d == 2^(4d); take the exponent directly so no intermediate
             // has to fit a narrower type.
-            let work = U256::pow2((difficulty as u32).saturating_mul(4));
+            let work = U256::pow2(
+                u32::try_from(difficulty)
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(4),
+            );
             score = score.saturating_add(work);
         }
         score

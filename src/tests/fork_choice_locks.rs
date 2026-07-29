@@ -2,10 +2,10 @@
 //!
 //! Two findings, both measured before the fix:
 //!
-//! 1. **PoS treated its checkpoint as a term in the score**, so chain length
+//! 1. **`PoS` treated its checkpoint as a term in the score**, so chain length
 //!    could buy the difference and a fork branching from an earlier
 //!    checkpoint could win outright.
-//! 2. **PoW accumulated work in a `u128` that saturates**, and the retarget
+//! 2. **`PoW` accumulated work in a `u128` that saturates**, and the retarget
 //!    ceiling sits exactly at the overflow boundary, so at high difficulty
 //!    every candidate scored `u128::MAX` and no reorg was ever accepted.
 //!
@@ -23,11 +23,10 @@ fn chain_of(len: usize, tag: &str) -> Vec<Block> {
     for index in 0..len {
         let previous_hash = chain
             .last()
-            .map(|b: &Block| b.hash.clone())
-            .unwrap_or_else(|| "0".repeat(64));
+            .map_or_else(|| "0".repeat(64), |b: &Block| b.hash.clone());
         let mut block = Block::new(index as u64, previous_hash, vec![]);
         // Deterministic, distinct, and 64 hex chars like a real block hash.
-        block.hash = format!("{:0>60}{:0>4x}", tag, index);
+        block.hash = format!("{tag:0>60}{index:0>4x}");
         block.index = index as u64;
         chain.push(block);
     }
