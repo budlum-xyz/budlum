@@ -168,6 +168,11 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .execution_weights_digest
                             .map(|d| d.to_vec())
                             .unwrap_or_default(),
+                        execution_dims: spec
+                            .execution_dims
+                            .as_ref()
+                            .map(|dims| dims.iter().map(|d| u32::from(*d)).collect())
+                            .unwrap_or_default(),
                     },
                 )),
             ),
@@ -372,6 +377,22 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .weights_digest
                             .map(|d| d.to_vec())
                             .unwrap_or_default(),
+                        public_inputs: proof.public_inputs.as_ref().map(|pi| {
+                            pb::ProtoAiExecutionPublicInputs {
+                                chain_id: pi.chain_id,
+                                program_hash: pi.program_hash.to_vec(),
+                                initial_state_root: pi.initial_state_root.to_vec(),
+                                final_state_root: pi.final_state_root.to_vec(),
+                                sender: pi.sender,
+                                nonce: pi.nonce,
+                                block_height: pi.block_height,
+                                gas_limit: pi.gas_limit,
+                                gas_used: pi.gas_used,
+                                exit_code: pi.exit_code,
+                                trace_len: pi.trace_len,
+                                event_digest: pi.event_digest.to_vec(),
+                            }
+                        }),
                     },
                 )),
             ),
@@ -916,6 +937,17 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     require_execution_proof: false,
                     execution_program_hash: None,
                     execution_class: 0,
+                    execution_dims: if payload.execution_dims.is_empty() {
+                        None
+                    } else {
+                        let mut dims = Vec::with_capacity(payload.execution_dims.len());
+                        for d in &payload.execution_dims {
+                            dims.push(u16::try_from(*d).map_err(|_| {
+                                "AiModelRegister execution_dims entry exceeds u16".to_string()
+                            })?);
+                        }
+                        Some(dims)
+                    },
                 })
             }
             pb::ProtoTransactionType::AiInferenceRequest => {
@@ -1244,6 +1276,29 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                             None
                         } else {
                             Some(to32(&payload.weights_digest, "weights_digest")?)
+                        },
+                        public_inputs: match payload.public_inputs {
+                            None => None,
+                            Some(pi) => Some(crate::ai::types::AiExecutionPublicInputs {
+                                chain_id: pi.chain_id,
+                                program_hash: to32(&pi.program_hash, "pi.program_hash")?,
+                                initial_state_root: to32(
+                                    &pi.initial_state_root,
+                                    "pi.initial_state_root",
+                                )?,
+                                final_state_root: to32(
+                                    &pi.final_state_root,
+                                    "pi.final_state_root",
+                                )?,
+                                sender: pi.sender,
+                                nonce: pi.nonce,
+                                block_height: pi.block_height,
+                                gas_limit: pi.gas_limit,
+                                gas_used: pi.gas_used,
+                                exit_code: pi.exit_code,
+                                trace_len: pi.trace_len,
+                                event_digest: to32(&pi.event_digest, "pi.event_digest")?,
+                            }),
                         },
                     },
                 }
@@ -1944,6 +1999,7 @@ mod tests {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_dims: None,
                 execution_weights_digest: None,
             }),
             TransactionType::AiInferenceRequest(crate::ai::types::AiInferenceRequest {

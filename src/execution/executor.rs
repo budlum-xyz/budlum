@@ -1666,20 +1666,63 @@ impl Executor {
                     })?
                     .clone();
                 let model = state.ai_registry.models.get(&proof.model_id).cloned();
-                // A proof is allowed to affect finalization/payment only after
-                // Full STARK verification against the registered guest
-                // Program and canonical public inputs. The transaction path
-                // Currently has no program/public-input bundle to pass to the
-                // Verifier, so proof-required models must fail closed rather
-                // Than treating an envelope as evidence.
+                // A proof may affect finalization or payment only after full
+                // STARK verification against the registered guest program and
+                // the public inputs the proof was produced against.
+                //
+                // This used to be unreachable, and the comment here said the
+                // transaction path had "no program/public-input bundle to pass
+                // to the verifier". Both halves of that bundle now exist: the
+                // model registers `execution_program_hash`, which the AIR also
+                // binds, and `AiExecutionProof::public_inputs` carries the
+                // inputs the envelope was produced against. A proof that omits
+                // them cannot be verified, so a proof-required model still
+                // fails closed — but for a reason that names what is missing
+                // from the proof rather than what is missing from the node.
                 if model
                     .as_ref()
                     .is_some_and(|spec| spec.require_execution_proof)
                 {
-                    return Err(BudlumError::validation(
-                        "ai_exec_verifier_unavailable",
-                        "execution-proof finalization is disabled until full STARK verification is wired",
-                    ));
+                    let Some(ref claimed_inputs) = proof.public_inputs else {
+                        return Err(BudlumError::validation(
+                            "ai_exec_no_public_inputs",
+                            "proof-required model needs an execution proof carrying its public inputs",
+                        ));
+                    };
+                    let spec = model.as_ref().ok_or_else(|| {
+                        BudlumError::validation("ai_exec_no_model", "model not registered")
+                    })?;
+                    let Some(registered_program_hash) = spec.execution_program_hash else {
+                        return Err(BudlumError::validation(
+                            "ai_exec_no_program_hash",
+                            "proof-required model must register execution_program_hash",
+                        ));
+                    };
+                    // The public inputs are the prover's claim; bind them to
+                    // the registration before spending work on the STARK. The
+                    // AIR ties `program_hash` to the trace, so agreeing here
+                    // means the proof is about the registered program.
+                    if claimed_inputs.program_hash != registered_program_hash {
+                        return Err(BudlumError::validation(
+                            "ai_exec_program_hash",
+                            "public inputs name a different program than the model registered",
+                        ));
+                    }
+                    if claimed_inputs.exit_code != 0 {
+                        return Err(BudlumError::validation(
+                            "ai_exec_exit_code",
+                            "execution proof attests to a failed run",
+                        ));
+                    }
+                    let expected_inputs = claimed_inputs.to_execution_inputs();
+                    let program = crate::ai::execution::guest_program_for_model(spec)
+                        .map_err(|e| BudlumError::validation("ai_exec_program_rebuild", e))?;
+                    crate::ai::execution::verify_execution_proof_stark(
+                        proof,
+                        &program,
+                        &expected_inputs,
+                    )
+                    .map_err(|e| BudlumError::validation("ai_exec_stark", e))?;
                 }
                 let report = crate::ai::execution::verify_execution_proof_structural_with_model(
                     proof,

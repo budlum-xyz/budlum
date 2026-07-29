@@ -15,12 +15,13 @@ mod verify;
 pub use guest::{
     build_fixed_point_mlp_guest, build_matmul_guest_program, estimate_full_gas,
     estimate_guest_instruction_count, estimate_structural_gas, eval_fixed_point_mlp, field_to_i32,
-    i32_to_field, input_commitment, matmul_program_hash, output_commitment,
-    program_hash_from_words, prove_mlp_inference, read_guest_output, run_matmul_guest,
-    setup_guest_memory, validate_gas_budget, weights_digest, words_to_bytecode, FixedPointMlpSpec,
-    GuestMemoryLayout, FIELD_HALF, GAS_BASE_STARK, GAS_BASE_STRUCTURAL, GAS_PER_KIB_PROOF,
-    GAS_PER_LAYER, GAS_PER_PARAM, GOLDILOCKS_P, GUEST_MEMORY_BYTES, MAX_GUEST_OPS, MAX_PROOF_BYTES,
-    MLP_GUEST_VERSION, WORD_BYTES,
+    guest_program_for_model, i32_to_field, input_commitment, matmul_program_hash,
+    output_commitment, program_hash_from_words, prove_mlp_inference, read_guest_output,
+    run_matmul_guest, setup_guest_memory, stark_program_hash_from_words, validate_gas_budget,
+    weights_digest, words_to_bytecode, FixedPointMlpSpec, GuestMemoryLayout, FIELD_HALF,
+    GAS_BASE_STARK, GAS_BASE_STRUCTURAL, GAS_PER_KIB_PROOF, GAS_PER_LAYER, GAS_PER_PARAM,
+    GOLDILOCKS_P, GUEST_MEMORY_BYTES, MAX_GUEST_OPS, MAX_PROOF_BYTES, MLP_GUEST_VERSION,
+    WORD_BYTES,
 };
 pub use model_class::{
     AiExecutionModelClass, ModelClassLimits, DEFAULT_EXECUTION_CLASS, MAX_MLP_LAYERS,

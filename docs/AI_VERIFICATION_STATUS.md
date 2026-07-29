@@ -13,8 +13,63 @@ feature, while the code deliberately refuses to perform it.
 | Guest program computes the MLP forward pass in-VM and matches the host evaluator bit-for-bit | working | `build_matmul_guest_program`, `run_matmul_guest` |
 | Initial guest memory (weights, biases, input) bound by the AIR | working | `COL_MEM_INIT_ACC`, `initial_state_root` |
 | Weights bound outside the proof, by registry comparison | working | `AiModelSpec::execution_weights_digest` |
-| STARK verification of an inference proof on the transaction path | **not wired** | `src/execution/executor.rs` |
+| STARK verification of an inference proof on the transaction path | working | `src/execution/executor.rs` |
 | `VerifyInference` opcode (0x1F) inside the zkVM | **always returns 0** | `budzero/bud-vm/src/lib.rs` |
+
+## STARK verification on the transaction path
+
+The executor verifies the STARK for any model with
+`require_execution_proof`. It used to refuse them outright, with the comment
+"the transaction path currently has no program/public-input bundle to pass to
+the verifier". Three things were missing, and each was a different kind of
+gap.
+
+**The program hash came from two schemes.** `AiExecutionProof::program_hash`
+carried `program_hash_from_words` — SHA3-256 over a domain tag, the guest
+version and the words — while `ExecutionPublicInputs::program_hash` carried an
+unlabelled Keccak-256 over the same words. `verify_execution_proof_stark`
+compares the two, so it could never succeed. Measured, with everything else
+already lining up:
+
+```
+program_hash esit mi -> true      (verifier rebuilt the program)
+pi hash esit mi      -> true      (public inputs matched byte for byte)
+pi.initial_state_root == turetilen -> true
+SONUC: Err("execution proof program_hash != public_inputs.program_hash")
+```
+
+`stark_program_hash_from_words` is now the one the proof and the registration
+both use, because the AIR fixes that end.
+
+**The verifier had no program.** A fixed-point MLP guest depends on the layer
+shape alone — weights are read from memory, not baked into immediates — so
+`AiModelSpec::execution_dims` is enough to rebuild the exact instruction words
+a proof was produced against. `guest_program_for_model` does that.
+`guest_program_for_model_ignores_weight_values` pins that weights never reach
+the program, which is why registering the architecture is enough and the
+owner's weights stay off-chain.
+
+**The verifier had no public inputs.** `AiInferenceRequest` carries an input
+*commitment*, not the raw input, so a node cannot replay the guest to derive
+`initial_state_root` or the gas counters.
+`AiExecutionProof::public_inputs` carries them. That is a claim, not an
+axiom: the envelope commits to `public_inputs_hash`, so a prover shipping
+inputs it did not prove against gets a mismatch, and the AIR binds every
+field in the bundle to the trace.
+`tampering_with_the_carried_public_inputs_is_refused` pins it.
+
+The executor checks, in order: the proof carries public inputs; the model
+registered a program hash; the claimed `program_hash` equals the registered
+one; `exit_code` is zero; and then the STARK itself against the rebuilt
+program. Each failure has its own error
+(`ai_exec_no_public_inputs`, `ai_exec_no_program_hash`,
+`ai_exec_program_hash`, `ai_exec_exit_code`, `ai_exec_stark`), so a rejection
+says which part disagreed.
+
+`a_real_inference_proof_verifies_against_the_registered_model` runs the whole
+thing: a 2 -> 2 -> 1 network with a negative weight so ReLU fires, proved and
+then verified against a model that holds only the architecture and the
+digests.
 
 ## What the guest actually computes
 

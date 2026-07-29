@@ -17,21 +17,54 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
 }
 
-/// The transaction path must keep failing closed for proof-required models.
-/// If STARK verification gets wired, this marker disappears and the status
-/// document has to be rewritten in the same change.
+/// The transaction path must verify the STARK for proof-required models.
+///
+/// This test used to assert the opposite: that the executor still carried the
+/// `ai_exec_verifier_unavailable` marker, because there was no program or
+/// public-input bundle to hand a verifier. Both halves now exist —
+/// `execution_dims` lets the node rebuild the guest program and
+/// `AiExecutionProof::public_inputs` carries the inputs the envelope was
+/// produced against — so the marker is gone and the check is real. The
+/// direction is reversed rather than deleted: if the call disappears the lock
+/// fails.
 #[test]
-fn execution_path_still_fails_closed_for_proof_required_models() {
+fn execution_path_verifies_the_stark_for_proof_required_models() {
     let src = read("src/execution/executor.rs");
     assert!(
-        src.contains("ai_exec_verifier_unavailable"),
-        "executor no longer fails closed for require_execution_proof models — \
-         wire the real verifier and update docs/AI_VERIFICATION_STATUS.md"
+        !src.contains("ai_exec_verifier_unavailable"),
+        "the executor is refusing proof-required models again; if that is \
+         deliberate, update docs/AI_VERIFICATION_STATUS.md in the same change"
     );
+    assert!(
+        src.contains("verify_execution_proof_stark"),
+        "the transaction path must call the STARK verifier for \
+         require_execution_proof models"
+    );
+    assert!(
+        src.contains("guest_program_for_model"),
+        "the STARK needs the guest program rebuilt from the registered model"
+    );
+    for marker in [
+        "ai_exec_no_public_inputs",
+        "ai_exec_no_program_hash",
+        "ai_exec_program_hash",
+        "ai_exec_stark",
+    ] {
+        assert!(
+            src.contains(marker),
+            "the executor must still fail closed on {marker}"
+        );
+    }
 }
 
-/// The STARK helpers are scaffolding: nothing on a production path may call
-/// them until the guest program + public inputs are actually available.
+/// The remaining STARK helpers are still scaffolding.
+///
+/// `verify_execution_proof_stark` is deliberately absent from this list: the
+/// transaction path calls it now, which is what
+/// `execution_path_verifies_the_stark_for_proof_required_models` pins. The
+/// three below are the ones with no caller — `verify_execution_proof_full`
+/// bundles the structural and STARK checks the executor performs separately,
+/// and the other two belong to paths that are not wired.
 #[test]
 fn stark_verification_helpers_have_no_production_callers() {
     let scaffolding = [

@@ -292,6 +292,7 @@ mod relayer_escrow_silent_failure_regression {
                 require_execution_proof: false,
                 execution_program_hash: None,
                 execution_class: 0,
+                execution_dims: None,
                 execution_weights_digest: None,
             })
             .unwrap();
