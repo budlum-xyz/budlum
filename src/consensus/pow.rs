@@ -3,6 +3,92 @@ use crate::core::account::AccountState;
 use crate::core::block::Block;
 use std::sync::RwLock;
 use tracing::info;
+
+/// A 256-bit unsigned integer, carrying exactly the three operations
+/// accumulated proof-of-work needs: `2^n`, addition, and comparison.
+///
+/// Chainwork does not fit 128 bits (see [`PoWEngine::accumulated_work`]), and
+/// pulling in a bignum crate to add four numbers would be a dependency, an
+/// audit obligation and a supply-chain entry for arithmetic that is a dozen
+/// lines. Stored as four little-endian 64-bit limbs; `Ord` is derived over the
+/// big-endian view via an explicit comparison so ordering matches magnitude.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct U256 {
+    /// Little-endian limbs: `limbs[0]` is the least significant.
+    limbs: [u64; 4],
+}
+
+impl U256 {
+    pub const ZERO: U256 = U256 { limbs: [0; 4] };
+    pub const MAX: U256 = U256 {
+        limbs: [u64::MAX; 4],
+    };
+
+    /// `2^exponent`, saturating at [`U256::MAX`] rather than wrapping.
+    ///
+    /// Wrapping here would be the same class of bug this type exists to fix:
+    /// a huge amount of work would score as a small one.
+    pub fn pow2(exponent: u32) -> U256 {
+        if exponent >= 256 {
+            return U256::MAX;
+        }
+        let limb = (exponent / 64) as usize;
+        let bit = exponent % 64;
+        let mut limbs = [0u64; 4];
+        limbs[limb] = 1u64 << bit;
+        U256 { limbs }
+    }
+
+    pub fn saturating_add(self, other: U256) -> U256 {
+        let mut limbs = [0u64; 4];
+        let mut carry = 0u64;
+        for ((out, lhs), rhs) in limbs
+            .iter_mut()
+            .zip(self.limbs.iter())
+            .zip(other.limbs.iter())
+        {
+            let (sum, c1) = lhs.overflowing_add(*rhs);
+            let (sum, c2) = sum.overflowing_add(carry);
+            *out = sum;
+            carry = u64::from(c1) + u64::from(c2);
+        }
+        if carry > 0 {
+            U256::MAX
+        } else {
+            U256 { limbs }
+        }
+    }
+
+    /// The low 128 bits, saturating if anything is set above them.
+    ///
+    /// Only for reporting. A saturating value cannot order two chains, which
+    /// is why `is_better_chain` compares `U256` directly.
+    pub fn saturating_to_u128(self) -> u128 {
+        if self.limbs[2] != 0 || self.limbs[3] != 0 {
+            return u128::MAX;
+        }
+        (self.limbs[0] as u128) | ((self.limbs[1] as u128) << 64)
+    }
+}
+
+impl Ord for U256 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Most significant limb first.
+        for i in (0..4).rev() {
+            match self.limbs[i].cmp(&other.limbs[i]) {
+                std::cmp::Ordering::Equal => continue,
+                non_equal => return non_equal,
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+}
+
+impl PartialOrd for U256 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 #[derive(Debug, Clone)]
 pub struct PoWConfig {
     pub difficulty: usize,
@@ -39,6 +125,50 @@ impl PoWEngine {
             current_difficulty: RwLock::new(d),
         }
     }
+    /// Accumulated proof-of-work across `chain`, in 256 bits.
+    ///
+    /// Work per block is `16^difficulty` — one hex digit of leading zeroes per
+    /// difficulty step. `adjusted_difficulty` clamps difficulty to 32, and
+    /// `16^32` is exactly `2^128`, so the retarget ceiling sits precisely at
+    /// the boundary of a `u128`. That is not a coincidence to design around;
+    /// it is the same 128 appearing on both sides.
+    ///
+    /// The previous accumulator saturated instead of widening:
+    ///
+    /// ```text
+    /// let work = 16u128.checked_pow(d).unwrap_or(u128::MAX);
+    /// score = score.saturating_add(work.max(1));
+    /// ```
+    ///
+    /// Measured, all of these produced the identical score:
+    ///
+    /// ```text
+    /// difficulty 32, any chain length  -> u128::MAX
+    /// difficulty 31, 16 blocks or more -> u128::MAX
+    /// ```
+    ///
+    /// Once two candidates both saturate they compare equal, `is_better_chain`
+    /// returns false for every reorg, and the node locks onto whichever chain
+    /// it saw first with no way to be corrected. Saturation is not a
+    /// conservative failure here: it disables fork choice silently, at exactly
+    /// the difficulties a mature chain reaches.
+    ///
+    /// Scaling every term down by a shared constant would preserve ordering at
+    /// the top but destroy it at the bottom — devnet runs at difficulty 1 or 2,
+    /// and a shift large enough to save difficulty 32 flattens those to zero.
+    /// Bitcoin carries chainwork in 256 bits for this reason, so this does too.
+    pub fn accumulated_work(&self, chain: &[Block]) -> U256 {
+        let mut score = U256::ZERO;
+        for index in 1..chain.len() {
+            let difficulty = self.difficulty_for_next_block(&chain[..index]);
+            // 16^d == 2^(4d); take the exponent directly so no intermediate
+            // has to fit a narrower type.
+            let work = U256::pow2((difficulty as u32).saturating_mul(4));
+            score = score.saturating_add(work);
+        }
+        score
+    }
+
     pub fn get_difficulty(&self) -> usize {
         *self
             .current_difficulty
@@ -263,13 +393,14 @@ impl ConsensusEngine for PoWEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        let mut score = 0u128;
-        for index in 1..chain.len() {
-            let difficulty = self.difficulty_for_next_block(&chain[..index]);
-            let work = 16u128.checked_pow(difficulty as u32).unwrap_or(u128::MAX);
-            score = score.saturating_add(work.max(1));
-        }
-        score
+        // Retained for the trait's reporting use. Chain comparison goes
+        // through `accumulated_work`, which does not truncate; this value is
+        // the low 128 bits and can saturate, so it must not decide a reorg.
+        self.accumulated_work(chain).saturating_to_u128()
+    }
+
+    fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
+        self.accumulated_work(candidate) > self.accumulated_work(current)
     }
 }
 #[cfg(test)]

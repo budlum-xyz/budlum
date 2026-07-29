@@ -209,6 +209,39 @@ impl PoSEngine {
         }
         Ok(())
     }
+    /// The last checkpoint this node has established, and its hash.
+    ///
+    /// Returns `None` when no checkpoint exists yet, which is a genuinely
+    /// different state from "checkpoint at height 0" and has to stay
+    /// distinguishable: a node with no checkpoint has nothing to anchor
+    /// against and must not silently behave as though it were anchored at
+    /// genesis.
+    pub fn last_checkpoint(&self) -> Option<(u64, String)> {
+        self.checkpoints
+            .read()
+            .ok()
+            .and_then(|guard| guard.last().map(|c| (c.block_index, c.block_hash.clone())))
+    }
+
+    /// Whether `chain` contains this node's last checkpoint at the height and
+    /// hash it was recorded with.
+    ///
+    /// A checkpoint is a revert limit, not a quantity. Ethereum's weak
+    /// subjectivity checkpoints work this way: blocks before a checkpoint
+    /// cannot be changed, so a fork that departs earlier is invalid *as a
+    /// matter of mechanism design*, whatever its length. A candidate that
+    /// does not contain the checkpoint is such a fork.
+    pub fn chain_honours_checkpoint(&self, chain: &[Block]) -> bool {
+        let Some((height, hash)) = self.last_checkpoint() else {
+            // Nothing established yet: nothing to violate.
+            return true;
+        };
+        let Ok(index) = usize::try_from(height) else {
+            return false;
+        };
+        chain.get(index).is_some_and(|block| block.hash == hash)
+    }
+
     pub fn is_before_checkpoint(&self, block: &Block) -> bool {
         if let Ok(guard) = self.checkpoints.read() {
             if let Some(last_cp) = guard.last() {
@@ -790,12 +823,39 @@ impl ConsensusEngine for PoSEngine {
     }
 
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
-        let last_checkpoint_height = if let Ok(guard) = self.checkpoints.read() {
-            guard.last().map_or(0, |c| c.block_index)
-        } else {
-            0
-        };
-        (last_checkpoint_height as u128) * 1000 + chain.len() as u128
+        // A candidate that abandons the checkpoint scores zero rather than
+        // scoring low. Previously the checkpoint height was a *term* in the
+        // score:
+        //
+        //     score = last_checkpoint_height * 1000 + chain.len()
+        //
+        // which let length buy the difference. Measured against that formula,
+        // a fork branching from one checkpoint earlier and running 1001 blocks
+        // longer wins outright:
+        //
+        //     honest   cp=10 len=1000 -> 11000
+        //     attacker cp= 9 len=2001 -> 11001
+        //
+        // The 1000 was also unrelated to `epoch_length`, so the exchange rate
+        // between "a checkpoint" and "a block" was arbitrary. There should be
+        // no exchange rate. A fork that drops the checkpoint is not a worse
+        // chain, it is not a chain this node may adopt.
+        if !self.chain_honours_checkpoint(chain) {
+            return 0;
+        }
+        chain.len() as u128
+    }
+
+    fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
+        // Fail closed on the candidate specifically. Scoring alone would let
+        // a checkpoint-violating candidate win whenever the current chain
+        // also scored zero — which happens on a node whose own chain has not
+        // reached the checkpoint height yet, exactly the node least able to
+        // tell the difference.
+        if !self.chain_honours_checkpoint(candidate) {
+            return false;
+        }
+        self.fork_choice_score(candidate) > self.fork_choice_score(current)
     }
 
     fn record_block(
