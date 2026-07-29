@@ -23,6 +23,28 @@
 
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 use sha3::{Digest, Keccak256};
+
+/// Hard bound on trie descent.
+///
+/// A path is `keccak256(key)` expanded to nibbles, so an honest proof
+/// descends at most 64 levels and each step consumes at least one nibble.
+/// Extension nodes are the exception: a hex-prefix path can decode to an
+/// *empty* nibble list (`hp_decode(&[0x00])`), and `nibbles.starts_with(&[])`
+/// is always true, so `remaining` comes back the same length it went in.
+///
+/// Two such nodes pointing at each other never terminate. Measured against
+/// the unbounded version:
+///
+/// ```text
+/// A -> B, B -> A, both empty-path extensions
+/// fatal runtime error: stack overflow, aborting
+/// ```
+///
+/// The proof bytes come from a bridge relayer, so that is a remote abort of
+/// the node process, not a local misuse. The depth is generous — twice the
+/// longest honest descent — because the goal is to stop non-termination, not
+/// to second-guess a legitimate trie.
+const MAX_WALK_DEPTH: usize = 128;
 use std::collections::HashMap;
 
 /// MPT doğrulama hatası.
@@ -42,6 +64,12 @@ pub enum MptError {
     InvalidNodeRef,
     /// Path eşleşmiyor (leaf/extension path uyuşmazlığı).
     PathMismatch,
+    /// Trie descent exceeded [`MAX_WALK_DEPTH`].
+    ///
+    /// Reached when a proof's nodes do not make progress — an empty-path
+    /// extension leaves the remaining nibbles unchanged, so a cycle among
+    /// such nodes would otherwise recurse until the stack is exhausted.
+    NestingTooDeep,
 }
 
 impl std::fmt::Display for MptError {
@@ -54,6 +82,9 @@ impl std::fmt::Display for MptError {
             MptError::InvalidHpEncoding => write!(f, "mpt: invalid hex-prefix encoding"),
             MptError::InvalidNodeRef => write!(f, "mpt: invalid node reference"),
             MptError::PathMismatch => write!(f, "mpt: path does not match"),
+            MptError::NestingTooDeep => {
+                write!(f, "mpt: trie descent exceeded {MAX_WALK_DEPTH} levels")
+            }
         }
     }
 }
@@ -159,7 +190,7 @@ pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Ve
     let root_item = rlp::decode(root_bytes)?;
     let path = to_nibbles(&keccak256(key));
 
-    walk(&root_item, &path, &node_map)
+    walk(&root_item, &path, &node_map, 0)
 }
 
 /// Recursive trie walk. `nibbles` = kalan path nibble'ları.
@@ -167,7 +198,11 @@ fn walk(
     node: &Item,
     nibbles: &[u8],
     node_map: &HashMap<[u8; 32], Vec<u8>>,
+    depth: usize,
 ) -> Result<Vec<u8>, MptError> {
+    if depth > MAX_WALK_DEPTH {
+        return Err(MptError::NestingTooDeep);
+    }
     match node {
         // Null node → boş/eksik.
         Item::String(b) if b.is_empty() => Err(MptError::KeyNotFound),
@@ -189,7 +224,7 @@ fn walk(
             }
             // Extension: child referansını çöz ve devam et.
             let child = resolve_ref(&items[1], node_map)?;
-            walk(&child, remaining, node_map)
+            walk(&child, remaining, node_map, depth + 1)
         }
 
         // 17-eleman liste: branch.
@@ -204,7 +239,7 @@ fn walk(
             }
             let nibble = nibbles[0] as usize;
             let child = resolve_ref(&items[nibble], node_map)?;
-            walk(&child, &nibbles[1..], node_map)
+            walk(&child, &nibbles[1..], node_map, depth + 1)
         }
 
         _ => Err(MptError::InvalidNode),
@@ -433,13 +468,13 @@ mod tests {
         node_map.insert(keccak256(&leaf_bytes), leaf_bytes.clone());
 
         let root_item = rlp_decode(&ext_bytes).unwrap();
-        let result = walk(&root_item, &full_path, &node_map).unwrap();
+        let result = walk(&root_item, &full_path, &node_map, 0).unwrap();
         assert_eq!(result, b"leaf-val");
 
         // Yanlış path (shared prefix değil) → PathMismatch
         let bad_path = vec![5u8, 6, 7, 8];
         assert_eq!(
-            walk(&root_item, &bad_path, &node_map).unwrap_err(),
+            walk(&root_item, &bad_path, &node_map, 0).unwrap_err(),
             MptError::PathMismatch
         );
 
@@ -509,7 +544,7 @@ mod tests {
 
         let root_item = rlp_decode(&branch_bytes).unwrap();
         let path = vec![5u8, 0xa, 0xb];
-        let result = walk(&root_item, &path, &node_map).unwrap();
+        let result = walk(&root_item, &path, &node_map, 0).unwrap();
         assert_eq!(result, b"v");
 
         // Root hash doğrulama
@@ -534,5 +569,121 @@ mod tests {
         }
         // Root hash'leri proof'ta olmadığı için MissingNode beklenir — önemli
         // Olan panic olmaması (DoS güvenliği).
+    }
+}
+
+#[cfg(test)]
+mod depth_bound_locks {
+    use super::*;
+    use crate::cross_domain::evm::rlp::encode as rlp_encode;
+
+    /// A cycle of empty-path extension nodes must be refused, not recursed.
+    ///
+    /// `hp_decode(&[0x00])` yields an empty nibble list, and
+    /// `nibbles.starts_with(&[])` is always true, so an extension node with an
+    /// empty path hands `walk` the same `remaining` it received. Two such
+    /// nodes referring to each other never make progress. Measured against the
+    /// unbounded version:
+    ///
+    /// ```text
+    /// A -> B, B -> A, both empty-path extensions
+    /// fatal runtime error: stack overflow, aborting
+    /// ```
+    ///
+    /// The proof bytes arrive from a bridge relayer, so this was a remote
+    /// abort of the node process.
+    #[test]
+    fn a_cycle_of_empty_path_extensions_is_refused() {
+        let a_ref = [0xAAu8; 32];
+        let b_ref = [0xBBu8; 32];
+
+        let node_a = Item::List(vec![
+            Item::String(hp_encode(&[], false)),
+            Item::String(b_ref.to_vec()),
+        ]);
+        let node_b = Item::List(vec![
+            Item::String(hp_encode(&[], false)),
+            Item::String(a_ref.to_vec()),
+        ]);
+        let bytes_a = rlp_encode(&node_a);
+        let bytes_b = rlp_encode(&node_b);
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(a_ref, bytes_a.clone());
+        map.insert(b_ref, bytes_b.clone());
+
+        let path = to_nibbles(&[0x11u8; 32]);
+        let root_item = rlp::decode(&bytes_a).expect("node A decodes");
+
+        assert_eq!(
+            walk(&root_item, &path, &map, 0),
+            Err(MptError::NestingTooDeep),
+            "a non-progressing cycle must terminate with an error"
+        );
+    }
+
+    /// The bound has to clear the deepest descent a real trie can produce.
+    ///
+    /// Comparing two constants would be folded away at compile time (clippy
+    /// calls it a constant assertion, correctly), so this builds an actual
+    /// branch chain 64 levels deep — the maximum a keccak256 path allows —
+    /// and checks it resolves. Lowering `MAX_WALK_DEPTH` below the honest
+    /// maximum would make this fail with `NestingTooDeep`.
+    #[test]
+    fn a_maximum_depth_honest_descent_still_resolves() {
+        let key = b"deep";
+        let path = to_nibbles(&keccak256(key));
+        assert_eq!(path.len(), 64, "keccak256 expands to 64 nibbles");
+        let value = b"found";
+
+        // Build bottom-up: a leaf consuming nothing, then 64 branch nodes each
+        // consuming one nibble of the path.
+        let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
+        let leaf = Item::List(vec![
+            Item::String(hp_encode(&[], true)),
+            Item::String(value.to_vec()),
+        ]);
+        let mut current_bytes = rlp_encode(&leaf);
+        let mut current_hash = keccak256(&current_bytes);
+        node_map.insert(current_hash, current_bytes.clone());
+
+        for level in (0..64).rev() {
+            let nibble = path[level] as usize;
+            let mut children: Vec<Item> = (0..17).map(|_| Item::String(Vec::new())).collect();
+            children[nibble] = Item::String(current_hash.to_vec());
+            let branch = Item::List(children);
+            current_bytes = rlp_encode(&branch);
+            current_hash = keccak256(&current_bytes);
+            node_map.insert(current_hash, current_bytes.clone());
+        }
+
+        let nodes: Vec<Vec<u8>> = node_map.values().cloned().collect();
+        assert_eq!(
+            verify(&nodes, &current_hash, key),
+            Ok(value.to_vec()),
+            "a 64-level descent is honest and must not hit the depth bound"
+        );
+    }
+
+    /// An existing round-trip must still work — the bound is a ceiling, not a
+    /// behaviour change.
+    #[test]
+    fn a_normal_leaf_lookup_still_resolves() {
+        let key = b"balance";
+        let value = b"42";
+        let path = to_nibbles(&keccak256(key));
+
+        let leaf = Item::List(vec![
+            Item::String(hp_encode(&path, true)),
+            Item::String(value.to_vec()),
+        ]);
+        let leaf_bytes = rlp_encode(&leaf);
+        let root = keccak256(&leaf_bytes);
+
+        assert_eq!(
+            verify(&[leaf_bytes], &root, key),
+            Ok(value.to_vec()),
+            "a single-leaf trie must still verify"
+        );
     }
 }

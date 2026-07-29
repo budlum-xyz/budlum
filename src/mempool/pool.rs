@@ -125,7 +125,7 @@ impl Mempool {
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis();
 
         self.by_sender
@@ -182,7 +182,7 @@ impl Mempool {
     pub fn cleanup_expired(&mut self) -> usize {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis();
 
         let ttl_ms = self.config.tx_ttl_secs as u128 * 1000;

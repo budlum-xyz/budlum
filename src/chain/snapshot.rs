@@ -27,7 +27,7 @@ impl StateSnapshot {
     ) -> Self {
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis();
         let balances = account_state.get_all_balances();
         let nonces = account_state.get_all_nonces();
@@ -614,7 +614,7 @@ impl StateSnapshotV2 {
     pub fn from_state(account_state: &AccountState, params: StateSnapshotV2Params) -> Self {
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis();
         let balances = account_state.get_all_balances();
         let nonces = account_state.get_all_nonces();
