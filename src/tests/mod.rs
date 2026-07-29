@@ -35,6 +35,8 @@ pub mod fork_choice_locks;
 #[cfg(test)]
 pub mod manifest_commitment_locks;
 #[cfg(test)]
+pub mod multi_consensus_locks;
+#[cfg(test)]
 pub mod qcblob_quorum;
 // Re-enabled (was `#![cfg(false)]`'d ghost-hunting).
 // The permissionless-registry / liveness / invalid-vote state was reinstated

@@ -45,8 +45,19 @@ mod byzantine_settlement_tests {
         let mut pos_commitments = Vec::new();
         let mut poa_commitments = Vec::new();
 
+        // Each domain's commitments have to form a contiguous chain: the
+        // commitment at height N+1 names the one at height N as its parent.
+        // `DomainCommitment::from_block` derives `parent_domain_block_hash`
+        // from `block.previous_hash`, so the blocks themselves must be linked.
+        // These used to all carry the same placeholder parent, which only went
+        // unnoticed because the chain-continuity check was compiled out under
+        // `#[cfg(test)]`.
+        let mut prev_pow = "pow".repeat(16);
+        let mut prev_pos = "pos".repeat(16);
+        let mut prev_poa = "poa".repeat(16);
+
         for i in 1..=100 {
-            let mut b_pow = Block::new(i, "pow".repeat(16), vec![]);
+            let mut b_pow = Block::new(i, prev_pow.clone(), vec![]);
             b_pow.state_root = format!("pow_state_{i}").repeat(16)[0..64].to_string();
             b_pow.tx_root = b_pow.calculate_tx_root();
             b_pow.hash = b_pow.calculate_hash();
@@ -55,9 +66,10 @@ mod byzantine_settlement_tests {
                     .unwrap();
             let proof_pow = FinalityProof::PoWHeaderChain { headers: vec![] };
             com_pow.finality_proof_hash = hash_finality_proof(&proof_pow);
+            prev_pow = b_pow.hash.clone();
             pow_commitments.push((com_pow, proof_pow));
 
-            let mut b_pos = Block::new(i, "pos".repeat(16), vec![]);
+            let mut b_pos = Block::new(i, prev_pos.clone(), vec![]);
             b_pos.state_root = format!("pos_state_{i}").repeat(16)[0..64].to_string();
             b_pos.tx_root = b_pos.calculate_tx_root();
             b_pos.hash = b_pos.calculate_hash();
@@ -81,9 +93,10 @@ mod byzantine_settlement_tests {
                 },
             };
             com_pos.finality_proof_hash = hash_finality_proof(&proof_pos);
+            prev_pos = b_pos.hash.clone();
             pos_commitments.push((com_pos, proof_pos));
 
-            let mut b_poa = Block::new(i, "poa".repeat(16), vec![]);
+            let mut b_poa = Block::new(i, prev_poa.clone(), vec![]);
             b_poa.state_root = format!("poa_state_{i}").repeat(16)[0..64].to_string();
             b_poa.tx_root = b_poa.calculate_tx_root();
             b_poa.hash = b_poa.calculate_hash();
@@ -95,6 +108,7 @@ mod byzantine_settlement_tests {
                 signatures: vec![],
             };
             com_poa.finality_proof_hash = hash_finality_proof(&proof_poa);
+            prev_poa = b_poa.hash.clone();
             poa_commitments.push((com_poa, proof_poa));
         }
 

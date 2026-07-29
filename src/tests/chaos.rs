@@ -571,8 +571,17 @@ mod chaos_tests {
 
         let num_blocks = 50;
 
+        // Commitments per domain must chain: height N+1 names N as parent.
+        // `from_block` takes the parent from `block.previous_hash`, so the
+        // blocks are linked here. They previously all shared one placeholder
+        // parent, which passed only because the continuity check was compiled
+        // out under `#[cfg(test)]`.
+        let mut prev_pow = "pow".repeat(32);
+        let mut prev_pos = "pos".repeat(32);
+        let mut prev_poa = "poa".repeat(32);
+
         for i in 1..=num_blocks {
-            let mut block_pow = Block::new(i, "pow".repeat(32), vec![]);
+            let mut block_pow = Block::new(i, prev_pow.clone(), vec![]);
             block_pow.state_root = format!("pow_state_{i}").repeat(32)[0..64].to_string();
             block_pow.tx_root = block_pow.calculate_tx_root();
             block_pow.hash = block_pow.calculate_hash();
@@ -581,9 +590,10 @@ mod chaos_tests {
                     .unwrap();
             let pow_proof = FinalityProof::PoWHeaderChain { headers: vec![] };
             pow_com.finality_proof_hash = hash_finality_proof(&pow_proof);
+            prev_pow = block_pow.hash.clone();
             commitments_to_submit.push((pow_com, pow_proof));
 
-            let mut block_pos = Block::new(i, "pos".repeat(32), vec![]);
+            let mut block_pos = Block::new(i, prev_pos.clone(), vec![]);
             block_pos.state_root = format!("pos_state_{i}").repeat(32)[0..64].to_string();
             block_pos.tx_root = block_pos.calculate_tx_root();
             block_pos.hash = block_pos.calculate_hash();
@@ -608,9 +618,10 @@ mod chaos_tests {
                 },
             };
             pos_com.finality_proof_hash = hash_finality_proof(&pos_proof);
+            prev_pos = block_pos.hash.clone();
             commitments_to_submit.push((pos_com, pos_proof));
 
-            let mut block_poa = Block::new(i, "poa".repeat(32), vec![]);
+            let mut block_poa = Block::new(i, prev_poa.clone(), vec![]);
             block_poa.state_root = format!("poa_state_{i}").repeat(32)[0..64].to_string();
             block_poa.tx_root = block_poa.calculate_tx_root();
             block_poa.hash = block_poa.calculate_hash();
@@ -622,6 +633,7 @@ mod chaos_tests {
                 signatures: vec![],
             };
             poa_com.finality_proof_hash = hash_finality_proof(&poa_proof);
+            prev_poa = block_poa.hash.clone();
             commitments_to_submit.push((poa_com, poa_proof));
 
             let msg = CrossDomainMessage::new(CrossDomainMessageParams {
