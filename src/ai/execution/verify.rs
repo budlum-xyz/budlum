@@ -199,6 +199,7 @@ mod tests {
             steps: 0,
             gas_used: 0,
             weights_digest: None,
+            public_inputs: None,
         };
         let rep = verify_execution_proof_structural(&proof, &req, &res);
         assert!(!rep.is_structurally_valid());
@@ -222,6 +223,7 @@ mod tests {
             require_execution_proof: true,
             execution_program_hash: Some([7u8; 32]),
             execution_class: 1,
+            execution_dims: None,
             execution_weights_digest: None,
         };
         let proof = AiExecutionProof {
@@ -233,6 +235,7 @@ mod tests {
             steps: 1,
             gas_used: 1,
             weights_digest: None,
+            public_inputs: None,
         };
         let rep = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
         assert!(!rep.program_hash_matches_model);
@@ -307,6 +310,7 @@ mod tests {
             require_execution_proof: true,
             execution_program_hash: Some([5u8; 32]),
             execution_class: 1,
+            execution_dims: None,
             execution_weights_digest: Some(weights_digest(&honest)),
         };
 
@@ -321,6 +325,7 @@ mod tests {
             steps: 1,
             gas_used: 1,
             weights_digest: Some(weights_digest(&swapped)),
+            public_inputs: None,
         };
         let rep = verify_execution_proof_structural_with_model(&attacker, &req, &res, Some(&spec));
         assert!(
@@ -333,6 +338,7 @@ mod tests {
         // The same proof with the registered digest passes.
         let honest_proof = AiExecutionProof {
             weights_digest: Some(weights_digest(&honest)),
+            public_inputs: None,
             ..attacker.clone()
         };
         let rep =
@@ -371,6 +377,7 @@ mod tests {
             require_execution_proof: true,
             execution_program_hash: Some([5u8; 32]),
             execution_class: 1,
+            execution_dims: None,
             execution_weights_digest: Some(weights_digest(&honest)),
         };
         let proof = AiExecutionProof {
@@ -382,6 +389,7 @@ mod tests {
             steps: 1,
             gas_used: 1,
             weights_digest: None,
+            public_inputs: None,
         };
         let rep = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
         assert!(!rep.weights_bound, "omitting the digest must not bypass it");
@@ -409,6 +417,7 @@ mod tests {
             require_execution_proof: false,
             execution_program_hash: None,
             execution_class: 0,
+            execution_dims: None,
             execution_weights_digest: None,
         };
         let proof = AiExecutionProof {
@@ -420,6 +429,7 @@ mod tests {
             steps: 1,
             gas_used: 1,
             weights_digest: None,
+            public_inputs: None,
         };
         let rep = verify_execution_proof_structural_with_model(&proof, &req, &res, Some(&spec));
         assert!(rep.weights_bound);
@@ -452,6 +462,7 @@ mod tests {
             steps: 1,
             gas_used: 1,
             weights_digest: Some(digest),
+            public_inputs: None,
         };
         let mut tx = Transaction::new(req.requester, req.requester, 0, Vec::new());
         tx.tx_type = TransactionType::AiAttachExecutionProof {
@@ -603,6 +614,218 @@ mod tests {
             expected_initial_state_root(&spec, &input).unwrap(),
             "the verifier's independent derivation must agree with the prover \
              on an honest proof"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stark_path_e2e {
+    use super::*;
+
+    /// The whole AI execution path, end to end, with nothing stubbed:
+    /// prove a real MLP forward pass, then verify its STARK the way the
+    /// transaction path now does — rebuild the guest program from the
+    /// registered model and check the proof against the public inputs it
+    /// carries.
+    #[test]
+    fn a_real_inference_proof_verifies_against_the_registered_model() {
+        use crate::ai::execution::{
+            guest_program_for_model, matmul_program_hash, prove_mlp_inference, weights_digest,
+            FixedPointMlpSpec,
+        };
+        use crate::ai::types::{AiModelId, AiModelSpec};
+
+        // 2 -> 2 -> 1 with a negative weight so ReLU actually fires.
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 2, 1],
+            weights: vec![1, -1, -1, 1, 1, 1],
+            biases: vec![0, 0, 0],
+        };
+        let input = vec![5, 10];
+        let model_id = AiModelId([7u8; 32]);
+
+        let (proof, host_output) = prove_mlp_inference(&spec, model_id, &input, 5_000_000)
+            .expect("proving a real forward pass");
+
+        // What a node holds: the registration, not the weights.
+        let model = AiModelSpec {
+            model_id,
+            model_hash: [1u8; 32],
+            owner: crate::core::address::Address::zero(),
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some(matmul_program_hash(&spec).unwrap()),
+            execution_class: 1,
+            execution_weights_digest: Some(weights_digest(&spec)),
+            execution_dims: Some(spec.dims.clone()),
+        };
+
+        // The verifier rebuilds the guest from `execution_dims` alone.
+        let program = guest_program_for_model(&model).expect("rebuild guest program");
+        let claimed = proof
+            .public_inputs
+            .as_ref()
+            .expect("a proof from prove_mlp_inference carries its public inputs");
+
+        assert_eq!(
+            claimed.program_hash,
+            model.execution_program_hash.unwrap(),
+            "the public inputs must name the registered program"
+        );
+        assert_eq!(claimed.exit_code, 0, "the run must have succeeded");
+
+        verify_execution_proof_stark(&proof, &program, &claimed.to_execution_inputs())
+            .expect("the STARK must verify against the rebuilt program");
+
+        assert_eq!(host_output, vec![5], "forward pass output");
+    }
+
+    /// A proof whose public inputs were edited must not verify. The envelope
+    /// commits to `public_inputs_hash`, so this is what stops the carried
+    /// bundle from being a free-form claim.
+    #[test]
+    fn tampering_with_the_carried_public_inputs_is_refused() {
+        use crate::ai::execution::{
+            guest_program_for_model, matmul_program_hash, prove_mlp_inference, weights_digest,
+            FixedPointMlpSpec,
+        };
+        use crate::ai::types::{AiModelId, AiModelSpec};
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let input = vec![4, 5];
+        let model_id = AiModelId([9u8; 32]);
+
+        let (proof, _) = prove_mlp_inference(&spec, model_id, &input, 5_000_000).unwrap();
+
+        let model = AiModelSpec {
+            model_id,
+            model_hash: [1u8; 32],
+            owner: crate::core::address::Address::zero(),
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some(matmul_program_hash(&spec).unwrap()),
+            execution_class: 1,
+            execution_weights_digest: Some(weights_digest(&spec)),
+            execution_dims: Some(spec.dims.clone()),
+        };
+        let program = guest_program_for_model(&model).unwrap();
+
+        let mut forged = proof.public_inputs.clone().unwrap();
+        forged.gas_used = forged.gas_used.wrapping_add(1);
+        assert!(
+            verify_execution_proof_stark(&proof, &program, &forged.to_execution_inputs()).is_err(),
+            "edited public inputs must not verify: the envelope commits to their hash"
+        );
+    }
+
+    /// A model that registers different dims rebuilds a different program, so
+    /// its proof must not verify. This is what makes `execution_dims` load
+    /// bearing rather than decorative.
+    fn model_for(
+        spec: &crate::ai::execution::FixedPointMlpSpec,
+        dims: Vec<u16>,
+    ) -> crate::ai::types::AiModelSpec {
+        use crate::ai::execution::{matmul_program_hash, weights_digest};
+        crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId([3u8; 32]),
+            model_hash: [1u8; 32],
+            owner: crate::core::address::Address::zero(),
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some(matmul_program_hash(spec).unwrap()),
+            execution_class: 1,
+            execution_weights_digest: Some(weights_digest(spec)),
+            execution_dims: Some(dims),
+        }
+    }
+
+    #[test]
+    fn a_proof_does_not_verify_against_a_different_architecture() {
+        use crate::ai::execution::{
+            guest_program_for_model, prove_mlp_inference, FixedPointMlpSpec,
+        };
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 2, 1],
+            weights: vec![1, -1, -1, 1, 1, 1],
+            biases: vec![0, 0, 0],
+        };
+        let input = vec![5, 10];
+        let (proof, _) = prove_mlp_inference(
+            &spec,
+            crate::ai::types::AiModelId([3u8; 32]),
+            &input,
+            5_000_000,
+        )
+        .unwrap();
+
+        // Same weights count, different shape: 2 -> 3 -> 1 needs more params,
+        // so use a shape the validator accepts and that differs from the one
+        // proved.
+        let wrong = model_for(&spec, vec![2, 1]);
+        let wrong_program = guest_program_for_model(&wrong).expect("rebuild");
+        let claimed = proof.public_inputs.as_ref().unwrap();
+        assert!(
+            verify_execution_proof_stark(&proof, &wrong_program, &claimed.to_execution_inputs())
+                .is_err(),
+            "a proof must not verify against a program rebuilt from different dims"
+        );
+    }
+
+    /// Weight values must not reach the rebuilt program: the guest loads them
+    /// from memory. If they did, a verifier would need the weights to check a
+    /// proof, and registering the architecture would not be enough.
+    #[test]
+    fn guest_program_for_model_ignores_weight_values() {
+        use crate::ai::execution::{
+            build_matmul_guest_program, guest_program_for_model, FixedPointMlpSpec,
+        };
+
+        let a = FixedPointMlpSpec {
+            dims: vec![3, 2, 1],
+            weights: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            biases: vec![9, 10, 11],
+        };
+        let b = FixedPointMlpSpec {
+            dims: vec![3, 2, 1],
+            weights: vec![-100, 100, -100, 100, -100, 100, -100, 100],
+            biases: vec![-1, -2, -3],
+        };
+        assert_eq!(
+            build_matmul_guest_program(&a).unwrap(),
+            build_matmul_guest_program(&b).unwrap(),
+            "the program depends on the architecture alone"
+        );
+        let model = model_for(&a, a.dims.clone());
+        assert_eq!(
+            guest_program_for_model(&model).unwrap(),
+            build_matmul_guest_program(&a).unwrap(),
+            "rebuilding from dims must reproduce the proved program"
         );
     }
 }

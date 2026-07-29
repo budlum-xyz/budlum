@@ -224,6 +224,14 @@ message ProtoAiModelRegister {
     // against. Optional: an empty value means the model did not register one,
     // which is only allowed when it does not require execution proofs.
     bytes execution_weights_digest = 12;
+    // Layer sizes of the registered guest: [input, hidden.., output].
+    //
+    // A fixed-point MLP guest program is a function of the architecture
+    // alone, so this is what lets a verifying node rebuild the exact
+    // instruction words a proof was produced against. Without it a node holds
+    // a program_hash it can compare but no program it can verify against.
+    // Empty when the model does not register an execution class.
+    repeated uint32 execution_dims = 13;
 }
 
 message ProtoAiInferenceRequest {
@@ -534,4 +542,27 @@ message ProtoAiAttachExecutionProof {
     // Digest of the weights the prover claims to have run. Compared against
     // ProtoAiModelRegister.execution_weights_digest. Empty when absent.
     bytes weights_digest = 9;
+    // Public inputs the STARK was produced against.
+    //
+    // Verification needs the envelope, the guest program words and these.
+    // The request carries an input *commitment*, not the raw input, so a
+    // verifier cannot replay the guest to derive initial_state_root or the
+    // gas counters. Absent for proofs written before this field existed;
+    // those cannot reach STARK verification.
+    ProtoAiExecutionPublicInputs public_inputs = 10;
+}
+
+message ProtoAiExecutionPublicInputs {
+    uint64 chain_id = 1;
+    bytes program_hash = 2;
+    bytes initial_state_root = 3;
+    bytes final_state_root = 4;
+    uint64 sender = 5;
+    uint64 nonce = 6;
+    uint64 block_height = 7;
+    uint64 gas_limit = 8;
+    uint64 gas_used = 9;
+    uint64 exit_code = 10;
+    uint64 trace_len = 11;
+    bytes event_digest = 12;
 }

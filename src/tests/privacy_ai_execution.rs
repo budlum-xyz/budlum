@@ -200,6 +200,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
         require_execution_proof: true,
         execution_program_hash: Some([7u8; 32]),
         execution_class: 1,
+        execution_dims: None,
         // A proof-required model has to register the weights it expects.
         // program_hash binds the architecture only, so without this the
         // structural check cannot tell two models of the same shape apart.
@@ -249,6 +250,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
         steps: 1,
         gas_used: 1,
         weights_digest: Some([11u8; 32]),
+        public_inputs: None,
     };
     // Structural attach requires postcard envelope in executor; registry attach
     // Only needs structural with non-empty proof_bytes

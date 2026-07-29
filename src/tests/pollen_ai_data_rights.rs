@@ -29,6 +29,7 @@ fn model_spec(owner: Address) -> AiModelSpec {
         require_execution_proof: false,
         execution_program_hash: None,
         execution_class: 0,
+        execution_dims: None,
         execution_weights_digest: None,
     }
 }

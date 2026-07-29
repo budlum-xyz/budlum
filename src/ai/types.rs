@@ -149,6 +149,24 @@ pub struct AiModelSpec {
     /// `docs/AI_VERIFICATION_STATUS.md`.
     #[serde(default)]
     pub execution_weights_digest: Option<[u8; 32]>,
+    /// Layer sizes of the registered guest, `[input, hidden.., output]`.
+    ///
+    /// The guest program for a fixed-point MLP is a function of the
+    /// architecture alone, so this is what lets a verifier rebuild the exact
+    /// instruction words a proof was produced against. Without it the node
+    /// held a `program_hash` it could compare but no program it could verify
+    /// against, which is why the transaction path could only check that an
+    /// envelope deserialised.
+    ///
+    /// Weights are deliberately absent: they are the model owner's, they are
+    /// far larger, and `execution_weights_digest` already binds them. Two
+    /// models with the same dims share a program and are separated by that
+    /// digest.
+    ///
+    /// `None` for models registered before this field existed; those cannot
+    /// require execution proofs.
+    #[serde(default)]
+    pub execution_dims: Option<Vec<u16>>,
 }
 
 impl AiModelSpec {
@@ -397,6 +415,86 @@ pub struct AiExecutionProof {
     /// use. Binding it inside the AIR is the remaining work.
     #[serde(default)]
     pub weights_digest: Option<[u8; 32]>,
+    /// The public inputs the STARK was produced against, canonically encoded.
+    ///
+    /// Verifying a proof needs three things: the envelope, the guest program
+    /// words, and the public inputs. The first travels in `proof_bytes` and
+    /// the second is rebuildable from the registered model, but the third was
+    /// missing — `AiInferenceRequest` carries an `input_commitment`, not the
+    /// raw input, so a verifier cannot replay the guest to derive
+    /// `initial_state_root` and the gas counters. That is what
+    /// `executor.rs` meant by "no program/public-input bundle to pass to the
+    /// verifier", and it is why proof-required models had to fail closed.
+    ///
+    /// Carrying them here does not make them trusted. `verify_execution_proof_stark`
+    /// checks that `envelope.public_inputs_hash` equals `hash()` of this
+    /// bundle, so a prover that ships inputs it did not prove against gets a
+    /// mismatch; and the AIR binds every field in it to the trace. The claim
+    /// is checkable, which is the same standing `weights_digest` has.
+    ///
+    /// `None` for proofs written before this field existed; those are
+    /// structurally verifiable but cannot reach STARK verification.
+    #[serde(default)]
+    pub public_inputs: Option<AiExecutionPublicInputs>,
+}
+
+/// `bud_proof::ExecutionPublicInputs` in a form that crosses the wire.
+///
+/// A mirror rather than a re-export: the proof-system type lives in the
+/// `bud-proof` crate and is not `serde`-derived for consensus encoding, and
+/// pinning the on-chain shape here means a change in the prover's struct shows
+/// up as a compile error in [`AiExecutionPublicInputs::to_execution_inputs`]
+/// instead of silently altering what nodes agree on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AiExecutionPublicInputs {
+    pub chain_id: u64,
+    pub program_hash: [u8; 32],
+    pub initial_state_root: [u8; 32],
+    pub final_state_root: [u8; 32],
+    pub sender: u64,
+    pub nonce: u64,
+    pub block_height: u64,
+    pub gas_limit: u64,
+    pub gas_used: u64,
+    pub exit_code: u64,
+    pub trace_len: u64,
+    pub event_digest: [u8; 32],
+}
+
+impl AiExecutionPublicInputs {
+    pub fn from_execution_inputs(pi: &bud_proof::ExecutionPublicInputs) -> Self {
+        Self {
+            chain_id: pi.chain_id,
+            program_hash: pi.program_hash,
+            initial_state_root: pi.initial_state_root,
+            final_state_root: pi.final_state_root,
+            sender: pi.sender,
+            nonce: pi.nonce,
+            block_height: pi.block_height,
+            gas_limit: pi.gas_limit,
+            gas_used: pi.gas_used,
+            exit_code: pi.exit_code,
+            trace_len: pi.trace_len,
+            event_digest: pi.event_digest,
+        }
+    }
+
+    pub fn to_execution_inputs(&self) -> bud_proof::ExecutionPublicInputs {
+        bud_proof::ExecutionPublicInputs {
+            chain_id: self.chain_id,
+            program_hash: self.program_hash,
+            initial_state_root: self.initial_state_root,
+            final_state_root: self.final_state_root,
+            sender: self.sender,
+            nonce: self.nonce,
+            block_height: self.block_height,
+            gas_limit: self.gas_limit,
+            gas_used: self.gas_used,
+            exit_code: self.exit_code,
+            trace_len: self.trace_len,
+            event_digest: self.event_digest,
+        }
+    }
 }
 
 impl AiExecutionProof {

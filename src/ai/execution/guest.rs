@@ -271,6 +271,38 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// The program hash the STARK actually binds.
+///
+/// [`program_hash_from_words`] is a *registry* identifier: SHA3-256 over a
+/// domain tag, the guest version and the words, so a model's registration can
+/// name its guest program without colliding with anything else in the tree.
+/// The proof system uses a different one — `ExecutionPublicInputs::program_hash`
+/// is an unlabelled Keccak-256 over the same words
+/// (`crate::execution::zkvm`), and that is the value the AIR is checked
+/// against.
+///
+/// Both are legitimate, and they are not interchangeable. `prove_mlp_inference`
+/// used to put the registry hash in `AiExecutionProof::program_hash` while the
+/// envelope carried the proof-system one, so `verify_execution_proof_stark`
+/// compared the two and failed every time:
+///
+/// ```text
+/// SONUC: Err("execution proof program_hash != public_inputs.program_hash")
+/// ```
+///
+/// Everything else in that measurement lined up — the verifier rebuilt the
+/// program, the public-inputs hash matched, and the independently derived
+/// `initial_state_root` matched — so this single mismatch was the whole reason
+/// the STARK path could not run.
+pub fn stark_program_hash_from_words(words: &[u64]) -> [u8; 32] {
+    use sha3::Keccak256;
+    let mut hasher = Keccak256::new();
+    for word in words {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
 pub fn words_to_bytecode(words: &[u64]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
@@ -298,7 +330,11 @@ pub fn prove_mlp_inference(
     let in_c = input_commitment(input);
     let out_c = output_commitment(&host_output);
     let words = build_matmul_guest_program(spec)?;
-    let program_hash = program_hash_from_words(&words);
+    // The proof carries the hash the STARK binds, not the registry
+    // identifier: `verify_execution_proof_stark` compares this field against
+    // `public_inputs.program_hash`, and the two used to come from different
+    // schemes, so that comparison could never succeed.
+    let program_hash = stark_program_hash_from_words(&words);
     let bytecode = words_to_bytecode(&words);
 
     let (envelope, pi, _prog) =
@@ -322,6 +358,11 @@ pub fn prove_mlp_inference(
         // image the AIR does not constrain, so `program_hash` — which depends
         // on the architecture alone — cannot carry this.
         weights_digest: Some(weights_digest(spec)),
+        // Ship the public inputs the STARK was produced against. Without them
+        // a verifier holding only the request (which carries an input
+        // *commitment*, not the input) cannot rebuild `initial_state_root` or
+        // the gas counters, and so cannot check the proof at all.
+        public_inputs: Some(crate::ai::types::AiExecutionPublicInputs::from_execution_inputs(&pi)),
     };
     Ok((proof, host_output))
 }
@@ -891,9 +932,50 @@ pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, 
 }
 
 /// Compute program hash for a matmul guest program.
+/// Rebuild the guest program words for a registered model.
+///
+/// The verifier side of `prove_mlp_inference`. A fixed-point MLP guest depends
+/// only on the layer shape — weights are read from memory, not baked into
+/// immediates — so `execution_dims` is enough to reproduce the exact
+/// instruction words a proof was produced against, which is what
+/// `Prover::verify` needs alongside the envelope and the public inputs.
+///
+/// Weights are not needed here and are not registered: they are bound
+/// separately by `execution_weights_digest`. The placeholder values below
+/// never reach the program, because `build_matmul_guest_program` emits loads
+/// rather than constants; `guest_program_for_model_ignores_weight_values`
+/// pins that.
+pub fn guest_program_for_model(model: &crate::ai::types::AiModelSpec) -> Result<Vec<u64>, String> {
+    let dims = model
+        .execution_dims
+        .as_ref()
+        .ok_or("model does not register execution_dims; cannot rebuild its guest program")?;
+    let spec = FixedPointMlpSpec {
+        dims: dims.clone(),
+        // Sized to match the architecture so `validate` passes. The values are
+        // irrelevant: the program loads weights from memory.
+        weights: vec![0i32; weight_count(dims)],
+        biases: vec![0i32; bias_count(dims)],
+    };
+    spec.validate()?;
+    build_matmul_guest_program(&spec)
+}
+
+fn weight_count(dims: &[u16]) -> usize {
+    dims.windows(2).map(|w| w[0] as usize * w[1] as usize).sum()
+}
+
+fn bias_count(dims: &[u16]) -> usize {
+    dims.iter().skip(1).map(|d| *d as usize).sum()
+}
+
 pub fn matmul_program_hash(spec: &FixedPointMlpSpec) -> Result<[u8; 32], String> {
     let words = build_matmul_guest_program(spec)?;
-    Ok(program_hash_from_words(&words))
+    // Registration and proofs have to name the guest program the same way, and
+    // the proof side is fixed by the AIR, so this follows it. Using the
+    // registry hash here while proofs carried the proof-system one made
+    // `execution_program_hash` unmatchable for any real proof.
+    Ok(stark_program_hash_from_words(&words))
 }
 
 /// Run the matmul guest inside the VM over a host-populated memory image and
