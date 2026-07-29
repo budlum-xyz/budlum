@@ -124,7 +124,7 @@ impl ContentDiscovery {
     /// Returns `true` if the CID needs to be (re-)announced (i.e.,
     /// It's new or the re-announce interval has elapsed).
     pub fn should_announce(&self, cid: &ContentId) -> bool {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
         match cache.last_announced.get(cid) {
             None => true,
             Some(last) => last.elapsed() >= cache.config.reannounce_interval,
@@ -133,7 +133,7 @@ impl ContentDiscovery {
 
     /// Mark a CID as announced to the DHT.
     pub fn mark_announced(&self, cid: &ContentId) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
 
         // Evict oldest if at capacity.
         if cache.last_announced.len() >= cache.config.max_cached_cids
@@ -155,7 +155,7 @@ impl ContentDiscovery {
 
     /// Record a discovered provider for a CID.
     pub fn add_provider(&self, cid: &ContentId, peer_id: PeerId) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
         let max = cache.config.max_providers_per_cid;
         let providers = cache.providers.entry(*cid).or_default();
         if providers.len() < max {
@@ -165,7 +165,7 @@ impl ContentDiscovery {
 
     /// Get all known providers for a CID.
     pub fn get_providers(&self, cid: &ContentId) -> Vec<PeerId> {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
         cache
             .providers
             .get(cid)
@@ -175,7 +175,7 @@ impl ContentDiscovery {
 
     /// Get all CIDs that need re-announcement.
     pub fn cids_needing_reannouncement(&self) -> Vec<ContentId> {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
         let interval = cache.config.reannounce_interval;
         cache
             .last_announced
@@ -187,14 +187,18 @@ impl ContentDiscovery {
 
     /// Total number of cached CIDs.
     pub fn cached_cid_count(&self) -> usize {
-        self.cache.read().unwrap().last_announced.len()
+        self.cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_announced
+            .len()
     }
 
     /// Total number of cached provider records.
     pub fn cached_provider_count(&self) -> usize {
         self.cache
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .providers
             .values()
             .map(|set| set.len())
@@ -304,5 +308,59 @@ mod tests {
 
         // Only 3 CIDs should remain.
         assert_eq!(disc.cached_cid_count(), 3);
+    }
+}
+
+#[cfg(test)]
+mod poisoned_lock_locks {
+    use super::*;
+
+    /// A panic while a lock is held must not kill the discovery layer.
+    ///
+    /// `RwLock` poisons when a thread panics holding it, and every later
+    /// `read()`/`write()` then returns `Err`. Unwrapping that turns one
+    /// unrelated panic into a permanently dead DHT cache — the node keeps
+    /// running but can never announce or resolve a CID again.
+    ///
+    /// The main crate settled this in `consensus/pow.rs` with
+    /// `unwrap_or_else(|e| e.into_inner())`: the data behind a poisoned lock
+    /// is still structurally valid, and for a cache the right answer is to
+    /// carry on rather than abort. This file had been left on the bare
+    /// `unwrap()`.
+    #[test]
+    fn the_cache_survives_a_poisoned_lock() {
+        use std::sync::Arc;
+
+        let discovery = Arc::new(ContentDiscovery::new(DiscoveryConfig::default()));
+        let cid = ContentId([7u8; 32]);
+        discovery.mark_announced(&cid);
+
+        // Poison the lock from another thread.
+        let poisoner = Arc::clone(&discovery);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoner.cache.write().unwrap_or_else(|e| e.into_inner());
+            panic!("deliberate panic while holding the write lock");
+        });
+        assert!(
+            handle.join().is_err(),
+            "the helper thread must have panicked"
+        );
+
+        // Every accessor must still work.
+        assert_eq!(
+            discovery.cached_cid_count(),
+            1,
+            "a poisoned lock must not hide the cache contents"
+        );
+        assert!(
+            !discovery.should_announce(&cid),
+            "reads must still answer after poisoning"
+        );
+        discovery.add_provider(&cid, PeerId::random());
+        assert_eq!(
+            discovery.get_providers(&cid).len(),
+            1,
+            "writes must still land after poisoning"
+        );
     }
 }

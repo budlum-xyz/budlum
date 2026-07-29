@@ -44,7 +44,7 @@ use sha3::{Digest, Keccak256};
 /// the node process, not a local misuse. The depth is generous — twice the
 /// longest honest descent — because the goal is to stop non-termination, not
 /// to second-guess a legitimate trie.
-const MAX_WALK_DEPTH: usize = 128;
+pub const MAX_WALK_DEPTH: usize = 128;
 use std::collections::HashMap;
 
 /// MPT doğrulama hatası.
