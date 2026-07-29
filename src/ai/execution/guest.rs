@@ -294,6 +294,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// program, the public-inputs hash matched, and the independently derived
 /// `initial_state_root` matched — so this single mismatch was the whole reason
 /// the STARK path could not run.
+#[must_use]
 pub fn stark_program_hash_from_words(words: &[u64]) -> [u8; 32] {
     use sha3::Keccak256;
     let mut hasher = Keccak256::new();
@@ -945,6 +946,11 @@ pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, 
 /// never reach the program, because `build_matmul_guest_program` emits loads
 /// rather than constants; `guest_program_for_model_ignores_weight_values`
 /// pins that.
+///
+/// # Errors
+///
+/// Returns an error when the model registers no `execution_dims`, or when the
+/// architecture those dims describe fails `FixedPointMlpSpec::validate`.
 pub fn guest_program_for_model(model: &crate::ai::types::AiModelSpec) -> Result<Vec<u64>, String> {
     let dims = model
         .execution_dims
@@ -961,10 +967,12 @@ pub fn guest_program_for_model(model: &crate::ai::types::AiModelSpec) -> Result<
     build_matmul_guest_program(&spec)
 }
 
+#[must_use]
 fn weight_count(dims: &[u16]) -> usize {
     dims.windows(2).map(|w| w[0] as usize * w[1] as usize).sum()
 }
 
+#[must_use]
 fn bias_count(dims: &[u16]) -> usize {
     dims.iter().skip(1).map(|d| *d as usize).sum()
 }

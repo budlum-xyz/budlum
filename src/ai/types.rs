@@ -462,7 +462,8 @@ pub struct AiExecutionPublicInputs {
 }
 
 impl AiExecutionPublicInputs {
-    pub fn from_execution_inputs(pi: &bud_proof::ExecutionPublicInputs) -> Self {
+    #[must_use]
+    pub const fn from_execution_inputs(pi: &bud_proof::ExecutionPublicInputs) -> Self {
         Self {
             chain_id: pi.chain_id,
             program_hash: pi.program_hash,
@@ -479,7 +480,8 @@ impl AiExecutionPublicInputs {
         }
     }
 
-    pub fn to_execution_inputs(&self) -> bud_proof::ExecutionPublicInputs {
+    #[must_use]
+    pub const fn to_execution_inputs(&self) -> bud_proof::ExecutionPublicInputs {
         bud_proof::ExecutionPublicInputs {
             chain_id: self.chain_id,
             program_hash: self.program_hash,
