@@ -1991,7 +1991,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2034,7 +2034,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2091,7 +2091,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2201,7 +2201,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2242,7 +2242,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2280,7 +2280,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2335,7 +2335,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2379,7 +2379,7 @@ impl BudlumApiServer for RpcServer {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2633,7 +2633,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2689,7 +2689,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -2917,7 +2917,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -3034,7 +3034,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -3132,7 +3132,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,
@@ -3364,7 +3364,7 @@ impl BudlumApiServer for RpcServer {
             data: Vec::new(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_millis(),
             hash: String::new(),
             signature: None,

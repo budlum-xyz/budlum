@@ -38,6 +38,8 @@ pub mod manifest_commitment_locks;
 pub mod multi_consensus_locks;
 #[cfg(test)]
 pub mod qcblob_quorum;
+#[cfg(test)]
+pub mod wall_clock_locks;
 // Re-enabled (was `#![cfg(false)]`'d ghost-hunting).
 // The permissionless-registry / liveness / invalid-vote state was reinstated
 // On `AccountState`, so these test files now exercise the real code paths
