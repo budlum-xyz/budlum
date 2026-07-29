@@ -635,6 +635,11 @@ fn trace_matrix(
             let bit = (key >> round) & 1;
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
+            // Remaining key for this round. The AIR walks this down with
+            // `rem == 2 * rem' + bit`, which is what ties `bit` to `key`;
+            // without it the direction bits were free and a flipped bit
+            // produced a different root that the AIR still accepted.
+            values[row_start + COL_MERKLE_KEY_REM] = Goldilocks::new(key >> round);
             values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(cur);
             values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
             values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
@@ -2283,6 +2288,168 @@ mod tests {
         assert!(
             res.is_err(),
             "Expected verification to FAIL when is_verify_merkle is zeroed on a 0x1E row, but it succeeded!"
+        );
+    }
+
+    /// A flipped direction bit must be refused.
+    ///
+    /// `merkle_bit` decides which side of the Poseidon pair the sibling goes
+    /// on, so it is the part of a Merkle path that says *where* the leaf sits.
+    /// It used to be constrained only to be boolean, and the AIR comment said
+    /// outright that "the prover can simply provide a valid bit column".
+    /// Measured against that version: flipping the round-0 bit, recomputing
+    /// the whole chain from it and leaving `merkle_key` untouched produced a
+    /// different root, and the proof still verified.
+    ///
+    /// `COL_MERKLE_KEY_REM` closes it with a shift chain
+    /// (`rem == 2 * rem' + bit`, seeded from the key, terminating at zero), so
+    /// a flipped bit no longer has a consistent remainder to sit in.
+    #[test]
+    fn rejects_verify_merkle_with_flipped_direction_bit() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        // key = 0 keeps every honest bit at 0, so flipping one is a clean,
+        // single-variable change.
+        vm.memory[256..264].copy_from_slice(&0u64.to_le_bytes());
+        for i in 0..64 {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&((1000 + i) as u64).to_le_bytes());
+        }
+        let _ = vm.run_receipt(&program);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        // Flip the round-0 direction bit and recompute the Poseidon chain
+        // from it, so the trace stays internally consistent everywhere the
+        // old AIR looked. `merkle_key` is deliberately left alone — that is
+        // the disagreement this test is about.
+        let row1 = TRACE_WIDTH;
+        let bit_before = matrix.values[row1 + COL_VM_MERKLE_BIT].as_canonical_u64();
+        let cur0 = matrix.values[row1 + COL_VM_MERKLE_CURRENT].as_canonical_u64();
+        let sib0 = matrix.values[row1 + COL_VM_MERKLE_SIBLING].as_canonical_u64();
+        matrix.values[row1 + COL_VM_MERKLE_BIT] = Goldilocks::new(1 - bit_before);
+
+        // Round 0's S-box witnesses have to be rebuilt too: flipping the bit
+        // swaps which of (current, sibling) is s0. Leaving them stale would
+        // trip the Poseidon identity instead, and the test would pass for a
+        // reason that has nothing to do with the direction bit — which is
+        // exactly what a first attempt at this test did.
+        let (f0, f1) = if bit_before == 0 {
+            (sib0, cur0)
+        } else {
+            (cur0, sib0)
+        };
+        for (i, v) in [f0, f1, 0, 0, 0, 0, 0, 0].iter().enumerate() {
+            let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
+            let x2 = x * x;
+            matrix.values[row1 + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
+            matrix.values[row1 + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
+        }
+
+        let mut running = bud_vm::merkle_poseidon_round(f0, f1);
+        for round in 1..64usize {
+            let base = (1 + round) * TRACE_WIDTH;
+            matrix.values[base + COL_VM_MERKLE_CURRENT] = Goldilocks::new(running);
+            let b = matrix.values[base + COL_VM_MERKLE_BIT].as_canonical_u64();
+            let sib = matrix.values[base + COL_VM_MERKLE_SIBLING].as_canonical_u64();
+            let (s0, s1) = if b == 0 {
+                (running, sib)
+            } else {
+                (sib, running)
+            };
+            let state = [s0, s1, 0, 0, 0, 0, 0, 0];
+            for (i, v) in state.iter().enumerate() {
+                let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
+                let x2 = x * x;
+                matrix.values[base + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
+                matrix.values[base + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
+            }
+            running = bud_vm::merkle_poseidon_round(s0, s1);
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        // Proving a trace that violates a constraint panics inside Plonky3, so
+        // the attempt is caught. Whichever way it comes out, the tampered
+        // trace must not end up as a verifying proof — and the two outcomes
+        // are kept distinguishable rather than both being treated as success,
+        // because "the prover panicked" would otherwise mask a missing
+        // constraint just as well as a working one.
+        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            prove_with_preprocessed(
+                &config,
+                &air,
+                matrix.clone(),
+                Some(crate::plonky3_prover::aux_trace_generator(
+                    matrix.clone(),
+                    n_cpu,
+                    program.clone(),
+                )),
+                &public_values,
+                preprocessed_ref,
+            )
+        }));
+
+        let rejected_at_proving = attempted.is_err();
+        let rejected_at_verification = match attempted {
+            Err(_) => false,
+            Ok(p3_proof) => {
+                let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+                let envelope = ProofEnvelope {
+                    proof_format_version: 1,
+                    backend: "Plonky3-Keccak-Goldilocks".to_string(),
+                    p3_version: "0.5.2".to_string(),
+                    fri_params_id: "test_fri_params".to_string(),
+                    public_inputs_hash: pi.hash(),
+                    proof_bytes,
+                    degree_bits: degree_bits as u32,
+                };
+                Plonky3Adapter::verify(&envelope, &pi, &program).is_err()
+            }
+        };
+
+        assert!(
+            rejected_at_proving || rejected_at_verification,
+            "a flipped Merkle direction bit produced a verifying proof: the \
+             path would prove membership at a position the key does not \
+             describe. proving_rejected={rejected_at_proving}, \
+             verification_rejected={rejected_at_verification}"
         );
     }
 

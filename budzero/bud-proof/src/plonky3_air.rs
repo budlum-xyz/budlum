@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 732;
+pub const TRACE_WIDTH: usize = 733;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -241,6 +241,30 @@ pub const COL_MERKLE_POSEIDON_X4_0: usize = 720; // 404..411 — x^4 intermediat
 // Witnesses.
 pub const COL_MERKLE_DIFF_INV: usize = 728; // 1 column — diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
 pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column — 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
+
+/// Remaining path key on a Merkle expansion row: `key >> round`.
+///
+/// This column is what binds [`COL_VM_MERKLE_BIT`] to [`COL_VM_MERKLE_KEY`].
+/// Booleanity alone left the direction bit free: a prover could flip "left
+/// sibling" to "right sibling" on any round, recompute the chain, and produce
+/// a different root for the same leaf and siblings — measured, and the AIR
+/// accepted it. A Merkle proof whose direction bits are unconstrained proves
+/// nothing about membership.
+///
+/// The binding is a shift chain rather than a 64-bit decomposition:
+///
+/// ```text
+/// round 0:      rem == key
+/// every round:  bit == rem - 2 * rem_next      (so rem = 2 * rem_next + bit)
+/// last round:   rem_next == 0
+/// ```
+///
+/// With `bit` already boolean, `rem = 2 * rem' + bit` is exactly one step of
+/// binary long division, so the chain forces `rem_r = key >> r` and
+/// `bit_r = (key >> r) & 1` for every round. Ending at zero after 64 rounds
+/// additionally pins `key` to 64 bits, which the old code assumed but never
+/// checked.
+pub const COL_MERKLE_KEY_REM: usize = 732;
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -601,14 +625,71 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let nxt_merkle_round: AB::Expr = nxt[COL_VM_MERKLE_ROUND].into();
         let nxt_is_expand: AB::Expr = nxt[COL_VM_MERKLE_IS_EXPAND].into();
 
-        // Bit extraction: on expansion rows, bit == (key >> round) & 1.
-        // The shift `key >> round` is implemented as a chain of
-        // Bit-extractions; for our purposes the prover can simply
-        // Provide a valid bit column. The booleanity of `bit` is
-        // Also enforced.
+        // Bit extraction: on expansion rows, `bit == (key >> round) & 1`.
+        //
+        // Booleanity alone used to be the whole constraint, and the comment
+        // here said the prover "can simply provide a valid bit column".
+        // Measured: flipping the round-0 bit, recomputing the chain from it
+        // and leaving `merkle_key` untouched produced a different root, and
+        // the AIR accepted the proof. Direction bits decide which sibling is
+        // on the left, so an unconstrained bit column means the path proves
+        // nothing about where the leaf sits — which is the entire content of
+        // a Merkle membership proof.
+        //
+        // `COL_MERKLE_KEY_REM` carries `key >> round` and is tied down by a
+        // shift chain:
+        //
+        //   round 0:     rem == key
+        //   each round:  rem == 2 * rem_next + bit
+        //   after 63:    rem_next == 0
+        //
+        // Since `bit` is boolean, `rem = 2 * rem' + bit` is one step of binary
+        // long division and admits exactly one solution per round, so the
+        // chain forces `bit_r = (key >> r) & 1`. Terminating at zero also pins
+        // `key` to 64 bits, which the previous code assumed without checking.
         builder
             .when(is_expand.clone())
             .assert_bool(merkle_bit.clone());
+
+        let merkle_key_rem: AB::Expr = cur[COL_MERKLE_KEY_REM].into();
+        let nxt_merkle_key_rem: AB::Expr = nxt[COL_MERKLE_KEY_REM].into();
+        let two: AB::Expr = AB::Expr::from(AB::F::from_u8(2));
+
+        // One long-division step per expansion row: rem == 2 * rem' + bit.
+        // Applied on expand -> expand transitions, which covers rounds 0..62
+        // and leaves round 63 to the terminator below.
+        builder
+            .when_transition()
+            .when(cpu_active.clone())
+            .assert_zero(
+                is_expand.clone()
+                    * nxt_is_expand.clone()
+                    * (merkle_key_rem.clone()
+                        - two.clone() * nxt_merkle_key_rem.clone()
+                        - merkle_bit.clone()),
+            );
+
+        // Terminator: the last expansion row of a path (expand followed by a
+        // non-expand row) has rem == bit, i.e. rem' would be zero. Together
+        // with the chain above this forces rem_r = key >> r exactly, and pins
+        // `key` to 64 bits — the old code assumed that without checking.
+        builder
+            .when_transition()
+            .when(cpu_active.clone())
+            .assert_zero(
+                is_expand.clone()
+                    * (one.clone() - nxt_is_expand.clone())
+                    * (merkle_key_rem.clone() - merkle_bit.clone()),
+            );
+
+        // Seed: the original VerifyMerkle step hands the whole key to its
+        // first expansion row. This is the same shape as the leaf binding
+        // below, and it is what ties the chain back to `merkle_key`.
+        builder
+            .when_transition()
+            .when(is_verify_merkle.clone() * (one.clone() - is_expand.clone()))
+            .when(nxt_is_expand.clone())
+            .assert_zero(nxt_merkle_key_rem.clone() - nxt[COL_VM_MERKLE_KEY].into());
 
         // Round index: the prover must set merkle_round to the
         // Expansion round number. For the first expansion row

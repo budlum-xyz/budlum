@@ -43,9 +43,28 @@ from honest nodes just in time to answer.
 
 **Direction for B.U.D.** `RetrievalResponse` already has an optional
 `proof_bytes: Option<ProofEnvelope>` field. Making it mandatory requires the
-BudZKVM `VerifyMerkle` 64-depth gate, which is currently closed and whose path
-verification is a known TODO. Sequencing: finish `VerifyMerkle`, then require
-`proof_bytes`, then retire the `interim_availability_only` label.
+BudZKVM `VerifyMerkle` 64-depth gate, which is still closed. What "unfinished
+path verification" actually meant has now been pinned down; see
+`budzero/docs/BudL_SPEC.md`. Of the three things missing, one is fixed:
+
+1. **Direction bits were unconstrained** — *fixed*. `merkle_bit` was only
+   asserted boolean, never tied to `merkle_key`. Measured: flipping the round-0
+   bit and recomputing the chain produced a different root that the AIR
+   accepted, which is the whole security property of a Merkle path.
+   `COL_MERKLE_KEY_REM` now carries `key >> round` and the AIR walks
+   `rem == 2 * rem' + bit`, seeded from the key and terminating at zero.
+2. **Siblings are not bound to memory** — open. `COL_VM_MERKLE_SIBLING` is read
+   as a Poseidon input and nothing ties it to the bytes at
+   `path_addr + 8 + i * 8`.
+3. **The key is not bound to memory** — open. `COL_VM_MERKLE_KEY` is
+   constrained only for continuity across rows, not against `path_addr`.
+
+Both remaining items need the path read to enter the memory argument
+(`COL_MEM_ADDR` / `COL_MEM_VAL`), which the VM does not currently emit for the
+65 words it reads. Until (2) and (3) land a prover can still choose the witness
+freely, so `verify_merkle_enabled` stays false. Sequencing is unchanged: finish
+`VerifyMerkle`, then require `proof_bytes`, then retire the
+`interim_availability_only` label.
 
 ## Gap 2 — replica answers — **closed at the challenge layer**
 
