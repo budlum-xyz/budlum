@@ -88,7 +88,7 @@ each other's live challenges in real time, within the deadline, for every
 challenge. That is a running cost and a detectable pattern rather than a
 one-off setup.
 
-## Gap 3 — erasure coding — **schema landed, coder pending**
+## Gap 3 — erasure coding — **closed**
 
 `ShardRef` now carries a `kind` (`Data` or `Parity`) and `ContentManifest`
 carries an `ErasureScheme { k, n }`: any `k` of the `n` shards reconstruct the
@@ -111,10 +111,72 @@ Manifests written before this deserialize to `ShardKind::Data` and
 `ErasureScheme::default()`, which is replication — exactly what they were.
 `legacy_json_deserialises_without_the_new_fields` pins that.
 
-**Still open:** the coder itself. Nothing computes parity shards or
-reconstructs from them yet; the schema describes redundancy that an off-chain
-chunker has to produce. `reed-solomon-erasure` (GF(2^8) or GF(2^16)) is the
-obvious dependency when that lands.
+### The coder
+
+`src/storage/erasure.rs` computes the parity and rebuilds from it:
+
+```rust
+let enc = encode_object(&bytes, ErasureScheme { k: 4, n: 6 })?;
+let manifest = enc.to_manifest()?;          // 4 Data + 2 Parity shards
+let bytes = reconstruct_object(&manifest, &survivors)?;  // any 4 of the 6
+```
+
+Encoding is a matrix product over GF(2^8) with a systematic generator: an
+identity block on top, so data shards pass through byte-for-byte and reading
+an intact object needs no decode pass, and a Cauchy block underneath that
+produces the parity. The Cauchy entries are `1 / (x_i + y_j)` over disjoint
+index sets, which makes every square submatrix invertible — the MDS condition
+(Blomer et al., Theorem 2.2). That is what makes recovery work from
+*whichever* `k` shards survived rather than a privileged subset; a Vandermonde
+block does not give it for free, because a Vandermonde matrix over a finite
+field can have singular submatrices even when the full matrix is invertible.
+`any_k_of_n_reconstructs_the_object` walks every one of the 15 two-loss
+patterns of a `(4,6)` code rather than a convenient one.
+
+**Why not a dependency.** `reed-solomon-erasure` is what this document
+previously named. Its owner stopped maintaining it in 2021 and asked for a new
+owner (darrenldl/reed-solomon-erasure#88); Solana, its largest user, moved
+off. `reed-solomon-simd` is maintained, but its speed comes from
+target-specific `unsafe` and `src/lib.rs` is `#![forbid(unsafe_code)]`. The
+in-tree coder is table-driven finite-field arithmetic with no dependencies and
+no `unsafe`.
+
+**Reconstruction is verified, not assumed.** The inverse matrix mixes every
+survivor into every recovered shard, so a single corrupted survivor silently
+poisons the whole object — the output still looks like plausible bytes.
+`reconstruct_object` re-derives each shard's `ContentId` and checks it against
+the manifest before returning, turning that into a detected failure
+(`a_corrupted_survivor_is_caught_not_propagated`).
+
+### Two things the schema alone got wrong
+
+Landing the coder surfaced two gaps in the manifest that replication had been
+hiding.
+
+**The object's length was not recorded.** `total_size` is the sum of the
+stored shard sizes. Under replication that is also the object's length, so
+nothing had to tell them apart. Erasure coding separates them twice: parity
+shards are stored bytes that are not object bytes, and the last data stripe is
+zero-padded to keep shards equal-length, which Reed-Solomon requires. A
+reconstructor holding only the manifest could not find where the object ended,
+and would return trailing zeroes as content. `content_size` records it;
+manifests written before the field read it as `total_size`, which is what they
+meant.
+
+**`kind` and `erasure` were outside the manifest commitment.** V1 hashed
+`(index, shard_id, size)` per shard and nothing else — complete while
+replication was the only scheme. Erasure coding added two fields that change
+what a manifest *means* without changing any byte V1 hashed. Measured:
+
+```
+kind flipped Data -> Parity, id unchanged -> true
+```
+
+Relabelling a data shard as parity changes which shards a reconstructor treats
+as content. Worse, `k` is the number a repair trigger compares against: a
+manifest claiming `k = 1` when four shards are needed reads as safe at one
+surviving shard, so no repair ever opens and the object is lost quietly. Both
+are now bound by `manifest_id_from_parts` under `BDLM_MANIFEST_V2`.
 
 ## Gap 4 — repair trigger — **expressible now**
 
@@ -195,10 +257,11 @@ would bound total load directly and is the better long-term shape.
 
 1. **Gap 2** (replica encoding) — the challenge-layer half has landed;
    per-replica byte encoding remains and still changes the stored format.
-2. **Gap 3** (erasure coding) — schema landed; the Reed-Solomon coder remains.
+2. **Gap 3** (erasure coding) — **closed**: schema, coder, and verified
+   reconstruction.
 3. **Gap 1** (real storage proof) — blocked on `VerifyMerkle`.
-4. **Gap 4** (repair) — predicates landed; wiring them to the deal lifecycle
-   needs the coder from Gap 3.
+4. **Gap 4** (repair) — predicates and coder landed; wiring the trigger into
+   the deal lifecycle remains.
 5. **Gap 5** (bond calibration) — measured; the range-proportional bond has
    landed, calibrating `OPENER_BOND_PER_KIB` and moving the rate limit to a
    per-operator ceiling remain.

@@ -18,6 +18,7 @@
 
 pub mod content_id;
 pub mod db;
+pub mod erasure;
 pub mod lifecycle;
 pub mod manifest;
 pub mod merkle_trie;
@@ -27,10 +28,14 @@ pub mod pruning;
 pub mod traits;
 
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
+pub use erasure::{encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon};
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
 };
-pub use manifest::{manifest_id_from_shards, ContentManifest, ShardRef};
+pub use manifest::{
+    manifest_id_from_parts, manifest_id_from_shards, ContentManifest, ErasureScheme, ShardKind,
+    ShardRef,
+};
 pub use mobile_self::{
     MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
 };

@@ -383,6 +383,11 @@ pub enum StorageError {
         manifest_id: ContentId,
         shard_id: ContentId,
     },
+    /// The manifest's `manifest_id` does not derive from its own contents,
+    /// so the caller either built it wrong or chose the id deliberately.
+    InvalidManifest {
+        reason: String,
+    },
     /// Deal end epoch must be strictly after start epoch.
     InvalidEpochRange {
         start: u64,
@@ -462,6 +467,9 @@ impl std::fmt::Display for StorageError {
                 manifest_id,
                 shard_id,
             } => write!(f, "shard {} not in manifest {}", shard_id, manifest_id),
+            StorageError::InvalidManifest { reason } => {
+                write!(f, "manifest rejected: {reason}")
+            }
             StorageError::InvalidEpochRange { start, end } => {
                 write!(f, "deal epoch range {start}..{end} invalid")
             }
@@ -675,6 +683,13 @@ impl StorageRegistry {
                 provided: economics.operator_bond,
             });
         }
+        // A deal-open carries its own copy of the manifest, and
+        // `register_manifest` is first-writer-wins, so this path can seed the
+        // registry just as `RegisterStorageManifest` can. Check the id here
+        // too rather than trusting that the other entry point ran first.
+        manifest
+            .verify_id()
+            .map_err(|reason| StorageError::InvalidManifest { reason })?;
         self.validate_shard_membership(manifest, &shard_id)?;
         self.register_manifest(manifest);
 
@@ -1456,6 +1471,74 @@ impl StorageRegistry {
                     *shard_id,
                     active,
                 ))
+            })
+            .collect()
+    }
+
+    /// How many of an object's distinct shards still have an active deal.
+    ///
+    /// This is the number erasure coding cares about, and it is not the one
+    /// `under_replicated_shards` computes. That function asks, per shard,
+    /// whether it has fewer than `STORAGE_REPLICATION_TARGET` copies — the
+    /// right question when every shard is a whole copy of the object. Under a
+    /// `(k, n)` code each shard is a distinct piece, and what decides whether
+    /// the object survives is how many *different* pieces are left, compared
+    /// against `k`.
+    ///
+    /// The two disagree in both directions. A `(4,6)` object with all six
+    /// shards held once is fully recoverable, yet every shard is "under
+    /// replicated" at 1 < 3. The same object down to three shards, each held
+    /// three times, looks healthy shard-by-shard and is already unrecoverable.
+    pub fn live_shard_count(&self, manifest_id: &ContentId) -> u32 {
+        let Some(manifest) = self.manifests.get(manifest_id) else {
+            return 0;
+        };
+        manifest
+            .shards
+            .iter()
+            .filter(|shard| self.active_replica_count(manifest_id, &shard.shard_id) > 0)
+            .count() as u32
+    }
+
+    /// Objects whose surviving shard count has fallen into the repair band.
+    ///
+    /// Returns `(manifest_id, live, k)` for each object where
+    /// `k <= live < k + margin`. Repair has to start with headroom: waiting
+    /// until `live == k` means the next loss is fatal with nothing in flight.
+    ///
+    /// Objects already below `k` are excluded — [`ContentManifest::needs_repair`]
+    /// returns false there, because there is nothing left to reconstruct from
+    /// and a repair deal opened then would only burn an operator bond. Use
+    /// [`StorageRegistry::unrecoverable_objects`] to see those; they need an
+    /// operator alarm, not a repair.
+    pub fn objects_needing_repair(&self, margin: u32) -> Vec<(ContentId, u32, u32)> {
+        self.manifests
+            .iter()
+            .filter_map(|(manifest_id, manifest)| {
+                let live = self.live_shard_count(manifest_id);
+                manifest.needs_repair(live, margin).then_some((
+                    *manifest_id,
+                    live,
+                    manifest.erasure.k,
+                ))
+            })
+            .collect()
+    }
+
+    /// Objects that can no longer be reconstructed: fewer than `k` distinct
+    /// shards still have an active deal.
+    ///
+    /// Separate from [`StorageRegistry::objects_needing_repair`] because the
+    /// response is different. A repairable object gets a replacement deal; an
+    /// unrecoverable one has already lost data, and opening deals for it
+    /// accomplishes nothing. Surfacing the two together would let the second
+    /// hide inside the first.
+    pub fn unrecoverable_objects(&self) -> Vec<(ContentId, u32, u32)> {
+        self.manifests
+            .iter()
+            .filter_map(|(manifest_id, manifest)| {
+                let live = self.live_shard_count(manifest_id);
+                (!manifest.is_recoverable(live)).then_some((*manifest_id, live, manifest.erasure.k))
             })
             .collect()
     }
