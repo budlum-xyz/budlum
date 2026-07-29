@@ -541,6 +541,13 @@ impl Vm {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
                     let key = u64::from_le_bytes(bytes);
+                    // The key is read from memory like any other word, so it
+                    // belongs in the memory argument. Without this the AIR
+                    // constrains the key only for continuity across rows and
+                    // nothing ties it to `path_addr`, letting a prover pick
+                    // the direction bits' source out of thin air.
+                    memory_addr = Some(path_addr);
+                    memory_val = Some(key);
                     // We keep the path's result computation for
                     // Backward compatibility (so the dst register
                     // Still gets the correct answer), but the
@@ -754,7 +761,14 @@ impl Vm {
                             rd: 0,
                             rs1: 0,
                             rs2: 0,
-                            imm: 0,
+                            // Carry the path base address. The memory
+                            // argument derives each expansion row's address as
+                            // `imm + 8 + 8 * round`, so a zero here would make
+                            // every sibling read claim an address near zero
+                            // while the memory table supplies the real one —
+                            // measured as a 7-of-8 mismatch across the first
+                            // rows before this was set.
+                            imm: inst.imm,
                         },
                         src1_idx: 0,
                         src2_idx: 0,
@@ -763,8 +777,16 @@ impl Vm {
                         src2_val: 0,
                         dst_val: 0,
                         registers: self.registers,
-                        memory_addr: None,
-                        memory_val: None,
+                        // Each expansion row carries the read that produced
+                        // its sibling. Without this the 64 words the path is
+                        // built from never reach the memory argument, so the
+                        // AIR sees a Poseidon chain over values that nothing
+                        // ties to the program's memory — a prover could supply
+                        // a path that was never there. Measured before the
+                        // fix: 64 expansion rows, 0 with `memory_addr`, and 0
+                        // of the 65 path words present in the argument.
+                        memory_addr: Some(sibling_addr),
+                        memory_val: Some(sibling),
                         is_memory_write: false,
                         stack_pointer: self.stack.len(),
                         merkle_key: Some(key),

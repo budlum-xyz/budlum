@@ -53,18 +53,23 @@ path verification" actually meant has now been pinned down; see
    accepted, which is the whole security property of a Merkle path.
    `COL_MERKLE_KEY_REM` now carries `key >> round` and the AIR walks
    `rem == 2 * rem' + bit`, seeded from the key and terminating at zero.
-2. **Siblings are not bound to memory** — open. `COL_VM_MERKLE_SIBLING` is read
-   as a Poseidon input and nothing ties it to the bytes at
-   `path_addr + 8 + i * 8`.
-3. **The key is not bound to memory** — open. `COL_VM_MERKLE_KEY` is
-   constrained only for continuity across rows, not against `path_addr`.
+2. **Siblings were not bound to memory** — *fixed*.
+3. **The key was not bound to memory** — *fixed*.
 
-Both remaining items need the path read to enter the memory argument
-(`COL_MEM_ADDR` / `COL_MEM_VAL`), which the VM does not currently emit for the
-65 words it reads. Until (2) and (3) land a prover can still choose the witness
-freely, so `verify_merkle_enabled` stays false. Sequencing is unchanged: finish
-`VerifyMerkle`, then require `proof_bytes`, then retire the
-`interim_availability_only` label.
+(2) and (3) needed the path reads to enter the memory argument, which the VM
+did not emit for the 65 words it reads. Measured: 64 expansion rows, none
+carrying a `memory_addr`, and none of the 65 path words present in the
+argument. Each expansion row now emits its sibling read and the original step
+emits the key read, with the LogUp demanding them at addresses the AIR derives
+(`imm` for the key, `imm + 8 + 8 * round` for round `r`) rather than the
+prover choosing.
+
+So the STARK side of `VerifyMerkle` is sound: the path a proof walks is the
+path the program read, in the order the key describes, hashing to the root it
+claims. `verify_merkle_enabled` stays false pending external review of the
+opcode against a real sparse-Merkle-tree deployment — a process gate now, not
+a known hole. Sequencing is unchanged: finish `VerifyMerkle`, then require
+`proof_bytes`, then retire the `interim_availability_only` label.
 
 ## Gap 2 — replica answers — **closed at the challenge layer**
 

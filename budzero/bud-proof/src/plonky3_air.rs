@@ -1449,8 +1449,26 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let is_real_mem_op = (is_load.clone() + is_store.clone()) * rs1_idx.clone(); // If rs1 is 0, it's LoadImm
             let is_stack_op = is_push.clone() + is_pop.clone() + is_call.clone() + is_ret.clone();
             let is_storage_op = is_sread.clone() + is_swrite.clone();
-            let is_any_mem_op =
-                is_real_mem_op.clone() + is_stack_op.clone() + is_storage_op.clone();
+            // A `VerifyMerkle` expansion row reads one sibling word from the
+            // path buffer, and the original step reads the key. Those reads go
+            // through the memory table like any other, so they have to appear
+            // on the demand side of the LogUp too — a row that supplies a
+            // memory entry without a matching demand unbalances the argument
+            // and every proof fails with `InvalidProof`.
+            //
+            // This is what binds `merkle_sibling` and `merkle_key` to the
+            // program's memory. Before it, both were free witness columns: the
+            // AIR consumed them as Poseidon inputs and nothing said they had
+            // come from `path_addr`, so a prover could walk a path that was
+            // never written.
+            let is_merkle_expand_mem: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
+            let is_merkle_key_read: AB::Expr =
+                is_verify_merkle.clone() * (one.clone() - is_merkle_expand_mem.clone());
+            let is_merkle_mem_op = is_merkle_expand_mem.clone() + is_merkle_key_read.clone();
+            let is_any_mem_op = is_real_mem_op.clone()
+                + is_stack_op.clone()
+                + is_storage_op.clone()
+                + is_merkle_mem_op.clone();
 
             let stack_base = AB::Expr::from(AB::F::from_u64(1 << 60));
             let storage_base = AB::Expr::from(AB::F::from_u64(2 << 60));
@@ -1459,10 +1477,22 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + (is_pop.clone() + is_ret.clone()) * (cur_stack_ptr.clone() - one.clone());
             let storage_addr = storage_base + cur[COL_IMM].into();
 
+            // The path buffer starts at the instruction's immediate. The key
+            // is the word at `path_addr`; expansion round `r` reads the
+            // sibling at `path_addr + 8 + 8*r`. Both are derived from columns
+            // the AIR already constrains, so the address a Merkle row claims
+            // in the memory argument is not something the prover chooses.
+            let merkle_path_addr: AB::Expr = cur[COL_IMM].into();
+            let eight: AB::Expr = AB::Expr::from(AB::F::from_u8(8));
+            let merkle_sibling_addr = merkle_path_addr.clone()
+                + eight.clone()
+                + eight.clone() * cur[COL_VM_MERKLE_ROUND].into();
             let final_mem_addr = is_real_mem_op.clone()
                 * (cur[COL_RS1_VAL].into() + cur[COL_IMM].into())
                 + is_stack_op.clone() * stack_addr
-                + is_storage_op.clone() * storage_addr;
+                + is_storage_op.clone() * storage_addr
+                + is_merkle_expand_mem.clone() * merkle_sibling_addr
+                + is_merkle_key_read.clone() * merkle_path_addr;
 
             let is_write = is_store.clone() + is_push.clone() + is_call.clone() + is_swrite.clone();
             let cpu_mem_val = is_load * cur[COL_RD_VAL_NEW].into()
@@ -1472,7 +1502,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + is_call * (cur[COL_PC].into() + one.clone())
                 + is_ret * cur[COL_NEXT_PC].into()
                 + is_sread * cur[COL_RD_VAL_NEW].into()
-                + is_swrite * cur[COL_RS1_VAL].into();
+                + is_swrite * cur[COL_RS1_VAL].into()
+                + is_merkle_expand_mem * cur[COL_VM_MERKLE_SIBLING].into()
+                + is_merkle_key_read * cur[COL_VM_MERKLE_KEY].into();
 
             let c_cpu_mem = term(
                 one.clone(),
