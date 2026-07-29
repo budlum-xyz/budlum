@@ -5,8 +5,8 @@
 //! Error.
 
 use crate::plonky3_air::{
-    COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE,
-    COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, TRACE_WIDTH,
+    COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
+    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -182,6 +182,14 @@ fn all_ranges() -> Vec<ColRange> {
             name: "mem_init_acc",
             start: COL_MEM_INIT_ACC,
             end: COL_MEM_INIT_ACC + 1,
+        },
+        // Merkle direction-bit binding. Carries `key >> round` so the AIR can
+        // walk `rem == 2 * rem' + bit` and tie the direction bits to the path
+        // key; before this the bits were only boolean and could be flipped.
+        ColRange {
+            name: "merkle_key_rem",
+            start: COL_MERKLE_KEY_REM,
+            end: COL_MERKLE_KEY_REM + 1,
         },
     ]
 }

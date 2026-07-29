@@ -19,7 +19,8 @@ akıllı kontrat dilidir. Özellikleri:
   bu trace Plonky3 STARK prover tarafından prove edilir.
 - **Gas-metered:** Her opcode'un sabit gas maliyeti vardır.
 - **Storage:** Kalıcı durum (`sread`/`swrite` opcode'ları).
-- **Cryptography:** Poseidon hash, VerifyMerkle (64-depth SMT).
+- **Cryptography:** Poseidon hash, VerifyMerkle (64-depth SMT — mainnet-gated,
+  see "VerifyMerkle soundness" below).
 
 ---
 
@@ -355,3 +356,54 @@ yazmak yeterli değil, o opcode'u içeren bir programın kanıtı üretilip
 doğrulanmalıdır.
 
 ---
+
+
+## VerifyMerkle soundness
+
+`VerifyMerkle (0x1E)` is gated off on mainnet
+(`MainnetActivation::default().verify_merkle_enabled == false`). The reason has
+always been recorded as "unfinished path verification"; this section says which
+part.
+
+The AIR already constrains most of the path. Each `VerifyMerkle` step is
+followed by 64 expansion rows, and the AIR checks the leaf binding
+(`original -> first expansion: current == rs2_val`), the round chain
+(`round' == round + 1`, first round zero), the Poseidon single-round S-box
+identities and output on every expansion row, and the final accumulator against
+the claimed root through an inverse witness. Negative tests cover a skipped
+round, a tampered accumulator and a tampered S-box.
+
+**Closed: the direction bits.** `merkle_bit` chooses which side of the Poseidon
+pair the sibling sits on, which is the part of a Merkle path that says *where*
+the leaf is. It used to be constrained only to be boolean — the AIR comment
+said the prover "can simply provide a valid bit column". Measured against that
+version: flipping the round-0 bit, recomputing the chain and leaving
+`merkle_key` untouched produced a different root, and the proof verified.
+
+`COL_MERKLE_KEY_REM` carries `key >> round`, and the AIR ties it down with
+
+```text
+seed:        first expansion row's rem == merkle_key
+every round: rem == 2 * rem' + bit
+last round:  rem == bit          (so rem' would be zero)
+```
+
+With `bit` boolean, `rem = 2 * rem' + bit` is one step of binary long division
+and has exactly one solution per round, so the chain forces
+`bit_r = (key >> r) & 1`. Terminating at zero also pins `key` to 64 bits, which
+the previous constraints assumed without checking.
+`rejects_verify_merkle_with_flipped_direction_bit` pins this, and it fails when
+the remainder chain is removed.
+
+**Still open: the witness is not bound to memory.** Two columns remain free:
+
+- `COL_VM_MERKLE_SIBLING` is consumed as a Poseidon input, with nothing tying it
+  to the bytes at `path_addr + 8 + i * 8`.
+- `COL_VM_MERKLE_KEY` is constrained only for continuity across rows, not
+  against the word at `path_addr`.
+
+The VM reads all 65 words (`bud-vm/src/lib.rs`), but those reads do not enter
+the memory argument (`COL_MEM_ADDR` / `COL_MEM_VAL`), so a prover can supply a
+path that was never in memory. Until that is closed, a proof shows only that
+*some* consistent path exists, not that it is the one the program read —
+`verify_merkle_enabled` stays false.
