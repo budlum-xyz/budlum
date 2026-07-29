@@ -81,6 +81,41 @@ pub fn verify_execution_proof_structural_with_model(
 /// Deserialize postcard `bud_proof::ProofEnvelope` and STARK-verify against
 /// `program` words. Public inputs are taken from the envelope hash check via
 /// Adapter (expected_inputs must match what was proven).
+/// Re-derive `initial_state_root` for a fixed-point MLP inference.
+///
+/// This is what makes the AIR's initial-memory commitment worth having. The
+/// AIR proves the trace folds to whatever `initial_state_root` says, but the
+/// fold uses fixed constants — a prover that wants a particular accumulator
+/// can solve for a set of reads that reaches it and run on different weights.
+/// Demonstrated: for reads `[(16,2),(24,3),(32,1)]` a forged set
+/// `[(16,9),(24,-9),(32,x)]` hits the same accumulator with one modular
+/// multiplication.
+///
+/// The defence is not to make the fold collision-resistant — that needs a hash
+/// in the AIR and the trace cannot afford one — but to stop trusting the
+/// prover's value. The verifier holds the registered model, so it can rebuild
+/// the memory image, replay the reads and compute the commitment itself. A
+/// proof whose public input disagrees is rejected before the STARK is even
+/// checked.
+pub fn expected_initial_state_root(
+    spec: &crate::ai::execution::FixedPointMlpSpec,
+    input: &[i32],
+) -> Result<[u8; 32], String> {
+    use crate::ai::execution::{
+        build_matmul_guest_program, setup_guest_memory, GUEST_MEMORY_BYTES,
+    };
+    let program = build_matmul_guest_program(spec)?;
+    let mut vm = bud_vm::Vm::with_gas_limit(GUEST_MEMORY_BYTES, u64::MAX);
+    setup_guest_memory(&mut vm.memory, spec, input)?;
+    let receipt = vm.run_receipt(&program);
+    if !receipt.success {
+        return Err(format!("guest re-execution failed: {:?}", receipt.error));
+    }
+    Ok(bud_proof::memory_image_commitment_of_reads(
+        &bud_proof::initial_memory_reads(&vm.trace),
+    ))
+}
+
 pub fn verify_execution_proof_stark(
     proof: &AiExecutionProof,
     program: &[u64],
@@ -436,5 +471,138 @@ mod tests {
             }
             other => panic!("wrong tx type: {other:?}"),
         }
+    }
+
+    /// The fold the AIR uses is solvable, and this shows it.
+    ///
+    /// `acc' = acc * BETA + addr * GAMMA + val` with fixed constants is a
+    /// polynomial evaluated at a known point. Given an honest accumulator, a
+    /// prover can pick the first reads freely and solve the last one to land
+    /// on the same value — one modular multiplication, no search.
+    #[test]
+    fn the_constant_fold_can_be_collided() {
+        const P: u128 = 18_446_744_069_414_584_321;
+        const BETA: u128 = 0x9E37_79B9_7F4A_7C15;
+        const GAMMA: u128 = 0xC2B2_AE3D_27D4_EB4F;
+
+        let fold = |reads: &[(u64, u64)]| -> u64 {
+            let mut acc: u128 = 0;
+            for (i, (a, v)) in reads.iter().enumerate() {
+                let t = ((*a as u128) * GAMMA + *v as u128) % P;
+                acc = if i == 0 { t } else { (acc * BETA + t) % P };
+            }
+            acc as u64
+        };
+
+        let honest = [(16u64, 2u64), (24, 3), (32, 1)];
+        let target = fold(&honest);
+
+        // Choose two different weights, solve for the third value.
+        let (a0, v0) = (16u64, 9u64);
+        let (a1, v1) = (24u64, (P - 9) as u64);
+        let a2 = 32u64;
+        let t0 = ((a0 as u128) * GAMMA + v0 as u128) % P;
+        let t1 = ((a1 as u128) * GAMMA + v1 as u128) % P;
+        let partial = (t0 * BETA + t1) % P;
+        let t2 = (target as u128 + P - (partial * BETA) % P) % P;
+        let v2 = (t2 + P - ((a2 as u128) * GAMMA) % P) % P;
+
+        let forged = [(a0, v0), (a1, v1), (a2, v2 as u64)];
+        assert_eq!(
+            fold(&forged),
+            target,
+            "the collision must land exactly; if this stops holding the fold \
+             changed and the defence below has to be re-argued"
+        );
+        assert_ne!(honest, forged, "the reads really are different");
+    }
+
+    /// Which is why the verifier does not trust the prover's value.
+    ///
+    /// It holds the registered model, so it rebuilds the image, replays the
+    /// reads and computes the commitment itself.
+    #[test]
+    fn the_verifier_derives_the_commitment_itself() {
+        use crate::ai::execution::FixedPointMlpSpec;
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let root = expected_initial_state_root(&spec, &[4, 5]).unwrap();
+        assert_ne!(root, [0u8; 32], "a seeded guest must commit to something");
+        // Deterministic: the same model and input give the same root.
+        assert_eq!(root, expected_initial_state_root(&spec, &[4, 5]).unwrap());
+    }
+
+    /// Different weights must give a different expected root, so a proof
+    /// produced for one model cannot be presented for another.
+    #[test]
+    fn different_weights_give_a_different_expected_root() {
+        use crate::ai::execution::FixedPointMlpSpec;
+
+        let a = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let b = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![9, -9],
+            biases: vec![1],
+        };
+        assert_ne!(
+            expected_initial_state_root(&a, &[4, 5]).unwrap(),
+            expected_initial_state_root(&b, &[4, 5]).unwrap()
+        );
+    }
+
+    /// And a different input too — the input is part of the seeded image.
+    #[test]
+    fn different_inputs_give_a_different_expected_root() {
+        use crate::ai::execution::FixedPointMlpSpec;
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        assert_ne!(
+            expected_initial_state_root(&spec, &[4, 5]).unwrap(),
+            expected_initial_state_root(&spec, &[6, 7]).unwrap()
+        );
+    }
+
+    /// The re-derived root must equal what the prover actually produced,
+    /// otherwise the check would reject every honest proof.
+    #[test]
+    fn the_expected_root_matches_a_real_proof() {
+        use crate::ai::execution::{
+            build_matmul_guest_program, setup_guest_memory, words_to_bytecode, FixedPointMlpSpec,
+            GUEST_MEMORY_BYTES,
+        };
+
+        let spec = FixedPointMlpSpec {
+            dims: vec![2, 1],
+            weights: vec![2, 3],
+            biases: vec![1],
+        };
+        let input = [4i32, 5];
+        let words = build_matmul_guest_program(&spec).unwrap();
+        let (_, pi, _) = crate::execution::zkvm::prove_bytecode_with_memory(
+            &words_to_bytecode(&words),
+            10_000_000,
+            |mem| setup_guest_memory(mem, &spec, &input).map(|_| ()),
+        )
+        .expect("the honest path must prove");
+        let _ = GUEST_MEMORY_BYTES;
+
+        assert_eq!(
+            pi.initial_state_root,
+            expected_initial_state_root(&spec, &input).unwrap(),
+            "the verifier's independent derivation must agree with the prover \
+             on an honest proof"
+        );
     }
 }

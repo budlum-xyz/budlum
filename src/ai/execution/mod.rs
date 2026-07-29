@@ -27,6 +27,7 @@ pub use model_class::{
     MAX_MLP_PARAMS, MAX_MLP_WIDTH,
 };
 pub use verify::{
-    verify_execution_proof_full, verify_execution_proof_stark, verify_execution_proof_structural,
-    verify_execution_proof_structural_with_model, ExecutionVerifyReport,
+    expected_initial_state_root, verify_execution_proof_full, verify_execution_proof_stark,
+    verify_execution_proof_structural, verify_execution_proof_structural_with_model,
+    ExecutionVerifyReport,
 };

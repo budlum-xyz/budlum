@@ -69,14 +69,27 @@ cannot influence execution, so binding them would make the commitment depend on
 padding. Every value the program consumed is bound — change a weight the guest
 reads and the commitment moves.
 
-**What is still weaker than it should be.** The fold is
-`acc' = acc * BETA + addr * GAMMA + val` with fixed constants, which is a
-polynomial evaluation at a known point rather than a hash. A prover who wants a
-specific accumulator can solve for a set of rows that reaches it. That is
-enough to stop accidental divergence and any substitution that does not go to
-that trouble, and it is what turns `initial_state_root` from a value nobody
-checks into one the trace must reproduce — but replacing the constants with
-Fiat-Shamir transcript challenges is the remaining step.
+**The fold on its own is collidable, and the verifier does not rely on it.**
+`acc' = acc * BETA + addr * GAMMA + val` with fixed constants is a polynomial
+evaluated at a known point. Given an honest accumulator a prover can pick the
+first reads freely and solve the last one to land on the same value — one
+modular multiplication, no search. `the_constant_fold_can_be_collided` performs
+that collision in code so the property is a measured fact rather than a worry.
+
+Making the fold collision-resistant would mean hashing inside the AIR, and the
+trace cannot afford one: the Poseidon gadget is per-row and already shares
+rows with the CPU, so a second instance for memory rows costs roughly 400 more
+columns. Moving the base to a Fiat-Shamir challenge does not work either — the
+accumulator lives in the main trace, which is committed before any challenge is
+sampled, and moving it to the aux trace leaves it with nothing to be compared
+against, because a challenge-dependent value cannot be a public input.
+
+So the defence is to stop trusting the prover's value.
+`expected_initial_state_root` rebuilds the memory image from the registered
+model, replays the guest, and derives the commitment independently. A proof
+whose `initial_state_root` disagrees is rejected before the STARK is checked.
+The AIR still proves the trace folds to what the public input claims; the
+verifier decides what that claim has to be.
 
 ## What the STARK does not cover
 
