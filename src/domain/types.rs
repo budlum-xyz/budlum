@@ -19,6 +19,15 @@ pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
 /// `StorageFinalityAdapter`, vision §3 + §8.3).
 pub const STORAGE_ATTESTATION_ADAPTER: &str = "storage-attestation-v1";
 
+/// Set as the `ConsensusDomain::finality_adapter` value when registering an
+/// `AiInference` domain.
+///
+/// The name was previously only a string literal in the registration gate,
+/// with no adapter answering to it, so an `AiInference` domain could be
+/// registered and never finalize. It is a constant now so the gate and the
+/// adapter cannot drift apart again silently.
+pub const AI_INFERENCE_ADAPTER: &str = "ai-inference-threshold";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConsensusKind {
     PoW,

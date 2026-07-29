@@ -19,7 +19,8 @@ use crate::domain::{
     hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusDomainRegistry,
     ConsensusKind, DomainCommitment, DomainCommitmentRegistry, DomainFinalityAdapter, DomainId,
     DomainPluginRegistry, DomainStatus, FinalityProof, FinalityStatus, PoAFinalityAdapter,
-    PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter, POW_HEADER_CHAIN_ADAPTER,
+    PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter, AI_INFERENCE_ADAPTER,
+    POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::execution::executor::Executor;
 use crate::mempool::pool::Mempool;
@@ -793,7 +794,7 @@ impl Blockchain {
             ConsensusKind::StorageAttestation(_) => {
                 domain.finality_adapter == "storage-attestation-v1"
             }
-            ConsensusKind::AiInference => domain.finality_adapter == "ai-inference-threshold",
+            ConsensusKind::AiInference => domain.finality_adapter == AI_INFERENCE_ADAPTER,
             ConsensusKind::Custom(name) => {
                 if name.trim().is_empty() {
                     return Err(format!(
@@ -1018,7 +1019,13 @@ impl Blockchain {
                 .ok_or_else(|| format!("Domain {domain_id} not found"))?
                 .last_committed_height;
             let next_height = last_height + 1;
-            #[cfg(not(test))]
+            // Compiled in every configuration. This is the check that keeps a
+            // domain's commitment chain contiguous: commitment N+1 must name
+            // commitment N as its parent, or the domain is frozen. It used to
+            // be `#[cfg(not(test))]`, which meant no test could ever exercise
+            // it and no test could notice if it were removed — a security
+            // check that only runs in the build nobody runs assertions
+            // against.
             let last_hash = self
                 .domain_registry
                 .get(domain_id)
@@ -1029,7 +1036,6 @@ impl Blockchain {
                 .domain_commitment_registry
                 .find_by_height(domain_id, next_height)
             {
-                #[cfg(not(test))]
                 if last_hash != [0u8; 32] && com.parent_domain_block_hash != last_hash {
                     let d_mut = self
                         .domain_registry
@@ -1155,12 +1161,19 @@ impl Blockchain {
                 status_res
             }
             ConsensusKind::AiInference => {
-                // AI Inference domain uses threshold-based finality.
-                // An outcome is finalized when agreement_threshold verifiers
-                // Submit matching output_commitments — verified in AiRegistry.
-                // At the settlement layer, we verify the outcome root matches
-                // The commitment's claimed root.
-                let adapter = crate::domain::StorageAttestationFinalityAdapter;
+                // AI Inference domain uses threshold-based finality. An
+                // outcome is finalized when `agreement_threshold` verifiers
+                // submit matching output_commitments, which `AiRegistry`
+                // enforces; at the settlement layer we check that the
+                // commitment carrying it is attested by the domain's set.
+                //
+                // This used to construct `StorageAttestationFinalityAdapter`,
+                // whose `adapter_name()` is "storage-attestation-v1", while
+                // registration requires "ai-inference-threshold". The
+                // `ensure_adapter_name` call below compares exactly those two,
+                // so the arm could never return anything but an error and no
+                // AiInference commitment could finalize.
+                let adapter = crate::domain::AiInferenceFinalityAdapter;
                 self.ensure_adapter_name(domain, adapter.adapter_name())?;
                 adapter.verify_finality(domain, commitment, proof)
             }

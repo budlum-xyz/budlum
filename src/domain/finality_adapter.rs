@@ -429,6 +429,78 @@ impl PoAFinalityAdapter {
     }
 }
 
+/// Re-derive the `validator_set_hash` a PoA domain would have been registered
+/// with, from an authority list carried inside a finality proof.
+///
+/// A PoA domain records its authority set as a `validator_set_hash` at
+/// registration: `genesis.rs` builds one `ValidatorEntry` per authority with
+/// `stake: 1` (PoA is equal-weight and has no stake concept), hashes them with
+/// `ValidatorSetSnapshot::compute_hash`, and normalises the result. This
+/// reproduces that derivation so an adapter can check a proof's claimed
+/// authorities against the registered commitment instead of trusting them.
+///
+/// `compute_hash` sorts by address, so the ordering of `authorities` does not
+/// matter, and duplicates must be removed by the caller before hashing —
+/// otherwise a proof could pad its list to change the digest.
+pub fn poa_authority_set_hash(
+    domain: &ConsensusDomain,
+    authorities: &[crate::core::address::Address],
+) -> Result<Hash32, FinalityError> {
+    use crate::chain::finality::ValidatorEntry;
+
+    let entries: Vec<ValidatorEntry> = authorities
+        .iter()
+        .map(|address| ValidatorEntry {
+            address: *address,
+            stake: 1,
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: Vec::new(),
+        })
+        .collect();
+
+    crate::domain::types::normalize_hash32(
+        b"bootstrap_validator_set_hash",
+        domain.id,
+        &crate::domain::types::RootScheme::Sha3_256,
+        ValidatorSetSnapshot::compute_hash(&entries).as_bytes(),
+    )
+    .map_err(FinalityError)
+}
+
+/// Check a proof's authority set against the one the domain was registered
+/// with, returning a rejection reason when they disagree.
+///
+/// Without this the authority set is whatever the proof says it is: an
+/// attacker supplies three keys it controls, signs with two of them, and
+/// `ceil(3 * 2 / 3) = 2` is met, so the commitment finalizes. Every
+/// stake-weighted adapter here already binds its validator set to
+/// `domain.validator_set_hash` (`PoSFinalityAdapter`, `BftFinalityAdapter`,
+/// and both certificate branches of `StorageAttestationFinalityAdapter`); the
+/// two count-weighted PoA branches were the ones that did not.
+///
+/// A domain with a zero `validator_set_hash` has no registered set to compare
+/// against — the same convention the stake-weighted adapters use — and is left
+/// to the quorum check alone.
+fn reject_unregistered_poa_authorities(
+    domain: &ConsensusDomain,
+    authority_set: &std::collections::BTreeSet<crate::core::address::Address>,
+    label: &str,
+) -> Result<Option<FinalityStatus>, FinalityError> {
+    if domain.validator_set_hash == [0u8; 32] {
+        return Ok(None);
+    }
+    let declared: Vec<crate::core::address::Address> = authority_set.iter().copied().collect();
+    let derived = poa_authority_set_hash(domain, &declared)?;
+    if derived != domain.validator_set_hash {
+        return Ok(Some(FinalityStatus::Rejected(format!(
+            "{label} authority set does not match the set registered for domain {}",
+            domain.id
+        ))));
+    }
+    Ok(None)
+}
+
 impl DomainFinalityAdapter for PoAFinalityAdapter {
     fn adapter_name(&self) -> &'static str {
         "poa-authority-quorum"
@@ -463,6 +535,14 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         // De-duplicate the declared authority set (order-independent).
         let authority_set: std::collections::BTreeSet<crate::core::address::Address> =
             authorities.iter().copied().collect();
+
+        // The authority set arrives inside the proof, and the quorum is a
+        // fraction of its size, so an unbound set lets a proof choose its own
+        // denominator. Bind it to the set the domain registered.
+        if let Some(rejected) = reject_unregistered_poa_authorities(domain, &authority_set, "PoA")?
+        {
+            return Ok(rejected);
+        }
 
         // The message every authority must have signed, bound to THIS commitment.
         let msg = poa_commit_signing_message(
@@ -745,6 +825,16 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 }
                 let authority_set: std::collections::BTreeSet<crate::core::address::Address> =
                     authorities.iter().copied().collect();
+                // Same binding as the plain PoA adapter: the attesting set has
+                // to be the one the domain registered, not the one the proof
+                // nominates for itself.
+                if let Some(rejected) = reject_unregistered_poa_authorities(
+                    domain,
+                    &authority_set,
+                    "Storage attestation",
+                )? {
+                    return Ok(rejected);
+                }
                 let msg = poa_commit_signing_message(
                     domain.id,
                     commitment.domain_height,
@@ -904,6 +994,60 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 "Unsupported or unverified storage attestation proof format".into(),
             )),
         }
+    }
+}
+
+/// Finality for the AI inference attestation domain.
+///
+/// AI verifiers stake and attest to inference results; agreement at the
+/// domain's threshold produces an `AiInferenceOutcome` that reaches the
+/// settlement layer through `GlobalBlockHeader::ai_root`. At this layer the
+/// question is the same one every other attestation domain answers: did
+/// enough registered attesters sign *this* commitment.
+///
+/// This exists as its own type rather than reusing
+/// [`StorageAttestationFinalityAdapter`] because of the name. Registration
+/// requires `finality_adapter == "ai-inference-threshold"`
+/// (`blockchain.rs`), and the runtime path re-checks the selected adapter's
+/// `adapter_name()` against that same field. Pointing the `AiInference` arm at
+/// the storage adapter meant comparing `"ai-inference-threshold"` against
+/// `"storage-attestation-v1"`, which never matches — so an `AiInference`
+/// domain could be registered but not one of its commitments could ever
+/// finalize. Measured across all seven kinds, it was the only disagreeing
+/// pair:
+///
+/// ```text
+/// PoW                kayit=pow-header-chain-v1    runtime=pow-header-chain-v1    OK
+/// PoS                kayit=pos-qc-finality        runtime=pos-qc-finality        OK
+/// PoA                kayit=poa-authority-quorum   runtime=poa-authority-quorum   OK
+/// Bft                kayit=bft-quorum-commit      runtime=bft-quorum-commit      OK
+/// Zk                 kayit=zk-proof-verification  runtime=zk-proof-verification  OK
+/// StorageAttestation kayit=storage-attestation-v1 runtime=storage-attestation-v1 OK
+/// AiInference        kayit=ai-inference-threshold runtime=storage-attestation-v1 CELISKI
+/// ```
+///
+/// The same class of dead wiring was already found and fixed once in the `Zk`
+/// arm, which used to call a trait method that always rejected.
+#[derive(Debug, Clone, Default)]
+pub struct AiInferenceFinalityAdapter;
+
+impl DomainFinalityAdapter for AiInferenceFinalityAdapter {
+    fn adapter_name(&self) -> &'static str {
+        crate::domain::types::AI_INFERENCE_ADAPTER
+    }
+
+    fn verify_finality(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        // Attestation shape is identical to storage: a set of registered
+        // signers over the commitment binding message, at a count quorum. The
+        // AI-specific agreement threshold is enforced where the outcome is
+        // produced (`AiRegistry`); this layer checks that the commitment
+        // carrying it is attested by the domain's registered set.
+        StorageAttestationFinalityAdapter.verify_finality(domain, commitment, proof)
     }
 }
 

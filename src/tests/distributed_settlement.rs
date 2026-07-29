@@ -150,8 +150,24 @@ mod distributed_settlement_tests {
         let path = temp.path().to_path_buf();
 
         let n1 = NodeHarness::new(6101, vec![], Some(path.clone())).await;
-        let mut b2 = Block::new(2, "h2".into(), vec![]);
-        b2.hash = "hash_2".repeat(8);
+
+        // Height 1 arrives second, so it is built first here to give height 2
+        // a real parent. The buffered commitment has to chain onto the one it
+        // waits for, otherwise applying it would break domain continuity —
+        // the check that used to be compiled out under `#[cfg(test)]`.
+        //
+        // The hashes are 64 hex characters, which is what a real block hash
+        // is. `normalize_hash32` decodes a 32-byte hex string straight
+        // through, but hashes anything else together with a field-specific
+        // domain tag — and `domain_block_hash` and `parent_domain_block_hash`
+        // use different tags. With a non-hex placeholder the same block hash
+        // therefore normalises to two different values depending on which
+        // field it lands in, and no chain could ever line up.
+        let mut b1 = Block::new(1, "11".repeat(32), vec![]);
+        b1.hash = "a1".repeat(32);
+
+        let mut b2 = Block::new(2, b1.hash.clone(), vec![]);
+        b2.hash = "b2".repeat(32);
         let com2 = DomainCommitment::from_block(
             &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
             &b2,
@@ -174,8 +190,6 @@ mod distributed_settlement_tests {
         n1.stop().await;
 
         let n2 = NodeHarness::new(6101, vec![], Some(path.clone())).await;
-        let mut b1 = Block::new(1, "h1".into(), vec![]);
-        b1.hash = "hash_1".repeat(8);
         let com1 = DomainCommitment::from_block(
             &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
             &b1,
