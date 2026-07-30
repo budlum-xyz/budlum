@@ -312,6 +312,13 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: StorageProvider gate canary
         run: bash ./scripts/check-storage-provider-gate.sh --self-test
+      # The proof-boundary script existed in scripts/ but no job ran it, so it
+      # proved nothing about any commit. Wired here rather than into a new job
+      # because it is source-only and needs no build.
+      - name: Storage proof boundary canary
+        run: bash ./scripts/check-storage-proof-production-boundary.sh --self-test
+      - name: Storage proof production boundary
+        run: bash ./scripts/check-storage-proof-production-boundary.sh
       - name:  StorageProvider tests
         run: |
           set -euo pipefail

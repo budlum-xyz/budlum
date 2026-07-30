@@ -4873,6 +4873,54 @@ impl Blockchain {
         Ok(issued)
     }
 
+    /// Burn a recorded storage slash against the operator's liquid balance.
+    ///
+    /// `StorageRegistry` only *records* a slash; the burn is an accounting
+    /// decision that belongs here. Both slashing outcomes route through this
+    /// one function so they cannot drift apart: a `Mismatched` answer and a
+    /// `Missed` deadline cost the operator the same bond, which is what makes
+    /// answering wrongly no cheaper than not answering.
+    ///
+    /// Returns the amount actually burned, which may be less than
+    /// `slashed_bond` if the operator's liquid balance has already been spent.
+    ///
+    /// The economics state is persisted here rather than by the caller: a
+    /// burn that survives only in memory is not a burn after a restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage-layer error when the economics state cannot be
+    /// persisted. The in-memory totals and the event have already been
+    /// applied at that point, so the caller must treat this as a failed block
+    /// rather than retrying the burn — replaying it would slash twice.
+    pub fn apply_storage_bond_slash(
+        &mut self,
+        epoch: u64,
+        deal_id: u64,
+        operator: Address,
+        slashed_bond: u64,
+        reason: &'static str,
+    ) -> Result<u64, String> {
+        self.storage_slashed_bond_total =
+            self.storage_slashed_bond_total.saturating_add(slashed_bond);
+
+        let burned = self.state.burn_from(&operator, slashed_bond);
+        if burned > 0 {
+            tracing::warn!("Burned {burned} from operator {operator} for {reason}");
+        }
+        self.storage_burned_bond_total = self.storage_burned_bond_total.saturating_add(burned);
+        self.storage_economics_events.push(StorageEconomicsEvent {
+            epoch,
+            deal_id,
+            operator,
+            amount: slashed_bond,
+            balance_effect: burned,
+            kind: StorageEconomicsEventKind::OperatorBondSlashed,
+        });
+        self.persist_storage_economics_state()?;
+        Ok(burned)
+    }
+
     /// Finalize all challenges whose deadline has passed without a valid
     /// Response. Slashes the operator bond per `StorageEconomicsParams`.
     /// Returns the number of challenges finalized and total slashed amount.
@@ -4912,30 +4960,13 @@ impl Blockchain {
             {
                 if result.outcome == crate::domain::storage_deal::ChallengeOutcome::Missed {
                     total_slashed = total_slashed.saturating_add(result.slashed_bond);
-                    self.storage_slashed_bond_total = self
-                        .storage_slashed_bond_total
-                        .saturating_add(result.slashed_bond);
-
-                    // Enable real burn_from for slashed bond.
-                    // Operator's liquid balance is slashed when challenge is missed.
-                    // Full escrow model deferred.
-                    let burned = self.state.burn_from(&operator, result.slashed_bond);
-                    if burned > 0 {
-                        tracing::warn!(
-                            "Burned {burned} from operator {operator} for missed challenge"
-                        );
-                    }
-
-                    self.storage_burned_bond_total =
-                        self.storage_burned_bond_total.saturating_add(burned);
-                    self.storage_economics_events.push(StorageEconomicsEvent {
-                        epoch: current_epoch,
+                    self.apply_storage_bond_slash(
+                        current_epoch,
                         deal_id,
                         operator,
-                        amount: result.slashed_bond,
-                        balance_effect: burned,
-                        kind: StorageEconomicsEventKind::OperatorBondSlashed,
-                    });
+                        result.slashed_bond,
+                        "missed challenge",
+                    )?;
                 }
                 finalized += 1;
             }

@@ -2847,6 +2847,23 @@ impl ChainActor {
                         )
                         .map_err(|e| e.to_string())
                         .and_then(|challenge_result| {
+                            // A `Mismatched` answer is a recorded slash, and a
+                            // recorded slash that never burns is not a slash.
+                            // Routed through the same accounting helper as a
+                            // missed deadline so the two cost the same.
+                            if challenge_result.outcome
+                                == crate::domain::storage_deal::ChallengeOutcome::Mismatched
+                            {
+                                self.blockchain
+                                    .apply_storage_bond_slash(
+                                        response_data.response_epoch,
+                                        challenge_result.deal_id,
+                                        response_data.responder,
+                                        challenge_result.slashed_bond,
+                                        "storage challenge answered with an unverifiable proof",
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                            }
                             self.blockchain
                                 .storage
                                 .as_ref()
