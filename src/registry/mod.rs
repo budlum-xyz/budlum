@@ -21,10 +21,6 @@
 pub mod d4_merge_tests;
 pub mod evidence;
 pub mod invalid_vote;
-/// Kani model-checking harnesses for bond arithmetic. Compiled only under
-/// `cfg(kani)`, so ordinary builds, tests and clippy never see it.
-#[cfg(kani)]
-pub mod kani_proofs;
 pub mod liveness;
 pub mod params;
 pub mod permissionless;

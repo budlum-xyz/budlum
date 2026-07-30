@@ -271,13 +271,14 @@ jobs:
   # script daha önce vardı, stub mesaj basıyor ve ağaçta olmayan bir dosyaya
   # işaret ediyordu; hiçbir workflow onu çalıştırmıyordu. Kapı sayılıyor ama
   # hiçbir şey kanıtlamıyordu, o yüzden silinmişti. Bu, yerine geçen gerçek
-  # kurulum: gerçek harness'lar (`src/registry/kani_proofs.rs`), gerçek kod.
+  # kurulum.
   #
-  # Bond aritmetiği ilk hedef, çünkü SECURITY.md'nin işaret ettiği türden:
-  # sınırlı, kendi içinde kapalı ve bir validator'ın ne kadar stake
-  # kaybedeceğine karar veriyor. `kani::any()` tipin TÜM değerleridir, yani
-  # geçen bir harness girdi uzayının tamamını eler — proptest'in örneklediği
-  # noktaları değil. İkisi de tutuluyor.
+  # Harness'lar `kani/` altında ayrı bir pakette, `fuzz/` gibi. Sebebi teknik:
+  # Kani kendi pinli nightly'siyle gelir (0.67.0 → rustc 1.93.0-nightly) ve
+  # `budlum-core` `rust-version = "1.94.0"` beyan eder, bu yüzden cargo kök
+  # crate'i derlemeyi reddeder. Upstream düzeltmesi (kani#4645) merge edilmiş
+  # ama henüz yayınlanmamış. Bir doğrulama aracı için MSRV'yi düşürmek
+  # operatörlere verilen sözü zayıflatırdı; paket ayrı duruyor.
   kani-proofs:
     name: Kani Proofs (bond arithmetic)
     runs-on: ubuntu-latest
@@ -289,9 +290,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # Kapının kendisi Kani kurmadan önce kanıtlanır: kanarya sahte çıktıyla
-      # çalışır, yani kurulum bozulsa bile "kapı vacuous mu" sorusu cevaplanmış
-      # olur.
+      # Kapının kendisi Kani kurulmadan önce kanıtlanır: kanarya sahte çıktıyla
+      # çalışır, yani kurulum bozulsa bile "kapı vacuous mu" sorusu cevaplanır.
       - name: Kapı kanaryası (Kani'den bağımsız)
         run: bash ./scripts/check-kani.sh --self-test
 
@@ -300,8 +300,6 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       - name: Install Kani (sürüm pinli)
         run: |
@@ -309,10 +307,10 @@ jobs:
           cargo install --locked kani-verifier --version 0.67.0
           cargo kani setup
 
-      # Harness'lar `cfg(kani)` altında, yani sıradan derlemeler onları görmez.
       # `--output-format terse` satır başına bir VERIFICATION sonucu verir;
-      # kapı bunları sayar.
+      # kapı bunları sayar ve kaynaktaki harness sayısıyla karşılaştırır.
       - name: Kani proofs
+        working-directory: kani
         run: |
           set -euo pipefail
           cargo kani --output-format terse 2>&1 | tee /tmp/kani.log

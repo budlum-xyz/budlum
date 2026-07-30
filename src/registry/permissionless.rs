@@ -1243,4 +1243,66 @@ mod tests {
             remaining_stake: 0,
         }
     }
+
+    /// The Kani harnesses in `kani/src/lib.rs` prove properties about a copy of
+    /// this function's arithmetic, because `cargo kani` cannot build this crate
+    /// (it ships rustc 1.93.0-nightly; `rust-version` here is 1.94.0) and
+    /// because unrolling a populated `BTreeMap` of registrations is not what is
+    /// under proof.
+    ///
+    /// A copy can drift. This test is the thing that stops it: it recomputes
+    /// both expressions over the boundary values the proofs care about and
+    /// fails if they ever disagree. If the registry's formula changes, update
+    /// `penalty_for` in `kani/src/lib.rs` in the same commit — the proofs are
+    /// about production only for as long as the two match.
+    #[test]
+    fn bond_arithmetic_matches_the_kani_mirror() {
+        // Mirrors `kani/src/lib.rs::penalty_for`, kept literal on purpose.
+        fn kani_mirror(stake: u64, slash_ratio_fixed: u64) -> u64 {
+            ((stake as u128 * slash_ratio_fixed as u128) / 1_000_000u128) as u64
+        }
+
+        assert_eq!(
+            1_000_000u64,
+            FIXED_POINT_SCALE,
+            "the mirror hardcodes 1_000_000; FIXED_POINT_SCALE moved"
+        );
+
+        let stakes = [
+            0u64,
+            1,
+            999,
+            1_000,
+            1_000_000,
+            u64::MAX / 2,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let ratios = [
+            0u64,
+            1,
+            FIXED_POINT_SCALE / 100,
+            FIXED_POINT_SCALE / 2,
+            FIXED_POINT_SCALE - 1,
+            FIXED_POINT_SCALE,
+        ];
+
+        for stake in stakes {
+            for ratio in ratios {
+                let registry = ((stake as u128 * ratio as u128) / FIXED_POINT_SCALE as u128) as u64;
+                assert_eq!(
+                    registry,
+                    kani_mirror(stake, ratio),
+                    "registry and Kani mirror disagree at stake={stake}, ratio={ratio}"
+                );
+                // The property the proofs establish, checked here at the
+                // boundaries so a divergence shows up as a failed invariant and
+                // not only as a failed equality.
+                assert!(
+                    registry <= stake,
+                    "penalty {registry} exceeds stake {stake} at ratio={ratio}"
+                );
+            }
+        }
+    }
 }

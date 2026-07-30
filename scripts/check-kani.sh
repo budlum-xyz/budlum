@@ -8,9 +8,9 @@
 # anywhere. It counted as a gate while proving nothing. SECURITY.md recorded
 # that removal and listed model checking as open work.
 #
-# This is the replacement. It runs real harnesses (`src/registry/kani_proofs.rs`)
-# against real code, it is invoked by `.github/workflows/extra-tooling.yml`, and
-# it fails when a proof fails.
+# This is the replacement. It runs real harnesses (`kani/src/lib.rs`), it is
+# invoked by `.github/workflows/extra-tooling.yml`, and it fails when a proof
+# fails.
 #
 # The gate checks two things, because either alone can pass while the property
 # is unverified:
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 ROOT="${BUDLUM_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
-PROOFS_FILE="$ROOT/src/registry/kani_proofs.rs"
+PROOFS_FILE="$ROOT/kani/src/lib.rs"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -37,10 +37,11 @@ fail() {
 }
 
 # Number of `#[kani::proof]` attributes in the source. This is the count the
-# run has to match.
+# run has to match. Indented, because the harnesses sit inside a `cfg(kani)`
+# module.
 declared_harnesses() {
   [ -f "$PROOFS_FILE" ] || fail "harness file missing: $PROOFS_FILE"
-  grep -c '^#\[kani::proof\]' "$PROOFS_FILE"
+  grep -c '#\[kani::proof\]' "$PROOFS_FILE"
 }
 
 gate() {
@@ -64,7 +65,7 @@ gate() {
 
   if [ "$successful" -ne "$declared" ]; then
     fail "Kani verified $successful harness(es) but $declared are declared in \
-$(basename "$PROOFS_FILE") — a proof stopped running without anyone noticing"
+kani/src/lib.rs — a proof stopped running without anyone noticing"
   fi
 
   echo "Kani gate OK: $successful/$declared harnesses verified."
