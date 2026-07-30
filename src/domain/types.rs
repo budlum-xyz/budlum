@@ -312,6 +312,53 @@ impl VerifiedDomainCommitment {
     }
 }
 
+/// Bind a validator-set digest to the domain that registered it.
+///
+/// This is deliberately *not* [`normalize_hash32`]. That function exists to
+/// carry a foreign chain's own hash through unchanged when it is already 32
+/// bytes, so the same block hash lands on the same value in every field that
+/// mentions it. A validator-set commitment needs the opposite property.
+///
+/// Measured before this existed: both production callers passed
+/// `ValidatorSetSnapshot::compute_hash(..).as_bytes()`, which is a 64-character
+/// hex `String`. `hex::decode` accepted it, produced 32 bytes, and returned
+/// from the first branch — so `tag`, `domain_id` and `scheme` were all
+/// discarded. Two `PoA` domains sharing an authority set therefore had byte-equal
+/// `validator_set_hash` values, and `reject_unregistered_poa_authorities`
+/// compares exactly that field. A quorum assembled for one domain satisfied the
+/// registered-set check on the other.
+///
+/// Hashing unconditionally is what makes the domain id load-bearing. The cost
+/// is one extra hash per comparison; the alternative is a cross-domain replay
+/// on the check that exists to prevent an attacker supplying their own
+/// authority set.
+#[must_use]
+pub fn validator_set_commitment(
+    tag: &[u8],
+    domain_id: DomainId,
+    scheme: &RootScheme,
+    digest: &[u8],
+) -> Hash32 {
+    hash_fields_bytes(&[
+        b"BDLM_VALIDATOR_SET_COMMITMENT_V1",
+        tag,
+        &domain_id.to_le_bytes(),
+        &scheme.as_bytes(),
+        digest,
+    ])
+}
+
+/// Normalise a foreign root into 32 bytes.
+///
+/// A root that is already 32 bytes — or 32 bytes of hex — is passed through
+/// unchanged, because the same external block hash has to normalise to the
+/// same value wherever it appears; `domain_block_hash` and
+/// `parent_domain_block_hash` use different tags, and a chain could never line
+/// up if the same hash produced two values.
+///
+/// That pass-through means `tag`, `domain_id` and `scheme` only take effect
+/// for inputs that are *not* 32 bytes. Do not use this to commit to something
+/// that must be unique per domain — see [`validator_set_commitment`].
 pub fn normalize_hash32(
     tag: &[u8],
     domain_id: DomainId,
@@ -362,5 +409,140 @@ mod tests {
         .unwrap();
         assert_ne!(custom, [0u8; 32]);
         assert_ne!(custom, normalized);
+    }
+}
+
+#[cfg(test)]
+mod validator_set_commitment_locks {
+    use super::*;
+
+    /// The digest both production callers actually pass: a 64-character hex
+    /// string from `ValidatorSetSnapshot::compute_hash`, not 32 raw bytes.
+    fn snapshot_digest() -> String {
+        "ab".repeat(32)
+    }
+
+    #[test]
+    fn two_domains_with_the_same_authorities_get_different_commitments() {
+        // The bug this pins: `normalize_hash32` hex-decoded the 64-char digest
+        // to 32 bytes and returned before `domain_id` was ever mixed in, so
+        // two PoA domains sharing an authority set had byte-equal
+        // `validator_set_hash` values. `reject_unregistered_poa_authorities`
+        // compares that field, so a quorum gathered on one domain satisfied
+        // the registered-set check on the other.
+        let digest = snapshot_digest();
+        let a = validator_set_commitment(
+            b"bootstrap_validator_set_hash",
+            1,
+            &RootScheme::Sha3_256,
+            digest.as_bytes(),
+        );
+        let b = validator_set_commitment(
+            b"bootstrap_validator_set_hash",
+            7,
+            &RootScheme::Sha3_256,
+            digest.as_bytes(),
+        );
+        assert_ne!(
+            a, b,
+            "the domain id must be load-bearing in a validator-set commitment"
+        );
+    }
+
+    #[test]
+    fn the_tag_and_scheme_are_load_bearing_too() {
+        let digest = snapshot_digest();
+        let base =
+            validator_set_commitment(b"tag_one", 1, &RootScheme::Sha3_256, digest.as_bytes());
+        assert_ne!(
+            base,
+            validator_set_commitment(b"tag_two", 1, &RootScheme::Sha3_256, digest.as_bytes()),
+            "tag must change the commitment"
+        );
+        assert_ne!(
+            base,
+            validator_set_commitment(b"tag_one", 1, &RootScheme::BudlumBlockV2, digest.as_bytes()),
+            "root scheme must change the commitment"
+        );
+    }
+
+    #[test]
+    fn a_different_authority_set_still_changes_the_commitment() {
+        // Domain separation must not come at the cost of the property the
+        // commitment existed for.
+        let a = validator_set_commitment(
+            b"bootstrap_validator_set_hash",
+            1,
+            &RootScheme::Sha3_256,
+            "ab".repeat(32).as_bytes(),
+        );
+        let b = validator_set_commitment(
+            b"bootstrap_validator_set_hash",
+            1,
+            &RootScheme::Sha3_256,
+            "cd".repeat(32).as_bytes(),
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_same_inputs_are_still_deterministic() {
+        let digest = snapshot_digest();
+        let a = validator_set_commitment(b"t", 3, &RootScheme::Sha3_256, digest.as_bytes());
+        let b = validator_set_commitment(b"t", 3, &RootScheme::Sha3_256, digest.as_bytes());
+        assert_eq!(a, b, "consensus requires this to be a pure function");
+        assert_ne!(a, [0u8; 32]);
+    }
+
+    #[test]
+    fn raw_32_byte_input_is_hashed_rather_than_passed_through() {
+        // `normalize_hash32` returns 32-byte input unchanged on purpose.
+        // `validator_set_commitment` must not, or the domain id would drop out
+        // again for any caller that happens to hand it raw bytes.
+        let raw = [0x11u8; 32];
+        let committed = validator_set_commitment(
+            b"bootstrap_validator_set_hash",
+            1,
+            &RootScheme::Sha3_256,
+            &raw,
+        );
+        assert_ne!(
+            committed, raw,
+            "a validator-set commitment must never be its own input"
+        );
+        let other = validator_set_commitment(
+            b"bootstrap_validator_set_hash",
+            2,
+            &RootScheme::Sha3_256,
+            &raw,
+        );
+        assert_ne!(committed, other);
+    }
+
+    #[test]
+    fn normalize_hash32_keeps_its_pass_through_for_foreign_roots() {
+        // The two functions are split precisely because this behaviour has to
+        // stay: `domain_block_hash` and `parent_domain_block_hash` use
+        // different tags, and a chain could not line up if the same external
+        // block hash normalised to two values.
+        let block_hash = "a1".repeat(32);
+        let as_child = normalize_hash32(
+            b"domain_block_hash",
+            1,
+            &RootScheme::BudlumBlockV2,
+            block_hash.as_bytes(),
+        )
+        .unwrap();
+        let as_parent = normalize_hash32(
+            b"parent_domain_block_hash",
+            9,
+            &RootScheme::Sha256,
+            block_hash.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            as_child, as_parent,
+            "a 32-byte foreign root must survive normalisation unchanged"
+        );
     }
 }

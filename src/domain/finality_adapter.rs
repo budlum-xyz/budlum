@@ -459,13 +459,12 @@ pub fn poa_authority_set_hash(
         })
         .collect();
 
-    crate::domain::types::normalize_hash32(
+    Ok(crate::domain::types::validator_set_commitment(
         b"bootstrap_validator_set_hash",
         domain.id,
         &crate::domain::types::RootScheme::Sha3_256,
         ValidatorSetSnapshot::compute_hash(&entries).as_bytes(),
-    )
-    .map_err(FinalityError)
+    ))
 }
 
 /// Check a proof's authority set against the one the domain was registered
