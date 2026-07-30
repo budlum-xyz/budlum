@@ -4886,6 +4886,13 @@ impl Blockchain {
     ///
     /// The economics state is persisted here rather than by the caller: a
     /// burn that survives only in memory is not a burn after a restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage-layer error when the economics state cannot be
+    /// persisted. The in-memory totals and the event have already been
+    /// applied at that point, so the caller must treat this as a failed block
+    /// rather than retrying the burn — replaying it would slash twice.
     pub fn apply_storage_bond_slash(
         &mut self,
         epoch: u64,
