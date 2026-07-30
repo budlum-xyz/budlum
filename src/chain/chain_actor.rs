@@ -16,6 +16,7 @@ pub enum AiPaymentDirection {
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
+    GetFinalizedHeight(oneshot::Sender<u64>),
     GetBlock(u64, oneshot::Sender<Option<Block>>),
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
@@ -430,6 +431,16 @@ impl ChainHandle {
     pub async fn get_height(&self) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetHeight(tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    /// Height of the last block covered by a finality certificate.
+    ///
+    /// Unlike [`Self::get_height`] this never moves backwards on a reorg, so
+    /// it is the only safe cursor for anything with an external side effect.
+    pub async fn get_finalized_height(&self) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetFinalizedHeight(tx)).await;
         rx.await.unwrap_or(0)
     }
 
@@ -2044,6 +2055,9 @@ impl ChainActor {
                 ChainCommand::GetHeight(tx) => {
                     let height = self.blockchain.chain.len().saturating_sub(1) as u64;
                     let _ = tx.send(height);
+                }
+                ChainCommand::GetFinalizedHeight(tx) => {
+                    let _ = tx.send(self.blockchain.finalized_height);
                 }
                 ChainCommand::GetBlock(height, tx) => {
                     let block = self.blockchain.chain.get(height as usize).cloned();

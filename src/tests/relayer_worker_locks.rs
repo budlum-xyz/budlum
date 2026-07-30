@@ -605,3 +605,61 @@ fn the_worker_source_contains_no_fabricated_success_literal() {
         "the source scan cannot detect a planted violation, so it proves nothing"
     );
 }
+
+/// The relay cursor must follow finalized height, not chain height.
+///
+/// Relaying is an external side effect: once a transaction is submitted to
+/// another chain it cannot be recalled. Following `get_height()` meant
+/// relaying blocks a reorg could still remove, so a request that ended up off
+/// the canonical chain had already been sent to the other side.
+///
+/// The old loop also stalled permanently after a reorg. `last_height` came
+/// from chain height and the guard was `if current_height <= last_height {
+/// continue; }`, so on a shorter fork the condition held forever and the
+/// relayer went silent with nothing in the logs.
+///
+/// A source check rather than a behavioural one, because reproducing a reorg
+/// needs a running chain actor; what matters is that the cursor cannot be
+/// wired back to the reorg-able value.
+#[test]
+fn the_relay_cursor_reads_finalized_height() {
+    let src = include_str!("../relayer/worker.rs");
+    let code: Vec<&str> = src
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && !line.starts_with("///"))
+        .collect();
+
+    assert!(
+        code.iter().any(|l| l.contains("get_finalized_height()")),
+        "the relay loop must take its cursor from finalized height"
+    );
+    let reorgable: Vec<&&str> = code
+        .iter()
+        .filter(|l| l.contains("self.chain.get_height()"))
+        .collect();
+    assert!(
+        reorgable.is_empty(),
+        "the relay loop reads chain height, which moves backwards on a reorg \
+         and has already caused a permanent stall: {reorgable:?}"
+    );
+}
+
+/// The scan must be able to see the shape it forbids.
+#[test]
+fn the_relay_cursor_scan_can_detect_a_violation() {
+    let planted = [
+        "        let mut last_height = self.chain.get_height().await;",
+        "/// followed self.chain.get_height() before the fix",
+    ];
+    let caught = planted
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.starts_with("//") && !l.starts_with("///"))
+        .filter(|l| l.contains("self.chain.get_height()"))
+        .count();
+    assert_eq!(
+        caught, 1,
+        "the scan must catch the code line and ignore the doc-comment one"
+    );
+}
