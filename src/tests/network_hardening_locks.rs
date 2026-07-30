@@ -58,11 +58,20 @@ mod tests {
         );
     }
 
-    /// The remote-content fetch path specifically must survive a poisoned
-    /// PeerManager: it is an optional optimisation over local storage, so
-    /// failing it is correct and panicking is not.
+    /// The remote-content fetch path must survive a poisoned PeerManager.
+    ///
+    /// It used to survive by giving up: the arm matched on the lock result and
+    /// answered "peer manager unavailable". That is better than panicking, but
+    /// it still let one panic elsewhere in peer bookkeeping stop every remote
+    /// fetch, and the peer list it could not read is stale rather than
+    /// dangerous. The arm now goes through `peer_manager_lock()`, which
+    /// recovers the state and logs, so the fetch proceeds with the peers the
+    /// node actually has.
+    ///
+    /// What this test still guarantees is the original property: this path
+    /// does not reach a bare `.lock()` that could panic the event loop.
     #[test]
-    fn remote_content_fetch_degrades_on_poisoned_peer_manager() {
+    fn remote_content_fetch_survives_a_poisoned_peer_manager() {
         // `NodeCommand::FetchRemoteContent {` appears twice: once where the
         // command is sent, once as the match arm that handles it. Only the arm
         // ends in `=> {`, so match on that.
@@ -71,15 +80,15 @@ mod tests {
             .expect("the FetchRemoteContent command arm must still exist");
         let arm = &NODE_RS[at..(at + 3000).min(NODE_RS.len())];
         assert!(
-            arm.contains("PeerManager lock poisoned during remote content fetch"),
-            "the FetchRemoteContent arm no longer handles a poisoned \
-             PeerManager lock; a panic elsewhere in the node would take the \
-             whole event loop down through this path"
+            arm.contains("peer_manager_lock()"),
+            "the FetchRemoteContent arm must read the peer list through the \
+             recovering helper; a bare lock here would either panic the event \
+             loop or silently drop every remote fetch after one unrelated panic"
         );
         assert!(
-            arm.contains("peer manager unavailable"),
-            "the caller must be told the fetch failed rather than being left \
-             waiting on a dropped channel"
+            !arm.contains("peer_manager.lock()"),
+            "the FetchRemoteContent arm reads the raw lock again, so a poisoned \
+             PeerManager changes its answer"
         );
     }
 
