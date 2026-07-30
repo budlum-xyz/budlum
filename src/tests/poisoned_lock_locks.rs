@@ -106,33 +106,68 @@ fn the_recovering_helper_exists_and_no_site_exits() {
 
 /// A poisoned lock must not silently deny every peer.
 ///
-/// Several sites read the lock through `is_ok_and(..)` or
-/// `.map(..).unwrap_or(false)`, so a poisoned mutex makes every rate-limit
-/// check answer "not allowed" and the node drops all traffic while looking
-/// healthy. That is a quieter failure than exiting but not a better one, and
-/// it is recorded here rather than fixed in this change: the read sites need
-/// a decision about what "unknown" should mean per call, which is a larger
-/// argument than the exit-on-poison one.
+/// This was recorded as a known gap rather than fixed, with a test that froze
+/// the count at 3. Re-measuring found **62** raw `peer_manager.lock()` sites:
+/// the old check only matched single-line `is_ok_and` / `.map(`, so it missed
+/// multi-line `.map(..).unwrap_or(false)` chains, every `if let Ok(mut pm)`
+/// block, and three `match` arms. Freezing a number does not make it right.
+///
+/// The three shapes and what each did on a poisoned lock:
+///
+///   - `is_ok_and(..)` / `.map(..).unwrap_or(false)` — answered "not allowed",
+///     so every rate-limit and handshake check denied, and the node dropped
+///     all traffic while reporting itself healthy;
+///   - `if let Ok(mut pm)` — skipped the body, so misbehaviour went
+///     unreported, bans were never applied, and peers kept their reputation;
+///   - `match` — returned an empty list or an early return, so the ban list
+///     was never persisted (bans lost across restart) and banned peers were
+///     never disconnected.
+///
+/// All three are worse than continuing with the recovered state. A poisoned
+/// `PeerManager` means one panic somewhere in peer bookkeeping; the recovered
+/// map is stale, not hostile, and the next message corrects it.
 #[test]
-fn poisoned_read_sites_are_recorded_as_a_known_gap() {
+fn no_peer_manager_site_reads_the_lock_directly() {
     let src =
         fs::read_to_string(repo_root().join("src/network/node.rs")).expect("node.rs is readable");
 
-    let denying: usize = src
+    let raw: Vec<(usize, &str)> = src
         .lines()
+        .enumerate()
+        .map(|(i, line)| (i + 1, line))
+        .filter(|(_, line)| line.contains("peer_manager.lock()"))
+        .filter(|(_, line)| !line.trim_start().starts_with("///"))
+        // The helper itself is the one place allowed to touch the raw lock.
+        .filter(|(_, line)| !line.contains("unwrap_or_else"))
+        .collect();
+
+    assert!(
+        raw.is_empty(),
+        "these sites still read peer_manager.lock() directly instead of going \
+         through peer_manager_lock(), so a poisoned lock changes their answer: {raw:?}"
+    );
+}
+
+/// The scan above has to be able to fail.
+///
+/// A source-level check that silently matches nothing would pass forever after
+/// a rename. This plants the exact shape being forbidden and asserts the
+/// filter still catches it.
+#[test]
+fn the_direct_lock_scan_can_still_detect_a_violation() {
+    let planted = [
+        "            if let Ok(mut pm) = self.peer_manager.lock() {",
+        "        let ok = self.peer_manager.lock().is_ok_and(|mut pm| pm.check_rate_limit(&p));",
+    ];
+    let caught = planted
+        .iter()
         .filter(|line| line.contains("peer_manager.lock()"))
         .filter(|line| !line.trim_start().starts_with("///"))
-        .filter(|line| line.contains("is_ok_and") || line.contains(".map("))
+        .filter(|line| !line.contains("unwrap_or_else"))
         .count();
-
-    // Not an assertion that the count is good — an assertion that it has not
-    // grown silently. If it moves, the decision above needs revisiting.
-    assert!(
-        denying <= 3,
-        "{denying} peer_manager read sites fail closed on a poisoned lock; \
-         that is more than the {} recorded when this was measured. Decide what \
-         'unknown' means for the new ones rather than inheriting fail-closed \
-         by accident.",
-        3
+    assert_eq!(
+        caught, 2,
+        "the scan used by no_peer_manager_site_reads_the_lock_directly cannot \
+         see a planted violation, so it proves nothing"
     );
 }
