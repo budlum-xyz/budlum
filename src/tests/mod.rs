@@ -170,3 +170,7 @@ pub mod consensus_digest;
 // Reproducibility sondası (`genesis_hash_deterministic`, bkz. determinism.yml).
 #[cfg(test)]
 pub mod genesis_repro;
+// A serialize failure must not fold into empty bytes on a path that feeds a
+// hash: two different values would then commit to the same digest.
+#[cfg(test)]
+pub mod hash_input_serialize_locks;

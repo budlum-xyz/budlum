@@ -593,7 +593,10 @@ pub struct StateSnapshotV2Params {
 /// C3 helper: herhangi bir `Serialize` tipini bincode → hasher.
 /// Deterministik (struct field order sabit; bincode canonical).
 fn hash_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, val: &T) {
-    let bytes = bincode::serialize(val).unwrap_or_default();
+    // A serialize failure used to fold into empty bytes, which makes two
+    // different states hash the same — the state root is what nodes compare,
+    // so a silent collision here is a fork with no error anywhere.
+    let bytes = bincode::serialize(val).expect("BUG: snapshot field must serialize for state root");
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(&bytes);
 }
@@ -774,7 +777,8 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
             // Finality_certificates: Vec — len-prefix + her elem serialize.
-            let fc_bytes = bincode::serialize(&self.finality_certificates).unwrap_or_default();
+            let fc_bytes = bincode::serialize(&self.finality_certificates)
+                .expect("BUG: finality certificates must serialize for state root");
             hasher.update((fc_bytes.len() as u64).to_le_bytes());
             hasher.update(&fc_bytes);
             hasher.update(self.created_at.to_le_bytes());
