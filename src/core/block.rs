@@ -226,18 +226,41 @@ impl Block {
             return "0".repeat(64);
         }
 
+        // An odd node is promoted to the next level unchanged. It must NOT be
+        // paired with itself.
+        //
+        // Pairing a lone node with itself is CVE-2012-2459, the Bitcoin
+        // duplicate-leaf attack. Measured on this tree before the fix:
+        //
+        //     [A, B, C]     -> 2f76bf7e7413d28e...
+        //     [A, B, C, C]  -> 2f76bf7e7413d28e...   identical
+        //
+        // Two different transaction lists producing one root is a fork
+        // primitive: a peer takes a valid block, appends a copy of the last
+        // transaction, and the header still matches. Nodes that reject the
+        // duplicate and nodes that accept it then disagree about a block whose
+        // tx_root verifies on both sides.
+        //
+        // Promotion is what RFC 6962 (Certificate Transparency) does, and it
+        // is collision-free for a different reason than a domain tag would be:
+        // a promoted node is never hashed a second time, so no preimage exists
+        // that could be confused with an interior node.
         while tx_hashes.len() > 1 {
-            let mut next_level = Vec::new();
+            let mut next_level = Vec::with_capacity(tx_hashes.len().div_ceil(2));
             for chunk in tx_hashes.chunks(2) {
-                let left = &chunk[0];
-                let right = if chunk.len() > 1 { &chunk[1] } else { left };
-
-                let mut combined = Vec::with_capacity(1 + 64);
-                combined.push(0x01);
-                combined.extend_from_slice(left);
-                combined.extend_from_slice(right);
-
-                next_level.push(crate::core::hash::calculate_hash_bytes(&combined));
+                match chunk {
+                    [left, right] => {
+                        let mut combined = Vec::with_capacity(1 + 64);
+                        combined.push(0x01);
+                        combined.extend_from_slice(left);
+                        combined.extend_from_slice(right);
+                        next_level.push(crate::core::hash::calculate_hash_bytes(&combined));
+                    }
+                    // Lone node: promote, do not self-pair.
+                    [lone] => next_level.push(*lone),
+                    // `chunks(2)` yields only 1- or 2-element slices.
+                    _ => unreachable!("chunks(2) cannot produce an empty or 3+ slice"),
+                }
             }
             tx_hashes = next_level;
         }
@@ -540,5 +563,135 @@ mod tests {
             hash_some, hash_other,
             "Different storage_root values must produce different hash"
         );
+    }
+}
+
+#[cfg(test)]
+mod merkle_duplicate_leaf_locks {
+    use super::*;
+    use crate::core::address::Address;
+    use crate::core::transaction::Transaction;
+
+    fn block_with_tx_hashes(hashes: &[&str]) -> Block {
+        let mut block = Block::new(1, "00".repeat(32), vec![]);
+        block.transactions = hashes
+            .iter()
+            .map(|h| {
+                let mut tx = Transaction::new(Address::zero(), Address::zero(), 0, vec![]);
+                tx.hash = (*h).to_string();
+                tx
+            })
+            .collect();
+        block
+    }
+
+    fn root(hashes: &[&str]) -> String {
+        block_with_tx_hashes(hashes).calculate_tx_root()
+    }
+
+    /// CVE-2012-2459: appending a copy of the last transaction must change the
+    /// root.
+    ///
+    /// Measured before the fix — both lists produced
+    /// `2f76bf7e7413d28edd1e7b531c6b023d2e9460bf8df9943d59594d72f055a446`:
+    ///
+    ///     [A, B, C]     -> 2f76bf7e...
+    ///     [A, B, C, C]  -> 2f76bf7e...
+    ///
+    /// A peer could take a valid block, append a duplicate of its last
+    /// transaction, and the header's `tx_root` would still verify. Nodes that
+    /// reject the duplicate and nodes that accept it then hold two different
+    /// blocks that both check out against the same header.
+    #[test]
+    fn duplicating_the_last_transaction_changes_the_root() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
+
+        assert_ne!(
+            root(&[&a, &b, &c]),
+            root(&[&a, &b, &c, &c]),
+            "[A,B,C] and [A,B,C,C] must not share a tx_root (CVE-2012-2459)"
+        );
+    }
+
+    /// The attack is not limited to three leaves — any level with an odd count
+    /// is a candidate, so check the shapes where the duplication lands on a
+    /// deeper level too.
+    #[test]
+    fn duplication_at_deeper_odd_levels_also_changes_the_root() {
+        let h: Vec<String> = (0u8..8).map(|i| format!("{i:02x}").repeat(32)).collect();
+        let r: Vec<&str> = h.iter().map(String::as_str).collect();
+
+        // 5 leaves: level 0 odd, and level 1 (3 nodes) odd as well.
+        assert_ne!(
+            root(&r[..5]),
+            root(&[r[0], r[1], r[2], r[3], r[4], r[4]]),
+            "duplicating the fifth of five leaves must change the root"
+        );
+
+        // 7 leaves: odd at level 0 and level 1.
+        assert_ne!(
+            root(&r[..7]),
+            root(&[r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[6]]),
+            "duplicating the seventh of seven leaves must change the root"
+        );
+
+        // 6 leaves: even at level 0, odd at level 1 (3 nodes).
+        assert_ne!(
+            root(&r[..6]),
+            root(&[r[0], r[1], r[2], r[3], r[4], r[5], r[5], r[5]]),
+            "an odd count at an interior level must not be self-pairable either"
+        );
+    }
+
+    /// A promoted lone node must not be confusable with an interior node.
+    ///
+    /// Promotion (RFC 6962) is safe because a promoted node is never hashed a
+    /// second time. This pins that a two-leaf tree and a one-leaf tree whose
+    /// leaf happens to equal the two-leaf root stay distinct — which they do
+    /// because interior nodes carry the `0x01` tag and leaves carry `0x00`.
+    #[test]
+    fn a_promoted_node_is_not_confusable_with_an_interior_node() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        assert_ne!(root(&[&a]), root(&[&a, &b]));
+        assert_ne!(root(&[&a, &b]), root(&[&a, &b, &a]));
+    }
+
+    /// The ordinary properties must survive the change.
+    #[test]
+    fn distinct_transaction_sets_still_produce_distinct_roots() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
+
+        assert_ne!(root(&[&a, &b]), root(&[&b, &a]), "order must matter");
+        assert_ne!(root(&[&a, &b]), root(&[&a, &c]), "content must matter");
+        assert_eq!(
+            root(&[&a, &b, &c]),
+            root(&[&a, &b, &c]),
+            "the root must be deterministic"
+        );
+        assert_eq!(root(&[]), "0".repeat(64), "an empty block keeps its root");
+    }
+
+    /// Every tree size in a realistic range must reject the duplicated tail.
+    ///
+    /// A single hand-picked shape can pass by luck; sweeping the sizes makes
+    /// the property hold rather than the example.
+    #[test]
+    fn no_tree_size_up_to_thirty_two_accepts_a_duplicated_tail() {
+        let h: Vec<String> = (0u8..32).map(|i| format!("{i:02x}").repeat(32)).collect();
+        for n in 1..=32usize {
+            let base: Vec<&str> = h[..n].iter().map(String::as_str).collect();
+            let mut dup = base.clone();
+            dup.push(base[n - 1]);
+            assert_ne!(
+                root(&base),
+                root(&dup),
+                "a {n}-leaf tree accepts a duplicated last leaf"
+            );
+        }
     }
 }
