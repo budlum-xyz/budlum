@@ -86,23 +86,38 @@ impl RelayerWorker {
             );
         }
 
-        let mut last_height = self.chain.get_height().await;
+        // The cursor follows finalized height, not chain height.
+        //
+        // Relaying is an external side effect: once a transaction has been
+        // submitted to another chain it cannot be recalled. Following
+        // `get_height()` meant relaying blocks that a reorg could still
+        // remove, so a request that ended up off the canonical chain had
+        // already been sent. Finalized height never moves backwards, so a
+        // relayed block is one that cannot be reorged away.
+        //
+        // The old loop also stalled permanently after a reorg. `last_height`
+        // was set from chain height, and `if current_height <= last_height {
+        // continue; }` then held forever on the shorter fork — the relayer
+        // went quiet with nothing in the logs. Tracking a monotonic value
+        // removes that state entirely.
+        let mut relayed_through = self.chain.get_finalized_height().await;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-            let current_height = self.chain.get_height().await;
-            if current_height <= last_height {
+            let finalized = self.chain.get_finalized_height().await;
+            if finalized <= relayed_through {
                 continue;
             }
 
-            for h in (last_height + 1)..=current_height {
+            for h in (relayed_through + 1)..=finalized {
                 if let Some(block) = self.chain.get_block(h).await {
                     for tx in block.transactions {
                         if let TransactionType::UniversalRelay(ext_tx) = tx.tx_type {
                             info!(
                                 chain = ?ext_tx.chain,
                                 target = %ext_tx.target_address,
+                                height = h,
                                 "Relayer: Detected external transaction request"
                             );
 
@@ -111,7 +126,7 @@ impl RelayerWorker {
                     }
                 }
             }
-            last_height = current_height;
+            relayed_through = finalized;
         }
     }
 
