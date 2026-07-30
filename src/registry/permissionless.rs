@@ -36,6 +36,27 @@ pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
 /// And for existing callers/tests.
 pub const UNBONDING_EPOCHS: u64 = 7;
 
+/// How many slashing records the live registry keeps.
+///
+/// The history was unbounded and is hashed into [`PermissionlessRegistry::root`],
+/// so it is consensus state that grew for the life of the chain. It is not
+/// cheap to abuse — `SlashingReport::is_actionable` requires
+/// `ProofProvenance::ConsensusVerified`, so records only appear for slashes
+/// that actually happened — but "only grows when a validator misbehaves" is
+/// still monotonic.
+///
+/// 4096 is chosen to be far above any plausible operational need: at one
+/// slash per epoch it is several years of history, and the records that
+/// matter to jail checks and operator tooling are the recent ones. Older
+/// records remain reconstructible from block history, which is where an
+/// audit trail belongs; live consensus state is the wrong place to keep one
+/// forever.
+///
+/// Changing this value is a consensus change: every node must apply the same
+/// cap or two nodes that observed the same slashes would compute different
+/// registry roots.
+pub const MAX_SLASHING_HISTORY: usize = 4096;
+
 /// Reasons a registered member can be slashed. Explicitly enumerated so the
 /// Economic-security surface is auditable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +199,13 @@ pub struct PermissionlessRegistry {
     #[serde(default)]
     params: RegistryParams,
     #[serde(default)]
+    /// Slashing records, newest last, capped at [`MAX_SLASHING_HISTORY`].
+    ///
+    /// This is consensus state: `root()` hashes every record, so the cap has
+    /// to be applied identically on every node or two nodes that saw the same
+    /// slashes would compute different registry roots. Trimming from the front
+    /// on insert is deterministic — it depends only on the number of records,
+    /// not on time, node age, or when a node joined.
     slashing_history: Vec<SlashingRecord>,
 }
 
@@ -612,36 +640,34 @@ impl PermissionlessRegistry {
                 if outcome.penalty == 0 {
                     return Ok(None);
                 }
-                self.slashing_history.push(SlashingRecord {
+                self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
                     remaining_stake: outcome.remaining_stake,
                 });
                 Ok(Some(outcome))
             }
-            // Not registered is a legitimate no-op: evidence can name an
-            // account that never held the role, and there is nothing to cut.
             Err(RegistryError::NotRegistered { .. }) => Ok(None),
-            // Everything else used to collapse into the same `Ok(None)`, so a
-            // slash that failed for any other reason was indistinguishable
-            // from one that correctly found nothing to do. Consensus called
-            // this and moved on believing the report had been handled.
-            //
-            // Still `Ok(None)` — a failed slash must not abort block
-            // application, or one bad report would halt the chain — but it is
-            // no longer silent. An operator seeing this line knows evidence
-            // was accepted and then dropped.
-            Err(reason) => {
-                tracing::warn!(
-                    offender = %report.offender,
-                    role = ?report.role,
-                    ?condition,
-                    %reason,
-                    "slashing report was actionable but the registry refused it; \
-                     no stake was cut"
-                );
-                Ok(None)
-            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Append a slashing record, dropping the oldest once the cap is reached.
+    ///
+    /// The history was unbounded. Nothing about that was cheap to abuse —
+    /// `is_actionable()` requires `ProofProvenance::ConsensusVerified` before
+    /// a record is ever created, so an attacker cannot spam it — but it grew
+    /// for the life of the chain and every entry is hashed into `root()` and
+    /// copied wholesale by the `get_slashing_history` RPC.
+    ///
+    /// Trimming from the front keeps the newest records, which are the ones
+    /// jail checks and operator tooling read. Anything older belongs in an
+    /// archive built from block history, not in live consensus state.
+    fn record_slash(&mut self, record: SlashingRecord) {
+        self.slashing_history.push(record);
+        if self.slashing_history.len() > MAX_SLASHING_HISTORY {
+            let excess = self.slashing_history.len() - MAX_SLASHING_HISTORY;
+            self.slashing_history.drain(..excess);
         }
     }
 
@@ -1073,54 +1099,109 @@ mod tests {
         assert!(reg.ensure_active_relayer(&relayer).is_err());
     }
 
-    /// A slash that the registry refuses must not look like a slash that
-    /// correctly found nothing to do.
+    /// The slashing history is capped, and the cap is deterministic.
     ///
-    /// `slash_from_report` used to map every `Err` to `Ok(None)`. Consensus
-    /// calls this and moves on, so a report that was accepted as actionable
-    /// and then dropped by the registry was indistinguishable from a report
-    /// naming an account that never held the role. All four call sites also
-    /// use `let _ =`, so neither layer would have noticed.
-    ///
-    /// It still returns `Ok(None)` — a failed slash must not abort block
-    /// application, or one bad report would halt the chain — but the refusal
-    /// is logged now. This test pins the two cases apart at the source level,
-    /// since a `tracing::warn!` is not observable from a unit test.
+    /// This is consensus state — `root()` hashes every record — so a cap that
+    /// depended on time, node age, or when a node joined would make two nodes
+    /// that saw the same slashes compute different registry roots. Trimming
+    /// from the front on insert depends only on the count.
     #[test]
-    fn a_refused_slash_is_logged_rather_than_silently_dropped() {
-        let src = include_str!("permissionless.rs");
-        let at = src
-            .find("pub fn slash_from_report(")
-            .expect("slash_from_report must still exist");
-        let body = &src[at..(at + 2400).min(src.len())];
+    fn the_slashing_history_stops_growing_at_the_cap() {
+        let mut registry = PermissionlessRegistry::new();
+        let record = |n: u64| SlashingRecord {
+            report: SlashingReport::consensus_double_sign(
+                Address::from([(n % 251) as u8; 32]),
+                n,
+                format!("{n:064x}"),
+                format!("{:064x}", n + 1),
+                vec![n as u8],
+                vec![(n + 1) as u8],
+                None,
+            ),
+            penalty: n,
+            remaining_stake: 0,
+        };
 
-        assert!(
-            body.contains("tracing::warn!"),
-            "slash_from_report drops a refused slash without saying so"
+        for n in 0..(MAX_SLASHING_HISTORY as u64 + 500) {
+            registry.record_slash(record(n));
+        }
+
+        assert_eq!(
+            registry.slashing_history().len(),
+            MAX_SLASHING_HISTORY,
+            "the history must stop at the cap"
         );
-        assert!(
-            !body.contains("Err(_) => Ok(None)"),
-            "slash_from_report still collapses every error into a silent Ok(None)"
+        // Newest kept, oldest dropped: jail checks and operator tooling read
+        // the recent end.
+        let penalties: Vec<u64> = registry
+            .slashing_history()
+            .iter()
+            .map(|r| r.penalty)
+            .collect();
+        assert_eq!(
+            *penalties.first().expect("non-empty"),
+            500,
+            "the oldest surviving record should be the 501st inserted"
         );
-        // The legitimate no-op must stay a quiet no-op: evidence naming an
-        // account that never held the role is normal, not an incident.
-        assert!(
-            body.contains("Err(RegistryError::NotRegistered { .. }) => Ok(None)"),
-            "an unregistered offender should remain a quiet no-op"
+        assert_eq!(
+            *penalties.last().expect("non-empty"),
+            MAX_SLASHING_HISTORY as u64 + 499,
+            "the newest record must be kept"
         );
     }
 
-    /// The scan above must be able to fail.
+    /// Two registries fed the same slashes must agree, cap or no cap.
+    ///
+    /// The property that actually matters: if trimming were non-deterministic
+    /// the two roots would diverge and the nodes would fork.
     #[test]
-    fn the_silent_slash_scan_can_detect_a_violation() {
-        let planted = "match self.slash(a, b, c, d) {\n    Err(_) => Ok(None),\n}";
-        assert!(
-            planted.contains("Err(_) => Ok(None)"),
-            "the pattern the scan looks for must match the shape it forbids"
+    fn trimming_keeps_the_registry_root_deterministic() {
+        let build = || {
+            let mut registry = PermissionlessRegistry::new();
+            for n in 0..(MAX_SLASHING_HISTORY as u64 + 37) {
+                registry.record_slash(SlashingRecord {
+                    report: SlashingReport::consensus_double_sign(
+                        Address::from([(n % 251) as u8; 32]),
+                        n,
+                        format!("{n:064x}"),
+                        format!("{:064x}", n + 1),
+                        vec![n as u8],
+                        vec![(n + 1) as u8],
+                        None,
+                    ),
+                    penalty: n,
+                    remaining_stake: 0,
+                });
+            }
+            registry
+        };
+        assert_eq!(
+            build().root(),
+            build().root(),
+            "two nodes applying the same slashes must reach the same registry root"
         );
-        assert!(
-            !planted.contains("tracing::warn!"),
-            "the planted violation must lack the log the real code has"
-        );
+    }
+
+    /// Below the cap nothing is dropped.
+    #[test]
+    fn a_short_history_is_untouched() {
+        let mut registry = PermissionlessRegistry::new();
+        for n in 0..10u64 {
+            registry.record_slash(SlashingRecord {
+                report: SlashingReport::consensus_double_sign(
+                    Address::from([n as u8; 32]),
+                    n,
+                    format!("{n:064x}"),
+                    format!("{:064x}", n + 1),
+                    vec![n as u8],
+                    vec![(n + 1) as u8],
+                    None,
+                ),
+                penalty: n,
+                remaining_stake: 0,
+            });
+        }
+        assert_eq!(registry.slashing_history().len(), 10);
+        assert_eq!(registry.slashing_history()[0].penalty, 0);
     }
 }

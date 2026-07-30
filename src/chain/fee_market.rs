@@ -57,8 +57,15 @@ pub struct EffectiveFee {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeeError {
-    MaxFeeBelowBaseFee { max_fee: u64, base_fee: u64 },
+    MaxFeeBelowBaseFee {
+        max_fee: u64,
+        base_fee: u64,
+    },
     InvalidParams,
+    /// The treasury cut was above 100%, which would pay the proposer nothing.
+    TreasuryRateAbovePpmDenominator {
+        rate_ppm: u64,
+    },
 }
 
 /// Compute next block base fee using EIP-1559 bounded adjustment.
@@ -128,10 +135,24 @@ pub fn distribute_fee(
     let base_fee_burned = block_base_fee.saturating_mul(gas_used);
     let total_priority = effective.priority_fee_paid.saturating_mul(gas_used);
 
-    // Treasury cut (saturating to prevent overflow)
+    // A rate above 100% would take the whole priority fee and leave the
+    // proposer nothing, silently: `saturating_sub` floors at zero rather than
+    // signalling. Producing blocks would stop paying while every arithmetic
+    // step still looked well-behaved.
+    //
+    // The only caller passes `DEFAULT_TREASURY_RATE_PPM`, so this is not
+    // reachable today. It is checked because the function is public and the
+    // rate is exactly the kind of value that later arrives from governance —
+    // and the failure would be a validator-incentive outage, not a panic.
+    if treasury_rate_ppm > PPM_DENOMINATOR {
+        return Err(FeeError::TreasuryRateAbovePpmDenominator {
+            rate_ppm: treasury_rate_ppm,
+        });
+    }
+
     let treasury_fee = total_priority
         .saturating_mul(treasury_rate_ppm)
-        .saturating_div(1_000_000);
+        .saturating_div(PPM_DENOMINATOR);
 
     let priority_fee_to_proposer = total_priority.saturating_sub(treasury_fee);
 
@@ -141,6 +162,9 @@ pub fn distribute_fee(
         treasury_fee,
     })
 }
+
+/// Parts-per-million denominator. A rate equal to this is 100%.
+pub const PPM_DENOMINATOR: u64 = 1_000_000;
 
 /// Default treasury rate: 1% (10_000 ppm).
 pub const DEFAULT_TREASURY_RATE_PPM: u64 = 10_000;
@@ -298,5 +322,66 @@ mod tests {
         let dist = distribute_fee(bid, 10, 1_000, 1_000_000).unwrap();
         assert_eq!(dist.treasury_fee, 5_000);
         assert_eq!(dist.priority_fee_to_proposer, 0);
+    }
+
+    /// A treasury cut above 100% must be refused, not silently absorbed.
+    ///
+    /// `saturating_sub` floors the proposer's share at zero, so a rate over
+    /// `PPM_DENOMINATOR` would take the entire priority fee and leave block
+    /// production unpaid — with no overflow, no panic, and nothing in the
+    /// logs. Every arithmetic step would look well-behaved.
+    ///
+    /// Not reachable from the current caller, which passes the constant. It is
+    /// guarded because the function is public and a treasury rate is exactly
+    /// the kind of value that later arrives from governance.
+    #[test]
+    fn a_treasury_rate_above_one_hundred_percent_is_refused() {
+        let bid = FeeBid {
+            max_fee: 100,
+            priority_fee: 50,
+        };
+        let err = distribute_fee(bid, 10, 1_000, PPM_DENOMINATOR + 1)
+            .expect_err("a rate above 100% must not be accepted");
+        assert!(matches!(
+            err,
+            FeeError::TreasuryRateAbovePpmDenominator { rate_ppm } if rate_ppm == PPM_DENOMINATOR + 1
+        ));
+    }
+
+    /// Exactly 100% is still a decision someone can make, and it is coherent:
+    /// the whole priority fee goes to the treasury and the proposer keeps the
+    /// burn-exempt remainder of nothing. The boundary is not off by one.
+    #[test]
+    fn exactly_one_hundred_percent_is_allowed_and_pays_the_treasury() {
+        let bid = FeeBid {
+            max_fee: 100,
+            priority_fee: 50,
+        };
+        let dist = distribute_fee(bid, 10, 1_000, PPM_DENOMINATOR)
+            .expect("100% is a coherent, if aggressive, policy");
+        assert_eq!(dist.priority_fee_to_proposer, 0);
+        assert!(dist.treasury_fee > 0);
+    }
+
+    /// The ordinary path is unchanged: proposer and treasury split the
+    /// priority fee, and the two add back up.
+    #[test]
+    fn the_default_rate_splits_without_losing_a_unit() {
+        let bid = FeeBid {
+            max_fee: 100,
+            priority_fee: 50,
+        };
+        let dist = distribute_fee(bid, 10, 1_000, DEFAULT_TREASURY_RATE_PPM)
+            .expect("the default rate must work");
+        let total_priority = dist.priority_fee_to_proposer + dist.treasury_fee;
+        assert!(dist.treasury_fee > 0, "1% of a real fee is not zero");
+        assert!(
+            dist.priority_fee_to_proposer > dist.treasury_fee,
+            "at 1% the proposer keeps the bulk of the priority fee"
+        );
+        assert_eq!(
+            total_priority, 50_000,
+            "the split must not lose or invent value"
+        );
     }
 }
