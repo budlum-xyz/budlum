@@ -115,7 +115,13 @@ pub struct RelayerExternalResult {
 impl RelayerExternalResult {
     /// / L1: result-fact leaf'i.
     pub fn result_leaf(&self) -> [u8; 32] {
-        let chain_bytes = bincode::serialize(&self.chain).unwrap_or_default();
+        // `unwrap_or_default()` here meant a serialize failure produced an
+        // EMPTY discriminator, so every chain would have hashed to the same
+        // leaf — the exact cross-domain replay this tag exists to prevent.
+        // `ExternalChain` is a small C-like enum; the only way bincode fails
+        // on it is allocation failure, which is a bug rather than an input.
+        let chain_bytes = bincode::serialize(&self.chain)
+            .expect("BUG: ExternalChain must serialize for the relayer result leaf");
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"BDLM_RELAYER_RESULT_V2");
         hasher.update(&chain_bytes);
