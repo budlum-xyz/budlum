@@ -3252,7 +3252,14 @@ impl ChainActor {
                     let _ = response.send(receipts);
                 }
                 ChainCommand::HubGetApps { response } => {
-                    let apps: Vec<_> = self.blockchain.state.budlumxyz.apps.values().cloned().collect();
+                    let apps: Vec<_> = self
+                        .blockchain
+                        .state
+                        .budlumxyz
+                        .apps
+                        .values()
+                        .cloned()
+                        .collect();
                     let _ = response.send(apps);
                 }
             }

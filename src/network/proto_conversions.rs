@@ -505,7 +505,9 @@ fn convert_app_category_to_proto(
         crate::budlumxyz::types::AppCategory::SocialFi => {
             pb::proto_hub_register_app::AppCategoryProto::SocialFi
         }
-        crate::budlumxyz::types::AppCategory::DeFi => pb::proto_hub_register_app::AppCategoryProto::DeFi,
+        crate::budlumxyz::types::AppCategory::DeFi => {
+            pb::proto_hub_register_app::AppCategoryProto::DeFi
+        }
         crate::budlumxyz::types::AppCategory::Storage => {
             pb::proto_hub_register_app::AppCategoryProto::Storage
         }
@@ -521,7 +523,9 @@ fn convert_app_category_to_proto(
     }
 }
 
-fn convert_proto_to_app_category(cat_i32: i32) -> Result<crate::budlumxyz::types::AppCategory, String> {
+fn convert_proto_to_app_category(
+    cat_i32: i32,
+) -> Result<crate::budlumxyz::types::AppCategory, String> {
     match pb::proto_hub_register_app::AppCategoryProto::try_from(cat_i32) {
         Ok(pb::proto_hub_register_app::AppCategoryProto::SocialFi) => {
             Ok(crate::budlumxyz::types::AppCategory::SocialFi)

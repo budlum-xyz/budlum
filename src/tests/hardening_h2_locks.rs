@@ -6,9 +6,9 @@ mod tests {
     use crate::bns::registry::BnsRegistry;
     use crate::core::address::Address;
 
-    use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
     use crate::budlumxyz::types::AppCategory;
     use crate::budlumxyz::BudlumxyzRegistry;
+    use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
     use crate::network::peer_manager::PeerManager;
 
     fn addr(b: u8) -> Address {

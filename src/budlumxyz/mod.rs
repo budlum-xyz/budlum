@@ -1,7 +1,7 @@
 pub mod types;
 
-use crate::core::address::Address;
 use crate::budlumxyz::types::{AppCategory, AppRecord, BudlumxyzError};
+use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -77,7 +77,11 @@ impl BudlumxyzRegistry {
     ///
     /// This does **not** set `verified` (DAO/governance badge).
     /// UI/indexers must not treat `developer_attested` as third-party audit.
-    pub fn attest_app_as_developer(&mut self, id: u64, caller: &Address) -> Result<(), BudlumxyzError> {
+    pub fn attest_app_as_developer(
+        &mut self,
+        id: u64,
+        caller: &Address,
+    ) -> Result<(), BudlumxyzError> {
         let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
         if &app.developer != caller {
             return Err(BudlumxyzError::NotDeveloper);

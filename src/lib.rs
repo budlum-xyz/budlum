@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 pub mod ai;
 pub mod bns;
+pub mod budlumxyz;
 pub mod chain;
 pub mod cli;
 pub mod consensus;
@@ -15,7 +16,6 @@ pub mod domain;
 pub mod error;
 pub mod execution;
 pub mod gateway;
-pub mod budlumxyz;
 pub mod lubot;
 pub mod mempool;
 pub mod network;

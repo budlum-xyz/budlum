@@ -168,7 +168,10 @@ fn test_hub_register_app_below_min_fee_rejected() {
     let tx = budlumxyz_tx(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE - 1, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
     assert!(err.contains("App registration requires"));
-    assert!(state.budlumxyz.apps.is_empty(), "reddedilen kayıt düşmemeli");
+    assert!(
+        state.budlumxyz.apps.is_empty(),
+        "reddedilen kayıt düşmemeli"
+    );
 }
 
 #[test]
