@@ -39,7 +39,12 @@ pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 /// ```
 #[must_use]
 pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
-    ((stake as u128 * slash_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64
+    // Written with `u128::from` / `try_from` rather than `as`, to match the
+    // form the mirror test in `budlum-core` compares against; the arithmetic is
+    // identical to `slash_role_only`'s. `penalty_never_exceeds_stake` is what
+    // proves the `try_from` cannot fail.
+    u64::try_from((u128::from(stake) * u128::from(slash_ratio_fixed)) / u128::from(FIXED_POINT_SCALE))
+        .expect("penalty is bounded by stake, which is a u64")
 }
 
 #[cfg(kani)]
@@ -150,11 +155,13 @@ mod proofs {
         kani::assume(stake > 0);
         kani::assume(ratio > FIXED_POINT_SCALE);
 
+        // `penalty_for` would panic on the overflow case, so the quotient is
+        // computed directly here rather than through it.
+        let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
         assert!(
-            penalty_for(stake, ratio) > stake
-                || u128::from(stake) * u128::from(ratio) > u128::from(u64::MAX),
-            "a ratio above FIXED_POINT_SCALE must overshoot the bond or \
-             overflow the u64 result — `validate()` is what prevents both"
+            quotient > u128::from(stake),
+            "a ratio above FIXED_POINT_SCALE must overshoot the bond — \
+             `validate()` is what prevents it"
         );
     }
 }

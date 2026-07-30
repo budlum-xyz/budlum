@@ -1259,7 +1259,10 @@ mod tests {
     fn bond_arithmetic_matches_the_kani_mirror() {
         // Mirrors `kani/src/lib.rs::penalty_for`, kept literal on purpose.
         fn kani_mirror(stake: u64, slash_ratio_fixed: u64) -> u64 {
-            ((stake as u128 * slash_ratio_fixed as u128) / 1_000_000u128) as u64
+            u64::try_from(
+                (u128::from(stake) * u128::from(slash_ratio_fixed)) / 1_000_000u128,
+            )
+            .expect("penalty is bounded by stake, which is a u64")
         }
 
         assert_eq!(
@@ -1288,7 +1291,10 @@ mod tests {
 
         for stake in stakes {
             for ratio in ratios {
-                let registry = ((stake as u128 * ratio as u128) / FIXED_POINT_SCALE as u128) as u64;
+                let registry = u64::try_from(
+                    (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE),
+                )
+                .expect("penalty is bounded by stake, which is a u64");
                 assert_eq!(
                     registry,
                     kani_mirror(stake, ratio),
