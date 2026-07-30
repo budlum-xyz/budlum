@@ -96,16 +96,34 @@ mod integration_tests {
 
         Executor::apply_transaction(&mut state, &vote_tx).unwrap();
 
-        // MIN_PROPOSAL_DURATION=10 → end_epoch=10. advance_epoch
-        // Check-before-increment yaptığı için 11 çağrı gerek (epoch 0→10,
-        // 11. çağrıda 10>=10 → finalize → Executed).
+        // MIN_PROPOSAL_DURATION=10 → end_epoch=10. advance_epoch does its
+        // check before incrementing, so 11 calls reach the close of voting
+        // (epoch 0→10, the 11th sees 10>=10 and finalises the tally).
         for _ in 0..11 {
+            state.advance_epoch(1000);
+        }
+
+        // Voting is over and the proposal carried — but it is not applied yet.
+        // Every proposal type now waits out an activation delay, so there is a
+        // window in which a passed vote is visible before it binds. This used
+        // to be `Executed` here because `ChangeBaseFee` had no delay at all.
+        assert_eq!(
+            state.governance.proposals[0].status,
+            crate::core::governance::ProposalStatus::Passed,
+            "a proposal must not execute in the same epoch its vote closes"
+        );
+
+        // Walk out the delay; then it applies.
+        let delay =
+            crate::core::governance::activation_delay_epochs(&state.governance.proposals[0].p_type);
+        for _ in 0..delay {
             state.advance_epoch(1000);
         }
 
         assert_eq!(
             state.governance.proposals[0].status,
-            crate::core::governance::ProposalStatus::Executed
+            crate::core::governance::ProposalStatus::Executed,
+            "a passed proposal must apply once its activation delay has elapsed"
         );
     }
 

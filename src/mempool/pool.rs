@@ -97,6 +97,22 @@ impl Mempool {
             return Err(MempoolError::PoolFull);
         }
 
+        // Read the sender's count *after* eviction, not before.
+        //
+        // `evict_lowest_fee` can remove a transaction belonging to this very
+        // sender — it picks the globally lowest fee, with no regard for whose
+        // it is. Counting first meant the limit was compared against a number
+        // that eviction had already invalidated, so a sender at its cap could
+        // push a high-fee transaction through: eviction dropped one of its own,
+        // the stale count still said "at the cap", and the check passed anyway.
+        //
+        // Measured with a canary before the fix, at max_per_sender=2:
+        //   A holds 2, pool is full, A submits a third at a higher fee -> Ok(())
+        //   A now holds 2 again, having replaced a peer's slot with its own.
+        //
+        // The effect is small per attempt and unbounded in aggregate: the
+        // per-sender cap exists so one account cannot occupy the pool, and it
+        // stops holding exactly when the pool is full and contention matters.
         let sender_count = self.by_sender.get(&tx.from).map_or(0, |v| v.len());
 
         if let Some(existing_hash) = self.find_tx_by_sender_nonce(&tx.from, tx.nonce) {
@@ -242,13 +258,42 @@ impl Mempool {
             .and_then(|nonces| nonces.get(&nonce).cloned())
     }
 
+    /// Drop the lowest-fee transaction to make room, if the incoming one
+    /// outbids it.
+    ///
+    /// The victim is chosen deterministically, and never from the sender being
+    /// admitted.
+    ///
+    /// Both properties were missing. `hashes.iter().next()` takes an arbitrary
+    /// element of a `HashSet`, so two nodes with the same mempool could evict
+    /// different transactions — and a test written against it failed roughly
+    /// one run in five. Worse, the victim could belong to the sender being
+    /// admitted: `add_transaction` then saw a count that eviction had just
+    /// decremented, and a sender sitting at `max_per_sender` bought itself
+    /// another slot by outbidding its own transaction.
+    ///
+    /// Skipping the sender's own entries makes the cap mean what it says: to
+    /// get a slot when the pool is full, you have to outbid *somebody else*.
     fn evict_lowest_fee(&mut self, new_tx: &Transaction) -> bool {
-        if let Some((&lowest_fee, hashes)) = self.by_fee.iter().next() {
-            if new_tx.fee > lowest_fee {
-                if let Some(hash) = hashes.iter().next().cloned() {
-                    self.remove_transaction(&hash);
-                    return true;
-                }
+        for (&fee, hashes) in &self.by_fee {
+            if new_tx.fee <= fee {
+                // `by_fee` is ordered, so nothing further down can be cheaper.
+                break;
+            }
+            // Deterministic choice among equal fees: the smallest hash. Two
+            // nodes with the same mempool must evict the same transaction.
+            let victim = hashes
+                .iter()
+                .filter(|h| {
+                    self.transactions
+                        .get(*h)
+                        .is_some_and(|entry| entry.tx.from != new_tx.from)
+                })
+                .min()
+                .cloned();
+            if let Some(hash) = victim {
+                self.remove_transaction(&hash);
+                return true;
             }
         }
         false
@@ -507,5 +552,177 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(pool.len(), 0);
         assert!(pool.is_empty());
+    }
+
+    /// Eviction must not let a sender exceed its own cap.
+    ///
+    /// `evict_lowest_fee` picks the globally lowest-fee transaction with no
+    /// regard for whose it is, so it can drop one belonging to the very sender
+    /// being admitted. The count used to be read *before* that ran, so the cap
+    /// was compared against a number eviction had already invalidated.
+    ///
+    /// Measured with a canary before the fix, at `max_per_sender = 2`:
+    ///
+    ///     A holds 2, pool is full, A submits a third at a higher fee -> Ok(())
+    ///
+    /// The per-sender cap exists so one account cannot occupy the pool, and it
+    /// stopped holding exactly when the pool was full and contention mattered.
+    #[test]
+    fn a_full_pool_does_not_let_a_sender_past_its_own_cap() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 4,
+            max_per_sender: 2,
+            min_fee: 0,
+            ..MempoolConfig::default()
+        });
+
+        let kp_a = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+        let kp_b = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+        let a = crate::core::address::Address::from(kp_a.public_key_bytes());
+
+        let mk = |kp: &crate::crypto::primitives::KeyPair, nonce: u64, fee: u64| {
+            let from = crate::core::address::Address::from(kp.public_key_bytes());
+            let mut tx = Transaction::new_with_chain_id(
+                from,
+                crate::core::address::Address::zero(),
+                1,
+                fee,
+                nonce,
+                vec![],
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                crate::core::transaction::TransactionType::Transfer,
+            );
+            tx.sign(kp);
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+
+        // A fills its cap; B fills the rest, so the pool is full.
+        for n in 0..2u64 {
+            pool.add_transaction(mk(&kp_a, n, 1)).expect("A within cap");
+        }
+        for n in 0..2u64 {
+            pool.add_transaction(mk(&kp_b, n, 1)).expect("B within cap");
+        }
+        assert_eq!(pool.transactions.len(), 4, "pool should be full");
+        assert_eq!(pool.by_sender.get(&a).map_or(0, |v| v.len()), 2);
+
+        // A is at its cap. A high fee may win eviction, but it must not buy a
+        // third slot for a sender that already holds two.
+        let err = pool
+            .add_transaction(mk(&kp_a, 2, 99))
+            .expect_err("a sender at its cap must be refused even with a high fee");
+        assert!(
+            matches!(err, MempoolError::SenderLimitReached),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            pool.by_sender.get(&a).map_or(0, |v| v.len()) <= 2,
+            "A holds more than max_per_sender after a rejected admission"
+        );
+    }
+
+    /// The cap still admits a sender that has room, even when eviction runs.
+    ///
+    /// Otherwise the fix above would be a gate that rejects everything.
+    #[test]
+    fn eviction_still_admits_a_sender_with_room() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 3,
+            max_per_sender: 5,
+            min_fee: 0,
+            ..MempoolConfig::default()
+        });
+
+        let kp_a = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+        let kp_b = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+
+        let mk = |kp: &crate::crypto::primitives::KeyPair, nonce: u64, fee: u64| {
+            let from = crate::core::address::Address::from(kp.public_key_bytes());
+            let mut tx = Transaction::new_with_chain_id(
+                from,
+                crate::core::address::Address::zero(),
+                1,
+                fee,
+                nonce,
+                vec![],
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                crate::core::transaction::TransactionType::Transfer,
+            );
+            tx.sign(kp);
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+
+        for n in 0..3u64 {
+            pool.add_transaction(mk(&kp_b, n, 1)).expect("B fills pool");
+        }
+        // A has room under its own cap and outbids the floor.
+        pool.add_transaction(mk(&kp_a, 0, 50))
+            .expect("a sender with room must still get in by outbidding");
+        assert_eq!(pool.transactions.len(), 3, "pool stays at max_size");
+    }
+
+    /// Two nodes with the same mempool must evict the same transaction.
+    ///
+    /// `hashes.iter().next()` returned an arbitrary element of a `HashSet`, so
+    /// the victim depended on hash iteration order. Nothing in consensus reads
+    /// the mempool directly, so this was not a fork — but it made block
+    /// contents depend on allocator state, and it made
+    /// `a_full_pool_does_not_let_a_sender_past_its_own_cap` fail about one run
+    /// in five, which is how it was found.
+    #[test]
+    fn eviction_picks_the_lowest_hash_among_equal_fees() {
+        let kps: Vec<crate::crypto::primitives::KeyPair> = (0..3)
+            .map(|_| crate::crypto::primitives::KeyPair::generate().expect("keypair"))
+            .collect();
+        let bidder = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+
+        let mk = |kp: &crate::crypto::primitives::KeyPair, nonce: u64, fee: u64| {
+            let from = crate::core::address::Address::from(kp.public_key_bytes());
+            let mut tx = Transaction::new_with_chain_id(
+                from,
+                crate::core::address::Address::zero(),
+                1,
+                fee,
+                nonce,
+                vec![],
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+                crate::core::transaction::TransactionType::Transfer,
+            );
+            tx.sign(kp);
+            tx.hash = tx.calculate_hash();
+            tx
+        };
+
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 3,
+            max_per_sender: 5,
+            min_fee: 0,
+            ..MempoolConfig::default()
+        });
+
+        // Three transactions at the same fee. The tie-break must be the
+        // smallest hash, not whatever the set yields first.
+        let mut seeded: Vec<String> = Vec::new();
+        for kp in &kps {
+            let tx = mk(kp, 0, 1);
+            seeded.push(tx.hash.clone());
+            pool.add_transaction(tx).expect("seed");
+        }
+        let expected_victim = seeded.iter().min().expect("three seeds").clone();
+
+        pool.add_transaction(mk(&bidder, 0, 99)).expect("outbid");
+
+        assert!(
+            !pool.transactions.contains_key(&expected_victim),
+            "the smallest hash among equal fees should have been evicted"
+        );
+        for hash in seeded.iter().filter(|h| **h != expected_victim) {
+            assert!(
+                pool.transactions.contains_key(hash),
+                "only one equal-fee entry should be evicted"
+            );
+        }
     }
 }

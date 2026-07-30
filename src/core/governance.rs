@@ -7,6 +7,67 @@ use std::collections::HashMap;
 /// Accepted parameter proposals activate after this delay.
 pub const GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS: u64 = 10;
 
+/// Activation delay for proposals that change what the chain enforces about
+/// itself, rather than a tunable number.
+///
+/// Longer than the parameter delay because the blast radius is larger: an
+/// encryption policy, a constitution parameter or an unfrozen domain changes
+/// the rules other checks are written against, and an operator who disagrees
+/// needs time to react before it takes effect.
+pub const GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS: u64 = 20;
+
+/// Activation delay for proposals that take stake or verifier standing away
+/// from a specific account.
+///
+/// Shorter than the policy delay: slashing evidence is time-sensitive, and a
+/// long window lets a proven equivocator keep signing. Still non-zero, because
+/// a governance slash names one account and the accused needs a window in
+/// which the decision can be seen and contested.
+pub const GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS: u64 = 5;
+
+/// A zero activation delay is not a timelock.
+///
+/// Enforced at compile time rather than in a test: a test asserting on
+/// constants is a constant assertion, and the point is that nobody can set one
+/// of these to zero in the first place. Two 2026 incidents turned on exactly
+/// this value being zero when it mattered.
+const _: () = {
+    assert!(GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS > 0);
+    assert!(GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS > 0);
+    assert!(GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS > 0);
+    // A rule that changes what the chain enforces waits longer than one that
+    // moves a number.
+    assert!(
+        GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS > GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS
+    );
+};
+
+/// How long an accepted proposal of this kind waits before it can be applied.
+///
+/// Exhaustive on purpose: a new `ProposalType` will not compile until someone
+/// decides which delay it belongs in. The previous code used
+/// `matches!(.., ParameterUpdate(..))`, so every variant added after it
+/// silently inherited a zero delay.
+#[must_use]
+pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
+    match p_type {
+        // Tunable numbers and parameter strings.
+        ProposalType::ChangeBaseFee(_)
+        | ProposalType::ChangeBlockReward(_)
+        | ProposalType::ParameterUpdate(_, _) => GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS,
+
+        // Rules the rest of the system is written against.
+        ProposalType::SetEncryptionPolicy(_)
+        | ProposalType::SetConstitutionParameter(_)
+        | ProposalType::UnfreezeConsensusDomain { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
+
+        // Actions aimed at one account.
+        ProposalType::SlashValidator { .. }
+        | ProposalType::WhitelistVerifier { .. }
+        | ProposalType::DewhitelistVerifier { .. } => GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS,
+    }
+}
+
 /// Minimal on-chain governance is parameter-only and whitelist-bound.
 pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "min_stake",
@@ -379,13 +440,22 @@ impl GovernanceState {
 
         let id = self.next_proposal_id;
         let mut proposal = Proposal::new(id, proposer, p_type, current_epoch, duration);
-        if matches!(proposal.p_type, ProposalType::ParameterUpdate(_, _)) {
-            proposal.activation_epoch = Some(
-                end_epoch
-                    .checked_add(GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS)
-                    .ok_or_else(|| "Proposal activation_epoch overflow".to_string())?,
-            );
-        }
+        // Every proposal type gets a delay.
+        //
+        // Only `ParameterUpdate` used to. The other eight fell through to
+        // `activation_epoch()`'s `unwrap_or(self.end_epoch)`, so they executed
+        // the moment voting closed — including `SlashValidator`,
+        // `SetConstitutionParameter` and `UnfreezeConsensusDomain`, which are
+        // the ones worth watching.
+        //
+        // A delay is what turns a passed vote into something observable before
+        // it binds. Without it, the first time anyone learns a domain was
+        // unfrozen is when it is already unfrozen.
+        proposal.activation_epoch = Some(
+            end_epoch
+                .checked_add(activation_delay_epochs(&proposal.p_type))
+                .ok_or_else(|| "Proposal activation_epoch overflow".to_string())?,
+        );
         self.proposals.push(proposal);
         self.next_proposal_id += 1;
         // Increment only after proposal creation succeeds; the next submission
@@ -893,5 +963,90 @@ mod l4_tests {
                 .unwrap();
             assert_eq!(gov.proposal_fee_multiplier(&proposer, 0), next_multiplier);
         }
+    }
+
+    /// Every proposal type waits before it binds.
+    ///
+    /// Only `ParameterUpdate` used to. The rest fell through to
+    /// `activation_epoch()`'s `unwrap_or(self.end_epoch)` and executed the
+    /// moment voting closed. Measured with a canary before the fix:
+    ///
+    ///     ChangeBaseFee          delay=0
+    ///     ChangeBlockReward      delay=0
+    ///     SlashValidator         delay=0
+    ///     ParameterUpdate        delay=10
+    ///     WhitelistVerifier      delay=0
+    ///     DewhitelistVerifier    delay=0
+    ///
+    /// A zero delay on a governance action is what turned two 2026 incidents
+    /// into drains rather than near-misses: there was no window in which a
+    /// passed vote could be seen before it bound.
+    #[test]
+    fn no_proposal_type_activates_the_moment_voting_closes() {
+        let proposer = Address::from([0x01; 32]);
+        let every_type = [
+            ProposalType::ChangeBaseFee(1),
+            ProposalType::ChangeBlockReward(1),
+            ProposalType::SlashValidator {
+                address: Address::from([0x02; 32]),
+                evidence_hash: [0u8; 32],
+            },
+            ProposalType::ParameterUpdate("min_stake".into(), "5000".into()),
+            ProposalType::WhitelistVerifier {
+                address: Address::from([0x03; 32]),
+            },
+            ProposalType::DewhitelistVerifier {
+                address: Address::from([0x04; 32]),
+            },
+        ];
+
+        for p_type in every_type {
+            let label = format!("{p_type:?}");
+            let mut gov = GovernanceState::default();
+            let id = gov
+                .create_proposal(proposer, p_type, 7, 10)
+                .unwrap_or_else(|e| panic!("{label} must be proposable: {e}"));
+            let proposal = gov.find_proposal_mut(id).expect("proposal exists");
+            let end = proposal.end_epoch;
+            let activation = proposal.activation_epoch();
+
+            assert!(
+                activation > end,
+                "{label} activates at {activation}, the same epoch voting ends \
+                 ({end}) — there is no window to observe it"
+            );
+            assert!(
+                !proposal.activation_ready(end),
+                "{label} is ready to execute the epoch voting closes"
+            );
+            assert!(
+                proposal.activation_ready(activation),
+                "{label} must be executable once its delay has passed"
+            );
+        }
+    }
+
+    /// The delay is chosen by kind, not left to a default.
+    #[test]
+    fn each_delay_class_is_what_it_claims() {
+        assert_eq!(
+            activation_delay_epochs(&ProposalType::ParameterUpdate("k".into(), "v".into())),
+            GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS
+        );
+        assert_eq!(
+            activation_delay_epochs(&ProposalType::UnfreezeConsensusDomain {
+                domain_id: 1,
+                expected_validator_set_hash: [0u8; 32],
+                justification_hash: [0u8; 32],
+            }),
+            GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS
+        );
+        assert_eq!(
+            activation_delay_epochs(&ProposalType::SlashValidator {
+                address: Address::from([0x02; 32]),
+                evidence_hash: [0u8; 32],
+            }),
+            GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS
+        );
     }
 }
