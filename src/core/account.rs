@@ -253,6 +253,18 @@ pub struct AccountState {
     pub unbonding_queue: Vec<UnbondingEntry>,
     storage: Option<Storage>,
     pub epoch_index: u64,
+    /// Wall-clock time of the last epoch close, in **milliseconds** since the
+    /// Unix epoch — whatever `apply_system_effects` read off `block.timestamp`.
+    ///
+    /// It is an absolute timestamp, not a duration since genesis and not a
+    /// count of anything. Two consumers previously treated it as the latter and
+    /// both released funds early; see `spendable_balance` and the timed burn in
+    /// [`Self::advance_epoch`]. Schedules are denominated in epochs, so measure
+    /// them against [`Self::epoch_index`], which is genesis-anchored and only
+    /// ever advances by one.
+    ///
+    /// It is persisted and hashed into the state root, so it cannot simply be
+    /// dropped; it is kept as the observability record it already was.
     pub last_epoch_time: u64,
     /// Gerçek blok yüksekliği. Eskiden executor
     /// `epoch_index * 100` approximation kullanıyordu (≤99 blok sapma).
@@ -1253,12 +1265,26 @@ impl AccountState {
         // Deterministic epoch-index path. Idempotent per year and a no-op
         // Unless a burn-reserve account is configured.
         if let Some(reserve) = self.burn_reserve_address {
-            let burned = if current_timestamp > 0 {
-                let timestamp_secs = u64::try_from(current_timestamp).unwrap_or(u64::MAX);
-                self.process_timed_burn_at_time(0, timestamp_secs, &reserve)
-            } else {
-                self.process_timed_burn(0, &reserve)
-            };
+            // The wall-clock path took `current_timestamp` as seconds since
+            // genesis. It is neither: `apply_system_effects` passes
+            // `block.timestamp`, which is absolute Unix time in *milliseconds*,
+            // and the genesis anchor was hardcoded to `0`.
+            //
+            // Both errors push the same way. Measured with a canary before the
+            // fix, on `mainnet_genesis()` at one epoch boundary:
+            //
+            //     seconds_per_year   = 16819200
+            //     annual_burn_amount = 4000000000000
+            //     years_burned  0 -> 106155
+            //     reserve balance    40000000000000 -> 0
+            //
+            // The entire 40M $BUD burn reserve — a ten-year schedule — was
+            // consumed at the first epoch close.
+            //
+            // `epoch_index` is the anchored, monotonic counter the schedule was
+            // written against, so the epoch-index path is the correct one for
+            // every caller. `due_years` subtracts `genesis_epoch` itself.
+            let burned = self.process_timed_burn(0, &reserve);
             if burned > 0 {
                 tracing::info!(
                     "Timed reserve burn: {} $BUD burned at epoch {} (timestamp={})",
@@ -1442,12 +1468,30 @@ impl AccountState {
         let balance = self.get_balance(address);
         if let Some((team, schedule)) = &self.team_vesting {
             if team == address {
-                let vesting_epoch = if self.last_epoch_time > 0 {
-                    self.tokenomics.epoch_at_timestamp(self.last_epoch_time)
-                } else {
-                    self.epoch_index
-                };
-                let locked = schedule.locked_at(vesting_epoch);
+                // `schedule` counts epochs from genesis: `team_vesting(0)` sets
+                // `start_epoch = 0`, and the cliff/duration are epoch *counts*
+                // (mainnet: 52_560 and 210_240). `epoch_index` lives in that
+                // same space — it starts at 0 and only ever advances by one.
+                //
+                // `epoch_at_timestamp` does not. It divides an absolute Unix
+                // timestamp by the epoch length, so it answers "how many epochs
+                // have elapsed since 1970", not "since genesis". Feeding its
+                // result into a genesis-relative schedule compared a number
+                // near 5.5 billion against a cliff of 52_560.
+                //
+                // Measured with a canary before the fix, on `mainnet_genesis()`
+                // with one epoch boundary and a real block timestamp:
+                //
+                //     epoch_at_timestamp        = 5579531250
+                //     spendable before advance  = 0
+                //     spendable after  advance  = 20000000000000  (all 20M BUD)
+                //     cliff was supposed to last 52560 epochs (1 year)
+                //
+                // The one-year cliff and the four-year linear tail both expired
+                // at the first epoch close. 20M $BUD — 20% of total supply — is
+                // enforced on the transfer path via `spendable_balance`, so
+                // this was a live spend gate, not a display value.
+                let locked = schedule.locked_at(self.epoch_index);
                 return balance.saturating_sub(locked);
             }
         }

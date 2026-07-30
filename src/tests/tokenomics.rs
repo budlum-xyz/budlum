@@ -304,18 +304,38 @@ fn fixed_supply_tokenomics_disables_epoch_yield_minting() {
     assert_eq!(before, after, "fixed-supply tokenomics chain must not mint epoch yield without explicit reward-pool wiring");
 }
 
+/// Vesting advances with the epoch counter the schedule was written against.
+///
+/// This test used to set `last_epoch_time` to
+/// `seconds_per_epoch() * team_cliff_epochs` and assert the cliff had just
+/// opened. That number is synthetic: it is the value
+/// `epoch_at_timestamp` needs in order to return `cliff_epochs`, not a value
+/// production can produce. Production passes `block.timestamp` — absolute Unix
+/// time in milliseconds — so the same call returned about 5.5 billion, and the
+/// cliff was long expired before the chain made its second block.
+///
+/// The schedule is genesis-relative (`start_epoch = 0`), so the epoch counter
+/// is the quantity that belongs on the other side of the comparison. Unlike a
+/// wall-clock division it is also anchored: it starts at zero at genesis and
+/// only ever advances by one.
 #[test]
-fn team_vesting_uses_wall_clock_when_timestamp_is_available() {
+fn team_vesting_tracks_the_genesis_relative_epoch_counter() {
     let addrs = TokenomicsAddresses::reserved();
     let mut state = GenesisConfig::new(45262)
         .with_bud_tokenomics()
         .build_state();
     assert_eq!(state.spendable_balance(&addrs.team), 0);
 
-    state.last_epoch_time = state
-        .tokenomics
-        .seconds_per_epoch()
-        .saturating_mul(state.tokenomics.team_cliff_epochs);
+    // A wall-clock timestamp, however large, is not an epoch count.
+    state.last_epoch_time = 1_785_450_000_000;
+    assert_eq!(
+        state.spendable_balance(&addrs.team),
+        0,
+        "a Unix timestamp must not be read as a genesis-relative epoch"
+    );
+
+    // At the cliff, the linear tail has released cliff/duration of the total.
+    state.epoch_index = state.tokenomics.team_cliff_epochs;
     assert_eq!(state.spendable_balance(&addrs.team), bud(5_000_000));
 }
 
@@ -434,4 +454,122 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
 
     // Booster should have lost amount + fee.
     assert_eq!(state.get_balance(&booster), 10_000_000 - boost_amount - 100);
+}
+
+/// One epoch boundary must not expire a one-year cliff.
+///
+/// `spendable_balance` read the team schedule at
+/// `tokenomics.epoch_at_timestamp(last_epoch_time)`. That function divides an
+/// absolute Unix timestamp by the epoch length, so it returns epochs elapsed
+/// since 1970 — around 5.5 billion. The schedule counts from genesis
+/// (`team_vesting(0)` sets `start_epoch = 0`) with a cliff of 52_560 epochs.
+///
+/// Measured with a canary before the fix, on `mainnet_genesis()`:
+///
+///     epoch_at_timestamp       = 5579531250
+///     spendable before advance = 0
+///     spendable after  advance = 20000000000000
+///
+/// 20M $BUD, 20% of total supply, unlocked at the first epoch close.
+/// `spendable_balance` gates transfers (`executor.rs`), so this was spendable.
+#[test]
+fn one_epoch_close_does_not_expire_the_team_cliff() {
+    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let (team, schedule) = state.team_vesting.expect("mainnet vests the team");
+
+    assert_eq!(schedule.start_epoch, 0, "schedule is genesis-relative");
+    assert!(schedule.cliff_epochs > 1, "cliff spans many epochs");
+    assert_eq!(state.spendable_balance(&team), 0, "locked at genesis");
+
+    // A real block timestamp, in milliseconds, exactly as
+    // `apply_system_effects` passes it.
+    state.advance_epoch(1_785_450_000_000);
+
+    assert_eq!(
+        state.spendable_balance(&team),
+        0,
+        "one epoch close must not unlock a {}-epoch cliff",
+        schedule.cliff_epochs
+    );
+}
+
+/// The cliff must still open once enough epochs actually pass.
+///
+/// Without this, the test above would be satisfied by a schedule that never
+/// unlocks anything.
+#[test]
+fn the_team_cliff_still_opens_after_its_epochs_elapse() {
+    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let (team, schedule) = state.team_vesting.expect("mainnet vests the team");
+
+    state.epoch_index = schedule.cliff_epochs;
+    let at_cliff = state.spendable_balance(&team);
+    assert!(
+        at_cliff > 0,
+        "the cliff must release something once it is reached"
+    );
+
+    state.epoch_index = schedule.start_epoch + schedule.duration_epochs;
+    assert_eq!(
+        state.spendable_balance(&team),
+        state.get_balance(&team),
+        "fully vested at the end of the schedule"
+    );
+}
+
+/// One epoch boundary must not burn a ten-year reserve.
+///
+/// `advance_epoch` passed `block.timestamp` — absolute Unix time in
+/// milliseconds — to `process_timed_burn_at_time`, whose parameter is seconds
+/// since genesis, with the genesis anchor hardcoded to `0`.
+///
+/// Measured with a canary before the fix, on `mainnet_genesis()`:
+///
+///     years_burned    0 -> 106155
+///     reserve balance 40000000000000 -> 0
+#[test]
+fn one_epoch_close_does_not_drain_the_burn_reserve() {
+    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let reserve = state
+        .burn_reserve_address
+        .expect("mainnet configures a burn reserve");
+    let before = state.get_balance(&reserve);
+    assert!(before > 0, "reserve is funded at genesis");
+
+    state.advance_epoch(1_785_450_000_000);
+
+    assert_eq!(
+        state.timed_burn.years_burned, 0,
+        "no annual burn is due one epoch after genesis"
+    );
+    assert_eq!(
+        state.get_balance(&reserve),
+        before,
+        "the reserve must be untouched one epoch after genesis"
+    );
+}
+
+/// The annual burn must still fire once a year of epochs elapses.
+#[test]
+fn the_annual_burn_still_fires_after_a_year_of_epochs() {
+    let mut state = crate::chain::genesis::mainnet_genesis().build_state();
+    let reserve = state
+        .burn_reserve_address
+        .expect("mainnet configures a burn reserve");
+    let before = state.get_balance(&reserve);
+    let per_year = state.tokenomics.annual_burn_amount();
+
+    // Step to one epoch short of a year, then across it.
+    state.epoch_index = state.tokenomics.epochs_per_year - 1;
+    state.advance_epoch(1_785_450_000_000);
+
+    assert_eq!(
+        state.timed_burn.years_burned, 1,
+        "one year of epochs is due exactly one burn"
+    );
+    assert_eq!(
+        state.get_balance(&reserve),
+        before - per_year,
+        "exactly one annual increment leaves the reserve"
+    );
 }
