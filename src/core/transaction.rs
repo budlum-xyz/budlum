@@ -113,7 +113,16 @@ pub struct RelayerExternalResult {
 }
 
 impl RelayerExternalResult {
-    /// / L1: result-fact leaf'i.
+    /// The result-fact leaf this result commits to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain discriminator cannot be serialised. `ExternalChain`
+    /// is a small C-like enum, so the only way that happens is allocation
+    /// failure — a bug rather than an input. The alternative, folding the
+    /// failure into empty bytes, would give every chain the same leaf and turn
+    /// a bug into a silent cross-domain replay.
+    #[must_use]
     pub fn result_leaf(&self) -> [u8; 32] {
         // `unwrap_or_default()` here meant a serialize failure produced an
         // EMPTY discriminator, so every chain would have hashed to the same
