@@ -262,3 +262,60 @@ jobs:
 
       - name: taplo lint kapısı
         run: taplo lint
+
+  # ── 5. Kani model checking (bond aritmetiği) ────────────────────────────────
+  # KAPI: bir proof başarısız olursa VEYA çalışan harness sayısı kaynakta
+  # bildirilenden azsa = FAIL.
+  #
+  # SECURITY.md model checking'i "açık iş" olarak kaydediyordu: bu adla bir
+  # script daha önce vardı, stub mesaj basıyor ve ağaçta olmayan bir dosyaya
+  # işaret ediyordu; hiçbir workflow onu çalıştırmıyordu. Kapı sayılıyor ama
+  # hiçbir şey kanıtlamıyordu, o yüzden silinmişti. Bu, yerine geçen gerçek
+  # kurulum: gerçek harness'lar (`src/registry/kani_proofs.rs`), gerçek kod.
+  #
+  # Bond aritmetiği ilk hedef, çünkü SECURITY.md'nin işaret ettiği türden:
+  # sınırlı, kendi içinde kapalı ve bir validator'ın ne kadar stake
+  # kaybedeceğine karar veriyor. `kani::any()` tipin TÜM değerleridir, yani
+  # geçen bir harness girdi uzayının tamamını eler — proptest'in örneklediği
+  # noktaları değil. İkisi de tutuluyor.
+  kani-proofs:
+    name: Kani Proofs (bond arithmetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Kapının kendisi Kani kurmadan önce kanıtlanır: kanarya sahte çıktıyla
+      # çalışır, yani kurulum bozulsa bile "kapı vacuous mu" sorusu cevaplanmış
+      # olur.
+      - name: Kapı kanaryası (Kani'den bağımsız)
+        run: bash ./scripts/check-kani.sh --self-test
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Install Kani (sürüm pinli)
+        run: |
+          set -euo pipefail
+          cargo install --locked kani-verifier --version 0.67.0
+          cargo kani setup
+
+      # Harness'lar `cfg(kani)` altında, yani sıradan derlemeler onları görmez.
+      # `--output-format terse` satır başına bir VERIFICATION sonucu verir;
+      # kapı bunları sayar.
+      - name: Kani proofs
+        run: |
+          set -euo pipefail
+          cargo kani --output-format terse 2>&1 | tee /tmp/kani.log
+
+      - name: Kani kapısı
+        run: bash ./scripts/check-kani.sh /tmp/kani.log
