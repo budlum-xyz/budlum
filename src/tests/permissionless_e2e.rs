@@ -17,7 +17,7 @@ fn addr(b: u8) -> Address {
 #[test]
 fn test_multi_validator_permissionless_lifecycle_and_slashing() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
 
     let v1 = addr(1);
     let v2 = addr(2);

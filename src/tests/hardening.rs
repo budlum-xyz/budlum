@@ -105,13 +105,13 @@ mod hardening_tests {
         use std::sync::Arc;
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.finalized_height = 10;
 
         let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
             5,
             "hash".to_string(),
-            1337,
+            45262,
             &bc.state,
             0,
             "finalhash".to_string(),

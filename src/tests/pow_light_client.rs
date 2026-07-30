@@ -30,7 +30,7 @@ fn mine_header(
 
 #[test]
 fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
-    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+    let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
 
     let mut source = default_domain(41, ConsensusKind::PoW, 41_001, POW_HEADER_CHAIN_ADAPTER, 3);
     source.operator = Some(address(41));

@@ -17,10 +17,10 @@ mod chaos_tests {
     #[test]
     fn test_chaos_network_partition_recovery() {
         let consensus_a = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus_a, None, 1337, None);
+        let mut chain_a = Blockchain::new(consensus_a, None, 45262, None);
 
         let consensus_b = Arc::new(PoWEngine::new(0));
-        let mut chain_b = Blockchain::new(consensus_b, None, 1337, None);
+        let mut chain_b = Blockchain::new(consensus_b, None, 45262, None);
 
         assert_eq!(chain_a.chain.len(), 1);
         assert_eq!(chain_b.chain.len(), 1);
@@ -56,7 +56,7 @@ mod chaos_tests {
     #[test]
     fn test_chaos_mempool_flood_stress() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
         println!("Flooding mempool with 1000 transactions from 1000 senders...");
         for i in 0..1000 {
@@ -97,10 +97,10 @@ mod chaos_tests {
         };
 
         let consensus_a = Arc::new(PoWEngine::with_config(pow_config.clone()));
-        let mut chain_a = Blockchain::new(consensus_a, None, 1337, None);
+        let mut chain_a = Blockchain::new(consensus_a, None, 45262, None);
 
         let consensus_b = Arc::new(PoWEngine::with_config(pow_config));
-        let mut chain_b = Blockchain::new(consensus_b, None, 1337, None);
+        let mut chain_b = Blockchain::new(consensus_b, None, 45262, None);
 
         let producer_a = Address::from_hex(&"01".repeat(32)).unwrap();
         for _ in 0..(MAX_REORG_DEPTH + 10) {
@@ -122,7 +122,7 @@ mod chaos_tests {
     #[test]
     fn test_chaos_invalid_tx_rejection() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
         let alice = Address::from_hex(&"01".repeat(32)).unwrap();
         let bob = Address::from_hex(&"02".repeat(32)).unwrap();
@@ -233,8 +233,8 @@ mod chaos_tests {
         use crate::domain::{ConsensusKind, DomainCommitment};
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
-        let domain = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let domain = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
 
         blockchain
             .register_consensus_domain(domain.clone())
@@ -279,8 +279,8 @@ mod chaos_tests {
         {
             let storage = Storage::new(db_path).unwrap();
             let consensus = Arc::new(PoWEngine::new(0));
-            let mut blockchain = Blockchain::new(consensus, Some(storage), 1337, None);
-            let domain = default_domain(7, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+            let mut blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
+            let domain = default_domain(7, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
             blockchain
                 .register_consensus_domain(domain.clone())
                 .unwrap();
@@ -298,7 +298,7 @@ mod chaos_tests {
 
         let storage = Storage::new(db_path).unwrap();
         let consensus = Arc::new(PoWEngine::new(0));
-        let blockchain = Blockchain::new(consensus, Some(storage), 1337, None);
+        let blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
 
         assert!(blockchain.domain_registry.get(7).is_some());
         assert_eq!(blockchain.global_headers.len(), 1);
@@ -312,8 +312,8 @@ mod chaos_tests {
         use crate::domain::{ConsensusKind, DomainCommitment};
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
-        let pow = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let pow = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         let pos = default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0);
         let poa = default_domain(3, ConsensusKind::PoA, 1339, "poa-authority-quorum", 0);
 
@@ -360,9 +360,9 @@ mod chaos_tests {
 
         fn fill(order: &[u32]) -> Blockchain {
             let consensus = Arc::new(PoWEngine::new(0));
-            let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+            let mut blockchain = Blockchain::new(consensus, None, 45262, None);
             let domains = [
-                default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+                default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
                 default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0),
                 default_domain(3, ConsensusKind::PoA, 1339, "poa-authority-quorum", 0),
             ];
@@ -414,8 +414,8 @@ mod chaos_tests {
         use crate::domain::{ConsensusKind, DomainCommitment};
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
-        let pow = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let pow = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         blockchain.register_consensus_domain(pow.clone()).unwrap();
 
         let owner = test_addr_from_byte(31u8);
@@ -479,8 +479,8 @@ mod chaos_tests {
         use crate::domain::{ConsensusKind, DomainCommitment};
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
-        let pow = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let pow = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         let poa = default_domain(2, ConsensusKind::PoA, 1338, "poa-authority-quorum", 0);
         blockchain.register_consensus_domain(pow.clone()).unwrap();
         blockchain.register_consensus_domain(poa.clone()).unwrap();
@@ -516,7 +516,7 @@ mod chaos_tests {
         use crate::cross_domain::{AssetId, BridgeState};
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         let mut bridge = BridgeState::new();
 
         let mut previous_hash = [0u8; 32];
@@ -550,9 +550,9 @@ mod chaos_tests {
         use crate::domain::{ConsensusKind, DomainCommitment};
 
         let consensus_settlement = Arc::new(PoWEngine::new(0));
-        let mut settlement_node = Blockchain::new(consensus_settlement, None, 1337, None);
+        let mut settlement_node = Blockchain::new(consensus_settlement, None, 45262, None);
 
-        let pow_domain = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let pow_domain = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         let pos_domain = default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0);
         let poa_domain = default_domain(3, ConsensusKind::PoA, 1339, "poa-authority-quorum", 0);
 
@@ -691,7 +691,7 @@ mod chaos_tests {
         use crate::domain::{ConsensusKind, DomainCommitment};
 
         let consensus_settlement = Arc::new(PoWEngine::new(0));
-        let mut settlement_node = Blockchain::new(consensus_settlement, None, 1337, None);
+        let mut settlement_node = Blockchain::new(consensus_settlement, None, 45262, None);
 
         let pos_domain = default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0);
         let poa_domain = default_domain(3, ConsensusKind::PoA, 1339, "poa-authority-quorum", 0);
@@ -816,7 +816,7 @@ mod chaos_tests {
     #[test]
     fn test_chaos_v2_mempool_poison_conflicting_nonce_serves_latest_fee() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
         let sender = KeyPair::generate().unwrap();
         let sender_pub = Address::from(sender.public_key_bytes());
@@ -961,8 +961,8 @@ mod chaos_tests {
     #[test]
     fn test_chaos_state_determinism_under_tx_reordering() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus.clone(), None, 1337, None);
-        let mut chain_b = Blockchain::new(consensus, None, 1337, None);
+        let mut chain_a = Blockchain::new(consensus.clone(), None, 45262, None);
+        let mut chain_b = Blockchain::new(consensus, None, 45262, None);
 
         let alice = Address::from_hex(&"01".repeat(32)).unwrap();
         let bob = Address::from_hex(&"02".repeat(32)).unwrap();
@@ -997,7 +997,7 @@ mod chaos_tests {
     #[test]
     fn test_chaos_genesis_mismatch_reorg_rejected() {
         let consensus_a = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus_a, None, 1337, None);
+        let mut chain_a = Blockchain::new(consensus_a, None, 45262, None);
 
         let consensus_b = Arc::new(PoWEngine::new(0));
         let mut chain_b = Blockchain::new(consensus_b, None, 9999, None); // farklı chain_id
@@ -1024,10 +1024,10 @@ mod chaos_tests {
     #[test]
     fn test_chaos_tx_validity_survives_reorg() {
         let consensus_a = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus_a.clone(), None, 1337, None);
+        let mut chain_a = Blockchain::new(consensus_a.clone(), None, 45262, None);
 
         let consensus_b = Arc::new(PoWEngine::new(0));
-        let mut chain_b = Blockchain::new(consensus_b, None, 1337, None);
+        let mut chain_b = Blockchain::new(consensus_b, None, 45262, None);
 
         let producer = Address::from_hex(&"01".repeat(32)).unwrap();
 

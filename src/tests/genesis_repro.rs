@@ -9,7 +9,7 @@
 //! Repoda YOKTU. Bu modül sondanın gerçek gövdesidir.
 //!
 //! Ne ölçülür (platform/koşu bağımsız olması GEREKENLER):
-//!   * Üç ağ çözümlemesi (Mainnet=1, Testnet=42, Devnet=1337) + tanımsız
+//!   * Üç ağ çözümlemesi (Mainnet=45260, Testnet=45261, Devnet=45262) + tanımsız
 //!     Chain_id fallback'i (`GenesisConfig::new`): genesis blok hash'i,
 //!     Timestamp, tx_root, validator_set_hash, state root, hesap sayısı,
 //!     Toplam dolaşım.
@@ -108,8 +108,8 @@ mod tests {
     /// Süreç-içi nondeterminizmi yakalar; buildler-arası eşitliği CI denetler.
     #[test]
     fn genesis_hash_deterministic() {
-        // Mainnet=1 (asal hedef), Testnet=42, Devnet=1337, fallback=9999.
-        let chain_ids = [1u64, 42, 1337, 9999];
+        // Mainnet=45260 (asal hedef), Testnet=45261, Devnet=45262, fallback=9999.
+        let chain_ids = [45260u64, 45261, 45262, 9999];
         let mut observations = Vec::new();
         for &chain_id in &chain_ids {
             let run_a = probe_chain(chain_id);

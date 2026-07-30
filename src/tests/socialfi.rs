@@ -33,7 +33,7 @@ const BOOST_AMOUNT: u64 = 250; // bud_share = 10, creator_share = 40, protocol =
 fn fresh_chain(db_path: &str) -> Blockchain {
     let storage = Storage::new(db_path).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
     bc.state.base_fee = 0;
     bc.mempool.set_min_fee(0);
     bc

@@ -274,21 +274,21 @@ mod tests {
 
     #[test]
     fn header_batch_must_be_hash_valid_parent_linked_and_same_chain() {
-        let first = Block::new_with_chain_id(1, "00".repeat(32), Vec::new(), 1337);
-        let second = Block::new_with_chain_id(2, first.hash.clone(), Vec::new(), 1337);
+        let first = Block::new_with_chain_id(1, "00".repeat(32), Vec::new(), 45262);
+        let second = Block::new_with_chain_id(2, first.hash.clone(), Vec::new(), 45262);
         let headers = vec![
             BlockHeader::from_block(&first),
             BlockHeader::from_block(&second),
         ];
-        assert!(NetworkMessage::validate_header_batch(&headers, 1337).is_ok());
+        assert!(NetworkMessage::validate_header_batch(&headers, 45262).is_ok());
 
         let mut wrong_chain = headers.clone();
         wrong_chain[1].chain_id = 42;
-        assert!(NetworkMessage::validate_header_batch(&wrong_chain, 1337).is_err());
+        assert!(NetworkMessage::validate_header_batch(&wrong_chain, 45262).is_err());
 
         let mut disconnected = headers;
         disconnected[1].previous_hash = "11".repeat(32);
         disconnected[1].hash = disconnected[1].calculate_hash();
-        assert!(NetworkMessage::validate_header_batch(&disconnected, 1337).is_err());
+        assert!(NetworkMessage::validate_header_batch(&disconnected, 45262).is_err());
     }
 }

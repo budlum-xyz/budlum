@@ -183,10 +183,10 @@ mod integration_tests {
         let sender_keypair = KeyPair::generate().unwrap();
         let sender_pubkey = Address::from(sender_keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
-        let genesis = crate::chain::genesis::GenesisConfig::new(1337)
+        let genesis = crate::chain::genesis::GenesisConfig::new(45262)
             .with_allocation(sender_pubkey, crate::core::account::GENESIS_BALANCE);
         let mut blockchain =
-            Blockchain::new_with_genesis(consensus, None, 1337, None, Some(genesis));
+            Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
 
         let recipient = test_addr_from_byte(2);
         let mut tx = Transaction::new(sender_pubkey, recipient, 100, vec![]);
@@ -206,7 +206,7 @@ mod integration_tests {
     #[test]
     fn test_unsigned_transaction_rejected() {
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         let alice = test_addr_from_byte(1);
         let bob = test_addr_from_byte(2);
         let tx = Transaction::new(alice, bob, 100, vec![]);
@@ -219,7 +219,7 @@ mod integration_tests {
         let keypair = KeyPair::generate().unwrap();
         let pubkey = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
         let recipient = test_addr_from_byte(2);
         let mut tx = Transaction::new(pubkey, recipient, 100, vec![]);
@@ -239,7 +239,7 @@ mod integration_tests {
         let keypair = KeyPair::generate().unwrap();
         let pubkey = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&pubkey);
 
         let recipient = test_addr_from_byte(2);
@@ -261,7 +261,7 @@ mod integration_tests {
         let keypair = KeyPair::generate().unwrap();
         let pubkey = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&pubkey);
 
         let recipient = test_addr_from_byte(2);
@@ -356,7 +356,7 @@ mod integration_tests {
         let vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&pubkey);
         blockchain.state.validators.clear();
 
@@ -480,7 +480,7 @@ mod integration_tests {
         let vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&pubkey);
         blockchain.state.validators.clear();
 
@@ -547,7 +547,7 @@ mod integration_tests {
         let vrf_public_key = keys.vrf_key.public.to_bytes().to_vec();
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&pubkey);
         blockchain.state.validators.clear();
 
@@ -611,7 +611,7 @@ mod integration_tests {
         let pubkey = Address::from(sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&pubkey);
         blockchain.state.validators.clear();
 
@@ -731,7 +731,7 @@ mod integration_tests {
 
         let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), None));
         let storage2 = Storage::new(path).unwrap();
-        let _bc = Blockchain::new(consensus, Some(storage2), 1337, None);
+        let _bc = Blockchain::new(consensus, Some(storage2), 45262, None);
     }
 
     #[test]
@@ -762,7 +762,7 @@ mod integration_tests {
         install_finality_keys(&mut state, validator_addr, &bls_sk, bls_pk, pq_public);
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state = state;
 
         let cp_height = FINALITY_CHECKPOINT_INTERVAL;
@@ -818,7 +818,7 @@ mod integration_tests {
             .to_vec();
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state.add_balance(&v_addr, 10000);
         bc.state.add_validator(v_addr, 5000);
         let pq_public = ValidatorKeys::generate()
@@ -950,7 +950,7 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 1337, None);
+        let bc = Blockchain::new(consensus, None, 45262, None);
 
         let prevote = bc.sign_prevote(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -972,7 +972,7 @@ mod integration_tests {
         let voter = Address::from(keys.sig_key.public_key_bytes());
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
-        let bc = Blockchain::new(consensus, None, 1337, None);
+        let bc = Blockchain::new(consensus, None, 45262, None);
 
         let precommit = bc.sign_precommit(1, 10, "test_cp_hash", &voter).unwrap();
 
@@ -1256,7 +1256,7 @@ mod integration_tests {
 
         // PoW has no BLS key
         let consensus = Arc::new(PoWEngine::new(0));
-        let bc = Blockchain::new(consensus, None, 1337, None);
+        let bc = Blockchain::new(consensus, None, 45262, None);
 
         let result = bc.sign_prevote(1, 10, "test", &voter);
         assert!(result.is_err());
@@ -1375,7 +1375,7 @@ mod integration_tests {
             height: 200,
             block_hash: "block_hash_v2".into(),
             genesis_hash: "genesis_hash".into(),
-            chain_id: 1337,
+            chain_id: 45262,
             finalized_height: 100,
             finalized_hash: "final_hash".into(),
             finality_certificates: vec![],
@@ -1458,7 +1458,7 @@ mod integration_tests {
         state.add_balance(&addr, 3000);
 
         let snapshot =
-            StateSnapshot::from_state(50, "test_hash".into(), 1337, &state, 10, "fin_hash".into());
+            StateSnapshot::from_state(50, "test_hash".into(), 45262, &state, 10, "fin_hash".into());
 
         assert!(snapshot.verify());
         let bytes = snapshot.to_bytes();
@@ -1508,7 +1508,7 @@ mod integration_tests {
             height: 100,
             block_hash: "test".into(),
             genesis_hash: "gen".into(),
-            chain_id: 1337,
+            chain_id: 45262,
             finalized_height: 50,
             finalized_hash: "fin".into(),
             finality_certificates: vec![],
@@ -1519,7 +1519,7 @@ mod integration_tests {
 
         let loaded = pm.load_latest_snapshot_v2().unwrap().unwrap();
         assert_eq!(loaded.height, 100);
-        assert_eq!(loaded.chain_id, 1337);
+        assert_eq!(loaded.chain_id, 45262);
         assert!(loaded.verify());
     }
 
@@ -1572,7 +1572,7 @@ mod integration_tests {
         use crate::network::node::Node;
 
         let consensus = std::sync::Arc::new(PoWEngine::new(0));
-        let bc = Blockchain::new(consensus, None, 1337, None);
+        let bc = Blockchain::new(consensus, None, 45262, None);
         let (_actor, handle) = crate::chain::chain_actor::ChainActor::new(bc);
 
         let mdns_on = Node::with_key(
@@ -1603,7 +1603,7 @@ mod integration_tests {
         use crate::network::node::Node;
 
         let consensus = std::sync::Arc::new(PoWEngine::new(0));
-        let bc = Blockchain::new(consensus, None, 1337, None);
+        let bc = Blockchain::new(consensus, None, 45262, None);
         let (_actor, handle) = crate::chain::chain_actor::ChainActor::new(bc);
 
         let node = Node::new(handle)
@@ -1628,7 +1628,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoWEngine::new(0));
         let metrics = Arc::new(Metrics::new());
-        let bc = Blockchain::new(consensus.clone(), None, 1337, None).with_metrics(metrics.clone());
+        let bc =
+            Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
         bc.emit_chain_metrics();
         assert_eq!(metrics.chain_height.get(), 1); // genesis block
@@ -1644,7 +1645,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoWEngine::new(0));
         let metrics = Arc::new(Metrics::new());
-        let bc = Blockchain::new(consensus.clone(), None, 1337, None).with_metrics(metrics.clone());
+        let bc =
+            Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
         bc.emit_tx_processed(5);
         assert_eq!(metrics.transactions_processed.get(), 5);
@@ -1662,7 +1664,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoWEngine::new(0));
         let metrics = Arc::new(Metrics::new());
-        let bc = Blockchain::new(consensus.clone(), None, 1337, None).with_metrics(metrics.clone());
+        let bc =
+            Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
         assert_eq!(metrics.reorgs_total.get(), 0);
         bc.emit_reorg();
@@ -1678,7 +1681,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoWEngine::new(0));
         let metrics = Arc::new(Metrics::new());
-        let bc = Blockchain::new(consensus.clone(), None, 1337, None).with_metrics(metrics.clone());
+        let bc =
+            Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
         bc.emit_mempool_eviction();
         bc.emit_mempool_eviction();

@@ -1102,7 +1102,7 @@ mod tests {
         let mut domain = default_domain(
             1,
             ConsensusKind::PoW,
-            1337,
+            45262,
             crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
             1,
         );
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn poa_finality_enforces_quorum_and_empty_validator_set_rejection() {
         use crate::crypto::primitives::KeyPair;
-        let domain = default_domain(2, ConsensusKind::PoA, 1337, "poa-authority-quorum", 0);
+        let domain = default_domain(2, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
         let commitment = commitment(ConsensusKind::PoA);
         let adapter = PoAFinalityAdapter::default();
 
@@ -1334,7 +1334,7 @@ mod tests {
 
     #[test]
     fn pos_finality_rejects_mismatched_height_or_hash_before_signature_work() {
-        let domain = default_domain(3, ConsensusKind::PoS, 1337, "pos-qc-finality", 0);
+        let domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
         let commitment = commitment(ConsensusKind::PoS);
         let adapter = PoSFinalityAdapter;
         let snapshot = ValidatorSetSnapshot::new(0, vec![]);
@@ -1396,7 +1396,7 @@ mod tests {
                 challenge_interval: 10,
                 ..Default::default()
             }),
-            1337,
+            45262,
             crate::domain::types::STORAGE_ATTESTATION_ADAPTER,
             0,
         );

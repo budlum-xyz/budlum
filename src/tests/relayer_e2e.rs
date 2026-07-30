@@ -77,7 +77,7 @@ fn relayer_enqueues_and_tracks_pending_relays() {
     let db = dir.path().join("relayer_e2e.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     // Initially no pending relays
     assert_eq!(bc.pending_relay_count(), 0);
@@ -90,7 +90,7 @@ fn relayer_root_is_deterministic() {
     let db = dir.path().join("relayer_root.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     let root1 = bc.relay_ledger_root();
     let root2 = bc.relay_ledger_root();
@@ -103,7 +103,7 @@ fn enqueue_bridge_relay_increments_pending() {
     let db = dir.path().join("enqueue.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     let a = asset(1);
     let (event, message) = make_lock_event(1, 2, 100, a);
@@ -120,7 +120,7 @@ fn pending_relay_persists_across_restart() {
     let db_path = db.to_str().unwrap().to_string();
     let storage = Storage::new(&db_path).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     let a = asset(1);
     let (event, message) = make_lock_event(1, 2, 100, a);
@@ -132,7 +132,7 @@ fn pending_relay_persists_across_restart() {
     let restarted = Blockchain::new(
         Arc::new(PoWEngine::new(0)),
         Some(Storage::new(&db_path).unwrap()),
-        1337,
+        45262,
         None,
     );
     assert_eq!(restarted.pending_relay_count(), 1);
@@ -148,13 +148,13 @@ fn lock_bridge_transfer_auto_enqueues_pending_relay() {
     let db = dir.path().join("auto_enqueue_lock.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     for id in [1u32, 2u32] {
         let mut d = crate::domain::default_domain(
             id,
             crate::domain::ConsensusKind::PoW,
-            1337,
+            45262,
             "pow-header-chain-v1",
             1,
         );
@@ -182,13 +182,13 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
     let db = dir.path().join("auto_enqueue_burn.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     for id in [1u32, 2u32] {
         let mut d = crate::domain::default_domain(
             id,
             crate::domain::ConsensusKind::PoW,
-            1337,
+            45262,
             "pow-header-chain-v1",
             1,
         );
@@ -222,7 +222,7 @@ fn relay_ledger_root_changes_with_relays() {
     let db = dir.path().join("root_change.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     let root_before = bc.relay_ledger_root();
 
@@ -241,7 +241,7 @@ fn expired_relays_detects_past_expiry() {
     let db = dir.path().join("expired.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
     // Create a message with short expiry
     let payload_hash = hash(b"test");
@@ -276,12 +276,12 @@ fn full_internal_relay_cycle_lock_mint() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("full_cycle.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
     // 1. Register domains
     let mut domains = Vec::new();
     for id in [1u32, 2u32] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         d.bridge_enabled = true;
         domains.push(d.clone());
         bc.register_consensus_domain(d).unwrap();
@@ -359,11 +359,11 @@ fn relayer_invalid_proof_is_rejected() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("bad_relay.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
     let mut domains = Vec::new();
     for id in [1u32, 2u32] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         d.bridge_enabled = true;
         domains.push(d.clone());
         bc.register_consensus_domain(d).unwrap();
@@ -426,12 +426,12 @@ fn full_internal_relay_cycle_burn_unlock() {
     let dir = tempdir().unwrap();
     let db = dir.path().join("full_cycle_burn.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
     // 1. Setup domains and relayer
     let mut domains = Vec::new();
     for id in [1u32, 2u32] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         d.bridge_enabled = true;
         domains.push(d.clone());
         bc.register_consensus_domain(d).unwrap();

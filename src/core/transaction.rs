@@ -12,7 +12,12 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use tracing::debug;
 
-pub const DEFAULT_CHAIN_ID: u64 = 1337;
+/// Devnet's chain id, and the value used wherever a chain id is implied
+/// rather than configured.
+///
+/// Was 1337, which is Geth Testnet in the public `chainid.network` registry.
+/// See `Network::chain_id` for why the three ids moved.
+pub const DEFAULT_CHAIN_ID: u64 = 45262;
 /// Strict signing format; all non-genesis transaction admission requires V4.
 pub const SIGNATURE_VERSION_V4: u32 = 4;
 

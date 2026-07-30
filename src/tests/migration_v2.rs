@@ -25,7 +25,7 @@ mod migration_tests {
                 height: 100,
                 block_hash: "test_block_hash".into(),
                 genesis_hash: "test_genesis_hash".into(),
-                chain_id: 1337,
+                chain_id: 45262,
                 finalized_height: 90,
                 finalized_hash: "finalized_hash".into(),
                 finality_certificates: vec![],
@@ -51,7 +51,7 @@ mod migration_tests {
         assert_eq!(restored.balances.get(&bob), Some(&3000));
         assert!(restored.validators.contains_key(&alice));
         assert_eq!(restored.height, 100);
-        assert_eq!(restored.chain_id, 1337);
+        assert_eq!(restored.chain_id, 45262);
         assert_eq!(restored.schema_version, 4);
     }
 

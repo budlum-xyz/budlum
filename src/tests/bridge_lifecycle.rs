@@ -26,11 +26,11 @@ fn asset_id() -> crate::cross_domain::AssetId {
 /// No longer exposes the unauthenticated `lock_bridge_transfer` entry.
 #[test]
 fn bridge_lock_mint_burn_unlock_lifecycle() {
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
 
     // Step 1: register both domains.
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 1);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
         d.operator_bond = 100_000;
         d.bridge_enabled = true;
@@ -120,11 +120,11 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 /// Calls (idempotency).
 #[test]
 fn bridge_sweep_is_height_aware_and_idempotent() {
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     bc.init_genesis_account(&addr(11));
     bc.init_genesis_account(&addr(12));
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 1);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
         d.operator_bond = 100_000;
         d.bridge_enabled = true;
@@ -208,13 +208,13 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
     let mut bc = Blockchain::new(
         Arc::new(PoSEngine::new(PoSConfig::default(), None)),
         None,
-        1337,
+        45262,
         None,
     );
     bc.init_genesis_account(&addr(11));
     bc.init_genesis_account(&addr(12));
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 1);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
         d.bridge_enabled = true;
         bc.register_consensus_domain(d).unwrap();

@@ -13,7 +13,7 @@ mod tests {
 
     fn setup_chain() -> Blockchain {
         let consensus = Arc::new(PoWEngine::new(0));
-        Blockchain::new(consensus, None, 1337, None)
+        Blockchain::new(consensus, None, 45262, None)
     }
 
     fn addr(byte: u8) -> Address {
@@ -110,11 +110,11 @@ mod tests {
 
     #[test]
     fn bft_block_validation_rejects_wrong_chain_id() {
-        let bc1 = setup_chain(); // chain_id 1337
+        let bc1 = setup_chain(); // chain_id 45262
         let consensus2 = Arc::new(PoWEngine::new(0));
         let bc2 = Blockchain::new(consensus2, None, 9999, None); // chain_id 9999
 
-        // Block from chain 9999 must not be valid in chain 1337
+        // Block from chain 9999 must not be valid in the devnet chain
         let block_from_other = bc2.chain[0].clone();
         assert_ne!(bc1.chain[0].chain_id, block_from_other.chain_id);
     }
@@ -132,7 +132,7 @@ mod tests {
             let _ = bc2.produce_block(producer);
         }
 
-        // Try to add a block from chain 9999 into chain 1337
+        // Try to add a block from chain 9999 into the devnet chain
         let foreign_block = bc2.chain[1].clone();
         let result = bc.validate_and_add_block(foreign_block);
         assert!(
@@ -144,8 +144,8 @@ mod tests {
     #[test]
     fn reorg_with_same_chain_id_succeeds() {
         let consensus_a = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus_a.clone(), None, 1337, None);
-        let mut chain_b = Blockchain::new(consensus_a, None, 1337, None);
+        let mut chain_a = Blockchain::new(consensus_a.clone(), None, 45262, None);
+        let mut chain_b = Blockchain::new(consensus_a, None, 45262, None);
 
         let producer = addr(0x50);
 

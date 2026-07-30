@@ -483,7 +483,7 @@ fn equivocation_generates_slashing_evidence() {
     let equivocator = test_addr_from_byte(2u8);
 
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&honest, 10_000);
     bc.state.add_validator(honest, 10_000);
     bc.state.add_validator(equivocator, 10_000);
@@ -581,7 +581,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     let (honest_bls, honest_pk) = make_test_key(55);
 
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&honest, 10_000);
     bc.state.add_validator(honest, 10_000);
     bc.state.add_validator(equivocator, 10_000);
@@ -635,7 +635,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         height: cp,
         block_hash: block.hash.clone(),
         genesis_hash: "aa".repeat(32),
-        chain_id: 1337,
+        chain_id: 45262,
         finalized_height: 0,
         finalized_hash: String::new(),
         finality_certificates: vec![],
@@ -678,7 +678,7 @@ fn repeated_invalid_signatures_trigger_slash() {
         .to_vec();
 
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&honest, 10_000);
     bc.state.add_validator(honest, 10_000);
     bc.state.add_validator(spammer, 10_000);
@@ -777,7 +777,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
         .to_vec();
 
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&honest, 10_000);
     bc.state.add_validator(honest, 10_000);
     bc.state.add_validator(spammer, 10_000);
@@ -841,7 +841,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     let honest = test_addr_from_byte(1u8);
 
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     bc.state.add_balance(&honest, 10_000);
     bc.state.add_validator(honest, 10_000);
     bc.state.validators.get_mut(&honest).unwrap().bls_public_key = honest_pk;

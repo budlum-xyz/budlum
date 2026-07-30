@@ -39,9 +39,9 @@ fn test_poa_engine_empty_authorities() {
 #[test]
 fn test_blockchain_invalid_previous_hash() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     let mut block = Block::new(1, "WRONG_HASH".to_string(), vec![]);
-    block.chain_id = 1337;
+    block.chain_id = 45262;
     // Should fail at blockchain level before consensus
     assert!(bc.validate_and_add_block(block).map(|_| ()).is_err());
 }
@@ -49,9 +49,9 @@ fn test_blockchain_invalid_previous_hash() {
 #[test]
 fn test_blockchain_future_timestamp_buffer() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     let mut block = Block::new(1, bc.chain[0].hash.clone(), vec![]);
-    block.chain_id = 1337;
+    block.chain_id = 45262;
     // Block far in the future (e.g., 1 hour) — most protocols reject.
     block.timestamp = bc.chain[0].timestamp + 3600 * 1000 + 1000;
     let res = bc.validate_and_add_block(block).map(|_| ());
@@ -82,14 +82,14 @@ gen_pow_difficulty_tests!(
 #[test]
 fn chain_boundary_index_zero() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let bc = Blockchain::new(consensus, None, 1337, None);
+    let bc = Blockchain::new(consensus, None, 45262, None);
     assert_eq!(bc.chain[0].index, 0);
 }
 
 #[test]
 fn chain_genesis_balance_check() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let bc = Blockchain::new(consensus, None, 1337, None);
+    let bc = Blockchain::new(consensus, None, 45262, None);
     // Devnet default allocation
     assert!(bc.state.get_balance(&Address::from([0x01; 32])) >= 1_000_000_000);
 }
@@ -101,7 +101,7 @@ macro_rules! gen_block_prod_tests {
             #[test]
             fn $name() {
                 let consensus = Arc::new(PoWEngine::new(0));
-                let mut bc = Blockchain::new(consensus, None, 1337, None);
+                let mut bc = Blockchain::new(consensus, None, 45262, None);
                 let p = addr($idx);
                 let res = bc.produce_block(p);
                 assert!(res.is_some());

@@ -75,11 +75,11 @@ fn make_lock_message(
 fn honest_fixture(register_relayer: bool) -> Fixture {
     let dir = tempdir().unwrap();
     let storage = Storage::new(dir.path().join("neg.db").to_str().unwrap()).unwrap();
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
     let mut domains = Vec::new();
     for id in [1u32, 2u32] {
-        let mut d = default_domain(id, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 1);
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.bridge_enabled = true;
         domains.push(d.clone());
         bc.register_consensus_domain(d).unwrap();

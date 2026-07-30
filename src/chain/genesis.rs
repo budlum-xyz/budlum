@@ -894,7 +894,7 @@ mod tests {
     fn test_mainnet_genesis_params() {
         // Permissionless validators + full $BUD tokenomics.
         let config = mainnet_genesis();
-        assert_eq!(config.chain_id, 1);
+        assert_eq!(config.chain_id, Network::Mainnet.chain_id().value());
         assert_eq!(config.block_reward, 50);
         assert_eq!(config.base_fee, Network::Mainnet.gas_schedule().base_fee);
         assert_eq!(config.gas_schedule, Network::Mainnet.gas_schedule());

@@ -18,7 +18,7 @@ use crate::crypto::signer::ConsensusSigner;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-pub const DEFAULT_CHAIN_ID: u64 = 1337;
+pub const DEFAULT_CHAIN_ID: u64 = 45262;
 use crate::consensus::pos::SlashingEvidence;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

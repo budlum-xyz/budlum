@@ -158,7 +158,7 @@ mod tests {
             previous_hash: "abc".to_string(),
             hash: "def".to_string(),
             producer: Some(Address::from_hex(&"03".repeat(32)).unwrap()),
-            chain_id: 1337,
+            chain_id: 45262,
             state_root: "root".to_string(),
             tx_root: "tx_root".to_string(),
             nonce: 0,

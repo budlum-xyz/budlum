@@ -28,7 +28,7 @@ async fn test_state_bit_identical_after_reload() {
     // In-memory add_balance would render the chain unreplayable (init
     // Hard-exits the process, blockchain.rs:339).
     let funded_genesis = || {
-        let mut g = crate::chain::genesis::GenesisConfig::new(1337);
+        let mut g = crate::chain::genesis::GenesisConfig::new(45262);
         g = g.with_allocation(alice, 1000);
         g.base_fee = 0;
         g
@@ -40,7 +40,7 @@ async fn test_state_bit_identical_after_reload() {
         let mut bc = Blockchain::new_with_genesis(
             Arc::new(PoWEngine::new(0)),
             Some(storage),
-            1337,
+            45262,
             None,
             Some(funded_genesis()),
         );
@@ -80,7 +80,7 @@ async fn test_state_bit_identical_after_reload() {
         let bc_reloaded = Blockchain::new_with_genesis(
             Arc::new(PoWEngine::new(0)),
             Some(storage),
-            1337,
+            45262,
             None,
             Some(funded_genesis()),
         );
@@ -125,7 +125,7 @@ async fn test_sub_registry_recovery() {
     // 1. Fill Registries
     {
         let storage = Storage::new(&db_str).unwrap();
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         // BNS
         bc.state
@@ -142,7 +142,7 @@ async fn test_sub_registry_recovery() {
     // 2. Verify Recovery
     {
         let storage = Storage::new(&db_str).unwrap();
-        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         assert_eq!(bc.state.bns_registry.resolve(&bns_name, 10), Some(alice));
         assert!(bc.state.nft_registry.get_nft(0).is_some());

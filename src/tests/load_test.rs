@@ -35,7 +35,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     // The init path hard-exits the process — blockchain.rs:339).
     let senders: Vec<KeyPair> = (0..10).map(|_| KeyPair::generate().unwrap()).collect();
     let funded_genesis = || {
-        let mut g = crate::chain::genesis::GenesisConfig::new(1337);
+        let mut g = crate::chain::genesis::GenesisConfig::new(45262);
         for kp in &senders {
             g = g.with_allocation(Address::from(kp.public_key_bytes()), 100_000);
         }
@@ -44,8 +44,13 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     };
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc =
-        Blockchain::new_with_genesis(consensus, Some(storage), 1337, None, Some(funded_genesis()));
+    let mut bc = Blockchain::new_with_genesis(
+        consensus,
+        Some(storage),
+        45262,
+        None,
+        Some(funded_genesis()),
+    );
     bc.mempool.set_min_fee(0);
 
     println!("Phase: Injecting 1000 transactions (10 senders x 100)...");
@@ -95,7 +100,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     let bc2 = Blockchain::new_with_genesis(
         Arc::new(PoWEngine::new(0)),
         Some(storage2),
-        1337,
+        45262,
         None,
         Some(funded_genesis()),
     );
