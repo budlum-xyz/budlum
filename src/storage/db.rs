@@ -90,9 +90,20 @@ fn encode<T: Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
+/// Decode a stored value.
+///
+/// bincode only. This used to fall back to `serde_json::from_slice` when the
+/// bincode decode failed, which gave one stored type two accepted wire
+/// formats while [`encode`] only ever writes one of them. Nothing in the tree
+/// writes JSON here, so the fallback could only ever succeed on bytes this
+/// node did not write: a corrupted page that happens to parse as JSON, or a
+/// value placed by something else with access to the database directory.
+///
+/// A second accepted parser on a path that has a single producer is a
+/// type-confusion surface with no upside. A decode failure now stays a decode
+/// failure, which is the honest answer for bytes we did not write.
 fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
     bincode::deserialize(value)
-        .or_else(|_| serde_json::from_slice(value))
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
@@ -153,11 +164,31 @@ impl Storage {
         Ok(())
     }
 
+    /// Read the on-disk schema version.
+    ///
+    /// A stored value that does not parse used to become `0` through
+    /// `unwrap_or(0)`, and `0` is exactly the value that means "fresh
+    /// database, run every migration". So a single corrupted byte in this key
+    /// did not surface as an error — it silently re-ran `apply_migrations`
+    /// against a populated database.
+    ///
+    /// A missing key still means `0`, because that genuinely is a fresh
+    /// database. A key that is present but unreadable is a different fact and
+    /// now refuses to boot.
     pub fn schema_version(&self) -> std::io::Result<u64> {
         if let Some(val) = self.db.get(b"SCHEMA_VERSION")? {
             let s = from_utf8(&val)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(s.parse().unwrap_or(0))
+            s.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "SCHEMA_VERSION is present but unreadable ({s:?}): {e}. \
+                         Refusing to boot: treating this as 0 would re-run every \
+                         migration against a populated database."
+                    ),
+                )
+            })
         } else {
             Ok(0)
         }
@@ -1598,5 +1629,107 @@ mod tests {
         // Blocking forever.
         let err = super::sled_open_with_retry(&path).unwrap_err();
         assert!(err.to_string().contains("could not acquire lock"));
+    }
+}
+
+#[cfg(test)]
+mod storage_decode_locks {
+    /// The decoder must accept exactly one wire format.
+    ///
+    /// `decode` used to try bincode and then fall back to
+    /// `serde_json::from_slice`, while `encode` only ever writes bincode. That
+    /// gave one stored type two accepted parsers on a path with a single
+    /// producer: the fallback could only succeed on bytes this node did not
+    /// write.
+    #[test]
+    fn json_is_no_longer_accepted_where_only_bincode_is_written() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct Stored {
+            a: u64,
+            b: String,
+        }
+
+        let value = Stored {
+            a: 7,
+            b: "seven".to_string(),
+        };
+
+        // What `encode` writes still round-trips.
+        let bin = super::encode(&value).expect("bincode encode");
+        let back: Stored = super::decode(&bin).expect("bincode decode");
+        assert_eq!(back, value);
+
+        // JSON for the same type must now be rejected rather than silently
+        // decoded into a second representation of the same record.
+        let json = serde_json::to_vec(&value).expect("json encode");
+        assert!(
+            super::decode::<Stored>(&json).is_err(),
+            "JSON must not decode on a path where only bincode is written"
+        );
+    }
+
+    /// What removing the fallback does and does not buy.
+    ///
+    /// It removes a *second* parser from a single-producer path. It does not
+    /// make bincode strict: bincode 1.x reads a `u64` as eight raw bytes and
+    /// does not require the input to be fully consumed by default, so
+    /// arbitrary bytes can still decode into a structurally valid value.
+    /// Measured on this very input:
+    ///
+    ///     decode::<Stored>(b"{\"a\":\"not-a-number\"}")
+    ///       -> Ok(Stored { a: 8029392818728411771 })
+    ///
+    /// So integrity on this path rests on the checksum in
+    /// `decode_database_backup` and on the database file itself, not on the
+    /// decoder rejecting nonsense. Pinned here so nobody reads the fallback
+    /// removal as "corrupt input is now caught".
+    #[test]
+    fn removing_the_fallback_does_not_make_bincode_strict() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug)]
+        struct Stored {
+            a: u64,
+        }
+        // Eight or more bytes decode into *some* u64 regardless of meaning.
+        let loose = super::decode::<Stored>(b"{\"a\":\"not-a-number\"}");
+        assert!(
+            loose.is_ok(),
+            "bincode is not strict here; if this starts failing the decoder \
+             changed and the comment above needs revisiting"
+        );
+        // Too short to hold a u64 — this genuinely fails.
+        assert!(super::decode::<Stored>(b"\xff\xff\xff").is_err());
+    }
+
+    /// A present-but-unreadable schema version must not read as zero.
+    ///
+    /// `unwrap_or(0)` turned a corrupted byte into "fresh database", which is
+    /// the one value that makes `apply_migrations` re-run every migration
+    /// against populated data.
+    #[test]
+    fn a_corrupt_schema_version_refuses_to_boot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage =
+            super::Storage::new(dir.path().to_str().expect("utf-8 path")).expect("storage opens");
+
+        // `Storage::new` runs migrations, so an opened database already
+        // carries the current version. What matters is that it reads back as
+        // a number rather than being invented.
+        let opened = storage.schema_version().expect("opened version reads");
+
+        // Same-module test: reach the sled handle directly to plant the
+        // corruption a failing disk would produce.
+        storage
+            .db
+            .insert(b"SCHEMA_VERSION", b"not-a-number".to_vec())
+            .expect("write corrupt version");
+        let err = storage
+            .schema_version()
+            .expect_err("a corrupt schema version must be an error, not 0");
+        let msg = err.to_string();
+        assert!(msg.contains("SCHEMA_VERSION"), "msg: {msg}");
+        assert!(msg.contains("Refusing to boot"), "msg: {msg}");
+
+        // And a readable version is still just read, not defaulted.
+        assert!(opened >= 1, "an opened database reports its real version");
     }
 }
