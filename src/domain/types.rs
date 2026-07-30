@@ -323,7 +323,7 @@ impl VerifiedDomainCommitment {
 /// `ValidatorSetSnapshot::compute_hash(..).as_bytes()`, which is a 64-character
 /// hex `String`. `hex::decode` accepted it, produced 32 bytes, and returned
 /// from the first branch — so `tag`, `domain_id` and `scheme` were all
-/// discarded. Two PoA domains sharing an authority set therefore had byte-equal
+/// discarded. Two `PoA` domains sharing an authority set therefore had byte-equal
 /// `validator_set_hash` values, and `reject_unregistered_poa_authorities`
 /// compares exactly that field. A quorum assembled for one domain satisfied the
 /// registered-set check on the other.
@@ -332,6 +332,7 @@ impl VerifiedDomainCommitment {
 /// is one extra hash per comparison; the alternative is a cross-domain replay
 /// on the check that exists to prevent an attacker supplying their own
 /// authority set.
+#[must_use]
 pub fn validator_set_commitment(
     tag: &[u8],
     domain_id: DomainId,
