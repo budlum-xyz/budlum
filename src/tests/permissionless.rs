@@ -439,10 +439,10 @@ fn separate_consensus_key_transaction_activates_bonded_validator() {
     );
     assert_eq!(state.get_nonce(&validator), 1);
 
-    let hash_before = state.consensus_validator_set_hash(1337).unwrap();
+    let hash_before = state.consensus_validator_set_hash(45262).unwrap();
     let alternate_vrf = ValidatorKeys::generate().unwrap().vrf_key.public.to_bytes();
     state.get_validator_mut(&validator).unwrap().vrf_public_key = alternate_vrf.to_vec();
-    let hash_after = state.consensus_validator_set_hash(1337).unwrap();
+    let hash_after = state.consensus_validator_set_hash(45262).unwrap();
     assert_ne!(hash_before, hash_after);
 }
 
@@ -557,7 +557,7 @@ fn mainnet_min_stake_floor_for_onboarding() {
     let g1 = genesis.build_genesis_block();
     let g2 = genesis.build_genesis_block();
     assert_eq!(g1.hash, g2.hash);
-    assert_eq!(g1.chain_id, 1);
+    assert_eq!(g1.chain_id, Network::Mainnet.chain_id().value());
 }
 
 /// Below-floor stake does not grant active validator role.

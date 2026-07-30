@@ -16,7 +16,7 @@ use crate::core::transaction::{
 use crate::cross_domain::event_tree::MerkleProof;
 use crate::execution::executor::Executor;
 
-const CHAIN_ID: u64 = 1337;
+const CHAIN_ID: u64 = 45262;
 
 fn relayer_addr() -> Address {
     Address::from([0x0A; 32])

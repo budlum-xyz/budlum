@@ -32,7 +32,7 @@ use crate::crypto::primitives::KeyPair;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-const SCENARIO_CHAIN_ID: u64 = 1337;
+const SCENARIO_CHAIN_ID: u64 = 45262;
 /// Digest normalizasyonu için sabit genesis zamanı (ms). Değer keyfidir ama
 /// HER platformda ve HER koşuda aynıdır; değiştirilmesi digest'i değiştirir
 /// (bu kasıtlıdır: sabit, dokümante bir çapa).

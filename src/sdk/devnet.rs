@@ -95,7 +95,7 @@ impl DevnetDomainProfile {
 /// Devnet yapılandırması — `budlum.toml` [devnet] bölümü ve ek parametreler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevnetConfig {
-    /// Base chain ID (öntanımlı: 1337, devnet standardı).
+    /// Base chain ID (öntanımlı: devnet chain id).
     #[serde(default = "default_base_chain_id")]
     pub base_chain_id: u64,
     /// Domain yapılandırmaları.
@@ -113,7 +113,7 @@ pub struct DevnetConfig {
 }
 
 fn default_base_chain_id() -> u64 {
-    1337
+    45262
 }
 
 fn default_data_dir() -> String {
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn default_domain_chain_ids_are_sequential() {
         let config = DevnetConfig::default();
-        assert_eq!(config.domains[&0].chain_id, 1337);
+        assert_eq!(config.domains[&0].chain_id, 45262);
         assert_eq!(config.domains[&1].chain_id, 1338);
         assert_eq!(config.domains[&2].chain_id, 1339);
         assert_eq!(config.domains[&3].chain_id, 1340);
@@ -439,7 +439,7 @@ mod tests {
         let config = DevnetConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: DevnetConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.base_chain_id, 1337);
+        assert_eq!(parsed.base_chain_id, 45262);
         assert_eq!(parsed.domains.len(), 4);
     }
 }

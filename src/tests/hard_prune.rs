@@ -28,7 +28,7 @@ async fn nft_burn_prunes_matching_storage_manifest_on_produce() {
     let db = dir.path().join("hard_prune_produce.db");
     let storage = Storage::new(db.to_str().unwrap()).unwrap();
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+    let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
     bc.state.base_fee = 0;
     bc.mempool.set_min_fee(0);
 

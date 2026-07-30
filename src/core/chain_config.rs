@@ -12,11 +12,28 @@ pub enum Network {
 }
 
 impl Network {
+    /// EIP-155 chain id.
+    ///
+    /// These used to be 1, 42 and 1337. All three are taken in the public
+    /// registry at `chainid.network` — checked against the live list of 2668
+    /// chains: 1 is Ethereum Mainnet, 42 is LUKSO Mainnet, and 1337 is Geth
+    /// Testnet.
+    ///
+    /// Budlum's own signing preimage is domain-separated (`BDLM_TX_V4` plus
+    /// the chain id), so a signature could not have been replayed onto
+    /// Ethereum. The cost was to users rather than to consensus: every EVM
+    /// wallet resolves a chain id through that registry, so a Budlum RPC
+    /// announcing `1` presents itself to MetaMask as Ethereum Mainnet, and the
+    /// user is asked to approve what looks like an Ethereum transaction.
+    ///
+    /// 45260..=45262 are unassigned in the same registry. Changing this before
+    /// mainnet costs a genesis hash; changing it after would mean asking every
+    /// wallet and explorer to migrate.
     pub fn chain_id(&self) -> ChainId {
         match self {
-            Network::Mainnet => ChainId(1),
-            Network::Testnet => ChainId(42),
-            Network::Devnet => ChainId(1337),
+            Network::Mainnet => ChainId(45260),
+            Network::Testnet => ChainId(45261),
+            Network::Devnet => ChainId(45262),
         }
     }
 
@@ -63,11 +80,15 @@ impl Network {
         }
     }
 
+    /// Inverse of [`Self::chain_id`].
+    ///
+    /// Kept next to `chain_id` on purpose: the two are a pair, and an id
+    /// changed in one and not the other silently stops resolving.
     pub fn from_chain_id(chain_id: u64) -> Option<Self> {
         match chain_id {
-            1 => Some(Network::Mainnet),
-            42 => Some(Network::Testnet),
-            1337 => Some(Network::Devnet),
+            45260 => Some(Network::Mainnet),
+            45261 => Some(Network::Testnet),
+            45262 => Some(Network::Devnet),
             _ => None,
         }
     }
@@ -356,9 +377,9 @@ mod tests {
     use super::*;
     #[test]
     fn test_network_configs() {
-        assert_eq!(Network::Mainnet.chain_id().value(), 1);
-        assert_eq!(Network::Testnet.chain_id().value(), 42);
-        assert_eq!(Network::Devnet.chain_id().value(), 1337);
+        assert_eq!(Network::Mainnet.chain_id().value(), 45260);
+        assert_eq!(Network::Testnet.chain_id().value(), 45261);
+        assert_eq!(Network::Devnet.chain_id().value(), 45262);
         assert_eq!(Network::Mainnet.default_port(), 4001);
     }
 

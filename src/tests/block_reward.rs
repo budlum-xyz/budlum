@@ -11,7 +11,7 @@ fn addr(b: u8) -> Address {
 }
 
 fn fresh_chain() -> Blockchain {
-    Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None)
+    Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None)
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn flat_fee_block_credits_producer_once_after_metabolic_burn() {
         100,
         0,
         Vec::new(),
-        1337,
+        45262,
         TransactionType::Transfer,
     );
     tx.sign(&sender_key);

@@ -108,11 +108,19 @@ fn signed_lubot_bond_debits_balance_and_registers_role8() {
 fn lubot_bond_floor_matches_each_known_network_validator_floor() {
     let state = AccountState::new();
     assert_eq!(
-        state.required_lubot_bond(1),
+        state.required_lubot_bond(
+            crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
+        ),
         crate::core::chain_config::Network::Mainnet.min_stake()
     );
     assert_eq!(
-        state.required_lubot_bond(42),
+        state.required_lubot_bond(
+            crate::core::chain_config::Network::Testnet
+                .chain_id()
+                .value()
+        ),
         crate::core::chain_config::Network::Testnet.min_stake()
     );
     assert_eq!(
@@ -155,7 +163,15 @@ fn mainnet_lubot_bond_rejects_devnet_sized_principal() {
     assert!(amount < required);
     state.add_balance(&operator, amount + fee);
 
-    let tx = Transaction::new_lubot_operator_bond(operator, amount, fee, 0, 1);
+    let tx = Transaction::new_lubot_operator_bond(
+        operator,
+        amount,
+        fee,
+        0,
+        crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value(),
+    );
     let err = Executor::apply_transaction(&mut state, &tx)
         .expect_err("mainnet must reject a devnet-sized Lubot bond");
 

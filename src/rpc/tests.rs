@@ -26,7 +26,7 @@ mod rpc_tests {
 
     async fn setup() -> (RpcServer, ChainHandle) {
         let consensus = Arc::new(PoWEngine::new(0));
-        let blockchain = Blockchain::new(consensus, None, 1337, None);
+        let blockchain = Blockchain::new(consensus, None, 45262, None);
         let (chain_actor, chain) = ChainActor::new(blockchain);
         tokio::spawn(async move {
             chain_actor.run().await;
@@ -49,7 +49,10 @@ mod rpc_tests {
         let (server, _) = setup().await;
         let chain_id = server.chain_id().await.unwrap();
         println!("bud_chainId: {chain_id}");
-        assert_eq!(chain_id, "0x539");
+        assert_eq!(
+            chain_id,
+            format!("0x{:x}", crate::core::transaction::DEFAULT_CHAIN_ID)
+        );
     }
 
     #[tokio::test]
@@ -202,7 +205,7 @@ mod rpc_tests {
         let domain = crate::domain::plugin::default_domain(
             1,
             crate::domain::ConsensusKind::PoW,
-            1337,
+            45262,
             "pow-header-chain-v1",
             1,
         );

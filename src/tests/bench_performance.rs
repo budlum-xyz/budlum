@@ -21,7 +21,7 @@ async fn bench_high_tps() {
     let validator_keys = ValidatorKeys::generate().unwrap();
     let consensus = Arc::new(PoSEngine::new(pos_config, Some(validator_keys.clone())));
 
-    let blockchain = Blockchain::new(consensus, None, 1337, None);
+    let blockchain = Blockchain::new(consensus, None, 45262, None);
     let (chain_actor, chain) = ChainActor::new(blockchain);
 
     tokio::spawn(async move {

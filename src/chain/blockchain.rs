@@ -5158,7 +5158,7 @@ mod tests {
                 prune_calls: producer_calls.clone(),
             }),
             None,
-            1337,
+            45262,
             None,
         );
         for _ in 0..EPOCH_LENGTH {
@@ -5173,7 +5173,7 @@ mod tests {
                 prune_calls: receiver_calls.clone(),
             }),
             None,
-            1337,
+            45262,
             None,
         );
         for block in accepted_blocks {
@@ -5184,7 +5184,7 @@ mod tests {
 
     #[test]
     fn validator_snapshot_retention_enforces_exact_entry_cap() {
-        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
         blockchain.max_validator_snapshots = 3;
 
         for epoch in 1..=5 {
@@ -5205,7 +5205,7 @@ mod tests {
 
     #[test]
     fn qc_blob_retention_enforces_exact_entry_cap() {
-        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
         blockchain.max_qc_blobs = 3;
         for height in 1..=5 {
             blockchain.verified_qc_blobs.insert(
@@ -5235,7 +5235,7 @@ mod tests {
 
     #[test]
     fn pending_finality_retention_deduplicates_and_caps_total_certs() {
-        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
         blockchain.max_pending_certs = 3;
         let make_cert = |hash: &str| FinalityCert {
             epoch: 1,
@@ -5277,7 +5277,7 @@ mod tests {
             loaded: loaded.clone(),
         });
 
-        let _blockchain = Blockchain::new(consensus, Some(storage), 1337, None);
+        let _blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
 
         assert!(
             loaded.load(Ordering::SeqCst),
@@ -5318,9 +5318,9 @@ mod tests {
         let consensus = Arc::new(PoWEngine::new(1));
         let keypair = KeyPair::generate().unwrap();
         let pubkey = Address::from(keypair.public_key_bytes());
-        let genesis = GenesisConfig::new(1337).with_allocation(pubkey, 100);
+        let genesis = GenesisConfig::new(45262).with_allocation(pubkey, 100);
         let mut blockchain =
-            Blockchain::new_with_genesis(consensus, None, 1337, None, Some(genesis));
+            Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
 
         let recipient = Address::from([1u8; 32]);
         let mut tx = Transaction::new(pubkey, recipient, 50, vec![]);
@@ -5340,9 +5340,9 @@ mod tests {
         let keypair = KeyPair::generate().unwrap();
         let sender = Address::from(keypair.public_key_bytes());
         let recipient = Address::from([0x44u8; 32]);
-        let genesis = GenesisConfig::new(1337).with_allocation(sender, 1_000);
+        let genesis = GenesisConfig::new(45262).with_allocation(sender, 1_000);
         let mut blockchain =
-            Blockchain::new_with_genesis(consensus, None, 1337, None, Some(genesis));
+            Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
 
         let mut tx = Transaction::new(sender, recipient, 10, vec![]);
         tx.fee = 1;
@@ -5356,7 +5356,7 @@ mod tests {
     #[test]
     fn test_epoch_transition_and_unjailing() {
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
         let mut val_bytes = [0u8; 32];
         val_bytes[0] = 1;
@@ -5420,7 +5420,7 @@ mod tests {
 
         let engine = Arc::new(PoSEngine::new(config.clone(), Some(alice_keys.clone())));
 
-        let mut blockchain = Blockchain::new(engine.clone(), None, 1337, None);
+        let mut blockchain = Blockchain::new(engine.clone(), None, 45262, None);
 
         blockchain.state.validators.clear();
         blockchain.state.add_validator(alice_pub, 2000);
@@ -5465,7 +5465,7 @@ mod tests {
         assert_eq!(produced_block.slashing_evidence.as_ref().unwrap().len(), 1);
 
         let fresh_engine = Arc::new(PoSEngine::new(config, Some(alice_keys)));
-        let mut blockchain2 = Blockchain::new(fresh_engine, None, 1337, None);
+        let mut blockchain2 = Blockchain::new(fresh_engine, None, 45262, None);
         blockchain2.state.validators.clear();
         blockchain2.state.add_validator(alice_pub, 2000);
         if let Some(v) = blockchain2.state.get_validator_mut(&alice_pub) {
@@ -5491,7 +5491,7 @@ mod tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let sender = KeyPair::generate().unwrap();
         let sender_pub = Address::from(sender.public_key_bytes());
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state.add_balance(&sender_pub, 1000);
 
         let recipient = Address::from([2u8; 32]);
@@ -5511,7 +5511,7 @@ mod tests {
         let signer = KeyPair::generate().unwrap();
         let signer_addr = Address::from(signer.public_key_bytes());
         let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), Some(signer)));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         // Hash-mix leader selection needs a controlled set — keep
         // Only the PoA signer active so they are always the expected proposer.
         bc.state.validators.clear();
@@ -5539,7 +5539,7 @@ mod tests {
         let sender = KeyPair::generate().unwrap();
         let sender_pub = Address::from(sender.public_key_bytes());
         let recipient = Address::from([7u8; 32]);
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state.add_balance(&sender_pub, 1_000);
 
         let mut tx0 = Transaction::new_with_fee(sender_pub, recipient, 10, 1, 0, vec![]);
@@ -5563,7 +5563,7 @@ mod tests {
         let db_path = db_path.to_string_lossy().to_string();
         let storage = Storage::new(&db_path).unwrap();
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+        let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
         for _ in 0..EPOCH_LENGTH {
             bc.produce_block(Address::from([3u8; 32])).unwrap();
@@ -5576,7 +5576,7 @@ mod tests {
         let restarted = Blockchain::new(
             Arc::new(PoWEngine::new(0)),
             Some(Storage::new(&db_path).unwrap()),
-            1337,
+            45262,
             None,
         );
 
@@ -5587,10 +5587,10 @@ mod tests {
     #[test]
     fn test_validate_rejects_empty_state_root() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
 
         let mut block = Block::new(1, bc.last_block().hash.clone(), vec![]);
-        block.chain_id = 1337;
+        block.chain_id = 45262;
         block.state_root = String::new();
         block.hash = block.calculate_hash();
 
@@ -5602,7 +5602,7 @@ mod tests {
     #[test]
     fn test_validate_rejects_finalized_conflict() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
 
         bc.finalized_height = 0;
         bc.finalized_hash = bc.chain[0].hash.clone();
@@ -5625,10 +5625,10 @@ mod tests {
     #[test]
     fn test_validate_rejects_tampered_tx_root() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
 
         let mut block = Block::new(1, bc.last_block().hash.clone(), vec![]);
-        block.chain_id = 1337;
+        block.chain_id = 45262;
         block.state_root = "a".repeat(64);
         block.tx_root = "b".repeat(64);
         block.hash = block.calculate_hash();
@@ -5641,10 +5641,10 @@ mod tests {
     #[test]
     fn test_validate_rejects_tampered_hash() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
 
         let mut block = Block::new(1, bc.last_block().hash.clone(), vec![]);
-        block.chain_id = 1337;
+        block.chain_id = 45262;
         block.state_root = "a".repeat(64);
         block.hash = "c".repeat(64);
 
@@ -5675,7 +5675,7 @@ mod tests {
     #[test]
     fn test_historical_snapshot_rebuilds_state_at_height() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         let late_account = Address::from([8u8; 32]);
         bc.state.add_balance(&late_account, 123);
 
@@ -5689,7 +5689,7 @@ mod tests {
     #[test]
     fn test_apply_snapshot_rejects_wrong_chain_id() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
             0,
             bc.chain[0].hash.clone(),
@@ -5708,11 +5708,11 @@ mod tests {
     #[test]
     fn test_apply_snapshot_rejects_unknown_block_hash() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         let snapshot = crate::chain::snapshot::StateSnapshot::from_state(
             0,
             "bad_hash".to_string(),
-            1337,
+            45262,
             &bc.state,
             0,
             bc.chain[0].hash.clone(),
@@ -5791,8 +5791,8 @@ mod tests {
     fn test_apply_snapshot_accepts_local_verified_snapshot() {
         let consensus = Arc::new(PoWEngine::new(0));
         let restored_account = Address::from([7u8; 32]);
-        let genesis = GenesisConfig::new(1337).with_allocation(restored_account, 250);
-        let mut bc = Blockchain::new_with_genesis(consensus, None, 1337, None, Some(genesis));
+        let genesis = GenesisConfig::new(45262).with_allocation(restored_account, 250);
+        let mut bc = Blockchain::new_with_genesis(consensus, None, 45262, None, Some(genesis));
         let snapshot = bc.get_state_snapshot(0).unwrap();
         bc.state.add_balance(&Address::from([9u8; 32]), 500);
 
@@ -5806,7 +5806,7 @@ mod tests {
     #[test]
     fn test_start_prevote_task_creates_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
         let cp_hash = "a".repeat(64);
 
@@ -5823,7 +5823,7 @@ mod tests {
     #[test]
     fn test_handle_prevote_rejects_when_no_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
 
         let vote = Prevote {
             epoch: 0,
@@ -5842,7 +5842,7 @@ mod tests {
     #[test]
     fn test_handle_precommit_rejects_when_no_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
 
         let vote = Precommit {
             epoch: 0,
@@ -5861,7 +5861,7 @@ mod tests {
     #[test]
     fn test_produce_block_advances_to_checkpoint() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, None, 1337, None);
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
         bc.state.add_balance(&Address::from([1u8; 32]), 1000);
 
         let cp_height = crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
@@ -5903,7 +5903,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     let mut blockchain = Blockchain::new(
         Arc::new(PoSEngine::new(PoSConfig::default(), None)),
         None,
-        1337,
+        45262,
         None,
     );
     let mut custom_params = *blockchain.state.registry.params();
@@ -5987,8 +5987,8 @@ fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
     use crate::consensus::PoWEngine;
     use std::sync::Arc;
 
-    let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
-    let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+    let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     let common_producer = Address::from([1u8; 32]);
     for _ in 0..3 {
         left.produce_block(common_producer).unwrap();

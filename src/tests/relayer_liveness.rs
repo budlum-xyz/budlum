@@ -26,7 +26,7 @@ fn addr(b: u8) -> Address {
 
 fn fresh_chain() -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
-    Blockchain::new(consensus, None, 1337, None)
+    Blockchain::new(consensus, None, 45262, None)
 }
 
 fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {

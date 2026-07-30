@@ -310,7 +310,7 @@ mod tests {
 
     fn make_inputs() -> ExecutionPublicInputs {
         ExecutionPublicInputs {
-            chain_id: 1337,
+            chain_id: 45262,
             program_hash: [1u8; 32],
             initial_state_root: [2u8; 32],
             final_state_root: [3u8; 32],

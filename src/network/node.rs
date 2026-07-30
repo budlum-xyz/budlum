@@ -176,7 +176,7 @@ async fn test_node_creation() {
     use crate::chain::chain_actor::ChainActor;
     use crate::consensus::pow::PoWEngine;
     let consensus = std::sync::Arc::new(PoWEngine::new(2));
-    let blockchain = Blockchain::new(consensus, None, 1337, None);
+    let blockchain = Blockchain::new(consensus, None, 45262, None);
     let (chain_actor, chain) = ChainActor::new(blockchain);
     tokio::spawn(async move {
         chain_actor.run().await;

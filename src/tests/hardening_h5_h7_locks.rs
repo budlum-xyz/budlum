@@ -78,7 +78,7 @@ mod tests {
                 height: 1,
                 block_hash: "b".into(),
                 genesis_hash: "g".into(),
-                chain_id: 1337,
+                chain_id: 45262,
                 finalized_height: 0,
                 finalized_hash: "f".into(),
                 finality_certificates: vec![],

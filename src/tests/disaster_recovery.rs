@@ -24,7 +24,7 @@ mod tests {
         {
             let storage = reopen_storage(db_path_str);
             let consensus = Arc::new(PoWEngine::new(0));
-            let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+            let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
             bc.state.base_fee = 0;
             bc.mempool.set_min_fee(0);
 
@@ -59,7 +59,7 @@ mod tests {
             let consensus = Arc::new(PoWEngine::new(0));
 
             // Reconstruct blockchain from existing storage
-            let mut bc = Blockchain::new(consensus, Some(storage), 1337, None);
+            let mut bc = Blockchain::new(consensus, Some(storage), 45262, None);
 
             // 3. Verify chain integrity survived restart
 
@@ -105,7 +105,7 @@ mod tests {
             let mut bc = Blockchain::new_with_genesis(
                 consensus,
                 Some(storage),
-                1337,
+                45262,
                 None,
                 Some(genesis.clone()),
             );
@@ -129,7 +129,7 @@ mod tests {
             let mut bc = Blockchain::new_with_genesis(
                 consensus,
                 Some(storage),
-                1337,
+                45262,
                 None,
                 Some(genesis.clone()),
             );
@@ -160,7 +160,7 @@ mod tests {
             let storage = reopen_storage(db_path_str);
             let consensus = Arc::new(PoWEngine::new(0));
             let bc =
-                Blockchain::new_with_genesis(consensus, Some(storage), 1337, None, Some(genesis));
+                Blockchain::new_with_genesis(consensus, Some(storage), 45262, None, Some(genesis));
 
             assert_eq!(
                 bc.state.nft_registry.nfts.len(),
@@ -210,7 +210,7 @@ async fn test_chaos_v2_heavy_network_partition_with_forks() {
     // 1. Partition A grows
     {
         let storage = reopen_storage(db_a.to_str().unwrap());
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         for _ in 0..10 {
             let _ = bc.produce_block(producer_a);
         }
@@ -220,7 +220,7 @@ async fn test_chaos_v2_heavy_network_partition_with_forks() {
     // 2. Partition B grows longer with different data
     {
         let storage = reopen_storage(db_b.to_str().unwrap());
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         for _ in 0..15 {
             let _ = bc.produce_block(producer_b);
         }
@@ -230,10 +230,10 @@ async fn test_chaos_v2_heavy_network_partition_with_forks() {
     // 3. Rejoin and Recovery: Node A sees Node B's chain and must reorg
     {
         let storage = reopen_storage(db_a.to_str().unwrap());
-        let mut bc_a = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc_a = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         let storage_b = reopen_storage(db_b.to_str().unwrap());
-        let bc_b = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage_b), 1337, None);
+        let bc_b = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage_b), 45262, None);
 
         let reorg_result = bc_a
             .try_reorg(bc_b.chain.clone())
@@ -260,7 +260,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
     // Phase: Normal operation
     {
         let storage = reopen_storage(db_path_str);
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         bc.state.base_fee = 0;
         bc.mempool.set_min_fee(0);
         bc.state.add_balance(&alice, 1_000_000);
@@ -281,7 +281,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
             1,
             0,
             Vec::new(),
-            1337,
+            45262,
             TransactionType::RelayerResult(res),
         );
         tx.sign(&relayer_keypair);
@@ -292,7 +292,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
     // Phase: Sudden crash during heavy writing
     {
         let storage = reopen_storage(db_path_str);
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         bc.state.base_fee = 0;
         bc.mempool.set_min_fee(0);
 
@@ -310,7 +310,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
     // Phase: Recovery and chain sync with a longer fork
     {
         let storage = reopen_storage(db_path_str);
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         bc.state.base_fee = 0;
         bc.mempool.set_min_fee(0);
 
@@ -349,7 +349,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
 #[tokio::test]
 async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     // NOT: devnet_genesis özel adreslerinden (0x01/0x02) uzak durulur.
     let producer = Address::from([0x61; 32]);
     let silent = Address::from([0x62; 32]);

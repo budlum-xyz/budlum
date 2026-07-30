@@ -48,7 +48,7 @@ fn blob_with_sigs(count: usize) -> QcBlob {
 #[test]
 fn import_qc_blob_rejects_empty_signature_set() {
     let consensus = Arc::new(PoWEngine::new(0));
-    let bc = Blockchain::new(consensus, None, 1337, None);
+    let bc = Blockchain::new(consensus, None, 45262, None);
 
     // The snapshot will have zero validators (no `add_validator` calls),
     // So `min_signers = ceil(0 * 2 / 3) = 0`. To exercise the empty

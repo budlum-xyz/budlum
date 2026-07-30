@@ -534,7 +534,7 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
         1,
         0,
         Vec::new(),
-        1337,
+        45262,
         TransactionType::RelayerResult(result),
     );
     let err = Executor::apply_transaction(&mut state, &tx)

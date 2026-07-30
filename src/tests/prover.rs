@@ -29,7 +29,7 @@ fn addr(b: u8) -> Address {
 
 fn fresh_chain() -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
-    Blockchain::new(consensus, None, 1337, None)
+    Blockchain::new(consensus, None, 45262, None)
 }
 
 /// A tiny valid program: Load imm 7 -> reg1, Log reg1, Halt.
@@ -303,7 +303,7 @@ fn proof_claim_registry_persists_across_restart() {
     let mut bc = Blockchain::new(
         Arc::new(PoWEngine::new(0)),
         Some(Storage::new(&db_path).unwrap()),
-        1337,
+        45262,
         None,
     );
     let (proof, pi, program) = real_proof();
@@ -319,7 +319,7 @@ fn proof_claim_registry_persists_across_restart() {
     let restarted = Blockchain::new(
         Arc::new(PoWEngine::new(0)),
         Some(Storage::new(&db_path).unwrap()),
-        1337,
+        45262,
         None,
     );
     let key = ProofClaimKey {

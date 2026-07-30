@@ -23,7 +23,7 @@ fn addr(b: u8) -> Address {
 
 fn chain_with_validators(producer: Address, absentee: Address) -> Blockchain {
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
     // Two validators: `producer` will produce every block; `absentee` never does.
     bc.state.add_validator(producer, 10_000);
     bc.state.add_validator(absentee, 10_000);

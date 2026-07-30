@@ -125,7 +125,7 @@ mod zkvm_tests {
         let keypair = KeyPair::generate().unwrap();
         let from = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&from);
 
         let tx = signed_contract_tx(&keypair, 7, 0, logging_program(9));
@@ -152,7 +152,7 @@ mod zkvm_tests {
         let keypair = KeyPair::generate().unwrap();
         let from = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
-        let mut blockchain = Blockchain::new(consensus, None, 1337, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
         blockchain.init_genesis_account(&from);
 
         let mut tx = Transaction::new_contract_call(from, 1, 0, vec![0xaa, 0xbb]);

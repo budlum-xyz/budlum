@@ -39,9 +39,9 @@ mod distributed_settlement_tests {
             let storage = Arc::new(Storage::new(path.to_str().unwrap()).unwrap());
 
             let consensus = Arc::new(PoWEngine::new(0));
-            let mut blockchain = Blockchain::new(consensus, Some((*storage).clone()), 1337, None);
+            let mut blockchain = Blockchain::new(consensus, Some((*storage).clone()), 45262, None);
 
-            let pow = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+            let pow = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
             let pos = default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0);
             let _ = blockchain.register_consensus_domain(pow);
             let _ = blockchain.register_consensus_domain(pos);
@@ -100,7 +100,7 @@ mod distributed_settlement_tests {
             let mut b = Block::new(i, "hash".into(), vec![]);
             b.hash = format!("hash_{i}").repeat(16)[0..64].to_string();
             let mut com = DomainCommitment::from_block(
-                &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+                &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
                 &b,
                 [0u8; 32],
                 [0u8; 32],
@@ -169,7 +169,7 @@ mod distributed_settlement_tests {
         let mut b2 = Block::new(2, b1.hash.clone(), vec![]);
         b2.hash = "b2".repeat(32);
         let com2 = DomainCommitment::from_block(
-            &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+            &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b2,
             [0u8; 32],
             [0u8; 32],
@@ -191,7 +191,7 @@ mod distributed_settlement_tests {
 
         let n2 = NodeHarness::new(6101, vec![], Some(path.clone())).await;
         let com1 = DomainCommitment::from_block(
-            &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+            &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b1,
             [0u8; 32],
             [0u8; 32],
@@ -223,7 +223,7 @@ mod distributed_settlement_tests {
         let b1 = Block::new(1, "h1".into(), vec![]);
         let b1_alt = Block::new(1, "h1_alt".into(), vec![]);
         let com1 = DomainCommitment::from_block(
-            &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+            &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b1,
             [0u8; 32],
             [0u8; 32],
@@ -231,7 +231,7 @@ mod distributed_settlement_tests {
         )
         .unwrap();
         let mut com1_alt = DomainCommitment::from_block(
-            &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+            &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b1_alt,
             [0u8; 32],
             [0u8; 32],
@@ -252,7 +252,7 @@ mod distributed_settlement_tests {
         let n2 = NodeHarness::new(7101, vec![], Some(path.clone())).await;
         let b2 = Block::new(2, "h2".into(), vec![]);
         let com2 = DomainCommitment::from_block(
-            &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+            &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b2,
             [0u8; 32],
             [0u8; 32],
@@ -277,7 +277,7 @@ mod distributed_settlement_tests {
         let mut b1 = Block::new(1, "h1".into(), vec![]);
         b1.hash = "h1".repeat(32);
         let mut com_pow = DomainCommitment::from_block(
-            &default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0),
+            &default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0),
             &b1,
             [0u8; 32],
             [0u8; 32],
@@ -323,7 +323,7 @@ mod distributed_settlement_tests {
         let alice = test_addr_from_byte(1u8);
         let mut b = Block::new(1, "h".into(), vec![]);
         b.hash = "h".repeat(32);
-        let pow_domain = default_domain(1, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let pow_domain = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
 
         use crate::domain::finality_adapter::{hash_finality_proof, FinalityProof};
 

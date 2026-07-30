@@ -174,3 +174,6 @@ pub mod genesis_repro;
 // hash: two different values would then commit to the same digest.
 #[cfg(test)]
 pub mod hash_input_serialize_locks;
+// Chain ids must not collide with another chain's registry entry.
+#[cfg(test)]
+pub mod chain_id_registry_locks;

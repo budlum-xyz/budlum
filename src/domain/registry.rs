@@ -274,7 +274,7 @@ mod tests {
         let domain_a = default_domain(
             1,
             ConsensusKind::PoW,
-            1337,
+            45262,
             crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
             64,
         );
@@ -296,7 +296,7 @@ mod tests {
         let domain = default_domain(
             1,
             ConsensusKind::PoW,
-            1337,
+            45262,
             crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
             64,
         );
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn domain_lifecycle_requires_freeze_before_retire() {
-        let domain = default_domain(7, ConsensusKind::PoS, 1337, "pos", 0);
+        let domain = default_domain(7, ConsensusKind::PoS, 45262, "pos", 0);
         let mut registry = ConsensusDomainRegistry::new();
         registry.register(domain).unwrap();
         assert!(registry
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn retired_domain_is_terminal() {
-        let domain = default_domain(8, ConsensusKind::Bft, 1337, "bft", 0);
+        let domain = default_domain(8, ConsensusKind::Bft, 45262, "bft", 0);
         let mut registry = ConsensusDomainRegistry::new();
         registry.register(domain).unwrap();
         registry
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn a_non_pow_domain_cannot_claim_a_confirmation_depth() {
         let mut registry = ConsensusDomainRegistry::new();
-        let domain = default_domain(101, ConsensusKind::PoS, 1337, "pos-qc-finality", 3);
+        let domain = default_domain(101, ConsensusKind::PoS, 45262, "pos-qc-finality", 3);
         let err = registry
             .register(domain)
             .expect_err("a depth no adapter reads must not be accepted silently");
@@ -375,7 +375,7 @@ mod tests {
             (113, ConsensusKind::PoA, "poa-authority-quorum"),
         ] {
             registry
-                .register(default_domain(id, kind, 1337, adapter, 1))
+                .register(default_domain(id, kind, 45262, adapter, 1))
                 .unwrap_or_else(|e| {
                     panic!("min_confirmations=1 must stay valid for {adapter}: {e}")
                 });
@@ -389,7 +389,7 @@ mod tests {
             .register(default_domain(
                 121,
                 ConsensusKind::Bft,
-                1337,
+                45262,
                 "bft-quorum-commit",
                 0,
             ))
@@ -404,7 +404,7 @@ mod tests {
             .register(default_domain(
                 131,
                 ConsensusKind::PoW,
-                1337,
+                45262,
                 crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
                 6,
             ))

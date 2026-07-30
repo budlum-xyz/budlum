@@ -2032,7 +2032,7 @@ mod tests {
                 10,
                 1,
                 vec![1],
-                1337,
+                45262,
                 tx_type.clone(),
             );
             tx.sign(&kp);
@@ -2060,7 +2060,7 @@ mod tests {
             timestamp: "1000".into(),
             hash: "abc".into(),
             signature: vec![],
-            chain_id: 1337,
+            chain_id: 45262,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
             tx_type: pb::ProtoTransactionType::NftBoost as i32,
             wire_version: 2,
@@ -2216,7 +2216,7 @@ mod tests {
             version: 1,
             global_height: 7,
             previous_global_hash: [1u8; 32],
-            chain_id: 1337,
+            chain_id: 45262,
             timestamp_ms: 456,
             domain_registry_root: [2u8; 32],
             domain_commitment_root: [3u8; 32],

@@ -32,7 +32,7 @@ mod settlement_prod_tests {
     use std::sync::Arc;
 
     fn test_chain() -> Blockchain {
-        Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None)
+        Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None)
     }
 
     fn domain(id: u32, kind: ConsensusKind) -> crate::domain::ConsensusDomain {
@@ -42,7 +42,7 @@ mod settlement_prod_tests {
             ConsensusKind::PoA => "poa-authority-quorum",
             _ => "custom",
         };
-        default_domain(id, kind, 1337 + id as u64, adapter, 0)
+        default_domain(id, kind, 45262 + id as u64, adapter, 0)
     }
 
     fn commitment_for(
@@ -298,7 +298,7 @@ mod settlement_prod_tests {
         {
             let storage = Storage::new(path).unwrap();
             let mut blockchain =
-                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
             for (id, kind, seed) in [
                 (1, ConsensusKind::PoW, 1u8),
                 (2, ConsensusKind::PoS, 2u8),
@@ -316,7 +316,7 @@ mod settlement_prod_tests {
         }
 
         let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         assert!(blockchain.domain_registry.get(1).is_some());
         assert!(blockchain.domain_registry.get(2).is_some());
@@ -343,7 +343,7 @@ mod settlement_prod_tests {
         }
 
         let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         assert!(blockchain.domain_registry.get(1).is_some());
         assert!(blockchain.domain_registry.get(2).is_none());
@@ -374,7 +374,7 @@ mod settlement_prod_tests {
         }
 
         let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         assert!(blockchain.domain_registry.get(1).is_some());
         assert_eq!(blockchain.domain_commitment_registry.len(), 1);
@@ -397,7 +397,7 @@ mod settlement_prod_tests {
             let mut blockchain = Blockchain::new(
                 Arc::new(PoWEngine::new(0)),
                 Some(storage.clone()),
-                1337,
+                45262,
                 None,
             );
             let first = blockchain.seal_global_header(None).unwrap();
@@ -409,7 +409,7 @@ mod settlement_prod_tests {
         }
 
         let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
 
         assert_eq!(blockchain.global_headers.len(), 1);
         assert_eq!(blockchain.global_headers[0].global_height, 0);
@@ -419,7 +419,7 @@ mod settlement_prod_tests {
     #[test]
     fn verified_pow_commitment_requires_finalized_depth_and_matching_proof_hash() {
         let mut blockchain = test_chain();
-        let mut pow = default_domain(1, ConsensusKind::PoW, 1337, POW_HEADER_CHAIN_ADAPTER, 2);
+        let mut pow = default_domain(1, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 2);
         pow.pow_parameters = Some(PoWDomainParameters {
             min_difficulty_bits: 4,
             max_difficulty_bits: 8,
@@ -498,7 +498,7 @@ mod settlement_prod_tests {
         // PoW finality path is the bounded PoWHeaderChain. These checks exercise the
         // New adapter's rejection reasons rather than the old self-declared ones.
         let mut blockchain = test_chain();
-        let mut pow = default_domain(1, ConsensusKind::PoW, 1337, POW_HEADER_CHAIN_ADAPTER, 4);
+        let mut pow = default_domain(1, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 4);
         pow.pow_parameters = Some(PoWDomainParameters {
             min_difficulty_bits: 4,
             max_difficulty_bits: 8,
@@ -693,7 +693,7 @@ mod settlement_prod_tests {
     fn domain_registration_rejects_reserved_or_malformed_domains() {
         let mut blockchain = test_chain();
 
-        let zero_id = default_domain(0, ConsensusKind::PoW, 1337, "pow-header-chain-v1", 0);
+        let zero_id = default_domain(0, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
         let err = blockchain.register_consensus_domain(zero_id).unwrap_err();
         assert!(err.contains("id 0"));
 
@@ -1034,7 +1034,7 @@ mod settlement_prod_tests {
         {
             let storage = Storage::new(path).unwrap();
             let mut blockchain =
-                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
             let pow = domain(1, ConsensusKind::PoW);
             let pos = domain(2, ConsensusKind::PoS);
             blockchain.register_consensus_domain(pow.clone()).unwrap();
@@ -1061,7 +1061,7 @@ mod settlement_prod_tests {
         }
 
         let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         let reloaded = blockchain.build_global_header(None);
         assert_eq!(reloaded.bridge_state_root, expected_bridge_root);
         assert_eq!(reloaded.replay_nonce_root, expected_replay_root);
@@ -1078,7 +1078,7 @@ mod settlement_prod_tests {
         {
             let storage = Storage::new(path).unwrap();
             let mut blockchain =
-                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
             let pow = domain(1, ConsensusKind::PoW);
             let pos = domain(2, ConsensusKind::PoS);
             blockchain.register_consensus_domain(pow.clone()).unwrap();
@@ -1109,7 +1109,7 @@ mod settlement_prod_tests {
         }
 
         let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 1337, None);
+        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
         assert!(blockchain.state.message_registry.get(&message_id).is_some());
         assert_eq!(
             blockchain.build_global_header(None).message_root,
@@ -1121,7 +1121,7 @@ mod settlement_prod_tests {
         default_domain(
             id,
             ConsensusKind::Bft,
-            1337 + id as u64,
+            45262 + id as u64,
             "bft-quorum-commit",
             0,
         )
@@ -1131,7 +1131,7 @@ mod settlement_prod_tests {
         default_domain(
             id,
             ConsensusKind::Zk,
-            1337 + id as u64,
+            45262 + id as u64,
             "zk-proof-verification",
             0,
         )
@@ -1298,7 +1298,7 @@ mod settlement_prod_tests {
     #[test]
     fn attack_fake_finality_proof_hash_tampered() {
         let mut bc = test_chain();
-        let mut pow = default_domain(1, ConsensusKind::PoW, 1337, POW_HEADER_CHAIN_ADAPTER, 2);
+        let mut pow = default_domain(1, ConsensusKind::PoW, 45262, POW_HEADER_CHAIN_ADAPTER, 2);
         pow.pow_parameters = Some(PoWDomainParameters {
             min_difficulty_bits: 4,
             max_difficulty_bits: 8,
@@ -2002,14 +2002,14 @@ mod zk_finality_real_proof {
 
     fn chain() -> Blockchain {
         let consensus = Arc::new(PoWEngine::new(0));
-        Blockchain::new(consensus, None, 1337, None)
+        Blockchain::new(consensus, None, 45262, None)
     }
 
     fn zk_domain() -> crate::domain::ConsensusDomain {
         default_domain(
             DOMAIN_ID,
             ConsensusKind::Zk,
-            1337 + DOMAIN_ID as u64,
+            45262 + DOMAIN_ID as u64,
             "zk-proof-verification",
             0,
         )

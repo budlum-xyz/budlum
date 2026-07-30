@@ -12,7 +12,7 @@ async fn test_sybil_role_rejection() {
     // Scenario: A malicious node attempts to submit consensus votes
     // Without having the STAKED role.
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
 
     let attacker = Address::from([0x66; 32]);
     // Attacker is NOT registered as a validator
@@ -63,7 +63,7 @@ async fn test_p2p_topology_latency_drift_simulation() {
     // Tests if the chain handles blocks with slightly future/past timestamps
     // Which simulate network propagation delays (latency drift).
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 1337, None);
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -77,7 +77,7 @@ async fn test_p2p_topology_latency_drift_simulation() {
     // Non-trivial to replicate by hand. Both chains are freshly constructed
     // (deterministic genesis, no txs), so their states and header summaries
     // Are identical.
-    let mut shadow = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 1337, None);
+    let mut shadow = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     let Some((mut future_block, _)) = shadow.produce_block(crate::core::address::Address::zero())
     else {
         panic!("shadow block production failed");

@@ -191,7 +191,7 @@ impl DeveloperOsManifest {
     pub fn local_standard(project_name: impl Into<String>, budl_source_hash: [u8; 32]) -> Self {
         Self {
             project_name: project_name.into(),
-            chain_id: 1337,
+            chain_id: 45262,
             devnet_topology: DevnetTopology::SingleNode,
             budl_package: BudlPackageFixture {
                 package_name: "budlum-app".into(),
@@ -328,7 +328,7 @@ mod tests {
         let sample = manifest();
         sample.validate().unwrap();
         assert!(!sample.external_network_access);
-        assert_eq!(sample.chain_id, 1337);
+        assert_eq!(sample.chain_id, 45262);
         assert_eq!(sample.project_id(), manifest().project_id());
     }
 

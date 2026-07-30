@@ -931,13 +931,13 @@ mod tests {
         let snapshot = StateSnapshot::from_state(
             100,
             "blockhash123".to_string(),
-            1337,
+            45262,
             &account_state,
             0,
             "genhash".to_string(),
         );
         assert_eq!(snapshot.height, 100);
-        assert_eq!(snapshot.chain_id, 1337);
+        assert_eq!(snapshot.chain_id, 45262);
         assert!(!snapshot.snapshot_hash.is_empty());
     }
     #[test]

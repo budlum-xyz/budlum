@@ -34,7 +34,7 @@ mod zk_finality_fail_open_regression {
 
     /// ZK domain + commitment yardımcı fonksiyonları.
     fn zk_domain() -> crate::domain::types::ConsensusDomain {
-        default_domain(42, ConsensusKind::Zk, 1337, "zk-proof-verification", 0)
+        default_domain(42, ConsensusKind::Zk, 45262, "zk-proof-verification", 0)
     }
 
     fn zk_commitment(state_root: Hash32) -> DomainCommitment {
