@@ -6,10 +6,10 @@
 //! As a NEW enum variant (not a `Custom("...")` string) so the type system
 //! Forces every consumer to handle the storage parameters explicitly.
 //!
-//! Per plan (`/tmp/the-plan/TASK0.38_PLAN.md` §3.1), the goal of
-//! Is **accounting only** — registering a storage domain in the
-//! Existing `ConsensusDomainRegistry` so it is queryable via the existing
-//! `bud_registerConsensusDomain` / `bud_getConsensusDomains` RPC surface.
+//! The scope of this module is **accounting only** — registering a storage
+//! Domain in the existing `ConsensusDomainRegistry` so it is queryable via
+//! The existing `bud_registerConsensusDomain` / `bud_getConsensusDomains`
+//! RPC surface.
 //! No proof, no slashing, no retrieval — those, gated on the
 //! BudZero `VerifyMerkle` gate and BLS/PQ HSM, respectively.
 //!

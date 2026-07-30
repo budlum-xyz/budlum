@@ -2152,21 +2152,28 @@ mod tests {
     //       `is_verify_merkle * (opcode - 0x1E) = 0`. This closes the
     //       Trivial "set the selector to 0 and pick any rd_val_new" attack.
     //
-    //   (b) **Path verification (still TODO).** The
-    //       `rd_val_new` for a VerifyMerkle row is currently constrained
-    //       Only to be 0 or 1. A malicious prover who knows the path
-    //       Can still claim "valid" for a fake root/leaf because the
-    //       AIR does not recompute the Poseidon path. Closing this
-    //       Requires moving key + 64 siblings into the trace as
-    //       Witness columns and adding a 64-round Poseidon chain
-    //       Constraint. That work is tracked in `TASK0.30.5-PLAN.md` and
-    //       Is too large for a single sprint; deprecation
-    //       Therefore remains partially in effect.
+    //   (b) **Path verification (implemented).** The path is recomputed
+    //       In-circuit over expansion rows: the sibling and direction bit
+    //       Of each round are witness columns, the Poseidon chain is
+    //       Constrained round by round, and `COL_MERKLE_KEY_REM` ties the
+    //       Direction bits to `merkle_key` through the shift chain
+    //       `rem == 2 * rem' + bit` (terminating at zero, which also pins
+    //       The key to 64 bits). The sibling values are bound to the
+    //       Memory they were read from by the LogUp memory argument, so a
+    //       Prover cannot substitute a path it never loaded. See
+    //       `plonky3_air.rs` around `COL_MERKLE_KEY_REM` for the
+    //       Constraints and `budzero/docs/BudL_SPEC.md` ("VerifyMerkle
+    //       Soundness") for the argument.
     //
-    // The `verify_merkle_opcode_is_deprecated_for_zk_proofs` test below
-    // Pins the 0x1E encoding; a second test,
-    // `rejects_verify_merkle_with_zero_selector`, validates the partial
-    // Fix.
+    // What this does *not* license: `verify_merkle_enabled` stays `false`
+    // In the default ISA config. That flag is gated on external review of
+    // The soundness argument, which is a process step, not a missing
+    // Constraint. Do not flip it on the strength of this comment.
+    //
+    // Tests: `verify_merkle_opcode_is_deprecated_for_zk_proofs` pins the
+    // 0x1E encoding, `rejects_verify_merkle_with_zero_selector` covers (a),
+    // And `rejects_verify_merkle_with_flipped_direction_bit` and its
+    // Neighbours cover (b).
 
     #[test]
     fn verify_merkle_opcode_is_deprecated_for_zk_proofs() {

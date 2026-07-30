@@ -1,8 +1,9 @@
 //! StorageProvider trait and deterministic mock implementation.
 //!
-//! This is the spec-first boundary from `BUD_STORAGE_TECHNICAL_SPEC.md`:
-//! Provider implementations move bytes/proofs off-chain, while consensus code
-//! Keeps the on-chain deal/challenge accounting in `domain::storage_deal`.
+//! This is the off-chain/on-chain boundary described in
+//! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
+//! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
+//! Accounting in `domain::storage_deal`.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::storage_deal::{ChallengeOutcome, RetrievalChallenge};

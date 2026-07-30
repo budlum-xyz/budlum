@@ -563,12 +563,15 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // A malicious prover can no longer set `is_verify_merkle = 0`
         // To bypass the constraint on a row where COL_OPCODE = 0x1E;
         // The AIR forces the selector to be 1 whenever the opcode is
-        // 0x1E. Note: this is a partial fix. The full soundness
-        // (forcing `rd_val_new` to match the actual Poseidon path
-        // Computation) requires the path to be moved into the trace
-        // (key + 64 sibling hashes as witness columns + a 64-round
-        // Poseidon chain constraint). That work is tracked in
-        // `TASK0.30.5-PLAN.md` and will land.
+        // 0x1E.
+        //
+        // This selector binding was once the only layer. The path itself
+        // Is now recomputed in-circuit as well: siblings and direction
+        // Bits live in the expansion rows, the Poseidon chain is
+        // Constrained per round, `COL_MERKLE_KEY_REM` binds the bits to
+        // `merkle_key`, and the LogUp memory argument binds the siblings
+        // To the memory they were read from. See the `COL_MERKLE_KEY_REM`
+        // Shift chain further down in this file.
         let opcode_verify_merkle: AB::Expr = AB::Expr::from(AB::F::from_u64(0x1E));
         let opcode_at_row: AB::Expr = cur[COL_OPCODE].into();
         // `is_verify_merkle = 1` ⇒ `COL_OPCODE = 0x1E`

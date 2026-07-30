@@ -82,6 +82,10 @@ pub mod relayer_liveness;
 // Regresyon kapilari (kullanici karari Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;
+// A relayer may stay silent; it may not sign an external outcome it never
+// observed. Pins the worker's refusal paths.
+#[cfg(test)]
+pub mod relayer_worker_locks;
 #[cfg(test)]
 pub mod settlement_prod;
 #[cfg(test)]
