@@ -1021,8 +1021,24 @@ impl StorageRegistry {
         }
 
         // === B.U.D.: full STARK proof verification ===
-        if let Some(root) = deal.storage_root {
-            if let Some(proof) = proof_bytes {
+        //
+        // A proof that fails to verify is not a malformed request, it is a
+        // wrong answer from the operator who is being challenged. Returning
+        // `Err` here would leave the challenge unresolved: nothing lands in
+        // `self.results`, no bond moves, and the operator is free to answer
+        // wrongly again. That made a wrong answer strictly cheaper than
+        // silence, since only silence reaches `finalize_missed_challenge`.
+        //
+        // `Mismatched` exists for exactly this case and was never produced
+        // anywhere in the tree. It is produced here now: the operator bond is
+        // recorded as slashed on the same terms as `Missed`, and the deal
+        // leaves `Active`.
+        //
+        // Errors raised *before* this point stay errors — they mean the
+        // caller addressed the wrong deal, missed the deadline, or is not the
+        // operator, none of which is evidence about stored bytes.
+        let verification: Result<(), StorageError> = match (deal.storage_root, proof_bytes) {
+            (Some(root), Some(proof)) => {
                 let context = StorageChallengeProofContext::from_registry(
                     chain_id,
                     challenge,
@@ -1035,21 +1051,51 @@ impl StorageRegistry {
                     &root,
                     &range_hash,
                     proof,
-                )?;
-            } else {
-                return Err(StorageError::InvalidMerkleProof(
-                    "ZK proof (ProofEnvelope) is mandatory for storage challenge verification"
-                        .into(),
-                ));
+                )
             }
-        }
+            (Some(_), None) => Err(StorageError::InvalidMerkleProof(
+                "ZK proof (ProofEnvelope) is mandatory for storage challenge verification".into(),
+            )),
+            // No `storage_root` on the deal means there is nothing to verify
+            // against. `open_deal` requires one, so this is unreachable for
+            // deals opened through the supported path; it is not treated as a
+            // slashable wrong answer, because absence of a commitment is the
+            // registry's gap, not the operator's fault.
+            (None, _) => Ok(()),
+        };
 
-        let result = ChallengeResult {
-            challenge_id,
-            deal_id: deal.deal_id,
-            outcome: ChallengeOutcome::Answered,
-            finalized_epoch: response_epoch,
-            slashed_bond: 0,
+        let deal_id = deal.deal_id;
+        let result = match verification {
+            Ok(()) => ChallengeResult {
+                challenge_id,
+                deal_id,
+                outcome: ChallengeOutcome::Answered,
+                finalized_epoch: response_epoch,
+                slashed_bond: 0,
+            },
+            Err(reason) => {
+                tracing::warn!(
+                    challenge_id,
+                    deal_id,
+                    operator = %responder,
+                    %reason,
+                    "storage challenge answered with a proof that does not verify; \
+                     slashing the operator bond"
+                );
+                let deal = self
+                    .deals
+                    .get_mut(&deal_id)
+                    .ok_or(StorageError::UnknownDeal(deal_id))?;
+                let slashed_bond = deal.economics.operator_bond;
+                deal.status = DealStatus::Slashed;
+                ChallengeResult {
+                    challenge_id,
+                    deal_id,
+                    outcome: ChallengeOutcome::Mismatched,
+                    finalized_epoch: response_epoch,
+                    slashed_bond,
+                }
+            }
         };
         self.results.insert(challenge_id, result.clone());
         Ok(result)
@@ -1879,6 +1925,159 @@ mod tests {
         assert!(matches!(err, StorageError::DeadlineElapsed { .. }));
     }
 
+    /// A wrong answer used to be cheaper than no answer at all.
+    ///
+    /// When the proof failed to verify, `answer_challenge` returned `Err`.
+    /// Nothing landed in `results`, no bond moved, the deal stayed `Active`,
+    /// and the operator could try again. Only silence reached
+    /// `finalize_missed_challenge` and got slashed — so an operator that had
+    /// discarded the data was better off answering wrongly, forever, than
+    /// staying quiet once.
+    ///
+    /// `Mismatched` was declared for this case and produced nowhere in the
+    /// tree. These tests hold it on the same economic terms as `Missed`.
+    #[test]
+    fn an_unverifiable_proof_slashes_the_operator_instead_of_erroring() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        // Deserializes as a ProofEnvelope but does not verify against the
+        // deal's storage_root.
+        let res = reg
+            .answer_challenge(
+                cid,
+                ContentId([1u8; 32]),
+                operator(),
+                115,
+                Some(&valid_merkle_proof()),
+            )
+            .expect("a wrong answer must resolve the challenge, not error out");
+        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(
+            res.slashed_bond,
+            good_econ().operator_bond,
+            "a mismatched answer slashes the full operator bond, as Missed does"
+        );
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+    }
+
+    #[test]
+    fn a_mismatched_answer_resolves_the_challenge_so_it_cannot_be_retried() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        reg.answer_challenge(
+            cid,
+            ContentId([1u8; 32]),
+            operator(),
+            115,
+            Some(&valid_merkle_proof()),
+        )
+        .expect("first wrong answer resolves");
+
+        // The retry loop is the whole point: before the fix the operator
+        // could keep guessing because nothing was recorded.
+        let err = reg
+            .answer_challenge(
+                cid,
+                ContentId([2u8; 32]),
+                operator(),
+                116,
+                Some(b"test-mock-proof"),
+            )
+            .expect_err("a resolved challenge must not accept a second answer");
+        assert!(matches!(err, StorageError::ChallengeAlreadyResolved(_)));
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+    }
+
+    #[test]
+    fn a_missing_proof_still_slashes_rather_than_leaving_the_challenge_open() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        // Answering in time but with no proof at all is a wrong answer, not a
+        // malformed request: the deal carries a storage_root, so a proof was
+        // owed.
+        let res = reg
+            .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
+            .expect("an answer with no proof resolves as mismatched");
+        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(res.slashed_bond, good_econ().operator_bond);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+    }
+
+    #[test]
+    fn addressing_errors_are_still_errors_not_slashes() {
+        // Only claims about stored bytes are slashable. Getting the deal, the
+        // deadline or the identity wrong says nothing about whether the
+        // operator kept the data, so those must not burn a bond.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+
+        assert!(matches!(
+            reg.answer_challenge(cid, ContentId([1u8; 32]), opener(), 115, None),
+            Err(StorageError::NotTheOperator { .. })
+        ));
+        assert!(matches!(
+            reg.answer_challenge(cid, ContentId([1u8; 32]), operator(), 200, None),
+            Err(StorageError::DeadlineElapsed { .. })
+        ));
+        assert!(matches!(
+            reg.answer_challenge(cid, ContentId([0u8; 32]), operator(), 115, None),
+            Err(StorageError::InvalidMerkleProof(_))
+        ));
+        assert!(matches!(
+            reg.answer_challenge(9_999, ContentId([1u8; 32]), operator(), 115, None),
+            Err(StorageError::UnknownChallenge(_))
+        ));
+
+        assert_eq!(
+            deal_status(&reg, deal_id),
+            DealStatus::Active,
+            "no addressing error may slash the deal"
+        );
+        assert!(
+            reg.get_result(cid).is_none(),
+            "an addressing error must leave the challenge open for a real answer"
+        );
+    }
+
+    #[test]
+    fn a_correct_answer_is_still_accepted_after_the_mismatch_path_exists() {
+        // The slash path is only meaningful if the honest path still works.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        let res = reg
+            .answer_challenge(
+                cid,
+                ContentId([1u8; 32]),
+                operator(),
+                115,
+                Some(b"test-mock-proof"),
+            )
+            .expect("an honest answer must pass");
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+    }
+
     #[test]
     fn challenge_answer_by_non_operator_rejected() {
         let m = good_manifest();
@@ -2382,14 +2581,19 @@ mod tests {
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
 
-        // Omitting proof_bytes on a production deal (storage_root present) must fail
-        let err = reg
+        // Omitting proof_bytes on a production deal (storage_root present)
+        // must not pass. It used to surface as `Err(InvalidMerkleProof)`,
+        // which left the challenge unresolved and the operator free to retry;
+        // it is now a `Mismatched` answer that slashes, on the same terms as
+        // a missed deadline. The property under test is unchanged — a
+        // production deal cannot be answered without a proof — but the
+        // consequence is no longer cheaper than staying silent.
+        let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
-            .unwrap_err();
-        assert!(
-            matches!(err, StorageError::InvalidMerkleProof(ref reason) if reason.contains("mandatory")),
-            "expected mandatory proof error, got {err:?}"
-        );
+            .expect("a proofless answer resolves the challenge rather than erroring");
+        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(res.slashed_bond, good_econ().operator_bond);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
     }
 
     #[test]
