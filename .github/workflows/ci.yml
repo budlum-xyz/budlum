@@ -631,7 +631,7 @@ jobs:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
     # Uzun koşular fuzz-nightly.yml (schedule, 4h/target, corpus cache) işler.
     # Quick: 60s/target (10 target × 60s ≈ 10dk + build; timeout-minutes 60).
-    name: Fuzz Quick (60s × 10 target) ()
+    name: Fuzz Quick (60s × 9 target) ()
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -650,7 +650,7 @@ jobs:
           shared-key: fuzz
       - name: Install cargo-fuzz
         run: cargo +nightly install --locked cargo-fuzz
-      - name: Her target 90 saniye fuzz
+      - name: Her target 60 saniye fuzz
         # Cargo-fuzz, fuzz/Cargo.toml'u MEVCUT crate köküne göre çözer;
         # Repo kökünden çalıştırılmalı (fuzz/ altından çağrı = fuzz/fuzz hatası).
         run: |
@@ -920,6 +920,12 @@ jobs:
         run: |
           bash ./scripts/check-zizmor.sh --self-test
           bash ./scripts/check-zizmor.sh
+      # Gate scripts that no workflow invokes prove nothing but still get
+      # counted as gates. Four had accumulated that way before this check.
+      - name: kapi kablolamasi + kanarya
+        run: |
+          bash ./scripts/check-gates-are-wired.sh --self-test
+          bash ./scripts/check-gates-are-wired.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail

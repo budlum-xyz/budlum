@@ -134,6 +134,38 @@ Sensitive paths include:
 
 ---
 
+## Automated Analysis: What Runs, and What Does Not
+
+Every gate below runs in CI on each pull request and carries a canary that
+plants a violation and fails if the gate accepts it. A gate that cannot fail
+is not evidence, so the canary is part of the gate rather than an extra.
+
+| Tool | Property | Status |
+| :--- | :--- | :--- |
+| `cargo clippy -D warnings` | lint-clean on lib and tests | gate |
+| clippy `pedantic` + `nursery` | ratchet, count may not increase | gate |
+| Miri | undefined behaviour in crypto and BudZero | gate |
+| `cargo fuzz` | 9 of 11 targets, 60s each per PR; the two EVM targets are nightly/manual | gate |
+| CodeQL, Semgrep | static analysis | gate |
+| `cargo audit`, `cargo deny`, OSV, Grype | advisories, licences, supply chain | gate |
+| `cargo geiger` | first-party `unsafe` must stay at zero, backing `#![forbid(unsafe_code)]` | gate |
+| `cargo machete`, `cargo shear` | unused dependencies | gate |
+| `cargo-semver-checks` | public API breakage | gate |
+| `taplo` | TOML formatting of supply-chain policy files | gate |
+| `cargo bloat` | binary size | report, not a gate — no calibrated threshold yet |
+
+**Kani is not integrated.** A `scripts/check-kani.sh` existed that printed a
+stub message and pointed at a `src/crypto/kani.rs` that is not in the tree; no
+workflow ran it, and there are no `#[kani::proof]` harnesses anywhere. It has
+been removed rather than left to imply coverage that does not exist.
+
+Model checking is worth doing here — the signature, bond-arithmetic and
+Merkle-path paths are the kind of bounded, self-contained logic Kani handles
+well, and other infrastructure projects run it in CI within a normal PR time
+budget. Treat this row as open work, not as a decision against the tool.
+
+---
+
 ## Coordinated Disclosure
 
 The expected disclosure flow:
