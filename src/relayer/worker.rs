@@ -117,7 +117,7 @@ impl RelayerWorker {
 
     /// Produce a result that is backed by an adapter observation, or an error.
     ///
-    /// Separated from [`Self::process_relay`] so the refusal behaviour is
+    /// Separated from the private relay loop so the refusal behaviour is
     /// directly testable without a running chain actor: the interesting
     /// property is that no input can make this return a `success: true`
     /// result the adapter did not verify.
