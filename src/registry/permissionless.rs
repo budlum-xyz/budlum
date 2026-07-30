@@ -619,8 +619,29 @@ impl PermissionlessRegistry {
                 });
                 Ok(Some(outcome))
             }
+            // Not registered is a legitimate no-op: evidence can name an
+            // account that never held the role, and there is nothing to cut.
             Err(RegistryError::NotRegistered { .. }) => Ok(None),
-            Err(_) => Ok(None),
+            // Everything else used to collapse into the same `Ok(None)`, so a
+            // slash that failed for any other reason was indistinguishable
+            // from one that correctly found nothing to do. Consensus called
+            // this and moved on believing the report had been handled.
+            //
+            // Still `Ok(None)` — a failed slash must not abort block
+            // application, or one bad report would halt the chain — but it is
+            // no longer silent. An operator seeing this line knows evidence
+            // was accepted and then dropped.
+            Err(reason) => {
+                tracing::warn!(
+                    offender = %report.offender,
+                    role = ?report.role,
+                    ?condition,
+                    %reason,
+                    "slashing report was actionable but the registry refused it; \
+                     no stake was cut"
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -1050,5 +1071,56 @@ mod tests {
         assert!(!reg.is_active(&relayer, roles::RELAYER));
         assert!(!reg.is_active_relayer(&relayer));
         assert!(reg.ensure_active_relayer(&relayer).is_err());
+    }
+
+    /// A slash that the registry refuses must not look like a slash that
+    /// correctly found nothing to do.
+    ///
+    /// `slash_from_report` used to map every `Err` to `Ok(None)`. Consensus
+    /// calls this and moves on, so a report that was accepted as actionable
+    /// and then dropped by the registry was indistinguishable from a report
+    /// naming an account that never held the role. All four call sites also
+    /// use `let _ =`, so neither layer would have noticed.
+    ///
+    /// It still returns `Ok(None)` — a failed slash must not abort block
+    /// application, or one bad report would halt the chain — but the refusal
+    /// is logged now. This test pins the two cases apart at the source level,
+    /// since a `tracing::warn!` is not observable from a unit test.
+    #[test]
+    fn a_refused_slash_is_logged_rather_than_silently_dropped() {
+        let src = include_str!("permissionless.rs");
+        let at = src
+            .find("pub fn slash_from_report(")
+            .expect("slash_from_report must still exist");
+        let body = &src[at..(at + 2400).min(src.len())];
+
+        assert!(
+            body.contains("tracing::warn!"),
+            "slash_from_report drops a refused slash without saying so"
+        );
+        assert!(
+            !body.contains("Err(_) => Ok(None)"),
+            "slash_from_report still collapses every error into a silent Ok(None)"
+        );
+        // The legitimate no-op must stay a quiet no-op: evidence naming an
+        // account that never held the role is normal, not an incident.
+        assert!(
+            body.contains("Err(RegistryError::NotRegistered { .. }) => Ok(None)"),
+            "an unregistered offender should remain a quiet no-op"
+        );
+    }
+
+    /// The scan above must be able to fail.
+    #[test]
+    fn the_silent_slash_scan_can_detect_a_violation() {
+        let planted = "match self.slash(a, b, c, d) {\n    Err(_) => Ok(None),\n}";
+        assert!(
+            planted.contains("Err(_) => Ok(None)"),
+            "the pattern the scan looks for must match the shape it forbids"
+        );
+        assert!(
+            !planted.contains("tracing::warn!"),
+            "the planted violation must lack the log the real code has"
+        );
     }
 }
