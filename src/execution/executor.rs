@@ -1017,7 +1017,7 @@ impl Executor {
                     BudlumError::validation("balance_overflow", "Marketplace sale credit overflow")
                 })?;
             }
-            TransactionType::HubRegisterApp {
+            TransactionType::BudlumxyzRegisterApp {
                 name,
                 category,
                 website_url,
@@ -1025,17 +1025,17 @@ impl Executor {
             } => {
                 // / M5: anti-sybil kayıt ücreti. BNS kolundaki
                 // H1 deseniyle simetrik: tam minimum ücret zorunlu + tam düşüm.
-                if tx.amount < crate::hub::HUB_REGISTER_MIN_FEE {
+                if tx.amount < crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE {
                     return Err(BudlumError::validation(
                         "hub_insufficient_fee",
                         format!(
                             "App registration requires {} fee, provided: {}",
-                            crate::hub::HUB_REGISTER_MIN_FEE,
+                            crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE,
                             tx.amount
                         ),
                     ));
                 }
-                state.hub.register_app(
+                state.budlumxyz.register_app(
                     name.clone(),
                     tx.from,
                     category.clone(),
@@ -1047,7 +1047,7 @@ impl Executor {
                 // Balance check before deduction
                 let hub_total = tx
                     .fee
-                    .checked_add(crate::hub::HUB_REGISTER_MIN_FEE)
+                    .checked_add(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE)
                     .ok_or_else(|| {
                         BudlumError::validation("cost_overflow", "hub total cost overflow")
                     })?;
@@ -1066,7 +1066,7 @@ impl Executor {
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "hub fee underflow")
                     })?
-                    .checked_sub(crate::hub::HUB_REGISTER_MIN_FEE)
+                    .checked_sub(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE)
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "hub register fee underflow")
                     })?;

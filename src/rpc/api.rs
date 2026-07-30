@@ -575,19 +575,19 @@ pub trait BudlumApi {
         payment_commitment: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // --- B.U.D. Hub ---
+    // --- B.U.D. budlumxyz ---
 
     /// List all registered dApps.
     #[method(name = "bud_hubGetApps")]
-    async fn hub_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Prepare a dApp registration transaction.
     #[method(name = "bud_hubPrepareRegister")]
-    async fn hub_prepare_register(
+    async fn budlumxyz_prepare_register(
         &self,
         developer: String,
         name: String,
-        category: crate::hub::types::AppCategory,
+        category: crate::budlumxyz::types::AppCategory,
         website_url: String,
         manifest_id: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;

@@ -78,7 +78,7 @@ pub mod private_transfer_fee_market;
 pub mod prover;
 #[cfg(test)]
 pub mod relayer_liveness;
-// L1 relayer proof kripto-doorulama + M5 hub fee + M4 BNS fee
+// L1 relayer proof kripto-doorulama + M5 budlumxyz fee + M4 BNS fee
 // Regresyon kapilari (kullanici karari Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;

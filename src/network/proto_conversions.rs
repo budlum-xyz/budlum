@@ -133,7 +133,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
-            TransactionType::HubRegisterApp {
+            TransactionType::BudlumxyzRegisterApp {
                 name,
                 category,
                 website_url,
@@ -499,47 +499,47 @@ fn convert_proto_to_ext_tx(
 }
 
 fn convert_app_category_to_proto(
-    cat: &crate::hub::types::AppCategory,
+    cat: &crate::budlumxyz::types::AppCategory,
 ) -> pb::proto_hub_register_app::AppCategoryProto {
     match cat {
-        crate::hub::types::AppCategory::SocialFi => {
+        crate::budlumxyz::types::AppCategory::SocialFi => {
             pb::proto_hub_register_app::AppCategoryProto::SocialFi
         }
-        crate::hub::types::AppCategory::DeFi => pb::proto_hub_register_app::AppCategoryProto::DeFi,
-        crate::hub::types::AppCategory::Storage => {
+        crate::budlumxyz::types::AppCategory::DeFi => pb::proto_hub_register_app::AppCategoryProto::DeFi,
+        crate::budlumxyz::types::AppCategory::Storage => {
             pb::proto_hub_register_app::AppCategoryProto::Storage
         }
-        crate::hub::types::AppCategory::Gaming => {
+        crate::budlumxyz::types::AppCategory::Gaming => {
             pb::proto_hub_register_app::AppCategoryProto::Gaming
         }
-        crate::hub::types::AppCategory::Infrastructure => {
+        crate::budlumxyz::types::AppCategory::Infrastructure => {
             pb::proto_hub_register_app::AppCategoryProto::Infrastructure
         }
-        crate::hub::types::AppCategory::Other => {
+        crate::budlumxyz::types::AppCategory::Other => {
             pb::proto_hub_register_app::AppCategoryProto::Other
         }
     }
 }
 
-fn convert_proto_to_app_category(cat_i32: i32) -> Result<crate::hub::types::AppCategory, String> {
+fn convert_proto_to_app_category(cat_i32: i32) -> Result<crate::budlumxyz::types::AppCategory, String> {
     match pb::proto_hub_register_app::AppCategoryProto::try_from(cat_i32) {
         Ok(pb::proto_hub_register_app::AppCategoryProto::SocialFi) => {
-            Ok(crate::hub::types::AppCategory::SocialFi)
+            Ok(crate::budlumxyz::types::AppCategory::SocialFi)
         }
         Ok(pb::proto_hub_register_app::AppCategoryProto::DeFi) => {
-            Ok(crate::hub::types::AppCategory::DeFi)
+            Ok(crate::budlumxyz::types::AppCategory::DeFi)
         }
         Ok(pb::proto_hub_register_app::AppCategoryProto::Storage) => {
-            Ok(crate::hub::types::AppCategory::Storage)
+            Ok(crate::budlumxyz::types::AppCategory::Storage)
         }
         Ok(pb::proto_hub_register_app::AppCategoryProto::Gaming) => {
-            Ok(crate::hub::types::AppCategory::Gaming)
+            Ok(crate::budlumxyz::types::AppCategory::Gaming)
         }
         Ok(pb::proto_hub_register_app::AppCategoryProto::Infrastructure) => {
-            Ok(crate::hub::types::AppCategory::Infrastructure)
+            Ok(crate::budlumxyz::types::AppCategory::Infrastructure)
         }
         Ok(pb::proto_hub_register_app::AppCategoryProto::Other) => {
-            Ok(crate::hub::types::AppCategory::Other)
+            Ok(crate::budlumxyz::types::AppCategory::Other)
         }
         Err(_) => Err("Invalid AppCategoryProto value".into()),
     }
@@ -878,19 +878,19 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             pb::ProtoTransactionType::HubRegisterApp => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::HubRegisterApp(p)) => p,
-                    _ => return Err("Missing or mismatched HubRegisterApp payload".into()),
+                    _ => return Err("Missing or mismatched BudlumxyzRegisterApp payload".into()),
                 };
                 let manifest_id = if payload.manifest_id.is_empty() {
                     None
                 } else {
                     if payload.manifest_id.len() != 32 {
-                        return Err("HubRegisterApp manifest_id must be 32 bytes".into());
+                        return Err("BudlumxyzRegisterApp manifest_id must be 32 bytes".into());
                     }
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&payload.manifest_id);
                     Some(crate::storage::content_id::ContentId(arr))
                 };
-                TransactionType::HubRegisterApp {
+                TransactionType::BudlumxyzRegisterApp {
                     name: payload.name,
                     category: convert_proto_to_app_category(payload.category)?,
                     website_url: payload.website_url,
@@ -1978,9 +1978,9 @@ mod tests {
                 price: 500,
             },
             TransactionType::AiPurchaseData { offer_id: 888 },
-            TransactionType::HubRegisterApp {
+            TransactionType::BudlumxyzRegisterApp {
                 name: "BudApp".into(),
-                category: crate::hub::types::AppCategory::DeFi,
+                category: crate::budlumxyz::types::AppCategory::DeFi,
                 website_url: "https://budlum.ai".into(),
                 manifest_id: Some(crate::storage::content_id::ContentId([8u8; 32])),
             },

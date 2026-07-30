@@ -16,7 +16,7 @@ burada yaşar.
 - ⚠️ **Boost ekonomisi.** NftBoost: `%4 B.U.D. share` operatör havuzuna
   (`distribute_bud_boost_share`, F4 fix). `NftBurn` → storage pruning hook
   (`NodeCommand::StoragePrune`).
-- ⚠️ **Mainnet v1 kapsam dışı** (M10 borcu — SocialFi/Hub/Marketplace post-launch).
+- ⚠️ **Mainnet v1 kapsam dışı** (M10 borcu — SocialFi/budlumxyz/Marketplace post-launch).
   Mainnet'te nft_registry boş kalır, governance activation sonrası.
 - ⚠️ **NftBoost integer overflow** (SECURITY_AUDIT_HACKER H3) — `saturating_mul`
   ile kapatıldı.

@@ -15,7 +15,7 @@ pub mod domain;
 pub mod error;
 pub mod execution;
 pub mod gateway;
-pub mod hub;
+pub mod budlumxyz;
 pub mod lubot;
 pub mod mempool;
 pub mod network;

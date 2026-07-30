@@ -484,7 +484,7 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub invalid_votes: Option<crate::registry::InvalidVoteTracker>,
 
-    // --- BNS/NFT/Hub/Marketplace persistence
+    // --- BNS/NFT/budlumxyz/Marketplace persistence
     // BNS registry was previously NOT round-tripped, so names were lost on restart from snapshot.
     // Now persisted with #[serde(default)] for backwards compatibility (old snapshots -> empty).
     #[serde(default)]
@@ -493,8 +493,8 @@ pub struct StateSnapshotV2 {
     pub nft_registry: Option<crate::socialfi::NftRegistry>,
     #[serde(default)]
     pub marketplace: Option<crate::pollen::MarketplaceRegistry>,
-    #[serde(default)]
-    pub hub: Option<crate::hub::HubRegistry>,
+    #[serde(default, rename = "hub")]
+    pub budlumxyz: Option<crate::budlumxyz::BudlumxyzRegistry>,
     #[serde(default)]
     pub governance: Option<crate::core::governance::GovernanceState>,
     #[serde(default)]
@@ -661,7 +661,7 @@ impl StateSnapshotV2 {
             bns_registry: Some(account_state.bns_registry.clone()),
             nft_registry: Some(account_state.nft_registry.clone()),
             marketplace: Some(account_state.marketplace.clone()),
-            hub: Some(account_state.hub.clone()),
+            budlumxyz: Some(account_state.budlumxyz.clone()),
             governance: Some(account_state.governance.clone()),
             storage_registry: Some(account_state.storage_registry.clone()),
             ai_registry: Some(account_state.ai_registry.clone()),
@@ -769,7 +769,7 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.bns_registry);
             hash_opt_serializable(&mut hasher, &self.nft_registry);
             hash_opt_serializable(&mut hasher, &self.marketplace);
-            hash_opt_serializable(&mut hasher, &self.hub);
+            hash_opt_serializable(&mut hasher, &self.budlumxyz);
             hash_opt_serializable(&mut hasher, &self.governance);
             hash_opt_serializable(&mut hasher, &self.storage_registry);
             hash_opt_serializable(&mut hasher, &self.ai_registry);

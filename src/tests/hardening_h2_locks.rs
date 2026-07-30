@@ -7,8 +7,8 @@ mod tests {
     use crate::core::address::Address;
 
     use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
-    use crate::hub::types::AppCategory;
-    use crate::hub::HubRegistry;
+    use crate::budlumxyz::types::AppCategory;
+    use crate::budlumxyz::BudlumxyzRegistry;
     use crate::network::peer_manager::PeerManager;
 
     fn addr(b: u8) -> Address {
@@ -46,7 +46,7 @@ mod tests {
     /// REGRESSION: developer self-verify does not set DAO verified badge.
     #[test]
     fn developer_self_verify_is_not_dao_verified() {
-        let mut hub = HubRegistry::new();
+        let mut hub = BudlumxyzRegistry::new();
         let dev = addr(0x42);
         let id = hub.register_app(
             "demo".into(),
