@@ -1263,8 +1263,7 @@ mod tests {
         }
 
         assert_eq!(
-            1_000_000u64,
-            FIXED_POINT_SCALE,
+            1_000_000u64, FIXED_POINT_SCALE,
             "the mirror hardcodes 1_000_000; FIXED_POINT_SCALE moved"
         );
 
