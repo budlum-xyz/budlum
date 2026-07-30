@@ -49,7 +49,7 @@ const _: () = {
 /// `matches!(.., ParameterUpdate(..))`, so every variant added after it
 /// silently inherited a zero delay.
 #[must_use]
-pub fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
+pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
     match p_type {
         // Tunable numbers and parameter strings.
         ProposalType::ChangeBaseFee(_)

@@ -124,6 +124,13 @@ pub struct FeeDistribution {
 ///
 /// `gas_used` is the actual gas consumed by the transaction.
 /// `treasury_rate_ppm` is the treasury cut in parts-per-million (0 = no treasury).
+///
+/// # Errors
+///
+/// Returns [`FeeError::MaxFeeBelowBaseFee`] when the bid cannot cover the
+/// block's base fee, and [`FeeError::TreasuryRateAbovePpmDenominator`] when the
+/// treasury cut exceeds 100% — a rate that would silently pay the proposer
+/// nothing rather than overflowing.
 pub fn distribute_fee(
     bid: FeeBid,
     block_base_fee: u64,
@@ -166,7 +173,7 @@ pub fn distribute_fee(
 /// Parts-per-million denominator. A rate equal to this is 100%.
 pub const PPM_DENOMINATOR: u64 = 1_000_000;
 
-/// Default treasury rate: 1% (10_000 ppm).
+/// Default treasury rate: 1%, i.e. `10_000` ppm.
 pub const DEFAULT_TREASURY_RATE_PPM: u64 = 10_000;
 
 #[cfg(test)]
