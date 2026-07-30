@@ -262,12 +262,12 @@ impl GenesisConfig {
                             pq_public_key: Vec::new(),
                         });
                     }
-                    domain.validator_set_hash = crate::domain::normalize_hash32(
+                    domain.validator_set_hash = crate::domain::validator_set_commitment(
                         b"bootstrap_validator_set_hash",
                         cfg.id,
                         &crate::domain::RootScheme::Sha3_256,
                         ValidatorSetSnapshot::compute_hash(&entries).as_bytes(),
-                    )?;
+                    );
                 }
 
                 Ok(domain)
