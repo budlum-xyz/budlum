@@ -319,6 +319,41 @@ pub struct Node {
 }
 
 impl Node {
+    /// Take the `PeerManager` lock, recovering if it was poisoned.
+    ///
+    /// A `Mutex` poisons when a thread panics while holding it, and every
+    /// later `lock()` then returns `Err`. Fourteen call sites in this file
+    /// answered that by logging and calling `std::process::exit(1)` — one
+    /// panic anywhere in peer scoring would take the whole node off the
+    /// chain, which is a far worse outcome than the bookkeeping it was
+    /// protecting.
+    ///
+    /// Three other sites in the same file already did the opposite: log and
+    /// carry on. `gossip_dedup` next door matches on `Ok`/`Err`. Same source,
+    /// same failure, three different answers. This is the one they now share.
+    ///
+    /// Recovering with `into_inner()` is safe here for the same reason it is
+    /// in `consensus/pow.rs`: `PeerManager` holds counters, ban timers and
+    /// rate-limit buckets. A panic mid-update can leave one peer's score
+    /// stale, and a stale score is a bounded, self-correcting error — the
+    /// next report overwrites it. Losing the node is not self-correcting.
+    ///
+    /// Reachability, measured: `peer_manager.rs` has no panic source in
+    /// production code today (`unix_now_secs` uses `unwrap_or(0)`, and the
+    /// `duration_since` calls are on `Instant`, which cannot fail). So this
+    /// was latent rather than live — but it turned every future panic added
+    /// to `PeerManager` into a node-killer, which is not a property worth
+    /// keeping.
+    fn peer_manager_lock(&self) -> std::sync::MutexGuard<'_, PeerManager> {
+        self.peer_manager.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                "PeerManager lock was poisoned by an earlier panic; \
+                 continuing with the recovered state"
+            );
+            poisoned.into_inner()
+        })
+    }
+
     pub fn new(chain: ChainHandle) -> Result<Self, Box<dyn Error>> {
         let local_key = identity::Keypair::generate_ed25519();
         Self::with_key(chain, local_key, true, None, None)
@@ -740,7 +775,7 @@ impl Node {
                         info!("Cleaned up {removed} expired transactions from mempool");
                     }
 
-                    let mut pm = self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); });
+                    let mut pm = self.peer_manager_lock();
                     pm.cleanup_expired_bans();
 
                     // Auto-reset orphaned sync_state.
@@ -1250,14 +1285,24 @@ impl Node {
                                 continue;
                             }
 
-                            let duplicate_action = match self.gossip_dedup.lock() {
-                                Ok(mut dedup) => match dedup.check_and_record(&message.data, &peer_id) {
+                            // Same reasoning as `peer_manager_lock`: a poisoned
+                            // dedup window is a stale duplicate-detection
+                            // window, which the next message corrects. Exiting
+                            // here would let one panic anywhere in dedup
+                            // bookkeeping remove the node from the network.
+                            let duplicate_action = {
+                                let mut dedup = self.gossip_dedup.lock().unwrap_or_else(|poisoned| {
+                                    tracing::error!(
+                                        "GossipDedup lock was poisoned by an earlier panic; \
+                                         continuing with the recovered state"
+                                    );
+                                    poisoned.into_inner()
+                                });
+                                match dedup.check_and_record(&message.data, &peer_id) {
                                     DedupResult::New => None,
-                                    DedupResult::Duplicate => Some(dedup.peer_should_be_banned(&peer_id)),
-                                },
-                                Err(e) => {
-                                    tracing::error!("GossipDedup lock poisoned: {e}");
-                                    std::process::exit(1);
+                                    DedupResult::Duplicate => {
+                                        Some(dedup.peer_should_be_banned(&peer_id))
+                                    }
                                 }
                             };
                             if let Some(should_ban) = duplicate_action {
@@ -1310,7 +1355,7 @@ impl Node {
                                         }
                                         if let Err(e) = NetworkMessage::validate_block_size(&block) {
                                             warn!("Received oversized block from {}: {:?}", peer_id, e);
-                                            self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).report_oversized_message(&peer_id);
+                                            self.peer_manager_lock().report_oversized_message(&peer_id);
                                             continue;
                                         }
                                         info!("BLOCK: #{} Hash: {}...", block.index, &block.hash[..8.min(block.hash.len())]);
@@ -1635,7 +1680,7 @@ impl Node {
                                     NetworkMessage::BlocksByHeight(blocks) => {
                                         if blocks.len() > crate::network::protocol::MAX_SNAP_BATCH as usize {
                                             warn!("Too many snap-sync blocks from {peer_id}");
-                                            self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).report_invalid_block(&peer_id);
+                                            self.peer_manager_lock().report_invalid_block(&peer_id);
                                             continue;
                                         }
                                         info!("Snap-sync: {} blocks from {}", blocks.len(), peer_id);
@@ -1653,7 +1698,7 @@ impl Node {
                                                 }
                                             }
                                         }
-                                        self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).report_good_behavior(&peer_id);
+                                        self.peer_manager_lock().report_good_behavior(&peer_id);
                                     }
 
                                     NetworkMessage::Handshake { version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes } => {
@@ -1671,12 +1716,12 @@ impl Node {
                                         let my_chain_id = self.chain.get_chain_id().await;
                                         if chain_id != my_chain_id {
                                             warn!("Peer {peer_id} has wrong chain_id {chain_id} (expected {my_chain_id}). Banning.");
-                                            self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).ban_peer(&peer_id);
+                                            self.peer_manager_lock().ban_peer(&peer_id);
                                             continue;
                                         }
                                         if !crate::core::encoding::is_compatible_version(version_major, version_minor) {
                                             warn!("Peer {peer_id} has incompatible protocol v{version_major}.{version_minor}. Banning.");
-                                            self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).ban_peer(&peer_id);
+                                            self.peer_manager_lock().ban_peer(&peer_id);
                                             continue;
                                         }
                                         if !supports_required_bls_scheme(&supported_schemes) {
@@ -1685,18 +1730,13 @@ impl Node {
                                                 peer_id,
                                                 crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                             );
-                                            self.peer_manager
-                                                .lock()
-                                                .unwrap_or_else(|e| {
-                                                    tracing::error!("PeerManager lock poisoned: {e}");
-                                                    std::process::exit(1);
-                                                })
+                                            self.peer_manager_lock()
                                                 .ban_peer(&peer_id);
                                             continue;
                                         }
                                         info!("Handshake from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
                                             peer_id, version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes);
-                                        self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).set_handshaked(&peer_id, true);
+                                        self.peer_manager_lock().set_handshaked(&peer_id, true);
                                         let our_height = self.chain.get_height().await;
                                         if best_height > our_height {
                                             let locator = self.chain.get_locator().await;
@@ -1749,12 +1789,12 @@ impl Node {
                                         let my_chain_id = self.chain.get_chain_id().await;
                                         if chain_id != my_chain_id {
                                             warn!("Peer {peer_id} Ack with wrong chain_id {chain_id} (expected {my_chain_id}). Banning.");
-                                            self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).ban_peer(&peer_id);
+                                            self.peer_manager_lock().ban_peer(&peer_id);
                                             continue;
                                         }
                                         if !crate::core::encoding::is_compatible_version(version_major, version_minor) {
                                             warn!("Peer {peer_id} Ack has incompatible protocol v{version_major}.{version_minor}. Banning.");
-                                            self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).ban_peer(&peer_id);
+                                            self.peer_manager_lock().ban_peer(&peer_id);
                                             continue;
                                         }
                                         if !supports_required_bls_scheme(&supported_schemes) {
@@ -1763,19 +1803,14 @@ impl Node {
                                                 peer_id,
                                                 crate::chain::finality::BLS_SCHEME_RFC9380_V1
                                             );
-                                            self.peer_manager
-                                                .lock()
-                                                .unwrap_or_else(|e| {
-                                                    tracing::error!("PeerManager lock poisoned: {e}");
-                                                    std::process::exit(1);
-                                                })
+                                            self.peer_manager_lock()
                                                 .ban_peer(&peer_id);
                                             continue;
                                         }
                                         info!("HandshakeAck from {}: v{}.{}, chain={}, height={}, val_set={}, schemes={:?}",
                                             peer_id, version_major, version_minor, chain_id, best_height, validator_set_hash, supported_schemes);
                                         {
-                                            let mut pm = self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); });
+                                            let mut pm = self.peer_manager_lock();
                                             pm.set_handshaked(&peer_id, true);
                                             pm.report_good_behavior(&peer_id);
                                         }
@@ -2129,7 +2164,7 @@ impl Node {
                                 Err(e) => {
                                     warn!("Computed invalid message from {}: {:?}", peer_id, e);
 
-                                    self.peer_manager.lock().unwrap_or_else(|e| { tracing::error!("PeerManager lock poisoned: {e}"); std::process::exit(1); }).report_oversized_message(&peer_id);
+                                    self.peer_manager_lock().report_oversized_message(&peer_id);
                                 }
                             }
                         }
