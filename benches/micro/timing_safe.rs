@@ -246,9 +246,7 @@ fn main() -> ExitCode {
     let ct_delta = (mean(&ct_a) - mean(&ct_b)).abs();
     let control_delta = (mean(&ctl_a) - mean(&ctl_b)).abs();
     if control_delta <= 0.0 {
-        eprintln!(
-            "FAIL(harness): kontrol sıfır fark ölçtü; etki büyüklüğü oranı kurulamaz."
-        );
+        eprintln!("FAIL(harness): kontrol sıfır fark ölçtü; etki büyüklüğü oranı kurulamaz.");
         return ExitCode::from(2);
     }
     let effect_ratio = ct_delta / control_delta;
