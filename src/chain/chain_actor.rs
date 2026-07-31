@@ -124,8 +124,8 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Result<(), String>>,
     ),
-    /// Begin unbonding an independently-debited role bond (RELAYER, PROVER,
-    /// STORAGE_OPERATOR). Returns the release epoch.
+    /// Begin unbonding an independently-debited role bond (`RELAYER`,
+    /// `PROVER`, `STORAGE_OPERATOR`). Returns the release epoch.
     BeginRoleBondUnbonding(
         crate::core::address::Address,
         crate::registry::RoleId,

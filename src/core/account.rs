@@ -726,7 +726,7 @@ impl AccountState {
     /// VALIDATOR is excluded: its bond lives in `self.validators` and unwinds
     /// Through `Unstake` -> `unbonding_queue` -> `process_unbonding`, and
     /// Crediting it here as well would pay the same stake out twice.
-    /// LUBOT_OPERATOR is excluded because it has its own pair
+    /// `LUBOT_OPERATOR` is excluded because it has its own pair
     /// (`begin_lubot_operator_unbonding` / `withdraw_lubot_operator`) that also
     /// Checks open inference obligations and charges the transaction fee.
     fn ensure_withdrawable_role(role: crate::registry::role::RoleId) -> Result<(), String> {

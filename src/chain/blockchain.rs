@@ -5246,6 +5246,12 @@ impl Blockchain {
     /// Losing it.
     ///
     /// Returns the number of deals expired and the total amount returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when crediting a bond back would overflow the
+    /// Operator's balance, or when the registry or economics state cannot be
+    /// Persisted after the sweep.
     pub fn finalize_expired_storage_deals(
         &mut self,
         current_epoch: u64,
