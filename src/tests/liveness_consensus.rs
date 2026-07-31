@@ -229,8 +229,11 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
 
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
     // Stake was actually cut by the configured liveness ratio (1%).
-    let expected_penalty = ((stake_before as u128 * FIXED_POINT_SCALE as u128 / 100)
-        / FIXED_POINT_SCALE as u128) as u64;
+    let expected_penalty = u64::try_from(
+        (u128::from(stake_before) * u128::from(FIXED_POINT_SCALE) / 100)
+            / u128::from(FIXED_POINT_SCALE),
+    )
+    .expect("a penalty is a fraction of a u64 stake");
     assert_eq!(
         reg.stake,
         stake_before - expected_penalty,
@@ -265,8 +268,10 @@ fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
         .unwrap()
         .stake;
     let rate = bc.state.registry.params().liveness_slash_ratio_fixed;
-    let expected_penalty =
-        ((stake_before as u128 * rate as u128) / FIXED_POINT_SCALE as u128) as u64;
+    let expected_penalty = u64::try_from(
+        (u128::from(stake_before) * u128::from(rate)) / u128::from(FIXED_POINT_SCALE),
+    )
+    .expect("a penalty is a fraction of a u64 stake");
 
     // One threshold crossing is enough (threshold = 1).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 2);
@@ -307,7 +312,7 @@ fn a_slashed_validator_stops_accruing_downtime() {
     });
 
     // One epoch of absence while still active: the streak starts.
-    let only_producer: HashSet<Address> = [producer].into_iter().collect();
+    let only_producer: HashSet<Address> = std::iter::once(producer).collect();
     bc.record_liveness_epoch(1, &only_producer);
     let after_first = bc.state.liveness.missed_count(&offender);
     assert_eq!(after_first, 1, "an active absentee accrues a miss");
@@ -362,7 +367,7 @@ fn every_liveness_path_expects_the_same_validators() {
         "test",
     );
 
-    let only_producer: HashSet<Address> = [producer].into_iter().collect();
+    let only_producer: HashSet<Address> = std::iter::once(producer).collect();
 
     let before = bc.state.liveness.missed_count(&offender);
     bc.maybe_observe_liveness_on_epoch_close(10, &only_producer);

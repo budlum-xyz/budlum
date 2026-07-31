@@ -89,7 +89,7 @@ fn test_bns_invalid_names() {
     let alice = addr(1);
 
     // Empty name
-    assert!(reg.register("".to_string(), alice, 0, 100).is_err());
+    assert!(reg.register(String::new(), alice, 0, 100).is_err());
 
     // Name too long
     let long_name = "a".repeat(256);
