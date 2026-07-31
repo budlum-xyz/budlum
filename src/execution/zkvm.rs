@@ -442,6 +442,83 @@ mod tests {
         );
     }
 
+    /// VerifyInference must answer "not verified" for every input.
+    ///
+    /// The opcode used to accept any non-zero commitment as proof of an AI
+    /// Inference — no cryptography, just a non-zero check. It was reduced to a
+    /// No-op that always writes 0 until a real STARK verification AIR exists.
+    ///
+    /// The mainnet gate is tested, and executing the opcode is tested, but
+    /// Nothing asserted the *result*. That is the assertion carrying the
+    /// Security property: a gate can be lifted by configuration, whereas "the
+    /// Answer is always 0" is what makes lifting it safe. If someone
+    /// Reintroduces the non-zero-commitment shortcut, the existing tests still
+    /// Pass — the opcode runs, the gate still gates — and only this one fails.
+    ///
+    /// Runs the operands that the old shortcut would have accepted: two
+    /// Non-zero commitments and a non-zero proof type.
+    #[test]
+    fn verify_inference_never_reports_success() {
+        // `Load` with rs1 = 0 writes `imm` straight into the register, and
+        // `imm` is an i32, so these stay inside what the encoding can carry.
+        // The interesting axis is not magnitude — it is that a *non-zero*
+        // commitment pair is exactly what the old shortcut accepted.
+        for (model, input, proof_type) in [
+            (0xABi32, 0xCDi32, 0i32),
+            (i32::MAX, i32::MAX, 1),
+            (1, 1, 0),
+            (0, 0, 0),
+        ] {
+            let program = vec![
+                Instruction {
+                    opcode: Opcode::Load,
+                    rd: 1,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: model,
+                },
+                Instruction {
+                    opcode: Opcode::Load,
+                    rd: 2,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: input,
+                },
+                // rd = 4 so the result lands somewhere readable; rd = 0 is
+                // discarded by the opcode's own `dst_idx > 0` guard.
+                Instruction {
+                    opcode: Opcode::VerifyInference,
+                    rd: 4,
+                    rs1: 1,
+                    rs2: 2,
+                    imm: proof_type,
+                },
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                },
+            ];
+            let bytecode: Vec<u8> = program
+                .into_iter()
+                .flat_map(|instruction| instruction.encode().to_le_bytes())
+                .collect();
+            let program_words = decode_program(&bytecode).expect("program decodes");
+
+            let mut vm = bud_vm::Vm::with_mainnet_mode(8192, DEFAULT_CONTRACT_GAS_LIMIT, false);
+            let receipt = vm.run_receipt(&program_words);
+            assert!(receipt.success, "the opcode must still execute");
+            assert_eq!(
+                vm.registers[4], 0,
+                "VerifyInference reported success for model={model:#x} \
+                 input={input:#x} proof_type={proof_type} — there is no \
+                 verification AIR behind it, so the only sound answer is 0"
+            );
+        }
+    }
+
     /// VerifyInference is mainnet-gated — without
     /// MainnetActivation, it must be rejected in mainnet mode.
     #[test]
