@@ -4662,7 +4662,27 @@ impl Blockchain {
     /// Canonical accounting path used by ChainActor maintenance ticks.
     /// It credits the operator account and records an event, while avoiding
     /// Double-accrual with `storage_last_reward_epoch`.
-    pub fn accrue_storage_operator_rewards(&mut self, current_epoch: u64) -> (u32, u64) {
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage-layer error when the economics state cannot be
+    /// Persisted, matching `apply_storage_bond_slash` and
+    /// `finalize_missed_storage_challenges`. This used to be
+    /// `let _ = self.persist_storage_economics_state();` — the one accounting
+    /// Path of the four that dropped the failure.
+    ///
+    /// It is the path where dropping it costs the most.
+    /// `storage_last_reward_epoch` is the only thing standing between an
+    /// Operator and being paid twice for the same epoch: the balance credit
+    /// Happens in memory and is committed with the block, but the cursor that
+    /// Says "already paid through epoch N" lives in the economics snapshot. If
+    /// That write fails and the node restarts, the cursor reloads at its old
+    /// Value and every epoch since is paid again, out of an escrow that was
+    /// Only ever funded once.
+    pub fn accrue_storage_operator_rewards(
+        &mut self,
+        current_epoch: u64,
+    ) -> Result<(u32, u64), String> {
         let deals: Vec<(u64, Address, u64, u64, u64)> = self
             .state
             .storage_registry
@@ -4725,9 +4745,9 @@ impl Blockchain {
             total = total.saturating_add(amount);
         }
         if rewarded > 0 {
-            let _ = self.persist_storage_economics_state();
+            self.persist_storage_economics_state()?;
         }
-        (rewarded, total)
+        Ok((rewarded, total))
     }
 
     pub fn storage_economics_events(&self) -> &[StorageEconomicsEvent] {

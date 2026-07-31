@@ -18,7 +18,7 @@ mod tests {
 
         // 1. block_height -> epoch check
         // Calling accrue at current_epoch=1 (which would be block 100)
-        let (rewarded, _) = blockchain.accrue_storage_operator_rewards(1);
+        let (rewarded, _) = blockchain.accrue_storage_operator_rewards(1).unwrap();
         assert_eq!(rewarded, 0, "No active deals yet");
 
         // 2. Add E2E validation placeholders for Payer, Escrow, Bond Release
@@ -79,7 +79,7 @@ mod tests {
             )
             .unwrap();
 
-        let (rewarded, total_reward) = blockchain.accrue_storage_operator_rewards(1);
+        let (rewarded, total_reward) = blockchain.accrue_storage_operator_rewards(1).unwrap();
         assert_eq!(rewarded, 1);
         assert_eq!(total_reward, 10);
 
@@ -119,6 +119,53 @@ mod tests {
             restarted.storage_economics_events().len(),
             expected_event_count
         );
+    }
+
+    /// All four storage accounting paths must surface a failed persist.
+    ///
+    /// `apply_storage_bond_slash`, `finalize_missed_storage_challenges` and
+    /// `finalize_expired_storage_deals` all end with
+    /// `self.persist_storage_economics_state()?`. `accrue_storage_operator_rewards`
+    /// Ended with `let _ = self.persist_storage_economics_state();` — the one
+    /// Path of the four that dropped the failure, and the one where dropping
+    /// It costs the most.
+    ///
+    /// `storage_last_reward_epoch` is the only thing between an operator and
+    /// Being paid twice for the same epoch. The balance credit commits with
+    /// The block; the "already paid through epoch N" cursor lives in the
+    /// Economics snapshot. A dropped write plus a restart reloads the old
+    /// Cursor and pays every epoch since a second time, out of an escrow
+    /// Funded once.
+    ///
+    /// Source-level because the failure needs an unwritable store, which the
+    /// In-memory test harness cannot produce. Canary: put the `let _ =` back
+    /// And this fails.
+    #[test]
+    fn every_storage_accounting_path_propagates_a_failed_persist() {
+        let src = include_str!("blockchain.rs");
+        let dropped = src
+            .matches("let _ = self.persist_storage_economics_state()")
+            .count();
+        assert_eq!(
+            dropped, 0,
+            "a storage accounting path is dropping its persist failure"
+        );
+
+        for name in [
+            "pub fn apply_storage_bond_slash",
+            "pub fn finalize_missed_storage_challenges",
+            "pub fn finalize_expired_storage_deals",
+            "pub fn accrue_storage_operator_rewards",
+        ] {
+            let at = src
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} must still exist"));
+            let body = &src[at..(at + 4000).min(src.len())];
+            assert!(
+                body.contains("self.persist_storage_economics_state()?"),
+                "{name} must propagate a failed persist, not drop it"
+            );
+        }
     }
 
     /// Shared setup: an operator with a funded balance and one active deal

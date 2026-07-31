@@ -2065,11 +2065,13 @@ impl ChainActor {
         }
         let current_epoch = block_height
             / crate::core::chain_config::epoch_len_for_chain_id(self.blockchain.chain_id);
-        let (rewarded, reward_total) = self
+        match self
             .blockchain
-            .accrue_storage_operator_rewards(current_epoch);
-        if rewarded > 0 {
-            tracing::info!("B.U.D. storage maintenance accrued rewards for {rewarded} deals at epoch {current_epoch} (amount={reward_total})");
+            .accrue_storage_operator_rewards(current_epoch)
+        {
+            Ok((rewarded, reward_total)) if rewarded > 0 => tracing::info!("B.U.D. storage maintenance accrued rewards for {rewarded} deals at epoch {current_epoch} (amount={reward_total})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. reward accrual failed at height {block_height}: {error}"),
         }
 
         match self.blockchain.issue_storage_challenges(current_epoch) {
