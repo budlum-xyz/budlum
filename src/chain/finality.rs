@@ -113,6 +113,21 @@ pub struct FinalityCert {
 }
 
 impl Prevote {
+    /// Bytes a validator signs to endorse a checkpoint.
+    ///
+    /// # Why there is no explicit `chain_id` here
+    ///
+    /// The obvious cross-chain replay question — could a prevote signed on
+    /// Testnet be replayed on mainnet? — is closed, but indirectly:
+    /// `checkpoint_hash` is a block hash, and `Block::calculate_hash_bytes`
+    /// Folds `chain_id` into the `BDLM_BLOCK_V3` preimage. Two networks cannot
+    /// Produce the same checkpoint hash at the same height, so the signature
+    /// Does not verify against any other chain's checkpoint.
+    ///
+    /// That is a derived guarantee, not a stated one: it holds because of what
+    /// `calculate_hash_bytes` happens to include, and would break silently if
+    /// `chain_id` ever left the block preimage. `prevote_and_precommit_bind_the_chain`
+    /// Asserts the dependency so the two cannot drift apart.
     pub fn signing_message(&self) -> Vec<u8> {
         let mut msg = Vec::new();
         msg.extend_from_slice(b"BUDLUM_PREVOTE");
@@ -1292,5 +1307,49 @@ mod tests {
         // Happy path (covered by `test_verify_pop`). The critical
         // Guarantee — that a non-decodable public key is rejected
         // By `verify_pop` — is what the test above pins.
+    }
+
+    /// A checkpoint signature must not verify on another network.
+    ///
+    /// `Prevote::signing_message` and `checkpoint_signing_message` commit to a
+    /// domain tag, the BLS scheme id, the epoch, the height and the checkpoint
+    /// hash — but not to `chain_id`. That is safe only because the checkpoint
+    /// hash *is* a block hash and `Block::calculate_hash_bytes` folds
+    /// `chain_id` into its preimage, so mainnet and testnet cannot agree on a
+    /// checkpoint hash at the same height.
+    ///
+    /// The whole cross-chain replay defence therefore rests on one line in
+    /// another module. Drop `chain_id` from the block preimage and every
+    /// checkpoint signature becomes portable between networks — with nothing
+    /// in `finality.rs` to notice, because the signing message never mentioned
+    /// it.
+    ///
+    /// This asserts the dependency directly: two blocks identical except for
+    /// `chain_id` must hash differently, and the resulting signing messages
+    /// must differ.
+    #[test]
+    fn prevote_and_precommit_bind_the_chain() {
+        use crate::core::block::Block;
+
+        let mut mainnet = Block::new_with_chain_id(10, "0".repeat(64), vec![], 45260);
+        mainnet.hash = mainnet.calculate_hash();
+        let mut testnet = mainnet.clone();
+        testnet.chain_id = 45261;
+        testnet.hash = testnet.calculate_hash();
+
+        assert_ne!(
+            mainnet.hash, testnet.hash,
+            "chain_id must be part of the block preimage; without it a \
+             checkpoint signature replays onto every other network, because \
+             the signing message does not carry chain_id itself"
+        );
+
+        let prevote_a = checkpoint_signing_message(3, 10, &mainnet.hash);
+        let prevote_b = checkpoint_signing_message(3, 10, &testnet.hash);
+        assert_ne!(
+            prevote_a, prevote_b,
+            "identical epoch and height on two networks must still produce \
+             different signing messages"
+        );
     }
 }
