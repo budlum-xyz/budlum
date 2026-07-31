@@ -309,6 +309,17 @@ pub struct Node {
     pub max_peers: usize,
     pub validator_address: Option<crate::core::address::Address>,
     pub last_precommit_height: u64,
+    /// Highest checkpoint height this node has already prevoted for.
+    ///
+    /// Lives next to `last_precommit_height` because it guards the same thing:
+    /// signing twice at one height. It used to be a local variable inside the
+    /// event loop, which meant it started at zero on every restart.
+    pub last_prevote_height: u64,
+    /// Where the vote high-water marks are persisted between runs.
+    ///
+    /// `None` disables persistence, which is what tests and ephemeral devnet
+    /// nodes want. A validator with a bonded stake should set it.
+    pub vote_history_db: Option<std::path::PathBuf>,
     pub identity_path: Option<std::path::PathBuf>,
     pub banned_peer_db: Option<std::path::PathBuf>,
     pub mdns_enabled: bool,
@@ -553,6 +564,8 @@ impl Node {
             max_peers: if mobile_mode { 10 } else { MAX_PEERS },
             validator_address: None,
             last_precommit_height: 0,
+            last_prevote_height: 0,
+            vote_history_db: None,
             identity_path: None,
             banned_peer_db: None,
             mdns_enabled,
@@ -649,6 +662,79 @@ impl Node {
         self.swarm.behaviour_mut().kad.bootstrap()?;
         Ok(())
     }
+    /// Restore the vote high-water marks written by a previous run.
+    ///
+    /// Both marks exist to stop this node signing twice at one checkpoint
+    /// height. Holding them only in memory means a restart forgets every vote
+    /// already cast, and the node is willing to sign that height again.
+    ///
+    /// On a chain that has not moved, re-signing is harmless: the hash is the
+    /// same, `detect_prevote_equivocation` compares hashes and sees no
+    /// conflict, and the aggregator refuses the duplicate. The dangerous case
+    /// is a restart across a reorg — the same height now carries a different
+    /// hash, and a second signature over it is exactly what equivocation
+    /// detection is looking for. The penalty is `double_sign_slash_ratio_fixed`,
+    /// 50% of the bond by default, for what is a crash and a restart rather
+    /// than any malice.
+    ///
+    /// A missing or unreadable file leaves the marks at zero, which is the
+    /// behaviour before this existed. Refusing to boot would convert a corrupt
+    /// file into downtime; the marks are a safety margin, not consensus state.
+    fn load_vote_history(&mut self) {
+        let Some(ref path) = self.vote_history_db else {
+            return;
+        };
+        #[derive(serde::Deserialize)]
+        struct VoteHistory {
+            #[serde(default)]
+            last_prevote_height: u64,
+            #[serde(default)]
+            last_precommit_height: u64,
+        }
+        match std::fs::read_to_string(path) {
+            Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
+                Ok(v) => {
+                    self.last_prevote_height = v.last_prevote_height;
+                    self.last_precommit_height = v.last_precommit_height;
+                    info!(
+                        prevote = v.last_prevote_height,
+                        precommit = v.last_precommit_height,
+                        "Vote history restored; this node will not re-sign at or below these heights"
+                    );
+                }
+                Err(e) => warn!(error = %e, path = %path.display(),
+                    "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)"),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(error = %e, path = %path.display(), "Vote history could not be read"),
+        }
+    }
+
+    /// Record the vote high-water marks.
+    ///
+    /// Written immediately after a vote is published, never batched: the
+    /// window between signing and persisting is exactly the window in which a
+    /// crash loses the record.
+    fn save_vote_history(&self) {
+        let Some(ref path) = self.vote_history_db else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
+                return;
+            }
+        }
+        let body = serde_json::json!({
+            "last_prevote_height": self.last_prevote_height,
+            "last_precommit_height": self.last_precommit_height,
+        });
+        if let Err(e) = std::fs::write(path, body.to_string()) {
+            warn!(error = %e, path = %path.display(),
+                  "Failed to persist vote history; a restart could re-sign a checkpoint");
+        }
+    }
+
     fn load_banned_peers_from_db(&self) {
         let Some(ref db_path) = self.banned_peer_db else {
             return;
@@ -764,7 +850,9 @@ impl Node {
         } else {
             Duration::from_secs(600) // 10 mins on server
         });
-        let mut last_voted_height: u64 = 0;
+        // The prevote high-water mark now lives on `self` so it can be
+        // persisted; see `load_vote_history`.
+        self.load_vote_history();
 
         loop {
             tokio::select! {
@@ -856,6 +944,7 @@ impl Node {
                                        let topic = gossipsub::IdentTopic::new("blocks");
                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
                                        self.last_precommit_height = agg_state.checkpoint_height;
+                                       self.save_vote_history();
                                    }
                                    Err(e) => {
                                        warn!("Failed to sign precommit: {e}");
@@ -864,7 +953,7 @@ impl Node {
                            }
 
                            // --- Periodic prevote ---
-                           if checkpoint_height > 0 && checkpoint_height > last_voted_height {
+                           if checkpoint_height > 0 && checkpoint_height > self.last_prevote_height {
                                if let Some(block) = self.chain.get_block(checkpoint_height).await {
                                    let epoch = checkpoint_height / checkpoint_interval;
                                    match self.chain.sign_prevote(
@@ -884,7 +973,8 @@ impl Node {
                                            };
                                            let topic = gossipsub::IdentTopic::new("blocks");
                                            let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
-                                           last_voted_height = checkpoint_height;
+                                           self.last_prevote_height = checkpoint_height;
+                                           self.save_vote_history();
                                        }
                                        Err(e) => {
                                            warn!("Failed to sign prevote: {e}");
