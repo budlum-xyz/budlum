@@ -2036,6 +2036,15 @@ impl ChainActor {
             Err(error) => tracing::warn!("B.U.D. missed-challenge finalization failed at height {block_height}: {error}"),
         }
 
+        // The settle counterpart to the slash above. Without it, maintenance
+        // Only ever took bonds: a deal served to term stayed `Active` forever
+        // And its bond stayed debited.
+        match self.blockchain.finalize_expired_storage_deals(current_epoch) {
+            Ok((expired, returned)) if expired > 0 => tracing::info!("B.U.D. storage maintenance expired {expired} matured deals at epoch {current_epoch} (returned_bond={returned})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. expired-deal finalization failed at height {block_height}: {error}"),
+        }
+
         let under_replicated = self
             .blockchain
             .state
