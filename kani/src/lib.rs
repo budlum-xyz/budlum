@@ -186,34 +186,45 @@ mod proofs {
     ///
     /// The claim is `>=`, not `>`. Kani rejected the strict version and was
     /// right to: at `stake = 1, ratio = 1_000_001` the quotient truncates back
-    /// down to 1, so the penalty equals the bond rather than exceeding it. What
-    /// actually holds is that the penalty stops being capped below the stake.
+    /// down to 1, so the penalty equals the bond rather than exceeding it.
     /// `an_unbounded_ratio_can_strictly_exceed_the_bond` pins the strict case.
     ///
-    /// `ratio` is a fixed step rather than a free variable. Two unconstrained
-    /// operands make `stake * ratio` a 128-bit multiply with both sides
-    /// symbolic, and CBMC did not finish that in ninety minutes — measured, on
-    /// this harness, twice. With the step fixed the same run takes about forty
-    /// milliseconds. The stake stays fully symbolic, which is the side the
-    /// truncation argument actually turns on.
+    /// # Why this is stated as a multiplication
+    ///
+    /// The obvious phrasing — compute the quotient, compare it to the stake —
+    /// did not finish. Twice, at forty-five and then ninety minutes, always on
+    /// this harness. The log made the reason legible once the two neighbouring
+    /// harnesses were compared: the one using `ratio = 2 * FIXED_POINT_SCALE`
+    /// verified in 0.04s, and the one using `FIXED_POINT_SCALE + 1` never
+    /// returned. The multiplier is not the problem. `x * 2_000_000 / 1_000_000`
+    /// folds to `x * 2` before the solver sees it, while
+    /// `x * 1_000_001 / 1_000_000` is a real 128-bit division against a
+    /// symbolic dividend, and CBMC models division bit by bit.
+    ///
+    /// So the division is removed instead of the quantification. For a
+    /// positive divisor, `(stake * ratio) / SCALE >= stake` holds exactly when
+    /// `stake * ratio >= stake * SCALE`, and the multiplication form is cheap.
+    /// The stake stays fully symbolic across `u32`, and the property proved is
+    /// the same one.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
     #[kani::proof]
     fn an_unbounded_ratio_would_overshoot_the_bond() {
         let stake: u32 = kani::any();
-        let stake = u64::from(stake);
+        let stake = u128::from(stake);
         kani::assume(stake > 0);
 
-        // The smallest possible violation, and a large one. If the bound
-        // stopped holding, it would stop at the smallest step first.
-        for ratio in [FIXED_POINT_SCALE + 1, 2 * FIXED_POINT_SCALE] {
-            let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
-            assert!(
-                quotient >= u128::from(stake),
-                "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
-            );
-        }
+        let ratio: u32 = kani::any();
+        let ratio = u128::from(ratio);
+        kani::assume(ratio > u128::from(FIXED_POINT_SCALE));
+
+        // Equivalent to `(stake * ratio) / SCALE >= stake`, without asking the
+        // solver to model a division by a value it cannot fold away.
+        assert!(
+            stake * ratio >= stake * u128::from(FIXED_POINT_SCALE),
+            "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
+        );
     }
 
     /// And a concrete witness that it really does exceed the bond.
