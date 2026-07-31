@@ -105,6 +105,33 @@ impl BnsRegistry {
     /// And only while the record is still live (not expired). The new expiry
     /// Extends from the current expiry — never from `current_epoch` — so
     /// Renewing early never shortens the registration.
+    ///
+    /// # No transaction reaches this
+    ///
+    /// `TransactionType` carries `BnsRegister`, `BnsSetContent`,
+    /// `BnsRegisterSubdomain` and `BnsSetStorage`. There is no `BnsRenew` and
+    /// No `BnsTransfer`, so this method and [`Self::transfer`] are called only
+    /// From tests. On a live chain an owner cannot renew, and cannot hand a
+    /// Name over.
+    ///
+    /// It is survivable rather than fatal, because `register` accepts the
+    /// Previous owner inside `GRACE_PERIOD` — see the front-running note there.
+    /// But re-registering is not the same operation:
+    ///
+    /// ```text
+    /// renew:    expires_at += duration        (extends from the old expiry)
+    /// register: expires_at  = now + duration  (restarts from today)
+    /// ```
+    ///
+    /// So the only available path throws away whatever time was left. An owner
+    /// Who renews a year early loses that year, and one who waits until the
+    /// Last epoch to avoid the loss is one missed block from the grace period
+    /// And a squatter. The safe move and the cheap move point in opposite
+    /// Directions, which is exactly the shape `renew` exists to remove.
+    ///
+    /// Wiring it needs a transaction type, an executor arm that charges
+    /// `calculate_cost`, and a signature check — small, but consensus surface,
+    /// So it is recorded here rather than smuggled into a hardening pass.
     pub fn renew(
         &mut self,
         name: &str,

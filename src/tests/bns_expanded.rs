@@ -149,3 +149,73 @@ fn test_bns_full_resolve_with_storage() {
     assert_eq!(resolved.storage_root, Some(cid));
     assert_eq!(resolved.storage_domain_id, Some(1));
 }
+
+/// `renew` and `transfer` are unreachable from a transaction, and
+/// re-registering is not an equivalent substitute.
+///
+/// `TransactionType` has `BnsRegister`, `BnsSetContent`,
+/// `BnsRegisterSubdomain` and `BnsSetStorage` — no `BnsRenew`, no
+/// `BnsTransfer`. Both methods are called only from tests, so on a live chain
+/// an owner cannot renew a name and cannot hand one over.
+///
+/// The grace period in `register` softens it: the previous owner can
+/// re-register after expiry without being front-run. It does not replace
+/// renewal, because the two compute a different expiry —
+///
+///     renew:    expires_at += duration
+///     register: expires_at  = current_epoch + duration
+///
+/// — so the only reachable path discards the remaining term. Renewing a year
+/// early costs that year; waiting until the last epoch to avoid the loss puts
+/// the name one missed block from the grace window. This asserts the size of
+/// that gap so it cannot be mistaken for a rounding difference, and fails the
+/// moment a `BnsRenew` transaction exists, forcing whoever adds it to delete
+/// the test deliberately.
+#[test]
+fn bns_renewal_is_unreachable_and_re_registering_loses_the_remaining_term() {
+    let alice = Address::from([1u8; 32]);
+    let mut reg = BnsRegistry::new();
+
+    // Registered at epoch 0 for 100 epochs: expires at 100.
+    reg.register("term.bud".into(), alice, 0, 100).unwrap();
+    assert_eq!(reg.names.get("term.bud").unwrap().expires_at, 100);
+
+    // Renewing at epoch 10 for another 100 extends from the *expiry*: 200.
+    reg.renew("term.bud", &alice, 10, 100).unwrap();
+    assert_eq!(
+        reg.names.get("term.bud").unwrap().expires_at,
+        200,
+        "renew must extend from the existing expiry"
+    );
+
+    // What an owner can actually do today. Re-register the same name at the
+    // same epoch, for the same duration, and the expiry restarts from now.
+    let mut reg2 = BnsRegistry::new();
+    reg2.register("term.bud".into(), alice, 0, 100).unwrap();
+    // Not yet expired, so a re-registration is refused outright while live...
+    assert_eq!(
+        reg2.register("term.bud".into(), alice, 10, 100),
+        Err(BnsError::NameTaken),
+        "a live name cannot be re-registered, so there is no early-renewal path at all"
+    );
+    // ...and after expiry the term restarts rather than extending.
+    reg2.register("term.bud".into(), alice, 100, 100).unwrap();
+    assert_eq!(
+        reg2.names.get("term.bud").unwrap().expires_at,
+        200,
+        "re-registering restarts from current_epoch"
+    );
+
+    // The transaction surface still has no way in.
+    let tx_src = include_str!("../core/transaction.rs");
+    assert!(
+        !tx_src.contains("BnsRenew"),
+        "a BnsRenew transaction now exists — wire it to `renew`, charge \
+         `calculate_cost`, and drop this test"
+    );
+    assert!(
+        !tx_src.contains("BnsTransfer"),
+        "a BnsTransfer transaction now exists — wire it to `transfer` and drop \
+         this test"
+    );
+}
