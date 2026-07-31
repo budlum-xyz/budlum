@@ -20,6 +20,16 @@ If you find the project useful, please also consider starring and forking the re
 
 ---
 
+## Project Constitution
+
+The rules this repository enforces are written down in
+[`.specify/memory/constitution.md`](.specify/memory/constitution.md): six
+principles, each paired with the CI mechanism that enforces it.
+
+Read it before a first change to consensus, tokenomics or a CI gate. It is
+descriptive, not aspirational — every claim in it names a script, a baseline or
+a commit you can check. Where it and the code disagree, the code is the fact.
+
 ## Before You Start
 
 1. Check existing issues and discussions.
