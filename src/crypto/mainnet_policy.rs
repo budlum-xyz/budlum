@@ -11,6 +11,14 @@ pub enum MainnetKeyPolicyViolation {
     NonPkcs11Backend,
     /// Explicit mock HSM backend attempted on mainnet.
     HsmMockBackend,
+    /// A software HSM (SoftHSM) was named on mainnet.
+    ///
+    /// Distinct from `NonPkcs11Backend` because SoftHSM *is* a PKCS#11
+    /// provider: it speaks the same interface a hardware token does, and the
+    /// CLI canonicalises `softhsm` to `pkcs11` before this check ever runs. So
+    /// the string never reaches the policy, and a testnet profile promoted to
+    /// mainnet by changing one `network =` line keeps its software keys.
+    SoftwareHsmBackend,
     /// Disk-backed `ValidatorKeys` path configured.
     DiskValidatorKeys,
     /// PKCS#11 module path empty.
@@ -30,6 +38,11 @@ impl std::fmt::Display for MainnetKeyPolicyViolation {
             Self::HsmMockBackend => {
                 write!(f, "hsm_mock is forbidden for mainnet validators")
             }
+            Self::SoftwareHsmBackend => write!(
+                f,
+                "softhsm is a software token and is forbidden for mainnet \
+                 validators; the signing key must be held by hardware"
+            ),
             Self::DiskValidatorKeys => write!(
                 f,
                 "mainnet validators must not load ValidatorKeys from disk"
@@ -51,6 +64,13 @@ impl std::fmt::Display for MainnetKeyPolicyViolation {
 #[derive(Debug, Clone)]
 pub struct MainnetValidatorKeyConfig<'a> {
     pub signer_backend: Option<&'a str>,
+    /// The backend exactly as the operator wrote it, before the CLI's
+    /// `canonical_signer_backend` folds `softhsm` into `pkcs11`.
+    ///
+    /// Without this the policy cannot tell the two apart: by the time it runs,
+    /// a SoftHSM configuration is indistinguishable from a hardware one. Leave
+    /// as `None` when there is no separate raw value to report.
+    pub raw_signer_backend: Option<&'a str>,
     pub validator_key_file: Option<&'a str>,
     pub pkcs11_module_path: Option<&'a str>,
     pub pkcs11_token_pin_env: Option<&'a str>,
@@ -65,8 +85,20 @@ pub fn check_mainnet_validator_key_policy(
     cfg: &MainnetValidatorKeyConfig<'_>,
 ) -> Result<(), MainnetKeyPolicyViolation> {
     let backend = cfg.signer_backend.unwrap_or("");
-    if backend.eq_ignore_ascii_case("hsm_mock") || backend.eq_ignore_ascii_case("mock") {
-        return Err(MainnetKeyPolicyViolation::HsmMockBackend);
+    // Check the operator's own spelling first, then the canonical form. The
+    // canonicaliser maps `softhsm` onto `pkcs11`, which is right for wiring up
+    // a signer and wrong for deciding whether the key is in hardware.
+    // When no raw value was recorded — the operator passed `--signer-backend`
+    // directly, so nothing canonicalised it — the canonical field still holds
+    // their spelling and the loop below checks it either way.
+    let raw = cfg.raw_signer_backend.unwrap_or(backend);
+    for candidate in [raw, backend] {
+        if candidate.eq_ignore_ascii_case("hsm_mock") || candidate.eq_ignore_ascii_case("mock") {
+            return Err(MainnetKeyPolicyViolation::HsmMockBackend);
+        }
+        if candidate.eq_ignore_ascii_case("softhsm") {
+            return Err(MainnetKeyPolicyViolation::SoftwareHsmBackend);
+        }
     }
     if backend != "pkcs11" {
         return Err(MainnetKeyPolicyViolation::NonPkcs11Backend);
@@ -102,8 +134,12 @@ mod tests {
     fn base() -> MainnetValidatorKeyConfig<'static> {
         MainnetValidatorKeyConfig {
             signer_backend: Some("pkcs11"),
+            raw_signer_backend: Some("pkcs11"),
             validator_key_file: None,
-            pkcs11_module_path: Some("/usr/lib/softhsm/libsofthsm2.so"),
+            // A hardware module path. The fixture used to name
+            // libsofthsm2.so, which made the "accepts a full pkcs11 config"
+            // test assert that a software token is acceptable on mainnet.
+            pkcs11_module_path: Some("/opt/nfast/toolkits/pkcs11/libcknfast.so"),
             pkcs11_token_pin_env: Some("BUD_HSM_PIN"),
             resolve_pin_env: false,
         }

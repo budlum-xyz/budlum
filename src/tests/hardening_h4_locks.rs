@@ -27,6 +27,7 @@ mod tests {
     fn mainnet_validator_requires_pkcs11_not_mock_or_disk() {
         let ok = MainnetValidatorKeyConfig {
             signer_backend: Some("pkcs11"),
+            raw_signer_backend: Some("pkcs11"),
             validator_key_file: None,
             pkcs11_module_path: Some("/opt/lib/pkcs11.so"),
             pkcs11_token_pin_env: Some("PIN"),
@@ -39,6 +40,34 @@ mod tests {
         assert_eq!(
             check_mainnet_validator_key_policy(&mock),
             Err(MainnetKeyPolicyViolation::HsmMockBackend)
+        );
+
+        // SoftHSM is a PKCS#11 provider, so it reaches this policy wearing the
+        // same name a hardware token does. `canonical_signer_backend` folds
+        // `softhsm` into `pkcs11` before admission runs, which is right for
+        // choosing a signer implementation and wrong for deciding whether the
+        // key is in hardware. testnet.toml ships `backend = "softhsm"`; before
+        // this lock, promoting that profile by editing one `network =` line
+        // started a mainnet validator whose signing key lives in a software
+        // token on the same disk the policy refuses to read keys from.
+        let mut soft_raw = ok.clone();
+        soft_raw.raw_signer_backend = Some("softhsm");
+        assert_eq!(
+            check_mainnet_validator_key_policy(&soft_raw),
+            Err(MainnetKeyPolicyViolation::SoftwareHsmBackend),
+            "a canonicalised softhsm config must be refused on its raw spelling"
+        );
+
+        // And when nothing canonicalised it — `--signer-backend softhsm` on the
+        // command line never passes through the config-file path — the
+        // canonical field still carries the operator's word.
+        let mut soft_direct = ok.clone();
+        soft_direct.signer_backend = Some("softhsm");
+        soft_direct.raw_signer_backend = None;
+        assert_eq!(
+            check_mainnet_validator_key_policy(&soft_direct),
+            Err(MainnetKeyPolicyViolation::SoftwareHsmBackend),
+            "an unnormalised softhsm backend must be refused too"
         );
 
         let mut disk = ok.clone();
