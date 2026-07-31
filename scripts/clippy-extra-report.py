@@ -59,16 +59,22 @@ def main() -> int:
     for code, count in per_lint.most_common(30):
         print(f"{count:6d}  {code}")
 
-    print("--- first-party hits (src/) ---")
-    for code in sorted(hits):
-        places = sorted({p for p in hits[code] if p.startswith("src/")})
-        if not places:
-            continue
-        print(f"{code}: {len(places)}")
-        for place in places[:cap]:
-            print(f"    {place}")
-        if len(places) > cap:
-            print(f"    ... and {len(places) - cap} more")
+    # One address per line, sorted, uncapped. The first version truncated at
+    # 40 per lint and hid over 2000 addresses — including, on the run that
+    # mattered, every remaining warning this branch was accountable for.
+    # Diffing two runs is the whole point, and a truncated list cannot be
+    # diffed.
+    print("--- first-party hits (src/, kani/), one per line ---")
+    flat = sorted(
+        f"{place}\t{code}"
+        for code, places in hits.items()
+        for place in set(places)
+        if place.startswith(("src/", "kani/"))
+    )
+    for row in flat:
+        print(row)
+    print(f"--- {len(flat)} first-party addresses ---")
+    _ = cap
     return 0
 
 
