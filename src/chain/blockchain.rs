@@ -6561,7 +6561,7 @@ mod bond_and_reorg_tests {
     fn reorg_rejects_fork_at_finalized_height() {
         let (mut left, right) = build_divergent_pow_chains();
         let fork_point = left.find_fork_point(&right.chain).unwrap();
-        left.finalized_height = fork_point as u64;
+        left.finalized_height = u64::try_from(fork_point).expect("fork point fits u64");
         left.finalized_hash = left.chain[fork_point].hash.clone();
 
         let error = left.try_reorg(right.chain).unwrap_err();
@@ -6613,14 +6613,17 @@ mod bond_and_reorg_tests {
         assert!(interval >= 2, "test needs a real interval");
 
         // A tip that is deliberately not a multiple of the interval.
-        let tip = chain.chain.len().saturating_sub(1) as u64;
+        let tip = u64::try_from(chain.chain.len().saturating_sub(1)).expect("tip fits u64");
         let highest_checkpoint = (tip / interval) * interval;
         if highest_checkpoint == 0 {
             return; // chain too short on this profile to carry a checkpoint
         }
 
         chain.finalized_height = highest_checkpoint;
-        chain.finalized_hash = chain.chain[highest_checkpoint as usize].hash.clone();
+        chain.finalized_hash = chain.chain
+            [usize::try_from(highest_checkpoint).expect("checkpoint fits usize")]
+        .hash
+        .clone();
 
         // The rescan's first probe must be the checkpoint, not the tip.
         let first_probe = (tip / interval) * interval;
