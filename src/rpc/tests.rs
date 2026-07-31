@@ -484,6 +484,11 @@ mod rpc_tests {
 
         let watcher_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
         let watcher = Address::from(watcher_keypair.public_key_bytes());
+        // The opener bond is now really debited from the opener's balance, so
+        // The watcher needs one. Before this change the field was documented as
+        // Debited and never was, which let a freshly generated key with a zero
+        // Balance open a challenge — exactly what this test was doing.
+        bc.add_balance(&watcher, 100_000).await;
         let open_msg = crate::core::hash::hash_fields_bytes(&[
             b"BUD_OPEN_CHALLENGE_V1",
             &deal_id.to_le_bytes(),

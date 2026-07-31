@@ -4912,6 +4912,67 @@ impl Blockchain {
         Ok(issued)
     }
 
+    /// Debit an opener's bond when they open a retrieval challenge.
+    ///
+    /// The bond is documented in five places as the anti-spam mechanism for a
+    /// permissionless challenge endpoint — `storage_deal.rs` says
+    /// "`opener_bond` already debited from the caller's stake", and the module
+    /// doc says the gate is "economically meaningless" without it. It was never
+    /// debited from anything. `open_challenge` validated the number against
+    /// `required_opener_bond(range_len)` and stored it; no balance moved.
+    ///
+    /// A caller could therefore pass `opener_bond: 999_999` with an empty
+    /// account and open challenges for free. Each one costs the operator a read
+    /// and a hash over the range — up to 16 MiB — so the cost of the attack sat
+    /// entirely on the operator. The rate limit bounds how fast that happens
+    /// per `(operator, manifest)`, but a bound is not a price: an attacker with
+    /// no funds could still spend an operator's I/O indefinitely.
+    ///
+    /// This is the same shape as `submit_registry_slashing_report`, which
+    /// debits `slashing_report_fee` before doing the work and refunds it when
+    /// the report turns out actionable. That function is forty lines up in this
+    /// file; the two paths now match.
+    ///
+    /// # Errors
+    ///
+    /// Returns the balance shortfall as an error so the caller refuses the
+    /// challenge instead of opening one that was never paid for.
+    pub fn debit_opener_bond(&mut self, opener: &Address, bond: u64) -> Result<(), String> {
+        if bond == 0 {
+            return Err("opener bond must be greater than zero".into());
+        }
+        let account = self.state.get_or_create(opener);
+        if account.balance < bond {
+            return Err(format!(
+                "insufficient balance for opener bond: have {}, need {bond}",
+                account.balance
+            ));
+        }
+        account.balance -= bond;
+        self.state.mark_dirty(opener);
+        Ok(())
+    }
+
+    /// Return an opener's bond once their challenge resolves.
+    ///
+    /// `ChallengeOutcome` already documents who should get the bond back:
+    /// `Answered` and `Mismatched` both return it (the opener called correctly
+    /// in either case — a wrong answer is the operator's fault), and only the
+    /// opener being wrong would justify keeping it. Since a challenge cannot
+    /// currently be judged frivolous, every resolved challenge refunds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if crediting the refund would overflow the balance.
+    pub fn refund_opener_bond(&mut self, opener: &Address, bond: u64) -> Result<(), String> {
+        if bond == 0 {
+            return Ok(());
+        }
+        self.state
+            .try_add_balance(opener, bond)
+            .map_err(|e| format!("opener bond refund overflow for {opener}: {e}"))
+    }
+
     /// Burn a recorded storage slash against the operator's liquid balance.
     ///
     /// `StorageRegistry` only *records* a slash; the burn is an accounting
@@ -6022,6 +6083,115 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
 }
 
 #[cfg(test)]
+/// An opener with an empty account must not be able to open a challenge.
+///
+/// `opener_bond` is documented in five places as the anti-spam mechanism for a
+/// permissionless endpoint, and nothing debited it. `storage_open_challenge` is
+/// public RPC, so a caller could pass any bond value with no balance and open
+/// challenges that cost the operator a read and a hash over up to 16 MiB each.
+#[test]
+fn an_empty_account_cannot_afford_an_opener_bond() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x42u8; 32]);
+    assert_eq!(bc.state.get_balance(&opener), 0, "opener starts with nothing");
+
+    let err = bc
+        .debit_opener_bond(&opener, 999_999)
+        .expect_err("an empty account must not afford a bond");
+    assert!(
+        err.contains("insufficient balance"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        0,
+        "a refused debit must not move the balance"
+    );
+}
+
+/// A funded opener pays exactly the bond, and gets exactly it back.
+///
+/// Paired with the test above so the fix cannot be a gate that refuses
+/// everything: the bond has to be chargeable, and the refund has to restore the
+/// balance rather than approximate it.
+#[test]
+fn an_opener_bond_is_debited_and_refunded_exactly() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x43u8; 32]);
+    bc.state.add_balance(&opener, 1_000);
+
+    bc.debit_opener_bond(&opener, 250)
+        .expect("a funded opener can post a bond");
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        750,
+        "the bond must leave the balance while the challenge is open"
+    );
+
+    bc.refund_opener_bond(&opener, 250)
+        .expect("a resolved challenge returns the bond");
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        1_000,
+        "the refund must restore the balance exactly"
+    );
+}
+
+/// A zero bond is refused rather than treated as a free challenge.
+///
+/// `open_challenge` already rejects `opener_bond == 0` with `ZeroOpenerBond`.
+/// The debit path agrees, so the two cannot drift into a state where one
+/// accepts what the other refuses.
+#[test]
+fn a_zero_opener_bond_is_refused() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x44u8; 32]);
+    bc.state.add_balance(&opener, 1_000);
+
+    assert!(
+        bc.debit_opener_bond(&opener, 0).is_err(),
+        "a zero bond buys a free challenge and must be refused"
+    );
+    assert_eq!(bc.state.get_balance(&opener), 1_000, "balance untouched");
+}
+
+/// Repeated challenges drain the opener, which is the property the bond exists
+/// for.
+///
+/// The rate limit bounds how *fast* an attacker can open challenges. The bond
+/// is what makes sustaining them cost something. Without a debit the attacker
+/// paid nothing and the operator paid every time.
+#[test]
+fn repeated_challenges_exhaust_the_opener_not_the_operator() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x45u8; 32]);
+    bc.state.add_balance(&opener, 100);
+
+    let bond = 30u64;
+    for i in 0..3 {
+        bc.debit_opener_bond(&opener, bond)
+            .unwrap_or_else(|e| panic!("challenge {i} should be affordable: {e}"));
+    }
+    assert_eq!(bc.state.get_balance(&opener), 10, "3 x 30 debited");
+
+    let err = bc
+        .debit_opener_bond(&opener, bond)
+        .expect_err("the fourth challenge is beyond what the opener can fund");
+    assert!(err.contains("insufficient balance"), "unexpected: {err}");
+}
+
 fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
     use crate::consensus::PoWEngine;
     use std::sync::Arc;

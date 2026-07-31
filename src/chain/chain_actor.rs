@@ -2818,12 +2818,27 @@ impl ChainActor {
                         opener.as_bytes(),
                         request.opener_signature.as_deref().unwrap_or(&[]),
                     ]);
+                    // Take the bond before opening the challenge. Without this
+                    // the number in the request was validated and then ignored,
+                    // so an empty account could open challenges that cost the
+                    // operator a 16 MiB read each.
                     let res = self
                         .blockchain
-                        .state
-                        .storage_registry
-                        .open_challenge_with_entropy(&request, opener, &entropy)
-                        .map_err(|e| e.to_string())
+                        .debit_opener_bond(&opener, request.opener_bond)
+                        .and_then(|()| {
+                            self.blockchain
+                                .state
+                                .storage_registry
+                                .open_challenge_with_entropy(&request, opener, &entropy)
+                                .map_err(|e| {
+                                    // The challenge was refused, so the bond
+                                    // must not stay debited.
+                                    let _ = self
+                                        .blockchain
+                                        .refund_opener_bond(&opener, request.opener_bond);
+                                    e.to_string()
+                                })
+                        })
                         .and_then(|challenge_id| {
                             self.blockchain
                                 .storage
