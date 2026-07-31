@@ -358,3 +358,68 @@ mod tests {
         );
     }
 }
+
+/// Inner signature digests must not become load-bearing while they omit
+/// `chain_id`.
+///
+/// `AiInferenceResult::calculate_signing_hash` and
+/// `SaleAuthorization::signing_hash` both build a digest a party would
+/// sign, and neither commits to `chain_id`. `AiInferenceRequest::calculate_id`
+/// does not either, so an identical request on testnet and mainnet derives
+/// the same `request_id` and a signature over the AI digest would verify
+/// on both networks.
+///
+/// Harmless today for one reason: neither digest is verified anywhere.
+/// Both reach consensus inside a `Transaction`, and
+/// `Transaction::signing_hash` does commit to `chain_id` — the envelope
+/// carries the domain separation the payload lacks.
+///
+/// That is the EIP-155 lesson in miniature: a signature is only bound to
+/// the network its preimage names. This fails if either digest gains a
+/// verification call site, so whoever wires one has to add `chain_id` to
+/// the preimage in the same change.
+#[test]
+fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
+    // The transaction envelope really does bind the chain — the property
+    // the two payload digests are relying on.
+    let tx_src = include_str!("../core/transaction.rs");
+    let at = tx_src
+        .find("pub fn signing_hash")
+        .expect("Transaction::signing_hash must exist");
+    let body = &tx_src[at..(at + 1200).min(tx_src.len())];
+    assert!(
+        body.contains("chain_id"),
+        "Transaction::signing_hash stopped committing to chain_id — the \
+             payload digests were relying on the envelope for domain separation"
+    );
+
+    // And the payload digests are still not verified against anything.
+    for (module, digest, src) in [
+        (
+            "ai/types.rs",
+            "calculate_signing_hash",
+            include_str!("../ai/types.rs"),
+        ),
+        (
+            "pollen/data_rights.rs",
+            "signing_hash",
+            include_str!("../pollen/data_rights.rs"),
+        ),
+    ] {
+        let definition = format!("fn {digest}");
+        let calls = src.matches(&format!("{digest}(")).count();
+        let definitions = src.matches(&definition).count();
+        assert!(
+            definitions > 0,
+            "{module}: {digest} disappeared; re-read this test"
+        );
+        // Definition plus its own `#[cfg(test)]` uses only. A production
+        // call site would push this past the allowance.
+        assert!(
+            calls <= definitions + 3,
+            "{module}: {digest} now has {calls} references against \
+                 {definitions} definitions — if it is being verified, add \
+                 chain_id to its preimage first, then drop this assertion"
+        );
+    }
+}

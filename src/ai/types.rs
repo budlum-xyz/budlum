@@ -289,6 +289,26 @@ pub struct AiInferenceResult {
 }
 
 impl AiInferenceResult {
+    /// Digest an AI verifier would sign over its result.
+    ///
+    /// # Nothing calls this
+    ///
+    /// Zero call sites outside this file. The result reaches consensus wrapped
+    /// In a `TransactionType::AiInferenceResult`, and it is the *transaction*
+    /// Signature that is checked — `Transaction::signing_hash` commits to
+    /// `chain_id`, so the envelope is bound to one network even though this
+    /// Digest is not.
+    ///
+    /// That matters if this ever becomes load-bearing. The preimage below
+    /// Commits to `request_id`, the verifier, the output and a nonce, and
+    /// `AiInferenceRequest::calculate_id` does not fold in `chain_id` either —
+    /// So an identical request submitted on testnet and mainnet derives the
+    /// Same `request_id`, and a signature over this digest would verify on
+    /// Both. Today the transaction envelope is what stops that.
+    ///
+    /// Anyone wiring this into verification must add `chain_id` to the
+    /// Preimage first, or the inner signature will be replayable between
+    /// Networks in a way the outer one is not.
     pub fn calculate_signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_RESULT_SIG_V1");
