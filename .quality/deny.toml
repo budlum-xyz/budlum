@@ -95,9 +95,11 @@ allow-git = ["https://github.com/libp2p/rust-libp2p"]
 # geçmiyordu.
 #
 # Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` — `pqcrypto-mldsa`
-# tarafından ikame edildi) mainnet varsayılan PQ imza yolunda duruyor, hiçbir
-# ignore listesinde kayıtlı değil ve hiçbir koşuda görünmedi. "Warn, fail yok"
-# kararı sessiz bir geçişe dönüşmüştü.
+# tarafından ikame edildi) mainnet varsayılan PQ imza yolunda duruyor. Karar
+# verilmiş ve `.quality/osv-scanner.toml`'da gerekçesiyle kayıtlı; buna karşın
+# cargo audit tarafında hiçbir koşuda görünmedi. Aynı ağacı tarayan iki
+# araçtan yalnız birinin sonucu okunabiliyordu — "warn, fail yok" kararının
+# dayandığı görünürlük tek bacaklıydı.
 #
 # `audit-deps.sh` artık iki lockfile'ın ham çıktısını log'a basıyor ve görülen
 # RUSTSEC kimliklerini tek listede özetliyor. Bu satırın gerekçesi ancak o

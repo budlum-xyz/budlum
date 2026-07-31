@@ -65,9 +65,12 @@ cargo audit --file budzero/Cargo.lock --deny warnings > "$BUDZERO_RAW_OUT" 2>&1 
 # Bu bos bir titizlik degil. `.quality/deny.toml` `unmaintained = "none"`
 # tutuyor ve bu kararin TEK gerekcesi soyle yazili: "Uyari gorunurlugu
 # kaybolmuyor: CI dependency-audit job'indaki cargo audit her kosuda
-# unmaintained uyarilarini raporlar." Raporlamiyordu. RUSTSEC-2024-0380
-# (`pqcrypto-dilithium` -- mainnet varsayilan PQ imza yolu) hicbir kosuda
-# gorunmedi, hicbir ignore listesinde de yok: sessizce gecti.
+# unmaintained uyarilarini raporlar." Raporlamiyordu.
+#
+# Ornek: RUSTSEC-2024-0380 (`pqcrypto-dilithium`, mainnet varsayilan PQ imza
+# yolu). Karar verilmis ve `.quality/osv-scanner.toml`'da gerekcesiyle
+# kayitli -- ama cargo audit tarafinda hicbir kosuda gorunmedi. Iki tarayici
+# ayni agaci tariyor ve yalniz birinin sonucu okunabiliyordu.
 echo ""
 echo "──────── cargo audit — root Cargo.lock ────────"
 cat "$ROOT_RAW_OUT"
