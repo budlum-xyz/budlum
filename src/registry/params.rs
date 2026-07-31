@@ -16,6 +16,26 @@ use serde::{Deserialize, Serialize};
 ///
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in
 /// `[0, FIXED_POINT_SCALE]` (e.g. `FIXED_POINT_SCALE / 2` == 50%).
+///
+/// # Adding a field is a state-format change
+///
+/// This struct is bincode-serialized into
+/// `PermissionlessRegistry::root()`, which feeds the state root. bincode
+/// encodes fields positionally with no names and no length prefix per struct,
+/// so a snapshot written by an older binary has fewer fields than a newer
+/// binary expects and fails to deserialize — `#[serde(default)]` on the
+/// `params` field in `PermissionlessRegistry` only covers the field being
+/// *absent*, not being *short*.
+///
+/// Two consequences, both intended here and both worth stating so the next
+/// person adding a field knows what they are signing up for:
+///
+/// 1. Snapshots taken before the new field cannot be loaded afterwards.
+/// 2. The state root changes, because `root()` hashes the serialized params.
+///
+/// That is acceptable pre-mainnet, where the chain is reset between releases.
+/// After launch it is a migration, and the right shape is a versioned params
+/// struct rather than an in-place field addition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryParams {
     /// Minimum stake required to *newly* register for a role. This is an
@@ -185,6 +205,25 @@ impl Default for RegistryParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The struct is hashed into the state root, so its serialized shape is
+    /// consensus. This pins the field count: adding one is a deliberate
+    /// state-format change, not a refactor.
+    ///
+    /// If this fails, the change is not necessarily wrong — but it is not
+    /// backwards compatible, and the `# Adding a field` note above applies.
+    #[test]
+    fn registry_params_serialized_shape_is_pinned() {
+        let encoded = bincode::serialize(&RegistryParams::default())
+            .expect("RegistryParams is serializable");
+        // 12 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        assert_eq!(
+            encoded.len(),
+            12 * 8 + 1,
+            "RegistryParams changed shape: old snapshots can no longer be \
+             deserialized and the state root moves. See the type's docs."
+        );
+    }
 
     #[test]
     fn registry_params_validate_accepts_defaults() {
