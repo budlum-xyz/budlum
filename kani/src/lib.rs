@@ -189,23 +189,27 @@ mod proofs {
     /// down to 1, so the penalty equals the bond rather than exceeding it.
     /// `an_unbounded_ratio_can_strictly_exceed_the_bond` pins the strict case.
     ///
-    /// # Why this is stated as a multiplication
+    /// # Why the ratio is concrete
     ///
-    /// The obvious phrasing — compute the quotient, compare it to the stake —
-    /// did not finish. Twice, at forty-five and then ninety minutes, always on
-    /// this harness. The log made the reason legible once the two neighbouring
-    /// harnesses were compared: the one using `ratio = 2 * FIXED_POINT_SCALE`
-    /// verified in 0.04s, and the one using `FIXED_POINT_SCALE + 1` never
-    /// returned. The multiplier is not the problem. `x * 2_000_000 / 1_000_000`
-    /// folds to `x * 2` before the solver sees it, while
-    /// `x * 1_000_001 / 1_000_000` is a real 128-bit division against a
-    /// symbolic dividend, and CBMC models division bit by bit.
+    /// This harness was cancelled at the CI timeout four times, and each
+    /// attempt narrowed the cause:
     ///
-    /// So the division is removed instead of the quantification. For a
-    /// positive divisor, `(stake * ratio) / SCALE >= stake` holds exactly when
-    /// `stake * ratio >= stake * SCALE`, and the multiplication form is cheap.
-    /// The stake stays fully symbolic across `u32`, and the property proved is
-    /// the same one.
+    /// | attempt | ratio | division | result |
+    /// | :-- | :-- | :-- | :-- |
+    /// | 1 | symbolic `u64` | yes | cancelled |
+    /// | 2 | `{SCALE+1, 2*SCALE}` | yes | cancelled |
+    /// | 3 | symbolic `u32` | no | cancelled |
+    /// | — | `2*SCALE` fixed | yes | **0.026s** |
+    ///
+    /// Attempt 3 removed the division and still hung, which rules out the
+    /// divide. The one variable that tracks the outcome is whether `ratio` is
+    /// symbolic: a 128-bit multiply with both operands symbolic is what CBMC
+    /// cannot close here, and it stays expensive with the division gone.
+    ///
+    /// So the ratio is enumerated at the boundaries that matter — the smallest
+    /// value above the bound, where truncation is most likely to hide the
+    /// overshoot, and a large one — while the stake stays fully symbolic
+    /// across `u32`. Each iteration is then a multiply with one concrete side.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
@@ -215,16 +219,19 @@ mod proofs {
         let stake = u128::from(stake);
         kani::assume(stake > 0);
 
-        let ratio: u32 = kani::any();
-        let ratio = u128::from(ratio);
-        kani::assume(ratio > u128::from(FIXED_POINT_SCALE));
-
-        // Equivalent to `(stake * ratio) / SCALE >= stake`, without asking the
-        // solver to model a division by a value it cannot fold away.
-        assert!(
-            stake * ratio >= stake * u128::from(FIXED_POINT_SCALE),
-            "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
-        );
+        for ratio in [
+            u128::from(FIXED_POINT_SCALE) + 1,
+            u128::from(FIXED_POINT_SCALE) + 2,
+            u128::from(FIXED_POINT_SCALE) * 3 / 2,
+            u128::from(FIXED_POINT_SCALE) * 2,
+        ] {
+            // Equivalent to `(stake * ratio) / SCALE >= stake` for a positive
+            // divisor, without asking for a division.
+            assert!(
+                stake * ratio >= stake * u128::from(FIXED_POINT_SCALE),
+                "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
+            );
+        }
     }
 
     /// And a concrete witness that it really does exceed the bond.
