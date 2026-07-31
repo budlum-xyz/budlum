@@ -42,8 +42,16 @@ COPY budzero/ ./budzero/
 # Derleyici gercekten pinli surum mu: build'den ONCE, imaj icinde.
 # Bu satir olmasaydi yanlis derleyiciyle uretilmis bir binary sessizce
 # yayinlanirdi ve "tekrarlanabilir build" iddiasi kagit uzerinde kalirdi.
+#
+# Boru YOK (hadolint DL4006): `rustc --version | cut` yazilsaydi rustc'nin
+# cikis kodu cut'inkiyle ortulurdu ve rustc calismasa bile adim gecerdi --
+# tam olarak bu kapinin engellemek istedigi sessiz gecis. `set -o pipefail`
+# eklemek yerine boruyu kaldirmak daha dar bir cozum: `rustc --version`
+# once kendi basina calisir, basarisiz olursa `&&` zinciri orada durur.
 RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
-    actual="$(rustc --version | cut -d' ' -f2)" && \
+    version_line="$(rustc --version)" && \
+    actual="${version_line#rustc }" && \
+    actual="${actual%% *}" && \
     if [ "$pinned" != "$actual" ]; then \
       echo "HATA: imaj rustc $actual tasiyor, rust-toolchain.toml $pinned pinliyor" >&2; \
       exit 1; \
