@@ -804,6 +804,15 @@ jobs:
         run: |
           bash ./scripts/check-gates-are-wired.sh --self-test
           bash ./scripts/check-gates-are-wired.sh
+      # A gate that names its required tests by hand is only as good as those
+      # names. Merging the hardening branches moved a `#[test]` attribute onto
+      # the wrong function and silently un-tested
+      # `total_bud_committed_counts_stake_and_unbonding`, which
+      # check-economy-invariants.sh lists as required.
+      - name: zorunlu testler gercekten test mi + kanarya
+        run: |
+          bash ./scripts/check-required-tests-are-tests.sh --self-test
+          bash ./scripts/check-required-tests-are-tests.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
