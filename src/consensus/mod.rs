@@ -19,6 +19,26 @@ impl Error for ConsensusError {}
 pub const MAX_FUTURE_BLOCK_TIME_MS: u128 = 15 * 1000;
 pub const MAX_PAST_BLOCK_TIME_MS: u128 = 2 * 60 * 60 * 1000;
 pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
+/// Consensus block-size ceiling, measured over the **JSON** encoding.
+///
+/// Distinct from `network::protocol::MAX_BLOCK_SIZE` (1 MiB) on purpose, and
+/// the two are not interchangeable despite the shared name:
+///
+/// | constant | value | measured over | rejects at |
+/// | :-- | :-- | :-- | :-- |
+/// | `consensus::MAX_BLOCK_SIZE` | 1_000_000 | `serde_json::to_vec` | block validation |
+/// | `protocol::MAX_BLOCK_SIZE` | 1_048_576 | `prost` `encoded_len` | gossip ingest |
+///
+/// The transport bound is the looser of the two *and* it measures the more
+/// compact encoding, so the consensus check is always the binding one. A block
+/// that clears gossip can still be refused by validation; the reverse cannot
+/// happen. That ordering is the safe one — the network never accepts something
+/// consensus would reject — but it is a property of the current numbers, not
+/// of the design, and nothing was recording it.
+///
+/// If either value moves, keep `protocol::MAX_BLOCK_SIZE` (protobuf) at or
+/// above this one (JSON), or gossip starts admitting blocks every validator
+/// then refuses.
 pub const MAX_BLOCK_SIZE: usize = 1_000_000;
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 5000;
 pub const MAX_REORG_DEPTH: usize = 100;
