@@ -4896,6 +4896,67 @@ impl Blockchain {
         Ok(issued)
     }
 
+    /// Debit an opener's bond when they open a retrieval challenge.
+    ///
+    /// The bond is documented in five places as the anti-spam mechanism for a
+    /// permissionless challenge endpoint — `storage_deal.rs` says
+    /// "`opener_bond` already debited from the caller's stake", and the module
+    /// doc says the gate is "economically meaningless" without it. It was never
+    /// debited from anything. `open_challenge` validated the number against
+    /// `required_opener_bond(range_len)` and stored it; no balance moved.
+    ///
+    /// A caller could therefore pass `opener_bond: 999_999` with an empty
+    /// account and open challenges for free. Each one costs the operator a read
+    /// and a hash over the range — up to 16 MiB — so the cost of the attack sat
+    /// entirely on the operator. The rate limit bounds how fast that happens
+    /// per `(operator, manifest)`, but a bound is not a price: an attacker with
+    /// no funds could still spend an operator's I/O indefinitely.
+    ///
+    /// This is the same shape as `submit_registry_slashing_report`, which
+    /// debits `slashing_report_fee` before doing the work and refunds it when
+    /// the report turns out actionable. That function is forty lines up in this
+    /// file; the two paths now match.
+    ///
+    /// # Errors
+    ///
+    /// Returns the balance shortfall as an error so the caller refuses the
+    /// challenge instead of opening one that was never paid for.
+    pub fn debit_opener_bond(&mut self, opener: &Address, bond: u64) -> Result<(), String> {
+        if bond == 0 {
+            return Err("opener bond must be greater than zero".into());
+        }
+        let account = self.state.get_or_create(opener);
+        if account.balance < bond {
+            return Err(format!(
+                "insufficient balance for opener bond: have {}, need {bond}",
+                account.balance
+            ));
+        }
+        account.balance -= bond;
+        self.state.mark_dirty(opener);
+        Ok(())
+    }
+
+    /// Return an opener's bond once their challenge resolves.
+    ///
+    /// `ChallengeOutcome` already documents who should get the bond back:
+    /// `Answered` and `Mismatched` both return it (the opener called correctly
+    /// in either case — a wrong answer is the operator's fault), and only the
+    /// opener being wrong would justify keeping it. Since a challenge cannot
+    /// currently be judged frivolous, every resolved challenge refunds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if crediting the refund would overflow the balance.
+    pub fn refund_opener_bond(&mut self, opener: &Address, bond: u64) -> Result<(), String> {
+        if bond == 0 {
+            return Ok(());
+        }
+        self.state
+            .try_add_balance(opener, bond)
+            .map_err(|e| format!("opener bond refund overflow for {opener}: {e}"))
+    }
+
     /// Burn a recorded storage slash against the operator's liquid balance.
     ///
     /// `StorageRegistry` only *records* a slash; the burn is an accounting
