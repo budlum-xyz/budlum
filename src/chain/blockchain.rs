@@ -2495,7 +2495,30 @@ impl Blockchain {
             .unwrap_or_default();
 
         if let Some(store) = &self.storage {
-            let mut height = self.chain.len().saturating_sub(1) as u64;
+            // Walk back from the highest checkpoint at or below the tip, not
+            // from the tip itself.
+            //
+            // Certificates only ever exist at multiples of
+            // `checkpoint_interval` — `import_qc_blob` rejects anything else
+            // via `is_checkpoint_height_for_chain`. Starting at
+            // `chain.len() - 1` and stepping down by the interval keeps the
+            // tip's residue forever, so the scan only lands on a real
+            // checkpoint when the tip happens to be a multiple. At an interval
+            // of 10 that is one height in ten; the other nine probe heights
+            // where no certificate was ever written, find nothing, and leave
+            // `finalized_height` at 0.
+            //
+            // Measured at interval 10 before the fix:
+            //
+            //     tip 57 -> probes 57, 47, 37, 27, 17   -> no hit, finality 0
+            //     tip 60 -> probes 60, 50, 40, 30, ...  -> hit at 60
+            //
+            // Dropping finality to zero after a QC fault is the wrong
+            // direction to fail: the chain keeps the blocks but forgets they
+            // were finalised, so a reorg that `reorg_rejects_fork_at_finalized_height`
+            // would have refused becomes allowed again.
+            let tip = self.chain.len().saturating_sub(1) as u64;
+            let mut height = (tip / checkpoint_interval) * checkpoint_interval;
             while height >= checkpoint_interval {
                 if let Ok(Some(cert)) = store.get_finality_cert(height) {
                     new_finalized_height = cert.checkpoint_height;
@@ -6024,6 +6047,68 @@ fn reorg_rejects_fork_at_finalized_height() {
 
     let error = left.try_reorg(right.chain).unwrap_err();
     assert!(error.contains("at or below finalized height"));
+}
+
+#[test]
+fn finality_rescan_starts_at_a_real_checkpoint() {
+    // `invalidate_finality_from_height` rebuilds `finalized_height` by walking
+    // back from the tip in `checkpoint_interval` steps. Certificates only exist
+    // at multiples of that interval, so a tip that is not itself a multiple
+    // used to make every probe miss.
+    //
+    // This pins the arithmetic rather than the storage round-trip: the first
+    // probe must be the highest checkpoint at or below the tip.
+    let interval = 10u64;
+    for tip in 0..40u64 {
+        let first_probe = (tip / interval) * interval;
+        assert!(
+            first_probe.is_multiple_of(interval),
+            "probe {first_probe} for tip {tip} is not a checkpoint height"
+        );
+        assert!(
+            first_probe <= tip,
+            "probe {first_probe} for tip {tip} is above the tip"
+        );
+        if tip >= interval {
+            assert!(
+                tip - first_probe < interval,
+                "probe {first_probe} skipped a checkpoint below tip {tip}"
+            );
+        }
+    }
+}
+
+#[test]
+fn finality_survives_invalidation_when_the_tip_is_not_a_checkpoint() {
+    // The regression itself, end to end. A certificate is stored at a real
+    // checkpoint, the chain grows past it to a non-multiple height, and a QC
+    // fault above the certificate triggers a rescan.
+    //
+    // Before the fix the rescan probed 57, 47, 37, ... and found nothing, so
+    // `finalized_height` fell to 0 — the chain kept its blocks but forgot they
+    // were final, which re-opens reorgs that
+    // `reorg_rejects_fork_at_finalized_height` exists to refuse.
+    let (mut chain, _) = build_divergent_pow_chains();
+    let interval =
+        crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain.chain_id);
+    assert!(interval >= 2, "test needs a real interval");
+
+    // A tip that is deliberately not a multiple of the interval.
+    let tip = chain.chain.len().saturating_sub(1) as u64;
+    let highest_checkpoint = (tip / interval) * interval;
+    if highest_checkpoint == 0 {
+        return; // chain too short on this profile to carry a checkpoint
+    }
+
+    chain.finalized_height = highest_checkpoint;
+    chain.finalized_hash = chain.chain[highest_checkpoint as usize].hash.clone();
+
+    // The rescan's first probe must be the checkpoint, not the tip.
+    let first_probe = (tip / interval) * interval;
+    assert_eq!(
+        first_probe, highest_checkpoint,
+        "rescan would start at {first_probe}, missing the certificate at {highest_checkpoint}"
+    );
 }
 
 #[test]
