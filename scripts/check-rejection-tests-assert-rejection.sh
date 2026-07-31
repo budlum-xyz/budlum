@@ -50,15 +50,22 @@ fail() {
 # hard thing to argue. Anything added needs its reason in the same commit.
 ALLOWED=()
 
+# Trees to scan. `src/` is the L1; budzero and wallet-core carry 294 tests
+# between them and were outside the first version of this gate for no reason
+# other than that the three offenders happened to live in src/. A gate that
+# only looks where the last bug was found is a gate that finds the last bug.
+SCAN_ROOTS=(src budzero wallet-core)
+
 scan() {
   local root="$1"
   [ -d "$root/src" ] || fail "no src directory at $root/src — wrong root?"
 
-  python3 - "$root" "${ALLOWED[@]+"${ALLOWED[@]}"}" <<'PY'
+  python3 - "$root" "${SCAN_ROOTS[*]}" "${ALLOWED[@]+"${ALLOWED[@]}"}" <<'PY'
 import os, re, sys
 
 root = sys.argv[1]
-allowed = set(sys.argv[2:])
+scan_roots = sys.argv[2].split()
+allowed = set(sys.argv[3:])
 
 # A name promising that something does not go through.
 # Deliberately narrower than "any name that sounds negative".
@@ -125,7 +132,13 @@ NEGATIVE = re.compile(
 scanned = 0
 offenders = []
 
-for dirpath, _dirs, files in os.walk(os.path.join(root, 'src')):
+for sub in scan_roots:
+  base = os.path.join(root, sub)
+  if not os.path.isdir(base):
+      continue
+  for dirpath, dirs, files in os.walk(base):
+    # Build output is not source.
+    dirs[:] = [d for d in dirs if d not in ('target', '.git')]
     for name in files:
         if not name.endswith('.rs'):
             continue
