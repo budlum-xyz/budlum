@@ -1521,6 +1521,11 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid bridge_relayer_min_fee: {e}"))?;
             }
+            "max_invalid_votes_per_epoch" => {
+                params.max_invalid_votes_per_epoch = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid max_invalid_votes_per_epoch: {e}"))?;
+            }
             other => return Err(format!("unknown registry parameter: {other}")),
         }
         params.validate()?;

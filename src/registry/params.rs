@@ -75,6 +75,13 @@ pub struct RegistryParams {
     /// May send within a single epoch before an `InvalidSignatureSpam` fault is
     /// Raised (and slashed). Counted per-epoch and reset each epoch.
     /// Set to 0 to disable invalid-vote-spam slashing entirely.
+    ///
+    /// Governance-settable: in `GOVERNANCE_PARAMETER_WHITELIST`, handled by
+    /// Both `apply_registry_parameter_update` arms, and bounded by
+    /// [`Self::validate`]. The `Default` impl called this
+    /// "governance-tunable per network" for a while before any of that was
+    /// True, which made a passed proposal fail at execution with "governance
+    /// Parameter is not whitelisted".
     pub max_invalid_votes_per_epoch: u64,
     /// Whether the live epoch-close hook actually slashes validators for
     /// Liveness (downtime) faults.
@@ -141,6 +148,15 @@ impl RegistryParams {
         // theft by governance parameter.
         if self.bridge_relayer_fee_ppm >= PPM_DENOMINATOR {
             return Err("bridge_relayer_fee_ppm must be below 100%".into());
+        }
+        // Zero is a documented off-switch ("set to 0 to disable
+        // invalid-vote-spam slashing entirely"), so the floor is not 1. The
+        // ceiling is: a threshold above one epoch's worth of votes can never
+        // be reached, which disables the fault while looking like it is
+        // configured. `max_votes_per_msg` is 128 per network, so 100_000 is
+        // orders of magnitude past any honest value and still refuses u64::MAX.
+        if self.max_invalid_votes_per_epoch > 100_000 {
+            return Err("max_invalid_votes_per_epoch must be at most 100,000".into());
         }
         Ok(())
     }
@@ -222,6 +238,110 @@ mod tests {
             12 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
+        );
+    }
+
+    /// A field the docs call governance-settable must actually be votable.
+    ///
+    /// `max_invalid_votes_per_epoch` carried "Governance-tunable per network"
+    /// While being absent from `GOVERNANCE_PARAMETER_WHITELIST`. A proposal
+    /// Naming it fails in `validate_governance_parameter_update` with
+    /// "governance parameter is not whitelisted" — after the vote, after the
+    /// Timelock. The comment described an intention, not the code.
+    ///
+    /// `bridge_relayer_fee_ppm` had the mirror-image gap once: whitelisted but
+    /// Missing from `apply_registry_parameter_update`, so the vote passed and
+    /// Then did nothing.
+    ///
+    /// This reads the doc comment attached to each field rather than a
+    /// Hand-maintained list, so a new field that claims to be
+    /// Governance-settable and is not wired up fails here instead of at
+    /// Execution time on a live chain.
+    ///
+    /// Only the unbroken run of `///` lines directly above the field counts.
+    /// A wider window bleeds into the neighbouring field's documentation and
+    /// Reports three false positives.
+    #[test]
+    fn every_field_documented_as_governance_settable_is_whitelisted() {
+        use crate::core::governance::GOVERNANCE_PARAMETER_WHITELIST;
+
+        let src = include_str!("params.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let mut checked = 0;
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((name, _)) = rest.split_once(':') else {
+                continue;
+            };
+            if !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                continue;
+            }
+
+            let mut doc = String::new();
+            for above in lines[..i].iter().rev() {
+                let above = above.trim();
+                if !above.starts_with("///") {
+                    break;
+                }
+                doc.push_str(&above.to_lowercase());
+                doc.push(' ');
+            }
+
+            if doc.contains("governance-tunable") || doc.contains("governance-settable") {
+                checked += 1;
+                assert!(
+                    GOVERNANCE_PARAMETER_WHITELIST.contains(&name),
+                    "{name} is documented as governance-settable but is not in \
+                     GOVERNANCE_PARAMETER_WHITELIST — a proposal naming it is \
+                     refused after the vote"
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "no field claims to be governance-settable — the doc scan is broken, \
+             not the code"
+        );
+    }
+
+    /// Governance must not be able to set a threshold that can never be hit.
+    ///
+    /// Zero is a documented off-switch, so the floor stays open. The ceiling
+    /// Is the real risk: a value above any reachable vote count disables the
+    /// Invalid-signature-spam fault while looking configured.
+    #[test]
+    fn max_invalid_votes_per_epoch_is_bounded() {
+        let p = RegistryParams {
+            max_invalid_votes_per_epoch: 0,
+            ..Default::default()
+        };
+        assert!(p.validate().is_ok(), "0 is the documented off-switch");
+
+        let p = RegistryParams {
+            max_invalid_votes_per_epoch: 100_000,
+            ..Default::default()
+        };
+        assert!(p.validate().is_ok(), "the ceiling itself is allowed");
+
+        let p = RegistryParams {
+            max_invalid_votes_per_epoch: 100_001,
+            ..Default::default()
+        };
+        let err = p.validate().expect_err("above the ceiling must be refused");
+        assert!(err.contains("max_invalid_votes_per_epoch"), "got: {err}");
+
+        let p = RegistryParams {
+            max_invalid_votes_per_epoch: u64::MAX,
+            ..Default::default()
+        };
+        assert!(
+            p.validate().is_err(),
+            "u64::MAX disables the fault while looking configured"
         );
     }
 
