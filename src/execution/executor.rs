@@ -297,13 +297,30 @@ impl Executor {
                     }
                 }
 
+                // The unbonding window is a governance parameter
+                // (`RegistryParams::unbonding_epochs`, whitelisted in
+                // `GOVERNANCE_PARAMETER_WHITELIST`). Reading the compile-time
+                // Constant here made every accepted governance vote a no-op on
+                // The only path that actually queues validator stake: the
+                // Registry stored the new window, the ledger kept releasing
+                // After the hard-coded 7. `PermissionlessRegistry::begin_unbonding`
+                // Already reads the parameter, so the two views disagreed.
+                let unbonding_epochs = state.registry.params().unbonding_epochs;
                 state
                     .unbonding_queue
                     .push(crate::core::account::UnbondingEntry {
                         address: tx.from,
                         amount: tx.amount,
-                        release_epoch: state.epoch_index + crate::core::account::UNBONDING_EPOCHS,
+                        release_epoch: state.epoch_index.saturating_add(unbonding_epochs),
                     });
+
+                // Mirror the reduced stake into the permissionless registry.
+                // `Stake` calls this; `Unstake` did not, so the registry kept
+                // Showing the pre-unstake stake forever. `registry.is_active`
+                // Is what the liveness / invalid-vote slashing paths and the
+                // RPC member views consult, and `registry.root()` is hashed
+                // Into the state root, so the stale entry was consensus state.
+                state.sync_validator_registration(&tx.from);
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
