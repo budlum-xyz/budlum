@@ -297,4 +297,64 @@ mod tests {
         assert!(!version_at_least("0.12.1", "0.13.10"));
         assert!(version_at_least("0.14.0", "0.13.10"));
     }
+
+    /// The gossipsub PRUNE-backoff advisories must stay closed.
+    ///
+    /// Two disclosures, same handler, three months apart:
+    ///
+    /// * `CVE-2026-33040` / `GHSA-gc42-3jg7-rxr2` — a `PRUNE` carrying a
+    ///   near-maximum backoff overflowed on *insertion*. Fixed in 0.49.3.
+    /// * `CVE-2026-34219` / `GHSA-xqmp-fxgv-xvq5` — the same value survived
+    ///   insertion and overflowed later, in the *heartbeat*, on
+    ///   `backoff_time + slack`. Fixed in 0.49.4.
+    ///
+    /// Either one is a remote unauthenticated panic: any peer that can open a
+    /// gossipsub session takes the node down with a single control message and
+    /// replays it after every restart. Rust turns the overflow into a panic
+    /// rather than memory corruption, so the class is denial of service — but
+    /// for a validator, "the process is dead" is the whole impact.
+    ///
+    /// A version assertion alone is not enough here. `libp2p-gossipsub` comes
+    /// from a git revision, not crates.io, so the `0.50.0` in the lockfile is
+    /// whatever that tree happened to call itself — it is not evidence that
+    /// either patch is in it. This asserts the version *and* names both
+    /// advisories so a future pin bump has to be checked against them rather
+    /// than trusted for having a larger number.
+    #[test]
+    fn gossipsub_prune_backoff_advisories_stay_closed() {
+        let lock = include_str!("../../Cargo.lock");
+        let versions = locked_versions_in(lock, "libp2p-gossipsub");
+        assert!(
+            !versions.is_empty(),
+            "libp2p-gossipsub must be in the graph; gossipsub is how blocks propagate"
+        );
+        for version in &versions {
+            assert!(
+                version_at_least(version, "0.49.4"),
+                "libp2p-gossipsub {version} predates the PRUNE backoff fixes \
+                     (CVE-2026-33040 insertion overflow, fixed 0.49.3; \
+                     CVE-2026-34219 heartbeat overflow, fixed 0.49.4). Any peer \
+                     can panic this node with one control message."
+            );
+        }
+
+        // The pin is by full revision, so record what was verified in that
+        // tree. Checked by hand against
+        // 38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd:
+        //
+        //   behaviour.rs: const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
+        //   backoff.rs:   backoff_time.checked_add(slack)
+        //
+        // the bound that closes the insertion path and the checked arithmetic
+        // that closes the heartbeat path. If the revision moves, both have to
+        // be re-checked in the new tree.
+        let manifest = include_str!("../../Cargo.toml");
+        assert!(
+            manifest.contains("38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"),
+            "the libp2p revision changed. Re-verify in the new tree that \
+                 gossipsub still bounds remote PRUNE backoff \
+                 (MAX_REMOTE_PRUNE_BACKOFF_SECONDS) and still uses checked_add for \
+                 the heartbeat slack, then update this hash."
+        );
+    }
 }
