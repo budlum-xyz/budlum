@@ -372,4 +372,57 @@ mod tests {
             derive_receipt_leaf("0xabc", &[0xdd; 20])
         );
     }
+
+    /// The stronger of the two verification paths has no caller.
+    ///
+    /// This file documents `verify_deposit` as "gerçek güvenli yol" — the real
+    /// safe path — and it is: it runs the full `verify_evm_receipt`
+    /// orchestrator (header chain with N confirmations, MPT inclusion, receipt
+    /// status, deposit-log match). The trait method `verify_receipt_proof`
+    /// checks a Merkle proof against a declared root plus a leaf binding, and
+    /// takes the receipts root on the relayer's word.
+    ///
+    /// Production calls the second one. `relayer/worker.rs:263` invokes
+    /// `adapter.verify_receipt_proof(...)`; nothing anywhere invokes
+    /// `verify_deposit`, and until this test existed nothing referenced it
+    /// outside its own definition — not even a test.
+    ///
+    /// That is survivable today only because the adapter registry is empty in
+    /// production (`with_adapters` is never called, so every chain answers
+    /// `UnsupportedChain`) — the outbound path refuses rather than accepting a
+    /// weakly-verified deposit. `relayer_worker_locks.rs` pins that.
+    ///
+    /// The danger is the order of events when someone wires the registry up:
+    /// the code compiles, the tests pass, the comment says the safe path
+    /// exists, and the weak path is what actually runs. This test makes the
+    /// gap explicit and breaks when either half of it changes.
+    #[test]
+    fn the_full_receipt_verification_path_is_still_unreachable_from_production() {
+        let adapter_src = include_str!("adapter.rs");
+        let worker_src = include_str!("../../relayer/worker.rs");
+
+        // `verify_deposit` exists and still wraps the full orchestrator.
+        assert!(
+            adapter_src.contains("pub fn verify_deposit("),
+            "verify_deposit was removed or renamed; update this pin"
+        );
+        assert!(
+            adapter_src.contains("verify_evm_receipt(proof)?"),
+            "verify_deposit no longer runs the full verify_evm_receipt \
+             orchestrator — the 'real safe path' claim in this file's header \
+             needs rewriting"
+        );
+
+        // The relayer reaches the adapter through the trait method only.
+        assert!(
+            worker_src.contains("verify_receipt_proof("),
+            "the relayer no longer calls verify_receipt_proof; re-derive which \
+             verification actually runs before touching this test"
+        );
+        assert!(
+            !worker_src.contains("verify_deposit"),
+            "the relayer now calls verify_deposit — the stronger path is live. \
+             Delete this test and pin the new behaviour instead"
+        );
+    }
 }
