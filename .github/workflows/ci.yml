@@ -876,6 +876,15 @@ jobs:
         run: |
           bash ./scripts/check-rejection-tests-assert-rejection.sh --self-test
           bash ./scripts/check-rejection-tests-assert-rejection.sh
+      # A .rs file no `mod` declares is never read by rustc: not linted, not
+      # covered, not tested -- while reading like live code in grep and in
+      # review. proto_bridge.rs sat there duplicating proto_conversions.rs,
+      # and bud-proof/src/memory_air.rs had drifted to an older p3-air API
+      # (row_slice vs current_slice) without anything noticing.
+      - name: yetim kaynak dosya var mi + kanarya
+        run: |
+          bash ./scripts/check-no-orphan-source-files.sh --self-test
+          bash ./scripts/check-no-orphan-source-files.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
