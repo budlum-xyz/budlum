@@ -52,6 +52,28 @@ jobs:
           set -euo pipefail
           cargo check --no-default-features --features pq-ml-dsa
           cargo clippy --no-default-features --features pq-ml-dsa --all-targets -- -D warnings
+          # `check` and `clippy` prove it compiles. They do not run a single
+          # signature. `pq-ml-dsa` is a consensus choice — `PQ_SCHEME_ID` is
+          # written into genesis and `validate_pq_scheme` refuses to start on a
+          # mismatch — so an operator can select it for mainnet, and until now
+          # no test had ever generated a key or verified a signature under it.
+          # The crypto module's own tests are the minimum bar for a signature
+          # scheme that gates validator registration.
+          cargo test --no-default-features --features pq-ml-dsa --lib crypto:: 2>&1 | tee /tmp/mldsa-tests.log
+          # Guard against the filter silently matching nothing: a `cargo test`
+          # that runs zero tests exits 0 and looks identical to a pass.
+          if grep -qE 'running 0 tests' /tmp/mldsa-tests.log; then
+            echo "HATA: pq-ml-dsa altinda 0 test kostu -> filtre eslesmedi (vacuous)"
+            exit 1
+          fi
+          # And that the ones that matter are among them. `crypto::` also
+          # matches PKCS#11 parsing and policy tests, which would pass without
+          # a single signature being produced.
+          for t in test_keypair_generation test_sign_and_verify test_deterministic_signature; do
+            grep -qE "primitives::tests::$t \.\.\. ok" /tmp/mldsa-tests.log \
+              || { echo "HATA: $t pq-ml-dsa altinda kosmadi/gecmedi"; exit 1; }
+          done
+          grep -E 'test result:' /tmp/mldsa-tests.log
       - name: Feature canary — --all-features REDDEDILMELI ()
         run: |
           set -euo pipefail
