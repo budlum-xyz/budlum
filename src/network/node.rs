@@ -417,14 +417,50 @@ impl Node {
         };
 
         // Lightweight Gossipsub for mobile
+        //
+        // The heartbeat interval is slowed from gossipsub's 1s default to save
+        // radio and CPU. Three other settings are counted in *heartbeat ticks*
+        // rather than seconds, so raising the interval silently stretches them
+        // by the same factor. That was not accounted for, and the drift was
+        // large:
+        //
+        //   check_explicit_peers_ticks = 300   5 min ->  50 min (mobile 150)
+        //   opportunistic_graft_ticks  =  60   1 min ->  10 min (mobile  30)
+        //
+        // Both govern mesh repair. The first is how long a dropped explicit
+        // peer — a bootstrap node or a configured sentry — goes unnoticed
+        // before reconnection is attempted; on a validator that is the link to
+        // the network it was deliberately pinned to. The second is how long a
+        // node keeps a mesh full of low-scoring peers before it looks for
+        // better ones, which is the mechanism that recovers from a partial
+        // eclipse.
+        //
+        // They are rescaled here so the wall-clock behaviour matches upstream's
+        // intent regardless of the heartbeat. Peer-score decay is NOT affected:
+        // it runs on `decay_interval` (1s), its own timer in `poll`, not on the
+        // heartbeat — verified in behaviour.rs at the pinned revision.
+        //
+        // `max_ihave_messages_heartbeat` (10) is left alone. Slower heartbeats
+        // make it stricter, not looser, and tightening an anti-flood budget is
+        // the safe direction to drift in.
+        let heartbeat = if mobile_mode {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(10)
+        };
+        // Preserve upstream's wall-clock intent: 300 ticks x 1s and 60 ticks x 1s.
+        let explicit_peer_ticks = (300 / heartbeat.as_secs()).max(1);
+        let opportunistic_ticks = (60 / heartbeat.as_secs()).max(1);
+
         let mut gossipsub_config_builder = gossipsub::ConfigBuilder::default();
+        gossipsub_config_builder
+            .heartbeat_interval(heartbeat)
+            .check_explicit_peers_ticks(explicit_peer_ticks)
+            .opportunistic_graft_ticks(opportunistic_ticks);
         if mobile_mode {
             gossipsub_config_builder
-                .heartbeat_interval(Duration::from_secs(30)) // Less frequent heartbeats
                 .history_length(3) // Smaller history
                 .history_gossip(3);
-        } else {
-            gossipsub_config_builder.heartbeat_interval(Duration::from_secs(10));
         }
 
         let gossipsub_config = gossipsub_config_builder

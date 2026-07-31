@@ -191,6 +191,65 @@ mod tests {
     ///
     /// A topic with no entry contributes nothing to a peer's score, so only
     /// the global penalties apply and per-topic delivery accounting is lost.
+    /// Tick-counted settings must be rescaled when the heartbeat is slowed.
+    ///
+    /// The node raises `heartbeat_interval` from gossipsub's 1s default to 10s
+    /// (30s on mobile) to save CPU and radio. Three settings are counted in
+    /// heartbeat *ticks*, not seconds, so that change stretched them by the
+    /// same factor without anyone asking for it:
+    ///
+    ///   check_explicit_peers_ticks = 300    5 min ->  50 min (mobile 150)
+    ///   opportunistic_graft_ticks  =  60    1 min ->  10 min (mobile  30)
+    ///
+    /// Both are mesh repair. The first decides how long a dropped explicit
+    /// peer — a bootstrap node, a configured sentry — goes unnoticed before a
+    /// reconnect is attempted; for a validator that is the link to the network
+    /// it was pinned to on purpose. The second decides how long a node keeps a
+    /// mesh of low-scoring peers before looking for better ones, which is the
+    /// mechanism that recovers from a partial eclipse. Fifty minutes of either
+    /// is not a tuning choice anybody made.
+    ///
+    /// Peer-score decay is deliberately absent from that list: it runs on
+    /// `decay_interval` (1s) from its own timer in `poll`, not on the
+    /// heartbeat. Verified in behaviour.rs at the pinned revision.
+    ///
+    /// `max_ihave_messages_heartbeat` is also left alone. A slower heartbeat
+    /// makes that budget stricter, not looser, and an anti-flood limit
+    /// drifting tighter is the safe direction.
+    #[test]
+    fn heartbeat_tick_counters_are_rescaled_with_the_heartbeat() {
+        assert!(
+            NODE_RS.contains("check_explicit_peers_ticks("),
+            "the explicit-peer recheck is back on gossipsub's 300-tick default. \
+             At a 10s heartbeat that is 50 minutes before a dropped bootstrap \
+             or sentry peer is retried, and 150 minutes on mobile"
+        );
+        assert!(
+            NODE_RS.contains("opportunistic_graft_ticks("),
+            "opportunistic grafting is back on the 60-tick default. At a 10s \
+             heartbeat a node sits on a low-scoring mesh for 10 minutes before \
+             looking for better peers — that is the partial-eclipse recovery path"
+        );
+
+        // The rescaling must be derived from the heartbeat, not typed in twice.
+        // A hardcoded tick count is correct for exactly one interval and wrong
+        // the moment mobile mode picks a different one.
+        assert!(
+            NODE_RS.contains("300 / heartbeat.as_secs()")
+                && NODE_RS.contains("60 / heartbeat.as_secs()"),
+            "the tick counts are no longer derived from the heartbeat. Upstream \
+             means 300s and 60s of wall clock; deriving them keeps both the \
+             normal and mobile paths honest with one expression"
+        );
+        assert!(
+            NODE_RS.contains(".max(1)"),
+            "the derived tick counts lost their floor. A heartbeat longer than \
+             the interval being scaled would round to zero ticks, and gossipsub \
+             treats a zero tick counter as 'every heartbeat' or never depending \
+             on the counter — neither is what was asked for"
+        );
+    }
+
     #[test]
     fn scored_topics_cover_what_the_node_publishes() {
         let at = NODE_RS

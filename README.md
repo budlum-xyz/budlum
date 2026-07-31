@@ -12,7 +12,7 @@ finality proofs and records cross-domain value transfer as a cryptographic fact 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
 [![Security Audit](https://github.com/budlum-xyz/budlum/actions/workflows/security-audit.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions/workflows/security-audit.yml)
 [![Determinism](https://github.com/budlum-xyz/budlum/actions/workflows/determinism.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions/workflows/determinism.yml)
-[![Tests](https://img.shields.io/badge/tests-1837%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-1838%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/budlum-xyz/budlum/main/.github/coverage-badge.json)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.94.0-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE.md)
