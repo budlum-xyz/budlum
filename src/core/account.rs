@@ -696,13 +696,14 @@ impl AccountState {
         {
             return Err("Lubot operator has open inference or dispute obligations".into());
         }
+        // Same governance parameter as validator unbonding. Passing the
+        // Compile-time `UNBONDING_EPOCHS` pinned the RoleId(8) bond to 7 epochs
+        // No matter what governance voted, while `begin_unbonding` (used by every
+        // Other role) honoured `RegistryParams::unbonding_epochs`. Two roles
+        // Unbonding on two different schedules from one parameter is a bug, not
+        // A policy: call the parameter-reading entry point.
         self.registry
-            .begin_unbonding_with_delay(
-                *address,
-                roles::LUBOT_OPERATOR,
-                self.epoch_index,
-                UNBONDING_EPOCHS,
-            )
+            .begin_unbonding(*address, roles::LUBOT_OPERATOR, self.epoch_index)
             .map_err(|error| error.to_string())
     }
 

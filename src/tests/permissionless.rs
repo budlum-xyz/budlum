@@ -343,6 +343,195 @@ fn registry_respects_custom_params() {
     assert_eq!(release, 5 + 21);
 }
 
+fn unstake_tx(from: Address, amount: u64, nonce: u64) -> Transaction {
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        amount,
+        1, // fee
+        nonce,
+        vec![],
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        TransactionType::Unstake,
+    );
+    tx.hash = tx.calculate_hash();
+    tx
+}
+
+/// The `Unstake` ledger path must queue the release using the governance
+/// Parameter, not a compile-time constant.
+///
+/// `unbonding_epochs` is in `GOVERNANCE_PARAMETER_WHITELIST` and
+/// `RegistryParams::validate` bounds it to 1..=100_000, so a vote to lengthen
+/// The window is a legitimate, accepted governance action. The executor read
+/// `core::account::UNBONDING_EPOCHS` (7) instead, so the vote changed the
+/// Registry's stored parameter and changed nothing about when stake actually
+/// Came back. Canary: pin the executor back to the constant and this fails
+/// With `release_epoch == 5 + 7` instead of `5 + 40`.
+#[test]
+fn unstake_release_epoch_follows_the_governance_parameter() {
+    use crate::registry::RegistryParams;
+
+    let staker = addr(0x51);
+    let mut state = funded_state(staker, 1_000_000);
+
+    // A window deliberately different from `UNBONDING_EPOCHS` (7) so the two
+    // Sources cannot be confused for each other.
+    let window = 40;
+    assert_ne!(
+        window,
+        crate::core::account::UNBONDING_EPOCHS,
+        "the test window must differ from the constant or it proves nothing"
+    );
+    let params = RegistryParams {
+        unbonding_epochs: window,
+        ..RegistryParams::default()
+    };
+    params.validate().expect("40 epochs is inside the bounds");
+    state.registry.set_params(params);
+
+    let amount = state.registry.params().min_stake + 500;
+    Executor::apply_transaction(&mut state, &stake_tx(staker, amount, 0)).unwrap();
+
+    state.epoch_index = 5;
+    Executor::apply_transaction(&mut state, &unstake_tx(staker, 400, 1)).unwrap();
+
+    let entry = state
+        .unbonding_queue
+        .iter()
+        .find(|e| e.address == staker)
+        .expect("unstake must queue an unbonding entry");
+    assert_eq!(
+        entry.release_epoch,
+        5 + window,
+        "release epoch must use the governance window, not UNBONDING_EPOCHS"
+    );
+}
+
+/// The RoleId(8) bond must unbond on the same governance window as every other
+/// Role. `begin_lubot_operator_unbonding` called `begin_unbonding_with_delay`
+/// With the hard-coded constant, so a governance vote moved every role's window
+/// Except this one. Canary: restore the `_with_delay(.., UNBONDING_EPOCHS)`
+/// Call and this fails with `7` instead of the configured window.
+#[test]
+fn lubot_operator_unbonding_follows_the_governance_parameter() {
+    use crate::registry::RegistryParams;
+
+    let operator = addr(0x52);
+    let mut state = funded_state(operator, 1_000_000);
+
+    let window = 33;
+    assert_ne!(window, crate::core::account::UNBONDING_EPOCHS);
+    let params = RegistryParams {
+        unbonding_epochs: window,
+        ..RegistryParams::default()
+    };
+    params.validate().expect("33 epochs is inside the bounds");
+    state.registry.set_params(params);
+
+    let bond = state.required_lubot_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
+    state
+        .bond_lubot_operator(&operator, bond, crate::core::transaction::DEFAULT_CHAIN_ID)
+        .expect("bond at the required floor");
+
+    state.epoch_index = 11;
+    let release = state
+        .begin_lubot_operator_unbonding(&operator)
+        .expect("an operator with no open obligations may unbond");
+    assert_eq!(
+        release,
+        11 + window,
+        "the RoleId(8) bond must use the same governance window as other roles"
+    );
+}
+
+/// `Unstake` must mirror the reduced stake into the permissionless registry.
+///
+/// `Stake` calls `sync_validator_registration`; `Unstake` did not. The registry
+/// Therefore reported the pre-unstake stake forever. That is not cosmetic:
+/// `registry.root()` is folded into the state root, `registry.is_active` gates
+/// The liveness and invalid-vote slashing paths, and `active_members` backs the
+/// RPC validator views. Canary: drop the `sync_validator_registration` call
+/// From the `Unstake` arm and this fails with the full pre-unstake stake.
+#[test]
+fn unstake_mirrors_the_reduced_stake_into_the_registry() {
+    let staker = addr(0x53);
+    let mut state = funded_state(staker, 1_000_000);
+
+    let amount = state.registry.params().min_stake + 5_000;
+    Executor::apply_transaction(&mut state, &stake_tx(staker, amount, 0)).unwrap();
+    assert_eq!(
+        state.registry.get(&staker, roles::VALIDATOR).unwrap().stake,
+        amount
+    );
+
+    Executor::apply_transaction(&mut state, &unstake_tx(staker, 3_000, 1)).unwrap();
+
+    let member = state
+        .registry
+        .get(&staker, roles::VALIDATOR)
+        .expect("still above the floor, so still registered");
+    assert_eq!(
+        member.stake,
+        amount - 3_000,
+        "registry stake must track the canonical validator stake after Unstake"
+    );
+    assert_eq!(
+        member.stake,
+        state.get_validator(&staker).unwrap().stake,
+        "the registry and the validator set must never disagree"
+    );
+}
+
+/// Unstaking below the floor must deactivate the registry membership.
+///
+/// Without the mirror, a validator could unstake down to dust (or to zero) and
+/// Keep an `Active` registry entry with its original stake — passing
+/// `registry.is_active` and appearing in `active_members` with stake it no
+/// Longer has.
+#[test]
+fn unstaking_below_the_floor_deactivates_the_registry_entry() {
+    let staker = addr(0x54);
+    let mut state = funded_state(staker, 1_000_000);
+
+    let floor = state.registry.params().min_stake;
+    let amount = floor + 100;
+    Executor::apply_transaction(&mut state, &stake_tx(staker, amount, 0)).unwrap();
+    assert!(state.registry.is_active(&staker, roles::VALIDATOR));
+
+    // Take the whole stake out.
+    Executor::apply_transaction(&mut state, &unstake_tx(staker, amount, 1)).unwrap();
+
+    assert_eq!(state.get_validator(&staker).unwrap().stake, 0);
+    assert!(
+        !state.registry.is_active(&staker, roles::VALIDATOR),
+        "a fully unstaked account must not remain an active registry validator"
+    );
+}
+
+/// The registry root is consensus state, so an `Unstake` must move it.
+///
+/// Before the mirror, applying `Unstake` left `registry.root()` byte-identical
+/// — the reduced stake was invisible to the state root. Two nodes, one of which
+/// Replayed history through a path that did sync, would compute different roots.
+#[test]
+fn unstake_changes_the_registry_root() {
+    let staker = addr(0x55);
+    let mut state = funded_state(staker, 1_000_000);
+
+    let amount = state.registry.params().min_stake + 5_000;
+    Executor::apply_transaction(&mut state, &stake_tx(staker, amount, 0)).unwrap();
+    let root_before = state.registry.root();
+
+    Executor::apply_transaction(&mut state, &unstake_tx(staker, 2_000, 1)).unwrap();
+
+    assert_ne!(
+        root_before,
+        state.registry.root(),
+        "reducing bonded stake must be visible in the registry root"
+    );
+}
+
 /// Regression guard: introducing the registry must not disturb PoA isolation.
 /// A staked (thus registry-registered) validator still has zero PoA authority.
 #[test]
