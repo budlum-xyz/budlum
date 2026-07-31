@@ -55,6 +55,38 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cargo audit --file Cargo.lock --deny warnings > "$ROOT_RAW_OUT" 2>&1 || true
 cargo audit --file budzero/Cargo.lock --deny warnings > "$BUDZERO_RAW_OUT" 2>&1 || true
 
+# Bulgular CI log'una BASILIR.
+#
+# Onceden basilmiyordu: `--json` gecici bir dosyaya, ham cikti da
+# `target/audit/DEPENDENCY_AUDIT.md`'ye gidiyordu ve o raporu hicbir workflow
+# artefakt olarak yuklemiyordu. Sonuc: is calisiyor, yesil doniyor ve tek bir
+# danisma adi log'da gorunmuyordu.
+#
+# Bu bos bir titizlik degil. `.quality/deny.toml` `unmaintained = "none"`
+# tutuyor ve bu kararin TEK gerekcesi soyle yazili: "Uyari gorunurlugu
+# kaybolmuyor: CI dependency-audit job'indaki cargo audit her kosuda
+# unmaintained uyarilarini raporlar." Raporlamiyordu. RUSTSEC-2024-0380
+# (`pqcrypto-dilithium` -- mainnet varsayilan PQ imza yolu) hicbir kosuda
+# gorunmedi, hicbir ignore listesinde de yok: sessizce gecti.
+echo ""
+echo "──────── cargo audit — root Cargo.lock ────────"
+cat "$ROOT_RAW_OUT"
+echo "──────── cargo audit — budzero/Cargo.lock ────────"
+cat "$BUDZERO_RAW_OUT"
+echo "──────────────────────────────────────────────────"
+echo ""
+
+# Danisma kimliklerini ozetle: log'u okuyan biri hangi uyarilarin bilindigini
+# tek bakista gorsun.
+ADVISORIES="$(grep -hoE 'RUSTSEC-[0-9]{4}-[0-9]{4}' "$ROOT_RAW_OUT" "$BUDZERO_RAW_OUT" | sort -u || true)"
+if [ -n "$ADVISORIES" ]; then
+    echo "[audit-deps] Bu agacta gorulen danismalar:"
+    printf '  - %s\n' $ADVISORIES
+else
+    echo "[audit-deps] Hicbir danisma bulunmadi."
+fi
+echo ""
+
 {
     echo "# Dependency Audit Raporu"
     echo ""

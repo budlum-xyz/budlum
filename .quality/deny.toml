@@ -84,11 +84,25 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = ["https://github.com/libp2p/rust-libp2p"]
 
 [advisories]
-# unmaintained = "none": eski davranışla aynı ("warn, fail yok"). Uyarı
-# görünürlüğü kaybolmuyor: CI dependency-audit job'ındaki cargo audit her
-# koşuda unmaintained uyarılarını raporlar. Bincode/pqcrypto-* gibi bilinen
-# öğeler org roadmap'te izleniyor; doğrudan kaynaklı yeni unmaintained
-# keşiflerde bu karar yeniden gözden geçirilir.
+# unmaintained = "none": eski davranışla aynı ("warn, fail yok").
+#
+# Bu kararın tek gerekçesi uyarıların başka bir yerde görünür kalmasıdır. Bu
+# satır 2026-07-31'e kadar "CI dependency-audit job'ındaki cargo audit her
+# koşuda unmaintained uyarılarını raporlar" diyordu ve bu DOĞRU DEĞİLDİ:
+# `scripts/audit-deps.sh` bulguları `--json` ile geçici bir dosyaya, ham çıktıyı
+# da `target/audit/DEPENDENCY_AUDIT.md`'ye yazıyordu; o raporu hiçbir workflow
+# artefakt olarak yüklemiyordu. İş yeşil dönüyor, log'da tek bir danışma adı
+# geçmiyordu.
+#
+# Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` — `pqcrypto-mldsa`
+# tarafından ikame edildi) mainnet varsayılan PQ imza yolunda duruyor, hiçbir
+# ignore listesinde kayıtlı değil ve hiçbir koşuda görünmedi. "Warn, fail yok"
+# kararı sessiz bir geçişe dönüşmüştü.
+#
+# `audit-deps.sh` artık iki lockfile'ın ham çıktısını log'a basıyor ve görülen
+# RUSTSEC kimliklerini tek listede özetliyor. Bu satırın gerekçesi ancak o
+# çıktı orada durduğu sürece geçerlidir — kaldırılırsa bu karar da yeniden
+# değerlendirilmelidir.
 unmaintained = "none"
 # unsound: doğrudan bağımlılıklarımızda unsound danışması = FAIL (sıkı).
 unsound = "workspace"
