@@ -124,6 +124,20 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Result<(), String>>,
     ),
+    /// Begin unbonding an independently-debited role bond (RELAYER, PROVER,
+    /// STORAGE_OPERATOR). Returns the release epoch.
+    BeginRoleBondUnbonding(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
+    /// Withdraw a matured role bond back into the account balance. Returns the
+    /// Withdrawn amount.
+    WithdrawRoleBond(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
     SubmitZkProof(
         crate::prover::ZkProofSubmission,
         oneshot::Sender<Result<crate::prover::ProofAcceptance, String>>,
@@ -1156,6 +1170,40 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::BondStorageOperator(address, amount, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Begin unbonding a RELAYER / PROVER / STORAGE_OPERATOR bond.
+    ///
+    /// These three bonds debit the account balance at bond time and had no exit
+    /// Path at all, so the debit was one-way. Returns the release epoch, which
+    /// Follows the `unbonding_epochs` governance parameter.
+    pub async fn begin_role_bond_unbonding(
+        &self,
+        address: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BeginRoleBondUnbonding(address, role, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Withdraw a matured RELAYER / PROVER / STORAGE_OPERATOR bond.
+    pub async fn withdraw_role_bond(
+        &self,
+        address: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::WithdrawRoleBond(address, role, tx))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -2407,6 +2455,17 @@ impl ChainActor {
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::BeginRoleBondUnbonding(address, role, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .begin_role_bond_unbonding(&address, role),
+                    );
+                }
+                ChainCommand::WithdrawRoleBond(address, role, res_tx) => {
+                    let _ = res_tx
+                        .send(self.blockchain.state.withdraw_role_bond(&address, role));
                 }
                 ChainCommand::SubmitZkProof(submission, res_tx) => {
                     let _ = res_tx.send(

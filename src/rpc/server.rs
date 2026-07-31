@@ -1394,6 +1394,60 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn registry_begin_role_bond_unbonding(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The exit for a bond posted through the legacy operator helpers must
+        // Sit behind the same listener as the entry.
+        self.require_operator("bud_registryBeginRoleBondUnbonding")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        let release_epoch = self
+            .chain
+            .begin_role_bond_unbonding(addr, role)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Role bond unbonding failed: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "roleId": role_id,
+            "status": "unbonding",
+            "releaseEpoch": release_epoch,
+        }))
+    }
+
+    async fn registry_withdraw_role_bond(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registryWithdrawRoleBond")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        let withdrawn = self
+            .chain
+            .withdraw_role_bond(addr, role)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Role bond withdrawal failed: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "roleId": role_id,
+            "status": "withdrawn",
+            "amount": withdrawn,
+        }))
+    }
+
     async fn submit_zk_proof(
         &self,
         submission: crate::prover::ZkProofSubmission,
