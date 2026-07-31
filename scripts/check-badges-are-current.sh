@@ -107,7 +107,7 @@ if [ "${1:-}" = "--self-test" ]; then
   # 4. A log with no parseable count must fail rather than pass by default.
   echo "warning: something unrelated" > "$tmp/garbage.log"
   if ( gate "$tmp/garbage.log" ) >/dev/null 2>&1; then
-    echo "VACUOUS GATE: an unparseable log was accepted!" >&2
+    echo "VACUOUS GATE: an unparsable log was accepted!" >&2
     exit 1
   fi
 
@@ -118,7 +118,7 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 1
   fi
 
-  echo "badge gate self-test OK: drift, red runs, empty and unparseable logs all rejected; a match passes."
+  echo "badge gate self-test OK: drift, red runs, empty and unparsable logs all rejected; a match passes."
   exit 0
 fi
 
