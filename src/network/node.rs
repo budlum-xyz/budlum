@@ -329,6 +329,19 @@ pub struct Node {
     pub mobile_mode: bool,
 }
 
+/// On-disk shape of the validator vote high-water marks.
+///
+/// Declared at module level rather than inside `load_vote_history`: an item
+/// After a statement is legal but confusing, since it is in scope for the
+/// Whole function including the lines above it.
+#[derive(serde::Deserialize)]
+struct VoteHistory {
+    #[serde(default)]
+    last_prevote_height: u64,
+    #[serde(default)]
+    last_precommit_height: u64,
+}
+
 impl Node {
     /// Take the `PeerManager` lock, recovering if it was poisoned.
     ///
@@ -604,7 +617,7 @@ impl Node {
         // Network on which the unsafe default is the right one.
         if self.vote_history_db.is_none() {
             self.vote_history_db = Some(std::path::PathBuf::from(
-                format!("./data/{:?}/vote-history.json", network).to_lowercase(),
+                format!("./data/{network:?}/vote-history.json").to_lowercase(),
             ));
         }
     }
@@ -631,6 +644,7 @@ impl Node {
     /// Inert because nothing ever set this path. Passing `None` keeps the
     /// In-memory behaviour, which is what the tests rely on;
     /// [`Self::apply_network_security`] fills in a default for a real network.
+    #[must_use]
     pub fn with_vote_history_db(mut self, path: Option<String>) -> Self {
         self.vote_history_db = path.map(std::path::PathBuf::from);
         self
@@ -710,13 +724,6 @@ impl Node {
         let Some(ref path) = self.vote_history_db else {
             return;
         };
-        #[derive(serde::Deserialize)]
-        struct VoteHistory {
-            #[serde(default)]
-            last_prevote_height: u64,
-            #[serde(default)]
-            last_precommit_height: u64,
-        }
         match std::fs::read_to_string(path) {
             Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
                 Ok(v) => {

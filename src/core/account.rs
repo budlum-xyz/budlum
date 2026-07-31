@@ -652,8 +652,8 @@ impl AccountState {
         Ok(amount)
     }
 
-    /// Begin unbonding an independently-debited role bond (RELAYER, PROVER,
-    /// STORAGE_OPERATOR).
+    /// Begin unbonding an independently-debited role bond (`RELAYER`,
+    /// `PROVER`, `STORAGE_OPERATOR`).
     ///
     /// `bond_relayer` / `bond_prover` / `bond_storage_operator` each debit the
     /// Account balance and register the bond, and `bond_relayer` documents that
@@ -664,6 +664,13 @@ impl AccountState {
     /// Down and nothing could ever put it back.
     ///
     /// The window is the governance parameter, matching every other role.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the role carries no independently debited bond
+    /// (`VALIDATOR` and `LUBOT_OPERATOR` each unwind through their own path),
+    /// Or when the registry refuses because the account is not registered for
+    /// The role or the bond is not `Active`.
     pub fn begin_role_bond_unbonding(
         &mut self,
         address: &Address,
@@ -682,6 +689,12 @@ impl AccountState {
     /// Or duplicate withdrawal cannot mint. `PermissionlessRegistry::withdraw`
     /// Rejects anything that is not `Unbonding` past its `release_epoch` and
     /// Removes the registration, so the bond cannot be withdrawn twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the role is not one this path owns, no bond is
+    /// Registered, the bond is still inside its unbonding window, or crediting
+    /// It back would overflow the account balance.
     pub fn withdraw_role_bond(
         &mut self,
         address: &Address,

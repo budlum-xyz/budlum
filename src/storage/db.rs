@@ -614,6 +614,11 @@ impl Storage {
     /// Proof until it has observed 100 fresh epochs.
     ///
     /// Same shape as `save_qc_blob`: keyed by epoch, flushed on write.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the snapshot cannot be encoded,
+    /// Written or flushed.
     pub fn save_validator_snapshot(
         &self,
         epoch: u64,
@@ -630,6 +635,12 @@ impl Storage {
     ///
     /// The caller re-applies its own retention bound, so a database holding
     /// More than the in-memory limit does not silently grow the live map.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the scan fails or a stored
+    /// Snapshot cannot be decoded. Keys whose epoch suffix does not parse are
+    /// Skipped rather than failing the whole load.
     pub fn load_validator_snapshots(
         &self,
     ) -> std::io::Result<Vec<(u64, crate::chain::finality::ValidatorSetSnapshot)>> {
@@ -652,6 +663,10 @@ impl Storage {
     }
 
     /// Drop a snapshot the caller has evicted from its retention window.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the removal cannot be flushed.
     pub fn delete_validator_snapshot(&self, epoch: u64) -> std::io::Result<()> {
         let key = format!("VALIDATOR_SNAPSHOT:{epoch}");
         self.db.remove(key.as_bytes())?;

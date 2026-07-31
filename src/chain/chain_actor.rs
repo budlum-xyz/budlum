@@ -1175,11 +1175,17 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Begin unbonding a RELAYER / PROVER / STORAGE_OPERATOR bond.
+    /// Begin unbonding a `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
     ///
     /// These three bonds debit the account balance at bond time and had no exit
     /// Path at all, so the debit was one-way. Returns the release epoch, which
     /// Follows the `unbonding_epochs` governance parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error as a string when the role carries no
+    /// Independently debited bond, the account is not registered for it, or
+    /// The bond is not `Active`. Also errors if the chain actor has stopped.
     pub async fn begin_role_bond_unbonding(
         &self,
         address: crate::core::address::Address,
@@ -1194,7 +1200,13 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Withdraw a matured RELAYER / PROVER / STORAGE_OPERATOR bond.
+    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error as a string when the bond is still inside
+    /// Its unbonding window, was already withdrawn, or belongs to a role this
+    /// Path does not own. Also errors if the chain actor has stopped.
     pub async fn withdraw_role_bond(
         &self,
         address: crate::core::address::Address,

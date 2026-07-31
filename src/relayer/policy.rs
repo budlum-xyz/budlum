@@ -24,7 +24,7 @@
 //!
 //! The sender pays `tx.fee`, and that fee is credited to the **block
 //! Producer**, not to the relayer that will spend external gas executing the
-//! Request. So relaying is unpaid work: a relayer bonds (RoleId 3), burns gas
+//! Request. So relaying is unpaid work: a relayer bonds (`RoleId` 3), burns gas
 //! On Ethereum, and earns nothing from the chain for it. `max_fee` is not
 //! Consulted — the flat-fee protocol requires `max_fee == fee` — so a user
 //! Cannot express a ceiling either, and nothing binds the relayer to a price

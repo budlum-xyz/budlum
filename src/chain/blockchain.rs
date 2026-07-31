@@ -36,6 +36,12 @@ use tracing::{error, info, warn};
 
 pub const MAX_REORG_DEPTH: usize = 100;
 pub const FINALITY_DEPTH: usize = 50;
+/// Validator set snapshots retained, in memory and on disk.
+///
+/// One owner for the bound: `new_with_genesis` trims the set it loads from
+/// Disk, and `record_validator_snapshot` trims as it grows. Two literals
+/// Would let a reload keep more than the live path is willing to hold.
+pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 #[cfg(test)]
 pub const EPOCH_LENGTH: u64 = 10;
 
@@ -468,7 +474,6 @@ impl Blockchain {
         // Build may have run with a larger bound, or a write failed between
         // Eviction and delete. Trim to the same limit `record_validator_snapshot`
         // Enforces so the in-memory map has one owner of its size.
-        const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
         while validator_snapshots.len() > MAX_VALIDATOR_SNAPSHOTS {
             let Some((evicted, _)) = validator_snapshots.pop_first() else {
                 break;

@@ -209,7 +209,7 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Begin unbonding a RELAYER (3), PROVER (4) or STORAGE_OPERATOR (5) bond.
+    /// Begin unbonding a `RELAYER` (3), `PROVER` (4) or `STORAGE_OPERATOR` (5) bond.
     ///
     /// These three bonds debit the account balance when they are posted and had
     /// No exit path: no command, no RPC, no transaction type. The bond was
@@ -226,7 +226,7 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Withdraw a matured RELAYER / PROVER / STORAGE_OPERATOR bond back into the
+    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond back into the
     /// Account balance. Fails while the bond is still inside its unbonding
     /// Window, and the registration is removed so it cannot be withdrawn twice.
     #[method(name = "bud_registryWithdrawRoleBond")]
