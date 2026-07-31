@@ -42,6 +42,11 @@ pub struct RelayerWorker {
     /// Empty by default: a worker with no adapter can observe relay requests
     /// but cannot produce a result for any of them.
     adapters: Arc<AdapterRegistry>,
+    /// Where the relay cursor is persisted between runs.
+    ///
+    /// `None` keeps the previous in-memory behaviour, which is what the tests
+    /// and any embedded use rely on; a deployed relayer sets this.
+    cursor_path: Option<std::path::PathBuf>,
 }
 
 impl RelayerWorker {
@@ -51,6 +56,7 @@ impl RelayerWorker {
             relayer_address,
             relayer_keypair: None,
             adapters: Arc::new(AdapterRegistry::new()),
+            cursor_path: None,
         }
     }
 
@@ -71,6 +77,71 @@ impl RelayerWorker {
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
         self
+    }
+
+    /// Persist the relay cursor to `path` so a restart resumes where it left
+    /// off.
+    ///
+    /// Without this the cursor starts at whatever `get_finalized_height()`
+    /// returns at boot, and every relay request finalized while the worker was
+    /// down is skipped. The user has already paid the fee and the request sits
+    /// on chain forever with nothing acting on it — a silent service failure,
+    /// not a loud one.
+    #[must_use]
+    pub fn with_cursor_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.cursor_path = path;
+        self
+    }
+
+    /// Read the persisted cursor, or `None` when there is nothing to resume.
+    ///
+    /// A malformed or unreadable file is treated as absent and logged rather
+    /// than fatal: refusing to start would turn a corrupt cursor into an
+    /// outage, and resuming from the chain tip is the behaviour this had
+    /// before the file existed.
+    fn load_cursor(&self) -> Option<u64> {
+        let path = self.cursor_path.as_ref()?;
+        match std::fs::read_to_string(path) {
+            Ok(text) => match text.trim().parse::<u64>() {
+                Ok(height) => {
+                    info!(height, path = %path.display(), "Relayer: resuming from persisted cursor");
+                    Some(height)
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %path.display(),
+                          "Relayer: cursor file is not a height; resuming from the chain tip");
+                    None
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                warn!(error = %e, path = %path.display(),
+                      "Relayer: cursor unreadable; resuming from the chain tip");
+                None
+            }
+        }
+    }
+
+    /// Write the cursor after a batch of heights has been relayed.
+    ///
+    /// Written *after* the relays, never before: a cursor ahead of the work is
+    /// how requests get skipped, which is the bug this exists to prevent. The
+    /// cost of the opposite ordering is a repeated relay attempt after a crash,
+    /// which the chain-side replay protection already refuses.
+    fn save_cursor(&self, height: u64) {
+        let Some(path) = self.cursor_path.as_ref() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(error = %e, path = %path.display(), "Relayer: cannot create cursor directory");
+                return;
+            }
+        }
+        if let Err(e) = std::fs::write(path, height.to_string()) {
+            warn!(error = %e, path = %path.display(), height,
+                  "Relayer: failed to persist cursor; a restart will skip relayed heights");
+        }
     }
 
     pub async fn run(self) {
@@ -100,7 +171,13 @@ impl RelayerWorker {
         // continue; }` then held forever on the shorter fork — the relayer
         // went quiet with nothing in the logs. Tracking a monotonic value
         // removes that state entirely.
-        let mut relayed_through = self.chain.get_finalized_height().await;
+        // Resume from the persisted cursor when there is one. Starting from the
+        // current finalized height means every request finalized while this
+        // worker was down is skipped silently.
+        let mut relayed_through = match self.load_cursor() {
+            Some(persisted) => persisted,
+            None => self.chain.get_finalized_height().await,
+        };
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -127,6 +204,7 @@ impl RelayerWorker {
                 }
             }
             relayed_through = finalized;
+            self.save_cursor(relayed_through);
         }
     }
 
