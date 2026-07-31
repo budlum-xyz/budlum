@@ -25,16 +25,33 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// VerifyMerkle/VerifyInference gate is now
-// Hard-coded to FULL activation on mainnet. Removed env var
-// BUDLUM_VERIFY_MERKLE which was a configuration attack vector —
-// A node operator could set it to "false" and disable Merkle
-// Verification, breaking state root trust.
-// Staged rollout should use governance/genesis config, not env vars.
+// Mainnet decoding uses the staged-rollout defaults, not full activation.
+//
+// The env var `BUDLUM_VERIFY_MERKLE` was removed for a good reason: an
+// operator could set it to "false" and turn off Merkle verification, which is
+// a configuration attack vector. But the replacement went past the target. It
+// hard-coded `MainnetActivation::full()`, which sets every gate to true and
+// makes `MainnetActivation::default()` unreachable from the only place that
+// consults it.
+//
+// The defaults are not decorative. `verify_merkle_enabled: false` is there
+// because the path verification is unfinished, and
+// `verify_inference_enabled: false` is there because, in the words of
+// `docs/AI_VERIFICATION_STATUS.md`, there is no verification circuit behind
+// the opcode at all and it returns a hard-coded zero. README states plainly
+// that VerifyMerkle is "gated off in production until 64-depth soundness is
+// proven". With `full()`, both opcodes decode and execute on mainnet, and
+// nothing downstream stops them — the execute arm has no second check.
+//
+// So the fix is `default()`, not `full()`. Turning a gate on is then a source
+// change with a reviewer, which is what "staged rollout should use
+// governance/genesis config, not env vars" was asking for; an env var is
+// still not consulted anywhere.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
-        // Always full activation — no env var override
-        let activation = bud_isa::MainnetActivation::full();
+        // Staged-rollout defaults — no env var override, and no blanket
+        // activation either.
+        let activation = bud_isa::MainnetActivation::default();
         bud_isa::Instruction::decode_for_mainnet(raw, activation).map_err(|e| e.to_string())
     } else {
         #[cfg(test)]

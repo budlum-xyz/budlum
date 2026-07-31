@@ -16,17 +16,43 @@ pub struct ZkVmReceipt {
 pub struct ZkVmExecutor;
 
 impl ZkVmExecutor {
+    /// Execute contract bytecode under the staged-rollout opcode gates.
+    ///
+    /// This used to pass `mainnet = false`, which skipped
+    /// `decode_for_mainnet` entirely and decoded under `IsaProfile::Production`
+    /// with no activation check at all. `ContractCall` in the executor is the
+    /// one path that runs bytecode straight out of a user transaction, so the
+    /// gates that hold `VerifyMerkle` and `VerifyInference` closed were not
+    /// applied to the only input an attacker controls.
+    ///
+    /// The gate is not a network property — it tracks whether the verification
+    /// behind an opcode is finished, and it is not finished on any network. So
+    /// the gated decode is unconditional here rather than keyed off a chain id
+    /// the executor does not have.
     pub fn execute_bytecode(bytecode: &[u8], gas_limit: u64) -> Result<ZkVmReceipt, String> {
-        Self::execute_bytecode_inner(bytecode, gas_limit, false)
+        Self::execute_bytecode_inner(bytecode, gas_limit, true)
     }
 
-    /// F2: Execute bytecode in mainnet mode where VerifyMerkle is gated
-    /// Behind `MainnetActivation::full`.
+    /// Explicitly gated execution. Same behaviour as `execute_bytecode`; kept
+    /// as a separate name because call sites use it to say the gating is the
+    /// point, and because removing it would be a silent API break.
     pub fn execute_bytecode_mainnet(
         bytecode: &[u8],
         gas_limit: u64,
     ) -> Result<ZkVmReceipt, String> {
         Self::execute_bytecode_inner(bytecode, gas_limit, true)
+    }
+
+    /// Ungated execution for local tooling and tests.
+    ///
+    /// Decodes under the testing profile and applies no activation gate. Never
+    /// reachable from transaction execution.
+    #[cfg(test)]
+    pub fn execute_bytecode_ungated(
+        bytecode: &[u8],
+        gas_limit: u64,
+    ) -> Result<ZkVmReceipt, String> {
+        Self::execute_bytecode_inner(bytecode, gas_limit, false)
     }
 
     fn execute_bytecode_inner(
@@ -279,9 +305,93 @@ mod tests {
         assert!(receipt.proof_bytes > 0);
     }
 
-    /// F2: Mainnet mode should gate VerifyMerkle behind MainnetActivation.
-    /// In mainnet mode with full activation, VerifyMerkle is allowed.
-    /// This verifies the wire is connected (not dead code).
+    /// The gated opcodes must be refused on the path a transaction reaches.
+    ///
+    /// `ContractCall` in the executor calls `execute_bytecode` with bytecode
+    /// taken straight out of `tx.data`. That call used to pass
+    /// `mainnet = false`, which skipped `decode_for_mainnet` and decoded under
+    /// `IsaProfile::Production` with no activation check — so the gates holding
+    /// `VerifyMerkle` and `VerifyInference` closed did not apply to the one
+    /// input an attacker chooses.
+    ///
+    /// `VerifyInference` matters most of the two: per
+    /// `docs/AI_VERIFICATION_STATUS.md` there is no verification circuit behind
+    /// it and it returns a hard-coded zero, so an accepted execution reads as a
+    /// successful verification.
+    #[test]
+    fn contract_call_bytecode_cannot_reach_a_gated_opcode() {
+        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let program = vec![
+                Instruction {
+                    opcode,
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0,
+                }
+                .encode(),
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ];
+            let bytecode: Vec<u8> = program
+                .into_iter()
+                .flat_map(|instruction| instruction.to_le_bytes())
+                .collect();
+
+            let err = ZkVmExecutor::execute_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+                .expect_err(&format!(
+                    "{opcode:?} decoded on the ContractCall path; the staged-rollout \
+                     gate is not applied to user bytecode"
+                ));
+            assert!(
+                err.contains("activation") || err.contains("Activation"),
+                "{opcode:?} was refused for the wrong reason: {err}"
+            );
+        }
+    }
+
+    /// The gate reads its defaults, not a blanket activation.
+    ///
+    /// `decode_instruction` hard-coded `MainnetActivation::full()`, which set
+    /// every flag true and left `MainnetActivation::default()` unreachable from
+    /// the only place that consults it. The defaults are load-bearing:
+    /// `verify_merkle_enabled: false` because the path verification is
+    /// unfinished, `verify_inference_enabled: false` because there is no
+    /// circuit at all.
+    #[test]
+    fn the_staged_rollout_defaults_are_the_ones_in_force() {
+        let d = bud_isa::MainnetActivation::default();
+        assert!(
+            !d.verify_merkle_enabled,
+            "VerifyMerkle is open by default; README states it stays gated until \
+             64-depth soundness is proven"
+        );
+        assert!(
+            !d.verify_inference_enabled,
+            "VerifyInference is open by default while its verification returns a \
+             hard-coded zero"
+        );
+
+        let vm_src = include_str!("../../budzero/bud-vm/src/lib.rs");
+        assert!(
+            vm_src.contains("MainnetActivation::default()"),
+            "the VM no longer decodes against the staged-rollout defaults"
+        );
+        assert!(
+            !vm_src.contains("MainnetActivation::full()"),
+            "the VM is back on full activation, which makes every gate in \
+             MainnetActivation::default() dead code"
+        );
+    }
+
+    /// Basic opcodes keep working under the gate — otherwise the two tests
+    /// above would be satisfied by a VM that refuses everything.
     #[test]
     fn f2_mainnet_activation_wire_connected() {
         // Build a simple program: Load + Halt (no VerifyMerkle).
@@ -309,9 +419,10 @@ mod tests {
             .flat_map(|instruction| instruction.to_le_bytes())
             .collect();
 
-        // Non-mainnet mode should work.
-        let receipt_normal = ZkVmExecutor::execute_bytecode(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
-            .expect("normal mode should work");
+        // Ungated decoding still works.
+        let receipt_normal =
+            ZkVmExecutor::execute_bytecode_ungated(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+                .expect("normal mode should work");
         assert!(receipt_normal.steps > 0);
 
         // Mainnet mode with full activation should also work for basic opcodes.
@@ -565,14 +676,22 @@ mod tests {
             .flat_map(|instruction| instruction.encode().to_le_bytes())
             .collect();
 
-        // Mainnet mode without activation: VerifyInference should fail
-        // (mainnet gate blocks it).
-        let result = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT);
-        // The VM should either reject the opcode or the execution should fail
-        // Because VerifyInference is not enabled in default mainnet mode.
+        // Mainnet mode without activation: VerifyInference must be refused.
+        //
+        // The assertion used to read `result.is_err() || gas_used > 0`, which
+        // is satisfied by every outcome a run can have — a rejection satisfies
+        // the left side, and any execution that does work at all satisfies the
+        // right. It passed while the VM was hard-coded to full activation and
+        // the opcode was running, which is exactly the state it claimed to
+        // rule out.
+        let err = ZkVmExecutor::execute_bytecode_mainnet(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT)
+            .expect_err(
+                "VerifyInference decoded under the mainnet gate; it is closed by \
+                 default because there is no verification circuit behind it",
+            );
         assert!(
-            result.is_err() || result.unwrap().gas_used > 0,
-            "VerifyInference in mainnet mode without activation must be gated"
+            err.contains("activation") || err.contains("Activation"),
+            "VerifyInference was refused, but not by the activation gate: {err}"
         );
     }
 }
