@@ -317,3 +317,75 @@ impl RelayerWorker {
 /// verifier was calibrated for. A one-block confirmation is not a
 /// confirmation on any chain this bridge targets.
 const CONFIRMATION_DEPTH: u32 = crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
+
+#[cfg(test)]
+mod cursor_persistence {
+    use super::*;
+
+    fn worker_with(path: Option<std::path::PathBuf>) -> RelayerWorker {
+        // The cursor helpers touch only `cursor_path`, so a worker built
+        // without a live chain actor is enough to exercise them.
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32])).with_cursor_path(path)
+    }
+
+    /// A cursor written by one run must be read by the next.
+    ///
+    /// Without this the worker resumes from the chain tip, and every relay
+    /// request finalized while it was down is skipped — the user has paid and
+    /// nothing acts on the request.
+    #[test]
+    fn a_persisted_cursor_is_read_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relay-cursor");
+        let w = worker_with(Some(path.clone()));
+
+        assert_eq!(w.load_cursor(), None, "nothing persisted yet");
+        w.save_cursor(4_211);
+        assert_eq!(
+            w.load_cursor(),
+            Some(4_211),
+            "a restart must resume from the persisted height"
+        );
+    }
+
+    /// The cursor only ever moves forward as work completes.
+    #[test]
+    fn a_later_cursor_replaces_an_earlier_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relay-cursor");
+        let w = worker_with(Some(path));
+
+        w.save_cursor(10);
+        w.save_cursor(20);
+        assert_eq!(w.load_cursor(), Some(20));
+    }
+
+    /// A corrupt cursor falls back to the chain tip instead of refusing to
+    /// start.
+    ///
+    /// Turning an unreadable file into an outage would be a worse failure than
+    /// the one this fixes.
+    #[test]
+    fn a_corrupt_cursor_is_ignored_rather_than_fatal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relay-cursor");
+        std::fs::write(&path, "not-a-height").expect("write");
+
+        let w = worker_with(Some(path));
+        assert_eq!(
+            w.load_cursor(),
+            None,
+            "a malformed cursor must read as absent, not panic"
+        );
+    }
+
+    /// Without a configured path the worker keeps its previous in-memory
+    /// behaviour, so tests and embedded uses are unaffected.
+    #[test]
+    fn no_path_means_no_persistence() {
+        let w = worker_with(None);
+        w.save_cursor(99);
+        assert_eq!(w.load_cursor(), None);
+    }
+}
