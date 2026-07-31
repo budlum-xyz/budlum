@@ -2294,7 +2294,8 @@ mod tests {
             let mut state = AccountState::new();
             let err = state.apply_registry_parameter_update(key, probe).err();
             assert!(
-                !err.as_deref().is_some_and(|e| e.contains("unknown registry parameter")),
+                !err.as_deref()
+                    .is_some_and(|e| e.contains("unknown registry parameter")),
                 "whitelisted parameter {key} is not handled by \
                  apply_registry_parameter_update: {err:?}"
             );

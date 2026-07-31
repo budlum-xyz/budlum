@@ -363,9 +363,15 @@ fn full_internal_relay_cycle_lock_mint() {
         params.bridge_relayer_min_fee,
     )
     .expect("100 units must cover the default floor");
-    assert_eq!(expected_fee, 10, "1% of 100 is 1, so the floor of 10 applies");
+    assert_eq!(
+        expected_fee, 10,
+        "1% of 100 is 1, so the floor of 10 applies"
+    );
     assert_eq!(expected_recipient, 90);
-    assert_eq!(bc.state.get_balance(&recipient()), expected_recipient as u64);
+    assert_eq!(
+        bc.state.get_balance(&recipient()),
+        expected_recipient as u64
+    );
     assert_eq!(
         bc.state.get_balance(&relayer),
         100_000_000 + expected_fee as u64

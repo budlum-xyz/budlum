@@ -721,9 +721,15 @@ mod bridge_fee_split {
     /// An amount that cannot cover the floor is refused, not relayed at a loss.
     #[test]
     fn an_amount_below_the_floor_is_refused() {
-        assert!(split_bridge_fee(10, PPM_1_PCT, 10).is_err(), "equal to floor");
+        assert!(
+            split_bridge_fee(10, PPM_1_PCT, 10).is_err(),
+            "equal to floor"
+        );
         assert!(split_bridge_fee(1, PPM_1_PCT, 10).is_err(), "below floor");
-        assert!(split_bridge_fee(11, PPM_1_PCT, 10).is_ok(), "just above floor");
+        assert!(
+            split_bridge_fee(11, PPM_1_PCT, 10).is_ok(),
+            "just above floor"
+        );
     }
 
     /// The recipient is never credited more than arrived, and never nothing.

@@ -214,8 +214,8 @@ mod tests {
     /// backwards compatible, and the `# Adding a field` note above applies.
     #[test]
     fn registry_params_serialized_shape_is_pinned() {
-        let encoded = bincode::serialize(&RegistryParams::default())
-            .expect("RegistryParams is serializable");
+        let encoded =
+            bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         // 12 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
         assert_eq!(
             encoded.len(),
@@ -239,7 +239,10 @@ mod tests {
         p.bridge_relayer_fee_ppm = PPM_DENOMINATOR + 1;
         assert!(p.validate().is_err(), "above 100% must be refused");
         p.bridge_relayer_fee_ppm = PPM_DENOMINATOR - 1;
-        assert!(p.validate().is_ok(), "just under 100% is a policy choice, not an error");
+        assert!(
+            p.validate().is_ok(),
+            "just under 100% is a policy choice, not an error"
+        );
     }
 
     /// The default rate is the one the hardcoded call sites used, so this

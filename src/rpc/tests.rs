@@ -78,7 +78,10 @@ mod rpc_tests {
             value, base_fee,
             "the estimate must be the fee floor the chain enforces, not 21000"
         );
-        assert_ne!(value, 21_000, "21000 is Ethereum's number, not this chain's");
+        assert_ne!(
+            value, 21_000,
+            "21000 is Ethereum's number, not this chain's"
+        );
     }
 
     /// A caller that already priced its transaction above the floor gets its

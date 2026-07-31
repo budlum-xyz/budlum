@@ -1430,7 +1430,11 @@ impl BudlumApiServer for RpcServer {
             .begin_role_bond_unbonding(addr, role)
             .await
             .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Role bond unbonding failed: {e}"), None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Role bond unbonding failed: {e}"),
+                    None::<()>,
+                )
             })?;
         Ok(serde_json::json!({
             "address": Self::to_0x_hash(addr.to_hex()),
@@ -1456,7 +1460,11 @@ impl BudlumApiServer for RpcServer {
             .withdraw_role_bond(addr, role)
             .await
             .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Role bond withdrawal failed: {e}"), None::<()>)
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Role bond withdrawal failed: {e}"),
+                    None::<()>,
+                )
             })?;
         Ok(serde_json::json!({
             "address": Self::to_0x_hash(addr.to_hex()),

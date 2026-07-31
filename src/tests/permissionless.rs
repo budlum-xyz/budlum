@@ -553,7 +553,11 @@ fn a_relayer_bond_can_be_unbonded_and_withdrawn() {
     let mut state = funded_state(relayer, 10_000);
 
     state.bond_relayer(&relayer, bond).expect("bond succeeds");
-    assert_eq!(state.get_balance(&relayer), 10_000 - bond, "bond is debited");
+    assert_eq!(
+        state.get_balance(&relayer),
+        10_000 - bond,
+        "bond is debited"
+    );
     assert!(state.registry.is_active(&relayer, roles::RELAYER));
 
     let release = state
@@ -621,7 +625,10 @@ fn a_role_bond_cannot_be_withdrawn_before_it_matures() {
     let err = state
         .withdraw_role_bond(&relayer, roles::RELAYER)
         .expect_err("an immature bond must not be withdrawable");
-    assert!(err.contains("Unbonding") || err.contains("unbonding"), "got: {err}");
+    assert!(
+        err.contains("Unbonding") || err.contains("unbonding"),
+        "got: {err}"
+    );
     assert_eq!(
         state.get_balance(&relayer),
         10_000 - bond,

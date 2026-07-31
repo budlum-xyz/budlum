@@ -6223,7 +6223,11 @@ fn an_empty_account_cannot_afford_an_opener_bond() {
 
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     let opener = Address::from([0x42u8; 32]);
-    assert_eq!(bc.state.get_balance(&opener), 0, "opener starts with nothing");
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        0,
+        "opener starts with nothing"
+    );
 
     let err = bc
         .debit_opener_bond(&opener, 999_999)

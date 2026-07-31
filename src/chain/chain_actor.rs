@@ -2473,8 +2473,7 @@ impl ChainActor {
                     );
                 }
                 ChainCommand::WithdrawRoleBond(address, role, res_tx) => {
-                    let _ = res_tx
-                        .send(self.blockchain.state.withdraw_role_bond(&address, role));
+                    let _ = res_tx.send(self.blockchain.state.withdraw_role_bond(&address, role));
                 }
                 ChainCommand::SubmitZkProof(submission, res_tx) => {
                     let _ = res_tx.send(

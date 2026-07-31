@@ -124,9 +124,7 @@ mod tests {
     /// Shared setup: an operator with a funded balance and one active deal
     /// Ending at `deal_end_epoch`. Returns (blockchain, deal_id, operator,
     /// Bond, balance_after_bond).
-    fn blockchain_with_one_deal(
-        deal_end_epoch: u64,
-    ) -> (Blockchain, u64, Address, u64, u64) {
+    fn blockchain_with_one_deal(deal_end_epoch: u64) -> (Blockchain, u64, Address, u64, u64) {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
@@ -196,8 +194,7 @@ mod tests {
     /// Assertion.
     #[test]
     fn an_expired_deal_returns_the_operator_bond() {
-        let (mut blockchain, _deal_id, operator, bond, after_bond) =
-            blockchain_with_one_deal(10);
+        let (mut blockchain, _deal_id, operator, bond, after_bond) = blockchain_with_one_deal(10);
         assert!(bond > 0, "the fixture must actually lock a bond");
 
         let (expired, returned) = blockchain.finalize_expired_storage_deals(10).unwrap();
@@ -214,8 +211,7 @@ mod tests {
     /// A deal that has not reached its end epoch must keep its bond locked.
     #[test]
     fn a_deal_before_its_end_epoch_keeps_its_bond() {
-        let (mut blockchain, _deal_id, operator, _bond, after_bond) =
-            blockchain_with_one_deal(100);
+        let (mut blockchain, _deal_id, operator, _bond, after_bond) = blockchain_with_one_deal(100);
 
         let (expired, returned) = blockchain.finalize_expired_storage_deals(50).unwrap();
 
@@ -232,8 +228,7 @@ mod tests {
     /// Is no longer `Active`, so a second maintenance pass cannot mint.
     #[test]
     fn an_expired_deal_does_not_return_its_bond_twice() {
-        let (mut blockchain, _deal_id, operator, bond, after_bond) =
-            blockchain_with_one_deal(10);
+        let (mut blockchain, _deal_id, operator, bond, after_bond) = blockchain_with_one_deal(10);
 
         blockchain.finalize_expired_storage_deals(10).unwrap();
         let once = blockchain.state.get_balance(&operator);
@@ -254,8 +249,7 @@ mod tests {
     /// `DealStatus::Slashed`, and only `Active` deals are expirable.
     #[test]
     fn a_slashed_deal_does_not_also_get_its_bond_returned() {
-        let (mut blockchain, deal_id, operator, _bond, after_bond) =
-            blockchain_with_one_deal(10);
+        let (mut blockchain, deal_id, operator, _bond, after_bond) = blockchain_with_one_deal(10);
 
         blockchain
             .state
@@ -269,7 +263,10 @@ mod tests {
 
         let (expired, returned) = blockchain.finalize_expired_storage_deals(20).unwrap();
 
-        assert_eq!(expired, 0, "a slashed deal is not Active and must not expire");
+        assert_eq!(
+            expired, 0,
+            "a slashed deal is not Active and must not expire"
+        );
         assert_eq!(returned, 0);
         assert_eq!(
             blockchain.state.get_balance(&operator),
@@ -285,8 +282,7 @@ mod tests {
     fn a_returned_bond_is_recorded_as_an_economics_event() {
         use crate::chain::blockchain::StorageEconomicsEventKind;
 
-        let (mut blockchain, deal_id, operator, bond, _after_bond) =
-            blockchain_with_one_deal(10);
+        let (mut blockchain, deal_id, operator, bond, _after_bond) = blockchain_with_one_deal(10);
         let before = blockchain.storage_economics_events().len();
 
         blockchain.finalize_expired_storage_deals(10).unwrap();
