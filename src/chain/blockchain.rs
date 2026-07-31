@@ -43,6 +43,10 @@ pub const EPOCH_LENGTH: u64 = 10;
 pub enum StorageEconomicsEventKind {
     OperatorRewardAccrued,
     OperatorBondSlashed,
+    /// A deal reached `deal_end_epoch` without being slashed and its operator
+    /// Bond was returned. The counterpart to `OperatorBondSlashed`: without it
+    /// The only recorded end-of-life for a bond was losing it.
+    OperatorBondReturned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5123,6 +5127,82 @@ impl Blockchain {
             self.persist_storage_economics_state()?;
         }
         Ok((finalized, total_slashed))
+    }
+
+    /// Return the operator bond for every deal that reached its
+    /// `deal_end_epoch` without being slashed.
+    ///
+    /// `open_deal` debits `economics.operator_bond` from the operator's
+    /// Balance and `StorageRegistry::expire_deal` was written to hand the
+    /// Amount back — its doc-comment says it "returns the operator bond amount
+    /// To be refunded by the blockchain accounting layer". No production path
+    /// Ever called it. `expire_deal` appears only in tests; the sole other
+    /// Writer of `DealStatus::Expired` is `prune_content`, reached when an NFT
+    /// Is burned, and that one does not return the bond either.
+    ///
+    /// So an honest operator that served a deal for its whole term never got
+    /// Its bond back. The slash path was fully wired
+    /// (`finalize_missed_storage_challenges` -> `apply_storage_bond_slash`),
+    /// The settle path was not: the only recorded end-of-life for a bond was
+    /// Losing it.
+    ///
+    /// Returns the number of deals expired and the total amount returned.
+    pub fn finalize_expired_storage_deals(
+        &mut self,
+        current_epoch: u64,
+    ) -> Result<(u32, u64), String> {
+        let matured: Vec<(u64, Address)> = self
+            .state
+            .storage_registry
+            .all_deals()
+            .iter()
+            .filter(|deal| deal.is_active() && deal.deal_end_epoch <= current_epoch)
+            .map(|deal| (deal.deal_id, deal.operator))
+            .collect();
+
+        let mut expired = 0u32;
+        let mut total_returned = 0u64;
+
+        for (deal_id, operator) in matured {
+            // `expire_deal` re-checks the epoch and the status, and returns 0
+            // For a deal that is not `Active`, so a double call cannot pay the
+            // Bond out twice.
+            let bond = match self
+                .state
+                .storage_registry
+                .expire_deal(deal_id, current_epoch)
+            {
+                Ok(bond) => bond,
+                Err(error) => {
+                    tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
+                    continue;
+                }
+            };
+            expired += 1;
+            if bond == 0 {
+                continue;
+            }
+            // Checked credit: the debit at `open_deal` was a plain
+            // `saturating_sub`, so the return must not silently cap either.
+            self.state
+                .try_add_balance(&operator, bond)
+                .map_err(|error| format!("storage bond return overflow for {operator}: {error}"))?;
+            total_returned = total_returned.saturating_add(bond);
+            self.storage_economics_events.push(StorageEconomicsEvent {
+                epoch: current_epoch,
+                deal_id,
+                operator,
+                amount: bond,
+                balance_effect: bond,
+                kind: StorageEconomicsEventKind::OperatorBondReturned,
+            });
+        }
+
+        if expired > 0 {
+            self.persist_storage_registry()?;
+            self.persist_storage_economics_state()?;
+        }
+        Ok((expired, total_returned))
     }
 
     /// Accumulate a verified storage proof hash into `pending_storage_root`.
