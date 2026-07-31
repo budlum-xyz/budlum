@@ -8,6 +8,7 @@
 //! `Default` impl) so introducing the registry does not change current
 //! Economic behaviour.
 
+use crate::chain::fee_market::PPM_DENOMINATOR;
 use crate::core::chain_config::FIXED_POINT_SCALE;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,24 @@ pub struct RegistryParams {
     /// Operator/governance explicitly enables it — the mechanism is fully wired
     /// And tested, but never auto-activates. Set to `true` to enable.
     pub liveness_slashing_enabled: bool,
+    /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
+    /// arriving amount.
+    ///
+    /// This is what lets someone bridge *into* Budlum without holding a single
+    /// $BUD: the fee is taken from the asset arriving, never from a Budlum
+    /// balance the user does not have yet.
+    pub bridge_relayer_fee_ppm: u64,
+    /// Floor on that cut, in base units of the arriving asset.
+    ///
+    /// A pure percentage rounds to zero on small transfers — at 1% every
+    /// transfer under 100 units paid the relayer nothing, so an attacker could
+    /// split a large bridge into 99-unit pieces and move it for free while
+    /// relayers carried the external gas. The floor is what makes each relayed
+    /// message cost something regardless of size.
+    ///
+    /// A transfer that cannot cover the floor is rejected rather than relayed
+    /// at a loss.
+    pub bridge_relayer_min_fee: u64,
 }
 
 impl RegistryParams {
@@ -96,6 +115,12 @@ impl RegistryParams {
         }
         if self.malicious_slash_ratio_fixed > FIXED_POINT_SCALE {
             return Err("malicious_slash_ratio_fixed cannot exceed FIXED_POINT_SCALE".into());
+        }
+        // A bridge fee at or above 100% would take the whole arriving amount
+        // and credit the recipient nothing, which is indistinguishable from
+        // theft by governance parameter.
+        if self.bridge_relayer_fee_ppm >= PPM_DENOMINATOR {
+            return Err("bridge_relayer_fee_ppm must be below 100%".into());
         }
         Ok(())
     }
@@ -145,6 +170,14 @@ impl Default for RegistryParams {
             // Caught within one epoch. Governance-tunable per network.
             max_invalid_votes_per_epoch: 20,
             liveness_slashing_enabled: true,
+            // 1% — the rate the three hardcoded call sites already used, now
+            // stated once and tunable.
+            bridge_relayer_fee_ppm: 10_000,
+            // Matches `slashing_report_fee` / `proof_submission_fee` (1% of the
+            // default min_stake). Small enough not to matter for a real
+            // transfer, large enough that splitting a bridge into dust costs
+            // more than doing it in one message.
+            bridge_relayer_min_fee: 10,
         }
     }
 }
@@ -156,6 +189,31 @@ mod tests {
     #[test]
     fn registry_params_validate_accepts_defaults() {
         assert!(RegistryParams::default().validate().is_ok());
+    }
+
+    /// A bridge fee of 100% or more would credit the recipient nothing.
+    #[test]
+    fn bridge_fee_at_or_above_one_hundred_percent_is_refused() {
+        let mut p = RegistryParams::default();
+        p.bridge_relayer_fee_ppm = PPM_DENOMINATOR;
+        assert!(p.validate().is_err(), "100% bridge fee must be refused");
+        p.bridge_relayer_fee_ppm = PPM_DENOMINATOR + 1;
+        assert!(p.validate().is_err(), "above 100% must be refused");
+        p.bridge_relayer_fee_ppm = PPM_DENOMINATOR - 1;
+        assert!(p.validate().is_ok(), "just under 100% is a policy choice, not an error");
+    }
+
+    /// The default rate is the one the hardcoded call sites used, so this
+    /// change is not a silent repricing of the bridge.
+    #[test]
+    fn default_bridge_fee_matches_the_rate_it_replaced() {
+        let p = RegistryParams::default();
+        assert_eq!(p.bridge_relayer_fee_ppm, 10_000, "10_000 ppm == 1%");
+        // 1% of 1_000_000 base units, the old `amount * 1 / 100`.
+        assert_eq!(
+            u128::from(p.bridge_relayer_fee_ppm) * 1_000_000 / u128::from(PPM_DENOMINATOR),
+            10_000
+        );
     }
 
     #[test]
