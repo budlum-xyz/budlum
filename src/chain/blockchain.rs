@@ -6062,7 +6062,7 @@ fn finality_rescan_starts_at_a_real_checkpoint() {
     for tip in 0..40u64 {
         let first_probe = (tip / interval) * interval;
         assert!(
-            first_probe % interval == 0,
+            first_probe.is_multiple_of(interval),
             "probe {first_probe} for tip {tip} is not a checkpoint height"
         );
         assert!(
