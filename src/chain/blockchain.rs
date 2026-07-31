@@ -426,10 +426,59 @@ impl Blockchain {
         );
 
         let mut validator_snapshots = BTreeMap::new();
+
+        // Reload the persisted sets before replay fills in the recent ones.
+        //
+        // Replay only reconstructs epochs from `start_index` onward, and
+        // `start_index` jumps to the state snapshot's height when one exists —
+        // So on a node that restores from a snapshot, replay reconstructs
+        // Almost nothing and every older epoch was simply gone.
+        // `require_validator_snapshot` then refused every past-epoch
+        // Certificate and fault proof until the node had observed a fresh
+        // Window of epochs. Failing closed is correct; failing closed on every
+        // Restart is an outage.
+        //
+        // Loaded first so the replay below overwrites any stored entry with
+        // The one it recomputes: replay is authoritative for the range it
+        // Covers.
+        if let Some(ref store) = storage {
+            match store.load_validator_snapshots() {
+                Ok(stored) => {
+                    let count = stored.len();
+                    for (epoch, snapshot) in stored {
+                        validator_snapshots.insert(epoch, snapshot);
+                    }
+                    if count > 0 {
+                        info!("Restored {count} validator set snapshots from disk");
+                    }
+                }
+                Err(error) => warn!(
+                    "Could not read persisted validator snapshots: {error}. \
+                     Past-epoch verification will refuse until the window refills."
+                ),
+            }
+        }
+
         validator_snapshots.insert(
             state.epoch_index,
             Self::build_validator_snapshot_from_state(state.epoch_index, &state, chain_id),
         );
+
+        // The stored set can outnumber the live retention window — an older
+        // Build may have run with a larger bound, or a write failed between
+        // Eviction and delete. Trim to the same limit `record_validator_snapshot`
+        // Enforces so the in-memory map has one owner of its size.
+        const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
+        while validator_snapshots.len() > MAX_VALIDATOR_SNAPSHOTS {
+            let Some((evicted, _)) = validator_snapshots.pop_first() else {
+                break;
+            };
+            if let Some(ref store) = storage {
+                if let Err(error) = store.delete_validator_snapshot(evicted) {
+                    warn!("Failed to trim stored validator snapshot {evicted}: {error}");
+                }
+            }
+        }
 
         for block in chain_vec.iter().skip(start_index) {
             let preceding = &chain_vec[..block.index as usize];
@@ -634,7 +683,7 @@ impl Blockchain {
             verified_qc_blobs: BTreeMap::new(),
             max_qc_blobs: 1000, // Keep last 1000 QC blobs
             validator_snapshots,
-            max_validator_snapshots: 100, // Keep last 100 epoch snapshots
+            max_validator_snapshots: MAX_VALIDATOR_SNAPSHOTS,
             pending_finality_certs: BTreeMap::new(),
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
@@ -2379,14 +2428,39 @@ impl Blockchain {
 
     fn record_validator_snapshot(&mut self, epoch: u64) {
         let snapshot = self.build_validator_snapshot(epoch);
-        self.validator_snapshots.insert(epoch, snapshot);
+        self.validator_snapshots.insert(epoch, snapshot.clone());
+
+        // Persist alongside the in-memory copy. Without this the map was pure
+        // Memory, so a restart dropped every historical set and
+        // `require_validator_snapshot` refused every past-epoch check until
+        // The node had observed a fresh window's worth of epochs. Failing
+        // Closed is right; failing closed on every restart is an outage.
+        //
+        // A failed write is logged, not fatal: losing a snapshot degrades to
+        // The pre-existing behaviour (refuse to verify that epoch), whereas
+        // Aborting block application would turn a disk hiccup into a halt.
+        if let Some(store) = &self.storage {
+            if let Err(error) = store.save_validator_snapshot(epoch, &snapshot) {
+                warn!("Failed to persist validator snapshot for epoch {epoch}: {error}");
+            }
+        }
 
         // Keep a bounded history while preserving the newest snapshot. A loop
         // Enforces the actual entry count; epoch arithmetic alone is off by one
         // Because the current epoch is inclusive.
         let retention = self.max_validator_snapshots.max(1);
         while self.validator_snapshots.len() > retention {
-            self.validator_snapshots.pop_first();
+            let Some((evicted, _)) = self.validator_snapshots.pop_first() else {
+                break;
+            };
+            // Evict from disk too, or the stored set grows without bound and a
+            // Restart would reload epochs the live node has deliberately
+            // Forgotten.
+            if let Some(store) = &self.storage {
+                if let Err(error) = store.delete_validator_snapshot(evicted) {
+                    warn!("Failed to evict validator snapshot for epoch {evicted}: {error}");
+                }
+            }
         }
     }
 
@@ -5447,6 +5521,95 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>(),
             vec![3, 4, 5]
+        );
+    }
+
+    /// A validator set recorded before a restart must still be there after it.
+    ///
+    /// `validator_snapshots` was an in-memory `BTreeMap` that nothing wrote to
+    /// Disk — the doc on `validator_snapshot_for_epoch` said so outright:
+    /// "keeps 100 epochs and is never written to disk, so every historical
+    /// Epoch falls into the fallback after a restart".
+    ///
+    /// Once #56 made that fallback fail closed, the restart behaviour stopped
+    /// Being "verify against the wrong set" and became "refuse to verify at
+    /// All". Correct, and an outage: a restarted node could not check any
+    /// Past-epoch certificate or fault proof until it had observed a fresh
+    /// Window of epochs.
+    ///
+    /// Canary: drop the `save_validator_snapshot` call from
+    /// `record_validator_snapshot` and this fails — the reopened node finds
+    /// Nothing.
+    #[test]
+    fn validator_snapshots_survive_a_restart() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("vsnap.db").to_string_lossy().to_string();
+
+        let recorded_hash = {
+            let storage = Storage::new(&db_path).unwrap();
+            let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+            bc.state.add_validator(Address::from([7u8; 32]), 5_000);
+            bc.state.epoch_index = 42;
+            bc.record_validator_snapshot(42);
+            bc.validator_snapshots
+                .get(&42)
+                .expect("just recorded")
+                .set_hash
+                .clone()
+        };
+
+        let reopened = Blockchain::new(
+            Arc::new(PoWEngine::new(0)),
+            Some(Storage::new(&db_path).unwrap()),
+            45262,
+            None,
+        );
+
+        let restored = reopened
+            .validator_snapshots
+            .get(&42)
+            .expect("epoch 42 must survive the restart");
+        assert_eq!(
+            restored.set_hash, recorded_hash,
+            "the restored set must be the one that was recorded, not a rebuild"
+        );
+    }
+
+    /// Eviction must reach the disk too.
+    ///
+    /// Persisting without evicting turns a bounded map into an unbounded
+    /// Table: the live node forgets an epoch, the next restart loads it back,
+    /// And the stored set grows for the life of the chain.
+    #[test]
+    fn evicting_a_validator_snapshot_also_removes_it_from_disk() {
+        let dir = tempdir().unwrap();
+        let db_path = dir
+            .path()
+            .join("vsnap-evict.db")
+            .to_string_lossy()
+            .to_string();
+
+        {
+            let storage = Storage::new(&db_path).unwrap();
+            let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+            bc.max_validator_snapshots = 3;
+            for epoch in 1..=5 {
+                bc.state.epoch_index = epoch;
+                bc.record_validator_snapshot(epoch);
+            }
+            assert_eq!(bc.validator_snapshots.len(), 3);
+        }
+
+        let store = Storage::new(&db_path).unwrap();
+        let stored: Vec<u64> = store
+            .load_validator_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|(epoch, _)| epoch)
+            .collect();
+        assert!(
+            !stored.contains(&1) && !stored.contains(&2),
+            "evicted epochs must not linger on disk, got {stored:?}"
         );
     }
 

@@ -604,6 +604,61 @@ impl Storage {
         self.db.flush()?;
         Ok(())
     }
+    /// Persist the validator set for `epoch`.
+    ///
+    /// `Blockchain::validator_snapshots` keeps the last 100 epochs in memory
+    /// And was never written anywhere. After a restart every historical epoch
+    /// Falls through `validator_snapshot_for_epoch` and
+    /// `require_validator_snapshot` refuses the whole check — a node that
+    /// Restarts can no longer verify any past-epoch certificate or fault
+    /// Proof until it has observed 100 fresh epochs.
+    ///
+    /// Same shape as `save_qc_blob`: keyed by epoch, flushed on write.
+    pub fn save_validator_snapshot(
+        &self,
+        epoch: u64,
+        snapshot: &crate::chain::finality::ValidatorSetSnapshot,
+    ) -> std::io::Result<()> {
+        let key = format!("VALIDATOR_SNAPSHOT:{epoch}");
+        let val = encode(snapshot)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Every persisted validator snapshot, oldest epoch first.
+    ///
+    /// The caller re-applies its own retention bound, so a database holding
+    /// More than the in-memory limit does not silently grow the live map.
+    pub fn load_validator_snapshots(
+        &self,
+    ) -> std::io::Result<Vec<(u64, crate::chain::finality::ValidatorSetSnapshot)>> {
+        let mut out: Vec<(u64, crate::chain::finality::ValidatorSetSnapshot)> = Vec::new();
+        for item in self.db.scan_prefix(b"VALIDATOR_SNAPSHOT:") {
+            let (key, val) = item?;
+            let key = String::from_utf8_lossy(&key).to_string();
+            let Some(epoch) = key
+                .rsplit(':')
+                .next()
+                .and_then(|raw| raw.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let snapshot = decode::<crate::chain::finality::ValidatorSetSnapshot>(&val)?;
+            out.push((epoch, snapshot));
+        }
+        out.sort_by_key(|(epoch, _)| *epoch);
+        Ok(out)
+    }
+
+    /// Drop a snapshot the caller has evicted from its retention window.
+    pub fn delete_validator_snapshot(&self, epoch: u64) -> std::io::Result<()> {
+        let key = format!("VALIDATOR_SNAPSHOT:{epoch}");
+        self.db.remove(key.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+
     pub fn save_finality_cert(
         &self,
         height: u64,
