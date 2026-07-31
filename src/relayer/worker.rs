@@ -73,6 +73,28 @@ impl RelayerWorker {
     /// Without this, [`Self::build_verified_result`] refuses every chain: the
     /// worker has no way to observe an external chain, so it has nothing
     /// truthful to report.
+    ///
+    /// # Nothing in production calls this
+    ///
+    /// `main.rs` builds the worker with `RelayerWorker::new(...)` and a cursor
+    /// Path, and never calls `with_adapters`. The registry is therefore empty
+    /// On every deployed node, and `build_verified_result` answers
+    /// `AdapterError::UnsupportedChain` for **all eight** `ExternalChain`
+    /// Variants — Ethereum included, even though `EvmChainAdapter` exists and
+    /// Is the one real implementation.
+    ///
+    /// So outbound relay is not "Ethereum-only" as the adapter set suggests;
+    /// It is off. That is the safe direction to be wrong in — the failure is a
+    /// Refusal, not a forged result — but it means the outbound path has never
+    /// Run against a live chain, and no test covers a populated registry
+    /// Outside `chain_adapter.rs`'s stub.
+    ///
+    /// Wiring it needs configuration the node does not currently carry:
+    /// `EvmChainAdapter::new` wants the bridge contract address and the
+    /// `Deposit` topic0, and `RelayerConfig` has no field for either.
+    /// `test_default()` supplies a zero address, which would let a node
+    /// Advertise Ethereum support while pointing at nothing — worse than
+    /// Refusing.
     #[must_use]
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
