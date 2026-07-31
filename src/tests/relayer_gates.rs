@@ -1,10 +1,10 @@
 // (kullanıcı kararı Q-A 2026-07-16) L1 relayer proof
-// Kriptografik doğrulama + M5 hub anti-sybil ücret + M4 BNS ücret regresyonu.
+// Kriptografik doğrulama + M5 budlumxyz anti-sybil ücret + M4 BNS ücret regresyonu.
 //
 // Bu dosya, "boş kontrol yeterli" döneminin bittiğini kodlar:
 // - RelayerResult artık bincode(MerkleProof) + result-fact leaf + root
 //   Anchoring gerektirir (executor::TransactionType::RelayerResult kolu).
-// - HubRegisterApp artık HUB_REGISTER_MIN_FEE zorunluluğu taşır.
+// - BudlumxyzRegisterApp artık BUDLUMXYZ_REGISTER_MIN_FEE zorunluluğu taşır.
 // - BnsRegister ücret kontrolü (H1/executor) regresyon olarak mühürlenir.
 
 use crate::core::account::AccountState;
@@ -143,7 +143,7 @@ fn test_relayer_result_empty_proof_and_zero_root_regressions() {
     assert!(err.contains("External state root cannot be zero"));
 }
 
-fn hub_tx(amount: u64, fee: u64) -> Transaction {
+fn budlumxyz_tx(amount: u64, fee: u64) -> Transaction {
     Transaction::new_with_chain_id(
         relayer_addr(),
         Address::zero(),
@@ -152,9 +152,9 @@ fn hub_tx(amount: u64, fee: u64) -> Transaction {
         0,
         Vec::new(),
         CHAIN_ID,
-        TransactionType::HubRegisterApp {
+        TransactionType::BudlumxyzRegisterApp {
             name: "my-dapp".to_string(),
-            category: crate::hub::types::AppCategory::Other,
+            category: crate::budlumxyz::types::AppCategory::Other,
             website_url: "https://example.org".to_string(),
             manifest_id: None,
         },
@@ -165,21 +165,24 @@ fn hub_tx(amount: u64, fee: u64) -> Transaction {
 fn test_hub_register_app_below_min_fee_rejected() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 10_000);
-    let tx = hub_tx(crate::hub::HUB_REGISTER_MIN_FEE - 1, 1);
+    let tx = budlumxyz_tx(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE - 1, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
     assert!(err.contains("App registration requires"));
-    assert!(state.hub.apps.is_empty(), "reddedilen kayıt düşmemeli");
+    assert!(
+        state.budlumxyz.apps.is_empty(),
+        "reddedilen kayıt düşmemeli"
+    );
 }
 
 #[test]
 fn test_hub_register_app_exact_min_fee_deducted_and_registered() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
-    let tx = hub_tx(crate::hub::HUB_REGISTER_MIN_FEE, 1);
+    let tx = budlumxyz_tx(crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE, 1);
     Executor::apply_transaction(&mut state, &tx).expect("min fee must pass");
-    assert_eq!(state.hub.apps.len(), 1, "app kaydedilmeli");
+    assert_eq!(state.budlumxyz.apps.len(), 1, "app kaydedilmeli");
     // H1 deseni: tam fee + tam registration cost, görevlası değil.
-    let expected = 1_000 - 1 - crate::hub::HUB_REGISTER_MIN_FEE;
+    let expected = 1_000 - 1 - crate::budlumxyz::BUDLUMXYZ_REGISTER_MIN_FEE;
     assert_eq!(state.get_balance(&relayer_addr()), expected);
 }
 

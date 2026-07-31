@@ -19,7 +19,7 @@ flowchart TB
   Chain --> Net[P2P / Gossip]
   Exec --> ZK[BudZero / BudZKVM]
   State --> XD[Cross-domain / bridge state]
-  State --> Apps[BNS - B.U.D. - Pollen - Hub - SocialFi - AI]
+  State --> Apps[BNS - B.U.D. - Pollen - budlumxyz - SocialFi - AI]
 ```
 
 ## 2. Consensus-domain izolasyonu
@@ -1247,7 +1247,7 @@ flowchart LR
   Guard[Luminance clamp i128 -> safe range] --> Luminance
 ```
 
-## 41. Hub app registry
+## 41. budlumxyz app registry
 
 ```mermaid
 flowchart LR

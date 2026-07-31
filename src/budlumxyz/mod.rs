@@ -1,28 +1,28 @@
 pub mod types;
 
+use crate::budlumxyz::types::{AppCategory, AppRecord, BudlumxyzError};
 use crate::core::address::Address;
-use crate::hub::types::{AppCategory, AppRecord, HubError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// / M5: anti-sybil minimum app kayıt ücreti (BNS `base_cost` ile uyumlu).
-/// Executor, `HubRegisterApp` tx'lerinde bu tutarı `tx.amount` üzerinden ZORUNLU
+/// Executor, `BudlumxyzRegisterApp` tx'lerinde bu tutarı `tx.amount` üzerinden ZORUNLU
 /// Tutar ve tam olarak bu kadarını düşer (H1 "exact cost" deseniyle simetrik).
-pub const HUB_REGISTER_MIN_FEE: u64 = 100;
+pub const BUDLUMXYZ_REGISTER_MIN_FEE: u64 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HubRegistry {
+pub struct BudlumxyzRegistry {
     /// App_id -> record
     pub apps: BTreeMap<u64, AppRecord>,
     pub next_app_id: u64,
     /// Authorized governors who can mark apps as governance-verified.
     /// Empty set = devnet mode (any caller accepted). Production must populate
-    /// Via governance action (e.g. GovernanceAction::AddHubGovernor).
+    /// Via governance action (e.g. GovernanceAction::AddBudlumxyzGovernor).
     #[serde(default)]
     pub authorized_governors: std::collections::HashSet<Address>,
 }
 
-impl HubRegistry {
+impl BudlumxyzRegistry {
     pub fn new() -> Self {
         Self::default()
     }
@@ -59,10 +59,10 @@ impl HubRegistry {
         caller: &Address,
         new_url: Option<String>,
         new_manifest: Option<crate::storage::content_id::ContentId>,
-    ) -> Result<(), HubError> {
-        let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;
+    ) -> Result<(), BudlumxyzError> {
+        let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
         if &app.developer != caller {
-            return Err(HubError::NotDeveloper);
+            return Err(BudlumxyzError::NotDeveloper);
         }
         if let Some(url) = new_url {
             app.website_url = url;
@@ -77,17 +77,21 @@ impl HubRegistry {
     ///
     /// This does **not** set `verified` (DAO/governance badge).
     /// UI/indexers must not treat `developer_attested` as third-party audit.
-    pub fn attest_app_as_developer(&mut self, id: u64, caller: &Address) -> Result<(), HubError> {
-        let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;
+    pub fn attest_app_as_developer(
+        &mut self,
+        id: u64,
+        caller: &Address,
+    ) -> Result<(), BudlumxyzError> {
+        let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
         if &app.developer != caller {
-            return Err(HubError::NotDeveloper);
+            return Err(BudlumxyzError::NotDeveloper);
         }
         app.developer_attested = true;
         Ok(())
     }
 
     /// Back-compat alias: self-verify == developer attestation only.
-    pub fn verify_app(&mut self, id: u64, caller: &Address) -> Result<(), HubError> {
+    pub fn verify_app(&mut self, id: u64, caller: &Address) -> Result<(), BudlumxyzError> {
         self.attest_app_as_developer(id, caller)
     }
 
@@ -106,11 +110,11 @@ impl HubRegistry {
         &mut self,
         id: u64,
         caller: &Address,
-    ) -> Result<(), HubError> {
+    ) -> Result<(), BudlumxyzError> {
         if !self.authorized_governors.is_empty() && !self.authorized_governors.contains(caller) {
-            return Err(HubError::NotAuthorized);
+            return Err(BudlumxyzError::NotAuthorized);
         }
-        let app = self.apps.get_mut(&id).ok_or(HubError::NotFound)?;
+        let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
         app.verified = true;
         Ok(())
     }
@@ -120,7 +124,7 @@ impl HubRegistry {
     }
 }
 
-impl HubRegistry {
+impl BudlumxyzRegistry {
     pub fn is_empty(&self) -> bool {
         self.apps.is_empty() && self.authorized_governors.is_empty() && self.next_app_id == 0
     }
@@ -171,7 +175,7 @@ mod tests {
 
     #[test]
     fn register_and_attest_flow() {
-        let mut reg = HubRegistry::new();
+        let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let id = reg.register_app(
             "TestApp".into(),
@@ -189,7 +193,7 @@ mod tests {
         let other = Address::from([9u8; 32]);
         assert!(matches!(
             reg.attest_app_as_developer(id, &other),
-            Err(HubError::NotDeveloper)
+            Err(BudlumxyzError::NotDeveloper)
         ));
         // Authorized_governors is empty → anyone can verify.
         // Add a different governor so dev is NOT authorized.
@@ -197,19 +201,19 @@ mod tests {
         reg.authorized_governors.insert(gov);
         assert!(matches!(
             reg.mark_verified_by_governance(id, &dev),
-            Err(HubError::NotAuthorized)
+            Err(BudlumxyzError::NotAuthorized)
         ));
         assert!(!reg.apps[&id].verified);
         assert!(matches!(
             reg.update_app(id, &other, Some("x".into()), None),
-            Err(HubError::NotDeveloper)
+            Err(BudlumxyzError::NotDeveloper)
         ));
         assert_eq!(reg.list_apps().len(), 1);
     }
 
     #[test]
     fn governance_verify_requires_authorized_governor() {
-        let mut reg = HubRegistry::new();
+        let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let gov = Address::from([5u8; 32]);
         let id = reg.register_app("G".into(), dev, AppCategory::Other, "u".into(), None, 1);
@@ -218,13 +222,13 @@ mod tests {
         assert!(reg.apps[&id].verified);
         assert!(matches!(
             reg.mark_verified_by_governance(id, &dev),
-            Err(HubError::NotAuthorized)
+            Err(BudlumxyzError::NotAuthorized)
         ));
     }
 
     #[test]
     fn update_by_developer_succeeds() {
-        let mut reg = HubRegistry::new();
+        let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let id = reg.register_app("U".into(), dev, AppCategory::DeFi, "u".into(), None, 1);
         assert!(reg
@@ -236,7 +240,7 @@ mod tests {
 
     #[test]
     fn root_changes_when_mutable_metadata_changes() {
-        let mut reg = HubRegistry::new();
+        let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let id = reg.register_app(
             "Rooted".into(),
@@ -259,7 +263,7 @@ mod tests {
 
     #[test]
     fn root_changes_when_governor_set_changes() {
-        let mut reg = HubRegistry::new();
+        let mut reg = BudlumxyzRegistry::new();
         let root_before = reg.root();
         reg.authorized_governors.insert(Address::from([8u8; 32]));
         assert_ne!(root_before, reg.root());

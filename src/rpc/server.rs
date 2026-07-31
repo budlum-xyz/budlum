@@ -2588,16 +2588,16 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    async fn hub_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let apps = self.chain.hub_get_apps().await;
+    async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let apps = self.chain.budlumxyz_get_apps().await;
         Ok(serde_json::json!(apps))
     }
 
-    async fn hub_prepare_register(
+    async fn budlumxyz_prepare_register(
         &self,
         developer: String,
         name: String,
-        category: crate::hub::types::AppCategory,
+        category: crate::budlumxyz::types::AppCategory,
         website_url: String,
         manifest_id: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -2639,7 +2639,7 @@ impl BudlumApiServer for RpcServer {
             signature: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V4,
-            tx_type: crate::core::transaction::TransactionType::HubRegisterApp {
+            tx_type: crate::core::transaction::TransactionType::BudlumxyzRegisterApp {
                 name,
                 category,
                 website_url,

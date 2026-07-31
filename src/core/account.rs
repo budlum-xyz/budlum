@@ -236,7 +236,7 @@ pub struct AccountState {
     pub bns_registry: crate::bns::BnsRegistry,
     pub nft_registry: crate::socialfi::NftRegistry,
     pub marketplace: crate::pollen::MarketplaceRegistry,
-    pub hub: crate::hub::HubRegistry,
+    pub budlumxyz: crate::budlumxyz::BudlumxyzRegistry,
     pub storage_registry: StorageRegistry,
     pub ai_registry: crate::ai::registry::AiRegistry,
     /// Parallel note subtree (privacy transfers).
@@ -328,7 +328,7 @@ impl AccountState {
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
             message_registry: CrossDomainMessageRegistry::new(),
-            hub: crate::hub::HubRegistry::new(),
+            budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -370,7 +370,7 @@ impl AccountState {
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
             marketplace: crate::pollen::MarketplaceRegistry::new(),
-            hub: crate::hub::HubRegistry::new(),
+            budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -427,7 +427,7 @@ impl AccountState {
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
             marketplace: crate::pollen::MarketplaceRegistry::new(),
-            hub: crate::hub::HubRegistry::new(),
+            budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
@@ -499,7 +499,7 @@ impl AccountState {
             bns_registry: snapshot.bns_registry.clone().unwrap_or_default(),
             nft_registry: snapshot.nft_registry.clone().unwrap_or_default(),
             marketplace: snapshot.marketplace.clone().unwrap_or_default(),
-            hub: snapshot.hub.clone().unwrap_or_default(),
+            budlumxyz: snapshot.budlumxyz.clone().unwrap_or_default(),
             governance: snapshot.governance.clone().unwrap_or_default(),
             external_roots: snapshot.external_roots.clone().unwrap_or_default(),
             base_fee: snapshot.base_fee,
@@ -1893,9 +1893,9 @@ impl AccountState {
         }
         final_hasher.update(b"pollen_v1");
         final_hasher.update(self.marketplace.root());
-        if !self.hub.is_empty() {
+        if !self.budlumxyz.is_empty() {
             final_hasher.update(b"hub_v1");
-            final_hasher.update(self.hub.root());
+            final_hasher.update(self.budlumxyz.root());
         }
         if self.registry.has_non_default_state() {
             final_hasher.update(b"registry_v1");
@@ -2439,13 +2439,13 @@ mod tests {
 
     #[test]
     fn hub_registry_mutation_changes_account_state_root() {
-        use crate::hub::types::AppCategory;
+        use crate::budlumxyz::types::AppCategory;
 
         let mut state = AccountState::new();
         let dev = test_addr_from_byte(9u8);
         state.add_balance(&dev, 1);
         let root_before = state.calculate_state_root();
-        let app_id = state.hub.register_app(
+        let app_id = state.budlumxyz.register_app(
             "HubApp".into(),
             dev,
             AppCategory::Infrastructure,
@@ -2457,7 +2457,7 @@ mod tests {
         assert_ne!(root_before, root_after_register);
 
         state
-            .hub
+            .budlumxyz
             .update_app(app_id, &dev, Some("https://new.example.bud".into()), None)
             .unwrap();
         let root_after_update = state.calculate_state_root();
@@ -2550,10 +2550,10 @@ mod tests {
     fn non_account_state_changes_root_even_when_accounts_empty() {
         let mut state = AccountState::new();
         let root_before = state.calculate_state_root();
-        state.hub.register_app(
+        state.budlumxyz.register_app(
             "HeadlessState".into(),
             test_addr_from_byte(8u8),
-            crate::hub::types::AppCategory::Other,
+            crate::budlumxyz::types::AppCategory::Other,
             "https://headless.example".into(),
             None,
             1,

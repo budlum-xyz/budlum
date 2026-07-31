@@ -219,9 +219,9 @@ pub enum TransactionType {
     AiPurchaseData {
         offer_id: u64,
     },
-    HubRegisterApp {
+    BudlumxyzRegisterApp {
         name: String,
-        category: crate::hub::types::AppCategory,
+        category: crate::budlumxyz::types::AppCategory,
         website_url: String,
         manifest_id: Option<crate::storage::content_id::ContentId>,
     },
@@ -741,7 +741,7 @@ impl Transaction {
             TransactionType::AiOfferData { .. } | TransactionType::AiPurchaseData { .. } => {
                 schedule.transfer_gas * 5
             }
-            TransactionType::HubRegisterApp { .. } => schedule.contract_call_gas * 2,
+            TransactionType::BudlumxyzRegisterApp { .. } => schedule.contract_call_gas * 2,
             TransactionType::AiModelRegister(_) => schedule.contract_call_gas * 3,
             TransactionType::AiInferenceRequest(_) => schedule.contract_call_gas * 2,
             TransactionType::AiInferenceResult(_) => schedule.contract_call_gas,
@@ -913,7 +913,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::RelayerResult(_) => 16,
         TransactionType::AiOfferData { .. } => 17,
         TransactionType::AiPurchaseData { .. } => 18,
-        TransactionType::HubRegisterApp { .. } => 19,
+        TransactionType::BudlumxyzRegisterApp { .. } => 19,
         TransactionType::AiModelRegister(_) => 20,
         TransactionType::AiInferenceRequest(_) => 21,
         TransactionType::AiInferenceResult(_) => 22,
@@ -1034,8 +1034,8 @@ fn encode_pollen_sale_authorization(
     put_fixed(out, authorization.seller_signature.as_bytes());
 }
 
-fn encode_app_category(category: &crate::hub::types::AppCategory, out: &mut Vec<u8>) {
-    use crate::hub::types::AppCategory;
+fn encode_app_category(category: &crate::budlumxyz::types::AppCategory, out: &mut Vec<u8>) {
+    use crate::budlumxyz::types::AppCategory;
     put_u8(
         out,
         match category {
@@ -1131,7 +1131,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u64(out, *price);
         }
         TransactionType::AiPurchaseData { offer_id } => put_u64(out, *offer_id),
-        TransactionType::HubRegisterApp {
+        TransactionType::BudlumxyzRegisterApp {
             name,
             category,
             website_url,
