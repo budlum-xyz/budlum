@@ -48,16 +48,23 @@ mod tests {
         assert_eq!(bc.chain[0].index, 0);
     }
 
+    /// Renamed from `pow_empty_block_rejected_by_validation`, which claimed a
+    /// rejection this test never asserted and the engine never performs:
+    /// `PoWEngine::validate_block` checks the previous hash, the block hash and
+    /// the difficulty target, and says nothing about the transaction list. An
+    /// empty block is valid under PoW — that is what keeps a chain live when
+    /// the mempool is empty. The old name asserted the opposite of the design
+    /// while the body asserted success, so nothing was ever going to catch the
+    /// contradiction.
     #[test]
-    fn pow_empty_block_rejected_by_validation() {
+    fn pow_produces_a_block_with_an_empty_mempool() {
         let mut bc = setup_chain();
         let producer = addr(0x02);
 
-        // Normal production
         let result = bc.produce_block(producer);
         assert!(
             result.is_some(),
-            "block production with valid producer must succeed"
+            "an empty mempool must still yield a block; PoW validity does not depend on transactions"
         );
     }
 
@@ -80,18 +87,35 @@ mod tests {
         );
     }
 
+    /// Renamed from `pos_double_producer_address_rejected`, which asserted the
+    /// exact opposite of its own name: both blocks must succeed. Producing two
+    /// sequential blocks from one address is ordinary behaviour, not a double
+    /// -sign — a double-sign is two *different* blocks at the *same* height,
+    /// and that is covered by the equivocation tests, not here. A name
+    /// promising a rejection over a body asserting acceptance is worse than no
+    /// test: a reader counting coverage sees the double-sign case handled.
     #[test]
-    fn pos_double_producer_address_rejected() {
+    fn the_same_producer_may_extend_the_chain_on_consecutive_heights() {
         let mut bc = setup_chain();
         let producer = addr(0x20);
 
-        // First block
         let r1 = bc.produce_block(producer);
         assert!(r1.is_some(), "first block must succeed");
 
-        // Second block by same producer (normal — sequential)
         let r2 = bc.produce_block(producer);
-        assert!(r2.is_some(), "second block must succeed (sequential)");
+        assert!(
+            r2.is_some(),
+            "consecutive heights from one producer are sequential production, not equivocation"
+        );
+
+        let (h1, h2) = (
+            r1.expect("checked above").0.index,
+            r2.expect("checked above").0.index,
+        );
+        assert_ne!(
+            h1, h2,
+            "the two blocks must sit at different heights, or this is not the sequential case"
+        );
     }
 
     // ─── BFT View-Change / Leader Election ───

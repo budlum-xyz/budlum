@@ -868,6 +868,14 @@ jobs:
         run: |
           bash ./scripts/check-pinned-downloads-are-really-pinned.sh --self-test
           bash ./scripts/check-pinned-downloads-are-really-pinned.sh
+      # A test name is the claim a reader trusts when counting coverage.
+      # `pow_empty_block_rejected_by_validation` asserted is_some();
+      # `pos_double_producer_address_rejected` asserted both blocks succeed;
+      # the four qcblob_quorum tests never called import_qc_blob at all.
+      - name: reddi iddia eden testler reddi assert ediyor mu + kanarya
+        run: |
+          bash ./scripts/check-rejection-tests-assert-rejection.sh --self-test
+          bash ./scripts/check-rejection-tests-assert-rejection.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
