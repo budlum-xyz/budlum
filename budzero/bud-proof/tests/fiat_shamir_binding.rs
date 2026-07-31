@@ -49,7 +49,12 @@ fn first(body: &str, needle: &str) -> usize {
     code(body)
         .iter()
         .position(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("expected to find `{needle}` in the source; it was removed or renamed, which is itself the thing this test is guarding"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected to find `{needle}` in the source; it was removed or \
+                 renamed, which is itself the thing this test guards"
+            )
+        })
 }
 
 #[test]
