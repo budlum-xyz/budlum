@@ -885,6 +885,15 @@ jobs:
         run: |
           bash ./scripts/check-no-orphan-source-files.sh --self-test
           bash ./scripts/check-no-orphan-source-files.sh
+      # Containment-first: a gate that is off by default must stay off, and the
+      # path that reaches it must consult it. bud-vm hard-coded
+      # MainnetActivation::full() while ContractCall passed mainnet=false, so
+      # the staged-rollout flags were dead code and user bytecode never met
+      # them.
+      - name: containment varsayilanlari + kanarya
+        run: |
+          bash ./scripts/check-containment-defaults.sh --self-test
+          bash ./scripts/check-containment-defaults.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
