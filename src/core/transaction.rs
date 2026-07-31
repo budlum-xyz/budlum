@@ -717,6 +717,20 @@ impl Transaction {
         self.amount.saturating_add(self.fee)
     }
 
+    /// Per-type gas cost under a `GasSchedule`.
+    ///
+    /// **This is not what the chain charges.** The live protocol is a flat fee:
+    /// `AccountState::validate_transaction` rejects `fee < base_fee`, rejects a
+    /// `max_fee` that diverges from `fee`, and rejects any `priority_fee`;
+    /// `total_cost` is `amount + fee`. No settlement path consults
+    /// `transfer_gas`, `stake_gas`, `vote_gas`, `contract_call_gas`,
+    /// `gas_per_byte` or `gas_per_signature`.
+    ///
+    /// It is kept because `GasSchedule` is part of the genesis document and is
+    /// Pinned per network, so the shape has to stay round-trippable — but a
+    /// Caller reaching for this to size a transaction will get a number the
+    /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
+    /// It returns the flat fee floor instead.
     pub fn estimate_gas_with_schedule(&self, schedule: GasSchedule) -> u64 {
         let intrinsic = match &self.tx_type {
             TransactionType::Transfer => schedule.transfer_gas,
