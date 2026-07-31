@@ -158,6 +158,7 @@ pub mod hardening_h4_locks;
 pub mod hardening_h5_h7_locks;
 #[cfg(test)]
 pub mod hardening_locks;
+pub mod mempool_dos_locks;
 pub mod network_hardening_locks;
 #[cfg(test)]
 pub mod regression_lock;
