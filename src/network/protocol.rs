@@ -280,24 +280,29 @@ mod tests {
     /// Canary: lower this constant below 1_000_000 and the assertion fails.
     #[test]
     fn transport_block_ceiling_is_not_stricter_than_consensus() {
-        assert!(
-            MAX_BLOCK_SIZE >= crate::consensus::MAX_BLOCK_SIZE,
-            "transport ceiling {} is below the consensus ceiling {} — gossip \
-             would refuse blocks that validation accepts, and honest producers \
-             would be unable to propagate them",
-            MAX_BLOCK_SIZE,
-            crate::consensus::MAX_BLOCK_SIZE
-        );
+        // Both sides are `const`, so this is decidable at compile time. In a
+        // `const` block it fails the build rather than a test run — the
+        // strictly better place for an invariant over two literals, and what
+        // `clippy::assertions_on_constants` is pointing at.
+        const {
+            assert!(
+                MAX_BLOCK_SIZE >= crate::consensus::MAX_BLOCK_SIZE,
+                "transport ceiling is below the consensus ceiling: gossip would \
+                 refuse blocks that validation accepts, and honest producers \
+                 could not propagate them"
+            );
+        }
         // And they are genuinely different bounds, not an accidental
         // duplicate: if someone unifies them, the encodings have to be
         // reconciled first.
-        assert_ne!(
-            MAX_BLOCK_SIZE,
-            crate::consensus::MAX_BLOCK_SIZE,
-            "the two ceilings became equal; they measure different encodings \
-             (protobuf here, JSON in consensus), so equal values mean one of \
-             the two checks is now the wrong shape"
-        );
+        const {
+            assert!(
+                MAX_BLOCK_SIZE != crate::consensus::MAX_BLOCK_SIZE,
+                "the two ceilings became equal; they measure different \
+                 encodings (protobuf here, JSON in consensus), so equal values \
+                 mean one of the two checks is now the wrong shape"
+            );
+        }
     }
 
     #[test]
