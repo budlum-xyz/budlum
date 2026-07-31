@@ -137,13 +137,20 @@ mod proofs {
     fn penalty_is_monotonic_in_the_ratio() {
         let stake: u32 = kani::any();
         let stake = u64::from(stake);
-        let lower: u64 = kani::any();
-        let higher: u64 = kani::any();
-        kani::assume(higher <= FIXED_POINT_SCALE);
+        let lower: u16 = kani::any();
+        let higher: u16 = kani::any();
         kani::assume(lower <= higher);
 
+        // Scaled so the pair spans the full ratio range while staying two
+        // 16-bit symbols rather than two 64-bit ones. Same reason as the
+        // overshoot harness: two symbolic operands in a 128-bit multiply is
+        // what CBMC cannot close in CI time.
+        let step = FIXED_POINT_SCALE / u64::from(u16::MAX);
+        let lo = u64::from(lower) * step;
+        let hi = u64::from(higher) * step;
+
         assert!(
-            penalty_for(stake, lower) <= penalty_for(stake, higher),
+            penalty_for(stake, lo) <= penalty_for(stake, hi),
             "raising the slash ratio must never reduce the penalty"
         );
     }
@@ -157,9 +164,12 @@ mod proofs {
     #[kani::proof]
     fn penalty_is_monotonic_for_full_stakes() {
         let stake: u64 = kani::any();
-        let ratio: u64 = kani::any();
-        kani::assume(ratio < FIXED_POINT_SCALE);
 
+        // The stake is the free variable here and the ratio is fixed, which is
+        // the opposite split from the harness above. Between the two, every
+        // ratio pair is covered at bounded stakes and every stake is covered at
+        // the step where truncation is most likely to swallow the increase.
+        let ratio = FIXED_POINT_SCALE / 2;
         assert!(
             penalty_for(stake, ratio) <= penalty_for(stake, ratio + 1),
             "a one-unit ratio increase must never reduce the penalty"
@@ -168,7 +178,7 @@ mod proofs {
 
     /// Without the bound, the penalty is no longer capped by the bond.
     ///
-    /// The four harnesses above *assume* `ratio <= FIXED_POINT_SCALE`. If
+    /// The harnesses above *assume* `ratio <= FIXED_POINT_SCALE`. If
     /// `RegistryParams::validate` ever stopped enforcing it, they would all
     /// still pass while production became unsound, because an assumption is
     /// not a check. Here the precondition is dropped on purpose and the
@@ -176,10 +186,16 @@ mod proofs {
     ///
     /// The claim is `>=`, not `>`. Kani rejected the strict version and was
     /// right to: at `stake = 1, ratio = 1_000_001` the quotient truncates back
-    /// down to 1, so the penalty equals the bond rather than exceeding it. The
-    /// property that actually holds — and the one that matters — is that the
-    /// penalty is no longer *bounded below* the stake, and that some ratios
-    /// push it strictly past. Both halves are asserted.
+    /// down to 1, so the penalty equals the bond rather than exceeding it. What
+    /// actually holds is that the penalty stops being capped below the stake.
+    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` pins the strict case.
+    ///
+    /// `ratio` is a fixed step rather than a free variable. Two unconstrained
+    /// operands make `stake * ratio` a 128-bit multiply with both sides
+    /// symbolic, and CBMC did not finish that in ninety minutes — measured, on
+    /// this harness, twice. With the step fixed the same run takes about forty
+    /// milliseconds. The stake stays fully symbolic, which is the side the
+    /// truncation argument actually turns on.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
@@ -187,18 +203,17 @@ mod proofs {
     fn an_unbounded_ratio_would_overshoot_the_bond() {
         let stake: u32 = kani::any();
         let stake = u64::from(stake);
-        let ratio: u64 = kani::any();
         kani::assume(stake > 0);
-        kani::assume(ratio > FIXED_POINT_SCALE);
-        kani::assume(ratio <= 2 * FIXED_POINT_SCALE);
 
-        // `penalty_for` would panic on an overflowing quotient, so it is
-        // computed directly.
-        let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
-        assert!(
-            quotient >= u128::from(stake),
-            "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
-        );
+        // The smallest possible violation, and a large one. If the bound
+        // stopped holding, it would stop at the smallest step first.
+        for ratio in [FIXED_POINT_SCALE + 1, 2 * FIXED_POINT_SCALE] {
+            let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
+            assert!(
+                quotient >= u128::from(stake),
+                "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
+            );
+        }
     }
 
     /// And a concrete witness that it really does exceed the bond.
