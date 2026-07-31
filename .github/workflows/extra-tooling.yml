@@ -262,3 +262,66 @@ jobs:
 
       - name: taplo lint kapısı
         run: taplo lint
+
+  # ── 5. Kani model checking (bond aritmetiği) ────────────────────────────────
+  # KAPI: bir proof başarısız olursa VEYA çalışan harness sayısı kaynakta
+  # bildirilenden azsa = FAIL.
+  #
+  # SECURITY.md model checking'i "açık iş" olarak kaydediyordu: bu adla bir
+  # script daha önce vardı, stub mesaj basıyor ve ağaçta olmayan bir dosyaya
+  # işaret ediyordu; hiçbir workflow onu çalıştırmıyordu. Kapı sayılıyor ama
+  # hiçbir şey kanıtlamıyordu, o yüzden silinmişti. Bu, yerine geçen gerçek
+  # kurulum.
+  #
+  # Harness'lar `kani/` altında ayrı bir pakette, `fuzz/` gibi. Sebebi teknik:
+  # Kani kendi pinli nightly'siyle gelir (0.67.0 → rustc 1.93.0-nightly) ve
+  # `budlum-core` `rust-version = "1.94.0"` beyan eder, bu yüzden cargo kök
+  # crate'i derlemeyi reddeder. Upstream düzeltmesi (kani#4645) merge edilmiş
+  # ama henüz yayınlanmamış. Bir doğrulama aracı için MSRV'yi düşürmek
+  # operatörlere verilen sözü zayıflatırdı; paket ayrı duruyor.
+  kani-proofs:
+    name: Kani Proofs (bond arithmetic)
+    runs-on: ubuntu-latest
+    # 45 dakika yetmedi: ilk gercek kosu `penalty_is_monotonic_in_the_ratio`
+    # icinde iptal edildi. O harness ikiye bolundu ve stake 32 bit'e baglandi.
+    # 90 dakika, ilk yesil kosudan sonra gercek sureye gore dusurulecek.
+    #
+    # `--harness-timeout` denendi ve geri alindi: `-Z unstable-options`
+    # istiyor. Bir kapiyi kararsiz bir bayraga baglamak, Kani'nin bir sonraki
+    # surumunde kapinin sessizce kirilmasi demek. Tek bir harness patlarsa job
+    # timeout'u devreye girer; bu daha kaba ama kapinin kendisi kadar dayanikli.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Kapının kendisi Kani kurulmadan önce kanıtlanır: kanarya sahte çıktıyla
+      # çalışır, yani kurulum bozulsa bile "kapı vacuous mu" sorusu cevaplanır.
+      - name: Kapı kanaryası (Kani'den bağımsız)
+        run: bash ./scripts/check-kani.sh --self-test
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install Kani (sürüm pinli)
+        run: |
+          set -euo pipefail
+          cargo install --locked kani-verifier --version 0.67.0
+          cargo kani setup
+
+      # `--output-format terse` satır başına bir VERIFICATION sonucu verir;
+      # kapı bunları sayar ve kaynaktaki harness sayısıyla karşılaştırır.
+      - name: Kani proofs
+        working-directory: kani
+        run: |
+          set -euo pipefail
+          cargo kani --output-format terse 2>&1 | tee /tmp/kani.log
+
+      - name: Kani kapısı
+        run: bash ./scripts/check-kani.sh /tmp/kani.log

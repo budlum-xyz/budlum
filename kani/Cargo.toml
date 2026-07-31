@@ -1,0 +1,33 @@
+[package]
+name = "budlum-kani"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Deliberately no `rust-version`, and deliberately no dependency on
+# `budlum-core`.
+#
+# Kani ships its own pinned nightly (0.67.0 bundles rustc 1.93.0-nightly), and
+# `budlum-core` declares `rust-version = "1.94.0"`. Cargo refuses to build a
+# package whose MSRV is above the running compiler, so pointing `cargo kani` at
+# the root crate fails before any harness runs:
+#
+#     error: rustc 1.93.0-nightly is not supported by the following packages:
+#       budlum-core@0.1.0 requires rustc 1.94.0
+#
+# The upstream fix is merged (model-checking/kani#4645 moved the bundled
+# toolchain to a nightly new enough for 1.94) but unreleased: 0.67.0 is still
+# the newest published version. Lowering the root crate's MSRV to work around a
+# verification tool would be the wrong trade — the MSRV is a promise to
+# operators, not a build knob.
+#
+# So this package stands alone, in the same way `fuzz/` is its own workspace.
+# It carries the arithmetic under proof and nothing else. `budlum-core`'s test
+# suite holds the two in step: `bond_arithmetic_matches_the_kani_mirror` fails
+# if this expression and `slash_role_only`'s ever diverge.
+[workspace]
+members = ["."]
+
+[dependencies]
+
+[dev-dependencies]

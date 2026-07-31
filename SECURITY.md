@@ -153,16 +153,47 @@ is not evidence, so the canary is part of the gate rather than an extra.
 | `cargo-semver-checks` | public API breakage | gate |
 | `taplo` | TOML formatting of supply-chain policy files | gate |
 | `cargo bloat` | binary size | report, not a gate — no calibrated threshold yet |
+| Kani | bond arithmetic: a slash never exceeds its bond | gate |
 
-**Kani is not integrated.** A `scripts/check-kani.sh` existed that printed a
-stub message and pointed at a `src/crypto/kani.rs` that is not in the tree; no
-workflow ran it, and there are no `#[kani::proof]` harnesses anywhere. It has
-been removed rather than left to imply coverage that does not exist.
+**Kani is integrated for bond arithmetic.** An earlier `scripts/check-kani.sh`
+printed a stub message and pointed at a `src/crypto/kani.rs` that was not in the
+tree; no workflow ran it, and there were no `#[kani::proof]` harnesses anywhere.
+It was removed rather than left to imply coverage that did not exist.
 
-Model checking is worth doing here — the signature, bond-arithmetic and
-Merkle-path paths are the kind of bounded, self-contained logic Kani handles
-well, and other infrastructure projects run it in CI within a normal PR time
-budget. Treat this row as open work, not as a decision against the tool.
+The replacement is real. `kani/` carries five harnesses over the slash penalty
+computation, and `.github/workflows/extra-tooling.yml` runs them on every pull
+request against a pinned Kani. What is proved: a penalty never exceeds the bond
+it is taken from; `remaining + penalty == stake` exactly, so the
+`saturating_sub` in `slash_role_only` is not masking an underflow; the 0% and
+100% ratios are exact; and the penalty is monotonic in the ratio, so raising a
+slash ratio through governance can never reduce the actual penalty. A fifth
+harness drops the `ratio <= FIXED_POINT_SCALE` precondition and asserts the
+bound would break without it, which records `RegistryParams::validate` as
+load-bearing rather than incidental — the other four *assume* that bound, and an
+assumption is not a check.
+
+`kani::any()` is every value of the type, so these cover the whole input space
+rather than sampled points. The existing proptests are kept alongside them.
+
+The harnesses live in a standalone `kani/` package, in the same way `fuzz/`
+does. Kani ships a pinned nightly — 0.67.0, the newest published release,
+bundles rustc 1.93.0-nightly — while `budlum-core` declares
+`rust-version = "1.94.0"`, so cargo refuses to build the root crate before any
+harness runs. The upstream toolchain bump is merged but unreleased
+(model-checking/kani#4645). Lowering the MSRV to suit a verification tool would
+weaken a promise made to operators in order to make a check pass, so the package
+stands alone and mirrors the one expression under proof.
+`bond_arithmetic_matches_the_kani_mirror` in the ordinary test suite fails if
+the mirror and `slash_role_only` ever diverge.
+
+The gate checks the proofs pass *and* that the number of harnesses Kani ran
+matches the number declared in the source, because a proof that silently stops
+being compiled would otherwise leave the gate green with nothing behind it —
+the exact way the deleted script was hollow.
+
+Signature verification and Merkle paths remain open work: both reach into
+third-party crypto crates that model checking would have to unroll, so they need
+harnesses written against extracted, bounded logic first.
 
 ---
 
