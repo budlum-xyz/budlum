@@ -362,7 +362,7 @@ fn unstake_tx(from: Address, amount: u64, nonce: u64) -> Transaction {
 /// Parameter, not a compile-time constant.
 ///
 /// `unbonding_epochs` is in `GOVERNANCE_PARAMETER_WHITELIST` and
-/// `RegistryParams::validate` bounds it to 1..=100_000, so a vote to lengthen
+/// `RegistryParams::validate` bounds it to `1..=100_000`, so a vote to lengthen
 /// The window is a legitimate, accepted governance action. The executor read
 /// `core::account::UNBONDING_EPOCHS` (7) instead, so the vote changed the
 /// Registry's stored parameter and changed nothing about when stake actually
@@ -579,7 +579,7 @@ fn a_relayer_bond_can_be_unbonded_and_withdrawn() {
     assert!(state.registry.get(&relayer, roles::RELAYER).is_none());
 }
 
-/// The same exit must exist for PROVER and STORAGE_OPERATOR, which are debited
+/// The same exit must exist for `PROVER` and `STORAGE_OPERATOR`, which are debited
 /// By the same one-way pattern.
 #[test]
 fn prover_and_storage_operator_bonds_can_also_be_withdrawn() {

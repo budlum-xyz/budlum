@@ -370,11 +370,11 @@ fn full_internal_relay_cycle_lock_mint() {
     assert_eq!(expected_recipient, 90);
     assert_eq!(
         bc.state.get_balance(&recipient()),
-        expected_recipient as u64
+        u64::try_from(expected_recipient).expect("recipient amount fits u64")
     );
     assert_eq!(
         bc.state.get_balance(&relayer),
-        100_000_000 + expected_fee as u64
+        100_000_000 + u64::try_from(expected_fee).expect("fee fits u64")
     );
 }
 
@@ -541,5 +541,8 @@ fn full_internal_relay_cycle_burn_unlock() {
     .expect("100 units must cover the default floor");
     assert_eq!(fee, 10);
     assert_eq!(credited, 90);
-    assert_eq!(bc.state.get_balance(&owner()), 1000 - 100 + credited as u64);
+    assert_eq!(
+        bc.state.get_balance(&owner()),
+        1000 - 100 + u64::try_from(credited).expect("credited fits u64")
+    );
 }

@@ -442,7 +442,7 @@ mod tests {
         );
     }
 
-    /// VerifyInference must answer "not verified" for every input.
+    /// `VerifyInference` must answer "not verified" for every input.
     ///
     /// The opcode used to accept any non-zero commitment as proof of an AI
     /// Inference — no cryptography, just a non-zero check. It was reduced to a

@@ -183,8 +183,8 @@ mod tests {
     }
 
     /// Shared setup: an operator with a funded balance and one active deal
-    /// Ending at `deal_end_epoch`. Returns (blockchain, deal_id, operator,
-    /// Bond, balance_after_bond).
+    /// Ending at `deal_end_epoch`. Returns `(blockchain, deal_id, operator,
+    /// bond, balance_after_bond)`.
     fn blockchain_with_one_deal(deal_end_epoch: u64) -> (Blockchain, u64, Address, u64, u64) {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
