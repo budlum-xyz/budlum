@@ -124,9 +124,19 @@ mod proofs {
     /// divide truncates, and a non-monotonic truncation would mean a higher
     /// configured penalty producing a smaller actual one for some stake — an
     /// incentive inversion no sampled test would be likely to find.
+    ///
+    /// `stake` is bounded to 32 bits here. Three unconstrained `u64`s make the
+    /// two multiplications a 128-bit-by-128-bit comparison, which CBMC does not
+    /// finish inside a CI budget — the first run was cancelled at 45 minutes on
+    /// exactly this harness. The bound keeps the property meaningful (it still
+    /// quantifies over every ratio pair, and over stakes past four billion
+    /// base units) while leaving the solver a problem it can close. The
+    /// unbounded case is covered by `penalty_is_monotonic_for_full_stakes`
+    /// below, which fixes the ratio pair instead.
     #[kani::proof]
     fn penalty_is_monotonic_in_the_ratio() {
-        let stake: u64 = kani::any();
+        let stake: u32 = kani::any();
+        let stake = u64::from(stake);
         let lower: u64 = kani::any();
         let higher: u64 = kani::any();
         kani::assume(higher <= FIXED_POINT_SCALE);
@@ -138,30 +148,75 @@ mod proofs {
         );
     }
 
-    /// Without the bound, the guarantee breaks — which is what `validate()` buys.
+    /// Monotonicity again, over the whole `u64` stake range.
+    ///
+    /// The harness above bounds the stake to keep the solver tractable. This
+    /// one lifts that bound and constrains the other side instead: the ratio
+    /// step is the smallest one that exists, which is the case where
+    /// truncation is most likely to swallow the increase.
+    #[kani::proof]
+    fn penalty_is_monotonic_for_full_stakes() {
+        let stake: u64 = kani::any();
+        let ratio: u64 = kani::any();
+        kani::assume(ratio < FIXED_POINT_SCALE);
+
+        assert!(
+            penalty_for(stake, ratio) <= penalty_for(stake, ratio + 1),
+            "a one-unit ratio increase must never reduce the penalty"
+        );
+    }
+
+    /// Without the bound, the penalty is no longer capped by the bond.
     ///
     /// The four harnesses above *assume* `ratio <= FIXED_POINT_SCALE`. If
     /// `RegistryParams::validate` ever stopped enforcing it, they would all
     /// still pass while production became unsound, because an assumption is
     /// not a check. Here the precondition is dropped on purpose and the
-    /// failure is asserted, so the bound is recorded as load-bearing.
+    /// consequence is asserted, so the bound is recorded as load-bearing.
+    ///
+    /// The claim is `>=`, not `>`. Kani rejected the strict version and was
+    /// right to: at `stake = 1, ratio = 1_000_001` the quotient truncates back
+    /// down to 1, so the penalty equals the bond rather than exceeding it. The
+    /// property that actually holds — and the one that matters — is that the
+    /// penalty is no longer *bounded below* the stake, and that some ratios
+    /// push it strictly past. Both halves are asserted.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
     #[kani::proof]
     fn an_unbounded_ratio_would_overshoot_the_bond() {
-        let stake: u64 = kani::any();
+        let stake: u32 = kani::any();
+        let stake = u64::from(stake);
         let ratio: u64 = kani::any();
         kani::assume(stake > 0);
         kani::assume(ratio > FIXED_POINT_SCALE);
+        kani::assume(ratio <= 2 * FIXED_POINT_SCALE);
 
-        // `penalty_for` would panic on the overflow case, so the quotient is
-        // computed directly here rather than through it.
+        // `penalty_for` would panic on an overflowing quotient, so it is
+        // computed directly.
+        let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
+        assert!(
+            quotient >= u128::from(stake),
+            "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
+        );
+    }
+
+    /// And a concrete witness that it really does exceed the bond.
+    ///
+    /// `>=` alone would be satisfied by a rule that merely reaches the bond.
+    /// This pins a case where the penalty is strictly larger, so the harness
+    /// above cannot be read as saying the overshoot is only theoretical.
+    #[kani::proof]
+    fn an_unbounded_ratio_can_strictly_exceed_the_bond() {
+        let stake: u32 = kani::any();
+        let stake = u64::from(stake);
+        kani::assume(stake >= 2);
+
+        let ratio = 2 * FIXED_POINT_SCALE;
         let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
         assert!(
             quotient > u128::from(stake),
-            "a ratio above FIXED_POINT_SCALE must overshoot the bond — \
-             `validate()` is what prevents it"
+            "a 200% ratio must take strictly more than the bond"
         );
     }
 }
