@@ -2277,7 +2277,6 @@ mod tests {
         assert_eq!(state.unbonding_queue[0].amount, 1);
     }
 
-    #[test]
     /// Every whitelisted governance parameter must be applicable.
     ///
     /// The whitelist lives in `governance.rs` and the apply match lives here.
