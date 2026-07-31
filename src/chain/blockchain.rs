@@ -6067,6 +6067,115 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
 }
 
 #[cfg(test)]
+/// An opener with an empty account must not be able to open a challenge.
+///
+/// `opener_bond` is documented in five places as the anti-spam mechanism for a
+/// permissionless endpoint, and nothing debited it. `storage_open_challenge` is
+/// public RPC, so a caller could pass any bond value with no balance and open
+/// challenges that cost the operator a read and a hash over up to 16 MiB each.
+#[test]
+fn an_empty_account_cannot_afford_an_opener_bond() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x42u8; 32]);
+    assert_eq!(bc.state.get_balance(&opener), 0, "opener starts with nothing");
+
+    let err = bc
+        .debit_opener_bond(&opener, 999_999)
+        .expect_err("an empty account must not afford a bond");
+    assert!(
+        err.contains("insufficient balance"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        0,
+        "a refused debit must not move the balance"
+    );
+}
+
+/// A funded opener pays exactly the bond, and gets exactly it back.
+///
+/// Paired with the test above so the fix cannot be a gate that refuses
+/// everything: the bond has to be chargeable, and the refund has to restore the
+/// balance rather than approximate it.
+#[test]
+fn an_opener_bond_is_debited_and_refunded_exactly() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x43u8; 32]);
+    bc.state.add_balance(&opener, 1_000);
+
+    bc.debit_opener_bond(&opener, 250)
+        .expect("a funded opener can post a bond");
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        750,
+        "the bond must leave the balance while the challenge is open"
+    );
+
+    bc.refund_opener_bond(&opener, 250)
+        .expect("a resolved challenge returns the bond");
+    assert_eq!(
+        bc.state.get_balance(&opener),
+        1_000,
+        "the refund must restore the balance exactly"
+    );
+}
+
+/// A zero bond is refused rather than treated as a free challenge.
+///
+/// `open_challenge` already rejects `opener_bond == 0` with `ZeroOpenerBond`.
+/// The debit path agrees, so the two cannot drift into a state where one
+/// accepts what the other refuses.
+#[test]
+fn a_zero_opener_bond_is_refused() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x44u8; 32]);
+    bc.state.add_balance(&opener, 1_000);
+
+    assert!(
+        bc.debit_opener_bond(&opener, 0).is_err(),
+        "a zero bond buys a free challenge and must be refused"
+    );
+    assert_eq!(bc.state.get_balance(&opener), 1_000, "balance untouched");
+}
+
+/// Repeated challenges drain the opener, which is the property the bond exists
+/// for.
+///
+/// The rate limit bounds how *fast* an attacker can open challenges. The bond
+/// is what makes sustaining them cost something. Without a debit the attacker
+/// paid nothing and the operator paid every time.
+#[test]
+fn repeated_challenges_exhaust_the_opener_not_the_operator() {
+    use crate::consensus::PoWEngine;
+    use std::sync::Arc;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let opener = Address::from([0x45u8; 32]);
+    bc.state.add_balance(&opener, 100);
+
+    let bond = 30u64;
+    for i in 0..3 {
+        bc.debit_opener_bond(&opener, bond)
+            .unwrap_or_else(|e| panic!("challenge {i} should be affordable: {e}"));
+    }
+    assert_eq!(bc.state.get_balance(&opener), 10, "3 x 30 debited");
+
+    let err = bc
+        .debit_opener_bond(&opener, bond)
+        .expect_err("the fourth challenge is beyond what the opener can fund");
+    assert!(err.contains("insufficient balance"), "unexpected: {err}");
+}
+
 fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
     use crate::consensus::PoWEngine;
     use std::sync::Arc;
