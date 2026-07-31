@@ -1419,11 +1419,17 @@ impl Blockchain {
             .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
             .clone();
 
-        let mut final_amount = transfer.amount;
-
-        // Fee deduction: 1% for the relayer (Decision 9)
-        let fee = final_amount.saturating_mul(1) / 100;
-        final_amount = final_amount.saturating_sub(fee);
+        // Fee comes out of the arriving asset, which is what lets a user
+        // bridge into Budlum without holding any $BUD yet. Rate and floor are
+        // governance parameters; see `split_bridge_fee` for why a bare
+        // percentage was not enough.
+        let params = *self.state.registry.params();
+        let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+            transfer.amount,
+            params.bridge_relayer_fee_ppm,
+            params.bridge_relayer_min_fee,
+        )
+        .map_err(|e| e.to_string())?;
 
         // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
         // Check BOTH final_amount AND fee for u64 overflow.
@@ -2140,8 +2146,13 @@ impl Blockchain {
                     .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
                     .clone();
 
-                let fee = transfer.amount.saturating_mul(1) / 100;
-                let final_amount = transfer.amount.saturating_sub(fee);
+                let params = *self.state.registry.params();
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+                    transfer.amount,
+                    params.bridge_relayer_fee_ppm,
+                    params.bridge_relayer_min_fee,
+                )
+                .map_err(|e| e.to_string())?;
 
                 // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
                 // Check BOTH final_amount AND fee for u64 overflow.
@@ -2200,8 +2211,13 @@ impl Blockchain {
 
                 // For unlock, the full amount goes back to the owner (Decision: relayer paid on target side)
                 // Actually, if a relayer brings proof of burn on target, they should be paid on source.
-                let fee = transfer.amount.saturating_mul(1) / 100;
-                let final_amount = transfer.amount.saturating_sub(fee);
+                let params = *self.state.registry.params();
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+                    transfer.amount,
+                    params.bridge_relayer_fee_ppm,
+                    params.bridge_relayer_min_fee,
+                )
+                .map_err(|e| e.to_string())?;
 
                 // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
                 // Check BOTH final_amount AND fee for u64 overflow.

@@ -862,15 +862,15 @@ impl Executor {
                                         )
                                     })?
                                     .clone();
-                                let fee = transfer.amount.checked_mul(1).ok_or_else(|| {
-                                    BudlumError::validation("fee_overflow", "bridge fee overflow")
-                                })? / 100;
-                                let final_amount =
-                                    transfer.amount.checked_sub(fee).ok_or_else(|| {
-                                        BudlumError::validation(
-                                            "bridge_amount_underflow",
-                                            "bridge fee exceeds amount",
-                                        )
+                                let params = *state.registry.params();
+                                let (final_amount, fee) =
+                                    crate::cross_domain::bridge::split_bridge_fee(
+                                        transfer.amount,
+                                        params.bridge_relayer_fee_ppm,
+                                        params.bridge_relayer_min_fee,
+                                    )
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_fee_below_minimum", e.0)
                                     })?;
                                 if final_amount > u64::MAX as u128 {
                                     return Err(BudlumError::validation(
@@ -929,15 +929,15 @@ impl Executor {
                                         BudlumError::validation("bridge_unlock_failed", e.0)
                                     })?;
                                 // Refund owner (1% relayer fee deducted, same as submit_relay_proof)
-                                let fee = transfer.amount.checked_mul(1).ok_or_else(|| {
-                                    BudlumError::validation("fee_overflow", "bridge fee overflow")
-                                })? / 100;
-                                let final_amount =
-                                    transfer.amount.checked_sub(fee).ok_or_else(|| {
-                                        BudlumError::validation(
-                                            "bridge_amount_underflow",
-                                            "bridge fee exceeds amount",
-                                        )
+                                let params = *state.registry.params();
+                                let (final_amount, fee) =
+                                    crate::cross_domain::bridge::split_bridge_fee(
+                                        transfer.amount,
+                                        params.bridge_relayer_fee_ppm,
+                                        params.bridge_relayer_min_fee,
+                                    )
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_fee_below_minimum", e.0)
                                     })?;
                                 if final_amount > u64::MAX as u128 {
                                     return Err(BudlumError::validation(

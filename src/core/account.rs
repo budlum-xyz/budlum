@@ -1430,6 +1430,16 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid malicious_slash_ratio_fixed: {e}"))?;
             }
+            "bridge_relayer_fee_ppm" => {
+                params.bridge_relayer_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid bridge_relayer_fee_ppm: {e}"))?;
+            }
+            "bridge_relayer_min_fee" => {
+                params.bridge_relayer_min_fee = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid bridge_relayer_min_fee: {e}"))?;
+            }
             other => return Err(format!("unknown registry parameter: {other}")),
         }
         params.validate()?;
@@ -2182,6 +2192,34 @@ mod tests {
     }
 
     #[test]
+    /// Every whitelisted governance parameter must be applicable.
+    ///
+    /// The whitelist lives in `governance.rs` and the apply match lives here.
+    /// Nothing connected them: a name could pass
+    /// `validate_governance_parameter_update` and then fail at execution with
+    /// "unknown registry parameter", which is a proposal that votes, waits out
+    /// its activation delay, and then does nothing.
+    ///
+    /// That is exactly what happened when `bridge_relayer_fee_ppm` was added to
+    /// one list and not the other.
+    #[test]
+    fn every_whitelisted_governance_parameter_can_be_applied() {
+        use crate::core::governance::GOVERNANCE_PARAMETER_WHITELIST;
+
+        // A value that parses for every currently whitelisted parameter. Each
+        // is a `u64`; `validate()` bounds are checked separately.
+        let probe = "1000";
+        for key in GOVERNANCE_PARAMETER_WHITELIST {
+            let mut state = AccountState::new();
+            let err = state.apply_registry_parameter_update(key, probe).err();
+            assert!(
+                !err.as_deref().is_some_and(|e| e.contains("unknown registry parameter")),
+                "whitelisted parameter {key} is not handled by \
+                 apply_registry_parameter_update: {err:?}"
+            );
+        }
+    }
+
     fn total_bud_committed_counts_stake_and_unbonding() {
         let liquid = test_addr_from_byte(11u8);
         let validator = test_addr_from_byte(12u8);
