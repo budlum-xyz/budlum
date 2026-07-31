@@ -283,11 +283,13 @@ jobs:
     name: Kani Proofs (bond arithmetic)
     runs-on: ubuntu-latest
     # 45 dakika yetmedi: ilk gercek kosu `penalty_is_monotonic_in_the_ratio`
-    # icinde iptal edildi. O harness bolundu ve stake 32 bit'e baglandi, ama
-    # sinir yine de olculmus bir sayiya dayanmali — tek bir harness'in 3 dakika
-    # surdugu gorulduyse yedi tanesi icin 45 dakika kagit uzerinde yetiyor
-    # gorunup pratikte yetmiyor. 90 dakika, sonraki yesil kosudan sonra gercek
-    # sureye gore dusurulecek.
+    # icinde iptal edildi. O harness ikiye bolundu ve stake 32 bit'e baglandi.
+    # 90 dakika, ilk yesil kosudan sonra gercek sureye gore dusurulecek.
+    #
+    # `--harness-timeout` denendi ve geri alindi: `-Z unstable-options`
+    # istiyor. Bir kapiyi kararsiz bir bayraga baglamak, Kani'nin bir sonraki
+    # surumunde kapinin sessizce kirilmasi demek. Tek bir harness patlarsa job
+    # timeout'u devreye girer; bu daha kaba ama kapinin kendisi kadar dayanikli.
     timeout-minutes: 90
     permissions:
       contents: read
@@ -319,7 +321,7 @@ jobs:
         working-directory: kani
         run: |
           set -euo pipefail
-          cargo kani --output-format terse --harness-timeout 15m 2>&1 | tee /tmp/kani.log
+          cargo kani --output-format terse 2>&1 | tee /tmp/kani.log
 
       - name: Kani kapısı
         run: bash ./scripts/check-kani.sh /tmp/kani.log
