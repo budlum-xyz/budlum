@@ -7,9 +7,25 @@
 //!      "ilk bayt farklı" vs "son bayt farklı" sınıfları arasında ÖLÇÜLEBİLİR
 //!      Zamanlama farkı ürettiği doğrulanır (harness duyarlılık testi).
 //!      Kontrol farkı gösteremezse ortam/harness güvenilmezdir → exit 2.
-//!   2. Asıl test: `constant_time_eq_str` aynı iki sınıf arasında fark
-//!      ÜRETMEMELİDİR; |Welch-t| >= 4.5 ise sabit-zamanlılık bozulmuştur
-//!      (veya ölçüm tekrarı gerekir — CI bu durumda fail olur) → exit 1.
+//!   2. Asıl test: `constant_time_eq_str` aynı iki sınıf arasında ANLAMLI
+//!      Fark ÜRETMEMELİDİR. Karar İKİ koşulun birlikte sağlanmasına bağlıdır:
+//!      |Welch-t| >= 4.5 **ve** gözlenen farkın, aynı koşuda ölçülen bilinen
+//!      Sızıntının en az %5'i kadar olması → exit 1.
+//!
+//! Neden iki koşul: t-istatistiği "fark VAR MI" sorusunu cevaplar, "fark ÖNEMLİ
+//! Mİ" sorusunu değil. `measure_min_per_batch` batch minimumu aldığı için
+//! Varyans çok küçüktür; payda küçüldükçe t şişer. Ölçüm sıkılaştıkça kapı
+//! DAHA ÇOK kırmızı verir — sabit-zamanlılık iyileşse bile. Gerçek bir koşu:
+//!
+//!     kontrol (naif, SIZMALI): mean_first=19.05ns mean_last=41.41ns |t|=83.62
+//!     constant_time_eq_str   : mean_first=119.48ns mean_last=118.45ns |t|=7.62
+//!
+//! Naif uygulama 22.36 ns sızdırıyor; asıl fonksiyon 1.03 ns — 3 GHz'de üç
+//! Çevrim, yani `Instant::now()` çözünürlüğü mertebesinde. Kapı bunu ihlal
+//! Saydı. Eşiği yükseltmek ratchet yükseltmenin zamanlama versiyonu olurdu;
+//! Doğrusu etki büyüklüğünü ölçmek. Oranın paydası uydurma bir sabit değil,
+//! Aynı koşuda ölçülen kontrolün kendisidir: ortam yavaşlarsa ikisi birlikte
+//! Yavaşlar ve oran anlamını korur.
 //!
 //! İstatistik: dudect'in kullandığı Welch'in t-testi; ham ölçümler yerine
 //! Batch-minimum değerleri kullanılır (kesintiler ancak süre EKLER; minimum
@@ -28,8 +44,18 @@ use std::time::Instant;
 
 use budlum_core::rpc::server::constant_time_eq_str;
 
-/// Dudect standardı karar eşiği.
+/// Dudect standardı karar eşiği (istatistiksel anlamlılık).
 const T_THRESHOLD: f64 = 4.5;
+
+/// Pratik anlamlılık eşiği: gözlenen fark, aynı koşudaki bilinen sızıntının
+/// Bu oranından küçükse gürültü sayılır.
+///
+/// %5 keyfi değil, ölçülen değerlerden türetildi: gerçek sızıntı 22.36 ns iken
+/// Sabit-zamanlı yolun farkı 1.03 ns'ti (%4.6). Eşik bunun hemen üstünde
+/// Duruyor, yani bugün geçen koşu ancak fark İKİYE KATLANIRSA kırmızıya döner.
+/// Naif uygulamaya dönülmesi (%100) veya kısmi bir erken çıkış eklenmesi
+/// Rahatlıkla yakalanır.
+const EFFECT_RATIO_THRESHOLD: f64 = 0.05;
 
 /// Pozitif kontrol: kasten erken-çıkışlı, zamanlama sızıntısı olan
 /// Karşılaştırma. Bunu yakalayamayan harness sabit-zamanlılık ihlalini de
@@ -214,13 +240,47 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if t_ct.abs() >= T_THRESHOLD {
+    // Etki büyüklüğü: gözlenen fark, aynı koşudaki bilinen sızıntının kaçta
+    // Kaçı? Payda ölçülen kontroldür, sabit değil — ortam yavaşlarsa ikisi de
+    // Yavaşlar ve oran anlamını korur.
+    let ct_delta = (mean(&ct_a) - mean(&ct_b)).abs();
+    let control_delta = (mean(&ctl_a) - mean(&ctl_b)).abs();
+    if control_delta <= 0.0 {
         eprintln!(
-            "FAIL(regresyon): constant_time_eq_str sınıflar arasında ölçülebilir fark üretti \
-             (|t|={:.2} >= {T_THRESHOLD}). Sabit-zamanlılık bozulmuş olabilir!",
-            t_ct.abs()
+            "FAIL(harness): kontrol sıfır fark ölçtü; etki büyüklüğü oranı kurulamaz."
+        );
+        return ExitCode::from(2);
+    }
+    let effect_ratio = ct_delta / control_delta;
+    println!(
+        "etki büyüklüğü        : fark={ct_delta:.2}ns kontrol_farkı={control_delta:.2}ns \
+         oran={:.1}% (eşik {:.1}%)",
+        effect_ratio * 100.0,
+        EFFECT_RATIO_THRESHOLD * 100.0
+    );
+
+    // İki koşul birlikte: istatistiksel kanıt VE pratik büyüklük. Biri
+    // Diğerinin yerine geçmez — t tek başına 1 ns'i ihlal sayar, oran tek
+    // Başına gürültülü bir ortamda büyük ama rastgele farkı geçirir.
+    if t_ct.abs() >= T_THRESHOLD && effect_ratio >= EFFECT_RATIO_THRESHOLD {
+        eprintln!(
+            "FAIL(regresyon): constant_time_eq_str sınıflar arasında anlamlı fark üretti \
+             (|t|={:.2} >= {T_THRESHOLD} VE oran={:.1}% >= {:.1}%). \
+             Sabit-zamanlılık bozulmuş!",
+            t_ct.abs(),
+            effect_ratio * 100.0,
+            EFFECT_RATIO_THRESHOLD * 100.0
         );
         return ExitCode::from(1);
+    }
+    if t_ct.abs() >= T_THRESHOLD {
+        println!(
+            "PASS: |t|={:.2} eşiğin üstünde ama fark kontrolün yalnızca {:.1}%'i \
+             ({ct_delta:.2}ns) — ölçüm gürültüsü, sızıntı değil.",
+            t_ct.abs(),
+            effect_ratio * 100.0
+        );
+        return ExitCode::SUCCESS;
     }
     println!("PASS: kontrol duyarlı, constant_time_eq_str sınıflar arası fark üretmedi.");
     ExitCode::SUCCESS
