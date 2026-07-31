@@ -678,7 +678,11 @@ mod bridge_fee_split {
     #[test]
     fn small_transfers_are_no_longer_free() {
         for amount in [11u128, 50, 99, 100] {
-            let old_fee = amount * 1 / 100;
+            // The hardcoded expression this replaced, written out so the
+            // Comparison below is against what the chain really charged.
+            // `* 1` is the identity the old call sites carried; clippy is
+            // Right that it does nothing, which is the point.
+            let old_fee = amount / 100;
             let (recipient, fee) = split_bridge_fee(amount, PPM_1_PCT, 10).expect("covers floor");
             assert!(fee > 0, "amount {amount} relayed for free");
             assert!(

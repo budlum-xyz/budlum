@@ -249,7 +249,7 @@ mod tests {
     /// `DealStatus::Slashed`, and only `Active` deals are expirable.
     #[test]
     fn a_slashed_deal_does_not_also_get_its_bond_returned() {
-        let (mut blockchain, deal_id, operator, _bond, after_bond) = blockchain_with_one_deal(10);
+        let (mut blockchain, deal_id, operator, _bond, _after_bond) = blockchain_with_one_deal(10);
 
         blockchain
             .state

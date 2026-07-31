@@ -2302,6 +2302,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn total_bud_committed_counts_stake_and_unbonding() {
         let liquid = test_addr_from_byte(11u8);
         let validator = test_addr_from_byte(12u8);

@@ -6210,232 +6210,241 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
 }
 
 #[cfg(test)]
-/// An opener with an empty account must not be able to open a challenge.
-///
-/// `opener_bond` is documented in five places as the anti-spam mechanism for a
-/// permissionless endpoint, and nothing debited it. `storage_open_challenge` is
-/// public RPC, so a caller could pass any bond value with no balance and open
-/// challenges that cost the operator a read and a hash over up to 16 MiB each.
-#[test]
-fn an_empty_account_cannot_afford_an_opener_bond() {
-    use crate::consensus::PoWEngine;
-    use std::sync::Arc;
+mod bond_and_reorg_tests {
+    //! `#[cfg(test)]` was attached to a single item here, not to a block, so
+    //! everything after the first test compiled into the production library.
+    //! `build_divergent_pow_chains` then tripped `-D dead-code` because
+    //! nothing outside the tests calls it. Wrapping the region in a module
+    //! restores the intent: these are tests.
+    use super::*;
 
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let opener = Address::from([0x42u8; 32]);
-    assert_eq!(
-        bc.state.get_balance(&opener),
-        0,
-        "opener starts with nothing"
-    );
+    /// An opener with an empty account must not be able to open a challenge.
+    ///
+    /// `opener_bond` is documented in five places as the anti-spam mechanism for a
+    /// permissionless endpoint, and nothing debited it. `storage_open_challenge` is
+    /// public RPC, so a caller could pass any bond value with no balance and open
+    /// challenges that cost the operator a read and a hash over up to 16 MiB each.
+    #[test]
+    fn an_empty_account_cannot_afford_an_opener_bond() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
 
-    let err = bc
-        .debit_opener_bond(&opener, 999_999)
-        .expect_err("an empty account must not afford a bond");
-    assert!(
-        err.contains("insufficient balance"),
-        "unexpected error: {err}"
-    );
-    assert_eq!(
-        bc.state.get_balance(&opener),
-        0,
-        "a refused debit must not move the balance"
-    );
-}
-
-/// A funded opener pays exactly the bond, and gets exactly it back.
-///
-/// Paired with the test above so the fix cannot be a gate that refuses
-/// everything: the bond has to be chargeable, and the refund has to restore the
-/// balance rather than approximate it.
-#[test]
-fn an_opener_bond_is_debited_and_refunded_exactly() {
-    use crate::consensus::PoWEngine;
-    use std::sync::Arc;
-
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let opener = Address::from([0x43u8; 32]);
-    bc.state.add_balance(&opener, 1_000);
-
-    bc.debit_opener_bond(&opener, 250)
-        .expect("a funded opener can post a bond");
-    assert_eq!(
-        bc.state.get_balance(&opener),
-        750,
-        "the bond must leave the balance while the challenge is open"
-    );
-
-    bc.refund_opener_bond(&opener, 250)
-        .expect("a resolved challenge returns the bond");
-    assert_eq!(
-        bc.state.get_balance(&opener),
-        1_000,
-        "the refund must restore the balance exactly"
-    );
-}
-
-/// A zero bond is refused rather than treated as a free challenge.
-///
-/// `open_challenge` already rejects `opener_bond == 0` with `ZeroOpenerBond`.
-/// The debit path agrees, so the two cannot drift into a state where one
-/// accepts what the other refuses.
-#[test]
-fn a_zero_opener_bond_is_refused() {
-    use crate::consensus::PoWEngine;
-    use std::sync::Arc;
-
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let opener = Address::from([0x44u8; 32]);
-    bc.state.add_balance(&opener, 1_000);
-
-    assert!(
-        bc.debit_opener_bond(&opener, 0).is_err(),
-        "a zero bond buys a free challenge and must be refused"
-    );
-    assert_eq!(bc.state.get_balance(&opener), 1_000, "balance untouched");
-}
-
-/// Repeated challenges drain the opener, which is the property the bond exists
-/// for.
-///
-/// The rate limit bounds how *fast* an attacker can open challenges. The bond
-/// is what makes sustaining them cost something. Without a debit the attacker
-/// paid nothing and the operator paid every time.
-#[test]
-fn repeated_challenges_exhaust_the_opener_not_the_operator() {
-    use crate::consensus::PoWEngine;
-    use std::sync::Arc;
-
-    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let opener = Address::from([0x45u8; 32]);
-    bc.state.add_balance(&opener, 100);
-
-    let bond = 30u64;
-    for i in 0..3 {
-        bc.debit_opener_bond(&opener, bond)
-            .unwrap_or_else(|e| panic!("challenge {i} should be affordable: {e}"));
-    }
-    assert_eq!(bc.state.get_balance(&opener), 10, "3 x 30 debited");
-
-    let err = bc
-        .debit_opener_bond(&opener, bond)
-        .expect_err("the fourth challenge is beyond what the opener can fund");
-    assert!(err.contains("insufficient balance"), "unexpected: {err}");
-}
-
-fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
-    use crate::consensus::PoWEngine;
-    use std::sync::Arc;
-
-    let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let common_producer = Address::from([1u8; 32]);
-    for _ in 0..3 {
-        left.produce_block(common_producer).unwrap();
-        right.produce_block(common_producer).unwrap();
-    }
-    for _ in 0..2 {
-        left.produce_block(Address::from([2u8; 32])).unwrap();
-    }
-    for _ in 0..3 {
-        right.produce_block(Address::from([3u8; 32])).unwrap();
-    }
-    (left, right)
-}
-
-#[test]
-fn reorg_preserves_actual_finalized_checkpoint() {
-    let (mut left, right) = build_divergent_pow_chains();
-    left.finalized_height = 2;
-    left.finalized_hash = left.chain[2].hash.clone();
-    let finalized_hash = left.finalized_hash.clone();
-
-    assert!(left.try_reorg(right.chain).unwrap());
-    assert_eq!(left.finalized_height, 2);
-    assert_eq!(left.finalized_hash, finalized_hash);
-}
-
-#[test]
-fn reorg_rejects_fork_at_finalized_height() {
-    let (mut left, right) = build_divergent_pow_chains();
-    let fork_point = left.find_fork_point(&right.chain).unwrap();
-    left.finalized_height = fork_point as u64;
-    left.finalized_hash = left.chain[fork_point].hash.clone();
-
-    let error = left.try_reorg(right.chain).unwrap_err();
-    assert!(error.contains("at or below finalized height"));
-}
-
-#[test]
-fn finality_rescan_starts_at_a_real_checkpoint() {
-    // `invalidate_finality_from_height` rebuilds `finalized_height` by walking
-    // back from the tip in `checkpoint_interval` steps. Certificates only exist
-    // at multiples of that interval, so a tip that is not itself a multiple
-    // used to make every probe miss.
-    //
-    // This pins the arithmetic rather than the storage round-trip: the first
-    // probe must be the highest checkpoint at or below the tip.
-    let interval = 10u64;
-    for tip in 0..40u64 {
-        let first_probe = (tip / interval) * interval;
-        assert!(
-            first_probe.is_multiple_of(interval),
-            "probe {first_probe} for tip {tip} is not a checkpoint height"
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x42u8; 32]);
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            0,
+            "opener starts with nothing"
         );
+
+        let err = bc
+            .debit_opener_bond(&opener, 999_999)
+            .expect_err("an empty account must not afford a bond");
         assert!(
-            first_probe <= tip,
-            "probe {first_probe} for tip {tip} is above the tip"
+            err.contains("insufficient balance"),
+            "unexpected error: {err}"
         );
-        if tip >= interval {
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            0,
+            "a refused debit must not move the balance"
+        );
+    }
+
+    /// A funded opener pays exactly the bond, and gets exactly it back.
+    ///
+    /// Paired with the test above so the fix cannot be a gate that refuses
+    /// everything: the bond has to be chargeable, and the refund has to restore the
+    /// balance rather than approximate it.
+    #[test]
+    fn an_opener_bond_is_debited_and_refunded_exactly() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x43u8; 32]);
+        bc.state.add_balance(&opener, 1_000);
+
+        bc.debit_opener_bond(&opener, 250)
+            .expect("a funded opener can post a bond");
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            750,
+            "the bond must leave the balance while the challenge is open"
+        );
+
+        bc.refund_opener_bond(&opener, 250)
+            .expect("a resolved challenge returns the bond");
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            1_000,
+            "the refund must restore the balance exactly"
+        );
+    }
+
+    /// A zero bond is refused rather than treated as a free challenge.
+    ///
+    /// `open_challenge` already rejects `opener_bond == 0` with `ZeroOpenerBond`.
+    /// The debit path agrees, so the two cannot drift into a state where one
+    /// accepts what the other refuses.
+    #[test]
+    fn a_zero_opener_bond_is_refused() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x44u8; 32]);
+        bc.state.add_balance(&opener, 1_000);
+
+        assert!(
+            bc.debit_opener_bond(&opener, 0).is_err(),
+            "a zero bond buys a free challenge and must be refused"
+        );
+        assert_eq!(bc.state.get_balance(&opener), 1_000, "balance untouched");
+    }
+
+    /// Repeated challenges drain the opener, which is the property the bond exists
+    /// for.
+    ///
+    /// The rate limit bounds how *fast* an attacker can open challenges. The bond
+    /// is what makes sustaining them cost something. Without a debit the attacker
+    /// paid nothing and the operator paid every time.
+    #[test]
+    fn repeated_challenges_exhaust_the_opener_not_the_operator() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x45u8; 32]);
+        bc.state.add_balance(&opener, 100);
+
+        let bond = 30u64;
+        for i in 0..3 {
+            bc.debit_opener_bond(&opener, bond)
+                .unwrap_or_else(|e| panic!("challenge {i} should be affordable: {e}"));
+        }
+        assert_eq!(bc.state.get_balance(&opener), 10, "3 x 30 debited");
+
+        let err = bc
+            .debit_opener_bond(&opener, bond)
+            .expect_err("the fourth challenge is beyond what the opener can fund");
+        assert!(err.contains("insufficient balance"), "unexpected: {err}");
+    }
+
+    fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let common_producer = Address::from([1u8; 32]);
+        for _ in 0..3 {
+            left.produce_block(common_producer).unwrap();
+            right.produce_block(common_producer).unwrap();
+        }
+        for _ in 0..2 {
+            left.produce_block(Address::from([2u8; 32])).unwrap();
+        }
+        for _ in 0..3 {
+            right.produce_block(Address::from([3u8; 32])).unwrap();
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn reorg_preserves_actual_finalized_checkpoint() {
+        let (mut left, right) = build_divergent_pow_chains();
+        left.finalized_height = 2;
+        left.finalized_hash = left.chain[2].hash.clone();
+        let finalized_hash = left.finalized_hash.clone();
+
+        assert!(left.try_reorg(right.chain).unwrap());
+        assert_eq!(left.finalized_height, 2);
+        assert_eq!(left.finalized_hash, finalized_hash);
+    }
+
+    #[test]
+    fn reorg_rejects_fork_at_finalized_height() {
+        let (mut left, right) = build_divergent_pow_chains();
+        let fork_point = left.find_fork_point(&right.chain).unwrap();
+        left.finalized_height = fork_point as u64;
+        left.finalized_hash = left.chain[fork_point].hash.clone();
+
+        let error = left.try_reorg(right.chain).unwrap_err();
+        assert!(error.contains("at or below finalized height"));
+    }
+
+    #[test]
+    fn finality_rescan_starts_at_a_real_checkpoint() {
+        // `invalidate_finality_from_height` rebuilds `finalized_height` by walking
+        // back from the tip in `checkpoint_interval` steps. Certificates only exist
+        // at multiples of that interval, so a tip that is not itself a multiple
+        // used to make every probe miss.
+        //
+        // This pins the arithmetic rather than the storage round-trip: the first
+        // probe must be the highest checkpoint at or below the tip.
+        let interval = 10u64;
+        for tip in 0..40u64 {
+            let first_probe = (tip / interval) * interval;
             assert!(
-                tip - first_probe < interval,
-                "probe {first_probe} skipped a checkpoint below tip {tip}"
+                first_probe.is_multiple_of(interval),
+                "probe {first_probe} for tip {tip} is not a checkpoint height"
             );
+            assert!(
+                first_probe <= tip,
+                "probe {first_probe} for tip {tip} is above the tip"
+            );
+            if tip >= interval {
+                assert!(
+                    tip - first_probe < interval,
+                    "probe {first_probe} skipped a checkpoint below tip {tip}"
+                );
+            }
         }
     }
-}
 
-#[test]
-fn finality_survives_invalidation_when_the_tip_is_not_a_checkpoint() {
-    // The regression itself, end to end. A certificate is stored at a real
-    // checkpoint, the chain grows past it to a non-multiple height, and a QC
-    // fault above the certificate triggers a rescan.
-    //
-    // Before the fix the rescan probed 57, 47, 37, ... and found nothing, so
-    // `finalized_height` fell to 0 — the chain kept its blocks but forgot they
-    // were final, which re-opens reorgs that
-    // `reorg_rejects_fork_at_finalized_height` exists to refuse.
-    let (mut chain, _) = build_divergent_pow_chains();
-    let interval =
-        crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain.chain_id);
-    assert!(interval >= 2, "test needs a real interval");
+    #[test]
+    fn finality_survives_invalidation_when_the_tip_is_not_a_checkpoint() {
+        // The regression itself, end to end. A certificate is stored at a real
+        // checkpoint, the chain grows past it to a non-multiple height, and a QC
+        // fault above the certificate triggers a rescan.
+        //
+        // Before the fix the rescan probed 57, 47, 37, ... and found nothing, so
+        // `finalized_height` fell to 0 — the chain kept its blocks but forgot they
+        // were final, which re-opens reorgs that
+        // `reorg_rejects_fork_at_finalized_height` exists to refuse.
+        let (mut chain, _) = build_divergent_pow_chains();
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain.chain_id);
+        assert!(interval >= 2, "test needs a real interval");
 
-    // A tip that is deliberately not a multiple of the interval.
-    let tip = chain.chain.len().saturating_sub(1) as u64;
-    let highest_checkpoint = (tip / interval) * interval;
-    if highest_checkpoint == 0 {
-        return; // chain too short on this profile to carry a checkpoint
+        // A tip that is deliberately not a multiple of the interval.
+        let tip = chain.chain.len().saturating_sub(1) as u64;
+        let highest_checkpoint = (tip / interval) * interval;
+        if highest_checkpoint == 0 {
+            return; // chain too short on this profile to carry a checkpoint
+        }
+
+        chain.finalized_height = highest_checkpoint;
+        chain.finalized_hash = chain.chain[highest_checkpoint as usize].hash.clone();
+
+        // The rescan's first probe must be the checkpoint, not the tip.
+        let first_probe = (tip / interval) * interval;
+        assert_eq!(
+            first_probe, highest_checkpoint,
+            "rescan would start at {first_probe}, missing the certificate at {highest_checkpoint}"
+        );
     }
 
-    chain.finalized_height = highest_checkpoint;
-    chain.finalized_hash = chain.chain[highest_checkpoint as usize].hash.clone();
+    #[test]
+    fn reorg_replays_transactions_and_rejects_false_state_root() {
+        let (mut left, right) = build_divergent_pow_chains();
+        let mut candidate = right.chain;
+        let tip = candidate.last_mut().unwrap();
+        tip.state_root = "ff".repeat(32);
+        tip.hash = tip.calculate_hash();
 
-    // The rescan's first probe must be the checkpoint, not the tip.
-    let first_probe = (tip / interval) * interval;
-    assert_eq!(
-        first_probe, highest_checkpoint,
-        "rescan would start at {first_probe}, missing the certificate at {highest_checkpoint}"
-    );
-}
-
-#[test]
-fn reorg_replays_transactions_and_rejects_false_state_root() {
-    let (mut left, right) = build_divergent_pow_chains();
-    let mut candidate = right.chain;
-    let tip = candidate.last_mut().unwrap();
-    tip.state_root = "ff".repeat(32);
-    tip.hash = tip.calculate_hash();
-
-    let error = left.try_reorg(candidate).unwrap_err();
-    assert!(error.contains("state root mismatch"));
+        let error = left.try_reorg(candidate).unwrap_err();
+        assert!(error.contains("state root mismatch"));
+    }
 }

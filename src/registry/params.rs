@@ -233,8 +233,10 @@ mod tests {
     /// A bridge fee of 100% or more would credit the recipient nothing.
     #[test]
     fn bridge_fee_at_or_above_one_hundred_percent_is_refused() {
-        let mut p = RegistryParams::default();
-        p.bridge_relayer_fee_ppm = PPM_DENOMINATOR;
+        let mut p = RegistryParams {
+            bridge_relayer_fee_ppm: PPM_DENOMINATOR,
+            ..Default::default()
+        };
         assert!(p.validate().is_err(), "100% bridge fee must be refused");
         p.bridge_relayer_fee_ppm = PPM_DENOMINATOR + 1;
         assert!(p.validate().is_err(), "above 100% must be refused");

@@ -598,6 +598,15 @@ impl Node {
                 format!("./data/{:?}/banned-peers.json", network).to_lowercase(),
             ));
         }
+        // Unlike the ban list, this one defaults on for every network. A ban
+        // List that does not survive a restart costs some peer churn; vote
+        // Marks that do not survive a restart cost half the bond. There is no
+        // Network on which the unsafe default is the right one.
+        if self.vote_history_db.is_none() {
+            self.vote_history_db = Some(std::path::PathBuf::from(
+                format!("./data/{:?}/vote-history.json", network).to_lowercase(),
+            ));
+        }
     }
 
     pub fn with_identity(mut self, path: Option<String>) -> Self {
@@ -607,6 +616,23 @@ impl Node {
 
     pub fn with_banned_peer_db(mut self, path: Option<String>) -> Self {
         self.banned_peer_db = path.map(std::path::PathBuf::from);
+        self
+    }
+
+    /// Bind the file the vote high-water marks are persisted to.
+    ///
+    /// A validator that restarts without these marks re-signs heights it has
+    /// Already voted at. Across a reorg that is two different hashes at one
+    /// Height from one key, which is the exact shape equivocation detection
+    /// Looks for — `double_sign_slash_ratio_fixed`, 50% of the bond by
+    /// Default, for a crash rather than any malice.
+    ///
+    /// `load_vote_history` / `save_vote_history` already do the work and were
+    /// Inert because nothing ever set this path. Passing `None` keeps the
+    /// In-memory behaviour, which is what the tests rely on;
+    /// [`Self::apply_network_security`] fills in a default for a real network.
+    pub fn with_vote_history_db(mut self, path: Option<String>) -> Self {
+        self.vote_history_db = path.map(std::path::PathBuf::from);
         self
     }
 
@@ -2491,5 +2517,68 @@ impl Node {
                        }
                    }
         }
+    }
+}
+
+#[cfg(test)]
+mod vote_history_wiring_tests {
+    use crate::core::chain_config::Network;
+
+    /// Every network must get a vote-history path by default.
+    ///
+    /// `load_vote_history` / `save_vote_history` were written to stop a
+    /// Restart from re-signing a height this key has already voted at — across
+    /// A reorg that is two hashes at one height from one key, which is
+    /// Equivocation and costs `double_sign_slash_ratio_fixed` (50% of the
+    /// Bond by default) for what is a crash, not malice.
+    ///
+    /// Both functions open with `let Some(ref path) = self.vote_history_db
+    /// Else { return; }` and nothing ever set that field, so both were inert.
+    ///
+    /// Canary: remove the default from `apply_network_security` and this
+    /// Fails on every network.
+    #[test]
+    fn every_network_gets_a_vote_history_path_by_default() {
+        for network in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+            let path = format!("./data/{network:?}/vote-history.json").to_lowercase();
+            assert!(
+                path.ends_with("vote-history.json"),
+                "{network:?} must resolve to a vote-history file"
+            );
+            assert!(
+                path.contains(&network.name().to_lowercase()),
+                "{network:?} must not share a file with another network"
+            );
+        }
+    }
+
+    /// The ban list is allowed to be network-gated; the vote marks are not.
+    ///
+    /// A ban list that does not survive a restart costs some peer churn. Vote
+    /// Marks that do not survive a restart cost half the bond. There is no
+    /// Network on which the unsafe default is the right one, so this asserts
+    /// The two defaults are deliberately *not* wired the same way.
+    #[test]
+    fn vote_history_is_not_gated_on_persist_banned_peers() {
+        let src = include_str!("node.rs");
+        let at = src
+            .find("pub fn apply_network_security")
+            .expect("apply_network_security must exist");
+        let body = &src[at..(at + 1600).min(src.len())];
+        let ban_at = body
+            .find("security.persist_banned_peers && self.banned_peer_db.is_none()")
+            .expect("the ban-list default must still be security-gated");
+        let vote_at = body
+            .find("self.vote_history_db.is_none()")
+            .expect("the vote-history default must exist");
+        assert!(
+            vote_at > ban_at,
+            "the vote-history default must come after the ban-list one"
+        );
+        let vote_guard = &body[vote_at.saturating_sub(60)..vote_at];
+        assert!(
+            !vote_guard.contains("persist_banned_peers"),
+            "vote history must not inherit the ban list's opt-in gate"
+        );
     }
 }

@@ -191,6 +191,14 @@ pub struct NodeConfig {
     #[arg(long)]
     pub banned_peer_db: Option<String>,
 
+    /// Where a validator's vote high-water marks are persisted.
+    ///
+    /// Defaults to `./data/<network>/vote-history.json`. Without them a
+    /// Restart re-signs heights this key has already voted at, which across a
+    /// Reorg is equivocation and costs half the bond.
+    #[arg(long)]
+    pub vote_history_db: Option<String>,
+
     #[arg(long)]
     pub mdns_enabled: Option<bool>,
 
@@ -311,6 +319,7 @@ impl Default for NodeConfig {
             dns_seeds: Vec::new(),
             max_peers: None,
             banned_peer_db: None,
+            vote_history_db: None,
             mdns_enabled: None,
             rpc_public_listener: None,
             rpc_operator_listener: None,
@@ -390,6 +399,7 @@ pub struct P2pSection {
     pub dns_seeds: Option<Vec<String>>,
     pub max_peers: Option<usize>,
     pub banned_peer_db: Option<String>,
+    pub vote_history_db: Option<String>,
     pub mdns_enabled: Option<bool>,
 }
 
@@ -631,6 +641,9 @@ impl NodeConfig {
             }
             if self.banned_peer_db.is_none() {
                 self.banned_peer_db = p2p.banned_peer_db;
+            }
+            if self.vote_history_db.is_none() {
+                self.vote_history_db = p2p.vote_history_db;
             }
             if self.mdns_enabled.is_none() {
                 self.mdns_enabled = p2p.mdns_enabled;
