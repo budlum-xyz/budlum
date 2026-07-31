@@ -221,5 +221,15 @@ mod tests {
         assert_eq!(MAX_FUTURE_BLOCK_TIME_MS, 15_000);
         assert_eq!(MIN_BLOCK_INTERVAL_MS, 1000);
         assert_eq!(MAX_REORG_DEPTH, 100);
+        // One definition, two gates. `try_reorg` refuses a deep reorg at the
+        // state machine and `is_better_chain` refuses it at fork choice; they
+        // used to hold separate `= 100` literals with nothing connecting them,
+        // so raising one silently left the other enforcing the old depth — a
+        // chain accepted by one gate and refused by the other.
+        assert_eq!(
+            crate::chain::blockchain::MAX_REORG_DEPTH,
+            MAX_REORG_DEPTH,
+            "the chain layer must re-export this constant, not redeclare it"
+        );
     }
 }

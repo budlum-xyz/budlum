@@ -34,7 +34,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
-pub const MAX_REORG_DEPTH: usize = 100;
+/// Re-exported so the two reorg gates cannot drift apart.
+///
+/// `try_reorg` (here) and `ConsensusEngine::is_better_chain`
+/// (`consensus/mod.rs`) both refuse a reorg deeper than this. They had
+/// separate `= 100` declarations with nothing tying them together: changing
+/// one left the other enforcing the old depth, so a chain could be refused by
+/// the fork-choice rule and accepted by the state machine, or the reverse.
+/// One definition, two call sites.
+pub use crate::consensus::MAX_REORG_DEPTH;
 pub const FINALITY_DEPTH: usize = 50;
 /// Validator set snapshots retained, in memory and on disk.
 ///
