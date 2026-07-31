@@ -2071,7 +2071,25 @@ impl Blockchain {
         participated: &std::collections::HashSet<Address>,
     ) -> usize {
         let params = *self.state.registry.params();
-        let expected: Vec<Address> = self.state.validators.keys().copied().collect();
+        // Same filter as `maybe_observe_liveness_on_epoch_close`. Taking every
+        // Key of `validators` counts members that cannot sign — a slashed or
+        // Jailed validator stays in the map (that is how `jail_until` is
+        // Tracked) while `registry.is_active` has already gone false. Feeding
+        // Them in as absentees accrues a downtime streak for not doing
+        // Something they are barred from doing, which is the shape of
+        // Cosmos SDK #1867: a validator dropped from the set kept its
+        // `SigningInfo` and was slashed for the window it was not in.
+        let expected: Vec<Address> = self
+            .state
+            .validators
+            .keys()
+            .filter(|addr| {
+                self.state
+                    .registry
+                    .is_active(addr, crate::registry::role::roles::VALIDATOR)
+            })
+            .copied()
+            .collect();
         let reports = self.state.liveness.record_epoch(
             epoch,
             &expected,

@@ -836,7 +836,21 @@ impl AccountState {
         participated: &std::collections::HashSet<Address>,
     ) -> Vec<crate::registry::evidence::SlashingReport> {
         let params = *self.registry.params();
-        let expected: Vec<Address> = self.validators.keys().copied().collect();
+        // Only members the registry still considers active. A slashed or
+        // Jailed validator remains in `self.validators` — that map holds
+        // `jail_until` — while `registry.is_active` has already gone false.
+        // Counting it absent accrues downtime for blocks it is barred from
+        // Signing (Cosmos SDK #1867). `Blockchain::maybe_observe_liveness_on_epoch_close`
+        // Has always filtered this way; the other two paths did not.
+        let expected: Vec<Address> = self
+            .validators
+            .keys()
+            .filter(|addr| {
+                self.registry
+                    .is_active(addr, crate::registry::role::roles::VALIDATOR)
+            })
+            .copied()
+            .collect();
         self.liveness.record_epoch(
             epoch,
             &expected,
