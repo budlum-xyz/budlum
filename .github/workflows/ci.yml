@@ -849,6 +849,15 @@ jobs:
         run: |
           bash ./scripts/check-consensus-maps-are-ordered.sh --self-test
           bash ./scripts/check-consensus-maps-are-ordered.sh
+      # The Dockerfile said it had been moved to 1.94.0 and was still on
+      # 1.97.1 — tag *and* digest, verified against the registry. Codegen
+      # differs between releases, so the shipped container was outside the
+      # reproducibility claim determinism.yml makes. rust-toolchain.toml was
+      # not copied into the build context either, so nothing corrected it.
+      - name: docker toolchain pini + kanarya
+        run: |
+          bash ./scripts/check-docker-toolchain-matches-pin.sh --self-test
+          bash ./scripts/check-docker-toolchain-matches-pin.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail

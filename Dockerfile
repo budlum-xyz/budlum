@@ -7,8 +7,16 @@
 # kullaniliyordu: imaj CI'dan farkli bir derleyiciyle build ediliyor, bu da
 # "tekrarlanabilir build" iddiasini gecersiz kiliyordu (codegen ve MIR
 # optimizasyonlari surumler arasi degisir, uretilen binary bit-bit farkli
-# olur). Digest, rust:1.94.0-bookworm icin dogrulandi.
-FROM rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
+# olur).
+#
+# Digest, registry'den dogrulandi: bu imajin config blob'undaki
+# RUST_VERSION=1.94.0'dir. Etiket adi kanit degildir -- onceki hali
+# `rust:1.97.1-bookworm@sha256:77fac8b9...` idi ve o digest'in icindeki
+# RUST_VERSION gercekten 1.97.1'di, yorum "1.94.0 icin dogrulandi" dedigi
+# halde. Sadece etiket 1.94.0'a cevrilse digest onu ezerdi; ikisi birlikte
+# degismek zorunda. `check-docker-toolchain-matches-pin.sh` bu ikisinin ve
+# rust-toolchain.toml'un ayni surumu gosterdigini her PR'da dogrular.
+FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS builder
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,11 +29,26 @@ WORKDIR /build
 
 # Copy the monorepo manifests and sources. BudZero/BudZKVM is vendored as
 # source under budzero/ and is built from the same immutable checkout.
-COPY Cargo.toml Cargo.lock build.rs ./
+# rust-toolchain.toml da kopyalanir: onsuz imaj icindeki derleyici ne ise o
+# kullanilir ve pin sessizce devre disi kalir. Ustelik dosya varsa rustup
+# uyusmazlikta durur, yani base imaj bir daha kayarsa build patlar -- bit-bit
+# farkli bir binary uretmek yerine.
+COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY src/ ./src/
 COPY benches/ ./benches/
 COPY proto/ ./proto/
 COPY budzero/ ./budzero/
+
+# Derleyici gercekten pinli surum mu: build'den ONCE, imaj icinde.
+# Bu satir olmasaydi yanlis derleyiciyle uretilmis bir binary sessizce
+# yayinlanirdi ve "tekrarlanabilir build" iddiasi kagit uzerinde kalirdi.
+RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
+    actual="$(rustc --version | cut -d' ' -f2)" && \
+    if [ "$pinned" != "$actual" ]; then \
+      echo "HATA: imaj rustc $actual tasiyor, rust-toolchain.toml $pinned pinliyor" >&2; \
+      exit 1; \
+    fi && \
+    echo "toolchain OK: rustc $actual == rust-toolchain.toml $pinned"
 
 # Build release binary
 RUN cargo build --release --locked && \
