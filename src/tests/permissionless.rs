@@ -532,6 +532,230 @@ fn unstake_changes_the_registry_root() {
     );
 }
 
+// --- Role bonds must have an exit ------------------------------------------
+
+/// A RELAYER bond must be recoverable.
+///
+/// `bond_relayer` debits the account balance and registers the bond, and its
+/// Doc-comment says the bond "remains locked but slashable until the relayer
+/// Begins unbonding". Nothing in the tree began that unbonding: no
+/// `ChainCommand`, no RPC method, no transaction type, no call to
+/// `registry.begin_unbonding` for RoleId(3). The debit was one-way and the
+/// Bond was permanently unrecoverable.
+///
+/// Canary: delete `begin_role_bond_unbonding` / `withdraw_role_bond` and this
+/// Fails to compile — which is the point. Delete only the balance credit in
+/// `withdraw_role_bond` and it fails on the final balance assertion.
+#[test]
+fn a_relayer_bond_can_be_unbonded_and_withdrawn() {
+    let relayer = addr(0x61);
+    let bond = 2_000;
+    let mut state = funded_state(relayer, 10_000);
+
+    state.bond_relayer(&relayer, bond).expect("bond succeeds");
+    assert_eq!(state.get_balance(&relayer), 10_000 - bond, "bond is debited");
+    assert!(state.registry.is_active(&relayer, roles::RELAYER));
+
+    let release = state
+        .begin_role_bond_unbonding(&relayer, roles::RELAYER)
+        .expect("a bonded relayer may begin unbonding");
+    assert_eq!(release, state.registry.params().unbonding_epochs);
+
+    state.epoch_index = release;
+    let withdrawn = state
+        .withdraw_role_bond(&relayer, roles::RELAYER)
+        .expect("a matured bond may be withdrawn");
+
+    assert_eq!(withdrawn, bond);
+    assert_eq!(
+        state.get_balance(&relayer),
+        10_000,
+        "the bond must come back to the balance it was debited from"
+    );
+    assert!(state.registry.get(&relayer, roles::RELAYER).is_none());
+}
+
+/// The same exit must exist for PROVER and STORAGE_OPERATOR, which are debited
+/// By the same one-way pattern.
+#[test]
+fn prover_and_storage_operator_bonds_can_also_be_withdrawn() {
+    for (role, bond_amount) in [
+        (roles::PROVER, 1_500u64),
+        (roles::STORAGE_OPERATOR, 3_000u64),
+    ] {
+        let account = addr(0x62);
+        let mut state = funded_state(account, 10_000);
+        if role == roles::PROVER {
+            state.bond_prover(&account, bond_amount).unwrap();
+        } else {
+            state.bond_storage_operator(&account, bond_amount).unwrap();
+        }
+        assert_eq!(state.get_balance(&account), 10_000 - bond_amount);
+
+        let release = state.begin_role_bond_unbonding(&account, role).unwrap();
+        state.epoch_index = release;
+        let withdrawn = state.withdraw_role_bond(&account, role).unwrap();
+
+        assert_eq!(withdrawn, bond_amount, "role {role}");
+        assert_eq!(state.get_balance(&account), 10_000, "role {role}");
+    }
+}
+
+/// Withdrawal before the release epoch must fail, and must not credit anything.
+///
+/// This is the property that stops the exit from becoming a mint: without the
+/// Maturity check a bonded account could withdraw repeatedly.
+#[test]
+fn a_role_bond_cannot_be_withdrawn_before_it_matures() {
+    let relayer = addr(0x63);
+    let bond = 2_000;
+    let mut state = funded_state(relayer, 10_000);
+    state.bond_relayer(&relayer, bond).unwrap();
+
+    let release = state
+        .begin_role_bond_unbonding(&relayer, roles::RELAYER)
+        .unwrap();
+    assert!(release > 0, "the default window must not be zero");
+
+    state.epoch_index = release - 1;
+    let err = state
+        .withdraw_role_bond(&relayer, roles::RELAYER)
+        .expect_err("an immature bond must not be withdrawable");
+    assert!(err.contains("Unbonding") || err.contains("unbonding"), "got: {err}");
+    assert_eq!(
+        state.get_balance(&relayer),
+        10_000 - bond,
+        "a rejected withdrawal must not credit the balance"
+    );
+}
+
+/// A bond can be withdrawn exactly once. `registry.withdraw` removes the
+/// Registration, so the second attempt has nothing to pay out.
+#[test]
+fn a_role_bond_cannot_be_withdrawn_twice() {
+    let relayer = addr(0x64);
+    let bond = 2_000;
+    let mut state = funded_state(relayer, 10_000);
+    state.bond_relayer(&relayer, bond).unwrap();
+    let release = state
+        .begin_role_bond_unbonding(&relayer, roles::RELAYER)
+        .unwrap();
+    state.epoch_index = release;
+    state.withdraw_role_bond(&relayer, roles::RELAYER).unwrap();
+    assert_eq!(state.get_balance(&relayer), 10_000);
+
+    state
+        .withdraw_role_bond(&relayer, roles::RELAYER)
+        .expect_err("a withdrawn bond must not pay out again");
+    assert_eq!(
+        state.get_balance(&relayer),
+        10_000,
+        "the second attempt must not mint"
+    );
+}
+
+/// Withdrawing without unbonding first must fail: an `Active` bond is still
+/// Slashable, and paying it out on demand would let a relayer exit the moment
+/// It sees evidence coming.
+#[test]
+fn an_active_role_bond_cannot_skip_the_unbonding_window() {
+    let relayer = addr(0x65);
+    let mut state = funded_state(relayer, 10_000);
+    state.bond_relayer(&relayer, 2_000).unwrap();
+
+    state
+        .withdraw_role_bond(&relayer, roles::RELAYER)
+        .expect_err("an active bond must go through unbonding first");
+    assert_eq!(state.get_balance(&relayer), 8_000);
+}
+
+/// Validator stake must NOT be payable through this path. It unwinds through
+/// `Unstake` -> `unbonding_queue` -> `process_unbonding`; crediting it here as
+/// Well would pay the same stake out twice.
+#[test]
+fn validator_stake_is_not_withdrawable_through_the_role_bond_path() {
+    let staker = addr(0x66);
+    let mut state = funded_state(staker, 1_000_000);
+    let amount = state.registry.params().min_stake + 500;
+    Executor::apply_transaction(&mut state, &stake_tx(staker, amount, 0)).unwrap();
+
+    let err = state
+        .begin_role_bond_unbonding(&staker, roles::VALIDATOR)
+        .expect_err("validator stake must not use the role-bond exit");
+    assert!(err.contains("Unstake"), "got: {err}");
+
+    let err = state
+        .withdraw_role_bond(&staker, roles::VALIDATOR)
+        .expect_err("validator stake must not be withdrawable here");
+    assert!(err.contains("Unstake"), "got: {err}");
+}
+
+/// The RoleId(8) bond has its own pair, which also checks open inference
+/// Obligations and charges the fee. Routing it here would skip both.
+#[test]
+fn the_lubot_bond_is_not_withdrawable_through_the_role_bond_path() {
+    let operator = addr(0x67);
+    let mut state = funded_state(operator, 1_000_000);
+    let bond = state.required_lubot_bond(crate::core::transaction::DEFAULT_CHAIN_ID);
+    state
+        .bond_lubot_operator(&operator, bond, crate::core::transaction::DEFAULT_CHAIN_ID)
+        .unwrap();
+
+    state
+        .begin_role_bond_unbonding(&operator, roles::LUBOT_OPERATOR)
+        .expect_err("the RoleId(8) bond has its own unbonding entry point");
+    state
+        .withdraw_role_bond(&operator, roles::LUBOT_OPERATOR)
+        .expect_err("the RoleId(8) bond has its own withdrawal entry point");
+}
+
+/// A role that never debits a balance has nothing to pay out, so the path must
+/// Refuse rather than invent a credit.
+#[test]
+fn a_role_with_no_independent_bond_is_rejected() {
+    let account = addr(0x68);
+    let mut state = funded_state(account, 10_000);
+    let err = state
+        .withdraw_role_bond(&account, roles::ATTESTER)
+        .expect_err("ATTESTER has no independently debited bond");
+    assert!(err.contains("no independently debited bond"), "got: {err}");
+    assert_eq!(state.get_balance(&account), 10_000);
+}
+
+/// Supply conservation across the full bond lifecycle.
+///
+/// `total_bud_committed` counts liquid balances plus registry role bonds, so a
+/// Bond that is debited and never creditable is not a supply leak in the
+/// Accounting sense — but it is a leak for the account. Round-tripping the bond
+/// Must leave both the balance and the committed total exactly where they
+/// Started.
+#[test]
+fn a_role_bond_round_trip_conserves_supply() {
+    let relayer = addr(0x69);
+    let mut state = funded_state(relayer, 10_000);
+    let before = state.total_bud_committed();
+
+    state.bond_relayer(&relayer, 2_000).unwrap();
+    assert_eq!(
+        state.total_bud_committed(),
+        before,
+        "bonding moves supply between buckets, it does not create or destroy it"
+    );
+
+    let release = state
+        .begin_role_bond_unbonding(&relayer, roles::RELAYER)
+        .unwrap();
+    state.epoch_index = release;
+    state.withdraw_role_bond(&relayer, roles::RELAYER).unwrap();
+
+    assert_eq!(
+        state.total_bud_committed(),
+        before,
+        "withdrawing must not mint"
+    );
+    assert_eq!(state.get_balance(&relayer), 10_000);
+}
+
 /// Regression guard: introducing the registry must not disturb PoA isolation.
 /// A staked (thus registry-registered) validator still has zero PoA authority.
 #[test]

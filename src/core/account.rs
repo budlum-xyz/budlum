@@ -652,6 +652,86 @@ impl AccountState {
         Ok(amount)
     }
 
+    /// Begin unbonding an independently-debited role bond (RELAYER, PROVER,
+    /// STORAGE_OPERATOR).
+    ///
+    /// `bond_relayer` / `bond_prover` / `bond_storage_operator` each debit the
+    /// Account balance and register the bond, and `bond_relayer` documents that
+    /// The bond "remains locked but slashable until the relayer begins
+    /// Unbonding". There was no path that begins unbonding: no `ChainCommand`,
+    /// No RPC method, no transaction type. The debit was one-way, so the bond
+    /// Was permanently unrecoverable — the account balance had already gone
+    /// Down and nothing could ever put it back.
+    ///
+    /// The window is the governance parameter, matching every other role.
+    pub fn begin_role_bond_unbonding(
+        &mut self,
+        address: &Address,
+        role: crate::registry::role::RoleId,
+    ) -> Result<u64, String> {
+        Self::ensure_withdrawable_role(role)?;
+        self.registry
+            .begin_unbonding(*address, role, self.epoch_index)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Withdraw a matured role bond back into the account balance.
+    ///
+    /// Mirrors `withdraw_lubot_operator`: the registry's maturity check runs
+    /// First and the balance is credited only after it succeeds, so a premature
+    /// Or duplicate withdrawal cannot mint. `PermissionlessRegistry::withdraw`
+    /// Rejects anything that is not `Unbonding` past its `release_epoch` and
+    /// Removes the registration, so the bond cannot be withdrawn twice.
+    pub fn withdraw_role_bond(
+        &mut self,
+        address: &Address,
+        role: crate::registry::role::RoleId,
+    ) -> Result<u64, String> {
+        Self::ensure_withdrawable_role(role)?;
+        let staked = self
+            .registry
+            .get(address, role)
+            .map(|registration| registration.stake)
+            .ok_or_else(|| format!("no {role} bond registered for {address}"))?;
+        let final_balance = self
+            .get_balance(address)
+            .checked_add(staked)
+            .ok_or_else(|| "role bond withdrawal would overflow the account balance".to_string())?;
+        let withdrawn = self
+            .registry
+            .withdraw(*address, role, self.epoch_index)
+            .map_err(|error| error.to_string())?;
+        debug_assert_eq!(withdrawn, staked);
+        let account = self.get_or_create(address);
+        account.balance = final_balance;
+        self.dirty_accounts.insert(*address);
+        Ok(withdrawn)
+    }
+
+    /// Roles whose bond this pair of helpers owns.
+    ///
+    /// VALIDATOR is excluded: its bond lives in `self.validators` and unwinds
+    /// Through `Unstake` -> `unbonding_queue` -> `process_unbonding`, and
+    /// Crediting it here as well would pay the same stake out twice.
+    /// LUBOT_OPERATOR is excluded because it has its own pair
+    /// (`begin_lubot_operator_unbonding` / `withdraw_lubot_operator`) that also
+    /// Checks open inference obligations and charges the transaction fee.
+    fn ensure_withdrawable_role(role: crate::registry::role::RoleId) -> Result<(), String> {
+        use crate::registry::role::roles;
+        match role {
+            roles::RELAYER | roles::PROVER | roles::STORAGE_OPERATOR => Ok(()),
+            roles::VALIDATOR => Err(
+                "validator stake unwinds through Unstake and the unbonding queue, not this path"
+                    .to_string(),
+            ),
+            roles::LUBOT_OPERATOR => Err(
+                "the RoleId(8) bond unwinds through begin_lubot_operator_unbonding/withdraw_lubot_operator"
+                    .to_string(),
+            ),
+            other => Err(format!("role {other} has no independently debited bond")),
+        }
+    }
+
     /// Minimum RoleId(8) bond for a chain. Known networks use the same floor
     /// As validator onboarding; a higher governance registry floor still wins.
     /// Custom chains fall back to the registry floor.
