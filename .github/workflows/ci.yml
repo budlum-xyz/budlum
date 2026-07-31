@@ -40,6 +40,12 @@ jobs:
           set -euo pipefail
           bash ./scripts/check-clippy-extra.sh --self-test
           cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
+          # Diagnostic only: the ratchet reports a count, and the JSON it counts
+          # lives in the runner's /tmp, so a trip leaves nothing to inspect.
+          # This prints the per-lint tally and every first-party file:line.
+          # It writes nothing and runs before the gate, so it cannot change the
+          # verdict.
+          python3 ./scripts/clippy-extra-report.py /tmp/clippy-extra.json
           bash ./scripts/check-clippy-extra.sh /tmp/clippy-extra.json
       - name: Feature matrix — pq-ml-dsa solo ()
         run: |
