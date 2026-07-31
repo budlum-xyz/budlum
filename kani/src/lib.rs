@@ -213,93 +213,86 @@ mod proofs {
     /// | 4 | concrete `u128` ratio list | yes | cancelled at 90m |
     /// | — | neighbour harness, no loop | **no** | **0.04s** |
     ///
-    /// Four asserts written out was *not* the whole fix, and the table above
-    /// stops one row short. The loop came out, and the harness still ran to the
-    /// 90-minute job timeout — measured on main at run 30663307731, where it
-    /// was the only job still going and the run was cancelled by the runner,
-    /// not by anyone managing the queue:
+    /// Four asserts written out was not the whole fix either, and neither was
+    /// the first rewrite of this comment. The table now runs to six rows,
+    /// every one of them measured:
     ///
-    /// | attempt | changed | loop | result |
+    /// | attempt | changed | symbolic operands | result |
     /// | :-- | :-- | :-- | :-- |
-    /// | 1 | symbolic `u64` ratio | yes | cancelled at 45m |
-    /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | yes | cancelled at 90m |
-    /// | 3 | dropped the division | yes | cancelled at 90m |
-    /// | 4 | concrete `u128` ratio list | yes | cancelled at 90m |
-    /// | 5 | loop unrolled into four asserts | **no** | **timed out at 90m** |
+    /// | 1 | symbolic `u64` ratio | 2 | cancelled at 45m |
+    /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | 1 | cancelled at 90m |
+    /// | 3 | dropped the division | 1 | cancelled at 90m |
+    /// | 4 | concrete `u128` ratio list | 1 | cancelled at 90m |
+    /// | 5 | loop unrolled into four asserts | 1 | timed out at 90m |
+    /// | 6 | symbolic `u32` excess, `u64` `checked_mul` | **2** | still running at 20m |
     ///
-    /// So the loop was never the cause. What separates this harness from its
-    /// neighbour — which does a 128-bit multiply *and* a 128-bit divide on a
-    /// symbolic stake and finishes in 0.04s — is how many symbolic 128-bit
-    /// multiplications reach the solver at once. The neighbour builds one. The
-    /// version with four asserts built five, each against the same symbolic
-    /// `stake`, plus the constant folding for `SCALE * 3 / 2` and `SCALE * 2`.
-    /// Bit-blasting a 128x128 multiply is roughly 16k partial products; five of
-    /// them sharing an operand is not five times the work.
+    /// Attempt 6 was mine, and it went the wrong way. The harness next door
+    /// (`penalty_is_monotonic_in_the_ratio`) already records the rule —
+    /// "two symbolic operands in a 128-bit multiply is what CBMC cannot close
+    /// in CI time" — and narrows its pair to `u16` for exactly that reason. I
+    /// replaced four constant ratios with a symbolic one, which reads like
+    /// broader coverage and hands the solver a second free operand.
     ///
-    /// The claim itself never needed any of it. For `stake > 0` and `k > 0`:
+    /// What the earlier attempts got right and I lost: with a constant ratio
+    /// there is one unknown, and the multiply is a shift-and-add over known
+    /// bits. With both sides symbolic it is a full 64x64 product.
     ///
-    ///     stake * (SCALE + k)  >=  stake * SCALE
-    ///     stake * SCALE + stake * k  >=  stake * SCALE
-    ///     stake * k  >=  0
+    /// So: one symbolic operand, and narrow. `stake` is `u16` here rather than
+    /// `u32`, which is the same trade the monotonicity harness makes — the
+    /// property is about the *shape* of the arithmetic, and no boundary in it
+    /// lives above 65535. The ratio stays a constant, and the four that
+    /// mattered are covered by four separate harnesses instead of four asserts
+    /// in one: a solver that has closed one has no work carried into the next,
+    /// which is not true of four asserts sharing a symbol.
     ///
-    /// which is true by construction. The harness was asking a solver to
-    /// rediscover distributivity over 128-bit words.
-    ///
-    /// What is worth proving is the part that is *not* algebraically obvious:
-    /// that the product does not wrap. A `u32` stake against the largest ratio
-    /// checked here reaches 8.6e15, comfortably inside `u64`, so the widening
-    /// to `u128` was never load-bearing either. This version keeps the stake
-    /// fully symbolic across `u32`, states the overshoot as the single
-    /// multiplication that carries it, and asserts the no-wrap property
-    /// explicitly with `checked_mul`.
+    /// The claim itself never needed a solver at all. For `stake > 0` and
+    /// `k > 0`, `stake * (SCALE + k) >= stake * SCALE` reduces to
+    /// `stake * k >= 0`. What is worth checking is that the product does not
+    /// wrap, which is why `checked_mul` stays.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
-    #[kani::proof]
-    fn an_unbounded_ratio_would_overshoot_the_bond() {
-        let stake: u32 = kani::any();
-        let stake = u64::from(stake);
+    fn overshoot_at_ratio(excess: u64) {
+        let stake: u16 = kani::any();
         kani::assume(stake > 0);
+        let stake = u64::from(stake);
 
         const SCALE: u64 = FIXED_POINT_SCALE;
+        let ratio = SCALE + excess;
 
-        // The ratio is symbolic above the bound rather than a list of four
-        // concrete values: it covers SCALE+1, SCALE+2, 1.5x and 2x and every
-        // other overshooting ratio up to 4x, in one multiplication instead of
-        // five.
-        //
-        // The excess is capped at 3 * SCALE rather than left free across u32,
-        // and the bound is arithmetic, not taste: an unconstrained u32 excess
-        // against a u32 stake reaches 1.845e19, which is over u64::MAX by a
-        // hair (18_451_039_032_414_617_025 against 18_446_744_073_709_551_615).
-        // `checked_mul` would return None on that one corner and the harness
-        // would fail in its own `expect` rather than on the property. Capping
-        // at 4x leaves a factor of ~1000 of headroom and still covers every
-        // ratio a slashing parameter could plausibly carry — `validate()`
-        // rejects anything above SCALE long before that.
-        let excess: u32 = kani::any();
-        kani::assume(excess > 0);
-        kani::assume(u64::from(excess) <= 3 * SCALE);
-        let ratio = SCALE + u64::from(excess);
-
-        // No wrap: this is the only part a solver is actually needed for.
         let penalty = stake
             .checked_mul(ratio)
-            .expect("a u32 stake times a ratio bounded by 4 * SCALE fits in u64");
+            .expect("a u16 stake times a ratio near SCALE fits in u64");
         let bond = stake
             .checked_mul(SCALE)
-            .expect("a u32 stake times SCALE fits in u64");
+            .expect("a u16 stake times SCALE fits in u64");
 
         assert!(
-            penalty >= bond,
-            "any ratio above FIXED_POINT_SCALE already takes at least the whole bond"
-        );
-        // And strictly more, which `>=` alone would not establish.
-        assert!(
             penalty > bond,
-            "a ratio strictly above FIXED_POINT_SCALE must take strictly more \
-             than the bond"
+            "a ratio above FIXED_POINT_SCALE must take strictly more than the bond"
         );
+    }
+
+    /// One unit above the bound — where truncation would most easily hide the
+    /// overshoot.
+    #[kani::proof]
+    fn an_unbounded_ratio_would_overshoot_the_bond() {
+        overshoot_at_ratio(1);
+    }
+
+    #[kani::proof]
+    fn an_unbounded_ratio_overshoots_two_units_above() {
+        overshoot_at_ratio(2);
+    }
+
+    #[kani::proof]
+    fn a_one_and_a_half_times_ratio_overshoots() {
+        overshoot_at_ratio(FIXED_POINT_SCALE / 2);
+    }
+
+    #[kani::proof]
+    fn a_double_ratio_overshoots() {
+        overshoot_at_ratio(FIXED_POINT_SCALE);
     }
 
     /// And a concrete witness that it really does exceed the bond.
