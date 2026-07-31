@@ -3410,8 +3410,8 @@ mod tests {
         let mut first_commitment = None;
         let mut last_commitment = [0u8; 32];
         for i in 0..overshoot {
-            let commitment = [(i % 251) as u8; 32];
-            let block = 10 + (i as u64) * 10;
+            let commitment = [u8::try_from(i % 251).expect("i % 251 fits u8"); 32];
+            let block = 10 + u64::try_from(i).expect("loop counter fits u64") * 10;
             let req_id = submit_request_with_callback(
                 &mut registry,
                 model_id,

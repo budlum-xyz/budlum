@@ -360,7 +360,7 @@ mod cursor_persistence {
     fn a_persisted_cursor_is_read_back() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("relay-cursor");
-        let w = worker_with(Some(path.clone()));
+        let w = worker_with(Some(path));
 
         assert_eq!(w.load_cursor(), None, "nothing persisted yet");
         w.save_cursor(4_211);
