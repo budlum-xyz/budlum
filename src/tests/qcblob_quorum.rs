@@ -158,7 +158,10 @@ fn import_qc_blob_rejects_below_quorum_signature_count() {
 
     let result = bc.import_qc_blob(blob_with_distinct_sigs(1, &hash));
 
-    assert!(result.is_err(), "one signature out of three is below quorum");
+    assert!(
+        result.is_err(),
+        "one signature out of three is below quorum"
+    );
     assert!(
         bc.get_qc_blob(CHECKPOINT_HEIGHT).is_none(),
         "a refused blob must not be stored"
