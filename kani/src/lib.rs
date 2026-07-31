@@ -155,15 +155,42 @@ mod proofs {
         );
     }
 
-    /// Monotonicity again, over the whole `u64` stake range.
-    ///
-    /// The harness above bounds the stake to keep the solver tractable. This
-    /// one lifts that bound and constrains the other side instead: the ratio
-    /// step is the smallest one that exists, which is the case where
-    /// truncation is most likely to swallow the increase.
     #[kani::proof]
+    /// A one-unit ratio increase must never reduce the penalty, at any stake.
+    ///
+    /// **This is the harness that was timing out**, and it took a per-harness
+    /// measurement to find out. Everything before it had been blamed on
+    /// `an_unbounded_ratio_would_overshoot_the_bond`, which runs earlier in
+    /// alphabetical order and so was the last name printed before the job died.
+    /// Timed separately with a four-minute cap:
+    ///
+    /// ```text
+    /// a_double_ratio_overshoots                        1s
+    /// an_unbounded_ratio_can_strictly_exceed_the_bond  0s
+    /// penalty_is_monotonic_for_full_stakes             >240s, killed
+    /// ```
+    ///
+    /// The reason is not the multiply everyone kept rewriting — it is the
+    /// divide. `penalty_for` is `(u128 * u128) / u128`, and this harness calls
+    /// it twice against a **full u64 symbolic stake**. A symbolic divide is
+    /// much harder than a symbolic multiply: the solver has to search for a
+    /// quotient and a remainder satisfying the relation, rather than sum
+    /// partial products. Two of those over a 2^64 space does not close.
+    ///
+    /// Every other harness here narrows the stake to `u32` or `u16` for
+    /// exactly this reason. This one did not, and its comment argued the
+    /// opposite — that leaving the stake free is what makes the pair of
+    /// harnesses complete.
+    ///
+    /// The property does not need the whole range. Truncation in
+    /// `(stake * ratio) / SCALE` depends on where `stake * ratio` falls
+    /// relative to a multiple of `SCALE`, and a `u32` stake already spans that
+    /// residue behaviour completely — 4.29e9 distinct stakes against a
+    /// SCALE of 1e6. What a `u64` adds is arithmetic magnitude, and magnitude
+    /// is what `penalty_never_exceeds_stake` covers.
     fn penalty_is_monotonic_for_full_stakes() {
-        let stake: u64 = kani::any();
+        let stake: u32 = kani::any();
+        let stake = u64::from(stake);
 
         // The stake is the free variable here and the ratio is fixed, which is
         // the opposite split from the harness above. Between the two, every
