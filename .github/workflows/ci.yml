@@ -819,6 +819,14 @@ jobs:
         run: |
           bash ./scripts/check-required-tests-are-tests.sh --self-test
           bash ./scripts/check-required-tests-are-tests.sh
+      # A HashMap folded into a root() hashes its entries in a per-process
+      # random order, so two honest nodes disagree. Thorchain halted on exactly
+      # this; determinism.yml compares digests across three OSes and cannot see
+      # a per-process seed, so this reads the source instead.
+      - name: konsensus map'leri sirali mi + kanarya
+        run: |
+          bash ./scripts/check-consensus-maps-are-ordered.sh --self-test
+          bash ./scripts/check-consensus-maps-are-ordered.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
