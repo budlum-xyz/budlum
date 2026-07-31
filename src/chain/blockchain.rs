@@ -2386,14 +2386,56 @@ impl Blockchain {
         }
     }
 
-    fn validator_snapshot_for_epoch(&self, epoch: u64) -> ValidatorSetSnapshot {
+    /// The validator set as it stood at `epoch`, or `None` when that set is no
+    /// longer known.
+    ///
+    /// The fallback this replaces built a snapshot from the *current* state and
+    /// labelled it with the requested epoch:
+    ///
+    ///     .unwrap_or_else(|| self.build_validator_snapshot(epoch))
+    ///
+    /// `build_validator_snapshot_from_state` takes `epoch` only to stamp it on
+    /// the result; the members come from `state.get_active_validators()`, which
+    /// is today's set. So a certificate from epoch 5 was checked against the
+    /// validators of epoch 200 — different members, different stakes, different
+    /// quorum — and nothing said so.
+    ///
+    /// That is reachable in normal operation, not just in theory.
+    /// `validator_snapshots` keeps 100 epochs and is never written to disk, so
+    /// every historical epoch falls into the fallback after a restart.
+    ///
+    /// It cuts both ways, which is what makes it worth failing closed over:
+    ///
+    /// - a genuine old certificate is rejected, because its signers have since
+    ///   left the set
+    /// - a forged old certificate is accepted, if today's members happen to
+    ///   satisfy the quorum
+    /// - `handle_qc_fault_proof` judges an old fault against the wrong set, so
+    ///   a validator can be slashed for an epoch it was not part of, or escape
+    ///   one it was
+    ///
+    /// Returning `None` makes the caller say "I cannot check this" instead of
+    /// answering with the wrong set. The current epoch still builds from state,
+    /// because there the current set *is* the right answer.
+    fn validator_snapshot_for_epoch(&self, epoch: u64) -> Option<ValidatorSetSnapshot> {
         if epoch == self.state.epoch_index {
-            return self.build_validator_snapshot(epoch);
+            return Some(self.build_validator_snapshot(epoch));
         }
-        self.validator_snapshots
-            .get(&epoch)
-            .cloned()
-            .unwrap_or_else(|| self.build_validator_snapshot(epoch))
+        self.validator_snapshots.get(&epoch).cloned()
+    }
+
+    /// The snapshot for `epoch`, or an error naming what is missing.
+    ///
+    /// Used by the paths that verify someone else's claim about a past epoch,
+    /// where guessing the set is worse than refusing.
+    fn require_validator_snapshot(&self, epoch: u64) -> Result<ValidatorSetSnapshot, String> {
+        self.validator_snapshot_for_epoch(epoch).ok_or_else(|| {
+            format!(
+                "no validator set recorded for epoch {epoch}; refusing to verify against the \
+                 current set (retained epochs: {})",
+                self.validator_snapshots.len()
+            )
+        })
     }
 
     pub fn get_qc_blob(&self, height: u64) -> Option<QcBlob> {
@@ -2621,7 +2663,7 @@ impl Blockchain {
             ));
         }
 
-        let snapshot = self.validator_snapshot_for_epoch(blob.epoch);
+        let snapshot = self.require_validator_snapshot(blob.epoch)?;
         // (security audit §4, §2) enforce the BLS
         // Finality quorum (2/3 of `snapshot.validators`) against the
         // POST-deduplication unique-signer count, not the raw
@@ -2675,7 +2717,7 @@ impl Blockchain {
         let blob = self
             .get_qc_blob(proof.checkpoint_height)
             .ok_or_else(|| format!("Missing QC blob at height {}", proof.checkpoint_height))?;
-        let snapshot = self.validator_snapshot_for_epoch(proof.epoch);
+        let snapshot = self.require_validator_snapshot(proof.epoch)?;
         let verdict = proof.verify_against_blob(&blob, &snapshot)?;
         self.apply_qc_fault_verdict(&proof, verdict)
     }
@@ -4281,7 +4323,7 @@ impl Blockchain {
             ));
         }
 
-        let snapshot = self.validator_snapshot_for_epoch(cert.epoch);
+        let snapshot = self.require_validator_snapshot(cert.epoch)?;
 
         cert.verify(&snapshot)?;
 
@@ -4499,7 +4541,12 @@ impl Blockchain {
         let epoch =
             checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
         let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
-        let snapshot = self.validator_snapshot_for_epoch(epoch);
+        // The aggregator is always started for the current epoch, so the set
+        // is known by construction; `build_validator_snapshot` is the same
+        // value the lookup would return.
+        let snapshot = self
+            .validator_snapshot_for_epoch(epoch)
+            .unwrap_or_else(|| self.build_validator_snapshot(epoch));
         aggregator.set_validator_snapshot(snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
