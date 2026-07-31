@@ -344,12 +344,38 @@ fn full_internal_relay_cycle_lock_mint() {
         t.status,
         crate::cross_domain::bridge::BridgeStatus::Minted { domain: 2 }
     ));
-    // - Balances: recipient received 99 (100 - 1% fee), relayer received 1.
+    // - Balances: the relayer fee is `split_bridge_fee(100, fee_ppm, min_fee)`.
+    //   At the defaults that is `max(100 * 10_000 / 1_000_000, 10)` =
+    //   `max(1, 10)` = 10, so the recipient receives 90.
+    //
+    //   This test asserted 99/1 when the fee was a bare `amount * 1 / 100`
+    //   With no floor. That rounding is exactly what made every transfer
+    //   Under 100 units free for the relayer, so the floor is the fix and 90
+    //   Is the correct number — not a regression.
+    //
     //   Note: registry stake tracking is bookkeeping-only at this layer; it
     //   Does NOT debit the relayer's native balance, so the relayer stays
-    //   At its initial 100M plus the 1 fee.
-    assert_eq!(bc.state.get_balance(&recipient()), 99);
-    assert_eq!(bc.state.get_balance(&relayer), 100_000_001); // 100M (no stake debit) + 1 (fee)
+    //   At its initial 100M plus the fee.
+    let params = bc.state.registry.params();
+    let (expected_recipient, expected_fee) = crate::cross_domain::bridge::split_bridge_fee(
+        100,
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .expect("100 units must cover the default floor");
+    assert_eq!(
+        expected_fee, 10,
+        "1% of 100 is 1, so the floor of 10 applies"
+    );
+    assert_eq!(expected_recipient, 90);
+    assert_eq!(
+        bc.state.get_balance(&recipient()),
+        u64::try_from(expected_recipient).expect("recipient amount fits u64")
+    );
+    assert_eq!(
+        bc.state.get_balance(&relayer),
+        100_000_000 + u64::try_from(expected_fee).expect("fee fits u64")
+    );
 }
 
 #[test]
@@ -500,7 +526,23 @@ fn full_internal_relay_cycle_burn_unlock() {
         t.status,
         crate::cross_domain::bridge::BridgeStatus::Unlocked { domain: 1 }
     ));
-    // Lock debits owner by full amount (100). Unlock credits
-    //   100 - 1% fee = 99. Start 1000 → 1000 - 100 + 99 = 999.
-    assert_eq!(bc.state.get_balance(&owner()), 999);
+    // Lock debits the owner by the full amount (100). Unlock credits
+    // `split_bridge_fee(100, ..)` = 90, the relayer keeping the 10-unit floor.
+    // Start 1000 -> 1000 - 100 + 90 = 990.
+    //
+    // The previous 999 assumed a bare 1% cut with no floor, which is the
+    // Rounding that let sub-100-unit bridges move for free.
+    let params = bc.state.registry.params();
+    let (credited, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        100,
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .expect("100 units must cover the default floor");
+    assert_eq!(fee, 10);
+    assert_eq!(credited, 90);
+    assert_eq!(
+        bc.state.get_balance(&owner()),
+        1000 - 100 + u64::try_from(credited).expect("credited fits u64")
+    );
 }

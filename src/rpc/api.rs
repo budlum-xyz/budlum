@@ -209,6 +209,33 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Begin unbonding a `RELAYER` (3), `PROVER` (4) or `STORAGE_OPERATOR` (5) bond.
+    ///
+    /// These three bonds debit the account balance when they are posted and had
+    /// No exit path: no command, no RPC, no transaction type. The bond was
+    /// Permanently unrecoverable. Returns the release epoch, which follows the
+    /// `unbonding_epochs` governance parameter.
+    ///
+    /// Operator-only, matching `bud_registryBondRelayer` — it is the same
+    /// Unsigned legacy administration surface, and the exit must not be easier
+    /// To reach than the entry.
+    #[method(name = "bud_registryBeginRoleBondUnbonding")]
+    async fn registry_begin_role_bond_unbonding(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond back into the
+    /// Account balance. Fails while the bond is still inside its unbonding
+    /// Window, and the registration is removed so it cannot be withdrawn twice.
+    #[method(name = "bud_registryWithdrawRoleBond")]
+    async fn registry_withdraw_role_bond(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Submit a ZK proof (L1 ↔ BudZKVM bridge). Permissionless: anyone may
     /// Submit; a valid proof is accepted regardless of registration. Registered
     /// Provers additionally earn a reward. Invalid proofs burn the fee.

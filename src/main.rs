@@ -970,6 +970,7 @@ async fn main() {
     .with_identity(config.p2p_identity_file.clone())
     .with_dns_seeds(config.dns_seeds.clone(), network.default_port())
     .with_banned_peer_db(config.banned_peer_db.clone())
+    .with_vote_history_db(config.vote_history_db.clone())
     .with_bootstrap_peers(bootstraps.clone())
     .with_metrics(metrics.clone());
     node.apply_network_security(network);
@@ -1182,7 +1183,15 @@ async fn main() {
     // Start Relayer Worker if configured
     if config.role == "relayer" || config.role == "validator" {
         let relayer_addr = cli_producer_address.unwrap_or(Address::zero());
-        let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr);
+        // Persist the relay cursor next to the chain database. Without a path
+        // The worker resumes from `get_finalized_height()` at boot, so every
+        // Request that finalized while it was down is skipped: the user has
+        // Paid the fee and nothing ever acts on the request. `with_cursor_path`
+        // Existed and was never called, which left the fix inert in
+        // Production.
+        let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
+        let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
+            .with_cursor_path(Some(cursor_path));
         tokio::spawn(async move {
             relayer.run().await;
         });

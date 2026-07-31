@@ -10,7 +10,7 @@
 > stays with the participants — never with a central operator.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions)
-[![Tests](https://img.shields.io/badge/tests-1542%20lib-blue)](https://github.com/budlum-xyz/budlum)
+[![Tests](https://img.shields.io/badge/tests-1828%20lib-blue)](https://github.com/budlum-xyz/budlum)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.md)
 [![Security](https://img.shields.io/badge/security-report%20privately-blue)](SECURITY.md)

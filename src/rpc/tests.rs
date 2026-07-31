@@ -44,6 +44,139 @@ mod rpc_tests {
         )
     }
 
+    /// `bud_estimateGas` must answer with a number this chain would charge.
+    ///
+    /// It returned the literal `21000` for every transaction type. That is
+    /// Ethereum's transfer intrinsic; this chain has no gas metering at all.
+    /// The live protocol is a flat fee — `validate_transaction` rejects
+    /// `fee < base_fee`, rejects a divergent `max_fee`, rejects any
+    /// `priority_fee` — so `21000` was not an estimate of anything.
+    ///
+    /// Canary: restore `Ok(Self::to_hex(21000))` and this fails, because the
+    /// Devnet base fee is 1.
+    #[tokio::test]
+    async fn estimate_gas_returns_the_flat_fee_floor_not_an_ethereum_constant() {
+        let (server, chain) = setup().await;
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            100,
+            0, // no fee set: the caller is asking what the floor is
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        let value = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+
+        let base_fee = chain.get_base_fee().await;
+        assert_eq!(
+            value, base_fee,
+            "the estimate must be the fee floor the chain enforces, not 21000"
+        );
+        assert_ne!(
+            value, 21_000,
+            "21000 is Ethereum's number, not this chain's"
+        );
+    }
+
+    /// A caller that already priced its transaction above the floor gets its
+    /// Own fee back — that is what will be charged, since the flat-fee protocol
+    /// Takes `tx.fee` verbatim once it clears `base_fee`.
+    #[tokio::test]
+    async fn estimate_gas_reflects_a_fee_the_caller_already_set() {
+        let (server, chain) = setup().await;
+        let base_fee = chain.get_base_fee().await;
+        let chosen = base_fee + 500;
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([3u8; 32]),
+            Address::from([4u8; 32]),
+            100,
+            chosen,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        let value = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+        assert_eq!(
+            value, chosen,
+            "a fee above the floor is charged as-is, so it is the estimate"
+        );
+    }
+
+    /// The estimate must not vary by transaction type, because the charge does
+    /// Not. A schedule-based answer would price these three differently and be
+    /// Wrong three times.
+    #[tokio::test]
+    async fn estimate_gas_is_the_same_for_every_transaction_type() {
+        use crate::core::transaction::TransactionType;
+        let (server, chain) = setup().await;
+        let base_fee = chain.get_base_fee().await;
+
+        for tx_type in [
+            TransactionType::Transfer,
+            TransactionType::Stake,
+            TransactionType::ContractCall,
+        ] {
+            let mut tx = Transaction::new_with_chain_id(
+                Address::from([5u8; 32]),
+                Address::zero(),
+                1,
+                0,
+                0,
+                vec![],
+                45262,
+                tx_type.clone(),
+            );
+            tx.hash = tx.calculate_hash();
+            let estimate = server.estimate_gas(tx).await.unwrap();
+            let value = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+            assert_eq!(
+                value, base_fee,
+                "flat fee means one answer for {tx_type:?}, not a per-type schedule"
+            );
+        }
+    }
+
+    /// `bud_gasPrice` and `bud_estimateGas` must agree on the floor. They are
+    /// The two numbers a wallet combines, and they were sourced from different
+    /// Places — one from the live chain, one from a constant.
+    #[tokio::test]
+    async fn gas_price_and_estimate_gas_agree_on_the_floor() {
+        let (server, _) = setup().await;
+
+        let price = server.gas_price().await.unwrap();
+        let price = u64::from_str_radix(price.trim_start_matches("0x"), 16).unwrap();
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([6u8; 32]),
+            Address::from([7u8; 32]),
+            1,
+            0,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        let estimate = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+
+        assert_eq!(
+            price, estimate,
+            "the advertised price and the estimated cost must come from the same source"
+        );
+    }
+
     #[tokio::test]
     async fn test_rpc_chain_info() {
         let (server, _) = setup().await;
@@ -484,6 +617,11 @@ mod rpc_tests {
 
         let watcher_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
         let watcher = Address::from(watcher_keypair.public_key_bytes());
+        // The opener bond is now really debited from the opener's balance, so
+        // The watcher needs one. Before this change the field was documented as
+        // Debited and never was, which let a freshly generated key with a zero
+        // Balance open a challenge — exactly what this test was doing.
+        bc.add_balance(&watcher, 100_000).await;
         let open_msg = crate::core::hash::hash_fields_bytes(&[
             b"BUD_OPEN_CHALLENGE_V1",
             &deal_id.to_le_bytes(),

@@ -16,8 +16,11 @@ pub struct BudlumxyzRegistry {
     pub apps: BTreeMap<u64, AppRecord>,
     pub next_app_id: u64,
     /// Authorized governors who can mark apps as governance-verified.
-    /// Empty set = devnet mode (any caller accepted). Production must populate
-    /// Via governance action (e.g. GovernanceAction::AddBudlumxyzGovernor).
+    ///
+    /// Empty set = any caller accepted. `GovernanceAction::AddBudlumxyzGovernor`
+    /// Does not exist — see [`BudlumxyzRegistry::mark_verified_by_governance`]
+    /// For why that is currently harmless and what has to change before it
+    /// Stops being harmless.
     #[serde(default)]
     pub authorized_governors: std::collections::HashSet<Address>,
 }
@@ -105,7 +108,30 @@ impl BudlumxyzRegistry {
     /// Can set `verified = true` without authorization. The caller parameter
     /// Is checked against an optional `authorized_governors` set; if the set
     /// Is empty (devnet), any caller is accepted (matching current behavior).
-    /// Production must populate `authorized_governors` via governance action.
+    ///
+    /// # The governance action this refers to does not exist yet
+    ///
+    /// The doc on [`BudlumxyzRegistry::authorized_governors`] names
+    /// `GovernanceAction::AddBudlumxyzGovernor`. There is no such variant:
+    /// `GovernanceAction` has `WhitelistVerifier`, `DewhitelistVerifier`,
+    /// `SetEncryptionPolicy`, `SetConstitutionParameter` and
+    /// `UnfreezeConsensusDomain`, and nothing else. The only writers of
+    /// `authorized_governors` are tests.
+    ///
+    /// So on any real network the set is empty, `is_empty()` short-circuits
+    /// The check, and every caller passes. That is fail-open on an
+    /// Authorization gate.
+    ///
+    /// It is not exploitable today, and that is the only reason this is a
+    /// Comment rather than a fix: nothing in production calls this function.
+    /// The single caller is `src/tests/hardening_h2_locks.rs`. The moment a
+    /// Transaction type or an RPC method reaches it, the empty set becomes a
+    /// Live authorization bypass.
+    ///
+    /// Whoever wires that call path must land the governance action in the
+    /// Same change, and flip this from "empty means everyone" to "empty means
+    /// No one" — a permission check that defaults to allow is the wrong shape
+    /// Regardless of how the set gets populated.
     pub fn mark_verified_by_governance(
         &mut self,
         id: u64,
@@ -267,5 +293,48 @@ mod tests {
         let root_before = reg.root();
         reg.authorized_governors.insert(Address::from([8u8; 32]));
         assert_ne!(root_before, reg.root());
+    }
+
+    /// `mark_verified_by_governance` fails open, and must stay unreachable
+    /// Until it does not.
+    ///
+    /// The authorization check is `if !set.is_empty() && !set.contains(caller)`
+    /// — an empty set accepts everyone. The doc says production populates the
+    /// Set "via governance action (e.g. `GovernanceAction::AddBudlumxyzGovernor`)".
+    /// That variant does not exist, so on every real network the set is empty
+    /// And the gate is open.
+    ///
+    /// Harmless today for exactly one reason: nothing in production calls the
+    /// Function. This test pins that reason. If a transaction type, an RPC
+    /// Method or a chain command starts calling it, this fails and whoever
+    /// Wired it has to land the governance action — and invert the empty-set
+    /// Default — in the same change.
+    #[test]
+    fn governance_verification_stays_unreachable_while_it_fails_open() {
+        // The empty-set default really is permissive: an arbitrary caller
+        // succeeds. This is the property that makes reachability matter.
+        let mut reg = BudlumxyzRegistry::new();
+        let id = reg.register_app(
+            "app".into(),
+            Address::from([1u8; 32]),
+            AppCategory::Other,
+            "https://example.invalid".into(),
+            None,
+            0,
+        );
+        assert!(reg.authorized_governors.is_empty());
+        let stranger = Address::from([0xEE; 32]);
+        reg.mark_verified_by_governance(id, &stranger)
+            .expect("an empty governor set accepts any caller — that is the hazard");
+        assert!(reg.apps[&id].verified);
+
+        // And the named governance action still does not exist, so nothing can
+        // populate the set on a real network.
+        let governance_src = include_str!("../core/governance.rs");
+        assert!(
+            !governance_src.contains("AddBudlumxyzGovernor"),
+            "the governance action now exists — populate the governor set and \
+             invert the empty-set default from allow to deny"
+        );
     }
 }

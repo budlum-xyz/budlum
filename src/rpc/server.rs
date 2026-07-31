@@ -946,7 +946,25 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        Ok(Self::to_hex(21000))
+        // The chain charges a flat fee: `AccountState::validate_transaction`
+        // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
+        // `fee`, and rejects any `priority_fee`. `total_cost` is
+        // `amount + fee`. There is no gas metering — the `GasSchedule`
+        // Per-opcode numbers are not consulted on any settlement path.
+        //
+        // The previous answer was the literal `21000` for every transaction
+        // Type, which is Ethereum's transfer intrinsic and has nothing to do
+        // With what this chain charges. A wallet sizing a transaction from it
+        // Would price a stake, a vote and a bridge relay identically, and all
+        // Three wrong: the number the chain actually enforces is `base_fee`,
+        // Which is 10 on mainnet, 1 on testnet and devnet, and moves with
+        // `adjust_base_fee` every block.
+        //
+        // So the estimate is the fee floor the caller's transaction must
+        // Clear. If the caller already set a fee at or above the floor, that
+        // Fee is what will be charged and it is returned unchanged.
+        let base_fee = self.chain.get_base_fee().await;
+        Ok(Self::to_hex(tx.fee.max(base_fee)))
     }
 
     async fn tx_precheck(&self, tx: Transaction) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -1391,6 +1409,68 @@ impl BudlumApiServer for RpcServer {
             "address": Self::to_0x_hash(addr.to_hex()),
             "role": "prover",
             "active": active,
+        }))
+    }
+
+    async fn registry_begin_role_bond_unbonding(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The exit for a bond posted through the legacy operator helpers must
+        // Sit behind the same listener as the entry.
+        self.require_operator("bud_registryBeginRoleBondUnbonding")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        let release_epoch = self
+            .chain
+            .begin_role_bond_unbonding(addr, role)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Role bond unbonding failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "roleId": role_id,
+            "status": "unbonding",
+            "releaseEpoch": release_epoch,
+        }))
+    }
+
+    async fn registry_withdraw_role_bond(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registryWithdrawRoleBond")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        let withdrawn = self
+            .chain
+            .withdraw_role_bond(addr, role)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Role bond withdrawal failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "roleId": role_id,
+            "status": "withdrawn",
+            "amount": withdrawn,
         }))
     }
 

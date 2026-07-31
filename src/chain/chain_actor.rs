@@ -124,6 +124,20 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Result<(), String>>,
     ),
+    /// Begin unbonding an independently-debited role bond (`RELAYER`,
+    /// `PROVER`, `STORAGE_OPERATOR`). Returns the release epoch.
+    BeginRoleBondUnbonding(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
+    /// Withdraw a matured role bond back into the account balance. Returns the
+    /// Withdrawn amount.
+    WithdrawRoleBond(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
     SubmitZkProof(
         crate::prover::ZkProofSubmission,
         oneshot::Sender<Result<crate::prover::ProofAcceptance, String>>,
@@ -1161,6 +1175,52 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// Begin unbonding a `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
+    ///
+    /// These three bonds debit the account balance at bond time and had no exit
+    /// Path at all, so the debit was one-way. Returns the release epoch, which
+    /// Follows the `unbonding_epochs` governance parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error as a string when the role carries no
+    /// Independently debited bond, the account is not registered for it, or
+    /// The bond is not `Active`. Also errors if the chain actor has stopped.
+    pub async fn begin_role_bond_unbonding(
+        &self,
+        address: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BeginRoleBondUnbonding(address, role, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error as a string when the bond is still inside
+    /// Its unbonding window, was already withdrawn, or belongs to a role this
+    /// Path does not own. Also errors if the chain actor has stopped.
+    pub async fn withdraw_role_bond(
+        &self,
+        address: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::WithdrawRoleBond(address, role, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
     /// Submit a ZK proof (permissionless; L1 ↔ BudZKVM bridge).
     pub async fn submit_zk_proof(
         &self,
@@ -2017,11 +2077,13 @@ impl ChainActor {
         }
         let current_epoch = block_height
             / crate::core::chain_config::epoch_len_for_chain_id(self.blockchain.chain_id);
-        let (rewarded, reward_total) = self
+        match self
             .blockchain
-            .accrue_storage_operator_rewards(current_epoch);
-        if rewarded > 0 {
-            tracing::info!("B.U.D. storage maintenance accrued rewards for {rewarded} deals at epoch {current_epoch} (amount={reward_total})");
+            .accrue_storage_operator_rewards(current_epoch)
+        {
+            Ok((rewarded, reward_total)) if rewarded > 0 => tracing::info!("B.U.D. storage maintenance accrued rewards for {rewarded} deals at epoch {current_epoch} (amount={reward_total})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. reward accrual failed at height {block_height}: {error}"),
         }
 
         match self.blockchain.issue_storage_challenges(current_epoch) {
@@ -2034,6 +2096,15 @@ impl ChainActor {
             Ok((finalized, slashed)) if finalized > 0 => tracing::info!("B.U.D. storage maintenance finalized {finalized} missed challenges at epoch {current_epoch} (slashed_bond={slashed})"),
             Ok(_) => {}
             Err(error) => tracing::warn!("B.U.D. missed-challenge finalization failed at height {block_height}: {error}"),
+        }
+
+        // The settle counterpart to the slash above. Without it, maintenance
+        // Only ever took bonds: a deal served to term stayed `Active` forever
+        // And its bond stayed debited.
+        match self.blockchain.finalize_expired_storage_deals(current_epoch) {
+            Ok((expired, returned)) if expired > 0 => tracing::info!("B.U.D. storage maintenance expired {expired} matured deals at epoch {current_epoch} (returned_bond={returned})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. expired-deal finalization failed at height {block_height}: {error}"),
         }
 
         let under_replicated = self
@@ -2407,6 +2478,16 @@ impl ChainActor {
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::BeginRoleBondUnbonding(address, role, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .begin_role_bond_unbonding(&address, role),
+                    );
+                }
+                ChainCommand::WithdrawRoleBond(address, role, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.state.withdraw_role_bond(&address, role));
                 }
                 ChainCommand::SubmitZkProof(submission, res_tx) => {
                     let _ = res_tx.send(
@@ -2818,12 +2899,27 @@ impl ChainActor {
                         opener.as_bytes(),
                         request.opener_signature.as_deref().unwrap_or(&[]),
                     ]);
+                    // Take the bond before opening the challenge. Without this
+                    // the number in the request was validated and then ignored,
+                    // so an empty account could open challenges that cost the
+                    // operator a 16 MiB read each.
                     let res = self
                         .blockchain
-                        .state
-                        .storage_registry
-                        .open_challenge_with_entropy(&request, opener, &entropy)
-                        .map_err(|e| e.to_string())
+                        .debit_opener_bond(&opener, request.opener_bond)
+                        .and_then(|()| {
+                            self.blockchain
+                                .state
+                                .storage_registry
+                                .open_challenge_with_entropy(&request, opener, &entropy)
+                                .map_err(|e| {
+                                    // The challenge was refused, so the bond
+                                    // must not stay debited.
+                                    let _ = self
+                                        .blockchain
+                                        .refund_opener_bond(&opener, request.opener_bond);
+                                    e.to_string()
+                                })
+                        })
                         .and_then(|challenge_id| {
                             self.blockchain
                                 .storage

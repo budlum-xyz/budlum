@@ -3,6 +3,43 @@
 //! This module models user intents and solver bids without introducing a
 //! Whitelist. Relayers remain permissionless; safety comes from signed intent
 //! Bounds, deadlines, replay ids, fee caps and slashable bid commitments.
+//!
+//! # Nothing on the chain reaches this module
+//!
+//! `UserIntent`, `SolverBid` and `IntentSettlement` have **zero** callers
+//! Outside this file and the `pub use` in `relayer/mod.rs`. There is no
+//! Transaction type that carries an intent, no `ChainCommand` that accepts a
+//! Bid, no RPC method that settles one. The 768 lines below are a complete
+//! Economic design with no edge into consensus.
+//!
+//! What actually happens today, in `executor.rs`:
+//!
+//! ```text
+//! TransactionType::UniversalRelay(ext_tx) => {
+//!     let sender = state.get_or_create(&tx.from);
+//!     sender.balance = sender.balance.checked_sub(tx.fee)?;
+//!     sender.nonce = sender.nonce.saturating_add(1);
+//! }
+//! ```
+//!
+//! The sender pays `tx.fee`, and that fee is credited to the **block
+//! Producer**, not to the relayer that will spend external gas executing the
+//! Request. So relaying is unpaid work: a relayer bonds (`RoleId` 3), burns gas
+//! On Ethereum, and earns nothing from the chain for it. `max_fee` is not
+//! Consulted — the flat-fee protocol requires `max_fee == fee` — so a user
+//! Cannot express a ceiling either, and nothing binds the relayer to a price
+//! Before it acts.
+//!
+//! The inbound direction *is* wired: `split_bridge_fee` pays the relayer out
+//! Of the arriving asset when a bridge transfer lands on Budlum. The outbound
+//! Direction, where this module would apply, is not.
+//!
+//! This is a design that has not been connected, not a design that failed.
+//! Wiring it means a transaction type, a settlement path that moves `paid_fee`
+//! From the user to the winning solver, and a slash path for a bid that is
+//! Committed and not honoured — each of which is a consensus change. Recorded
+//! Here so the gap is visible at the definition rather than inferred from a
+//! Grep returning nothing.
 
 use crate::core::address::Address;
 use crate::core::transaction::ExternalChain;
@@ -764,5 +801,52 @@ mod tests {
             .settle_intent(intent_id, addr(9), 40, 30)
             .unwrap_err()
             .contains("bid expired"));
+    }
+
+    /// The policy layer is unreachable from consensus, and the relay fee goes
+    /// To the block producer rather than the relayer.
+    ///
+    /// `UserIntent`, `SolverBid` and `IntentSettlement` have no callers outside
+    /// This module. No transaction type carries an intent, no `ChainCommand`
+    /// Accepts a bid, no RPC settles one. Meanwhile `TransactionType::UniversalRelay`
+    /// Debits `tx.fee` from the sender and stops — and that fee is credited to
+    /// The block producer, so a relayer that spends external gas on the request
+    /// Earns nothing from the chain for it.
+    ///
+    /// This pins the gap so it cannot be half-closed by accident. When a real
+    /// Settlement path lands, this test fails and whoever wired it has to
+    /// Delete it deliberately — having also moved `paid_fee` to the winning
+    /// Solver and given a committed-but-unhonoured bid something to lose.
+    #[test]
+    fn the_policy_layer_is_still_unwired_and_relaying_is_still_unpaid() {
+        let executor_src = include_str!("../execution/executor.rs");
+
+        for kind in ["UserIntent", "SolverBid", "IntentSettlement"] {
+            assert!(
+                !executor_src.contains(kind),
+                "{kind} now reaches the executor — settle it to the solver and \
+                 give an unhonoured bid something to lose, then drop this test"
+            );
+        }
+
+        // The relay arm still only takes the flat fee. If it grew a credit to
+        // anyone, this window would no longer look like this.
+        let at = executor_src
+            .find("TransactionType::UniversalRelay(ext_tx)")
+            .expect("the relay arm must still exist");
+        let arm = &executor_src[at..at + 600];
+        let end = arm
+            .find("TransactionType::RelayerResult")
+            .unwrap_or(arm.len());
+        let arm = &arm[..end];
+        assert!(
+            arm.contains("checked_sub(tx.fee)"),
+            "the relay arm no longer debits a flat fee — re-read this test"
+        );
+        assert!(
+            !arm.contains("try_add_balance") && !arm.contains("checked_add"),
+            "the relay arm now credits someone — if that is the relayer, this \
+             gap is closed and the test should go"
+        );
     }
 }

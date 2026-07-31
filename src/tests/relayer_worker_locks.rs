@@ -663,3 +663,56 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
         "the scan must catch the code line and ignore the doc-comment one"
     );
 }
+
+/// Production builds the relay worker with an empty adapter registry, so every
+/// chain is refused — Ethereum included.
+///
+/// `main.rs` calls `RelayerWorker::new(...).with_cursor_path(...)` and never
+/// `with_adapters`. `EvmChainAdapter` is the one real implementation and
+/// nothing constructs it outside its own tests. The result is that outbound
+/// relay is not "Ethereum-only" as the `ExternalChain` list suggests: it is
+/// off, for all eight variants.
+///
+/// That is the safe direction to fail — a refusal, not a forged result — but
+/// it is worth pinning, because the difference between "off" and "Ethereum
+/// works" is invisible from the type signatures.
+///
+/// Wiring it needs config the node does not carry: `EvmChainAdapter::new`
+/// wants the bridge contract address and the `Deposit` topic0, and
+/// `RelayerConfig` has fields for neither. `test_default()` would supply a
+/// zero address, letting a node advertise Ethereum support while pointing at
+/// nothing — worse than refusing.
+///
+/// When the adapter is wired, the `main.rs` half of this fails and whoever
+/// wired it has to confirm the config plumbing landed with it.
+#[tokio::test]
+async fn an_unconfigured_worker_refuses_every_external_chain() {
+    let empty = AdapterRegistry::new();
+
+    for chain in [
+        ExternalChain::Ethereum,
+        ExternalChain::Solana,
+        ExternalChain::Bitcoin,
+        ExternalChain::Avalanche,
+        ExternalChain::Polygon,
+        ExternalChain::Arbitrum,
+        ExternalChain::Optimism,
+        ExternalChain::Custom(99),
+    ] {
+        let err = RelayerWorker::build_verified_result(&empty, &relay_request(chain))
+            .await
+            .expect_err("an empty registry must refuse, never fabricate a result");
+        assert!(
+            matches!(err, AdapterError::UnsupportedChain(_)),
+            "{chain:?} must be refused as unsupported, got {err:?}"
+        );
+    }
+
+    // And production really does leave it empty.
+    let main_src = include_str!("../main.rs");
+    assert!(
+        !main_src.contains("with_adapters"),
+        "main.rs now registers adapters — confirm the bridge address and \
+         deposit topic0 are configurable, then drop this half of the test"
+    );
+}

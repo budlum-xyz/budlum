@@ -297,13 +297,30 @@ impl Executor {
                     }
                 }
 
+                // The unbonding window is a governance parameter
+                // (`RegistryParams::unbonding_epochs`, whitelisted in
+                // `GOVERNANCE_PARAMETER_WHITELIST`). Reading the compile-time
+                // Constant here made every accepted governance vote a no-op on
+                // The only path that actually queues validator stake: the
+                // Registry stored the new window, the ledger kept releasing
+                // After the hard-coded 7. `PermissionlessRegistry::begin_unbonding`
+                // Already reads the parameter, so the two views disagreed.
+                let unbonding_epochs = state.registry.params().unbonding_epochs;
                 state
                     .unbonding_queue
                     .push(crate::core::account::UnbondingEntry {
                         address: tx.from,
                         amount: tx.amount,
-                        release_epoch: state.epoch_index + crate::core::account::UNBONDING_EPOCHS,
+                        release_epoch: state.epoch_index.saturating_add(unbonding_epochs),
                     });
+
+                // Mirror the reduced stake into the permissionless registry.
+                // `Stake` calls this; `Unstake` did not, so the registry kept
+                // Showing the pre-unstake stake forever. `registry.is_active`
+                // Is what the liveness / invalid-vote slashing paths and the
+                // RPC member views consult, and `registry.root()` is hashed
+                // Into the state root, so the stale entry was consensus state.
+                state.sync_validator_registration(&tx.from);
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -862,15 +879,15 @@ impl Executor {
                                         )
                                     })?
                                     .clone();
-                                let fee = transfer.amount.checked_mul(1).ok_or_else(|| {
-                                    BudlumError::validation("fee_overflow", "bridge fee overflow")
-                                })? / 100;
-                                let final_amount =
-                                    transfer.amount.checked_sub(fee).ok_or_else(|| {
-                                        BudlumError::validation(
-                                            "bridge_amount_underflow",
-                                            "bridge fee exceeds amount",
-                                        )
+                                let params = *state.registry.params();
+                                let (final_amount, fee) =
+                                    crate::cross_domain::bridge::split_bridge_fee(
+                                        transfer.amount,
+                                        params.bridge_relayer_fee_ppm,
+                                        params.bridge_relayer_min_fee,
+                                    )
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_fee_below_minimum", e.0)
                                     })?;
                                 if final_amount > u64::MAX as u128 {
                                     return Err(BudlumError::validation(
@@ -929,15 +946,15 @@ impl Executor {
                                         BudlumError::validation("bridge_unlock_failed", e.0)
                                     })?;
                                 // Refund owner (1% relayer fee deducted, same as submit_relay_proof)
-                                let fee = transfer.amount.checked_mul(1).ok_or_else(|| {
-                                    BudlumError::validation("fee_overflow", "bridge fee overflow")
-                                })? / 100;
-                                let final_amount =
-                                    transfer.amount.checked_sub(fee).ok_or_else(|| {
-                                        BudlumError::validation(
-                                            "bridge_amount_underflow",
-                                            "bridge fee exceeds amount",
-                                        )
+                                let params = *state.registry.params();
+                                let (final_amount, fee) =
+                                    crate::cross_domain::bridge::split_bridge_fee(
+                                        transfer.amount,
+                                        params.bridge_relayer_fee_ppm,
+                                        params.bridge_relayer_min_fee,
+                                    )
+                                    .map_err(|e| {
+                                        BudlumError::validation("bridge_fee_below_minimum", e.0)
                                     })?;
                                 if final_amount > u64::MAX as u128 {
                                     return Err(BudlumError::validation(

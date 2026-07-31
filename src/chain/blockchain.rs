@@ -36,6 +36,12 @@ use tracing::{error, info, warn};
 
 pub const MAX_REORG_DEPTH: usize = 100;
 pub const FINALITY_DEPTH: usize = 50;
+/// Validator set snapshots retained, in memory and on disk.
+///
+/// One owner for the bound: `new_with_genesis` trims the set it loads from
+/// Disk, and `record_validator_snapshot` trims as it grows. Two literals
+/// Would let a reload keep more than the live path is willing to hold.
+pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 #[cfg(test)]
 pub const EPOCH_LENGTH: u64 = 10;
 
@@ -43,6 +49,10 @@ pub const EPOCH_LENGTH: u64 = 10;
 pub enum StorageEconomicsEventKind {
     OperatorRewardAccrued,
     OperatorBondSlashed,
+    /// A deal reached `deal_end_epoch` without being slashed and its operator
+    /// Bond was returned. The counterpart to `OperatorBondSlashed`: without it
+    /// The only recorded end-of-life for a bond was losing it.
+    OperatorBondReturned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -422,10 +432,58 @@ impl Blockchain {
         );
 
         let mut validator_snapshots = BTreeMap::new();
+
+        // Reload the persisted sets before replay fills in the recent ones.
+        //
+        // Replay only reconstructs epochs from `start_index` onward, and
+        // `start_index` jumps to the state snapshot's height when one exists —
+        // So on a node that restores from a snapshot, replay reconstructs
+        // Almost nothing and every older epoch was simply gone.
+        // `require_validator_snapshot` then refused every past-epoch
+        // Certificate and fault proof until the node had observed a fresh
+        // Window of epochs. Failing closed is correct; failing closed on every
+        // Restart is an outage.
+        //
+        // Loaded first so the replay below overwrites any stored entry with
+        // The one it recomputes: replay is authoritative for the range it
+        // Covers.
+        if let Some(ref store) = storage {
+            match store.load_validator_snapshots() {
+                Ok(stored) => {
+                    let count = stored.len();
+                    for (epoch, snapshot) in stored {
+                        validator_snapshots.insert(epoch, snapshot);
+                    }
+                    if count > 0 {
+                        info!("Restored {count} validator set snapshots from disk");
+                    }
+                }
+                Err(error) => warn!(
+                    "Could not read persisted validator snapshots: {error}. \
+                     Past-epoch verification will refuse until the window refills."
+                ),
+            }
+        }
+
         validator_snapshots.insert(
             state.epoch_index,
             Self::build_validator_snapshot_from_state(state.epoch_index, &state, chain_id),
         );
+
+        // The stored set can outnumber the live retention window — an older
+        // Build may have run with a larger bound, or a write failed between
+        // Eviction and delete. Trim to the same limit `record_validator_snapshot`
+        // Enforces so the in-memory map has one owner of its size.
+        while validator_snapshots.len() > MAX_VALIDATOR_SNAPSHOTS {
+            let Some((evicted, _)) = validator_snapshots.pop_first() else {
+                break;
+            };
+            if let Some(ref store) = storage {
+                if let Err(error) = store.delete_validator_snapshot(evicted) {
+                    warn!("Failed to trim stored validator snapshot {evicted}: {error}");
+                }
+            }
+        }
 
         for block in chain_vec.iter().skip(start_index) {
             let preceding = &chain_vec[..block.index as usize];
@@ -630,7 +688,7 @@ impl Blockchain {
             verified_qc_blobs: BTreeMap::new(),
             max_qc_blobs: 1000, // Keep last 1000 QC blobs
             validator_snapshots,
-            max_validator_snapshots: 100, // Keep last 100 epoch snapshots
+            max_validator_snapshots: MAX_VALIDATOR_SNAPSHOTS,
             pending_finality_certs: BTreeMap::new(),
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
@@ -1419,11 +1477,17 @@ impl Blockchain {
             .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
             .clone();
 
-        let mut final_amount = transfer.amount;
-
-        // Fee deduction: 1% for the relayer (Decision 9)
-        let fee = final_amount.saturating_mul(1) / 100;
-        final_amount = final_amount.saturating_sub(fee);
+        // Fee comes out of the arriving asset, which is what lets a user
+        // bridge into Budlum without holding any $BUD yet. Rate and floor are
+        // governance parameters; see `split_bridge_fee` for why a bare
+        // percentage was not enough.
+        let params = *self.state.registry.params();
+        let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+            transfer.amount,
+            params.bridge_relayer_fee_ppm,
+            params.bridge_relayer_min_fee,
+        )
+        .map_err(|e| e.to_string())?;
 
         // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
         // Check BOTH final_amount AND fee for u64 overflow.
@@ -2140,8 +2204,13 @@ impl Blockchain {
                     .ok_or_else(|| "Failed to retrieve transfer after mint".to_string())?
                     .clone();
 
-                let fee = transfer.amount.saturating_mul(1) / 100;
-                let final_amount = transfer.amount.saturating_sub(fee);
+                let params = *self.state.registry.params();
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+                    transfer.amount,
+                    params.bridge_relayer_fee_ppm,
+                    params.bridge_relayer_min_fee,
+                )
+                .map_err(|e| e.to_string())?;
 
                 // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
                 // Check BOTH final_amount AND fee for u64 overflow.
@@ -2200,8 +2269,13 @@ impl Blockchain {
 
                 // For unlock, the full amount goes back to the owner (Decision: relayer paid on target side)
                 // Actually, if a relayer brings proof of burn on target, they should be paid on source.
-                let fee = transfer.amount.saturating_mul(1) / 100;
-                let final_amount = transfer.amount.saturating_sub(fee);
+                let params = *self.state.registry.params();
+                let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
+                    transfer.amount,
+                    params.bridge_relayer_fee_ppm,
+                    params.bridge_relayer_min_fee,
+                )
+                .map_err(|e| e.to_string())?;
 
                 // Security: Prevent u128 -> u64 truncation (AÇIK Fix)
                 // Check BOTH final_amount AND fee for u64 overflow.
@@ -2359,25 +2433,92 @@ impl Blockchain {
 
     fn record_validator_snapshot(&mut self, epoch: u64) {
         let snapshot = self.build_validator_snapshot(epoch);
-        self.validator_snapshots.insert(epoch, snapshot);
+        self.validator_snapshots.insert(epoch, snapshot.clone());
+
+        // Persist alongside the in-memory copy. Without this the map was pure
+        // Memory, so a restart dropped every historical set and
+        // `require_validator_snapshot` refused every past-epoch check until
+        // The node had observed a fresh window's worth of epochs. Failing
+        // Closed is right; failing closed on every restart is an outage.
+        //
+        // A failed write is logged, not fatal: losing a snapshot degrades to
+        // The pre-existing behaviour (refuse to verify that epoch), whereas
+        // Aborting block application would turn a disk hiccup into a halt.
+        if let Some(store) = &self.storage {
+            if let Err(error) = store.save_validator_snapshot(epoch, &snapshot) {
+                warn!("Failed to persist validator snapshot for epoch {epoch}: {error}");
+            }
+        }
 
         // Keep a bounded history while preserving the newest snapshot. A loop
         // Enforces the actual entry count; epoch arithmetic alone is off by one
         // Because the current epoch is inclusive.
         let retention = self.max_validator_snapshots.max(1);
         while self.validator_snapshots.len() > retention {
-            self.validator_snapshots.pop_first();
+            let Some((evicted, _)) = self.validator_snapshots.pop_first() else {
+                break;
+            };
+            // Evict from disk too, or the stored set grows without bound and a
+            // Restart would reload epochs the live node has deliberately
+            // Forgotten.
+            if let Some(store) = &self.storage {
+                if let Err(error) = store.delete_validator_snapshot(evicted) {
+                    warn!("Failed to evict validator snapshot for epoch {evicted}: {error}");
+                }
+            }
         }
     }
 
-    fn validator_snapshot_for_epoch(&self, epoch: u64) -> ValidatorSetSnapshot {
+    /// The validator set as it stood at `epoch`, or `None` when that set is no
+    /// longer known.
+    ///
+    /// The fallback this replaces built a snapshot from the *current* state and
+    /// labelled it with the requested epoch:
+    ///
+    ///     .unwrap_or_else(|| self.build_validator_snapshot(epoch))
+    ///
+    /// `build_validator_snapshot_from_state` takes `epoch` only to stamp it on
+    /// the result; the members come from `state.get_active_validators()`, which
+    /// is today's set. So a certificate from epoch 5 was checked against the
+    /// validators of epoch 200 — different members, different stakes, different
+    /// quorum — and nothing said so.
+    ///
+    /// That is reachable in normal operation, not just in theory.
+    /// `validator_snapshots` keeps 100 epochs and is never written to disk, so
+    /// every historical epoch falls into the fallback after a restart.
+    ///
+    /// It cuts both ways, which is what makes it worth failing closed over:
+    ///
+    /// - a genuine old certificate is rejected, because its signers have since
+    ///   left the set
+    /// - a forged old certificate is accepted, if today's members happen to
+    ///   satisfy the quorum
+    /// - `handle_qc_fault_proof` judges an old fault against the wrong set, so
+    ///   a validator can be slashed for an epoch it was not part of, or escape
+    ///   one it was
+    ///
+    /// Returning `None` makes the caller say "I cannot check this" instead of
+    /// answering with the wrong set. The current epoch still builds from state,
+    /// because there the current set *is* the right answer.
+    fn validator_snapshot_for_epoch(&self, epoch: u64) -> Option<ValidatorSetSnapshot> {
         if epoch == self.state.epoch_index {
-            return self.build_validator_snapshot(epoch);
+            return Some(self.build_validator_snapshot(epoch));
         }
-        self.validator_snapshots
-            .get(&epoch)
-            .cloned()
-            .unwrap_or_else(|| self.build_validator_snapshot(epoch))
+        self.validator_snapshots.get(&epoch).cloned()
+    }
+
+    /// The snapshot for `epoch`, or an error naming what is missing.
+    ///
+    /// Used by the paths that verify someone else's claim about a past epoch,
+    /// where guessing the set is worse than refusing.
+    fn require_validator_snapshot(&self, epoch: u64) -> Result<ValidatorSetSnapshot, String> {
+        self.validator_snapshot_for_epoch(epoch).ok_or_else(|| {
+            format!(
+                "no validator set recorded for epoch {epoch}; refusing to verify against the \
+                 current set (retained epochs: {})",
+                self.validator_snapshots.len()
+            )
+        })
     }
 
     pub fn get_qc_blob(&self, height: u64) -> Option<QcBlob> {
@@ -2605,7 +2746,7 @@ impl Blockchain {
             ));
         }
 
-        let snapshot = self.validator_snapshot_for_epoch(blob.epoch);
+        let snapshot = self.require_validator_snapshot(blob.epoch)?;
         // (security audit §4, §2) enforce the BLS
         // Finality quorum (2/3 of `snapshot.validators`) against the
         // POST-deduplication unique-signer count, not the raw
@@ -2659,7 +2800,7 @@ impl Blockchain {
         let blob = self
             .get_qc_blob(proof.checkpoint_height)
             .ok_or_else(|| format!("Missing QC blob at height {}", proof.checkpoint_height))?;
-        let snapshot = self.validator_snapshot_for_epoch(proof.epoch);
+        let snapshot = self.require_validator_snapshot(proof.epoch)?;
         let verdict = proof.verify_against_blob(&blob, &snapshot)?;
         self.apply_qc_fault_verdict(&proof, verdict)
     }
@@ -4265,7 +4406,7 @@ impl Blockchain {
             ));
         }
 
-        let snapshot = self.validator_snapshot_for_epoch(cert.epoch);
+        let snapshot = self.require_validator_snapshot(cert.epoch)?;
 
         cert.verify(&snapshot)?;
 
@@ -4483,7 +4624,12 @@ impl Blockchain {
         let epoch =
             checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
         let mut aggregator = FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash);
-        let snapshot = self.validator_snapshot_for_epoch(epoch);
+        // The aggregator is always started for the current epoch, so the set
+        // is known by construction; `build_validator_snapshot` is the same
+        // value the lookup would return.
+        let snapshot = self
+            .validator_snapshot_for_epoch(epoch)
+            .unwrap_or_else(|| self.build_validator_snapshot(epoch));
         aggregator.set_validator_snapshot(snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
@@ -4595,7 +4741,27 @@ impl Blockchain {
     /// Canonical accounting path used by ChainActor maintenance ticks.
     /// It credits the operator account and records an event, while avoiding
     /// Double-accrual with `storage_last_reward_epoch`.
-    pub fn accrue_storage_operator_rewards(&mut self, current_epoch: u64) -> (u32, u64) {
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage-layer error when the economics state cannot be
+    /// Persisted, matching `apply_storage_bond_slash` and
+    /// `finalize_missed_storage_challenges`. This used to be
+    /// `let _ = self.persist_storage_economics_state();` — the one accounting
+    /// Path of the four that dropped the failure.
+    ///
+    /// It is the path where dropping it costs the most.
+    /// `storage_last_reward_epoch` is the only thing standing between an
+    /// Operator and being paid twice for the same epoch: the balance credit
+    /// Happens in memory and is committed with the block, but the cursor that
+    /// Says "already paid through epoch N" lives in the economics snapshot. If
+    /// That write fails and the node restarts, the cursor reloads at its old
+    /// Value and every epoch since is paid again, out of an escrow that was
+    /// Only ever funded once.
+    pub fn accrue_storage_operator_rewards(
+        &mut self,
+        current_epoch: u64,
+    ) -> Result<(u32, u64), String> {
         let deals: Vec<(u64, Address, u64, u64, u64)> = self
             .state
             .storage_registry
@@ -4658,9 +4824,9 @@ impl Blockchain {
             total = total.saturating_add(amount);
         }
         if rewarded > 0 {
-            let _ = self.persist_storage_economics_state();
+            self.persist_storage_economics_state()?;
         }
-        (rewarded, total)
+        Ok((rewarded, total))
     }
 
     pub fn storage_economics_events(&self) -> &[StorageEconomicsEvent] {
@@ -4896,6 +5062,67 @@ impl Blockchain {
         Ok(issued)
     }
 
+    /// Debit an opener's bond when they open a retrieval challenge.
+    ///
+    /// The bond is documented in five places as the anti-spam mechanism for a
+    /// permissionless challenge endpoint — `storage_deal.rs` says
+    /// "`opener_bond` already debited from the caller's stake", and the module
+    /// doc says the gate is "economically meaningless" without it. It was never
+    /// debited from anything. `open_challenge` validated the number against
+    /// `required_opener_bond(range_len)` and stored it; no balance moved.
+    ///
+    /// A caller could therefore pass `opener_bond: 999_999` with an empty
+    /// account and open challenges for free. Each one costs the operator a read
+    /// and a hash over the range — up to 16 MiB — so the cost of the attack sat
+    /// entirely on the operator. The rate limit bounds how fast that happens
+    /// per `(operator, manifest)`, but a bound is not a price: an attacker with
+    /// no funds could still spend an operator's I/O indefinitely.
+    ///
+    /// This is the same shape as `submit_registry_slashing_report`, which
+    /// debits `slashing_report_fee` before doing the work and refunds it when
+    /// the report turns out actionable. That function is forty lines up in this
+    /// file; the two paths now match.
+    ///
+    /// # Errors
+    ///
+    /// Returns the balance shortfall as an error so the caller refuses the
+    /// challenge instead of opening one that was never paid for.
+    pub fn debit_opener_bond(&mut self, opener: &Address, bond: u64) -> Result<(), String> {
+        if bond == 0 {
+            return Err("opener bond must be greater than zero".into());
+        }
+        let account = self.state.get_or_create(opener);
+        if account.balance < bond {
+            return Err(format!(
+                "insufficient balance for opener bond: have {}, need {bond}",
+                account.balance
+            ));
+        }
+        account.balance -= bond;
+        self.state.mark_dirty(opener);
+        Ok(())
+    }
+
+    /// Return an opener's bond once their challenge resolves.
+    ///
+    /// `ChallengeOutcome` already documents who should get the bond back:
+    /// `Answered` and `Mismatched` both return it (the opener called correctly
+    /// in either case — a wrong answer is the operator's fault), and only the
+    /// opener being wrong would justify keeping it. Since a challenge cannot
+    /// currently be judged frivolous, every resolved challenge refunds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if crediting the refund would overflow the balance.
+    pub fn refund_opener_bond(&mut self, opener: &Address, bond: u64) -> Result<(), String> {
+        if bond == 0 {
+            return Ok(());
+        }
+        self.state
+            .try_add_balance(opener, bond)
+            .map_err(|e| format!("opener bond refund overflow for {opener}: {e}"))
+    }
+
     /// Burn a recorded storage slash against the operator's liquid balance.
     ///
     /// `StorageRegistry` only *records* a slash; the burn is an accounting
@@ -4999,6 +5226,88 @@ impl Blockchain {
             self.persist_storage_economics_state()?;
         }
         Ok((finalized, total_slashed))
+    }
+
+    /// Return the operator bond for every deal that reached its
+    /// `deal_end_epoch` without being slashed.
+    ///
+    /// `open_deal` debits `economics.operator_bond` from the operator's
+    /// Balance and `StorageRegistry::expire_deal` was written to hand the
+    /// Amount back — its doc-comment says it "returns the operator bond amount
+    /// To be refunded by the blockchain accounting layer". No production path
+    /// Ever called it. `expire_deal` appears only in tests; the sole other
+    /// Writer of `DealStatus::Expired` is `prune_content`, reached when an NFT
+    /// Is burned, and that one does not return the bond either.
+    ///
+    /// So an honest operator that served a deal for its whole term never got
+    /// Its bond back. The slash path was fully wired
+    /// (`finalize_missed_storage_challenges` -> `apply_storage_bond_slash`),
+    /// The settle path was not: the only recorded end-of-life for a bond was
+    /// Losing it.
+    ///
+    /// Returns the number of deals expired and the total amount returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when crediting a bond back would overflow the
+    /// Operator's balance, or when the registry or economics state cannot be
+    /// Persisted after the sweep.
+    pub fn finalize_expired_storage_deals(
+        &mut self,
+        current_epoch: u64,
+    ) -> Result<(u32, u64), String> {
+        let matured: Vec<(u64, Address)> = self
+            .state
+            .storage_registry
+            .all_deals()
+            .iter()
+            .filter(|deal| deal.is_active() && deal.deal_end_epoch <= current_epoch)
+            .map(|deal| (deal.deal_id, deal.operator))
+            .collect();
+
+        let mut expired = 0u32;
+        let mut total_returned = 0u64;
+
+        for (deal_id, operator) in matured {
+            // `expire_deal` re-checks the epoch and the status, and returns 0
+            // For a deal that is not `Active`, so a double call cannot pay the
+            // Bond out twice.
+            let bond = match self
+                .state
+                .storage_registry
+                .expire_deal(deal_id, current_epoch)
+            {
+                Ok(bond) => bond,
+                Err(error) => {
+                    tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
+                    continue;
+                }
+            };
+            expired += 1;
+            if bond == 0 {
+                continue;
+            }
+            // Checked credit: the debit at `open_deal` was a plain
+            // `saturating_sub`, so the return must not silently cap either.
+            self.state
+                .try_add_balance(&operator, bond)
+                .map_err(|error| format!("storage bond return overflow for {operator}: {error}"))?;
+            total_returned = total_returned.saturating_add(bond);
+            self.storage_economics_events.push(StorageEconomicsEvent {
+                epoch: current_epoch,
+                deal_id,
+                operator,
+                amount: bond,
+                balance_effect: bond,
+                kind: StorageEconomicsEventKind::OperatorBondReturned,
+            });
+        }
+
+        if expired > 0 {
+            self.persist_storage_registry()?;
+            self.persist_storage_economics_state()?;
+        }
+        Ok((expired, total_returned))
     }
 
     /// Accumulate a verified storage proof hash into `pending_storage_root`.
@@ -5223,6 +5532,95 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>(),
             vec![3, 4, 5]
+        );
+    }
+
+    /// A validator set recorded before a restart must still be there after it.
+    ///
+    /// `validator_snapshots` was an in-memory `BTreeMap` that nothing wrote to
+    /// Disk — the doc on `validator_snapshot_for_epoch` said so outright:
+    /// "keeps 100 epochs and is never written to disk, so every historical
+    /// Epoch falls into the fallback after a restart".
+    ///
+    /// Once #56 made that fallback fail closed, the restart behaviour stopped
+    /// Being "verify against the wrong set" and became "refuse to verify at
+    /// All". Correct, and an outage: a restarted node could not check any
+    /// Past-epoch certificate or fault proof until it had observed a fresh
+    /// Window of epochs.
+    ///
+    /// Canary: drop the `save_validator_snapshot` call from
+    /// `record_validator_snapshot` and this fails — the reopened node finds
+    /// Nothing.
+    #[test]
+    fn validator_snapshots_survive_a_restart() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("vsnap.db").to_string_lossy().to_string();
+
+        let recorded_hash = {
+            let storage = Storage::new(&db_path).unwrap();
+            let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+            bc.state.add_validator(Address::from([7u8; 32]), 5_000);
+            bc.state.epoch_index = 42;
+            bc.record_validator_snapshot(42);
+            bc.validator_snapshots
+                .get(&42)
+                .expect("just recorded")
+                .set_hash
+                .clone()
+        };
+
+        let reopened = Blockchain::new(
+            Arc::new(PoWEngine::new(0)),
+            Some(Storage::new(&db_path).unwrap()),
+            45262,
+            None,
+        );
+
+        let restored = reopened
+            .validator_snapshots
+            .get(&42)
+            .expect("epoch 42 must survive the restart");
+        assert_eq!(
+            restored.set_hash, recorded_hash,
+            "the restored set must be the one that was recorded, not a rebuild"
+        );
+    }
+
+    /// Eviction must reach the disk too.
+    ///
+    /// Persisting without evicting turns a bounded map into an unbounded
+    /// Table: the live node forgets an epoch, the next restart loads it back,
+    /// And the stored set grows for the life of the chain.
+    #[test]
+    fn evicting_a_validator_snapshot_also_removes_it_from_disk() {
+        let dir = tempdir().unwrap();
+        let db_path = dir
+            .path()
+            .join("vsnap-evict.db")
+            .to_string_lossy()
+            .to_string();
+
+        {
+            let storage = Storage::new(&db_path).unwrap();
+            let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+            bc.max_validator_snapshots = 3;
+            for epoch in 1..=5 {
+                bc.state.epoch_index = epoch;
+                bc.record_validator_snapshot(epoch);
+            }
+            assert_eq!(bc.validator_snapshots.len(), 3);
+        }
+
+        let store = Storage::new(&db_path).unwrap();
+        let stored: Vec<u64> = store
+            .load_validator_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|(epoch, _)| epoch)
+            .collect();
+        assert!(
+            !stored.contains(&1) && !stored.contains(&2),
+            "evicted epochs must not linger on disk, got {stored:?}"
         );
     }
 
@@ -6006,119 +6404,244 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
 }
 
 #[cfg(test)]
-fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
-    use crate::consensus::PoWEngine;
-    use std::sync::Arc;
+mod bond_and_reorg_tests {
+    //! `#[cfg(test)]` was attached to a single item here, not to a block, so
+    //! everything after the first test compiled into the production library.
+    //! `build_divergent_pow_chains` then tripped `-D dead-code` because
+    //! nothing outside the tests calls it. Wrapping the region in a module
+    //! restores the intent: these are tests.
+    use super::*;
 
-    let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    let common_producer = Address::from([1u8; 32]);
-    for _ in 0..3 {
-        left.produce_block(common_producer).unwrap();
-        right.produce_block(common_producer).unwrap();
-    }
-    for _ in 0..2 {
-        left.produce_block(Address::from([2u8; 32])).unwrap();
-    }
-    for _ in 0..3 {
-        right.produce_block(Address::from([3u8; 32])).unwrap();
-    }
-    (left, right)
-}
+    /// An opener with an empty account must not be able to open a challenge.
+    ///
+    /// `opener_bond` is documented in five places as the anti-spam mechanism for a
+    /// permissionless endpoint, and nothing debited it. `storage_open_challenge` is
+    /// public RPC, so a caller could pass any bond value with no balance and open
+    /// challenges that cost the operator a read and a hash over up to 16 MiB each.
+    #[test]
+    fn an_empty_account_cannot_afford_an_opener_bond() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
 
-#[test]
-fn reorg_preserves_actual_finalized_checkpoint() {
-    let (mut left, right) = build_divergent_pow_chains();
-    left.finalized_height = 2;
-    left.finalized_hash = left.chain[2].hash.clone();
-    let finalized_hash = left.finalized_hash.clone();
-
-    assert!(left.try_reorg(right.chain).unwrap());
-    assert_eq!(left.finalized_height, 2);
-    assert_eq!(left.finalized_hash, finalized_hash);
-}
-
-#[test]
-fn reorg_rejects_fork_at_finalized_height() {
-    let (mut left, right) = build_divergent_pow_chains();
-    let fork_point = left.find_fork_point(&right.chain).unwrap();
-    left.finalized_height = fork_point as u64;
-    left.finalized_hash = left.chain[fork_point].hash.clone();
-
-    let error = left.try_reorg(right.chain).unwrap_err();
-    assert!(error.contains("at or below finalized height"));
-}
-
-#[test]
-fn finality_rescan_starts_at_a_real_checkpoint() {
-    // `invalidate_finality_from_height` rebuilds `finalized_height` by walking
-    // back from the tip in `checkpoint_interval` steps. Certificates only exist
-    // at multiples of that interval, so a tip that is not itself a multiple
-    // used to make every probe miss.
-    //
-    // This pins the arithmetic rather than the storage round-trip: the first
-    // probe must be the highest checkpoint at or below the tip.
-    let interval = 10u64;
-    for tip in 0..40u64 {
-        let first_probe = (tip / interval) * interval;
-        assert!(
-            first_probe.is_multiple_of(interval),
-            "probe {first_probe} for tip {tip} is not a checkpoint height"
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x42u8; 32]);
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            0,
+            "opener starts with nothing"
         );
+
+        let err = bc
+            .debit_opener_bond(&opener, 999_999)
+            .expect_err("an empty account must not afford a bond");
         assert!(
-            first_probe <= tip,
-            "probe {first_probe} for tip {tip} is above the tip"
+            err.contains("insufficient balance"),
+            "unexpected error: {err}"
         );
-        if tip >= interval {
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            0,
+            "a refused debit must not move the balance"
+        );
+    }
+
+    /// A funded opener pays exactly the bond, and gets exactly it back.
+    ///
+    /// Paired with the test above so the fix cannot be a gate that refuses
+    /// everything: the bond has to be chargeable, and the refund has to restore the
+    /// balance rather than approximate it.
+    #[test]
+    fn an_opener_bond_is_debited_and_refunded_exactly() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x43u8; 32]);
+        bc.state.add_balance(&opener, 1_000);
+
+        bc.debit_opener_bond(&opener, 250)
+            .expect("a funded opener can post a bond");
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            750,
+            "the bond must leave the balance while the challenge is open"
+        );
+
+        bc.refund_opener_bond(&opener, 250)
+            .expect("a resolved challenge returns the bond");
+        assert_eq!(
+            bc.state.get_balance(&opener),
+            1_000,
+            "the refund must restore the balance exactly"
+        );
+    }
+
+    /// A zero bond is refused rather than treated as a free challenge.
+    ///
+    /// `open_challenge` already rejects `opener_bond == 0` with `ZeroOpenerBond`.
+    /// The debit path agrees, so the two cannot drift into a state where one
+    /// accepts what the other refuses.
+    #[test]
+    fn a_zero_opener_bond_is_refused() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x44u8; 32]);
+        bc.state.add_balance(&opener, 1_000);
+
+        assert!(
+            bc.debit_opener_bond(&opener, 0).is_err(),
+            "a zero bond buys a free challenge and must be refused"
+        );
+        assert_eq!(bc.state.get_balance(&opener), 1_000, "balance untouched");
+    }
+
+    /// Repeated challenges drain the opener, which is the property the bond exists
+    /// for.
+    ///
+    /// The rate limit bounds how *fast* an attacker can open challenges. The bond
+    /// is what makes sustaining them cost something. Without a debit the attacker
+    /// paid nothing and the operator paid every time.
+    #[test]
+    fn repeated_challenges_exhaust_the_opener_not_the_operator() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let opener = Address::from([0x45u8; 32]);
+        bc.state.add_balance(&opener, 100);
+
+        let bond = 30u64;
+        for i in 0..3 {
+            bc.debit_opener_bond(&opener, bond)
+                .unwrap_or_else(|e| panic!("challenge {i} should be affordable: {e}"));
+        }
+        assert_eq!(bc.state.get_balance(&opener), 10, "3 x 30 debited");
+
+        let err = bc
+            .debit_opener_bond(&opener, bond)
+            .expect_err("the fourth challenge is beyond what the opener can fund");
+        assert!(err.contains("insufficient balance"), "unexpected: {err}");
+    }
+
+    fn build_divergent_pow_chains() -> (Blockchain, Blockchain) {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let common_producer = Address::from([1u8; 32]);
+        for _ in 0..3 {
+            left.produce_block(common_producer).unwrap();
+            right.produce_block(common_producer).unwrap();
+        }
+        for _ in 0..2 {
+            left.produce_block(Address::from([2u8; 32])).unwrap();
+        }
+        for _ in 0..3 {
+            right.produce_block(Address::from([3u8; 32])).unwrap();
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn reorg_preserves_actual_finalized_checkpoint() {
+        let (mut left, right) = build_divergent_pow_chains();
+        left.finalized_height = 2;
+        left.finalized_hash = left.chain[2].hash.clone();
+        let finalized_hash = left.finalized_hash.clone();
+
+        assert!(left.try_reorg(right.chain).unwrap());
+        assert_eq!(left.finalized_height, 2);
+        assert_eq!(left.finalized_hash, finalized_hash);
+    }
+
+    #[test]
+    fn reorg_rejects_fork_at_finalized_height() {
+        let (mut left, right) = build_divergent_pow_chains();
+        let fork_point = left.find_fork_point(&right.chain).unwrap();
+        left.finalized_height = u64::try_from(fork_point).expect("fork point fits u64");
+        left.finalized_hash = left.chain[fork_point].hash.clone();
+
+        let error = left.try_reorg(right.chain).unwrap_err();
+        assert!(error.contains("at or below finalized height"));
+    }
+
+    #[test]
+    fn finality_rescan_starts_at_a_real_checkpoint() {
+        // `invalidate_finality_from_height` rebuilds `finalized_height` by walking
+        // back from the tip in `checkpoint_interval` steps. Certificates only exist
+        // at multiples of that interval, so a tip that is not itself a multiple
+        // used to make every probe miss.
+        //
+        // This pins the arithmetic rather than the storage round-trip: the first
+        // probe must be the highest checkpoint at or below the tip.
+        let interval = 10u64;
+        for tip in 0..40u64 {
+            let first_probe = (tip / interval) * interval;
             assert!(
-                tip - first_probe < interval,
-                "probe {first_probe} skipped a checkpoint below tip {tip}"
+                first_probe.is_multiple_of(interval),
+                "probe {first_probe} for tip {tip} is not a checkpoint height"
             );
+            assert!(
+                first_probe <= tip,
+                "probe {first_probe} for tip {tip} is above the tip"
+            );
+            if tip >= interval {
+                assert!(
+                    tip - first_probe < interval,
+                    "probe {first_probe} skipped a checkpoint below tip {tip}"
+                );
+            }
         }
     }
-}
 
-#[test]
-fn finality_survives_invalidation_when_the_tip_is_not_a_checkpoint() {
-    // The regression itself, end to end. A certificate is stored at a real
-    // checkpoint, the chain grows past it to a non-multiple height, and a QC
-    // fault above the certificate triggers a rescan.
-    //
-    // Before the fix the rescan probed 57, 47, 37, ... and found nothing, so
-    // `finalized_height` fell to 0 — the chain kept its blocks but forgot they
-    // were final, which re-opens reorgs that
-    // `reorg_rejects_fork_at_finalized_height` exists to refuse.
-    let (mut chain, _) = build_divergent_pow_chains();
-    let interval =
-        crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain.chain_id);
-    assert!(interval >= 2, "test needs a real interval");
+    #[test]
+    fn finality_survives_invalidation_when_the_tip_is_not_a_checkpoint() {
+        // The regression itself, end to end. A certificate is stored at a real
+        // checkpoint, the chain grows past it to a non-multiple height, and a QC
+        // fault above the certificate triggers a rescan.
+        //
+        // Before the fix the rescan probed 57, 47, 37, ... and found nothing, so
+        // `finalized_height` fell to 0 — the chain kept its blocks but forgot they
+        // were final, which re-opens reorgs that
+        // `reorg_rejects_fork_at_finalized_height` exists to refuse.
+        let (mut chain, _) = build_divergent_pow_chains();
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain.chain_id);
+        assert!(interval >= 2, "test needs a real interval");
 
-    // A tip that is deliberately not a multiple of the interval.
-    let tip = chain.chain.len().saturating_sub(1) as u64;
-    let highest_checkpoint = (tip / interval) * interval;
-    if highest_checkpoint == 0 {
-        return; // chain too short on this profile to carry a checkpoint
+        // A tip that is deliberately not a multiple of the interval.
+        let tip = u64::try_from(chain.chain.len().saturating_sub(1)).expect("tip fits u64");
+        let highest_checkpoint = (tip / interval) * interval;
+        if highest_checkpoint == 0 {
+            return; // chain too short on this profile to carry a checkpoint
+        }
+
+        chain.finalized_height = highest_checkpoint;
+        chain.finalized_hash = chain.chain
+            [usize::try_from(highest_checkpoint).expect("checkpoint fits usize")]
+        .hash
+        .clone();
+
+        // The rescan's first probe must be the checkpoint, not the tip.
+        let first_probe = (tip / interval) * interval;
+        assert_eq!(
+            first_probe, highest_checkpoint,
+            "rescan would start at {first_probe}, missing the certificate at {highest_checkpoint}"
+        );
     }
 
-    chain.finalized_height = highest_checkpoint;
-    chain.finalized_hash = chain.chain[highest_checkpoint as usize].hash.clone();
+    #[test]
+    fn reorg_replays_transactions_and_rejects_false_state_root() {
+        let (mut left, right) = build_divergent_pow_chains();
+        let mut candidate = right.chain;
+        let tip = candidate.last_mut().unwrap();
+        tip.state_root = "ff".repeat(32);
+        tip.hash = tip.calculate_hash();
 
-    // The rescan's first probe must be the checkpoint, not the tip.
-    let first_probe = (tip / interval) * interval;
-    assert_eq!(
-        first_probe, highest_checkpoint,
-        "rescan would start at {first_probe}, missing the certificate at {highest_checkpoint}"
-    );
-}
-
-#[test]
-fn reorg_replays_transactions_and_rejects_false_state_root() {
-    let (mut left, right) = build_divergent_pow_chains();
-    let mut candidate = right.chain;
-    let tip = candidate.last_mut().unwrap();
-    tip.state_root = "ff".repeat(32);
-    tip.hash = tip.calculate_hash();
-
-    let error = left.try_reorg(candidate).unwrap_err();
-    assert!(error.contains("state root mismatch"));
+        let error = left.try_reorg(candidate).unwrap_err();
+        assert!(error.contains("state root mismatch"));
+    }
 }

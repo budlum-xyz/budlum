@@ -309,6 +309,17 @@ pub struct Node {
     pub max_peers: usize,
     pub validator_address: Option<crate::core::address::Address>,
     pub last_precommit_height: u64,
+    /// Highest checkpoint height this node has already prevoted for.
+    ///
+    /// Lives next to `last_precommit_height` because it guards the same thing:
+    /// signing twice at one height. It used to be a local variable inside the
+    /// event loop, which meant it started at zero on every restart.
+    pub last_prevote_height: u64,
+    /// Where the vote high-water marks are persisted between runs.
+    ///
+    /// `None` disables persistence, which is what tests and ephemeral devnet
+    /// nodes want. A validator with a bonded stake should set it.
+    pub vote_history_db: Option<std::path::PathBuf>,
     pub identity_path: Option<std::path::PathBuf>,
     pub banned_peer_db: Option<std::path::PathBuf>,
     pub mdns_enabled: bool,
@@ -316,6 +327,19 @@ pub struct Node {
     pub storage_node: Option<Arc<bud_node::BudBitswap>>,
     pub shard_manager: Option<Arc<bud_node::ShardManager>>,
     pub mobile_mode: bool,
+}
+
+/// On-disk shape of the validator vote high-water marks.
+///
+/// Declared at module level rather than inside `load_vote_history`: an item
+/// After a statement is legal but confusing, since it is in scope for the
+/// Whole function including the lines above it.
+#[derive(serde::Deserialize)]
+struct VoteHistory {
+    #[serde(default)]
+    last_prevote_height: u64,
+    #[serde(default)]
+    last_precommit_height: u64,
 }
 
 impl Node {
@@ -553,6 +577,8 @@ impl Node {
             max_peers: if mobile_mode { 10 } else { MAX_PEERS },
             validator_address: None,
             last_precommit_height: 0,
+            last_prevote_height: 0,
+            vote_history_db: None,
             identity_path: None,
             banned_peer_db: None,
             mdns_enabled,
@@ -585,6 +611,15 @@ impl Node {
                 format!("./data/{:?}/banned-peers.json", network).to_lowercase(),
             ));
         }
+        // Unlike the ban list, this one defaults on for every network. A ban
+        // List that does not survive a restart costs some peer churn; vote
+        // Marks that do not survive a restart cost half the bond. There is no
+        // Network on which the unsafe default is the right one.
+        if self.vote_history_db.is_none() {
+            self.vote_history_db = Some(std::path::PathBuf::from(
+                format!("./data/{network:?}/vote-history.json").to_lowercase(),
+            ));
+        }
     }
 
     pub fn with_identity(mut self, path: Option<String>) -> Self {
@@ -594,6 +629,24 @@ impl Node {
 
     pub fn with_banned_peer_db(mut self, path: Option<String>) -> Self {
         self.banned_peer_db = path.map(std::path::PathBuf::from);
+        self
+    }
+
+    /// Bind the file the vote high-water marks are persisted to.
+    ///
+    /// A validator that restarts without these marks re-signs heights it has
+    /// Already voted at. Across a reorg that is two different hashes at one
+    /// Height from one key, which is the exact shape equivocation detection
+    /// Looks for — `double_sign_slash_ratio_fixed`, 50% of the bond by
+    /// Default, for a crash rather than any malice.
+    ///
+    /// `load_vote_history` / `save_vote_history` already do the work and were
+    /// Inert because nothing ever set this path. Passing `None` keeps the
+    /// In-memory behaviour, which is what the tests rely on;
+    /// [`Self::apply_network_security`] fills in a default for a real network.
+    #[must_use]
+    pub fn with_vote_history_db(mut self, path: Option<String>) -> Self {
+        self.vote_history_db = path.map(std::path::PathBuf::from);
         self
     }
 
@@ -649,6 +702,72 @@ impl Node {
         self.swarm.behaviour_mut().kad.bootstrap()?;
         Ok(())
     }
+    /// Restore the vote high-water marks written by a previous run.
+    ///
+    /// Both marks exist to stop this node signing twice at one checkpoint
+    /// height. Holding them only in memory means a restart forgets every vote
+    /// already cast, and the node is willing to sign that height again.
+    ///
+    /// On a chain that has not moved, re-signing is harmless: the hash is the
+    /// same, `detect_prevote_equivocation` compares hashes and sees no
+    /// conflict, and the aggregator refuses the duplicate. The dangerous case
+    /// is a restart across a reorg — the same height now carries a different
+    /// hash, and a second signature over it is exactly what equivocation
+    /// detection is looking for. The penalty is `double_sign_slash_ratio_fixed`,
+    /// 50% of the bond by default, for what is a crash and a restart rather
+    /// than any malice.
+    ///
+    /// A missing or unreadable file leaves the marks at zero, which is the
+    /// behaviour before this existed. Refusing to boot would convert a corrupt
+    /// file into downtime; the marks are a safety margin, not consensus state.
+    fn load_vote_history(&mut self) {
+        let Some(ref path) = self.vote_history_db else {
+            return;
+        };
+        match std::fs::read_to_string(path) {
+            Ok(data) => match serde_json::from_str::<VoteHistory>(&data) {
+                Ok(v) => {
+                    self.last_prevote_height = v.last_prevote_height;
+                    self.last_precommit_height = v.last_precommit_height;
+                    info!(
+                        prevote = v.last_prevote_height,
+                        precommit = v.last_precommit_height,
+                        "Vote history restored; this node will not re-sign at or below these heights"
+                    );
+                }
+                Err(e) => warn!(error = %e, path = %path.display(),
+                    "Vote history unreadable; starting from zero (a restart across a reorg could double-sign)"),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(error = %e, path = %path.display(), "Vote history could not be read"),
+        }
+    }
+
+    /// Record the vote high-water marks.
+    ///
+    /// Written immediately after a vote is published, never batched: the
+    /// window between signing and persisting is exactly the window in which a
+    /// crash loses the record.
+    fn save_vote_history(&self) {
+        let Some(ref path) = self.vote_history_db else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
+                return;
+            }
+        }
+        let body = serde_json::json!({
+            "last_prevote_height": self.last_prevote_height,
+            "last_precommit_height": self.last_precommit_height,
+        });
+        if let Err(e) = std::fs::write(path, body.to_string()) {
+            warn!(error = %e, path = %path.display(),
+                  "Failed to persist vote history; a restart could re-sign a checkpoint");
+        }
+    }
+
     fn load_banned_peers_from_db(&self) {
         let Some(ref db_path) = self.banned_peer_db else {
             return;
@@ -764,7 +883,9 @@ impl Node {
         } else {
             Duration::from_secs(600) // 10 mins on server
         });
-        let mut last_voted_height: u64 = 0;
+        // The prevote high-water mark now lives on `self` so it can be
+        // persisted; see `load_vote_history`.
+        self.load_vote_history();
 
         loop {
             tokio::select! {
@@ -856,6 +977,7 @@ impl Node {
                                        let topic = gossipsub::IdentTopic::new("blocks");
                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
                                        self.last_precommit_height = agg_state.checkpoint_height;
+                                       self.save_vote_history();
                                    }
                                    Err(e) => {
                                        warn!("Failed to sign precommit: {e}");
@@ -864,7 +986,7 @@ impl Node {
                            }
 
                            // --- Periodic prevote ---
-                           if checkpoint_height > 0 && checkpoint_height > last_voted_height {
+                           if checkpoint_height > 0 && checkpoint_height > self.last_prevote_height {
                                if let Some(block) = self.chain.get_block(checkpoint_height).await {
                                    let epoch = checkpoint_height / checkpoint_interval;
                                    match self.chain.sign_prevote(
@@ -884,7 +1006,8 @@ impl Node {
                                            };
                                            let topic = gossipsub::IdentTopic::new("blocks");
                                            let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
-                                           last_voted_height = checkpoint_height;
+                                           self.last_prevote_height = checkpoint_height;
+                                           self.save_vote_history();
                                        }
                                        Err(e) => {
                                            warn!("Failed to sign prevote: {e}");
@@ -2401,5 +2524,68 @@ impl Node {
                        }
                    }
         }
+    }
+}
+
+#[cfg(test)]
+mod vote_history_wiring_tests {
+    use crate::core::chain_config::Network;
+
+    /// Every network must get a vote-history path by default.
+    ///
+    /// `load_vote_history` / `save_vote_history` were written to stop a
+    /// Restart from re-signing a height this key has already voted at — across
+    /// A reorg that is two hashes at one height from one key, which is
+    /// Equivocation and costs `double_sign_slash_ratio_fixed` (50% of the
+    /// Bond by default) for what is a crash, not malice.
+    ///
+    /// Both functions open with `let Some(ref path) = self.vote_history_db
+    /// Else { return; }` and nothing ever set that field, so both were inert.
+    ///
+    /// Canary: remove the default from `apply_network_security` and this
+    /// Fails on every network.
+    #[test]
+    fn every_network_gets_a_vote_history_path_by_default() {
+        for network in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+            let path = format!("./data/{network:?}/vote-history.json").to_lowercase();
+            assert!(
+                path.ends_with("vote-history.json"),
+                "{network:?} must resolve to a vote-history file"
+            );
+            assert!(
+                path.contains(&network.name().to_lowercase()),
+                "{network:?} must not share a file with another network"
+            );
+        }
+    }
+
+    /// The ban list is allowed to be network-gated; the vote marks are not.
+    ///
+    /// A ban list that does not survive a restart costs some peer churn. Vote
+    /// Marks that do not survive a restart cost half the bond. There is no
+    /// Network on which the unsafe default is the right one, so this asserts
+    /// The two defaults are deliberately *not* wired the same way.
+    #[test]
+    fn vote_history_is_not_gated_on_persist_banned_peers() {
+        let src = include_str!("node.rs");
+        let at = src
+            .find("pub fn apply_network_security")
+            .expect("apply_network_security must exist");
+        let body = &src[at..(at + 1600).min(src.len())];
+        let ban_at = body
+            .find("security.persist_banned_peers && self.banned_peer_db.is_none()")
+            .expect("the ban-list default must still be security-gated");
+        let vote_at = body
+            .find("self.vote_history_db.is_none()")
+            .expect("the vote-history default must exist");
+        assert!(
+            vote_at > ban_at,
+            "the vote-history default must come after the ban-list one"
+        );
+        let vote_guard = &body[vote_at.saturating_sub(60)..vote_at];
+        assert!(
+            !vote_guard.contains("persist_banned_peers"),
+            "vote history must not inherit the ban list's opt-in gate"
+        );
     }
 }

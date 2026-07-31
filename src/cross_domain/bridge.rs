@@ -148,6 +148,55 @@ pub struct BridgeState {
     pub replay: ReplayNonceStore,
 }
 
+/// Split an inbound bridge amount into the recipient's share and the relayer's.
+///
+/// # Why this exists
+///
+/// The rate was written out three times in `blockchain.rs` as
+/// `amount.saturating_mul(1) / 100`, once per mint/unlock path. Three copies of
+/// an economic constant drift: change one and the other two keep the old price
+/// without saying so.
+///
+/// # Why there is a floor
+///
+/// Integer division rounds down, so a pure percentage charges nothing below
+/// `100 / rate` units. At the 1% the call sites used, every transfer of 99 base
+/// units or less was relayed for free:
+///
+///     amount  1 -> fee 0
+///     amount 50 -> fee 0
+///     amount 99 -> fee 0
+///     amount 100 -> fee 1
+///
+/// The relayer still pays external gas for each of those messages, so an
+/// attacker splitting a large bridge into 99-unit pieces moves value across for
+/// nothing and bills the relayers for it. The floor makes every relayed message
+/// cost something.
+///
+/// # Errors
+///
+/// Returns `Err` when the amount cannot cover `min_fee`. Relaying at a loss and
+/// crediting a negative balance are both worse than refusing, and the caller
+/// surfaces the refusal instead of silently moving zero.
+pub fn split_bridge_fee(
+    amount: u128,
+    fee_ppm: u64,
+    min_fee: u64,
+) -> Result<(u128, u128), BridgeError> {
+    let min_fee = u128::from(min_fee);
+    if amount <= min_fee {
+        return Err(BridgeError(format!(
+            "bridge amount {amount} does not cover the minimum relayer fee {min_fee}"
+        )));
+    }
+    let proportional = amount.saturating_mul(u128::from(fee_ppm)) / 1_000_000u128;
+    let fee = proportional.max(min_fee);
+    // `amount > min_fee` and `fee_ppm < 100%` (enforced by
+    // `RegistryParams::validate`) together keep this below `amount`.
+    let recipient = amount.saturating_sub(fee);
+    Ok((recipient, fee))
+}
+
 impl BridgeState {
     pub fn new() -> Self {
         Self {
@@ -606,5 +655,94 @@ mod tests {
             root_before, root_after,
             "Forged transfer amount must change bridge root"
         );
+    }
+}
+
+#[cfg(test)]
+mod bridge_fee_split {
+    use super::split_bridge_fee;
+
+    const PPM_1_PCT: u64 = 10_000;
+
+    /// The regression: a percentage alone charges nothing on small transfers.
+    ///
+    /// Measured against the arithmetic the three call sites used
+    /// (`amount * 1 / 100`) before this change:
+    ///
+    ///     amount  1 -> fee 0
+    ///     amount 50 -> fee 0
+    ///     amount 99 -> fee 0
+    ///
+    /// Every one of those is a relayed message with real external gas behind
+    /// it, paid for by nobody.
+    #[test]
+    fn small_transfers_are_no_longer_free() {
+        for amount in [11u128, 50, 99, 100] {
+            // The hardcoded expression this replaced, written out so the
+            // Comparison below is against what the chain really charged.
+            // `* 1` is the identity the old call sites carried; clippy is
+            // Right that it does nothing, which is the point.
+            let old_fee = amount / 100;
+            let (recipient, fee) = split_bridge_fee(amount, PPM_1_PCT, 10).expect("covers floor");
+            assert!(fee > 0, "amount {amount} relayed for free");
+            assert!(
+                fee >= old_fee,
+                "amount {amount}: new fee {fee} below the old {old_fee}"
+            );
+            assert_eq!(recipient + fee, amount, "value must be conserved");
+        }
+    }
+
+    /// Splitting a transfer must not make it cheaper than sending it whole.
+    ///
+    /// This is the attack the floor exists to stop, stated as a property.
+    #[test]
+    fn splitting_a_transfer_never_reduces_total_fees() {
+        let whole = 10_000u128;
+        let (_, single_fee) = split_bridge_fee(whole, PPM_1_PCT, 10).expect("covers floor");
+
+        for pieces in [2u128, 10, 100] {
+            let piece = whole / pieces;
+            let (_, piece_fee) = split_bridge_fee(piece, PPM_1_PCT, 10).expect("covers floor");
+            let total = piece_fee * pieces;
+            assert!(
+                total >= single_fee,
+                "splitting into {pieces} pieces costs {total}, less than {single_fee} whole"
+            );
+        }
+    }
+
+    /// Above the floor the proportional rate is what applies, unchanged.
+    ///
+    /// Without this the fix could be a floor that swallows every transfer.
+    #[test]
+    fn large_transfers_still_pay_the_percentage() {
+        let (recipient, fee) = split_bridge_fee(1_000_000, PPM_1_PCT, 10).expect("covers floor");
+        assert_eq!(fee, 10_000, "1% of 1_000_000");
+        assert_eq!(recipient, 990_000);
+    }
+
+    /// An amount that cannot cover the floor is refused, not relayed at a loss.
+    #[test]
+    fn an_amount_below_the_floor_is_refused() {
+        assert!(
+            split_bridge_fee(10, PPM_1_PCT, 10).is_err(),
+            "equal to floor"
+        );
+        assert!(split_bridge_fee(1, PPM_1_PCT, 10).is_err(), "below floor");
+        assert!(
+            split_bridge_fee(11, PPM_1_PCT, 10).is_ok(),
+            "just above floor"
+        );
+    }
+
+    /// The recipient is never credited more than arrived, and never nothing.
+    #[test]
+    fn value_is_conserved_and_the_recipient_is_never_zeroed() {
+        for amount in [11u128, 100, 12_345, u128::from(u64::MAX)] {
+            let (recipient, fee) = split_bridge_fee(amount, PPM_1_PCT, 10).expect("covers floor");
+            assert_eq!(recipient + fee, amount);
+            assert!(recipient > 0, "amount {amount} left the recipient nothing");
+        }
     }
 }

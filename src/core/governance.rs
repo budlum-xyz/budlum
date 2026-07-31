@@ -75,6 +75,9 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "double_sign_slash_ratio_fixed",
     "liveness_slash_ratio_fixed",
     "malicious_slash_ratio_fixed",
+    "bridge_relayer_fee_ppm",
+    "bridge_relayer_min_fee",
+    "max_invalid_votes_per_epoch",
 ];
 
 pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
@@ -107,6 +110,21 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
             params.liveness_slash_ratio_fixed = value
                 .parse::<u64>()
                 .map_err(|e| format!("invalid liveness_slash_ratio_fixed: {e}"))?;
+        }
+        "bridge_relayer_fee_ppm" => {
+            params.bridge_relayer_fee_ppm = value
+                .parse()
+                .map_err(|e| format!("invalid bridge_relayer_fee_ppm: {e}"))?;
+        }
+        "bridge_relayer_min_fee" => {
+            params.bridge_relayer_min_fee = value
+                .parse()
+                .map_err(|e| format!("invalid bridge_relayer_min_fee: {e}"))?;
+        }
+        "max_invalid_votes_per_epoch" => {
+            params.max_invalid_votes_per_epoch = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid max_invalid_votes_per_epoch: {e}"))?;
         }
         "malicious_slash_ratio_fixed" => {
             params.malicious_slash_ratio_fixed = value
