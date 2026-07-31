@@ -47,6 +47,39 @@ pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
         .expect("penalty is bounded by stake, which is a u64")
 }
 
+// MEASURED, 2026-08-01: every harness that calls `penalty_for` times out.
+//
+// Six rewrites went into `an_unbounded_ratio_would_overshoot_the_bond` on the
+// theory that its multiplications were the problem. They were not. Timing each
+// harness separately in an isolated repo, with a three-minute cap each:
+//
+//     penalty_is_monotonic_for_full_stakes   TIMEOUT
+//     penalty_never_exceeds_stake            TIMEOUT
+//     remaining_stake_is_exact               TIMEOUT
+//     ratio_endpoints_are_exact              TIMEOUT
+//     penalty_is_monotonic_in_the_ratio      TIMEOUT
+//     a_double_ratio_overshoots                   1s
+//     an_unbounded_ratio_can_strictly_exceed_the_bond  0s
+//
+// The split is exact: the two that finish are the two that do not call
+// `penalty_for`. Stake width does not explain it —
+// `penalty_is_monotonic_in_the_ratio` was already narrowed to u16 symbols and
+// still times out. Multiplication count does not explain it either.
+//
+// What `penalty_for` has that nothing else here has is a **symbolic division**:
+// `(u128 * u128) / u128`. A solver handles a symbolic multiply by summing
+// partial products; a symbolic divide it must encode as a search for a
+// quotient and remainder satisfying `n = q*d + r, r < d`, over 128-bit terms.
+// That is the wall, and it is in the shared helper rather than in any one
+// harness — which is why every diagnosis that looked at a single harness found
+// something plausible and fixed nothing.
+//
+// Not fixed here. The honest options are to prove the division away (the
+// divisor is the constant FIXED_POINT_SCALE, so `penalty_for` could be
+// restated as a shift/multiply-high pair a solver can close), or to accept
+// that these five are not CI-budget harnesses and run them on a schedule.
+// Both are real work with a real argument behind them, and neither should be
+// done in the same commit as the measurement that motivates it.
 #[cfg(kani)]
 mod proofs {
     use super::{penalty_for, FIXED_POINT_SCALE};
