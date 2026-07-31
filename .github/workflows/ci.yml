@@ -764,14 +764,17 @@ jobs:
           curl -sSfL -o /tmp/clcov.tar.gz \
             https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
           echo "9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168  /tmp/clcov.tar.gz" | sha256sum -c -
-          cd /tmp
-          curl -sSfLO https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
-          curl -sSfLO https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.sha256
-          sha256sum -c cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.sha256
-          cd -
+          # Hash BURADA sabit. Onceden yanindaki `.sha256` dosyasi da ayni
+          # release'ten indirilip ona karsi dogrulaniyordu: artefakti degistiren
+          # biri yanindaki hash dosyasini da degistirir, yani kontrol kendini
+          # dogruluyordu. Adim adi "sha256 pinli" diyordu ve pin degildi.
+          # Bu deger bagimsiz olarak indirilip hesaplandi (2026-07-31).
+          curl -sSfL -o /tmp/nextest.tar.gz \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
+          echo "4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3  /tmp/nextest.tar.gz" | sha256sum -c -
           mkdir -p ~/.cargo/bin
           tar -xzf /tmp/clcov.tar.gz -C ~/.cargo/bin/
-          tar -xzf /tmp/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz -C ~/.cargo/bin/
+          tar -xzf /tmp/nextest.tar.gz -C ~/.cargo/bin/
           cargo llvm-cov --version && cargo nextest --version
       - name: Kapi kanaryasi (vacuous-gate korumasi)
         run: bash ./scripts/check-coverage.sh --self-test
@@ -858,6 +861,13 @@ jobs:
         run: |
           bash ./scripts/check-docker-toolchain-matches-pin.sh --self-test
           bash ./scripts/check-docker-toolchain-matches-pin.sh
+      # The nextest step was named "(sha256 pinli)" and fetched the .sha256
+      # from the same release as the tarball. Whoever can replace one can
+      # replace the other, so it verified transit and not provenance.
+      - name: indirme pinleri gercekten pin mi + kanarya
+        run: |
+          bash ./scripts/check-pinned-downloads-are-really-pinned.sh --self-test
+          bash ./scripts/check-pinned-downloads-are-really-pinned.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
