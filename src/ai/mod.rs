@@ -3378,6 +3378,79 @@ mod tests {
         assert_eq!(events[0].callback_address, cb_addr);
     }
 
+    /// The per-address callback backlog must be bounded.
+    ///
+    /// `callback_queue` is drained by `consume_callback_events`, which nothing
+    /// In production calls — the RPC path only reads it. So an address whose
+    /// Owner never collects grew a vector for the life of the chain, and that
+    /// Vector is hashed into `AiRegistry::root` under
+    /// `BDLM_AI_CALLBACK_QUEUE`: every validator rehashed the entire backlog
+    /// On every block.
+    ///
+    /// Canary: remove the `drain` from `enqueue_callback_event` and the length
+    /// Assertion fails.
+    #[test]
+    fn callback_queue_is_bounded_per_address() {
+        use crate::ai::registry::MAX_CALLBACK_EVENTS_PER_ADDRESS;
+
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let cb_addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        // Finalize more inferences than the bound, all pointing at one
+        // callback address that never consumes.
+        let overshoot = MAX_CALLBACK_EVENTS_PER_ADDRESS + 10;
+        let mut first_commitment = None;
+        let mut last_commitment = [0u8; 32];
+        for i in 0..overshoot {
+            let commitment = [(i % 251) as u8; 32];
+            let block = 10 + (i as u64) * 10;
+            let req_id = submit_request_with_callback(
+                &mut registry,
+                model_id,
+                owner,
+                block,
+                block + 100,
+                100,
+                Some(cb_addr),
+            );
+            submit_ai_result(&mut registry, req_id, v1, commitment, 1, block + 5).unwrap();
+            submit_ai_result(&mut registry, req_id, v2, commitment, 2, block + 6).unwrap();
+            if first_commitment.is_none() {
+                first_commitment = Some(commitment);
+            }
+            last_commitment = commitment;
+        }
+
+        let events = registry.get_callback_queue(&cb_addr);
+        assert_eq!(
+            events.len(),
+            MAX_CALLBACK_EVENTS_PER_ADDRESS,
+            "an unconsumed callback queue must stop growing at the bound"
+        );
+
+        // Eviction is oldest-first: a consumer coming back online wants the
+        // newest result, not the one from thousands of blocks ago.
+        assert_eq!(
+            events.last().unwrap().output_commitment,
+            last_commitment,
+            "the newest event must be retained"
+        );
+        assert!(
+            !events.iter().any(
+                |e| Some(e.output_commitment) == first_commitment && e.finalized_at_block <= 16
+            ),
+            "the oldest events must have been evicted"
+        );
+    }
+
     #[test]
     fn test_no_callback_event_without_address() {
         // No callback event when callback is None

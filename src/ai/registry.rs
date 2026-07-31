@@ -29,6 +29,22 @@ pub fn is_equivocation_error(error: &str) -> bool {
 /// Prevents Sybil attacks — verifiers must have economic skin-in-the-game.
 pub const MIN_VERIFIER_STAKE: u64 = 1_000;
 
+/// Callback events retained per address.
+///
+/// `callback_queue` is drained by `consume_callback_events`, which nothing in
+/// Production calls: the RPC path (`bud_aiCallbackQueue` ->
+/// `get_ai_callback_queue`) only *reads* the queue. So for any callback
+/// Address whose owner never consumes, the vector grew for the life of the
+/// Chain — and it is hashed into `AiRegistry::root` under
+/// `BDLM_AI_CALLBACK_QUEUE`, so every validator rehashes the whole backlog on
+/// Every block.
+///
+/// Bounding it per address rather than in total keeps one noisy consumer from
+/// Evicting another's events. Oldest-first, matching `record_slash`: a
+/// Callback that has not been collected in 256 finalized inferences is not
+/// Going to be.
+pub const MAX_CALLBACK_EVENTS_PER_ADDRESS: usize = 256;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiRegistry {
     pub models: BTreeMap<AiModelId, AiModelSpec>,
@@ -343,7 +359,7 @@ impl AiRegistry {
                     finalized_at_block: outcome.finalized_at_block,
                     callback_address: *cb_addr,
                 };
-                self.callback_queue.entry(*cb_addr).or_default().push(event);
+                self.enqueue_callback_event(*cb_addr, event);
             }
 
             return Ok(Some(outcome));
@@ -970,6 +986,20 @@ impl AiRegistry {
             .unwrap_or_default()
     }
 
+    /// Queue a callback event, keeping the per-address backlog bounded.
+    ///
+    /// Both finalization paths route through here so the bound cannot be
+    /// Enforced on one and forgotten on the other. Eviction is oldest-first:
+    /// The newest result is the one a consumer coming back online wants.
+    fn enqueue_callback_event(&mut self, callback_address: Address, event: AiCallbackEvent) {
+        let queue = self.callback_queue.entry(callback_address).or_default();
+        queue.push(event);
+        if queue.len() > MAX_CALLBACK_EVENTS_PER_ADDRESS {
+            let excess = queue.len() - MAX_CALLBACK_EVENTS_PER_ADDRESS;
+            queue.drain(..excess);
+        }
+    }
+
     /// Consume (drain) callback events for an address.
     /// Called after off-chain system has delivered the callbacks.
     /// Returns the number of events consumed.
@@ -1117,7 +1147,7 @@ impl AiRegistry {
                 finalized_at_block: outcome.finalized_at_block,
                 callback_address: *cb_addr,
             };
-            self.callback_queue.entry(*cb_addr).or_default().push(event);
+            self.enqueue_callback_event(*cb_addr, event);
         }
         Some(outcome)
     }
