@@ -189,27 +189,38 @@ mod proofs {
     /// down to 1, so the penalty equals the bond rather than exceeding it.
     /// `an_unbounded_ratio_can_strictly_exceed_the_bond` pins the strict case.
     ///
-    /// # Why the ratio is concrete
+    /// # Why the ratios are written out instead of iterated
     ///
-    /// This harness was cancelled at the CI timeout four times, and each
-    /// attempt narrowed the cause:
+    /// This harness was cancelled at the CI timeout five times while the
+    /// suspect was the arithmetic. It is not the arithmetic. The neighbouring
+    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` does *more* work — a
+    /// 128-bit multiply **and** a 128-bit divide, on a symbolic stake — and
+    /// finishes in 0.04s. The only structural difference between the two was
+    /// that this one wrapped its asserts in a `for` loop over an array.
     ///
-    /// | attempt | ratio | division | result |
+    /// CBMC unwinds loops. With no `--unwind` bound and no
+    /// `#[kani::unwind(n)]`, it has no reason to stop at the array's four
+    /// elements, so it keeps unwinding and never reaches a decision. Every
+    /// earlier attempt changed the operands and left the loop in place, which
+    /// is why each one produced the same cancellation and each diagnosis was
+    /// wrong:
+    ///
+    /// | attempt | changed | loop | result |
     /// | :-- | :-- | :-- | :-- |
-    /// | 1 | symbolic `u64` | yes | cancelled |
-    /// | 2 | `{SCALE+1, 2*SCALE}` | yes | cancelled |
-    /// | 3 | symbolic `u32` | no | cancelled |
-    /// | — | `2*SCALE` fixed | yes | **0.026s** |
+    /// | 1 | symbolic `u64` ratio | yes | cancelled at 45m |
+    /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | yes | cancelled at 90m |
+    /// | 3 | dropped the division | yes | cancelled at 90m |
+    /// | 4 | concrete `u128` ratio list | yes | cancelled at 90m |
+    /// | — | neighbour harness, no loop | **no** | **0.04s** |
     ///
-    /// Attempt 3 removed the division and still hung, which rules out the
-    /// divide. The one variable that tracks the outcome is whether `ratio` is
-    /// symbolic: a 128-bit multiply with both operands symbolic is what CBMC
-    /// cannot close here, and it stays expensive with the division gone.
+    /// Four asserts written out is the whole fix. A `#[kani::unwind(5)]` would
+    /// also work, but a bound that has to be kept in step with the length of a
+    /// literal array is a footgun: add a fifth ratio, forget the attribute, and
+    /// the harness silently stops covering it.
     ///
-    /// So the ratio is enumerated at the boundaries that matter — the smallest
-    /// value above the bound, where truncation is most likely to hide the
-    /// overshoot, and a large one — while the stake stays fully symbolic
-    /// across `u32`. Each iteration is then a multiply with one concrete side.
+    /// The ratios are the boundaries that matter — the two smallest values
+    /// above the bound, where truncation is most likely to hide the overshoot,
+    /// and two larger ones — while the stake stays fully symbolic across `u32`.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
@@ -219,19 +230,28 @@ mod proofs {
         let stake = u128::from(stake);
         kani::assume(stake > 0);
 
-        for ratio in [
-            u128::from(FIXED_POINT_SCALE) + 1,
-            u128::from(FIXED_POINT_SCALE) + 2,
-            u128::from(FIXED_POINT_SCALE) * 3 / 2,
-            u128::from(FIXED_POINT_SCALE) * 2,
-        ] {
-            // Equivalent to `(stake * ratio) / SCALE >= stake` for a positive
-            // divisor, without asking for a division.
-            assert!(
-                stake * ratio >= stake * u128::from(FIXED_POINT_SCALE),
-                "above FIXED_POINT_SCALE the penalty is no longer capped by the bond"
-            );
-        }
+        const SCALE: u128 = FIXED_POINT_SCALE as u128;
+        let capped = stake * SCALE;
+
+        // Equivalent to `(stake * ratio) / SCALE >= stake` for a positive
+        // divisor, without asking for a division. Written out rather than
+        // Iterated: see the note above.
+        assert!(
+            stake * (SCALE + 1) >= capped,
+            "one unit above FIXED_POINT_SCALE the penalty already exceeds the bond"
+        );
+        assert!(
+            stake * (SCALE + 2) >= capped,
+            "two units above FIXED_POINT_SCALE the penalty exceeds the bond"
+        );
+        assert!(
+            stake * (SCALE * 3 / 2) >= capped,
+            "a 150% ratio takes more than the bond"
+        );
+        assert!(
+            stake * (SCALE * 2) >= capped,
+            "a 200% ratio takes more than the bond"
+        );
     }
 
     /// And a concrete witness that it really does exceed the bond.
