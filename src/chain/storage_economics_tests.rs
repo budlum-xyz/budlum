@@ -143,12 +143,26 @@ mod tests {
     #[test]
     fn every_storage_accounting_path_propagates_a_failed_persist() {
         let src = include_str!("blockchain.rs");
-        let dropped = src
-            .matches("let _ = self.persist_storage_economics_state()")
-            .count();
-        assert_eq!(
-            dropped, 0,
-            "a storage accounting path is dropping its persist failure"
+
+        // Line-based and doc-comment-aware. A raw `str::matches` over the whole
+        // file also counts the doc-comment on `accrue_storage_operator_rewards`
+        // that quotes the old `let _ = ...` line to explain what changed — so
+        // the test failed on its own documentation. Same mistake as scanning a
+        // gate script that contains the string it scans for.
+        let dropped: Vec<usize> = src
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//")
+                    && trimmed.contains("let _ = self.persist_storage_economics_state()")
+            })
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "a storage accounting path is dropping its persist failure at \
+             blockchain.rs lines {dropped:?}"
         );
 
         for name in [
