@@ -46,7 +46,8 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     let recipient = addr(12);
     // Lock debits owner balance - fund accounts.
     bc.fund_development_account(&owner).expect("devnet faucet");
-    bc.fund_development_account(&recipient).expect("devnet faucet");
+    bc.fund_development_account(&recipient)
+        .expect("devnet faucet");
 
     // Bridge lock now debits owner balance, so the owner must
     // Have sufficient funds before locking.
