@@ -80,7 +80,10 @@ mod zkvm_tests {
         let err = ZkVmExecutor::execute_bytecode(&infinite_loop_program(), 3)
             .expect_err("gas exhaustion must abort execution");
 
-        assert_eq!(err, "BudZKVM execution failed");
+        // The reason is part of the contract now. It used to be flattened into
+        // "BudZKVM execution failed" for every failure alike, which told an
+        // operator reading a rejected transaction nothing at all.
+        assert_eq!(err, "BudZKVM execution failed: OutOfGas");
     }
 
     #[test]
@@ -115,7 +118,7 @@ mod zkvm_tests {
         let err = Executor::apply_transaction(&mut state, &tx)
             .expect_err("failing VM execution must reject the tx");
 
-        assert_eq!(err, "BudZKVM execution failed");
+        assert_eq!(err, "BudZKVM execution failed: OutOfGas");
         assert_eq!(state.get_balance(&from), before_balance);
         assert_eq!(state.get_nonce(&from), before_nonce);
     }
