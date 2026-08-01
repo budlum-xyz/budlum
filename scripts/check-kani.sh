@@ -129,14 +129,16 @@ slow_harness_names() {
   harness_names slow
 }
 
-# The module path `--exact` needs, derived from the source rather than typed
-# into the workflow.
+# The module path a fully-qualified harness name would need.
 #
-# Kani rejects a bare name under `--exact` with "Please specify the
-# fully-qualified name of a harness", which is the good failure mode: a
-# mistyped prefix turns the job red instead of quietly matching nothing. It
-# still has to be right, and it is a fact about the tree, so it is read from
-# the tree.
+# Not used by the workflow any more: `--exact` was tried, rejected a bare name
+# and rejected `budlum_kani::proofs::x` too, and the 0.67.0 source shows why.
+# It compares against `mangled_name`, which carries the module but not the
+# crate, so `proofs::x` is the form it wants. Binding a gate to Kani internal
+# naming is a bad trade, so the workflow filters on the bare name instead and
+# relies on the harness count for exactness.
+#
+# Kept because the next person will try `--exact` too, and this answers it.
 harness_module_path() {
   local crate module
   crate=$(grep -m1 '^name = ' "$(dirname "$PROOFS_FILE")/../Cargo.toml" \

@@ -340,22 +340,26 @@ jobs:
       # `--exclude-harness` yok, `--harness` var ve tekrarlanabiliyor, o
       # yuzden secim dislama degil dahil etme yonunde.
       #
-      # `--exact` tam nitelikli ad ister. Sade isimle cagirildiginda Kani
-      # dokuzunu da reddetti ("Please specify the fully-qualified name"),
-      # yani `--exact` bir on-ek eksikligini sessiz gecmiyor, bu iyi:
-      # yanlis yazilan bir isim harness'i atlamak yerine isi kirmizi yapar.
-      # Harness'ler `budlum_kani` crate'inin `proofs` modulunde.
+      # `--exact` KULLANILMIYOR ve bu olculdu. Sade isimle reddetti, crate
+      # onekiyle (`budlum_kani::proofs::x`) de reddetti. 0.67.0 kaynagina
+      # bakildiginda `--exact` `mangled_name` ile karsilastiriyor ve o ad
+      # crate onekini tasimiyor; dogru form `proofs::x` olurdu. Ama bu, bir
+      # kapiyi Kani'nin ic adlandirmasina baglamak demek: bir sonraki surumde
+      # ad semasi degisirse kapi sessizce hicbir harness'e eslesmez.
+      #
+      # `--exact` olmadan `--harness` bir alt-dize filtresidir. Buradaki
+      # isimler benzersiz oldugu icin ayni dokuzu secer, ve daha onemlisi
+      # eslesme SAYISI kapi tarafindan dogrulanir: dokuz beklenip sekiz
+      # kosarsa `check-kani.sh` bunu yakalar. Filtre gevsedi, kapi gevsemedi.
       - name: Kani proofs (hizli set)
         working-directory: kani
         run: |
           set -euo pipefail
           mapfile -t fast < <(bash ../scripts/check-kani.sh --fast-names)
           [ "${#fast[@]}" -gt 0 ] || { echo "no fast harnesses found; the gate would be vacuous" >&2; exit 1; }
-          mod="$(bash ../scripts/check-kani.sh --module-path)"
-          echo "module path: $mod"
           args=()
           for h in "${fast[@]}"; do
-            [ -n "$h" ] && args+=(--harness "$mod::$h" --exact)
+            [ -n "$h" ] && args+=(--harness "$h")
           done
           echo "running ${#fast[@]} fast harnesses: ${fast[*]}"
           cargo kani "${args[@]}" --output-format terse 2>&1 | tee /tmp/kani.log
@@ -406,7 +410,6 @@ jobs:
           set -uo pipefail
           mapfile -t slow < <(bash ../scripts/check-kani.sh --slow-names)
           [ "${#slow[@]}" -gt 0 ] || { echo "no slow harnesses; nothing to measure" >&2; exit 1; }
-          mod="$(bash ../scripts/check-kani.sh --module-path)"
           {
             echo "| harness | result | seconds |"
             echo "| :-- | :-- | --: |"
@@ -414,8 +417,7 @@ jobs:
           rc_all=0
           for h in "${slow[@]}"; do
             start=$(date +%s)
-            timeout 6000 cargo kani --harness "$mod::$h" --exact \
-              --output-format terse \
+            timeout 6000 cargo kani --harness "$h" --output-format terse \
               > "/tmp/$h.log" 2>&1
             rc=$?
             elapsed=$(( $(date +%s) - start ))
