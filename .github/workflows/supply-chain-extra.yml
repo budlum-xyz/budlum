@@ -38,6 +38,8 @@ jobs:
         with:
           toolchain: nightly
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo-udeps kur (locked; crate.io sürümü log'da kanıtlı)
@@ -66,6 +68,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo-geiger kur (locked; crate.io sürümü log'da kanıtlı)

@@ -60,6 +60,8 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install cargo-auditable + cargo-audit (sürüm pinli)
         run: |
           set -euo pipefail
@@ -136,6 +138,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       # Kaynaktan derlemek yerine pinli binary. Repoda bu desen zaten var
       # (gitleaks, grype, typos, actionlint), burada tutarli uygulaniyor.
       # sha256'lar indirilip hesaplandi; machete'ninki upstream .sha256
@@ -223,6 +227,8 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install cargo-bloat (sürüm pinli)
         run: cargo install cargo-bloat --version 0.12.1 --locked
       - name: Release build
@@ -261,6 +267,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install taplo (sürüm + sha256 pinli)
         run: |
           set -euo pipefail
@@ -349,6 +357,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
 
       - name: Install Kani (sürüm pinli)
         run: |
@@ -416,6 +426,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
 
       - name: Install Kani (sürüm pinli)
         run: |
