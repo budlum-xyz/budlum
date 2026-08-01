@@ -986,7 +986,7 @@ mod tests {
     /// without the cost growing with the entry count.
     ///
     /// If the bound is ever removed this test still passes on correctness but
-    /// the timing assertion fails, which is the point - the finding was a CPU
+    /// the timing assertion fails, which is the point, the finding was a CPU
     /// exhaustion, not a wrong answer.
     #[test]
     fn oversized_blob_is_refused_in_constant_time() {

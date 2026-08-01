@@ -478,7 +478,7 @@ impl Blockchain {
             Self::build_validator_snapshot_from_state(state.epoch_index, &state, chain_id),
         );
 
-        // The stored set can outnumber the live retention window - an older
+        // The stored set can outnumber the live retention window, an older
         // Build may have run with a larger bound, or a write failed between
         // Eviction and delete. Trim to the same limit `record_validator_snapshot`
         // Enforces so the in-memory map has one owner of its size.
@@ -1089,7 +1089,7 @@ impl Blockchain {
             // domain's commitment chain contiguous: commitment N+1 must name
             // commitment N as its parent, or the domain is frozen. It used to
             // be `#[cfg(not(test))]`, which meant no test could ever exercise
-            // it and no test could notice if it were removed - a security
+            // it and no test could notice if it were removed, a security
             // check that only runs in the build nobody runs assertions
             // against.
             let last_hash = self
@@ -1598,7 +1598,7 @@ impl Blockchain {
 
         // Debit the owner's balance when locking bridge
         // Transfer. Without this, the owner retains the locked amount while
-        // The recipient also receives it on the target domain - creating BUD
+        // The recipient also receives it on the target domain, creating BUD
         // Out of thin air (inflation bug). The sweep_expired_locks path
         // Already refunds the owner on expiry, so this debit is the
         // Corresponding credit-side bookkeeping.
@@ -2080,7 +2080,7 @@ impl Blockchain {
     ) -> usize {
         let params = *self.state.registry.params();
         // Same filter as `maybe_observe_liveness_on_epoch_close`. Taking every
-        // Key of `validators` counts members that cannot sign - a slashed or
+        // Key of `validators` counts members that cannot sign, a slashed or
         // Jailed validator stays in the map (that is how `jail_until` is
         // Tracked) while `registry.is_active` has already gone false. Feeding
         // Them in as absentees accrues a downtime streak for not doing
@@ -3374,7 +3374,7 @@ impl Blockchain {
         Self::distribute_bud_boost_share_in_state(&mut next_state, boost_share)?;
 
         // Fee settlement has a single authority: Executor::apply_block_checked
-        // Credits the producer exactly once with flat fee - metabolic burn.
+        // Credits the producer exactly once with flat fee, metabolic burn.
 
         Ok(next_state)
     }
@@ -5099,7 +5099,7 @@ impl Blockchain {
     ///
     /// A caller could therefore pass `opener_bond: 999_999` with an empty
     /// account and open challenges for free. Each one costs the operator a read
-    /// and a hash over the range - up to 16 MiB - so the cost of the attack sat
+    /// and a hash over the range, up to 16 MiB, so the cost of the attack sat
     /// entirely on the operator. The rate limit bounds how fast that happens
     /// per `(operator, manifest)`, but a bound is not a price: an attacker with
     /// no funds could still spend an operator's I/O indefinitely.
@@ -5575,7 +5575,7 @@ mod tests {
     /// Window of epochs.
     ///
     /// Canary: drop the `save_validator_snapshot` call from
-    /// `record_validator_snapshot` and this fails - the reopened node finds
+    /// `record_validator_snapshot` and this fails, the reopened node finds
     /// Nothing.
     #[test]
     fn validator_snapshots_survive_a_restart() {
@@ -5959,7 +5959,7 @@ mod tests {
         let signer_addr = Address::from(signer.public_key_bytes());
         let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), Some(signer)));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
-        // Hash-mix leader selection needs a controlled set - keep
+        // Hash-mix leader selection needs a controlled set, keep
         // Only the PoA signer active so they are always the expected proposer.
         bc.state.validators.clear();
         bc.state.add_validator(signer_addr, 1);

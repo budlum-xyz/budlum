@@ -91,12 +91,12 @@ Bu açığı kapatmak için şu mimariyi entegre ettik:
 AIR denklemlerinde `if (x != 0)` koşulunu yazmak doğrudan imkansızdır. Polinomlar sürekli fonksiyonlar olduğundan, sıfır dışılık durumunu kanıtlamak için **Aritmetik Ters Eleman Tanığı (Arithmetic Inverse Witness)** yöntemi kullanılır.
 
 Cebirsel kural şudur: Bir $x$ elemanının sıfır olmadığını kanıtlamak için, prover trace içine yardımcı bir $v$ (inverse) sütunu koyar. AIR bu $v$ değerinin gerçekten $x$'in tersi olduğunu ve $x \neq 0$ durumunu şu denklemlerle doğrular:
-1. $$x \cdot (1 - x \cdot v) = 0$$
+1. $$x \cdot (1, x \cdot v) = 0$$
 2. Eğer $x \neq 0$ ise, $x \cdot v = 1$ olmak zorundadır.
 
 BudZKVM'de bu mekanizma şu işlemler için tam olarak implement edilmiştir:
 * **`Div` (Bölme):** Paydanın sıfır olmadığı kanıtlanır ve tersi ile çarpım doğrulanır.
-* **`Eq` / `Neq` (Eşitlik / Eşitsizlik):** İki değerin farkı $d = A - B$ hesaplanır. Farkın tersi $v = d^{-1}$ tanık olarak trace'e eklenir. Eşitlik durumu bu ters eleman üzerinden doğrulanır.
+* **`Eq` / `Neq` (Eşitlik / Eşitsizlik):** İki değerin farkı $d = A, B$ hesaplanır. Farkın tersi $v = d^{-1}$ tanık olarak trace'e eklenir. Eşitlik durumu bu ters eleman üzerinden doğrulanır.
 * **`Jnz` (Sıfır Değilse Atla):** Koşul yazmacının sıfır dışı olup olmadığı bu ters eleman tanığıyla denetlenerek dallanma doğruluğu kilitlenir.
 
 ```rust
@@ -148,7 +148,7 @@ Bu zafiyeti engellemek için **Keccak256 hash bağlamı** kurduk:
 3. Verifier, ispatı doğrulamadan önce kendi elindeki verilerden bu hash'i yeniden hesaplar ve STARK açılışında doğrular. Böylece en ufak bir parametre değişikliği (örneğin chain_id veya gas_used tahrifatı) ispatın geçersiz kılınmasına neden olur.
 
 ### Güvenli ProofEnvelope ve Bincode Bounded Decoding
-Rust ekosistemindeki `bincode 1.3` sürümü, sınırlandırılmamış girdi boyutu çözme (unbounded decoding) işlemlerinde bellek tüketim zafiyetlerine (RustSec zafiyeti) sahiptir. Kötü niyetli bir saldırgan, verifier RPC düğümüne devasa boyutlu geçersiz bir proof byte dizisi göndererek düğümü çökertebilir (Denial of Service - DoS).
+Rust ekosistemindeki `bincode 1.3` sürümü, sınırlandırılmamış girdi boyutu çözme (unbounded decoding) işlemlerinde bellek tüketim zafiyetlerine (RustSec zafiyeti) sahiptir. Kötü niyetli bir saldırgan, verifier RPC düğümüne devasa boyutlu geçersiz bir proof byte dizisi göndererek düğümü çökertebilir (Denial of Service, DoS).
 
 Bunu engellemek için proof taşıma katmanını **`ProofEnvelope`** ile sarmaladık:
 * `ProofEnvelope` içinde versiyon bilgisi (`version: u32`), kullanılan backend (`backend: String`) ve asıl ispat byte dizisi bulunur.

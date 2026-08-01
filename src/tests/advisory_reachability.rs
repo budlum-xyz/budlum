@@ -20,7 +20,7 @@
 #[cfg(test)]
 mod tests {
     /// All three lockfiles. They are separate workspaces that resolve
-    /// independently, and Dependabot reports each one separately - three
+    /// independently, and Dependabot reports each one separately, three
     /// advisories times three lockfiles is where the nine alerts came from.
     /// Fixing only the root would leave six of them open.
     const LOCKFILES: [(&str, &str); 3] = [
@@ -240,7 +240,7 @@ mod tests {
     /// The three advisories must not reappear in any scanner's ignore list.
     ///
     /// This is the canary for the whole change: they are patched, so ignoring
-    /// them would be silencing a finding that is already fixed - and would
+    /// them would be silencing a finding that is already fixed, and would
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
@@ -311,12 +311,12 @@ mod tests {
     /// Either one is a remote unauthenticated panic: any peer that can open a
     /// gossipsub session takes the node down with a single control message and
     /// replays it after every restart. Rust turns the overflow into a panic
-    /// rather than memory corruption, so the class is denial of service - but
+    /// rather than memory corruption, so the class is denial of service, but
     /// for a validator, "the process is dead" is the whole impact.
     ///
     /// A version assertion alone is not enough here. `libp2p-gossipsub` comes
     /// from a git revision, not crates.io, so the `0.50.0` in the lockfile is
-    /// whatever that tree happened to call itself - it is not evidence that
+    /// whatever that tree happened to call itself, it is not evidence that
     /// either patch is in it. This asserts the version *and* names both
     /// advisories so a future pin bump has to be checked against them rather
     /// than trusted for having a larger number.
@@ -380,7 +380,7 @@ mod tests {
 /// the preimage in the same change.
 #[test]
 fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
-    // The transaction envelope really does bind the chain - the property
+    // The transaction envelope really does bind the chain, the property
     // the two payload digests are relying on.
     let tx_src = include_str!("../core/transaction.rs");
     let at = tx_src

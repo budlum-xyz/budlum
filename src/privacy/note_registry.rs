@@ -176,7 +176,7 @@ impl L1NoteRegistry {
     }
 
     /// Enforce bounded storage via hard caps.
-    /// Spent nullifiers are consensus replay protection - they cannot be deleted
+    /// Spent nullifiers are consensus replay protection, they cannot be deleted
     /// Without breaking double-spend resistance. Instead, MAX_SPENT_NULLIFIERS
     /// Enforces a hard ceiling (fail-closed): once the cap is reached, no new
     /// Private transfers are accepted until the chain performs a state migration

@@ -1,4 +1,4 @@
-# BudZero - BudZKVM
+# BudZero: BudZKVM
 
 STARK-provable execution for **[Budlum](https://github.com/budlum-xyz/budlum)**’s Universal Settlement Layer.
 
@@ -59,14 +59,14 @@ cargo test --workspace
 
 | Feature | Effect |
 | --- | --- |
-| default | **Production** ISA - experimental opcodes (e.g. `VerifyMerkle`) rejected at decode |
+| default | **Production** ISA, experimental opcodes (e.g. `VerifyMerkle`) rejected at decode |
 | `experimental` | Enables experimental opcodes for ZK harness / research (`bud-proof` enables this for itself) |
 
 ---
 
 ## Soundness work (honest status)
 
-Bu crate seti **bu monorepo içindeki** [`budzero/`](./) ağacıdır (ayrı `budlum-xyz/BudZero` checkout'u yok - kaynak burası). **Z-B:** `proves_verify_merkle_valid_64_depth` yeşil. VerifyMerkle **mainnet-gated** (`MainnetActivation`, default off) - staged ceremony rollout; eski experimental-ISA kilidiyle aynı değil.
+Bu crate seti **bu monorepo içindeki** [`budzero/`](./) ağacıdır (ayrı `budlum-xyz/BudZero` checkout'u yok, kaynak burası). **Z-B:** `proves_verify_merkle_valid_64_depth` yeşil. VerifyMerkle **mainnet-gated** (`MainnetActivation`, default off), staged ceremony rollout; eski experimental-ISA kilidiyle aynı değil.
 
 | Item | Status |
 | --- | --- |
@@ -110,9 +110,9 @@ CI enforces:
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace` - **124 test geçerli sayım** (CI-kanıtlı, 2026-07-18)
+3. `cargo test --workspace`: **124 test geçerli sayım** (CI-kanıtlı, 2026-07-18)
 
-Modül-ayrımı kuralı (): bu sayı kök README'nin dashboard tablosunda
+Modül-ayrımı kuralı: bu sayı kök README'nin dashboard tablosunda
 kendi satırında raporlanır; toplam Core sayısına (755 lib) karışmaz.
 
 No `#[allow(clippy::…)]` as a substitute for fixing lints on new work.
@@ -129,8 +129,8 @@ jobs in one commit.
 
 ## License
 
-Apache-2.0 - see [LICENSE.md](../LICENSE.md).
+Apache-2.0, see [LICENSE.md](../LICENSE.md).
 
 ## See also
 
-- [Budlum L1](https://github.com/budlum-xyz/budlum) - settlement, bridge, multi-consensus
+- [Budlum L1](https://github.com/budlum-xyz/budlum), settlement, bridge, multi-consensus

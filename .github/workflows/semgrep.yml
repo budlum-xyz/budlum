@@ -1,4 +1,4 @@
-# Semgrep - kural tabanlı SAST (budlum-ek-security-workflows.md ÖNCELİK 2, madde 3)
+# Semgrep, kural tabanlı SAST (budlum-ek-security-workflows.md ÖNCELİK 2, madde 3)
 #
 # CodeQL ile örtüşmez, tamamlar: CodeQL veri-akışı (taint) analizi yapar,
 # Semgrep sözdizimsel desen eşleştirir. p/rust + p/security-audit + p/secrets
@@ -6,7 +6,7 @@
 # (tehlikeli API çağrıları, sabit kodlanmış kimlik bilgisi kalıpları) yakalar.
 #
 # Kapı politikası: bulgu = FAIL. Direktifin standing rule'u gereği "çalışıp
-# Yeşil dönmesi yetmez, merge'ü gerçekten bloke etmelidir" - bu yüzden
+# Yeşil dönmesi yetmez, merge'ü gerçekten bloke etmelidir", bu yüzden
 # `continue-on-error` KULLANILMAZ. SARIF yine de Security sekmesine yüklenir
 # (`if: always`), böylece FAIL durumunda bulgular UI'da görünür.
 #

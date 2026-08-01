@@ -86,8 +86,8 @@ treated as proof of local access.
 
 That assumption breaks wherever the loopback interface is shared. The case to
 watch is a Kubernetes pod: every container in a pod shares a network namespace,
-so a sidecar - a log shipper, a service mesh proxy, anything pulled in by a
-mutating webhook - can reach the operator RPC as if it were the node itself.
+so a sidecar, a log shipper, a service mesh proxy, anything pulled in by a
+mutating webhook, can reach the operator RPC as if it were the node itself.
 The same applies to `docker run --network=container:...` and to any process
 running directly on the host.
 
@@ -152,7 +152,7 @@ is not evidence, so the canary is part of the gate rather than an extra.
 | `cargo machete`, `cargo shear` | unused dependencies | gate |
 | `cargo-semver-checks` | public API breakage | gate |
 | `taplo` | TOML formatting of supply-chain policy files | gate |
-| `cargo bloat` | binary size | report, not a gate - no calibrated threshold yet |
+| `cargo bloat` | binary size | report, not a gate, no calibrated threshold yet |
 | Kani | bond arithmetic: a slash never exceeds its bond | gate |
 
 **Kani is integrated for bond arithmetic.** An earlier `scripts/check-kani.sh`
@@ -169,15 +169,15 @@ it is taken from; `remaining + penalty == stake` exactly, so the
 slash ratio through governance can never reduce the actual penalty. A fifth
 harness drops the `ratio <= FIXED_POINT_SCALE` precondition and asserts the
 bound would break without it, which records `RegistryParams::validate` as
-load-bearing rather than incidental - the other four *assume* that bound, and an
+load-bearing rather than incidental, the other four *assume* that bound, and an
 assumption is not a check.
 
 `kani::any()` is every value of the type, so these cover the whole input space
 rather than sampled points. The existing proptests are kept alongside them.
 
 The harnesses live in a standalone `kani/` package, in the same way `fuzz/`
-does. Kani ships a pinned nightly - 0.67.0, the newest published release,
-bundles rustc 1.93.0-nightly - while `budlum-core` declares
+does. Kani ships a pinned nightly, 0.67.0, the newest published release,
+bundles rustc 1.93.0-nightly, while `budlum-core` declares
 `rust-version = "1.94.0"`, so cargo refuses to build the root crate before any
 harness runs. The upstream toolchain bump is merged but unreleased
 (model-checking/kani#4645). Lowering the MSRV to suit a verification tool would
@@ -188,7 +188,7 @@ the mirror and `slash_role_only` ever diverge.
 
 The gate checks the proofs pass *and* that the number of harnesses Kani ran
 matches the number declared in the source, because a proof that silently stops
-being compiled would otherwise leave the gate green with nothing behind it -
+being compiled would otherwise leave the gate green with nothing behind it,
 the exact way the deleted script was hollow.
 
 Signature verification and Merkle paths remain open work: both reach into
@@ -217,21 +217,21 @@ Budlum Core, mainnet v1 lansmanından itibaren bir bug bounty programı yürüte
 
 | Seviye | Ödül (USD) |
 |--------|------------|
-| Kritik (consensus bypass, key extraction, bridge drain) | $50,000–$100,000 |
-| Yüksek (DoS, RPC bypass, P2P eclipse) | $10,000–$25,000 |
-| Orta (rate limit bypass, info leak) | $2,500–$5,000 |
-| Düşük (best practice, docs) | $500–$1,000 |
+| Kritik (consensus bypass, key extraction, bridge drain) | $50,000 to $100,000 |
+| Yüksek (DoS, RPC bypass, P2P eclipse) | $10,000 to $25,000 |
+| Orta (rate limit bypass, info leak) | $2,500 to $5,000 |
+| Düşük (best practice, docs) | $500 to $1,000 |
 
 **Raporlama:** `security@budlum.network` veya GitHub private security advisory.
 **Triage:** 72 saat içinde ilk yanıt. Coordinated disclosure: 90 gün.
 
-> Program henüz aktif değil - mainnet lansmanıyla birlikte Immunefi üzerinden açılacaktır.
+> Program henüz aktif değil: mainnet lansmanıyla birlikte Immunefi üzerinden açılacaktır.
 
 ### Triage Kanalları
 
 - **Discord:** `#security-reports` (yalnızca reporter + security lead görür)
-- **Telegram:** `@budlum_security` (alternatif - PGP key talep edilir)
-- **GitHub:** Private security advisory (önerilen - audit trail)
+- **Telegram:** `@budlum_security` (alternatif, PGP key talep edilir)
+- **GitHub:** Private security advisory (önerilen: audit trail)
 
 ### Safe Harbor (İyi Niyetli Araştırmacı Koruması)
 

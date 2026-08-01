@@ -39,7 +39,7 @@ impl std::error::Error for CompileError {}
 /// Byte offset where the generated prologue points the heap pointer (`r31`).
 ///
 /// Struct literals allocate above this address, so a VM whose memory is
-/// smaller than this cannot run any program that uses a struct - it faults
+/// smaller than this cannot run any program that uses a struct, it faults
 /// with `InvalidMemoryAccess` on the first allocation. Hosts must size their
 /// `Vm` with at least [`MIN_VM_MEMORY_BYTES`].
 pub const HEAP_BASE: i32 = 4096;
@@ -500,7 +500,7 @@ mod tests {
     /// *actual* struct layout. `A` and `B` both declare a field named
     /// `name`, but at different positions (offset 0 vs offset 8). The
     /// Legacy codegen scanned every struct layout and used the first hit,
-    /// So one of the two reads below returned the wrong word - and because
+    /// So one of the two reads below returned the wrong word, and because
     /// The layouts live in a hash map, *which* one was wrong depended on
     /// Iteration order. Type-aware resolution reads each field from its
     /// Own struct's layout, making the result correct and deterministic.
@@ -853,7 +853,7 @@ mod tests {
 
     // === OPERATOR TYPE HARDENING ===============================================
 
-    /// Arithmetic on struct values (heap pointers) is rejected - adding two
+    /// Arithmetic on struct values (heap pointers) is rejected, adding two
     /// Pointers is meaningless and previously type-checked silently (the VM
     /// Would compute over raw pointer words).
     #[test]
@@ -1008,7 +1008,7 @@ mod tests {
         }
     }
 
-    /// A scalar condition (here a comparison result) still compiles - the
+    /// A scalar condition (here a comparison result) still compiles, the
     /// Check rejects only struct/void conditions.
     #[test]
     fn test_scalar_condition_still_compiles() {
@@ -1060,7 +1060,7 @@ mod tests {
         );
     }
 
-    /// A comparison result is Bool, not the operand type - using it in u64
+    /// A comparison result is Bool, not the operand type, using it in u64
     /// Arithmetic is now a type mismatch (the behavior change from typing
     /// Comparisons as Bool).
     #[test]

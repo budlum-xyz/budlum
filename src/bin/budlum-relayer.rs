@@ -284,7 +284,7 @@ impl EthClient {
     }
 
     /// Eth_getLogs - bridge deposit eventleri için.
-    /// Topic0 = keccak256("Deposit(address,uint256,bytes32,uint256)") placeholder - gerçek kontratla set edilmeli.
+    /// Topic0 = keccak256("Deposit(address,uint256,bytes32,uint256)") placeholder, gerçek kontratla set edilmeli.
     pub async fn get_deposit_logs(
         &self,
         from_block: u64,
@@ -596,7 +596,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
             let source_domain = 1u32;
 
             // Proof format expected by Budlum: MerkleProof { leaf, index, siblings } + external root
-            // Here we pass our proof_json as placeholder - real impl would bincode-serialize MerkleProof
+            // Here we pass our proof_json as placeholder, real impl would bincode-serialize MerkleProof
             // And submit via bud_submitRelayProof
             match budlum_client
                 .submit_relay_proof(&message_id, &relayer_addr, proof_json, source_domain)

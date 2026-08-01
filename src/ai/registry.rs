@@ -703,7 +703,7 @@ impl AiRegistry {
             return Err(format!("Request {} already cancelled", request_id.to_hex()));
         }
 
-        // Cannot cancel before the deadline has passed - the request is
+        // Cannot cancel before the deadline has passed, the request is
         // Still valid and verifiers may still submit results.
         // Cancellation is for requests where the requester no longer wants
         // To wait, but verifiers might still be working. We allow
@@ -850,7 +850,7 @@ impl AiRegistry {
 
     /// Lock stake for an AI verifier.
     /// Verifiers must stake to participate in AI inference.
-    /// This stake is slashable on equivocation - economic skin-in-the-game.
+    /// This stake is slashable on equivocation, economic skin-in-the-game.
     pub fn lock_verifier_stake(&mut self, verifier: &Address, amount: u64) -> Result<u64, String> {
         if amount == 0 {
             return Err("Verifier stake must be > 0".into());
@@ -1014,7 +1014,7 @@ impl AiRegistry {
 
     /// Attach a ZKVM execution proof to a result.
     /// The proof cryptographically verifies that the inference output was
-    /// Produced by the claimed model on the claimed input - the core
+    /// Produced by the claimed model on the claimed input, the core
     /// Primitive for trustless AI inference in the Agentic Economy.
     ///
     /// Returns Ok if the proof commitments match the existing result.
@@ -1153,7 +1153,7 @@ impl AiRegistry {
     }
 
     /// Check if a result has an execution proof.
-    /// Results with execution proofs are "trustless" - verified by
+    /// Results with execution proofs are "trustless", verified by
     /// Mathematics rather than by verifier reputation.
     pub fn has_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.execution_proofs
@@ -1321,7 +1321,7 @@ impl AiRegistry {
             .remove(payment_id)
             .ok_or_else(|| String::from("Agent payment: payment_id not found for settle"))?;
         if payment.is_escrowed() {
-            // Should not be called for escrowed payments - put back and error.
+            // Should not be called for escrowed payments, put back and error.
             self.agent_payments.insert(payment.payment_id, payment);
             return Err(String::from(
                 "Agent payment: escrowed payment cannot use immediate settle",

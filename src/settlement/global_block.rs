@@ -229,7 +229,7 @@ mod tests {
         // The domain tag changed.
         let h = sample_header();
         let hash = h.calculate_hash_bytes();
-        // Just verify it produces a non-zero hash - the tag change
+        // Just verify it produces a non-zero hash, the tag change
         // Is the critical security property.
         assert_ne!(hash, [0u8; 32], "V3 header must produce non-zero hash");
     }

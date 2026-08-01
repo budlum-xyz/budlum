@@ -1,4 +1,4 @@
-# OSV-Scanner - RustSec dışı zafiyet kaynaklarını kapatan tarama
+# OSV-Scanner, RustSec dışı zafiyet kaynaklarını kapatan tarama
 #
 # NEDEN cargo-audit/cargo-deny YETMİYOR: her ikisi de yalnız RustSec advisory
 # Veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve

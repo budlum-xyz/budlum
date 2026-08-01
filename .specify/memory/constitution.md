@@ -5,7 +5,7 @@ Version change:      (none) → 1.0.0
 Ratification:        initial adoption
 
 Added sections:
-  - Core Principles I–VI
+  - Core Principles I to VI
   - Consensus and Wire Compatibility
   - Development Workflow
   - Governance
@@ -27,7 +27,7 @@ Follow-up TODOs:
 # Budlum Core Constitution
 
 Budlum is a permissionless multi-consensus L1. The code decides who holds funds
-and which chain is real, so the bar is not "reviewed and looks correct" - it is
+and which chain is real, so the bar is not "reviewed and looks correct", it is
 "a machine refuses the change when the property breaks".
 
 These principles describe what the repository already does. They are written
@@ -75,7 +75,7 @@ goes in the commit message. After the fix, reverting it must fail the new tests.
 This cuts both ways, and the discipline earns its keep on the second half: a
 plausible-looking finding that survives investigation is worth more than a fix,
 and a plausible-looking finding that does *not* survive must be dropped rather
-than shipped. Several have been - a duplicate-leaf collision in
+than shipped. Several have been, a duplicate-leaf collision in
 `calculate_state_root` was real at the tree level and unreachable in practice,
 because the leaf commits to the account address and `accounts` is a `BTreeMap`.
 
@@ -125,12 +125,12 @@ Where logic is bounded and self-contained, a proof beats a sample.
 someone thought of.
 
 Model checking is not free and is not applied everywhere. It is applied where
-the property is worth the cost and the solver can close it - bond arithmetic
+the property is worth the cost and the solver can close it, bond arithmetic
 decides how much stake a validator loses, and it is pure `u64`/`u128` maths.
 Proptests are kept alongside, not replaced.
 
 **Enforcement**: `scripts/check-kani.sh` fails on a failed proof *and* when the
-number of harnesses that ran is lower than the number declared in the source -
+number of harnesses that ran is lower than the number declared in the source,
 a proof that silently stops compiling would otherwise leave the gate green.
 
 ## Consensus and Wire Compatibility
@@ -166,7 +166,7 @@ changes even when they look like refactors.
 ## Governance
 
 This constitution describes the rules the repository enforces. Where it and the
-code disagree, the code is the fact and the document is the bug - unless the
+code disagree, the code is the fact and the document is the bug, unless the
 disagreement is a gate that stopped working, which is Principle I.
 
 **Amendment**: a change to these principles is a pull request that says which

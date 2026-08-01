@@ -130,7 +130,7 @@ impl BnsRegistry {
     /// Directions, which is exactly the shape `renew` exists to remove.
     ///
     /// Wiring it needs a transaction type, an executor arm that charges
-    /// `calculate_cost`, and a signature check - small, but consensus surface,
+    /// `calculate_cost`, and a signature check, small, but consensus surface,
     /// So it is recorded here rather than smuggled into a hardening pass.
     pub fn renew(
         &mut self,

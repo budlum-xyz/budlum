@@ -31,6 +31,6 @@ are governed by their own licences. The permitted set is enforced in CI by the
 "License Compliance" job against the allow-list in .quality/deny.toml; a full
 per-dependency inventory is written to that job's summary on every run.
 
-Provenance observations for non-trivial in-tree algorithms — including the
-cases where an origin could not be established — are recorded in
+Provenance observations for non-trivial in-tree algorithms, including the
+cases where an origin could not be established, are recorded in
 PROVENANCE_NOTES.md. That file is a map for reviewers, not a clearance.

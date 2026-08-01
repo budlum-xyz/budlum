@@ -3,7 +3,7 @@
 //! The ADAMS family of attacks (DETER, `MemPurge`, and the variants catalogued
 //! in the 2024 USENIX mempool study) all rest on the same footing: a mempool
 //! that admits transactions it cannot charge for. The classic shape is the
-//! *future* transaction - nonce well above the account's next - which can
+//! *future* transaction, nonce well above the account's next, which can
 //! never be mined from the pool it occupies, so the attacker pays nothing
 //! while evicting transactions that would have paid. Geth carried this until
 //! v1.11.4.
@@ -15,7 +15,7 @@
 //!
 //! None of that was pinned. The mempool itself has no view of account state -
 //! `Mempool::add_transaction` checks the signature, the fee floor, the
-//! per-sender cap and RBF, and nothing else - so the entire defence is one
+//! per-sender cap and RBF, and nothing else, so the entire defence is one
 //! call in `Blockchain::add_transaction`. Removing it leaves every mempool
 //! unit test green.
 
@@ -54,8 +54,8 @@ fn signed(kp: &KeyPair, to: Address, amount: u64, fee: u64, nonce: u64) -> Trans
 
 /// A transaction whose nonce is ahead of the account must be refused.
 ///
-/// This is the DETER primitive. Admitting it costs the attacker nothing -
-/// the transaction cannot be included while the gap exists - but it occupies
+/// This is the DETER primitive. Admitting it costs the attacker nothing,
+/// the transaction cannot be included while the gap exists, but it occupies
 /// a slot that a payable transaction would have used.
 #[test]
 fn a_future_nonce_is_refused_instead_of_parked() {
@@ -124,7 +124,7 @@ fn a_sequential_batch_from_one_sender_is_admitted() {
 /// queue a batch that only the first transaction can afford.
 ///
 /// This is the `MemPurge` shape: overdraft transactions are admitted, then all
-/// but the first turn out to be unpayable at mining time - again occupying
+/// but the first turn out to be unpayable at mining time, again occupying
 /// slots for free.
 #[test]
 fn a_batch_that_outruns_the_balance_is_refused_at_the_point_it_does() {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-pinned-downloads-are-really-pinned.sh - a checksum fetched from the
+# check-pinned-downloads-are-really-pinned.sh, a checksum fetched from the
 # server it verifies is not a pin.
 #
 # The coverage job installed two tools. One was pinned:
@@ -16,7 +16,7 @@
 #
 # Both files come from the same release. Anyone who can replace the tarball can
 # replace the `.sha256` next to it, so the check verifies the artefact against
-# a hash the artefact's own host supplied - it proves the download was not
+# a hash the artefact's own host supplied, it proves the download was not
 # corrupted in transit and nothing else. The step was named
 # "(sha256 pinli)" and had been for as long as it existed.
 #

@@ -208,7 +208,7 @@ impl Block {
                 // Is folded into a fixed domain-separated sentinel instead. That keeps
                 // This function total (it must stay infallible: callers compare the
                 // Result against the block header) while making every malformed hash
-                // Collapse to the SAME leaf on every node - deterministic, and
+                // Collapse to the SAME leaf on every node, deterministic, and
                 // Guaranteed not to collide with any well-formed 32-byte hash because
                 // Of the distinct 0x01 domain tag.
                 match hex_32(&tx.hash) {
@@ -615,7 +615,7 @@ mod merkle_duplicate_leaf_locks {
         );
     }
 
-    /// The attack is not limited to three leaves - any level with an odd count
+    /// The attack is not limited to three leaves, any level with an odd count
     /// is a candidate, so check the shapes where the duplication lands on a
     /// deeper level too.
     #[test]
@@ -649,7 +649,7 @@ mod merkle_duplicate_leaf_locks {
     ///
     /// Promotion (RFC 6962) is safe because a promoted node is never hashed a
     /// second time. This pins that a two-leaf tree and a one-leaf tree whose
-    /// leaf happens to equal the two-leaf root stay distinct - which they do
+    /// leaf happens to equal the two-leaf root stay distinct, which they do
     /// because interior nodes carry the `0x01` tag and leaves carry `0x00`.
     #[test]
     fn a_promoted_node_is_not_confusable_with_an_interior_node() {

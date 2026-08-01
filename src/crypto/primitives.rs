@@ -664,7 +664,7 @@ impl KeyPair {
                 .map_err(|e| CryptoError::Io(e.to_string()))?;
         }
         // (security audit §7) the file path of a
-        // Freshly-saved keypair is a sensitive secret - an
+        // Freshly-saved keypair is a sensitive secret, an
         // Attacker reading process stdout learns exactly where
         // To look on disk. The same `tracing::debug!` rationale as
         // `KeyPair::generate` applies: surface under explicit

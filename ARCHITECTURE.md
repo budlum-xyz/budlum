@@ -19,7 +19,7 @@ flowchart TB
   Chain --> Net[P2P / Gossip]
   Exec --> ZK[BudZero / BudZKVM]
   State --> XD[Cross-domain / bridge state]
-  State --> Apps[BNS - B.U.D. - Pollen - budlumxyz - SocialFi - AI]
+  State --> Apps["BNS, B.U.D., Pollen, budlumxyz, SocialFi, AI"]
 ```
 
 ## 2. Consensus-domain izolasyonu
@@ -171,9 +171,9 @@ flowchart TD
 flowchart LR
   Push[Commit / PR] --> Fmt["Format + lint"]
   Fmt --> Core[Core / BudZero tests]
-  Core --> Invariants[BNS - B.U.D. - PoA invariant gates]
+  Core --> Invariants["BNS, B.U.D., PoA invariant gates"]
   Invariants --> Coverage[Coverage ratchet]
-  Coverage --> Supply[deny - SBOM - secret scan - geiger - udeps]
+  Coverage --> Supply["deny, SBOM, secret scan, geiger, udeps"]
   Supply --> Smoke[Docker / multinode smoke]
   Smoke --> CI[CI verdict]
   Fuzz["Fuzz quick + nightly campaigns"] -. ongoing evidence .-> CI
@@ -184,7 +184,7 @@ flowchart LR
 
 # Kapsamlı Sistem Diyagramları (Detaylı Veri Akışı)
 
-## 13. Executor - tam state transition pipeline
+## 13. Executor: tam state transition pipeline
 
 ```mermaid
 flowchart TD
@@ -237,7 +237,7 @@ flowchart TD
   end
 ```
 
-## 14. Privacy layer - Poseidon circuit + note registry state machine
+## 14. Privacy layer: Poseidon circuit + note registry state machine
 
 ```mermaid
 flowchart TD
@@ -292,7 +292,7 @@ flowchart TD
   end
 ```
 
-## 15. Bridge - full cross-domain message verification pipeline
+## 15. Bridge: full cross-domain message verification pipeline
 
 ```mermaid
 flowchart TD
@@ -344,7 +344,7 @@ flowchart TD
   end
 ```
 
-## 16. AI inference + execution proof - full lifecycle with STARK
+## 16. AI inference + execution proof: full lifecycle with STARK
 
 ```mermaid
 flowchart TD
@@ -434,7 +434,7 @@ flowchart TD
   end
 ```
 
-## 17. Consensus finality - all 5 domain adapters
+## 17. Consensus finality: all 5 domain adapters
 
 ```mermaid
 flowchart TD
@@ -498,7 +498,7 @@ flowchart TD
   end
 ```
 
-## 18. Registry - complete stake + slash + unbond state machine
+## 18. Registry: complete stake + slash + unbond state machine
 
 ```mermaid
 stateDiagram-v2
@@ -532,7 +532,7 @@ stateDiagram-v2
   end note
 ```
 
-## 19. Wallet - complete signing + privacy + TEE pipeline
+## 19. Wallet: complete signing + privacy + TEE pipeline
 
 ```mermaid
 flowchart TD
@@ -591,7 +591,7 @@ flowchart TD
   end
 ```
 
-## 20. BudZero STARK - bytecode to verified proof pipeline
+## 20. BudZero STARK: bytecode to verified proof pipeline
 
 ```mermaid
 flowchart TD
@@ -612,7 +612,7 @@ flowchart TD
 
     Words --> Decode[decode_instruction raw u64 -> Instruction]
     Decode --> MainnetGate["MainnetActivation: VerifyMerkle + VerifyInference gates"]
-    MainnetGate --> S5[S5: env var gate REMOVED - always full activation]
+    MainnetGate --> S5["S5: env var gate REMOVED, always full activation"]
     Decode --> Execute[opcode dispatch: Add/Sub/Mul/Load/Store/Poseidon/etc]
     Execute --> Trace[Execution trace: Vec Step]
     Trace --> Fields[pc next_pc opcode rs1 rs2 rd imm registers memory]
@@ -661,7 +661,7 @@ flowchart TD
   end
 ```
 
-## 21. Governance - proposal to execution pipeline
+## 21. Governance: proposal to execution pipeline
 
 ```mermaid
 flowchart TD
@@ -691,7 +691,7 @@ flowchart TD
     Active --> Cancel[cancel_proposal owner-only]
   end
 
-  subgraph sg39[Epoch advance - finalize]
+  subgraph sg39["Epoch advance: finalize"]
 
     EndEpoch["current_epoch >= end_epoch"] --> Finalize[proposal.finalize]
     Finalize --> TotalStake[total_stake = get_total_stake]
@@ -701,7 +701,7 @@ flowchart TD
     Check -->|no| Rejected[Status: Rejected]
   end
 
-  subgraph sg40[Activation - execute]
+  subgraph sg40["Activation: execute"]
 
     Passed --> ActCheck["current_epoch >= activation_epoch?"]
     ActCheck -->|yes| Execute[execute_proposal]
@@ -715,7 +715,7 @@ flowchart TD
   end
 ```
 
-## 22. Tokenomics - burn + vesting + reward state machine
+## 22. Tokenomics: burn + vesting + reward state machine
 
 ```mermaid
 flowchart TD
@@ -776,7 +776,7 @@ flowchart TD
   end
 ```
 
-## 23. P2P protocol stack - libp2p to application
+## 23. P2P protocol stack: libp2p to application
 
 ```mermaid
 flowchart TD
@@ -838,7 +838,7 @@ flowchart TD
   end
 ```
 
-## 24. Pollen data marketplace - full grant + encryption + AI gate
+## 24. Pollen data marketplace: full grant + encryption + AI gate
 
 ```mermaid
 flowchart TD
@@ -883,7 +883,7 @@ flowchart TD
   subgraph sg56[AI inference data gate]
 
     Req[AiInferenceRequest] --> InputRef["input_ref: Pollen data reference?"]
-    InputRef -->|no poll| Legacy[Legacy opaque path - no grant needed]
+    InputRef -->|no poll| Legacy["Legacy opaque path, no grant needed"]
     InputRef -->|yes poll| GrantCheck{valid AccessGrant exists?}
     GrantCheck -->|no grant| Deny1[REJECT: ai_data_access_denied]
     GrantCheck -->|expired| Deny2[REJECT: grant_expired]
@@ -901,13 +901,13 @@ flowchart TD
     Profile --> Evidence[EvidenceCard: BNS verified/expired]
     Profile --> PollenSummary[Pollen lineage counts]
     Profile --> Bundle[PassportProofBundle deterministic root]
-    Bundle --> Warning[Warning hash only - NO plaintext]
+    Bundle --> Warning["Warning hash only, NO plaintext"]
     Profile --> RPC[bud_passportGetProfile read-only]
     Bundle --> RPC2[bud_passportGetProofBundle read-only]
   end
 ```
 
-## 25. Cross-domain message verification - EVM MPT deep dive
+## 25. Cross-domain message verification: EVM MPT deep dive
 
 ```mermaid
 flowchart TD
@@ -962,7 +962,7 @@ flowchart TD
     PayloadHash -->|pass| Accept[ACCEPT: verified deposit/lock facts]
   end
 ```
-## 26. Privacy layer - note lifecycle (D2)
+## 26. Privacy layer: note lifecycle (D2)
 
 ```mermaid
 flowchart LR
@@ -1029,7 +1029,7 @@ flowchart TD
   TxnFee --> Proposer[Proposer tip]
   TxnFee --> Treasury[Treasury share]
   BlockReward[block_reward mint] --> Proposer2[Block producer]
-  TimedBurn --> Sink[Burn sink - supply decreases]
+  TimedBurn --> Sink["Burn sink, supply decreases"]
   FeeBurn --> Sink
 ```
 
@@ -1058,7 +1058,7 @@ flowchart TB
 ```mermaid
 flowchart LR
   Stake[Stake tx] --> Reg[PermissionlessRegistry]
-  Reg --> Roles[RoleId: VALIDATOR - VERIFIER - RELAYER - PROVER - STORAGE_OPERATOR - AI_VERIF...]
+  Reg --> Roles["RoleId: VALIDATOR, VERIFIER, RELAYER, PROVER, STORAGE_OPERATOR, AI_VERIF..."]
   Reg --> Slash[SlashingReport -> slash]
   Slash --> DoubleSign[DoubleSign -> 100%]
   Slash --> Liveness[LivenessFault -> configurable]
@@ -1084,14 +1084,14 @@ flowchart LR
   Isolation[PoA isolated from permissionless domains] -. no shared registry .-> Permissionless
 ```
 
-## 33. Validator lifecycle - multi-role architecture
+## 33. Validator lifecycle: multi-role architecture
 
 ```mermaid
 flowchart TD
   Genesis[Genesis config] --> Val[Validator created with keys]
   Stake[Stake tx] --> Active[Active validator]
 
-  subgraph sg1[Role 1 - Consensus Validation]
+  subgraph sg1["Role 1: Consensus Validation"]
     Active --> Propose[Block proposal via VRF]
     Active --> Finality[BLS finality signing]
     Active --> Witness[Epoch witness + vote]
@@ -1099,7 +1099,7 @@ flowchart TD
     Finality --> FinalityReward[Finality signing reward]
   end
 
-  subgraph sg2[Role 2 - Lubot CPU/System Provider]
+  subgraph sg2["Role 2: Lubot CPU/System Provider"]
     Active --> LubotBond[LUBOT_OPERATOR role bond]
     LubotBond --> LubotCompute[CPU/GPU compute for AI inference]
     LubotCompute --> LubotServe[Serve Lubot inference requests]
@@ -1107,7 +1107,7 @@ flowchart TD
     LubotServe --> LubotSlash[Compute fault -> slash]
   end
 
-  subgraph sg3[Role 3 - B.U.D. Storage Verification]
+  subgraph sg3["Role 3: B.U.D. Storage Verification"]
     Active --> StorageBond[STORAGE_OPERATOR role bond]
     StorageBond --> StorageStore[Store content shards]
     StorageStore --> StorageChallenge[Respond to retrieval challenges]
@@ -1142,7 +1142,7 @@ flowchart LR
   Grant --> AI[AI inference request]
   AI --> Gate[Pollen data gate: valid grant required]
   Gate -->|grant valid| Allow[Allow data read]
-  Gate -->|no grant| Deny[Deny - strict default-deny]
+  Gate -->|no grant| Deny["Deny, strict default-deny"]
   Encrypt[EncryptionPolicy DAO-managed] -. parameters .-> Asset
   Revoke[Revoke grant/asset] -. owner only .-> Grant
 ```
@@ -1177,7 +1177,7 @@ flowchart LR
   Bid --> Effective["effective_fee = min(max_fee, base_fee + priority)"]
   Effective --> Check["effective_fee >= base_fee?"]
   Check -->|yes| Accept[Accepted]
-  Check -->|no| Reject[Rejected - underpriced]
+  Check -->|no| Reject["Rejected, underpriced"]
   Accept --> Burn[base_fee burned]
   Accept --> Tip[priority_fee -> proposer]
 ```
@@ -1214,7 +1214,7 @@ flowchart LR
   Deal --> Operator[Storage operator bonds]
   Deal --> Challenge[Retrieval challenge]
   Challenge --> Proof[VerifyMerkle 64-depth proof]
-  Roles[Permissionless roles: STORAGE_OPERATOR - ATTESTER] -. no whitelist .-> Deal
+  Roles["Permissionless roles: STORAGE_OPERATOR, ATTESTER"] -. no whitelist .-> Deal
 ```
 
 ## 39. BNS (Budlum Name Service) lifecycle
@@ -1294,7 +1294,7 @@ flowchart LR
   Project --> Traversal[Path traversal rejection]
 ```
 
-## 44. Gateway - Atlas + Passport evidence
+## 44. Gateway: Atlas + Passport evidence
 
 ```mermaid
 flowchart LR
@@ -1305,7 +1305,7 @@ flowchart LR
   Name[BNS name] --> Passport[DwebPassportProfile]
   Passport --> Evidence[EvidenceCard: verified/expired/pending]
   Passport --> Bundle[PassportProofBundle deterministic root]
-  Bundle --> Warning[Warning hash only - no plaintext]
+  Bundle --> Warning["Warning hash only, no plaintext"]
   Atlas --> RPC[bud_atlasGetWalletContext read-only]
   Passport --> RPC2[bud_passportGetProofBundle read-only]
   NoPlaintext[Endpoint never returns raw data] -. enforced .-> RPC
@@ -1331,7 +1331,7 @@ flowchart TD
   Merkle --> Forge[expected_block_hash forgery gate]
 ```
 
-## 46. Prover market - proof verification
+## 46. Prover market: proof verification
 
 ```mermaid
 flowchart LR
@@ -1340,7 +1340,7 @@ flowchart LR
   Prove --> Receipt["ProofReceipt: task_id + prover + hash + reward"]
   Receipt --> Verify["Verification: task_id + prover + epoch + hash + reward cap"]
   Verify -->|valid| Complete[complete_task -> reward committed]
-  Verify -->|invalid| Reject[Reject - task stays active]
+  Verify -->|invalid| Reject["Reject, task stays active"]
   Policy[First valid receipt wins] --> Complete
   Policy --> Duplicate[Identical duplicate -> idempotent]
   Limits["Active tasks + pending receipts bounded"] --> Task
@@ -1387,7 +1387,7 @@ flowchart LR
   Profile --> Storage["StorageStatus: capacity + availability"]
   Network --> Relay[Relay address for NAT traversal]
   Storage --> Critical[Critical content requires paid replica]
-  Profile --> Opportunistic[Opportunistic hosting - not always-on]
+  Profile --> Opportunistic["Opportunistic hosting, not always-on"]
   Profile --> Scheduled[Scheduled replication windows]
   Validation[Impossible battery state rejected] --> Battery
   Validation[Zero bandwidth rejected] --> Network
@@ -1409,7 +1409,7 @@ flowchart LR
   Root[Pollen root hash] --> StateRoot[AccountState state_root]
 ```
 
-## 51. Security audit - attack graph
+## 51. Security audit: attack graph
 
 ```mermaid
 flowchart TD

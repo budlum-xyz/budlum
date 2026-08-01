@@ -1,7 +1,7 @@
 //! Locks on where the multi-consensus surfaces meet.
 //!
 //! Budlum runs seven `ConsensusKind`s against six finality adapters, all
-//! feeding one settlement layer. The friction is not inside any one engine -
+//! feeding one settlement layer. The friction is not inside any one engine,
 //! each was reviewed on its own - it is at the joins, where two pieces of code
 //! hold different beliefs about the same domain. Three were measured:
 //!

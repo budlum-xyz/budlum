@@ -246,7 +246,7 @@ mod tests {
     ///
     /// `open_deal` debits `operator_bond`. `StorageRegistry::expire_deal` was
     /// Written to hand it back - "returns the operator bond amount to be
-    /// Refunded by the blockchain accounting layer" - and no production path
+    /// Refunded by the blockchain accounting layer", and no production path
     /// Ever called it. The slash path was fully wired; the settle path was not,
     /// So the only recorded end-of-life for a bond was losing it.
     ///

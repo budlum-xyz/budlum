@@ -86,7 +86,7 @@ fn verifier_absorbs_public_values_before_sampling_any_challenge() {
 }
 
 /// Prover and verifier must absorb the same things in the same order, or they
-/// derive different challenges and an honest proof stops verifying - the
+/// derive different challenges and an honest proof stops verifying, the
 /// failure is loud. The dangerous case is the reverse: an item dropped from
 /// *both* sides stays quiet and stops binding anything.
 #[test]

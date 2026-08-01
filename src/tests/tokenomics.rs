@@ -129,7 +129,7 @@ fn burn_strictly_reduces_supply_no_mint_offset() {
     let after = state.circulating_supply();
 
     assert!(burned > 0);
-    // Supply decreased by EXACTLY the burned amount - nothing minted it back.
+    // Supply decreased by EXACTLY the burned amount, nothing minted it back.
     assert_eq!(after, before - burned as u128);
     assert!(after < before);
 }
@@ -250,7 +250,7 @@ fn burn_reserve_cannot_bypass_schedule_with_transaction() {
     assert_eq!(state.get_balance(&addrs.burn_reserve), bud(40_000_000));
 }
 
-/// Default genesis (no tokenomics) is unchanged - regression guard for Decision B.
+/// Default genesis (no tokenomics) is unchanged, regression guard for Decision B.
 #[test]
 fn plain_genesis_has_no_tokenomics_wiring() {
     let state = GenesisConfig::new(45262).build_state();

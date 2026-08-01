@@ -12,7 +12,7 @@
 //! # Why a coder in-tree rather than a dependency
 //!
 //! `reed-solomon-erasure` is the crate everyone reaches for, and it is the
-//! one `docs/BUD_STORAGE_ROADMAP.md` named. It is unmaintained - the owner
+//! one `docs/BUD_STORAGE_ROADMAP.md` named. It is unmaintained, the owner
 //! stopped in 2021 and asked for a new owner
 //! (darrenldl/reed-solomon-erasure#88); Solana, its largest user, moved off
 //! it. `reed-solomon-simd` is maintained but its speed comes from
@@ -153,7 +153,7 @@ impl GfMatrix {
     }
 
     /// Gauss-Jordan inverse over GF(2^8). Returns `None` if singular, which
-    /// for a Cauchy submatrix should be unreachable - the caller treats it as
+    /// for a Cauchy submatrix should be unreachable, the caller treats it as
     /// a hard error rather than a recoverable case.
     fn invert(&self) -> Option<GfMatrix> {
         if self.rows != self.cols {
@@ -329,7 +329,7 @@ impl ReedSolomon {
 
     /// Compute the parity shards for `data`.
     ///
-    /// Every data shard must be the same length - Reed-Solomon works
+    /// Every data shard must be the same length, Reed-Solomon works
     /// symbol-wise across the shards, so column `c` of the code word is built
     /// from byte `c` of each shard and a short shard would leave columns
     /// undefined. Callers slicing an object should pad the last data shard to
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn every_square_submatrix_of_the_cauchy_block_is_invertible() {
         // This is the MDS condition. If it fails for even one subset, some
-        // pattern of k survivors is unrecoverable - and the manifest would
+        // pattern of k survivors is unrecoverable, and the manifest would
         // still claim the object is safe.
         let (k, m) = (4usize, 4usize);
         let g = generator_matrix(k, m);

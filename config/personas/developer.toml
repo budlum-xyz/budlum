@@ -1,4 +1,4 @@
-# Persona: protocol developer - full local stack on devnet.
+# Persona: protocol developer, full local stack on devnet.
 # Disk validator keys allowed ONLY on devnet (mainnet refuses them).
 
 [network]

@@ -34,7 +34,7 @@ pub struct BudToEthClaim {
     pub finalized_height: u64,
     /// Budlum finalized header hash (light-client checkpoint).
     pub finalized_header_hash: Hash32,
-    /// Budlum finality proof (BLS aggregate veya QC) - Solidity verify eder.
+    /// Budlum finality proof (BLS aggregate veya QC), Solidity verify eder.
     pub finality_proof: Vec<u8>,
     /// Burn event Merkle proof (Budlum event tree → Budlum root).
     pub burn_event_proof: Vec<u8>,

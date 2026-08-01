@@ -241,7 +241,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     // Etki büyüklüğü: gözlenen fark, aynı koşudaki bilinen sızıntının kaçta
-    // Kaçı? Payda ölçülen kontroldür, sabit değil - ortam yavaşlarsa ikisi de
+    // Kaçı? Payda ölçülen kontroldür, sabit değil, ortam yavaşlarsa ikisi de
     // Yavaşlar ve oran anlamını korur.
     let ct_delta = (mean(&ct_a) - mean(&ct_b)).abs();
     let control_delta = (mean(&ctl_a) - mean(&ctl_b)).abs();

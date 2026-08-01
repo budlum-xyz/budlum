@@ -103,7 +103,7 @@ mod integration_tests {
             state.advance_epoch(1000);
         }
 
-        // Voting is over and the proposal carried - but it is not applied yet.
+        // Voting is over and the proposal carried, but it is not applied yet.
         // Every proposal type now waits out an activation delay, so there is a
         // window in which a passed vote is visible before it binds. This used
         // to be `Executed` here because `ChangeBaseFee` had no delay at all.

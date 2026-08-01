@@ -359,7 +359,7 @@ impl Node {
     /// Recovering with `into_inner()` is safe here for the same reason it is
     /// in `consensus/pow.rs`: `PeerManager` holds counters, ban timers and
     /// rate-limit buckets. A panic mid-update can leave one peer's score
-    /// stale, and a stale score is a bounded, self-correcting error - the
+    /// stale, and a stale score is a bounded, self-correcting error, the
     /// next report overwrites it. Losing the node is not self-correcting.
     ///
     /// Reachability, measured: `peer_manager.rs` has no panic source in
@@ -428,7 +428,7 @@ impl Node {
         //   opportunistic_graft_ticks  =  60   1 min ->  10 min (mobile  30)
         //
         // Both govern mesh repair. The first is how long a dropped explicit
-        // peer - a bootstrap node or a configured sentry - goes unnoticed
+        // peer, a bootstrap node or a configured sentry, goes unnoticed
         // before reconnection is attempted; on a validator that is the link to
         // the network it was deliberately pinned to. The second is how long a
         // node keeps a mesh full of low-scoring peers before it looks for
@@ -2570,7 +2570,7 @@ mod vote_history_wiring_tests {
     /// Every network must get a vote-history path by default.
     ///
     /// `load_vote_history` / `save_vote_history` were written to stop a
-    /// Restart from re-signing a height this key has already voted at - across
+    /// Restart from re-signing a height this key has already voted at, across
     /// A reorg that is two hashes at one height from one key, which is
     /// Equivocation and costs `double_sign_slash_ratio_fixed` (50% of the
     /// Bond by default) for what is a crash, not malice.

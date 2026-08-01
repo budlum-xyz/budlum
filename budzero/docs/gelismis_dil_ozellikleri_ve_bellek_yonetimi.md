@@ -31,10 +31,10 @@ pub fn main() {
 
 ### Call ve Ret Opcodeları
 Sanal makinemizde fonksiyon çağrıları için iki özel komut bulunur: `Call` ve `Ret`.
-* `Call`: Mevcut işlem satırını (Program Counter - PC) stack'e (yığına) kaydeder ve hedeflenen fonksiyonun satırına atlar.
+* `Call`: Mevcut işlem satırını (Program Counter: PC) stack'e (yığına) kaydeder ve hedeflenen fonksiyonun satırına atlar.
 * `Ret`: Stack'in en üstündeki adresi alır ve o adrese geri döner.
 
-Ancak ortada büyük bir sorun vardır: **Register Sınırı.** BudVM'de sadece 32 adet register (kaydedici) bulunur (`R0` - `R31`). Eğer `main` fonksiyonu `R5` içine önemli bir değer kaydetmişse ve `add_and_mul` fonksiyonunu çağırırsa, `add_and_mul` fonksiyonu habersizce `R5`'i kendi işlemleri için kullanıp üzerine yazabilir! `main` fonksiyonuna geri dönüldüğünde `R5`'teki veri bozulmuş olacaktır.
+Ancak ortada büyük bir sorun vardır: **Register Sınırı.** BudVM'de sadece 32 adet register (kaydedici) bulunur (`R0`, `R31`). Eğer `main` fonksiyonu `R5` içine önemli bir değer kaydetmişse ve `add_and_mul` fonksiyonunu çağırırsa, `add_and_mul` fonksiyonu habersizce `R5`'i kendi işlemleri için kullanıp üzerine yazabilir! `main` fonksiyonuna geri dönüldüğünde `R5`'teki veri bozulmuş olacaktır.
 
 ### Caller-Saved Register Stratejisi
 Bu sorunu çözmek için derleyici **Caller-Saved** (Çağıran Tarafından Korunan) yaklaşımını kullanır:

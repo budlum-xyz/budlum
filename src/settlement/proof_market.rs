@@ -509,7 +509,7 @@ impl ProofMarketState {
     }
 
     /// Prune paid receipts from pending_receipts Vec.
-    /// Without this, the Vec grows indefinitely - paid receipts are never
+    /// Without this, the Vec grows indefinitely, paid receipts are never
     /// Removed, only marked as paid. Call this periodically after pay_receipt.
     pub fn prune_paid_receipts(&mut self) -> usize {
         let before = self.pending_receipts.len();

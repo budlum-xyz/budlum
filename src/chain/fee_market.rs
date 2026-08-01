@@ -149,7 +149,7 @@ pub fn distribute_fee(
     //
     // The only caller passes `DEFAULT_TREASURY_RATE_PPM`, so this is not
     // reachable today. It is checked because the function is public and the
-    // rate is exactly the kind of value that later arrives from governance -
+    // rate is exactly the kind of value that later arrives from governance,
     // and the failure would be a validator-incentive outage, not a panic.
     if treasury_rate_ppm > PPM_DENOMINATOR {
         return Err(FeeError::TreasuryRateAbovePpmDenominator {

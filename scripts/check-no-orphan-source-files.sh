@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-no-orphan-source-files.sh - a .rs file no `mod` declares is not code.
+# check-no-orphan-source-files.sh, a .rs file no `mod` declares is not code.
 #
 # src/network/proto_bridge.rs sat in the tree carrying:
 #

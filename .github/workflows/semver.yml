@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   semver-check:
-    # CI Genişletme Madde 5: cargo-semver-checks - public API kırılması tespiti.
+    # CI Genişletme Madde 5: cargo-semver-checks, public API kırılması tespiti.
     #
     # Sertleştirme (2026-07-21): eski sürüm her iki adımda da
     # `continue-on-error: true` idi → kapı ASLA kırmızı veremiyordu (gözlem
@@ -24,7 +24,7 @@ jobs:
     #     `.github/semver-exceptions.txt` boşsa FAIL. İstisna satırları
     #     Kullanıcı onaylı, gerekçeli "kanıtlı skip-list" desenindedir
     #     (.quality/deny.toml [advisories] ile aynı disiplin).
-    name: Semver Check (Madde 5 — public API breakage gate)
+    name: "Semver Check (Madde 5: public API breakage gate)"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -54,7 +54,7 @@ jobs:
         with:
           toolchain: "1.94.0"
       - name: Install pinned nightly (rustdoc-json backend for semver-checks)
-        # 'rustdoc' nightly'de ayrı bir component DEĞİL - rustc component'inin
+        # 'rustdoc' nightly'de ayrı bir component DEĞİL, rustc component'inin
         # Parçası (rustup: "did you mean 'rust-docs'?" ile exit 1, 2026-07-21 CI kanıtı).
         run: rustup toolchain install nightly-2026-07-19 --profile minimal
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -71,7 +71,7 @@ jobs:
       - name: Teşhis (kalıcı kanıt adımı) - doğrudan rustdoc-json
         # Gelecekteki sessiz-crash sınıflarında wrapper'ın yuttuğu hata gövdesini
         # Ham olarak görünür kılar (continue-on-error: koşuyu bloklamaz).
-        # NOT: `-o <dir>` YASAK - cargo rustdoc kendisi --out-dir ekler; ikinci
+        # NOT: `-o <dir>` YASAK, cargo rustdoc kendisi --out-dir ekler; ikinci
         # Veriliş "Option 'out-dir' given more than once" ile ölür (2026-07-21
         # Lokal kanıt). JSON target/doc/budlum_core.json'a düşer.
         continue-on-error: true

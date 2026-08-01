@@ -1,4 +1,4 @@
-# BudL - Dil Spesifikasyonu (v0.1)
+# BudL: Dil Spesifikasyonu (v0.1)
 
 > BudZKVM üzerinde çalışan akıllı kontrat dili. STARK-provable, deterministik,
 > gas-metered. Bu doküman dilin gramerini, tiplerini, opcode mapping'ini ve
@@ -19,7 +19,7 @@ akıllı kontrat dilidir. Özellikleri:
   bu trace Plonky3 STARK prover tarafından prove edilir.
 - **Gas-metered:** Her opcode'un sabit gas maliyeti vardır.
 - **Storage:** Kalıcı durum (`sread`/`swrite` opcode'ları).
-- **Cryptography:** Poseidon hash, VerifyMerkle (64-depth SMT - mainnet-gated,
+- **Cryptography:** Poseidon hash, VerifyMerkle (64-depth SMT, mainnet-gated,
   see "VerifyMerkle soundness" below).
 
 ---
@@ -266,7 +266,7 @@ contract SimpleToken {
 Derlenen bytecode BudZKVM'de çalışır → execution trace → Plonky3 STARK proof.
 
 ---
-## 9. Kanıtlanabilirlik Sınırı - Dallanan Programlar
+## 9. Kanıtlanabilirlik Sınırı: Dallanan Programlar
 
 `bud-proof` içindeki AIR, bir Program CTL (LogUp) ile her CPU satırını tam
 olarak bir ön-işlenmiş program satırıyla eşler (`plonky3_air.rs`,
@@ -298,7 +298,7 @@ sınır kapatılmadan dallanan sözleşmeler zincir üzerinde kanıtlanamaz.
 
 ---
 
-## 10. Genel Girdi Sözleşmesi - `event_digest`
+## 10. Genel Girdi Sözleşmesi: `event_digest`
 
 `ExecutionPublicInputs::event_digest` bir **hash değildir.** AIR, sekiz adet
 küçük-endian `u32` limb taşıyan toplamsal bir akümülatör bağlar
@@ -307,7 +307,7 @@ limb 0'a ekler, limb 1..8 sıfır kalır.
 
 Bu alanı `bud_proof::event_digest_from_events()` ile üretin. `keccak256(events)`
 yazmak, doğrulaması her zaman `OodEvaluationMismatch` ile başarısız olan bir
-kanıt üretir - `bud-cli` tam olarak bunu yapıyordu ve `prove`/`run` komutları
+kanıt üretir: `bud-cli` tam olarak bunu yapıyordu ve `prove`/`run` komutları
 hiç çalışmıyordu.
 
 ---
@@ -337,7 +337,7 @@ takılır. Test bunu koşullu doğrular: doğrulama **tam olarak** her komut
 çalıştığında başarılı olmalıdır.
 
 ---
-## 12. AIR Kanıt Kapsamı - Opcode Matrisi
+## 12. AIR Kanıt Kapsamı: Opcode Matrisi
 
 `bud-proof` içindeki AIR tüm opcode'ları kısıtlar, ancak **kısıtlanmış olmak
 kanıtlanmış olmak değildir.** Ölçüm sırasında dört opcode'un hiçbir prover
@@ -375,7 +375,7 @@ round, a tampered accumulator and a tampered S-box.
 
 **Closed: the direction bits.** `merkle_bit` chooses which side of the Poseidon
 pair the sibling sits on, which is the part of a Merkle path that says *where*
-the leaf is. It used to be constrained only to be boolean - the AIR comment
+the leaf is. It used to be constrained only to be boolean, the AIR comment
 said the prover "can simply provide a valid bit column". Measured against that
 version: flipping the round-0 bit, recomputing the chain and leaving
 `merkle_key` untouched produced a different root, and the proof verified.
@@ -396,7 +396,7 @@ the previous constraints assumed without checking.
 the remainder chain is removed.
 
 **Closed: the witness is bound to memory.** `COL_VM_MERKLE_SIBLING` and
-`COL_VM_MERKLE_KEY` used to be free witness columns - the AIR consumed them as
+`COL_VM_MERKLE_KEY` used to be free witness columns, the AIR consumed them as
 Poseidon inputs and nothing tied them to the bytes at `path_addr`. Measured:
 
 ```text
@@ -422,7 +422,7 @@ matching demand unbalances the LogUp, so adding the reads to the table alone
 turned every proof into `InvalidProof` until the demand side was extended in
 the same shape. And the expansion rows carried a synthetic instruction with
 `imm: 0`, so the derived addresses landed near zero while the table supplied
-the real ones - measured as a 7-of-8 mismatch across the first rows. The
+the real ones, measured as a 7-of-8 mismatch across the first rows. The
 expansion rows carry the real immediate now.
 
 `rejects_verify_merkle_with_a_sibling_not_in_memory` pins it, and removing the

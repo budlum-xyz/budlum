@@ -51,7 +51,7 @@ pub struct RegistryParams {
     pub malicious_slash_ratio_fixed: u64,
     /// Number of *consecutive* epochs a validator may miss expected consensus
     /// Participation before a liveness fault is raised (and slashed). Counted
-    /// Consecutively and reset on any participation - never cumulative, so a
+    /// Consecutively and reset on any participation, never cumulative, so a
     /// Validator is not disproportionately punished for scattered misses.
     pub liveness_max_missed_epochs: u64,
     /// Fee required to submit a slashing report, as an anti-spam/DoS measure.
@@ -226,7 +226,7 @@ mod tests {
     /// consensus. This pins the field count: adding one is a deliberate
     /// state-format change, not a refactor.
     ///
-    /// If this fails, the change is not necessarily wrong - but it is not
+    /// If this fails, the change is not necessarily wrong, but it is not
     /// backwards compatible, and the `# Adding a field` note above applies.
     #[test]
     fn registry_params_serialized_shape_is_pinned() {
@@ -246,7 +246,7 @@ mod tests {
     /// `max_invalid_votes_per_epoch` carried "Governance-tunable per network"
     /// While being absent from `GOVERNANCE_PARAMETER_WHITELIST`. A proposal
     /// Naming it fails in `validate_governance_parameter_update` with
-    /// "governance parameter is not whitelisted" - after the vote, after the
+    /// "governance parameter is not whitelisted", after the vote, after the
     /// Timelock. The comment described an intention, not the code.
     ///
     /// `bridge_relayer_fee_ppm` had the mirror-image gap once: whitelisted but

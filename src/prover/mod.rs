@@ -2,7 +2,7 @@
 //!
 //! ## Model (decided this turn: "Option B" - fully open submission)
 //! Anyone may submit a proof; registration is NOT required to have a valid proof
-//! Accepted, because a STARK proof is self-verifying - the chain verifies the
+//! Accepted, because a STARK proof is self-verifying, the chain verifies the
 //! Math and never needs to trust the submitter. Registration (the `PROVER` role)
 //! Is *optional* and only affects **reward eligibility**.
 //!

@@ -64,7 +64,7 @@ pub fn event_digest_from_events(events: &[u64]) -> [u8; 32] {
 /// keep an all-zero `initial_state_root` and are unaffected.
 ///
 /// **It commits to what was read, not to the whole image.** Bytes the host
-/// wrote and the program never touched are outside it - they cannot influence
+/// wrote and the program never touched are outside it, they cannot influence
 /// the execution, so binding them would only make the commitment depend on
 /// padding. What it does bind is every value the program consumed: change a
 /// weight the guest reads and the commitment moves, so a proof produced for

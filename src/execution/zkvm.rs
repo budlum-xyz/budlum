@@ -133,7 +133,7 @@ pub fn prove_bytecode_mainnet(
 ///
 /// The initial memory image is *not* bound by the current public inputs, so a
 /// proof produced here attests that *some* memory image drove the trace, not
-/// that it was this one. Callers must bind the image out of band - for AI
+/// that it was this one. Callers must bind the image out of band, for AI
 /// execution that is `weights_digest` plus `input_commitment` on the
 /// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
 pub fn prove_bytecode_with_memory<F>(
@@ -188,7 +188,7 @@ fn prove_bytecode_inner_with_memory(
     // `Prover::prove` succeeds whenever it can build a trace; it does not
     // check that the trace satisfies the AIR. So a program the constraints
     // reject still yields an envelope here, and the caller has no way to tell
-    // the difference until someone downstream tries to verify it - which, for
+    // the difference until someone downstream tries to verify it, which, for
     // a proof that is attached to a transaction and only checked much later,
     // can be a long way from the code that caused it.
     //
@@ -208,14 +208,14 @@ fn build_public_inputs(
     // `initial_state_root` commits to the memory image the program started
     // from. It used to be a hard-coded zero that nothing checked; the AIR now
     // folds every pre-seeded word into a trace column and compares the two, so
-    // a guest that reads host-written weights can be proven - and cannot claim
+    // a guest that reads host-written weights can be proven, and cannot claim
     // to have read different ones.
     //
     // Programs that seed nothing fold to zero and keep the old value.
     let initial_state_root =
         bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace));
     // Public inputs must match BudZero AIR bindings.
-    // `event_digest` is NOT a keccak of events - the AIR binds an additive
+    // `event_digest` is NOT a keccak of events, the AIR binds an additive
     // Log accumulator packed as eight little-endian u32 limbs (limb 0 holds
     // The sum of Log values). Using keccak here made every prove/verify fail
     // Against BudZero main task2 (InvalidProof), forcing the CI pin.
@@ -319,7 +319,7 @@ mod tests {
     /// `ContractCall` in the executor calls `execute_bytecode` with bytecode
     /// taken straight out of `tx.data`. That call used to pass
     /// `mainnet = false`, which skipped `decode_for_mainnet` and decoded under
-    /// `IsaProfile::Production` with no activation check - so the gates holding
+    /// `IsaProfile::Production` with no activation check, so the gates holding
     /// `VerifyMerkle` and `VerifyInference` closed did not apply to the one
     /// input an attacker chooses.
     ///
@@ -413,7 +413,7 @@ mod tests {
         );
     }
 
-    /// Basic opcodes keep working under the gate - otherwise the two tests
+    /// Basic opcodes keep working under the gate, otherwise the two tests
     /// above would be satisfied by a VM that refuses everything.
     #[test]
     fn f2_mainnet_activation_wire_connected() {
@@ -587,7 +587,7 @@ mod tests {
     /// Security property: a gate can be lifted by configuration, whereas "the
     /// Answer is always 0" is what makes lifting it safe. If someone
     /// Reintroduces the non-zero-commitment shortcut, the existing tests still
-    /// Pass - the opcode runs, the gate still gates - and only this one fails.
+    /// Pass: the opcode runs, the gate still gates, and only this one fails.
     ///
     /// Runs the operands that the old shortcut would have accepted: two
     /// Non-zero commitments and a non-zero proof type.
@@ -702,7 +702,7 @@ mod tests {
         // Mainnet mode without activation: VerifyInference must be refused.
         //
         // The assertion used to read `result.is_err() || gas_used > 0`, which
-        // is satisfied by every outcome a run can have - a rejection satisfies
+        // is satisfied by every outcome a run can have, a rejection satisfies
         // the left side, and any execution that does work at all satisfies the
         // right. It passed while the VM was hard-coded to full activation and
         // the opcode was running, which is exactly the state it claimed to

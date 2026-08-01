@@ -782,7 +782,7 @@ impl Vm {
                             // argument derives each expansion row's address as
                             // `imm + 8 + 8 * round`, so a zero here would make
                             // every sibling read claim an address near zero
-                            // while the memory table supplies the real one -
+                            // while the memory table supplies the real one,
                             // measured as a 7-of-8 mismatch across the first
                             // rows before this was set.
                             imm: inst.imm,
@@ -1067,7 +1067,7 @@ pub fn merkle_poseidon_round(a: u64, b: u64) -> u64 {
 ///
 /// MDS circulant matrix first row: [7, 1, 3, 8, 8, 3, 4, 9]
 /// Domain separator for nullifier derivation.
-/// ASCII-ish constant "NULLIFER" as a field element - domain-separates
+/// ASCII-ish constant "NULLIFER" as a field element, domain-separates
 /// Nullifier hashes from plain Poseidon(a,b) and PrivacyCommit.
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552; // "NULLIFER"
 
@@ -1118,7 +1118,7 @@ pub const POSEIDON_MDS: [[u64; 8]; 8] = [
 /// [`poseidon4_hash_state`] still runs four rounds, because the BudZero AIR
 /// constrains exactly four (`plonky3_air.rs`, `for r in 0..4`). Swapping the
 /// permutation without rebuilding those constraints would produce proofs that
-/// attest to a different function than the VM ran - a soundness break strictly
+/// attest to a different function than the VM ran, a soundness break strictly
 /// worse than the weak hash. The parameters are derived and pinned here so the
 /// AIR work has something exact to target; the opcodes that depend on the hash
 /// stay disabled until it lands.
@@ -1476,7 +1476,7 @@ pub const POSEIDON_ROUNDS_IN_USE: usize = POSEIDON_FULL_ROUNDS + POSEIDON_PARTIA
 /// Reference implementation of the **full** 30-round permutation.
 ///
 /// Not used by the VM: the AIR constrains four rounds, and the VM must compute
-/// what the AIR checks. This exists so the target is executable - the AIR work
+/// what the AIR checks. This exists so the target is executable, the AIR work
 /// can be validated against it, and
 /// `full_permutation_differs_from_truncated_one` proves the two really are
 /// different functions rather than the same one under another name.
@@ -1493,7 +1493,7 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
             s[i] = ((s[i] as u128 + rc[i] as u128) % P as u128) as u64;
         }
         // Full rounds apply the S-box to every lane; partial rounds only to
-        // lane 0. That asymmetry is the whole point of the partial rounds -
+        // lane 0. That asymmetry is the whole point of the partial rounds,
         // they raise the algebraic degree cheaply.
         let is_full = round < half_full || round >= POSEIDON_RC_FULL.len() - half_full;
         if is_full {
@@ -1535,8 +1535,8 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
 /// evaluations) is hours of GPU time rather than a theoretical bound.
 ///
 /// For `PrivacyCommit` that means an observer can recover
-/// `(amount, blinding, recipient_tag)` from a published commitment - hiding is
-/// gone - and can find a second opening for the same commitment or nullifier -
+/// `(amount, blinding, recipient_tag)` from a published commitment, hiding is
+/// gone, and can find a second opening for the same commitment or nullifier,
 /// binding is gone.
 ///
 /// These are the *first four rounds* of Plonky3's Goldilocks width-8 Poseidon1

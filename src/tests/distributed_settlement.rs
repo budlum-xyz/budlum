@@ -153,7 +153,7 @@ mod distributed_settlement_tests {
 
         // Height 1 arrives second, so it is built first here to give height 2
         // a real parent. The buffered commitment has to chain onto the one it
-        // waits for, otherwise applying it would break domain continuity -
+        // waits for, otherwise applying it would break domain continuity,
         // the check that used to be compiled out under `#[cfg(test)]`.
         //
         // The hashes are 64 hex characters, which is what a real block hash

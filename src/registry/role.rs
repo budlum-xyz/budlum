@@ -70,7 +70,7 @@ pub mod roles {
     pub const MASTER_VERIFIER: RoleId = RoleId(2);
     /// Cross-domain message relayer (permissionless).
     pub const RELAYER: RoleId = RoleId(3);
-    /// ZK proof producer (BudZKVM prover). Registration is OPTIONAL - proof
+    /// ZK proof producer (BudZKVM prover). Registration is OPTIONAL, proof
     /// Submission is fully permissionless (STARK proofs are self-verifying);
     /// Registering as a PROVER is only required to be eligible for rewards.
     pub const PROVER: RoleId = RoleId(4);

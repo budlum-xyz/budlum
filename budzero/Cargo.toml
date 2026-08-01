@@ -17,7 +17,7 @@ license = "Apache-2.0"
 # budzero is a separate workspace, so it does not inherit the root manifest's
 # profile and would otherwise wrap arithmetic silently in release builds.
 # bud-vm evaluates Goldilocks field arithmetic and bud-proof derives trace
-# indices and degree_bits from it - a silent wrap there produces a wrong proof
+# indices and degree_bits from it, a silent wrap there produces a wrong proof
 # rather than a crash. Mirrors the root Cargo.toml.
 [profile.release]
 overflow-checks = true

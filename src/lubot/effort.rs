@@ -17,7 +17,7 @@
 //! 1. **Declared capability gates eligibility.** An operator advertises the
 //!    highest tier its hardware can serve. A request above that ceiling is not
 //!    routable to it. If *no* verifier in the registry advertises `10.0x`, then
-//!    a `10.0x` request cannot be served at all - it fails closed rather than
+//!    a `10.0x` request cannot be served at all, it fails closed rather than
 //!    being silently downgraded to a cheaper answer.
 //! 2. **The tier is part of the request identity.** It is folded into the
 //!    canonical request hash, so an operator cannot accept a `5.0x` request and

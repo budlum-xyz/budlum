@@ -137,7 +137,7 @@ pub struct AiModelSpec {
     /// compile to the same instructions, because the weights are read from
     /// memory rather than baked into immediates.
     ///
-    /// The STARK does not bind that memory either - the AIR constrains the
+    /// The STARK does not bind that memory either, the AIR constrains the
     /// program, the gas counters, the exit code, the trace length and the
     /// event accumulator, but not the image the program starts from. So a
     /// prover can run the registered program over a *different* weight matrix
@@ -387,7 +387,7 @@ pub struct AiVerifierStakeInfo {
 /// When a verifier submits a result, they can optionally attach a ZKVM execution
 /// Proof that cryptographically verifies the inference output was produced by
 /// The claimed model on the claimed input. This bridges the gap between "verifier
-/// Says so" (trust-based) and "mathematics prove it" (trustless) - the core
+/// Says so" (trust-based) and "mathematics prove it" (trustless), the core
 /// Paradigm shift needed for Agentic Economy.
 ///
 /// The proof binds three things:
@@ -756,7 +756,7 @@ impl AiAgentPayment {
 /// Track records. This struct tracks an agent's reputation across multiple
 /// Dimensions: payment reliability, inference quality, and uptime.
 ///
-/// Reputation is the currency of trust in the Agentic Economy - an agent
+/// Reputation is the currency of trust in the Agentic Economy, an agent
 /// With high reputation can command higher fees and attract more requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentReputation {

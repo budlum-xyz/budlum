@@ -264,7 +264,7 @@ fn actionable_report_slashes_registered_validator() {
     assert!(!state.registry.is_active(&offender, roles::VALIDATOR));
 }
 
-/// An unverified (externally-submitted) report must NOT slash - even though it
+/// An unverified (externally-submitted) report must NOT slash, even though it
 /// Is structurally valid. This is what makes the permissionless
 /// `submit_slashing_report` RPC safe without a whitelist.
 #[test]
@@ -486,7 +486,7 @@ fn unstake_mirrors_the_reduced_stake_into_the_registry() {
 /// Unstaking below the floor must deactivate the registry membership.
 ///
 /// Without the mirror, a validator could unstake down to dust (or to zero) and
-/// Keep an `Active` registry entry with its original stake - passing
+/// Keep an `Active` registry entry with its original stake, passing
 /// `registry.is_active` and appearing in `active_members` with stake it no
 /// Longer has.
 #[test]

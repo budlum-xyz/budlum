@@ -33,7 +33,7 @@ pub enum Opcode {
     Syscall = 0x1D,
     VerifyMerkle = 0x1E,
     /// AI Inference verification opcode.
-    /// Verifies a ZKVM execution proof for AI inference - the core
+    /// Verifies a ZKVM execution proof for AI inference, the core
     /// Primitive for trustless AI in the Agentic Economy paradigm.
     ///
     /// Semantics: VerifyInference rd, rs1, rs2, imm
@@ -113,7 +113,7 @@ impl Default for MainnetActivation {
     /// `SumConservation`) were held closed because they hash through a
     /// Poseidon permutation truncated to four rounds. At `alpha = 7` that
     /// leaves algebraic degree 2401 - low enough to invert by interpolation
-    /// and cheap enough to collide by brute force - so the commitments
+    /// and cheap enough to collide by brute force, so the commitments
     /// neither hid nor bound.
     ///
     /// The permutation is now the full Goldilocks width-8 instance: `R_F = 8`,
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(inst.opcode, Opcode::VerifyInference);
     }
 
-    // ===================== Privacy opcodes (0x20–0x22) =====================
+    // ===================== Privacy opcodes (0x20 to 0x22) =====================
 
     #[test]
     fn d2_privacy_opcodes_decode_and_decode_any_roundtrip() {

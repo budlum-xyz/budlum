@@ -77,7 +77,7 @@ Yamalı sürüm 0.26.1, libp2p ^0.25.2'ye pinli olduğu için upstream bekleniyo
 # "unmaintained"). Repo politikası bunları deny.toml'da `unmaintained = "none"`
 # ile FAIL saymaz; görünürlük CI'daki cargo audit raporundan sağlanır ve
 # org roadmap'te izlenir. OSV bunları da zafiyet gibi döndürdüğü için burada
-# aynı politikayı yansıtıyoruz - aksi halde iki araç birbiriyle çelişirdi.
+# aynı politikayı yansıtıyoruz, aksi halde iki araç birbiriyle çelişirdi.
 # Not: bu dosyada yalnız BudZero grafiğinde GERÇEKTEN görünen kayıtlar tutulur;
 # osv-scanner kullanılmayan istisnaları "unused ignores" olarak raporlar ve
 # ölü istisna birikmesi kapının güvenilirliğini aşındırır.

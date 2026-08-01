@@ -809,7 +809,7 @@ mod tests {
     /// `UserIntent`, `SolverBid` and `IntentSettlement` have no callers outside
     /// This module. No transaction type carries an intent, no `ChainCommand`
     /// Accepts a bid, no RPC settles one. Meanwhile `TransactionType::UniversalRelay`
-    /// Debits `tx.fee` from the sender and stops - and that fee is credited to
+    /// Debits `tx.fee` from the sender and stops, and that fee is credited to
     /// The block producer, so a relayer that spends external gas on the request
     /// Earns nothing from the chain for it.
     ///

@@ -20,7 +20,7 @@
 //! [`penalty_for`] is the expression from
 //! `PermissionlessRegistry::slash_role_only`, character for character. It is
 //! not called through the registry because that needs a populated `BTreeMap`
-//! of registrations, which a bit-precise model checker would have to unroll -
+//! of registrations, which a bit-precise model checker would have to unroll,
 //! the arithmetic is what is under proof, not the map.
 //!
 //! A copy can rot. Two things stop it: `budlum-core`'s
@@ -155,7 +155,7 @@ mod proofs {
     ///
     /// Governance relies on this when it raises a ratio. The fixed-point
     /// divide truncates, and a non-monotonic truncation would mean a higher
-    /// configured penalty producing a smaller actual one for some stake - an
+    /// configured penalty producing a smaller actual one for some stake, an
     /// incentive inversion no sampled test would be likely to find.
     ///
     /// `stake` is bounded to 32 bits here. Three unconstrained `u64`s make the
@@ -203,7 +203,7 @@ mod proofs {
     /// penalty_is_monotonic_for_full_stakes             >240s, killed
     /// ```
     ///
-    /// The reason is not the multiply everyone kept rewriting - it is the
+    /// The reason is not the multiply everyone kept rewriting, it is the
     /// divide. `penalty_for` is `(u128 * u128) / u128`, and this harness calls
     /// it twice against a **full u64 symbolic stake**. A symbolic divide is
     /// much harder than a symbolic multiply: the solver has to search for a
@@ -298,7 +298,7 @@ mod proofs {
     /// bits. With both sides symbolic it is a full 64x64 product.
     ///
     /// So: one symbolic operand, and narrow. `stake` is `u16` here rather than
-    /// `u32`, which is the same trade the monotonicity harness makes - the
+    /// `u32`, which is the same trade the monotonicity harness makes, the
     /// property is about the *shape* of the arithmetic, and no boundary in it
     /// lives above 65535. The ratio stays a constant, and the four that
     /// mattered are covered by four separate harnesses instead of four asserts

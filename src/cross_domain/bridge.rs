@@ -75,7 +75,7 @@ impl AsRef<[u8]> for AssetId {
     }
 }
 
-/// Hex-string serde helper (Address deseni) - JSON-safe object-key.
+/// Hex-string serde helper (Address deseni), JSON-safe object-key.
 mod asset_id_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 

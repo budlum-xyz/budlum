@@ -84,7 +84,7 @@ pub const COL_MEM_IS_INIT: usize = 730;
 ///
 /// This is what makes [`COL_MEM_IS_INIT`] safe to exempt from the zero rule.
 /// Each flagged row folds `(addr, val)` into the accumulator, so a prover that
-/// flags a row it did not seed - or seeds a different value - lands on a
+/// flags a row it did not seed, or seeds a different value, lands on a
 /// different accumulator than the public input it is checked against.
 ///
 /// The fold is `acc' = acc * BETA + addr * GAMMA + val`, with fixed constants
@@ -247,7 +247,7 @@ pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column - 1 on the *original* 
 /// This column is what binds [`COL_VM_MERKLE_BIT`] to [`COL_VM_MERKLE_KEY`].
 /// Booleanity alone left the direction bit free: a prover could flip "left
 /// sibling" to "right sibling" on any round, recompute the chain, and produce
-/// a different root for the same leaf and siblings - measured, and the AIR
+/// a different root for the same leaf and siblings, measured, and the AIR
 /// accepted it. A Merkle proof whose direction bits are unconstrained proves
 /// nothing about membership.
 ///
@@ -1053,7 +1053,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // (1b) initial memory image: last real row, the fold equals the low
         // 64 bits of `initial_state_root`.
         //
-        // `initial_state_root` was a public input nothing constrained - every
+        // `initial_state_root` was a public input nothing constrained, every
         // caller passed zeroes and the AIR compared them against a column the
         // prover also filled with zeroes. It now carries the commitment to the
         // memory image the program started from, which is what lets a

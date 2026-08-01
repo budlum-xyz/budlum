@@ -188,7 +188,7 @@ fn test_hub_register_app_exact_min_fee_deducted_and_registered() {
 
 #[test]
 fn test_bns_register_fee_enforced_regression_m4() {
-    // M4 kaydı executor H1 fix'iyle zaten kapalıydı - burada
+    // M4 kaydı executor H1 fix'iyle zaten kapalıydı, burada
     // Regresyon olarak mühürlenir: 4-harfli isim, duration 1 → cost > amount.
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 10_000);

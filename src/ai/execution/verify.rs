@@ -13,7 +13,7 @@ pub struct ExecutionVerifyReport {
     /// The proof carries the weights digest the model registered.
     ///
     /// `program_hash_matches_model` only binds the guest program, which for
-    /// the fixed-point MLP depends on the architecture alone - the weights
+    /// the fixed-point MLP depends on the architecture alone, the weights
     /// live in a memory image the STARK does not constrain. Without this
     /// field a prover could run the registered program over any weights.
     pub weights_bound: bool,
@@ -91,8 +91,8 @@ pub fn verify_execution_proof_structural_with_model(
 /// `[(16,9),(24,-9),(32,x)]` hits the same accumulator with one modular
 /// multiplication.
 ///
-/// The defence is not to make the fold collision-resistant - that needs a hash
-/// in the AIR and the trace cannot afford one - but to stop trusting the
+/// The defence is not to make the fold collision-resistant, that needs a hash
+/// in the AIR and the trace cannot afford one, but to stop trusting the
 /// prover's value. The verifier holds the registered model, so it can rebuild
 /// the memory image, replay the reads and compute the commitment itself. A
 /// proof whose public input disagrees is rejected before the STARK is even

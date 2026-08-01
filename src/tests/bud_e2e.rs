@@ -350,7 +350,7 @@ fn e2e_deal_queries_return_replica_set() {
 
 /// İnvariant 1: Hiçbir depolama-eylemi whitelist gerektirmez.
 /// (Aynı fikir `permissionless.rs` testlerinde validator/relayer için
-/// Zaten var; burada depolama-spesifik olarak tekrar ediyoruz - kod
+/// Zaten var; burada depolama-spesifik olarak tekrar ediyoruz, kod
 /// Kapsamı farklı.)
 #[test]
 fn invariant_1_no_whitelist_for_deal_or_challenge() {
@@ -496,7 +496,7 @@ fn invariant_4_any_account_meeting_bond_can_open_deal() {
     assert_eq!(reg.all_deals().len(), 5);
 }
 
-/// İnvariant 5: Challenge opener_bond > 0 olmalı - aksi halde herkes
+/// İnvariant 5: Challenge opener_bond > 0 olmalı, aksi halde herkes
 /// Ücretsiz spam challenge açardı. Bu, data-sovereignty §0.5'in
 /// "-özgü anti-spam rolü yok, ekonomik teşvik var" formülüdür.
 #[test]

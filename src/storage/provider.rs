@@ -88,7 +88,7 @@ pub struct InMemoryStorageProvider {
     /// Challenge answers are bound to it, so two operators holding the same
     /// bytes produce different answers and neither can respond on the other's
     /// behalf. `Default` leaves it zeroed, which is fine for a single-provider
-    /// test but means every default-constructed provider shares an identity -
+    /// test but means every default-constructed provider shares an identity,
     /// use [`Self::with_operator`] wherever more than one exists.
     operator: [u8; 32],
 }
@@ -178,7 +178,7 @@ impl StorageProvider for InMemoryStorageProvider {
         let challenge_id = provider_challenge_id(deal_id, challenge);
         // Bound to this deal, not just to the bytes. A plain content hash is
         // identical for every operator holding a replica of the same shard,
-        // so one of them could answer for all of them - the outsourcing and
+        // so one of them could answer for all of them, the outsourcing and
         // Sybil cases in docs/BUD_STORAGE_ROADMAP.md Gap 2.
         let range_hash = ContentId::of_subrange_for_deal(
             bytes,

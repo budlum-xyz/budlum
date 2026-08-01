@@ -68,7 +68,7 @@ Gte: rd = 1 - cmp_lt_raw
 
 ### Alınacak Ders
 
-Sonlu cisimler üzerinde inequality (eşitsizlik) kontrolü her zaman bit decomposition gerektirir. Bu, hem sütun sayısını (193 yeni sütun) hem constraint derecesini artırır. Goldilocks gibi 64-bit'e yakın asal sayılarda, doğal/sarmalanmış fark ayrımı yapılamaz - mutlaka operand'ların kendisi ayrıştırılmalıdır.
+Sonlu cisimler üzerinde inequality (eşitsizlik) kontrolü her zaman bit decomposition gerektirir. Bu, hem sütun sayısını (193 yeni sütun) hem constraint derecesini artırır. Goldilocks gibi 64-bit'e yakın asal sayılarda, doğal/sarmalanmış fark ayrımı yapılamaz, mutlaka operand'ların kendisi ayrıştırılmalıdır.
 
 ---
 
@@ -76,7 +76,7 @@ Sonlu cisimler üzerinde inequality (eşitsizlik) kontrolü her zaman bit decomp
 
 ### Problem
 
-`And`, `Or`, `Xor`, `Not` opcode'ları AIR'de `assert_zero(rd - rd)` (yani "her şey kabul") ile placeholder durumdaydı. Bu, bir soundness felaketidir - kanıtlayıcı herhangi bir bitwise işlem sonucunu uydurabilir.
+`And`, `Or`, `Xor`, `Not` opcode'ları AIR'de `assert_zero(rd - rd)` (yani "her şey kabul") ile placeholder durumdaydı. Bu, bir soundness felaketidir, kanıtlayıcı herhangi bir bitwise işlem sonucunu uydurabilir.
 
 ### Çözüm: Paylaşımlı Bit Decomposition
 
@@ -102,7 +102,7 @@ Bitwise işlemler için en verimli yaklaşım, operand'ların bit decomposition'
 
 `Poseidon` opcode'u `src1*31 + src2 + 0x1337` gibi kriptografik olarak anlamsız bir placeholder ile çalışıyordu. Gerçek bir ZKVM'de hash fonksiyonu, Merkle proof doğrulama, state commitment ve rastgelelik üretimi için kritik öneme sahiptir.
 
-### 4-Round Poseidon (alpha=7, width=8) - ÜRETİME HAZIR DEĞİL
+### 4-Round Poseidon (alpha=7, width=8): ÜRETİME HAZIR DEĞİL
 
 > **✅ ÇÖZÜLDÜ (2026-07-28).** Aşağıdaki bölüm 4-round parametre setini ve
 > neden yetersiz olduğunu anlatıyor; **artık kullanılmıyor**. VM ve AIR tam
@@ -115,8 +115,8 @@ Bitwise işlemler için en verimli yaklaşım, operand'ların bit decomposition'
 > GPU ile saatler içinde erişilebilir.
 >
 > Somut sonucu: `PrivacyCommit` commitment'ından `(amount, blinding,
-> recipient_tag)` geri çıkarılabilirdi - gizleme yok. Aynı commitment veya
-> nullifier için ikinci bir açılım bulunabilirdi - bağlayıcılık yok.
+> recipient_tag)` geri çıkarılabilirdi, gizleme yok. Aynı commitment veya
+> nullifier için ikinci bir açılım bulunabilirdi, bağlayıcılık yok.
 >
 > STARK tarafı o zaman da dürüsttü: AIR dört round'un tamamını kısıtlıyordu,
 > yani kanıt sistemi zayıf fonksiyonun doğru çalıştırıldığını doğru
@@ -131,7 +131,7 @@ diyordu. "Kabaca" kalktı; set türetildi, koda kondu ve kilitlendi.
 |---|---|---|
 | R_F (tam round) | 8 | 4 baş + 4 son, Poseidon2 makalesinin +2 marjıyla |
 | R_P (kısmi round) | 22 | interpolasyon sınırı + %7.5 marj (aşağıda) |
-| α (S-box) | 7 | `gcd(7, P−1) = 1`, testle doğrulanmış |
+| α (S-box) | 7 | `gcd(7, P-1) = 1`, testle doğrulanmış |
 | toplam round | 30 | `POSEIDON_RC_FULL` |
 | toplam S-box | 86 | `t·R_F + R_P = 8·8 + 22` |
 
@@ -139,9 +139,9 @@ R_P bir tercih değil, Poseidon makalesinin interpolasyon sınırından (Eq. 3)
 çıkıyor:
 
 ```
-R_interp ≥ ⌈min(κ,n) / log₂(α)⌉ + ⌈log_α(t)⌉ − 5
-         = ⌈64 / log₂(7)⌉ + ⌈log₇(8)⌉ − 5
-         = 23 + 2 − 5 = 20
+R_interp ≥ ⌈min(κ,n) / log₂(α)⌉ + ⌈log_α(t)⌉ - 5
+         = ⌈64 / log₂(7)⌉ + ⌈log₇(8)⌉ - 5
+         = 23 + 2 - 5 = 20
 ⌈1.075 × 20⌉ = 22
 ```
 
@@ -155,10 +155,10 @@ yeniden yapılıyor; sabit elle değiştirilirse test düşer.
 **Neden hâlâ dört round çalışıyor?** Çünkü AIR dört round kısıtlıyor
 (`plonky3_air.rs`, `for r in 0..4`). VM'i tek başına 30 round'a çevirmek,
 kanıtın VM'in çalıştırdığından **başka** bir fonksiyonu doğruladığı anlamına
-gelir - zayıf hash'ten kesinlikle daha kötü bir soundness kırılması. Bu yüzden:
+gelir, zayıf hash'ten kesinlikle daha kötü bir soundness kırılması. Bu yüzden:
 
 - `POSEIDON_RC_FULL`, `POSEIDON_FULL_ROUNDS`, `POSEIDON_PARTIAL_ROUNDS`,
-  `POSEIDON_ALPHA` eklendi - AIR çalışmasının nişan alacağı kesin hedef.
+  `POSEIDON_ALPHA` eklendi, AIR çalışmasının nişan alacağı kesin hedef.
 - `poseidon_full_hash_state` referans uygulaması eklendi; AIR bunun karşısında
   doğrulanabilir. `full_permutation_differs_from_truncated_one` iki fonksiyonun
   gerçekten farklı olduğunu örneklenen her girdide gösteriyor (yoksa hedef
@@ -168,7 +168,7 @@ gelir - zayıf hash'ten kesinlikle daha kötü bir soundness kırılması. Bu y�
 
 ### Uygulandı (2026-07-28)
 
-Üçü birden aynı değişiklikte taşındı - tek taraflı taşımak, kanıtın VM'in
+Üçü birden aynı değişiklikte taşındı, tek taraflı taşımak, kanıtın VM'in
 çalıştırdığından başka bir fonksiyonu doğrulaması demek olurdu:
 
 | bileşen | ne yapıldı |
@@ -205,7 +205,7 @@ sebepleriyle kapalı kalmaya devam ediyor (bitmemiş yol doğrulaması; devrede
 olmayan doğrulama devresi).
 
 Kilit: `privacy_opcodes_are_open_only_while_poseidon_is_strong` round sayısı
-30'dan düşerse düşüyor - açık kapı, güçlü permütasyon varsayımına bağlı.
+30'dan düşerse düşüyor, açık kapı, güçlü permütasyon varsayımına bağlı.
 
 ### Uygulanan parametreler
 
@@ -271,9 +271,9 @@ STORAGE_BASE = 2 << 60   (storage işlemleri için)
 `SWrite(slot, val)` → `STORAGE_BASE + slot` adresine memory write
 
 Bu sayede:
-* **Yeni LogUp tablosu gerekmez** - mevcut 3 akümülatör (register, memory+storage, program) yeterli
+* **Yeni LogUp tablosu gerekmez**: mevcut 3 akümülatör (register, memory+storage, program) yeterli
 * **Storage tutarlılığı** memory consistency kurallarıyla (same-address read/write, first-read zero) otomatik sağlanır
-* **Adres çakışması yok** - stack (1<<60), storage (2<<60), normal memory (0..2^60) farklı aralıklarda
+* **Adres çakışması yok**: stack (1<<60), storage (2<<60), normal memory (0..2^60) farklı aralıklarda
 
 ### Alınacak Ders
 
@@ -347,7 +347,7 @@ Toplam: 51 test, 0 failure
 - Her level'de `key`'in ilgili bitine göre: `Poseidon(current, sibling)` veya `Poseidon(sibling, current)`
 - Sonuç: `rd = (current == root) ? 1 : 0`
 
-**AIR:** `rd`'nin boolean (0 veya 1) olduğu doğrulanır. Tam 64-adımlı path doğrulaması, çoklu Poseidon round constraint'leri gerektirdiğinden gelecek görevya bırakılmıştır. Mevcut constraint: `assert_bool(rd)` - sonucun geçerli bir boolean olduğunu garanti eder.
+**AIR:** `rd`'nin boolean (0 veya 1) olduğu doğrulanır. Tam 64-adımlı path doğrulaması, çoklu Poseidon round constraint'leri gerektirdiğinden gelecek görevya bırakılmıştır. Mevcut constraint: `assert_bool(rd)`, sonucun geçerli bir boolean olduğunu garanti eder.
 
 ```rust
 // VerifyMerkle constraint:

@@ -2,7 +2,7 @@
 //!
 //! Bu testler, geçmişte tespit edilen ve düzeltilen güvenlik bug'larının
 //! Yanlışlıkla geri alınmasını önler. Herhangi birinin CI'da kırılması,
-//! Ilgili düzeltmenin bozulduğu anlamına gelir - yalnızca bilinçli bir
+//! Ilgili düzeltmenin bozulduğu anlamına gelir, yalnızca bilinçli bir
 //! Kararla (ve bu dosyanın güncellenmesiyle) kaldırılabilir.
 //!
 //! ## Regresyon #1: ZK finality fail-open

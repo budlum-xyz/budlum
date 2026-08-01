@@ -2,7 +2,7 @@
 # ============================================================================
 # check-clippy-extra.sh - clippy pedantic+nursery izleme-ratchet kapısı
 # (izleme modu + ratchet ile güçlendirilmiş:
-#  Sayı ARTARSA fail - düşmesi serbest, yeni baseline bilinçli PR'la düşürülür)
+#  Sayı ARTARSA fail, düşmesi serbest, yeni baseline bilinçli PR'la düşürülür)
 #
 # Baseline kanıtı (2026-07-17, yerel, `98b0fd9` worktree):
 #   Cargo clippy --all-targets -- -W pedantic -W nursery → 217 uyarı, 20 lint

@@ -15,7 +15,7 @@
 //!   Gerçek bir slash'e yol açar (bkz. `equivocation_generates_slashing_evidence`).
 //! * **1.3 Geçersiz imza:** `add_prevote`/`add_precommit` artık bireysel BLS
 //!   Imzasını INGEST'te doğrular (Seçenek A). Geçersiz imza
-//!   Aggregat'a HİÇ girmez; dürüst alt-küme her zaman finalize edebilir - tek
+//!   Aggregat'a HİÇ girmez; dürüst alt-küme her zaman finalize edebilir, tek
 //!   Kötü aktör round'u durduramaz (bkz.
 //!   `finality_recovers_honest_subset_after_invalid_signature`).
 
@@ -148,7 +148,7 @@ fn drive_prevote_quorum(
 
 /// Bir voter aynı yükseklik/epoch için iki FARKLI checkpoint hash'e prevote
 /// Imzalıyor. Çelişkili oy sayıma GİRMEZ (aggregator tek-hash'e bağlı) AMA artık
-///  Bir equivocation slashing-evidence ÜRETİLİR - sessizce yutulmaz.
+///  Bir equivocation slashing-evidence ÜRETİLİR, sessizce yutulmaz.
 /// Aynı hash'e tekrar oy ise "Duplicate" olur ve yeni evidence üretmez.
 #[test]
 fn finality_rejects_equivocating_voter() {
@@ -229,7 +229,7 @@ fn finality_stays_pending_below_quorum() {
 /// **BİLİNÇLİ davranış değişikliği** (regresyon DEĞİL):
 /// Eski `finality_invalid_signature_poisons_aggregate` testi, tek geçersiz
 /// Imzanın tüm agregasyonu düşürdüğünü (fail-closed) doğruluyordu.
-/// (Seçenek A) ile geçersiz imza artık AGGREGAT'A HİÇ GİRMEZ - ingest'te
+/// (Seçenek A) ile geçersiz imza artık AGGREGAT'A HİÇ GİRMEZ, ingest'te
 /// Reddedilir. Böylece dürüst alt-küme (3/4) yine de finalize edebilir ve tek
 /// Kötü aktör round'u durduramaz (DoS önlendi).
 #[test]

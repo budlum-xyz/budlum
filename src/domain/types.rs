@@ -350,7 +350,7 @@ pub fn validator_set_commitment(
 
 /// Normalise a foreign root into 32 bytes.
 ///
-/// A root that is already 32 bytes - or 32 bytes of hex - is passed through
+/// A root that is already 32 bytes, or 32 bytes of hex, is passed through
 /// unchanged, because the same external block hash has to normalise to the
 /// same value wherever it appears; `domain_block_hash` and
 /// `parent_domain_block_hash` use different tags, and a chain could never line

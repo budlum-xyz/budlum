@@ -1829,7 +1829,7 @@ impl Executor {
                     .attach_execution_proof(request_id, &tx.from, proof.clone())
                     .map_err(|e| BudlumError::validation("ai_exec_attach", e))?;
                 // If this attach unlocks finalization for require_execution_proof models,
-                // Try re-check by re-submitting is not automatic - next result or
+                // Try re-check by re-submitting is not automatic, next result or
                 // Explicit finalize path. For single-verifier threshold, caller may
                 // Re-submit same result after attach; multi-verifier attaches race.
                 // Convenience: attempt threshold re-eval without new result.
