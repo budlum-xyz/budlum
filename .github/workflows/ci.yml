@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
@@ -556,6 +560,23 @@ jobs:
           shared-key: fuzz
       - name: Install cargo-fuzz
         run: cargo +nightly install --locked cargo-fuzz
+      # Corpus, koşular arasında taşınır. Without this every run starts from
+      # an empty corpus, so the same 60 seconds re-explores the same shallow
+      # surface each time and the gate never gets deeper. `fuzz-nightly.yml`
+      # already caches per target; this is the same pattern for the quick set,
+      # in one entry because the quick job runs all nine in a single job.
+      #
+      # `restore-keys` is the part that matters: the exact key contains the
+      # run id and will never hit, so the prefix match is what pulls the most
+      # recent corpus forward.
+      - name: Corpus cache (yuvarlanan, dokuz target birlikte)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fuzz/corpus
+          key: fuzz-quick-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-quick-corpus-
       - name: Her target 60 saniye fuzz
         # Cargo-fuzz, fuzz/Cargo.toml'u MEVCUT crate köküne göre çözer;
         # Repo kökünden çalıştırılmalı (fuzz/ altından çağrı = fuzz/fuzz hatası).

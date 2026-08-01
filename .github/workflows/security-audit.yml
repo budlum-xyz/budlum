@@ -31,6 +31,10 @@ on:
     - cron: "0 3 * * 1"   # haftalık, Pazartesi 03:00 UTC
   workflow_dispatch:
 
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
@@ -88,6 +92,9 @@ jobs:
         with:
           toolchain: "1.94.0"
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-audit
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Build (CodeQL extraction)
@@ -106,6 +113,9 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-audit
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Toolchain pins agree across workspaces
@@ -145,10 +155,23 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-audit
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: cargo install cargo-hack
-        run: cargo install cargo-hack --locked
+      # Surum pinsizdi: `cargo install cargo-hack --locked` her kosuda o anki
+      # en yeni surumu kaynaktan derliyordu, yani hem yavas hem tekrarlanamaz.
+      # sha256 indirilip hesaplandi.
+      - name: Install cargo-hack (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/cargo-hack.tar.gz \
+            https://github.com/taiki-e/cargo-hack/releases/download/v0.6.45/cargo-hack-x86_64-unknown-linux-musl.tar.gz
+          echo "b242dffcfd43317ac484dd2dbc3b9fc5f8a7eb3ba252af31b531503f0bad33d1  /tmp/cargo-hack.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/cargo-hack.tar.gz -C /tmp
+          install -m755 /tmp/cargo-hack /usr/local/bin/cargo-hack
+          cargo hack --version
       - name: Feature matrix check
         run: cargo hack check --each-feature --exclude-no-default-features --exclude-features pq-ml-dsa --locked
 
@@ -178,6 +201,9 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-audit
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Determinism test (genesis reproducibility)

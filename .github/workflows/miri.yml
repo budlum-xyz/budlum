@@ -9,6 +9,10 @@ on:
   schedule:
     - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
 
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
