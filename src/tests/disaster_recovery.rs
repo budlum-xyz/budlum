@@ -181,7 +181,7 @@ use crate::storage::db::Storage;
 
 /// Sled's file-lock release is not guaranteed to be synchronous with the
 /// Previous owner's `drop` under CI scheduling (os error 11 / WouldBlock
-/// Flake — Budlum Core run on `4d57f61`, `test_chaos_v2_ultimate_byzantine_recovery`).
+/// Flake - Budlum Core run on `4d57f61`, `test_chaos_v2_ultimate_byzantine_recovery`).
 /// Reopen with a bounded wait: the lock always drains within milliseconds in
 /// Practice; 100 x 25ms is generous, then the final open reports the error.
 fn reopen_storage(path: &str) -> Storage {
@@ -339,7 +339,7 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
     }
 }
 
-/// Chaos v2: CHAIN-HALT — tam sessizlik sonrası kurtarma.
+/// Chaos v2: CHAIN-HALT - tam sessizlik sonrası kurtarma.
 ///
 /// Mevcut 4 senaryo crash/fork/byzantine/restart kapsar; bu mühür ağın HİÇ
 /// Üretim yapmadığı sessiz dönemin dayanıklılığını kilitler: epoch-close
@@ -356,7 +356,7 @@ async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     bc.state.add_validator(producer, 10_000);
     bc.state.add_validator(silent, 10_000);
 
-    // 1) Baseline: bir tam epoch üret — silent ilk miss'ini alır.
+    // 1) Baseline: bir tam epoch üret - silent ilk miss'ini alır.
     for _ in 0..EPOCH_LENGTH {
         bc.produce_block(producer).expect("produce must succeed");
     }
@@ -366,7 +366,7 @@ async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
 
     // 2) CHAIN-HALT: tam sessizlik (hiçbir produce_block çağrısı). Epoch ancak
     //    Blok üretimiyle kapanır; dolayısıyla sessizlikte liveness sayaçları
-    //    Da state de kımıldamamalıdır. Burada çağrı YOK — doğrudan mühür:
+    //    Da state de kımıldamamalıdır. Burada çağrı YOK - doğrudan mühür:
     assert_eq!(
         bc.state.liveness.missed_count(&silent),
         missed_before,

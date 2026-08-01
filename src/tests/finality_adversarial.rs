@@ -5,7 +5,7 @@
 //! "sanal" validator kimliğini (her biri kendi GERÇEK BLS anahtar çiftiyle)
 //! Simüle eder. `src/chain/finality.rs` içindeki mevcut test-harness deseninin
 //! (`make_test_key`, `make_snapshot_with_keys`, gerçek `sign_bls` imzaları)
-//! Doğal bir genişlemesidir — mock/placeholder imza KULLANILMAZ.
+//! Doğal bir genişlemesidir - mock/placeholder imza KULLANILMAZ.
 //!
 //! ## sonrası davranış (bulguları düzeltildi)
 //!
@@ -15,7 +15,7 @@
 //!   Gerçek bir slash'e yol açar (bkz. `equivocation_generates_slashing_evidence`).
 //! * **1.3 Geçersiz imza:** `add_prevote`/`add_precommit` artık bireysel BLS
 //!   Imzasını INGEST'te doğrular (Seçenek A). Geçersiz imza
-//!   Aggregat'a HİÇ girmez; dürüst alt-küme her zaman finalize edebilir — tek
+//!   Aggregat'a HİÇ girmez; dürüst alt-küme her zaman finalize edebilir - tek
 //!   Kötü aktör round'u durduramaz (bkz.
 //!   `finality_recovers_honest_subset_after_invalid_signature`).
 
@@ -144,11 +144,11 @@ fn drive_prevote_quorum(
     }
 }
 
-// 1.1 — Equivocation (eşdeğer oy)
+// 1.1 - Equivocation (eşdeğer oy)
 
 /// Bir voter aynı yükseklik/epoch için iki FARKLI checkpoint hash'e prevote
 /// Imzalıyor. Çelişkili oy sayıma GİRMEZ (aggregator tek-hash'e bağlı) AMA artık
-///  Bir equivocation slashing-evidence ÜRETİLİR — sessizce yutulmaz.
+///  Bir equivocation slashing-evidence ÜRETİLİR - sessizce yutulmaz.
 /// Aynı hash'e tekrar oy ise "Duplicate" olur ve yeni evidence üretmez.
 #[test]
 fn finality_rejects_equivocating_voter() {
@@ -199,7 +199,7 @@ fn finality_rejects_equivocating_voter() {
     assert!(!agg.prevote_quorum_reached);
 }
 
-// 1.2 — Quorum altı senaryo
+// 1.2 - Quorum altı senaryo
 
 /// N=4, quorum 2/3 -> 2667 gerekiyor. Sadece 2 validator (2000 stake) imzalarsa
 /// Cert üretilmez, finality Pending kalır.
@@ -224,12 +224,12 @@ fn finality_stays_pending_below_quorum() {
     assert!(agg.try_produce_cert().is_none());
 }
 
-// 1.3 — Karışık geçersiz imza (Seçenek A: ingest-time doğrulama)
+// 1.3 - Karışık geçersiz imza (Seçenek A: ingest-time doğrulama)
 
 /// **BİLİNÇLİ davranış değişikliği** (regresyon DEĞİL):
 /// Eski `finality_invalid_signature_poisons_aggregate` testi, tek geçersiz
 /// Imzanın tüm agregasyonu düşürdüğünü (fail-closed) doğruluyordu.
-/// (Seçenek A) ile geçersiz imza artık AGGREGAT'A HİÇ GİRMEZ — ingest'te
+/// (Seçenek A) ile geçersiz imza artık AGGREGAT'A HİÇ GİRMEZ - ingest'te
 /// Reddedilir. Böylece dürüst alt-küme (3/4) yine de finalize edebilir ve tek
 /// Kötü aktör round'u durduramaz (DoS önlendi).
 #[test]
@@ -270,7 +270,7 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
         "dürüst 3/4 quorum'u karşılamalı"
     );
 
-    // Cert üretilir VE doğrulanır — dürüst alt-küme kötü aktöre rağmen finalize etti.
+    // Cert üretilir VE doğrulanır - dürüst alt-küme kötü aktöre rağmen finalize etti.
     let cert = agg.try_produce_cert().expect("honest subset cert produced");
     assert_eq!(cert.signer_count(4), 3, "sadece dürüst 3 imza sayılmalı");
     cert.verify(&snap)
@@ -299,7 +299,7 @@ fn finality_valid_quorum_produces_verifiable_cert() {
     cert.verify(&snap).expect("valid quorum cert must verify");
 }
 
-// 1.4 — Ağ bölünmesi (split quorum) / split-brain
+// 1.4 - Ağ bölünmesi (split quorum) / split-brain
 
 /// 4 validator, quorum 3 (2667). İki alt-grup 2-2 bölünür, her biri FARKLI bir
 /// Checkpoint hash'e oy verir. Hiçbir taraf kendi başına quorum'a ulgörevz;
@@ -339,7 +339,7 @@ fn finality_prevents_split_brain_on_partition() {
     assert!(agg_b.try_produce_cert().is_none());
 }
 
-// 1.5 — Geç gelen oylar (cert üretildikten sonra)
+// 1.5 - Geç gelen oylar (cert üretildikten sonra)
 
 /// Cert üretildikten sonra gelen oylar sistemi bozmaz: (a) daha önce sayılmış
 /// Bir voter'ın tekrar oyu "Duplicate" ile reddedilir, (b) yeni bir geç oy
@@ -386,12 +386,12 @@ fn finality_ignores_late_votes_after_cert() {
     cert2.verify(&snap).expect("post-late cert still verifies");
 }
 
-// 1.6 — Gürültü altında dürüst quorum
+// 1.6 - Gürültü altında dürüst quorum
 
 /// 7 validator, quorum 2/3 -> 4667. 5 dürüst validator HONEST hash'e oy verir
 /// (5000 >= 4667). 2 byzantine validator ÇELİŞKİLİ bir hash'e "gürültü" oyu
 /// Gönderir; bunlar honest aggregator tarafından reddedilir ve honest finality'yi
-/// ENGELLEMEZ — dürüst quorum yine de doğrulanabilir cert üretir.
+/// ENGELLEMEZ - dürüst quorum yine de doğrulanabilir cert üretir.
 #[test]
 fn finality_honest_quorum_survives_byzantine_noise() {
     let (snap, sks) = make_snapshot_with_keys(7, 1000);
@@ -827,7 +827,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
 }
 
 /// Uçtan uca: `Blockchain::handle_prevote` geçersiz BLS imzalı bir
-/// Oyu ingest'te reddeder — aggregat'a hiç girmez, state değişmez.
+/// Oyu ingest'te reddeder - aggregat'a hiç girmez, state değişmez.
 #[test]
 fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;

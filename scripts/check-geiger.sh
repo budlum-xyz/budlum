@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-geiger.sh — cargo-geiger unsafe görünürlük raporu
+# check-geiger.sh - cargo-geiger unsafe görünürlük raporu
 #
 # Cargo geiger --all-targets çıktısını alır. First-party crate'lerde
-# (budlum-core, bud-*) unsafe kullanımı SIFIR beklenir — src/lib.rs
+# (budlum-core, bud-*) unsafe kullanımı SIFIR beklenir - src/lib.rs
 # `#![forbid(unsafe_code)]` bunu derleme zamanında ZATEN kilitler (bu kapı
 # Ikinci, bağımsız kanıt katmanıdır). Üçüncü-taraf bağımlılıklar BİLGİ
-# Amaçlı basılır (gate'e girmez — her dep update'i farklı unsafe taşır;
+# Amaçlı basılır (gate'e girmez - her dep update'i farklı unsafe taşır;
 # Ratchet kırılgan olur, dürüst scoping).
 #
 # Kullanım:
@@ -23,7 +23,7 @@ gate() {
   local fp_bad
   fp_bad=$(grep -E '^(budlum-core|bud-)' "$out" | grep -vE '\b0/[0-9]+' || true)
   if [ -n "$fp_bad" ]; then
-    echo "FAIL: first-party crate'te sıfır-olmayan unsafe kullanımı (forbid(unsafe_code) ile çelişir — sahte rapor olabilir!):"
+    echo "FAIL: first-party crate'te sıfır-olmayan unsafe kullanımı (forbid(unsafe_code) ile çelişir - sahte rapor olabilir!):"
     echo "$fp_bad"
     return 1
   fi

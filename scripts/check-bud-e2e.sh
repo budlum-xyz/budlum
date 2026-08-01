@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-bud-e2e.sh — bud_e2e invariant isim kanaryası
+# check-bud-e2e.sh - bud_e2e invariant isim kanaryası
 #
 # `cargo test --lib bud_e2e` çıktısını alır ve 9 invariant + 4 e2e testinin
 # HER BİRİNİN isim-isim "... ok" göründüğünü doğrular.
@@ -15,7 +15,7 @@
 # ============================================================================
 set -euo pipefail
 
-# Zorunlu liste — 9 invariant + 4 e2e akış (birebir isim kilidi)
+# Zorunlu liste - 9 invariant + 4 e2e akış (birebir isim kilidi)
 EXPECTED=(
   "invariant_1_no_whitelist_for_deal_or_challenge"
   "invariant_2_no_admin_pause_freeze_hook"
@@ -37,14 +37,14 @@ gate() {
   [ -s "$out" ] || { echo "FAIL: test çıktısı yok/boş: $out"; return 1; }
   local missing=0 name
   for name in "${EXPECTED[@]}"; do
-    # Birebir isim + "ok" — alt-dize eşleşmesi (ör. invariant_1 → invariant_10) engelli:
+    # Birebir isim + "ok" - alt-dize eşleşmesi (ör. invariant_1 → invariant_10) engelli:
     if ! grep -Eq "test tests::bud_e2e::${name} \.\.\. ok$" "$out"; then
       echo "FAIL: beklenen test çıktıda yok veya ok değil: $name"
       missing=1
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    echo "FAIL: bud_e2e isim kanaryası — zorunlu 13 testten en az biri eksik/kırık."
+    echo "FAIL: bud_e2e isim kanaryası - zorunlu 13 testten en az biri eksik/kırık."
     return 1
   fi
   echo "OK: bud_e2e 13 zorunlu test (9 invariant + 4 e2e) isim-isim ok."

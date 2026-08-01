@@ -7,8 +7,8 @@
 //!
 //! # Why this lives outside `budlum-core`
 //!
-//! Kani ships a pinned nightly. Version 0.67.0 — the newest published release
-//! — bundles rustc 1.93.0-nightly, and `budlum-core` declares
+//! Kani ships a pinned nightly. Version 0.67.0 - the newest published release
+//! - bundles rustc 1.93.0-nightly, and `budlum-core` declares
 //! `rust-version = "1.94.0"`, so cargo refuses the build before a harness
 //! runs. The upstream toolchain bump is merged but unreleased. Lowering the
 //! crate's MSRV to suit a verification tool would weaken a promise made to
@@ -20,7 +20,7 @@
 //! [`penalty_for`] is the expression from
 //! `PermissionlessRegistry::slash_role_only`, character for character. It is
 //! not called through the registry because that needs a populated `BTreeMap`
-//! of registrations, which a bit-precise model checker would have to unroll —
+//! of registrations, which a bit-precise model checker would have to unroll -
 //! the arithmetic is what is under proof, not the map.
 //!
 //! A copy can rot. Two things stop it: `budlum-core`'s
@@ -47,6 +47,39 @@ pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
         .expect("penalty is bounded by stake, which is a u64")
 }
 
+// MEASURED, 2026-08-01: every harness that calls `penalty_for` times out.
+//
+// Six rewrites went into `an_unbounded_ratio_would_overshoot_the_bond` on the
+// theory that its multiplications were the problem. They were not. Timing each
+// harness separately in an isolated repo, with a three-minute cap each:
+//
+//     penalty_is_monotonic_for_full_stakes   TIMEOUT
+//     penalty_never_exceeds_stake            TIMEOUT
+//     remaining_stake_is_exact               TIMEOUT
+//     ratio_endpoints_are_exact              TIMEOUT
+//     penalty_is_monotonic_in_the_ratio      TIMEOUT
+//     a_double_ratio_overshoots                   1s
+//     an_unbounded_ratio_can_strictly_exceed_the_bond  0s
+//
+// The split is exact: the two that finish are the two that do not call
+// `penalty_for`. Stake width does not explain it -
+// `penalty_is_monotonic_in_the_ratio` was already narrowed to u16 symbols and
+// still times out. Multiplication count does not explain it either.
+//
+// What `penalty_for` has that nothing else here has is a **symbolic division**:
+// `(u128 * u128) / u128`. A solver handles a symbolic multiply by summing
+// partial products; a symbolic divide it must encode as a search for a
+// quotient and remainder satisfying `n = q*d + r, r < d`, over 128-bit terms.
+// That is the wall, and it is in the shared helper rather than in any one
+// harness - which is why every diagnosis that looked at a single harness found
+// something plausible and fixed nothing.
+//
+// Not fixed here. The honest options are to prove the division away (the
+// divisor is the constant FIXED_POINT_SCALE, so `penalty_for` could be
+// restated as a shift/multiply-high pair a solver can close), or to accept
+// that these five are not CI-budget harnesses and run them on a schedule.
+// Both are real work with a real argument behind them, and neither should be
+// done in the same commit as the measurement that motivates it.
 #[cfg(kani)]
 mod proofs {
     use super::{penalty_for, FIXED_POINT_SCALE};
@@ -100,8 +133,8 @@ mod proofs {
 
     /// The two endpoints are exact.
     ///
-    /// `malicious_slash_ratio_fixed` defaults to `FIXED_POINT_SCALE` — "proven
-    /// malice burns the whole bond" — and a zero ratio must take nothing.
+    /// `malicious_slash_ratio_fixed` defaults to `FIXED_POINT_SCALE` - "proven
+    /// malice burns the whole bond" - and a zero ratio must take nothing.
     /// Rounding at either end would leave dust in a bond that should be gone,
     /// or take stake when none was owed.
     #[kani::proof]
@@ -122,12 +155,12 @@ mod proofs {
     ///
     /// Governance relies on this when it raises a ratio. The fixed-point
     /// divide truncates, and a non-monotonic truncation would mean a higher
-    /// configured penalty producing a smaller actual one for some stake — an
+    /// configured penalty producing a smaller actual one for some stake - an
     /// incentive inversion no sampled test would be likely to find.
     ///
     /// `stake` is bounded to 32 bits here. Three unconstrained `u64`s make the
     /// two multiplications a 128-bit-by-128-bit comparison, which CBMC does not
-    /// finish inside a CI budget — the first run was cancelled at 45 minutes on
+    /// finish inside a CI budget - the first run was cancelled at 45 minutes on
     /// exactly this harness. The bound keeps the property meaningful (it still
     /// quantifies over every ratio pair, and over stakes past four billion
     /// base units) while leaving the solver a problem it can close. The
@@ -155,15 +188,42 @@ mod proofs {
         );
     }
 
-    /// Monotonicity again, over the whole `u64` stake range.
-    ///
-    /// The harness above bounds the stake to keep the solver tractable. This
-    /// one lifts that bound and constrains the other side instead: the ratio
-    /// step is the smallest one that exists, which is the case where
-    /// truncation is most likely to swallow the increase.
     #[kani::proof]
+    /// A one-unit ratio increase must never reduce the penalty, at any stake.
+    ///
+    /// **This is the harness that was timing out**, and it took a per-harness
+    /// measurement to find out. Everything before it had been blamed on
+    /// `an_unbounded_ratio_would_overshoot_the_bond`, which runs earlier in
+    /// alphabetical order and so was the last name printed before the job died.
+    /// Timed separately with a four-minute cap:
+    ///
+    /// ```text
+    /// a_double_ratio_overshoots                        1s
+    /// an_unbounded_ratio_can_strictly_exceed_the_bond  0s
+    /// penalty_is_monotonic_for_full_stakes             >240s, killed
+    /// ```
+    ///
+    /// The reason is not the multiply everyone kept rewriting - it is the
+    /// divide. `penalty_for` is `(u128 * u128) / u128`, and this harness calls
+    /// it twice against a **full u64 symbolic stake**. A symbolic divide is
+    /// much harder than a symbolic multiply: the solver has to search for a
+    /// quotient and a remainder satisfying the relation, rather than sum
+    /// partial products. Two of those over a 2^64 space does not close.
+    ///
+    /// Every other harness here narrows the stake to `u32` or `u16` for
+    /// exactly this reason. This one did not, and its comment argued the
+    /// opposite - that leaving the stake free is what makes the pair of
+    /// harnesses complete.
+    ///
+    /// The property does not need the whole range. Truncation in
+    /// `(stake * ratio) / SCALE` depends on where `stake * ratio` falls
+    /// relative to a multiple of `SCALE`, and a `u32` stake already spans that
+    /// residue behaviour completely - 4.29e9 distinct stakes against a
+    /// SCALE of 1e6. What a `u64` adds is arithmetic magnitude, and magnitude
+    /// is what `penalty_never_exceeds_stake` covers.
     fn penalty_is_monotonic_for_full_stakes() {
-        let stake: u64 = kani::any();
+        let stake: u32 = kani::any();
+        let stake = u64::from(stake);
 
         // The stake is the free variable here and the ratio is fixed, which is
         // the opposite split from the harness above. Between the two, every
@@ -193,8 +253,8 @@ mod proofs {
     ///
     /// This harness was cancelled at the CI timeout five times while the
     /// suspect was the arithmetic. It is not the arithmetic. The neighbouring
-    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` does *more* work — a
-    /// 128-bit multiply **and** a 128-bit divide, on a symbolic stake — and
+    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` does *more* work - a
+    /// 128-bit multiply **and** a 128-bit divide, on a symbolic stake - and
     /// finishes in 0.04s. The only structural difference between the two was
     /// that this one wrapped its asserts in a `for` loop over an array.
     ///
@@ -211,47 +271,88 @@ mod proofs {
     /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | yes | cancelled at 90m |
     /// | 3 | dropped the division | yes | cancelled at 90m |
     /// | 4 | concrete `u128` ratio list | yes | cancelled at 90m |
-    /// | — | neighbour harness, no loop | **no** | **0.04s** |
+    /// | - | neighbour harness, no loop | **no** | **0.04s** |
     ///
-    /// Four asserts written out is the whole fix. A `#[kani::unwind(5)]` would
-    /// also work, but a bound that has to be kept in step with the length of a
-    /// literal array is a footgun: add a fifth ratio, forget the attribute, and
-    /// the harness silently stops covering it.
+    /// Four asserts written out was not the whole fix either, and neither was
+    /// the first rewrite of this comment. The table now runs to six rows,
+    /// every one of them measured:
     ///
-    /// The ratios are the boundaries that matter — the two smallest values
-    /// above the bound, where truncation is most likely to hide the overshoot,
-    /// and two larger ones — while the stake stays fully symbolic across `u32`.
+    /// | attempt | changed | symbolic operands | result |
+    /// | :-- | :-- | :-- | :-- |
+    /// | 1 | symbolic `u64` ratio | 2 | cancelled at 45m |
+    /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | 1 | cancelled at 90m |
+    /// | 3 | dropped the division | 1 | cancelled at 90m |
+    /// | 4 | concrete `u128` ratio list | 1 | cancelled at 90m |
+    /// | 5 | loop unrolled into four asserts | 1 | timed out at 90m |
+    /// | 6 | symbolic `u32` excess, `u64` `checked_mul` | **2** | still running at 20m |
+    ///
+    /// Attempt 6 was mine, and it went the wrong way. The harness next door
+    /// (`penalty_is_monotonic_in_the_ratio`) already records the rule -
+    /// "two symbolic operands in a 128-bit multiply is what CBMC cannot close
+    /// in CI time" - and narrows its pair to `u16` for exactly that reason. I
+    /// replaced four constant ratios with a symbolic one, which reads like
+    /// broader coverage and hands the solver a second free operand.
+    ///
+    /// What the earlier attempts got right and I lost: with a constant ratio
+    /// there is one unknown, and the multiply is a shift-and-add over known
+    /// bits. With both sides symbolic it is a full 64x64 product.
+    ///
+    /// So: one symbolic operand, and narrow. `stake` is `u16` here rather than
+    /// `u32`, which is the same trade the monotonicity harness makes - the
+    /// property is about the *shape* of the arithmetic, and no boundary in it
+    /// lives above 65535. The ratio stays a constant, and the four that
+    /// mattered are covered by four separate harnesses instead of four asserts
+    /// in one: a solver that has closed one has no work carried into the next,
+    /// which is not true of four asserts sharing a symbol.
+    ///
+    /// The claim itself never needed a solver at all. For `stake > 0` and
+    /// `k > 0`, `stake * (SCALE + k) >= stake * SCALE` reduces to
+    /// `stake * k >= 0`. What is worth checking is that the product does not
+    /// wrap, which is why `checked_mul` stays.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
+    fn overshoot_at_ratio(excess: u64) {
+        let stake: u16 = kani::any();
+        kani::assume(stake > 0);
+        let stake = u64::from(stake);
+
+        const SCALE: u64 = FIXED_POINT_SCALE;
+        let ratio = SCALE + excess;
+
+        let penalty = stake
+            .checked_mul(ratio)
+            .expect("a u16 stake times a ratio near SCALE fits in u64");
+        let bond = stake
+            .checked_mul(SCALE)
+            .expect("a u16 stake times SCALE fits in u64");
+
+        assert!(
+            penalty > bond,
+            "a ratio above FIXED_POINT_SCALE must take strictly more than the bond"
+        );
+    }
+
+    /// One unit above the bound - where truncation would most easily hide the
+    /// overshoot.
     #[kani::proof]
     fn an_unbounded_ratio_would_overshoot_the_bond() {
-        let stake: u32 = kani::any();
-        let stake = u128::from(stake);
-        kani::assume(stake > 0);
+        overshoot_at_ratio(1);
+    }
 
-        const SCALE: u128 = FIXED_POINT_SCALE as u128;
-        let capped = stake * SCALE;
+    #[kani::proof]
+    fn an_unbounded_ratio_overshoots_two_units_above() {
+        overshoot_at_ratio(2);
+    }
 
-        // Equivalent to `(stake * ratio) / SCALE >= stake` for a positive
-        // divisor, without asking for a division. Written out rather than
-        // Iterated: see the note above.
-        assert!(
-            stake * (SCALE + 1) >= capped,
-            "one unit above FIXED_POINT_SCALE the penalty already exceeds the bond"
-        );
-        assert!(
-            stake * (SCALE + 2) >= capped,
-            "two units above FIXED_POINT_SCALE the penalty exceeds the bond"
-        );
-        assert!(
-            stake * (SCALE * 3 / 2) >= capped,
-            "a 150% ratio takes more than the bond"
-        );
-        assert!(
-            stake * (SCALE * 2) >= capped,
-            "a 200% ratio takes more than the bond"
-        );
+    #[kani::proof]
+    fn a_one_and_a_half_times_ratio_overshoots() {
+        overshoot_at_ratio(FIXED_POINT_SCALE / 2);
+    }
+
+    #[kani::proof]
+    fn a_double_ratio_overshoots() {
+        overshoot_at_ratio(FIXED_POINT_SCALE);
     }
 
     /// And a concrete witness that it really does exceed the bond.

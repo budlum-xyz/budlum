@@ -153,13 +153,13 @@ mod distributed_settlement_tests {
 
         // Height 1 arrives second, so it is built first here to give height 2
         // a real parent. The buffered commitment has to chain onto the one it
-        // waits for, otherwise applying it would break domain continuity —
+        // waits for, otherwise applying it would break domain continuity -
         // the check that used to be compiled out under `#[cfg(test)]`.
         //
         // The hashes are 64 hex characters, which is what a real block hash
         // is. `normalize_hash32` decodes a 32-byte hex string straight
         // through, but hashes anything else together with a field-specific
-        // domain tag — and `domain_block_hash` and `parent_domain_block_hash`
+        // domain tag - and `domain_block_hash` and `parent_domain_block_hash`
         // use different tags. With a non-hex placeholder the same block hash
         // therefore normalises to two different values depending on which
         // field it lands in, and no chain could ever line up.

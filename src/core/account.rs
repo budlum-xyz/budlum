@@ -193,7 +193,7 @@ impl Validator {
             .is_ok()
     }
 
-    /// Full readiness check — VRF + BLS + PoP signature.
+    /// Full readiness check - VRF + BLS + PoP signature.
     /// Mainnet validators MUST pass this check before participating in
     /// Consensus. Returns list of missing key types.
     pub fn missing_consensus_keys(&self) -> Vec<&'static str> {
@@ -254,7 +254,7 @@ pub struct AccountState {
     storage: Option<Storage>,
     pub epoch_index: u64,
     /// Wall-clock time of the last epoch close, in **milliseconds** since the
-    /// Unix epoch — whatever `apply_system_effects` read off `block.timestamp`.
+    /// Unix epoch - whatever `apply_system_effects` read off `block.timestamp`.
     ///
     /// It is an absolute timestamp, not a duration since genesis and not a
     /// count of anything. Two consumers previously treated it as the latter and
@@ -273,7 +273,7 @@ pub struct AccountState {
     pub governance: GovernanceState,
     pub base_fee: u64,
     /// Legacy EIP-1559 preview records. Not part of live flat-fee settlement.
-    /// NOT included in `calculate_state_root` — this is an audit log, not
+    /// NOT included in `calculate_state_root` - this is an audit log, not
     /// Consensus state. Overwritten each block (not appended).
     pub fee_distributions: Vec<crate::chain::fee_market::FeeDistribution>,
     dirty_accounts: HashSet<Address>,
@@ -568,7 +568,7 @@ impl AccountState {
         }
         // Pull the bond from the account's spendable balance (so we can't
         // Bond funds the team vesting has locked). Use the underlying
-        // Balance field directly — there is no team vesting on the test
+        // Balance field directly - there is no team vesting on the test
         // Path we exercise.
         let account = self.get_or_create(address);
         if account.balance < amount {
@@ -590,7 +590,7 @@ impl AccountState {
 
     /// Bond `amount` from the account's spendable balance into the
     /// Prover role. Unlike the relayer role, prover registration is NOT a
-    /// Submission gate (proofs are self-verifying) — it only controls
+    /// Submission gate (proofs are self-verifying) - it only controls
     /// Whether a successful proof earns its submitter a reward.
     pub fn bond_prover(
         &mut self,
@@ -660,7 +660,7 @@ impl AccountState {
     /// The bond "remains locked but slashable until the relayer begins
     /// Unbonding". There was no path that begins unbonding: no `ChainCommand`,
     /// No RPC method, no transaction type. The debit was one-way, so the bond
-    /// Was permanently unrecoverable — the account balance had already gone
+    /// Was permanently unrecoverable - the account balance had already gone
     /// Down and nothing could ever put it back.
     ///
     /// The window is the governance parameter, matching every other role.
@@ -836,7 +836,21 @@ impl AccountState {
         participated: &std::collections::HashSet<Address>,
     ) -> Vec<crate::registry::evidence::SlashingReport> {
         let params = *self.registry.params();
-        let expected: Vec<Address> = self.validators.keys().copied().collect();
+        // Only members the registry still considers active. A slashed or
+        // Jailed validator remains in `self.validators` - that map holds
+        // `jail_until` - while `registry.is_active` has already gone false.
+        // Counting it absent accrues downtime for blocks it is barred from
+        // Signing (Cosmos SDK #1867). `Blockchain::maybe_observe_liveness_on_epoch_close`
+        // Has always filtered this way; the other two paths did not.
+        let expected: Vec<Address> = self
+            .validators
+            .keys()
+            .filter(|addr| {
+                self.registry
+                    .is_active(addr, crate::registry::role::roles::VALIDATOR)
+            })
+            .copied()
+            .collect();
         self.liveness.record_epoch(
             epoch,
             &expected,
@@ -1234,8 +1248,8 @@ impl AccountState {
         // Views stay consistent. The registry's `is_active` predicate is what
         // The rest of the node (consensus, RPC) checks, so an account that
         // Was slashed at the account-state layer must also become inactive in
-        // The registry — otherwise the same offence would be paid-for twice.
-        // Apply_slashing feeds double-sign evidence — label
+        // The registry - otherwise the same offence would be paid-for twice.
+        // Apply_slashing feeds double-sign evidence - label
         // The registry mirror as DoubleSign, not LivenessFault (audit trail).
         let _ = self.registry.slash(
             *address,
@@ -1372,7 +1386,7 @@ impl AccountState {
             //     years_burned  0 -> 106155
             //     reserve balance    40000000000000 -> 0
             //
-            // The entire 40M $BUD burn reserve — a ten-year schedule — was
+            // The entire 40M $BUD burn reserve - a ten-year schedule - was
             // consumed at the first epoch close.
             //
             // `epoch_index` is the anchored, monotonic counter the schedule was
@@ -1580,7 +1594,7 @@ impl AccountState {
                 // `schedule` counts epochs from genesis: `team_vesting(0)` sets
                 // `start_epoch = 0`, and the cliff/duration are epoch *counts*
                 // (mainnet: 52_560 and 210_240). `epoch_index` lives in that
-                // same space — it starts at 0 and only ever advances by one.
+                // same space - it starts at 0 and only ever advances by one.
                 //
                 // `epoch_at_timestamp` does not. It divides an absolute Unix
                 // timestamp by the epoch length, so it answers "how many epochs
@@ -1597,7 +1611,7 @@ impl AccountState {
                 //     cliff was supposed to last 52560 epochs (1 year)
                 //
                 // The one-year cliff and the four-year linear tail both expired
-                // at the first epoch close. 20M $BUD — 20% of total supply — is
+                // at the first epoch close. 20M $BUD - 20% of total supply - is
                 // enforced on the transfer path via `spendable_balance`, so
                 // this was a live spend gate, not a display value.
                 let locked = schedule.locked_at(self.epoch_index);
@@ -1675,7 +1689,7 @@ impl AccountState {
         }
         let account = self.get_or_create(address);
         let burned = amount.min(account.balance);
-        // Warn when burn is clipped — indicates a potential
+        // Warn when burn is clipped - indicates a potential
         // Accounting error upstream (caller expected to burn more than available).
         if burned < amount {
             tracing::warn!(
@@ -1694,7 +1708,7 @@ impl AccountState {
     /// Execute any timed (annual) reserve burns that are due by the current
     /// Epoch. Time-triggered (NOT usage-triggered): each crossed "year" boundary
     /// Burns `annual_burn_amount` from the burn-reserve account. Idempotent per
-    /// Year — calling repeatedly within the same year burns nothing extra.
+    /// Year - calling repeatedly within the same year burns nothing extra.
     ///
     /// `genesis_epoch` is the epoch tokenomics started (usually 0);
     /// `reserve_addr` is the on-chain burn-reserve account.
@@ -2413,7 +2427,7 @@ mod tests {
     }
 
     /// Nonce mismatch must fail with a nonce error even when the
-    /// Signature is valid — proves cheap checks still run and still gate.
+    /// Signature is valid - proves cheap checks still run and still gate.
     #[test]
     fn wrong_nonce_rejected_before_accepting_valid_sig() {
         let alice_kp = KeyPair::generate().unwrap();

@@ -1,4 +1,4 @@
-//! In-tree Recursive Length Prefix (RLP) — Ethereum Yellow Paper Appendix B.
+//! In-tree Recursive Length Prefix (RLP) - Ethereum Yellow Paper Appendix B.
 //!
 //! Minimal, denetlenebilir, bağımsız impl. **alloy/ethers YOK** (RFC Q3 = in_tree;
 //! Minimal-dep + cargo-deny kuralıyla uyumlu). Keccak256 RLP tarafında kullanılmaz
@@ -13,7 +13,7 @@
 //! 5. List (payload >55 bytes) → `[0xf7 + len_of_len, ...len_be, ...payload]`.
 //!
 //! `len_of_len` = big-endian length'i ifade eden minimum bayt sayısı (leading
-//! Zero YASAK — canonical olmayan encoding decoding'de RED).
+//! Zero YASAK - canonical olmayan encoding decoding'de RED).
 //!
 //! # Negatif test mühürleri
 //!
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// RLP item hiyerarşisi: byte-string veya list-of-items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
-    /// Ham byte string (integer encoding değil — caller ayrıştırır).
+    /// Ham byte string (integer encoding değil - caller ayrıştırır).
     String(Vec<u8>),
     /// Ordered item list.
     List(Vec<Item>),
@@ -216,7 +216,7 @@ fn decode_list_items(payload: &[u8], depth: usize) -> Result<Vec<Item>, RlpError
 }
 
 // ---------------------------------------------------------------------------
-// Convenience: integer encode/decode (RLP integer kuralı — leading zero YASAK)
+// Convenience: integer encode/decode (RLP integer kuralı - leading zero YASAK)
 // ---------------------------------------------------------------------------
 
 /// Bir u64'ü RLP integer olarak encode eder (0 → empty string → 0x80).
@@ -267,7 +267,7 @@ pub fn as_bytes(item: &Item) -> Result<&[u8], RlpError> {
     }
 }
 
-/// Serde-güvenli wrapper (snapshot/RPC yüzeyi için — `#[serde(transparent)]` `Vec<u8>`).
+/// Serde-güvenli wrapper (snapshot/RPC yüzeyi için - `#[serde(transparent)]` `Vec<u8>`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RlpBytes(pub Vec<u8>);
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn kat_nested_list() {
-        // [[], [[]], [[], [[]]]] — classic nested test
+        // [[], [[]], [[], [[]]]] - classic nested test
         let item = Item::List(vec![
             Item::List(vec![]),
             Item::List(vec![Item::List(vec![])]),

@@ -1,6 +1,6 @@
 //! Minimal 32-byte address type for the standalone verifier registry.
 //!
-//! This is intentionally a thin newtype — the registry only needs
+//! This is intentionally a thin newtype - the registry only needs
 //! Equality, ordering, and hashing.  Full address utilities (hex parsing,
 //! Bech32, etc.) live in the host crate.
 

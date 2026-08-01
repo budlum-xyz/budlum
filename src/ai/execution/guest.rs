@@ -63,7 +63,7 @@ impl FixedPointMlpSpec {
             return Err("total params exceed MAX_MLP_PARAMS".into());
         }
         // The class limits (width, layers, params) are not the binding
-        // constraint — guest memory is, and it bites much earlier. A 32x32
+        // constraint - guest memory is, and it bites much earlier. A 32x32
         // layer is 1056 params (well under MAX_MLP_PARAMS) but needs 9984
         // bytes of guest memory against the VM's 8192. Rejecting here means a
         // spec that validates can always be built and run; otherwise the
@@ -104,7 +104,7 @@ impl FixedPointMlpSpec {
     // Representable on the wire even though `validate` rejects it. Indexing
     // With `[0]` / `.last.unwrap` therefore turns a malformed spec into a
     // Panic in whichever task touches it first. Both accessors now fold the
-    // Empty case to 0, which callers already treat as an invalid dimension —
+    // Empty case to 0, which callers already treat as an invalid dimension -
     // The spec is rejected instead of taking the process down.
     pub fn input_dim(&self) -> usize {
         self.dims.first().copied().unwrap_or(0) as usize
@@ -206,7 +206,7 @@ pub fn weights_digest(spec: &FixedPointMlpSpec) -> [u8; 32] {
 
 /// Commitment-only guest: binds `weights_digest` and `input_commitment` into
 /// the execution trace via Poseidon, then halts. It does **not** compute the
-/// forward pass — [`build_matmul_guest_program`] does that.
+/// forward pass - [`build_matmul_guest_program`] does that.
 ///
 /// A digest limb is 64 bits and `imm` is 32, so each limb is loaded in two
 /// halves and recombined (`hi * 2^32 + lo`). The previous version masked each
@@ -276,7 +276,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// [`program_hash_from_words`] is a *registry* identifier: SHA3-256 over a
 /// domain tag, the guest version and the words, so a model's registration can
 /// name its guest program without colliding with anything else in the tree.
-/// The proof system uses a different one — `ExecutionPublicInputs::program_hash`
+/// The proof system uses a different one - `ExecutionPublicInputs::program_hash`
 /// is an unlabelled Keccak-256 over the same words
 /// (`crate::execution::zkvm`), and that is the value the AIR is checked
 /// against.
@@ -290,9 +290,9 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// SONUC: Err("execution proof program_hash != public_inputs.program_hash")
 /// ```
 ///
-/// Everything else in that measurement lined up — the verifier rebuilt the
+/// Everything else in that measurement lined up - the verifier rebuilt the
 /// program, the public-inputs hash matched, and the independently derived
-/// `initial_state_root` matched — so this single mismatch was the whole reason
+/// `initial_state_root` matched - so this single mismatch was the whole reason
 /// the STARK path could not run.
 #[must_use]
 pub fn stark_program_hash_from_words(words: &[u64]) -> [u8; 32] {
@@ -356,8 +356,8 @@ pub fn prove_mlp_inference(
         steps: pi.trace_len,
         gas_used: pi.gas_used,
         // States which weights were run. The guest reads them from a memory
-        // image the AIR does not constrain, so `program_hash` — which depends
-        // on the architecture alone — cannot carry this.
+        // image the AIR does not constrain, so `program_hash` - which depends
+        // on the architecture alone - cannot carry this.
         weights_digest: Some(weights_digest(spec)),
         // Ship the public inputs the STARK was produced against. Without them
         // a verifier holding only the request (which carries an input
@@ -579,7 +579,7 @@ mod gas_tests {
 // Branchless ReLU. `Jnz` skipped an instruction, which the Program CTL
 // argument in BudL_SPEC §9 does not model (every fetched row must be the
 // row the program table holds at that pc). ReLU is therefore computed as a
-// multiplication by a selector bit — no control flow at all:
+// multiplication by a selector bit - no control flow at all:
 //
 //     is_neg = Gt(acc, HALF)      // 1 when acc encodes a negative value
 //     keep   = Sub(one, is_neg)   // 1 when acc is non-negative
@@ -936,8 +936,8 @@ pub fn build_matmul_guest_program(spec: &FixedPointMlpSpec) -> Result<Vec<u64>, 
 /// Rebuild the guest program words for a registered model.
 ///
 /// The verifier side of `prove_mlp_inference`. A fixed-point MLP guest depends
-/// only on the layer shape — weights are read from memory, not baked into
-/// immediates — so `execution_dims` is enough to reproduce the exact
+/// only on the layer shape - weights are read from memory, not baked into
+/// immediates - so `execution_dims` is enough to reproduce the exact
 /// instruction words a proof was produced against, which is what
 /// `Prover::verify` needs alongside the envelope and the public inputs.
 ///
@@ -1235,7 +1235,7 @@ mod matmul_tests {
     }
 
     /// The logged commitment must depend on the outputs. The old guest logged
-    /// `Poseidon(output_base_pointer, output_dim)` — the same value for two
+    /// `Poseidon(output_base_pointer, output_dim)` - the same value for two
     /// models with the same shape and completely different results.
     #[test]
     fn logged_commitment_depends_on_the_outputs() {
@@ -1309,7 +1309,7 @@ mod matmul_tests {
 
     #[test]
     fn validate_rejects_models_that_do_not_fit_in_guest_memory() {
-        // A 32x32 layer is 1056 params — a quarter of MAX_MLP_PARAMS — and
+        // A 32x32 layer is 1056 params - a quarter of MAX_MLP_PARAMS - and
         // still needs 9984 bytes against the VM's 8192. Guest memory, not the
         // parameter budget, is what actually caps model size.
         let n = 32usize;
@@ -1327,7 +1327,7 @@ mod matmul_tests {
         );
     }
 
-    /// Anything `validate` accepts must be buildable and runnable — no shape
+    /// Anything `validate` accepts must be buildable and runnable - no shape
     /// may pass validation and then fail inside the guest.
     #[test]
     fn every_valid_shape_can_be_built_and_run() {
@@ -1436,8 +1436,8 @@ mod matmul_tests {
 
     /// `prove_mlp_inference` must produce a proof that actually verifies.
     ///
-    /// It never did. `Prover::prove` succeeds whenever it can build a trace —
-    /// it does not check the trace against the AIR — and `prove_bytecode` did
+    /// It never did. `Prover::prove` succeeds whenever it can build a trace -
+    /// it does not check the trace against the AIR - and `prove_bytecode` did
     /// not verify what it produced, so the function returned an envelope no
     /// verifier would accept.
     ///
@@ -1448,7 +1448,7 @@ mod matmul_tests {
     /// noticed, because nobody verified.
     ///
     /// The AIR now commits to the initial memory image, so a guest that reads
-    /// host-written weights can be proven — and the proof verifies.
+    /// host-written weights can be proven - and the proof verifies.
     #[test]
     fn prove_mlp_inference_produces_a_verifiable_proof() {
         let spec = FixedPointMlpSpec {
@@ -1522,7 +1522,7 @@ mod matmul_tests {
     /// the prover and the host both summed only its low 32 bits. Every test
     /// logged a small constant, so the two agreed by accident; a Poseidon
     /// output never fits in 32 bits, so the one guest that logged one produced
-    /// an envelope no verifier would accept — and nothing checked, because
+    /// an envelope no verifier would accept - and nothing checked, because
     /// `prove_bytecode` did not verify its own output.
     #[test]
     fn commitment_guest_proof_verifies() {

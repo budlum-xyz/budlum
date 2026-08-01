@@ -17,7 +17,7 @@
 //!
 //! 2. **Retrieval Challenge:** the interim retrieval challenge remains
 //!    As an anti-unresponsiveness mechanism. An operator can pass by holding only
-//!    The requested byte range — it does NOT prove full storage. Treat
+//!    The requested byte range - it does NOT prove full storage. Treat
 //!    Slashing-from-missed-challenge as a "this operator is unresponsive" signal,
 //!    NOT as a "this operator is destroying provable storage" signal.
 //!
@@ -65,14 +65,14 @@ pub struct RetrievalChallengeRequest {
 }
 
 /// Lifecycle status of a `StorageDeal`. Reuses the same enum-tag
-/// Convention as the `permissionless::MemberStatus` enum — explicit
+/// Convention as the `permissionless::MemberStatus` enum - explicit
 /// Variants so the economic surface is auditable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DealStatus {
     /// Active deal, bond locked, fee per epoch accruing.
     Active,
     /// Bond was slashed (challenge missed). The bond is *not* auto-burned
-    /// In this layer — it is recorded in `Slashed` and handed to a
+    /// In this layer - it is recorded in `Slashed` and handed to a
     /// Higher-level `Blockchain` accounting path.
     /// This is the explicit "no admin hook, no silent burn" rule.
     Slashed,
@@ -144,7 +144,7 @@ impl StorageDeal {
 }
 
 /// A pending retrieval challenge. The opener (`opener`) is just a regular
-/// Account — no role required. `byte_start`/`byte_end` describe the
+/// Account - no role required. `byte_start`/`byte_end` describe the
 /// Sub-range of the shard the operator must hash to answer.
 ///
 /// **WARNING:** answering this challenge only proves
@@ -161,7 +161,7 @@ pub struct RetrievalChallenge {
     pub deadline_epoch: u64,
     pub opener: Address,
     /// Bond the opener locks when opening the challenge. Symmetric to
-    /// `submit_registry_slashing_report` in `chain/blockchain.rs` —
+    /// `submit_registry_slashing_report` in `chain/blockchain.rs` -
     /// Bond is returned on success, burned on false positive. This is
     /// The **data-sovereignty anti-spam mechanism** (no team-gated
     /// Monitor role).
@@ -511,7 +511,7 @@ impl std::fmt::Display for StorageError {
                 "merkle_proof and storage_root are mandatory (VerifyMerkle gate open)"
             ),
             StorageError::InvalidMerkleProof(ref reason) => {
-                write!(f, "invalid merkle proof — {reason}")
+                write!(f, "invalid merkle proof - {reason}")
             }
             StorageError::TooManyOpenChallenges { deal_id, max } => {
                 write!(f, "too many open challenges for deal {deal_id} (max {max})")
@@ -605,7 +605,7 @@ impl StorageRegistry {
     }
 
     /// Register a manifest so subsequent deal-opens can validate
-    /// `(manifest_id, shard_id)` membership. Idempotent — re-registering
+    /// `(manifest_id, shard_id)` membership. Idempotent - re-registering
     /// The same `manifest_id` is a no-op (per the chain-only rule: the
     /// Canonical manifest lives in `ContentManifest`; this index only
     /// Tracks "is this manifest known to the storage domain?").
@@ -721,7 +721,7 @@ impl StorageRegistry {
     }
 
     /// Open a retrieval challenge. Anyone can call this (no role
-    /// Required) — the opener_bond is the anti-spam mechanism.
+    /// Required) - the opener_bond is the anti-spam mechanism.
     #[allow(clippy::too_many_arguments)]
     /// Maximum concurrent open challenges per deal.
     /// Prevents spam attacks where a single deal gets unlimited challenges,
@@ -732,13 +732,13 @@ impl StorageRegistry {
     ///
     /// A challenge costs the operator a read plus a hash over the range. On
     /// commodity NVMe that is roughly 20 ms for the 16 MiB maximum chunk and
-    /// 0.3 ms for the 256 KiB default — small individually, but the rate limit
+    /// 0.3 ms for the 256 KiB default - small individually, but the rate limit
     /// is keyed on `(operator, manifest)`, so an operator serving 1000
     /// manifests can be made to spend seconds of I/O per epoch by an attacker
     /// who pays nothing: the bond is refunded whenever the operator answers.
     ///
     /// Tying the bond to the range does not make griefing expensive in the
-    /// long run — the capital comes back — but it makes it *capital-bound*:
+    /// long run - the capital comes back - but it makes it *capital-bound*:
     /// sustaining the attack requires locking stake proportional to the
     /// damage, in parallel, for the whole challenge window.
     pub const OPENER_BOND_PER_KIB: u64 = 1;
@@ -986,7 +986,7 @@ impl StorageRegistry {
         response_epoch: u64,
         proof_bytes: Option<&[u8]>,
     ) -> Result<ChallengeResult, StorageError> {
-        // Reject empty/zero range_hash — operator must provide a real hash
+        // Reject empty/zero range_hash - operator must provide a real hash
         if range_hash == ContentId([0u8; 32]) {
             return Err(StorageError::InvalidMerkleProof(
                 "range_hash must be non-zero (empty hash rejected)".into(),
@@ -1034,7 +1034,7 @@ impl StorageRegistry {
         // recorded as slashed on the same terms as `Missed`, and the deal
         // leaves `Active`.
         //
-        // Errors raised *before* this point stay errors — they mean the
+        // Errors raised *before* this point stay errors - they mean the
         // caller addressed the wrong deal, missed the deadline, or is not the
         // operator, none of which is evidence about stored bytes.
         let verification: Result<(), StorageError> = match (deal.storage_root, proof_bytes) {
@@ -1205,7 +1205,7 @@ impl StorageRegistry {
 
     /// Finalize a challenge whose deadline has elapsed without a
     /// Response. The deal transitions to `Slashed` and the operator
-    /// Bond is *recorded* as slashed (not burned — burning is a
+    /// Bond is *recorded* as slashed (not burned - burning is a
     /// Higher-layer `Blockchain` accounting decision).
     pub fn finalize_missed_challenge(
         &mut self,
@@ -1525,7 +1525,7 @@ impl StorageRegistry {
     ///
     /// This is the number erasure coding cares about, and it is not the one
     /// `under_replicated_shards` computes. That function asks, per shard,
-    /// whether it has fewer than `STORAGE_REPLICATION_TARGET` copies — the
+    /// whether it has fewer than `STORAGE_REPLICATION_TARGET` copies - the
     /// right question when every shard is a whole copy of the object. Under a
     /// `(k, n)` code each shard is a distinct piece, and what decides whether
     /// the object survives is how many *different* pieces are left, compared
@@ -1552,7 +1552,7 @@ impl StorageRegistry {
     /// `k <= live < k + margin`. Repair has to start with headroom: waiting
     /// until `live == k` means the next loss is fatal with nothing in flight.
     ///
-    /// Objects already below `k` are excluded — [`ContentManifest::needs_repair`]
+    /// Objects already below `k` are excluded - [`ContentManifest::needs_repair`]
     /// returns false there, because there is nothing left to reconstruct from
     /// and a repair deal opened then would only burn an operator bond. Use
     /// [`StorageRegistry::unrecoverable_objects`] to see those; they need an
@@ -1680,7 +1680,7 @@ mod tests {
     }
 
     /// Format-gecerli test zarfi (durust
-    /// Marker — GERCEK STARK kaniti degil; bincode-deserialize olabilen minimal
+    /// Marker - GERCEK STARK kaniti degil; bincode-deserialize olabilen minimal
     /// ProofEnvelope). NOT: a0671c4'teki inline 78-baytlık diziler tip hatasi
     /// (E0308) veriyordu ve niyeti gizliyordu; helper geri yuklendi.
     fn valid_merkle_proof() -> Vec<u8> {
@@ -1930,7 +1930,7 @@ mod tests {
     /// When the proof failed to verify, `answer_challenge` returned `Err`.
     /// Nothing landed in `results`, no bond moved, the deal stayed `Active`,
     /// and the operator could try again. Only silence reached
-    /// `finalize_missed_challenge` and got slashed — so an operator that had
+    /// `finalize_missed_challenge` and got slashed - so an operator that had
     /// discarded the data was better off answering wrongly, forever, than
     /// staying quiet once.
     ///
@@ -2267,7 +2267,7 @@ mod tests {
     #[test]
     fn deal_open_rejects_missing_merkle_proof() {
         // Gate (9d82f61): None her zaman MerkleProofRequired vermeli.
-        // REGRESYON KILIDI — a0671c4'te silinmisti, geri yuklendi; SILME.
+        // REGRESYON KILIDI - a0671c4'te silinmisti, geri yuklendi; SILME.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -2292,7 +2292,7 @@ mod tests {
     #[test]
     fn deal_open_rejects_malformed_merkle_proof() {
         // Format gate: deserialize edilemeyen blob InvalidMerkleProof vermeli.
-        // REGRESYON KILIDI — a0671c4'te silinmisti, geri yuklendi; SILME.
+        // REGRESYON KILIDI - a0671c4'te silinmisti, geri yuklendi; SILME.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let shard_id = m.shards[0].shard_id;
@@ -2317,7 +2317,7 @@ mod tests {
     #[test]
     fn prune_content_expires_active_deals_and_removes_manifest() {
         // F1 (Constitution §1): NFT yakılırsa veri B.U.D. storage'dan fiziksel silinir.
-        // REGRESYON KILIDI — prune_content aktif deal'leri expire etmeli
+        // REGRESYON KILIDI - prune_content aktif deal'leri expire etmeli
         // Ve manifest'i registry'den kaldırmalı.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -2585,8 +2585,8 @@ mod tests {
         // must not pass. It used to surface as `Err(InvalidMerkleProof)`,
         // which left the challenge unresolved and the operator free to retry;
         // it is now a `Mismatched` answer that slashes, on the same terms as
-        // a missed deadline. The property under test is unchanged — a
-        // production deal cannot be answered without a proof — but the
+        // a missed deadline. The property under test is unchanged - a
+        // production deal cannot be answered without a proof - but the
         // consequence is no longer cheaper than staying silent.
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
@@ -2748,7 +2748,7 @@ mod tests {
         }
     }
 
-    /// And it must accept the challenge once the bond covers the range —
+    /// And it must accept the challenge once the bond covers the range -
     /// the canary that proves the gate is not simply rejecting everything.
     #[test]
     fn open_challenge_accepts_a_bond_that_covers_the_range() {

@@ -1,4 +1,4 @@
-//! (2026-07-21 — kullanıcı görev listesi "CI sertleştirme")
+//! (2026-07-21 - kullanıcı görev listesi "CI sertleştirme")
 //! **Cross-platform consensus determinism digest'i.**
 //!
 //! Kullanıcı maddesi: "Cross-platform determinism matrix (Linux/macOS/Windows
@@ -11,13 +11,13 @@
 //! 64-hex digest'e indirgenir ve `CONSENSUS_DIGEST=<hex>` olarak stdout'a
 //! Yazılır (`--nocapture` ile). `determinism.yml` üç işletim sisteminde bu
 //! Satırı artefakt olarak toplayıp `consensus-digest-compare` job'unda byte
-//! Eşitliği ister — fark çıkarsa platformlar arası consensus sapması
+//! Eşitliği ister - fark çıkarsa platformlar arası consensus sapması
 //! FAIL olunur (sahte-yeşil yok: `if-no-files-found: error`).
 //!
 //! Determinizm sınırları (bilinçli):
 //!   * `genesis_time` sabitlenir (`Blockchain::new` aksi halde duvar saatini
 //!     Okur; `produce_block` timestamp'i `genesis_time + slot*SLOT_MS`'tir).
-//!   * İşlemler Ed25519 ile imzalanır (RFC 8032 — deterministik imza).
+//!   * İşlemler Ed25519 ile imzalanır (RFC 8032 - deterministik imza).
 //!   * Senaryo aynı-fee tie çifti (bob/carol, fee=9) içerir: mempool tie-break
 //!     `BTreeSet<(fee, hash)>` kuralıyla canonik olduğundan dahil olma sırası
 //!     Platformdan bağımsızdır (bkz. `src/mempool/pool.rs` yaması).
@@ -55,7 +55,7 @@ fn run_scenario() -> Vec<String> {
     let carol = Address::from(carol_kp.public_key_bytes());
     let miner = alice; // blok üreticisi sabit (digest'in parçası değil ama sabit tutulur)
 
-    // Başlangıç dağılımı (test fikstürü; genesis hash'ini ETKİLEMEZ — bu state
+    // Başlangıç dağılımı (test fikstürü; genesis hash'ini ETKİLEMEZ - bu state
     // Genesis block sonrası test scaffold'udur, mainnet genesis config değil).
     chain.state.add_balance(&alice, 100_000);
     chain.state.add_balance(&bob, 50_000);
@@ -67,7 +67,7 @@ fn run_scenario() -> Vec<String> {
         chain.state.calculate_state_root()
     ));
 
-    // İşlem planı: (gönderen_idx, alıcı_idx, amount, fee) — 3 tur x 3-4 tx.
+    // İşlem planı: (gönderen_idx, alıcı_idx, amount, fee) - 3 tur x 3-4 tx.
     // Tur 2'de bob/carol aynı fee (9) ile tie üretir (canonik sıralama sınavı).
     // Sender indeksleri: 0=alice,1=bob,2=carol
     let rounds: [&[(usize, usize, u64, u64)]; 4] = [

@@ -1,4 +1,4 @@
-# Pollen — B.U.D. Veri Marketplace (modül README'si)
+# Pollen - B.U.D. Veri Marketplace (modül README'si)
 
 **Modül-ayrımı kuralı gereği Pollen'ın kendi README'sidir.**
 Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
@@ -8,7 +8,7 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 - **Olgunluk:** Temel tipler + Data Rights gate. `DataAsset` ve
   `AccessGrant` primitifleri artık kodda; AI input_ref Pollen/B.U.D. verisine
   işaret ediyorsa grant olmadan reddedilir (strict no-override).
-- **Kod konumu:** `src/pollen/` — `mod.rs` (temel tipler: `AssetId`, `Signature64`,
+- **Kod konumu:** `src/pollen/` - `mod.rs` (temel tipler: `AssetId`, `Signature64`,
   `GrantId`), `data_rights.rs` (`DataAsset`, `AccessGrant`, `SaleAuthorization`,
   `AiDataInputRef`), `offers.rs` (`MarketplaceRegistry` + geçici `DataOffer`).
 - **Test sayısı:** CI summary doğrulamalı; Data Rights regresyonları
@@ -39,5 +39,5 @@ ekonomik yaptırım (-1). HPKE (-2) → storage node plaintext'i ASLA görmez.
 
 ## Sıradaki (P1)
 
-`src/pollen/marketplace.rs` (P1) — RFC §3.2 primitifleri + imza yardımcıları
+`src/pollen/marketplace.rs` (P1) - RFC §3.2 primitifleri + imza yardımcıları
 (RFC §5).

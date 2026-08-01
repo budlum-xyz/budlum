@@ -63,11 +63,11 @@ impl Default for RegistryParams {
         RegistryParams {
             min_stake: 1_000,
             unbonding_epochs: 7,
-            // 50% — equivocation is severe.
+            // 50% - equivocation is severe.
             double_sign_slash_ratio_fixed: FIXED_POINT_SCALE / 2,
-            // 1% — downtime is light.
+            // 1% - downtime is light.
             liveness_slash_ratio_fixed: FIXED_POINT_SCALE / 100,
-            // 100% — proven malice burns the whole bond.
+            // 100% - proven malice burns the whole bond.
             malicious_slash_ratio_fixed: FIXED_POINT_SCALE,
         }
     }

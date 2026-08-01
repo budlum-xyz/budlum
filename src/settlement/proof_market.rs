@@ -1,4 +1,4 @@
-//! P12-11: Proof Verification Market — settlement-side proof task/receipt model.
+//! P12-11: Proof Verification Market - settlement-side proof task/receipt model.
 //!
 //! This module is intentionally LUM-adapter free. It models bounded proof tasks,
 //! Prover receipts and settlement accounting in $BUD-compatible commitments so
@@ -20,13 +20,13 @@ fn nonzero_hash(value: &Hash32) -> bool {
 /// Proof görev türü.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProofTaskKind {
-    /// Domain commitment doğrulama — Merkle proof + event verification.
+    /// Domain commitment doğrulama - Merkle proof + event verification.
     DomainCommitment {
         domain_id: DomainId,
         domain_height: u64,
         sequence: u64,
     },
-    /// ZK-proof doğrulama — STARK/SNARK verifier.
+    /// ZK-proof doğrulama - STARK/SNARK verifier.
     ZkProof {
         circuit_id: [u8; 32],
         public_inputs_hash: Hash32,
@@ -137,22 +137,22 @@ impl ProofTaskKind {
 /// Proof görev durumu.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProofTaskStatus {
-    /// Beklemede — prover atanmamış.
+    /// Beklemede - prover atanmamış.
     Pending,
-    /// Prover atanmış — çalışıyor.
+    /// Prover atanmış - çalışıyor.
     Assigned {
         prover: Address,
         assigned_at_epoch: u64,
     },
-    /// Tamamlanmış — proof doğrulanmış.
+    /// Tamamlanmış - proof doğrulanmış.
     Completed,
     /// Süresi dolmuş.
     Expired,
-    /// Başarısız — proof geçersiz.
+    /// Başarısız - proof geçersiz.
     Failed { reason: String },
 }
 
-/// Proof görevi — prover'ların üstlenebileceği bir doğrulama görevi.
+/// Proof görevi - prover'ların üstlenebileceği bir doğrulama görevi.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProofTask {
     /// Görev ID (deterministik: hash(task_kind + creator + created/deadline/reward)).
@@ -312,7 +312,7 @@ impl ProofTask {
     }
 }
 
-/// Proof makbuzu — prover'ın bir görevi başarıyla tamamladığını kanıtlar.
+/// Proof makbuzu - prover'ın bir görevi başarıyla tamamladığını kanıtlar.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProofReceipt {
     /// İlgili görev ID.
@@ -332,11 +332,11 @@ pub struct ProofReceipt {
 /// Makbuz durumu.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReceiptStatus {
-    /// Ödenmemiş — settlement onayı bekliyor.
+    /// Ödenmemiş - settlement onayı bekliyor.
     Pending,
-    /// Ödenmiş — ödül prover'a dağıtıldı.
+    /// Ödenmiş - ödül prover'a dağıtıldı.
     Paid,
-    /// İptal — proof geçersiz bulundu.
+    /// İptal - proof geçersiz bulundu.
     Revoked { reason: String },
 }
 
@@ -509,7 +509,7 @@ impl ProofMarketState {
     }
 
     /// Prune paid receipts from pending_receipts Vec.
-    /// Without this, the Vec grows indefinitely — paid receipts are never
+    /// Without this, the Vec grows indefinitely - paid receipts are never
     /// Removed, only marked as paid. Call this periodically after pay_receipt.
     pub fn prune_paid_receipts(&mut self) -> usize {
         let before = self.pending_receipts.len();
@@ -519,7 +519,7 @@ impl ProofMarketState {
 
     /// Cap active_tasks + pending_receipts to prevent unbounded memory
     /// Growth on long-running nodes.
-    /// Only prune expired/expired tasks — never drop
+    /// Only prune expired/expired tasks - never drop
     /// In-progress tasks that still have time remaining.
     pub fn enforce_max_sizes(&mut self) {
         if self.active_tasks.len() > MAX_PROOF_MARKET_ACTIVE_TASKS {
@@ -541,7 +541,7 @@ impl ProofMarketState {
             // But do NOT drop in-progress tasks (they represent real prover work).
             if self.active_tasks.len() > MAX_PROOF_MARKET_ACTIVE_TASKS {
                 tracing::error!(
-                    "active_tasks ({}) still over cap ({}) after expiry pruning — \
+                    "active_tasks ({}) still over cap ({}) after expiry pruning - \
                      refusing to drop in-progress proof tasks",
                     self.active_tasks.len(),
                     MAX_PROOF_MARKET_ACTIVE_TASKS

@@ -52,7 +52,7 @@ pub enum ConsensusKind {
     /// Their collective agreement threshold produces `AiInferenceOutcome`s
     /// That are committed to the `GlobalBlockHeader.ai_root`.
     ///
-    /// This is NOT a separate blockchain — it's an attestation domain
+    /// This is NOT a separate blockchain - it's an attestation domain
     /// Within Budlum's multi-consensus architecture, analogous to
     /// `StorageAttestation` for B.U.D. but for AI verification.
     AiInference,
@@ -322,7 +322,7 @@ impl VerifiedDomainCommitment {
 /// Measured before this existed: both production callers passed
 /// `ValidatorSetSnapshot::compute_hash(..).as_bytes()`, which is a 64-character
 /// hex `String`. `hex::decode` accepted it, produced 32 bytes, and returned
-/// from the first branch — so `tag`, `domain_id` and `scheme` were all
+/// from the first branch - so `tag`, `domain_id` and `scheme` were all
 /// discarded. Two `PoA` domains sharing an authority set therefore had byte-equal
 /// `validator_set_hash` values, and `reject_unregistered_poa_authorities`
 /// compares exactly that field. A quorum assembled for one domain satisfied the
@@ -350,7 +350,7 @@ pub fn validator_set_commitment(
 
 /// Normalise a foreign root into 32 bytes.
 ///
-/// A root that is already 32 bytes — or 32 bytes of hex — is passed through
+/// A root that is already 32 bytes - or 32 bytes of hex - is passed through
 /// unchanged, because the same external block hash has to normalise to the
 /// same value wherever it appears; `domain_block_hash` and
 /// `parent_domain_block_hash` use different tags, and a chain could never line
@@ -358,7 +358,7 @@ pub fn validator_set_commitment(
 ///
 /// That pass-through means `tag`, `domain_id` and `scheme` only take effect
 /// for inputs that are *not* 32 bytes. Do not use this to commit to something
-/// that must be unique per domain — see [`validator_set_commitment`].
+/// that must be unique per domain - see [`validator_set_commitment`].
 pub fn normalize_hash32(
     tag: &[u8],
     domain_id: DomainId,

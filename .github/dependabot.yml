@@ -4,7 +4,7 @@
 #
 # Gruplama (2026-07-22,): minor+patch cargo güncellemeleri tek PR'da
 # Toplanır → PR backlog azalır (eski "7 açık dependabot PR" durumunu önler).
-# Major güncellemeler ayrı PR olarak kalır (dikkatli review ister — örn. bincode
+# Major güncellemeler ayrı PR olarak kalır (dikkatli review ister - örn. bincode
 # 1→3 gibi breaking change).
 # Cooldown (zizmor: dependabot-cooldown): 7 gun minimum, supply-chain mitigasyon.
 version: 2

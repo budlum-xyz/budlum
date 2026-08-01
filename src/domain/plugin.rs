@@ -238,7 +238,7 @@ pub fn default_domain(
 
     // PoW domains with the bounded header-chain adapter require pow_parameters.
     // Only emit defaults when the adapter is the recognized PoW header-chain
-    // Adapter — short names like "pow" are test-only and must not carry
+    // Adapter - short names like "pow" are test-only and must not carry
     // Pow_parameters (registry rejects "pow_parameters for incompatible adapter").
     let adapter_str: String = finality_adapter.into();
     let pow_parameters = if adapter_str == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {

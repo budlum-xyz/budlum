@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 /// Sözleşme dili.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContractLanguage {
-    /// BudL — Budlum'un native sözleşme dili.
+    /// BudL - Budlum'un native sözleşme dili.
     Budl,
-    /// Assembly — Düşük seviye bytecode.
+    /// Assembly - Düşük seviye bytecode.
     Assembly,
 }
 

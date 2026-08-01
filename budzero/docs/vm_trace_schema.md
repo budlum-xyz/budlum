@@ -28,7 +28,7 @@ Bu doküman `bud-vm` tarafından üretilen `Step` kayıtlarının AIR trace matr
 | `is_memory_write` | Yazma işlemi mi? |
 | `stack_pointer` | Stack işaretçisinin güncel değeri |
 
-## Prover Trace Sütunları (Ana Matris — Main Trace)
+## Prover Trace Sütunları (Ana Matris - Main Trace)
 
 Prover tarafında oluşturulan ana matris **354 sütun** genişliğindedir. Sütunlar şu gruplara ayrılır:
 

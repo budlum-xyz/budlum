@@ -244,7 +244,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
         output_commitment: res.output_commitment,
         program_hash: [7u8; 32],
         proof_bytes: {
-            // Minimal fake won't deserialize — use real prove for attach path
+            // Minimal fake won't deserialize - use real prove for attach path
             vec![1]
         },
         steps: 1,

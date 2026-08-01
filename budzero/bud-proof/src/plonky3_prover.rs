@@ -87,7 +87,7 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
         if step.instruction.opcode == bud_isa::Opcode::Halt {
             continue;
         }
-        // Merkle expansion rows are synthetic — no register
+        // Merkle expansion rows are synthetic - no register
         // Bus traffic (they reuse Opcode::VerifyMerkle with zeroed operands).
         if step.merkle_is_expand {
             continue;
@@ -279,7 +279,7 @@ fn trace_matrix(
             // Caller passes it through `public_inputs` already.
             values[row_start + COL_GAS_LIMIT] = Goldilocks::new(public_inputs.gas_limit);
             // Chain_id: bound to public_inputs[0,1] on the first row.
-            // Chain_id is a fixed domain constant — we record
+            // Chain_id is a fixed domain constant - we record
             // (public.chain_id & 0xFFFFFFFF) here; the AIR compares
             // It to public_inputs[0,1] on the first row.
             values[row_start + COL_CHAIN_ID] =
@@ -301,7 +301,7 @@ fn trace_matrix(
         if op == 0x1A {
             // Log opcode: accumulate rs1 into limb 0 of the event digest.
             //
-            // The whole value, in the field — not the low 32 bits. The AIR
+            // The whole value, in the field - not the low 32 bits. The AIR
             // constrains `nxt_event_0 - cur_event_0 - is_log * nxt_rs1 == 0`
             // and `nxt_rs1` is the full register, so masking here made the
             // witness disagree with the constraint for any logged value at or
@@ -488,7 +488,7 @@ fn trace_matrix(
             }
         }
 
-        // Not (logical NOT) — store inverse witness in COL_INV_ZERO
+        // Not (logical NOT) - store inverse witness in COL_INV_ZERO
         if opcode == bud_isa::Opcode::Not {
             let a = step.src1_val;
             let inv = if a != 0 {
@@ -716,7 +716,7 @@ fn trace_matrix(
             // `(key >> 0) & 1`. They should match.
             values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(key & 1);
             //: this is the "final" row of the
-            // VerifyMerkle path — the AIR uses the final_flag
+            // VerifyMerkle path - the AIR uses the final_flag
             // (1 only here) to apply the final root check on the
             // *64th* expansion row's `merkle_current`.
             values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(1);
@@ -1145,7 +1145,7 @@ fn aux_trace_generator(
             let diff_pre_prog = gamma - term_pre_prog;
 
             // Expansion rows reuse opcode 0x1E at the same PC
-            // But are NOT program fetches — counting them unbalances LogUp
+            // But are NOT program fetches - counting them unbalances LogUp
             // (trace_len >> program.len for VerifyMerkle paths).
             let is_expand_row = row[COL_VM_MERKLE_IS_EXPAND];
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
@@ -1211,7 +1211,7 @@ fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // The AIR compares `COL_EVENT_DIGEST_0` against `public_inputs[40]`, and
     // that column accumulates each `Log` row's whole `rs1`. Reading limb 0 as
     // four bytes truncated it, so the comparison held only while every logged
-    // value stayed below 2^32 — which every test did, and which a Poseidon
+    // value stayed below 2^32 - which every test did, and which a Poseidon
     // output never does.
     vals.push(Goldilocks::from_u64(u64::from_le_bytes(
         pi.event_digest[0..8].try_into().unwrap(),
@@ -1522,7 +1522,7 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
-    /// Public inputs built by the shared helper must verify — this is the path
+    /// Public inputs built by the shared helper must verify - this is the path
     /// every caller outside this crate takes.
     ///
     /// The in-crate `prove_and_verify` helper hard-codes
@@ -2073,7 +2073,7 @@ mod tests {
         });
     }
 
-    /// E2E private-transfer skeleton —
+    /// E2E private-transfer skeleton -
     /// Commit inputs/outputs + nullifier ownership + sum conservation.
     #[test]
     fn d2_proves_private_transfer_e2e() {
@@ -2148,7 +2148,7 @@ mod tests {
     //
     //   (a) **Selector binding (partial fix).** The prover can no
     //       Longer set `is_verify_merkle = 0` on a row where
-    //       `COL_OPCODE = 0x1E` — the AIR forces
+    //       `COL_OPCODE = 0x1E` - the AIR forces
     //       `is_verify_merkle * (opcode - 0x1E) = 0`. This closes the
     //       Trivial "set the selector to 0 and pick any rd_val_new" attack.
     //
@@ -2194,7 +2194,7 @@ mod tests {
     /// (security audit) partial-fix test for the
     /// Selector binding. Take a valid Add+Halt program, mutate the
     /// Trace so the *last* real row's `is_verify_merkle` column is
-    /// Zeroed out while `COL_OPCODE` is left at 0x00 (Halt) — that
+    /// Zeroed out while `COL_OPCODE` is left at 0x00 (Halt) - that
     /// Row is still a Halt so the constraint
     /// `is_verify_merkle * (opcode - 0x1E) = 0` is vacuously true.
     ///
@@ -2213,7 +2213,7 @@ mod tests {
         //
         // The program: set r2=root, r3=leaf, run VerifyMerkle on a
         // Trivial 64-sibling path, then Halt. We do not need the
-        // Path to be valid — we only need the opcode to be 0x1E.
+        // Path to be valid - we only need the opcode to be 0x1E.
         let program = vec![
             inst(Opcode::Load, 2, 0, 0, 0xCAFE),
             inst(Opcode::Load, 3, 0, 0, 0xBABE),
@@ -2371,7 +2371,7 @@ mod tests {
 
         // Flip the round-0 direction bit and recompute the Poseidon chain
         // from it, so the trace stays internally consistent everywhere the
-        // old AIR looked. `merkle_key` is deliberately left alone — that is
+        // old AIR looked. `merkle_key` is deliberately left alone - that is
         // the disagreement this test is about.
         let row1 = TRACE_WIDTH;
         let bit_before = matrix.values[row1 + COL_VM_MERKLE_BIT].as_canonical_u64();
@@ -2382,7 +2382,7 @@ mod tests {
         // Round 0's S-box witnesses have to be rebuilt too: flipping the bit
         // swaps which of (current, sibling) is s0. Leaving them stale would
         // trip the Poseidon identity instead, and the test would pass for a
-        // reason that has nothing to do with the direction bit — which is
+        // reason that has nothing to do with the direction bit - which is
         // exactly what a first attempt at this test did.
         let (f0, f1) = if bit_before == 0 {
             (sib0, cur0)
@@ -2430,7 +2430,7 @@ mod tests {
 
         // Proving a trace that violates a constraint panics inside Plonky3, so
         // the attempt is caught. Whichever way it comes out, the tampered
-        // trace must not end up as a verifying proof — and the two outcomes
+        // trace must not end up as a verifying proof - and the two outcomes
         // are kept distinguishable rather than both being treated as success,
         // because "the prover panicked" would otherwise mask a missing
         // constraint just as well as a working one.
@@ -2489,9 +2489,9 @@ mod tests {
     ///
     /// `merkle_sibling` used to be a free witness column: the AIR consumed it
     /// as a Poseidon input and nothing tied it to the bytes at
-    /// `path_addr + 8 + 8 * round`. Measured before the fix — 64 expansion
+    /// `path_addr + 8 + 8 * round`. Measured before the fix - 64 expansion
     /// rows, 0 carrying a `memory_addr`, and 0 of the 65 path words present in
-    /// the memory argument — so a prover could walk a path that was never
+    /// the memory argument - so a prover could walk a path that was never
     /// written and still produce a verifying proof.
     ///
     /// The expansion rows now emit their reads, and the LogUp demands them at
@@ -2849,8 +2849,8 @@ mod tests {
         println!("matrix chain OK for 64-depth path (n_rows={n_rows})");
     }
 
-    /// Q15 depth_1_test — 1 meaningful sibling, but VM always does 64 rounds (66 rows total)
-    /// This isolates whether InvalidProof is due to row count (64 vs small) — we still do 64 rounds,
+    /// Q15 depth_1_test - 1 meaningful sibling, but VM always does 64 rounds (66 rows total)
+    /// This isolates whether InvalidProof is due to row count (64 vs small) - we still do 64 rounds,
     /// But 63 siblings are zero, so Poseidon chain is simple.
     #[test]
     fn proves_verify_merkle_valid_1_depth() {
@@ -2920,7 +2920,7 @@ mod tests {
         assert!(res.is_ok(), "1-depth should succeed: {:?}", res);
     }
 
-    /// Q15 depth_2_test — 2 meaningful siblings, rest zero, still 66 rows
+    /// Q15 depth_2_test - 2 meaningful siblings, rest zero, still 66 rows
     #[test]
     fn proves_verify_merkle_valid_2_depth() {
         let program = vec![
@@ -3340,7 +3340,7 @@ mod tests {
         // The trace has 2 rows: row 0 = Add, row 1 = Halt. We rewrite
         // Row 1's opcode/is_halt so the row looks like an Add (the
         // Existing arithmetic constraints force dst_val=10+20=30, but
-        // We don't care — the *transition* 1->0 is the violation).
+        // We don't care - the *transition* 1->0 is the violation).
         let last = n_cpu - 1;
         let row_start = last * TRACE_WIDTH;
         matrix.values[row_start + COL_OPCODE] = Goldilocks::new(Opcode::Add as u64);
@@ -3474,7 +3474,7 @@ mod tests {
     #[test]
     fn rejects_tampered_trace_len() {
         let (envelope, mut pi, program) = build_arith_proof();
-        // Bump trace_len by one — should fail because
+        // Bump trace_len by one - should fail because
         // COL_TRACE_LEN_CTR was set to n_cpu (which doesn't change).
         pi.trace_len = pi.trace_len.wrapping_add(1);
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);

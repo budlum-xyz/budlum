@@ -94,7 +94,7 @@ async fn test_p2p_topology_latency_drift_simulation() {
     );
 
     // 2. Block with a clock-regression timestamp (older than the current
-    // Tip — replay / skewed producer clock). NOTE: the chain's genesis
+    // Tip - replay / skewed producer clock). NOTE: the chain's genesis
     // Timestamp is a deterministic constant (GENESIS_TIMESTAMP == 0), so
     // "older than genesis" is not representable; regressing against the tip
     // Exercises the same monotonicity guard.

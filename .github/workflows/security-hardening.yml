@@ -1,4 +1,4 @@
-# Security Hardening — Ek denetimler
+# Security Hardening - Ek denetimler
 #
 # Eksik denetimler:
 #   - cargo machete (kullanılmayan bağımlılıklar)
@@ -8,7 +8,7 @@
 #   - RUSTFLAGS overflow-checks doğrulaması
 #
 # Bu workflow haftalık çalışır (yoğun/yavaş denetimler).
-# PR'larda tetiklenmez — sadece schedule + workflow_dispatch.
+# PR'larda tetiklenmez - sadece schedule + workflow_dispatch.
 
 name: Security Hardening
 

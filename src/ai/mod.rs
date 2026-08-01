@@ -248,7 +248,7 @@ mod tests {
         assert!(!finalized.agreeing_verifiers.contains(&v_minority));
     }
 
-    // ===================== P5 — Deadline, Dispute, Robustness Tests =====================
+    // ===================== P5 - Deadline, Dispute, Robustness Tests =====================
 
     #[test]
     fn test_p5_request_deadline_rejected_after_expiry() {
@@ -657,7 +657,7 @@ mod tests {
         assert!(registry.submit_request(req, 100).is_ok());
     }
 
-    // ===================== P5 — Fee Escrow + Nonce Tests =====================
+    // ===================== P5 - Fee Escrow + Nonce Tests =====================
 
     #[test]
     fn test_p5_fee_reclaim_after_deadline_no_outcome() {
@@ -706,7 +706,7 @@ mod tests {
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
 
-        // Only one verifier submitted (below threshold of 2) — no finalization
+        // Only one verifier submitted (below threshold of 2) - no finalization
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
@@ -1054,7 +1054,7 @@ mod tests {
         assert_eq!(max_fee, 250);
     }
 
-    // ===================== P5 — Model Deactivation + Callback Tests =====================
+    // ===================== P5 - Model Deactivation + Callback Tests =====================
 
     #[test]
     fn test_p5_model_deactivation_by_owner() {
@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(outcome.callback, None);
     }
 
-    // ===================== P5 — Update, Transfer, Pruning, MinFee Tests =====================
+    // ===================== P5 - Update, Transfer, Pruning, MinFee Tests =====================
 
     #[test]
     fn test_p5_update_model_spec_by_owner() {
@@ -1589,7 +1589,7 @@ mod tests {
         assert!(result.unwrap_err().contains("max_fee must be >= 1"));
     }
 
-    // ===================== P5 — Reward Distribution + Edge Case Tests =====================
+    // ===================== P5 - Reward Distribution + Edge Case Tests =====================
 
     #[test]
     fn test_p5_reward_distribution_with_remainder() {
@@ -1689,7 +1689,7 @@ mod tests {
             .expect("Should finalize with 3 verifiers");
 
         assert_eq!(outcome.agreeing_verifiers.len(), 3);
-        // Verify the outcome exists — executor distributes rewards based on these
+        // Verify the outcome exists - executor distributes rewards based on these
     }
 
     #[test]
@@ -2143,7 +2143,7 @@ mod tests {
         let err1 = submit_ai_result(&mut registry, req_id, v_a, [2u8; 32], 2, 16).unwrap_err();
         assert!(err1.contains("EQUIVOCATION"));
 
-        // Third attempt (also equivocation — compared against first [1u8;32])
+        // Third attempt (also equivocation - compared against first [1u8;32])
         let err2 = submit_ai_result(&mut registry, req_id, v_a, [3u8; 32], 3, 17).unwrap_err();
         assert!(err2.contains("EQUIVOCATION"));
     }
@@ -2162,7 +2162,7 @@ mod tests {
         assert_eq!(reclaimer, owner);
         assert_eq!(fee, 100);
 
-        // Now try to submit a result — deadline has passed
+        // Now try to submit a result - deadline has passed
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
@@ -2173,7 +2173,7 @@ mod tests {
 
     #[test]
     fn test_reclaim_then_second_reclaim_rejected() {
-        // P5 -T1(c): Double reclaim prevention — second reclaim must fail.
+        // P5 -T1(c): Double reclaim prevention - second reclaim must fail.
         let (mut registry, model_id, owner) = setup_ai_registry(3, 3);
         let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
 
@@ -2200,7 +2200,7 @@ mod tests {
         submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
         submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
 
-        // Try to reclaim — should fail because outcome exists
+        // Try to reclaim - should fail because outcome exists
         let err = registry.reclaim_fee(&req_id, 200).unwrap_err();
         assert!(err.contains("finalized"));
     }
@@ -2400,7 +2400,7 @@ mod tests {
     #[test]
     fn test_deactivate_model_pending_requests_still_accept_results() {
         // P5 -T1(f): Deactivating a model does NOT affect existing
-        // Pending requests — results can still be submitted and finalized.
+        // Pending requests - results can still be submitted and finalized.
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
         let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
 
@@ -2481,7 +2481,7 @@ mod tests {
     #[test]
     fn test_update_spec_on_inactive_model() {
         // P5 -T1(f): Spec update on an inactive model should be
-        // Allowed — the owner may want to adjust thresholds before reactivating.
+        // Allowed - the owner may want to adjust thresholds before reactivating.
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
         registry.deactivate_model(&model_id, &owner).unwrap();
 
@@ -3137,7 +3137,7 @@ mod tests {
                 .unwrap();
         submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
         let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
-        // Slash at block 50 — equivocation detected at block 16, well within window
+        // Slash at block 50 - equivocation detected at block 16, well within window
         assert!(registry.slash_equivocator(&req_id, &v1, 50).is_ok());
     }
 
@@ -3381,7 +3381,7 @@ mod tests {
     /// The per-address callback backlog must be bounded.
     ///
     /// `callback_queue` is drained by `consume_callback_events`, which nothing
-    /// In production calls — the RPC path only reads it. So an address whose
+    /// In production calls - the RPC path only reads it. So an address whose
     /// Owner never collects grew a vector for the life of the chain, and that
     /// Vector is hashed into `AiRegistry::root` under
     /// `BDLM_AI_CALLBACK_QUEUE`: every validator rehashed the entire backlog
@@ -3624,7 +3624,7 @@ mod tests {
         let proof = AiExecutionProof {
             model_id,
             input_commitment: [2u8; 32],
-            output_commitment: [0xFF; 32], // WRONG — doesn't match result
+            output_commitment: [0xFF; 32], // WRONG - doesn't match result
             program_hash: [0xAA; 32],
             proof_bytes: vec![],
             steps: 100,

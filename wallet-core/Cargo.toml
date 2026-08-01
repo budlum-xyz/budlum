@@ -2,7 +2,7 @@
 name = "budlum-wallet-core"
 version = "0.1.0"
 edition = "2021"
-description = "Budlum wallet core — BIP39 mnemonic, SLIP-0010 Ed25519 key derivation, transaction signing"
+description = "Budlum wallet core - BIP39 mnemonic, SLIP-0010 Ed25519 key derivation, transaction signing"
 license = "Apache-2.0"
 
 [lib]
@@ -16,7 +16,7 @@ sha2 = "0.10"
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 
-# BIP39 mnemonic generation (minimal in-tree impl — no external dep for entropy→mnemonic)
+# BIP39 mnemonic generation (minimal in-tree impl - no external dep for entropy→mnemonic)
 # SLIP-0010: Ed25519 HD derivation (hardened-only per RFC 8032)
 
 [package.metadata.cargo-machete]

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ── devnet-multinode-smoke.sh ────────────────────────────────────────────────
 # 4-node PoS docker-compose devnet'ini CI'da ayağa kaldırır ve aşağıdaki
-# Güvenlik/liveness iddialarını mühürler (hepsi node1, 127.0.0.1:8545 üzerinden —
+# Güvenlik/liveness iddialarını mühürler (hepsi node1, 127.0.0.1:8545 üzerinden -
 # Node2..4 kasıtlı olarak RPC açmaz; compose böyle sertleştirilmiştir):
 #   [1] bud_netListening == true → P2P stack canlı
 #   [2] peer mesh evidence from node2..4     → 4-node mesh (P2P log kanıtı; peerCount fallback)
 #   [3] bud_blockNumber iki ölçümde artıyor → 4 node'luk konsensus liveness
 #   [4] /metrics (127.0.0.1:9090) HTTP 2xx + boş olmayan gövde
 #   [5] operator RPC 127.0.0.1:8546 hosttan erişilemez (yayınlanmaz + node yalnız
-#       127.0.0.1'e bağlar) — sızırsa FAIL.
+#       127.0.0.1'e bağlar) - sızırsa FAIL.
 set -u   # -e yerine manuel fail: hata anında teardown/log adımı çalışabilsin
 
 RPC=http://127.0.0.1:8545
@@ -43,8 +43,8 @@ echo "== [2/5] peer mesh: node1 bud_netPeerCount >= 0x3 (maks 120 sn) =="
 # Yalnızca SwarmEvent::ConnectionEstablished ile artar, yani gerçekten kurulmuş
 # Bir P2P bağlantısını ölçer. Eski "log_nodes" fallback'i ('Connected to' vb.
 # Desenlerini node2..4 loglarında aramak) kapıyı zayıflatıyordu: node'lar birbiri
-# Yerine yalnız node1'e bağlansa bile — hatta hiç bağlanmasa da bazı desenler
-# Eşleşerek — mesh kurulmuş gibi görünebiliyordu. Tek ölçüt bırakıldı.
+# Yerine yalnız node1'e bağlansa bile - hatta hiç bağlanmasa da bazı desenler
+# Eşleşerek - mesh kurulmuş gibi görünebiliyordu. Tek ölçüt bırakıldı.
 ok=0; hex=0x0; count=0
 for _ in $(seq 1 60); do
   hex=$(rpc bud_netPeerCount \
@@ -76,7 +76,7 @@ echo "PASS [4/5]: /metrics 2xx ($(printf '%s' "$body" | wc -l) satır)"
 
 echo "== [5/5] operator RPC izolasyonu (8546 hosttan kapalı olmalı) =="
 if curl -s --max-time 2 http://127.0.0.1:8546 >/dev/null 2>&1; then
-  fail "operator RPC 127.0.0.1:8546 hosttan erişilebilir — SIZMA"
+  fail "operator RPC 127.0.0.1:8546 hosttan erişilebilir - SIZMA"
 fi
 echo "PASS [5/5]: operator RPC hosttan erişilemez (bağlantı reddedildi)"
 

@@ -7,7 +7,7 @@
 //!
 //! The tests for the "already handled" items are not busywork. Each of those
 //! properties is one careless edit away from being false, and none of them
-//! fails loudly when it breaks — a slashing replay silently double-slashes, a
+//! fails loudly when it breaks - a slashing replay silently double-slashes, a
 //! spoofed header silently bypasses a rate limit. Naming them here turns a
 //! reviewer's question into something CI answers.
 
@@ -20,7 +20,7 @@ mod tests {
     /// `validate_public_key` is called on the validation path
     /// (`core/account.rs`, `core/transaction.rs`), so a node built with the
     /// wrong feature rejects every validator registration on the chain as a
-    /// malformed key — a partition with no error naming its cause.
+    /// malformed key - a partition with no error naming its cause.
     #[test]
     fn genesis_pins_the_pq_scheme_and_mismatch_is_fatal() {
         use crate::chain::genesis::GenesisConfig;

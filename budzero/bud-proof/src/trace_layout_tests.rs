@@ -246,7 +246,7 @@ fn trace_layout_reserved_gap_is_documented() {
     //
     // It used to assert absolute indices (370..373, 373..378). That made it
     // fail for the right reason but with the wrong message when the Poseidon
-    // block grew from 4 rounds to 30 and pushed everything after it along —
+    // block grew from 4 rounds to 30 and pushed everything after it along -
     // nothing about the adjacency it exists to check had changed. The
     // assertions are now relative, so the test still catches a gap or an
     // overlap but does not need editing every time an earlier block resizes.

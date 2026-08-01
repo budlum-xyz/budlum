@@ -1434,7 +1434,7 @@ impl ChainHandle {
     }
 
     /// Get execution proof for a (request, verifier) pair.
-    /// Returns None if no proof exists — results without proofs are
+    /// Returns None if no proof exists - results without proofs are
     /// "trust-based"; results with proofs are "trustless" (ZKVM-verified).
     pub async fn get_ai_execution_proof(
         &self,
@@ -2169,7 +2169,7 @@ impl ChainActor {
                             self.blockchain.start_prevote_task(b.index, b.hash.clone());
                         }
                         if !cids.is_empty() {
-                            tracing::info!(count = cids.len(), "NftBurn detected during production — notifying node for physical pruning");
+                            tracing::info!(count = cids.len(), "NftBurn detected during production - notifying node for physical pruning");
                         }
                     }
                     let _ = tx.send(result);
@@ -2195,7 +2195,7 @@ impl ChainActor {
                         if !cids.is_empty() {
                             tracing::info!(
                                 count = cids.len(),
-                                "NftBurn detected — notifying node for physical pruning"
+                                "NftBurn detected - notifying node for physical pruning"
                             );
                         }
                     }

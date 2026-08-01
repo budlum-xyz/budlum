@@ -175,7 +175,7 @@ impl SlashingReport {
         }
     }
 
-    /// Relayer invalid proof — griefing/fronting/wrong-relay
+    /// Relayer invalid proof - griefing/fronting/wrong-relay
     pub fn consensus_invalid_relay_proof(
         offender: Address,
         reason: String,

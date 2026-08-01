@@ -1,4 +1,4 @@
-//! B.U.D. Bitswap — Bitswap-like block exchange protocol.
+//! B.U.D. Bitswap - Bitswap-like block exchange protocol.
 //!
 //! Implements a simplified Bitswap protocol using libp2p's
 //! `request-response` codec. Peers can request content chunks by
@@ -9,8 +9,8 @@
 //!
 //! ```text
 //! Request:  { want_cid: ContentId }
-//! Response: { cid: ContentId, data: Vec<u8> }  — on success
-//!           { cid: ContentId, not_found: true } — on miss
+//! Response: { cid: ContentId, data: Vec<u8> }  - on success
+//!           { cid: ContentId, not_found: true } - on miss
 //! ```
 //!
 //! # Security
@@ -18,7 +18,7 @@
 //! - Response data is verified against the requested CID before
 //!   Being stored locally (integrity check via `ContentId::of`).
 //! - Rate limiting is handled by the libp2p swarm layer.
-//! - No authentication is required — the protocol is permissionless
+//! - No authentication is required - the protocol is permissionless
 //!   (anyone can request or serve content).
 
 use crate::store::{ContentId, ContentStore, StoreError};
@@ -28,14 +28,14 @@ use std::sync::Arc;
 /// Protocol name for the Bitswap-like exchange.
 pub const BITSWAP_PROTOCOL_NAME: &str = "/bud/bitswap/1.0.0";
 
-/// A Bitswap request — "I want this CID".
+/// A Bitswap request - "I want this CID".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitswapRequest {
     /// The content identifier being requested.
     pub want_cid: ContentId,
 }
 
-/// A Bitswap response — "here's the data" or "I don't have it".
+/// A Bitswap response - "here's the data" or "I don't have it".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BitswapResponse {
     /// The CID this response is for.
@@ -141,7 +141,7 @@ pub enum CodecError {
     Io(String),
 }
 
-/// The Bitswap behaviour — wraps `request_response::Behaviour` with
+/// The Bitswap behaviour - wraps `request_response::Behaviour` with
 /// A content store for automatic request handling.
 pub struct BudBitswap {
     /// The content store used to serve and cache chunks.
@@ -199,7 +199,7 @@ impl BudBitswap {
             tracing::warn!(
                 expected = %response.cid,
                 actual = %computed,
-                "received chunk with integrity mismatch — rejecting"
+                "received chunk with integrity mismatch - rejecting"
             );
             return Err(StoreError::IntegrityMismatch {
                 expected: response.cid,

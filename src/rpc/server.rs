@@ -51,7 +51,7 @@ pub struct RpcSecurityConfig {
 
 impl Default for RpcSecurityConfig {
     fn default() -> Self {
-        // (security audit §5) secure default — auth ON, no API key
+        // (security audit §5) secure default - auth ON, no API key
         // (caller must configure `api_key` before serving). This is what
         // [`Self::operator_default`] used to be (auth OFF); the prior
         // Behaviour is preserved under that explicit name for trusted
@@ -77,7 +77,7 @@ impl RpcSecurityConfig {
         // At every server start so an operator cannot accidentally ship
         // An unauthenticated RPC to the public internet.
         tracing::warn!(
-            "[GUVENLIK] Operator RPC auth_required=false — yalnizca localhost/ozel ag icindir."
+            "[GUVENLIK] Operator RPC auth_required=false - yalnizca localhost/ozel ag icindir."
         );
         tracing::warn!(
             "[GUVENLIK] Yonetim metodlari public listener'da reddedilir; operator listener yine hassastir."
@@ -470,7 +470,7 @@ impl RpcServer {
             "replayNonceRoot": Self::bytes32_to_0x(h.replay_nonce_root),
             "proposer": h.proposer.map(|p| p.to_string()),
             "settlementFinalityRoot": Self::bytes32_to_0x(h.settlement_finality_root),
-            // B.U.D.: storage_root anchoring — null when no
+            // B.U.D.: storage_root anchoring - null when no
             // Storage proofs in this block, 0x-prefixed hex when present.
             "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
         })
@@ -949,7 +949,7 @@ impl BudlumApiServer for RpcServer {
         // The chain charges a flat fee: `AccountState::validate_transaction`
         // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
         // `fee`, and rejects any `priority_fee`. `total_cost` is
-        // `amount + fee`. There is no gas metering — the `GasSchedule`
+        // `amount + fee`. There is no gas metering - the `GasSchedule`
         // Per-opcode numbers are not consulted on any settlement path.
         //
         // The previous answer was the literal `21000` for every transaction
@@ -1558,7 +1558,7 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Security: never trust caller-supplied provenance. An external
         // Submitter cannot self-certify a report as ConsensusVerified to force a
-        // Slash — the RPC path is always Unverified. Only the node's own
+        // Slash - the RPC path is always Unverified. Only the node's own
         // Consensus layer emits ConsensusVerified reports internally.
         report.provenance = crate::registry::ProofProvenance::Unverified;
         // A reporter is required so the anti-spam fee can be charged.
@@ -1597,7 +1597,7 @@ impl BudlumApiServer for RpcServer {
         // The proof's correctness is enforced by
         // `handle_qc_fault_proof` (merkle inclusion +
         // Cryptographic dilithium verification), which is the
-        // Only acceptable gate — it costs ~millions of dollars
+        // Only acceptable gate - it costs ~millions of dollars
         // Of compute to forge a valid proof, so a fee gate is
         // Not required. On a successful proof the underlying
         // QC blob's finality is invalidated from the proof's
@@ -1985,7 +1985,7 @@ impl BudlumApiServer for RpcServer {
     async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Ghost RPC was documented but not implemented.
         // Implementation: query PermissionlessRegistry active members for STORAGE_OPERATOR (RoleId 5).
-        // No admin gate, no whitelist — permissionless read, same as bud_registryActiveMembers.
+        // No admin gate, no whitelist - permissionless read, same as bud_registryActiveMembers.
         let role = crate::registry::role::roles::STORAGE_OPERATOR;
         let members = self.chain.get_registry_active_members(role).await;
         let list: Vec<serde_json::Value> = members

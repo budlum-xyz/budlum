@@ -1,4 +1,4 @@
-# .grype.yaml — Grype (Anchore) zafiyet tarayıcısı yapılandırması
+# .grype.yaml - Grype (Anchore) zafiyet tarayıcısı yapılandırması
 #
 # NEDEN OSV-Scanner'IN YANINDA: Grype farklı bir veritabanı setinden besleniyor
 # (NVD + GHSA + distro feed'leri) ve her bulguya EPSS skoru ekliyor. EPSS,
@@ -14,12 +14,12 @@
 # POLİTİKA: istisna listesi osv-scanner.toml ile birebir aynı olmalıdır. İki
 # tarayıcının aynı bulgu için çelişmesi kapının güvenilirliğini aşındırır;
 # biri güncellenirse diğeri de güncellenmelidir. Listede olmayan her bulgu
-# FAIL'dir. Şu an liste boş — taşınan hiçbir zafiyet yok.
+# FAIL'dir. Şu an liste boş - taşınan hiçbir zafiyet yok.
 
 # Yalnız düzeltmesi olan bulgular değil, hepsi raporlansın.
 ignore-wontfix: ''
 
-# Eşik: high ve üzeri job'ı kırar. Aşağısı raporlanır ama bloke etmez —
+# Eşik: high ve üzeri job'ı kırar. Aşağısı raporlanır ama bloke etmez -
 # Grype'ın distro/NVD kaynakları düşük şiddetli gürültü üretebiliyor ve bu
 # kapının amacı OSV/cargo-deny'nin üstüne EK sinyal koymak, onları
 # tekrarlamak değil.

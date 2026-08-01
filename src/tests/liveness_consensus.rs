@@ -2,7 +2,7 @@
 //!
 //! These tests drive real block production through `Blockchain::produce_block`
 //! (which commits blocks and, at epoch boundaries, runs
-//! `maybe_observe_liveness_on_epoch_close`) — NOT the isolated
+//! `maybe_observe_liveness_on_epoch_close`) - NOT the isolated
 //! `state.record_liveness_epoch` call.
 //!
 //! Decision 2.3 = OBSERVE MODE: crossing the miss threshold is logged/reported
@@ -83,7 +83,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
     let mut bc = chain_with_validators(producer, absentee);
 
     // Lower the liveness threshold to 2 so we can cross it quickly.
-    // Explicitly assert the observe-only (disabled) behavior — this is
+    // Explicitly assert the observe-only (disabled) behavior - this is
     // Also the default, but we set it explicitly so the test documents intent
     // And stays correct even if the default ever changes.
     bc.state.registry.set_params(RegistryParams {
@@ -92,7 +92,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
         ..RegistryParams::default()
     });
     // `add_validator` already auto-registered the absentee in the registry
-    // (sync), so a slash WOULD have something to cut — proving the
+    // (sync), so a slash WOULD have something to cut - proving the
     // No-slash property is meaningful, not vacuous.
     let stake_before = bc
         .state
@@ -166,7 +166,7 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
-    // A PoA domain with an approved member — kept in the SEPARATE membership
+    // A PoA domain with an approved member - kept in the SEPARATE membership
     // Registry, never in AccountState.validators.
     let mut poa = PoaMembershipRegistry::new();
     let poa_domain = 7u32;
@@ -229,8 +229,11 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
 
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
     // Stake was actually cut by the configured liveness ratio (1%).
-    let expected_penalty = ((stake_before as u128 * FIXED_POINT_SCALE as u128 / 100)
-        / FIXED_POINT_SCALE as u128) as u64;
+    let expected_penalty = u64::try_from(
+        (u128::from(stake_before) * u128::from(FIXED_POINT_SCALE) / 100)
+            / u128::from(FIXED_POINT_SCALE),
+    )
+    .expect("a penalty is a fraction of a u64 stake");
     assert_eq!(
         reg.stake,
         stake_before - expected_penalty,
@@ -244,7 +247,7 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
 }
 
 /// The amount cut through the real epoch flow equals exactly the configured
-/// `liveness_slash_ratio_fixed` (default 1%) — same formula as isolated
+/// `liveness_slash_ratio_fixed` (default 1%) - same formula as isolated
 /// Test, but driven by the live epoch-close hook.
 #[test]
 fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
@@ -265,8 +268,10 @@ fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
         .unwrap()
         .stake;
     let rate = bc.state.registry.params().liveness_slash_ratio_fixed;
-    let expected_penalty =
-        ((stake_before as u128 * rate as u128) / FIXED_POINT_SCALE as u128) as u64;
+    let expected_penalty = u64::try_from(
+        (u128::from(stake_before) * u128::from(rate)) / u128::from(FIXED_POINT_SCALE),
+    )
+    .expect("a penalty is a fraction of a u64 stake");
 
     // One threshold crossing is enough (threshold = 1).
     produce_n(&mut bc, producer, EPOCH_LENGTH * 2);
@@ -274,4 +279,105 @@ fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
     let reg = bc.state.registry.get(&absentee, roles::VALIDATOR).unwrap();
     assert_eq!(reg.stake, stake_before - expected_penalty);
     assert!(expected_penalty > 0, "1% of 10_000 must be > 0");
+}
+
+/// A validator that has already been slashed must stop accruing downtime.
+///
+/// `slash_validator` sets `jailed` / `active = false` and flips the registry
+/// entry to `MemberStatus::Slashed`, but the validator stays in
+/// `AccountState.validators` - that map is where `jail_until` lives, so it has
+/// to. `get_active_validators` filters on `active && !slashed`; the liveness
+/// expectation set did not.
+///
+/// Two of the three call sites took `validators.keys()` unfiltered, so a jailed
+/// member was counted absent every epoch for not signing blocks it is barred
+/// from signing. Its streak climbs, and the moment it is unjailed the next
+/// missed epoch tips it over a threshold it should have re-entered at zero.
+///
+/// This is Cosmos SDK #1867: a validator dropped from the active set kept its
+/// `SigningInfo` and was slashed for the window it was not in the set.
+///
+/// Canary: drop the `registry.is_active` filter from
+/// `Blockchain::record_liveness_epoch` and the streak assertion fails.
+#[test]
+fn a_slashed_validator_stops_accruing_downtime() {
+    use std::collections::HashSet;
+
+    let producer = addr(1);
+    let offender = addr(2);
+    let mut bc = chain_with_validators(producer, offender);
+    bc.state.registry.set_params(RegistryParams {
+        liveness_max_missed_epochs: 100, // high, so nothing reports during the test
+        ..RegistryParams::default()
+    });
+
+    // One epoch of absence while still active: the streak starts.
+    let only_producer: HashSet<Address> = std::iter::once(producer).collect();
+    bc.record_liveness_epoch(1, &only_producer);
+    let after_first = bc.state.liveness.missed_count(&offender);
+    assert_eq!(after_first, 1, "an active absentee accrues a miss");
+
+    // Now slash it for something else entirely (a double-sign), which jails it.
+    bc.state.slash_validator(
+        &offender,
+        crate::core::chain_config::FIXED_POINT_SCALE / 2,
+        "test",
+    );
+    assert!(
+        !bc.state.registry.is_active(&offender, roles::VALIDATOR),
+        "a slashed member must be inactive in the registry"
+    );
+    assert!(
+        bc.state.validators.contains_key(&offender),
+        "and must still be in the validator map, which is where jail_until lives"
+    );
+
+    // Several more epochs pass. It cannot sign - it is jailed.
+    for epoch in 2..=6 {
+        bc.record_liveness_epoch(epoch, &only_producer);
+    }
+
+    assert_eq!(
+        bc.state.liveness.missed_count(&offender),
+        after_first,
+        "a jailed validator must not accrue downtime for blocks it may not sign"
+    );
+}
+
+/// All three liveness call sites must agree on who is expected to sign.
+///
+/// `maybe_observe_liveness_on_epoch_close` filtered on `registry.is_active`
+/// from the start; `Blockchain::record_liveness_epoch` and
+/// `AccountState::record_liveness_epoch` did not. One filter in three places is
+/// how the two views drift, so this pins that they are the same set.
+#[test]
+fn every_liveness_path_expects_the_same_validators() {
+    use std::collections::HashSet;
+
+    let producer = addr(1);
+    let offender = addr(2);
+    let mut bc = chain_with_validators(producer, offender);
+    bc.state.registry.set_params(RegistryParams {
+        liveness_max_missed_epochs: 100,
+        ..RegistryParams::default()
+    });
+    bc.state.slash_validator(
+        &offender,
+        crate::core::chain_config::FIXED_POINT_SCALE / 2,
+        "test",
+    );
+
+    let only_producer: HashSet<Address> = std::iter::once(producer).collect();
+
+    let before = bc.state.liveness.missed_count(&offender);
+    bc.maybe_observe_liveness_on_epoch_close(10, &only_producer);
+    let after_observe = bc.state.liveness.missed_count(&offender);
+    bc.record_liveness_epoch(11, &only_producer);
+    let after_record = bc.state.liveness.missed_count(&offender);
+
+    assert_eq!(
+        (before, after_observe, after_record),
+        (before, before, before),
+        "both entry points must exclude an inactive member identically"
+    );
 }

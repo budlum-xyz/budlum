@@ -23,14 +23,14 @@ queries:
 # Için alertin satır-hash'ini değiştirip mevcut alerti "fixed" gösterip
 # Yenisini açıyorlardı (alert churn). Hepsi kaldırıldı.
 query-filters:
-  # Rust/hard-coded-cryptographic-value — 81 alert, tamamı yanlış pozitif.
+  # Rust/hard-coded-cryptographic-value - 81 alert, tamamı yanlış pozitif.
   #
   # Kural `[0u8; 32]` gibi dizi başlatıcılarını "sabit kodlanmış kriptografik
   # Değer" sayıyor. Bu kod tabanında hepsi iki desenden biri:
-  #   (a) `let mut buf = [0u8; 32];` — hemen ardından copy_from_slice/hash ile
+  #   (a) `let mut buf = [0u8; 32];` - hemen ardından copy_from_slice/hash ile
   #       DOLDURULAN boş tampon (proto_conversions.rs, pos.rs). Sabit bir
   #       Değer değil, yalnızca tampon ayırma.
-  #   (b) Boş Merkle kökü / sıfır sentinel — merkle_trie.rs boş alt ağaç için
+  #   (b) Boş Merkle kökü / sıfır sentinel - merkle_trie.rs boş alt ağaç için
   #       `[0u8; 32]` döner; account.rs'te bridge_root/message_root başlangıç
   #       Değerleri. Bunlar protokol sabitleri; gizli değildirler ve rastgele
   #       Olmaları protokolü bozardı.
@@ -42,7 +42,7 @@ query-filters:
   - exclude:
       id: rust/hard-coded-cryptographic-value
 
-  # Rust/cleartext-logging — 1 alert (high), yanlış pozitif.
+  # Rust/cleartext-logging - 1 alert (high), yanlış pozitif.
   #
   # Blockchain.rs:2407'de "hassas veri log'a yazılıyor" diyor. İlgili blok
   # Pending_finality_certs üzerinde retention budaması yapıyor (`get_mut` +

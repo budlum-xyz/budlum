@@ -92,7 +92,7 @@ impl Pkcs11Signer {
         let session = client.open_rw_session(*target_slot).map_err(|e| {
             CryptoError::KeyGeneration(format!("Failed to open RW session on slot {slot_id}: {e}"))
         })?;
-        // Secrecy 0.10 — secrecy::Secret kaldırıldı;
+        // Secrecy 0.10 - secrecy::Secret kaldırıldı;
         // Cryptoki 0.12 AuthPin = SecretString = SecretBox<str>.
         let pin_secret = secrecy::SecretString::new(pin.into_boxed_str());
         session
@@ -162,7 +162,7 @@ impl Pkcs11Signer {
     }
 
     /// Vendor mekanizma kurulumu. S1 fix (2026-07-17): cryptoki 0.12
-    /// GERÇEK API'si — struct literal YOK (alanlar private: E0451/E0560):
+    /// GERÇEK API'si - struct literal YOK (alanlar private: E0451/E0560):
     /// MechanismType::new_vendor_defined CKM_VENDOR_DEFINED tabanının
     /// Altındaki id'leri reddeder (fail-closed value doğrulaması);
     /// VendorDefinedMechanism yalnızca ::new ile kurulur.
@@ -172,7 +172,7 @@ impl Pkcs11Signer {
         // CI (2026-07-21): Cross-platform determinism matrisinin
         // Ilk Windows koşusu bu satırı yakaladı (E0308). `CK_MECHANISM_TYPE`
         // Cryptoki-sys'te Windows'ta u32 (CK_ULONG, LLP64 ABI), Unix'te u64
-        // (LP64) — ve cryptoki_sys dışa açık olmadığından tür isimlendirilemez.
+        // (LP64) - ve cryptoki_sys dışa açık olmadığından tür isimlendirilemez.
         // Platform eşlemesi cryptoki-sys'in kendi tanımıyla aynı tutulur;
         // 32-bit'e sığmayan vendor id fail-closed hata verir (sessiz kırpma yok).
         #[cfg(windows)]
@@ -366,7 +366,7 @@ impl Pkcs11Signer {
 ///
 /// PKCS#11 standard has no portable BLS/Dilithium mechanism. Vendors expose
 /// `CKM_VENDOR_DEFINED + offset` IDs. This struct records whether the operator
-/// Configured those IDs and whether software fallback material is present —
+/// Configured those IDs and whether software fallback material is present -
 /// It does **not** claim non-extractable hardware keys without vendor audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pkcs11VendorCapabilities {
@@ -469,7 +469,7 @@ impl ConsensusSigner for Pkcs11Signer {
             return Err(CryptoError::Signing("No Ed25519 private key in HSM".into()));
         }
         let mechanism = cryptoki::mechanism::Mechanism::Eddsa(
-            // Cryptoki 0.12 — EddsaParams::default
+            // Cryptoki 0.12 - EddsaParams::default
             // Kaldırıldı; paramsız saf Ed25519 = EddsaSignatureScheme::Pure.
             cryptoki::mechanism::eddsa::EddsaParams::new(
                 cryptoki::mechanism::eddsa::EddsaSignatureScheme::Pure,

@@ -1,12 +1,12 @@
-//! PoA/Permissionless izolasyon test seti — CI Genişletme Madde 9.
+//! PoA/Permissionless izolasyon test seti - CI Genişletme Madde 9.
 //!
 //! Bu dosya PoA domain'inin permissionless tarafa sızmadığını doğrular.
 //! 5 farklı sızma senaryosu test edilir:
-//! 1. RPC leak — PoA verisi permissionless RPC'de görünmemeli
-//! 2. Event leak — PoA membership event'leri permissionless domain'e sızmamalı
-//! 3. Cross-domain mesaj leak — PoA KYC metadata cross-domain mesajda taşınmamalı
-//! 4. Log leak — PoA bilgisi zincir verilerinde sızdırılmamalı
-//! 5. Error message leak — Hata mesajları PoA detaylarını ifşa etmemeli
+//! 1. RPC leak - PoA verisi permissionless RPC'de görünmemeli
+//! 2. Event leak - PoA membership event'leri permissionless domain'e sızmamalı
+//! 3. Cross-domain mesaj leak - PoA KYC metadata cross-domain mesajda taşınmamalı
+//! 4. Log leak - PoA bilgisi zincir verilerinde sızdırılmamalı
+//! 5. Error message leak - Hata mesajları PoA detaylarını ifşa etmemeli
 
 #[cfg(test)]
 mod poa_isolation_tests {
@@ -18,7 +18,7 @@ mod poa_isolation_tests {
 
     const POA_DOMAIN: u32 = 3;
 
-    /// Senaryo 1: RPC Leak — PoA membership verisi permissionless registry'de görünmemeli.
+    /// Senaryo 1: RPC Leak - PoA membership verisi permissionless registry'de görünmemeli.
     ///
     /// PoA üyesi permissionless registry'ye stake atlamadan girememeli.
     #[test]
@@ -54,7 +54,7 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Senaryo 2: Event Leak — PoA membership event'leri permissionless domain'de görünmemeli.
+    /// Senaryo 2: Event Leak - PoA membership event'leri permissionless domain'de görünmemeli.
     ///
     /// PoA üyeliği permissionless validator setine yansımamalı.
     #[test]
@@ -92,9 +92,9 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Senaryo 3: Cross-Domain Mesaj Leak — PoA KYC metadata cross-domain mesajda taşınmamalı.
+    /// Senaryo 3: Cross-Domain Mesaj Leak - PoA KYC metadata cross-domain mesajda taşınmamalı.
     ///
-    /// CrossDomainMessage KYC commitment içermez — sadece payload_hash taşır.
+    /// CrossDomainMessage KYC commitment içermez - sadece payload_hash taşır.
     #[test]
     fn cross_domain_message_does_not_carry_kyc_metadata() {
         use crate::cross_domain::message::{
@@ -131,7 +131,7 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Senaryo 4: Log Leak — PoA bilgisi zincir verilerinde sızdırılmamalı.
+    /// Senaryo 4: Log Leak - PoA bilgisi zincir verilerinde sızdırılmamalı.
     ///
     /// PoA registry'si permissionless registry'den tamamen ayrıdır.
     #[test]
@@ -161,7 +161,7 @@ mod poa_isolation_tests {
         );
     }
 
-    /// Senaryo 5: Error Message Leak — Hata mesajları PoA detaylarını ifşa etmemeli.
+    /// Senaryo 5: Error Message Leak - Hata mesajları PoA detaylarını ifşa etmemeli.
     ///
     /// PoA ve Permissionless registry'ler tamamen ayrı veri yapılarıdır.
     #[test]
@@ -247,7 +247,7 @@ mod poa_isolation_tests {
         let admin = Address::from([0xAD; 32]);
         poa.add_admin(POA_DOMAIN, admin);
 
-        // Permissionless validator — stake ile
+        // Permissionless validator - stake ile
         let perm_validator = Address::from([0xBB; 32]);
         perm_state.add_balance(&perm_validator, 10_000);
         perm_state.add_validator(perm_validator, 5_000);

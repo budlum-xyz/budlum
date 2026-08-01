@@ -1,16 +1,16 @@
-# BNS — Budlum Name Service (`.bud`) (modül README'si)
+# BNS - Budlum Name Service (`.bud`) (modül README'si)
 
 **Modül-ayrımı kuralı gereği BNS'in kendi README'sidir.**
 
 ## Durum
 
-- **Olgunluk:** iskelet mevcut — `src/bns/` (`registry.rs`: `BnsRegistry`,
+- **Olgunluk:** iskelet mevcut - `src/bns/` (`registry.rs`: `BnsRegistry`,
   `types.rs`: `NameRecord`/`BnsError`/`BnsResolved`).
 - **Düzeltme (2026-07-18 kod doğrulaması):** "henüz mimarisi yok, sıfırdan"
-  ifadesi güncel değildir — kayıt/resolve/transfer/
+  ifadesi güncel değildir - kayıt/resolve/transfer/
   renewal/subdomain/maliyet-ölçekleme davranışları kodlu ve testlidir.
 - **Kapsam dışı (bu tur):** squatting/speaking-rights ekonomisi, B.U.D./AI layer
-  entegrasyon sözleşmesi —  dokümanı §4.4 gereği ayrı talimat turu.
+  entegrasyon sözleşmesi -  dokümanı §4.4 gereği ayrı talimat turu.
 
 ## Mevcut davranış (test-kilitli)
 
@@ -22,6 +22,6 @@ maliyet ölçekleme (cost scaling).
 
 - 9 test, hepsi `test_bns_` prefix'li: `src/tests/bns.rs` (2),
   `src/tests/bns_expanded.rs` (7).
-- Şu an Core lib suite içinde (`cargo test --lib`) koşar — **ayrı
+- Şu an Core lib suite içinde (`cargo test --lib`) koşar - **ayrı
   isim-kanaryalı CI gate'i ekleniyor**
   (`scripts/check-bns-gate.sh`, B.U.D. kapı deseni kopyası; vacuous-gate korumalı).

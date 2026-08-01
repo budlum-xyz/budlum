@@ -3,6 +3,11 @@ use crate::core::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+/// Transport block-size ceiling, measured over the **protobuf** encoding.
+///
+/// Not the same bound as `consensus::MAX_BLOCK_SIZE` (1_000_000 over JSON),
+/// which is stricter in both value and encoding. See that constant for the
+/// comparison and for why this one must stay the looser of the two.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
 pub const MAX_TX_SIZE: usize = 100 * 1024;
 /// Maximum number of full blocks returned in one range-sync response.
@@ -257,6 +262,47 @@ mod tests {
             "range-sync worst-case payload must stay below one transport frame"
         );
         assert_eq!(MAX_SNAP_BATCH, MAX_CHAIN_SYNC_BLOCKS as u64);
+    }
+
+    /// The transport bound must stay looser than the consensus bound.
+    ///
+    /// Two constants share the name `MAX_BLOCK_SIZE` and measure different
+    /// things: this one is protobuf `encoded_len`, `consensus::MAX_BLOCK_SIZE`
+    /// is `serde_json::to_vec`. JSON is the fatter encoding and carries the
+    /// smaller ceiling, so consensus is always the binding check - a block that
+    /// clears gossip can still be refused by validation, and never the reverse.
+    ///
+    /// That ordering is what keeps the network from admitting blocks every
+    /// validator then rejects, wasting bandwidth on gossip that cannot be
+    /// applied. It holds because of the current numbers, not because of
+    /// anything in the design, so it is asserted here.
+    ///
+    /// Canary: lower this constant below 1_000_000 and the assertion fails.
+    #[test]
+    fn transport_block_ceiling_is_not_stricter_than_consensus() {
+        // Both sides are `const`, so this is decidable at compile time. In a
+        // `const` block it fails the build rather than a test run - the
+        // strictly better place for an invariant over two literals, and what
+        // `clippy::assertions_on_constants` is pointing at.
+        const {
+            assert!(
+                MAX_BLOCK_SIZE >= crate::consensus::MAX_BLOCK_SIZE,
+                "transport ceiling is below the consensus ceiling: gossip would \
+                 refuse blocks that validation accepts, and honest producers \
+                 could not propagate them"
+            );
+        }
+        // And they are genuinely different bounds, not an accidental
+        // duplicate: if someone unifies them, the encodings have to be
+        // reconciled first.
+        const {
+            assert!(
+                MAX_BLOCK_SIZE != crate::consensus::MAX_BLOCK_SIZE,
+                "the two ceilings became equal; they measure different \
+                 encodings (protobuf here, JSON in consensus), so equal values \
+                 mean one of the two checks is now the wrong shape"
+            );
+        }
     }
 
     #[test]

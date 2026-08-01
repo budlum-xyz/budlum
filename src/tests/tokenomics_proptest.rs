@@ -1,4 +1,4 @@
-//! Tokenomics property-based test seti — CI Genişletme Madde 8.
+//! Tokenomics property-based test seti - CI Genişletme Madde 8.
 //!
 //! $BUD tokenomics invariant'larını binlerce rastgele senaryoda sınar:
 //! 1. Toplam arz 100M'ı hiçbir zaman geçmez
@@ -13,12 +13,12 @@ mod tests {
     use crate::tokenomics::{TokenomicsParams, BUD_TOTAL_SUPPLY};
     use proptest::prelude::*;
 
-    /// Adres üretici — rastgele 32 byte.
+    /// Adres üretici - rastgele 32 byte.
     fn arb_address() -> impl Strategy<Value = Address> {
         any::<[u8; 32]>().prop_map(Address::from)
     }
 
-    /// Bakiye üretici — 0 ile 10M arasında.
+    /// Bakiye üretici - 0 ile 10M arasında.
     fn arb_balance() -> impl Strategy<Value = u64> {
         0..10_000_000u64
     }
@@ -38,7 +38,7 @@ mod tests {
             // Genesis allocations toplamı = BUD_TOTAL_SUPPLY
             assert_eq!(params.total(), BUD_TOTAL_SUPPLY);
 
-            // Rastgele bakiye ekleme — toplam arzı aşmamalı
+            // Rastgele bakiye ekleme - toplam arzı aşmamalı
             let mut total_added: u64 = 0;
             for (addr, balance) in &balances {
                 state.add_balance(addr, *balance);

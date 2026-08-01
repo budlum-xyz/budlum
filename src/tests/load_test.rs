@@ -32,7 +32,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     // Reload replays blocks from the deterministic genesis state, and direct
     // In-memory state mutations are not part of the chain (replaying block
     // #1 against an unfunded account fails inside apply_block_effects and
-    // The init path hard-exits the process — blockchain.rs:339).
+    // The init path hard-exits the process - blockchain.rs:339).
     let senders: Vec<KeyPair> = (0..10).map(|_| KeyPair::generate().unwrap()).collect();
     let funded_genesis = || {
         let mut g = crate::chain::genesis::GenesisConfig::new(45262);
@@ -108,7 +108,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     let state2 = bc2.state.clone();
 
     // The state root is a pure function of (pubkey, balance, nonce) over the
-    // Accounts map — diagnose at map level first so any replay divergence
+    // Accounts map - diagnose at map level first so any replay divergence
     // Pinpoints the offending accounts instead of an opaque hash.
     assert_eq!(
         live_accounts.len(),
@@ -137,9 +137,9 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     // (bridge_root, message_root, settlement_root, global_header_summary).
     // Those are projections from Blockchain-level structures captured
     // As-of-production-height; the reload replay loop does not (yet) mirror
-    // Them per-block — that mirroring is the V3 replay-anchoring work item.
-    // The executable consensus surface — accounts, validators, unbonding,
-    // Epoch, base_fee, block_reward — is fully replayable and MUST be
+    // Them per-block - that mirroring is the V3 replay-anchoring work item.
+    // The executable consensus surface - accounts, validators, unbonding,
+    // Epoch, base_fee, block_reward - is fully replayable and MUST be
     // Bit-identical. Normalize the overlays on both sides and compare.
     let mut live_masked = live_state.clone();
     live_masked.bridge_root = [0u8; 32];

@@ -169,7 +169,7 @@ impl Storage {
     /// A stored value that does not parse used to become `0` through
     /// `unwrap_or(0)`, and `0` is exactly the value that means "fresh
     /// database, run every migration". So a single corrupted byte in this key
-    /// did not surface as an error — it silently re-ran `apply_migrations`
+    /// did not surface as an error - it silently re-ran `apply_migrations`
     /// against a populated database.
     ///
     /// A missing key still means `0`, because that genuinely is a fresh
@@ -321,7 +321,7 @@ impl Storage {
             // Instead of dropping it and reopening the path: sled's lock
             // Release is asynchronous with `Db::drop`, so a back-to-back
             // Reopen races with it and flakes (tur13_5, 2026-07-18). The
-            // Semantics are unchanged — the checks run on the freshly
+            // Semantics are unchanged - the checks run on the freshly
             // Restored data exactly as `Storage::new` would run them.
             let restored = Storage { db };
             restored.apply_migrations()?;
@@ -609,7 +609,7 @@ impl Storage {
     /// `Blockchain::validator_snapshots` keeps the last 100 epochs in memory
     /// And was never written anywhere. After a restart every historical epoch
     /// Falls through `validator_snapshot_for_epoch` and
-    /// `require_validator_snapshot` refuses the whole check — a node that
+    /// `require_validator_snapshot` refuses the whole check - a node that
     /// Restarts can no longer verify any past-epoch certificate or fault
     /// Proof until it has observed 100 fresh epochs.
     ///
@@ -1766,7 +1766,7 @@ mod storage_decode_locks {
             "bincode is not strict here; if this starts failing the decoder \
              changed and the comment above needs revisiting"
         );
-        // Too short to hold a u64 — this genuinely fails.
+        // Too short to hold a u64 - this genuinely fails.
         assert!(super::decode::<Stored>(b"\xff\xff\xff").is_err());
     }
 

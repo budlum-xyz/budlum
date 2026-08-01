@@ -9,13 +9,13 @@
 # parse hatasıyla düşüyordu; dosyanın varlığı denetim yapıldığı izlenimi
 # veriyordu ama tek bir bağımlılık bile denetlenmemişti.
 #
-# Kural: bu sayı ARTAMAZ. Düşmesi serbesttir ve teşvik edilir — düştüğünde
+# Kural: bu sayı ARTAMAZ. Düşmesi serbesttir ve teşvik edilir - düştüğünde
 # bilinçli bir PR ile burası da düşürülür (ratchet sıkılır). Sayıyı yukarı
 # çekmek CI-softening sayılır.
 #
 # Import kapsamı ölçüldü (2026-07-26): `cargo vet regenerate imports` altı
 # güvenilir kaynaktan (Mozilla, Google, Bytecode Alliance, ISRG, Embark,
-# Zcash) 158 crate için 268 denetim kaydı çekti — imports.lock 74 KB. Buna
+# Zcash) 158 crate için 268 denetim kaydı çekti - imports.lock 74 KB. Buna
 # rağmen sayı 437'de sabit: imports.lock dolu ve tamamen boş halleriyle
 # ölçüm birebir aynı sonucu verdi (437 = 437, kapanan crate farkı 0).
 # Sebep, cargo-vet'in tam sürüm/delta eşleşmesi istemesi; çekilen denetimler

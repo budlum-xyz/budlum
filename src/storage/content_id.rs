@@ -7,7 +7,7 @@
 //! `BDLM_CONTENT_V1` domain tag. This is exactly the same trade-off the Tur
 //! 14 plan §3.1 makes:
 //!
-//! > "İçerik adresleme: `ContentId` tipi — Poseidon4 hash tabanlı (BudZero'da
+//! > "İçerik adresleme: `ContentId` tipi - Poseidon4 hash tabanlı (BudZero'da
 //! >  zaten kullanılan `poseidon4_hash` primitive'iyle aynı aile; yeni bir
 //! >  hash fonksiyonu icat etme)."
 //!
@@ -16,7 +16,7 @@
 //! Hashed the same way in a different module.
 //!
 //! Plan §0.5 (data-sovereignty / team-independence rule),
-//! `ContentId` is a **pure on-chain data shape** — no network calls, no
+//! `ContentId` is a **pure on-chain data shape** - no network calls, no
 //! "Budlum Inc. indexer" dependency, no admin/pause hook. Any independent
 //! Node can compute it from the raw chunk bytes alone.
 
@@ -47,13 +47,13 @@ impl ContentId {
 
     /// Compute the `ContentId` of a chunk plus an explicit sub-chunk byte
     /// Range (used by `RetrievalChallenge` to pin a deterministic
-    /// Sub-range within a chunk — vision §8.3 /).
+    /// Sub-range within a chunk - vision §8.3 /).
     ///
     /// **Critically (plan §2.5):** the resulting `ContentId` is
     /// Only a byte-range hash, not a proof-of-storage. The full chunk can
     /// Be discarded and a fresh chunk holding only the requested range
     /// Can still answer the challenge. This is the documented
-    /// "interim retrieval challenge" limitation — see
+    /// "interim retrieval challenge" limitation - see
     /// `crate::domain::storage_deal::RetrievalChallenge` for the long
     /// Warning comment and the README cross-link.
     pub fn of_subrange(chunk: &[u8], start: u64, end: u64) -> Self {
@@ -83,10 +83,10 @@ impl ContentId {
     /// the same value. That makes two attacks free, both named in the SoK on
     /// decentralized storage networks:
     ///
-    /// * **outsourcing** — several operators keep one physical copy between
+    /// * **outsourcing** - several operators keep one physical copy between
     ///   them and collect a payment each, because any of them can produce the
     ///   answer the others would have produced;
-    /// * **Sybil** — one machine registers N identities, claims N replicas and
+    /// * **Sybil** - one machine registers N identities, claims N replicas and
     ///   stores one.
     ///
     /// Binding the answer to `(operator, deal_id, manifest_id)` means a

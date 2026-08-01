@@ -1,12 +1,12 @@
-//! Privacy-layer note/UTXO model — paralel izole subtree.
+//! Privacy-layer note/UTXO model - paralel izole subtree.
 //!
 //! Account model'e DOKUNMADAN, ayrı bir state alanında yaşar (gizlilik talimatı
 //! Bölüm 7 izolasyon kuralı). NFT / B.U.D. / Pollen state'i ile paylaşılmaz.
 //!
 //! Commitment + nullifier primitifleri:
-//! - commitment = Poseidon(amount || recipient || blinding) — zincire yalnızca
+//! - commitment = Poseidon(amount || recipient || blinding) - zincire yalnızca
 //!   Bu hash yazılır; amount/recipient gizli.
-//! - nullifier = Poseidon(secret) — harcanan commitment'ı işaretleyen tek-
+//! - nullifier = Poseidon(secret) - harcanan commitment'ı işaretleyen tek-
 //!   Kullanımlık değer; hangi commitment'ın harcandığını açıklamadan çifte-
 //!   Harcamayı önler.
 //!
@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 ///
 /// VM/AIR tarafı Goldilocks field element (u64) üretir; registry 32-byte Hash
 /// Saklar. `hash_from_field` / `field_from_hash` köprüsü little-endian packing
-/// Kullanır (üst 24 byte sıfır — domain'ler arası çakışma riski yok çünkü
+/// Kullanır (üst 24 byte sıfır - domain'ler arası çakışma riski yok çünkü
 /// Note subtree izole).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrivacyNote {
@@ -41,7 +41,7 @@ pub fn hash_from_field(fe: u64) -> Hash {
 }
 
 /// Extract the field element from a Hash produced by `hash_from_field`.
-/// Non-canonical (non-zero high bytes) hashes return the low 8 bytes only —
+/// Non-canonical (non-zero high bytes) hashes return the low 8 bytes only -
 /// Callers that need strictness should compare full Hash equality instead.
 #[must_use]
 pub fn field_from_hash(h: &Hash) -> u64 {
@@ -66,7 +66,7 @@ impl PrivacyNote {
 pub struct NoteRegistry {
     /// Canlı (harcanmamış) note commitment'ları.
     notes: BTreeSet<Hash>,
-    /// Harcanmış nullifier'lar — çifte-harcama önleme.
+    /// Harcanmış nullifier'lar - çifte-harcama önleme.
     spent_nullifiers: BTreeSet<Hash>,
 }
 
@@ -90,7 +90,7 @@ impl NoteRegistry {
 
     /// Bir note'u nullifier ile harca: nullifier halihazırda harcanmışsa RED
     /// (çifte-harcama önleme). Commitment canlı set'ten çıkarılır, nullifier
-    /// Spent set'e eklenir. Harcanan commitment KAMUYA açıklanmaz — çağıran
+    /// Spent set'e eklenir. Harcanan commitment KAMUYA açıklanmaz - çağıran
     /// Sum-conservation constraint ile mülkiyeti kanıtlar.
     pub fn spend(&mut self, nullifier: Hash, commitment: Hash) -> Result<(), String> {
         if self.spent_nullifiers.contains(&nullifier) {

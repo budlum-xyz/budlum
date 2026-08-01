@@ -27,7 +27,7 @@ Follow-up TODOs:
 # Budlum Core Constitution
 
 Budlum is a permissionless multi-consensus L1. The code decides who holds funds
-and which chain is real, so the bar is not "reviewed and looks correct" — it is
+and which chain is real, so the bar is not "reviewed and looks correct" - it is
 "a machine refuses the change when the property breaks".
 
 These principles describe what the repository already does. They are written
@@ -42,7 +42,7 @@ gate must reject. A gate that cannot fail proves nothing about the commit it
 passed, while still appearing in the check list.
 
 This is not hypothetical. Four gates were once removed from this repository
-because they printed `echo OK; exit 0` — they had never rejected anything, and
+because they printed `echo OK; exit 0` - they had never rejected anything, and
 one of them pointed at a source file that was not in the tree.
 `scripts/check-gates-are-wired.sh` closed the door behind them: a
 `scripts/check-*.sh` that no workflow invokes now fails CI by name.
@@ -63,7 +63,7 @@ warnings fail the build. The number may fall in a deliberate commit; it may not
 rise to accommodate one.
 
 **Enforcement**: `scripts/check-clippy-extra.sh` fails when the count exceeds
-the baseline, and its canary proves both directions — 999999 warnings must fail,
+the baseline, and its canary proves both directions - 999999 warnings must fail,
 2 must pass.
 
 ### III. Findings Are Measured, Not Asserted
@@ -75,7 +75,7 @@ goes in the commit message. After the fix, reverting it must fail the new tests.
 This cuts both ways, and the discipline earns its keep on the second half: a
 plausible-looking finding that survives investigation is worth more than a fix,
 and a plausible-looking finding that does *not* survive must be dropped rather
-than shipped. Several have been — a duplicate-leaf collision in
+than shipped. Several have been - a duplicate-leaf collision in
 `calculate_state_root` was real at the tree level and unreachable in practice,
 because the leaf commits to the account address and `accounts` is a `BTreeMap`.
 
@@ -89,7 +89,7 @@ test of production. A test asserted against the value the buggy code happens to
 produce pins the bug.
 
 Both have happened here. `team_vesting_uses_wall_clock_when_timestamp_is_available`
-fed `seconds_per_epoch() * team_cliff_epochs` — the one input that makes the
+fed `seconds_per_epoch() * team_cliff_epochs` - the one input that makes the
 broken conversion return the expected answer, and a value production cannot
 produce. It passed for as long as the bug existed and would have failed the
 moment the bug was fixed.
@@ -110,7 +110,7 @@ and neither failure announces itself.
 The `budlumxyz` rename is the worked example: types, modules and prose all
 moved, while `BDLM_HUB_REGISTRY_V2`, `b"hub_v1"`, `HUB_REGISTER_APP = 19` and
 the prost-generated paths stayed exactly as they were. The snapshot field was
-renamed in Rust and kept its disk key through `#[serde(rename = "hub")]` —
+renamed in Rust and kept its disk key through `#[serde(rename = "hub")]` -
 without that, `#[serde(default)]` would have loaded every existing snapshot
 *successfully*, with an empty registry.
 
@@ -125,12 +125,12 @@ Where logic is bounded and self-contained, a proof beats a sample.
 someone thought of.
 
 Model checking is not free and is not applied everywhere. It is applied where
-the property is worth the cost and the solver can close it — bond arithmetic
+the property is worth the cost and the solver can close it - bond arithmetic
 decides how much stake a validator loses, and it is pure `u64`/`u128` maths.
 Proptests are kept alongside, not replaced.
 
 **Enforcement**: `scripts/check-kani.sh` fails on a failed proof *and* when the
-number of harnesses that ran is lower than the number declared in the source —
+number of harnesses that ran is lower than the number declared in the source -
 a proof that silently stops compiling would otherwise leave the gate green.
 
 ## Consensus and Wire Compatibility
@@ -166,7 +166,7 @@ changes even when they look like refactors.
 ## Governance
 
 This constitution describes the rules the repository enforces. Where it and the
-code disagree, the code is the fact and the document is the bug — unless the
+code disagree, the code is the fact and the document is the bug - unless the
 disagreement is a gate that stopped working, which is Principle I.
 
 **Amendment**: a change to these principles is a pull request that says which

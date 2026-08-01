@@ -1,4 +1,4 @@
-//! Budlum L1 CLI — işlem gönderme, state sorgulama, validator kılavuzu.
+//! Budlum L1 CLI - işlem gönderme, state sorgulama, validator kılavuzu.
 //!
 //!. Bu binary L1 çekirdeği (`budlum_core`) ile konuşur:
 //! Imzalı işlem oluştur + gönder (`tx send`), salt-okunur sorgu
@@ -30,7 +30,7 @@ const RPC_TIMEOUT_SECS: u64 = 15;
     name = "bud",
     author,
     version,
-    about = "Budlum L1 CLI — tx gönder, state sorgula, validator kılavuzu"
+    about = "Budlum L1 CLI - tx gönder, state sorgula, validator kılavuzu"
 )]
 struct Cli {
     /// Düğüm JSON-RPC uç noktası.
@@ -248,8 +248,8 @@ fn run_tx_send(
     // Gönder (bud_sendRawTransaction Transaction nesnesini doğrudan alır).
     let r = rpc_call(rpc_url, "bud_sendRawTransaction", serde_json::json!([tx]))?;
     match r.as_str() {
-        Some(returned) => println!("gönderildi \u{2713} — düğüm tx hash: {returned}"),
-        None => println!("gönderildi \u{2713} — düğüm cevap: {r}"),
+        Some(returned) => println!("gönderildi \u{2713} - düğüm tx hash: {returned}"),
+        None => println!("gönderildi \u{2713} - düğüm cevap: {r}"),
     }
     Ok(())
 }
@@ -304,7 +304,7 @@ fn run_query_status(rpc_url: &str) -> Result<(), String> {
 
 fn run_validator(config: Option<&str>) -> Result<(), String> {
     // Tam node runner (chain + consensus loop + RPC sunucu) paketli bir binary
-    // Değildir — `validator run` burada yapılandırma doğrulama + kılavuz verir.
+    // Değildir - `validator run` burada yapılandırma doğrulama + kılavuz verir.
     // `RpcServer::run` + `NodeConfig` ile gerçek node başlatma gelecek görev.
     match config {
         Some(path) => {
@@ -316,7 +316,7 @@ fn run_validator(config: Option<&str>) -> Result<(), String> {
             println!("yapılandırma geçerli (TOML): {path}");
         }
         None => {
-            println!("(yapılandırma belirtilmedi — --config <path> ile doğrulanabilir)");
+            println!("(yapılandırma belirtilmedi - --config <path> ile doğrulanabilir)");
         }
     }
     println!();

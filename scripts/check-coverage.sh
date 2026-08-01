@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Check-coverage.sh —  ratchet kapısı (kullanıcı kararı Q-7b1(a))
+# Check-coverage.sh -  ratchet kapısı (kullanıcı kararı Q-7b1(a))
 #
 # Line coverage'ı .github/coverage-baseline.txt eşiğiyle karşılaştırır.
 # Ratchet kuralı: baseline yalnız BİLİNÇLİ PR ile yükselir (sprint başına +%2
@@ -36,14 +36,14 @@ except Exception as e:
 L = t["lines"]
 print(f"lines: {L['covered']}/{L['count']} = {actual:.2f}%  |  baseline: {baseline:.2f}%")
 if actual + 1e-9 < baseline:
-    print(f"FAIL: coverage %{actual:.2f} baseline'ın (%{baseline:.2f}) ALTINDA — regresyon kapısı.")
+    print(f"FAIL: coverage %{actual:.2f} baseline'ın (%{baseline:.2f}) ALTINDA - regresyon kapısı.")
     raise SystemExit(1)
 print("OK: coverage baseline üstünde (ratchet sağlam).")
 PYEOF
 }
 
 if [ "${1:-}" = "--self-test" ]; then
-  # Kanarya: düşük JSON FAIL, yüksek JSON PASS olmak zorunda — yoksa kapı vacuous.
+  # Kanarya: düşük JSON FAIL, yüksek JSON PASS olmak zorunda - yoksa kapı vacuous.
   tmp=$(mktemp -d)
   python3 - "$tmp" <<'PYEOF'
 import json, pathlib, sys

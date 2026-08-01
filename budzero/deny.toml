@@ -1,4 +1,4 @@
-# budzero/deny.toml — BudZero/BudZKVM supply-chain kapısı ( / )
+# budzero/deny.toml - BudZero/BudZKVM supply-chain kapısı ( / )
 #
 # Kökteli deny.toml ile aynı politika; BudZero grafiği kendi matrix adımında
 # denetlenir. Şema cargo-deny 0.20+'a güncellendi (eski anahtarlar kaldırıldı;

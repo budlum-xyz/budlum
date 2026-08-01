@@ -48,9 +48,9 @@ mod rpc_tests {
     ///
     /// It returned the literal `21000` for every transaction type. That is
     /// Ethereum's transfer intrinsic; this chain has no gas metering at all.
-    /// The live protocol is a flat fee — `validate_transaction` rejects
+    /// The live protocol is a flat fee - `validate_transaction` rejects
     /// `fee < base_fee`, rejects a divergent `max_fee`, rejects any
-    /// `priority_fee` — so `21000` was not an estimate of anything.
+    /// `priority_fee` - so `21000` was not an estimate of anything.
     ///
     /// Canary: restore `Ok(Self::to_hex(21000))` and this fails, because the
     /// Devnet base fee is 1.
@@ -85,7 +85,7 @@ mod rpc_tests {
     }
 
     /// A caller that already priced its transaction above the floor gets its
-    /// Own fee back — that is what will be charged, since the flat-fee protocol
+    /// Own fee back - that is what will be charged, since the flat-fee protocol
     /// Takes `tx.fee` verbatim once it clears `base_fee`.
     #[tokio::test]
     async fn estimate_gas_reflects_a_fee_the_caller_already_set() {
@@ -149,7 +149,7 @@ mod rpc_tests {
 
     /// `bud_gasPrice` and `bud_estimateGas` must agree on the floor. They are
     /// The two numbers a wallet combines, and they were sourced from different
-    /// Places — one from the live chain, one from a constant.
+    /// Places - one from the live chain, one from a constant.
     #[tokio::test]
     async fn gas_price_and_estimate_gas_agree_on_the_floor() {
         let (server, _) = setup().await;
@@ -451,7 +451,7 @@ mod rpc_tests {
                 proof: proof2,
             })
             .await;
-        // Legacy PoW finality retired — valid-looking PoW
+        // Legacy PoW finality retired - valid-looking PoW
         // Proofs now reject. Previously this finalized successfully.
         assert!(result.is_err(), "D3: legacy self-declared PoW must reject");
 
@@ -477,7 +477,7 @@ mod rpc_tests {
         let verified_result = server
             .submit_verified_domain_commitment(verified_payload)
             .await;
-        // Legacy PoW finality retired — must reject.
+        // Legacy PoW finality retired - must reject.
         assert!(
             verified_result.is_err(),
             "D3: legacy self-declared PoW must reject"
@@ -548,7 +548,7 @@ mod rpc_tests {
         //
         // What this RPC test still proves: domain registration, weak-proof
         // Rejection, relayed submit path with active-relayer gate, and
-        // Global-header sealing — i.e. the full settlement surface minus
+        // Global-header sealing - i.e. the full settlement surface minus
         // The deprecated `lock_bridge_transfer` flow.
         let _ = Address::from([11u8; 32]);
         let _ = Address::from([12u8; 32]);
@@ -620,7 +620,7 @@ mod rpc_tests {
         // The opener bond is now really debited from the opener's balance, so
         // The watcher needs one. Before this change the field was documented as
         // Debited and never was, which let a freshly generated key with a zero
-        // Balance open a challenge — exactly what this test was doing.
+        // Balance open a challenge - exactly what this test was doing.
         bc.add_balance(&watcher, 100_000).await;
         let open_msg = crate::core::hash::hash_fields_bytes(&[
             b"BUD_OPEN_CHALLENGE_V1",

@@ -137,7 +137,7 @@ pub struct AiModelSpec {
     /// compile to the same instructions, because the weights are read from
     /// memory rather than baked into immediates.
     ///
-    /// The STARK does not bind that memory either — the AIR constrains the
+    /// The STARK does not bind that memory either - the AIR constrains the
     /// program, the gas counters, the exit code, the trace length and the
     /// event accumulator, but not the image the program starts from. So a
     /// prover can run the registered program over a *different* weight matrix
@@ -289,6 +289,26 @@ pub struct AiInferenceResult {
 }
 
 impl AiInferenceResult {
+    /// Digest an AI verifier would sign over its result.
+    ///
+    /// # Nothing calls this
+    ///
+    /// Zero call sites outside this file. The result reaches consensus wrapped
+    /// In a `TransactionType::AiInferenceResult`, and it is the *transaction*
+    /// Signature that is checked - `Transaction::signing_hash` commits to
+    /// `chain_id`, so the envelope is bound to one network even though this
+    /// Digest is not.
+    ///
+    /// That matters if this ever becomes load-bearing. The preimage below
+    /// Commits to `request_id`, the verifier, the output and a nonce, and
+    /// `AiInferenceRequest::calculate_id` does not fold in `chain_id` either -
+    /// So an identical request submitted on testnet and mainnet derives the
+    /// Same `request_id`, and a signature over this digest would verify on
+    /// Both. Today the transaction envelope is what stops that.
+    ///
+    /// Anyone wiring this into verification must add `chain_id` to the
+    /// Preimage first, or the inner signature will be replayable between
+    /// Networks in a way the outer one is not.
     pub fn calculate_signing_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_AI_RESULT_SIG_V1");
@@ -362,29 +382,29 @@ pub struct AiVerifierStakeInfo {
     pub total_equivocations: usize,
 }
 
-/// AI Execution Proof — ZKVM-based verifiable inference.
+/// AI Execution Proof - ZKVM-based verifiable inference.
 ///
 /// When a verifier submits a result, they can optionally attach a ZKVM execution
 /// Proof that cryptographically verifies the inference output was produced by
 /// The claimed model on the claimed input. This bridges the gap between "verifier
-/// Says so" (trust-based) and "mathematics prove it" (trustless) — the core
+/// Says so" (trust-based) and "mathematics prove it" (trustless) - the core
 /// Paradigm shift needed for Agentic Economy.
 ///
 /// The proof binds three things:
-/// 1. **Model identity** — `model_id` is embedded in the ZKVM program_hash
-/// 2. **Input commitment** — `input_commitment` is a public input to the proof
-/// 3. **Output commitment** — `output_commitment` is derived from the proof
+/// 1. **Model identity** - `model_id` is embedded in the ZKVM program_hash
+/// 2. **Input commitment** - `input_commitment` is a public input to the proof
+/// 3. **Output commitment** - `output_commitment` is derived from the proof
 ///
 /// Verification: `verify(model_id, input_commitment, output_commitment, proof)`
 /// Returns true only if the output was produced by the model on the input.
 ///
 /// This is the "AI Execution Layer" that the whitepaper describes as mainnet
-/// Blocker #5: "Primitiflerin ötesinde AI yürütme katmanı — araştırma/
+/// Blocker #5: "Primitiflerin ötesinde AI yürütme katmanı - araştırma/
 /// Entegrasyon görevsında."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiExecutionProof {
     /// The model that produced this inference. The ZKVM program_hash must
-    /// Match this model's registered `model_hash` — this is the cryptographic
+    /// Match this model's registered `model_hash` - this is the cryptographic
     /// Binding between the proof and the model.
     pub model_id: AiModelId,
     /// The input commitment that was the preimage to this proof.
@@ -393,7 +413,7 @@ pub struct AiExecutionProof {
     /// The output commitment derived from the proof execution.
     /// This must match the AiInferenceResult's `output_commitment`.
     pub output_commitment: [u8; 32],
-    /// The ZKVM program hash — keccak256 of the model's bytecode.
+    /// The ZKVM program hash - keccak256 of the model's bytecode.
     /// This binds the proof to a specific model implementation.
     pub program_hash: [u8; 32],
     /// The STARK proof envelope bytes produced by BudZKVM.
@@ -420,7 +440,7 @@ pub struct AiExecutionProof {
     /// Verifying a proof needs three things: the envelope, the guest program
     /// words, and the public inputs. The first travels in `proof_bytes` and
     /// the second is rebuildable from the registered model, but the third was
-    /// missing — `AiInferenceRequest` carries an `input_commitment`, not the
+    /// missing - `AiInferenceRequest` carries an `input_commitment`, not the
     /// raw input, so a verifier cannot replay the guest to derive
     /// `initial_state_root` and the gas counters. That is what
     /// `executor.rs` meant by "no program/public-input bundle to pass to the
@@ -501,7 +521,7 @@ impl AiExecutionPublicInputs {
 
 impl AiExecutionProof {
     /// Verify that this proof's commitments match the given request and result.
-    /// This is a structural check — cryptographic verification happens in
+    /// This is a structural check - cryptographic verification happens in
     /// ZkVmExecutor::verify_proof.
     pub fn commitments_match(
         &self,
@@ -532,7 +552,7 @@ impl AiExecutionProof {
 /// Verifier Quality of Service (QoS) reputation.
 ///
 /// In the Agentic Economy paradigm, verifier stake is not just a slashing
-/// Deposit — it's also a service quality guarantee. Agents selecting verifiers
+/// Deposit - it's also a service quality guarantee. Agents selecting verifiers
 /// Need to know which verifiers are reliable. This struct tracks per-verifier
 /// Performance metrics that enable QoS-aware verifier selection.
 ///
@@ -655,24 +675,24 @@ impl AiInferenceOutcome {
     }
 }
 
-/// Agent-to-Agent Payment — trustless value transfer
+/// Agent-to-Agent Payment - trustless value transfer
 /// Between AI agents in the Agentic Economy.
 ///
 /// In the paradigm shift #5 (AI + Blockchain Konverjansı), the core problem
 /// Is: "AI ajanlarının birbirleriyle ve insanlarla güvenli value transfer
 /// Yapamaması." This type enables:
 ///
-/// 1. **Inference-linked payments** — agent pays for inference results
+/// 1. **Inference-linked payments** - agent pays for inference results
 ///    (request_id binds the payment to a specific AI inference outcome)
-/// 2. **Autonomous agent payments** — agent-to-agent value transfer without
+/// 2. **Autonomous agent payments** - agent-to-agent value transfer without
 ///    Human intervention (the foundation of Agentic Economy)
-/// 3. **Escrow-gated** — payments can be escrowed until a condition is met
+/// 3. **Escrow-gated** - payments can be escrowed until a condition is met
 ///    (e.g., outcome finalization, execution proof verification)
 ///
 /// The payment is atomic: either the full payment succeeds (recipient gets
 /// Amount, sender loses amount + fee) or it fails (no state change).
 ///
-/// Future: ZKVM verification gate — payment only releases if an
+/// Future: ZKVM verification gate - payment only releases if an
 /// AiExecutionProof is attached and verified (trustless settlement).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentPayment {
@@ -689,7 +709,7 @@ pub struct AiAgentPayment {
     pub request_id: Option<AiRequestId>,
     /// Optional: Require execution proof for payment release.
     /// If true, the recipient must attach an AiExecutionProof before
-    /// The escrowed payment is released — this is the "trustless" path.
+    /// The escrowed payment is released - this is the "trustless" path.
     pub require_proof: bool,
     /// Block when this payment was submitted.
     pub submitted_at_block: u64,
@@ -730,13 +750,13 @@ impl AiAgentPayment {
     }
 }
 
-/// Agent Reputation Score — Agentic Economy primitive.
+/// Agent Reputation Score - Agentic Economy primitive.
 ///
 /// In the paradigm shift #5, agents need to build trust through verifiable
 /// Track records. This struct tracks an agent's reputation across multiple
 /// Dimensions: payment reliability, inference quality, and uptime.
 ///
-/// Reputation is the currency of trust in the Agentic Economy — an agent
+/// Reputation is the currency of trust in the Agentic Economy - an agent
 /// With high reputation can command higher fees and attract more requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiAgentReputation {

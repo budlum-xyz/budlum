@@ -6,7 +6,7 @@
 //!     `src/network/node.rs` holds ~20 lock sites; all but one already matched
 //!     on the result or exited deliberately, and the odd one out turned an
 //!     optional content fetch into a node-wide panic.
-//!   * Gossipsub's defaults are the network's DoS surface. They are currently
+//!   * `Gossipsub`'s defaults are the network's DoS surface. They are currently
 //!     accepted deliberately, and this file records which ones were checked so
 //!     "we never looked" cannot be confused with "we looked and accepted".
 
@@ -14,16 +14,13 @@
 mod tests {
     const NODE_RS: &str = include_str!("../network/node.rs");
 
-    /// Strip comments and string literals so a lock cannot be satisfied — or
-    /// tripped — by prose that merely mentions the pattern.
+    /// Strip comments and string literals so a lock cannot be satisfied - or
+    /// tripped - by prose that merely mentions the pattern.
     fn code_lines(body: &str) -> Vec<(usize, String)> {
         body.lines()
             .enumerate()
             .map(|(i, line)| {
-                let no_comment = match line.find("//") {
-                    Some(at) => &line[..at],
-                    None => line,
-                };
+                let no_comment = line.find("//").map_or(line, |at| &line[..at]);
                 (i + 1, no_comment.trim().to_string())
             })
             .filter(|(_, l)| !l.is_empty())
@@ -48,7 +45,7 @@ mod tests {
 
         assert!(
             offenders.is_empty(),
-            "node.rs contains bare .lock().unwrap() at {:?} — a poisoned mutex \
+            "node.rs contains bare .lock().unwrap() at {:?} - a poisoned mutex \
              would panic the node instead of failing the request. Match on the \
              Result, or use unwrap_or_else with an explicit logged exit.",
             offenders
@@ -58,7 +55,7 @@ mod tests {
         );
     }
 
-    /// The remote-content fetch path must survive a poisoned PeerManager.
+    /// The remote-content fetch path must survive a poisoned `PeerManager`.
     ///
     /// It used to survive by giving up: the arm matched on the lock result and
     /// answered "peer manager unavailable". That is better than panicking, but
@@ -179,7 +176,7 @@ mod tests {
              peers on one address is usually one machine claiming to be ten"
         );
         // The compensating control predates scoring and must not be dropped
-        // now that scoring exists — they cover different things: PeerManager
+        // now that scoring exists - they cover different things: PeerManager
         // bans on protocol violations, scoring degrades on mesh behaviour.
         assert!(
             NODE_RS.contains("check_rate_limit"),
@@ -191,6 +188,65 @@ mod tests {
     ///
     /// A topic with no entry contributes nothing to a peer's score, so only
     /// the global penalties apply and per-topic delivery accounting is lost.
+    /// Tick-counted settings must be rescaled when the heartbeat is slowed.
+    ///
+    /// The node raises `heartbeat_interval` from gossipsub's 1s default to 10s
+    /// (30s on mobile) to save CPU and radio. Three settings are counted in
+    /// heartbeat *ticks*, not seconds, so that change stretched them by the
+    /// same factor without anyone asking for it:
+    ///
+    ///   `check_explicit_peers_ticks` = 300    5 min ->  50 min (mobile 150)
+    ///   `opportunistic_graft_ticks`  =  60    1 min ->  10 min (mobile  30)
+    ///
+    /// Both are mesh repair. The first decides how long a dropped explicit
+    /// peer - a bootstrap node, a configured sentry - goes unnoticed before a
+    /// reconnect is attempted; for a validator that is the link to the network
+    /// it was pinned to on purpose. The second decides how long a node keeps a
+    /// mesh of low-scoring peers before looking for better ones, which is the
+    /// mechanism that recovers from a partial eclipse. Fifty minutes of either
+    /// is not a tuning choice anybody made.
+    ///
+    /// Peer-score decay is deliberately absent from that list: it runs on
+    /// `decay_interval` (1s) from its own timer in `poll`, not on the
+    /// heartbeat. Verified in behaviour.rs at the pinned revision.
+    ///
+    /// `max_ihave_messages_heartbeat` is also left alone. A slower heartbeat
+    /// makes that budget stricter, not looser, and an anti-flood limit
+    /// drifting tighter is the safe direction.
+    #[test]
+    fn heartbeat_tick_counters_are_rescaled_with_the_heartbeat() {
+        assert!(
+            NODE_RS.contains("check_explicit_peers_ticks("),
+            "the explicit-peer recheck is back on gossipsub's 300-tick default. \
+             At a 10s heartbeat that is 50 minutes before a dropped bootstrap \
+             or sentry peer is retried, and 150 minutes on mobile"
+        );
+        assert!(
+            NODE_RS.contains("opportunistic_graft_ticks("),
+            "opportunistic grafting is back on the 60-tick default. At a 10s \
+             heartbeat a node sits on a low-scoring mesh for 10 minutes before \
+             looking for better peers - that is the partial-eclipse recovery path"
+        );
+
+        // The rescaling must be derived from the heartbeat, not typed in twice.
+        // A hardcoded tick count is correct for exactly one interval and wrong
+        // the moment mobile mode picks a different one.
+        assert!(
+            NODE_RS.contains("300 / heartbeat.as_secs()")
+                && NODE_RS.contains("60 / heartbeat.as_secs()"),
+            "the tick counts are no longer derived from the heartbeat. Upstream \
+             means 300s and 60s of wall clock; deriving them keeps both the \
+             normal and mobile paths honest with one expression"
+        );
+        assert!(
+            NODE_RS.contains(".max(1)"),
+            "the derived tick counts lost their floor. A heartbeat longer than \
+             the interval being scaled would round to zero ticks, and gossipsub \
+             treats a zero tick counter as 'every heartbeat' or never depending \
+             on the counter - neither is what was asked for"
+        );
+    }
+
     #[test]
     fn scored_topics_cover_what_the_node_publishes() {
         let at = NODE_RS

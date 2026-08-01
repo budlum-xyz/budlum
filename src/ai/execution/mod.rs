@@ -1,4 +1,4 @@
-//! On-chain AI **execution** primitives (paradigm shift #5 — Agentic Economy).
+//! On-chain AI **execution** primitives (paradigm shift #5 - Agentic Economy).
 //!
 //! Hardened surface:
 //! - bounded model-class whitelist

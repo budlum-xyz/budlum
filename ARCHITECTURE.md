@@ -184,7 +184,7 @@ flowchart LR
 
 # Kapsamlı Sistem Diyagramları (Detaylı Veri Akışı)
 
-## 13. Executor — tam state transition pipeline
+## 13. Executor - tam state transition pipeline
 
 ```mermaid
 flowchart TD
@@ -237,7 +237,7 @@ flowchart TD
   end
 ```
 
-## 14. Privacy layer — Poseidon circuit + note registry state machine
+## 14. Privacy layer - Poseidon circuit + note registry state machine
 
 ```mermaid
 flowchart TD
@@ -292,7 +292,7 @@ flowchart TD
   end
 ```
 
-## 15. Bridge — full cross-domain message verification pipeline
+## 15. Bridge - full cross-domain message verification pipeline
 
 ```mermaid
 flowchart TD
@@ -344,7 +344,7 @@ flowchart TD
   end
 ```
 
-## 16. AI inference + execution proof — full lifecycle with STARK
+## 16. AI inference + execution proof - full lifecycle with STARK
 
 ```mermaid
 flowchart TD
@@ -434,7 +434,7 @@ flowchart TD
   end
 ```
 
-## 17. Consensus finality — all 5 domain adapters
+## 17. Consensus finality - all 5 domain adapters
 
 ```mermaid
 flowchart TD
@@ -498,7 +498,7 @@ flowchart TD
   end
 ```
 
-## 18. Registry — complete stake + slash + unbond state machine
+## 18. Registry - complete stake + slash + unbond state machine
 
 ```mermaid
 stateDiagram-v2
@@ -532,7 +532,7 @@ stateDiagram-v2
   end note
 ```
 
-## 19. Wallet — complete signing + privacy + TEE pipeline
+## 19. Wallet - complete signing + privacy + TEE pipeline
 
 ```mermaid
 flowchart TD
@@ -591,7 +591,7 @@ flowchart TD
   end
 ```
 
-## 20. BudZero STARK — bytecode to verified proof pipeline
+## 20. BudZero STARK - bytecode to verified proof pipeline
 
 ```mermaid
 flowchart TD
@@ -661,7 +661,7 @@ flowchart TD
   end
 ```
 
-## 21. Governance — proposal to execution pipeline
+## 21. Governance - proposal to execution pipeline
 
 ```mermaid
 flowchart TD
@@ -715,7 +715,7 @@ flowchart TD
   end
 ```
 
-## 22. Tokenomics — burn + vesting + reward state machine
+## 22. Tokenomics - burn + vesting + reward state machine
 
 ```mermaid
 flowchart TD
@@ -776,7 +776,7 @@ flowchart TD
   end
 ```
 
-## 23. P2P protocol stack — libp2p to application
+## 23. P2P protocol stack - libp2p to application
 
 ```mermaid
 flowchart TD
@@ -838,7 +838,7 @@ flowchart TD
   end
 ```
 
-## 24. Pollen data marketplace — full grant + encryption + AI gate
+## 24. Pollen data marketplace - full grant + encryption + AI gate
 
 ```mermaid
 flowchart TD
@@ -907,7 +907,7 @@ flowchart TD
   end
 ```
 
-## 25. Cross-domain message verification — EVM MPT deep dive
+## 25. Cross-domain message verification - EVM MPT deep dive
 
 ```mermaid
 flowchart TD
@@ -962,7 +962,7 @@ flowchart TD
     PayloadHash -->|pass| Accept[ACCEPT: verified deposit/lock facts]
   end
 ```
-## 26. Privacy layer — note lifecycle (D2)
+## 26. Privacy layer - note lifecycle (D2)
 
 ```mermaid
 flowchart LR
@@ -1084,7 +1084,7 @@ flowchart LR
   Isolation[PoA isolated from permissionless domains] -. no shared registry .-> Permissionless
 ```
 
-## 33. Validator lifecycle — multi-role architecture
+## 33. Validator lifecycle - multi-role architecture
 
 ```mermaid
 flowchart TD
@@ -1294,7 +1294,7 @@ flowchart LR
   Project --> Traversal[Path traversal rejection]
 ```
 
-## 44. Gateway — Atlas + Passport evidence
+## 44. Gateway - Atlas + Passport evidence
 
 ```mermaid
 flowchart LR
@@ -1331,7 +1331,7 @@ flowchart TD
   Merkle --> Forge[expected_block_hash forgery gate]
 ```
 
-## 46. Prover market — proof verification
+## 46. Prover market - proof verification
 
 ```mermaid
 flowchart LR
@@ -1409,7 +1409,7 @@ flowchart LR
   Root[Pollen root hash] --> StateRoot[AccountState state_root]
 ```
 
-## 51. Security audit — attack graph
+## 51. Security audit - attack graph
 
 ```mermaid
 flowchart TD

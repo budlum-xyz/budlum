@@ -1,4 +1,4 @@
-//! Runtime — Lubot çıkarım akışı (gerçek `AiRegistry` üzerinde).
+//! Runtime - Lubot çıkarım akışı (gerçek `AiRegistry` üzerinde).
 //!
 //! Lubot sorgusunun gerçek budlum-core AI katmanında uçtan-uca akışı:
 //! Model kaydı → operator compute-bond → kapalı-devre input_ref ile request

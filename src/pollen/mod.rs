@@ -1,4 +1,4 @@
-//! B.U.D. Marketplace — AccessGrant v2 (APPROVED RFC) §3.1 temel tipleri (P0).
+//! B.U.D. Marketplace - AccessGrant v2 (APPROVED RFC) §3.1 temel tipleri (P0).
 //!
 //! Kapsam (P0-deseni, tek atomik iş): `AssetId`, `Signature64`, `GrantId`.
 //! P1 (primitifler) bu tipler main'de yeşil olduktan sonra başlar.
@@ -10,7 +10,7 @@
 //! - **R3:** serde_json object-key yalnız string olabilir; ham `[u8; N]`
 //!   Anahtar serialize patlar (`permissionless.rs:176` tuzağı). `AssetId`
 //!   Address deseniyle string-serialize (`core/address.rs:64-73`).
-//! - ** (review kararı; revize — kullanıcı scope_v1):** bu `AssetId`
+//! - ** (review kararı; revize - kullanıcı scope_v1):** bu `AssetId`
 //!   Başlangıçta `crate::bud::marketplace` yolundaydı; kategorizasyon C2 ile
 //!   `crate::pollen` altına taşındı. `cross_domain::AssetId`
 //!   (= `Hash32` alias) dokunulmaz.
@@ -101,7 +101,7 @@ impl From<[u8; 32]> for AssetId {
     }
 }
 
-/// Ed25519 imzası — bounded, sentinel-default (R2 çözümü).
+/// Ed25519 imzası - bounded, sentinel-default (R2 çözümü).
 ///
 /// `Default` sıfır-imzadır (geçersiz-sentinel): boş bırakılmış imza alanı
 /// Geçerli imza gibi davranamaz; §5 kuralı sentinel'i her zaman reddeder.
@@ -277,7 +277,7 @@ mod tests {
 // Ekonomisi `src/marketplace`'ten buraya taşındı. Fiziksel taşıma bu adımda;
 // Model birleştirmesi (DataOffer (u64 id, seller, cid, price, active) ↔
 // V2 DataAsset/MarketplaceListing (AssetId + SaleAuthorization)) P1/P2
-// Kapsamında tasarlanır — bu modül v2 ile ÇAKIŞAN İKİ modeli barındırmaz,
+// Kapsamında tasarlanır - bu modül v2 ile ÇAKIŞAN İKİ modeli barındırmaz,
 // Geçiş köprüsüdür (bkz. RFC_ACCESSGRANT_V2 §3.2/).
 // ---------------------------------------------------------------------------
 
@@ -289,6 +289,6 @@ pub use data_rights::{
     SaleAuthorization, SaleAuthorizationId, POLLEN_AI_INPUT_REF_PREFIX,
 };
 
-/// AI Data Marketplace (satıcı-teklifi ekonomisi) — geçiş modülü.
+/// AI Data Marketplace (satıcı-teklifi ekonomisi) - geçiş modülü.
 pub mod offers;
 pub use offers::{DataOffer, MarketplaceRegistry, PollenPurchaseReceipt};

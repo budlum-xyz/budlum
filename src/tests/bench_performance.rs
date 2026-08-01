@@ -145,7 +145,7 @@ async fn bench_high_tps() {
     // Division to avoid the divide-by-zero panic on the empty-block edge
     // Case (a degenerate scenario, but the benchmark output is the only
     // Observable signal so it must not crash the run). The form below
-    // Is intentional — clippy would suggest `checked_div(...).unwrap_or(0)`,
+    // Is intentional - clippy would suggest `checked_div(...).unwrap_or(0)`,
     // Which is structurally identical; we keep the explicit form to make
     // The saturating behaviour auditable in a print-only context.
     let avg_tx_per_block = total_tx_processed.checked_div(blocks_count).unwrap_or(0);

@@ -88,7 +88,7 @@ pub enum FinalityProof {
     },
     PoA {
         /// The KYC-approved authority set for this PoA domain (equal-weight, no
-        /// Stake — PoA deliberately has no stake concept). Order-independent;
+        /// Stake - PoA deliberately has no stake concept). Order-independent;
         /// Duplicates are ignored during verification.
         #[serde(default)]
         authorities: Vec<crate::core::address::Address>,
@@ -103,14 +103,14 @@ pub enum FinalityProof {
         round: u64,
         commit_hash: Hash32,
         /// Real BFT commit certificate (BLS aggregate over the validator set),
-        /// Verified cryptographically — replaces the former self-reported
+        /// Verified cryptographically - replaces the former self-reported
         /// `signer_count`/`total_validators` (hardening).
         cert: FinalityCert,
         validator_snapshot: ValidatorSetSnapshot,
     },
     /// ZK finality: rather than carrying the raw STARK proof,
-    /// This references a proof already submitted to — and cryptographically
-    /// Verified by — the `ProofClaimRegistry` (via `submit_zk_proof`). This keeps
+    /// This references a proof already submitted to - and cryptographically
+    /// Verified by - the `ProofClaimRegistry` (via `submit_zk_proof`). This keeps
     /// A single source of truth for ZK verification and removes the two parallel
     /// Verification paths that audit flagged.
     ///
@@ -405,7 +405,7 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
 
 #[derive(Debug, Clone)]
 pub struct PoAFinalityAdapter {
-    /// Count-based quorum numerator (PoA is equal-weight, NOT stake-weighted —
+    /// Count-based quorum numerator (PoA is equal-weight, NOT stake-weighted -
     /// PoA deliberately has no stake concept, preserving-2 isolation).
     pub quorum_numerator: u64,
     /// Count-based quorum denominator.
@@ -440,7 +440,7 @@ impl PoAFinalityAdapter {
 /// authorities against the registered commitment instead of trusting them.
 ///
 /// `compute_hash` sorts by address, so the ordering of `authorities` does not
-/// matter, and duplicates must be removed by the caller before hashing —
+/// matter, and duplicates must be removed by the caller before hashing -
 /// otherwise a proof could pad its list to change the digest.
 pub fn poa_authority_set_hash(
     domain: &ConsensusDomain,
@@ -479,7 +479,7 @@ pub fn poa_authority_set_hash(
 /// two count-weighted PoA branches were the ones that did not.
 ///
 /// A domain with a zero `validator_set_hash` has no registered set to compare
-/// against — the same convention the stake-weighted adapters use — and is left
+/// against - the same convention the stake-weighted adapters use - and is left
 /// to the quorum check alone.
 fn reject_unregistered_poa_authorities(
     domain: &ConsensusDomain,
@@ -514,7 +514,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         // PoA finality now verifies REAL ed25519 signatures from the
         // Approved authority set (count-based quorum), instead of trusting a
         // Self-reported signer_count. `domain` and `commitment` are genuinely
-        // Used. This does NOT touch the permissionless stake registry — PoA
+        // Used. This does NOT touch the permissionless stake registry - PoA
         // Keeps its own separate, stake-free authority/signature model
         // (isolation preserved).
         let FinalityProof::PoA {
@@ -699,13 +699,13 @@ impl ZkFinalityAdapter {
     /// Verify ZK finality against an already-accepted proof claim (
     /// Option B).
     ///
-    /// The raw STARK proof is NOT re-verified here — it was already
+    /// The raw STARK proof is NOT re-verified here - it was already
     /// Cryptographically verified when it was submitted via `submit_zk_proof`
     /// And recorded in the `ProofClaimRegistry`. This method enforces the
     /// Binding the audit found missing:
     ///
     /// - `accepted_claim_root` is the `final_state_root` of the claim the
-    ///   Registry accepted for `(domain_id, target_height)` — `None` if no such
+    ///   Registry accepted for `(domain_id, target_height)` - `None` if no such
     ///   Claim exists.
     /// - It must match BOTH the proof's declared `final_state_root` AND the
     ///   `commitment.state_root`, so a finality request cannot borrow a proof
@@ -873,7 +873,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 cert,
                 validator_snapshot,
             } => {
-                // Real PoS verification — same checks as
+                // Real PoS verification - same checks as
                 // PosFinalityAdapter (lines 470-525). Previously this branch only
                 // Checked agg_sig_bls.is_empty and height/hash match, which
                 // Allowed a fake agg_sig_bls to pass if height/hash matched.
@@ -932,7 +932,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 cert,
                 validator_snapshot,
             } => {
-                // Real BFT verification — same checks as
+                // Real BFT verification - same checks as
                 // BftFinalityAdapter (lines 665-730). Previously this branch only
                 // Checked agg_sig_bls.is_empty and height/hash match.
                 if validator_snapshot.validators.is_empty() {
@@ -1010,7 +1010,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
 /// (`blockchain.rs`), and the runtime path re-checks the selected adapter's
 /// `adapter_name()` against that same field. Pointing the `AiInference` arm at
 /// the storage adapter meant comparing `"ai-inference-threshold"` against
-/// `"storage-attestation-v1"`, which never matches — so an `AiInference`
+/// `"storage-attestation-v1"`, which never matches - so an `AiInference`
 /// domain could be registered but not one of its commitments could ever
 /// finalize. Measured across all seven kinds, it was the only disagreeing
 /// pair:
@@ -1097,7 +1097,7 @@ mod tests {
     fn pow_header_chain_rejects_empty_or_short_chain_d3() {
         // The ONLY PoW finality path left is the bounded
         // PoWHeaderChain. The legacy self-declared `FinalityProof::PoW` variant
-        // Was removed from the production ISA — a PoW domain finalizes solely
+        // Was removed from the production ISA - a PoW domain finalizes solely
         // Via `PoWHeaderChainFinalityAdapter`.
         let mut domain = default_domain(
             1,

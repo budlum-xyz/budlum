@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// `PermissionlessRegistry::root()`, which feeds the state root. bincode
 /// encodes fields positionally with no names and no length prefix per struct,
 /// so a snapshot written by an older binary has fewer fields than a newer
-/// binary expects and fails to deserialize — `#[serde(default)]` on the
+/// binary expects and fails to deserialize - `#[serde(default)]` on the
 /// `params` field in `PermissionlessRegistry` only covers the field being
 /// *absent*, not being *short*.
 ///
@@ -51,7 +51,7 @@ pub struct RegistryParams {
     pub malicious_slash_ratio_fixed: u64,
     /// Number of *consecutive* epochs a validator may miss expected consensus
     /// Participation before a liveness fault is raised (and slashed). Counted
-    /// Consecutively and reset on any participation — never cumulative, so a
+    /// Consecutively and reset on any participation - never cumulative, so a
     /// Validator is not disproportionately punished for scattered misses.
     pub liveness_max_missed_epochs: u64,
     /// Fee required to submit a slashing report, as an anti-spam/DoS measure.
@@ -91,7 +91,7 @@ pub struct RegistryParams {
     /// Jails a validator on ANY offence, so even a light (1%) liveness penalty
     /// Fully jails the offender. Per decision ("observe first,
     /// Validate on live/testnet, then activate"), this stays OFF until an
-    /// Operator/governance explicitly enables it — the mechanism is fully wired
+    /// Operator/governance explicitly enables it - the mechanism is fully wired
     /// And tested, but never auto-activates. Set to `true` to enable.
     pub liveness_slashing_enabled: bool,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
@@ -103,7 +103,7 @@ pub struct RegistryParams {
     pub bridge_relayer_fee_ppm: u64,
     /// Floor on that cut, in base units of the arriving asset.
     ///
-    /// A pure percentage rounds to zero on small transfers — at 1% every
+    /// A pure percentage rounds to zero on small transfers - at 1% every
     /// transfer under 100 units paid the relayer nothing, so an attacker could
     /// split a large bridge into 99-unit pieces and move it for free while
     /// relayers carried the external gas. The floor is what makes each relayed
@@ -175,11 +175,11 @@ impl Default for RegistryParams {
             // Targeting a multi-day window on mainnet should raise this via
             // Governance rather than editing code.
             unbonding_epochs: crate::core::account::UNBONDING_EPOCHS,
-            // 50% — matches `PoSConfig::double_sign_penalty`.
+            // 50% - matches `PoSConfig::double_sign_penalty`.
             double_sign_slash_ratio_fixed: FIXED_POINT_SCALE / 2,
-            // 1% — downtime is a light offence.
+            // 1% - downtime is a light offence.
             liveness_slash_ratio_fixed: FIXED_POINT_SCALE / 100,
-            // 100% — proven malice burns the whole bond.
+            // 100% - proven malice burns the whole bond.
             malicious_slash_ratio_fixed: FIXED_POINT_SCALE,
             // 20 consecutive missed epochs. Aligned with mainnet readiness decision
             // For operator tolerance and reliability.
@@ -206,7 +206,7 @@ impl Default for RegistryParams {
             // Caught within one epoch. Governance-tunable per network.
             max_invalid_votes_per_epoch: 20,
             liveness_slashing_enabled: true,
-            // 1% — the rate the three hardcoded call sites already used, now
+            // 1% - the rate the three hardcoded call sites already used, now
             // stated once and tunable.
             bridge_relayer_fee_ppm: 10_000,
             // Matches `slashing_report_fee` / `proof_submission_fee` (1% of the
@@ -226,7 +226,7 @@ mod tests {
     /// consensus. This pins the field count: adding one is a deliberate
     /// state-format change, not a refactor.
     ///
-    /// If this fails, the change is not necessarily wrong — but it is not
+    /// If this fails, the change is not necessarily wrong - but it is not
     /// backwards compatible, and the `# Adding a field` note above applies.
     #[test]
     fn registry_params_serialized_shape_is_pinned() {
@@ -246,7 +246,7 @@ mod tests {
     /// `max_invalid_votes_per_epoch` carried "Governance-tunable per network"
     /// While being absent from `GOVERNANCE_PARAMETER_WHITELIST`. A proposal
     /// Naming it fails in `validate_governance_parameter_update` with
-    /// "governance parameter is not whitelisted" — after the vote, after the
+    /// "governance parameter is not whitelisted" - after the vote, after the
     /// Timelock. The comment described an intention, not the code.
     ///
     /// `bridge_relayer_fee_ppm` had the mirror-image gap once: whitelisted but
@@ -296,7 +296,7 @@ mod tests {
                 assert!(
                     GOVERNANCE_PARAMETER_WHITELIST.contains(&name),
                     "{name} is documented as governance-settable but is not in \
-                     GOVERNANCE_PARAMETER_WHITELIST — a proposal naming it is \
+                     GOVERNANCE_PARAMETER_WHITELIST - a proposal naming it is \
                      refused after the vote"
                 );
             }
@@ -304,7 +304,7 @@ mod tests {
 
         assert!(
             checked > 0,
-            "no field claims to be governance-settable — the doc scan is broken, \
+            "no field claims to be governance-settable - the doc scan is broken, \
              not the code"
         );
     }

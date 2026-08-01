@@ -113,6 +113,21 @@ pub struct FinalityCert {
 }
 
 impl Prevote {
+    /// Bytes a validator signs to endorse a checkpoint.
+    ///
+    /// # Why there is no explicit `chain_id` here
+    ///
+    /// The obvious cross-chain replay question - could a prevote signed on
+    /// Testnet be replayed on mainnet? - is closed, but indirectly:
+    /// `checkpoint_hash` is a block hash, and `Block::calculate_hash_bytes`
+    /// Folds `chain_id` into the `BDLM_BLOCK_V3` preimage. Two networks cannot
+    /// Produce the same checkpoint hash at the same height, so the signature
+    /// Does not verify against any other chain's checkpoint.
+    ///
+    /// That is a derived guarantee, not a stated one: it holds because of what
+    /// `calculate_hash_bytes` happens to include, and would break silently if
+    /// `chain_id` ever left the block preimage. `prevote_and_precommit_bind_the_chain`
+    /// Asserts the dependency so the two cannot drift apart.
     pub fn signing_message(&self) -> Vec<u8> {
         let mut msg = Vec::new();
         msg.extend_from_slice(b"BUDLUM_PREVOTE");
@@ -211,7 +226,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     // Actually in the correct prime-order subgroup. Without this
     // Check an attacker can supply a small-subgroup point as the
     // Public key, which makes the pairing produce values in a
-    // Sub-group that pairs to identity for any message — bypassing
+    // Sub-group that pairs to identity for any message - bypassing
     // The BLS signature scheme entirely. The bls12_381 crate
     // Exposes `is_torsion_free` for exactly this check.
     let is_on_curve_pk: bool = pk_affine.is_torsion_free().into();
@@ -348,7 +363,7 @@ pub struct FinalityAggregator {
     /// [`SlashingReport`] here. The `Blockchain` drains this after each
     /// `add_prevote`/`add_precommit` and routes it through the SAME
     /// `submit_registry_slashing_report` path as every other consensus-verified
-    /// Report — no second slashing path is opened.
+    /// Report - no second slashing path is opened.
     pub detected_equivocations: Vec<SlashingReport>,
     /// First validly-signed prevote (hash, signature) seen per voter, used to
     /// Detect a later conflicting-hash vote regardless of arrival order.
@@ -416,7 +431,7 @@ impl FinalityAggregator {
 
         // Equivocation detection . A validly-signed vote for a
         // DIFFERENT checkpoint hash than one already seen from this voter is a
-        // Double-sign — record canonical evidence once (order-independent).
+        // Double-sign - record canonical evidence once (order-independent).
         self.detect_prevote_equivocation(&vote);
 
         if vote.checkpoint_hash != self.checkpoint_hash {
@@ -523,11 +538,11 @@ impl FinalityAggregator {
 
     /// Build and queue a consensus-verified double-sign report for `voter`.
     /// Deduplicated: one report per voter for the lifetime of this aggregator
-    /// (a single actionable report is enough — the registry jails on it).
+    /// (a single actionable report is enough - the registry jails on it).
     ///
     /// Provenance is [`ProofProvenance::ConsensusVerified`](crate::registry::ProofProvenance)
     /// Because BOTH signatures were verified at ingest against the voter's BLS
-    /// Key from the validator snapshot — the aggregator has full context to
+    /// Key from the validator snapshot - the aggregator has full context to
     /// Prove the double-sign, so no re-verification is needed downstream.
     fn record_equivocation(
         &mut self,
@@ -1290,7 +1305,51 @@ mod tests {
         // Without a known non-torsion-free generator, so we instead
         // Exercise the `is_none` rejection (covered above) and the
         // Happy path (covered by `test_verify_pop`). The critical
-        // Guarantee — that a non-decodable public key is rejected
-        // By `verify_pop` — is what the test above pins.
+        // Guarantee - that a non-decodable public key is rejected
+        // By `verify_pop` - is what the test above pins.
+    }
+
+    /// A checkpoint signature must not verify on another network.
+    ///
+    /// `Prevote::signing_message` and `checkpoint_signing_message` commit to a
+    /// domain tag, the BLS scheme id, the epoch, the height and the checkpoint
+    /// hash - but not to `chain_id`. That is safe only because the checkpoint
+    /// hash *is* a block hash and `Block::calculate_hash_bytes` folds
+    /// `chain_id` into its preimage, so mainnet and testnet cannot agree on a
+    /// checkpoint hash at the same height.
+    ///
+    /// The whole cross-chain replay defence therefore rests on one line in
+    /// another module. Drop `chain_id` from the block preimage and every
+    /// checkpoint signature becomes portable between networks - with nothing
+    /// in `finality.rs` to notice, because the signing message never mentioned
+    /// it.
+    ///
+    /// This asserts the dependency directly: two blocks identical except for
+    /// `chain_id` must hash differently, and the resulting signing messages
+    /// must differ.
+    #[test]
+    fn prevote_and_precommit_bind_the_chain() {
+        use crate::core::block::Block;
+
+        let mut mainnet = Block::new_with_chain_id(10, "0".repeat(64), vec![], 45260);
+        mainnet.hash = mainnet.calculate_hash();
+        let mut testnet = mainnet.clone();
+        testnet.chain_id = 45261;
+        testnet.hash = testnet.calculate_hash();
+
+        assert_ne!(
+            mainnet.hash, testnet.hash,
+            "chain_id must be part of the block preimage; without it a \
+             checkpoint signature replays onto every other network, because \
+             the signing message does not carry chain_id itself"
+        );
+
+        let prevote_a = checkpoint_signing_message(3, 10, &mainnet.hash);
+        let prevote_b = checkpoint_signing_message(3, 10, &testnet.hash);
+        assert_ne!(
+            prevote_a, prevote_b,
+            "identical epoch and height on two networks must still produce \
+             different signing messages"
+        );
     }
 }

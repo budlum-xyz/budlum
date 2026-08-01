@@ -1,6 +1,6 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
-//! F10.5 Bud→ETH yönü — Budlum burn event + finality proof → Ethereum claim.
+//! F10.5 Bud→ETH yönü - Budlum burn event + finality proof → Ethereum claim.
 //!
 //! İki taraf:
 //!
@@ -13,7 +13,7 @@
 //!
 //! **Güvenlik:** Bud→ETH yönünde Budlum finality'sini EVM'de verify etmek gerek
 //! (BLS12-381 precompile + sync-committee Solidity impl). Ethereum bu proof'u
-//! Bağımsız doğrular — Budlum'u trust ETMEZ.
+//! Bağımsız doğrular - Budlum'u trust ETMEZ.
 
 use crate::cross_domain::bridge::{BridgeState, BridgeStatus, BridgeTransfer};
 use crate::cross_domain::message::MessageId;
@@ -34,7 +34,7 @@ pub struct BudToEthClaim {
     pub finalized_height: u64,
     /// Budlum finalized header hash (light-client checkpoint).
     pub finalized_header_hash: Hash32,
-    /// Budlum finality proof (BLS aggregate veya QC) — Solidity verify eder.
+    /// Budlum finality proof (BLS aggregate veya QC) - Solidity verify eder.
     pub finality_proof: Vec<u8>,
     /// Burn event Merkle proof (Budlum event tree → Budlum root).
     pub burn_event_proof: Vec<u8>,

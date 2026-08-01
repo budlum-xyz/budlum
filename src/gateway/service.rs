@@ -53,11 +53,11 @@ impl BudGateway {
             .storage_root
             .ok_or_else(|| format!("BNS name '{name}' has no storage binding"))?;
 
-        // Storage_root zaten 32-bayt content anahtarı — ContentId tuple-wrap yeterli.
+        // Storage_root zaten 32-bayt content anahtarı - ContentId tuple-wrap yeterli.
         let cid = ContentId(storage_root);
 
         // 3. Local storage lookup (cached content). NOT: Storage::get_content
-        //    Bugün stub (kapsamı: blob store henüz yok) — bu dal
+        //    Bugün stub (kapsamı: blob store henüz yok) - bu dal
         //    Doğal olarak ıskalar, NotFound dönüşü P2P hatasına düşer.
         if let Some(ref storage) = self.storage {
             if let Ok(chunk) = storage.get_content(&cid) {

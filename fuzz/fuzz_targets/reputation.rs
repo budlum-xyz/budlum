@@ -1,6 +1,6 @@
 #![no_main]
 
-//! / §3.4 — reputation/peer-score/ban fuzz.
+//! / §3.4 - reputation/peer-score/ban fuzz.
 //! Oracle: panic-freedom + score ∈ [MIN_SCORE, MAX_SCORE].
 
 use budlum_core::network::peer_manager::{PeerManager, MAX_SCORE, MIN_SCORE};

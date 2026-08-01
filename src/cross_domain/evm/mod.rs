@@ -1,15 +1,15 @@
-//! F10 EVM ChainAdapter — Universal Relayer gerçek Ethereum köprüsü.
+//! F10 EVM ChainAdapter - Universal Relayer gerçek Ethereum köprüsü.
 //!
 //! Bu modül grubu Budlum'a, relayer'ın ürettiği Ethereum receipt proof'larını
 //! **bağımsız olarak** kriptografik doğrulama yeteneği kazandırır:
 //!
-//! - `rlp` — in-tree Recursive Length Prefix (Ethereum Yellow Paper Appendix B).
-//! - `mpt` — in-tree Merkle-Patricia trie **verifier** (Appendix D, verify-only;
+//! - `rlp` - in-tree Recursive Length Prefix (Ethereum Yellow Paper Appendix B).
+//! - `mpt` - in-tree Merkle-Patricia trie **verifier** (Appendix D, verify-only;
 //!   Proof üretimi relayer'da).
-//! - `receipt` — Ethereum receipt RLP schema + receiptsRoot proof.
-//! - `sync_committee` — PoS light-client (BLS12-381, `blst` reuse).
-//! - `header` — Ethereum header chain + finality kararı.
-//! - `adapter` — `EvmChainAdapter` (ChainAdapter impl).
+//! - `receipt` - Ethereum receipt RLP schema + receiptsRoot proof.
+//! - `sync_committee` - PoS light-client (BLS12-381, `blst` reuse).
+//! - `header` - Ethereum header chain + finality kararı.
+//! - `adapter` - `EvmChainAdapter` (ChainAdapter impl).
 //!
 //! **Güvenlik sabiti:** hiçbir fonksiyon network'e bağlanmaz. Tüm doğrulama
 //! Deterministik ve on-chain (Budlum konsensüsünde). Relayer proof üretir,

@@ -126,7 +126,7 @@ mod tests {
     /// `apply_storage_bond_slash`, `finalize_missed_storage_challenges` and
     /// `finalize_expired_storage_deals` all end with
     /// `self.persist_storage_economics_state()?`. `accrue_storage_operator_rewards`
-    /// Ended with `let _ = self.persist_storage_economics_state();` — the one
+    /// Ended with `let _ = self.persist_storage_economics_state();` - the one
     /// Path of the four that dropped the failure, and the one where dropping
     /// It costs the most.
     ///
@@ -146,7 +146,7 @@ mod tests {
 
         // Line-based and doc-comment-aware. A raw `str::matches` over the whole
         // file also counts the doc-comment on `accrue_storage_operator_rewards`
-        // that quotes the old `let _ = ...` line to explain what changed — so
+        // that quotes the old `let _ = ...` line to explain what changed - so
         // the test failed on its own documentation. Same mistake as scanning a
         // gate script that contains the string it scans for.
         let dropped: Vec<usize> = src
@@ -245,8 +245,8 @@ mod tests {
     /// An operator that serves a deal to term must get its bond back.
     ///
     /// `open_deal` debits `operator_bond`. `StorageRegistry::expire_deal` was
-    /// Written to hand it back — "returns the operator bond amount to be
-    /// Refunded by the blockchain accounting layer" — and no production path
+    /// Written to hand it back - "returns the operator bond amount to be
+    /// Refunded by the blockchain accounting layer" - and no production path
     /// Ever called it. The slash path was fully wired; the settle path was not,
     /// So the only recorded end-of-life for a bond was losing it.
     ///

@@ -217,6 +217,16 @@ pub struct NodeConfig {
     #[arg(long)]
     pub signer_backend: Option<String>, // local | softhsm | pkcs11
 
+    /// The backend exactly as configured, before canonicalisation.
+    ///
+    /// `canonical_signer_backend` maps `softhsm` onto `pkcs11` so the signer
+    /// wiring has one name to match on. That is correct for construction and
+    /// wrong for policy: mainnet admission has to distinguish a hardware token
+    /// from a software one, and by the time it runs the difference is gone.
+    /// Not a CLI flag - it is filled in wherever the canonical value is set.
+    #[arg(skip)]
+    pub raw_signer_backend: Option<String>,
+
     #[arg(long)]
     pub pkcs11_module_path: Option<String>,
 
@@ -326,6 +336,7 @@ impl Default for NodeConfig {
             rpc_trusted_proxies: Vec::new(),
             metrics_listener: None,
             signer_backend: None,
+            raw_signer_backend: None,
             pkcs11_module_path: None,
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
@@ -726,6 +737,7 @@ impl NodeConfig {
                         std::process::exit(1);
                     }
                 } else {
+                    self.raw_signer_backend = Some(backend.clone());
                     self.signer_backend = Some(canonical);
                 }
             }
@@ -745,6 +757,7 @@ impl NodeConfig {
                             std::process::exit(1);
                         }
                     } else {
+                        self.raw_signer_backend = Some(backend.clone());
                         self.signer_backend = Some(canonical);
                     }
                 }
@@ -1011,13 +1024,18 @@ impl NodeConfig {
         }
 
         if self.network == Network::Mainnet {
-            // Rule 1 / H4.1: mainnet validators — pure policy (crypto::mainnet_policy).
+            // Rule 1 / H4.1: mainnet validators - pure policy (crypto::mainnet_policy).
             if self.role == "validator" {
                 use crate::crypto::mainnet_policy::{
                     check_mainnet_validator_key_policy, MainnetValidatorKeyConfig,
                 };
                 let cfg = MainnetValidatorKeyConfig {
                     signer_backend: self.signer_backend.as_deref(),
+                    // `signer_backend` has already been through
+                    // `canonical_signer_backend`, which folds `softhsm` into
+                    // `pkcs11`. The policy needs the operator's own spelling to
+                    // tell a hardware token from a software one.
+                    raw_signer_backend: self.raw_signer_backend.as_deref(),
                     validator_key_file: self.validator_key_file.as_deref(),
                     pkcs11_module_path: self.pkcs11_module_path.as_deref(),
                     pkcs11_token_pin_env: self.pkcs11_token_pin_env.as_deref(),

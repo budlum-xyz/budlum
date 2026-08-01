@@ -86,7 +86,7 @@ async fn test_state_bit_identical_after_reload() {
         );
 
         // Overlay fields (bridge/message/settlement/global-header roots) are
-        // Commit-path projections not mirrored by the replay loop — normalize
+        // Commit-path projections not mirrored by the replay loop - normalize
         // On both sides (see load_test.rs for the full rationale) and
         // Compare the executable consensus surface bit-for-bit.
         let mut state_reloaded_masked = bc_reloaded.state.clone();
@@ -106,9 +106,33 @@ async fn test_state_bit_identical_after_reload() {
     }
 }
 
+/// Sub-registry recovery across a restart.
+///
+/// This test carried `#[ignore]` with the note "V3 sub-registry persistence is
+/// not implemented: Blockchain::new reloads blocks but rebuilds BNS/NFT
+/// registries empty". The note is wrong, and the ignore was hiding a broken
+/// test rather than a missing feature.
+///
+/// The old body wrote straight into `bc.state.bns_registry` and
+/// `bc.state.nft_registry`, then produced a block and expected the entries to
+/// come back. They could not. Restart recovery replays blocks through
+/// `apply_block_effects`, so state that never entered a transaction is not
+/// part of the chain and there is nothing to replay. The test was asserting
+/// that an in-memory mutation survives a restart, which is not a property this
+/// system has or should have.
+///
+/// BNS state does persist, by both routes that exist: `BnsRegister` is a
+/// transaction the executor applies (`executor.rs:496`, mutating
+/// `state.bns_registry`), so replay reconstructs it; and `bns_registry` is
+/// carried in the schema-4 snapshot and covered by its digest
+/// (`snapshot.rs:661`, `769`).
+///
+/// This version drives the real path: fund an account at genesis, register a
+/// name with a signed `BnsRegister` transaction, produce the block, drop the
+/// chain, reopen it against the same database and ask the rebuilt registry to
+/// resolve the name.
 #[tokio::test]
-#[ignore = "V3 sub-registry persistence is not implemented: Blockchain::new reloads blocks but rebuilds BNS/NFT registries empty (6ba5728 moved them into AccountState without wiring storage recovery). Tracked as mainnet-gap; see STATUS_ONLINE."]
-async fn test_sub_registry_recovery() {
+async fn a_bns_name_registered_by_transaction_survives_a_restart() {
     let dir = tempdir().unwrap();
     let db_str = dir
         .path()
@@ -117,35 +141,79 @@ async fn test_sub_registry_recovery() {
         .unwrap()
         .to_string();
 
-    let alice = Address::from([0x01; 32]);
-    let cid = crate::storage::content_id::ContentId([0xCC; 32]);
-
+    let alice_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
     let bns_name = "recovery.bud".to_string();
 
-    // 1. Fill Registries
+    // Funding has to come from genesis: replay rebuilds state from the
+    // deterministic genesis, so an in-memory `add_balance` would leave the
+    // chain unreplayable.
+    let funded_genesis = || {
+        let mut g = crate::chain::genesis::GenesisConfig::new(45262);
+        g = g.with_allocation(alice, 1_000_000);
+        g.base_fee = 0;
+        g
+    };
+
+    let cost;
+
+    // 1. Register the name through a transaction, so it is in the chain.
     {
         let storage = Storage::new(&db_str).unwrap();
-        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+        let mut bc = Blockchain::new_with_genesis(
+            Arc::new(PoWEngine::new(0)),
+            Some(storage),
+            45262,
+            None,
+            Some(funded_genesis()),
+        );
+        bc.mempool.set_min_fee(0);
 
-        // BNS
-        bc.state
-            .bns_registry
-            .register(bns_name.clone(), alice, 0, 1000)
-            .unwrap();
-        // NFT
-        bc.state.nft_registry.mint(alice, cid, 0, None);
+        cost = bc.state.bns_registry.calculate_cost(&bns_name, 1000);
+        let data = bincode::serialize(&(bns_name.clone(), 1000u64)).expect("ser");
+        let mut tx = Transaction::new_with_chain_id(
+            alice,
+            Address::zero(),
+            cost,
+            1,
+            0,
+            data,
+            45262,
+            crate::core::transaction::TransactionType::BnsRegister,
+        );
+        tx.sign(&alice_kp);
+        bc.mempool.add_transaction(tx).unwrap();
+        let produced = bc.produce_block(Address::zero());
+        assert!(produced.is_some(), "the registering block must be produced");
 
-        let _ = bc.produce_block(Address::zero());
-        // Save current state to storage (this would usually happen via block commit)
+        assert_eq!(
+            bc.state.bns_registry.resolve(&bns_name, 10),
+            Some(alice),
+            "the name must resolve while the chain is still live, or the \
+             restart half of this test proves nothing"
+        );
     }
 
-    // 2. Verify Recovery
+    // 2. Reopen against the same database and replay.
     {
         let storage = Storage::new(&db_str).unwrap();
-        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+        let bc = Blockchain::new_with_genesis(
+            Arc::new(PoWEngine::new(0)),
+            Some(storage),
+            45262,
+            None,
+            Some(funded_genesis()),
+        );
 
-        assert_eq!(bc.state.bns_registry.resolve(&bns_name, 10), Some(alice));
-        assert!(bc.state.nft_registry.get_nft(0).is_some());
-        assert_eq!(bc.state.nft_registry.get_nft(0).unwrap().content_id, cid);
+        assert!(
+            bc.chain.len() > 1,
+            "the reopened chain must carry the registering block, or replay had \
+             nothing to apply"
+        );
+        assert_eq!(
+            bc.state.bns_registry.resolve(&bns_name, 10),
+            Some(alice),
+            "a name registered by transaction must survive a restart"
+        );
     }
 }

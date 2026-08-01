@@ -1,4 +1,4 @@
-# deny.toml — Budlum Core supply-chain kapısı ( / )
+# deny.toml - Budlum Core supply-chain kapısı ( / )
 #
 # Bu dosya `cargo deny check` ile CI'da zorunlu kapıdır (strict mod:
 # ilk günden fail kapısı; gevşetme YOK). BudZero tarafındaki karşılığı
@@ -40,7 +40,7 @@ allow = [
 
 # On copyleft (GPL / AGPL / LGPL / SSPL): there is deliberately no `deny`
 # list here. cargo-deny removed `[licenses] deny` in 0.20 (PR #611) because
-# the allow-list above is already closed — anything absent from it is
+# the allow-list above is already closed - anything absent from it is
 # refused, so a separate deny list would be a second spelling of the same
 # rule and, worse, a place where someone could later "fix" a failure by
 # quietly editing one list while the other still passed.
@@ -84,11 +84,27 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = ["https://github.com/libp2p/rust-libp2p"]
 
 [advisories]
-# unmaintained = "none": eski davranışla aynı ("warn, fail yok"). Uyarı
-# görünürlüğü kaybolmuyor: CI dependency-audit job'ındaki cargo audit her
-# koşuda unmaintained uyarılarını raporlar. Bincode/pqcrypto-* gibi bilinen
-# öğeler org roadmap'te izleniyor; doğrudan kaynaklı yeni unmaintained
-# keşiflerde bu karar yeniden gözden geçirilir.
+# unmaintained = "none": eski davranışla aynı ("warn, fail yok").
+#
+# Bu kararın tek gerekçesi uyarıların başka bir yerde görünür kalmasıdır. Bu
+# satır 2026-07-31'e kadar "CI dependency-audit job'ındaki cargo audit her
+# koşuda unmaintained uyarılarını raporlar" diyordu ve bu DOĞRU DEĞİLDİ:
+# `scripts/audit-deps.sh` bulguları `--json` ile geçici bir dosyaya, ham çıktıyı
+# da `target/audit/DEPENDENCY_AUDIT.md`'ye yazıyordu; o raporu hiçbir workflow
+# artefakt olarak yüklemiyordu. İş yeşil dönüyor, log'da tek bir danışma adı
+# geçmiyordu.
+#
+# Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
+# tarafından ikame edildi) mainnet varsayılan PQ imza yolunda duruyor. Karar
+# verilmiş ve `.quality/osv-scanner.toml`'da gerekçesiyle kayıtlı; buna karşın
+# cargo audit tarafında hiçbir koşuda görünmedi. Aynı ağacı tarayan iki
+# araçtan yalnız birinin sonucu okunabiliyordu - "warn, fail yok" kararının
+# dayandığı görünürlük tek bacaklıydı.
+#
+# `audit-deps.sh` artık iki lockfile'ın ham çıktısını log'a basıyor ve görülen
+# RUSTSEC kimliklerini tek listede özetliyor. Bu satırın gerekçesi ancak o
+# çıktı orada durduğu sürece geçerlidir - kaldırılırsa bu karar da yeniden
+# değerlendirilmelidir.
 unmaintained = "none"
 # unsound: doğrudan bağımlılıklarımızda unsound danışması = FAIL (sıkı).
 unsound = "workspace"

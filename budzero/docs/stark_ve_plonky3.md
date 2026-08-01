@@ -38,7 +38,7 @@ Eğer işlem bir Toplama (ADD) ise, trace oluşturulurken `COL_IS_ADD` sütununa
 builder.when(cur[COL_IS_ADD].clone())
     .assert_eq(rd_val_new.clone(), rs1_val.clone() + rs2_val.clone());
 ```
-Bu sayede her bir matematiksel denklem, sadece kendi opcode'u aktif olduğunda çalışır. BudZKVM'de **32 selector sütunu** vardır — her opcode için bir tane.
+Bu sayede her bir matematiksel denklem, sadece kendi opcode'u aktif olduğunda çalışır. BudZKVM'de **32 selector sütunu** vardır - her opcode için bir tane.
 
 ### Trace Matrisi Yapısı
 

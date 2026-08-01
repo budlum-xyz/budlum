@@ -1,4 +1,4 @@
-//! Regression canary tests — CI runner'da çalışır (sandbox OOM kaçınımı).
+//! Regression canary tests - CI runner'da çalışır (sandbox OOM kaçınımı).
 
 #[cfg(test)]
 mod tests {
@@ -7,7 +7,7 @@ mod tests {
 
     /// Canary: ConsensusDomainRegistry::new boş başlar.
     /// Try_reorg içinde domain_registry = ConsensusDomainRegistry::new
-    /// Ataması var — stale state temizlenir.
+    /// Ataması var - stale state temizlenir.
     #[test]
     fn domain_registry_new_is_empty_after_reorg_reset() {
         let registry = ConsensusDomainRegistry::new();

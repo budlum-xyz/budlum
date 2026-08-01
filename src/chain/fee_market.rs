@@ -129,7 +129,7 @@ pub struct FeeDistribution {
 ///
 /// Returns [`FeeError::MaxFeeBelowBaseFee`] when the bid cannot cover the
 /// block's base fee, and [`FeeError::TreasuryRateAbovePpmDenominator`] when the
-/// treasury cut exceeds 100% — a rate that would silently pay the proposer
+/// treasury cut exceeds 100% - a rate that would silently pay the proposer
 /// nothing rather than overflowing.
 pub fn distribute_fee(
     bid: FeeBid,
@@ -149,7 +149,7 @@ pub fn distribute_fee(
     //
     // The only caller passes `DEFAULT_TREASURY_RATE_PPM`, so this is not
     // reachable today. It is checked because the function is public and the
-    // rate is exactly the kind of value that later arrives from governance —
+    // rate is exactly the kind of value that later arrives from governance -
     // and the failure would be a validator-incentive outage, not a panic.
     if treasury_rate_ppm > PPM_DENOMINATOR {
         return Err(FeeError::TreasuryRateAbovePpmDenominator {
@@ -335,7 +335,7 @@ mod tests {
     ///
     /// `saturating_sub` floors the proposer's share at zero, so a rate over
     /// `PPM_DENOMINATOR` would take the entire priority fee and leave block
-    /// production unpaid — with no overflow, no panic, and nothing in the
+    /// production unpaid - with no overflow, no panic, and nothing in the
     /// logs. Every arithmetic step would look well-behaved.
     ///
     /// Not reachable from the current caller, which passes the constant. It is

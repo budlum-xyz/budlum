@@ -1,7 +1,7 @@
 //! Budlum's chain ids must not belong to somebody else.
 //!
 //! The ids were 1, 42 and 1337. All three are assigned in the public EIP-155
-//! registry at `chainid.network` — measured against the live list of 2668
+//! registry at `chainid.network` - measured against the live list of 2668
 //! chains: 1 is Ethereum Mainnet, 42 is LUKSO Mainnet, 1337 is Geth Testnet.
 //!
 //! The signing preimage is domain-separated (`BDLM_TX_V4` plus the chain id),
@@ -20,7 +20,7 @@ use crate::core::transaction::DEFAULT_CHAIN_ID;
 /// Ids that were measured as assigned in the registry on 2026-07-30, plus the
 /// low-numbered space that is effectively reserved by convention.
 ///
-/// Not the whole registry — 2668 entries pinned here would rot immediately and
+/// Not the whole registry - 2668 entries pinned here would rot immediately and
 /// tell a reader nothing. These are the ones this project actually used.
 const KNOWN_TAKEN: &[(u64, &str)] = &[
     (1, "Ethereum Mainnet"),

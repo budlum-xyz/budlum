@@ -1,11 +1,11 @@
-# OSV-Scanner — RustSec dışı zafiyet kaynaklarını kapatan tarama
+# OSV-Scanner - RustSec dışı zafiyet kaynaklarını kapatan tarama
 #
 # NEDEN cargo-audit/cargo-deny YETMİYOR: her ikisi de yalnız RustSec advisory
 # Veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
 # RustSec'te karşılığı olmayan kayıtları da görür.
 #
 # Bu somut olarak kanıtlandı: bu workflow eklenirken yapılan ilk tarama
-# CVE-2026-32314 / GHSA-vxx9-2994-q338'i yakaladı — yamux'ta kimlik doğrulaması
+# CVE-2026-32314 / GHSA-vxx9-2994-q338'i yakaladı - yamux'ta kimlik doğrulaması
 # GEREKTİRMEYEN, uzaktan tetiklenebilir panic (DoS), CVSS 8.7. Aynı ağaçta
 # `cargo audit` "0 vulnerabilities found" diyordu, çünkü bu kaydın RustSec
 # Karşılığı yok (rustsec/advisory-db/crates/yamux → 404). Bir L1 node'un P2P
@@ -60,7 +60,7 @@ jobs:
       # Çalışmamış/ağa ulaşamamış bir taramayı gösterebilir. Kanarya, bilinen
       # Savunmasız bir sürümü içeren sentetik bir lockfile üretip tarayıcının
       # Onu YAKALADIĞINI kanıtlar; yakalayamazsa kapı güvenilmezdir.
-      - name: Kanarya — OSV alarmının çalıştığının kanıtı
+      - name: Kanarya - OSV alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
           mkdir -p /tmp/osv-canary
@@ -83,7 +83,7 @@ jobs:
           fi
           echo "Kanarya yakalandı → OSV alarmı çalışıyor."
 
-      - name: Tarama — root + budzero lockfile (bulgu = fail)
+      - name: Tarama - root + budzero lockfile (bulgu = fail)
         run: |
           set -euo pipefail
           osv-scanner scan source \

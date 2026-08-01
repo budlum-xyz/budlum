@@ -1,16 +1,16 @@
-//! In-tree Merkle-Patricia Trie (MPT) **verifier** — Ethereum Yellow Paper
+//! In-tree Merkle-Patricia Trie (MPT) **verifier** - Ethereum Yellow Paper
 //! Appendix D.
 //!
 //! **Verify-only** (RFC Q1 = relayer_produces): proof üretimi relayer binary'sinde
 //!; Budlum yalnız `(proof_nodes, root, key) → value` doğrular.
-//! Deterministik, network'süz — konsensüs güvenliği için kritik.
+//! Deterministik, network'süz - konsensüs güvenliği için kritik.
 //!
 //! # MPT node tipleri (RLP-decode sonrası)
 //!
 //! - **Null**: empty string `""` → boş trie / eksik child.
-//! - **Leaf**: `[hp_encoded_path, value]` — path terminator flag=1.
-//! - **Extension**: `[hp_encoded_path, child_ref]` — terminator flag=0.
-//! - **Branch**: `[c0, c1, ..., c15, value]` — 17 eleman (16 child + optional value).
+//! - **Leaf**: `[hp_encoded_path, value]` - path terminator flag=1.
+//! - **Extension**: `[hp_encoded_path, child_ref]` - terminator flag=0.
+//! - **Branch**: `[c0, c1, ..., c15, value]` - 17 eleman (16 child + optional value).
 //!
 //! `child_ref` ya 32-byte keccak256 hash'tir (node_map'te lookup) ya da inline
 //! RLP-encoded node (≤32 byte, küçük node optimizasyonu).
@@ -41,8 +41,8 @@ use sha3::{Digest, Keccak256};
 /// ```
 ///
 /// The proof bytes come from a bridge relayer, so that is a remote abort of
-/// the node process, not a local misuse. The depth is generous — twice the
-/// longest honest descent — because the goal is to stop non-termination, not
+/// the node process, not a local misuse. The depth is generous - twice the
+/// longest honest descent - because the goal is to stop non-termination, not
 /// to second-guess a legitimate trie.
 pub const MAX_WALK_DEPTH: usize = 128;
 use std::collections::HashMap;
@@ -66,7 +66,7 @@ pub enum MptError {
     PathMismatch,
     /// Trie descent exceeded [`MAX_WALK_DEPTH`].
     ///
-    /// Reached when a proof's nodes do not make progress — an empty-path
+    /// Reached when a proof's nodes do not make progress - an empty-path
     /// extension leaves the remaining nibbles unchanged, so a cycle among
     /// such nodes would otherwise recurse until the stack is exhausted.
     NestingTooDeep,
@@ -106,7 +106,7 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
 
 /// Boş trie root = `keccak256(rlp(""))` = `keccak256(0x80)`.
 /// Ethereum'da kanonik sabit; tüm boş trie'ler bu root'a sahiptir.
-/// Değer CI-kanıtlı (keccak256(0x80) — lokalde hesaplanamadı, CI test
+/// Değer CI-kanıtlı (keccak256(0x80) - lokalde hesaplanamadı, CI test
 /// `empty_trie_root_constant_correct` otorite değeridir).
 pub const EMPTY_TRIE_ROOT: [u8; 32] = [
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6, 0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
@@ -257,7 +257,7 @@ fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Ite
             rlp::decode(node_bytes).map_err(MptError::from)
         }
         Item::String(b) => {
-            // Inline node (≤32 byte RLP) — decode et ve yerinde işle.
+            // Inline node (≤32 byte RLP) - decode et ve yerinde işle.
             rlp::decode(b).map_err(MptError::from)
         }
         Item::List(_) => {
@@ -459,7 +459,7 @@ mod tests {
             .chain(std::iter::once(9))
             .chain(leaf_nibbles.iter().cloned())
             .collect();
-        // Key bytes (path'in her çift nibble'ı bir byte) — tam 64 nibble olması
+        // Key bytes (path'in her çift nibble'ı bir byte) - tam 64 nibble olması
         // Şart değil çünkü verify keccak256(key)'i kullanır; burada doğrudan
         // Walk test etmek için verify yerine walk çağırıyoruz.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
@@ -537,7 +537,7 @@ mod tests {
         let branch_bytes = branch_node_bytes(children, None);
         let root = keccak256(&branch_bytes);
 
-        // Verify keccak256(key)'i path yapar — biz doğrudan walk ile test edelim
+        // Verify keccak256(key)'i path yapar - biz doğrudan walk ile test edelim
         // Çünkü key'den path = keccak256(key) geliyor ve yapay path'e uymaz.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         node_map.insert(keccak256(&branch_bytes), branch_bytes.clone());
@@ -567,7 +567,7 @@ mod tests {
             // Sonuç Err olmalı (MissingNode / InvalidNode / Rlp), panic değil.
             let _ = verify(proof, &root, b"key");
         }
-        // Root hash'leri proof'ta olmadığı için MissingNode beklenir — önemli
+        // Root hash'leri proof'ta olmadığı için MissingNode beklenir - önemli
         // Olan panic olmaması (DoS güvenliği).
     }
 }
@@ -626,7 +626,7 @@ mod depth_bound_locks {
     ///
     /// Comparing two constants would be folded away at compile time (clippy
     /// calls it a constant assertion, correctly), so this builds an actual
-    /// branch chain 64 levels deep — the maximum a keccak256 path allows —
+    /// branch chain 64 levels deep - the maximum a keccak256 path allows -
     /// and checks it resolves. Lowering `MAX_WALK_DEPTH` below the honest
     /// maximum would make this fail with `NestingTooDeep`.
     #[test]
@@ -665,7 +665,7 @@ mod depth_bound_locks {
         );
     }
 
-    /// An existing round-trip must still work — the bound is a ceiling, not a
+    /// An existing round-trip must still work - the bound is a ceiling, not a
     /// behaviour change.
     #[test]
     fn a_normal_leaf_lookup_still_resolves() {

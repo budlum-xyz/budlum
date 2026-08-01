@@ -6,7 +6,7 @@
 //! Expected consensus participation. When that count crosses
 //! [`RegistryParams::liveness_max_missed_epochs`], a canonical
 //! [`SlashingReport`] (proof = `Liveness`, provenance = `ConsensusVerified`) is
-//! Emitted so the *existing* report→slash flow can act on it — no new slashing
+//! Emitted so the *existing* report→slash flow can act on it - no new slashing
 //! Path is introduced.
 //!
 //! ## Counting semantics (consecutive, not cumulative)
@@ -48,12 +48,12 @@ impl LivenessTracker {
 
     /// Record one epoch's worth of participation.
     ///
-    /// * `epoch` — the epoch that just completed.
-    /// * `expected` — validators that were expected to participate this epoch
+    /// * `epoch` - the epoch that just completed.
+    /// * `expected` - validators that were expected to participate this epoch
     ///   (typically the active validator set).
-    /// * `participated` — a predicate returning `true` if the given validator
+    /// * `participated` - a predicate returning `true` if the given validator
     ///   Showed the expected participation this epoch.
-    /// * `params` — governs the threshold and is embedded in emitted proofs.
+    /// * `params` - governs the threshold and is embedded in emitted proofs.
     ///
     /// Returns a [`SlashingReport`] for every validator whose consecutive-miss
     /// Count reached the threshold this epoch (and had not already been
@@ -201,7 +201,7 @@ mod tests {
         let v = addr(1);
         t.record_epoch(1, &[v], |_| false, &p);
         assert_eq!(t.record_epoch(2, &[v], |_| false, &p).len(), 1);
-        // Still down at epoch 3 — no duplicate report.
+        // Still down at epoch 3 - no duplicate report.
         assert!(t.record_epoch(3, &[v], |_| false, &p).is_empty());
     }
 

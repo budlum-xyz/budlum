@@ -239,7 +239,7 @@ mod pow_work_does_not_saturate {
         // Measured with the old accumulator: at difficulty 32 every chain
         // scored u128::MAX, so `is_better_chain` was false for every reorg and
         // the node locked onto whatever it saw first. Difficulty 32 is not
-        // hypothetical — `adjusted_difficulty` clamps to exactly 32.
+        // hypothetical - `adjusted_difficulty` clamps to exactly 32.
         let engine = PoWEngine::with_config(PoWConfig {
             difficulty: 32,
             target_block_time: 10,

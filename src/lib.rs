@@ -1,4 +1,4 @@
-// Unsafe kilidi — src/ şu an 0 unsafe temiz taban;
+// Unsafe kilidi - src/ şu an 0 unsafe temiz taban;
 // Bir `unsafe` blok girdiği an derleme FAIL eder (regresyon kapısı).
 #![forbid(unsafe_code)]
 pub mod ai;

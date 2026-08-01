@@ -4,14 +4,14 @@
 # Bu dosyanin ILK bare-sayi satiri baseline'dir (scripts/check-clippy-extra.sh
 # `grep -E '^[0-9]+$' | head -1` ile okur); asagisi gerekcedir.
 #
-# 2026-07-26 — 217 -> 7108 (ekip, PR #158)
+# 2026-07-26 - 217 -> 7108 (ekip, PR #158)
 #
 # BU BIR GEVSETME DEGIL; ratchet'in ILK GERCEK OLCUMU.
 #
 # Neden 217 olu bir sayiydi:
 #   - Ratchet adimi (`Clippy pedantic/nursery ratchet`) kendinden onceki
 #     `Clippy` adimina baglidir. `Clippy` adimi `main`'de ve her branch'te
-#     kirmizi oldugu icin ratchet adimi HIC CALISMADI — son 20 tamamlanmis CI
+#     kirmizi oldugu icin ratchet adimi HIC CALISMADI - son 20 tamamlanmis CI
 #     kosusunun 20'sinde de `skipped` (kanit: run 30200010164, 30202231034,
 #     30206161047, 30206496472 ... hepsi ratchet:skipped).
 #   - 217 degeri 2026-07-17'de `98b0fd9` worktree'sinde YEREL olarak

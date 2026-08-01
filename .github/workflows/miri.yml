@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Haftalık gece koşusu — sürekli UB denetimi
+  # Haftalık gece koşusu - sürekli UB denetimi
   schedule:
     - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
 
@@ -40,21 +40,21 @@ jobs:
           cache-on-failure: true
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: Miri — crypto crate
+      - name: Miri - crypto crate
         run: |
           echo "Running Miri on crypto module..."
           cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- crypto 2>&1 | tee /tmp/miri-crypto.txt
           echo "Miri crypto: $(grep -c 'test result: ok' /tmp/miri-crypto.txt || echo '0') suites passed"
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
-      - name: Miri — budzero bud-vm
+      - name: Miri - budzero bud-vm
         run: |
           echo "Running Miri on bud-vm module..."
           cargo +nightly-2026-07-19 miri test -p bud-vm --lib 2>&1 | tee /tmp/miri-budvm.txt
           echo "Miri bud-vm: $(grep -c 'test result: ok' /tmp/miri-budvm.txt || echo '0') suites passed"
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
-      - name: Miri — storage module
+      - name: Miri - storage module
         run: |
           echo "Running Miri on storage module..."
           cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage 2>&1 | tee /tmp/miri-storage.txt

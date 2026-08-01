@@ -124,14 +124,14 @@ impl RelayerExternalResult {
     ///
     /// Panics if the chain discriminator cannot be serialised. `ExternalChain`
     /// is a small C-like enum, so the only way that happens is allocation
-    /// failure — a bug rather than an input. The alternative, folding the
+    /// failure - a bug rather than an input. The alternative, folding the
     /// failure into empty bytes, would give every chain the same leaf and turn
     /// a bug into a silent cross-domain replay.
     #[must_use]
     pub fn result_leaf(&self) -> [u8; 32] {
         // `unwrap_or_default()` here meant a serialize failure produced an
         // EMPTY discriminator, so every chain would have hashed to the same
-        // leaf — the exact cross-domain replay this tag exists to prevent.
+        // leaf - the exact cross-domain replay this tag exists to prevent.
         // `ExternalChain` is a small C-like enum; the only way bincode fails
         // on it is allocation failure, which is a bug rather than an input.
         let chain_bytes = bincode::serialize(&self.chain)
@@ -267,7 +267,7 @@ pub enum TransactionType {
     /// Submit private transfer (note commitments + nullifiers).
     /// Mainnet opcode activation is separate; L1 registry updates here.
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
-    /// Faucet/test helper — insert a live note commitment (governance/tests).
+    /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
     /// AI execution layer: attach BudZKVM execution proof to a result
     /// (active RoleId(8) operator-submitted; structural verify on L1).
@@ -727,7 +727,7 @@ impl Transaction {
     /// `gas_per_byte` or `gas_per_signature`.
     ///
     /// It is kept because `GasSchedule` is part of the genesis document and is
-    /// Pinned per network, so the shape has to stay round-trippable — but a
+    /// Pinned per network, so the shape has to stay round-trippable - but a
     /// Caller reaching for this to size a transaction will get a number the
     /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
     /// It returns the flat fee floor instead.

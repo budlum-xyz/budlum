@@ -4,8 +4,8 @@
 //! (boot sessiz-yutma) ve (çapraz-şema gölgeleme) 2026-07-19'da
 //! KAPANDI: loader'lar karantina-sonrası eski adaya düşer,
 //! V1 probe'u v2 dosyasını ISKART eder (karantinasız), boot Err'de fail-loud
-//! Loglar. Kalan GAP pinleri: (authenticity — imza görevi) +
-//! (hash kapsamı — versiyonlu genişletme, halefle koordineli);
+//! Loglar. Kalan GAP pinleri: (authenticity - imza görevi) +
+//! (hash kapsamı - versiyonlu genişletme, halefle koordineli);
 //! `_gap` testleri o görevlarda TERS ÇEVRİLİR.
 
 #[cfg(test)]
@@ -99,7 +99,7 @@ mod tests {
         );
     }
 
-    // ── 2) UNHASHED alan sahtesi (GAP) — bns_registry hash kapsamı dışında ─
+    // ── 2) UNHASHED alan sahtesi (GAP) - bns_registry hash kapsamı dışında ─
     // Calculate_hash yalnız çekirdek konsensus alanlarını kapsıyor; schema-3
     // Ve Task-0.08+ ile eklenen alanlar (bns/nft/registry/bridge_state/…)
     // Kapsam dışı. Sonuç: bu alanlara yapılan sahtecilik verify'ı GEÇER.
@@ -125,7 +125,7 @@ mod tests {
         assert!(!snap.verify(), "schema-4 must reject BNS registry forgery");
     }
 
-    // ── 3) Bilinçli rehash sahtesi (GAP) — authenticity yok ────────────────
+    // ── 3) Bilinçli rehash sahtesi (GAP) - authenticity yok ────────────────
     // Calculate_hash deterministik ve gizli-girdi içermez; kaynağı okuyan her
     // Saldırgan HASHED bir alanı (balance) değiştirip hash'i yeniden üretebilir.
     // Integrity ≠ authenticity: manifest imzası (validator/HSM) emri bekliyor.
@@ -250,7 +250,7 @@ mod tests {
         let raw = std::fs::read_to_string(&newer_file).expect("read");
         std::fs::write(&newer_file, &raw[..raw.len() / 2]).expect("truncate");
 
-        // Onarımı sonrası: TEK çağrı yeterli — loader yarım dosyayı
+        // Onarımı sonrası: TEK çağrı yeterli - loader yarım dosyayı
         // Karantinalayıp eski-geçerli adaya kendi içinde düşer.
         let first = pm
             .load_latest_snapshot_v2()
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(loaded.height, 10);
         assert_eq!(loaded.balances.values().next().copied(), Some(700));
 
-        // PIN 2: geçerli v2 dosyası YERİNDE kalır (karantina YOK — giderildi).
+        // PIN 2: geçerli v2 dosyası YERİNDE kalır (karantina YOK - giderildi).
         assert!(dir.path().join("snaps").join("snapshot_20.json").exists());
         assert!(
             !dir.path()
@@ -435,7 +435,7 @@ mod tests {
     // ── 8) bridge_state internal binding (serde hash) ─────────────
     // Transfer scope is locked at `root` (bridge.rs). This pins the
     // SECOND layer: the schema-4 digest covers the FULL serialized
-    // Bridge_state via hash_opt_serializable — i.e. the private `expiry_queue`
+    // Bridge_state via hash_opt_serializable - i.e. the private `expiry_queue`
     // AND the `replay` store, neither of which is in `root`. Forging the
     // Replay store (and, by the same serde binding, expiry_queue) without
     // Recomputing snapshot_hash must be rejected by verify.

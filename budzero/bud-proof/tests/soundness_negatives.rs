@@ -52,7 +52,7 @@ fn test_tampered_pc_violates_constraints() {
     assert!(res.is_err());
 }
 
-// ── Negative corpus expansion (2026-07-18, — P0 ZK-soundness) ────────
+// ── Negative corpus expansion (2026-07-18, - P0 ZK-soundness) ────────
 // Same construction discipline as the original `test_tampered_pc_...` test:
 // Materialize a 2-row trace, mutate ONE aspect, and require `check_constraints`
 // To panic (unsatisfied AIR). These pin the tamper classes the proving system

@@ -7,10 +7,10 @@
 //!
 //! Three sites did this on hash inputs:
 //!
-//!   - `RelayerExternalResult::result_leaf` — the chain discriminator. Every
+//!   - `RelayerExternalResult::result_leaf` - the chain discriminator. Every
 //!     `ExternalChain` would have produced the same leaf, which is precisely
 //!     the cross-domain replay the `BDLM_RELAYER_RESULT_V2` tag exists to stop.
-//!   - `snapshot::hash_serializable` — every field of the state-root digest.
+//!   - `snapshot::hash_serializable` - every field of the state-root digest.
 //!   - the `finality_certificates` branch of the same digest.
 //!
 //! The state root is what nodes compare to agree they are on the same chain,

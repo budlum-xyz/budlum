@@ -3,7 +3,7 @@ use crate::core::hash::hash_fields_bytes;
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 
-/// Global settlement block header — anchors all domain roots, bridge state,
+/// Global settlement block header - anchors all domain roots, bridge state,
 /// And (as / B.U.D.) the aggregated storage proof root.
 ///
 /// **B.U.D. (vision §8.4):** `storage_root` is `Some(hash)` when the
@@ -33,7 +33,7 @@ pub struct GlobalBlockHeader {
     pub proposer: Option<Address>,
     pub settlement_finality_root: Hash32,
 
-    /// B.U.D. — Aggregated Merkle root of all verified
+    /// B.U.D. - Aggregated Merkle root of all verified
     /// `StorageProofResponse`s included in this block.
     ///
     /// `None`: no storage proofs were submitted or verified.
@@ -72,7 +72,7 @@ impl GlobalBlockHeader {
             .unwrap_or_default();
 
         // B.U.D.: storage_root is included in the hash chain.
-        // When None, we use 32 zero bytes — this is safe because
+        // When None, we use 32 zero bytes - this is safe because
         // The domain-separation tag (V2) prevents collision with
         // V1 headers that never had this field.
         let storage_root_bytes: [u8; 32] = self.storage_root.unwrap_or([0u8; 32]);
@@ -229,7 +229,7 @@ mod tests {
         // The domain tag changed.
         let h = sample_header();
         let hash = h.calculate_hash_bytes();
-        // Just verify it produces a non-zero hash — the tag change
+        // Just verify it produces a non-zero hash - the tag change
         // Is the critical security property.
         assert_ne!(hash, [0u8; 32], "V3 header must produce non-zero hash");
     }

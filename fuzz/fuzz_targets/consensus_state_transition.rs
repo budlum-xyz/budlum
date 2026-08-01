@@ -62,7 +62,7 @@ fuzz_target!(|data: &[u8]| {
             alt.chain
         }
         1 => {
-            // Truncated prefix — should not be "better".
+            // Truncated prefix - should not be "better".
             let keep = (take_u8(data, &mut i) as usize) % chain.chain.len().max(1);
             chain.chain[..keep.max(1)].to_vec()
         }
@@ -101,7 +101,7 @@ fuzz_target!(|data: &[u8]| {
         candidate.truncate(MAX_CANDIDATE + 4);
     }
 
-    // Try_reorg must not panic — Ok(false)/Err are both acceptable.
+    // Try_reorg must not panic - Ok(false)/Err are both acceptable.
     let _ = chain.try_reorg(candidate);
 
     // State root query must not panic at arbitrary heights.

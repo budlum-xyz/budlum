@@ -49,7 +49,7 @@ pub enum Stmt {
     /// Required by the semantic analyzer (every match must be
     /// Exhaustive over the scrutinee's reachable value set), but
     /// At the AST level we keep it as just another arm to keep the
-    /// Parser simple — sema is where exhaustiveness is checked.
+    /// Parser simple - sema is where exhaustiveness is checked.
     Match {
         scrutinee: Expr,
         arms: Vec<MatchArm>,
@@ -58,7 +58,7 @@ pub enum Stmt {
 }
 
 /// One arm of a `match` expression. The pattern is restricted to
-/// Integer literals or a wildcard (`_`) — full algebraic
+/// Integer literals or a wildcard (`_`) - full algebraic
 /// Data type patterns (struct destructuring, ranges).
 #[derive(Debug, Clone)]
 pub struct MatchArm {
@@ -70,9 +70,9 @@ pub struct MatchArm {
 /// (`_`) always matches; integer patterns match exactly that value.
 #[derive(Debug, Clone)]
 pub enum MatchPattern {
-    /// `0`, `1`, `42`, ... — exact integer match.
+    /// `0`, `1`, `42`, ... - exact integer match.
     IntLit(u64),
-    /// `_` — matches anything not matched by a previous arm.
+    /// `_` - matches anything not matched by a previous arm.
     Wildcard,
 }
 

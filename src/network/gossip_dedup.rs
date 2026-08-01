@@ -41,7 +41,7 @@ pub const SCORE_INVALID: f64 = -5.0;
 /// Score increment for a timely message (within propagation window).
 pub const SCORE_TIMELY: f64 = 0.5;
 
-/// Propagation window in milliseconds — messages within this window
+/// Propagation window in milliseconds - messages within this window
 /// Are considered "timely" and earn bonus score.
 pub const PROPAGATION_WINDOW_MS: u128 = 5_000; // 5 seconds
 
@@ -55,9 +55,9 @@ pub const MAX_DUPLICATE_COUNT: u64 = 1_000;
 /// Result of a deduplication check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupResult {
-    /// Message is new — should be processed.
+    /// Message is new - should be processed.
     New,
-    /// Message was already seen — should be skipped.
+    /// Message was already seen - should be skipped.
     Duplicate,
 }
 
@@ -101,7 +101,7 @@ pub struct GossipDedup {
     ///
     /// Previously this was a `VecDeque` queried with `contains`, which is an
     /// O(n) linear scan (up to `window_size` = 10_000 entries) on *every*
-    /// Incoming gossip message — itself a CPU-DoS vector under high load.
+    /// Incoming gossip message - itself a CPU-DoS vector under high load.
     /// Membership is now a `HashSet` lookup.
     seen_set: HashSet<[u8; 32]>,
     /// Insertion-order ring buffer used purely for LRU eviction so `seen_set`
@@ -137,7 +137,7 @@ impl GossipDedup {
         let hash = hash_message(message_bytes);
 
         if self.seen_set.contains(&hash) {
-            // Duplicate — record on peer score
+            // Duplicate - record on peer score
             self.total_duplicates += 1;
             let score = self.peer_scores.entry(*peer).or_default();
             score.score += SCORE_DUPLICATE;
@@ -146,7 +146,7 @@ impl GossipDedup {
             return DedupResult::Duplicate;
         }
 
-        // New message — add to seen set (bounded by LRU eviction)
+        // New message - add to seen set (bounded by LRU eviction)
         if self.seen_order.len() >= self.window_size {
             if let Some(old) = self.seen_order.pop_front() {
                 self.seen_set.remove(&old);

@@ -7,12 +7,12 @@
 //! ## Key facts grounded in the existing codebase (research)
 //! - Balances are `u64` (`core::account::Account::balance`). With **6 decimals**
 //!   The total supply 100M × 10^6 = 10^14 fits comfortably (u64 max ≈ 1.8e19).
-//!   18 decimals would need 10^26 and would NOT fit u64 — hence 6 decimals.
+//!   18 decimals would need 10^26 and would NOT fit u64 - hence 6 decimals.
 //! - There is **no `total_supply` field**; supply is the implicit sum of all
 //!   Balances. Burns are real: fees are `saturating_sub`'d from a balance and
 //!   Added nowhere (`slashing_report_fee`, `proof_submission_fee`).
 //!   The timed reserve burn and the metabolic burn here reuse that same "reduce
-//!   A balance, credit nothing" model — no new mint path is introduced.
+//!   A balance, credit nothing" model - no new mint path is introduced.
 //! - Validator income is fee-only: block and epoch emissions are disabled.
 //!   The producer receives `tx.fee - metabolic_burn` exactly once per included
 //!   Transaction. The legacy `block_reward` field is wire/snapshot compatibility
@@ -48,7 +48,7 @@ pub enum Allocation {
     Ecosystem,
     /// Team (subject to vesting).
     Team,
-    /// Burn reserve — the pool the timed annual burn consumes.
+    /// Burn reserve - the pool the timed annual burn consumes.
     BurnReserve,
 }
 
@@ -64,7 +64,7 @@ impl Allocation {
     }
 }
 
-/// Time-based team vesting schedule (Option B — standard cliff + linear).
+/// Time-based team vesting schedule (Option B - standard cliff + linear).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VestingSchedule {
     /// Total amount subject to vesting (base units).
@@ -148,7 +148,7 @@ impl Default for TokenomicsParams {
             team: bud(20_000_000),
             burn_reserve: bud(40_000_000),
             // Devnet: keep "a year" short enough to test; mainnet raises via
-            // Governance. EPOCH_LEN-agnostic — this is epochs, not wall-clock.
+            // Governance. EPOCH_LEN-agnostic - this is epochs, not wall-clock.
             epochs_per_year: 1000,
             // 10% of the original 40M reserve per year → reserve exhausted after
             // ~10 years of *reserve* burns (doc suggested a 5yr/40M schedule;
@@ -193,7 +193,7 @@ impl TokenomicsParams {
         timestamp_secs / self.seconds_per_epoch()
     }
 
-    /// Sum of all category allocations — must equal [`BUD_TOTAL_SUPPLY`].
+    /// Sum of all category allocations - must equal [`BUD_TOTAL_SUPPLY`].
     pub fn total(&self) -> u64 {
         self.community
             .saturating_add(self.liquidity)
@@ -326,7 +326,7 @@ impl TokenomicsAddresses {
 /// Genesis lock model (decision):
 /// - Liquidity + Community: immediately liquid at genesis.
 /// - Ecosystem: allocated to its account (treated as locked/governed off this
-///   Module's scope — held in a distinct account).
+///   Module's scope - held in a distinct account).
 /// - Team: allocated to the team account but subject to [`VestingSchedule`]
 ///   (see [`TokenomicsParams::team_vesting`]); consumers enforce vesting when
 ///   Moving funds.
@@ -348,7 +348,7 @@ pub fn genesis_allocations(
 ///
 /// The reserve lives in an on-chain account (`burn_reserve` address). Each time
 /// A new "year" boundary is crossed, `annual_burn_amount` is removed from that
-/// Account and credited nowhere — a true burn that reduces total supply.
+/// Account and credited nowhere - a true burn that reduces total supply.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimedBurnState {
     /// Number of annual burns already executed.
@@ -565,7 +565,7 @@ mod tests {
         // During cliff (start + cliff = 60)
         assert_eq!(v.unlocked_at(59), 0);
         // Cliff aninda (start+cliff=60): linear-from-start tasarimi
-        // (bkz. unlocked_at doc) — birikmis pay total*50/200 acilir.
+        // (bkz. unlocked_at doc) - birikmis pay total*50/200 acilir.
         // (fix 2026-07-17: onceki "0" beklentisi yanlis model
         // Varsayimiydi; mod.rs:82-96 belgelenmis davranis kilidi.)
         assert_eq!(v.unlocked_at(60), bud(1_000_000) / 4);

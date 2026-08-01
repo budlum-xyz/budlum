@@ -25,16 +25,33 @@ pub struct ExecutionReceipt {
     pub state_writes_digest: [u8; 32],
 }
 
-// VerifyMerkle/VerifyInference gate is now
-// Hard-coded to FULL activation on mainnet. Removed env var
-// BUDLUM_VERIFY_MERKLE which was a configuration attack vector —
-// A node operator could set it to "false" and disable Merkle
-// Verification, breaking state root trust.
-// Staged rollout should use governance/genesis config, not env vars.
+// Mainnet decoding uses the staged-rollout defaults, not full activation.
+//
+// The env var `BUDLUM_VERIFY_MERKLE` was removed for a good reason: an
+// operator could set it to "false" and turn off Merkle verification, which is
+// a configuration attack vector. But the replacement went past the target. It
+// hard-coded `MainnetActivation::full()`, which sets every gate to true and
+// makes `MainnetActivation::default()` unreachable from the only place that
+// consults it.
+//
+// The defaults are not decorative. `verify_merkle_enabled: false` is there
+// because the path verification is unfinished, and
+// `verify_inference_enabled: false` is there because, in the words of
+// `docs/AI_VERIFICATION_STATUS.md`, there is no verification circuit behind
+// the opcode at all and it returns a hard-coded zero. README states plainly
+// that VerifyMerkle is "gated off in production until 64-depth soundness is
+// proven". With `full()`, both opcodes decode and execute on mainnet, and
+// nothing downstream stops them - the execute arm has no second check.
+//
+// So the fix is `default()`, not `full()`. Turning a gate on is then a source
+// change with a reviewer, which is what "staged rollout should use
+// governance/genesis config, not env vars" was asking for; an env var is
+// still not consulted anywhere.
 fn decode_instruction(raw: u64, mainnet_mode: bool) -> Result<bud_isa::Instruction, String> {
     if mainnet_mode {
-        // Always full activation — no env var override
-        let activation = bud_isa::MainnetActivation::full();
+        // Staged-rollout defaults - no env var override, and no blanket
+        // activation either.
+        let activation = bud_isa::MainnetActivation::default();
         bud_isa::Instruction::decode_for_mainnet(raw, activation).map_err(|e| e.to_string())
     } else {
         #[cfg(test)]
@@ -265,7 +282,7 @@ impl Vm {
                 (0, cur_pc)
             }
             Opcode::Add => {
-                // Goldilocks field add — must match the AIR's
+                // Goldilocks field add - must match the AIR's
                 // `rd = rs1 + rs2` field constraint (see GOLDILOCKS_P).
                 let result = field_add_goldilocks(src1_val, src2_val);
                 self.registers[dst_idx as usize] = result;
@@ -273,14 +290,14 @@ impl Vm {
                 (result, cur_pc + 1)
             }
             Opcode::Sub => {
-                // Goldilocks field sub — matches the AIR field constraint.
+                // Goldilocks field sub - matches the AIR field constraint.
                 let result = field_sub_goldilocks(src1_val, src2_val);
                 self.registers[dst_idx as usize] = result;
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
             Opcode::Mul => {
-                // Goldilocks field mul — matches the AIR field constraint.
+                // Goldilocks field mul - matches the AIR field constraint.
                 let result = field_mul_goldilocks(src1_val, src2_val);
                 self.registers[dst_idx as usize] = result;
                 self.pc += 1;
@@ -532,7 +549,7 @@ impl Vm {
                 //
                 // (security audit) the original step
                 // Records `merkle_key` and `dst_val = 0` (the result is
-                // Not known yet — it will be set by the final expansion
+                // Not known yet - it will be set by the final expansion
                 // Round). 64 follow-up "expansion" rows are pushed
                 // Immediately, one per Poseidon round, so the AIR can
                 // Verify the path row-by-row.
@@ -581,7 +598,7 @@ impl Vm {
                 // Stash the path key on the VM so the expansion rows
                 // (pushed immediately below) can read it. We use a
                 // Local `Vec<(u64, u64, u8)>`-style scratch on `self`
-                // By reusing a private field — but to keep the
+                // By reusing a private field - but to keep the
                 // Signature simple we just walk the path twice
                 // (once for `result`, once for the expansion rows
                 // Below). For depth 64 this is 2*64=128 hashes per
@@ -601,7 +618,7 @@ impl Vm {
             Opcode::VerifyInference => {
                 // Always return 0 (verification failed) until proper
                 // STARK verification AIR is implemented. Operands intentionally
-                // Unread — keep decode/execute shape for future activation.
+                // Unread - keep decode/execute shape for future activation.
                 let _proof_addr = src1_val as usize;
                 let _model_addr = src2_val as usize;
                 let _proof_type = inst.imm; // 0=STARK, 1=SNARK wrap
@@ -613,7 +630,7 @@ impl Vm {
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
-            // (2026-07-22) privacy-layer opcodes — real semantics.
+            // (2026-07-22) privacy-layer opcodes - real semantics.
             //
             // PrivacyCommit (0x20):
             //   Commitment = Poseidon3(amount=rs1, recipient=rs2, blinding=imm)
@@ -765,7 +782,7 @@ impl Vm {
                             // argument derives each expansion row's address as
                             // `imm + 8 + 8 * round`, so a zero here would make
                             // every sibling read claim an address near zero
-                            // while the memory table supplies the real one —
+                            // while the memory table supplies the real one -
                             // measured as a 7-of-8 mismatch across the first
                             // rows before this was set.
                             imm: inst.imm,
@@ -781,7 +798,7 @@ impl Vm {
                         // its sibling. Without this the 64 words the path is
                         // built from never reach the memory argument, so the
                         // AIR sees a Poseidon chain over values that nothing
-                        // ties to the program's memory — a prover could supply
+                        // ties to the program's memory - a prover could supply
                         // a path that was never there. Measured before the
                         // fix: 64 expansion rows, 0 with `memory_addr`, and 0
                         // of the 65 path words present in the argument.
@@ -1050,11 +1067,11 @@ pub fn merkle_poseidon_round(a: u64, b: u64) -> u64 {
 ///
 /// MDS circulant matrix first row: [7, 1, 3, 8, 8, 3, 4, 9]
 /// Domain separator for nullifier derivation.
-/// ASCII-ish constant "NULLIFER" as a field element — domain-separates
+/// ASCII-ish constant "NULLIFER" as a field element - domain-separates
 /// Nullifier hashes from plain Poseidon(a,b) and PrivacyCommit.
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552; // "NULLIFER"
 
-/// MDS circulant matrix — must match BudAir / plonky3_prover.
+/// MDS circulant matrix - must match BudAir / plonky3_prover.
 /// Module-level const so lock test can access.
 pub const POSEIDON_MDS: [[u64; 8]; 8] = [
     [7, 1, 3, 8, 8, 3, 4, 9],
@@ -1069,13 +1086,13 @@ pub const POSEIDON_MDS: [[u64; 8]; 8] = [
 
 /// Round constants: first 4 rounds from Plonky3 Poseidon1 Goldilocks width-8.
 /// Module-level const so lock test can access.
-/// Full Poseidon1 round constants for Goldilocks width 8 — the parameter set
+/// Full Poseidon1 round constants for Goldilocks width 8 - the parameter set
 /// the weak 4-round permutation below is a truncation of.
 ///
 /// Source: Plonky3 `goldilocks/src/poseidon1.rs`, `GOLDILOCKS_POSEIDON1_RC_8`.
 /// Verified: `POSEIDON_RC` (the 4-round set actually in use) is byte-identical
 /// to the first four rows here, which is what makes the truncation claim
-/// checkable rather than folklore — see `four_round_set_is_a_prefix_of_full`.
+/// checkable rather than folklore - see `four_round_set_is_a_prefix_of_full`.
 ///
 /// Round schedule for this instance:
 ///
@@ -1101,7 +1118,7 @@ pub const POSEIDON_MDS: [[u64; 8]; 8] = [
 /// [`poseidon4_hash_state`] still runs four rounds, because the BudZero AIR
 /// constrains exactly four (`plonky3_air.rs`, `for r in 0..4`). Swapping the
 /// permutation without rebuilding those constraints would produce proofs that
-/// attest to a different function than the VM ran — a soundness break strictly
+/// attest to a different function than the VM ran - a soundness break strictly
 /// worse than the weak hash. The parameters are derived and pinned here so the
 /// AIR work has something exact to target; the opcodes that depend on the hash
 /// stay disabled until it lands.
@@ -1459,7 +1476,7 @@ pub const POSEIDON_ROUNDS_IN_USE: usize = POSEIDON_FULL_ROUNDS + POSEIDON_PARTIA
 /// Reference implementation of the **full** 30-round permutation.
 ///
 /// Not used by the VM: the AIR constrains four rounds, and the VM must compute
-/// what the AIR checks. This exists so the target is executable — the AIR work
+/// what the AIR checks. This exists so the target is executable - the AIR work
 /// can be validated against it, and
 /// `full_permutation_differs_from_truncated_one` proves the two really are
 /// different functions rather than the same one under another name.
@@ -1476,7 +1493,7 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
             s[i] = ((s[i] as u128 + rc[i] as u128) % P as u128) as u64;
         }
         // Full rounds apply the S-box to every lane; partial rounds only to
-        // lane 0. That asymmetry is the whole point of the partial rounds —
+        // lane 0. That asymmetry is the whole point of the partial rounds -
         // they raise the algebraic degree cheaply.
         let is_full = round < half_full || round >= POSEIDON_RC_FULL.len() - half_full;
         if is_full {
@@ -1501,7 +1518,7 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
 
 /// Round constants for the 4-round Poseidon permutation.
 ///
-/// # Superseded — kept only as the AIR's historical prefix
+/// # Superseded - kept only as the AIR's historical prefix
 ///
 /// `poseidon4_hash_state` no longer uses these. It runs the full 30-round
 /// permutation ([`POSEIDON_RC_FULL`]), which the AIR now constrains in full.
@@ -1518,8 +1535,8 @@ pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
 /// evaluations) is hours of GPU time rather than a theoretical bound.
 ///
 /// For `PrivacyCommit` that means an observer can recover
-/// `(amount, blinding, recipient_tag)` from a published commitment — hiding is
-/// gone — and can find a second opening for the same commitment or nullifier —
+/// `(amount, blinding, recipient_tag)` from a published commitment - hiding is
+/// gone - and can find a second opening for the same commitment or nullifier -
 /// binding is gone.
 ///
 /// These are the *first four rounds* of Plonky3's Goldilocks width-8 Poseidon1
@@ -1670,7 +1687,7 @@ mod tests {
             inst(Opcode::PrivacyCommit, 1, 2, 3, blinding as i32),
             // R4 = NullifierCheck(r5=claimed_nullifier, r6=secret)
             inst(Opcode::NullifierCheck, 4, 5, 6, 0),
-            // R7 = SumConservation(r8=sum_in, r9=sum_out) — equal
+            // R7 = SumConservation(r8=sum_in, r9=sum_out) - equal
             inst(Opcode::SumConservation, 7, 8, 9, 0),
             // R10 = SumConservation unequal
             inst(Opcode::SumConservation, 10, 8, 2, 0),
@@ -1966,7 +1983,7 @@ mod tests {
 
     /// Lock Poseidon MDS and RC constants.
     /// If someone changes these in bud-vm, this test fails.
-    /// Wallet-core has its own lock test — both must match.
+    /// Wallet-core has its own lock test - both must match.
     #[test]
     fn poseidon_mds_rc_lock() {
         // MDS circulant matrix first row must be [7,1,3,8,8,3,4,9]
@@ -2146,7 +2163,7 @@ mod poseidon_parameter_tests {
 
     /// The VM must keep computing what the AIR constrains. Four rounds is the
     /// number the AIR enforces, so the VM's hash must stay at four until the
-    /// AIR is rebuilt — swapping only one side is a soundness break.
+    /// AIR is rebuilt - swapping only one side is a soundness break.
     #[test]
     fn vm_hash_still_matches_the_air_round_count() {
         assert_eq!(
@@ -2173,7 +2190,7 @@ mod poseidon_parameter_tests {
         assert_eq!(truncated, 2401);
         assert!(
             truncated < 1u64 << 32,
-            "2401 is far below the field size — interpolable in practice, \
+            "2401 is far below the field size - interpolable in practice, \
              which is why four rounds was not enough"
         );
         // Eight full rounds alone already exceed it by orders of magnitude,

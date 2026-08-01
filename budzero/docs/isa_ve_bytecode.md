@@ -38,7 +38,7 @@ pub struct Instruction {
 | 18-22 | `rs2` | İkinci kaynak register (0-31) |
 | 23-54 | `imm` | 32-bit işaretli immediate değer |
 
-Bu sayede her instruction 8 byte'lık sabit boyutlu bir kelimedir — bu, L1 entegrasyonunda bytecode hizalama kontrolü için kritik avantaj sağlar.
+Bu sayede her instruction 8 byte'lık sabit boyutlu bir kelimedir - bu, L1 entegrasyonunda bytecode hizalama kontrolü için kritik avantaj sağlar.
 
 ## Opcodes (İşlem Kodları) ve Üretim Durumu
 

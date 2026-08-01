@@ -1,4 +1,4 @@
-//! B.U.D. Content Store — content-addressed storage layer.
+//! B.U.D. Content Store - content-addressed storage layer.
 //!
 //! Implements the `ContentStore` trait for storing and retrieving
 //! Content chunks by their `ContentId`. The primary implementation
@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-/// A content identifier — 32-byte hash of the chunk data.
+/// A content identifier - 32-byte hash of the chunk data.
 /// Mirrors `budlum_core::storage::content_id::ContentId` but is
 /// Self-contained so this crate can be used independently.
 #[derive(
@@ -69,7 +69,7 @@ pub enum StoreError {
 ///
 /// All implementations MUST verify content integrity on `put`:
 /// The provided `ContentId` must match `ContentId::of(data)`.
-/// This is a hard security requirement — a malicious peer must not be
+/// This is a hard security requirement - a malicious peer must not be
 /// Able to store data under a wrong CID.
 pub trait ContentStore: Send + Sync {
     /// Store a chunk. Returns `Err(StoreError::IntegrityMismatch)` if

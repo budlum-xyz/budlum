@@ -158,7 +158,7 @@ BudVM aritmetigi Goldilocks asal cismi (P = 2^64 - 2^32 + 1) uzerinde calisir:
 * `Inv`: Moduler ters: `rd = rs1^{-1} mod P`. Girdi sifirsa sonuc 0.
 * **`Poseidon`**: 4-round Poseidon hash (alpha=7, width=8). Iki register degerini alir, Goldilocks cisminde Poseidon permutasyonu uygular.
 * **`VerifyMerkle`**: 64-depth Merkle proof dogrulama. `rs1` = root, `rs2` = leaf, `imm` = bellek adresi. Bellek layout'u: `[key: u64, 64x sibling: u64]` (520 byte). Her level'de key'in bitine gore `poseidon4_hash` ile hash yonu belirlenir.
-* **`Not`**: Lojik NOT — `rs1 == 0` ise 1, degilse 0 dondurur.
+* **`Not`**: Lojik NOT - `rs1 == 0` ise 1, degilse 0 dondurur.
 * **`Eq/Neq`**: Karsilastirma. `Lt/Gt/Lte/Gte`: 64-bit karsilastirma.
 * **`And/Or/Xor`**: Bitwise islemler. `And`: bitwise AND, `Or`: bitwise OR, `Xor`: bitwise XOR.
 * **`SRead/SWrite`**: Storage okuma/yazma. `imm` ile belirtilen slot'a erisir. Bellek uzerinde `STORAGE_BASE + slot` adresinde saklanir (LogUp CTL icin).

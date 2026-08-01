@@ -1,4 +1,4 @@
-//! DeEd (src/deed) integration test — exercises the canonical manifest
+//! DeEd (src/deed) integration test - exercises the canonical manifest
 //! Primitives and permissionless role vocabulary in the shared integration suite.
 use crate::core::address::Address;
 #[cfg(test)]

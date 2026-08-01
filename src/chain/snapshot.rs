@@ -247,7 +247,7 @@ impl PruningManager {
         snapshots.sort_by_key(|entry| {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
-        // Onarımı (2026-07-19,): tek-şans yüklemesi kaldırıldı —
+        // Onarımı (2026-07-19,): tek-şans yüklemesi kaldırıldı -
         // Bozuk aday karantinaya gider ve bir SONRAKİ eski aday denenir; V2-şema
         // Dosyalar ("schema_version") v1 probe'unda karantinasız ISKART edilir
         // (çapraz-şema gölgeleme giderildi: geçerli V2 artık imha edilmiyor).
@@ -344,7 +344,7 @@ impl PruningManager {
         snapshots.sort_by_key(|entry| {
             std::cmp::Reverse(get_snapshot_height(&entry.path()).unwrap_or(0))
         });
-        // Onarımı (2026-07-19,): tek-şans yüklemesi kaldırıldı —
+        // Onarımı (2026-07-19,): tek-şans yüklemesi kaldırıldı -
         // Bozuk aday karantinaya gider ve bir sonraki eski aday denenir.
         let mut quarantined_any = false;
         for entry in &snapshots {
@@ -441,7 +441,7 @@ pub struct StateSnapshotV2 {
 
     // --- schema_version 3: previously-unpersisted state. All
     // `#[serde(default)]` so schema-2 snapshots still deserialize (the fields
-    // Simply come back empty/None — meaning "this feature wasn't active when the
+    // Simply come back empty/None - meaning "this feature wasn't active when the
     // Snapshot was taken", not data loss).
     //
     // GHOST-HUNTING NOTE: `registry`, `liveness`, and `invalid_votes`
@@ -460,7 +460,7 @@ pub struct StateSnapshotV2 {
     /// `account_state.tokenomics.block_reward`.
     #[serde(default)]
     pub tokenomics: crate::tokenomics::TokenomicsParams,
-    /// Tokenomics restore block (MUST restore together — see below). The timed
+    /// Tokenomics restore block (MUST restore together - see below). The timed
     /// Reserve burn counter, the reserve account and team vesting are one atomic
     /// Unit: restoring the burn counter without the reserve address (or vice
     /// Versa) would risk double-burning already-burned reserve. Kept as a single
@@ -594,7 +594,7 @@ pub struct StateSnapshotV2Params {
 /// Deterministik (struct field order sabit; bincode canonical).
 fn hash_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, val: &T) {
     // A serialize failure used to fold into empty bytes, which makes two
-    // different states hash the same — the state root is what nodes compare,
+    // different states hash the same - the state root is what nodes compare,
     // so a silent collision here is a fork with no error anywhere.
     let bytes = bincode::serialize(val).expect("BUG: snapshot field must serialize for state root");
     hasher.update((bytes.len() as u64).to_le_bytes());
@@ -694,14 +694,14 @@ impl StateSnapshotV2 {
     }
 
     /// (P2 schema-4) ham digest. schema_version'a göre dallanır:
-    /// - `< 4`: legacy digest (backward-compat — eski disk snapshot'ları verify).
+    /// - `< 4`: legacy digest (backward-compat - eski disk snapshot'ları verify).
     /// - `>= 4`: genişletilmiş digest (`budlum.snapshot.v4` prefix + 15
     ///   Önce-hash'lenmemiş alan). Forgery surface kapanması (RFC_GAP1 §"Ek eksik").
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
         // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4, f40f5f6 dersi:
-        // Tek-taraflı root değişikliği YASAK — prefix ile koordineli bump).
+        // Tek-taraflı root değişikliği YASAK - prefix ile koordineli bump).
         if self.schema_version >= 4 {
             hasher.update(b"budlum.snapshot.v4");
         }
@@ -776,7 +776,7 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.bridge_state);
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
-            // Finality_certificates: Vec — len-prefix + her elem serialize.
+            // Finality_certificates: Vec - len-prefix + her elem serialize.
             let fc_bytes = bincode::serialize(&self.finality_certificates)
                 .expect("BUG: finality certificates must serialize for state root");
             hasher.update((fc_bytes.len() as u64).to_le_bytes());

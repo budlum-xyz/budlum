@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Maximum number of processed message IDs
 /// Retained in the replay store. Beyond this limit, the oldest entries
 /// Are pruned to prevent unbounded memory growth (OOM liveness failure).
-/// 65536 entries × 32 bytes ≈ 2 MiB — sufficient for weeks of bridge traffic.
+/// 65536 entries × 32 bytes ≈ 2 MiB - sufficient for weeks of bridge traffic.
 pub const MAX_PROCESSED_MESSAGES: usize = 65_536;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -16,7 +16,7 @@ pub struct ReplayNonceStore {
     processed_messages: BTreeSet<MessageId>,
     /// Block height at which each message was processed.
     /// Used for safe height-based pruning that only removes entries after
-    /// FINALITY_PRUNE_DEPTH blocks — ensuring replay protection covers the
+    /// FINALITY_PRUNE_DEPTH blocks - ensuring replay protection covers the
     /// Finality window. Messages younger than the depth are never pruned.
     #[serde(skip)]
     processed_at_height: BTreeMap<MessageId, u64>,
@@ -52,7 +52,7 @@ impl ReplayNonceStore {
 
     /// Mark processed with block height for safe pruning.
     /// The height is recorded so that pruning only removes entries that are
-    /// Deeper than FINALITY_PRUNE_DEPTH blocks — preventing replay within
+    /// Deeper than FINALITY_PRUNE_DEPTH blocks - preventing replay within
     /// The finality window.
     pub fn mark_processed_at(
         &mut self,
@@ -68,7 +68,7 @@ impl ReplayNonceStore {
         Ok(())
     }
 
-    /// Fix (legacy — kept for backward compat): Unconditional count-based prune.
+    /// Fix (legacy - kept for backward compat): Unconditional count-based prune.
     /// WARNING: This can create a replay window for pruned messages.
     /// Prefer prune_processed_safe which respects finality depth.
     pub fn prune_processed(&mut self) {
@@ -215,7 +215,7 @@ mod v4_prune_tests {
             store.mark_processed_at(id, i * 20).unwrap(); // spread across heights
         }
         assert_eq!(store.processed_count(), 100);
-        // Prune at height 500 — only messages before height 500-1000=0 can be pruned
+        // Prune at height 500 - only messages before height 500-1000=0 can be pruned
         // Since we have 100 entries (< MAX_PROCESSED_MESSAGES=65536), no pruning occurs
         store.prune_processed_safe(500);
         assert_eq!(
@@ -251,7 +251,7 @@ mod v4_prune_tests {
             id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
             store.mark_processed_at(id, 999).unwrap(); // all at height 999
         }
-        // Prune at height 1000 — cutoff = 1000-1000=0, nothing is below 0
+        // Prune at height 1000 - cutoff = 1000-1000=0, nothing is below 0
         store.prune_processed_safe(1000);
         // All messages are at height 999, cutoff is 0, so none are pruned
         assert_eq!(

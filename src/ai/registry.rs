@@ -26,7 +26,7 @@ pub fn is_equivocation_error(error: &str) -> bool {
 }
 
 /// Minimum verifier stake to participate in AI inference.
-/// Prevents Sybil attacks — verifiers must have economic skin-in-the-game.
+/// Prevents Sybil attacks - verifiers must have economic skin-in-the-game.
 pub const MIN_VERIFIER_STAKE: u64 = 1_000;
 
 /// Callback events retained per address.
@@ -35,7 +35,7 @@ pub const MIN_VERIFIER_STAKE: u64 = 1_000;
 /// Production calls: the RPC path (`bud_aiCallbackQueue` ->
 /// `get_ai_callback_queue`) only *reads* the queue. So for any callback
 /// Address whose owner never consumes, the vector grew for the life of the
-/// Chain — and it is hashed into `AiRegistry::root` under
+/// Chain - and it is hashed into `AiRegistry::root` under
 /// `BDLM_AI_CALLBACK_QUEUE`, so every validator rehashes the whole backlog on
 /// Every block.
 ///
@@ -56,7 +56,7 @@ pub struct AiRegistry {
     pub reclaimed_fees: BTreeSet<AiRequestId>,
     /// Equivocation event record with block timestamp.
     /// Maps (request_id, verifier_bytes) → block_number when detected.
-    /// Dispute window enforcement — equivocation events
+    /// Dispute window enforcement - equivocation events
     /// Expire after `DISPUTE_WINDOW_BLOCKS` blocks, preventing stale slashing.
     pub equivocation_events: BTreeMap<(AiRequestId, [u8; 32]), u64>,
     /// Set of request IDs that have been cancelled
@@ -66,7 +66,7 @@ pub struct AiRegistry {
     /// AI verifier stake registry.
     /// Maps verifier address → staked amount. Verifiers must stake to
     /// Participate in AI inference; slashed amount goes to zero on equivocation.
-    /// This is separate from validator stake — AI verifiers have their own
+    /// This is separate from validator stake - AI verifiers have their own
     /// Economic commitment to the inference layer.
     pub verifier_stakes: BTreeMap<Address, u64>,
     /// Callback event queue.
@@ -78,7 +78,7 @@ pub struct AiRegistry {
     /// Execution proof registry.
     /// Maps (request_id, verifier) → AiExecutionProof. When a verifier
     /// Submits a ZKVM-verified inference result, the proof is stored here.
-    /// This enables trustless verification — the paradigm shift from
+    /// This enables trustless verification - the paradigm shift from
     /// "verifier says so" to "mathematics prove it."
     pub execution_proofs: BTreeMap<(AiRequestId, [u8; 32]), AiExecutionProof>,
     /// Verifier Quality of Service registry.
@@ -91,7 +91,7 @@ pub struct AiRegistry {
     pub agent_payments: BTreeMap<[u8; 32], AiAgentPayment>,
     /// Finalized payment receipts (payment_id never reusable).
     pub settled_agent_payments: BTreeMap<[u8; 32], AiAgentPaymentSettlement>,
-    /// Verifier whitelist — only whitelisted verifiers
+    /// Verifier whitelist - only whitelisted verifiers
     /// Can submit results. When empty, any staked verifier can submit
     /// (permissionless mode). When non-empty, only addresses in this set
     /// Are allowed (permissioned mode). This enables governance-controlled
@@ -248,7 +248,7 @@ impl AiRegistry {
         }
 
         // Result nonce enforcement:
-        // Result_nonce must be >= 1 (zero is invalid — prevents accidental/ambiguous submissions).
+        // Result_nonce must be >= 1 (zero is invalid - prevents accidental/ambiguous submissions).
         if result.result_nonce == 0 {
             return Err("result_nonce must be >= 1 (zero is invalid)".into());
         }
@@ -274,7 +274,7 @@ impl AiRegistry {
                     .or_insert_with(|| AiVerifierQos::new(result.verifier))
                     .record_equivocation();
                 return Err(format!(
-                    "{} verifier {:?} submitted conflicting commitments for request {} — dispute flagged",
+                    "{} verifier {:?} submitted conflicting commitments for request {} - dispute flagged",
                     EQUIVOCATION_ERROR_PREFIX,
                     result.verifier,
                     result.request_id.to_hex()
@@ -286,7 +286,7 @@ impl AiRegistry {
         // A cancelled request should never reach finalization.
         if self.cancelled_requests.contains(&result.request_id) {
             return Err(format!(
-                "Request {} has been cancelled — results not accepted",
+                "Request {} has been cancelled - results not accepted",
                 result.request_id.to_hex()
             ));
         }
@@ -307,7 +307,7 @@ impl AiRegistry {
         // Check if we reached agreement threshold for this commitment.
         // Hardening: when model.require_execution_proof, only verifiers that
         // Already attached a structurally-valid execution proof count toward
-        // Agreement — attestation alone cannot finalize execution-class models.
+        // Agreement - attestation alone cannot finalize execution-class models.
         let candidates: Vec<(Address, [u8; 32])> = entries
             .iter()
             .filter(|r| r.output_commitment == result.output_commitment)
@@ -433,7 +433,7 @@ impl AiRegistry {
 
     /// Update mutable model specification fields.
     /// Only the model owner can update. Immutable fields (model_id, model_hash,
-    /// Owner, version) cannot be changed — those require registering a new model.
+    /// Owner, version) cannot be changed - those require registering a new model.
     #[allow(clippy::too_many_arguments)]
     pub fn update_model_spec(
         &mut self,
@@ -480,7 +480,7 @@ impl AiRegistry {
         // Every spec change produces a new version number, providing a clear
         // On-chain audit trail. External systems can detect spec mutations
         // By comparing version values. The version is immutable from the
-        // Caller's perspective — only this method may increment it.
+        // Caller's perspective - only this method may increment it.
         spec.version = spec.version.saturating_add(1);
 
         Ok(())
@@ -617,7 +617,7 @@ impl AiRegistry {
         // Must not already have an outcome (finalized request → fee belongs to verifiers)
         if self.outcomes.contains_key(request_id) {
             return Err(format!(
-                "Request {} has been finalized — fee belongs to verifiers",
+                "Request {} has been finalized - fee belongs to verifiers",
                 request_id.to_hex()
             ));
         }
@@ -685,7 +685,7 @@ impl AiRegistry {
         // Cannot cancel an already-finalized request
         if self.outcomes.contains_key(request_id) {
             return Err(format!(
-                "Request {} has been finalized — cannot cancel",
+                "Request {} has been finalized - cannot cancel",
                 request_id.to_hex()
             ));
         }
@@ -693,7 +693,7 @@ impl AiRegistry {
         // Cannot cancel an already-reclaimed request
         if self.reclaimed_fees.contains(request_id) {
             return Err(format!(
-                "Request {} fee already reclaimed — cannot cancel",
+                "Request {} fee already reclaimed - cannot cancel",
                 request_id.to_hex()
             ));
         }
@@ -703,7 +703,7 @@ impl AiRegistry {
             return Err(format!("Request {} already cancelled", request_id.to_hex()));
         }
 
-        // Cannot cancel before the deadline has passed — the request is
+        // Cannot cancel before the deadline has passed - the request is
         // Still valid and verifiers may still submit results.
         // Cancellation is for requests where the requester no longer wants
         // To wait, but verifiers might still be working. We allow
@@ -808,7 +808,7 @@ impl AiRegistry {
     }
 
     /// Slash a verifier for equivocation.
-    /// Now enforces dispute window — cannot slash after DISPUTE_WINDOW_BLOCKS
+    /// Now enforces dispute window - cannot slash after DISPUTE_WINDOW_BLOCKS
     /// Have passed since the equivocation was detected.
     pub fn slash_equivocator(
         &mut self,
@@ -850,7 +850,7 @@ impl AiRegistry {
 
     /// Lock stake for an AI verifier.
     /// Verifiers must stake to participate in AI inference.
-    /// This stake is slashable on equivocation — economic skin-in-the-game.
+    /// This stake is slashable on equivocation - economic skin-in-the-game.
     pub fn lock_verifier_stake(&mut self, verifier: &Address, amount: u64) -> Result<u64, String> {
         if amount == 0 {
             return Err("Verifier stake must be > 0".into());
@@ -1014,7 +1014,7 @@ impl AiRegistry {
 
     /// Attach a ZKVM execution proof to a result.
     /// The proof cryptographically verifies that the inference output was
-    /// Produced by the claimed model on the claimed input — the core
+    /// Produced by the claimed model on the claimed input - the core
     /// Primitive for trustless AI inference in the Agentic Economy.
     ///
     /// Returns Ok if the proof commitments match the existing result.
@@ -1153,7 +1153,7 @@ impl AiRegistry {
     }
 
     /// Check if a result has an execution proof.
-    /// Results with execution proofs are "trustless" — verified by
+    /// Results with execution proofs are "trustless" - verified by
     /// Mathematics rather than by verifier reputation.
     pub fn has_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.execution_proofs
@@ -1321,7 +1321,7 @@ impl AiRegistry {
             .remove(payment_id)
             .ok_or_else(|| String::from("Agent payment: payment_id not found for settle"))?;
         if payment.is_escrowed() {
-            // Should not be called for escrowed payments — put back and error.
+            // Should not be called for escrowed payments - put back and error.
             self.agent_payments.insert(payment.payment_id, payment);
             return Err(String::from(
                 "Agent payment: escrowed payment cannot use immediate settle",
@@ -1504,7 +1504,7 @@ impl AiRegistry {
         self.agent_reputations.get(agent)
     }
 
-    /// Get all agents sorted by trust score (descending — highest trust first).
+    /// Get all agents sorted by trust score (descending - highest trust first).
     /// Returns Vec of (agent_address, trust_score) tuples.
     pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
         let mut scored: Vec<(Address, f64)> = self

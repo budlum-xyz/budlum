@@ -822,7 +822,7 @@ mod chaos_tests {
         let sender_pub = Address::from(sender.public_key_bytes());
         blockchain.state.add_balance(&sender_pub, 10_000);
 
-        // Tx_old: nonce=0 fee=1, payload=[1] — önce bu girer.
+        // Tx_old: nonce=0 fee=1, payload=[1] - önce bu girer.
         let mut tx_old = Transaction::new(sender_pub, Address::from([0x99; 32]), 1, vec![1]);
         tx_old.nonce = 0;
         tx_old.fee = 1;
@@ -831,7 +831,7 @@ mod chaos_tests {
         blockchain.add_transaction(tx_old).unwrap();
         assert_eq!(blockchain.mempool.len(), 1);
 
-        // Tx_new: aynı nonce=0 ama fee=5, payload=[2] — RBF kazananı; eski silinir.
+        // Tx_new: aynı nonce=0 ama fee=5, payload=[2] - RBF kazananı; eski silinir.
         let mut tx_new = Transaction::new(sender_pub, Address::from([0x99; 32]), 1, vec![2]);
         tx_new.nonce = 0;
         tx_new.fee = 5;
@@ -907,14 +907,14 @@ mod chaos_tests {
         }
         assert_eq!(pool.len(), 100);
 
-        // 2) Dürüst akış: 100 gönderici fee=2 — her biri bir spam'i evict eder.
+        // 2) Dürüst akış: 100 gönderici fee=2 - her biri bir spam'i evict eder.
         for i in 0..100u8 {
             let tx = create_signed_tx(i | 0x80, 2);
             pool.add_transaction(tx).unwrap();
         }
         assert_eq!(pool.len(), 100);
 
-        // 3) Mühür: havuzun en düşük fee'si artık 2 — yeni fee=1 spam hiçbir
+        // 3) Mühür: havuzun en düşük fee'si artık 2 - yeni fee=1 spam hiçbir
         //    Şeyi evict edemez -> PoolFull; fee=3 ise tam tersine evict EDER.
         let spam = create_signed_tx(0x7E, 1);
         assert!(matches!(
@@ -930,7 +930,7 @@ mod chaos_tests {
     // ─── Chaos: double-lock, state determinism, genesis mismatch ───
 
     /// **Double-spend koruması:** Aynı asset iki kez lock edilemez. BridgeState
-    /// `asset_locations` tek-durum haritası — ilk lock'tan sonra asset Active→Locked
+    /// `asset_locations` tek-durum haritası - ilk lock'tan sonra asset Active→Locked
     /// Geçer, ikinci lock reddedilir. Bu, cross-domain double-spend'in temel
     /// Korumasıdır.
     #[test]
@@ -948,7 +948,7 @@ mod chaos_tests {
             .lock(1, 2, 10, 0, asset, owner, recipient, 100, 1000)
             .expect("first lock must succeed");
 
-        // İkinci lock AYNI asset ile — reddedilmeli (double-spend koruması).
+        // İkinci lock AYNI asset ile - reddedilmeli (double-spend koruması).
         let result = bridge.lock(1, 2, 11, 0, asset, owner, recipient, 100, 1000);
         assert!(
             result.is_err(),
@@ -957,7 +957,7 @@ mod chaos_tests {
     }
 
     /// **State determinizmi:** Aynı işlem seti farklı sıralarda işlendiğinde
-    /// Bakiye değişmemeli (konsensüs gereği — conservation of funds).
+    /// Bakiye değişmemeli (konsensüs gereği - conservation of funds).
     #[test]
     fn test_chaos_state_determinism_under_tx_reordering() {
         let consensus = Arc::new(PoWEngine::new(0));
@@ -973,7 +973,7 @@ mod chaos_tests {
         chain_b.state.add_balance(&alice, 1000);
         chain_b.state.add_balance(&bob, 1000);
 
-        // Bakiye transferi模拟 — direkt state mutate (add/spend) ile.
+        // Bakiye transferi模拟 - direkt state mutate (add/spend) ile.
         // Alice → Bob: 100
         chain_a.state.add_balance(&bob, 100);
         chain_a.state.add_balance(&alice, 0); // (no-op, conservation check için)

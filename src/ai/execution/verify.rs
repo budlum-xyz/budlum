@@ -13,7 +13,7 @@ pub struct ExecutionVerifyReport {
     /// The proof carries the weights digest the model registered.
     ///
     /// `program_hash_matches_model` only binds the guest program, which for
-    /// the fixed-point MLP depends on the architecture alone — the weights
+    /// the fixed-point MLP depends on the architecture alone - the weights
     /// live in a memory image the STARK does not constrain. Without this
     /// field a prover could run the registered program over any weights.
     pub weights_bound: bool,
@@ -85,14 +85,14 @@ pub fn verify_execution_proof_structural_with_model(
 ///
 /// This is what makes the AIR's initial-memory commitment worth having. The
 /// AIR proves the trace folds to whatever `initial_state_root` says, but the
-/// fold uses fixed constants — a prover that wants a particular accumulator
+/// fold uses fixed constants - a prover that wants a particular accumulator
 /// can solve for a set of reads that reaches it and run on different weights.
 /// Demonstrated: for reads `[(16,2),(24,3),(32,1)]` a forged set
 /// `[(16,9),(24,-9),(32,x)]` hits the same accumulator with one modular
 /// multiplication.
 ///
-/// The defence is not to make the fold collision-resistant — that needs a hash
-/// in the AIR and the trace cannot afford one — but to stop trusting the
+/// The defence is not to make the fold collision-resistant - that needs a hash
+/// in the AIR and the trace cannot afford one - but to stop trusting the
 /// prover's value. The verifier holds the registered model, so it can rebuild
 /// the memory image, replay the reads and compute the commitment itself. A
 /// proof whose public input disagrees is rejected before the STARK is even
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(
             matmul_program_hash(&honest).unwrap(),
             matmul_program_hash(&swapped).unwrap(),
-            "same architecture must produce the same program — this is the gap"
+            "same architecture must produce the same program - this is the gap"
         );
         assert_ne!(
             weights_digest(&honest),
@@ -330,7 +330,7 @@ mod tests {
         let rep = verify_execution_proof_structural_with_model(&attacker, &req, &res, Some(&spec));
         assert!(
             rep.program_hash_matches_model,
-            "the program hash still matches — that is exactly why it is not enough"
+            "the program hash still matches - that is exactly why it is not enough"
         );
         assert!(!rep.weights_bound, "the weights digest must not match");
         assert!(!rep.is_structurally_valid());
@@ -346,7 +346,7 @@ mod tests {
         assert!(rep.weights_bound);
         assert!(
             rep.is_structurally_valid(),
-            "the honest proof must still pass — the gate cannot just reject everything"
+            "the honest proof must still pass - the gate cannot just reject everything"
         );
     }
 
@@ -397,7 +397,7 @@ mod tests {
     }
 
     /// A model that does not require an execution proof keeps working without
-    /// a digest — the binding is a requirement of the proof path, not a new
+    /// a digest - the binding is a requirement of the proof path, not a new
     /// obligation on every model.
     #[test]
     fn attestation_only_models_are_unaffected() {
@@ -489,7 +489,7 @@ mod tests {
     /// `acc' = acc * BETA + addr * GAMMA + val` with fixed constants is a
     /// polynomial evaluated at a known point. Given an honest accumulator, a
     /// prover can pick the first reads freely and solve the last one to land
-    /// on the same value — one modular multiplication, no search.
+    /// on the same value - one modular multiplication, no search.
     #[test]
     fn the_constant_fold_can_be_collided() {
         const P: u128 = 18_446_744_069_414_584_321;
@@ -569,7 +569,7 @@ mod tests {
         );
     }
 
-    /// And a different input too — the input is part of the seeded image.
+    /// And a different input too - the input is part of the seeded image.
     #[test]
     fn different_inputs_give_a_different_expected_root() {
         use crate::ai::execution::FixedPointMlpSpec;
@@ -624,7 +624,7 @@ mod stark_path_e2e {
 
     /// The whole AI execution path, end to end, with nothing stubbed:
     /// prove a real MLP forward pass, then verify its STARK the way the
-    /// transaction path now does — rebuild the guest program from the
+    /// transaction path now does - rebuild the guest program from the
     /// registered model and check the proof against the public inputs it
     /// carries.
     #[test]

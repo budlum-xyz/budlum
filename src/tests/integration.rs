@@ -103,7 +103,7 @@ mod integration_tests {
             state.advance_epoch(1000);
         }
 
-        // Voting is over and the proposal carried — but it is not applied yet.
+        // Voting is over and the proposal carried - but it is not applied yet.
         // Every proposal type now waits out an activation delay, so there is a
         // window in which a passed vote is visible before it binds. This used
         // to be `Executed` here because `ChangeBaseFee` had no delay at all.
@@ -390,7 +390,7 @@ mod integration_tests {
         validator.vrf_public_key = vrf_public_key;
         validator.bls_public_key = bls_pk.clone();
         // Gerçek bir BLS PoP üret (önceden sahte sıfır vektör
-        // Kullanılıyordu — bu, güvenlik denetimi Madde 3 kapsamında
+        // Kullanılıyordu - bu, güvenlik denetimi Madde 3 kapsamında
         // Kapatılan rogue-key saldırısına açıktı). IETF PoP = sk · H(bls_pk)
         // Under the dedicated BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_ DST.
         let pop_msg = crate::chain::finality::pop_signing_message(

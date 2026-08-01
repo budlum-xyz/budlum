@@ -7,7 +7,7 @@
 //! Wallet-core intentionally does **not** depend on bud-vm (mobile/WASM
 //! Footprint); this is a deliberate duplicated primitive with lock tests.
 
-/// Domain separator for nullifier derivation — ASCII "NULLIFER".
+/// Domain separator for nullifier derivation - ASCII "NULLIFER".
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552;
 
 const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
@@ -156,7 +156,7 @@ mod tests {
     fn poseidon_two_vs_three_absorb_differ() {
         let a = poseidon4_hash(1, 2);
         let b = poseidon4_hash3(1, 2, 0);
-        // State [1,2,0,...] vs [1,2,0,...] — hash3 with c=0 equals hash2
+        // State [1,2,0,...] vs [1,2,0,...] - hash3 with c=0 equals hash2
         assert_eq!(a, b);
         assert_ne!(poseidon4_hash3(1, 2, 3), a);
     }

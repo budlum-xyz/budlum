@@ -3,7 +3,7 @@
 //! This is the single, canonical shape in which a proven offence is reported to
 //! The [`PermissionlessRegistry`](super::permissionless::PermissionlessRegistry).
 //! The consensus layer produces it, the RPC `slash-evidence-submit` endpoint
-//! Accepts it, and future domains reuse it verbatim — so the format lives here,
+//! Accepts it, and future domains reuse it verbatim - so the format lives here,
 //! Not in any one producer.
 //!
 //! ## Design
@@ -68,7 +68,7 @@ pub enum SlashingProof {
     ///
     /// The consensus layer rejects each cryptographically-invalid vote at
     /// Ingest; this proof attests that a validator crossed the per-epoch
-    /// `threshold` of such rejected votes — i.e. it is spamming garbage
+    /// `threshold` of such rejected votes - i.e. it is spamming garbage
     /// Signatures. `count`/`threshold` bound the offence.
     InvalidSignatureSpam {
         epoch: u64,
@@ -224,7 +224,7 @@ impl SlashingReport {
     /// Convenience: a consensus-verified invalid-signature-spam fault.
     ///
     /// Provenance is `ConsensusVerified` because the node's own consensus layer
-    /// Cryptographically rejected every one of the `count` votes at ingest — the
+    /// Cryptographically rejected every one of the `count` votes at ingest - the
     /// Count is the node's first-hand observation, not an external claim.
     pub fn consensus_invalid_signature_spam(
         offender: Address,
@@ -247,7 +247,7 @@ impl SlashingReport {
         )
     }
 
-    /// Relayer invalid proof — griefing/fronting/yanlış-relay.
+    /// Relayer invalid proof - griefing/fronting/yanlış-relay.
     /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
     /// Per decision reuse_malicious to avoid semver break.
     pub fn consensus_invalid_relay_proof(
@@ -267,7 +267,7 @@ impl SlashingReport {
         )
     }
 
-    /// Relayer **griefing** — submitting garbage / low-value /
+    /// Relayer **griefing** - submitting garbage / low-value /
     /// Resource-wasting proofs to deny service or waste other relayers'
     /// Resources. Uses `Other` with tag `relayer_griefing`, mapped to
     /// `MaliciousBehaviour` (100% slash in default params). Per decision
@@ -290,7 +290,7 @@ impl SlashingReport {
         )
     }
 
-    /// Relayer **front-running** — racing another relayer's valid
+    /// Relayer **front-running** - racing another relayer's valid
     /// Proof to capture fees / rewards illegitimately (e.g. copying the proof
     /// And submitting it first). Tag `relayer_front_running`, mapped to
     /// `MaliciousBehaviour` (100% slash).
@@ -311,7 +311,7 @@ impl SlashingReport {
         )
     }
 
-    /// Relayer **wrong-relay** — relaying a message to the wrong
+    /// Relayer **wrong-relay** - relaying a message to the wrong
     /// Destination domain, forging relay metadata, or delivering a proof that
     /// Does not correspond to the attested message. Tag `relayer_wrong_relay`,
     /// Mapped to `MaliciousBehaviour` (100% slash).
@@ -332,7 +332,7 @@ impl SlashingReport {
         )
     }
 
-    /// Attester invalid attestation — supply-chain forged attestation.
+    /// Attester invalid attestation - supply-chain forged attestation.
     pub fn consensus_invalid_attester_proof(
         offender: Address,
         reason: String,
@@ -350,7 +350,7 @@ impl SlashingReport {
         )
     }
 
-    /// Content validator invalid validation — SocialFi content forgery.
+    /// Content validator invalid validation - SocialFi content forgery.
     pub fn consensus_invalid_content_validation(
         offender: Address,
         reason: String,
@@ -421,7 +421,7 @@ impl SlashingReport {
     /// Whether the registry is allowed to act on this report: it must be both
     /// Structurally valid AND consensus-verified. Externally-submitted
     /// (`Unverified`) reports pass structural checks but are not actioned until
-    /// The consensus layer confirms them — this is what keeps the permissionless
+    /// The consensus layer confirms them - this is what keeps the permissionless
     /// `slash-evidence-submit` endpoint safe without a whitelist.
     pub fn is_actionable(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
@@ -532,8 +532,8 @@ mod tests {
         assert_eq!(r2.condition(), SlashingCondition::LivenessFault);
     }
 
-    /// The three relayer offence classes — griefing,
-    /// Front-running, wrong-relay — are each structurally valid, labelled as
+    /// The three relayer offence classes - griefing,
+    /// Front-running, wrong-relay - are each structurally valid, labelled as
     /// `MaliciousBehaviour` (100% slash), and consensus-actionable. The single
     /// `Other` proof variant with distinct tags keeps the `SlashingCondition`
     /// Enum stable (no semver break) while still separating offence classes.

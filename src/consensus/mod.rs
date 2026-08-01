@@ -19,6 +19,26 @@ impl Error for ConsensusError {}
 pub const MAX_FUTURE_BLOCK_TIME_MS: u128 = 15 * 1000;
 pub const MAX_PAST_BLOCK_TIME_MS: u128 = 2 * 60 * 60 * 1000;
 pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
+/// Consensus block-size ceiling, measured over the **JSON** encoding.
+///
+/// Distinct from `network::protocol::MAX_BLOCK_SIZE` (1 MiB) on purpose, and
+/// the two are not interchangeable despite the shared name:
+///
+/// | constant | value | measured over | rejects at |
+/// | :-- | :-- | :-- | :-- |
+/// | `consensus::MAX_BLOCK_SIZE` | 1_000_000 | `serde_json::to_vec` | block validation |
+/// | `protocol::MAX_BLOCK_SIZE` | 1_048_576 | `prost` `encoded_len` | gossip ingest |
+///
+/// The transport bound is the looser of the two *and* it measures the more
+/// compact encoding, so the consensus check is always the binding one. A block
+/// that clears gossip can still be refused by validation; the reverse cannot
+/// happen. That ordering is the safe one - the network never accepts something
+/// consensus would reject - but it is a property of the current numbers, not
+/// of the design, and nothing was recording it.
+///
+/// If either value moves, keep `protocol::MAX_BLOCK_SIZE` (protobuf) at or
+/// above this one (JSON), or gossip starts admitting blocks every validator
+/// then refuses.
 pub const MAX_BLOCK_SIZE: usize = 1_000_000;
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 5000;
 pub const MAX_REORG_DEPTH: usize = 100;
@@ -71,7 +91,7 @@ pub trait ConsensusEngine: Send + Sync {
     /// Committed and the chain is in its post-commit state. The
     /// Default implementation is a no-op; engines that need access to
     /// The full chain (e.g. `PoWEngine` for difficulty adjustment)
-    /// Override it. Validation (`validate_block`) MUST remain pure —
+    /// Override it. Validation (`validate_block`) MUST remain pure -
     /// Any state mutation triggered by a block landing on the chain
     /// Belongs here, not in validation.
     fn record_block_with_chain(
@@ -221,5 +241,15 @@ mod tests {
         assert_eq!(MAX_FUTURE_BLOCK_TIME_MS, 15_000);
         assert_eq!(MIN_BLOCK_INTERVAL_MS, 1000);
         assert_eq!(MAX_REORG_DEPTH, 100);
+        // One definition, two gates. `try_reorg` refuses a deep reorg at the
+        // state machine and `is_better_chain` refuses it at fork choice; they
+        // used to hold separate `= 100` literals with nothing connecting them,
+        // so raising one silently left the other enforcing the old depth - a
+        // chain accepted by one gate and refused by the other.
+        assert_eq!(
+            crate::chain::blockchain::MAX_REORG_DEPTH,
+            MAX_REORG_DEPTH,
+            "the chain layer must re-export this constant, not redeclare it"
+        );
     }
 }

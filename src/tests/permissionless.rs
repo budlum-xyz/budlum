@@ -107,7 +107,7 @@ fn permissionless_account_cannot_enter_poa_without_approval() {
 }
 
 /// Even after submitting KYC, a candidate is not authorized until an admin
-/// Approves — the permissioned gate the permissionless registry does not have.
+/// Approves - the permissioned gate the permissionless registry does not have.
 #[test]
 fn poa_requires_admin_approval_not_stake() {
     let mut poa = PoaMembershipRegistry::new();
@@ -195,7 +195,7 @@ fn stake_tx(from: Address, amount: u64, nonce: u64) -> Transaction {
 }
 
 /// Applying a Stake transaction must AUTOMATICALLY register the account in the
-/// Permissionless registry — no separate registration call. This is the core
+/// Permissionless registry - no separate registration call. This is the core
 /// "staking == registration" acceptance criterion.
 #[test]
 fn stake_tx_auto_registers_in_registry() {
@@ -226,7 +226,7 @@ fn additional_stake_updates_registry_stake() {
 }
 
 /// A stake below the floor still creates a validator (existing behaviour) but is
-/// NOT active in the registry — the economic floor is the only gate, and there
+/// NOT active in the registry - the economic floor is the only gate, and there
 /// Is still no whitelist.
 #[test]
 fn stake_below_floor_is_not_active_in_registry() {
@@ -264,7 +264,7 @@ fn actionable_report_slashes_registered_validator() {
     assert!(!state.registry.is_active(&offender, roles::VALIDATOR));
 }
 
-/// An unverified (externally-submitted) report must NOT slash — even though it
+/// An unverified (externally-submitted) report must NOT slash - even though it
 /// Is structurally valid. This is what makes the permissionless
 /// `submit_slashing_report` RPC safe without a whitelist.
 #[test]
@@ -293,7 +293,7 @@ fn unverified_report_does_not_slash() {
 }
 
 /// A report against an account that never registered is a harmless no-op
-/// (Ok(None)), not an error — anyone can submit reports permissionlessly.
+/// (Ok(None)), not an error - anyone can submit reports permissionlessly.
 #[test]
 fn report_against_unregistered_is_noop() {
     let mut state = AccountState::new();
@@ -486,7 +486,7 @@ fn unstake_mirrors_the_reduced_stake_into_the_registry() {
 /// Unstaking below the floor must deactivate the registry membership.
 ///
 /// Without the mirror, a validator could unstake down to dust (or to zero) and
-/// Keep an `Active` registry entry with its original stake — passing
+/// Keep an `Active` registry entry with its original stake - passing
 /// `registry.is_active` and appearing in `active_members` with stake it no
 /// Longer has.
 #[test]
@@ -511,8 +511,8 @@ fn unstaking_below_the_floor_deactivates_the_registry_entry() {
 
 /// The registry root is consensus state, so an `Unstake` must move it.
 ///
-/// Before the mirror, applying `Unstake` left `registry.root()` byte-identical
-/// — the reduced stake was invisible to the state root. Two nodes, one of which
+/// Before the mirror, applying `Unstake` left `registry.root()` byte-identical:
+/// the reduced stake was invisible to the state root. Two nodes, one of which
 /// Replayed history through a path that did sync, would compute different roots.
 #[test]
 fn unstake_changes_the_registry_root() {
@@ -544,7 +544,7 @@ fn unstake_changes_the_registry_root() {
 /// Bond was permanently unrecoverable.
 ///
 /// Canary: delete `begin_role_bond_unbonding` / `withdraw_role_bond` and this
-/// Fails to compile — which is the point. Delete only the balance credit in
+/// Fails to compile - which is the point. Delete only the balance credit in
 /// `withdraw_role_bond` and it fails on the final balance assertion.
 #[test]
 fn a_relayer_bond_can_be_unbonded_and_withdrawn() {
@@ -733,7 +733,7 @@ fn a_role_with_no_independent_bond_is_rejected() {
 ///
 /// `total_bud_committed` counts liquid balances plus registry role bonds, so a
 /// Bond that is debited and never creditable is not a supply leak in the
-/// Accounting sense — but it is a leak for the account. Round-tripping the bond
+/// Accounting sense - but it is a leak for the account. Round-tripping the bond
 /// Must leave both the balance and the committed total exactly where they
 /// Started.
 #[test]

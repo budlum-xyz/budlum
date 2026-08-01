@@ -165,7 +165,7 @@ mod hardening_tests {
     /// Test'te çağrılıyordu; production'da hiçbir yerde çağrılmıyordu
     /// (rogue-key saldırısına açık). Bu test, public `verify_pop`
     /// Fonksiyonunun hâlâ geçerli PoP'leri kabul ettiğini, geçersiz
-    /// Olanları reddettiğini doğrular — böylece `blockchain.rs`'in
+    /// Olanları reddettiğini doğrular - böylece `blockchain.rs`'in
     /// `build_validator_snapshot_from_state` filtresi güvenle
     /// Kullanabilir. (Filtre unit test'lerde doğrudan çağrılamaz çünkü
     /// Private'tır; bu test public API'nin kontratını garanti eder.)
@@ -189,7 +189,7 @@ mod hardening_tests {
             crate::core::transaction::DEFAULT_CHAIN_ID,
         ));
 
-        // Geçersiz PoP (sahte) — production filtresi bunu reddetmeli
+        // Geçersiz PoP (sahte) - production filtresi bunu reddetmeli
         let invalid = ValidatorEntry {
             address: test_addr_from_byte(1u8),
             stake: 1000,
@@ -223,7 +223,7 @@ mod hardening_tests {
     }
 
     /// `operator_default` kimlik doğrulamayı kapatır ve `auth_required=false`
-    /// Döner — operatörün bilinçli olarak devre dışı bıraktığını gösterir.
+    /// Döner - operatörün bilinçli olarak devre dışı bıraktığını gösterir.
     /// (Başlangıçta GÜVENLİK uyarıları loglanır, ama davranış kontratı
     /// Budur.)
     #[test]
@@ -235,7 +235,7 @@ mod hardening_tests {
     }
 
     /// `from_env` ile `auth_required=true` ve boş api_key
-    /// (env var ayarlanmamış) geçirildiğinde hata döner — operatörün
+    /// (env var ayarlanmamış) geçirildiğinde hata döner - operatörün
     /// Public bir RPC'yi boş key ile başlatması engellenir.
     #[test]
     fn rpc_empty_api_key_rejected_when_auth_required() {
@@ -306,7 +306,7 @@ mod hardening_tests {
     // Bu test, default'un struct literal'ı üzerinden gerçekten `true`
     // Olduğunu sabitler. (sadece `RpcSecurityConfig::default`'ı
     // Düzeltmişti; CLI'nin okuduğu `NodeConfig::default`'a
-    // Dokunmamıştı — yani gerçek main başlangıcında hâlâ `false`
+    // Dokunmamıştı - yani gerçek main başlangıcında hâlâ `false`
     // Kalıyordu. wiring gap'i kapatıyor.)
     #[test]
     fn cli_config_default_has_rpc_auth_required_true() {
@@ -332,7 +332,7 @@ mod hardening_tests {
     /// Ile log yakalayarak. (`tracing` global subscriber zaten
     /// Test'lerde kurulu olmayabilir; bu test pratik olarak sadece
     /// Kod yolunun compile edildiğini + doğru koşulda çağrıldığını
-    /// Doğrular — gerçek warning davranışı entegrasyon test'lerinde
+    /// Doğrular - gerçek warning davranışı entegrasyon test'lerinde
     /// Manuel olarak doğrulanır.)
     #[test]
     fn main_resolved_auth_required_check_compiles() {

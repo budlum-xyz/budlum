@@ -47,12 +47,34 @@ jobs:
           # verdict.
           python3 ./scripts/clippy-extra-report.py /tmp/clippy-extra.json
           bash ./scripts/check-clippy-extra.sh /tmp/clippy-extra.json
-      - name: Feature matrix — pq-ml-dsa solo ()
+      - name: Feature matrix - pq-ml-dsa solo ()
         run: |
           set -euo pipefail
           cargo check --no-default-features --features pq-ml-dsa
           cargo clippy --no-default-features --features pq-ml-dsa --all-targets -- -D warnings
-      - name: Feature canary — --all-features REDDEDILMELI ()
+          # `check` and `clippy` prove it compiles. They do not run a single
+          # signature. `pq-ml-dsa` is a consensus choice - `PQ_SCHEME_ID` is
+          # written into genesis and `validate_pq_scheme` refuses to start on a
+          # mismatch - so an operator can select it for mainnet, and until now
+          # no test had ever generated a key or verified a signature under it.
+          # The crypto module's own tests are the minimum bar for a signature
+          # scheme that gates validator registration.
+          cargo test --no-default-features --features pq-ml-dsa --lib crypto:: 2>&1 | tee /tmp/mldsa-tests.log
+          # Guard against the filter silently matching nothing: a `cargo test`
+          # that runs zero tests exits 0 and looks identical to a pass.
+          if grep -qE 'running 0 tests' /tmp/mldsa-tests.log; then
+            echo "HATA: pq-ml-dsa altinda 0 test kostu -> filtre eslesmedi (vacuous)"
+            exit 1
+          fi
+          # And that the ones that matter are among them. `crypto::` also
+          # matches PKCS#11 parsing and policy tests, which would pass without
+          # a single signature being produced.
+          for t in test_keypair_generation test_sign_and_verify test_deterministic_signature; do
+            grep -qE "primitives::tests::$t \.\.\. ok" /tmp/mldsa-tests.log \
+              || { echo "HATA: $t pq-ml-dsa altinda kosmadi/gecmedi"; exit 1; }
+          done
+          grep -E 'test result:' /tmp/mldsa-tests.log
+      - name: Feature canary - --all-features REDDEDILMELI ()
         run: |
           set -euo pipefail
           if cargo check --all-features 2>/dev/null; then
@@ -63,15 +85,15 @@ jobs:
       - name: Test
         # Pipefail zorunlu: tee tek başına exit 0 döner; aksi halde test fail
         # Core job'ı sahte-yeşil yapar (kanıt: d815561 Test=success, 1 fail gizli;
-        # Coverage nextest aynı fail ile kırmızı — 2026-07-19).
+        # Coverage nextest aynı fail ile kırmızı - 2026-07-19).
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
-      - name: cargo doc (Madde 6 — public API dokümantasyon)
+      - name: cargo doc (Madde 6 - public API dokümantasyon)
         run: |
           set -euo pipefail
           RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features pq-dilithium 2>&1 | tee /tmp/doc.log
-          echo "cargo doc: warnings as errors — passed"
+          echo "cargo doc: warnings as errors - passed"
       - name: Rozet kanaryasi (log'dan bagimsiz)
         run: bash ./scripts/check-badges-are-current.sh --self-test
       - name: Rozet guncel mi (README = olculen test sayisi)
@@ -91,7 +113,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         # NOT: master 2026-07-16+ `toolchain` input'unu ZORUNLU kiliyor
-        # (CI kanit: job 87741629986 — "'toolchain' is a required input").
+        # (CI kanit: job 87741629986 - "'toolchain' is a required input").
         with:
           toolchain: "1.94.0"
           components: clippy, rustfmt
@@ -126,7 +148,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Kapı kanaryası (vacuous değil kanıtı)
         run: bash ./scripts/check-bud-e2e.sh --self-test
-      - name: bud_e2e — 9 invariant + 3 e2e (isim kanaryalı)
+      - name: bud_e2e - 9 invariant + 3 e2e (isim kanaryalı)
         run: |
           cargo test --lib bud_e2e 2>&1 | tee /tmp/bud-e2e.txt
           bash ./scripts/check-bud-e2e.sh /tmp/bud-e2e.txt
@@ -365,7 +387,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Kapi kanaryasi (vacuous degil kaniti)
         run: bash ./scripts/check-bns-gate.sh --self-test
-      - name: bns — 8 test (isim kanaryali)
+      - name: bns - 8 test (isim kanaryali)
         run: |
           cargo test --lib bns 2>&1 | tee /tmp/bns-gate.txt
           bash ./scripts/check-bns-gate.sh /tmp/bns-gate.txt
@@ -522,7 +544,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust (nightly — cargo-fuzz gereksinimi)
+      - name: Install Rust (nightly - cargo-fuzz gereksinimi)
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: nightly
@@ -575,7 +597,7 @@ jobs:
     # Birebir aynıdır).
     name: Secret Scan (gitleaks, tam geçmiş) ()
     runs-on: ubuntu-latest
-    # Security-events: write — gitleaks bulgularinin Security sekmesine SARIF
+    # Security-events: write - gitleaks bulgularinin Security sekmesine SARIF
     # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
     # Yukseltme yalniz bu job'a verilir.
     permissions:
@@ -595,7 +617,7 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
           gitleaks version
-      - name: Kanarya — gitleaks alarmının çalıştığının kanıtı
+      - name: Kanarya - gitleaks alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
           # DİKKAT: Sahte token asla tek parça olarak bu dosyaya yazılmaz;
@@ -620,7 +642,7 @@ jobs:
       # Tek adimda hem rapor hem fail istenirse bulgu bulundugunda adim orada
       # Olur ve upload hic calismaz; yani gorulmesi en kritik olan bulgular
       # Security sekmesine hic dusmez.
-      - name: Tam geçmiş taraması — SARIF üret (raporlama, kapı değil)
+      - name: Tam geçmiş taraması - SARIF üret (raporlama, kapı değil)
         run: |
           gitleaks detect --source . --config .gitleaks.toml --redact \
             --report-format sarif --report-path gitleaks.sarif --exit-code 0
@@ -661,11 +683,11 @@ jobs:
     # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
     # Hadolint binary surum+sha256 pinli (gitleaks deseni). DL3008 (apt surum
     # Pinleme) warning seviyesinde birakilir: bookworm apt churn'une karsi
-    # Bilincli kalibrasyon — failure-threshold: error ile yalniz error+ FAIL.
+    # Bilincli kalibrasyon - failure-threshold: error ile yalniz error+ FAIL.
     name: Docker Security (trivy + hadolint) ()
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Security-events: write — Trivy bulgularinin Security sekmesine SARIF
+    # Security-events: write - Trivy bulgularinin Security sekmesine SARIF
     # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
     # Yukseltme yalniz bu job'a verilir.
     permissions:
@@ -690,7 +712,7 @@ jobs:
       # Hem exit-code 1 verilirse bulgu bulundugunda adim orada olur ve upload
       # Hic calismaz; bulgular Security sekmesine dusmez. Bu sirayla bulgu
       # Gorunur olur VE job yine kirmiziya doner.
-      - name: Trivy fs taramasi — SARIF uret (raporlama, kapi degil)
+      - name: Trivy fs taramasi - SARIF uret (raporlama, kapi degil)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
@@ -742,14 +764,17 @@ jobs:
           curl -sSfL -o /tmp/clcov.tar.gz \
             https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
           echo "9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168  /tmp/clcov.tar.gz" | sha256sum -c -
-          cd /tmp
-          curl -sSfLO https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
-          curl -sSfLO https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.sha256
-          sha256sum -c cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.sha256
-          cd -
+          # Hash BURADA sabit. Onceden yanindaki `.sha256` dosyasi da ayni
+          # release'ten indirilip ona karsi dogrulaniyordu: artefakti degistiren
+          # biri yanindaki hash dosyasini da degistirir, yani kontrol kendini
+          # dogruluyordu. Adim adi "sha256 pinli" diyordu ve pin degildi.
+          # Bu deger bagimsiz olarak indirilip hesaplandi (2026-07-31).
+          curl -sSfL -o /tmp/nextest.tar.gz \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
+          echo "4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3  /tmp/nextest.tar.gz" | sha256sum -c -
           mkdir -p ~/.cargo/bin
           tar -xzf /tmp/clcov.tar.gz -C ~/.cargo/bin/
-          tar -xzf /tmp/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz -C ~/.cargo/bin/
+          tar -xzf /tmp/nextest.tar.gz -C ~/.cargo/bin/
           cargo llvm-cov --version && cargo nextest --version
       - name: Kapi kanaryasi (vacuous-gate korumasi)
         run: bash ./scripts/check-coverage.sh --self-test
@@ -760,13 +785,13 @@ jobs:
           bash ./scripts/check-coverage.sh coverage/cov.json
       - name: Modül analizi kanaryası (vacuous değil)
         run: python3 ./scripts/check_module_coverage.py --self-test
-      - name: Modül coverage raporu — budlum (baselines 2. adımda, vacuous-gate YOK)
+      - name: Modül coverage raporu - budlum (baselines 2. adımda, vacuous-gate YOK)
         run: python3 ./scripts/check_module_coverage.py coverage/cov.json
       - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
         run: |
           cd budzero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
-      - name: Modül coverage raporu — budzero (rapor modu)
+      - name: Modül coverage raporu - budzero (rapor modu)
         run: python3 ./scripts/check_module_coverage.py coverage/budzero-cov.json
       - name: Coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -778,7 +803,7 @@ jobs:
   repo-lint:
     # : actionlint + buf + genesis schema (tek birlesik statik kapi).
     # Araclar surum+sha256 pinli. buf breaking, main'de buf.yaml bulundugunda
-    # Aktiflesir (baseline bu dalgayla kuruluyor — ilk kosuda SKIP dürüst marker).
+    # Aktiflesir (baseline bu dalgayla kuruluyor - ilk kosuda SKIP dürüst marker).
     # zizmor workflow güvenlik lint'i de bu job'da (kanaryalı, 0-bulgu politikası).
     name: Repo Lint (actionlint + buf + genesis + zizmor)
     runs-on: ubuntu-latest
@@ -819,6 +844,56 @@ jobs:
         run: |
           bash ./scripts/check-required-tests-are-tests.sh --self-test
           bash ./scripts/check-required-tests-are-tests.sh
+      # A HashMap folded into a root() hashes its entries in a per-process
+      # random order, so two honest nodes disagree. Thorchain halted on exactly
+      # this; determinism.yml compares digests across three OSes and cannot see
+      # a per-process seed, so this reads the source instead.
+      - name: konsensus map'leri sirali mi + kanarya
+        run: |
+          bash ./scripts/check-consensus-maps-are-ordered.sh --self-test
+          bash ./scripts/check-consensus-maps-are-ordered.sh
+      # The Dockerfile said it had been moved to 1.94.0 and was still on
+      # 1.97.1 - tag *and* digest, verified against the registry. Codegen
+      # differs between releases, so the shipped container was outside the
+      # reproducibility claim determinism.yml makes. rust-toolchain.toml was
+      # not copied into the build context either, so nothing corrected it.
+      - name: docker toolchain pini + kanarya
+        run: |
+          bash ./scripts/check-docker-toolchain-matches-pin.sh --self-test
+          bash ./scripts/check-docker-toolchain-matches-pin.sh
+      # The nextest step was named "(sha256 pinli)" and fetched the .sha256
+      # from the same release as the tarball. Whoever can replace one can
+      # replace the other, so it verified transit and not provenance.
+      - name: indirme pinleri gercekten pin mi + kanarya
+        run: |
+          bash ./scripts/check-pinned-downloads-are-really-pinned.sh --self-test
+          bash ./scripts/check-pinned-downloads-are-really-pinned.sh
+      # A test name is the claim a reader trusts when counting coverage.
+      # `pow_empty_block_rejected_by_validation` asserted is_some();
+      # `pos_double_producer_address_rejected` asserted both blocks succeed;
+      # the four qcblob_quorum tests never called import_qc_blob at all.
+      - name: reddi iddia eden testler reddi assert ediyor mu + kanarya
+        run: |
+          bash ./scripts/check-rejection-tests-assert-rejection.sh --self-test
+          bash ./scripts/check-rejection-tests-assert-rejection.sh
+      # A .rs file no `mod` declares is never read by rustc: not linted, not
+      # covered, not tested -- while reading like live code in grep and in
+      # review. proto_bridge.rs sat there duplicating proto_conversions.rs,
+      # and bud-proof/src/memory_air.rs had drifted to an older p3-air API
+      # (row_slice vs current_slice) without anything noticing.
+      - name: yetim kaynak dosya var mi + kanarya
+        run: |
+          bash ./scripts/check-no-orphan-source-files.sh --self-test
+          bash ./scripts/check-no-orphan-source-files.sh
+      # Containment-first: a gate that is off by default must stay off, and the
+      # path that reaches it must consult it. bud-vm hard-coded
+      # MainnetActivation::full() while ContractCall passed mainnet=false, so
+      # the staged-rollout flags were dead code and user bytecode never met
+      # them.
+      - name: containment varsayilanlari + kanarya
+        run: |
+          bash ./scripts/check-containment-defaults.sh --self-test
+          bash ./scripts/check-containment-defaults.sh
       - name: buf v1.71.0 kur (sha256 pinli)
         run: |
           set -euo pipefail
@@ -832,7 +907,7 @@ jobs:
           set -o pipefail
           buf build
           buf lint
-      - name: buf breaking — baseline varsa aktif ()
+      - name: buf breaking - baseline varsa aktif ()
         run: |
           set -euo pipefail
           # Main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;
@@ -843,7 +918,7 @@ jobs:
             buf breaking --against '.git#branch=origin/main'
             echo "buf breaking: main'e karsi temiz."
           else
-            echo "SKIP (durust marker): main'de buf.yaml henuz yok — baseline bu dalgayla kuruluyor."
+            echo "SKIP (durust marker): main'de buf.yaml henuz yok - baseline bu dalgayla kuruluyor."
           fi
       - name: genesis schema kapisi + kanarya
         run: |

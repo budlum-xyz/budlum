@@ -1,8 +1,8 @@
 //! Locks on where the multi-consensus surfaces meet.
 //!
 //! Budlum runs seven `ConsensusKind`s against six finality adapters, all
-//! feeding one settlement layer. The friction is not inside any one engine —
-//! each was reviewed on its own — it is at the joins, where two pieces of code
+//! feeding one settlement layer. The friction is not inside any one engine -
+//! each was reviewed on its own - it is at the joins, where two pieces of code
 //! hold different beliefs about the same domain. Three were measured:
 //!
 //! 1. **`AiInference` could never finalize.** Registration required the
@@ -68,7 +68,7 @@ fn kind_adapter_pairs() -> Vec<(&'static str, &'static str, &'static str)> {
 fn every_consensus_kind_agrees_with_its_runtime_adapter_name() {
     // `verify_domain_commitment_finality` selects an adapter by kind and then
     // calls `ensure_adapter_name`, which compares the adapter's own name
-    // against `domain.finality_adapter` — the field the registration gate
+    // against `domain.finality_adapter` - the field the registration gate
     // validated. If those two names disagree for a kind, that kind can be
     // registered and can never finalize. Measured before the fix, AiInference
     // was the one disagreeing pair out of seven.

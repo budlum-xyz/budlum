@@ -1,4 +1,4 @@
-# Security Audit — Budlum Core
+# Security Audit - Budlum Core
 #
 # Bu workflow, tek-authority CI yaklaşımını uygular.
 # Mevcut CI zaten şunları karşılıyor: cargo fmt/clippy (ci.yml),
@@ -16,7 +16,7 @@
 #   - OpenSSF Scorecard (zamanlanmış, bilgilendirici)
 #
 # TÜM action'lar Güvenlik Planı §3.1 gereği TAM commit SHA'sına pinlendi
-# (tag yerine SHA — supply-chain'a karşı koruma). SHAtar Dependabot
+# (tag yerine SHA - supply-chain'a karşı koruma). SHAtar Dependabot
 # (github-actions) ile güncellenir. checkout / rust-toolchain repo'nun
 # Ci.yml'deki SHA'larla aynı pinleme disiplinine uyuyor.
 
@@ -49,7 +49,7 @@ jobs:
   zizmor:
     name: zizmor (GitHub Actions static analysis)
     runs-on: ubuntu-latest
-    # Statik analiz — bulsa da bulmasa da CI'ı kırmasın (bilgilendirici + SARIF).
+    # Statik analiz - bulsa da bulmasa da CI'ı kırmasın (bilgilendirici + SARIF).
     continue-on-error: true
     permissions:
       contents: read
@@ -135,7 +135,7 @@ jobs:
   cargo-hack:
     name: cargo-hack feature matrix
     runs-on: ubuntu-latest
-    # Özellik matrisi taraması — bilgilendirici; yavaş/yoğun olabilir.
+    # Özellik matrisi taraması - bilgilendirici; yavaş/yoğun olabilir.
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -2,9 +2,9 @@
 //!
 //! Three advisories were carried for weeks as "unreachable" exceptions:
 //!
-//!   * GHSA-vxx9-2994-q338 — yamux remote panic (CVSS 8.7)
-//!   * GHSA-3v94-mw7p-v465 / RUSTSEC-2026-0118 — hickory NSEC3 validation loop
-//!   * GHSA-q2qq-hmj6-3wpp — hickory O(n²) message encoding
+//!   * GHSA-vxx9-2994-q338 - yamux remote panic (CVSS 8.7)
+//!   * GHSA-3v94-mw7p-v465 / RUSTSEC-2026-0118 - hickory NSEC3 validation loop
+//!   * GHSA-q2qq-hmj6-3wpp - hickory O(n²) message encoding
 //!
 //! Each exception rested on a fact a routine dependency change could silently
 //! flip (the muxer picking the patched backend, DNSSEC not being compiled in,
@@ -20,7 +20,7 @@
 #[cfg(test)]
 mod tests {
     /// All three lockfiles. They are separate workspaces that resolve
-    /// independently, and Dependabot reports each one separately — three
+    /// independently, and Dependabot reports each one separately - three
     /// advisories times three lockfiles is where the nine alerts came from.
     /// Fixing only the root would leave six of them open.
     const LOCKFILES: [(&str, &str); 3] = [
@@ -126,7 +126,7 @@ mod tests {
     ///
     /// The three workspaces resolve independently, so a crates.io requirement
     /// left in any one of them puts the vulnerable yamux/hickory back into
-    /// that lockfile — six of the original nine Dependabot alerts.
+    /// that lockfile - six of the original nine Dependabot alerts.
     ///
     /// A direct git dependency is used rather than `[patch.crates-io]`
     /// because tools that re-resolve the manifest in a scratch directory
@@ -240,7 +240,7 @@ mod tests {
     /// The three advisories must not reappear in any scanner's ignore list.
     ///
     /// This is the canary for the whole change: they are patched, so ignoring
-    /// them would be silencing a finding that is already fixed — and would
+    /// them would be silencing a finding that is already fixed - and would
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
@@ -278,7 +278,7 @@ mod tests {
                     assert!(
                         !code.contains(advisory),
                         "{name} suppresses {advisory}, but it is patched \
-                         (yamux 0.14 / hickory 0.26.1). Remove the entry — an \
+                         (yamux 0.14 / hickory 0.26.1). Remove the entry - an \
                          ignore rule over a fixed finding hides the regression \
                          if the graph slides back.\nline: {code}"
                     );
@@ -296,5 +296,130 @@ mod tests {
         assert!(!version_at_least("0.25.2", "0.26.1"));
         assert!(!version_at_least("0.12.1", "0.13.10"));
         assert!(version_at_least("0.14.0", "0.13.10"));
+    }
+
+    /// The gossipsub PRUNE-backoff advisories must stay closed.
+    ///
+    /// Two disclosures, same handler, three months apart:
+    ///
+    /// * `CVE-2026-33040` / `GHSA-gc42-3jg7-rxr2` - a `PRUNE` carrying a
+    ///   near-maximum backoff overflowed on *insertion*. Fixed in 0.49.3.
+    /// * `CVE-2026-34219` / `GHSA-xqmp-fxgv-xvq5` - the same value survived
+    ///   insertion and overflowed later, in the *heartbeat*, on
+    ///   `backoff_time + slack`. Fixed in 0.49.4.
+    ///
+    /// Either one is a remote unauthenticated panic: any peer that can open a
+    /// gossipsub session takes the node down with a single control message and
+    /// replays it after every restart. Rust turns the overflow into a panic
+    /// rather than memory corruption, so the class is denial of service - but
+    /// for a validator, "the process is dead" is the whole impact.
+    ///
+    /// A version assertion alone is not enough here. `libp2p-gossipsub` comes
+    /// from a git revision, not crates.io, so the `0.50.0` in the lockfile is
+    /// whatever that tree happened to call itself - it is not evidence that
+    /// either patch is in it. This asserts the version *and* names both
+    /// advisories so a future pin bump has to be checked against them rather
+    /// than trusted for having a larger number.
+    #[test]
+    fn gossipsub_prune_backoff_advisories_stay_closed() {
+        let lock = include_str!("../../Cargo.lock");
+        let versions = locked_versions_in(lock, "libp2p-gossipsub");
+        assert!(
+            !versions.is_empty(),
+            "libp2p-gossipsub must be in the graph; gossipsub is how blocks propagate"
+        );
+        for version in &versions {
+            assert!(
+                version_at_least(version, "0.49.4"),
+                "libp2p-gossipsub {version} predates the PRUNE backoff fixes \
+                     (CVE-2026-33040 insertion overflow, fixed 0.49.3; \
+                     CVE-2026-34219 heartbeat overflow, fixed 0.49.4). Any peer \
+                     can panic this node with one control message."
+            );
+        }
+
+        // The pin is by full revision, so record what was verified in that
+        // tree. Checked by hand against
+        // 38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd:
+        //
+        //   behaviour.rs: const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
+        //   backoff.rs:   backoff_time.checked_add(slack)
+        //
+        // the bound that closes the insertion path and the checked arithmetic
+        // that closes the heartbeat path. If the revision moves, both have to
+        // be re-checked in the new tree.
+        let manifest = include_str!("../../Cargo.toml");
+        assert!(
+            manifest.contains("38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"),
+            "the libp2p revision changed. Re-verify in the new tree that \
+                 gossipsub still bounds remote PRUNE backoff \
+                 (MAX_REMOTE_PRUNE_BACKOFF_SECONDS) and still uses checked_add for \
+                 the heartbeat slack, then update this hash."
+        );
+    }
+}
+
+/// Inner signature digests must not become load-bearing while they omit
+/// `chain_id`.
+///
+/// `AiInferenceResult::calculate_signing_hash` and
+/// `SaleAuthorization::signing_hash` both build a digest a party would
+/// sign, and neither commits to `chain_id`. `AiInferenceRequest::calculate_id`
+/// does not either, so an identical request on testnet and mainnet derives
+/// the same `request_id` and a signature over the AI digest would verify
+/// on both networks.
+///
+/// Harmless today for one reason: neither digest is verified anywhere.
+/// Both reach consensus inside a `Transaction`, and
+/// `Transaction::signing_hash` does commit to `chain_id` - the envelope
+/// carries the domain separation the payload lacks.
+///
+/// That is the EIP-155 lesson in miniature: a signature is only bound to
+/// the network its preimage names. This fails if either digest gains a
+/// verification call site, so whoever wires one has to add `chain_id` to
+/// the preimage in the same change.
+#[test]
+fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
+    // The transaction envelope really does bind the chain - the property
+    // the two payload digests are relying on.
+    let tx_src = include_str!("../core/transaction.rs");
+    let at = tx_src
+        .find("pub fn signing_hash")
+        .expect("Transaction::signing_hash must exist");
+    let body = &tx_src[at..(at + 1200).min(tx_src.len())];
+    assert!(
+        body.contains("chain_id"),
+        "Transaction::signing_hash stopped committing to chain_id - the \
+             payload digests were relying on the envelope for domain separation"
+    );
+
+    // And the payload digests are still not verified against anything.
+    for (module, digest, src) in [
+        (
+            "ai/types.rs",
+            "calculate_signing_hash",
+            include_str!("../ai/types.rs"),
+        ),
+        (
+            "pollen/data_rights.rs",
+            "signing_hash",
+            include_str!("../pollen/data_rights.rs"),
+        ),
+    ] {
+        let definition = format!("fn {digest}");
+        let calls = src.matches(&format!("{digest}(")).count();
+        let definitions = src.matches(&definition).count();
+        assert!(
+            definitions > 0,
+            "{module}: {digest} disappeared; re-read this test"
+        );
+        // Definition plus its own `#[cfg(test)]` uses only. A production
+        // call site would push this past the allowance.
+        assert!(
+            calls <= definitions + 3,
+            "{module}: {digest} now has {calls} references against \
+                 {definitions} definitions - if it is being verified, add \
+                 chain_id to its preimage first, then drop this assertion"
+        );
     }
 }

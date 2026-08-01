@@ -1,4 +1,4 @@
-//! B.U.D. Active Sharding — determines shard responsibility.
+//! B.U.D. Active Sharding - determines shard responsibility.
 //!
 //! Implements the sharding logic from Vision §7: nodes are responsible
 //! For a subset of the global storage state based on the distance between

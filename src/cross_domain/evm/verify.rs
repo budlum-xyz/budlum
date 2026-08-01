@@ -1,13 +1,13 @@
-//! F10.2 güvenlik çekirdeği — `verify_evm_receipt` deterministik orchestrator.
+//! F10.2 güvenlik çekirdeği - `verify_evm_receipt` deterministik orchestrator.
 //!
 //! RFC §4.1 (ETH → Budlum mint akışı) adımlarını tek doğrulama yüzeyinde birleştirir.
-//! **On-chain (Budlum konsensüsünde) çalışır** — network'süz, deterministik. Relayer
+//! **On-chain (Budlum konsensüsünde) çalışır** - network'süz, deterministik. Relayer
 //! Proof üretir, Budlum burada verify eder.
 //!
 //! # Doğrulama akışı
 //!
-//! 1. `header_chain` — target + confirmations, N-confirmation finality (RFC Q2 N-conf).
-//! 2. `proof_nodes` + `target_header.receipts_root` — MPT verify → receipt bytes.
+//! 1. `header_chain` - target + confirmations, N-confirmation finality (RFC Q2 N-conf).
+//! 2. `proof_nodes` + `target_header.receipts_root` - MPT verify → receipt bytes.
 //! 3. `receipt` RLP decode (F10.2 receipt.rs) → `{status, logs}`.
 //! 4. `status == true` (işlem başarılı).
 //! 5. Deposit log match: `find_log(emitter, topic0)` → expected payload eşleşmesi.
@@ -84,7 +84,7 @@ pub struct EvmDepositProof<'a> {
     pub required_confirmations: u32,
     /// MPT proof node'ları (receiptsRoot → target receipt).
     pub proof_nodes: &'a [Vec<u8>],
-    /// Trie'deki key (RLP(tx_index) — receipt'in bulunduğu sıra).
+    /// Trie'deki key (RLP(tx_index) - receipt'in bulunduğu sıra).
     pub receipt_key: &'a [u8],
     /// Ethereum tx hash (replay koruması + log arama için).
     pub tx_hash: &'a str,
@@ -126,7 +126,7 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
         .find_log(proof.emitter_address, proof.deposit_topic0)
         .ok_or(VerifyError::LogNotFound)?;
 
-    // 6. (Replay koruması caller domain'inde — tx_hash döner.)
+    // 6. (Replay koruması caller domain'inde - tx_hash döner.)
     Ok(VerifiedDeposit {
         tx_hash: proof.tx_hash.to_string(),
         deposit_log_data: log.data.clone(),

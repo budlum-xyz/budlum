@@ -1,8 +1,8 @@
-//! # Verifier Registry — Generic RoleId-based Staking + Slashing Primitive
+//! # Verifier Registry - Generic RoleId-based Staking + Slashing Primitive
 //!
 //! A standalone, domain-agnostic registry for Budlum's multi-domain L1.
-//! Any role — Master Verifier, Relayer, Attester, Storage Operator, AI Verifier,
-//! Or a future caller-defined role — shares **one** registry, **one** staking
+//! Any role - Master Verifier, Relayer, Attester, Storage Operator, AI Verifier,
+//! Or a future caller-defined role - shares **one** registry, **one** staking
 //! Mechanism, and **one** slashing pipeline. There is no per-role bespoke code.
 //!
 //! ## Design principles
@@ -12,7 +12,7 @@
 //! 2. **Open role set.** [`RoleId`] is a `u32` newtype, not an enum. New roles
 //!    Can be introduced without changing this crate.
 //! 3. **Cross-role slashing.** Slashing one role automatically jails all other
-//!    Roles held by the same address — economic security is per-address, not
+//!    Roles held by the same address - economic security is per-address, not
 //!    Per-role.
 //! 4. **Evidence-gated slashing.** Slashing requires a structurally valid AND
 //!    Consensus-verified [`SlashingReport`]. Unverified reports are accepted

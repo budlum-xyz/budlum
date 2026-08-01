@@ -1,4 +1,4 @@
-//! P12-4: Encryption DAO — DAO yönetimli Pollen şifreleme politikası.
+//! P12-4: Encryption DAO - DAO yönetimli Pollen şifreleme politikası.
 //!
 //! EncryptionPolicy, Pollen data asset'lerinin şifreleme gereksinimlerini
 //! DAO (merkeziyetsiz otonom organizasyon) tarafından yönetilen parametreler
@@ -255,7 +255,7 @@ impl EncryptionPolicy {
 
         if let Some(algo) = update.default_algorithm {
             // EncryptionAlgorithm::None must never be set as
-            // Default — even if someone adds it to allowed_algorithms, the
+            // Default - even if someone adds it to allowed_algorithms, the
             // Default must require encryption.
             if algo == EncryptionAlgorithm::None {
                 return Err(EncryptionPolicyError::AlgorithmNotAllowed { algorithm: algo });

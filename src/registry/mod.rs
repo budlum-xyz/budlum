@@ -3,12 +3,12 @@
 //! This module encodes the master-context split between two deliberately
 //! Separate membership models:
 //!
-//! * [`permissionless`] — the network-wide default for PoW/PoS/BFT domains.
+//! * [`permissionless`] - the network-wide default for PoW/PoS/BFT domains.
 //!   Anyone may join by staking; there is **no whitelist, approval or central
 //!   Gate**. Security = stake + slashing. This is a generic, role-parameterised
 //!   Primitive (see [`role`]) so future application layers can reuse it.
 //!
-//! * [`poa_membership`] — the isolated permissioned exception for the PoA
+//! * [`poa_membership`] - the isolated permissioned exception for the PoA
 //!   Domain (institutional / regulated parties). Entry is by **KYC + approval**,
 //!   Never by staking.
 //!

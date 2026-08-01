@@ -3,7 +3,7 @@
 //!
 //! Nothing exercised the compiler output through the prover before this file.
 //! The unit tests inside `bud-proof` build their public inputs by hand, and the
-//! shared helper hard-codes `event_digest: [0u8; 32]` — correct only for
+//! shared helper hard-codes `event_digest: [0u8; 32]` - correct only for
 //! programs that emit nothing. `bud-cli` filled that field with
 //! `keccak256(events)`, so every proof it produced failed verification with
 //! `OodEvaluationMismatch` and `bud-cli prove`/`run` were unusable.
@@ -156,7 +156,7 @@ fn branching_programs_execute_but_cannot_be_proved_yet() {
             .unwrap_or_else(|e| panic!("{name}: prove failed: {e:?}"));
         assert!(
             bud_proof::Plonky3Adapter::verify(&envelope, &pi, &bytecode).is_err(),
-            "{name}: verified unexpectedly — the Program CTL branch gap looks fixed, \
+            "{name}: verified unexpectedly - the Program CTL branch gap looks fixed, \
              update BudL_SPEC.md and move this program to PROVABLE_PROGRAMS"
         );
     }

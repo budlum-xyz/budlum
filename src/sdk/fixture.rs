@@ -1,4 +1,4 @@
-//! P12-12: Fixture üreteçleri — test ve geliştirme için deterministik veri üretimi.
+//! P12-12: Fixture üreteçleri - test ve geliştirme için deterministik veri üretimi.
 //!
 //! Bu modül, geliştiricilerin test ve entegrasyon çalışmaları için
 //! Deterministik fixture verileri üretmesini sağlar. Üç tip fixture
@@ -8,7 +8,7 @@
 //! - **Pollen Fixture:** Pollen data asset ve access grant fixture'ları
 //! - **Relayer Intent Fixture:** Relayer intent simülasyonu için
 //!
-//! Tüm fixture üreteçleri seed tabanlıdır — aynı seed ile aynı fixture seti
+//! Tüm fixture üreteçleri seed tabanlıdır - aynı seed ile aynı fixture seti
 //! Elde edilir. Bu, test tekrarlanabilirliği için kritiktir.
 
 use crate::core::address::Address;

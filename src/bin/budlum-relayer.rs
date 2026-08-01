@@ -1,5 +1,5 @@
 #![allow(clippy::pedantic, clippy::nursery)]
-//! F10.4 + Budlum Relayer Binary — permissionless cross-chain relay servisi.
+//! F10.4 + Budlum Relayer Binary - permissionless cross-chain relay servisi.
 //!
 //! ## Design (permissionless)
 //! - **Permissionless entry:** Tek gate `min_stake` (1000 $BUD). Herkes relayer çalıştırabilir.
@@ -28,7 +28,7 @@ use std::time::Duration;
 // Reqwest for both Eth and Budlum JSON-RPC
 // Added to Cargo.toml: reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
-/// Relayer CLI konfigürasyonu — permissionless.
+/// Relayer CLI konfigürasyonu - permissionless.
 #[derive(Debug, Clone)]
 pub struct RelayerConfig {
     pub eth_rpc_url: String,
@@ -103,7 +103,7 @@ pub struct BudlumBurnEvent {
     pub burn_height: u64,
 }
 
-/// Budlum JSON-RPC client — permissionless registry kapısı.
+/// Budlum JSON-RPC client - permissionless registry kapısı.
 #[derive(Debug, Clone)]
 pub struct BudlumClient {
     pub url: String,
@@ -183,7 +183,7 @@ impl BudlumClient {
         Ok(false)
     }
 
-    /// Relay proof submit — bud_submitRelayProof
+    /// Relay proof submit - bud_submitRelayProof
     /// Params: message_id (hex), relayer_addr (hex), proof (object), source_domain (u32)
     pub async fn submit_relay_proof(
         &self,
@@ -196,7 +196,7 @@ impl BudlumClient {
         self.rpc_call("bud_submitRelayProof", params).await
     }
 
-    /// Slashing report submit — bud_submitSlashingReport
+    /// Slashing report submit - bud_submitSlashingReport
     /// Tag: relayer_invalid_proof → MaliciousBehaviour %100
     pub async fn submit_slashing_report_for_invalid_relay(
         &self,
@@ -218,7 +218,7 @@ impl BudlumClient {
     }
 }
 
-/// Ethereum JSON-RPC client — permissionless relayer için deposit gözlemi.
+/// Ethereum JSON-RPC client - permissionless relayer için deposit gözlemi.
 #[derive(Debug, Clone)]
 pub struct EthClient {
     pub url: String,
@@ -283,19 +283,19 @@ impl EthClient {
         }
     }
 
-    /// Eth_getLogs — bridge deposit eventleri için.
-    /// Topic0 = keccak256("Deposit(address,uint256,bytes32,uint256)") placeholder — gerçek kontratla set edilmeli.
+    /// Eth_getLogs - bridge deposit eventleri için.
+    /// Topic0 = keccak256("Deposit(address,uint256,bytes32,uint256)") placeholder - gerçek kontratla set edilmeli.
     pub async fn get_deposit_logs(
         &self,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<EthDepositEvent>, String> {
-        // Minimal filter — gerçek topic0 konfigürasyondan gelmeli.
+        // Minimal filter - gerçek topic0 konfigürasyondan gelmeli.
         let filter = serde_json::json!({
             "fromBlock": format!("0x{:x}", from_block),
             "toBlock": format!("0x{:x}", to_block),
             "address": self.bridge_address,
-            // "topics": [["0x..."]] — placeholder, tüm logları getir
+            // "topics": [["0x..."]] - placeholder, tüm logları getir
         });
         let logs = self
             .rpc_call("eth_getLogs", serde_json::json!([filter]))
@@ -320,7 +320,7 @@ impl EthClient {
                     .unwrap_or("0x0");
                 let log_index = u64::from_str_radix(log_index_str.trim_start_matches("0x"), 16)
                     .unwrap_or(idx as u64);
-                // Parse naive — amount/recipient from data/topics placeholder
+                // Parse naive - amount/recipient from data/topics placeholder
                 events.push(EthDepositEvent {
                     tx_hash,
                     block_number,
@@ -345,7 +345,7 @@ impl EthClient {
         Ok(events)
     }
 
-    /// F10.1/F10.2 proof paketi üretimi — MPT + header chain + receipt.
+    /// F10.1/F10.2 proof paketi üretimi - MPT + header chain + receipt.
     /// Gerçek impl: eth_getTransactionReceipt + eth_getBlockByHash + eth_getProof (receiptsRoot proof).
     /// Burada placeholder: EvmChainAdapter offline stub + verify_evm_receipt path'e uygun.
     pub async fn build_deposit_proof(
@@ -436,7 +436,7 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
 }
 
 fn print_usage() {
-    eprintln!("budlum-relayer — F10 Universal Relayer (D1 permissionless + D4 unified registry)");
+    eprintln!("budlum-relayer - F10 Universal Relayer (D1 permissionless + D4 unified registry)");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  budlum-relayer --eth-rpc <URL> --budlum-rpc <URL> --bridge-address <ADDR>");
@@ -460,7 +460,7 @@ fn print_usage() {
     eprintln!("  -h, --help                 Show this help");
     eprintln!();
     eprintln!("Permissionless model (D1):");
-    eprintln!("  - Tek gate: min_stake (1000 $BUD) — PermissionlessRegistry RoleId(3) RELAYER");
+    eprintln!("  - Tek gate: min_stake (1000 $BUD) - PermissionlessRegistry RoleId(3) RELAYER");
     eprintln!("  - Bond: bud_registryBondRelayer ile stake yatırılır");
     eprintln!("  - Slashing: relayer_invalid_proof tag → MaliciousBehaviour %100 slash");
     eprintln!("  - Challenge: open relayer set + bad relay challenge via bud_submitSlashingReport");
@@ -487,13 +487,13 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
         );
     }
     if config.relayer_address == "0x0" || config.relayer_address.len() < 10 {
-        eprintln!("WARN: relayer-address is placeholder — permissionless gate will skip active check (devnet mode). Set real Budlum address for mainnet.");
+        eprintln!("WARN: relayer-address is placeholder - permissionless gate will skip active check (devnet mode). Set real Budlum address for mainnet.");
     }
 
     Ok(())
 }
 
-/// Permissionless registration check — is relayer active?
+/// Permissionless registration check - is relayer active?
 async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConfig) -> bool {
     if config.relayer_address == "0x0" {
         eprintln!("Devnet mode: relayer-address placeholder, skip active check (assume active).");
@@ -510,7 +510,7 @@ async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConf
                     config.relayer_address, config.min_stake
                 );
             } else {
-                eprintln!("Relayer {} is NOT active — need to bond >= {} via bud_registryBondRelayer (RoleId 3 RELAYER).", config.relayer_address, config.min_stake);
+                eprintln!("Relayer {} is NOT active - need to bond >= {} via bud_registryBondRelayer (RoleId 3 RELAYER).", config.relayer_address, config.min_stake);
                 eprintln!("Continuing in observation mode (will fail on submit). Bond first for production.");
             }
             active
@@ -522,7 +522,7 @@ async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConf
     }
 }
 
-/// Production loop — EthToBud direction
+/// Production loop - EthToBud direction
 async fn run_eth_to_bud_loop(config: RelayerConfig) {
     let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
@@ -551,7 +551,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
         let latest = match eth_client.get_block_number().await {
             Ok(bn) => bn.saturating_sub(config.required_confirmations as u64),
             Err(e) => {
-                eprintln!("EthToBud poll: get_block_number failed: {e} — retry");
+                eprintln!("EthToBud poll: get_block_number failed: {e} - retry");
                 continue;
             }
         };
@@ -596,7 +596,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
             let source_domain = 1u32;
 
             // Proof format expected by Budlum: MerkleProof { leaf, index, siblings } + external root
-            // Here we pass our proof_json as placeholder — real impl would bincode-serialize MerkleProof
+            // Here we pass our proof_json as placeholder - real impl would bincode-serialize MerkleProof
             // And submit via bud_submitRelayProof
             match budlum_client
                 .submit_relay_proof(&message_id, &relayer_addr, proof_json, source_domain)
@@ -616,7 +616,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
                     // Slashing scenario: if we submitted invalid proof, we would be slashed.
                     // If we detect another relayer's invalid proof, we submit slashing report.
                     if e.contains("invalid") || e.contains("proof") {
-                        eprintln!("EthToBud: detected invalid proof — would trigger slashing (relayer_invalid_proof tag)");
+                        eprintln!("EthToBud: detected invalid proof - would trigger slashing (relayer_invalid_proof tag)");
                         // Example slashing report (reporter = our relayer)
                         let _ = budlum_client
                             .submit_slashing_report_for_invalid_relay(
@@ -633,7 +633,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
     }
 }
 
-/// Production loop — BudToEth direction
+/// Production loop - BudToEth direction
 async fn run_bud_to_eth_loop(config: RelayerConfig) {
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
     let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
@@ -641,7 +641,7 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
     let _active = check_relayer_active(&budlum_client, &config).await;
 
     eprintln!("BudToEth: watching Budlum burn events → Ethereum claim");
-    eprintln!("BudToEth: (Production needs Budlum light-client proof + Ethereum bridge tx — Solidity bridge contract separate RFC F10.5b)");
+    eprintln!("BudToEth: (Production needs Budlum light-client proof + Ethereum bridge tx - Solidity bridge contract separate RFC F10.5b)");
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
     let mut last_burn_height: u64 = 0;
@@ -651,11 +651,11 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
 
         // TODO: Real impl would:
         // 1. Call Budlum RPC bud_getBridgeBurnEvents or scan blocks for TransactionType::BurnBridgeTransferWithEvent
-        // 2. For each burn, construct BudToEthClaim (bud_to_eth.rs: build_bud_to_eth_claim) — check Burned status
+        // 2. For each burn, construct BudToEthClaim (bud_to_eth.rs: build_bud_to_eth_claim) - check Burned status
         // 3. Build Budlum finality proof (BLS aggregate / QC)
         // 4. Submit to Ethereum bridge via eth_sendRawTransaction claimUnlock
         // Placeholder poll:
-        eprintln!("BudToEth: poll tick at height {last_burn_height} (RPC integration pending — would fetch burn events)");
+        eprintln!("BudToEth: poll tick at height {last_burn_height} (RPC integration pending - would fetch burn events)");
 
         // Example placeholder burn event simulation (devnet):
         // Simulate no events
@@ -663,9 +663,9 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
 
         // Challenge window logic (RFC F10 §4-5):
         // If we see a bad relay (e.g., invalid burn proof), submit slashing report.
-        // Open relayer set is permissionless — anyone can challenge.
+        // Open relayer set is permissionless - anyone can challenge.
         if last_burn_height.is_multiple_of(100) {
-            eprintln!("BudToEth: challenge window check — no bad relays detected (open relayer set, permissionless)");
+            eprintln!("BudToEth: challenge window check - no bad relays detected (open relayer set, permissionless)");
         }
 
         // Prevent unused warning for eth_client (would be used for eth_sendRawTransaction)

@@ -110,7 +110,7 @@ fuzz_target!(|data: &[u8]| {
                 if let Some(mid) = last_message_id {
                     let burn_dom = src_dom.wrapping_add(1).max(2);
                     let _ = bridge.unlock(mid, burn_dom);
-                    let _ = bridge.unlock(mid, src_dom); // wrong domain — Err ok
+                    let _ = bridge.unlock(mid, src_dom); // wrong domain - Err ok
                 }
             }
             4 => {
@@ -151,7 +151,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
             _ => {
-                // Sweep expired locks — must not panic
+                // Sweep expired locks - must not panic
                 let _ =
                     bridge.sweep_expired_locks(height.saturating_add(take(data, &mut i) as u64));
                 let _ = relayer.expired_relays(height.saturating_add(1000));

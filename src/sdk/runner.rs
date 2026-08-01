@@ -196,7 +196,7 @@ impl BudlRunner {
         Ok(compiled)
     }
 
-    /// Test çalıştırır (şu an stub — gerçek test framework gelecekte).
+    /// Test çalıştırır (şu an stub - gerçek test framework gelecekte).
     ///
     /// Şu an sadece derleme başarısını kontrol eder ve temel test
     /// Sonuçları üretir. Gerçek BudL test framework'ü eklendiğinde

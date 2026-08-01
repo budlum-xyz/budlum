@@ -33,7 +33,7 @@ fn make_result(tx_hash: &str) -> RelayerExternalResult {
     }
 }
 
-/// Tek-yaprak ağaç: leaf == root, boş siblings — executor kapısıyla aynı şema.
+/// Tek-yaprak ağaç: leaf == root, boş siblings - executor kapısıyla aynı şema.
 fn seal_single_leaf(res: &mut RelayerExternalResult) {
     let leaf = res.result_leaf();
     let proof = MerkleProof {
@@ -85,7 +85,7 @@ fn test_relayer_result_tampered_facts_leaf_mismatch_rejected() {
     state
         .external_roots
         .insert(ExternalChain::Ethereum.domain_id(), res.external_state_root);
-    // Proof başka olgular için üretildi — tx_hash'i sonradan değiştirirsek
+    // Proof başka olgular için üretildi - tx_hash'i sonradan değiştirirsek
     // Leaf uyuşmazlığı çıkmalı.
     res.tx_hash = "0xFORGED_HASH".to_string();
     let tx = relayer_tx(res, 1);
@@ -120,7 +120,7 @@ fn test_relayer_result_malformed_proof_rejected() {
     res.external_state_root = [0x11; 32];
     let tx = relayer_tx(res, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("must reject");
-    // Bincode hata metni sürüme göre değişir — reddedildiği ve bakiyenin
+    // Bincode hata metni sürüme göre değişir - reddedildiği ve bakiyenin
     // Dokunulmadığı doğrulanır.
     assert!(!err.is_empty(), "hata metni boş olmamalı");
     assert_eq!(state.get_balance(&relayer_addr()), 1_000);
@@ -130,7 +130,7 @@ fn test_relayer_result_malformed_proof_rejected() {
 fn test_relayer_result_empty_proof_and_zero_root_regressions() {
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 1_000);
-    // Boş proof (C4 öncesi tek kontroldü — regresyon kalmalı).
+    // Boş proof (C4 öncesi tek kontroldü - regresyon kalmalı).
     let empty_proof = make_result("0xH");
     let tx = relayer_tx(empty_proof, 1);
     let err = Executor::apply_transaction(&mut state, &tx).expect_err("empty must reject");
@@ -188,7 +188,7 @@ fn test_hub_register_app_exact_min_fee_deducted_and_registered() {
 
 #[test]
 fn test_bns_register_fee_enforced_regression_m4() {
-    // M4 kaydı executor H1 fix'iyle zaten kapalıydı — burada
+    // M4 kaydı executor H1 fix'iyle zaten kapalıydı - burada
     // Regresyon olarak mühürlenir: 4-harfli isim, duration 1 → cost > amount.
     let mut state = AccountState::new();
     state.add_balance(&relayer_addr(), 10_000);

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // Fix (2026-07-18): `AssetId` eskiden `Hash32`
-// (= [u8;32]) alias'ıydı — serde_json object-key olarak serialize EDİLEMEZDİ
+// (= [u8;32]) alias'ıydı - serde_json object-key olarak serialize EDİLEMEZDİ
 // (R3 anti-pattern; bridge_state snapshot/RPC yoluna girerse patlar). Artık
 // String-serde struct (Address deseni, `src/core/address.rs`); AsRef<[u8]> ile
 // Mevcut hash_fields_bytes çağrıları uyumlu.
@@ -75,7 +75,7 @@ impl AsRef<[u8]> for AssetId {
     }
 }
 
-/// Hex-string serde helper (Address deseni) — JSON-safe object-key.
+/// Hex-string serde helper (Address deseni) - JSON-safe object-key.
 mod asset_id_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -304,11 +304,11 @@ impl BridgeState {
         // Verify payload_hash binds to the
         // Stored transfer's asset_id and amount. Without this check, a
         // Relayer could substitute a message with a different payload_hash
-        // Claiming a different amount — fund inflation vector.
+        // Claiming a different amount - fund inflation vector.
         let expected_payload = bridge_payload_hash(transfer.asset_id, transfer.amount);
         if message.payload_hash != expected_payload {
             return Err(BridgeError(format!(
-                "B2: payload_hash mismatch — message claims {:?}, transfer binds {:?}",
+                "B2: payload_hash mismatch - message claims {:?}, transfer binds {:?}",
                 message.payload_hash, expected_payload
             )));
         }
@@ -459,7 +459,7 @@ impl BridgeState {
 
     pub fn root(&self) -> Hash32 {
         // Root eskiden yalnızca asset_locations'ı
-        // Hash'liyordu — transfers (owner/recipient/amount/status) kapsam
+        // Hash'liyordu - transfers (owner/recipient/amount/status) kapsam
         // Dışındaydı. Artık transfer metadata da digest'e girer.
         let mut leaves: Vec<Hash32> = self
             .asset_locations

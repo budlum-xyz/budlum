@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Check-cargo-vet.sh — tedarik zinciri güven denetimi (cargo-vet) ratchet kapısı
+# Check-cargo-vet.sh - tedarik zinciri güven denetimi (cargo-vet) ratchet kapısı
 #
-# ARKA PLAN — bu kapı neden "yeni" sayılmalı:
+# ARKA PLAN - bu kapı neden "yeni" sayılmalı:
 # `supply-chain/config.toml` depoda aylardır duruyordu ve dosyanın varlığı
 # "cargo-vet denetimi var" izlenimi veriyordu. Gerçekte dosya cargo-vet
 # Şemasında OLMAYAN uydurma anahtarlarla yazılmıştı
@@ -16,7 +16,7 @@
 #
 # NEDEN GÜN-1 FAIL DEĞİL: 437 crate / ~6.7M satır denetim backlog'u tek
 # Oturumda kapatılamaz. Gün-1 `cargo vet check` zorunlu kılınsaydı kapı ya
-# Kalıcı kırmızı kalırdı ya da ilk sıkışmada gevşetilirdi — ikisi de
+# Kalıcı kırmızı kalırdı ya da ilk sıkışmada gevşetilirdi - ikisi de
 # CI-softening. Bunun yerine repo'nun zaten kullandığı RATCHET
 # Deseni uygulanıyor: sayı ARTAMAZ, düşmesi serbesttir. Yeni bir denetimsiz
 # Bağımlılık eklemek bugünden itibaren CI'ı kırar; mevcut borç ise bilinçli
@@ -57,9 +57,9 @@ if [ "${1:-}" = "--self-test" ]; then
 
 123 unvetted dependencies:
   aead:0.5.2 missing [\"safe-to-deploy\"]")
-  [ "$got" = "123" ] || { echo "FAIL: kanarya — sayaç 123 yerine '$got' okudu (parse bozuk)"; exit 1; }
+  [ "$got" = "123" ] || { echo "FAIL: kanarya - sayaç 123 yerine '$got' okudu (parse bozuk)"; exit 1; }
   got_clean=$(probe "Vetting Succeeded!")
-  [ "$got_clean" = "0" ] || { echo "FAIL: kanarya — temiz çıktı 0 yerine '$got_clean' okudu"; exit 1; }
+  [ "$got_clean" = "0" ] || { echo "FAIL: kanarya - temiz çıktı 0 yerine '$got_clean' okudu"; exit 1; }
   # Baseline dosyası gerçekten bir sayı içermeli.
   b=$(read_baseline)
   echo "Kanarya OK: sayaç 123/0 doğru okudu, baseline=$b."

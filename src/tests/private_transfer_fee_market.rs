@@ -46,7 +46,7 @@ fn private_transfer_fee_market_gates_inclusion() {
 
     let base_fee = 50;
     // A private-transfer fee bid that covers the base fee is accepted by the
-    // Fee market — inclusion is allowed.
+    // Fee market - inclusion is allowed.
     assert!(effective_fee(tx.fee_bid(), base_fee).is_ok());
 
     // A private-transfer fee bid below the base fee is rejected: the fee

@@ -3,7 +3,7 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// B.U.D. Name Service (BNS) — decentralized naming for the Budlum network.
+/// B.U.D. Name Service (BNS) - decentralized naming for the Budlum network.
 /// Full_impl per Q10 (storage_root + full resolve) + lifecycle integration.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub struct NameRecord {
     pub expires_at: u64,
     pub resolver: Option<Address>,
 
-    // Full_impl — storage/address binding
+    // Full_impl - storage/address binding
     pub address: Option<Address>,
     pub consensus_domain_id: Option<u32>,
     pub storage_root: Option<[u8; 32]>,

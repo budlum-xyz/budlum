@@ -40,7 +40,7 @@ run_checks() {
   # 4. Production code must reject test-mock-proof when cfg!(test) is false
   #    The cfg!(test) guard ensures test-mock-proof only works in test builds
   grep -q 'cfg!(test) && proof_bytes == b"test-mock-proof"' "$src" 2>/dev/null ||
-    fail "cfg!(test) guard for test-mock-proof not found — production may accept mock proofs"
+    fail "cfg!(test) guard for test-mock-proof not found - production may accept mock proofs"
 
   # 5. storage_root must be checked (mandatory proof when storage_root exists)
   grep -qE "storage_root.*proof_bytes|proof_bytes.*storage_root|storage_root.is_some" "$src" 2>/dev/null ||
@@ -51,15 +51,15 @@ run_checks() {
   #    `ChallengeOutcome::Mismatched` was declared with a doc comment saying
   #    the operator bond is slashed, and produced nowhere in the tree. The
   #    verification failure returned `Err`, which left nothing in `results`,
-  #    moved no bond, and let the operator answer wrongly again — so a wrong
+  #    moved no bond, and let the operator answer wrongly again - so a wrong
   #    answer was strictly cheaper than silence, since only silence reached
   #    `finalize_missed_challenge`. Both directions are checked, because a
   #    recorded slash that never burns is not a slash.
   grep -q "ChallengeOutcome::Mismatched" "$src" 2>/dev/null ||
-    fail "storage_deal.rs never produces ChallengeOutcome::Mismatched — a wrong answer costs the operator nothing"
+    fail "storage_deal.rs never produces ChallengeOutcome::Mismatched - a wrong answer costs the operator nothing"
 
   grep -qE "\\bapply_storage_bond_slash\\b" "$actor" 2>/dev/null ||
-    fail "chain_actor.rs does not burn the bond for a Mismatched answer — the slash is recorded but never applied"
+    fail "chain_actor.rs does not burn the bond for a Mismatched answer - the slash is recorded but never applied"
 }
 
 # --------------------------------------------------------------------------

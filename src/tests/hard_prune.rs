@@ -1,4 +1,4 @@
-//! Hard Pruning zincir-seviyesi mühür (F1 — raporu bulgusu,
+//! Hard Pruning zincir-seviyesi mühür (F1 - raporu bulgusu,
 //! Test mühürü, 2026-07-17).
 //!
 //! Constitution §1: NFT yakılınca bağlı olduğu B.U.D. içeriği silinmelidir.
@@ -9,7 +9,7 @@
 //! Fiziksel chunk silme (NodeCommand::StoragePrune worker) ayrı doğrulama
 //! Konusudur (bkz. STATUS_ONLINE bulgusu R1: sender wiring eksik).
 //!
-//! NOT (CI kanıtlı): mempool tx doğrulaması imza ister — tx'ler gerçek
+//! NOT (CI kanıtlı): mempool tx doğrulaması imza ister - tx'ler gerçek
 //! KeyPair ile imzalanır, nonce zincirden okunur, nft_id registry'den okunur.
 
 use crate::chain::blockchain::Blockchain;

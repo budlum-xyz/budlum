@@ -21,10 +21,10 @@ fn read(rel: &str) -> String {
 ///
 /// This test used to assert the opposite: that the executor still carried the
 /// `ai_exec_verifier_unavailable` marker, because there was no program or
-/// public-input bundle to hand a verifier. Both halves now exist —
+/// public-input bundle to hand a verifier. Both halves now exist -
 /// `execution_dims` lets the node rebuild the guest program and
 /// `AiExecutionProof::public_inputs` carries the inputs the envelope was
-/// produced against — so the marker is gone and the check is real. The
+/// produced against - so the marker is gone and the check is real. The
 /// direction is reversed rather than deleted: if the call disappears the lock
 /// fails.
 #[test]
@@ -62,7 +62,7 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
 /// `verify_execution_proof_stark` is deliberately absent from this list: the
 /// transaction path calls it now, which is what
 /// `execution_path_verifies_the_stark_for_proof_required_models` pins. The
-/// three below are the ones with no caller — `verify_execution_proof_full`
+/// three below are the ones with no caller - `verify_execution_proof_full`
 /// bundles the structural and STARK checks the executor performs separately,
 /// and the other two belong to paths that are not wired.
 #[test]
@@ -102,7 +102,7 @@ fn stark_verification_helpers_have_no_production_callers() {
 
     assert!(
         offenders.is_empty(),
-        "STARK inference verification gained a caller ({offenders:?}) — that is \
+        "STARK inference verification gained a caller ({offenders:?}) - that is \
          good news, but docs/AI_VERIFICATION_STATUS.md and this test must be \
          updated together with it"
     );
@@ -119,7 +119,7 @@ fn verify_inference_opcode_still_returns_zero() {
     let arm = &src[idx..idx + 600.min(src.len() - idx)];
     assert!(
         arm.contains("let result = 0u64;"),
-        "VerifyInference no longer hard-codes a failed verification — if a real \
+        "VerifyInference no longer hard-codes a failed verification - if a real \
          circuit landed, update docs/AI_VERIFICATION_STATUS.md"
     );
 }
@@ -183,7 +183,7 @@ fn guest_relu_uses_the_signed_field_threshold() {
     );
     assert!(
         !src.contains("Opcode::Lt, r_product, r_acc, r_zero"),
-        "the unsigned Lt(acc, 0) sign test must not come back — it never fires"
+        "the unsigned Lt(acc, 0) sign test must not come back - it never fires"
     );
 }
 

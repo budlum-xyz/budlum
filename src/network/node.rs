@@ -60,7 +60,7 @@ pub enum NodeCommand {
     Broadcast(String, NetworkMessage),
     BroadcastTx(crate::core::transaction::Transaction),
     ListPeers,
-    /// Hard Pruning — physical deletion of B.U.D. content.
+    /// Hard Pruning - physical deletion of B.U.D. content.
     /// Triggered ONLY by local Executor after verified NftBurn (SECURITY_AUDIT_HACKER.md).
     /// Payload is 32-byte ContentId (mirrors budlum_core::storage::content_id::ContentId and bud_node::store::ContentId).
     StoragePrune {
@@ -347,7 +347,7 @@ impl Node {
     ///
     /// A `Mutex` poisons when a thread panics while holding it, and every
     /// later `lock()` then returns `Err`. Fourteen call sites in this file
-    /// answered that by logging and calling `std::process::exit(1)` — one
+    /// answered that by logging and calling `std::process::exit(1)` - one
     /// panic anywhere in peer scoring would take the whole node off the
     /// chain, which is a far worse outcome than the bookkeeping it was
     /// protecting.
@@ -359,13 +359,13 @@ impl Node {
     /// Recovering with `into_inner()` is safe here for the same reason it is
     /// in `consensus/pow.rs`: `PeerManager` holds counters, ban timers and
     /// rate-limit buckets. A panic mid-update can leave one peer's score
-    /// stale, and a stale score is a bounded, self-correcting error — the
+    /// stale, and a stale score is a bounded, self-correcting error - the
     /// next report overwrites it. Losing the node is not self-correcting.
     ///
     /// Reachability, measured: `peer_manager.rs` has no panic source in
     /// production code today (`unix_now_secs` uses `unwrap_or(0)`, and the
     /// `duration_since` calls are on `Instant`, which cannot fail). So this
-    /// was latent rather than live — but it turned every future panic added
+    /// was latent rather than live - but it turned every future panic added
     /// to `PeerManager` into a node-killer, which is not a property worth
     /// keeping.
     fn peer_manager_lock(&self) -> std::sync::MutexGuard<'_, PeerManager> {
@@ -408,7 +408,7 @@ impl Node {
         info!("Node ID: {peer_id} (mDNS: {mdns_enabled}, Mobile: {mobile_mode})");
         // Replace DefaultHasher (64-bit, collision-prone) with
         // SHA-256 for gossipsub MessageId. The previous implementation used
-        // `DefaultHasher::finish` which returns u64 — birthday attack gives
+        // `DefaultHasher::finish` which returns u64 - birthday attack gives
         // Collision probability at ~2^32 messages. SHA-256 eliminates this.
         let message_id_fn = |message: &gossipsub::Message| {
             use sha2::{Digest, Sha256};
@@ -417,14 +417,50 @@ impl Node {
         };
 
         // Lightweight Gossipsub for mobile
+        //
+        // The heartbeat interval is slowed from gossipsub's 1s default to save
+        // radio and CPU. Three other settings are counted in *heartbeat ticks*
+        // rather than seconds, so raising the interval silently stretches them
+        // by the same factor. That was not accounted for, and the drift was
+        // large:
+        //
+        //   check_explicit_peers_ticks = 300   5 min ->  50 min (mobile 150)
+        //   opportunistic_graft_ticks  =  60   1 min ->  10 min (mobile  30)
+        //
+        // Both govern mesh repair. The first is how long a dropped explicit
+        // peer - a bootstrap node or a configured sentry - goes unnoticed
+        // before reconnection is attempted; on a validator that is the link to
+        // the network it was deliberately pinned to. The second is how long a
+        // node keeps a mesh full of low-scoring peers before it looks for
+        // better ones, which is the mechanism that recovers from a partial
+        // eclipse.
+        //
+        // They are rescaled here so the wall-clock behaviour matches upstream's
+        // intent regardless of the heartbeat. Peer-score decay is NOT affected:
+        // it runs on `decay_interval` (1s), its own timer in `poll`, not on the
+        // heartbeat - verified in behaviour.rs at the pinned revision.
+        //
+        // `max_ihave_messages_heartbeat` (10) is left alone. Slower heartbeats
+        // make it stricter, not looser, and tightening an anti-flood budget is
+        // the safe direction to drift in.
+        let heartbeat = if mobile_mode {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(10)
+        };
+        // Preserve upstream's wall-clock intent: 300 ticks x 1s and 60 ticks x 1s.
+        let explicit_peer_ticks = (300 / heartbeat.as_secs()).max(1);
+        let opportunistic_ticks = (60 / heartbeat.as_secs()).max(1);
+
         let mut gossipsub_config_builder = gossipsub::ConfigBuilder::default();
+        gossipsub_config_builder
+            .heartbeat_interval(heartbeat)
+            .check_explicit_peers_ticks(explicit_peer_ticks)
+            .opportunistic_graft_ticks(opportunistic_ticks);
         if mobile_mode {
             gossipsub_config_builder
-                .heartbeat_interval(Duration::from_secs(30)) // Less frequent heartbeats
                 .history_length(3) // Smaller history
                 .history_gossip(3);
-        } else {
-            gossipsub_config_builder.heartbeat_interval(Duration::from_secs(10));
         }
 
         let gossipsub_config = gossipsub_config_builder
@@ -444,8 +480,8 @@ impl Node {
         // answers the resulting IWANT is capped at
         // `max_ihave_messages_heartbeat` per heartbeat, but is never
         // penalised, never gossip-suppressed and never pruned from the mesh.
-        // The router already *counts* that behaviour — P7 in the scoring
-        // spec — and the count was simply being discarded.
+        // The router already *counts* that behaviour - P7 in the scoring
+        // spec - and the count was simply being discarded.
         //
         // The parameters are libp2p's defaults with two changes, both about
         // making the penalties bite sooner than they do on a public
@@ -637,7 +673,7 @@ impl Node {
     /// A validator that restarts without these marks re-signs heights it has
     /// Already voted at. Across a reorg that is two different hashes at one
     /// Height from one key, which is the exact shape equivocation detection
-    /// Looks for — `double_sign_slash_ratio_fixed`, 50% of the bond by
+    /// Looks for - `double_sign_slash_ratio_fixed`, 50% of the bond by
     /// Default, for a crash rather than any malice.
     ///
     /// `load_vote_history` / `save_vote_history` already do the work and were
@@ -711,7 +747,7 @@ impl Node {
     /// On a chain that has not moved, re-signing is harmless: the hash is the
     /// same, `detect_prevote_equivocation` compares hashes and sees no
     /// conflict, and the aggregator refuses the duplicate. The dangerous case
-    /// is a restart across a reorg — the same height now carries a different
+    /// is a restart across a reorg - the same height now carries a different
     /// hash, and a second signature over it is exactly what equivocation
     /// detection is looking for. The penalty is `double_sign_slash_ratio_fixed`,
     /// 50% of the bond by default, for what is a crash and a restart rather
@@ -1097,7 +1133,7 @@ impl Node {
                                        }
                                    }
                                    NodeCommand::StoragePrune { cid } => {
-                                       // Hard Pruning worker — physical deletion from local B.U.D. store.
+                                       // Hard Pruning worker - physical deletion from local B.U.D. store.
                                        // Only triggered by local Executor (not via P2P gossip), per SECURITY_AUDIT_HACKER.md.
                                        if let Some(ref storage_node) = self.storage_node {
                                            let content_id = bud_node::store::ContentId(cid);
@@ -1109,7 +1145,7 @@ impl Node {
                                                    );
                                                }
                                                Err(e) => {
-                                                   // Not found is not an error — content may have been pruned already or never stored locally
+                                                   // Not found is not an error - content may have been pruned already or never stored locally
                                                    tracing::debug!(
                                                        cid = %hex::encode(cid),
                                                        error = %e,
@@ -1120,7 +1156,7 @@ impl Node {
                                        } else {
                                            warn!(
                                                cid = %hex::encode(cid),
-                                               "StoragePrune received but storage_node is None — no-op (node without B.U.D. storage)"
+                                               "StoragePrune received but storage_node is None - no-op (node without B.U.D. storage)"
                                            );
                                        }
                                    }
@@ -1343,7 +1379,7 @@ impl Node {
                                }
                                // Dial failures used to fall into the catch-all `_ => {}`
                                // Arm, so a transport that refused every bootstrap
-                               // Address produced no log line at all — the node just
+                               // Address produced no log line at all - the node just
                                // Looked like a healthy peer-less island. Surface them.
                                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                                    warn!(
@@ -2534,7 +2570,7 @@ mod vote_history_wiring_tests {
     /// Every network must get a vote-history path by default.
     ///
     /// `load_vote_history` / `save_vote_history` were written to stop a
-    /// Restart from re-signing a height this key has already voted at — across
+    /// Restart from re-signing a height this key has already voted at - across
     /// A reorg that is two hashes at one height from one key, which is
     /// Equivocation and costs `double_sign_slash_ratio_fixed` (50% of the
     /// Bond by default) for what is a crash, not malice.
