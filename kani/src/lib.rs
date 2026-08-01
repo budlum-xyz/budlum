@@ -142,6 +142,33 @@ pub fn raw_quotient(stake: u64, slash_ratio_fixed: u64) -> u128 {
 // that the division cannot overshoot. It is evidence that an overshoot cannot
 // reach the ledger. The overshoot harnesses below keep asking the first
 // question by calling `raw_quotient`, so the clamp cannot turn them vacuous.
+//
+// MEASURED IN CI, per harness, each in its own job with its own cap:
+//
+//     penalty_never_exceeds_stake                       1s   was TIMEOUT
+//     remaining_stake_is_exact                          6s   was TIMEOUT
+//     the_clamp_catches_the_quotient_that_used_to_wrap  1s   new
+//     no_ratio_can_make_the_penalty_exceed_the_bond     1s   new
+//     an_unbounded_ratio_would_overshoot_the_bond       8s   control, unchanged
+//     an_unbounded_ratio_overshoots_two_units_above     7s   control, unchanged
+//     a_one_and_a_half_times_ratio_overshoots           1s   control, unchanged
+//     a_double_ratio_overshoots                         1s   control, unchanged
+//     an_unbounded_ratio_can_strictly_exceed_the_bond   1s   control, unchanged
+//
+// Three are still slow and the clamp does not help them, which is consistent
+// rather than surprising:
+//
+//     ratio_endpoints_are_exact
+//     penalty_is_monotonic_in_the_ratio
+//     penalty_is_monotonic_for_full_stakes
+//
+// Each calls `penalty_for` **twice** and relates the two results. The clamp
+// bounds a single call against its own input; it says nothing that lets a
+// solver compare two independent quotients, so both symbolic products survive
+// in the query. That is the same wall the 2x2 measurement found, met from the
+// other side, and it is recorded here rather than papered over: the job cap
+// is what currently stops them, and the honest reading is that these three
+// are not yet CI-budget harnesses.
 #[cfg(kani)]
 mod proofs {
     use super::{penalty_for, raw_quotient, FIXED_POINT_SCALE};

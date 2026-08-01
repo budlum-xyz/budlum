@@ -8,6 +8,35 @@ use serde::{Deserialize, Serialize};
 /// Fixed-point scale factor (1_000_000 == 100%).
 pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 
+/// The penalty a slash of `slash_ratio_fixed` takes from `stake`, capped at
+/// the bond.
+///
+/// This mirrors `budlum_core::core::chain_config::slash_penalty`. The two are
+/// separate because this crate is in the BudZero workspace and does not depend
+/// on `budlum-core`; `slash_expression_is_the_same_in_both_workspaces` in the
+/// core tree compares them so the copy cannot drift silently.
+///
+/// The cap is not decoration. Written the obvious way, as
+/// `((stake as u128 * ratio as u128) / SCALE as u128) as u64`, a ratio above
+/// `FIXED_POINT_SCALE` produces a quotient wider than `u64` and the narrowing
+/// truncates it. At `stake = u64::MAX` and `ratio = FIXED_POINT_SCALE + 1`
+/// that turned a 100.0001% slash into one that took about 1.8e13 from a bond
+/// of about 1.8e19, leaving the offender 99.9999% of the stake. See B35.
+#[must_use]
+pub fn slash_penalty(stake: u64, slash_ratio_fixed: u64) -> u64 {
+    let quotient =
+        (u128::from(stake) * u128::from(slash_ratio_fixed)) / u128::from(FIXED_POINT_SCALE);
+    if quotient > u128::from(u64::MAX) {
+        return stake;
+    }
+    let narrow = quotient as u64;
+    if narrow > stake {
+        stake
+    } else {
+        narrow
+    }
+}
+
 /// Economic / timing parameters that gate participation and slashing.
 ///
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in

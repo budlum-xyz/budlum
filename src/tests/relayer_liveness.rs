@@ -311,7 +311,12 @@ fn liveness_slash_uses_configured_rate() {
     bc.state.sync_validator_registration(&v);
     let k = bc.state.registry.params().liveness_max_missed_epochs;
     let rate = bc.state.registry.params().liveness_slash_ratio_fixed;
-    let expected_penalty = (stake as u128 * rate as u128 / FIXED_POINT_SCALE as u128) as u64;
+    // Computed by the same function production uses, not by a second copy of
+    // the expression. A test that recomputes the formula by hand agrees with
+    // production only until one of the two changes, and B35 was exactly that:
+    // five copies, two spellings of the narrowing, and a mirror test that
+    // compared them only where they happened to agree.
+    let expected_penalty = crate::core::chain_config::slash_penalty(stake, rate);
 
     let none: HashSet<Address> = HashSet::new();
     for e in 1..=k {
