@@ -618,9 +618,16 @@ jobs:
             reputation
             relayer_escrow
             zk_verifier
+            budl_compile
           )
           # Note: evm_rlp_decode + evm_mpt_verify remain nightly/manual (F10.1);
           # Quick gate covers deserialize +  state/relayer/zk.
+          #
+          # `budl_compile` runs here because the front end is cheap to drive:
+          # it parses and type checks and returns. `budl_compile_then_run`
+          # executes what it emitted and is left to fuzz-nightly, since an
+          # accepted program can spend the whole gas limit before halting and
+          # one slow input would eat the 60 second budget for the target.
           for t in "${targets[@]}"; do
             echo "=== fuzz-quick: $t (60s) ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
@@ -894,6 +901,13 @@ jobs:
         run: |
           bash ./scripts/check-no-unicode-dashes.sh --self-test
           bash ./scripts/check-no-unicode-dashes.sh
+      # Bir fuzz hedefi ancak uc dosya ayni fikirdeyse fuzz'lar: harness,
+      # fuzz/Cargo.toml'daki [[bin]], ve onu kosturan bir workflow. Uclusunden
+      # biri eksikse hedef listede gorunur ve hicbir sey yapmaz.
+      - name: fuzz hedefi kablolamasi + kanarya
+        run: |
+          bash ./scripts/check-fuzz-targets-are-wired.sh --self-test
+          bash ./scripts/check-fuzz-targets-are-wired.sh
       # B35: the fixed-point slash expression was written out at five call
       # sites across two workspaces, and the narrowing was not spelled the same
       # way in all of them. `as u64` truncated where the Kani mirror panicked,
