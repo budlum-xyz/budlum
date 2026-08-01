@@ -36,6 +36,11 @@ jobs:
           - consensus_state_transition
           - relayer_escrow
           - zk_verifier
+          # Ikili fuzz'in agir yarisi. `budl_compile` PR kapisinda kosar,
+          # bu ise derleyicinin urettigi bytecode'u VM'de calistirir: kabul
+          # edilen bir program gas limitine kadar donebilir, o yuzden 60
+          # saniyelik hizli butceye degil dort saatlik programa ait.
+          - budl_compile_then_run
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
