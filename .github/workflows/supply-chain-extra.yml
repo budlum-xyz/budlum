@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   udeps:
-    name: Udeps - kullanılmayan bağımlılık kapısı
+    name: Udeps — kullanılmayan bağımlılık kapısı
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -50,7 +50,7 @@ jobs:
           bash "$ROOT/scripts/check-udeps.sh" /tmp/udeps2.txt
 
   geiger:
-    name: "Geiger - unsafe görünürlük (first-party 0 kanıt katmanı)"
+    name: "Geiger — unsafe görünürlük (first-party 0 kanıt katmanı)"
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
