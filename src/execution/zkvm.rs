@@ -76,7 +76,16 @@ impl ZkVmExecutor {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run_receipt(&program)))
                 .map_err(|_| "BudZKVM execution failed".to_string())?;
         if !receipt.success {
-            return Err("BudZKVM execution failed".into());
+            // Carry the VM's own error out instead of flattening every failure
+            // into one string. A gated opcode, an out-of-gas, and a bad memory
+            // access were all reported as "BudZKVM execution failed", which is
+            // useless to an operator reading a rejected transaction and was
+            // actively misleading in tests asserting *why* something was
+            // refused.
+            return Err(match receipt.error {
+                Some(e) => format!("BudZKVM execution failed: {e:?}"),
+                None => "BudZKVM execution failed".to_string(),
+            });
         }
 
         let public_inputs = build_public_inputs(&program, &vm, &receipt);
@@ -378,13 +387,27 @@ mod tests {
              hard-coded zero"
         );
 
+        // Strip line comments before matching. The comment above
+        // `decode_instruction` explains what `full()` used to do and why it was
+        // wrong, so a whole-file `contains` finds the word in the explanation
+        // and reports the bug it is describing. `check-containment-defaults.sh`
+        // strips comments for the same reason; this test did not, and CI caught
+        // the difference the moment the surrounding prose was reflowed.
         let vm_src = include_str!("../../budzero/bud-vm/src/lib.rs");
+        let vm_code: String = vm_src
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(at) => &l[..at],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            vm_src.contains("MainnetActivation::default()"),
+            vm_code.contains("MainnetActivation::default()"),
             "the VM no longer decodes against the staged-rollout defaults"
         );
         assert!(
-            !vm_src.contains("MainnetActivation::full()"),
+            !vm_code.contains("MainnetActivation::full()"),
             "the VM is back on full activation, which makes every gate in \
              MainnetActivation::default() dead code"
         );

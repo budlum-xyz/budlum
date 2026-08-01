@@ -88,10 +88,15 @@ gate() {
   done
 
   # 2. The VM consults the defaults.
-  printf '%s\n' "$vm_code" | grep -q "MainnetActivation::default()" \
-    || fail "bud-vm no longer decodes against MainnetActivation::default().
-  Whatever it uses instead is what the gate actually is."
-  if printf '%s\n' "$vm_code" | grep -q "MainnetActivation::full()"; then
+  # `printf | grep -q` makes grep exit at the first match while printf is still
+  # writing, and printf reports "write error: Broken pipe" under `set -o
+  # pipefail`. It passed locally and failed in CI. Match the variable directly.
+  case "$vm_code" in
+    *"MainnetActivation::default()"*) ;;
+    *) fail "bud-vm no longer decodes against MainnetActivation::default().
+  Whatever it uses instead is what the gate actually is." ;;
+  esac
+  if case "$vm_code" in *"MainnetActivation::full()"*) true ;; *) false ;; esac; then
     fail "bud-vm decodes against MainnetActivation::full(), which sets every
   staged-rollout flag true and makes default() dead code. This is the exact
   state the gate was in when VerifyMerkle and VerifyInference were both open
