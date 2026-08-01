@@ -66,9 +66,11 @@ fn pow_header_finality_authorizes_bridge_mint_but_legacy_does_not() {
         .register_bridge_asset(asset, source.id)
         .expect("asset registration");
     // Lock debits owner balance.
-    chain.fund_development_account(&address(7))
+    chain
+        .fund_development_account(&address(7))
         .expect("devnet faucet");
-    chain.fund_development_account(&address(8))
+    chain
+        .fund_development_account(&address(8))
         .expect("devnet faucet");
     let (_transfer, event) = chain
         .lock_bridge_transfer(source.id, 42, 1, 0, asset, address(7), address(8), 500, 100)

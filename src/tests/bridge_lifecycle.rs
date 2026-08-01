@@ -45,15 +45,13 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     let owner = addr(11);
     let recipient = addr(12);
     // Lock debits owner balance - fund accounts.
-    bc.fund_development_account(&owner)
-        .expect("devnet faucet");
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.fund_development_account(&recipient)
         .expect("devnet faucet");
 
     // Bridge lock now debits owner balance, so the owner must
     // Have sufficient funds before locking.
-    bc.fund_development_account(&owner)
-        .expect("devnet faucet");
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.state.add_balance(&owner, 1_000_000);
 
     // Step 3: lock via the internal path (the only path that exists
@@ -140,8 +138,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     let recipient = addr(12);
 
     // Bridge lock debits owner balance
-    bc.fund_development_account(&owner)
-        .expect("devnet faucet");
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.state.add_balance(&owner, 1_000_000);
 
     // Two locks: one expiring at 100, one at 500.
@@ -233,8 +230,7 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
     let recipient = addr(12);
 
     // Bridge lock debits owner balance
-    bc.fund_development_account(&owner)
-        .expect("devnet faucet");
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.state.add_balance(&owner, 1_000_000);
 
     let (_transfer, lock_event) = bc
