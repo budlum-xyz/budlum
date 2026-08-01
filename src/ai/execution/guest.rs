@@ -290,7 +290,7 @@ pub fn program_hash_from_words(words: &[u64]) -> [u8; 32] {
 /// SONUC: Err("execution proof program_hash != public_inputs.program_hash")
 /// ```
 ///
-/// Everything else in that measurement lined up - the verifier rebuilt the
+/// Everything else in that measurement lined up, the verifier rebuilt the
 /// program, the public-inputs hash matched, and the independently derived
 /// `initial_state_root` matched - so this single mismatch was the whole reason
 /// the STARK path could not run.
@@ -1327,7 +1327,7 @@ mod matmul_tests {
         );
     }
 
-    /// Anything `validate` accepts must be buildable and runnable - no shape
+    /// Anything `validate` accepts must be buildable and runnable, no shape
     /// may pass validation and then fail inside the guest.
     #[test]
     fn every_valid_shape_can_be_built_and_run() {
@@ -1436,8 +1436,8 @@ mod matmul_tests {
 
     /// `prove_mlp_inference` must produce a proof that actually verifies.
     ///
-    /// It never did. `Prover::prove` succeeds whenever it can build a trace -
-    /// it does not check the trace against the AIR - and `prove_bytecode` did
+    /// It never did. `Prover::prove` succeeds whenever it can build a trace,
+    /// it does not check the trace against the AIR, and `prove_bytecode` did
     /// not verify what it produced, so the function returned an envelope no
     /// verifier would accept.
     ///

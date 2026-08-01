@@ -52,7 +52,7 @@ impl ReplayNonceStore {
 
     /// Mark processed with block height for safe pruning.
     /// The height is recorded so that pruning only removes entries that are
-    /// Deeper than FINALITY_PRUNE_DEPTH blocks - preventing replay within
+    /// Deeper than FINALITY_PRUNE_DEPTH blocks, preventing replay within
     /// The finality window.
     pub fn mark_processed_at(
         &mut self,

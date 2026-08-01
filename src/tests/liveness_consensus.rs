@@ -83,7 +83,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
     let mut bc = chain_with_validators(producer, absentee);
 
     // Lower the liveness threshold to 2 so we can cross it quickly.
-    // Explicitly assert the observe-only (disabled) behavior - this is
+    // Explicitly assert the observe-only (disabled) behavior, this is
     // Also the default, but we set it explicitly so the test documents intent
     // And stays correct even if the default ever changes.
     bc.state.registry.set_params(RegistryParams {
@@ -92,7 +92,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
         ..RegistryParams::default()
     });
     // `add_validator` already auto-registered the absentee in the registry
-    // (sync), so a slash WOULD have something to cut - proving the
+    // (sync), so a slash WOULD have something to cut, proving the
     // No-slash property is meaningful, not vacuous.
     let stake_before = bc
         .state
@@ -332,7 +332,7 @@ fn a_slashed_validator_stops_accruing_downtime() {
         "and must still be in the validator map, which is where jail_until lives"
     );
 
-    // Several more epochs pass. It cannot sign - it is jailed.
+    // Several more epochs pass. It cannot sign, it is jailed.
     for epoch in 2..=6 {
         bc.record_liveness_epoch(epoch, &only_producer);
     }

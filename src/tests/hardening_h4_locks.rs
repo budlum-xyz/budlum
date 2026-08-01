@@ -59,7 +59,7 @@ mod tests {
         );
 
         // And when nothing canonicalised it - `--signer-backend softhsm` on the
-        // command line never passes through the config-file path - the
+        // command line never passes through the config-file path, the
         // canonical field still carries the operator's word.
         let mut soft_direct = ok.clone();
         soft_direct.signer_backend = Some("softhsm");

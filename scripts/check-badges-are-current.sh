@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-badges-are-current.sh - README badges must match what CI measured.
+# check-badges-are-current.sh, README badges must match what CI measured.
 #
 # The test badge is written by a CI step that pushes to `main`. That push has
 # been rejected on every run since branch protection was enabled:
@@ -97,7 +97,7 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 1
   fi
 
-  # 3. Empty output must fail - the case where the test step never ran.
+  # 3. Empty output must fail, the case where the test step never ran.
   : > "$tmp/empty.log"
   if ( gate "$tmp/empty.log" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: empty test output was accepted!" >&2

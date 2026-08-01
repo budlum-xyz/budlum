@@ -3,7 +3,7 @@
 //! This is the single, canonical shape in which a proven offence is reported to
 //! The [`PermissionlessRegistry`](super::permissionless::PermissionlessRegistry).
 //! The consensus layer produces it, the RPC `slash-evidence-submit` endpoint
-//! Accepts it, and future domains reuse it verbatim - so the format lives here,
+//! Accepts it, and future domains reuse it verbatim, so the format lives here,
 //! Not in any one producer.
 //!
 //! ## Design
@@ -224,7 +224,7 @@ impl SlashingReport {
     /// Convenience: a consensus-verified invalid-signature-spam fault.
     ///
     /// Provenance is `ConsensusVerified` because the node's own consensus layer
-    /// Cryptographically rejected every one of the `count` votes at ingest - the
+    /// Cryptographically rejected every one of the `count` votes at ingest, the
     /// Count is the node's first-hand observation, not an external claim.
     pub fn consensus_invalid_signature_spam(
         offender: Address,

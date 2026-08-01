@@ -109,7 +109,7 @@ pub enum FinalityProof {
         validator_snapshot: ValidatorSetSnapshot,
     },
     /// ZK finality: rather than carrying the raw STARK proof,
-    /// This references a proof already submitted to - and cryptographically
+    /// This references a proof already submitted to, and cryptographically
     /// Verified by - the `ProofClaimRegistry` (via `submit_zk_proof`). This keeps
     /// A single source of truth for ZK verification and removes the two parallel
     /// Verification paths that audit flagged.
@@ -440,7 +440,7 @@ impl PoAFinalityAdapter {
 /// authorities against the registered commitment instead of trusting them.
 ///
 /// `compute_hash` sorts by address, so the ordering of `authorities` does not
-/// matter, and duplicates must be removed by the caller before hashing -
+/// matter, and duplicates must be removed by the caller before hashing,
 /// otherwise a proof could pad its list to change the digest.
 pub fn poa_authority_set_hash(
     domain: &ConsensusDomain,
@@ -479,7 +479,7 @@ pub fn poa_authority_set_hash(
 /// two count-weighted PoA branches were the ones that did not.
 ///
 /// A domain with a zero `validator_set_hash` has no registered set to compare
-/// against - the same convention the stake-weighted adapters use - and is left
+/// against, the same convention the stake-weighted adapters use, and is left
 /// to the quorum check alone.
 fn reject_unregistered_poa_authorities(
     domain: &ConsensusDomain,
@@ -514,7 +514,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         // PoA finality now verifies REAL ed25519 signatures from the
         // Approved authority set (count-based quorum), instead of trusting a
         // Self-reported signer_count. `domain` and `commitment` are genuinely
-        // Used. This does NOT touch the permissionless stake registry - PoA
+        // Used. This does NOT touch the permissionless stake registry, PoA
         // Keeps its own separate, stake-free authority/signature model
         // (isolation preserved).
         let FinalityProof::PoA {
@@ -699,7 +699,7 @@ impl ZkFinalityAdapter {
     /// Verify ZK finality against an already-accepted proof claim (
     /// Option B).
     ///
-    /// The raw STARK proof is NOT re-verified here - it was already
+    /// The raw STARK proof is NOT re-verified here, it was already
     /// Cryptographically verified when it was submitted via `submit_zk_proof`
     /// And recorded in the `ProofClaimRegistry`. This method enforces the
     /// Binding the audit found missing:
@@ -1010,7 +1010,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
 /// (`blockchain.rs`), and the runtime path re-checks the selected adapter's
 /// `adapter_name()` against that same field. Pointing the `AiInference` arm at
 /// the storage adapter meant comparing `"ai-inference-threshold"` against
-/// `"storage-attestation-v1"`, which never matches - so an `AiInference`
+/// `"storage-attestation-v1"`, which never matches, so an `AiInference`
 /// domain could be registered but not one of its commitments could ever
 /// finalize. Measured across all seven kinds, it was the only disagreeing
 /// pair:

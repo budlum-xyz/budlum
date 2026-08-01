@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-containment-defaults.sh - a gate that is off by default must stay off
+# check-containment-defaults.sh, a gate that is off by default must stay off
 # by default, and the path that reaches it must actually consult it.
 #
 # From the containment-first directive: the protection is not that a
 # vulnerability is hidden, it is that it cannot be triggered. Three mechanisms
-# carry that here - a feature closed until a threshold is proven, a default
+# carry that here, a feature closed until a threshold is proven, a default
 # that refuses on uncertainty, and structural isolation. All three fail the
 # same way: the flag stays in the source, reads correctly in review, and the
 # code path that matters never looks at it.

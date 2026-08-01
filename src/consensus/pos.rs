@@ -905,7 +905,7 @@ impl ConsensusEngine for PoSEngine {
             }
 
             // Prune seen_blocks to prevent unbounded growth.
-            // Keep entries from the last 2 epochs only - older double-sign evidence
+            // Keep entries from the last 2 epochs only, older double-sign evidence
             // Is no longer actionable (already slashed or epoch-finalized).
             let current_epoch = block.index / self.config.epoch_length;
             let min_slot = current_epoch.saturating_sub(2) * self.config.epoch_length;

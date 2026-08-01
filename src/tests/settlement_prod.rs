@@ -601,7 +601,7 @@ mod settlement_prod_tests {
 
     #[test]
     fn poa_finality_rejects_forged_signatures() {
-        // Claiming quorum with INVALID signatures must be rejected - the
+        // Claiming quorum with INVALID signatures must be rejected, the
         // Old self-reported signer_count path is gone.
         let mut blockchain = test_chain();
         let poa = domain(31, ConsensusKind::PoA);

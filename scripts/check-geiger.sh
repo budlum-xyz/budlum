@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-geiger.sh - cargo-geiger unsafe görünürlük raporu
+# check-geiger.sh, cargo-geiger unsafe görünürlük raporu
 #
 # Cargo geiger --all-targets çıktısını alır. First-party crate'lerde
 # (budlum-core, bud-*) unsafe kullanımı SIFIR beklenir - src/lib.rs

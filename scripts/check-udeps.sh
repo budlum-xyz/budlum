@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-udeps.sh - cargo-udeps kullanılmayan-bağımlılık kapısı
+# check-udeps.sh, cargo-udeps kullanılmayan-bağımlılık kapısı
 #
 # `cargo +nightly udeps --all-targets` çıktısındaki GERÇEK formatı parse eder:
 #   Unused dependencies:

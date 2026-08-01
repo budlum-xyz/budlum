@@ -51,7 +51,7 @@ run_checks() {
   #    `ChallengeOutcome::Mismatched` was declared with a doc comment saying
   #    the operator bond is slashed, and produced nowhere in the tree. The
   #    verification failure returned `Err`, which left nothing in `results`,
-  #    moved no bond, and let the operator answer wrongly again - so a wrong
+  #    moved no bond, and let the operator answer wrongly again, so a wrong
   #    answer was strictly cheaper than silence, since only silence reached
   #    `finalize_missed_challenge`. Both directions are checked, because a
   #    recorded slash that never burns is not a slash.

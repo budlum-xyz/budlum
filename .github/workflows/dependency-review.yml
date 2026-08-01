@@ -3,7 +3,7 @@ name: Dependency Review (PR güvenlik kapısı)
 # Bu kapı, her pull_request'te PR diff'inde yeni tanıtılan bağımlılıkların
 # Bilinen zaafiyet/lisans sorunları için GitHub Advisory veritabanına göre
 # Denetlenmesini sağlar. cargo-audit / cargo-deny TÜM bağımlılık ağacını
-# Tararken, bu kapı yalnızca PR'ın getirdiği DELTAYA odaklanır - yani bir PR
+# Tararken, bu kapı yalnızca PR'ın getirdiği DELTAYA odaklanır, yani bir PR
 # Bilinen zaafiyetli bir sürüm eklemeye çalışırsa (dependabot dahil) main'e
 # Merge olmadan RED edilir. Tamamlayıcı, tekrarlamaz.
 

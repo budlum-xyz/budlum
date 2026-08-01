@@ -727,7 +727,7 @@ impl Transaction {
     /// `gas_per_byte` or `gas_per_signature`.
     ///
     /// It is kept because `GasSchedule` is part of the genesis document and is
-    /// Pinned per network, so the shape has to stay round-trippable - but a
+    /// Pinned per network, so the shape has to stay round-trippable, but a
     /// Caller reaching for this to size a transaction will get a number the
     /// Chain has never charged. `bud_estimateGas` deliberately does not use it;
     /// It returns the flat fee floor instead.

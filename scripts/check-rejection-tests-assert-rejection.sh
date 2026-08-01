@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-rejection-tests-assert-rejection.sh - a test named for a rejection must
+# check-rejection-tests-assert-rejection.sh, a test named for a rejection must
 # assert one.
 #
 # A test name is a claim, and it is the claim a reader trusts when they are
@@ -20,7 +20,7 @@
 #   import_qc_blob_rejects_empty_signature_set  (and three siblings)
 #       never called import_qc_blob. They recomputed the quorum arithmetic
 #       inline and compared it against `blob.pq_signatures.len()`. Deleting
-#       import_qc_blob outright would have left all four green - and the raw
+#       import_qc_blob outright would have left all four green, and the raw
 #       count they blessed is exactly what the production fix had stopped
 #       trusting, because duplicate entries inflate it.
 #
@@ -29,7 +29,7 @@
 #
 # This gate reads every `#[test]` whose name promises a refusal and requires
 # the body to contain a matching negative assertion. It cannot tell whether the
-# assertion is about the right thing - no static check can - but it does catch
+# assertion is about the right thing, no static check can, but it does catch
 # the case where there is no negative assertion at all, which is how all three
 # of the above got in.
 #
@@ -230,7 +230,7 @@ self_test() {
   fi
 
   # 3. A tree with no such tests must fail rather than pass for having no
-  #    offenders - otherwise deleting every rejection test turns the gate green.
+  #    offenders, otherwise deleting every rejection test turns the gate green.
   mk "$tmp/none" \
     '#[test]' \
     'fn a_block_is_produced() {' \

@@ -6,8 +6,8 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 ## Durum
 
 - **Olgunluk:** canlı (verifier ağ'ı + RPC + ZKVM host-call).
-- **Kod konumu:** `src/ai/` - `mod.rs` (soft-incentive ödül + P5 deadline/escrow),
-  `registry.rs` (`AiRegistry` - request/result/outcome + agreement threshold +
+- **Kod konumu:** `src/ai/`, `mod.rs` (soft-incentive ödül + P5 deadline/escrow),
+  `registry.rs` (`AiRegistry`: request/result/outcome + agreement threshold +
   equivocation detection), `types.rs` (`AiModelSpec`, `AiInferenceRequest/Result/Outcome`,
   `AiRequestId`, `BoundedBytes`).
 - **Test sayısı:** 76 (`#[test]` sayımı).
@@ -19,7 +19,7 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 ## Olgunluk uyarıları
 
 - ⚠️ **Attestation model (-1).** On-chain AI inference = off-chain hesaplama +
-  on-chain attestation (k-of-n verifier agreement). **zkML DEĞİL** - büyük modelleri
+  on-chain attestation (k-of-n verifier agreement). **zkML DEĞİL**, büyük modelleri
   zincirde prove etmek 2026'da pratik değil (determinizm sorunu). -2 kısıtlı
   model sınıfları için STARK-provable inference (BudZKVM).
 - ⚠️ **Determinizm riski.** Aynı model farklı donanımda farklı çıktı verebilir →

@@ -134,7 +134,7 @@ impl SemanticAnalyzer {
     /// Struct that is actually declared. `Type::from_str` maps ANY
     /// Non-primitive name to `Type::Struct(name)`, so without this check
     /// A typo in a struct type annotation (field / parameter / return)
-    /// Would silently become a phantom struct type - and field access on
+    /// Would silently become a phantom struct type, and field access on
     /// Values of that type would then skip validation entirely.
     fn check_struct_type(&self, ty: &Type, ctx: &str, errors: &mut Vec<CompileError>) {
         if let Type::Struct(name) = ty {
@@ -149,7 +149,7 @@ impl SemanticAnalyzer {
 
     /// A value used as a condition (`if` / `while` / `constrain`) is
     /// Tested for non-zero by the VM, so it must be a scalar
-    /// (u64 / bool / field). A struct value is a heap pointer - always
+    /// (u64 / bool / field). A struct value is a heap pointer, always
     /// Non-zero, so the branch/assertion is trivially true - and `void`
     /// Is not a value; both are near-certain bugs, rejected at compile
     /// Time. (match has its own stricter scrutinee check.)

@@ -1,4 +1,4 @@
-# Security Audit - Budlum Core
+# Security Audit, Budlum Core
 #
 # Bu workflow, tek-authority CI yaklaşımını uygular.
 # Mevcut CI zaten şunları karşılıyor: cargo fmt/clippy (ci.yml),
@@ -49,7 +49,7 @@ jobs:
   zizmor:
     name: zizmor (GitHub Actions static analysis)
     runs-on: ubuntu-latest
-    # Statik analiz - bulsa da bulmasa da CI'ı kırmasın (bilgilendirici + SARIF).
+    # Statik analiz, bulsa da bulmasa da CI'ı kırmasın (bilgilendirici + SARIF).
     continue-on-error: true
     permissions:
       contents: read

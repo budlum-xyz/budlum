@@ -235,7 +235,7 @@ mod hardening_tests {
     }
 
     /// `from_env` ile `auth_required=true` ve boş api_key
-    /// (env var ayarlanmamış) geçirildiğinde hata döner - operatörün
+    /// (env var ayarlanmamış) geçirildiğinde hata döner, operatörün
     /// Public bir RPC'yi boş key ile başlatması engellenir.
     #[test]
     fn rpc_empty_api_key_rejected_when_auth_required() {

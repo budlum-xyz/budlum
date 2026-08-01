@@ -65,7 +65,7 @@ pub struct RetrievalChallengeRequest {
 }
 
 /// Lifecycle status of a `StorageDeal`. Reuses the same enum-tag
-/// Convention as the `permissionless::MemberStatus` enum - explicit
+/// Convention as the `permissionless::MemberStatus` enum, explicit
 /// Variants so the economic surface is auditable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DealStatus {
@@ -605,7 +605,7 @@ impl StorageRegistry {
     }
 
     /// Register a manifest so subsequent deal-opens can validate
-    /// `(manifest_id, shard_id)` membership. Idempotent - re-registering
+    /// `(manifest_id, shard_id)` membership. Idempotent, re-registering
     /// The same `manifest_id` is a no-op (per the chain-only rule: the
     /// Canonical manifest lives in `ContentManifest`; this index only
     /// Tracks "is this manifest known to the storage domain?").
@@ -1525,7 +1525,7 @@ impl StorageRegistry {
     ///
     /// This is the number erasure coding cares about, and it is not the one
     /// `under_replicated_shards` computes. That function asks, per shard,
-    /// whether it has fewer than `STORAGE_REPLICATION_TARGET` copies - the
+    /// whether it has fewer than `STORAGE_REPLICATION_TARGET` copies, the
     /// right question when every shard is a whole copy of the object. Under a
     /// `(k, n)` code each shard is a distinct piece, and what decides whether
     /// the object survives is how many *different* pieces are left, compared
@@ -1930,7 +1930,7 @@ mod tests {
     /// When the proof failed to verify, `answer_challenge` returned `Err`.
     /// Nothing landed in `results`, no bond moved, the deal stayed `Active`,
     /// and the operator could try again. Only silence reached
-    /// `finalize_missed_challenge` and got slashed - so an operator that had
+    /// `finalize_missed_challenge` and got slashed, so an operator that had
     /// discarded the data was better off answering wrongly, forever, than
     /// staying quiet once.
     ///
@@ -2585,8 +2585,8 @@ mod tests {
         // must not pass. It used to surface as `Err(InvalidMerkleProof)`,
         // which left the challenge unresolved and the operator free to retry;
         // it is now a `Mismatched` answer that slashes, on the same terms as
-        // a missed deadline. The property under test is unchanged - a
-        // production deal cannot be answered without a proof - but the
+        // a missed deadline. The property under test is unchanged, a
+        // production deal cannot be answered without a proof, but the
         // consequence is no longer cheaper than staying silent.
         let res = reg
             .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
@@ -2748,7 +2748,7 @@ mod tests {
         }
     }
 
-    /// And it must accept the challenge once the bond covers the range -
+    /// And it must accept the challenge once the bond covers the range,
     /// the canary that proves the gate is not simply rejecting everything.
     #[test]
     fn open_challenge_accepts_a_bond_that_covers_the_range() {

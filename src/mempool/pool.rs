@@ -667,7 +667,7 @@ mod tests {
     ///
     /// `hashes.iter().next()` returned an arbitrary element of a `HashSet`, so
     /// the victim depended on hash iteration order. Nothing in consensus reads
-    /// the mempool directly, so this was not a fork - but it made block
+    /// the mempool directly, so this was not a fork, but it made block
     /// contents depend on allocator state, and it made
     /// `a_full_pool_does_not_let_a_sender_past_its_own_cap` fail about one run
     /// in five, which is how it was found.

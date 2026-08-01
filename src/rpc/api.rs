@@ -760,7 +760,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Query ZKVM execution proof for a (request, verifier) pair.
-    /// Results with execution proofs are "trustless" - verified by ZKVM
+    /// Results with execution proofs are "trustless", verified by ZKVM
     /// Mathematics rather than by verifier reputation alone. This is the
     /// Core primitive for the Agentic Economy paradigm shift.
     #[method(name = "bud_aiExecutionProof")]

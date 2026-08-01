@@ -18,7 +18,7 @@ publish = false
 # The upstream fix is merged (model-checking/kani#4645 moved the bundled
 # toolchain to a nightly new enough for 1.94) but unreleased: 0.67.0 is still
 # the newest published version. Lowering the root crate's MSRV to work around a
-# verification tool would be the wrong trade - the MSRV is a promise to
+# verification tool would be the wrong trade, the MSRV is a promise to
 # operators, not a build knob.
 #
 # So this package stands alone, in the same way `fuzz/` is its own workspace.

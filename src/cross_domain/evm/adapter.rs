@@ -375,7 +375,7 @@ mod tests {
 
     /// The stronger of the two verification paths has no caller.
     ///
-    /// This file documents `verify_deposit` as "gerçek güvenli yol" - the real
+    /// This file documents `verify_deposit` as "gerçek güvenli yol", the real
     /// safe path - and it is: it runs the full `verify_evm_receipt`
     /// orchestrator (header chain with N confirmations, MPT inclusion, receipt
     /// status, deposit-log match). The trait method `verify_receipt_proof`

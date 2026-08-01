@@ -6,7 +6,7 @@ name: Extra Tooling (security + quality)
 # `slsa-provenance` job'ı bir reusable workflow'u (`.github/workflows/*.yml@ref`)
 # `steps[].uses` içinde çağırıyordu. Reusable workflow yalnız job seviyesinde
 # (`jobs.<id>.uses`) geçerlidir; adım içinde kullanılınca GitHub dosyanın
-# Tamamını reddeder. Sonuç: her koşu 0 job ile anında "failure" - diğer beş
+# Tamamını reddeder. Sonuç: her koşu 0 job ile anında "failure", diğer beş
 # Job da hiç çalışmıyordu. actionlint bunu yakalamıyor (yerelde temiz geçiyor),
 # Bu yüzden hata gözden kaçmıştı.
 #
@@ -110,7 +110,7 @@ jobs:
   # ── 2. Kullanılmayan bağımlılıklar ──────────────────────────────────────────
   # KAPI. Daha önce rapor modundaydı çünkü machete bu ağaçta 9 aday veriyordu
   # ve bunların bir kısmı (chrono, group) makro/trait dolaylılığı yüzünden
-  # yanlış pozitifti - o hâlde FAIL yapmak ya CI'ı gevşetmeye ya da kullanılan
+  # yanlış pozitifti, o hâlde FAIL yapmak ya CI'ı gevşetmeye ya da kullanılan
   # bağımlılıkları ignore listesine doldurup kapıyı içi boş bırakmaya zorlardı.
   #
   # O borç kapandı: gerçek ölü bağımlılıklar temizlendi, yanlış pozitifler
@@ -169,7 +169,7 @@ jobs:
       # Kapı: her workspace ayrı taranır. cargo-machete bulgu bulduğunda
       # sıfırdan farklı çıkar, `set -e` altında job orada düşer. Yanlış
       # pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
-      # kaydına alınır - ignore etmek serbest değil, gerekçe commit'te durur.
+      # kaydına alınır, ignore etmek serbest değil, gerekçe commit'te durur.
       - name: Machete kapısı - root + budzero + fuzz + wallet-core
         run: |
           set -euo pipefail

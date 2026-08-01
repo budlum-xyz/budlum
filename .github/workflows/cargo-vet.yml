@@ -1,7 +1,7 @@
-# Cargo-vet - tedarik zinciri güven denetimi (ratchet kapısı)
+# Cargo-vet, tedarik zinciri güven denetimi (ratchet kapısı)
 #
 # NEDEN AYRI BİR KAPI: cargo-audit/cargo-deny/OSV "bu bağımlılıkta BİLİNEN bir
-# Açık var mı?" sorusunu yanıtlar - hepsi bir advisory yayınlanmasını bekler.
+# Açık var mı?" sorusunu yanıtlar, hepsi bir advisory yayınlanmasını bekler.
 # Cargo-vet farklı bir soruyu sorar: "bu kodu hiç kimse okudu mu?" Kaynağı
 # Güvenilir bir denetim kaydına bağlar (Mozilla, Google, Bytecode Alliance,
 # ISRG, Embark, Zcash import'ları). Bir bağımlılık ele geçirilip zararlı sürüm
@@ -9,14 +9,14 @@
 # Ise ilk dakikadan görünür. Bir L1 zincirin kripto/FFI yüzeyi için bu boşluk
 # Kapatılmalı.
 #
-# ÖNEMLİ - bu "mevcut aracı CI'a bağlamak" değil, ARACI İLK KEZ ÇALIŞTIRMAK:
+# ÖNEMLİ, bu "mevcut aracı CI'a bağlamak" değil, ARACI İLK KEZ ÇALIŞTIRMAK:
 # Supply-chain/config.toml depoda duruyordu ama cargo-vet şemasında olmayan
 # Uydurma anahtarlarla yazılmıştı (`audit-compatible-output`,
 # `[default-criteria] safe-to-run`) ve araç parse hatasıyla düşüyordu. Hiçbir
 # Workflow da onu çağırmıyordu. Dosyanın varlığı denetim yapıldığı izlenimi
 # Veriyordu; gerçekte tek bir bağımlılık bile denetlenmemişti.
 #
-# KAPI POLİTİKASI - ratchet, tam-yeşil değil: ilk gerçek ölçüm 437 denetimsiz
+# KAPI POLİTİKASI, ratchet, tam-yeşil değil: ilk gerçek ölçüm 437 denetimsiz
 # Bağımlılık (~6.7M satır backlog). Gün-1 `cargo vet check` zorunlu kılınsaydı
 # Kapı kalıcı kırmızı kalır ve ilk sıkışmada gevşetilirdi. Repo'nun diğer kapılarında
 # Zaten kullandığı desen uygulanıyor: sayı ARTAMAZ, düşmesi serbesttir.

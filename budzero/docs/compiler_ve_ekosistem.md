@@ -13,7 +13,7 @@ Projemizdeki `bud-compiler` crate'i, Bud adını verdiğimiz yüksek seviyeli ve
    > [!NOTE]
    > **Yorum Satırı Desteği:** Lexer katmanında tek satırlı (`// ...`) ve çok satırlı blok yorumlar (`/* ... */`) Logos tabanlı kurallarla dinamik olarak taranır ve derleme görevsına girmeden temiz bir şekilde yoksayılır (`logos::skip`).
 
-2. **Parser (Sözdizimi Analizi):** Token dizisini alıp bir "Abstract Syntax Tree" (Soyut Sözdizimi Ağacı - AST) oluşturur. Bu ağaç kodun mantıksal yapısını yansıtır.
+2. **Parser (Sözdizimi Analizi):** Token dizisini alıp bir "Abstract Syntax Tree" (Soyut Sözdizimi Ağacı, AST) oluşturur. Bu ağaç kodun mantıksal yapısını yansıtır.
 
    #### Operatör Önceliği ve Parantezlerin Çözümü (Operator Precedence)
    Düz ve recursive-descent parser tasarımlarında en sık yapılan hata aritmetik ifadelerin düz bir sırayla (soldan sağa) çözülmesidir. Örneğin `2 + 3 * 4` ifadesinin sonucu düz bir parser ile `20` çıkarken, matematiksel olarak `14` olması gerekir.

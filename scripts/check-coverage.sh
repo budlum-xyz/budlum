@@ -43,7 +43,7 @@ PYEOF
 }
 
 if [ "${1:-}" = "--self-test" ]; then
-  # Kanarya: düşük JSON FAIL, yüksek JSON PASS olmak zorunda - yoksa kapı vacuous.
+  # Kanarya: düşük JSON FAIL, yüksek JSON PASS olmak zorunda, yoksa kapı vacuous.
   tmp=$(mktemp -d)
   python3 - "$tmp" <<'PYEOF'
 import json, pathlib, sys

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-gates-are-wired.sh - every gate script must actually run somewhere.
+# check-gates-are-wired.sh, every gate script must actually run somewhere.
 #
 # A script in `scripts/` that no workflow invokes proves nothing about any
 # commit, but it still shows up when someone counts the gates. Four of them
@@ -26,7 +26,7 @@ fail() {
 # Scripts that are deliberately not invoked by a workflow.
 #
 # Empty on purpose. An entry here is a standing claim that a gate is worth
-# keeping without running, which is a hard claim to make honestly - if it is
+# keeping without running, which is a hard claim to make honestly, if it is
 # worth keeping, wire it up. Anything added here needs the reason in the same
 # commit.
 ALLOWED_UNWIRED=()

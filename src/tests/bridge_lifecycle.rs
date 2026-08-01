@@ -93,7 +93,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     // Use an arbitrary-but-valid commitment block hash: this mint
     // Will fail either at the forgery gate (no matching commitment
     // Exists for this exact block hash) or at the bridge-state level
-    // (the lock has been released). Both are acceptable - the test's
+    // (the lock has been released). Both are acceptable, the test's
     // Contract is "the released lock cannot be minted".
     let bad_mint = bc.mint_bridge_transfer_from_verified_event(
         1,
@@ -196,7 +196,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
 /// (security audit §9) bridge mint MUST reject calls that pass
 /// `expected_block_hash = None`. Without an explicit block-hash bound,
 /// A caller could pick ANY commitment matching (domain_id, height,
-/// Sequence) - including stale or finality-unconfirmed ones - and
+/// Sequence) - including stale or finality-unconfirmed ones, and
 /// Mint against it. The forgery gate forces the caller to bind the
 /// Mint to a specific block.
 #[test]

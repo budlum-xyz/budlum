@@ -7,7 +7,7 @@
 #   1) EPSS skoru. "Bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir
 #      Cevabı; ne RustSec'te ne OSV.dev'de var. Önceliklendirme farkı yaratır:
 #      Ilk koşuda yamux CVE-2026-32314 CVSS 8.7 ama EPSS %0.5 (36. persentil)
-#      Olarak raporlandı - yüksek şiddet, düşük sömürülme olasılığı. Bu ayrım
+#      Olarak raporlandı, yüksek şiddet, düşük sömürülme olasılığı. Bu ayrım
 #      Olmadan bütün "high" bulgular aynı aciliyette görünür.
 #
 #   2) SARIF çıktısı. Şu an Security sekmesine yalnız CodeQL, Semgrep ve zizmor

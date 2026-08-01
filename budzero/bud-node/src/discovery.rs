@@ -319,7 +319,7 @@ mod poisoned_lock_locks {
     ///
     /// `RwLock` poisons when a thread panics holding it, and every later
     /// `read()`/`write()` then returns `Err`. Unwrapping that turns one
-    /// unrelated panic into a permanently dead DHT cache - the node keeps
+    /// unrelated panic into a permanently dead DHT cache, the node keeps
     /// running but can never announce or resolve a CID again.
     ///
     /// The main crate settled this in `consensus/pow.rs` with

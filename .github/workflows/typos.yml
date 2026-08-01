@@ -1,7 +1,7 @@
-# Typos - yazım denetimi (budlum-ek-security-workflows.md ÖNCELİK 3, madde 9)
+# Typos, yazım denetimi (budlum-ek-security-workflows.md ÖNCELİK 3, madde 9)
 #
 # Neden kalite kapısı: yazım hatası kozmetik görünür ama bu repoda somut risk
-# Taşır - yanlış yazılmış bir identifier, config anahtarı veya RPC metot adı
+# Taşır, yanlış yazılmış bir identifier, config anahtarı veya RPC metot adı
 # Derlenir ama çalışmaz. `Toplogy`/`compromize` gibi bulgular ilk koşuda
 # Gerçekten yakalandı.
 #

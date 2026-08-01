@@ -590,7 +590,7 @@ impl AccountState {
 
     /// Bond `amount` from the account's spendable balance into the
     /// Prover role. Unlike the relayer role, prover registration is NOT a
-    /// Submission gate (proofs are self-verifying) - it only controls
+    /// Submission gate (proofs are self-verifying), it only controls
     /// Whether a successful proof earns its submitter a reward.
     pub fn bond_prover(
         &mut self,
@@ -1249,7 +1249,7 @@ impl AccountState {
         // The rest of the node (consensus, RPC) checks, so an account that
         // Was slashed at the account-state layer must also become inactive in
         // The registry - otherwise the same offence would be paid-for twice.
-        // Apply_slashing feeds double-sign evidence - label
+        // Apply_slashing feeds double-sign evidence, label
         // The registry mirror as DoubleSign, not LivenessFault (audit trail).
         let _ = self.registry.slash(
             *address,
@@ -1386,7 +1386,7 @@ impl AccountState {
             //     years_burned  0 -> 106155
             //     reserve balance    40000000000000 -> 0
             //
-            // The entire 40M $BUD burn reserve - a ten-year schedule - was
+            // The entire 40M $BUD burn reserve, a ten-year schedule, was
             // consumed at the first epoch close.
             //
             // `epoch_index` is the anchored, monotonic counter the schedule was

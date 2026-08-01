@@ -1,4 +1,4 @@
-# AI Inference Verification - What Is and Is Not Verified
+# AI Inference Verification: What Is and Is Not Verified
 
 Status document for the Lubot AI layer. It exists because the README and
 several module headers described on-chain inference verification as a working
@@ -25,8 +25,8 @@ the verifier". Three things were missing, and each was a different kind of
 gap.
 
 **The program hash came from two schemes.** `AiExecutionProof::program_hash`
-carried `program_hash_from_words` - SHA3-256 over a domain tag, the guest
-version and the words - while `ExecutionPublicInputs::program_hash` carried an
+carried `program_hash_from_words`: SHA3-256 over a domain tag, the guest
+version and the words, while `ExecutionPublicInputs::program_hash` carried an
 unlabelled Keccak-256 over the same words. `verify_execution_proof_stark`
 compares the two, so it could never succeed. Measured, with everything else
 already lining up:
@@ -42,7 +42,7 @@ SONUC: Err("execution proof program_hash != public_inputs.program_hash")
 both use, because the AIR fixes that end.
 
 **The verifier had no program.** A fixed-point MLP guest depends on the layer
-shape alone - weights are read from memory, not baked into immediates - so
+shape alone, weights are read from memory, not baked into immediates, so
 `AiModelSpec::execution_dims` is enough to rebuild the exact instruction words
 a proof was produced against. `guest_program_for_model` does that.
 `guest_program_for_model_ignores_weight_values` pins that weights never reach
@@ -85,7 +85,7 @@ Three things were wrong before and are fixed:
   five-instruction commitment stub; the matmul builder existed but only its
   program hash was ever taken. Nothing ran it in the VM, so nothing noticed
   the two items below.
-- **ReLU never fired.** The guest tested `Lt(acc, 0)`, and `Lt` is unsigned -
+- **ReLU never fired.** The guest tested `Lt(acc, 0)`, and `Lt` is unsigned,
   no `u64` is below zero. Negative activations passed through unclamped. The
   sign test is now `Gt(acc, (P-1)/2)`, the signed embedding for a prime field,
   and the threshold is materialised arithmetically because it does not fit in
@@ -111,7 +111,7 @@ Both are now handled. A memory row can be flagged `COL_MEM_IS_INIT`, which
 exempts it from the zero rule, and every flagged row is folded into
 `COL_MEM_INIT_ACC`. The AIR checks that accumulator against
 `public_inputs.initial_state_root` on the halt row, so the exemption costs the
-prover a commitment it cannot fake by flagging rows it did not seed -
+prover a commitment it cannot fake by flagging rows it did not seed,
 flagging changes the fold, and the fold has to equal a public input the
 verifier already holds.
 
@@ -121,20 +121,20 @@ It now carries that commitment.
 **What it covers.** Exactly the pre-written words the program reads. Bytes the
 host seeded and the guest never touched are outside it, deliberately: they
 cannot influence execution, so binding them would make the commitment depend on
-padding. Every value the program consumed is bound - change a weight the guest
+padding. Every value the program consumed is bound, change a weight the guest
 reads and the commitment moves.
 
 **The fold on its own is collidable, and the verifier does not rely on it.**
 `acc' = acc * BETA + addr * GAMMA + val` with fixed constants is a polynomial
 evaluated at a known point. Given an honest accumulator a prover can pick the
-first reads freely and solve the last one to land on the same value - one
+first reads freely and solve the last one to land on the same value, one
 modular multiplication, no search. `the_constant_fold_can_be_collided` performs
 that collision in code so the property is a measured fact rather than a worry.
 
 Making the fold collision-resistant would mean hashing inside the AIR, and the
 trace cannot afford one: the Poseidon gadget is per-row and already shares
 rows with the CPU, so a second instance for memory rows costs roughly 400 more
-columns. Moving the base to a Fiat-Shamir challenge does not work either - the
+columns. Moving the base to a Fiat-Shamir challenge does not work either, the
 accumulator lives in the main trace, which is committed before any challenge is
 sampled, and moving it to the aux trace leaves it with nothing to be compared
 against, because a challenge-dependent value cannot be a public input.
@@ -149,7 +149,7 @@ verifier decides what that claim has to be.
 ## What the STARK does not cover
 
 The initial memory image is witness data. The AIR binds the program, the gas
-counters, the exit code, the trace length and the event accumulator - it does
+counters, the exit code, the trace length and the event accumulator, it does
 not bind the memory a program starts from. A prover can therefore run the same
 program words over a different weight matrix and produce an equally valid
 proof.
@@ -166,7 +166,7 @@ absent or different. Both fields travel over the wire
 encoding would silently turn the check into a no-op on every relayed
 transaction.
 
-`matmul_program_hash` still binds the model *architecture* only - two models
+`matmul_program_hash` still binds the model *architecture* only, two models
 with the same shape share a program hash, which
 `program_hash_alone_does_not_separate_two_models_of_the_same_shape` records
 deliberately. That is exactly why the digest exists.
@@ -199,11 +199,11 @@ computation happened.
 These functions compile and are unit-tested, but nothing in a production path
 calls them. They are the scaffolding for the feature, not the feature:
 
-- `src/ai/execution/verify.rs::verify_execution_proof_stark` - only reached
+- `src/ai/execution/verify.rs::verify_execution_proof_stark`, only reached
   through `verify_execution_proof_full`
-- `src/ai/execution/verify.rs::verify_execution_proof_full` - no callers
-- `src/lubot/verify.rs::verify_inference_stark` - only its own tests
-- `src/lubot/verify.rs::generate_and_verify_proof` - only its own tests
+- `src/ai/execution/verify.rs::verify_execution_proof_full`, no callers
+- `src/lubot/verify.rs::verify_inference_stark`: only its own tests
+- `src/lubot/verify.rs::generate_and_verify_proof`: only its own tests
 
 `src/tests/ai_verification_status_locks.rs` pins this: if any of them gains a
 production caller, or if the executor stops failing closed, those tests break
@@ -212,7 +212,7 @@ and this document has to be updated with the change.
 ## The zkVM opcode
 
 `VerifyInference` (0x1F) is constrained in the AIR, but the constraint says the
-result is always zero (fail-closed) - the AIR binds the selector to the opcode
+result is always zero (fail-closed), the AIR binds the selector to the opcode
 and forces `rd_val_new = 0`. There is no STARK-verification circuit behind it
 yet. The opcode is additionally gated by `MainnetActivation`, which is off by
 default.

@@ -60,7 +60,7 @@ def main() -> int:
         print(f"{count:6d}  {code}")
 
     # One address per line, sorted, uncapped. The first version truncated at
-    # 40 per lint and hid over 2000 addresses - including, on the run that
+    # 40 per lint and hid over 2000 addresses, including, on the run that
     # mattered, every remaining warning this branch was accountable for.
     # Diffing two runs is the whole point, and a truncated list cannot be
     # diffed.

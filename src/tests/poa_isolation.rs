@@ -94,7 +94,7 @@ mod poa_isolation_tests {
 
     /// Senaryo 3: Cross-Domain Mesaj Leak - PoA KYC metadata cross-domain mesajda taşınmamalı.
     ///
-    /// CrossDomainMessage KYC commitment içermez - sadece payload_hash taşır.
+    /// CrossDomainMessage KYC commitment içermez, sadece payload_hash taşır.
     #[test]
     fn cross_domain_message_does_not_carry_kyc_metadata() {
         use crate::cross_domain::message::{

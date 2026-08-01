@@ -14,7 +14,7 @@
 mod tests {
     const NODE_RS: &str = include_str!("../network/node.rs");
 
-    /// Strip comments and string literals so a lock cannot be satisfied - or
+    /// Strip comments and string literals so a lock cannot be satisfied, or
     /// tripped - by prose that merely mentions the pattern.
     fn code_lines(body: &str) -> Vec<(usize, String)> {
         body.lines()
@@ -199,7 +199,7 @@ mod tests {
     ///   `opportunistic_graft_ticks`  =  60    1 min ->  10 min (mobile  30)
     ///
     /// Both are mesh repair. The first decides how long a dropped explicit
-    /// peer - a bootstrap node, a configured sentry - goes unnoticed before a
+    /// peer, a bootstrap node, a configured sentry, goes unnoticed before a
     /// reconnect is attempted; for a validator that is the link to the network
     /// it was pinned to on purpose. The second decides how long a node keeps a
     /// mesh of low-scoring peers before looking for better ones, which is the

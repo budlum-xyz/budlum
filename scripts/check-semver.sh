@@ -40,7 +40,7 @@ self_test() {
   # 3) Gate fonksiyonları tanımlı mı?
   grep -Fq "semver_checks_gate" "$repo_root/scripts/check-semver.sh" \
     || fail "self-test: gate function missing"
-  # 4) Sınıflandırma kanaryası: INFRA kilidi mevcut mu (crash≠kırılma - istisna
+  # 4) Sınıflandırma kanaryası: INFRA kilidi mevcut mu (crash≠kırılma, istisna
   #    Yalnız kırılma raporuna uygulanabilir; altyapı çökmesi maskelenemez).
   grep -Fq "SEMVER_INFRA_PATTERN" "$repo_root/scripts/check-semver.sh" \
     || fail "self-test: infra/crash classification missing"
@@ -95,7 +95,7 @@ semver_checks_gate() {
   # İstisnaların anlamı "(b-c) bilinen kırılmayı gerekçesiyle kabul"
   # Olduğundan maskelenmesi KABUL EDİLEMEZ şey altyapı crash'idir:
   # Crash = "kırılma olup olmadığı BİLİNEMEZ" (kanıt yok), sahte-yeşil olur.
-  # Bu yüzden INFRA sınıfında istisna listesi DEVRE DIŞI - kapı fail-closed.
+  # Bu yüzden INFRA sınıfında istisna listesi DEVRE DIŞI, kapı fail-closed.
   local SEMVER_INFRA_PATTERN='^error: running cargo-(doc|metadata)|error\[E[0-9]+\]|^error: could not (compile|document)|^error: failed to build rustdoc|failed to parse lock file|no matching package|^error: no such command'
   if grep -Eq "$SEMVER_INFRA_PATTERN" "$out"; then
     echo "SEMVER GATE: FAIL - araç ALTYAPI hatasıyla sonuçsuz kaldı (crash≠kırılma; istisna uygulanamaz)." >&2

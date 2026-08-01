@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default chunk size, per vision §8.2 (256 KiB). Kept as a constant - the
+/// Default chunk size, per vision §8.2 (256 KiB). Kept as a constant, the
 /// Per-domain `chunk_size` parameter can override it on registration.
 pub const DEFAULT_CHUNK_SIZE: u32 = 262_144;
 

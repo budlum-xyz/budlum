@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Forever, defeating the re-KYC discipline.
 pub const DEFAULT_KYC_HORIZON: u64 = 100_000;
 
-/// What an authorized admin decided about an applicant - the audit vocabulary.
+/// What an authorized admin decided about an applicant, the audit vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnboardingDecision {
     /// A candidate submitted a KYC commitment (actor = the candidate).

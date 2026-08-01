@@ -447,7 +447,7 @@ mod tests {
         assert!(block2.hash.starts_with("00"));
     }
 
-    /// (security audit §3) `validate_block` must be PURE - calling
+    /// (security audit §3) `validate_block` must be PURE, calling
     /// It twice on the same block must produce the same result AND
     /// Must not mutate the engine's `current_difficulty`. The
     /// Previous implementation mutated difficulty from inside

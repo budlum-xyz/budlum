@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-kani.sh - model-checking gate for bond arithmetic.
+# check-kani.sh, model-checking gate for bond arithmetic.
 #
 # A script with this name existed before and was deleted, for a good reason:
 # it printed a stub message, pointed at a `src/crypto/kani.rs` that was not in
@@ -17,9 +17,9 @@
 #
 #   1. `cargo kani` reports VERIFICATION:- SUCCESSFUL and no failures.
 #   2. The number of harnesses it actually ran matches the number declared in
-#      the source. A proof that silently stops being compiled - a stray
+#      the source. A proof that silently stops being compiled, a stray
 #      `cfg`, a renamed module, a harness filtered out by a `--harness` flag
-#      that no longer matches - would otherwise leave the gate green with
+#      that no longer matches, would otherwise leave the gate green with
 #      nothing behind it. This is the same failure the deleted script had.
 #
 # Usage:
@@ -87,7 +87,7 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 1
   fi
 
-  # 2. Empty output must fail - the case where Kani never ran.
+  # 2. Empty output must fail, the case where Kani never ran.
   : > "$tmp/empty.log"
   if ( gate "$tmp/empty.log" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: empty Kani output was accepted!" >&2

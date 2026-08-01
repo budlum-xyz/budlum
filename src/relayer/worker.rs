@@ -84,7 +84,7 @@ impl RelayerWorker {
     /// Is the one real implementation.
     ///
     /// So outbound relay is not "Ethereum-only" as the adapter set suggests;
-    /// It is off. That is the safe direction to be wrong in - the failure is a
+    /// It is off. That is the safe direction to be wrong in, the failure is a
     /// Refusal, not a forged result - but it means the outbound path has never
     /// Run against a live chain, and no test covers a populated registry
     /// Outside `chain_adapter.rs`'s stub.
@@ -93,7 +93,7 @@ impl RelayerWorker {
     /// `EvmChainAdapter::new` wants the bridge contract address and the
     /// `Deposit` topic0, and `RelayerConfig` has no field for either.
     /// `test_default()` supplies a zero address, which would let a node
-    /// Advertise Ethereum support while pointing at nothing - worse than
+    /// Advertise Ethereum support while pointing at nothing, worse than
     /// Refusing.
     #[must_use]
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
@@ -107,7 +107,7 @@ impl RelayerWorker {
     /// Without this the cursor starts at whatever `get_finalized_height()`
     /// returns at boot, and every relay request finalized while the worker was
     /// down is skipped. The user has already paid the fee and the request sits
-    /// on chain forever with nothing acting on it - a silent service failure,
+    /// on chain forever with nothing acting on it, a silent service failure,
     /// not a loud one.
     #[must_use]
     pub fn with_cursor_path(mut self, path: Option<std::path::PathBuf>) -> Self {
@@ -354,7 +354,7 @@ mod cursor_persistence {
     /// A cursor written by one run must be read by the next.
     ///
     /// Without this the worker resumes from the chain tip, and every relay
-    /// request finalized while it was down is skipped - the user has paid and
+    /// request finalized while it was down is skipped, the user has paid and
     /// nothing acts on the request.
     #[test]
     fn a_persisted_cursor_is_read_back() {

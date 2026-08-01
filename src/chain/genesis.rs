@@ -278,7 +278,7 @@ impl GenesisConfig {
     /// Refuse to run when this binary's PQ backend is not the one the chain
     /// was launched with.
     ///
-    /// Deliberately fail-closed. The alternative - starting anyway - produces a
+    /// Deliberately fail-closed. The alternative, starting anyway, produces a
     /// node that accepts blocks but rejects every validator registration from
     /// its peers, which looks like a peering problem rather than a build
     /// problem and costs an operator hours to diagnose.

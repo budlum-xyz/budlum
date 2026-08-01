@@ -165,7 +165,7 @@ fn d4_cross_role_slash_jails_all_four_domains() {
     assert!(matches!(validator.status, MemberStatus::Slashed));
 }
 
-/// LUBOT_OPERATOR (RoleId 8) is preserved across merge - its RoleId is
+/// LUBOT_OPERATOR (RoleId 8) is preserved across merge, its RoleId is
 /// Pinned and its registration path is intact.
 #[test]
 fn d4_lubot_operator_preserved() {

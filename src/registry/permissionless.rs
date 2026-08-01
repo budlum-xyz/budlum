@@ -653,7 +653,7 @@ impl PermissionlessRegistry {
             // this and moved on believing the report had been handled.
             //
             // Still `Ok(None)` - a failed slash must not abort block
-            // application, or one bad report would halt the chain - but it is
+            // application, or one bad report would halt the chain, but it is
             // no longer silent. An operator seeing this line knows evidence
             // was accepted and then dropped.
             Err(reason) => {
@@ -1121,7 +1121,7 @@ mod tests {
     /// use `let _ =`, so neither layer would have noticed.
     ///
     /// It still returns `Ok(None)` - a failed slash must not abort block
-    /// application, or one bad report would halt the chain - but the refusal
+    /// application, or one bad report would halt the chain, but the refusal
     /// is logged now. This test pins the two cases apart at the source level,
     /// since a `tracing::warn!` is not observable from a unit test.
     #[test]
@@ -1164,7 +1164,7 @@ mod tests {
 
     /// The slashing history is capped, and the cap is deterministic.
     ///
-    /// Consensus state - `root()` hashes every record - so a cap that depended
+    /// Consensus state - `root()` hashes every record, so a cap that depended
     /// on time, node age, or when a node joined would make two nodes that saw
     /// the same slashes compute different registry roots. Trimming from the
     /// front on insert depends only on the count.

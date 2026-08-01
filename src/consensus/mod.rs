@@ -244,7 +244,7 @@ mod tests {
         // One definition, two gates. `try_reorg` refuses a deep reorg at the
         // state machine and `is_better_chain` refuses it at fork choice; they
         // used to hold separate `= 100` literals with nothing connecting them,
-        // so raising one silently left the other enforcing the old depth - a
+        // so raising one silently left the other enforcing the old depth, a
         // chain accepted by one gate and refused by the other.
         assert_eq!(
             crate::chain::blockchain::MAX_REORG_DEPTH,

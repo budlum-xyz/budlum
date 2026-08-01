@@ -41,7 +41,7 @@ use sha3::{Digest, Keccak256};
 /// ```
 ///
 /// The proof bytes come from a bridge relayer, so that is a remote abort of
-/// the node process, not a local misuse. The depth is generous - twice the
+/// the node process, not a local misuse. The depth is generous, twice the
 /// longest honest descent - because the goal is to stop non-termination, not
 /// to second-guess a legitimate trie.
 pub const MAX_WALK_DEPTH: usize = 128;
@@ -66,7 +66,7 @@ pub enum MptError {
     PathMismatch,
     /// Trie descent exceeded [`MAX_WALK_DEPTH`].
     ///
-    /// Reached when a proof's nodes do not make progress - an empty-path
+    /// Reached when a proof's nodes do not make progress, an empty-path
     /// extension leaves the remaining nibbles unchanged, so a cycle among
     /// such nodes would otherwise recurse until the stack is exhausted.
     NestingTooDeep,
@@ -459,7 +459,7 @@ mod tests {
             .chain(std::iter::once(9))
             .chain(leaf_nibbles.iter().cloned())
             .collect();
-        // Key bytes (path'in her çift nibble'ı bir byte) - tam 64 nibble olması
+        // Key bytes (path'in her çift nibble'ı bir byte), tam 64 nibble olması
         // Şart değil çünkü verify keccak256(key)'i kullanır; burada doğrudan
         // Walk test etmek için verify yerine walk çağırıyoruz.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
@@ -567,7 +567,7 @@ mod tests {
             // Sonuç Err olmalı (MissingNode / InvalidNode / Rlp), panic değil.
             let _ = verify(proof, &root, b"key");
         }
-        // Root hash'leri proof'ta olmadığı için MissingNode beklenir - önemli
+        // Root hash'leri proof'ta olmadığı için MissingNode beklenir, önemli
         // Olan panic olmaması (DoS güvenliği).
     }
 }
@@ -626,7 +626,7 @@ mod depth_bound_locks {
     ///
     /// Comparing two constants would be folded away at compile time (clippy
     /// calls it a constant assertion, correctly), so this builds an actual
-    /// branch chain 64 levels deep - the maximum a keccak256 path allows -
+    /// branch chain 64 levels deep, the maximum a keccak256 path allows,
     /// and checks it resolves. Lowering `MAX_WALK_DEPTH` below the honest
     /// maximum would make this fail with `NestingTooDeep`.
     #[test]

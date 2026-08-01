@@ -4,7 +4,7 @@
 //! Bölüm 7 izolasyon kuralı). NFT / B.U.D. / Pollen state'i ile paylaşılmaz.
 //!
 //! Commitment + nullifier primitifleri:
-//! - commitment = Poseidon(amount || recipient || blinding) - zincire yalnızca
+//! - commitment = Poseidon(amount || recipient || blinding), zincire yalnızca
 //!   Bu hash yazılır; amount/recipient gizli.
 //! - nullifier = Poseidon(secret) - harcanan commitment'ı işaretleyen tek-
 //!   Kullanımlık değer; hangi commitment'ın harcandığını açıklamadan çifte-
@@ -90,7 +90,7 @@ impl NoteRegistry {
 
     /// Bir note'u nullifier ile harca: nullifier halihazırda harcanmışsa RED
     /// (çifte-harcama önleme). Commitment canlı set'ten çıkarılır, nullifier
-    /// Spent set'e eklenir. Harcanan commitment KAMUYA açıklanmaz - çağıran
+    /// Spent set'e eklenir. Harcanan commitment KAMUYA açıklanmaz, çağıran
     /// Sum-conservation constraint ile mülkiyeti kanıtlar.
     pub fn spend(&mut self, nullifier: Hash, commitment: Hash) -> Result<(), String> {
         if self.spent_nullifiers.contains(&nullifier) {

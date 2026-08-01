@@ -70,10 +70,10 @@ run'lar release/audit öncesi manuel veya ayrı yetkili CI job'ı ile çalışt�
 
 ## İlgili
 
-- `scripts/audit-deps.sh` - dependency audit raporu.
-- `scripts/generate-sbom.sh` - CycloneDX SBOM üretimi.
-- `target/audit/DEPENDENCY_AUDIT.md` - son dependency audit durumu.
-- `target/audit/SBOM.md` - SBOM üretim prosedürü.
+- `scripts/audit-deps.sh`: dependency audit raporu.
+- `scripts/generate-sbom.sh`: CycloneDX SBOM üretimi.
+- `target/audit/DEPENDENCY_AUDIT.md`: son dependency audit durumu.
+- `target/audit/SBOM.md`: SBOM üretim prosedürü.
 
 
 ## Fuzz targets

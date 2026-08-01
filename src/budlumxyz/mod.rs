@@ -307,7 +307,7 @@ mod tests {
     /// Harmless today for exactly one reason: nothing in production calls the
     /// Function. This test pins that reason. If a transaction type, an RPC
     /// Method or a chain command starts calling it, this fails and whoever
-    /// Wired it has to land the governance action - and invert the empty-set
+    /// Wired it has to land the governance action, and invert the empty-set
     /// Default - in the same change.
     #[test]
     fn governance_verification_stays_unreachable_while_it_fails_open() {

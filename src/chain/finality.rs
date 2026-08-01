@@ -117,7 +117,7 @@ impl Prevote {
     ///
     /// # Why there is no explicit `chain_id` here
     ///
-    /// The obvious cross-chain replay question - could a prevote signed on
+    /// The obvious cross-chain replay question, could a prevote signed on
     /// Testnet be replayed on mainnet? - is closed, but indirectly:
     /// `checkpoint_hash` is a block hash, and `Block::calculate_hash_bytes`
     /// Folds `chain_id` into the `BDLM_BLOCK_V3` preimage. Two networks cannot
@@ -226,7 +226,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     // Actually in the correct prime-order subgroup. Without this
     // Check an attacker can supply a small-subgroup point as the
     // Public key, which makes the pairing produce values in a
-    // Sub-group that pairs to identity for any message - bypassing
+    // Sub-group that pairs to identity for any message, bypassing
     // The BLS signature scheme entirely. The bls12_381 crate
     // Exposes `is_torsion_free` for exactly this check.
     let is_on_curve_pk: bool = pk_affine.is_torsion_free().into();
@@ -1320,7 +1320,7 @@ mod tests {
     ///
     /// The whole cross-chain replay defence therefore rests on one line in
     /// another module. Drop `chain_id` from the block preimage and every
-    /// checkpoint signature becomes portable between networks - with nothing
+    /// checkpoint signature becomes portable between networks, with nothing
     /// in `finality.rs` to notice, because the signing message never mentioned
     /// it.
     ///

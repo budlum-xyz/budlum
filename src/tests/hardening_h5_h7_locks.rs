@@ -1,4 +1,4 @@
-//! Hardening Protocol H5–H7 (+ H8 prep) regression locks.
+//! Hardening Protocol H5 to H7 (+ H8 prep) regression locks.
 //! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]

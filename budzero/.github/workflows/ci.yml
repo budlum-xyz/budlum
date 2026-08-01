@@ -52,11 +52,11 @@ jobs:
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      # Kapı 1: FORMAT - whitespace tutarlılığı
+      # Kapı 1: FORMAT, whitespace tutarlılığı
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      # Kapı 2: CLIPPY - lint ihlali YOK. -D warnings ile her uyarı hata
+      # Kapı 2: CLIPPY, lint ihlali YOK. -D warnings ile her uyarı hata
       # Sayılır. BudZero'da 9 bud-compiler + 36+1 bud-proof + 6+2
       # Bud-vm + 4 bud-state testi var; hepsi clippy-clean codebase
       # Üzerinde çalışıyor.

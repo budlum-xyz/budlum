@@ -47,7 +47,7 @@ jobs:
           # verdict.
           python3 ./scripts/clippy-extra-report.py /tmp/clippy-extra.json
           bash ./scripts/check-clippy-extra.sh /tmp/clippy-extra.json
-      - name: Feature matrix - pq-ml-dsa solo ()
+      - name: "Feature matrix: pq-ml-dsa solo"
         run: |
           set -euo pipefail
           cargo check --no-default-features --features pq-ml-dsa
@@ -55,7 +55,7 @@ jobs:
           # `check` and `clippy` prove it compiles. They do not run a single
           # signature. `pq-ml-dsa` is a consensus choice - `PQ_SCHEME_ID` is
           # written into genesis and `validate_pq_scheme` refuses to start on a
-          # mismatch - so an operator can select it for mainnet, and until now
+          # mismatch, so an operator can select it for mainnet, and until now
           # no test had ever generated a key or verified a signature under it.
           # The crypto module's own tests are the minimum bar for a signature
           # scheme that gates validator registration.
@@ -74,7 +74,7 @@ jobs:
               || { echo "HATA: $t pq-ml-dsa altinda kosmadi/gecmedi"; exit 1; }
           done
           grep -E 'test result:' /tmp/mldsa-tests.log
-      - name: Feature canary - --all-features REDDEDILMELI ()
+      - name: Feature canary - --all-features REDDEDILMELI
         run: |
           set -euo pipefail
           if cargo check --all-features 2>/dev/null; then
@@ -133,7 +133,7 @@ jobs:
     # 9 modül-bağımsızlık invariant'ı isimlendirilmiş ZORUNLU
     # Job. İsim kanaryası: bir invariant silinir/yeniden adlandırılırsa kapı
     # `cargo test` yeşil kalsa bile FAIL olur (vacuous-gate koruması, kanaryalı).
-    name: B.U.D. E2E Invariants (9/9 isim-kilitli) ()
+    name: B.U.D. E2E Invariants (9/9 isim-kilitli)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,7 +156,7 @@ jobs:
   economy-invariants:
     # : EIP-1559 + reward-pool + committed-supply denominator locks.
     # Name canary prevents a vacuous green if tests are renamed/deleted.
-    name: Economy Invariants ()
+    name: Economy Invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -180,7 +180,7 @@ jobs:
   fork-choice-gate:
     # : per-domain fork-choice/lifecycle named tests.
     # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
-    name: Fork-Choice Invariants ()
+    name: Fork-Choice Invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -203,7 +203,7 @@ jobs:
 
   storage-provider-gate:
     # : StorageProvider trait + mock implementation named tests.
-    name: StorageProvider Gate ()
+    name: StorageProvider Gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,7 +234,7 @@ jobs:
   node-classification-gate:
     # : full/archive node classification + pruning policy named tests.
     # Name canary prevents a vacuous green if classification tests are renamed/deleted.
-    name: Node Classification ()
+    name: Node Classification
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -258,7 +258,7 @@ jobs:
   network-hardening-gate:
     # : network hardening named tests.
     # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
-    name: Network Hardening ()
+    name: Network Hardening
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -299,7 +299,7 @@ jobs:
 
   poa-compliance-gate:
     # : MASAK/AML hooks are isolated to PoA domains only.
-    name: PoA Compliance Isolation ()
+    name: PoA Compliance Isolation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -322,7 +322,7 @@ jobs:
 
   governance-invariants:
     # : minimal on-chain governance parameter whitelist + activation timelock.
-    name: Governance Invariants ()
+    name: Governance Invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -345,7 +345,7 @@ jobs:
 
   wallet-core-gate:
     # : wallet-core multisig/social recovery primitives.
-    name: Wallet Core ()
+    name: Wallet Core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -372,7 +372,7 @@ jobs:
   bns-gate:
     #  Bolum 4 modul-ayrimi: BNS'in kendi CI gate'i (B.U.D. kapi deseni).
     # Isim kanaryasi: bir test silinir/yeniden adlandirilirsa kapi FAIL olur.
-    name: BNS Name Registry (8/8 isim-kilitli) ()
+    name: BNS Name Registry (8/8 isim-kilitli)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -424,7 +424,7 @@ jobs:
 
   dependency-audit:
     # : cargo audit + SBOM üretimi + SBOM artifact.
-    name: Dependency Audit + SBOM ()
+    name: Dependency Audit + SBOM
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -449,7 +449,7 @@ jobs:
 
   cargo-deny:
     # : root ve budzero grafikleri ayrı matrix adımlarında denetlenir.
-    name: Cargo Deny (${{ matrix.name }}) ()
+    name: Cargo Deny (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
@@ -537,7 +537,7 @@ jobs:
     #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
     # Uzun koşular fuzz-nightly.yml (schedule, 4h/target, corpus cache) işler.
     # Quick: 60s/target (10 target × 60s ≈ 10dk + build; timeout-minutes 60).
-    name: Fuzz Quick (60s × 9 target) ()
+    name: Fuzz Quick (60s × 9 target)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -595,9 +595,9 @@ jobs:
     # Lisanssız çalıştırır. Sürüm + sha256 pinlidir. Resmi action'a geçiş,
     # Lisans anahtarı temin edildiğinde değerlendirilebilir (güvenlik çıktısı
     # Birebir aynıdır).
-    name: Secret Scan (gitleaks, tam geçmiş) ()
+    name: Secret Scan (gitleaks, tam geçmiş)
     runs-on: ubuntu-latest
-    # Security-events: write - gitleaks bulgularinin Security sekmesine SARIF
+    # Security-events: write, gitleaks bulgularinin Security sekmesine SARIF
     # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
     # Yukseltme yalniz bu job'a verilir.
     permissions:
@@ -658,7 +658,7 @@ jobs:
   timing-safe:
     # : RPC/crypto'da ham-eşitlik statik taraması + dudect-tarzı
     # Istatistiksel zamanlama regresyon testi (cargo bench).
-    name: Timing-Safe Regression ()
+    name: Timing-Safe Regression
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -683,11 +683,11 @@ jobs:
     # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
     # Hadolint binary surum+sha256 pinli (gitleaks deseni). DL3008 (apt surum
     # Pinleme) warning seviyesinde birakilir: bookworm apt churn'une karsi
-    # Bilincli kalibrasyon - failure-threshold: error ile yalniz error+ FAIL.
-    name: Docker Security (trivy + hadolint) ()
+    # Bilincli kalibrasyon, failure-threshold: error ile yalniz error+ FAIL.
+    name: Docker Security (trivy + hadolint)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Security-events: write - Trivy bulgularinin Security sekmesine SARIF
+    # Security-events: write, Trivy bulgularinin Security sekmesine SARIF
     # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
     # Yukseltme yalniz bu job'a verilir.
     permissions:
@@ -743,7 +743,7 @@ jobs:
     # : nextest + llvm-cov, ratchet kapisi (Q-7b1(a)).
     # Basline kaniti 2026-07-17: lines 64.15% (14493/22594), 531/531 PASS.
     # Araclar surum+sha256 pinli (nextest resmi .sha256 asset ile birebir dogrulanmis).
-    name: Coverage (nextest + llvm-cov, ratchet) ()
+    name: Coverage (nextest + llvm-cov, ratchet)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -835,6 +835,14 @@ jobs:
         run: |
           bash ./scripts/check-gates-are-wired.sh --self-test
           bash ./scripts/check-gates-are-wired.sh
+      # A typographic dash in a workflow `name:` silently unlists the job from
+      # branch protection: it runs, it passes, and it stops counting. Three
+      # required checks were carrying one. A hand count already missed them
+      # once, so the count is now a gate.
+      - name: tipografik tire kapisi + kanarya
+        run: |
+          bash ./scripts/check-no-unicode-dashes.sh --self-test
+          bash ./scripts/check-no-unicode-dashes.sh
       # A gate that names its required tests by hand is only as good as those
       # names. Merging the hardening branches moved a `#[test]` attribute onto
       # the wrong function and silently un-tested
@@ -907,7 +915,7 @@ jobs:
           set -o pipefail
           buf build
           buf lint
-      - name: buf breaking - baseline varsa aktif ()
+      - name: "buf breaking: baseline varsa aktif"
         run: |
           set -euo pipefail
           # Main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;

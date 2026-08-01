@@ -1205,7 +1205,7 @@ async fn main() {
     // Olarak motor katmanında kalır: PoS'ta `preview_common` (aktif-validator
     // + VRF liderlik - bunun için daemon'un PoSEngine'e enjekte edilmiş
     // Validator_keys'e ihtiyacı vardır; adres-only 0x02 ile PoS üretimi
-    // YAPAMAZ, bakınız STATUS_ONLINE backlog) - PoW'da `mine` (difficulty
+    // YAPAMAZ, bakınız STATUS_ONLINE backlog), PoW'da `mine` (difficulty
     // CLI bayrağından; smoke difficulty=0). Yayın gossipsub "blocks"
     // Kanalından; eşler aynı deterministik commit yolunu koşar.
     if consensus_type == ConsensusType::PoS || consensus_type == ConsensusType::PoW {

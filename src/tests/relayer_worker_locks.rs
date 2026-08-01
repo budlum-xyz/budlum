@@ -465,7 +465,7 @@ async fn an_internally_consistent_adapter_observation_is_accepted() {
 #[tokio::test]
 async fn the_placeholder_transaction_hash_is_no_longer_reachable() {
     // `0xEE` repeated 32 times was the fabricated hash. It is still returned
-    // by the offline `submit_transaction` stubs, which is fine - those are
+    // by the offline `submit_transaction` stubs, which is fine, those are
     // inputs, not results. What must not happen is that hash reaching a
     // signed `RelayerResult` without a verified receipt behind it.
     let placeholder = format!("0x{}", hex::encode([0xEEu8; 32]));
@@ -491,7 +491,7 @@ async fn the_placeholder_transaction_hash_is_no_longer_reachable() {
 ///
 /// A real Ethereum receipts root does not commit to Budlum's
 /// `BDLM_RELAYER_RESULT_V2` leaf, so an honest adapter observation is rejected
-/// by the executor. That is the correct direction to fail - but it means the
+/// by the executor. That is the correct direction to fail, but it means the
 /// bridge acceptance path is not merely unfinished, it is unsatisfiable as
 /// specified. This test pins that so the gap is closed by designing the
 /// anchor, not by loosening the executor until adapter output slips through.
@@ -559,7 +559,7 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
 #[test]
 fn the_worker_source_contains_no_fabricated_success_literal() {
     let src = include_str!("../relayer/worker.rs");
-    // Comments are allowed to name the thing they forbid - that is how the
+    // Comments are allowed to name the thing they forbid, that is how the
     // next reader learns why the branch is missing. Only executable lines are
     // measured.
     let code: Vec<&str> = src
@@ -673,7 +673,7 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
 /// relay is not "Ethereum-only" as the `ExternalChain` list suggests: it is
 /// off, for all eight variants.
 ///
-/// That is the safe direction to fail - a refusal, not a forged result - but
+/// That is the safe direction to fail, a refusal, not a forged result, but
 /// it is worth pinning, because the difference between "off" and "Ethereum
 /// works" is invisible from the type signatures.
 ///

@@ -9,7 +9,7 @@
 //! Fiziksel chunk silme (NodeCommand::StoragePrune worker) ayrı doğrulama
 //! Konusudur (bkz. STATUS_ONLINE bulgusu R1: sender wiring eksik).
 //!
-//! NOT (CI kanıtlı): mempool tx doğrulaması imza ister - tx'ler gerçek
+//! NOT (CI kanıtlı): mempool tx doğrulaması imza ister, tx'ler gerçek
 //! KeyPair ile imzalanır, nonce zincirden okunur, nft_id registry'den okunur.
 
 use crate::chain::blockchain::Blockchain;

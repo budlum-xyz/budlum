@@ -1,4 +1,4 @@
-name: Docker Smoke ()
+name: Docker Smoke
 
 on:
   push:
@@ -24,7 +24,7 @@ permissions:
 jobs:
   docker-smoke:
     runs-on: ubuntu-latest
-    # Security-events: write - Trivy IMAGE bulgularinin Security sekmesine
+    # Security-events: write, Trivy IMAGE bulgularinin Security sekmesine
     # SARIF olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`.
     permissions:
       contents: read

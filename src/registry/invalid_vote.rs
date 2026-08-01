@@ -64,7 +64,7 @@ impl InvalidVoteTracker {
     }
 
     /// Record one rejected (cryptographically-invalid) vote from `validator` in
-    /// `epoch`. Returns `Some(report)` exactly once - on the vote that crosses
+    /// `epoch`. Returns `Some(report)` exactly once, on the vote that crosses
     /// [`RegistryParams::max_invalid_votes_per_epoch`] for this validator this
     /// Epoch. A threshold of 0 disables spam slashing entirely.
     pub fn record_invalid_vote(

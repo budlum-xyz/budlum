@@ -1522,7 +1522,7 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
-    /// Public inputs built by the shared helper must verify - this is the path
+    /// Public inputs built by the shared helper must verify, this is the path
     /// every caller outside this crate takes.
     ///
     /// The in-crate `prove_and_verify` helper hard-codes
@@ -2194,7 +2194,7 @@ mod tests {
     /// (security audit) partial-fix test for the
     /// Selector binding. Take a valid Add+Halt program, mutate the
     /// Trace so the *last* real row's `is_verify_merkle` column is
-    /// Zeroed out while `COL_OPCODE` is left at 0x00 (Halt) - that
+    /// Zeroed out while `COL_OPCODE` is left at 0x00 (Halt), that
     /// Row is still a Halt so the constraint
     /// `is_verify_merkle * (opcode - 0x1E) = 0` is vacuously true.
     ///
@@ -2371,7 +2371,7 @@ mod tests {
 
         // Flip the round-0 direction bit and recompute the Poseidon chain
         // from it, so the trace stays internally consistent everywhere the
-        // old AIR looked. `merkle_key` is deliberately left alone - that is
+        // old AIR looked. `merkle_key` is deliberately left alone, that is
         // the disagreement this test is about.
         let row1 = TRACE_WIDTH;
         let bit_before = matrix.values[row1 + COL_VM_MERKLE_BIT].as_canonical_u64();
@@ -2382,7 +2382,7 @@ mod tests {
         // Round 0's S-box witnesses have to be rebuilt too: flipping the bit
         // swaps which of (current, sibling) is s0. Leaving them stale would
         // trip the Poseidon identity instead, and the test would pass for a
-        // reason that has nothing to do with the direction bit - which is
+        // reason that has nothing to do with the direction bit, which is
         // exactly what a first attempt at this test did.
         let (f0, f1) = if bit_before == 0 {
             (sib0, cur0)
@@ -2430,7 +2430,7 @@ mod tests {
 
         // Proving a trace that violates a constraint panics inside Plonky3, so
         // the attempt is caught. Whichever way it comes out, the tampered
-        // trace must not end up as a verifying proof - and the two outcomes
+        // trace must not end up as a verifying proof, and the two outcomes
         // are kept distinguishable rather than both being treated as success,
         // because "the prover panicked" would otherwise mask a missing
         // constraint just as well as a working one.
@@ -2850,7 +2850,7 @@ mod tests {
     }
 
     /// Q15 depth_1_test - 1 meaningful sibling, but VM always does 64 rounds (66 rows total)
-    /// This isolates whether InvalidProof is due to row count (64 vs small) - we still do 64 rounds,
+    /// This isolates whether InvalidProof is due to row count (64 vs small), we still do 64 rounds,
     /// But 63 siblings are zero, so Poseidon chain is simple.
     #[test]
     fn proves_verify_merkle_valid_1_depth() {

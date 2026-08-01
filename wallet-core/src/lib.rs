@@ -64,7 +64,7 @@ pub enum WalletError {
     InvalidRecoveryPolicy(String),
     /// Geçersiz social recovery proposal.
     InvalidRecoveryProposal(String),
-    /// Production entropy (CSPRNG) kullanılamıyor - fail-closed.
+    /// Production entropy (CSPRNG) kullanılamıyor, fail-closed.
     ProductionEntropyUnavailable(String),
     /// Note privacy / private transfer builder hatası.
     InvalidPrivateTransfer(String),
@@ -474,7 +474,7 @@ impl WalletPrivacyConfig {
         }
     }
 
-    /// Yalnızca ağ-seviyesi note privacy (TEE kapalı) - daha hafif seçenek.
+    /// Yalnızca ağ-seviyesi note privacy (TEE kapalı), daha hafif seçenek.
     #[must_use]
     pub fn note_privacy_only(enable: bool) -> Self {
         Self {
@@ -1284,7 +1284,7 @@ mod tests {
     }
 
     /// Permissionless relayer kuralı mührü: wallet-core'da relayer kayıt/stake/
-    /// Whitelist kodu YOK. Bu test grep kanıtı olarak çalışır - eğer biri
+    /// Whitelist kodu YOK. Bu test grep kanıtı olarak çalışır, eğer biri
     /// Relayer kodu eklerse bu test kırılır (bilinçli koruma).
     #[test]
     fn no_relayer_registration_code_in_wallet_core() {

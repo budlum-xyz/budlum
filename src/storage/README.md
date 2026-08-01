@@ -1,4 +1,4 @@
-# B.U.D. - Broad Universal Database (modül README'si)
+# B.U.D.: Broad Universal Database (modül README'si)
 
 **Modül-ayrımı kuralı gereği B.U.D.'un kendi README'sidir.**
 Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşar.
@@ -18,14 +18,14 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 
 ## Olgunluk uyarıları (kök dashboard'a taşınmadan burada kalır)
 
-1. **Sahte-yeşil riski:** `RetrievalChallenge` gerçek Proof-of-Storage değildir -
+1. **Sahte-yeşil riski:** `RetrievalChallenge` gerçek Proof-of-Storage değildir,
    yanıt yalnız `range_hash` kabul eder (bkz. `api.rs` notu); operatör tam veri yerine
    yalnız istenen byte-range'i saklayarak gate'i geçebilir. `bud_storageGetOutcome`
    bu nedenle her yanıtta `proofKind` / `proof_kind = "interim_availability_only"` döndürür. Tam
    kanıt BudZKVM `VerifyMerkle` 64-derinlik Production-gate'ine bağlıdır (kapalı).
 2. **İzin/consent katmanı yok:** manifest ve deal bilgisi tamamen açıktır;
    `AccessGrant` kavramı izin katmanında tasarlanacaktır
-   (hard-enforcement hedefli - egemenlik kuralı soft enforcement'ı eler).
+   (hard-enforcement hedefli, egemenlik kuralı soft enforcement'ı eler).
 3. **`ContentManifest` owner taşır, ama zorunlu değil.** F01 ile `owner` alanı
    eklendi ve `manifest_id` hesabı owner'ı kapsıyor (alanlar:
    `manifest_id/owner/total_size/shard_count/shards`). Ancak `from_shards()`
@@ -73,4 +73,4 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
 - Zorunlu entegrasyon: `AiInferenceRequest.input_ref` bir
   `DataAsset`'e işaret ediyorsa AiVerifier grant kontrolü OLMADAN hesaplayamaz.
 - Tam-PoS (Merkle-64) gate'i kapanmadan "veri bütünlüğü kanıtlandı" iddiası
-  kurulamaz - sahte-yeşil uyarısı o güne kadar bu README'de kalır.
+  kurulamaz, sahte-yeşil uyarısı o güne kadar bu README'de kalır.

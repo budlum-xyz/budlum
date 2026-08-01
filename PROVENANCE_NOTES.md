@@ -1,8 +1,8 @@
 # Provenance notes
 
 A map for reviewers, not a clearance. This file records, per module, what a
-non-trivial implementation appears to be based on - a paper, a specification,
-or an existing crate - and marks the cases where the origin could not be
+non-trivial implementation appears to be based on, a paper, a specification,
+or an existing crate, and marks the cases where the origin could not be
 established.
 
 **What this file is not.** It is not a similarity scan and it makes no claim
@@ -17,9 +17,9 @@ by line. Findings that rest on a measurement quote the measurement.
 
 ---
 
-## Requires attribution - action needed
+## Requires attribution: action needed
 
-### `budzero/bud-proof/src/bud_stark/` - derived from Plonky3 `p3-uni-stark`
+### `budzero/bud-proof/src/bud_stark/`: derived from Plonky3 `p3-uni-stark`
 
 Not merely "follows the approach of". Compared against `p3-uni-stark 0.6.2`
 (fetched 2026-07-27):
@@ -39,9 +39,9 @@ The file layout is identical and several doc comments match verbatim
 degree calculations."). This is a fork with local modifications, not an
 independent implementation.
 
-- **Upstream licence:** `MIT OR Apache-2.0` - compatible with Budlum's
+- **Upstream licence:** `MIT OR Apache-2.0`, compatible with Budlum's
   Apache-2.0 distribution, so there is no licence conflict.
-- **Gap:** there is currently **no attribution anywhere in the tree** - no
+- **Gap:** there is currently **no attribution anywhere in the tree**, no
   header, no `NOTICE`, no mention in the crate docs. Apache-2.0 §4 requires
   retaining attribution notices for derivative works. This should be fixed
   before mainnet; it is a paperwork gap, not a legal blocker, but it is the
@@ -59,7 +59,7 @@ conformance rather than novelty.
 
 | module | specification |
 |---|---|
-| `src/cross_domain/evm/rlp.rs` | Ethereum Yellow Paper, Appendix B (RLP). Stated in the module docs. In-tree by decision - no `alloy`/`ethers`. |
+| `src/cross_domain/evm/rlp.rs` | Ethereum Yellow Paper, Appendix B (RLP). Stated in the module docs. In-tree by decision, no `alloy`/`ethers`. |
 | `src/cross_domain/evm/mpt.rs` | Ethereum Yellow Paper, Appendix D (Merkle-Patricia Trie). Verify-only; proof construction lives in the relayer. |
 | `src/cross_domain/evm/sync_committee.rs` | Ethereum consensus specs, Altair sync-committee light client (512 validators, ~27h period, BLS12-381 aggregate). |
 | `src/cross_domain/evm/receipt.rs` | Ethereum receipt RLP schema + `receiptsRoot` proof. |
@@ -71,16 +71,16 @@ conformance rather than novelty.
 Not implemented in-tree. Budlum calls the crate; the algorithm's provenance is
 the crate's.
 
-- Ed25519 - `ed25519-dalek`
-- BLS12-381 signatures and pairings - `bls12_381`, `blst`
-- Post-quantum signatures - `pqcrypto-dilithium` (Dilithium), `ml-dsa` (ML-DSA / FIPS 204)
-- SHA-2 / SHA-3 / Keccak / BLAKE2 - `sha2`, `sha3`, `blake2`
-- AES-GCM, ChaCha20-Poly1305 - `aes-gcm`, `chacha20poly1305`
-- sr25519 / VRF - `schnorrkel`
-- PKCS#11 HSM - `cryptoki`
-- Poseidon / Poseidon2 permutations - `p3-poseidon1`, `p3-poseidon2` (constants come from Plonky3, locked by a test)
+- Ed25519: `ed25519-dalek`
+- BLS12-381 signatures and pairings, `bls12_381`, `blst`
+- Post-quantum signatures, `pqcrypto-dilithium` (Dilithium), `ml-dsa` (ML-DSA / FIPS 204)
+- SHA-2 / SHA-3 / Keccak / BLAKE2: `sha2`, `sha3`, `blake2`
+- AES-GCM, ChaCha20-Poly1305, `aes-gcm`, `chacha20poly1305`
+- sr25519 / VRF: `schnorrkel`
+- PKCS#11 HSM, `cryptoki`
+- Poseidon / Poseidon2 permutations: `p3-poseidon1`, `p3-poseidon2` (constants come from Plonky3, locked by a test)
 
-## Origin unclear or original - flagged for the audit
+## Origin unclear or original: flagged for the audit
 
 Marked because they could not be traced to a known source, **not** because they
 are believed to be original. These are where an external reviewer should look
@@ -101,7 +101,7 @@ hardest: they are consensus-critical and have no upstream to compare against.
 ## Not reviewed here
 
 `src/ai/`, `src/pollen/`, `src/socialfi/`, `src/storage/`, `src/hub/`,
-`src/bns/` - application-layer modules. They were skipped because this pass was
+`src/bns/`: application-layer modules. They were skipped because this pass was
 scoped to cryptography, proving and consensus, which is where a provenance
 problem would be both hardest to spot and most damaging. They are not implied
 to be clean.
@@ -118,7 +118,7 @@ to be clean.
 3. **Conformance tests over novelty review** for the spec-based modules: RLP
    and MPT against Ethereum test vectors, BIP-39/32 against the BIP vectors.
 4. **The "origin unclear" table is the audit's starting point**, particularly
-   the consensus modules - no upstream exists to diff them against, so
+   the consensus modules, no upstream exists to diff them against, so
    correctness has to be argued from the code and its tests.
 
 Generated 2026-07-27 against commit `f92774b`.

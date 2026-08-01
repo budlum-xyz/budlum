@@ -609,7 +609,7 @@ impl Storage {
     /// `Blockchain::validator_snapshots` keeps the last 100 epochs in memory
     /// And was never written anywhere. After a restart every historical epoch
     /// Falls through `validator_snapshot_for_epoch` and
-    /// `require_validator_snapshot` refuses the whole check - a node that
+    /// `require_validator_snapshot` refuses the whole check, a node that
     /// Restarts can no longer verify any past-epoch certificate or fault
     /// Proof until it has observed 100 fresh epochs.
     ///

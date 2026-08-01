@@ -53,7 +53,7 @@ impl ContentId {
     /// Only a byte-range hash, not a proof-of-storage. The full chunk can
     /// Be discarded and a fresh chunk holding only the requested range
     /// Can still answer the challenge. This is the documented
-    /// "interim retrieval challenge" limitation - see
+    /// "interim retrieval challenge" limitation, see
     /// `crate::domain::storage_deal::RetrievalChallenge` for the long
     /// Warning comment and the README cross-link.
     pub fn of_subrange(chunk: &[u8], start: u64, end: u64) -> Self {

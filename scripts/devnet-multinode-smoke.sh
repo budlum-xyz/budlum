@@ -8,7 +8,7 @@
 #   [3] bud_blockNumber iki ölçümde artıyor → 4 node'luk konsensus liveness
 #   [4] /metrics (127.0.0.1:9090) HTTP 2xx + boş olmayan gövde
 #   [5] operator RPC 127.0.0.1:8546 hosttan erişilemez (yayınlanmaz + node yalnız
-#       127.0.0.1'e bağlar) - sızırsa FAIL.
+#       127.0.0.1'e bağlar), sızırsa FAIL.
 set -u   # -e yerine manuel fail: hata anında teardown/log adımı çalışabilsin
 
 RPC=http://127.0.0.1:8545
@@ -43,8 +43,8 @@ echo "== [2/5] peer mesh: node1 bud_netPeerCount >= 0x3 (maks 120 sn) =="
 # Yalnızca SwarmEvent::ConnectionEstablished ile artar, yani gerçekten kurulmuş
 # Bir P2P bağlantısını ölçer. Eski "log_nodes" fallback'i ('Connected to' vb.
 # Desenlerini node2..4 loglarında aramak) kapıyı zayıflatıyordu: node'lar birbiri
-# Yerine yalnız node1'e bağlansa bile - hatta hiç bağlanmasa da bazı desenler
-# Eşleşerek - mesh kurulmuş gibi görünebiliyordu. Tek ölçüt bırakıldı.
+# Yerine yalnız node1'e bağlansa bile, hatta hiç bağlanmasa da bazı desenler
+# Eşleşerek, mesh kurulmuş gibi görünebiliyordu. Tek ölçüt bırakıldı.
 ok=0; hex=0x0; count=0
 for _ in $(seq 1 60); do
   hex=$(rpc bud_netPeerCount \

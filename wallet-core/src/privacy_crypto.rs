@@ -7,7 +7,7 @@
 //! Wallet-core intentionally does **not** depend on bud-vm (mobile/WASM
 //! Footprint); this is a deliberate duplicated primitive with lock tests.
 
-/// Domain separator for nullifier derivation - ASCII "NULLIFER".
+/// Domain separator for nullifier derivation, ASCII "NULLIFER".
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552;
 
 const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
