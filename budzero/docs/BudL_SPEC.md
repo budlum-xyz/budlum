@@ -109,15 +109,18 @@ contract Token {
         nonce: u64,
     }
 
+    // `owner` bir `Address`; bir Address degeri BUGUN yalnizca parametre
+    // olarak gelebilir. `msg::sender()` `u64` doner (bkz. bolum 6), ve
+    // struct alan tipleri denetlendigi icin onu dogrudan `owner`'a vermek
+    // derleme hatasidir. Sinir burasi ve ornek onu gizlemiyor.
     fn record(owner: Address, amount: u64) -> u64 {
         let entry = UserData { owner: owner, amount: amount, nonce: 0 };
         return entry.amount;
     }
 
     pub fn main() {
-        let who = msg::sender();
-        let recorded = record(who, 100);
-        emit Recorded(recorded);
+        let word = msg::sender();
+        emit Recorded(word);
     }
 }
 ```
@@ -277,10 +280,9 @@ contract SimpleToken {
     }
 
     pub fn main() {
-        let who = msg::sender();
         let height = block::number();
-        let minted = mint(who, 50);
-        emit Mint(minted);
+        let nonce = msg::nonce();
+        emit Mint(height);
     }
 }
 ```
