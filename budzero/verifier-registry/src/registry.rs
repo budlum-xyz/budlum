@@ -13,7 +13,7 @@
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingReport};
-use crate::params::{RegistryParams, FIXED_POINT_SCALE};
+use crate::params::{slash_penalty, RegistryParams};
 use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -431,8 +431,7 @@ impl VerifierRegistry {
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
 
-        let penalty =
-            ((reg.stake as u128 * slash_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64;
+        let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
         reg.status = MemberStatus::Slashed;
         let remaining_stake = reg.stake;
@@ -464,8 +463,7 @@ impl VerifierRegistry {
                 if matches!(reg.status, MemberStatus::Slashed) {
                     continue;
                 }
-                let penalty = ((reg.stake as u128 * slash_ratio_fixed as u128)
-                    / FIXED_POINT_SCALE as u128) as u64;
+                let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
                 reg.stake = reg.stake.saturating_sub(penalty);
                 reg.status = MemberStatus::Slashed;
             }
@@ -626,6 +624,7 @@ impl VerifierRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::FIXED_POINT_SCALE;
     use crate::role::roles;
 
     fn addr(b: u8) -> Address {

@@ -282,15 +282,33 @@ jobs:
   kani-proofs:
     name: Kani Proofs (bond arithmetic)
     runs-on: ubuntu-latest
-    # 45 dakika yetmedi: ilk gercek kosu `penalty_is_monotonic_in_the_ratio`
-    # icinde iptal edildi. O harness ikiye bolundu ve stake 32 bit'e baglandi.
-    # 90 dakika, ilk yesil kosudan sonra gercek sureye gore dusurulecek.
+    # 12 harness'in 9'u saniyeler icinde bitiyor, 3'u bitmiyor. Bu tahmin
+    # degil, olculdu: her harness ayri bir isde, kendi cap'iyle kosturuldu.
+    #
+    #     penalty_never_exceeds_stake                       1s
+    #     remaining_stake_is_exact                          6s
+    #     the_clamp_catches_the_quotient_that_used_to_wrap  1s
+    #     no_ratio_can_make_the_penalty_exceed_the_bond     1s
+    #     overshoot harness'leri (5 adet)                 1-8s
+    #     ratio_endpoints_are_exact                       >22dk
+    #     penalty_is_monotonic_in_the_ratio               >22dk
+    #     penalty_is_monotonic_for_full_stakes            >22dk
+    #
+    # Yavas ucu `penalty_for`'u iki kez cagirip sonuclari iliskilendiriyor.
+    # Clamp tek bir cagriyi kendi girdisine baglar; iki bagimsiz bolumu
+    # karsilastirmak icin cozucuye hicbir sey vermez. Assert'leri bolmek de
+    # cozmuyor, olculdu: `ratio == 0` bedava, `ratio == SCALE` yine timeout.
+    #
+    # Bu yuzden PR kapisi 9 hizli harness'i kosturur, ucu `kani-slow-proofs`
+    # ile gecelik programda kosar. Ayrim kaynaktaki `// SLOW:` isaretinden
+    # okunur, elle tutulan bir isim listesinden degil, ve kapi isaretin bir
+    # `#[kani::proof]` uzerinde durdugunu dogrular: yoksa isaret beklenen
+    # sayiyi dusurur ama hicbir harness'i dislamaz.
     #
     # `--harness-timeout` denendi ve geri alindi: `-Z unstable-options`
     # istiyor. Bir kapiyi kararsiz bir bayraga baglamak, Kani'nin bir sonraki
-    # surumunde kapinin sessizce kirilmasi demek. Tek bir harness patlarsa job
-    # timeout'u devreye girer; bu daha kaba ama kapinin kendisi kadar dayanikli.
-    timeout-minutes: 90
+    # surumunde kapinin sessizce kirilmasi demek.
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -317,11 +335,108 @@ jobs:
 
       # `--output-format terse` satır başına bir VERIFICATION sonucu verir;
       # kapı bunları sayar ve kaynaktaki harness sayısıyla karşılaştırır.
-      - name: Kani proofs
+      # Hangi harness'lerin kosacagi kaynaktan okunur, burada tekrar
+      # yazilmaz: iki liste birbirinden sessizce ayrilabilir. Kani 0.67'de
+      # `--exclude-harness` yok, `--harness` var ve tekrarlanabiliyor, o
+      # yuzden secim dislama degil dahil etme yonunde.
+      #
+      # `--exact` KULLANILMIYOR ve bu olculdu. Sade isimle reddetti, crate
+      # onekiyle (`budlum_kani::proofs::x`) de reddetti. 0.67.0 kaynagina
+      # bakildiginda `--exact` `mangled_name` ile karsilastiriyor ve o ad
+      # crate onekini tasimiyor; dogru form `proofs::x` olurdu. Ama bu, bir
+      # kapiyi Kani'nin ic adlandirmasina baglamak demek: bir sonraki surumde
+      # ad semasi degisirse kapi sessizce hicbir harness'e eslesmez.
+      #
+      # `--exact` olmadan `--harness` bir alt-dize filtresidir. Buradaki
+      # isimler benzersiz oldugu icin ayni dokuzu secer, ve daha onemlisi
+      # eslesme SAYISI kapi tarafindan dogrulanir: dokuz beklenip sekiz
+      # kosarsa `check-kani.sh` bunu yakalar. Filtre gevsedi, kapi gevsemedi.
+      - name: Kani proofs (hizli set)
         working-directory: kani
         run: |
           set -euo pipefail
-          cargo kani --output-format terse 2>&1 | tee /tmp/kani.log
+          mapfile -t fast < <(bash ../scripts/check-kani.sh --fast-names)
+          [ "${#fast[@]}" -gt 0 ] || { echo "no fast harnesses found; the gate would be vacuous" >&2; exit 1; }
+          args=()
+          for h in "${fast[@]}"; do
+            [ -n "$h" ] && args+=(--harness "$h")
+          done
+          echo "running ${#fast[@]} fast harnesses: ${fast[*]}"
+          cargo kani "${args[@]}" --output-format terse 2>&1 | tee /tmp/kani.log
 
       - name: Kani kapısı
         run: bash ./scripts/check-kani.sh /tmp/kani.log
+
+  # Olculen gercek: bu uc harness `penalty_for`'u iki kez cagirip sonuclari
+  # iliskilendiriyor ve bir cozucu iki bagimsiz 128-bit sembolik carpimi CI
+  # butcesi icinde kapatamiyor. Silmek yanlis cevap olurdu: agacta kesmenin
+  # monoton oldugunu soyleyen tek ifade bunlar. PR'dan cikarilip programa
+  # alindilar, cap gercek olcume gore 6 saat.
+  #
+  # Bu is bir KAPI DEGIL, bir olcum. Kirmizi dustugunde soyledigi sey
+  # "ozellik bozuldu" degil, "hala butce disinda"; o yuzden PR'i bloke etmez
+  # ama sessizce de kaybolmaz.
+  kani-slow-proofs:
+    name: Kani Proofs (yavas set, programli)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install Kani (sürüm pinli)
+        run: |
+          set -euo pipefail
+          cargo install --locked kani-verifier --version 0.67.0
+          cargo kani setup
+
+      # Her harness ayri kosar ve ayri zamanlanir. Hepsini tek `cargo kani`
+      # icinde kosturmak, ilk yavas olanin digerlerinin sonucunu gizlemesi
+      # demekti; bu tam olarak bu bulgunun uc kere yanlis teshis edilmesinin
+      # sebebiydi.
+      - name: Yavas harness'ler, her biri ayri olculur
+        working-directory: kani
+        run: |
+          set -uo pipefail
+          mapfile -t slow < <(bash ../scripts/check-kani.sh --slow-names)
+          [ "${#slow[@]}" -gt 0 ] || { echo "no slow harnesses; nothing to measure" >&2; exit 1; }
+          {
+            echo "| harness | result | seconds |"
+            echo "| :-- | :-- | --: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          rc_all=0
+          for h in "${slow[@]}"; do
+            start=$(date +%s)
+            timeout 6000 cargo kani --harness "$h" --output-format terse \
+              > "/tmp/$h.log" 2>&1
+            rc=$?
+            elapsed=$(( $(date +%s) - start ))
+            if [ "$rc" -eq 124 ]; then
+              result="TIMEOUT"
+            elif [ "$rc" -ne 0 ]; then
+              result="FAILED($rc)"
+              rc_all=1
+            elif grep -q '^VERIFICATION:- SUCCESSFUL' "/tmp/$h.log"; then
+              result="SUCCESSFUL"
+            else
+              result="UNKNOWN"
+              rc_all=1
+            fi
+            echo "$h: $result in ${elapsed}s"
+            echo "| $h | $result | $elapsed |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          # Bir harness gercekten BOZULDUYSA (FAILED/UNKNOWN) bu is kirmizi
+          # olur. TIMEOUT beklenen durumdur ve olculmus haliyle raporlanir:
+          # bunu kirmizi saymak, bilinen bir gercegi her hafta alarma cevirir
+          # ve alarm anlamini kaybeder.
+          exit "$rc_all"

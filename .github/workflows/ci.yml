@@ -843,6 +843,15 @@ jobs:
         run: |
           bash ./scripts/check-no-unicode-dashes.sh --self-test
           bash ./scripts/check-no-unicode-dashes.sh
+      # B35: the fixed-point slash expression was written out at five call
+      # sites across two workspaces, and the narrowing was not spelled the same
+      # way in all of them. `as u64` truncated where the Kani mirror panicked,
+      # so a ratio one unit above the ceiling took a millionth of the bond
+      # instead of all of it.
+      - name: slash ifadesi tek evde mi + kanarya
+        run: |
+          bash ./scripts/check-slash-expression-has-one-home.sh --self-test
+          bash ./scripts/check-slash-expression-has-one-home.sh
       # A gate that names its required tests by hand is only as good as those
       # names. Merging the hardening branches moved a `#[test]` attribute onto
       # the wrong function and silently un-tested

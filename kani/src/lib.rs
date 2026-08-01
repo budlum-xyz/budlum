@@ -39,12 +39,56 @@ pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 /// ```
 #[must_use]
 pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
-    // Written with `u128::from` / `try_from` rather than `as`, to match the
-    // form the mirror test in `budlum-core` compares against; the arithmetic is
-    // identical to `slash_role_only`'s. `penalty_never_exceeds_stake` is what
-    // proves the `try_from` cannot fail.
-    u64::try_from((u128::from(stake) * u128::from(slash_ratio_fixed)) / u128::from(FIXED_POINT_SCALE))
-        .expect("penalty is bounded by stake, which is a u64")
+    // The quotient is clamped to `stake` instead of being unwrapped into a
+    // `u64`.
+    //
+    // The previous form was `try_from(...).expect(...)`, which asserted the
+    // quotient always fits. It does not. At `stake = u64::MAX` and any ratio
+    // above `FIXED_POINT_SCALE` the quotient exceeds `u64::MAX`, so the mirror
+    // panicked while production, which spelled the same expression with
+    // `as u64`, wrapped instead: `ratio = FIXED_POINT_SCALE + 1` turned a
+    // 100.0001% slash into one that left 99.9999% of the bond standing. The
+    // two copies did not agree, and the mirror test compared them only over
+    // ratios at or below the ceiling, where they do. See B35.
+    //
+    // Clamping is also what makes the bound provable. Measured against the
+    // same class of bitvector query Kani issues, negating `penalty <= stake`:
+    //
+    //     symbolic udiv, 128 bit       TIMEOUT at 120s
+    //     symbolic product, no divide  TIMEOUT at  45s
+    //     divide by a constant         TIMEOUT at  45s
+    //     clamped form                 PROVED  in 0.37s
+    //
+    // Both terms are walls, not only the divide. The plan recorded earlier,
+    // restating the division as a shift/multiply-high pair, would have removed
+    // one wall and left the other: `sym * sym` with no divide at all still
+    // times out. Clamping moves the property off the arithmetic. `penalty
+    // <= stake` is now a fact about a `min`, and holds with no precondition on
+    // the ratio, which is the point: it does not depend on governance having
+    // validated anything.
+    let quotient =
+        (u128::from(stake) * u128::from(slash_ratio_fixed)) / u128::from(FIXED_POINT_SCALE);
+    if quotient > u128::from(u64::MAX) {
+        return stake;
+    }
+    let narrow = quotient as u64;
+    if narrow > stake {
+        stake
+    } else {
+        narrow
+    }
+}
+
+/// The unclamped quotient, for the harnesses that are *about* the overshoot.
+///
+/// `penalty_for` now caps at the bond, so a harness asking "does a ratio above
+/// the ceiling take more than the bond?" would be asking about the cap rather
+/// than about the arithmetic. This keeps the raw expression available so that
+/// question stays answerable, and so the clamp cannot quietly turn those
+/// harnesses vacuous.
+#[must_use]
+pub fn raw_quotient(stake: u64, slash_ratio_fixed: u64) -> u128 {
+    (u128::from(stake) * u128::from(slash_ratio_fixed)) / u128::from(FIXED_POINT_SCALE)
 }
 
 // MEASURED, 2026-08-01: every harness that calls `penalty_for` times out.
@@ -66,23 +110,85 @@ pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
 // `penalty_is_monotonic_in_the_ratio` was already narrowed to u16 symbols and
 // still times out. Multiplication count does not explain it either.
 //
-// What `penalty_for` has that nothing else here has is a **symbolic division**:
+// What `penalty_for` had that nothing else here has is a **symbolic division**:
 // `(u128 * u128) / u128`. A solver handles a symbolic multiply by summing
 // partial products; a symbolic divide it must encode as a search for a
 // quotient and remainder satisfying `n = q*d + r, r < d`, over 128-bit terms.
-// That is the wall, and it is in the shared helper rather than in any one
-// harness - which is why every diagnosis that looked at a single harness found
-// something plausible and fixed nothing.
+// That reading named a real cost, and it was still the wrong conclusion.
 //
-// Not fixed here. The honest options are to prove the division away (the
-// divisor is the constant FIXED_POINT_SCALE, so `penalty_for` could be
-// restated as a shift/multiply-high pair a solver can close), or to accept
-// that these five are not CI-budget harnesses and run them on a schedule.
-// Both are real work with a real argument behind them, and neither should be
-// done in the same commit as the measurement that motivates it.
+// MEASURED AGAIN, 2026-08-01, second pass. The plan recorded above was to
+// restate the division as a shift/multiply-high pair. Before writing it, the
+// same class of query was put to a bitvector solver directly, negating
+// `penalty <= stake`, with the divide present and removed:
+//
+//     sym * sym, then divide          TIMEOUT   (penalty_for as written)
+//     sym * sym, no divide at all     TIMEOUT
+//     sym * const, then divide        TIMEOUT
+//     sym * const, no divide          PROVED in 0.02s
+//     multiply-high reciprocal        TIMEOUT   (the recorded plan)
+//
+// The recorded plan does not work. Removing the divide is not sufficient
+// because the 128-bit **symbolic product** is a wall on its own: three of the
+// four cells time out, and the only affordable one is the cell with neither a
+// symbolic product nor a divide. A width sweep puts the cliff between u16 and
+// u24 operands, far below the u64 the property needs.
+//
+// So the expression cannot be rewritten into something a solver closes while
+// it still multiplies two symbols. The bound is made structural instead:
+// `penalty_for` clamps to `stake`. The clamped form is PROVED in 0.37s, and
+// in 13.6s even with the ratio precondition dropped entirely.
+//
+// What that costs, stated plainly: `penalty <= stake` is no longer evidence
+// that the division cannot overshoot. It is evidence that an overshoot cannot
+// reach the ledger. The overshoot harnesses below keep asking the first
+// question by calling `raw_quotient`, so the clamp cannot turn them vacuous.
+//
+// MEASURED IN CI, per harness, each in its own job with its own cap:
+//
+//     penalty_never_exceeds_stake                       1s   was TIMEOUT
+//     remaining_stake_is_exact                          6s   was TIMEOUT
+//     the_clamp_catches_the_quotient_that_used_to_wrap  1s   new
+//     no_ratio_can_make_the_penalty_exceed_the_bond     1s   new
+//     an_unbounded_ratio_would_overshoot_the_bond       8s   control, unchanged
+//     an_unbounded_ratio_overshoots_two_units_above     7s   control, unchanged
+//     a_one_and_a_half_times_ratio_overshoots           1s   control, unchanged
+//     a_double_ratio_overshoots                         1s   control, unchanged
+//     an_unbounded_ratio_can_strictly_exceed_the_bond   1s   control, unchanged
+//
+// Three are still slow and the clamp does not help them, which is consistent
+// rather than surprising:
+//
+//     ratio_endpoints_are_exact
+//     penalty_is_monotonic_in_the_ratio
+//     penalty_is_monotonic_for_full_stakes
+//
+// Each calls `penalty_for` **twice** and relates the two results. The clamp
+// bounds a single call against its own input; it says nothing that lets a
+// solver compare two independent quotients, so both symbolic products survive
+// in the query. Measured: one clamped call is proved in 0.39s, two clamped
+// calls related to each other time out at 90s.
+//
+// Splitting the asserts does not rescue them either, which was the obvious
+// next guess and was measured before being believed:
+//
+//     ratio_endpoints, both asserts together   TIMEOUT
+//       split out `ratio == 0` alone           PROVED in 0.00s
+//       split out `ratio == SCALE` alone       TIMEOUT
+//
+// `ratio == 0` collapses the product to zero, so it is free. `ratio == SCALE`
+// leaves `stake * 1_000_000` over a symbolic 64-bit stake, which is the same
+// wall as everything else here. The pair is not the problem; a symbolic
+// product wider than about 24 bits is.
+//
+// So these three are not CI-budget harnesses, and nothing in this commit
+// changes that. What the commit does change is that the property they were
+// guarding, `penalty <= stake`, is now proved in a second by a harness that
+// does not need them. They are left in place, timing out honestly, rather
+// than deleted to make the job green: deleting them would remove the only
+// statement in the tree that the truncation is monotonic.
 #[cfg(kani)]
 mod proofs {
-    use super::{penalty_for, FIXED_POINT_SCALE};
+    use super::{penalty_for, raw_quotient, FIXED_POINT_SCALE};
 
     /// A slash can never take more stake than the member has.
     ///
@@ -137,6 +243,7 @@ mod proofs {
     /// malice burns the whole bond" - and a zero ratio must take nothing.
     /// Rounding at either end would leave dust in a bond that should be gone,
     /// or take stake when none was owed.
+    // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     fn ratio_endpoints_are_exact() {
         let stake: u64 = kani::any();
@@ -166,6 +273,7 @@ mod proofs {
     /// base units) while leaving the solver a problem it can close. The
     /// unbounded case is covered by `penalty_is_monotonic_for_full_stakes`
     /// below, which fixes the ratio pair instead.
+    // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     fn penalty_is_monotonic_in_the_ratio() {
         let stake: u32 = kani::any();
@@ -188,6 +296,7 @@ mod proofs {
         );
     }
 
+    // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     /// A one-unit ratio increase must never reduce the penalty, at any stake.
     ///
@@ -353,6 +462,56 @@ mod proofs {
     #[kani::proof]
     fn a_double_ratio_overshoots() {
         overshoot_at_ratio(FIXED_POINT_SCALE);
+    }
+
+    /// The clamp fires exactly where the old code wrapped.
+    ///
+    /// This is the harness for B35. `stake = u64::MAX` with
+    /// `ratio = FIXED_POINT_SCALE + 1` produces a quotient above `u64::MAX`.
+    /// The previous `penalty_for` narrowed that with `try_from().expect()` and
+    /// panicked; production wrote the same expression as `as u64` and wrapped,
+    /// yielding a penalty of about 1.8e13 against a bond of about 1.8e19, so a
+    /// 100.0001% slash left 99.9999% of the bond standing.
+    ///
+    /// `raw_quotient` keeps the unclamped value reachable so this states the
+    /// overshoot and the containment as two separate facts rather than one.
+    #[kani::proof]
+    fn the_clamp_catches_the_quotient_that_used_to_wrap() {
+        let stake = u64::MAX;
+        let ratio = FIXED_POINT_SCALE + 1;
+
+        assert!(
+            raw_quotient(stake, ratio) > u128::from(u64::MAX),
+            "this is the input that overflows a u64; if it stopped doing so, \
+             the clamp below is being tested against nothing"
+        );
+        assert!(
+            penalty_for(stake, ratio) == stake,
+            "an overshooting ratio must take the whole bond, never wrap below it"
+        );
+    }
+
+    /// The bound holds with no precondition on the ratio at all.
+    ///
+    /// Every other harness here assumes `ratio <= FIXED_POINT_SCALE`, which is
+    /// what `RegistryParams::validate` enforces. That assumption is the reason
+    /// B35 stayed invisible: the mirror test compared the two copies only over
+    /// ratios where they agree.
+    ///
+    /// This one drops the assumption. It is the containment claim rather than
+    /// the arithmetic claim: whatever ratio reaches this function, validated or
+    /// not, the penalty cannot exceed the bond. Measured at 13.6s against a
+    /// bitvector solver, against a timeout for the unclamped form.
+    #[kani::proof]
+    fn no_ratio_can_make_the_penalty_exceed_the_bond() {
+        let stake: u64 = kani::any();
+        let ratio: u64 = kani::any();
+
+        assert!(
+            penalty_for(stake, ratio) <= stake,
+            "the clamp must hold for every ratio, including ones governance \
+             would refuse"
+        );
     }
 
     /// And a concrete witness that it really does exceed the bond.
