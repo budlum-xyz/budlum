@@ -41,8 +41,9 @@ async fn main() {
     for _ in 0..sender_count {
         let kp = KeyPair::generate().unwrap();
         chain
-            .add_balance(&Address::from(kp.public_key_bytes()), 1_000_000)
-            .await;
+            .credit_development_account(&Address::from(kp.public_key_bytes()), 1_000_000)
+            .await
+            .expect("benchmark runs on a devnet chain");
         keypairs.push(kp);
     }
 

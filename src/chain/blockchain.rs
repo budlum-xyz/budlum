@@ -3561,11 +3561,91 @@ impl Blockchain {
         Ok(())
     }
 
-    pub fn init_genesis_account(&mut self, address: &Address) {
+    /// Top an account up to [`GENESIS_BALANCE`] on a development chain.
+    ///
+    /// This is a faucet, and the name hid that. It was called
+    /// `init_genesis_account` and it is bound to nothing about genesis: no
+    /// height check, no network check, no supply accounting. Measured against
+    /// the body as it stood:
+    ///
+    /// ```text
+    /// height          0  -> 1,000,000,000
+    /// height  10,000,000 -> 1,000,000,000
+    /// spend down to 5, call again -> 1,000,000,000
+    /// ```
+    ///
+    /// It does not stack on one address, so it is not a mint loop, but it
+    /// refills without limit: any address can be returned to 1e9 as often as
+    /// it is drained, and a fresh address can be created already funded.
+    /// `BUD_TOTAL_SUPPLY` is 1e14, so a hundred thousand calls exceed the
+    /// entire supply while `nonzero_block_reward_config_cannot_mint` and its
+    /// neighbours go on asserting that no path can mint.
+    ///
+    /// Nothing in production called it. That is the same shape as B27: the
+    /// hazard is not what runs today, it is what the next person wires up
+    /// after reading a name that says "genesis" and a signature that says
+    /// "any address, any time".
+    ///
+    /// So it is gated rather than deleted, because the devnet and RPC test
+    /// paths do need a funded account. On mainnet it refuses and says why.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on the mainnet chain id. The refusal is the point:
+    /// fail closed, and let the caller see it rather than silently doing
+    /// nothing.
+    pub fn fund_development_account(&mut self, address: &Address) -> Result<(), String> {
+        if self.mainnet_chain_id() {
+            return Err(format!(
+                "refusing to fund {address}: this is a development faucet and the \
+                 chain id is mainnet. There is no path that credits an account \
+                 without consensus on mainnet, and adding one here would make \
+                 BUD_TOTAL_SUPPLY (1e14) an advisory number."
+            ));
+        }
         let account = self.state.get_or_create(address);
         if account.balance < GENESIS_BALANCE {
             account.balance = GENESIS_BALANCE;
         }
+        Ok(())
+    }
+
+    /// Credit an arbitrary amount outside consensus, development chains only.
+    ///
+    /// The actor exposed this as `ChainCommand::AddBalance` and it went
+    /// straight to `state.add_balance`, which saturates. No signature, no
+    /// nonce, no proof, no supply accounting: the whole of what a block has
+    /// to carry before it can move value, skipped.
+    ///
+    /// # Errors
+    ///
+    /// Refuses on the mainnet chain id.
+    pub fn credit_development_account(
+        &mut self,
+        address: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if self.mainnet_chain_id() {
+            return Err(format!(
+                "refusing to credit {address} with {amount}: this path bypasses \
+                 consensus and exists for development chains. On mainnet, value \
+                 moves through a signed transaction or a verified bridge event, \
+                 and nowhere else."
+            ));
+        }
+        self.state.add_balance(address, amount);
+        Ok(())
+    }
+
+    /// True when this chain is mainnet, by chain id.
+    ///
+    /// Mirrors `mainnet_requires_signed_remote_snapshot`, which is the
+    /// established way this file asks the question.
+    fn mainnet_chain_id(&self) -> bool {
+        self.chain_id
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
     }
 
     pub fn validate_and_add_block(&mut self, block: Block) -> Result<Vec<[u8; 32]>, String> {
