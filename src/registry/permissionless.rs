@@ -581,8 +581,7 @@ impl PermissionlessRegistry {
             });
         }
 
-        let penalty =
-            ((reg.stake as u128 * slash_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64;
+        let penalty = penalty_for(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
         reg.status = MemberStatus::Slashed;
 
