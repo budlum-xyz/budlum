@@ -511,8 +511,8 @@ fn unstaking_below_the_floor_deactivates_the_registry_entry() {
 
 /// The registry root is consensus state, so an `Unstake` must move it.
 ///
-/// Before the mirror, applying `Unstake` left `registry.root()` byte-identical
-/// - the reduced stake was invisible to the state root. Two nodes, one of which
+/// Before the mirror, applying `Unstake` left `registry.root()` byte-identical:
+/// the reduced stake was invisible to the state root. Two nodes, one of which
 /// Replayed history through a path that did sync, would compute different roots.
 #[test]
 fn unstake_changes_the_registry_root() {

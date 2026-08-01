@@ -165,7 +165,7 @@ fn test_bns_full_resolve_with_storage() {
 ///     renew:    expires_at += duration
 ///     register: expires_at  = current_epoch + duration
 ///
-/// - so the only reachable path discards the remaining term. Renewing a year
+/// So the only reachable path discards the remaining term. Renewing a year
 /// early costs that year; waiting until the last epoch to avoid the loss puts
 /// the name one missed block from the grace window. This asserts the size of
 /// that gap so it cannot be mistaken for a rounding difference, and fails the

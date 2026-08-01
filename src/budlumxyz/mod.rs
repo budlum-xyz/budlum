@@ -298,8 +298,8 @@ mod tests {
     /// `mark_verified_by_governance` fails open, and must stay unreachable
     /// Until it does not.
     ///
-    /// The authorization check is `if !set.is_empty() && !set.contains(caller)`
-    /// - an empty set accepts everyone. The doc says production populates the
+    /// The authorization check is `if !set.is_empty() && !set.contains(caller)`,
+    /// so an empty set accepts everyone. The doc says production populates the
     /// Set "via governance action (e.g. `GovernanceAction::AddBudlumxyzGovernor`)".
     /// That variant does not exist, so on every real network the set is empty
     /// And the gate is open.
