@@ -176,10 +176,19 @@ fn the_faucet_refills_rather_than_stacking() {
 #[test]
 fn nothing_outside_tests_calls_the_out_of_consensus_paths() {
     let sources: [(&str, &str); 6] = [
-        ("chain/blockchain.rs", include_str!("../chain/blockchain.rs")),
-        ("chain/chain_actor.rs", include_str!("../chain/chain_actor.rs")),
+        (
+            "chain/blockchain.rs",
+            include_str!("../chain/blockchain.rs"),
+        ),
+        (
+            "chain/chain_actor.rs",
+            include_str!("../chain/chain_actor.rs"),
+        ),
         ("rpc/server.rs", include_str!("../rpc/server.rs")),
-        ("execution/executor.rs", include_str!("../execution/executor.rs")),
+        (
+            "execution/executor.rs",
+            include_str!("../execution/executor.rs"),
+        ),
         ("relayer/worker.rs", include_str!("../relayer/worker.rs")),
         ("network/node.rs", include_str!("../network/node.rs")),
     ];

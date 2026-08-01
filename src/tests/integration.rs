@@ -258,7 +258,8 @@ mod integration_tests {
         let pubkey = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        blockchain.fund_development_account(&pubkey).expect("devnet faucet");
+        blockchain.fund_development_account(&pubkey)
+            .expect("devnet faucet");
 
         let recipient = test_addr_from_byte(2);
         let mut tx1 = Transaction::new(pubkey, recipient, 10, vec![]);
@@ -280,7 +281,8 @@ mod integration_tests {
         let pubkey = Address::from(keypair.public_key_bytes());
         let consensus = Arc::new(PoWEngine::new(1));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        blockchain.fund_development_account(&pubkey).expect("devnet faucet");
+        blockchain.fund_development_account(&pubkey)
+            .expect("devnet faucet");
 
         let recipient = test_addr_from_byte(2);
         let mut tx = Transaction::new(pubkey, recipient, 10, vec![]);
@@ -375,7 +377,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        blockchain.fund_development_account(&pubkey).expect("devnet faucet");
+        blockchain.fund_development_account(&pubkey)
+            .expect("devnet faucet");
         blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 1000);
@@ -499,7 +502,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        blockchain.fund_development_account(&pubkey).expect("devnet faucet");
+        blockchain.fund_development_account(&pubkey)
+            .expect("devnet faucet");
         blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 2_000);
@@ -566,7 +570,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        blockchain.fund_development_account(&pubkey).expect("devnet faucet");
+        blockchain.fund_development_account(&pubkey)
+            .expect("devnet faucet");
         blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 2_000);
@@ -630,7 +635,8 @@ mod integration_tests {
 
         let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), Some(keys)));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        blockchain.fund_development_account(&pubkey).expect("devnet faucet");
+        blockchain.fund_development_account(&pubkey)
+            .expect("devnet faucet");
         blockchain.state.validators.clear();
 
         let mut validator = crate::core::account::Validator::new(pubkey, 2_000);
