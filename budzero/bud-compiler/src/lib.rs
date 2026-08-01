@@ -1107,7 +1107,11 @@ mod tests {
             let source = format!(
                 r#"
                 contract C {{
-                    pub fn main(x: {name}) {{
+                    fn takes(x: {name}) -> u64 {{
+                        return 1;
+                    }}
+
+                    pub fn main() {{
                         emit E(1);
                     }}
                 }}
@@ -1143,9 +1147,14 @@ mod tests {
     fn address_and_hash32_are_types_rather_than_phantom_structs() {
         let source = r#"
             contract C {
-                pub fn main(who: Address, digest: Hash32) {
+                fn holds(who: Address, digest: Hash32) -> u64 {
                     let a = who;
                     let d = digest;
+                    return 1;
+                }
+
+                pub fn main() {
+                    let sender = msg::sender();
                     emit E(1);
                 }
             }
@@ -1166,8 +1175,12 @@ mod tests {
             let source = format!(
                 r#"
                 contract C {{
-                    pub fn main(a: Address, b: Address) {{
+                    fn combine(a: Address, b: Address) -> u64 {{
                         let c = a {op} b;
+                        return 1;
+                    }}
+
+                    pub fn main() {{
                         emit E(1);
                     }}
                 }}
@@ -1190,8 +1203,12 @@ mod tests {
     fn the_opaque_type_rejection_names_the_type() {
         let source = r#"
             contract C {
-                pub fn main(a: Address, b: Address) {
+                fn combine(a: Address, b: Address) -> u64 {
                     let c = a + b;
+                    return 1;
+                }
+
+                pub fn main() {
                     emit E(1);
                 }
             }
@@ -1214,9 +1231,12 @@ mod tests {
     fn opaque_types_can_still_be_compared_and_copied() {
         let source = r#"
             contract C {
-                pub fn main(a: Address, b: Address) {
-                    let same = a == b;
+                fn compare(a: Address, b: Address) -> bool {
                     let copy = a;
+                    return a == b;
+                }
+
+                pub fn main() {
                     emit E(1);
                 }
             }

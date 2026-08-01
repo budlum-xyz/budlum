@@ -28,6 +28,9 @@ akıllı kontrat dilidir. Özellikleri:
 
 ```
 contract     := 'contract' ident '{' contract_body '}'
+             // Her kontrat bir `main` fonksiyonu ICERMELIDIR: codegen
+             // giristeki jump'i ona yamalar. Yoksa derleme
+             // `Codegen error: main function not found` ile durur.
 contract_body := (struct_decl | fn_decl | storage_decl)*
 
 struct_decl  := 'struct' ident '{' (field_decl)+ '}'
@@ -106,11 +109,15 @@ contract Token {
         nonce: u64,
     }
 
-    pub fn record(owner: Address, amount: u64) -> u64 {
-        let who = msg::sender();
+    fn record(owner: Address, amount: u64) -> u64 {
         let entry = UserData { owner: owner, amount: amount, nonce: 0 };
-        emit Recorded(amount);
         return entry.amount;
+    }
+
+    pub fn main() {
+        let who = msg::sender();
+        let recorded = record(who, 100);
+        emit Recorded(recorded);
     }
 }
 ```
@@ -264,12 +271,16 @@ contract SimpleToken {
         amount: u64,
     }
 
-    pub fn mint(to: Address, amount: u64) -> u64 {
+    fn mint(to: Address, amount: u64) -> u64 {
+        let entry = Balance { owner: to, amount: amount };
+        return entry.amount;
+    }
+
+    pub fn main() {
         let who = msg::sender();
         let height = block::number();
-        let entry = Balance { owner: to, amount: amount };
-        emit Mint(amount);
-        return entry.amount;
+        let minted = mint(who, 50);
+        emit Mint(minted);
     }
 }
 ```
