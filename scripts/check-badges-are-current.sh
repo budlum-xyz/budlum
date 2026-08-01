@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-badges-are-current.sh — README badges must match what CI measured.
+# check-badges-are-current.sh - README badges must match what CI measured.
 #
 # The test badge is written by a CI step that pushes to `main`. That push has
 # been rejected on every run since branch protection was enabled:
@@ -10,7 +10,7 @@
 #   ##[warning]Rozet 1773 olmali ama push 3/3 denemede reddedildi.
 #
 # The step emits a warning and then exits 0, so the job stays green and nobody
-# notices. The badge said 1542 while the suite had grown to 1773 — a 231-test
+# notices. The badge said 1542 while the suite had grown to 1773 - a 231-test
 # gap, advertised on the front page of the repository.
 #
 # A warning that nothing reads is not a signal. This gate turns the mismatch
@@ -60,7 +60,7 @@ gate() {
 
   local measured badge
   measured="$(measured_count "$log")"
-  [ -n "$measured" ] || fail "could not parse a test count from $log — gate would be vacuous"
+  [ -n "$measured" ] || fail "could not parse a test count from $log - gate would be vacuous"
 
   badge="$(badge_count)"
   [ -n "$badge" ] || fail "no tests-N%20lib badge found in README.md"
@@ -97,7 +97,7 @@ if [ "${1:-}" = "--self-test" ]; then
     exit 1
   fi
 
-  # 3. Empty output must fail — the case where the test step never ran.
+  # 3. Empty output must fail - the case where the test step never ran.
   : > "$tmp/empty.log"
   if ( gate "$tmp/empty.log" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: empty test output was accepted!" >&2

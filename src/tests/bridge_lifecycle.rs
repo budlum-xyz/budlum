@@ -22,7 +22,7 @@ fn asset_id() -> crate::cross_domain::AssetId {
 
 /// Bridge end-to-end: register domains, register the asset, lock through
 /// The internal system path, mint on the target side, burn on the source,
-/// And unlock. All via the *internal* `Blockchain` API — the RPC surface
+/// And unlock. All via the *internal* `Blockchain` API - the RPC surface
 /// No longer exposes the unauthenticated `lock_bridge_transfer` entry.
 #[test]
 fn bridge_lock_mint_burn_unlock_lifecycle() {
@@ -44,7 +44,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 
     let owner = addr(11);
     let recipient = addr(12);
-    // Lock debits owner balance — fund accounts.
+    // Lock debits owner balance - fund accounts.
     bc.init_genesis_account(&owner);
     bc.init_genesis_account(&recipient);
 
@@ -54,7 +54,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     bc.state.add_balance(&owner, 1_000_000);
 
     // Step 3: lock via the internal path (the only path that exists
-    // — RPC is closed).
+    // - RPC is closed).
     let (_transfer, lock_event) = bc
         .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 100, 1000)
         .expect("internal lock must succeed");
@@ -93,7 +93,7 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     // Use an arbitrary-but-valid commitment block hash: this mint
     // Will fail either at the forgery gate (no matching commitment
     // Exists for this exact block hash) or at the bridge-state level
-    // (the lock has been released). Both are acceptable — the test's
+    // (the lock has been released). Both are acceptable - the test's
     // Contract is "the released lock cannot be minted".
     let bad_mint = bc.mint_bridge_transfer_from_verified_event(
         1,
@@ -196,7 +196,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
 /// (security audit §9) bridge mint MUST reject calls that pass
 /// `expected_block_hash = None`. Without an explicit block-hash bound,
 /// A caller could pick ANY commitment matching (domain_id, height,
-/// Sequence) — including stale or finality-unconfirmed ones — and
+/// Sequence) - including stale or finality-unconfirmed ones - and
 /// Mint against it. The forgery gate forces the caller to bind the
 /// Mint to a specific block.
 #[test]

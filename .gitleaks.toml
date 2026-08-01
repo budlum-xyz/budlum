@@ -1,8 +1,8 @@
-# .gitleaks.toml — Budlum secret-scan yapılandırması ( / )
+# .gitleaks.toml - Budlum secret-scan yapılandırması ( / )
 #
 # CI `gitleaks detect` ile TAM git geçmişini tarar (fetch-depth: 0).
 # Varsayılan kural seti korunur; hiçbir global pattern/path/commit muafiyeti
-# YOKTUR — herhangi bir sızıntı job'u FAIL eder.
+# YOKTUR - herhangi bir sızıntı job'u FAIL eder.
 #
 # Geçmiş doğrulaması (baseline GEREKMEDİĞİ için kanıt):
 #   Araç: gitleaks v8.30.1, tam tarih taraması, 2026-07-16

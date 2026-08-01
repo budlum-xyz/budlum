@@ -33,7 +33,7 @@ pub enum Opcode {
     Syscall = 0x1D,
     VerifyMerkle = 0x1E,
     /// AI Inference verification opcode.
-    /// Verifies a ZKVM execution proof for AI inference — the core
+    /// Verifies a ZKVM execution proof for AI inference - the core
     /// Primitive for trustless AI in the Agentic Economy paradigm.
     ///
     /// Semantics: VerifyInference rd, rs1, rs2, imm
@@ -47,14 +47,14 @@ pub enum Opcode {
     /// Ceremony completes. This ensures the AI verification layer
     /// Is thoroughly audited before mainnet deployment.
     VerifyInference = 0x1F,
-    /// Privacy layer — commitment for private transfer.
+    /// Privacy layer - commitment for private transfer.
     /// Binds amount + recipient + blinding into a Poseidon commitment hash.
     /// Mainnet-gated (staged rollout, like VerifyMerkle/VerifyInference).
     PrivacyCommit = 0x20,
-    /// Nullifier check — marks a spent commitment without revealing which.
+    /// Nullifier check - marks a spent commitment without revealing which.
     /// Prevents double-spend. Mainnet-gated.
     NullifierCheck = 0x21,
-    /// Sum-conservation — proves Σinputs == Σoutputs without revealing
+    /// Sum-conservation - proves Σinputs == Σoutputs without revealing
     /// Amounts (homomorphic commitment). Mainnet-gated.
     SumConservation = 0x22,
 }
@@ -92,11 +92,11 @@ pub enum IsaProfile {
 /// The corresponding flags to true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainnetActivation {
-    /// False = mainnet'te KAPALI (staged rollout) — bool::default ile aynı,
+    /// False = mainnet'te KAPALI (staged rollout) - bool::default ile aynı,
     /// clippy::derivable_impls nedeniyle derive'a indirildi.
     pub verify_merkle_enabled: bool,
     /// AI inference verification opcode gate.
-    /// False = mainnet'te KAPALI — requires post-ceremony activation.
+    /// False = mainnet'te KAPALI - requires post-ceremony activation.
     /// When true, VerifyInference (0x1F) opcode is allowed on mainnet,
     /// Enabling ZKVM-proven AI inference verification.
     pub verify_inference_enabled: bool,
@@ -112,8 +112,8 @@ impl Default for MainnetActivation {
     /// The privacy three (`PrivacyCommit`, `NullifierCheck`,
     /// `SumConservation`) were held closed because they hash through a
     /// Poseidon permutation truncated to four rounds. At `alpha = 7` that
-    /// leaves algebraic degree 2401 — low enough to invert by interpolation
-    /// and cheap enough to collide by brute force — so the commitments
+    /// leaves algebraic degree 2401 - low enough to invert by interpolation
+    /// and cheap enough to collide by brute force - so the commitments
     /// neither hid nor bound.
     ///
     /// The permutation is now the full Goldilocks width-8 instance: `R_F = 8`,
@@ -136,7 +136,7 @@ impl Default for MainnetActivation {
 }
 
 impl MainnetActivation {
-    /// Full activation — all mainnet-gated opcodes enabled (post-ceremony).
+    /// Full activation - all mainnet-gated opcodes enabled (post-ceremony).
     pub fn full() -> Self {
         Self {
             verify_merkle_enabled: true,
@@ -481,7 +481,7 @@ mod tests {
     }
 
     /// The two opcodes that are still gated must keep failing closed, and for
-    /// their own reasons — an unfinished Merkle path check and a
+    /// their own reasons - an unfinished Merkle path check and a
     /// VerifyInference that has no circuit behind it.
     #[test]
     fn d2_mainnet_activation_default_still_rejects_merkle_and_inference() {

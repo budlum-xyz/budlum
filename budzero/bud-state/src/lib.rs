@@ -6,7 +6,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 pub type Hash = [u8; 32];
 
-// Gizlilik katmanı note/UTXO modeli — account model'den
+// Gizlilik katmanı note/UTXO modeli - account model'den
 // Izole, paralel subtree.
 pub mod note;
 

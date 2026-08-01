@@ -2,9 +2,9 @@
 //!
 //! Three advisories were carried for weeks as "unreachable" exceptions:
 //!
-//!   * GHSA-vxx9-2994-q338 — yamux remote panic (CVSS 8.7)
-//!   * GHSA-3v94-mw7p-v465 / RUSTSEC-2026-0118 — hickory NSEC3 validation loop
-//!   * GHSA-q2qq-hmj6-3wpp — hickory O(n²) message encoding
+//!   * GHSA-vxx9-2994-q338 - yamux remote panic (CVSS 8.7)
+//!   * GHSA-3v94-mw7p-v465 / RUSTSEC-2026-0118 - hickory NSEC3 validation loop
+//!   * GHSA-q2qq-hmj6-3wpp - hickory O(n²) message encoding
 //!
 //! Each exception rested on a fact a routine dependency change could silently
 //! flip (the muxer picking the patched backend, DNSSEC not being compiled in,
@@ -20,7 +20,7 @@
 #[cfg(test)]
 mod tests {
     /// All three lockfiles. They are separate workspaces that resolve
-    /// independently, and Dependabot reports each one separately — three
+    /// independently, and Dependabot reports each one separately - three
     /// advisories times three lockfiles is where the nine alerts came from.
     /// Fixing only the root would leave six of them open.
     const LOCKFILES: [(&str, &str); 3] = [
@@ -126,7 +126,7 @@ mod tests {
     ///
     /// The three workspaces resolve independently, so a crates.io requirement
     /// left in any one of them puts the vulnerable yamux/hickory back into
-    /// that lockfile — six of the original nine Dependabot alerts.
+    /// that lockfile - six of the original nine Dependabot alerts.
     ///
     /// A direct git dependency is used rather than `[patch.crates-io]`
     /// because tools that re-resolve the manifest in a scratch directory
@@ -240,7 +240,7 @@ mod tests {
     /// The three advisories must not reappear in any scanner's ignore list.
     ///
     /// This is the canary for the whole change: they are patched, so ignoring
-    /// them would be silencing a finding that is already fixed — and would
+    /// them would be silencing a finding that is already fixed - and would
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
@@ -278,7 +278,7 @@ mod tests {
                     assert!(
                         !code.contains(advisory),
                         "{name} suppresses {advisory}, but it is patched \
-                         (yamux 0.14 / hickory 0.26.1). Remove the entry — an \
+                         (yamux 0.14 / hickory 0.26.1). Remove the entry - an \
                          ignore rule over a fixed finding hides the regression \
                          if the graph slides back.\nline: {code}"
                     );
@@ -302,21 +302,21 @@ mod tests {
     ///
     /// Two disclosures, same handler, three months apart:
     ///
-    /// * `CVE-2026-33040` / `GHSA-gc42-3jg7-rxr2` — a `PRUNE` carrying a
+    /// * `CVE-2026-33040` / `GHSA-gc42-3jg7-rxr2` - a `PRUNE` carrying a
     ///   near-maximum backoff overflowed on *insertion*. Fixed in 0.49.3.
-    /// * `CVE-2026-34219` / `GHSA-xqmp-fxgv-xvq5` — the same value survived
+    /// * `CVE-2026-34219` / `GHSA-xqmp-fxgv-xvq5` - the same value survived
     ///   insertion and overflowed later, in the *heartbeat*, on
     ///   `backoff_time + slack`. Fixed in 0.49.4.
     ///
     /// Either one is a remote unauthenticated panic: any peer that can open a
     /// gossipsub session takes the node down with a single control message and
     /// replays it after every restart. Rust turns the overflow into a panic
-    /// rather than memory corruption, so the class is denial of service — but
+    /// rather than memory corruption, so the class is denial of service - but
     /// for a validator, "the process is dead" is the whole impact.
     ///
     /// A version assertion alone is not enough here. `libp2p-gossipsub` comes
     /// from a git revision, not crates.io, so the `0.50.0` in the lockfile is
-    /// whatever that tree happened to call itself — it is not evidence that
+    /// whatever that tree happened to call itself - it is not evidence that
     /// either patch is in it. This asserts the version *and* names both
     /// advisories so a future pin bump has to be checked against them rather
     /// than trusted for having a larger number.
@@ -371,7 +371,7 @@ mod tests {
 ///
 /// Harmless today for one reason: neither digest is verified anywhere.
 /// Both reach consensus inside a `Transaction`, and
-/// `Transaction::signing_hash` does commit to `chain_id` — the envelope
+/// `Transaction::signing_hash` does commit to `chain_id` - the envelope
 /// carries the domain separation the payload lacks.
 ///
 /// That is the EIP-155 lesson in miniature: a signature is only bound to
@@ -380,7 +380,7 @@ mod tests {
 /// the preimage in the same change.
 #[test]
 fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
-    // The transaction envelope really does bind the chain — the property
+    // The transaction envelope really does bind the chain - the property
     // the two payload digests are relying on.
     let tx_src = include_str!("../core/transaction.rs");
     let at = tx_src
@@ -389,7 +389,7 @@ fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
     let body = &tx_src[at..(at + 1200).min(tx_src.len())];
     assert!(
         body.contains("chain_id"),
-        "Transaction::signing_hash stopped committing to chain_id — the \
+        "Transaction::signing_hash stopped committing to chain_id - the \
              payload digests were relying on the envelope for domain separation"
     );
 
@@ -418,7 +418,7 @@ fn unverified_signing_digests_stay_unverified_while_they_omit_chain_id() {
         assert!(
             calls <= definitions + 3,
             "{module}: {digest} now has {calls} references against \
-                 {definitions} definitions — if it is being verified, add \
+                 {definitions} definitions - if it is being verified, add \
                  chain_id to its preimage first, then drop this assertion"
         );
     }

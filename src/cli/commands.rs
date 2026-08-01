@@ -223,7 +223,7 @@ pub struct NodeConfig {
     /// wiring has one name to match on. That is correct for construction and
     /// wrong for policy: mainnet admission has to distinguish a hardware token
     /// from a software one, and by the time it runs the difference is gone.
-    /// Not a CLI flag — it is filled in wherever the canonical value is set.
+    /// Not a CLI flag - it is filled in wherever the canonical value is set.
     #[arg(skip)]
     pub raw_signer_backend: Option<String>,
 
@@ -336,6 +336,7 @@ impl Default for NodeConfig {
             rpc_trusted_proxies: Vec::new(),
             metrics_listener: None,
             signer_backend: None,
+            raw_signer_backend: None,
             pkcs11_module_path: None,
             pkcs11_slot_id: None,
             pkcs11_token_pin_env: None,
@@ -1023,7 +1024,7 @@ impl NodeConfig {
         }
 
         if self.network == Network::Mainnet {
-            // Rule 1 / H4.1: mainnet validators — pure policy (crypto::mainnet_policy).
+            // Rule 1 / H4.1: mainnet validators - pure policy (crypto::mainnet_policy).
             if self.role == "validator" {
                 use crate::crypto::mainnet_policy::{
                     check_mainnet_validator_key_policy, MainnetValidatorKeyConfig,

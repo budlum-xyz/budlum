@@ -15,7 +15,7 @@ impl Network {
     /// EIP-155 chain id.
     ///
     /// These used to be 1, 42 and 1337. All three are taken in the public
-    /// registry at `chainid.network` — checked against the live list of 2668
+    /// registry at `chainid.network` - checked against the live list of 2668
     /// chains: 1 is Ethereum Mainnet, 42 is LUKSO Mainnet, and 1337 is Geth
     /// Testnet.
     ///
@@ -254,7 +254,7 @@ pub const MAX_QC_BLOB_BYTES: usize = 1_048_576;
 pub const MAX_VOTES_PER_MSG: usize = 128;
 
 // Empty until the mainnet genesis ceremony fills in real multiaddrs.
-// Q7 dummy bootnodes — NOT production; ceremony must replace.
+// Q7 dummy bootnodes - NOT production; ceremony must replace.
 // Ceremony (2026-07-16): ceremony-ready bootstrap peers.
 // These use well-known placeholder peer IDs. During MAINNET_GENESIS_CEREMONY,
 // Operators MUST replace these with their actual libp2p peer IDs.
@@ -271,7 +271,7 @@ const TESTNET_FALLBACK_BOOTNODES: &[&str] = &[];
 // // Ceremony (2026-07-16): ceremony DNS seeds.
 // Replace with actual operator-published DNS TXT records during ceremony.
 // Fail-closed onarim: hedef ceremony domain'leri
-// `_dnsaddr.bootstrap-{1,2}.mainnet.budlum.network` — operatorler ceremony'de
+// `_dnsaddr.bootstrap-{1,2}.mainnet.budlum.network` - operatorler ceremony'de
 // GERCEK TXT publish edene kadar "placeholder" marker'i bilinclidir; guard
 // Mainnet boot'unu bloke etmeye devam eder (4129861 regresyonu kapatildi).
 const MAINNET_DNS_SEEDS: &[&str] = &[
@@ -283,7 +283,7 @@ const TESTNET_DNS_SEEDS: &[&str] = &[];
 // (kullanıcı onayı 2026-07-16) mainnet placeholder peer
 // Fail-closed guard'ı. Genesis placeholder reddiyle (cli/commands.rs Rule 4)
 // Simetrik: dummy/placeholder marker içeren bootnode veya dns seed
-// Mainnet'te DIAL EDİLMEZ — süreç startup'ta CRITICAL exit 1 ile durur.
+// Mainnet'te DIAL EDİLMEZ - süreç startup'ta CRITICAL exit 1 ile durur.
 // Ceremony'si bu sabitleri gerçek multiaddr'lara çevirir.
 const PLACEHOLDER_PEER_MARKERS: &[&str] = &["dummy", "placeholder", "203.0.113.", ".example"];
 
@@ -333,7 +333,7 @@ pub struct SecurityConfig {
     pub persist_banned_peers: bool,
     pub mdns_enabled: bool,
     /// Max outbound connections per /24 subnet (0 = no limit). Outbound
-    /// Peer diversity — prevents eclipse via single-subnet outbound concentration.
+    /// Peer diversity - prevents eclipse via single-subnet outbound concentration.
     #[serde(default)]
     pub max_outbound_per_subnet: usize,
     /// Enable libp2p circuit relay for NAT traversal. Default false
@@ -399,7 +399,7 @@ mod tests {
 
     /// Dummy bootnode/dns-seed sabitleri guard tarafından
     /// Yakalanmalı (fail-closed), gerçek multiaddr'lar serbest kalmalı.
-    /// Guard test gücü artırıldı — derlenmiş mainnet sabitlerinin
+    /// Guard test gücü artırıldı - derlenmiş mainnet sabitlerinin
     /// Placeholder marker ile yakalandığını doğrular (c953049 regresyonu kapatıldı).
     #[test]
     fn test_placeholder_peer_detection_blocks_dummy_mainnet_entries() {

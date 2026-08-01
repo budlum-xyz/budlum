@@ -351,7 +351,7 @@ fn full_internal_relay_cycle_lock_mint() {
     //   This test asserted 99/1 when the fee was a bare `amount * 1 / 100`
     //   With no floor. That rounding is exactly what made every transfer
     //   Under 100 units free for the relayer, so the floor is the fix and 90
-    //   Is the correct number — not a regression.
+    //   Is the correct number - not a regression.
     //
     //   Note: registry stake tracking is bookkeeping-only at this layer; it
     //   Does NOT debit the relayer's native balance, so the relayer stays

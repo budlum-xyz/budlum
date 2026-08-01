@@ -319,7 +319,7 @@ mod repair_band {
     #[test]
     fn shard_level_replication_disagrees_with_object_level_durability() {
         // Each shard is held exactly once, so every one of them is "under
-        // replicated" against the target of 3 — while the object itself is
+        // replicated" against the target of 3 - while the object itself is
         // fully intact. Repair driven by the shard view would open six
         // pointless deals here.
         let (reg, manifest_id, _) = registry_with_object(4, 6);

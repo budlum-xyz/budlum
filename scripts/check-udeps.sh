@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-udeps.sh — cargo-udeps kullanılmayan-bağımlılık kapısı
+# check-udeps.sh - cargo-udeps kullanılmayan-bağımlılık kapısı
 #
 # `cargo +nightly udeps --all-targets` çıktısındaki GERÇEK formatı parse eder:
 #   Unused dependencies:
@@ -11,7 +11,7 @@
 # Her bulgu "<paket>:<dep>" biçimine indirgenir ve .github/udeps-baseline.txt
 # (izin verilenler, doc-test/YALANCI-pozitif notlarıyla) ile karşılaştırılır.
 # Baseline'da OLMAYAN bulgu = FAIL (ratchet: yeni kullanılmayan dep eklenemez).
-# Baseline dosyası yoksa SKIP (adım 1 ölçüm modu — vacuous-gate YOK).
+# Baseline dosyası yoksa SKIP (adım 1 ölçüm modu - vacuous-gate YOK).
 #
 # Kullanım:
 #   Bash scripts/check-udeps.sh <udeps-cikti>   # kapı
@@ -47,7 +47,7 @@ gate() {
     return 0
   fi
   if [ ! -f "$BASELINE" ]; then
-    echo "SKIP: $BASELINE yok — ilk ölçüm (adım 1); bulgular:"
+    echo "SKIP: $BASELINE yok - ilk ölçüm (adım 1); bulgular:"
     echo "$found"
     return 0
   fi

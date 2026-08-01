@@ -4,7 +4,7 @@ use crate::core::transaction::Transaction;
 
 /// Decode a hex string that must represent exactly 32 bytes.
 ///
-/// Returns `None` for anything else — wrong length, odd digit count, non-hex
+/// Returns `None` for anything else - wrong length, odd digit count, non-hex
 /// Characters. Hash fields carried in wire structs are plain `String`s, so a
 /// Peer controls their contents; callers must not fall back to interpreting a
 /// Malformed value as raw bytes, because that makes the derived commitment
@@ -201,14 +201,14 @@ impl Block {
                 // `hex::decode(..).unwrap_or_else(|_| tx.hash.as_bytes.to_vec)`,
                 // Which silently fed the RAW BYTES of a malformed string into the
                 // Merkle leaf preimage. Two nodes could then disagree on the tx root
-                // For the same block — a state-root fork primitive, reachable by any
+                // For the same block - a state-root fork primitive, reachable by any
                 // Peer, with no error surfaced anywhere.
                 //
                 // A non-hex hash is not a value we can meaningfully commit to, so it
                 // Is folded into a fixed domain-separated sentinel instead. That keeps
                 // This function total (it must stay infallible: callers compare the
                 // Result against the block header) while making every malformed hash
-                // Collapse to the SAME leaf on every node — deterministic, and
+                // Collapse to the SAME leaf on every node - deterministic, and
                 // Guaranteed not to collide with any well-formed 32-byte hash because
                 // Of the distinct 0x01 domain tag.
                 match hex_32(&tx.hash) {
@@ -443,7 +443,7 @@ mod tests {
     /// Peer controls it. The old code decoded it with
     /// `unwrap_or_else(|_| tx.hash.as_bytes.to_vec)`, which meant a non-hex
     /// Value still produced a "valid looking" tx root. Two nodes could commit
-    /// Different roots for the same block — a state-root fork primitive.
+    /// Different roots for the same block - a state-root fork primitive.
     ///
     /// The property that matters is determinism plus separation: every
     /// Malformed hash must fold to the SAME leaf, and that leaf must differ
@@ -482,8 +482,8 @@ mod tests {
             "well-formed hash must not share a leaf with malformed input"
         );
 
-        // And the all-zero hash — the value the raw-bytes fallback was most
-        // Likely to alias onto — stays distinct as well.
+        // And the all-zero hash - the value the raw-bytes fallback was most
+        // Likely to alias onto - stays distinct as well.
         assert_ne!(mk(&"00".repeat(32)), bad_a);
     }
     #[test]
@@ -592,7 +592,7 @@ mod merkle_duplicate_leaf_locks {
     /// CVE-2012-2459: appending a copy of the last transaction must change the
     /// root.
     ///
-    /// Measured before the fix — both lists produced
+    /// Measured before the fix - both lists produced
     /// `2f76bf7e7413d28edd1e7b531c6b023d2e9460bf8df9943d59594d72f055a446`:
     ///
     ///     [A, B, C]     -> 2f76bf7e...
@@ -615,7 +615,7 @@ mod merkle_duplicate_leaf_locks {
         );
     }
 
-    /// The attack is not limited to three leaves — any level with an odd count
+    /// The attack is not limited to three leaves - any level with an odd count
     /// is a candidate, so check the shapes where the duplication lands on a
     /// deeper level too.
     #[test]
@@ -649,7 +649,7 @@ mod merkle_duplicate_leaf_locks {
     ///
     /// Promotion (RFC 6962) is safe because a promoted node is never hashed a
     /// second time. This pins that a two-leaf tree and a one-leaf tree whose
-    /// leaf happens to equal the two-leaf root stay distinct — which they do
+    /// leaf happens to equal the two-leaf root stay distinct - which they do
     /// because interior nodes carry the `0x01` tag and leaves carry `0x00`.
     #[test]
     fn a_promoted_node_is_not_confusable_with_an_interior_node() {

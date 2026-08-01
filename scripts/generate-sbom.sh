@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scripts/generate-sbom.sh — Rust SBOM üretici
+# Scripts/generate-sbom.sh - Rust SBOM üretici
 #
 # Bu script CycloneDX formatında SBOM (Software Bill of Materials)
 # Üretir. ch12 §3.7 mainnet blocker kapsamında; harici audit
@@ -22,7 +22,7 @@ echo "[generate-sbom] SBOM üretimi başlatılıyor..."
 # 1. cargo-cyclonedx yükle (yoksa veya sürüm pinli değilse).
 # Sürüm pinli: CLI bayrakları sürümler arası değişebiliyor (run #728:
 # `--output-file` kaldırılmıştı), kapının deterministik kalması için pin ZORUNLU.
-# (PR #13 fix'inden taşıma — triyaj bakiyesi.)
+# (PR #13 fix'inden taşıma - triyaj bakiyesi.)
 CYCLONEDX_VERSION="0.5.9"
 if ! command -v cargo-cyclonedx >/dev/null 2>&1 \
     || ! cargo cyclonedx --version 2>/dev/null | grep -q "$CYCLONEDX_VERSION"; then

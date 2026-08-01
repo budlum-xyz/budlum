@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-containment-defaults.sh — a gate that is off by default must stay off
+# check-containment-defaults.sh - a gate that is off by default must stay off
 # by default, and the path that reaches it must actually consult it.
 #
 # From the containment-first directive: the protection is not that a
 # vulnerability is hidden, it is that it cannot be triggered. Three mechanisms
-# carry that here — a feature closed until a threshold is proven, a default
+# carry that here - a feature closed until a threshold is proven, a default
 # that refuses on uncertainty, and structural isolation. All three fail the
 # same way: the flag stays in the source, reads correctly in review, and the
 # code path that matters never looks at it.
@@ -32,7 +32,7 @@
 #   2. The VM decodes against `default()`, not `full()`.
 #   3. The contract-execution entry point requests gated decoding.
 #
-# It cannot prove a gate is *correct* — only that it is still wired the way it
+# It cannot prove a gate is *correct* - only that it is still wired the way it
 # was argued. That is the property that decayed.
 #
 # Usage:
@@ -75,7 +75,7 @@ gate() {
   # first.
   local default_block
   default_block="$(printf '%s\n' "$isa_code" | sed -n '/impl Default for MainnetActivation/,/^}/p')"
-  [ -n "$default_block" ] || fail "MainnetActivation no longer has a Default impl — the staged-rollout defaults are the containment boundary"
+  [ -n "$default_block" ] || fail "MainnetActivation no longer has a Default impl - the staged-rollout defaults are the containment boundary"
 
   local flag
   for flag in verify_merkle_enabled verify_inference_enabled; do

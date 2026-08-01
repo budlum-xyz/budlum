@@ -1,4 +1,4 @@
-# typos-cli konfigürasyonu — Budlum Core
+# typos-cli konfigürasyonu - Budlum Core
 #
 # Bu repo iki dillidir: kod ve API yüzeyi İngilizce, mimari/denetim
 # dokümantasyonu ve kod içi yorumların büyük bölümü Türkçedir. typos'un
@@ -19,7 +19,7 @@ extend-exclude = [
   "Cargo.lock",
   "*.lock",
   "supply-chain/",   # cargo-vet üretimi, elle düzenlenmez
-  "proto/",          # wire şeması — kelime değişimi protokolü bozar
+  "proto/",          # wire şeması - kelime değişimi protokolü bozar
   "fuzz/corpus/",    # fuzzer üretimi binary seed'ler, metin değil
   "fuzz/artifacts/",
 ]

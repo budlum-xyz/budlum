@@ -1,20 +1,20 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
-//! F10.4 EvmChainAdapter — gerçek ChainAdapter impl (H4 tam canlı yol).
+//! F10.4 EvmChainAdapter - gerçek ChainAdapter impl (H4 tam canlı yol).
 //!
 //! İki taraf:
 //!
 //! - **On-chain (verify_receipt_proof):** Budlum konsensüsünde deterministik.
 //!   F10.1 (MPT) + F10.2 (receipt/header/verify) + F10.3 (sync-committee) kullanır.
-//!   Network'süz — relayer proof üretir, Budlum verify eder.
+//!   Network'süz - relayer proof üretir, Budlum verify eder.
 //!
 //! - **Off-chain (generate/submit/wait):** Relayer binary'sinde (`src/bin/
 //!   Budlum-relayer.rs`). Ethereum RPC'ye bağlanır. Bu modül yapı + minimal
-//!   Impl sağlar; production RPC client ayrı (reqwest/alloy — mainnet sonrası).
+//!   Impl sağlar; production RPC client ayrı (reqwest/alloy - mainnet sonrası).
 //!
 //! **Güvenlik sabiti:** `verify_receipt_proof` ASLA network'e bağlanmaz.
 //!
-//! ## — receipt ↔ tx_hash kriptografik bağı
+//! ## - receipt ↔ tx_hash kriptografik bağı
 //!
 //! `proof.leaf` artık `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`
 //! Formülüyle türetilmiş olmalı. Saldırgan farklı bir tx_hash ile aynı
@@ -23,7 +23,7 @@
 //! Cross-bridge proof kullanımını da engeller (leaf bridge_address'e
 //! Bağlı).
 //!
-//! **Güvenlik sınırı:** Wire format değişti — relayer off-chain tool
+//! **Güvenlik sınırı:** Wire format değişti - relayer off-chain tool
 //! Aynı formülle leaf üretmeli. `verify_deposit` (gerçek güvenli yol)
 //! Etkilenmedi: zaten tam `EvmDepositProof` üzerinden MPT + header
 //! Chain + status + log match yapıyor.
@@ -39,16 +39,16 @@ use crate::cross_domain::evm::verify::{verify_evm_receipt, EvmDepositProof, Veri
 use crate::domain::types::Hash32;
 
 /// Ethereum bridge kontrat deposit event imzas (topic0).
-/// Keccak256("Deposit(address,uint256,bytes32,uint256)") — gerçek değer
+/// Keccak256("Deposit(address,uint256,bytes32,uint256)") - gerçek değer
 /// Ceremony'de chain config ile set edilir. Burada placeholder (CI test).
 pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 
-/// EvmChainAdapter — Ethereum için gerçek ChainAdapter.
+/// EvmChainAdapter - Ethereum için gerçek ChainAdapter.
 ///
 /// `verify_receipt_proof` on-chain deterministik. Off-chain metodlar
 /// (`generate_receipt_proof`/`submit_transaction`/`wait_for_confirmation`)
 /// Relayer binary'sinde Ethereum RPC'ye bağlanır; bu impl'de offline-test
-/// Modu (StubAdapter deseni) — production RPC ayrı.
+/// Modu (StubAdapter deseni) - production RPC ayrı.
 pub struct EvmChainAdapter {
     /// Ethereum bridge kontrat adresi (deposit event emitter).
     pub bridge_address: Vec<u8>,
@@ -67,7 +67,7 @@ impl EvmChainAdapter {
         }
     }
 
-    /// Default (test/devnet) — placeholder bridge address + topic0.
+    /// Default (test/devnet) - placeholder bridge address + topic0.
     pub fn test_default() -> Self {
         Self::new(vec![0u8; 20], DEFAULT_DEPOSIT_TOPIC0)
     }
@@ -111,9 +111,9 @@ impl ChainAdapter for EvmChainAdapter {
     /// Header chain + sync-committee proof caller (`verify_evm_receipt`)
     /// Tarafından sağlanır.
     ///
-    /// **** İki görevlı doğrulama —
-    /// 1) `proof.verify(external_state_root)` — Merkle self-consistency.
-    /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` —
+    /// **** İki görevlı doğrulama -
+    /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
+    /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    Kriptografik leaf bağı. Saldırgan farklı bir tx_hash ile aynı
     ///    Proof'u ileri süremez; cross-bridge proof da reddedilir.
     fn verify_receipt_proof(
@@ -128,7 +128,7 @@ impl ChainAdapter for EvmChainAdapter {
                 "EVM receipt Merkle proof does not verify against declared receipts root".into(),
             ));
         }
-        // Tam fix — leaf ↔ tx_hash + bridge_address kriptografik bağı.
+        // Tam fix - leaf ↔ tx_hash + bridge_address kriptografik bağı.
         if expected_tx_hash.is_empty() {
             return Err(AdapterError::ProofVerificationFailed(
                 "EVM receipt proof requires non-empty tx_hash for receipt binding".into(),
@@ -176,7 +176,7 @@ impl ChainAdapter for EvmChainAdapter {
 
 impl EvmChainAdapter {
     /// Tam on-chain EVM receipt verify (F10.2 verify.rs orchestrator).
-    /// Bu, ChainAdapter::verify_receipt_proof'un zenginleştirilmiş hali —
+    /// Bu, ChainAdapter::verify_receipt_proof'un zenginleştirilmiş hali -
     /// Relayer tam proof paketi (header chain + MPT nodes + receipt) sağlar.
     pub fn verify_deposit(&self, proof: &EvmDepositProof<'_>) -> Result<EthReceipt, VerifyError> {
         // Verify_evm_receipt: header N-conf → MPT → receipt → status → deposit log.
@@ -375,8 +375,8 @@ mod tests {
 
     /// The stronger of the two verification paths has no caller.
     ///
-    /// This file documents `verify_deposit` as "gerçek güvenli yol" — the real
-    /// safe path — and it is: it runs the full `verify_evm_receipt`
+    /// This file documents `verify_deposit` as "gerçek güvenli yol" - the real
+    /// safe path - and it is: it runs the full `verify_evm_receipt`
     /// orchestrator (header chain with N confirmations, MPT inclusion, receipt
     /// status, deposit-log match). The trait method `verify_receipt_proof`
     /// checks a Merkle proof against a declared root plus a leaf binding, and
@@ -385,11 +385,11 @@ mod tests {
     /// Production calls the second one. `relayer/worker.rs:263` invokes
     /// `adapter.verify_receipt_proof(...)`; nothing anywhere invokes
     /// `verify_deposit`, and until this test existed nothing referenced it
-    /// outside its own definition — not even a test.
+    /// outside its own definition - not even a test.
     ///
     /// That is survivable today only because the adapter registry is empty in
     /// production (`with_adapters` is never called, so every chain answers
-    /// `UnsupportedChain`) — the outbound path refuses rather than accepting a
+    /// `UnsupportedChain`) - the outbound path refuses rather than accepting a
     /// weakly-verified deposit. `relayer_worker_locks.rs` pins that.
     ///
     /// The danger is the order of events when someone wires the registry up:
@@ -409,7 +409,7 @@ mod tests {
         assert!(
             adapter_src.contains("verify_evm_receipt(proof)?"),
             "verify_deposit no longer runs the full verify_evm_receipt \
-             orchestrator — the 'real safe path' claim in this file's header \
+             orchestrator - the 'real safe path' claim in this file's header \
              needs rewriting"
         );
 
@@ -421,7 +421,7 @@ mod tests {
         );
         assert!(
             !worker_src.contains("verify_deposit"),
-            "the relayer now calls verify_deposit — the stronger path is live. \
+            "the relayer now calls verify_deposit - the stronger path is live. \
              Delete this test and pin the new behaviour instead"
         );
     }

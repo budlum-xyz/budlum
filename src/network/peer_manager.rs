@@ -235,7 +235,7 @@ impl PeerManager {
     /// Returns false if admitting `subnet` would exceed the eclipse bound.
     pub fn can_admit_subnet(&self, subnet: Option<[u8; 3]>) -> bool {
         let Some(key) = subnet else {
-            return true; // non-IPv4 (relay/circuit) — bound by max_peers only
+            return true; // non-IPv4 (relay/circuit) - bound by max_peers only
         };
         self.subnet_counts.get(&key).copied().unwrap_or(0) < self.max_peers_per_subnet
     }
@@ -662,7 +662,7 @@ mod tests {
 
         // Fill with 8 synthetic peers via check_rate_limit.
         for i in 0..8u8 {
-            // PeerId from random-ish bytes — use libp2p Keypair for uniqueness.
+            // PeerId from random-ish bytes - use libp2p Keypair for uniqueness.
             let keypair = libp2p::identity::Keypair::generate_ed25519();
             let peer = keypair.public().to_peer_id();
             assert!(
@@ -737,7 +737,7 @@ mod tests {
             .is_some());
     }
 
-    /// Eclipse protection — /24 subnet connection bound.
+    /// Eclipse protection - /24 subnet connection bound.
     #[test]
     fn eclipse_subnet_bound_rejects_fifth_peer() {
         let mut pm = PeerManager::new();
@@ -811,9 +811,9 @@ mod tests {
                 .to_peer_id();
             assert!(pm.note_connected(peer, Some(subnet_a)));
         }
-        // Subnet A is full — partition enforced
+        // Subnet A is full - partition enforced
         assert!(!pm.can_admit_subnet(Some(subnet_a)));
-        // Subnet B is still available — groups are isolated
+        // Subnet B is still available - groups are isolated
         assert!(pm.can_admit_subnet(Some(subnet_b)));
     }
 
@@ -838,7 +838,7 @@ mod tests {
         assert!(pm.is_banned(&peer), "byzantine peer must be banned");
     }
 
-    /// Chaos: eclipse single-peer isolation — a peer that can only
+    /// Chaos: eclipse single-peer isolation - a peer that can only
     /// Connect to one subnet is isolated from the broader network.
     #[test]
     fn chaos_eclipse_single_peer_isolation() {
@@ -853,7 +853,7 @@ mod tests {
                 .to_peer_id();
             assert!(pm.note_connected(peer, Some(subnet)));
         }
-        // New peer on same subnet is rejected — eclipse isolation
+        // New peer on same subnet is rejected - eclipse isolation
         assert!(!pm.can_admit_subnet(Some(subnet)));
         // New peer on different subnet is accepted
         assert!(pm.can_admit_subnet(Some([192, 168, 2])));
@@ -899,7 +899,7 @@ mod tests {
         assert!(!pm.is_banned(&peer));
     }
 
-    /// Chaos: reputation fuzz decay — peer score decreases
+    /// Chaos: reputation fuzz decay - peer score decreases
     /// With repeated violations.
     #[test]
     fn chaos_reputation_fuzz_decay() {

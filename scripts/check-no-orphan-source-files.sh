@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-no-orphan-source-files.sh — a .rs file no `mod` declares is not code.
+# check-no-orphan-source-files.sh - a .rs file no `mod` declares is not code.
 #
 # src/network/proto_bridge.rs sat in the tree carrying:
 #
@@ -50,7 +50,7 @@ SCAN_ROOTS=(src budzero wallet-core)
 
 scan() {
   local root="$1"
-  [ -d "$root/src" ] || fail "no src directory at $root/src — wrong root?"
+  [ -d "$root/src" ] || fail "no src directory at $root/src - wrong root?"
 
   python3 - "$root" "${SCAN_ROOTS[*]}" <<'PY'
 import os, re, sys
@@ -104,7 +104,7 @@ for sub in scan_roots:
                 path_targets.add(os.path.basename(target).removesuffix('.rs'))
 
 if not files:
-    print("FAIL: no .rs files found — wrong root, the gate would be vacuous", file=sys.stderr)
+    print("FAIL: no .rs files found - wrong root, the gate would be vacuous", file=sys.stderr)
     sys.exit(1)
 
 orphans = []

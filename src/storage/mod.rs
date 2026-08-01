@@ -2,13 +2,13 @@
 //!
 //! Two intentionally separate namespaces live in `src/storage/`:
 //!
-//! * [`db`] / [`traits`] — the *node-local* key-value store (sled) that
+//! * [`db`] / [`traits`] - the *node-local* key-value store (sled) that
 //!   Holds chain state, accounts, blocks, etc. Pre-existing, not touched
 //!   By the storage layer.
 //!
-//! * [`content_id`] / [`manifest`] — the *B.U.D. on-chain content-addressing
+//! * [`content_id`] / [`manifest`] - the *B.U.D. on-chain content-addressing
 //!   Primitives* introduced. These are
-//!   Pure data shapes — no I/O, no admin hooks, no team-server dependency
+//!   Pure data shapes - no I/O, no admin hooks, no team-server dependency
 //!   (plan §0.5).
 //!
 //! The domain-level deal / challenge accounting lives in

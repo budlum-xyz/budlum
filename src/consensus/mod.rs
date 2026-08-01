@@ -32,8 +32,8 @@ pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
 /// The transport bound is the looser of the two *and* it measures the more
 /// compact encoding, so the consensus check is always the binding one. A block
 /// that clears gossip can still be refused by validation; the reverse cannot
-/// happen. That ordering is the safe one — the network never accepts something
-/// consensus would reject — but it is a property of the current numbers, not
+/// happen. That ordering is the safe one - the network never accepts something
+/// consensus would reject - but it is a property of the current numbers, not
 /// of the design, and nothing was recording it.
 ///
 /// If either value moves, keep `protocol::MAX_BLOCK_SIZE` (protobuf) at or
@@ -91,7 +91,7 @@ pub trait ConsensusEngine: Send + Sync {
     /// Committed and the chain is in its post-commit state. The
     /// Default implementation is a no-op; engines that need access to
     /// The full chain (e.g. `PoWEngine` for difficulty adjustment)
-    /// Override it. Validation (`validate_block`) MUST remain pure —
+    /// Override it. Validation (`validate_block`) MUST remain pure -
     /// Any state mutation triggered by a block landing on the chain
     /// Belongs here, not in validation.
     fn record_block_with_chain(
@@ -244,7 +244,7 @@ mod tests {
         // One definition, two gates. `try_reorg` refuses a deep reorg at the
         // state machine and `is_better_chain` refuses it at fork choice; they
         // used to hold separate `= 100` literals with nothing connecting them,
-        // so raising one silently left the other enforcing the old depth — a
+        // so raising one silently left the other enforcing the old depth - a
         // chain accepted by one gate and refused by the other.
         assert_eq!(
             crate::chain::blockchain::MAX_REORG_DEPTH,

@@ -27,7 +27,7 @@ The rules this repository enforces are written down in
 principles, each paired with the CI mechanism that enforces it.
 
 Read it before a first change to consensus, tokenomics or a CI gate. It is
-descriptive, not aspirational — every claim in it names a script, a baseline or
+descriptive, not aspirational - every claim in it names a script, a baseline or
 a commit you can check. Where it and the code disagree, the code is the fact.
 
 ## Before You Start

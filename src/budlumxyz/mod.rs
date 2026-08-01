@@ -18,7 +18,7 @@ pub struct BudlumxyzRegistry {
     /// Authorized governors who can mark apps as governance-verified.
     ///
     /// Empty set = any caller accepted. `GovernanceAction::AddBudlumxyzGovernor`
-    /// Does not exist — see [`BudlumxyzRegistry::mark_verified_by_governance`]
+    /// Does not exist - see [`BudlumxyzRegistry::mark_verified_by_governance`]
     /// For why that is currently harmless and what has to change before it
     /// Stops being harmless.
     #[serde(default)]
@@ -100,7 +100,7 @@ impl BudlumxyzRegistry {
 
     /// DAO/governance verification path (sets trusted `verified` badge).
     /// Currently restricted: only the developer can call until authorized_verifiers
-    /// Exists — and it still only sets developer_attested via verify_app.
+    /// Exists - and it still only sets developer_attested via verify_app.
     /// Explicit governance action should call `mark_verified_by_governance`.
     ///
     /// Require an explicit caller identity for governance
@@ -130,7 +130,7 @@ impl BudlumxyzRegistry {
     ///
     /// Whoever wires that call path must land the governance action in the
     /// Same change, and flip this from "empty means everyone" to "empty means
-    /// No one" — a permission check that defaults to allow is the wrong shape
+    /// No one" - a permission check that defaults to allow is the wrong shape
     /// Regardless of how the set gets populated.
     pub fn mark_verified_by_governance(
         &mut self,
@@ -299,7 +299,7 @@ mod tests {
     /// Until it does not.
     ///
     /// The authorization check is `if !set.is_empty() && !set.contains(caller)`
-    /// — an empty set accepts everyone. The doc says production populates the
+    /// - an empty set accepts everyone. The doc says production populates the
     /// Set "via governance action (e.g. `GovernanceAction::AddBudlumxyzGovernor`)".
     /// That variant does not exist, so on every real network the set is empty
     /// And the gate is open.
@@ -307,8 +307,8 @@ mod tests {
     /// Harmless today for exactly one reason: nothing in production calls the
     /// Function. This test pins that reason. If a transaction type, an RPC
     /// Method or a chain command starts calling it, this fails and whoever
-    /// Wired it has to land the governance action — and invert the empty-set
-    /// Default — in the same change.
+    /// Wired it has to land the governance action - and invert the empty-set
+    /// Default - in the same change.
     #[test]
     fn governance_verification_stays_unreachable_while_it_fails_open() {
         // The empty-set default really is permissive: an arbitrary caller
@@ -325,7 +325,7 @@ mod tests {
         assert!(reg.authorized_governors.is_empty());
         let stranger = Address::from([0xEE; 32]);
         reg.mark_verified_by_governance(id, &stranger)
-            .expect("an empty governor set accepts any caller — that is the hazard");
+            .expect("an empty governor set accepts any caller - that is the hazard");
         assert!(reg.apps[&id].verified);
 
         // And the named governance action still does not exist, so nothing can
@@ -333,7 +333,7 @@ mod tests {
         let governance_src = include_str!("../core/governance.rs");
         assert!(
             !governance_src.contains("AddBudlumxyzGovernor"),
-            "the governance action now exists — populate the governor set and \
+            "the governance action now exists - populate the governor set and \
              invert the empty-set default from allow to deny"
         );
     }

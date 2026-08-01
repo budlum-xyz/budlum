@@ -1,6 +1,6 @@
 //! Mainnet validator key / HSM admission policy (Hardening H4).
 //!
-//! Pure checks — no process exit — so CI can lock the fail-closed surface.
+//! Pure checks - no process exit - so CI can lock the fail-closed surface.
 //! Runtime CLI (`NodeConfig::validate_strict_rules`) and `main` map these
 //! Violations to hard process termination.
 
@@ -88,8 +88,8 @@ pub fn check_mainnet_validator_key_policy(
     // Check the operator's own spelling first, then the canonical form. The
     // canonicaliser maps `softhsm` onto `pkcs11`, which is right for wiring up
     // a signer and wrong for deciding whether the key is in hardware.
-    // When no raw value was recorded — the operator passed `--signer-backend`
-    // directly, so nothing canonicalised it — the canonical field still holds
+    // When no raw value was recorded - the operator passed `--signer-backend`
+    // directly, so nothing canonicalised it - the canonical field still holds
     // their spelling and the loop below checks it either way.
     let raw = cfg.raw_signer_backend.unwrap_or(backend);
     for candidate in [raw, backend] {

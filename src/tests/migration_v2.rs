@@ -1,4 +1,4 @@
-//! Migration/upgrade path testi — CI Genişletme Madde 3.
+//! Migration/upgrade path testi - CI Genişletme Madde 3.
 //!
 //! Eski format snapshot'tan yeni formata migration veri bozmadan çalışmalı.
 

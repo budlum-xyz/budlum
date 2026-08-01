@@ -1,4 +1,4 @@
-//! Lubot sorgu API katmanı — model listesi, stats, sorgu hazırlığı.
+//! Lubot sorgu API katmanı - model listesi, stats, sorgu hazırlığı.
 //!
 //! RPC/CLI tarafından çağrılacak Lubot katmanı yardımcıları.
 

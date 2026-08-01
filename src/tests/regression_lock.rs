@@ -1,8 +1,8 @@
-//! Regresyon kilidi testleri — CI kırıcı güvenlik mühürleri.
+//! Regresyon kilidi testleri - CI kırıcı güvenlik mühürleri.
 //!
 //! Bu testler, geçmişte tespit edilen ve düzeltilen güvenlik bug'larının
 //! Yanlışlıkla geri alınmasını önler. Herhangi birinin CI'da kırılması,
-//! Ilgili düzeltmenin bozulduğu anlamına gelir — yalnızca bilinçli bir
+//! Ilgili düzeltmenin bozulduğu anlamına gelir - yalnızca bilinçli bir
 //! Kararla (ve bu dosyanın güncellenmesiyle) kaldırılabilir.
 //!
 //! ## Regresyon #1: ZK finality fail-open
@@ -60,11 +60,11 @@ mod zk_finality_fail_open_regression {
     /// (generic trait entry point) ASLA `Finalized` dönmemelidir.
     ///
     /// Bu metod eskiden ProofClaimRegistry lookup'ı olmadan finalize
-    /// Edebiliyordu — bu, ikinci bir registry-bağımsız doğrulama yoluydu
+    /// Edebiliyordu - bu, ikinci bir registry-bağımsız doğrulama yoluydu
     /// (fail-open). Birisi yanlışlıkla bu metodu "düzeltip" `Finalized`
     /// Dönmeye başlarsa, bu test kırılır.
     ///
-    /// İstenen davranış: her zaman `Rejected` — ZK finality yalnızca
+    /// İstenen davranış: her zaman `Rejected` - ZK finality yalnızca
     /// `verify_finality_with_claim` üzerinden çözülebilir.
     #[test]
     fn zk_trait_verify_finality_never_finalizes() {
@@ -84,7 +84,7 @@ mod zk_finality_fail_open_regression {
         assert!(
             matches!(result, FinalityStatus::Rejected(_)),
             "ZkFinalityAdapter::verify_finality must NEVER return Finalized or Pending. \
-             Got: {:?}. This is a regression — ZK finality must only \
+             Got: {:?}. This is a regression - ZK finality must only \
              resolve via verify_finality_with_claim with ProofClaimRegistry.",
             result
         );
@@ -94,7 +94,7 @@ mod zk_finality_fail_open_regression {
     /// (registry'de claim yok) durumunda ASLA `Finalized` dönmemelidir.
     ///
     /// Bu, audit'inde bulunan "missing binding" hatasının bir
-    /// Tezahürü — claim yoksa finalize olmamalı.
+    /// Tezahürü - claim yoksa finalize olmamalı.
     #[test]
     fn zk_verify_with_claim_rejects_missing_claim() {
         let adapter = ZkFinalityAdapter;
@@ -121,7 +121,7 @@ mod zk_finality_fail_open_regression {
     /// Commitment state root eşleşmediğinde ASLA `Finalized` dönmemelidir.
     ///
     /// Audit: "binding the proof to the accepted claim" + "binding
-    /// The claim to THIS commitment" — ikisi de başarısız olursa finalize
+    /// The claim to THIS commitment" - ikisi de başarısız olursa finalize
     /// Olmamalı.
     #[test]
     fn zk_verify_with_claim_rejects_root_mismatch() {
@@ -427,7 +427,7 @@ mod relayer_escrow_silent_failure_regression {
         assert!(
             registry.get_agent_payment(&[0xFEu8; 32]).is_none(),
             "REGRESYON: escrowed payment release sonrası payment hâlâ registry'de! \
-             Bu, release'in payment'ı kaldırmadığı (silent-failure) anlamına gelir — \
+             Bu, release'in payment'ı kaldırmadığı (silent-failure) anlamına gelir - \
              fonlar alıcıya credit edilmeden payment donmuş kalır."
         );
     }
@@ -490,13 +490,13 @@ mod relayer_escrow_silent_failure_regression {
         assert!(
             registry.get_agent_payment(&[0xFDu8; 32]).is_none(),
             "REGRESYON: expired payment reclaim sonrası payment hâlâ registry'de! \
-             Bu, reclaim'in payment'ı kaldırmadığı (silent-failure) anlamına gelir — \
+             Bu, reclaim'in payment'ı kaldırmadığı (silent-failure) anlamına gelir - \
              gönderen fonlarını geri alamadan payment donmuş kalır."
         );
     }
 
     /// REGRESYON KİLİDİ: Non-escrowed payment (request_id=None) asla release
-    /// Edilemez — bu path zaten "immediate credit" ile executor'da çözülür.
+    /// Edilemez - bu path zaten "immediate credit" ile executor'da çözülür.
     /// Release çağrılmamalı, çünkü escrow yok.
     #[test]
     fn non_escrowed_payment_cannot_be_released() {

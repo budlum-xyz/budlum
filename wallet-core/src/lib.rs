@@ -1,4 +1,4 @@
-//! Budlum Wallet Core — BIP39 mnemonic + SLIP-0010 Ed25519 key derivation + signing.
+//! Budlum Wallet Core - BIP39 mnemonic + SLIP-0010 Ed25519 key derivation + signing.
 //!
 //! **Permissionless Relayer Kuralı (bkz. README):** Bu crate bir WALLET'tir,
 //! RELAYER değildir. Wallet imzalar üretir; kullanıcı imzalı işlemi herhangi
@@ -18,7 +18,7 @@
 //! // Transaction imzala
 //! Let sig = wallet.sign(b"message to sign");
 //!
-//! // Opt-in note privacy (ağ seçeneği) — TEE kapalı
+//! // Opt-in note privacy (ağ seçeneği) - TEE kapalı
 //! Let mut w = Wallet::from_entropy(&[1u8; 16]).unwrap;
 //! W.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
 //! ```
@@ -26,7 +26,7 @@
 //! ## Gizlilik
 //!
 //! - `note_privacy_enabled`: gizli transfer intent üretir (PrivacyCommit yolu).
-//! - `tee_enabled`: execution-time confidentiality — **fail-closed** without a
+//! - `tee_enabled`: execution-time confidentiality - **fail-closed** without a
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
 mod bip39_wordlist;
@@ -64,11 +64,11 @@ pub enum WalletError {
     InvalidRecoveryPolicy(String),
     /// Geçersiz social recovery proposal.
     InvalidRecoveryProposal(String),
-    /// Production entropy (CSPRNG) kullanılamıyor — fail-closed.
+    /// Production entropy (CSPRNG) kullanılamıyor - fail-closed.
     ProductionEntropyUnavailable(String),
     /// Note privacy / private transfer builder hatası.
     InvalidPrivateTransfer(String),
-    /// TEE opt-in açık ama runtime yok — fail-closed (sessiz plaintext yok).
+    /// TEE opt-in açık ama runtime yok - fail-closed (sessiz plaintext yok).
     TeeUnavailable(String),
     /// Note privacy kapalıyken private transfer istendi.
     NotePrivacyDisabled,
@@ -96,7 +96,7 @@ impl std::fmt::Display for WalletError {
             WalletError::TeeUnavailable(m) => write!(f, "TEE unavailable: {m}"),
             WalletError::NotePrivacyDisabled => write!(
                 f,
-                "note privacy disabled — enable WalletPrivacyConfig::note_privacy_enabled"
+                "note privacy disabled - enable WalletPrivacyConfig::note_privacy_enabled"
             ),
         }
     }
@@ -194,7 +194,7 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     let expected_checksum = hash[0] >> (8 - checksum_bits);
     if checksum != expected_checksum {
         return Err(WalletError::InvalidMnemonic(
-            "checksum mismatch — invalid mnemonic".into(),
+            "checksum mismatch - invalid mnemonic".into(),
         ));
     }
 
@@ -424,7 +424,7 @@ pub type BudlumAddress = [u8; 32];
 ///    (PrivacyCommit/NullifierCheck/SumConservation). Kullanıcı cüzdanında
 ///    "gizli işlem kullan" tercihi; varsayılan kapalı.
 /// 2. **TEE execution-time confidentiality (Bölüm 10 #5):** işlem üretimi
-///    TEE enklavı üzerinden — operatör düz-metin görmez. UX prompt:
+///    TEE enklavı üzerinden - operatör düz-metin görmez. UX prompt:
 ///    "Bu cüzdanın işlemleri TEE katmanıyla gizli kılınsın mı?
 ///    Evet (işlemleriniz biraz yavaşlar)." Varsayılan kapalı.
 ///
@@ -436,7 +436,7 @@ pub type BudlumAddress = [u8; 32];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletPrivacyConfig {
     /// Ağ-seviyesi gizli transfer (note/UTXO opcode ailesi) kullanılsın mı.
-    /// Varsayılan `false` — kullanıcı cüzdan ayarından açar (ağ için seçenek).
+    /// Varsayılan `false` - kullanıcı cüzdan ayarından açar (ağ için seçenek).
     pub note_privacy_enabled: bool,
     /// TEE gizlilik toggle'ı. `false` = varsayılan (mevcut akış, operatör veriyi
     /// Görür, sadece STARK integrity). `true` = işlemler TEE ile gizli (yavaşlar).
@@ -474,7 +474,7 @@ impl WalletPrivacyConfig {
         }
     }
 
-    /// Yalnızca ağ-seviyesi note privacy (TEE kapalı) — daha hafif seçenek.
+    /// Yalnızca ağ-seviyesi note privacy (TEE kapalı) - daha hafif seçenek.
     #[must_use]
     pub fn note_privacy_only(enable: bool) -> Self {
         Self {
@@ -710,7 +710,7 @@ impl Wallet {
     ///
     /// **Production güvenliği:** Bu fonksiyon yalnızca `production` feature'ı
     /// Etkinleştirilmişse çalışır. Production feature olmadan `Wallet::generate`
-    /// **fail-closed** döner — placeholder/deterministic entropy asla production
+    /// **fail-closed** döner - placeholder/deterministic entropy asla production
     /// Ortamına sızar. Test/dev ortamları için `from_entropy` kullanın.
     pub fn generate(word_count: usize) -> Result<Self, WalletError> {
         let entropy_len = match word_count {
@@ -853,7 +853,7 @@ impl Wallet {
         sig.to_bytes()
     }
 
-    /// İmza doğrula (statik helper — wallet oluşturmadan).
+    /// İmza doğrula (statik helper - wallet oluşturmadan).
     pub fn verify(public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
         let pk = match VerifyingKey::from_bytes(public_key) {
             Ok(pk) => pk,
@@ -863,7 +863,7 @@ impl Wallet {
         pk.verify(message, &sig).is_ok()
     }
 
-    /// Seed (SLIP-0010 master key — export için dikkatli kullan).
+    /// Seed (SLIP-0010 master key - export için dikkatli kullan).
     #[must_use]
     pub fn seed(&self) -> &[u8; 32] {
         &self.seed
@@ -888,7 +888,7 @@ impl Wallet {
     }
 
     /// TEE toggle. When `true`, private transfer / sensitive paths require a
-    /// Live [`TeeRuntime`] — default is fail-closed.
+    /// Live [`TeeRuntime`] - default is fail-closed.
     pub fn set_tee_enabled(&mut self, enable: bool) {
         self.privacy.tee_enabled = enable;
     }
@@ -1284,11 +1284,11 @@ mod tests {
     }
 
     /// Permissionless relayer kuralı mührü: wallet-core'da relayer kayıt/stake/
-    /// Whitelist kodu YOK. Bu test grep kanıtı olarak çalışır — eğer biri
+    /// Whitelist kodu YOK. Bu test grep kanıtı olarak çalışır - eğer biri
     /// Relayer kodu eklerse bu test kırılır (bilinçli koruma).
     #[test]
     fn no_relayer_registration_code_in_wallet_core() {
-        // Bu test bir mühürdür — wallet-core'un permissionless prensibini korur.
+        // Bu test bir mühürdür - wallet-core'un permissionless prensibini korur.
         // README: "Herkes relayer olabilir, stake + slashing ile güvenlik."
         // Wallet-core bir WALLET'tir, RELAYER değildir.
         assert!(true, "wallet-core has no relayer registration/stake code");
@@ -1668,7 +1668,7 @@ mod tests {
         .is_err());
     }
 
-    // ===== — WalletPrivacyConfig (Bölüm 10 #5 + view-key) =====
+    // ===== - WalletPrivacyConfig (Bölüm 10 #5 + view-key) =====
 
     #[test]
     fn d2_privacy_config_defaults_off() {

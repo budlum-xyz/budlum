@@ -11,7 +11,7 @@ use tracing::{info, warn};
 /// `hex::decode(h).unwrap_or_else(|_| h.as_bytes.to_vec)` in three separate
 /// Places, which fed the raw bytes of a malformed string into the proposer
 /// Selection. Two nodes seeing the same block could then compute different
-/// Expected proposers — one accepts the block, the other rejects it as
+/// Expected proposers - one accepts the block, the other rejects it as
 /// Wrong-leader. That is a consensus split reachable by any peer.
 ///
 /// A malformed hash now maps to a single fixed sentinel on every node, so the
@@ -160,7 +160,7 @@ impl PoAEngine {
         hasher.update(block_index.to_le_bytes());
         // V5-SECURITY-12: Mix in external entropy (previous block hash).
         // This makes the leader unpredictable until the previous block
-        // Is durably committed — preventing pre-computation attacks.
+        // Is durably committed - preventing pre-computation attacks.
         hasher.update(entropy);
         // Fingerprint the ordered set (callers pass address-sorted active set).
         hasher.update((n as u64).to_le_bytes());

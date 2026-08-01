@@ -5,7 +5,7 @@
 //! To avoid scope-locking it to a fixed set of roles, roles are modelled as an
 //! Open `RoleId` newtype rather than a hard-coded `enum`. The well-known roles
 //! (validator/verifier/relayer) are provided as constants for convenience, but
-//! The registry accepts *any* `RoleId` — new roles can be introduced by callers
+//! The registry accepts *any* `RoleId` - new roles can be introduced by callers
 //! Without changing this module or breaking existing tests.
 
 use serde::{Deserialize, Serialize};
@@ -52,9 +52,9 @@ impl std::fmt::Display for RoleId {
 }
 
 /// Well-known protocol-level roles. These are *conveniences*, not an exhaustive
-/// List — the registry never checks membership against this set.
+/// List - the registry never checks membership against this set.
 ///
-/// Unified stake-based registry for v1 — master verifiers (DeEd),
+/// Unified stake-based registry for v1 - master verifiers (DeEd),
 /// SocialFi content validator, relayer, supply-chain attester all share the
 /// Same primitive. RoleIds 1-8 are pinned from budzero/verifier-registry crate
 /// For consistency; 9 is new for SocialFi content validator.
@@ -65,25 +65,25 @@ pub mod roles {
     pub const VALIDATOR: RoleId = RoleId(1);
     /// Settlement / proof verifier (generic).
     pub const VERIFIER: RoleId = RoleId(2);
-    /// DeEd master verifier — alias to VERIFIER (RoleId 2), same primitive,
+    /// DeEd master verifier - alias to VERIFIER (RoleId 2), same primitive,
     /// Distinct semantic label matrix. Preserves LUBOT_OPERATOR=8.
     pub const MASTER_VERIFIER: RoleId = RoleId(2);
     /// Cross-domain message relayer (permissionless).
     pub const RELAYER: RoleId = RoleId(3);
-    /// ZK proof producer (BudZKVM prover). Registration is OPTIONAL — proof
+    /// ZK proof producer (BudZKVM prover). Registration is OPTIONAL - proof
     /// Submission is fully permissionless (STARK proofs are self-verifying);
     /// Registering as a PROVER is only required to be eligible for rewards.
     pub const PROVER: RoleId = RoleId(4);
     /// B.U.D. storage operator.
     ///
-    /// Registration is OPTIONAL — opening a `StorageDeal` is itself
+    /// Registration is OPTIONAL - opening a `StorageDeal` is itself
     /// Permissionless (the deal's `operator_bond` is the only gate, see
     /// `domain::storage_deal::StorageRegistry::open_deal`). Registering as
     /// `STORAGE_OPERATOR` is only required to be eligible for the
     /// Per-deal reward stream.
     ///
     /// **Note:** `bud_storageActiveOperators`
-    /// RPC is now implemented (`src/rpc/api.rs` + `server.rs`) — queries active
+    /// RPC is now implemented (`src/rpc/api.rs` + `server.rs`) - queries active
     /// `PermissionlessRegistry` members for `RoleId(5)`. Previously it was ghost
     /// Docs only.
     ///
@@ -101,7 +101,7 @@ pub mod roles {
     /// Attestation results for consensus agreement thresholds.
     pub const AI_VERIFIER: RoleId = RoleId(6);
 
-    /// Supply-chain attester — submits finality / checkpoint attestations
+    /// Supply-chain attester - submits finality / checkpoint attestations
     /// For Budlum Go supply-chain and StorageAttestation domains.
     /// Unified under PermissionlessRegistry.
     pub const ATTESTER: RoleId = RoleId(7);
@@ -110,7 +110,7 @@ pub mod roles {
     /// Must be preserved acceptance (RoleId 8).
     pub const LUBOT_OPERATOR: RoleId = RoleId(8);
 
-    /// SocialFi content validator — validates D-Web content authenticity
+    /// SocialFi content validator - validates D-Web content authenticity
     /// For SocialFi NFT registry. New (RoleId 9).
     pub const CONTENT_VALIDATOR: RoleId = RoleId(9);
 }

@@ -601,7 +601,7 @@ mod settlement_prod_tests {
 
     #[test]
     fn poa_finality_rejects_forged_signatures() {
-        // Claiming quorum with INVALID signatures must be rejected — the
+        // Claiming quorum with INVALID signatures must be rejected - the
         // Old self-reported signer_count path is gone.
         let mut blockchain = test_chain();
         let poa = domain(31, ConsensusKind::PoA);
@@ -1139,7 +1139,7 @@ mod settlement_prod_tests {
 
     #[test]
     fn bft_finality_accepts_real_certificate() {
-        // Positive regression — a genuine BLS commit certificate over the
+        // Positive regression - a genuine BLS commit certificate over the
         // Validator set finalizes.
         let mut bc = test_chain();
         let dom = bft_domain(10);
@@ -1156,7 +1156,7 @@ mod settlement_prod_tests {
     #[test]
     fn bft_finality_rejects_forged_signer_count() {
         // A proof claiming quorum but carrying an INVALID aggregate
-        // Signature (forged/empty) must be rejected by cert.verify — the old
+        // Signature (forged/empty) must be rejected by cert.verify - the old
         // Self-reported signer_count path is gone.
         let mut bc = test_chain();
         let dom = bft_domain(13);
@@ -1979,7 +1979,7 @@ mod settlement_prod_tests {
 }
 
 /// (Step 3) ZK finality now flows through the ProofClaimRegistry using a
-/// REAL STARK proof (produced by `execution::zkvm::prove_bytecode`) — replacing
+/// REAL STARK proof (produced by `execution::zkvm::prove_bytecode`) - replacing
 /// The deleted fake-hash acceptance test.
 #[cfg(test)]
 mod zk_finality_real_proof {
@@ -2149,7 +2149,7 @@ mod zk_finality_real_proof {
         let dom = zk_domain();
         bc.register_consensus_domain(dom.clone()).unwrap();
 
-        // No submit_zk_proof call — registry is empty for this key.
+        // No submit_zk_proof call - registry is empty for this key.
         let (_, pi, _) = real_proof();
         let mut c = zk_commitment(&dom, pi.final_state_root);
         let fproof = FinalityProof::Zk {

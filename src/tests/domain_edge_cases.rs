@@ -27,7 +27,7 @@ mod tests {
         let mut bc = setup_chain();
         let producer = addr(0x01);
 
-        // Produce several blocks — difficulty should adjust
+        // Produce several blocks - difficulty should adjust
         for _ in 0..5 {
             let _ = bc.produce_block(producer);
         }
@@ -52,7 +52,7 @@ mod tests {
     /// rejection this test never asserted and the engine never performs:
     /// `PoWEngine::validate_block` checks the previous hash, the block hash and
     /// the difficulty target, and says nothing about the transaction list. An
-    /// empty block is valid under PoW — that is what keeps a chain live when
+    /// empty block is valid under PoW - that is what keeps a chain live when
     /// the mempool is empty. The old name asserted the opposite of the design
     /// while the body asserted success, so nothing was ever going to catch the
     /// contradiction.
@@ -90,7 +90,7 @@ mod tests {
     /// Renamed from `pos_double_producer_address_rejected`, which asserted the
     /// exact opposite of its own name: both blocks must succeed. Producing two
     /// sequential blocks from one address is ordinary behaviour, not a double
-    /// -sign — a double-sign is two *different* blocks at the *same* height,
+    /// -sign - a double-sign is two *different* blocks at the *same* height,
     /// and that is covered by the equivocation tests, not here. A name
     /// promising a rejection over a body asserting acceptance is worse than no
     /// test: a reader counting coverage sees the double-sign case handled.

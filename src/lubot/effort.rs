@@ -1,4 +1,4 @@
-//! Lubot effort tiers — how hard an operator is asked to work on a request.
+//! Lubot effort tiers - how hard an operator is asked to work on a request.
 //!
 //! A Lubot operator answers with the machine it actually owns. A small CPU can
 //! serve a shallow, fast answer; a large GPU rig can serve a deep one. The tier
@@ -7,17 +7,17 @@
 //!
 //! | Tier | Meaning |
 //! |---|---|
-//! | `0.5x` | fastest, shallowest — cheap and rough, useful for previews |
-//! | `1.0x` | baseline — the reference amount of work |
+//! | `0.5x` | fastest, shallowest - cheap and rough, useful for previews |
+//! | `1.0x` | baseline - the reference amount of work |
 //! | `1.1x` … `9.9x` | progressively deeper |
-//! | `10.0x` | deepest — needs dedicated hardware |
+//! | `10.0x` | deepest - needs dedicated hardware |
 //!
 //! Two rules make the tier meaningful rather than decorative:
 //!
 //! 1. **Declared capability gates eligibility.** An operator advertises the
 //!    highest tier its hardware can serve. A request above that ceiling is not
 //!    routable to it. If *no* verifier in the registry advertises `10.0x`, then
-//!    a `10.0x` request cannot be served at all — it fails closed rather than
+//!    a `10.0x` request cannot be served at all - it fails closed rather than
 //!    being silently downgraded to a cheaper answer.
 //! 2. **The tier is part of the request identity.** It is folded into the
 //!    canonical request hash, so an operator cannot accept a `5.0x` request and
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// Fixed-point scale for effort tiers: the value is stored as tenths.
 ///
 /// `1.0x` is stored as `10`, `0.5x` as `5`, `10.0x` as `100`. Integer storage
-/// keeps the value consensus-safe — no float ever reaches a hash or a
+/// keeps the value consensus-safe - no float ever reaches a hash or a
 /// comparison.
 pub const TIER_SCALE: u16 = 10;
 
@@ -55,11 +55,11 @@ pub const TIER_MAX_TENTHS: u16 = 100;
 pub struct EffortTier(u16);
 
 impl EffortTier {
-    /// The `0.5x` floor — fast and rough.
+    /// The `0.5x` floor - fast and rough.
     pub const FASTEST: EffortTier = EffortTier(TIER_MIN_TENTHS);
     /// The `1.0x` reference point.
     pub const BASELINE: EffortTier = EffortTier(TIER_BASELINE_TENTHS);
-    /// The `10.0x` ceiling — dedicated hardware only.
+    /// The `10.0x` ceiling - dedicated hardware only.
     pub const DEEPEST: EffortTier = EffortTier(TIER_MAX_TENTHS);
 
     /// Build a tier from tenths of the baseline (`5` = 0.5x, `10` = 1.0x,
@@ -119,7 +119,7 @@ impl EffortTier {
 }
 
 impl Default for EffortTier {
-    /// `1.0x` — a request that does not say otherwise gets baseline work.
+    /// `1.0x` - a request that does not say otherwise gets baseline work.
     fn default() -> Self {
         EffortTier::BASELINE
     }
@@ -135,7 +135,7 @@ impl std::fmt::Display for EffortTier {
 ///
 /// `ceilings` is what each eligible operator advertises. An empty iterator, or
 /// one where every ceiling is below the request, means the request is
-/// unservable — the caller must fail closed instead of downgrading.
+/// unservable - the caller must fail closed instead of downgrading.
 pub fn tier_is_servable<I: IntoIterator<Item = EffortTier>>(tier: EffortTier, ceilings: I) -> bool {
     ceilings.into_iter().any(|c| tier.servable_by(c))
 }
@@ -205,7 +205,7 @@ mod tests {
         let fleet = vec![
             EffortTier::from_tenths(10).unwrap(),
             EffortTier::from_tenths(35).unwrap(),
-            EffortTier::from_tenths(99).unwrap(), // 9.9x — still not enough
+            EffortTier::from_tenths(99).unwrap(), // 9.9x - still not enough
         ];
         assert!(
             !tier_is_servable(EffortTier::DEEPEST, fleet.clone()),
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn canonical_bytes_distinguish_adjacent_tiers() {
-        // 1.1x and 1.2x must not hash the same — the tier is part of request
+        // 1.1x and 1.2x must not hash the same - the tier is part of request
         // identity, so adjacent rungs have to be distinguishable.
         let a = EffortTier::from_tenths(11).unwrap();
         let b = EffortTier::from_tenths(12).unwrap();

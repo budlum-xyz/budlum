@@ -1,5 +1,5 @@
 //! Hardening Protocol H4 regression locks.
-//! Marker: REGRESSION — do not delete without replacing coverage.
+//! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]
 mod tests {
@@ -58,8 +58,8 @@ mod tests {
             "a canonicalised softhsm config must be refused on its raw spelling"
         );
 
-        // And when nothing canonicalised it — `--signer-backend softhsm` on the
-        // command line never passes through the config-file path — the
+        // And when nothing canonicalised it - `--signer-backend softhsm` on the
+        // command line never passes through the config-file path - the
         // canonical field still carries the operator's word.
         let mut soft_direct = ok.clone();
         soft_direct.signer_backend = Some("softhsm");

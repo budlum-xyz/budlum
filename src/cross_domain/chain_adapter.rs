@@ -6,7 +6,7 @@
 //! - Proof verification (against the chain's state root)
 //! - Transaction submission (broadcast signed tx to external chain)
 //!
-//! The relayer is chain-agnostic at the orchestrator level — it delegates
+//! The relayer is chain-agnostic at the orchestrator level - it delegates
 //! Chain-specific logic to the adapter.
 
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};

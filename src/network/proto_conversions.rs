@@ -254,7 +254,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 )),
             ),
             // AiAgentPayment now uses dedicated proto type instead of
-            // AiFeeReclaim (type collision — 4 tx types sharing same enum).
+            // AiFeeReclaim (type collision - 4 tx types sharing same enum).
             TransactionType::AiAgentPayment(payment) => (
                 pb::ProtoTransactionType::AiAgentPayment as i32,
                 Some(pb::proto_transaction::TypePayload::AiAgentPayment(

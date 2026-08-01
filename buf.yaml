@@ -1,4 +1,4 @@
-#  — proto/buf kapı yapılandırması
+#  - proto/buf kapı yapılandırması
 # Kapsam: buf lint (STANDARD) + buf build + buf breaking --against main (CI'da).
 version: v2
 modules:
@@ -8,9 +8,9 @@ lint:
     - STANDARD
   ignore_only:
     # BİLİNÇLİ KALİBRASYONLAR (mevcut wire/semantik durum korunur):
-    # (1) Enum'da 0 değeri TRANSFER — _UNSPECIFIED çevirisi default semantiğini
+    # (1) Enum'da 0 değeri TRANSFER - _UNSPECIFIED çevirisi default semantiğini
     #     değiştirir (wire sayıları sabit kalsa bile default tx_type sapar).
-    # (2) Paket adı budlum.network korunur — .v1 suffix'i message FQN'lerini
+    # (2) Paket adı budlum.network korunur - .v1 suffix'i message FQN'lerini
     #     değiştirir (= wire breaking). Paket versiyonlama evrimi ileri bir iş.
     # PACKAGE_DIRECTORY_MATCH ise gerçek uyumla çözüldü (dosya taşındı,
     # protoc FQN/paket adı değişmedi → wire etkisiz).

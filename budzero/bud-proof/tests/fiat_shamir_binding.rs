@@ -22,7 +22,7 @@
 //!
 //! Nothing was pinning that. These tests read both files and fail if the
 //! observe/sample order changes, because the change that breaks soundness here
-//! is a *reordering* — it compiles, every existing test passes, and proofs
+//! is a *reordering* - it compiles, every existing test passes, and proofs
 //! still verify against an honest prover. Only a malicious prover notices.
 //!
 //! The permutation challenges (rand_1..3) are also derived after the public
@@ -86,7 +86,7 @@ fn verifier_absorbs_public_values_before_sampling_any_challenge() {
 }
 
 /// Prover and verifier must absorb the same things in the same order, or they
-/// derive different challenges and an honest proof stops verifying — the
+/// derive different challenges and an honest proof stops verifying - the
 /// failure is loud. The dangerous case is the reverse: an item dropped from
 /// *both* sides stays quiet and stops binding anything.
 #[test]
@@ -95,7 +95,7 @@ fn both_sides_absorb_the_same_items_before_the_first_challenge() {
     // position was the first attempt, and it does not survive contact with the
     // source: the verifier wraps one call across two lines, and joining lines
     // to compensate double-counts the neighbours. The property that actually
-    // matters is not the formatting — it is that each item is absorbed on both
+    // matters is not the formatting - it is that each item is absorbed on both
     // sides, and that public_values is absorbed last of them, immediately
     // before the challenges.
     let absorbed_before_first_challenge = |body: &str, needle: &str| -> bool {

@@ -44,7 +44,7 @@ mod tests {
         // Expired at epoch 25
         assert_eq!(reg.resolve("expire.bud", 25), None);
 
-        // F14: grace-period — expire (25) + GRACE_PERIOD (3000)
+        // F14: grace-period - expire (25) + GRACE_PERIOD (3000)
         // Içinde 3. parti squat edemez. epoch 30 < 3025 → bob RED.
         let bob = test_addr_from_byte(2u8);
         assert!(matches!(

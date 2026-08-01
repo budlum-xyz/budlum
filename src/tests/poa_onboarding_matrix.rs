@@ -1,4 +1,4 @@
-//! PoA katılımcı onboarding test matrisi —.
+//! PoA katılımcı onboarding test matrisi -.
 //!
 //! [`crate::registry::poa_onboarding::PoAOnboarding`] modülünün tam yaşam
 //! Döngüsünü, whitelist zorunluluğunu, KYC son kullanma (expiry) davranışını
@@ -230,7 +230,7 @@ mod tests {
         assert!(!poa.whitelist(DOMAIN, 0).contains(&member));
     }
 
-    /// 8. Varsayılan horizon sonludur — açık-sonlu onay re-KYC disiplinini
+    /// 8. Varsayılan horizon sonludur - açık-sonlu onay re-KYC disiplinini
     ///    Bozmaz (modül içi testi burada bir kez daha teyit ediyoruz).
     #[test]
     fn default_horizon_is_finite_and_positive() {

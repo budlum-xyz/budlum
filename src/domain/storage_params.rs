@@ -1,4 +1,4 @@
-//! B.U.D. (Broad Universal Database) — Storage ConsensusDomain parameters
+//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters
 //!.
 //!
 //! Vision reference: `budlum-xyz/B.U.D./BUD_Merkeziyetsiz_Depolama_Vizyonu.md`,
@@ -6,11 +6,11 @@
 //! As a NEW enum variant (not a `Custom("...")` string) so the type system
 //! Forces every consumer to handle the storage parameters explicitly.
 //!
-//! The scope of this module is **accounting only** — registering a storage
+//! The scope of this module is **accounting only** - registering a storage
 //! Domain in the existing `ConsensusDomainRegistry` so it is queryable via
 //! The existing `bud_registerConsensusDomain` / `bud_getConsensusDomains`
 //! RPC surface.
-//! No proof, no slashing, no retrieval — those, gated on the
+//! No proof, no slashing, no retrieval - those, gated on the
 //! BudZero `VerifyMerkle` gate and BLS/PQ HSM, respectively.
 //!
 //! Permissionless / whitelist rule (see README, "Permissionless" section): the
@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default chunk size, per vision §8.2 (256 KiB). Kept as a constant — the
+/// Default chunk size, per vision §8.2 (256 KiB). Kept as a constant - the
 /// Per-domain `chunk_size` parameter can override it on registration.
 pub const DEFAULT_CHUNK_SIZE: u32 = 262_144;
 
@@ -49,7 +49,7 @@ pub struct StorageDomainParams {
     /// Millions of trivial commitments.
     pub max_committed_chunks: u64,
     /// Number of blocks between consecutive challenges issued to each
-    /// Active operator. `0` is rejected — challenges must be periodic.
+    /// Active operator. `0` is rejected - challenges must be periodic.
     pub challenge_interval: u64,
     /// Minimum operator bond, in the same `u64` units as
     /// `ConsensusDomain::operator_bond` (1 token = 1_000_000 fixed-point).

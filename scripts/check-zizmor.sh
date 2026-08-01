@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-zizmor.sh — GitHub Actions statik güvenlik analizi
+# check-zizmor.sh - GitHub Actions statik güvenlik analizi
 #
-# Zizmor v1.27.0 — sürüm + sha256 pinli indirme (hadolint/gitleaks deseni).
+# Zizmor v1.27.0 - sürüm + sha256 pinli indirme (hadolint/gitleaks deseni).
 # Politika: repo workflow'larında 0 bulgu (düzeltmeler gerçek, bastırmalar
 # Satır-içi gerekçeli `# zizmor: ignore[...]` marker'lı).
 #

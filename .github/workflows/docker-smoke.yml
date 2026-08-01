@@ -17,14 +17,14 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# Minimal permissions — bu workflow yalniz okur (build+scan+smoke).
+# Minimal permissions - bu workflow yalniz okur (build+scan+smoke).
 permissions:
   contents: read
 
 jobs:
   docker-smoke:
     runs-on: ubuntu-latest
-    # Security-events: write — Trivy IMAGE bulgularinin Security sekmesine
+    # Security-events: write - Trivy IMAGE bulgularinin Security sekmesine
     # SARIF olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`.
     permissions:
       contents: read
@@ -37,7 +37,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Build mainnet image
         run: docker build -t budlum-core:smoke-test -f Dockerfile .
-      - name: İmza kanıtı — taranan imaj az önce BURADA build edilen
+      - name: İmza kanıtı - taranan imaj az önce BURADA build edilen
         run: |
           docker image inspect budlum-core:smoke-test --format 'taranan_imaj_id={{.Id}} boyut={{.Size}}byte'
       # Uc adimli: once SARIF uret (exit-code 0 -> adim dusmez), sonra Security
@@ -45,7 +45,7 @@ jobs:
       # Exit-code 1 verilirse bulgu bulundugunda adim orada olur ve upload hic
       # Calismaz; yani gorulmesi en kritik olan bulgular Security sekmesine
       # Dusmez. ci.yml'deki Trivy fs taramasiyla ayni desen.
-      - name: Trivy IMAGE taramasi — SARIF uret (raporlama, kapi degil)
+      - name: Trivy IMAGE taramasi - SARIF uret (raporlama, kapi degil)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image

@@ -2,7 +2,7 @@
 //!
 //! These tests drive real block production through `Blockchain::produce_block`
 //! (which commits blocks and, at epoch boundaries, runs
-//! `maybe_observe_liveness_on_epoch_close`) — NOT the isolated
+//! `maybe_observe_liveness_on_epoch_close`) - NOT the isolated
 //! `state.record_liveness_epoch` call.
 //!
 //! Decision 2.3 = OBSERVE MODE: crossing the miss threshold is logged/reported
@@ -83,7 +83,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
     let mut bc = chain_with_validators(producer, absentee);
 
     // Lower the liveness threshold to 2 so we can cross it quickly.
-    // Explicitly assert the observe-only (disabled) behavior — this is
+    // Explicitly assert the observe-only (disabled) behavior - this is
     // Also the default, but we set it explicitly so the test documents intent
     // And stays correct even if the default ever changes.
     bc.state.registry.set_params(RegistryParams {
@@ -92,7 +92,7 @@ fn threshold_crossing_reports_but_does_not_slash_when_disabled() {
         ..RegistryParams::default()
     });
     // `add_validator` already auto-registered the absentee in the registry
-    // (sync), so a slash WOULD have something to cut — proving the
+    // (sync), so a slash WOULD have something to cut - proving the
     // No-slash property is meaningful, not vacuous.
     let stake_before = bc
         .state
@@ -166,7 +166,7 @@ fn poa_domain_member_is_not_touched_by_liveness_flow() {
     let absentee = addr(2);
     let mut bc = chain_with_validators(producer, absentee);
 
-    // A PoA domain with an approved member — kept in the SEPARATE membership
+    // A PoA domain with an approved member - kept in the SEPARATE membership
     // Registry, never in AccountState.validators.
     let mut poa = PoaMembershipRegistry::new();
     let poa_domain = 7u32;
@@ -247,7 +247,7 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
 }
 
 /// The amount cut through the real epoch flow equals exactly the configured
-/// `liveness_slash_ratio_fixed` (default 1%) — same formula as isolated
+/// `liveness_slash_ratio_fixed` (default 1%) - same formula as isolated
 /// Test, but driven by the live epoch-close hook.
 #[test]
 fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
@@ -285,7 +285,7 @@ fn liveness_slash_uses_configured_rate_through_real_epoch_flow() {
 ///
 /// `slash_validator` sets `jailed` / `active = false` and flips the registry
 /// entry to `MemberStatus::Slashed`, but the validator stays in
-/// `AccountState.validators` — that map is where `jail_until` lives, so it has
+/// `AccountState.validators` - that map is where `jail_until` lives, so it has
 /// to. `get_active_validators` filters on `active && !slashed`; the liveness
 /// expectation set did not.
 ///
@@ -332,7 +332,7 @@ fn a_slashed_validator_stops_accruing_downtime() {
         "and must still be in the validator map, which is where jail_until lives"
     );
 
-    // Several more epochs pass. It cannot sign — it is jailed.
+    // Several more epochs pass. It cannot sign - it is jailed.
     for epoch in 2..=6 {
         bc.record_liveness_epoch(epoch, &only_producer);
     }

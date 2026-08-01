@@ -117,8 +117,8 @@ impl Prevote {
     ///
     /// # Why there is no explicit `chain_id` here
     ///
-    /// The obvious cross-chain replay question — could a prevote signed on
-    /// Testnet be replayed on mainnet? — is closed, but indirectly:
+    /// The obvious cross-chain replay question - could a prevote signed on
+    /// Testnet be replayed on mainnet? - is closed, but indirectly:
     /// `checkpoint_hash` is a block hash, and `Block::calculate_hash_bytes`
     /// Folds `chain_id` into the `BDLM_BLOCK_V3` preimage. Two networks cannot
     /// Produce the same checkpoint hash at the same height, so the signature
@@ -226,7 +226,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     // Actually in the correct prime-order subgroup. Without this
     // Check an attacker can supply a small-subgroup point as the
     // Public key, which makes the pairing produce values in a
-    // Sub-group that pairs to identity for any message — bypassing
+    // Sub-group that pairs to identity for any message - bypassing
     // The BLS signature scheme entirely. The bls12_381 crate
     // Exposes `is_torsion_free` for exactly this check.
     let is_on_curve_pk: bool = pk_affine.is_torsion_free().into();
@@ -363,7 +363,7 @@ pub struct FinalityAggregator {
     /// [`SlashingReport`] here. The `Blockchain` drains this after each
     /// `add_prevote`/`add_precommit` and routes it through the SAME
     /// `submit_registry_slashing_report` path as every other consensus-verified
-    /// Report — no second slashing path is opened.
+    /// Report - no second slashing path is opened.
     pub detected_equivocations: Vec<SlashingReport>,
     /// First validly-signed prevote (hash, signature) seen per voter, used to
     /// Detect a later conflicting-hash vote regardless of arrival order.
@@ -431,7 +431,7 @@ impl FinalityAggregator {
 
         // Equivocation detection . A validly-signed vote for a
         // DIFFERENT checkpoint hash than one already seen from this voter is a
-        // Double-sign — record canonical evidence once (order-independent).
+        // Double-sign - record canonical evidence once (order-independent).
         self.detect_prevote_equivocation(&vote);
 
         if vote.checkpoint_hash != self.checkpoint_hash {
@@ -538,11 +538,11 @@ impl FinalityAggregator {
 
     /// Build and queue a consensus-verified double-sign report for `voter`.
     /// Deduplicated: one report per voter for the lifetime of this aggregator
-    /// (a single actionable report is enough — the registry jails on it).
+    /// (a single actionable report is enough - the registry jails on it).
     ///
     /// Provenance is [`ProofProvenance::ConsensusVerified`](crate::registry::ProofProvenance)
     /// Because BOTH signatures were verified at ingest against the voter's BLS
-    /// Key from the validator snapshot — the aggregator has full context to
+    /// Key from the validator snapshot - the aggregator has full context to
     /// Prove the double-sign, so no re-verification is needed downstream.
     fn record_equivocation(
         &mut self,
@@ -1305,22 +1305,22 @@ mod tests {
         // Without a known non-torsion-free generator, so we instead
         // Exercise the `is_none` rejection (covered above) and the
         // Happy path (covered by `test_verify_pop`). The critical
-        // Guarantee — that a non-decodable public key is rejected
-        // By `verify_pop` — is what the test above pins.
+        // Guarantee - that a non-decodable public key is rejected
+        // By `verify_pop` - is what the test above pins.
     }
 
     /// A checkpoint signature must not verify on another network.
     ///
     /// `Prevote::signing_message` and `checkpoint_signing_message` commit to a
     /// domain tag, the BLS scheme id, the epoch, the height and the checkpoint
-    /// hash — but not to `chain_id`. That is safe only because the checkpoint
+    /// hash - but not to `chain_id`. That is safe only because the checkpoint
     /// hash *is* a block hash and `Block::calculate_hash_bytes` folds
     /// `chain_id` into its preimage, so mainnet and testnet cannot agree on a
     /// checkpoint hash at the same height.
     ///
     /// The whole cross-chain replay defence therefore rests on one line in
     /// another module. Drop `chain_id` from the block preimage and every
-    /// checkpoint signature becomes portable between networks — with nothing
+    /// checkpoint signature becomes portable between networks - with nothing
     /// in `finality.rs` to notice, because the signing message never mentioned
     /// it.
     ///

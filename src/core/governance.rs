@@ -285,7 +285,7 @@ impl Proposal {
             .insert(*voter, current.saturating_sub(applied));
     }
 
-    /// Finalize proposal — now requires current_epoch >= end_epoch.
+    /// Finalize proposal - now requires current_epoch >= end_epoch.
     /// Previously, finalize could be called at any time, allowing early-finalize
     /// Attacks where a proposal with sufficient votes could be forced through
     /// Before the voting period ended.
@@ -462,7 +462,7 @@ impl GovernanceState {
         //
         // Only `ParameterUpdate` used to. The other eight fell through to
         // `activation_epoch()`'s `unwrap_or(self.end_epoch)`, so they executed
-        // the moment voting closed — including `SlashValidator`,
+        // the moment voting closed - including `SlashValidator`,
         // `SetConstitutionParameter` and `UnfreezeConsensusDomain`, which are
         // the ones worth watching.
         //
@@ -1031,7 +1031,7 @@ mod l4_tests {
             assert!(
                 activation > end,
                 "{label} activates at {activation}, the same epoch voting ends \
-                 ({end}) — there is no window to observe it"
+                 ({end}) - there is no window to observe it"
             );
             assert!(
                 !proposal.activation_ready(end),

@@ -7,8 +7,8 @@
 //!
 //! # Why this lives outside `budlum-core`
 //!
-//! Kani ships a pinned nightly. Version 0.67.0 — the newest published release
-//! — bundles rustc 1.93.0-nightly, and `budlum-core` declares
+//! Kani ships a pinned nightly. Version 0.67.0 - the newest published release
+//! - bundles rustc 1.93.0-nightly, and `budlum-core` declares
 //! `rust-version = "1.94.0"`, so cargo refuses the build before a harness
 //! runs. The upstream toolchain bump is merged but unreleased. Lowering the
 //! crate's MSRV to suit a verification tool would weaken a promise made to
@@ -20,7 +20,7 @@
 //! [`penalty_for`] is the expression from
 //! `PermissionlessRegistry::slash_role_only`, character for character. It is
 //! not called through the registry because that needs a populated `BTreeMap`
-//! of registrations, which a bit-precise model checker would have to unroll —
+//! of registrations, which a bit-precise model checker would have to unroll -
 //! the arithmetic is what is under proof, not the map.
 //!
 //! A copy can rot. Two things stop it: `budlum-core`'s
@@ -62,7 +62,7 @@ pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
 //     an_unbounded_ratio_can_strictly_exceed_the_bond  0s
 //
 // The split is exact: the two that finish are the two that do not call
-// `penalty_for`. Stake width does not explain it —
+// `penalty_for`. Stake width does not explain it -
 // `penalty_is_monotonic_in_the_ratio` was already narrowed to u16 symbols and
 // still times out. Multiplication count does not explain it either.
 //
@@ -71,7 +71,7 @@ pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
 // partial products; a symbolic divide it must encode as a search for a
 // quotient and remainder satisfying `n = q*d + r, r < d`, over 128-bit terms.
 // That is the wall, and it is in the shared helper rather than in any one
-// harness — which is why every diagnosis that looked at a single harness found
+// harness - which is why every diagnosis that looked at a single harness found
 // something plausible and fixed nothing.
 //
 // Not fixed here. The honest options are to prove the division away (the
@@ -133,8 +133,8 @@ mod proofs {
 
     /// The two endpoints are exact.
     ///
-    /// `malicious_slash_ratio_fixed` defaults to `FIXED_POINT_SCALE` — "proven
-    /// malice burns the whole bond" — and a zero ratio must take nothing.
+    /// `malicious_slash_ratio_fixed` defaults to `FIXED_POINT_SCALE` - "proven
+    /// malice burns the whole bond" - and a zero ratio must take nothing.
     /// Rounding at either end would leave dust in a bond that should be gone,
     /// or take stake when none was owed.
     #[kani::proof]
@@ -155,12 +155,12 @@ mod proofs {
     ///
     /// Governance relies on this when it raises a ratio. The fixed-point
     /// divide truncates, and a non-monotonic truncation would mean a higher
-    /// configured penalty producing a smaller actual one for some stake — an
+    /// configured penalty producing a smaller actual one for some stake - an
     /// incentive inversion no sampled test would be likely to find.
     ///
     /// `stake` is bounded to 32 bits here. Three unconstrained `u64`s make the
     /// two multiplications a 128-bit-by-128-bit comparison, which CBMC does not
-    /// finish inside a CI budget — the first run was cancelled at 45 minutes on
+    /// finish inside a CI budget - the first run was cancelled at 45 minutes on
     /// exactly this harness. The bound keeps the property meaningful (it still
     /// quantifies over every ratio pair, and over stakes past four billion
     /// base units) while leaving the solver a problem it can close. The
@@ -203,7 +203,7 @@ mod proofs {
     /// penalty_is_monotonic_for_full_stakes             >240s, killed
     /// ```
     ///
-    /// The reason is not the multiply everyone kept rewriting — it is the
+    /// The reason is not the multiply everyone kept rewriting - it is the
     /// divide. `penalty_for` is `(u128 * u128) / u128`, and this harness calls
     /// it twice against a **full u64 symbolic stake**. A symbolic divide is
     /// much harder than a symbolic multiply: the solver has to search for a
@@ -212,13 +212,13 @@ mod proofs {
     ///
     /// Every other harness here narrows the stake to `u32` or `u16` for
     /// exactly this reason. This one did not, and its comment argued the
-    /// opposite — that leaving the stake free is what makes the pair of
+    /// opposite - that leaving the stake free is what makes the pair of
     /// harnesses complete.
     ///
     /// The property does not need the whole range. Truncation in
     /// `(stake * ratio) / SCALE` depends on where `stake * ratio` falls
     /// relative to a multiple of `SCALE`, and a `u32` stake already spans that
-    /// residue behaviour completely — 4.29e9 distinct stakes against a
+    /// residue behaviour completely - 4.29e9 distinct stakes against a
     /// SCALE of 1e6. What a `u64` adds is arithmetic magnitude, and magnitude
     /// is what `penalty_never_exceeds_stake` covers.
     fn penalty_is_monotonic_for_full_stakes() {
@@ -253,8 +253,8 @@ mod proofs {
     ///
     /// This harness was cancelled at the CI timeout five times while the
     /// suspect was the arithmetic. It is not the arithmetic. The neighbouring
-    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` does *more* work — a
-    /// 128-bit multiply **and** a 128-bit divide, on a symbolic stake — and
+    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` does *more* work - a
+    /// 128-bit multiply **and** a 128-bit divide, on a symbolic stake - and
     /// finishes in 0.04s. The only structural difference between the two was
     /// that this one wrapped its asserts in a `for` loop over an array.
     ///
@@ -271,7 +271,7 @@ mod proofs {
     /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | yes | cancelled at 90m |
     /// | 3 | dropped the division | yes | cancelled at 90m |
     /// | 4 | concrete `u128` ratio list | yes | cancelled at 90m |
-    /// | — | neighbour harness, no loop | **no** | **0.04s** |
+    /// | - | neighbour harness, no loop | **no** | **0.04s** |
     ///
     /// Four asserts written out was not the whole fix either, and neither was
     /// the first rewrite of this comment. The table now runs to six rows,
@@ -287,9 +287,9 @@ mod proofs {
     /// | 6 | symbolic `u32` excess, `u64` `checked_mul` | **2** | still running at 20m |
     ///
     /// Attempt 6 was mine, and it went the wrong way. The harness next door
-    /// (`penalty_is_monotonic_in_the_ratio`) already records the rule —
+    /// (`penalty_is_monotonic_in_the_ratio`) already records the rule -
     /// "two symbolic operands in a 128-bit multiply is what CBMC cannot close
-    /// in CI time" — and narrows its pair to `u16` for exactly that reason. I
+    /// in CI time" - and narrows its pair to `u16` for exactly that reason. I
     /// replaced four constant ratios with a symbolic one, which reads like
     /// broader coverage and hands the solver a second free operand.
     ///
@@ -298,7 +298,7 @@ mod proofs {
     /// bits. With both sides symbolic it is a full 64x64 product.
     ///
     /// So: one symbolic operand, and narrow. `stake` is `u16` here rather than
-    /// `u32`, which is the same trade the monotonicity harness makes — the
+    /// `u32`, which is the same trade the monotonicity harness makes - the
     /// property is about the *shape* of the arithmetic, and no boundary in it
     /// lives above 65535. The ratio stays a constant, and the four that
     /// mattered are covered by four separate harnesses instead of four asserts
@@ -333,7 +333,7 @@ mod proofs {
         );
     }
 
-    /// One unit above the bound — where truncation would most easily hide the
+    /// One unit above the bound - where truncation would most easily hide the
     /// overshoot.
     #[kani::proof]
     fn an_unbounded_ratio_would_overshoot_the_bond() {

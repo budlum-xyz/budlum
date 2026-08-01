@@ -446,7 +446,7 @@ impl Executor {
                     // Sender must have sufficient balance
                     // For max_fee escrow BEFORE submitting. Without this, an
                     // Account with 0 balance can submit requests (the
-                    // Saturating_sub silently keeps it at 0 — fee leak).
+                    // Saturating_sub silently keeps it at 0 - fee leak).
                     let sender_balance = state.get_balance(&tx.from);
                     if sender_balance < max_fee {
                         return Err(BudlumError::validation(
@@ -482,7 +482,7 @@ impl Executor {
                         }
                         Err(_) => {
                             // Request rejected (deadline, max_fee=0, etc.)
-                            // Max_fee NOT deducted — no fee leak
+                            // Max_fee NOT deducted - no fee leak
                         }
                     }
                 }
@@ -629,7 +629,7 @@ impl Executor {
                 // Constitution §1: "NFT yakılırsa veri B.U.D. storage'dan fiziksel silinir."
                 // Physical pruning is handled at Blockchain level (storage_registry.prune_content);
                 // Here we record the CID for the post-block prune hook.
-                tracing::info!(%cid, "NftBurn recorded — storage content pruning delegated to blockchain");
+                tracing::info!(%cid, "NftBurn recorded - storage content pruning delegated to blockchain");
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -718,12 +718,12 @@ impl Executor {
 
                 // F4 treasury_pool (Q-X4 config_driven): 80% protocol share goes to burn_reserve (treasury) if set,
                 // Otherwise implicit burn (honest fallback). This makes Treasury/Burn explicit per Constitution §3.
-                // Analysis: "Implicit burn" is CORRECT — the booster's
+                // Analysis: "Implicit burn" is CORRECT - the booster's
                 // Balance was already reduced by `amount`, and only `creator_share`
                 // + `bud_share` are credited elsewhere. The remaining `protocol_share`
                 // (80%) is effectively burned because it leaves no account balance.
                 // This is equivalent to deducting from booster and not crediting
-                // Anyone — circulating_supply strictly decreases. No fix needed.
+                // Anyone - circulating_supply strictly decreases. No fix needed.
                 if protocol_share > 0 {
                     if let Some(treasury_addr) = state.burn_reserve_address {
                         let treasury = state.get_or_create(&treasury_addr);
@@ -794,7 +794,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::RelayerResult(res) => {
-                // Relayer EVM Proofs — cryptographic verification.
+                // Relayer EVM Proofs - cryptographic verification.
                 if res.receipt_proof.is_empty() {
                     return Err(BudlumError::validation(
                         "relayer_invalid_proof",
@@ -909,7 +909,7 @@ impl Executor {
                                     })?;
                                 // Credit relayer fee to tx.from (the
                                 // Relayer who submitted the proof). Previously the fee was
-                                // Silently dropped — BUD lost to the void. The submit_relay_proof
+                                // Silently dropped - BUD lost to the void. The submit_relay_proof
                                 // Path correctly credits the relayer; this path should too.
                                 if fee > 0 {
                                     state.try_add_balance(&tx.from, fee as u64).map_err(|e| {
@@ -919,7 +919,7 @@ impl Executor {
                             }
                             crate::cross_domain::message::MessageKind::BridgeBurn => {
                                 // Inbound burn (from target back to source) -> Unlock on Budlum
-                                // Correlation_id is MANDATORY — without it
+                                // Correlation_id is MANDATORY - without it
                                 // We cannot identify which transfer to unlock. Also, owner
                                 // Balance must be refunded after unlock (1% relayer fee
                                 // Deducted, consistent with submit_relay_proof).
@@ -1484,7 +1484,7 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
                 // If not escrowed, credit recipient immediately and ARCHIVE
-                // Settlement receipt — never drop payment_id without trail.
+                // Settlement receipt - never drop payment_id without trail.
                 if !payment.is_escrowed() {
                     let recipient = state.get_or_create(&payment.to_agent);
                     recipient.balance =
@@ -1520,7 +1520,7 @@ impl Executor {
                     })?
                     .amount;
                 // Use actual block height instead of
-                // Epoch_index * 100 approximation — these are NOT equivalent
+                // Epoch_index * 100 approximation - these are NOT equivalent
                 // In general and cause expiry timing inconsistencies.
                 let current_block = state.current_block_height;
                 let recipient = state
@@ -1659,7 +1659,7 @@ impl Executor {
                 // bud_proof::ProofEnvelope AND guest program words are supplied
                 // Via model execution_program_hash registration path (host
                 // Re-derives guest is not available on-chain for arbitrary
-                // Weights — STARK of the weight-binding guest is verified
+                // Weights - STARK of the weight-binding guest is verified
                 // When postcard envelope is present via prove_mlp_inference).
                 let req = state
                     .ai_registry
@@ -1694,7 +1694,7 @@ impl Executor {
                 // binds, and `AiExecutionProof::public_inputs` carries the
                 // inputs the envelope was produced against. A proof that omits
                 // them cannot be verified, so a proof-required model still
-                // fails closed — but for a reason that names what is missing
+                // fails closed - but for a reason that names what is missing
                 // from the proof rather than what is missing from the node.
                 if model
                     .as_ref()
@@ -1762,7 +1762,7 @@ impl Executor {
                         "execution proof_bytes exceed MAX_PROOF_BYTES",
                     ));
                 }
-                // Production gas metering — validate
+                // Production gas metering - validate
                 // Proof size against the execution class limits before
                 // Deserializing the full envelope.
                 if let Some(ref model_spec) = model {
@@ -1829,7 +1829,7 @@ impl Executor {
                     .attach_execution_proof(request_id, &tx.from, proof.clone())
                     .map_err(|e| BudlumError::validation("ai_exec_attach", e))?;
                 // If this attach unlocks finalization for require_execution_proof models,
-                // Try re-check by re-submitting is not automatic — next result or
+                // Try re-check by re-submitting is not automatic - next result or
                 // Explicit finalize path. For single-verifier threshold, caller may
                 // Re-submit same result after attach; multi-verifier attaches race.
                 // Convenience: attempt threshold re-eval without new result.

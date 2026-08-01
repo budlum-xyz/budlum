@@ -8,11 +8,11 @@ use std::collections::BTreeSet;
 pub type NoteHash = [u8; 32];
 
 /// Maximum live commitments to prevent unbounded state growth.
-/// At 65536 entries × 32 bytes = 2MB — well within node memory limits.
+/// At 65536 entries × 32 bytes = 2MB - well within node memory limits.
 pub const MAX_LIVE_COMMITMENTS: usize = 65_536;
 
 /// Maximum spent nullifiers before fail-closed rejection.
-/// At 262144 entries × 32 bytes = 8MB — bounded memory for consensus replay protection.
+/// At 262144 entries × 32 bytes = 8MB - bounded memory for consensus replay protection.
 pub const MAX_SPENT_NULLIFIERS: usize = 262_144;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,10 +54,10 @@ impl L1NoteRegistry {
         if self.spent_nullifiers.contains(&commitment) {
             // Defensive: commitment hash space must not collide with nullifiers in use
         }
-        // Bounded live commitment set — fail-closed
+        // Bounded live commitment set - fail-closed
         if self.live_commitments.len() >= MAX_LIVE_COMMITMENTS {
             return Err(format!(
-                "live commitment set full ({}/{}) — compact or wait for spends",
+                "live commitment set full ({}/{}) - compact or wait for spends",
                 self.live_commitments.len(),
                 MAX_LIVE_COMMITMENTS
             ));
@@ -135,10 +135,10 @@ impl L1NoteRegistry {
             if !self.live_commitments.remove(commitment) {
                 return Err("spend: commitment not in live set".into());
             }
-            // Bounded nullifier set — fail-closed
+            // Bounded nullifier set - fail-closed
             if self.spent_nullifiers.len() >= MAX_SPENT_NULLIFIERS {
                 return Err(format!(
-                    "spent nullifier set full ({}/{}) — chain must compact before more private transfers",
+                    "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
                     self.spent_nullifiers.len(),
                     MAX_SPENT_NULLIFIERS
                 ));
@@ -176,7 +176,7 @@ impl L1NoteRegistry {
     }
 
     /// Enforce bounded storage via hard caps.
-    /// Spent nullifiers are consensus replay protection — they cannot be deleted
+    /// Spent nullifiers are consensus replay protection - they cannot be deleted
     /// Without breaking double-spend resistance. Instead, MAX_SPENT_NULLIFIERS
     /// Enforces a hard ceiling (fail-closed): once the cap is reached, no new
     /// Private transfers are accepted until the chain performs a state migration
@@ -262,7 +262,7 @@ mod h3_tests {
             h[1..9].copy_from_slice(&(i as u64).to_le_bytes());
             r.insert_note(h).unwrap();
         }
-        // Next insert must fail-closed (use [0xFF; 32] — guaranteed unique)
+        // Next insert must fail-closed (use [0xFF; 32] - guaranteed unique)
         let overflow = [0xFFu8; 32];
         let err = r.insert_note(overflow).unwrap_err();
         assert!(

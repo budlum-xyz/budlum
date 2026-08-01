@@ -55,7 +55,7 @@ impl ConsensusDomainRegistry {
             ));
         } else if domain.min_confirmations > 1 {
             // `min_confirmations` is a header-chain depth. Exactly one of the
-            // seven finality adapters reads it — the PoW one, at
+            // seven finality adapters reads it - the PoW one, at
             // `observed_depth < domain.min_confirmations`. The other six never
             // look at the field, so a value above the no-op default was
             // accepted, stored, hashed into the registry, and then ignored.
@@ -343,7 +343,7 @@ mod tests {
     /// the other six.
     ///
     /// Measured: of the seven `DomainFinalityAdapter` implementations, exactly
-    /// one — `PoWHeaderChainFinalityAdapter` — reads `min_confirmations`, at
+    /// one - `PoWHeaderChainFinalityAdapter` - reads `min_confirmations`, at
     /// `observed_depth < domain.min_confirmations`. The rest never look at it.
     /// The shipped `config/mainnet-genesis.json` nonetheless sets it on all
     /// four bootstrap domains, so an operator reading that file has every

@@ -14,8 +14,8 @@
 mod tests {
     const NODE_RS: &str = include_str!("../network/node.rs");
 
-    /// Strip comments and string literals so a lock cannot be satisfied — or
-    /// tripped — by prose that merely mentions the pattern.
+    /// Strip comments and string literals so a lock cannot be satisfied - or
+    /// tripped - by prose that merely mentions the pattern.
     fn code_lines(body: &str) -> Vec<(usize, String)> {
         body.lines()
             .enumerate()
@@ -48,7 +48,7 @@ mod tests {
 
         assert!(
             offenders.is_empty(),
-            "node.rs contains bare .lock().unwrap() at {:?} — a poisoned mutex \
+            "node.rs contains bare .lock().unwrap() at {:?} - a poisoned mutex \
              would panic the node instead of failing the request. Match on the \
              Result, or use unwrap_or_else with an explicit logged exit.",
             offenders
@@ -179,7 +179,7 @@ mod tests {
              peers on one address is usually one machine claiming to be ten"
         );
         // The compensating control predates scoring and must not be dropped
-        // now that scoring exists — they cover different things: PeerManager
+        // now that scoring exists - they cover different things: PeerManager
         // bans on protocol violations, scoring degrades on mesh behaviour.
         assert!(
             NODE_RS.contains("check_rate_limit"),
@@ -202,7 +202,7 @@ mod tests {
     ///   opportunistic_graft_ticks  =  60    1 min ->  10 min (mobile  30)
     ///
     /// Both are mesh repair. The first decides how long a dropped explicit
-    /// peer — a bootstrap node, a configured sentry — goes unnoticed before a
+    /// peer - a bootstrap node, a configured sentry - goes unnoticed before a
     /// reconnect is attempted; for a validator that is the link to the network
     /// it was pinned to on purpose. The second decides how long a node keeps a
     /// mesh of low-scoring peers before looking for better ones, which is the
@@ -228,7 +228,7 @@ mod tests {
             NODE_RS.contains("opportunistic_graft_ticks("),
             "opportunistic grafting is back on the 60-tick default. At a 10s \
              heartbeat a node sits on a low-scoring mesh for 10 minutes before \
-             looking for better peers — that is the partial-eclipse recovery path"
+             looking for better peers - that is the partial-eclipse recovery path"
         );
 
         // The rescaling must be derived from the heartbeat, not typed in twice.
@@ -246,7 +246,7 @@ mod tests {
             "the derived tick counts lost their floor. A heartbeat longer than \
              the interval being scaled would round to zero ticks, and gossipsub \
              treats a zero tick counter as 'every heartbeat' or never depending \
-             on the counter — neither is what was asked for"
+             on the counter - neither is what was asked for"
         );
     }
 

@@ -1,4 +1,4 @@
-//! # Lubot — Merkeziyetsiz Yapay Zeka Katmanı (: gerçek budlum-core wiring)
+//! # Lubot - Merkeziyetsiz Yapay Zeka Katmanı (: gerçek budlum-core wiring)
 //!
 //! Kapalı-devre AI katmanı. Bu modül Lubot'u gerçek budlum-core
 //! Primitive'lerine bağlar (mock yok):
@@ -36,7 +36,7 @@ pub mod verify;
 ///
 /// `lock_verifier_stake` only rejects a zero bond, so without a floor a single
 /// actor could register many addresses at one unit each and fill
-/// `agreement_threshold` alone — the threshold counts addresses, not stake.
+/// `agreement_threshold` alone - the threshold counts addresses, not stake.
 /// The floor makes that attack cost `threshold × MIN_OPERATOR_BOND` instead of
 /// `threshold × 1`.
 ///
@@ -106,7 +106,7 @@ pub fn validate_inference_grant(
     Ok(())
 }
 
-// Pollen hardening: training-data grant (yeni — bulk eğitim okuma)
+// Pollen hardening: training-data grant (yeni - bulk eğitim okuma)
 
 /// Eğitim için bulk veri erişim yetkisi (epoch-sınırlı). Pollen inference
 /// Grant'ından farklı: eğitim bir corpus'u tekrar-tekrar (epoch) okur.

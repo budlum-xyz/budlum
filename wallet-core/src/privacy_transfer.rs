@@ -2,7 +2,7 @@
 //!
 //! Produces the witness + public commitments a relayer/prover needs to
 //! Assemble PrivacyCommit / NullifierCheck / SumConservation VM programs.
-//! Does **not** submit on-chain (wallet is not a relayer — see README).
+//! Does **not** submit on-chain (wallet is not a relayer - see README).
 
 use crate::privacy_crypto::{address_to_recipient_tag, privacy_commit, privacy_nullifier};
 use crate::{BudlumAddress, WalletError};
@@ -55,9 +55,9 @@ pub struct PrivateTransferIntent {
     pub output_commitments: Vec<[u8; 32]>,
     /// Public nullifiers for spent notes (double-spend markers).
     pub nullifiers: Vec<[u8; 32]>,
-    /// Σ input amounts (SumConservation rs1 witness — private).
+    /// Σ input amounts (SumConservation rs1 witness - private).
     pub sum_in: u64,
-    /// Σ output amounts (SumConservation rs2 witness — private).
+    /// Σ output amounts (SumConservation rs2 witness - private).
     pub sum_out: u64,
     /// Per-input witnesses (never broadcast in clear if TEE active).
     pub inputs: Vec<PrivateNoteInput>,
@@ -144,7 +144,7 @@ pub(crate) fn build_outputs(
     if change > 0 {
         outs.push(PrivateNoteOutput {
             amount: change,
-            recipient: [0u8; 32], // change to self — caller fills address if needed
+            recipient: [0u8; 32], // change to self - caller fills address if needed
             recipient_tag: req.change_recipient_tag.expect("validated"),
             blinding: req.change_blinding.expect("validated"),
         });

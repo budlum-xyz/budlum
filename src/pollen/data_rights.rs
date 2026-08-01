@@ -1,4 +1,4 @@
-//! Pollen Data Rights — AccessGrant v2 primitives.
+//! Pollen Data Rights - AccessGrant v2 primitives.
 //!
 //! Kullanıcı metaforu: veri tomurcuğu kullanıcıya aittir; satılan şey tomurcuğun
 //! Kendisi değil, o tomurcuğun polenidir. Bu modül bu nedenle `DataAsset` +

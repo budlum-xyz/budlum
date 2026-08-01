@@ -63,7 +63,7 @@ jobs:
     # CI Genişletme Madde 2: Cross-platform determinism matrix.
     #
     # Sertleştirme (2026-07-21):
-    #   * Matrise Windows eklendi (öncesi: yalnız Ubuntu + macOS — kullanıcı
+    #   * Matrise Windows eklendi (öncesi: yalnız Ubuntu + macOS - kullanıcı
     #     Maddesi "Linux/macOS/Windows"u üçlü ister).
     #   * Gerçek "cross" kapandı: eskiden her OS kendi testini koşup geçiyordu
     #     Ama ÇIKTILAR karşılaştırılmıyordu → aynı isteğin farklı platformda

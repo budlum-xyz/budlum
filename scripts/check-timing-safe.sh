@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scripts/check-timing-safe.sh —  statik regresyon taraması
+# Scripts/check-timing-safe.sh -  statik regresyon taraması
 #
 # Src/rpc ve src/crypto'da gizli materyalin (API anahtarı, bearer token,
 # Secret, credential vb.) ham `==` / `!=` ile karşılaştırılmasını YASAKLAR.

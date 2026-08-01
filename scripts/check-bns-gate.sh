@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Check-bns-gate.sh —  Bölüm 4: BNS test isim kanaryası
+# Check-bns-gate.sh -  Bölüm 4: BNS test isim kanaryası
 #
 # `cargo test --lib bns` çıktısını alır ve 8 BNS testinin HER BİRİNİN
 # Isim-isim "... ok" göründüğünü doğrular (scripts/check-bud-e2e.sh deseni).
 #
 # Neden gerekli (vacuous-gate koruması): bir test silinir/yeniden adlandırılırsa
 # `cargo test` yine yeşil kalabilir (daha az test geçer). Bu kapı, BNS suite'in
-# BİREBİR isimleriyle koştuğunu kilitler (modül-bazlı denetim — toplam sayı
+# BİREBİR isimleriyle koştuğunu kilitler (modül-bazlı denetim - toplam sayı
 # Üzerinden değil).
 #
 # Kullanım:
@@ -16,7 +16,7 @@
 # ============================================================================
 set -euo pipefail
 
-#  Bölüm 4 zorunlu listesi — 8 BNS testi (birebir isim kilidi)
+#  Bölüm 4 zorunlu listesi - 8 BNS testi (birebir isim kilidi)
 EXPECTED=(
   "test tests::bns::tests::test_bns_registration_and_resolution"
   "test tests::bns::tests::test_bns_expiration"
@@ -33,14 +33,14 @@ gate() {
   [ -s "$out" ] || { echo "FAIL: test ciktisi yok/bos: $out"; return 1; }
   local missing=0 name
   for name in "${EXPECTED[@]}"; do
-    # Birebir yol + "ok" sonlanmasi — alt-dize eslesmesi engelli:
+    # Birebir yol + "ok" sonlanmasi - alt-dize eslesmesi engelli:
     if ! grep -Eq "^${name} \.\.\. ok$" "$out"; then
       echo "FAIL: beklenen test ciktida yok veya ok degil: $name"
       missing=1
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    echo "FAIL: bns isim kanaryasi — zorunlu 8 testten en az biri eksik/kirik."
+    echo "FAIL: bns isim kanaryasi - zorunlu 8 testten en az biri eksik/kirik."
     return 1
   fi
   echo "OK: bns 8 zorunlu test isim-isim ok."

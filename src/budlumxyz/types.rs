@@ -1,7 +1,7 @@
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 
-/// Budlum budlumxyz — Unified Ecosystem Interface for dApp Registration.
+/// Budlum budlumxyz - Unified Ecosystem Interface for dApp Registration.
 /// Every blockchain application can register here to be visible to Budlum users.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

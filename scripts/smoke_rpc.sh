@@ -79,4 +79,4 @@ done
 
 echo "[smoke] RPC response: $(cat /tmp/budlum-smoke-rpc.json)"
 grep -q '"result"' /tmp/budlum-smoke-rpc.json
-echo "[smoke] OK — bud_chainId responded on ${NETWORK}"
+echo "[smoke] OK - bud_chainId responded on ${NETWORK}"

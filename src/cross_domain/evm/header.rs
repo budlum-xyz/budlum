@@ -19,15 +19,15 @@ use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 /// Minimal Ethereum header (köprü doğrulaması için gerekli alanlar).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthHeader {
-    /// `parentHash` — zincir bağlantısı (parent.hash ile eşleşmeli).
+    /// `parentHash` - zincir bağlantısı (parent.hash ile eşleşmeli).
     pub parent_hash: [u8; 32],
-    /// `number` — blok yüksekliği.
+    /// `number` - blok yüksekliği.
     pub number: u64,
-    /// `stateRoot` — account trie kökü (bilgi amaçlı).
+    /// `stateRoot` - account trie kökü (bilgi amaçlı).
     pub state_root: [u8; 32],
-    /// `receiptsRoot` — receipts trie kökü (receipt proof bunu anchorlar).
+    /// `receiptsRoot` - receipts trie kökü (receipt proof bunu anchorlar).
     pub receipts_root: [u8; 32],
-    /// `keccak256(rlp(raw_header))` — blok kimliği (zincir bağlantısı + onay derinliği).
+    /// `keccak256(rlp(raw_header))` - blok kimliği (zincir bağlantısı + onay derinliği).
     pub hash: [u8; 32],
 }
 
@@ -65,7 +65,7 @@ impl From<RlpError> for HeaderError {
 }
 
 /// Bridge için varsayılan onay derinliği (reorg penceresi üst sınırı; mainnet ≈64).
-/// Üretimde governance/config ile ayarlanabilir (hard-code DEĞİL — RFC Q2).
+/// Üretimde governance/config ile ayarlanabilir (hard-code DEĞİL - RFC Q2).
 pub const DEFAULT_CONFIRMATIONS: u32 = 64;
 
 /// Ham RLP header bytes'ını minimal `EthHeader`'a decode eder.

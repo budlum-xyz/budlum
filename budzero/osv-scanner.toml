@@ -1,4 +1,4 @@
-# budzero/osv-scanner.toml — BudZero workspace'i için OSV istisnaları
+# budzero/osv-scanner.toml - BudZero workspace'i için OSV istisnaları
 #
 # BudZero ayrı bir Cargo workspace'idir (kendi Cargo.lock'u var), bu yüzden
 # osv-scanner onu kök config ile değil kendi yanındaki config ile eşler.
@@ -18,7 +18,7 @@
 # bağımlılık yükseltilir.
 
 [[IgnoredVulns]]
-id = "GHSA-vxx9-2994-q338"   # CVE-2026-32314 — yamux remote panic (DoS), CVSS 8.7
+id = "GHSA-vxx9-2994-q338"   # CVE-2026-32314 - yamux remote panic (DoS), CVSS 8.7
 reason = """
 Erişilemez: yamalı kod yolu kullanılıyor, yamasız olan yalnız derleniyor.
 
@@ -36,7 +36,7 @@ tasarımı yüzünden duruyor; hiçbir bağlantı onun üzerinden kurulmuyor.
 
 Takip: libp2p-yamux 0.12 desteğini düşürdüğünde bu istisna silinir. Eğer
 node.rs'te yamux yapılandırması değişir ve 0.12 yoluna geçilirse bu gerekçe
-geçersizdir — o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
+geçersizdir - o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
 """
 
 [[IgnoredVulns]]
@@ -49,7 +49,7 @@ olur. Ölçüm (2026-07-27): aktif hickory-proto özellikleri std/tokio/futures-
 dnssec YOK, mdns YOK.
 
 DÜZELTME: eski gerekçe "yalnız opsiyonel p2p-mdns ile çözülür" diyordu; libp2p
-`dns` özelliği açıldığından beri yanlış — hickory libp2p-dns üzerinden default
+`dns` özelliği açıldığından beri yanlış - hickory libp2p-dns üzerinden default
 derlemede. Erişilemezlik sürüyor, sebebi DNSSEC'in derlenmemesi.
 
 Premis src/tests/advisory_reachability.rs ile kilitli.
@@ -65,7 +65,7 @@ derlenmiyor. Aynı düzeltme notu geçerli.
 [[IgnoredVulns]]
 id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
 reason = """
-DNS mesajı üretirken quadratic CPU tüketimi — tetiklemek için yanıt encode
+DNS mesajı üretirken quadratic CPU tüketimi - tetiklemek için yanıt encode
 etmek, yani DNS SUNMAK gerekir. Budlum yalnız çözümlüyor (libp2p-dns istemci
 tarafı resolver); ağaçta hickory-server yok. Premis
 src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree ile kilitli.
@@ -77,17 +77,17 @@ Yamalı sürüm 0.26.1, libp2p ^0.25.2'ye pinli olduğu için upstream bekleniyo
 # "unmaintained"). Repo politikası bunları deny.toml'da `unmaintained = "none"`
 # ile FAIL saymaz; görünürlük CI'daki cargo audit raporundan sağlanır ve
 # org roadmap'te izlenir. OSV bunları da zafiyet gibi döndürdüğü için burada
-# aynı politikayı yansıtıyoruz — aksi halde iki araç birbiriyle çelişirdi.
+# aynı politikayı yansıtıyoruz - aksi halde iki araç birbiriyle çelişirdi.
 # Not: bu dosyada yalnız BudZero grafiğinde GERÇEKTEN görünen kayıtlar tutulur;
 # osv-scanner kullanılmayan istisnaları "unused ignores" olarak raporlar ve
 # ölü istisna birikmesi kapının güvenilirliğini aşındırır.
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0089"
-reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) — deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
+reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) - deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
-reason = "bincode 1.x unmaintained — org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
+reason = "bincode 1.x unmaintained - org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"

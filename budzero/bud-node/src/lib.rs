@@ -1,4 +1,4 @@
-//! B.U.D. (Broad Universal Database) — P2P Storage Node
+//! B.U.D. (Broad Universal Database) - P2P Storage Node
 //!
 //! This crate implements the P2P storage backend for the B.U.D. network,
 //! Providing content-addressed storage, discovery via Kademlia DHT, and
@@ -28,7 +28,7 @@
 //! # B.U.D. Vision Reference
 //!
 //! - `budlum-xyz/B.U.D./BUD_Merkeziyetsiz_Depolama_Vizyonu.md` §2 (mantık örtüşmesi)
-//! - §7 (bugün kodda OLMAYANLAR — Bitswap, içerik routing)
+//! - §7 (bugün kodda OLMAYANLAR - Bitswap, içerik routing)
 //! - (içerik adresleme)
 
 pub mod bitswap;

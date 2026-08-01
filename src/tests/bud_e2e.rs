@@ -3,14 +3,14 @@
 //!
 //! Bu dosya iki bölümden oluşur:
 //!
-//! 1. **`e2e_three_actor_manifest_to_challenge_flow`** — 3-aktör
+//! 1. **`e2e_three_actor_manifest_to_challenge_flow`** - 3-aktör
 //!    Happy-path: operatör A bir manifest + shard için deal açar,
 //!    Izleyici C retrieval challenge açar, operatör A cevap verir,
 //!    Deal `Active` kalır. Bu, " interim retrieval challenge"ın
 //!    Çalıştığını, **teknik olarak sağlam** olduğunu kanıtlar (vizyon
 //!    §0.5: "üçüncü taraflar challenge açmaya devam eder").
 //!
-//! 2. **`team_independence_invariants` modülü** — 9 invariant:
+//! 2. **`team_independence_invariants` modülü** - 9 invariant:
 //!    Whitelist YOK, admin/pause hook YOK, "Budlum ekibi servisi"
 //!    Bağımlılığı YOK, permissionless challenge, farklı hesaplar aynı
 //!    Shard için yarışabilir, vb. (plan §4 + §0.5).
@@ -61,7 +61,7 @@ fn good_econ() -> StorageEconomicsParams {
     }
 }
 
-/// Format-GEÇERLİ test zarfı (dürüst marker —
+/// Format-GEÇERLİ test zarfı (dürüst marker -
 /// GERÇEK STARK kanıtı değil; bincode-deserialize olabilen minimal ProofEnvelope).
 fn valid_merkle_proof() -> Vec<u8> {
     let envelope = bud_proof::ProofEnvelope {
@@ -76,7 +76,7 @@ fn valid_merkle_proof() -> Vec<u8> {
     bincode::serialize(&envelope).expect("test envelope serialize")
 }
 
-//  1. 3-AKTÖR E2E — manifest → deal → challenge → answer
+//  1. 3-AKTÖR E2E - manifest → deal → challenge → answer
 
 #[test]
 fn e2e_three_actor_manifest_to_challenge_flow() {
@@ -151,7 +151,7 @@ fn e2e_three_actor_manifest_to_challenge_flow() {
     assert_eq!(reg.all_challenges().len(), 1);
 
     // Operatör A zamanında cevap verir. Hash'in gerçekten eşleşip
-    // Eşleşmediği off-chain doğrulanır — zincir yalnızca zaman + kimlik +
+    // Eşleşmediği off-chain doğrulanır - zincir yalnızca zaman + kimlik +
     // Yapı kontrol eder (interim sınırlama, plan §2.5).
     let dummy_hash = ContentId::of_subrange(b"x", 0, 0);
     let result = reg
@@ -350,7 +350,7 @@ fn e2e_deal_queries_return_replica_set() {
 
 /// İnvariant 1: Hiçbir depolama-eylemi whitelist gerektirmez.
 /// (Aynı fikir `permissionless.rs` testlerinde validator/relayer için
-/// Zaten var; burada depolama-spesifik olarak tekrar ediyoruz — kod
+/// Zaten var; burada depolama-spesifik olarak tekrar ediyoruz - kod
 /// Kapsamı farklı.)
 #[test]
 fn invariant_1_no_whitelist_for_deal_or_challenge() {
@@ -394,7 +394,7 @@ fn invariant_2_no_admin_pause_freeze_hook() {
     //     Deals_for_shard, deals_for_manifest,
     //     All_deals, all_challenges, all_results
     // Hiçbir `pause_*`, `freeze_*`, `admin_*`, `whitelist_*`, `force_*`
-    // Fonksiyonu yoktur — aşağıdaki olmaması gereken isimler için
+    // Fonksiyonu yoktur - aşağıdaki olmaması gereken isimler için
     // `doesnt_exist!` makrosu yok (Rust'ta), bu yüzden yüzeyi
     // Elle sayıyoruz:
     let registry: StorageRegistry = StorageRegistry::new();
@@ -415,7 +415,7 @@ fn invariant_2_no_admin_pause_freeze_hook() {
 }
 
 /// İnvariant 3: Herhangi bir hesap, herhangi bir shard için challenge
-/// Açabilir — operatörün kendisi bile, kendi deal'ına karşı bile
+/// Açabilir - operatörün kendisi bile, kendi deal'ına karşı bile
 /// (anti-spam bond yeterli, başka hiçbir gate yok).
 #[test]
 fn invariant_3_any_account_can_challenge_any_deal() {
@@ -469,7 +469,7 @@ fn invariant_3_any_account_can_challenge_any_deal() {
 }
 
 /// İnvariant 4: Operatör bond'u `StorageDomainParams::min_operator_bond`
-/// Üzerindeyse herkes deal açabilir — KYC, whitelist, "resmi başvuru"
+/// Üzerindeyse herkes deal açabilir - KYC, whitelist, "resmi başvuru"
 /// Yok. Aynı hesap aynı shard için birden görevla deal (replica) açabilir.
 #[test]
 fn invariant_4_any_account_meeting_bond_can_open_deal() {
@@ -496,7 +496,7 @@ fn invariant_4_any_account_meeting_bond_can_open_deal() {
     assert_eq!(reg.all_deals().len(), 5);
 }
 
-/// İnvariant 5: Challenge opener_bond > 0 olmalı — aksi halde herkes
+/// İnvariant 5: Challenge opener_bond > 0 olmalı - aksi halde herkes
 /// Ücretsiz spam challenge açardı. Bu, data-sovereignty §0.5'in
 /// "-özgü anti-spam rolü yok, ekonomik teşvik var" formülüdür.
 #[test]
@@ -526,7 +526,7 @@ fn invariant_5_opener_bond_must_be_positive() {
     );
 }
 
-/// İnvariant 6: Slashing yalnızca missed-deadline yoluyla olur —
+/// İnvariant 6: Slashing yalnızca missed-deadline yoluyla olur -
 /// "operator verileri yok etti" gibi ekstra-supreme iddialar zincir
 /// Üzerinde YAPILAMAZ. Bu, vizyon §9.1'in "sahte-yeşil yol" riskine
 /// Karşı koruma.
@@ -564,7 +564,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
         .unwrap();
     assert_eq!(reg.get_deal(deal).unwrap().status, DealStatus::Active);
     // Süresi dolmuş bir başka challenge açmaya çalışmadan önce
-    // Finalize edemeyiz — yeni bir deal ile test edelim.
+    // Finalize edemeyiz - yeni bir deal ile test edelim.
     let deal2 = reg
         .open_deal(
             1,
@@ -594,7 +594,7 @@ fn invariant_6_slash_only_via_missed_deadline() {
 }
 
 /// İnvariant 7: Bir deal `Slashed` olduktan sonra yeni challenge
-/// Kabul edilmez — bu, "jail" durumunun tutarlı olmasını sağlar.
+/// Kabul edilmez - bu, "jail" durumunun tutarlı olmasını sağlar.
 #[test]
 fn invariant_7_slashed_deal_rejects_new_challenges() {
     let mut reg = StorageRegistry::new();
@@ -653,7 +653,7 @@ fn invariant_8_deal_requires_shard_to_be_in_manifest() {
 }
 
 /// İnvariant 9: Aynı şartlar altında üretilen `ContentManifest` her
-/// Zaman aynı `manifest_id`'ye sahiptir — yani iki bağımsız node
+/// Zaman aynı `manifest_id`'ye sahiptir - yani iki bağımsız node
 /// (ekibin sunucusuna ihtiyaç duymadan) aynı `manifest_id` üzerinde
 /// Mutabık olur. Veri egemenliği.
 #[test]

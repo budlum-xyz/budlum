@@ -5,7 +5,7 @@
 //! Bu dosya bir kez yeniden yazıldı. Önceki hâli `import_qc_blob`'u **hiç
 //! çağırmıyordu**: dört test de quorum aritmetiğini kendi içinde tekrar
 //! hesaplayıp `blob.pq_signatures.len()` ile karşılaştırıyordu. Ölçtükleri şey
-//! üretim kodunun davranışı değil, testin kendi iki satırıydı —
+//! üretim kodunun davranışı değil, testin kendi iki satırıydı -
 //! `import_qc_blob` tamamen silinse dördü de yeşil kalırdı.
 //!
 //! Daha kötüsü, saydıkları şey **ham girdi sayısıydı**. Üretim kodu tam da bu
@@ -40,7 +40,7 @@ fn validator_address(i: u8) -> Address {
 
 /// A 3-validator snapshot. `pq_public_key` is non-empty because
 /// `verify_against_snapshot` refuses a validator without one before it ever
-/// reaches the signature check — with empty keys the tests would pass on the
+/// reaches the signature check - with empty keys the tests would pass on the
 /// wrong error.
 fn snapshot_3_validators(epoch: u64) -> ValidatorSetSnapshot {
     let validators: Vec<ValidatorEntry> = (0..3)
@@ -84,7 +84,7 @@ fn chain_ready_for_checkpoint() -> (Blockchain, String) {
 
 /// A blob carrying `count` distinct validators' signatures. The addresses are
 /// rendered with `to_string`, which is what `verify_against_snapshot` compares
-/// against — `Debug` would render `Address(..)` and fail on the wrong branch.
+/// against - `Debug` would render `Address(..)` and fail on the wrong branch.
 fn blob_with_distinct_sigs(count: usize, checkpoint_hash: &str) -> QcBlob {
     let sigs: Vec<PqSignatureEntry> = (0..count)
         .map(|i| PqSignatureEntry {

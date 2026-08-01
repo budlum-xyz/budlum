@@ -1,4 +1,4 @@
-//! Universal Relayer — permissionless cross-domain relay orchestrator.
+//! Universal Relayer - permissionless cross-domain relay orchestrator.
 //!
 //! Architecture:
 //! - Any account with the RELAYER role (staked via PermissionlessRegistry) can
@@ -291,7 +291,7 @@ impl UniversalRelayer {
         }
 
         // 4. Record the relay
-        // Use checked serialization — if proof cannot
+        // Use checked serialization - if proof cannot
         // Serialize, reject the relay rather than recording a bogus proof_hash.
         let proof_bytes = bincode::serialize(proof)
             .map_err(|e| RelayerError::Other(format!("proof serialization failed: {e}")))?;

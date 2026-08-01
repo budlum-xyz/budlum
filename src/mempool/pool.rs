@@ -2,12 +2,12 @@ use crate::core::address::Address;
 use crate::core::transaction::Transaction;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-// (2026-07-21) consensus determinizmi — aynı fee'deki
+// (2026-07-21) consensus determinizmi - aynı fee'deki
 // Işlemler HashSet iteration sırasıyla (process-random) geliyordu;
 // `get_sorted_transactions` → `collect_block_transactions` → blok gövdesi
 // Sırası node'dan node'a değişebilirdi (aynı-fee tie durumunda farklı blok
 // Hash'i / potansiyel split). Tie-break artık canonik: `BTreeSet<String>`
-// Ile tx.hash lexikografik düzeni — ücret DESC, hash ASC. Bu kuralı değiştirmek
+// Ile tx.hash lexikografik düzeni - ücret DESC, hash ASC. Bu kuralı değiştirmek
 // Consensus davranışını değiştirir: dokümante ve testli (`test_same_fee_canonical_order_by_hash`).
 
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ impl Mempool {
         // Read the sender's count *after* eviction, not before.
         //
         // `evict_lowest_fee` can remove a transaction belonging to this very
-        // sender — it picks the globally lowest fee, with no regard for whose
+        // sender - it picks the globally lowest fee, with no regard for whose
         // it is. Counting first meant the limit was compared against a number
         // that eviction had already invalidated, so a sender at its cap could
         // push a high-fee transaction through: eviction dropped one of its own,
@@ -266,7 +266,7 @@ impl Mempool {
     ///
     /// Both properties were missing. `hashes.iter().next()` takes an arbitrary
     /// element of a `HashSet`, so two nodes with the same mempool could evict
-    /// different transactions — and a test written against it failed roughly
+    /// different transactions - and a test written against it failed roughly
     /// one run in five. Worse, the victim could belong to the sender being
     /// admitted: `add_transaction` then saw a count that eviction had just
     /// decremented, and a sender sitting at `max_per_sender` bought itself
@@ -408,19 +408,19 @@ mod tests {
         let tx1 = create_test_tx_from_seed(alice_seed, 0, 10);
         pool.add_transaction(tx1).unwrap();
 
-        // Same sender+nonce, higher fee — RBF replace.
+        // Same sender+nonce, higher fee - RBF replace.
         let tx2 = create_test_tx_from_seed(alice_seed, 0, 15);
         assert!(pool.add_transaction(tx2).is_ok());
         assert_eq!(pool.len(), 1);
     }
 
     /// Aynı fee tie-break canonik (tx.hash ASC). Farklı ekleme
-    /// Sırası sonucu DEĞİŞTİRMEMELİ — eski HashSet yolu process-random
+    /// Sırası sonucu DEĞİŞTİRMEMELİ - eski HashSet yolu process-random
     /// Iteration ile bu testin iki havuzunda fark verirdi (flaky/üretimde
     /// Nondeterministik blok gövdesi sırası).
     #[test]
     fn test_same_fee_canonical_order_by_hash() {
-        // Three different senders with same fee — canonical order by tx.hash.
+        // Three different senders with same fee - canonical order by tx.hash.
         let tx_a = create_test_tx_from_seed(1, 0, 10);
         let tx_b = create_test_tx_from_seed(2, 0, 10);
         let tx_c = create_test_tx_from_seed(3, 0, 10);
@@ -463,7 +463,7 @@ mod tests {
         let tx1 = create_test_tx_from_seed(alice_seed, 0, 1);
         pool.add_transaction(tx1).unwrap();
 
-        // Aynı fee ile replace RED — farklı hash için nonce'u 1 kullan,
+        // Aynı fee ile replace RED - farklı hash için nonce'u 1 kullan,
         // Sonra geri nonce 0'a dönüp fee bump kontrolünü test et.
         // Tx2: same sender, same nonce (0), same fee (1), different data → different hash.
         let seed = [alice_seed; 32];
@@ -667,7 +667,7 @@ mod tests {
     ///
     /// `hashes.iter().next()` returned an arbitrary element of a `HashSet`, so
     /// the victim depended on hash iteration order. Nothing in consensus reads
-    /// the mempool directly, so this was not a fork — but it made block
+    /// the mempool directly, so this was not a fork - but it made block
     /// contents depend on allocator state, and it made
     /// `a_full_pool_does_not_let_a_sender_past_its_own_cap` fail about one run
     /// in five, which is how it was found.

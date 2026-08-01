@@ -1,20 +1,20 @@
-//! PoA participant onboarding — the full KYC-gated admission lifecycle.
+//! PoA participant onboarding - the full KYC-gated admission lifecycle.
 //!
 //! Layered on [`PoaMembershipRegistry`], this module adds the production
 //! Compliance concerns that a bare status enum cannot express. The underlying
 //! Registry remains the single source of truth for admission *status*; this
 //! Layer adds:
 //!
-//! 1. **Decision audit trail** — every `approve` / `reject` / `revoke` /
+//! 1. **Decision audit trail** - every `approve` / `reject` / `revoke` /
 //!    `renew_kyc` is recorded as an append-only log entry (actor + block +
 //!    Reason). Compliance regimes require a non-repudiable record of who
 //!    Decided what, when.
-//! 2. **KYC validity horizon** — approvals carry an *expiry block*. An expired
+//! 2. **KYC validity horizon** - approvals carry an *expiry block*. An expired
 //!    KYC silently drops the account from the whitelist until it is re-KYC'd,
 //!    So a stale compliance dossier can never keep producing blocks. This
 //!    Mirrors the expiry-horizon discipline already applied to AI payments
 //!    (`crate::ai::registry`).
-//! 3. **Whitelist enforcement view** — [`PoAWhitelist`] is the single object
+//! 3. **Whitelist enforcement view** - [`PoAWhitelist`] is the single object
 //!    Consensus code should query to answer *"is this account authorized to act
 //!    In the PoA domain **right now**"*, accounting for both status **and**
 //!    Expiry.
@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Forever, defeating the re-KYC discipline.
 pub const DEFAULT_KYC_HORIZON: u64 = 100_000;
 
-/// What an authorized admin decided about an applicant — the audit vocabulary.
+/// What an authorized admin decided about an applicant - the audit vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnboardingDecision {
     /// A candidate submitted a KYC commitment (actor = the candidate).
@@ -311,7 +311,7 @@ impl PoAOnboarding {
                 from: member.status,
             });
         }
-        // Admin authority gate (do NOT re-approve — approve rejects an
+        // Admin authority gate (do NOT re-approve - approve rejects an
         // Already-Approved member; we only need the authority check here).
         if !self.registry.is_admin(domain, &admin) {
             return Err(PoaMembershipError::NotAnAdmin {

@@ -1,4 +1,4 @@
-//! Lubot metrikleri — sorgu/verifier/operator istatistik takibi.
+//! Lubot metrikleri - sorgu/verifier/operator istatistik takibi.
 //!
 //! Lubot katmanının çalışma durumunu izler: toplam sorgu, başarılı doğrulama,
 //! Slash edilen operator, aktif model sayısı. Monitoring + dashboard için.
@@ -59,7 +59,7 @@ impl LubotMetrics {
     }
 }
 
-/// Metrik anlık görüntüsü (snapshot — Clone + Display).
+/// Metrik anlık görüntüsü (snapshot - Clone + Display).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LubotMetricsSnapshot {
     pub total_queries: u64,

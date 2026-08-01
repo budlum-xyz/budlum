@@ -1,6 +1,6 @@
 //! Generic, permissionless verifier/relayer/attester registry.
 //!
-//! **One** registry, **one** staking mechanism, **one** slashing pipeline —
+//! **One** registry, **one** staking mechanism, **one** slashing pipeline -
 //! Shared by every role (Master Verifier, Relayer, Attester, Storage Operator,
 //! AI Verifier, or any future caller-defined role).
 //!

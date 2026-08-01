@@ -1,4 +1,4 @@
-//! PoA domain membership — the *deliberate, isolated permissioned exception*.
+//! PoA domain membership - the *deliberate, isolated permissioned exception*.
 //!
 //! Master-context rule: the PoA domain exists only for institutional / regulated
 //! Parties (banks, participation-bank pilot, ...). Entry is by **KYC / identity
@@ -10,14 +10,14 @@
 //! - This registry is a **completely separate data structure** from
 //!   [`crate::registry::permissionless::PermissionlessRegistry`]. They share no
 //!   Storage, no keys and no code path.
-//! - There is **no `stake`-based entry** here at all — the only way in is
+//! - There is **no `stake`-based entry** here at all - the only way in is
 //!   `submit_application` → `approve` by an authorized PoA admin.
 //! - The permissionless registry has **no approval gate**; this one has **no
 //!   Stake gate**. Neither type can be used where the other is expected, so the
 //!   Two models cannot leak into each other.
 //! - Cross-domain messaging (via `CrossDomainMessage`) between PoA and other
 //!   Domains is still possible, but PoA's admission rules never travel with the
-//!   Message — messaging is orthogonal to membership.
+//!   Message - messaging is orthogonal to membership.
 
 use crate::core::address::Address;
 use crate::domain::types::DomainId;
@@ -128,7 +128,7 @@ impl PoaMembershipRegistry {
     }
 
     /// Step 1 of admission: a candidate submits a KYC commitment. This does NOT
-    /// Grant any authority — it only creates a `Pending` record.
+    /// Grant any authority - it only creates a `Pending` record.
     pub fn submit_application(
         &mut self,
         domain: DomainId,
@@ -222,7 +222,7 @@ impl PoaMembershipRegistry {
     }
 
     /// The authorization check the PoA domain should use. True ONLY for
-    /// KYC-approved members — never as a function of stake.
+    /// KYC-approved members - never as a function of stake.
     pub fn is_authorized(&self, domain: DomainId, account: &Address) -> bool {
         self.members
             .get(&(domain, *account))

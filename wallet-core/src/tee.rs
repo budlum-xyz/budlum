@@ -74,13 +74,13 @@ impl TeeRuntime for UnavailableTeeRuntime {
     }
 }
 
-// ── (2026-07-23): TEE SDK extension — attestation + mock runtime ──
+// ── (2026-07-23): TEE SDK extension - attestation + mock runtime ──
 //
 // Production: UnavailableTeeRuntime (fail-closed) remains the default.
 // Testing: MockTeeRuntime provides deterministic seal/attest for CI.
 // Future: Real SGX/Nitro adapters implement TeeRuntime + TeeAttester.
 
-/// TEE attestation report — binds enclave measurement to runtime data.
+/// TEE attestation report - binds enclave measurement to runtime data.
 /// Production attestations are signed by the enclave hardware root of trust.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TeeAttestation {
@@ -147,7 +147,7 @@ pub mod mock {
 
         fn seal_private_intent(&self, plaintext: &[u8]) -> Result<Vec<u8>, WalletError> {
             // Mock seal: prefix with 0xSEAL marker + length + plaintext.
-            // NOT cryptographically secure — test only.
+            // NOT cryptographically secure - test only.
             let mut sealed = Vec::with_capacity(4 + 4 + plaintext.len());
             sealed.extend_from_slice(&[0x5E, 0xA1, 0xED, 0x00]);
             sealed.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());

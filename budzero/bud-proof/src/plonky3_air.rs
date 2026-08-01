@@ -66,7 +66,7 @@ pub const COL_MEM_SAME: usize = 54;
 /// execution began, rather than one the program wrote.
 ///
 /// Without it the AIR has to require that the first access to any address
-/// reads zero — otherwise a prover could claim whatever starting memory made
+/// reads zero - otherwise a prover could claim whatever starting memory made
 /// its trace work out, which for the AI guest means claiming whatever weights
 /// it liked. That rule is correct but it also makes a host-seeded image
 /// unprovable: the matmul guest reads weights written before the first
@@ -84,7 +84,7 @@ pub const COL_MEM_IS_INIT: usize = 730;
 ///
 /// This is what makes [`COL_MEM_IS_INIT`] safe to exempt from the zero rule.
 /// Each flagged row folds `(addr, val)` into the accumulator, so a prover that
-/// flags a row it did not seed — or seeds a different value — lands on a
+/// flags a row it did not seed - or seeds a different value - lands on a
 /// different accumulator than the public input it is checked against.
 ///
 /// The fold is `acc' = acc * BETA + addr * GAMMA + val`, with fixed constants
@@ -92,7 +92,7 @@ pub const COL_MEM_IS_INIT: usize = 730;
 /// polynomial evaluation at a known point, so a prover who wants a specific
 /// accumulator can solve for a set of rows that reaches it. What it does bind
 /// is *accidental* divergence and any substitution that does not go to the
-/// trouble of solving the system — which is the difference between "the
+/// trouble of solving the system - which is the difference between "the
 /// verifier holds a value nobody checks" and "the verifier holds a value the
 /// trace must reproduce". Replacing the constants with transcript challenges
 /// is the remaining step; see `docs/AI_VERIFICATION_STATUS.md`.
@@ -115,9 +115,9 @@ pub const COL_RAW_INST: usize = 63;
 pub const COL_CPU_ACTIVE: usize = 64;
 
 // Comparison witness columns (64-bit decomposition + equality prefix flags)
-pub const COL_CMP_RS1_BASE: usize = 65; // 65..128 — rs1 bit decomposition
-pub const COL_CMP_RS2_BASE: usize = 129; // 129..192 — rs2 bit decomposition
-pub const COL_CMP_EQ_BASE: usize = 193; // 193..256 — equality prefix flags eq_0..eq_63
+pub const COL_CMP_RS1_BASE: usize = 65; // 65..128 - rs1 bit decomposition
+pub const COL_CMP_RS2_BASE: usize = 129; // 129..192 - rs2 bit decomposition
+pub const COL_CMP_EQ_BASE: usize = 193; // 193..256 - equality prefix flags eq_0..eq_63
 pub const COL_CMP_LT_RAW: usize = 257; // raw less-than result computed from bits
 
 // Poseidon witness columns.
@@ -126,14 +126,14 @@ pub const COL_CMP_LT_RAW: usize = 257; // raw less-than result computed from bit
 // `R_F = 8` full rounds (4 leading + 4 trailing), `R_P = 22` partial rounds,
 // `alpha = 7`, 30 rounds total. The round constants and the MDS matrix are
 // taken from `bud_vm` so the AIR, the prover's witness generator and the VM
-// cannot drift apart — previously all three carried their own copy of a
+// cannot drift apart - previously all three carried their own copy of a
 // 4-round prefix.
 //
 // Layout. Every round records its entry state (8 columns). The S-box
 // intermediates are only recorded where an S-box actually runs: full rounds
 // touch all eight lanes, partial rounds only lane 0. That asymmetry is the
-// point of partial rounds — they raise the algebraic degree at a fraction of
-// the width — so the trace must not pay for lanes that are never squared.
+// point of partial rounds - they raise the algebraic degree at a fraction of
+// the width - so the trace must not pay for lanes that are never squared.
 //
 //   state: 30 * 8                       = 240 columns
 //   x2:    8 * 8 (full) + 22 * 1 (part) =  86 columns
@@ -171,7 +171,7 @@ pub const fn poseidon_sbox_offset(round: usize) -> usize {
 /// Total S-box intermediates per block (x2 and x4 each need this many).
 pub const POSEIDON_SBOX_SLOTS: usize = poseidon_sbox_offset(POSEIDON_ROUNDS);
 
-pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..497 — state[r][i] at round entry
+pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..497 - state[r][i] at round entry
 pub const COL_POSEIDON_X2_BASE: usize = COL_POSEIDON_STATE_BASE + POSEIDON_ROUNDS * 8;
 pub const COL_POSEIDON_X4_BASE: usize = COL_POSEIDON_X2_BASE + POSEIDON_SBOX_SLOTS;
 pub const COL_POSEIDON_END: usize = COL_POSEIDON_X4_BASE + POSEIDON_SBOX_SLOTS;
@@ -186,8 +186,8 @@ pub const COL_POSEIDON_END: usize = COL_POSEIDON_X4_BASE + POSEIDON_SBOX_SLOTS;
 // State root are bound at the first row; final_state_root, gas_used,
 // Exit_code, trace_len, event_digest are bound at the last real step
 // (cpu_active=1, is_halt=1).
-pub const COL_FINAL_ROOT_0: usize = 670; // 354..361 — final state root (8 × u32 limbs)
-pub const COL_INIT_ROOT_0: usize = 678; // 362..369 — initial state root (8 × u32 limbs)
+pub const COL_FINAL_ROOT_0: usize = 670; // 354..361 - final state root (8 × u32 limbs)
+pub const COL_INIT_ROOT_0: usize = 678; // 362..369 - initial state root (8 × u32 limbs)
 
 // (2026-07-22) privacy-layer opcode selectors.
 // Consumes 3 columns from the intentional reserved gap (was 370..378).
@@ -208,11 +208,11 @@ pub const COL_INFERENCE_MODEL_COMMIT: usize = 691; // model commitment limb (u64
 pub const COL_INFERENCE_INPUT_COMMIT: usize = 692; // input commitment limb
 pub const COL_INFERENCE_OUTPUT_COMMIT: usize = 693; // output commitment limb
 
-pub const COL_TRACE_LEN_CTR: usize = 694; // 1 column — running count of cpu_active=1 rows
-pub const COL_GAS_LIMIT: usize = 695; // 1 column — vm.gas_limit, first row
-pub const COL_EVENT_DIGEST_0: usize = 696; // 380..387 — event_digest accumulator (8 × u32 limbs, additive)
-pub const COL_EXIT_CODE: usize = 704; // 1 column — 0=normal Halt, 1=error (set on Halt row)
-pub const COL_CHAIN_ID: usize = 705; // 1 column — vm.gas_limit sibling; chain_id is bound via first-row public input
+pub const COL_TRACE_LEN_CTR: usize = 694; // 1 column - running count of cpu_active=1 rows
+pub const COL_GAS_LIMIT: usize = 695; // 1 column - vm.gas_limit, first row
+pub const COL_EVENT_DIGEST_0: usize = 696; // 380..387 - event_digest accumulator (8 × u32 limbs, additive)
+pub const COL_EXIT_CODE: usize = 704; // 1 column - 0=normal Halt, 1=error (set on Halt row)
+pub const COL_CHAIN_ID: usize = 705; // 1 column - vm.gas_limit sibling; chain_id is bound via first-row public input
 
 // (security audit) Merkle path verification columns.
 //
@@ -225,29 +225,29 @@ pub const COL_CHAIN_ID: usize = 705; // 1 column — vm.gas_limit sibling; chain
 // `merkle_is_expand` is false, and `merkle_current` is unused on
 // That row (it gets populated on the first expansion row from the
 // Leaf value via the AIR transition below).
-pub const COL_VM_MERKLE_KEY: usize = 706; // 1 column — path key (constant across the 64 expansion rows)
-pub const COL_VM_MERKLE_BIT: usize = 707; // 1 column — (key >> round) & 1
-pub const COL_VM_MERKLE_CURRENT: usize = 708; // 1 column — Poseidon accumulator entering this round
-pub const COL_VM_MERKLE_SIBLING: usize = 709; // 1 column — sibling hash for this round
-pub const COL_VM_MERKLE_ROUND: usize = 710; // 1 column — 0..63
-pub const COL_VM_MERKLE_IS_EXPAND: usize = 711; // 1 column — 1 on rows 1..64 of a VerifyMerkle expansion
+pub const COL_VM_MERKLE_KEY: usize = 706; // 1 column - path key (constant across the 64 expansion rows)
+pub const COL_VM_MERKLE_BIT: usize = 707; // 1 column - (key >> round) & 1
+pub const COL_VM_MERKLE_CURRENT: usize = 708; // 1 column - Poseidon accumulator entering this round
+pub const COL_VM_MERKLE_SIBLING: usize = 709; // 1 column - sibling hash for this round
+pub const COL_VM_MERKLE_ROUND: usize = 710; // 1 column - 0..63
+pub const COL_VM_MERKLE_IS_EXPAND: usize = 711; // 1 column - 1 on rows 1..64 of a VerifyMerkle expansion
                                                 // Poseidon 1-round witnesses (re-used from the existing Poseidon
                                                 // Opcode columns; these are *expansion-only* and only meaningful
                                                 // On rows where merkle_is_expand=1).
-pub const COL_MERKLE_POSEIDON_X2_0: usize = 712; // 396..403 — x^2 intermediate per element (8 columns)
-pub const COL_MERKLE_POSEIDON_X4_0: usize = 720; // 404..411 — x^4 intermediate per element (8 columns)
+pub const COL_MERKLE_POSEIDON_X2_0: usize = 712; // 396..403 - x^2 intermediate per element (8 columns)
+pub const COL_MERKLE_POSEIDON_X4_0: usize = 720; // 404..411 - x^4 intermediate per element (8 columns)
 
 // (security audit) final root check
 // Witnesses.
-pub const COL_MERKLE_DIFF_INV: usize = 728; // 1 column — diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
-pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column — 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
+pub const COL_MERKLE_DIFF_INV: usize = 728; // 1 column - diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
+pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column - 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
 
 /// Remaining path key on a Merkle expansion row: `key >> round`.
 ///
 /// This column is what binds [`COL_VM_MERKLE_BIT`] to [`COL_VM_MERKLE_KEY`].
 /// Booleanity alone left the direction bit free: a prover could flip "left
 /// sibling" to "right sibling" on any round, recompute the chain, and produce
-/// a different root for the same leaf and siblings — measured, and the AIR
+/// a different root for the same leaf and siblings - measured, and the AIR
 /// accepted it. A Merkle proof whose direction bits are unconstrained proves
 /// nothing about membership.
 ///
@@ -636,7 +636,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // and leaving `merkle_key` untouched produced a different root, and
         // the AIR accepted the proof. Direction bits decide which sibling is
         // on the left, so an unconstrained bit column means the path proves
-        // nothing about where the leaf sits — which is the entire content of
+        // nothing about where the leaf sits - which is the entire content of
         // a Merkle membership proof.
         //
         // `COL_MERKLE_KEY_REM` carries `key >> round` and is tied down by a
@@ -675,7 +675,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Terminator: the last expansion row of a path (expand followed by a
         // non-expand row) has rem == bit, i.e. rem' would be zero. Together
         // with the chain above this forces rem_r = key >> r exactly, and pins
-        // `key` to 64 bits — the old code assumed that without checking.
+        // `key` to 64 bits - the old code assumed that without checking.
         builder
             .when_transition()
             .when(cpu_active.clone())
@@ -708,7 +708,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Will consume them.
         //
         // Key must equal the key from the *previous* expansion
-        // Row's key, or — for the first expansion row (round=0)
+        // Row's key, or - for the first expansion row (round=0)
         // The key from the original step. Since the original
         // Step's merkle_is_expand is 0 and `merkle_key` is
         // Patched in-place by the VM (see `Vm::step`), the same
@@ -727,7 +727,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Between two VerifyMerkle calls or at the start/end of
         // The trace).
         // Key continuity only when staying in / entering
-        // Expansion — not when leaving expansion to Halt (next key is 0).
+        // Expansion - not when leaving expansion to Halt (next key is 0).
         builder
             .when_transition()
             .when(cpu_active.clone())
@@ -844,7 +844,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // We apply it on the current row's transition (nxt row
         // Carries the next accumulator). The transition is
         // Suppressed when the next row is *not* an expansion row
-        // (last round) — that row's merkle_current is the
+        // (last round) - that row's merkle_current is the
         // 64th-round output and is checked below.
         builder
             .when_transition()
@@ -870,7 +870,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Merkle_final_flag = 1).
         // Equality boolean via inverse witness on the
         // *original* VerifyMerkle step only. Expansion rows reuse opcode 0x1E
-        // So is_verify_merkle=1 on them too — must gate with (1 - is_expand).
+        // So is_verify_merkle=1 on them too - must gate with (1 - is_expand).
         //   Prod = diff * inv ∈ {0,1}
         //   Eq = 1 - prod (1 when final==root, 0 otherwise)
         //   Diff * eq = 0
@@ -895,7 +895,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Expansion rows reuse Opcode::VerifyMerkle so is_verify_merkle=1 on
         // Them too; without (1 - is_expand) the constraint wrongly forces
         // Every expand→expand transition to set nxt_merkle_current = rs2_val
-        // (0 on expansion steps) and nxt_round = 0 — which breaks valid proofs.
+        // (0 on expansion steps) and nxt_round = 0 - which breaks valid proofs.
         //
         // Leaf binding: original → first expansion: nxt.merkle_current = leaf.
         builder
@@ -1047,13 +1047,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //   [40..48] event_digest (bound)
         //
         // We compare one 32-bit limb at a time, so each side has only
-        // A `public_inputs[i]` and a `cur[COL...]` — no `<< 32j`
+        // A `public_inputs[i]` and a `cur[COL...]` - no `<< 32j`
         // Shifts that would overflow a u64 in Rust.
 
         // (1b) initial memory image: last real row, the fold equals the low
         // 64 bits of `initial_state_root`.
         //
-        // `initial_state_root` was a public input nothing constrained — every
+        // `initial_state_root` was a public input nothing constrained - every
         // caller passed zeroes and the AIR compared them against a column the
         // prover also filled with zeroes. It now carries the commitment to the
         // memory image the program started from, which is what lets a
@@ -1122,7 +1122,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //   Digest[i+1] = digest[i] + is_log[i+1] * rs1[i+1]
         // The previous formulation used cur is_log/rs1, which forced
         // Digest to update one row late and rejected every Log program
-        // (InvalidProof) — that also broke budlum's CI pin rebind.
+        // (InvalidProof) - that also broke budlum's CI pin rebind.
         {
             let nxt_event_0: AB::Expr = nxt[COL_EVENT_DIGEST_0].into();
             let cur_event_0: AB::Expr = cur[COL_EVENT_DIGEST_0].into();
@@ -1132,7 +1132,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .when_transition()
                 .when(cpu_active.clone())
                 .assert_zero(nxt_event_0 - cur_event_0 - nxt_is_log * nxt_rs1);
-            // Bounds check: COL_EVENT_DIGEST_0 < 2^32 — too expensive
+            // Bounds check: COL_EVENT_DIGEST_0 < 2^32 - too expensive
             // To do as a range proof; we instead require that the
             // First column never carries a bit beyond the 32nd. This
             // Is approximated by zero-extending the u32 limb: as long
@@ -1300,7 +1300,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //   acc' = acc*BETA + addr*GAMMA + val   when it is
         //
         // The first row starts the fold from zero, so an empty image gives a
-        // zero accumulator and matches an all-zero `initial_state_root` — the
+        // zero accumulator and matches an all-zero `initial_state_root` - the
         // behaviour every existing program relies on.
         {
             let beta = AB::Expr::from(AB::F::from_u64(MEM_INIT_BETA));
@@ -1455,7 +1455,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // A `VerifyMerkle` expansion row reads one sibling word from the
             // path buffer, and the original step reads the key. Those reads go
             // through the memory table like any other, so they have to appear
-            // on the demand side of the LogUp too — a row that supplies a
+            // on the demand side of the LogUp too - a row that supplies a
             // memory entry without a matching demand unbalances the argument
             // and every proof fails with `InvalidProof`.
             //
@@ -1745,7 +1745,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Constraints ensure:
         //   1. Selector is bound to opcode 0x1F (malicious prover cannot
         //      Set is_verify_inference=1 on non-0x1F rows or =0 on 0x1F rows).
-        //   2. rd_val_new = 0 always (proof always fails — fail-closed).
+        //   2. rd_val_new = 0 always (proof always fails - fail-closed).
         //   3. Expansion rows (COL_INFERENCE_IS_EXPAND=1) carry consistent
         //      Commitment chain: model/input/output commitments are constant
         //      Across all 8 expansion rows of a single VerifyInference step.
@@ -1825,7 +1825,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             //   Poseidon:        s0=rs1, s1=rs2, s2..s7=0
             //   PrivacyCommit:   s0=rs1(amount), s1=rs2(recipient), s2=imm(blinding), s3..s7=0
             //   NullifierCheck:  s0=rs2(secret), s1=DOMAIN_NULLIFIER, s2..s7=0
-            // DOMAIN_NULLIFIER = 0x4e554c4c49464552 ("NULLIFER") — must match bud-vm.
+            // DOMAIN_NULLIFIER = 0x4e554c4c49464552 ("NULLIFER") - must match bud-vm.
             let domain_nullifier = AB::Expr::from(AB::F::from_u64(0x4e554c4c49464552));
             let expected_s0 = p_poseidon.clone() * rs1_val.clone()
                 + p_commit.clone() * rs1_val.clone()

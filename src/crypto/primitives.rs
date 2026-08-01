@@ -233,7 +233,7 @@ pub struct PqKeyPair {
 /// and its length is enforced by `validate_public_key` on the validation path.
 /// Dilithium5 keys are 2592 bytes, ML-DSA-65 keys are 1952. A node built with
 /// one backend therefore *rejects* validator registrations produced by the
-/// other — not as a signature failure, but as a malformed key.
+/// other - not as a signature failure, but as a malformed key.
 ///
 /// That is a network split with no error message pointing at its cause, so the
 /// scheme is named here, pinned in genesis, and checked at startup rather than
@@ -489,7 +489,7 @@ impl ValidatorKeys {
     /// # Security
     /// Contents are **plaintext** (sig + VRF + optional PQ + BLS).
     /// File mode is `0o600` on Unix, but there is no password/KDF/AEAD.
-    /// **Do not use on mainnet** — `validate_strict_rules` rejects this path.
+    /// **Do not use on mainnet** - `validate_strict_rules` rejects this path.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
         tracing::warn!(
             "ValidatorKeys::save writes plaintext key material to {}; mainnet forbids this path",
@@ -601,7 +601,7 @@ impl KeyPair {
         // (security audit §7) never `println!` keypair
         // Material. The public key being written to stdout is a
         // Soft info leak (operator's terminal scrollback, CI logs,
-        // Process accounting) — under default settings, every
+        // Process accounting) - under default settings, every
         // Call to `KeyPair::generate` would surface a freshly
         // Generated validator pubkey in plain text. Use `tracing`
         // At the `debug` level so the info is available when an
@@ -664,7 +664,7 @@ impl KeyPair {
                 .map_err(|e| CryptoError::Io(e.to_string()))?;
         }
         // (security audit §7) the file path of a
-        // Freshly-saved keypair is a sensitive secret — an
+        // Freshly-saved keypair is a sensitive secret - an
         // Attacker reading process stdout learns exactly where
         // To look on disk. The same `tracing::debug!` rationale as
         // `KeyPair::generate` applies: surface under explicit
@@ -788,7 +788,7 @@ mod tests {
 /// The captured test stdout which cargo doesn't surface),
 /// But we can pin the contract that the function returns
 /// Silently and the public key is recoverable only through
-/// The public_key accessor — proving the API never needed
+/// The public_key accessor - proving the API never needed
 /// The println. This is the regression guard for the
 /// Security-relevant side-channel removal.
 #[test]
@@ -804,7 +804,7 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
     // Default, so the public key stays in-process.
     let pk_bytes = kp.public_key_bytes();
     assert_eq!(pk_bytes.len(), 32, "ed25519 public key is 32 bytes");
-    // Round-trip: serialize and re-import — proves the API
+    // Round-trip: serialize and re-import - proves the API
     // Is complete without the println.
     let hex_pk = hex::encode(pk_bytes);
     assert_eq!(hex_pk.len(), 64, "hex-encoded pubkey is 64 chars");
@@ -817,7 +817,7 @@ fn bls_from_bytes_roundtrip_and_integrity() {
     let loaded = BlsKeypair::from_bytes(&bytes).expect("roundtrip");
     assert_eq!(loaded.public_key, kp.public_key);
 
-    // Corrupt the public key half — must reject.
+    // Corrupt the public key half - must reject.
     let mut bad = bytes.clone();
     bad[32] ^= 0xFF;
     assert!(

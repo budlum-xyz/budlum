@@ -1,4 +1,4 @@
-# Grype — zafiyet taraması + EPSS önceliklendirme, bulgular Security sekmesine
+# Grype - zafiyet taraması + EPSS önceliklendirme, bulgular Security sekmesine
 #
 # NEDEN MEVCUT TARAYICILARIN ÜSTÜNE: repoda zaten cargo-audit (RustSec),
 # Cargo-deny (RustSec) ve OSV-Scanner (OSV.dev toplayıcısı) var. Grype iki şey
@@ -7,7 +7,7 @@
 #   1) EPSS skoru. "Bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir
 #      Cevabı; ne RustSec'te ne OSV.dev'de var. Önceliklendirme farkı yaratır:
 #      Ilk koşuda yamux CVE-2026-32314 CVSS 8.7 ama EPSS %0.5 (36. persentil)
-#      Olarak raporlandı — yüksek şiddet, düşük sömürülme olasılığı. Bu ayrım
+#      Olarak raporlandı - yüksek şiddet, düşük sömürülme olasılığı. Bu ayrım
 #      Olmadan bütün "high" bulgular aynı aciliyette görünür.
 #
 #   2) SARIF çıktısı. Şu an Security sekmesine yalnız CodeQL, Semgrep ve zizmor
@@ -16,7 +16,7 @@
 #      Değil. Grype bu boşluğu kapatıyor.
 #
 # Kapı politikası: high ve üzeri FAIL (`continue-on-error` YOK). İstisnalar
-# .quality/grype.yaml içinde ve .quality/osv-scanner.toml'daki gerekçelerin birebir aynısı —
+# .quality/grype.yaml içinde ve .quality/osv-scanner.toml'daki gerekçelerin birebir aynısı -
 # Iki tarayıcının aynı bulguda çelişmesi kapının güvenilirliğini aşındırır.
 #
 # Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
@@ -71,7 +71,7 @@ jobs:
       # Bilinçli olarak devre dışı (--config ile boş dosya), aksi halde
       # .quality/grype.yaml'daki yamux istisnası kanaryayı da susturur ve kapı kendi
       # Kendini kandırır.
-      - name: Kanarya — Grype alarmının çalıştığının kanıtı
+      - name: Kanarya - Grype alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
           mkdir -p /tmp/grype-canary
@@ -95,7 +95,7 @@ jobs:
           fi
           echo "Kanarya yakalandı → Grype alarmı çalışıyor."
 
-      - name: Tarama — SARIF üret
+      - name: Tarama - SARIF üret
         run: grype dir:. --config .quality/grype.yaml -o sarif --file grype.sarif
 
       - name: SARIF yükle (Security sekmesi)
@@ -107,5 +107,5 @@ jobs:
 
       # SARIF yüklendikten SONRA kapı: yükleme adımı atlanmadan bulgular
       # Security sekmesine düşsün, ardından job kırmızıya dönsün.
-      - name: Kapı — high ve üzeri bulgu = fail
+      - name: Kapı - high ve üzeri bulgu = fail
         run: grype dir:. --config .quality/grype.yaml --fail-on high -o table

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-docker-toolchain-matches-pin.sh — the image must build with the pinned
+# check-docker-toolchain-matches-pin.sh - the image must build with the pinned
 # compiler.
 #
 # The Dockerfile carried this comment:
@@ -11,7 +11,7 @@
 #   FROM rust:1.97.1-bookworm@sha256:77fac8b9...
 #
 # The comment describes a fix that was never applied. The tag still said
-# 1.97.1, and the digest was not rust:1.94.0-bookworm either — pulling that
+# 1.97.1, and the digest was not rust:1.94.0-bookworm either - pulling that
 # digest's config blob from the registry gives RUST_VERSION=1.97.1. So the
 # published image was built by a compiler three minor versions ahead of the one
 # every CI job uses, while a comment in the same file asserted the opposite.
@@ -23,7 +23,7 @@
 # operators was outside that guarantee.
 #
 # `rust-toolchain.toml` was also not copied into the build context, so rustup
-# had nothing to correct the base image with — whatever compiler the image
+# had nothing to correct the base image with - whatever compiler the image
 # carried is what ran.
 #
 # This gate compares three places that must agree and fails by name when they
@@ -34,14 +34,14 @@
 #   3. .github/workflows/*   dtolnay/rust-toolchain  toolchain: "X"
 #
 # It also requires that the Dockerfile copies rust-toolchain.toml, and that
-# the builder stage verifies `rustc --version` against it — a pin that nothing
+# the builder stage verifies `rustc --version` against it - a pin that nothing
 # checks at build time is a pin that silently stops holding.
 #
 # What this gate deliberately does NOT do: resolve the digest against a
 # registry. That needs network access from the runner and would make the gate
 # fail for reasons unrelated to the tree. The digest/tag correspondence is
 # verified by hand when either changes, and the in-image `rustc --version`
-# check is what catches a mismatch that slips through — it runs inside the
+# check is what catches a mismatch that slips through - it runs inside the
 # actual build, where the actual compiler is.
 #
 # Usage:
@@ -82,22 +82,22 @@ gate() {
 
   local pinned tag
   pinned="$(pinned_channel "$root")"
-  [ -n "$pinned" ] || fail "could not parse channel from rust-toolchain.toml — gate would be vacuous"
+  [ -n "$pinned" ] || fail "could not parse channel from rust-toolchain.toml - gate would be vacuous"
 
   tag="$(dockerfile_tag_version "$root")"
-  [ -n "$tag" ] || fail "could not parse a rust:VERSION tag from the Dockerfile FROM line — gate would be vacuous"
+  [ -n "$tag" ] || fail "could not parse a rust:VERSION tag from the Dockerfile FROM line - gate would be vacuous"
 
   if [ "$tag" != "$pinned" ]; then
     fail "Dockerfile builds on rust:$tag but rust-toolchain.toml pins $pinned.
   A release binary built by a different compiler is not bit-identical to the one
   CI produces, which is exactly the claim the determinism workflow makes.
-  Update the FROM line *and* its digest together — the digest overrides the tag,
+  Update the FROM line *and* its digest together - the digest overrides the tag,
   so changing only the tag changes nothing."
   fi
 
   # The digest must be present. A floating tag is not a pin.
   grep -qE '^FROM[[:space:]]+rust:[0-9][0-9.]*-[a-z]+@sha256:[0-9a-f]{64}' "$root/Dockerfile" \
-    || fail "the builder FROM line has no @sha256 digest — the base image can move under us"
+    || fail "the builder FROM line has no @sha256 digest - the base image can move under us"
 
   # Every workflow toolchain must agree with the pin.
   local v mismatched=()
@@ -158,7 +158,7 @@ self_test() {
     exit 1
   fi
 
-  # 2. A floating tag with no digest must fail — the base image could move.
+  # 2. A floating tag with no digest must fail - the base image could move.
   build_fixture "$tmp/nodigest" 'rust:1.94.0-bookworm' "$GOOD_COPY" "$GOOD_CHECK" "1.94.0"
   if ( gate "$tmp/nodigest" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: a FROM line without a digest was accepted!" >&2

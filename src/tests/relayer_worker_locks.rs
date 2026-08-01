@@ -4,7 +4,7 @@
 //! signature is what makes the claim credible to the rest of the network, so
 //! the worker is the last place where an unverified external outcome can still
 //! be stopped cheaply. Once it is signed and gossiped, the only remaining
-//! defence is the consensus gate — and a gate is a worse place to discover
+//! defence is the consensus gate - and a gate is a worse place to discover
 //! that your own relayer fabricates receipts.
 //!
 //! These tests pin the refusal behaviour on the paths that used to fabricate:
@@ -107,7 +107,7 @@ impl ChainAdapter for HonestAdapter {
 
 /// An adapter that reports success while handing back a proof its own verifier
 /// rejects. This is the exact failure the worker must not launder into a
-/// signed transaction — a real adapter can reach this state through an RPC
+/// signed transaction - a real adapter can reach this state through an RPC
 /// bug, a reorg between read and proof assembly, or a hostile endpoint.
 struct ContradictoryAdapter;
 
@@ -446,7 +446,7 @@ async fn a_malformed_receipt_proof_from_an_adapter_is_refused() {
 #[tokio::test]
 async fn an_internally_consistent_adapter_observation_is_accepted() {
     // The refusals above are only meaningful if the accepting path still
-    // works — otherwise this would be a gate that rejects everything and
+    // works - otherwise this would be a gate that rejects everything and
     // proves nothing.
     let mut registry = AdapterRegistry::new();
     registry.register(Box::new(HonestAdapter {
@@ -465,7 +465,7 @@ async fn an_internally_consistent_adapter_observation_is_accepted() {
 #[tokio::test]
 async fn the_placeholder_transaction_hash_is_no_longer_reachable() {
     // `0xEE` repeated 32 times was the fabricated hash. It is still returned
-    // by the offline `submit_transaction` stubs, which is fine — those are
+    // by the offline `submit_transaction` stubs, which is fine - those are
     // inputs, not results. What must not happen is that hash reaching a
     // signed `RelayerResult` without a verified receipt behind it.
     let placeholder = format!("0x{}", hex::encode([0xEEu8; 32]));
@@ -491,7 +491,7 @@ async fn the_placeholder_transaction_hash_is_no_longer_reachable() {
 ///
 /// A real Ethereum receipts root does not commit to Budlum's
 /// `BDLM_RELAYER_RESULT_V2` leaf, so an honest adapter observation is rejected
-/// by the executor. That is the correct direction to fail — but it means the
+/// by the executor. That is the correct direction to fail - but it means the
 /// bridge acceptance path is not merely unfinished, it is unsatisfiable as
 /// specified. This test pins that so the gap is closed by designing the
 /// anchor, not by loosening the executor until adapter output slips through.
@@ -554,12 +554,12 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
 ///
 /// A behavioural test can be satisfied by a code path that is bypassed
 /// elsewhere in the same file. Reading the source keeps the specific
-/// regression — "construct a `RelayerExternalResult` with `success: true`
-/// inline" — from coming back through a different function.
+/// regression - "construct a `RelayerExternalResult` with `success: true`
+/// inline" - from coming back through a different function.
 #[test]
 fn the_worker_source_contains_no_fabricated_success_literal() {
     let src = include_str!("../relayer/worker.rs");
-    // Comments are allowed to name the thing they forbid — that is how the
+    // Comments are allowed to name the thing they forbid - that is how the
     // next reader learns why the branch is missing. Only executable lines are
     // measured.
     let code: Vec<&str> = src
@@ -665,7 +665,7 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
 }
 
 /// Production builds the relay worker with an empty adapter registry, so every
-/// chain is refused — Ethereum included.
+/// chain is refused - Ethereum included.
 ///
 /// `main.rs` calls `RelayerWorker::new(...).with_cursor_path(...)` and never
 /// `with_adapters`. `EvmChainAdapter` is the one real implementation and
@@ -673,7 +673,7 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
 /// relay is not "Ethereum-only" as the `ExternalChain` list suggests: it is
 /// off, for all eight variants.
 ///
-/// That is the safe direction to fail — a refusal, not a forged result — but
+/// That is the safe direction to fail - a refusal, not a forged result - but
 /// it is worth pinning, because the difference between "off" and "Ethereum
 /// works" is invisible from the type signatures.
 ///
@@ -681,7 +681,7 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
 /// wants the bridge contract address and the `Deposit` topic0, and
 /// `RelayerConfig` has fields for neither. `test_default()` would supply a
 /// zero address, letting a node advertise Ethereum support while pointing at
-/// nothing — worse than refusing.
+/// nothing - worse than refusing.
 ///
 /// When the adapter is wired, the `main.rs` half of this fails and whoever
 /// wired it has to confirm the config plumbing landed with it.
@@ -712,7 +712,7 @@ async fn an_unconfigured_worker_refuses_every_external_chain() {
     let main_src = include_str!("../main.rs");
     assert!(
         !main_src.contains("with_adapters"),
-        "main.rs now registers adapters — confirm the bridge address and \
+        "main.rs now registers adapters - confirm the bridge address and \
          deposit topic0 are configurable, then drop this half of the test"
     );
 }

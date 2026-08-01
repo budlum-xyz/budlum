@@ -11,7 +11,7 @@
 //!
 //! And that `LUBOT_OPERATOR` (RoleId 8) is preserved (never removed).
 //!
-//! There is exactly ONE registry type and ONE stake/slashing model — no
+//! There is exactly ONE registry type and ONE stake/slashing model - no
 //! Per-domain allow-lists, no separate registries. The consumer gates
 //! (`ensure_active_relayer`, `ensure_active_attester`) are the same methods
 //! The production paths [`crate::chain::blockchain::Blockchain::submit_relay_proof`]
@@ -77,7 +77,7 @@ fn d4_same_account_holds_all_four_domains() {
     assert_eq!(reg.len(), 4);
 }
 
-/// `MASTER_VERIFIER` (RoleId 2) is a true alias of `VERIFIER` — DeEd master
+/// `MASTER_VERIFIER` (RoleId 2) is a true alias of `VERIFIER` - DeEd master
 /// Verifiers ARE generic verifiers in the unified registry.
 #[test]
 fn d4_master_verifier_is_verifier_alias() {
@@ -131,7 +131,7 @@ fn d4_attester_gate_enforces_active_registration() {
 }
 
 /// Unified slashing: slashing an account on ANY role jails every other role it
-/// Holds across all four domains — proving the merged stake model is shared.
+/// Holds across all four domains - proving the merged stake model is shared.
 #[test]
 fn d4_cross_role_slash_jails_all_four_domains() {
     let mut reg = PermissionlessRegistry::new();
@@ -165,7 +165,7 @@ fn d4_cross_role_slash_jails_all_four_domains() {
     assert!(matches!(validator.status, MemberStatus::Slashed));
 }
 
-/// LUBOT_OPERATOR (RoleId 8) is preserved across merge — its RoleId is
+/// LUBOT_OPERATOR (RoleId 8) is preserved across merge - its RoleId is
 /// Pinned and its registration path is intact.
 #[test]
 fn d4_lubot_operator_preserved() {
@@ -177,7 +177,7 @@ fn d4_lubot_operator_preserved() {
     assert_eq!(roles::LUBOT_OPERATOR.value(), 8);
 
     // Slashing the validator role of the same account also jails its lubot
-    // Operator role — the merged model never leaves a role behind.
+    // Operator role - the merged model never leaves a role behind.
     let a = addr(8);
     reg.register_validator(a, 10_000, 0).unwrap();
     reg.slash(
@@ -191,7 +191,7 @@ fn d4_lubot_operator_preserved() {
 }
 
 /// Slashing a malicious relayer (the `relayer_invalid_proof` / `MaliciousBehaviour`
-/// Path used) jails its other domain roles too — griefing/front-running
+/// Path used) jails its other domain roles too - griefing/front-running
 /// On one domain cannot be laundered through another.
 #[test]
 fn d4_malicious_relayer_slash_jails_other_domains() {
@@ -206,7 +206,7 @@ fn d4_malicious_relayer_slash_jails_other_domains() {
         a,
         roles::RELAYER,
         SlashingCondition::MaliciousBehaviour,
-        FIXED_POINT_SCALE, // 100% — default malicious_slash_ratio_fixed
+        FIXED_POINT_SCALE, // 100% - default malicious_slash_ratio_fixed
     )
     .unwrap();
 

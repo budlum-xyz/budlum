@@ -2,12 +2,12 @@
 //!
 //! Rejects every cryptographically-invalid finality vote at ingest
 //! (closing a single-signature DoS). But a rejected vote never enters the
-//! Aggregate, so the sender paid nothing — a validator could spam garbage
+//! Aggregate, so the sender paid nothing - a validator could spam garbage
 //! Signatures forever. This module closes that gap with the SAME pattern as
 //! [`LivenessTracker`](crate::registry::LivenessTracker): a persisted per-epoch
 //! Counter that, once it crosses [`RegistryParams::max_invalid_votes_per_epoch`],
 //! Emits a canonical [`SlashingReport`] (proof = `InvalidSignatureSpam`,
-//! Provenance = `ConsensusVerified`) for the *existing* report→slash flow — no
+//! Provenance = `ConsensusVerified`) for the *existing* report→slash flow - no
 //! Second slashing path is introduced.
 //!
 //! ## Design decisions
@@ -18,7 +18,7 @@
 //! * **Persisted, standalone tracker** (NOT inside `FinalityAggregator`): the
 //!   Aggregator is recreated every checkpoint (`FINALITY_CHECKPOINT_INTERVAL`
 //!   Blocks) and dropped after each certificate, while an epoch spans
-//!   `EPOCH_LEN` blocks — so an epoch-scoped counter cannot live in the
+//!   `EPOCH_LEN` blocks - so an epoch-scoped counter cannot live in the
 //!   Aggregator. It lives in `AccountState` and round-trips via `StateSnapshotV2`.
 //! * **Provenance `ConsensusVerified`**: the node's own consensus layer
 //!   Cryptographically rejected each vote at ingest; "how many were rejected" is
@@ -64,7 +64,7 @@ impl InvalidVoteTracker {
     }
 
     /// Record one rejected (cryptographically-invalid) vote from `validator` in
-    /// `epoch`. Returns `Some(report)` exactly once — on the vote that crosses
+    /// `epoch`. Returns `Some(report)` exactly once - on the vote that crosses
     /// [`RegistryParams::max_invalid_votes_per_epoch`] for this validator this
     /// Epoch. A threshold of 0 disables spam slashing entirely.
     pub fn record_invalid_vote(

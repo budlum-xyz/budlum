@@ -7,7 +7,7 @@ burada yaşar.
 ## Durum
 
 - **Olgunluk:** canlı (NFT registry + boost ekonomisi).
-- **Kod konumu:** `src/socialfi/` — `mod.rs` (`NftRegistry`), `types.rs` (`Nft`).
+- **Kod konumu:** `src/socialfi/` - `mod.rs` (`NftRegistry`), `types.rs` (`Nft`).
 - **Test sayısı:** parent suite'te (Core test'leri içinde, ayrı modül gate'i YOK).
 - **Snapshot:** `StateSnapshotV2.nft_registry: Option<NftRegistry>` (GAP-2 digest).
 
@@ -16,9 +16,9 @@ burada yaşar.
 - ⚠️ **Boost ekonomisi.** NftBoost: `%4 B.U.D. share` operatör havuzuna
   (`distribute_bud_boost_share`, F4 fix). `NftBurn` → storage pruning hook
   (`NodeCommand::StoragePrune`).
-- ⚠️ **Mainnet v1 kapsam dışı** (M10 borcu — SocialFi/budlumxyz/Marketplace post-launch).
+- ⚠️ **Mainnet v1 kapsam dışı** (M10 borcu - SocialFi/budlumxyz/Marketplace post-launch).
   Mainnet'te nft_registry boş kalır, governance activation sonrası.
-- ⚠️ **NftBoost integer overflow** (SECURITY_AUDIT_HACKER H3) — `saturating_mul`
+- ⚠️ **NftBoost integer overflow** (SECURITY_AUDIT_HACKER H3) - `saturating_mul`
   ile kapatıldı.
 
 ## Sıradaki

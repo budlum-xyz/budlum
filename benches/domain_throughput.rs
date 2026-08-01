@@ -128,7 +128,7 @@ fn bench_tx_execution(c: &mut Criterion) {
     group.finish();
 }
 
-// ─── 2. State Root — Flat Hash vs Merkle Trie ───────────────────────
+// ─── 2. State Root - Flat Hash vs Merkle Trie ───────────────────────
 
 fn bench_state_root(c: &mut Criterion) {
     let mut group = c.benchmark_group("state_root");
@@ -159,7 +159,7 @@ fn bench_state_root(c: &mut Criterion) {
             )
         });
 
-        // Merkle trie — single update
+        // Merkle trie - single update
         group.bench_with_input(BenchmarkId::new("merkle_trie_update", n), &n, |b, &n| {
             b.iter_with_setup(
                 || {
@@ -220,7 +220,7 @@ fn bench_block(c: &mut Criterion) {
         })
     });
 
-    // Block with N transactions — hash
+    // Block with N transactions - hash
     for n in [10, 50, 100] {
         let kps: Vec<_> = (0..n).map(|_| KeyPair::generate().unwrap()).collect();
         let txs: Vec<Transaction> = kps

@@ -72,7 +72,7 @@ impl BnsRegistry {
             if record.expires_at > current_epoch {
                 return Err(BnsError::NameTaken);
             }
-            // F14: grace-period — expire olmuş isim, eski owner'a
+            // F14: grace-period - expire olmuş isim, eski owner'a
             // Yenileme penceresi tanır. `current_epoch < expires_at + GRACE_PERIOD`
             // Içinde yalnızca eski owner register/renew yapabilir; böylece
             // Front-running squatting (3. tarafın expired ismi kapması) engellenir.
@@ -81,7 +81,7 @@ impl BnsRegistry {
                 return Err(BnsError::NameTaken);
             }
         }
-        // Cap total name count — fail-closed.
+        // Cap total name count - fail-closed.
         // Reuse slots from expired names first; only reject if truly at capacity.
         if self.names.len() >= Self::MAX_NAMES {
             // Try to evict the oldest expired name to make room
@@ -103,7 +103,7 @@ impl BnsRegistry {
 
     /// Renew an existing name registration. Only the current owner may renew
     /// And only while the record is still live (not expired). The new expiry
-    /// Extends from the current expiry — never from `current_epoch` — so
+    /// Extends from the current expiry - never from `current_epoch` - so
     /// Renewing early never shortens the registration.
     ///
     /// # No transaction reaches this
@@ -115,7 +115,7 @@ impl BnsRegistry {
     /// Name over.
     ///
     /// It is survivable rather than fatal, because `register` accepts the
-    /// Previous owner inside `GRACE_PERIOD` — see the front-running note there.
+    /// Previous owner inside `GRACE_PERIOD` - see the front-running note there.
     /// But re-registering is not the same operation:
     ///
     /// ```text
@@ -130,7 +130,7 @@ impl BnsRegistry {
     /// Directions, which is exactly the shape `renew` exists to remove.
     ///
     /// Wiring it needs a transaction type, an executor arm that charges
-    /// `calculate_cost`, and a signature check — small, but consensus surface,
+    /// `calculate_cost`, and a signature check - small, but consensus surface,
     /// So it is recorded here rather than smuggled into a hardening pass.
     pub fn renew(
         &mut self,
@@ -189,7 +189,7 @@ impl BnsRegistry {
         if &parent.owner != caller {
             return Err(BnsError::NotOwner);
         }
-        // Cap subdomains per name — fail-closed.
+        // Cap subdomains per name - fail-closed.
         if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
             return Err(BnsError::InvalidName);
         }

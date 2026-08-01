@@ -1,4 +1,4 @@
-//! B.U.D. Content Discovery — Kademlia DHT-based CID → peer mapping.
+//! B.U.D. Content Discovery - Kademlia DHT-based CID → peer mapping.
 //!
 //! Uses libp2p's Kademlia DHT to announce which content chunks a node
 //! Holds ("provider records") and to discover which peers hold a given
@@ -74,7 +74,7 @@ struct DiscoveryCache {
     config: DiscoveryConfig,
 }
 
-/// Content discovery layer — bridges the Kademlia DHT with the
+/// Content discovery layer - bridges the Kademlia DHT with the
 /// Bitswap protocol.
 ///
 /// This struct manages the local cache of provider records and
@@ -319,7 +319,7 @@ mod poisoned_lock_locks {
     ///
     /// `RwLock` poisons when a thread panics holding it, and every later
     /// `read()`/`write()` then returns `Err`. Unwrapping that turns one
-    /// unrelated panic into a permanently dead DHT cache — the node keeps
+    /// unrelated panic into a permanently dead DHT cache - the node keeps
     /// running but can never announce or resolve a CID again.
     ///
     /// The main crate settled this in `consensus/pow.rs` with

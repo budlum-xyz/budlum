@@ -51,7 +51,7 @@ fn test_bns_renewal() {
         reg.renew("test.bud", &alice, 400, 100),
         Err(BnsError::Expired)
     ));
-    // F14: grace-period — expire (350) + GRACE_PERIOD (3000)
+    // F14: grace-period - expire (350) + GRACE_PERIOD (3000)
     // Içinde 3. parti squat edemez. epoch 400 < 3350 → bob RED.
     assert!(matches!(
         reg.register("test.bud".to_string(), bob, 400, 100),
@@ -154,18 +154,18 @@ fn test_bns_full_resolve_with_storage() {
 /// re-registering is not an equivalent substitute.
 ///
 /// `TransactionType` has `BnsRegister`, `BnsSetContent`,
-/// `BnsRegisterSubdomain` and `BnsSetStorage` — no `BnsRenew`, no
+/// `BnsRegisterSubdomain` and `BnsSetStorage` - no `BnsRenew`, no
 /// `BnsTransfer`. Both methods are called only from tests, so on a live chain
 /// an owner cannot renew a name and cannot hand one over.
 ///
 /// The grace period in `register` softens it: the previous owner can
 /// re-register after expiry without being front-run. It does not replace
-/// renewal, because the two compute a different expiry —
+/// renewal, because the two compute a different expiry -
 ///
 ///     renew:    expires_at += duration
 ///     register: expires_at  = current_epoch + duration
 ///
-/// — so the only reachable path discards the remaining term. Renewing a year
+/// - so the only reachable path discards the remaining term. Renewing a year
 /// early costs that year; waiting until the last epoch to avoid the loss puts
 /// the name one missed block from the grace window. This asserts the size of
 /// that gap so it cannot be mistaken for a rounding difference, and fails the
@@ -210,12 +210,12 @@ fn bns_renewal_is_unreachable_and_re_registering_loses_the_remaining_term() {
     let tx_src = include_str!("../core/transaction.rs");
     assert!(
         !tx_src.contains("BnsRenew"),
-        "a BnsRenew transaction now exists — wire it to `renew`, charge \
+        "a BnsRenew transaction now exists - wire it to `renew`, charge \
          `calculate_cost`, and drop this test"
     );
     assert!(
         !tx_src.contains("BnsTransfer"),
-        "a BnsTransfer transaction now exists — wire it to `transfer` and drop \
+        "a BnsTransfer transaction now exists - wire it to `transfer` and drop \
          this test"
     );
 }

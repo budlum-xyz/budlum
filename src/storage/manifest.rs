@@ -2,7 +2,7 @@
 //!
 //! A `ContentManifest` is the on-chain commitment to a sharded piece of
 //! Content. The actual chunking algorithm (erasure coding, Reed-Solomon,
-//! Simple byte slicing) is **off-chain** — the chain only sees the
+//! Simple byte slicing) is **off-chain** - the chain only sees the
 //! Per-shard `ContentId`s and a deterministic `manifest_id` derived from
 //! Them. This matches the existing project rule "the chain carries the
 //! Proof/address of data, not the data itself" (BudZKVM STARK proof
@@ -59,13 +59,13 @@ impl ShardRef {
     }
 }
 
-/// A content manifest — the on-chain commitment to a sharded piece of
+/// A content manifest - the on-chain commitment to a sharded piece of
 /// Content. `manifest_id` is the canonical identity of the whole piece; it
 /// Is computed deterministically from `(owner, total_size, shards)` so two
 /// Clients sharding the same content the same way always produce the
 /// Same `manifest_id`.
 ///
-/// `owner` alanı F01 ile eklendi — veri sahipliği zincir-üstü
+/// `owner` alanı F01 ile eklendi - veri sahipliği zincir-üstü
 /// Kanıtlanabilir (Data Owner identity). `#[serde(default)]` ile eski
 /// Snapshot'lar/JSON'lar backward-compat (owner = zero = "belirsiz").
 /// Redundancy scheme for an object: any `k` of `n` shards reconstruct it.
@@ -74,7 +74,7 @@ impl ShardRef {
 /// shard loses part of the object and durability has to come from storing the
 /// whole thing again. Erasure coding reaches the same durability at a fraction
 /// of the stored bytes, which is the point of `docs/BUD_STORAGE_ROADMAP.md`
-/// Gap 3 — and it is what makes Gap 4 expressible at all, because a repair
+/// Gap 3 - and it is what makes Gap 4 expressible at all, because a repair
 /// trigger needs something to reconstruct *from*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErasureScheme {
@@ -157,7 +157,7 @@ pub struct ContentManifest {
     /// stripe is zero-padded to keep the shards equal-length, which
     /// Reed-Solomon requires. A reconstructor holds only the manifest, so
     /// without this field it cannot know where the object ends and the
-    /// padding begins — it would hand back trailing zeroes as content.
+    /// padding begins - it would hand back trailing zeroes as content.
     ///
     /// Zero means "not recorded", which is how every manifest written before
     /// this field deserializes; [`ContentManifest::content_size`] reads it as
@@ -245,7 +245,7 @@ impl ContentManifest {
     /// `manifest_id` is the key every registry, deal and challenge indexes
     /// by, and it arrives over RPC inside a caller-supplied struct. Nothing
     /// recomputed it, so a caller could register a manifest under any id it
-    /// liked — including one already meaningful to someone else, or one
+    /// liked - including one already meaningful to someone else, or one
     /// chosen so a later honest registration of the real content collides
     /// with a squatted entry that `register_manifest` would then keep,
     /// because registration is idempotent and first-writer-wins.
@@ -374,7 +374,7 @@ impl ContentManifest {
 
     /// Whether redundancy has fallen far enough to start a repair.
     ///
-    /// Repair has to begin *before* the object becomes unrecoverable —
+    /// Repair has to begin *before* the object becomes unrecoverable -
     /// waiting until `live == k` means the next loss is fatal and there is no
     /// time to rebuild. `margin` is how much headroom to keep; Storj triggers
     /// on a safety threshold above `k` for the same reason.
@@ -420,7 +420,7 @@ impl ContentManifest {
     }
 
     /// Look up a shard by `ContentId`. Returns `None` if the shard is not
-    /// In this manifest — used by the `bud_storageGetDealsByShard` query
+    /// In this manifest - used by the `bud_storageGetDealsByShard` query
     /// Path and the E2E test (`src/tests/bud_e2e.rs`).
     pub fn shard(&self, shard_id: &ContentId) -> Option<&ShardRef> {
         self.shards.iter().find(|s| &s.shard_id == shard_id)
@@ -453,10 +453,10 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// two fields that change what the manifest *means* without changing any
 /// byte V1 hashed:
 ///
-/// * `kind` — relabelling a data shard as parity, or the reverse, alters
+/// * `kind` - relabelling a data shard as parity, or the reverse, alters
 ///   which shards a reconstructor treats as content and which it treats as
 ///   redundancy.
-/// * `erasure` — `k` is the number a repair trigger compares against. A
+/// * `erasure` - `k` is the number a repair trigger compares against. A
 ///   manifest claiming `k = 1` when four shards are needed reads as safe at
 ///   one surviving shard, so no repair opens and the object is lost quietly.
 ///

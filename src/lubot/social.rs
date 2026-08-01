@@ -25,7 +25,7 @@ pub fn lubot_output_to_nft(
 }
 
 /// Bir sosyal NFT içeriğini Lubot kapalı-devre veri kaynağına dönüştür.
-/// (Lubot bu içeriği yalnızca bir Pollen grant ile okur — `validate_inference_grant`.)
+/// (Lubot bu içeriği yalnızca bir Pollen grant ile okur - `validate_inference_grant`.)
 #[must_use]
 pub fn social_nft_to_data_ref(nft_id: u64, content_id: ContentId, owner: Address) -> SocialDataRef {
     SocialDataRef::from_social(nft_id, content_id.0, owner)

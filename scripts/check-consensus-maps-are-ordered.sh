@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-consensus-maps-are-ordered.sh — every map folded into a hash must
+# check-consensus-maps-are-ordered.sh - every map folded into a hash must
 # iterate in a defined order.
 #
 # A `root()` / `leaf_hash()` / `calculate_state_root()` walks a collection and
 # feeds each entry into a digest. If that collection is a `HashMap` or
 # `HashSet`, the iteration order is whatever the hasher's random seed decides
-# for that process — so two honest nodes with identical state hash the same
+# for that process - so two honest nodes with identical state hash the same
 # entries in different sequences and produce different roots.
 #
 # This is the single most-cited source of consensus divergence in the
 # ecosystem: Thorchain halted on a Go map iteration, Cosmos SDK documents it
 # as a standing hazard, and Tendermint's application guide lists
 # "nondeterministic serialisation" first among the things that break replicated
-# state machines. Rust has exactly the same exposure — `std::collections::HashMap`
+# state machines. Rust has exactly the same exposure - `std::collections::HashMap`
 # uses `RandomState`, reseeded per process.
 #
 # `determinism.yml` already runs the suite on three operating systems and
@@ -152,7 +152,7 @@ RS
     exit 1
   fi
 
-  # The same HashMap outside a hashing function is fine — iteration order
+  # The same HashMap outside a hashing function is fine - iteration order
   # only matters where it reaches a digest.
   cat > "$tmp/src/ok.rs" <<'RS'
 pub struct Registry {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-pinned-downloads-are-really-pinned.sh — a checksum fetched from the
+# check-pinned-downloads-are-really-pinned.sh - a checksum fetched from the
 # server it verifies is not a pin.
 #
 # The coverage job installed two tools. One was pinned:
@@ -16,7 +16,7 @@
 #
 # Both files come from the same release. Anyone who can replace the tarball can
 # replace the `.sha256` next to it, so the check verifies the artefact against
-# a hash the artefact's own host supplied — it proves the download was not
+# a hash the artefact's own host supplied - it proves the download was not
 # corrupted in transit and nothing else. The step was named
 # "(sha256 pinli)" and had been for as long as it existed.
 #
@@ -64,7 +64,7 @@ scan() {
     done < "$f"
   done
 
-  [ "$found_any" -eq 1 ] || fail "no workflow files found under $workflows — wrong root?"
+  [ "$found_any" -eq 1 ] || fail "no workflow files found under $workflows - wrong root?"
 
   if [ "${#offenders[@]}" -gt 0 ]; then
     echo "FAIL: these workflow lines download a checksum from the same host as the artefact:" >&2
@@ -86,7 +86,7 @@ EOT
   # Guard against passing on a tree where no workflow verifies anything at all.
   local verifies
   verifies="$(grep -rlE 'sha256sum -c|shasum -a 256 -c' "$workflows" 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$verifies" -gt 0 ] || fail "no workflow verifies any checksum — the gate would be vacuous"
+  [ "$verifies" -gt 0 ] || fail "no workflow verifies any checksum - the gate would be vacuous"
 
   echo "Download pinning OK: every verified checksum is written in the repository ($verifies workflow file(s) verify hashes; none fetch one)."
   return 0

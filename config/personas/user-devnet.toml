@@ -1,4 +1,4 @@
-# Persona: end user / hobbyist — sync, verify, optional light use on devnet.
+# Persona: end user / hobbyist - sync, verify, optional light use on devnet.
 # Not a validator. Localhost RPC only.
 
 [network]

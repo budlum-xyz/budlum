@@ -39,7 +39,7 @@ impl std::error::Error for CompileError {}
 /// Byte offset where the generated prologue points the heap pointer (`r31`).
 ///
 /// Struct literals allocate above this address, so a VM whose memory is
-/// smaller than this cannot run any program that uses a struct — it faults
+/// smaller than this cannot run any program that uses a struct - it faults
 /// with `InvalidMemoryAccess` on the first allocation. Hosts must size their
 /// `Vm` with at least [`MIN_VM_MEMORY_BYTES`].
 pub const HEAP_BASE: i32 = 4096;
@@ -198,7 +198,7 @@ mod tests {
     fn test_large_integer_literal_compilation() {
         // The VM/AIR operate over the Goldilocks field, so the largest
         // Valid literal is P-1 = 18446744069414584320 (values >= P are
-        // Rejected — see test_integer_literal_exceeding_field_modulus).
+        // Rejected - see test_integer_literal_exceeding_field_modulus).
         let source = r#"
             contract LargeIntTest {
                 pub fn main() {
@@ -416,7 +416,7 @@ mod tests {
     /// Limitation: `match` is only allowed as an expression
     /// Statement (its result register is not yet surfaced as a
     /// Value to `let`/`return` bindings). This is a deliberate
-    /// Boundary — surfacing a value requires a dedicated
+    /// Boundary - surfacing a value requires a dedicated
     /// "result register" convention that conflicts with the
     /// Current `r31` HEAP_PTR reservation; it is deferred.
     /// For now the test asserts the dispatch + jump-chain codegen
@@ -500,7 +500,7 @@ mod tests {
     /// *actual* struct layout. `A` and `B` both declare a field named
     /// `name`, but at different positions (offset 0 vs offset 8). The
     /// Legacy codegen scanned every struct layout and used the first hit,
-    /// So one of the two reads below returned the wrong word — and because
+    /// So one of the two reads below returned the wrong word - and because
     /// The layouts live in a hash map, *which* one was wrong depended on
     /// Iteration order. Type-aware resolution reads each field from its
     /// Own struct's layout, making the result correct and deterministic.
@@ -541,7 +541,7 @@ mod tests {
 
     /// A function parameter typed as a struct carries its struct type into
     /// Codegen, so a field access on the parameter resolves against *that*
-    /// Struct's layout — not a different struct that shares the field name.
+    /// Struct's layout - not a different struct that shares the field name.
     /// `P.a` is at offset 0 while `Q.a` is at offset 8.
     #[test]
     fn test_field_access_on_struct_parameter_uses_param_type() {
@@ -656,7 +656,7 @@ mod tests {
 
     /// A struct literal that omits a declared field is rejected at compile
     /// Time. Leaving a field uninitialized would read undefined memory at
-    /// Its (declared) offset in the VM, so sema requires every field —
+    /// Its (declared) offset in the VM, so sema requires every field -
     /// Fail-fast, mirroring Rust's exhaustive struct literals.
     #[test]
     fn test_struct_literal_missing_field_rejected() {
@@ -689,7 +689,7 @@ mod tests {
     }
 
     /// A struct literal providing every declared field still compiles and
-    /// Runs — the exhaustiveness check rejects only *partial* literals.
+    /// Runs - the exhaustiveness check rejects only *partial* literals.
     #[test]
     fn test_struct_literal_with_all_fields_compiles() {
         let source = r#"
@@ -716,7 +716,7 @@ mod tests {
     /// A struct literal that initializes the same field twice is rejected
     /// At compile time. Without this check, codegen stores both values at
     /// The field's single declared offset and the last write silently
-    /// Wins — a hidden, order-dependent value.
+    /// Wins - a hidden, order-dependent value.
     #[test]
     fn test_struct_literal_duplicate_field_rejected() {
         let source = r#"
@@ -762,7 +762,7 @@ mod tests {
                     y: u64,
                 }
 
-                // `Ponit` is a typo — not a declared struct.
+                // `Ponit` is a typo - not a declared struct.
                 fn read(p: Ponit) -> u64 {
                     return p.x;
                 }
@@ -824,7 +824,7 @@ mod tests {
 
     /// A struct field may reference another struct declared *later* in the
     /// Contract (forward reference). Validation runs after all structs are
-    /// Registered, so this still compiles — the check rejects only truly
+    /// Registered, so this still compiles - the check rejects only truly
     /// Undefined struct names, not forward references.
     #[test]
     fn test_struct_field_forward_reference_compiles() {
@@ -853,7 +853,7 @@ mod tests {
 
     // === OPERATOR TYPE HARDENING ===============================================
 
-    /// Arithmetic on struct values (heap pointers) is rejected — adding two
+    /// Arithmetic on struct values (heap pointers) is rejected - adding two
     /// Pointers is meaningless and previously type-checked silently (the VM
     /// Would compute over raw pointer words).
     #[test]
@@ -920,7 +920,7 @@ mod tests {
     }
 
     /// Equality on struct values stays allowed (comparing two pointers for
-    /// Equality is meaningful) — the hardening rejects only arithmetic and
+    /// Equality is meaningful) - the hardening rejects only arithmetic and
     /// Ordering on struct/void operands.
     #[test]
     fn test_struct_equality_still_allowed() {
@@ -951,7 +951,7 @@ mod tests {
     // === CONDITION TYPE HARDENING ==============================================
 
     /// Branching on a struct value (a heap pointer, always non-zero) is
-    /// Rejected — the branch would be trivially true, a near-certain bug.
+    /// Rejected - the branch would be trivially true, a near-certain bug.
     #[test]
     fn test_if_on_struct_condition_rejected() {
         let source = r#"
@@ -981,7 +981,7 @@ mod tests {
     }
 
     /// `constrain` on a struct value (always non-zero) is rejected for the
-    /// Same reason — the assertion would be vacuously satisfied.
+    /// Same reason - the assertion would be vacuously satisfied.
     #[test]
     fn test_constrain_on_struct_condition_rejected() {
         let source = r#"
@@ -1008,7 +1008,7 @@ mod tests {
         }
     }
 
-    /// A scalar condition (here a comparison result) still compiles — the
+    /// A scalar condition (here a comparison result) still compiles - the
     /// Check rejects only struct/void conditions.
     #[test]
     fn test_scalar_condition_still_compiles() {
@@ -1060,7 +1060,7 @@ mod tests {
         );
     }
 
-    /// A comparison result is Bool, not the operand type — using it in u64
+    /// A comparison result is Bool, not the operand type - using it in u64
     /// Arithmetic is now a type mismatch (the behavior change from typing
     /// Comparisons as Bool).
     #[test]

@@ -539,11 +539,11 @@ impl PoSEngine {
 
         // Fail-closed when validator set is empty.
         // Previously this returned Ok which allowed hash-only blocks without
-        // Producer membership or signature — a security gap in the bootstrap window.
+        // Producer membership or signature - a security gap in the bootstrap window.
         // Now we require at least one active, consensus-ready validator.
         if active_validators.is_empty() {
             return Err(ConsensusError(
-                "No active validators — PoS block production requires at least one                  consensus-ready validator. Bootstrap via genesis validator set or                  RegisterConsensusKeys transaction."
+                "No active validators - PoS block production requires at least one                  consensus-ready validator. Bootstrap via genesis validator set or                  RegisterConsensusKeys transaction."
                     .into(),
             ));
         }
@@ -849,7 +849,7 @@ impl ConsensusEngine for PoSEngine {
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
         // Fail closed on the candidate specifically. Scoring alone would let
         // a checkpoint-violating candidate win whenever the current chain
-        // also scored zero — which happens on a node whose own chain has not
+        // also scored zero - which happens on a node whose own chain has not
         // reached the checkpoint height yet, exactly the node least able to
         // tell the difference.
         if !self.chain_honours_checkpoint(candidate) {
@@ -905,7 +905,7 @@ impl ConsensusEngine for PoSEngine {
             }
 
             // Prune seen_blocks to prevent unbounded growth.
-            // Keep entries from the last 2 epochs only — older double-sign evidence
+            // Keep entries from the last 2 epochs only - older double-sign evidence
             // Is no longer actionable (already slashed or epoch-finalized).
             let current_epoch = block.index / self.config.epoch_length;
             let min_slot = current_epoch.saturating_sub(2) * self.config.epoch_length;

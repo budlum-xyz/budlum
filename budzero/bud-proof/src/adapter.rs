@@ -38,7 +38,7 @@ pub struct ExecutionPublicInputs {
 pub fn event_digest_from_events(events: &[u64]) -> [u8; 32] {
     // Sum in the field, then pack the canonical representative as eight u32
     // limbs. The AIR adds each `Log` row's full `rs1` into limb 0, so anything
-    // narrower here disagrees with it as soon as a logged value reaches 2^32 —
+    // narrower here disagrees with it as soon as a logged value reaches 2^32 -
     // and a Poseidon output always does.
     const P: u128 = 18_446_744_069_414_584_321;
     let mut acc: u128 = 0;
@@ -64,7 +64,7 @@ pub fn event_digest_from_events(events: &[u64]) -> [u8; 32] {
 /// keep an all-zero `initial_state_root` and are unaffected.
 ///
 /// **It commits to what was read, not to the whole image.** Bytes the host
-/// wrote and the program never touched are outside it — they cannot influence
+/// wrote and the program never touched are outside it - they cannot influence
 /// the execution, so binding them would only make the commitment depend on
 /// padding. What it does bind is every value the program consumed: change a
 /// weight the guest reads and the commitment moves, so a proof produced for
@@ -166,7 +166,7 @@ mod event_digest_tests {
 
     #[test]
     fn empty_event_list_yields_all_zero_accumulator() {
-        // keccak256("") starts 0xc5d24601 — if that ever comes back, a caller
+        // keccak256("") starts 0xc5d24601 - if that ever comes back, a caller
         // is hashing instead of accumulating.
         assert_eq!(event_digest_from_events(&[]), [0u8; 32]);
     }

@@ -61,7 +61,7 @@ impl SemanticAnalyzer {
         // `Type::from_str` maps ANY non-primitive name to
         // `Type::Struct(name)` without checking the struct exists, so a
         // Typo in a field's type (e.g. `b: Ponit`) would silently become
-        // A phantom struct type — and field access on values of that
+        // A phantom struct type - and field access on values of that
         // Type would then skip validation entirely (a soundness gap).
         // This runs *after* the registration pass so fields may reference
         // Structs declared later in the contract.
@@ -134,7 +134,7 @@ impl SemanticAnalyzer {
     /// Struct that is actually declared. `Type::from_str` maps ANY
     /// Non-primitive name to `Type::Struct(name)`, so without this check
     /// A typo in a struct type annotation (field / parameter / return)
-    /// Would silently become a phantom struct type — and field access on
+    /// Would silently become a phantom struct type - and field access on
     /// Values of that type would then skip validation entirely.
     fn check_struct_type(&self, ty: &Type, ctx: &str, errors: &mut Vec<CompileError>) {
         if let Type::Struct(name) = ty {
@@ -149,8 +149,8 @@ impl SemanticAnalyzer {
 
     /// A value used as a condition (`if` / `while` / `constrain`) is
     /// Tested for non-zero by the VM, so it must be a scalar
-    /// (u64 / bool / field). A struct value is a heap pointer — always
-    /// Non-zero, so the branch/assertion is trivially true — and `void`
+    /// (u64 / bool / field). A struct value is a heap pointer - always
+    /// Non-zero, so the branch/assertion is trivially true - and `void`
     /// Is not a value; both are near-certain bugs, rejected at compile
     /// Time. (match has its own stricter scrutinee check.)
     fn check_condition_type(&self, ty: &Type, ctx: &str, errors: &mut Vec<CompileError>) {
@@ -362,8 +362,8 @@ impl SemanticAnalyzer {
                     }
                     // Reject partial literals: every declared field must
                     // Be initialized. A field left out would be read as
-                    // Uninitialized memory at its (declared) offset —
-                    // Undefined behavior in the VM — so we fail at compile
+                    // Uninitialized memory at its (declared) offset -
+                    // Undefined behavior in the VM - so we fail at compile
                     // Time instead. Fail-fast keeps ZK contracts total:
                     // A struct value always carries a defined value for
                     // Every field (mirrors Rust's exhaustive struct
@@ -378,7 +378,7 @@ impl SemanticAnalyzer {
                         }
                     }
                     // Reject duplicate field initializers: a field listed
-                    // Twice is almost certainly a mistake — codegen stores
+                    // Twice is almost certainly a mistake - codegen stores
                     // Both at the same declared offset, so the last write
                     // Silently wins (a hidden, order-dependent value).
                     // Fail at compile time instead.
@@ -444,7 +444,7 @@ impl SemanticAnalyzer {
                 // Types. A struct value is a heap pointer and `void` is
                 // Not a value, so arithmetic (+ - * /) and ordering
                 // (< > <= >=) over them would make the VM compute over
-                // Raw pointer words — silent nonsense that previously
+                // Raw pointer words - silent nonsense that previously
                 // Type-checked. Equality (== !=) on structs stays
                 // Allowed (pointer equality is meaningful). Booleans are
                 // Permitted in arithmetic because BudL exposes no

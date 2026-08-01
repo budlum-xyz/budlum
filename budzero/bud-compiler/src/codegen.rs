@@ -6,7 +6,7 @@ use bud_isa::{Instruction, IsaProfile, Opcode};
 /// Track the struct type a variable holds (when it holds a struct
 /// Pointer). `FieldAccess` uses this to resolve the field offset within
 /// The base expression's *actual* struct layout instead of guessing by
-/// Scanning every declared struct — which is wrong (and, because
+/// Scanning every declared struct - which is wrong (and, because
 /// `struct_layouts` is a hash map, non-deterministic) as soon as two
 /// Structs declare a field with the same name at different positions.
 ///
@@ -137,7 +137,7 @@ impl Codegen {
 
         for (param, reg) in func.params.iter().zip(param_regs.iter()) {
             // A parameter whose declared type names a struct holds a
-            // Struct pointer — record that so `FieldAccess` on the
+            // Struct pointer - record that so `FieldAccess` on the
             // Parameter resolves against the correct layout.
             let struct_type = if self.struct_layouts.contains_key(&param.ty) {
                 Some(param.ty.clone())
@@ -326,7 +326,7 @@ impl Codegen {
             }
             Stmt::Match { scrutinee, arms } => {
                 // Pattern matching codegen. ZK-circuit-friendly
-                // Linear jump chain — at most one arm body executes per
+                // Linear jump chain - at most one arm body executes per
                 // Match, so the prover's trace records exactly one
                 // Branch (no non-determinism).
                 //
@@ -358,7 +358,7 @@ impl Codegen {
                 for arm in arms {
                     // Emit the test or unconditional jump. Whichever
                     // Path we take, the next instruction is the start
-                    // Of this arm's body — the placeholder is patched
+                    // Of this arm's body - the placeholder is patched
                     // Right after we know the body's first PC.
                     match &arm.pattern {
                         MatchPattern::IntLit(val) => {
@@ -396,7 +396,7 @@ impl Codegen {
 
                 // Patch every arm's end-jump to the instruction after
                 // The last arm body. This is the natural "match result"
-                // Site — the caller is expected to use the produced
+                // Site - the caller is expected to use the produced
                 // Register if the match ever grows a value.
                 let end_idx = self.instructions.len();
                 for idx in end_jump_indices {
@@ -551,8 +551,8 @@ impl Codegen {
                 // The VM and STARK AIR operate over the Goldilocks field
                 // (mod P = 2^64 - 2^32 + 1), so every value must be a
                 // Canonical field element (< P). A literal >= P is not
-                // Representable as itself — field arithmetic would silently
-                // Reduce it to `v mod P` — so reject it at compile time
+                // Representable as itself - field arithmetic would silently
+                // Reduce it to `v mod P` - so reject it at compile time
                 // Instead, making the out-of-range value explicit.
                 const GOLDILOCKS_P: u64 = 18446744069414584321;
                 if v >= GOLDILOCKS_P {
@@ -733,7 +733,7 @@ impl Codegen {
                     // Type-aware path: resolve the offset within the
                     // Base's *actual* struct layout. This stays correct
                     // When several structs declare a field with the same
-                    // Name at different positions — the old code scanned
+                    // Name at different positions - the old code scanned
                     // Every layout and took the first hit, which is both
                     // Wrong and (hash-map iteration order) non-deterministic.
                     Some(fields) => match fields.iter().position(|f| f == field) {

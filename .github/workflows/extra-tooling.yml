@@ -2,11 +2,11 @@ name: Extra Tooling (security + quality)
 #
 # Bu workflow, ana CI'ın kapsamadığı ek araçları çalıştırır.
 #
-# 2026-07-27 onarımı — workflow HİÇ ÇALIŞMIYORDU:
+# 2026-07-27 onarımı - workflow HİÇ ÇALIŞMIYORDU:
 # `slsa-provenance` job'ı bir reusable workflow'u (`.github/workflows/*.yml@ref`)
 # `steps[].uses` içinde çağırıyordu. Reusable workflow yalnız job seviyesinde
 # (`jobs.<id>.uses`) geçerlidir; adım içinde kullanılınca GitHub dosyanın
-# Tamamını reddeder. Sonuç: her koşu 0 job ile anında "failure" — diğer beş
+# Tamamını reddeder. Sonuç: her koşu 0 job ile anında "failure" - diğer beş
 # Job da hiç çalışmıyordu. actionlint bunu yakalamıyor (yerelde temiz geçiyor),
 # Bu yüzden hata gözden kaçmıştı.
 #
@@ -72,7 +72,7 @@ jobs:
       # Ağacı hem de advisory veritabanını indirememiş bir koşuyu gösterebilir.
       # Kanarya, bilinen savunmasız bir sürüm içeren sentetik lockfile üretip
       # Aracın onu YAKALADIĞINI kanıtlar.
-      - name: Kanarya — cargo audit alarmının çalıştığının kanıtı
+      - name: Kanarya - cargo audit alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
           mkdir -p /tmp/audit-canary
@@ -110,7 +110,7 @@ jobs:
   # ── 2. Kullanılmayan bağımlılıklar ──────────────────────────────────────────
   # KAPI. Daha önce rapor modundaydı çünkü machete bu ağaçta 9 aday veriyordu
   # ve bunların bir kısmı (chrono, group) makro/trait dolaylılığı yüzünden
-  # yanlış pozitifti — o hâlde FAIL yapmak ya CI'ı gevşetmeye ya da kullanılan
+  # yanlış pozitifti - o hâlde FAIL yapmak ya CI'ı gevşetmeye ya da kullanılan
   # bağımlılıkları ignore listesine doldurup kapıyı içi boş bırakmaya zorlardı.
   #
   # O borç kapandı: gerçek ölü bağımlılıklar temizlendi, yanlış pozitifler
@@ -146,7 +146,7 @@ jobs:
       # Bilerek kullanilmayan bir bagimlilik iceren sentetik crate uretip
       # Machete'nin onu yakaladigini kanitlar; yakalayamazsa asagidaki rapor
       # "0 bulgu" ile bos gecer ve kimse fark etmez.
-      - name: Kanarya — machete alarmının çalıştığının kanıtı
+      - name: Kanarya - machete alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
           mkdir -p /tmp/machete-canary/src
@@ -169,8 +169,8 @@ jobs:
       # Kapı: her workspace ayrı taranır. cargo-machete bulgu bulduğunda
       # sıfırdan farklı çıkar, `set -e` altında job orada düşer. Yanlış
       # pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
-      # kaydına alınır — ignore etmek serbest değil, gerekçe commit'te durur.
-      - name: Machete kapısı — root + budzero + fuzz + wallet-core
+      # kaydına alınır - ignore etmek serbest değil, gerekçe commit'te durur.
+      - name: Machete kapısı - root + budzero + fuzz + wallet-core
         run: |
           set -euo pipefail
           fail=0
@@ -249,7 +249,7 @@ jobs:
         run: cargo install taplo-cli --version 0.9.3 --locked
 
       # Kanarya: bozuk bir TOML üretip taplo'nun yakaladığını doğrular.
-      - name: Kanarya — taplo alarmının çalıştığının kanıtı
+      - name: Kanarya - taplo alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
           mkdir -p /tmp/taplo-canary

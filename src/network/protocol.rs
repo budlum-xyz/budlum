@@ -269,7 +269,7 @@ mod tests {
     /// Two constants share the name `MAX_BLOCK_SIZE` and measure different
     /// things: this one is protobuf `encoded_len`, `consensus::MAX_BLOCK_SIZE`
     /// is `serde_json::to_vec`. JSON is the fatter encoding and carries the
-    /// smaller ceiling, so consensus is always the binding check — a block that
+    /// smaller ceiling, so consensus is always the binding check - a block that
     /// clears gossip can still be refused by validation, and never the reverse.
     ///
     /// That ordering is what keeps the network from admitting blocks every
@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn transport_block_ceiling_is_not_stricter_than_consensus() {
         // Both sides are `const`, so this is decidable at compile time. In a
-        // `const` block it fails the build rather than a test run — the
+        // `const` block it fails the build rather than a test run - the
         // strictly better place for an invariant over two literals, and what
         // `clippy::assertions_on_constants` is pointing at.
         const {

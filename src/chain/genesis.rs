@@ -113,7 +113,7 @@ pub struct GenesisConfig {
     /// Optional $BUD tokenomics. When `Some`, genesis additionally
     /// Seeds the $BUD distribution accounts (Community/Liquidity/Ecosystem/Team/
     /// BurnReserve) and configures the on-chain burn-reserve address + team
-    /// Vesting schedule. Default `None` — plain genesis is unchanged.
+    /// Vesting schedule. Default `None` - plain genesis is unchanged.
     #[serde(default)]
     pub bud_tokenomics: Option<crate::tokenomics::TokenomicsParams>,
 
@@ -126,7 +126,7 @@ pub struct GenesisConfig {
     /// Post-quantum signature scheme this chain was launched with.
     ///
     /// The PQ backend is a compile-time feature, but the public key it emits is
-    /// consensus data — its length is enforced on the validation path, and
+    /// consensus data - its length is enforced on the validation path, and
     /// Dilithium5 (2592 bytes) and ML-DSA-65 (1952) disagree. Two nodes built
     /// with different features would reject each other's validator
     /// registrations as malformed keys and split the network with no error
@@ -278,7 +278,7 @@ impl GenesisConfig {
     /// Refuse to run when this binary's PQ backend is not the one the chain
     /// was launched with.
     ///
-    /// Deliberately fail-closed. The alternative — starting anyway — produces a
+    /// Deliberately fail-closed. The alternative - starting anyway - produces a
     /// node that accepts blocks but rejects every validator registration from
     /// its peers, which looks like a peering problem rather than a build
     /// problem and costs an operator hours to diagnose.
@@ -293,7 +293,7 @@ impl GenesisConfig {
             return Err(format!(
                 "post-quantum backend mismatch: this binary was built for `{build_scheme}` \
                  (public keys {} bytes) but the chain genesis declares `{chain_scheme}`. \
-                 Rebuild with the matching feature — running anyway would reject every \
+                 Rebuild with the matching feature - running anyway would reject every \
                  validator registration on this chain as a malformed key.",
                 crate::crypto::primitives::pq_public_key_len()
             ));
@@ -539,10 +539,10 @@ fn address(byte: u8) -> Address {
 /// Mainnet genesis configuration.
 ///
 /// Key characteristics:
-/// - **Timestamp: TBD** — set to 0, actual launch timestamp configured separately
-/// - **Ceremony bootstrap** — at least four keyed validators at genesis;
+/// - **Timestamp: TBD** - set to 0, actual launch timestamp configured separately
+/// - **Ceremony bootstrap** - at least four keyed validators at genesis;
 ///   Permissionless onboarding follows
-/// - **Full $BUD tokenomics** — 100M fixed supply, 6 decimals, 2 burn mechanisms
+/// - **Full $BUD tokenomics** - 100M fixed supply, 6 decimals, 2 burn mechanisms
 ///
 /// Token distribution (100M total, 6 decimals = 10^14 base units):
 /// - 10M Community (dev + users)
@@ -559,7 +559,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
     use crate::core::chain_config::FIXED_POINT_SCALE;
     use crate::tokenomics::bud;
 
-    // Full tokenomics params — 100M fixed supply
+    // Full tokenomics params - 100M fixed supply
     let tokenomics = crate::tokenomics::TokenomicsParams {
         community: bud(10_000_000),    // 10M - community/dev
         liquidity: bud(10_000_000),    // 10M - liquidity provisioning
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn test_mainnet_genesis_deterministic() {
-        // Mainnet genesis must be deterministic — same config → same hash
+        // Mainnet genesis must be deterministic - same config → same hash
         let cfg = GenesisConfig::for_network(Network::Mainnet);
         let g1 = cfg.build_genesis_block();
         let g2 = cfg.build_genesis_block();

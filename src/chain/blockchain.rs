@@ -110,7 +110,7 @@ pub struct Blockchain {
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
-    /// Universal Relayer — permissionless cross-domain relay orchestrator.
+    /// Universal Relayer - permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
     pub settlement_finality_hashes: Vec<crate::domain::Hash32>,
@@ -331,13 +331,13 @@ impl Blockchain {
         let mut restored_finalized_hash = chain_vec[0].hash.clone();
 
         if let Some(ref pm) = pruning_manager {
-            // Onarımı (2026-07-19,): yükleme hatası artık yutulmuyor —
+            // Onarımı (2026-07-19,): yükleme hatası artık yutulmuyor -
             // Fail-loud error! log (karantina detaylı). Loader kendi içinde eski
             // Adaylara düşer; Err ancak TÜM adaylar bozuksa gelir.
             let v2_load = pm.load_latest_snapshot_v2();
             if let Err(ref e) = v2_load {
                 error!(
-                    "V2 snapshot yukleme basarisiz (FAIL-LOUD): {e}. Genesis/DB state ile devam ediliyor — operator mudahalesi onerilir!"
+                    "V2 snapshot yukleme basarisiz (FAIL-LOUD): {e}. Genesis/DB state ile devam ediliyor - operator mudahalesi onerilir!"
                 );
             }
             // Try V2 snapshot first, fall back to V1
@@ -444,7 +444,7 @@ impl Blockchain {
         // Reload the persisted sets before replay fills in the recent ones.
         //
         // Replay only reconstructs epochs from `start_index` onward, and
-        // `start_index` jumps to the state snapshot's height when one exists —
+        // `start_index` jumps to the state snapshot's height when one exists -
         // So on a node that restores from a snapshot, replay reconstructs
         // Almost nothing and every older epoch was simply gone.
         // `require_validator_snapshot` then refused every past-epoch
@@ -478,7 +478,7 @@ impl Blockchain {
             Self::build_validator_snapshot_from_state(state.epoch_index, &state, chain_id),
         );
 
-        // The stored set can outnumber the live retention window — an older
+        // The stored set can outnumber the live retention window - an older
         // Build may have run with a larger bound, or a write failed between
         // Eviction and delete. Trim to the same limit `record_validator_snapshot`
         // Enforces so the in-memory map has one owner of its size.
@@ -668,7 +668,7 @@ impl Blockchain {
         // `bridge_root` / `message_root` are *cached* commitments, so replacing
         // Their backing structure leaves the cache describing the pre-load
         // Contents; they must be re-derived here. (`storage_registry` is hashed
-        // Live inside `calculate_state_root`, so it needs no cache refresh —
+        // Live inside `calculate_state_root`, so it needs no cache refresh -
         // But it is subject to the same ordering hazard: whatever is loaded
         // From disk must equal what the replay produced, otherwise the node's
         // Own state root will not match the tip it just replayed.)
@@ -676,7 +676,7 @@ impl Blockchain {
         // Getting this wrong is silent until the node has to validate a chain:
         // `calculate_state_root` disagrees with the `block.state_root` of the
         // Replayed tip, and the first reorg fails with "Candidate state root
-        // Mismatch" — a restarted node refuses a valid canonical chain and
+        // Mismatch" - a restarted node refuses a valid canonical chain and
         // Stalls (liveness / fork-choice split).
         state.bridge_root = state.bridge_state.root();
         state.message_root = state.message_registry.root();
@@ -1089,7 +1089,7 @@ impl Blockchain {
             // domain's commitment chain contiguous: commitment N+1 must name
             // commitment N as its parent, or the domain is frozen. It used to
             // be `#[cfg(not(test))]`, which meant no test could ever exercise
-            // it and no test could notice if it were removed — a security
+            // it and no test could notice if it were removed - a security
             // check that only runs in the build nobody runs assertions
             // against.
             let last_hash = self
@@ -1210,7 +1210,7 @@ impl Blockchain {
             }
             ConsensusKind::StorageAttestation(_) => {
                 // StorageAttestation domains now use StorageAttestationFinalityAdapter (implemented by)
-                // Deep wiring: unified registry — attesters must be active in PermissionlessRegistry if registry has any ATTESTER stake.
+                // Deep wiring: unified registry - attesters must be active in PermissionlessRegistry if registry has any ATTESTER stake.
                 let adapter = crate::domain::StorageAttestationFinalityAdapter;
                 self.ensure_adapter_name(domain, adapter.adapter_name())?;
                 let status_res = adapter.verify_finality(domain, commitment, proof);
@@ -1314,7 +1314,7 @@ impl Blockchain {
 
         // B.U.D.: storage_root is computed from any verified
         // StorageProofResponses accumulated in this block period. Currently
-        // None (no proof aggregation pipeline wired yet — gated on BudZero
+        // None (no proof aggregation pipeline wired yet - gated on BudZero
         // VerifyMerkle gate). The field is set to None here and
         // Will be populated by `apply_storage_proofs` once lands.
         let storage_root = self.pending_storage_root;
@@ -1336,7 +1336,7 @@ impl Blockchain {
             // Anchor AI Inference Layer into global settlement.
             // When AiRegistry has any state, its root is committed here;
             // When empty, None ensures no bloat. This fulfills Paradigma
-            // §5 — AI outcomes are cryptographically provable at settlement.
+            // §5 - AI outcomes are cryptographically provable at settlement.
             ai_root: if self.state.ai_registry.is_empty() {
                 None
             } else {
@@ -1396,8 +1396,8 @@ impl Blockchain {
         // (security audit §9) bridge mint REQUIRES an explicit
         // `expected_block_hash`. Without it, an attacker who knows the
         // (domain, height, sequence) tuple could pick any matching
-        // Commitment from the registry — including stale, equivocated,
-        // Or finality-unconfirmed ones — and mint bridge tokens against
+        // Commitment from the registry - including stale, equivocated,
+        // Or finality-unconfirmed ones - and mint bridge tokens against
         // It. The caller's commitment hash is the bound to the exact
         // Block that produced the event; refusing to mint without it
         // Forces the caller to actually know what they are minting
@@ -1598,7 +1598,7 @@ impl Blockchain {
 
         // Debit the owner's balance when locking bridge
         // Transfer. Without this, the owner retains the locked amount while
-        // The recipient also receives it on the target domain — creating BUD
+        // The recipient also receives it on the target domain - creating BUD
         // Out of thin air (inflation bug). The sweep_expired_locks path
         // Already refunds the owner on expiry, so this debit is the
         // Corresponding credit-side bookkeeping.
@@ -1922,7 +1922,7 @@ impl Blockchain {
             &submission.public_inputs,
             &submission.program,
         ) {
-            // Burn the fee — the proof was unverified, and only the submitter
+            // Burn the fee - the proof was unverified, and only the submitter
             // Had skin in the game.
             return Err(format!("invalid proof: {e:?}"));
         }
@@ -1954,7 +1954,7 @@ impl Blockchain {
             }
             Ok(ClaimDecision::Duplicate) => ProofAcceptance::Idempotent,
             Err(ProofError::ConflictingClaim { .. }) => {
-                // Refund the fee — the protocol rejected the conflict.
+                // Refund the fee - the protocol rejected the conflict.
                 if charged_fee {
                     let account = self.state.get_or_create(&submitter);
                     account.balance = account.balance.saturating_add(fee);
@@ -2080,7 +2080,7 @@ impl Blockchain {
     ) -> usize {
         let params = *self.state.registry.params();
         // Same filter as `maybe_observe_liveness_on_epoch_close`. Taking every
-        // Key of `validators` counts members that cannot sign — a slashed or
+        // Key of `validators` counts members that cannot sign - a slashed or
         // Jailed validator stays in the map (that is how `jail_until` is
         // Tracked) while `registry.is_active` has already gone false. Feeding
         // Them in as absentees accrues a downtime streak for not doing
@@ -2129,7 +2129,7 @@ impl Blockchain {
     /// The `CrossDomainMessageRegistry` itself accepts any message, but the
     /// Permissionless submission RPC must gate on the sender being an active
     /// Relayer (registered with stake). The internal `submit_cross_domain_message`
-    /// Path used by the bridge lock/burn events is NOT gated — those messages
+    /// Path used by the bridge lock/burn events is NOT gated - those messages
     /// Come from authorized on-chain logic.
     pub fn submit_relayed_cross_domain_message(
         &mut self,
@@ -2269,7 +2269,7 @@ impl Blockchain {
                 // Using unwrap_or(message.message_id) is incorrect because the burn
                 // Message has its OWN message_id (different from the lock transfer id).
                 // Without correlation_id, we'd try to look up the burn message_id in
-                // The transfer table — which would only match by coincidence.
+                // The transfer table - which would only match by coincidence.
                 let transfer_id = message.correlation_id.ok_or_else(|| {
                     "Bridge burn message missing correlation_id (required to identify the original lock transfer)".to_string()
                 })?;
@@ -2370,7 +2370,7 @@ impl Blockchain {
     /// * If the report is ACTIONABLE (i.e. `slash_from_report` actually
     ///   Slashes the offender) the fee is refunded.
     /// * If the report is REJECTED (e.g. unverified proof) the fee is
-    ///   Burned — the report carries no economic protection, and the
+    ///   Burned - the report carries no economic protection, and the
     ///   Submitter is the only one with skin in the game.
     /// * If the report targets an account that simply isn't registered
     ///   (`Ok(None)`), the report is still treated as honest and the fee
@@ -2506,8 +2506,8 @@ impl Blockchain {
     /// `build_validator_snapshot_from_state` takes `epoch` only to stamp it on
     /// the result; the members come from `state.get_active_validators()`, which
     /// is today's set. So a certificate from epoch 5 was checked against the
-    /// validators of epoch 200 — different members, different stakes, different
-    /// quorum — and nothing said so.
+    /// validators of epoch 200 - different members, different stakes, different
+    /// quorum - and nothing said so.
     ///
     /// That is reachable in normal operation, not just in theory.
     /// `validator_snapshots` keeps 100 epochs and is never written to disk, so
@@ -2610,7 +2610,7 @@ impl Blockchain {
     ) -> Result<(), String> {
         let proofs = blob.detect_fault_proofs(snapshot);
         if !proofs.is_empty() {
-            // Unexpected for post-import path — still apply if present.
+            // Unexpected for post-import path - still apply if present.
             tracing::warn!(
                 "QC post-import fault scan found {} proof(s) at height {}",
                 proofs.len(),
@@ -2666,7 +2666,7 @@ impl Blockchain {
             // from the tip itself.
             //
             // Certificates only ever exist at multiples of
-            // `checkpoint_interval` — `import_qc_blob` rejects anything else
+            // `checkpoint_interval` - `import_qc_blob` rejects anything else
             // via `is_checkpoint_height_for_chain`. Starting at
             // `chain.len() - 1` and stepping down by the interval keeps the
             // tip's residue forever, so the scan only lands on a real
@@ -2721,7 +2721,7 @@ impl Blockchain {
             // (security audit §8) the QC-fault slash
             // Ratio is a critical security parameter and must
             // Come from `RegistryParams` rather than a hardcoded
-            // Literal — a 50% literal scattered through the code
+            // Literal - a 50% literal scattered through the code
             // Is impossible to retune for a security incident
             // Without finding every occurrence. We use the
             // `MaliciousBehaviour` ratio (currently 100%, the
@@ -3956,7 +3956,7 @@ impl Blockchain {
         self.state = new_state;
 
         // Reorg sonrası domain/bridge/settlement yapılarını
-        // Storage'dan reload et. Eski kod bu alanları olduğu gibi bırakıyordu —
+        // Storage'dan reload et. Eski kod bu alanları olduğu gibi bırakıyordu -
         // Split-brain (eski zincirin domain/bridge state'i ile yeni zincirin
         // Account state'i tutarsız oluyordu).
         self.domain_registry = crate::domain::ConsensusDomainRegistry::new();
@@ -4747,7 +4747,7 @@ impl Blockchain {
                 Ok(deal_id)
             }
             Err(e) => {
-                // Refund on deal failure — try_add_balance
+                // Refund on deal failure - try_add_balance
                 if total_fee > 0 {
                     self.state
                         .try_add_balance(&payer, total_fee)
@@ -4773,7 +4773,7 @@ impl Blockchain {
     /// Returns the storage-layer error when the economics state cannot be
     /// Persisted, matching `apply_storage_bond_slash` and
     /// `finalize_missed_storage_challenges`. This used to be
-    /// `let _ = self.persist_storage_economics_state();` — the one accounting
+    /// `let _ = self.persist_storage_economics_state();` - the one accounting
     /// Path of the four that dropped the failure.
     ///
     /// It is the path where dropping it costs the most.
@@ -5091,7 +5091,7 @@ impl Blockchain {
     /// Debit an opener's bond when they open a retrieval challenge.
     ///
     /// The bond is documented in five places as the anti-spam mechanism for a
-    /// permissionless challenge endpoint — `storage_deal.rs` says
+    /// permissionless challenge endpoint - `storage_deal.rs` says
     /// "`opener_bond` already debited from the caller's stake", and the module
     /// doc says the gate is "economically meaningless" without it. It was never
     /// debited from anything. `open_challenge` validated the number against
@@ -5099,7 +5099,7 @@ impl Blockchain {
     ///
     /// A caller could therefore pass `opener_bond: 999_999` with an empty
     /// account and open challenges for free. Each one costs the operator a read
-    /// and a hash over the range — up to 16 MiB — so the cost of the attack sat
+    /// and a hash over the range - up to 16 MiB - so the cost of the attack sat
     /// entirely on the operator. The rate limit bounds how fast that happens
     /// per `(operator, manifest)`, but a bound is not a price: an attacker with
     /// no funds could still spend an operator's I/O indefinitely.
@@ -5133,7 +5133,7 @@ impl Blockchain {
     ///
     /// `ChallengeOutcome` already documents who should get the bond back:
     /// `Answered` and `Mismatched` both return it (the opener called correctly
-    /// in either case — a wrong answer is the operator's fault), and only the
+    /// in either case - a wrong answer is the operator's fault), and only the
     /// opener being wrong would justify keeping it. Since a challenge cannot
     /// currently be judged frivolous, every resolved challenge refunds.
     ///
@@ -5168,7 +5168,7 @@ impl Blockchain {
     /// Returns the storage-layer error when the economics state cannot be
     /// persisted. The in-memory totals and the event have already been
     /// applied at that point, so the caller must treat this as a failed block
-    /// rather than retrying the burn — replaying it would slash twice.
+    /// rather than retrying the burn - replaying it would slash twice.
     pub fn apply_storage_bond_slash(
         &mut self,
         epoch: u64,
@@ -5259,7 +5259,7 @@ impl Blockchain {
     ///
     /// `open_deal` debits `economics.operator_bond` from the operator's
     /// Balance and `StorageRegistry::expire_deal` was written to hand the
-    /// Amount back — its doc-comment says it "returns the operator bond amount
+    /// Amount back - its doc-comment says it "returns the operator bond amount
     /// To be refunded by the blockchain accounting layer". No production path
     /// Ever called it. `expire_deal` appears only in tests; the sole other
     /// Writer of `DealStatus::Expired` is `prune_content`, reached when an NFT
@@ -5564,7 +5564,7 @@ mod tests {
     /// A validator set recorded before a restart must still be there after it.
     ///
     /// `validator_snapshots` was an in-memory `BTreeMap` that nothing wrote to
-    /// Disk — the doc on `validator_snapshot_for_epoch` said so outright:
+    /// Disk - the doc on `validator_snapshot_for_epoch` said so outright:
     /// "keeps 100 epochs and is never written to disk, so every historical
     /// Epoch falls into the fallback after a restart".
     ///
@@ -5575,7 +5575,7 @@ mod tests {
     /// Window of epochs.
     ///
     /// Canary: drop the `save_validator_snapshot` call from
-    /// `record_validator_snapshot` and this fails — the reopened node finds
+    /// `record_validator_snapshot` and this fails - the reopened node finds
     /// Nothing.
     #[test]
     fn validator_snapshots_survive_a_restart() {
@@ -5959,7 +5959,7 @@ mod tests {
         let signer_addr = Address::from(signer.public_key_bytes());
         let consensus = Arc::new(PoAEngine::new(PoAConfig::default(), Some(signer)));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
-        // Hash-mix leader selection needs a controlled set — keep
+        // Hash-mix leader selection needs a controlled set - keep
         // Only the PoA signer active so they are always the expected proposer.
         bc.state.validators.clear();
         bc.state.add_validator(signer_addr, 1);
@@ -6392,7 +6392,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
         .map(|v| v.stake)
         .unwrap_or(0);
     // Drive the slashing path with the configured DoubleSign
-    // Ratio (7%) — the same ratio that `apply_system_effects`
+    // Ratio (7%) - the same ratio that `apply_system_effects`
     // Reads from `RegistryParams` for on-chain
     // `slashing_evidence`. This pins the contract that the
     // Configured ratio is what gets applied to the stake:
@@ -6412,7 +6412,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
         .map(|v| v.stake)
         .unwrap_or(0);
 
-    // The configured DoubleSign ratio is 7% — so the slash
+    // The configured DoubleSign ratio is 7% - so the slash
     // Must be ~7% of `stake_before`, NOT 10% (the historical
     // Hardcoded) and NOT 50% (the QC-fault literal). A
     // Tolerance of 1% of stake is plenty: the test
@@ -6630,7 +6630,7 @@ mod bond_and_reorg_tests {
         // fault above the certificate triggers a rescan.
         //
         // Before the fix the rescan probed 57, 47, 37, ... and found nothing, so
-        // `finalized_height` fell to 0 — the chain kept its blocks but forgot they
+        // `finalized_height` fell to 0 - the chain kept its blocks but forgot they
         // were final, which re-opens reorgs that
         // `reorg_rejects_fork_at_finalized_height` exists to refuse.
         let (mut chain, _) = build_divergent_pow_chains();

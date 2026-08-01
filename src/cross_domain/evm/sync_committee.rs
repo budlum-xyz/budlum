@@ -73,7 +73,7 @@ impl std::error::Error for SyncCommitteeError {}
 /// Sync-committee boyutu (Altair sabiti).
 pub const SYNC_COMMITTEE_SIZE: usize = 512;
 
-/// Participation eşiği (2/3 — Altair finality). 512 * 2 / 3 = 341.33 → 342.
+/// Participation eşiği (2/3 - Altair finality). 512 * 2 / 3 = 341.33 → 342.
 pub const PARTICIPATION_THRESHOLD: usize = (SYNC_COMMITTEE_SIZE * 2) / 3 + 1;
 
 /// BLS pubkey boyutu (G2 compressed, BLS12-381).
@@ -126,13 +126,13 @@ impl SyncAggregate {
 ///
 /// **fix:** Önceki impl sadece 1 geçerli pubkey yeterli sayıyordu
 /// (return Ok on first success). Bu, 342+ threshold'u tamamen anlamsız
-/// Kılıyordu — saldirgan sadece 1 geçerli imza ile finality bypass edebilirdi.
+/// Kılıyordu - saldirgan sadece 1 geçerli imza ile finality bypass edebilirdi.
 ///
 /// **Düzeltilmiş impl:** Her participating pubkey için imzayı doğrular,
 /// Geçerli imza sayısını sayar ve threshold'u (342/512 = 2/3) karşılar.
 /// Bu, aggregate verify ile güvenlik açısından eşdeğerdir (her imza ayrı
 /// Verify = en az aggregate verify kadar güçlü), sadece daha yavaştır.
-/// F10.3 minimal — production'da aggregate-pubkey optimizasyonu.
+/// F10.3 minimal - production'da aggregate-pubkey optimizasyonu.
 ///
 /// `signing_message` = Altair signing domain + header hash (caller üretir).
 pub fn verify_sync_aggregate(

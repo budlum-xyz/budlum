@@ -1,5 +1,5 @@
 //! Hardening Protocol H2 regression locks.
-//! Marker: REGRESSION — do not delete without replacing coverage.
+//! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]
 mod tests {

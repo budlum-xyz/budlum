@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 ///
 /// NOTE: this is only the *default* used by [`PermissionlessRegistry::new`].
 /// The effective floor is a governance/config parameter
-/// ([`RegistryParams::min_stake`]) — this constant must not be treated as a
+/// ([`RegistryParams::min_stake`]) - this constant must not be treated as a
 /// Hard rule. It is a *stake floor*, not a permission check: anyone meeting it
 /// Can join.
 pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
@@ -40,9 +40,9 @@ pub const UNBONDING_EPOCHS: u64 = 7;
 ///
 /// The history was unbounded and is hashed into [`PermissionlessRegistry::root`],
 /// so it is consensus state that grew for the life of the chain. It is not
-/// cheap to abuse — `SlashingReport::is_actionable` requires
+/// cheap to abuse - `SlashingReport::is_actionable` requires
 /// `ProofProvenance::ConsensusVerified`, so records only appear for slashes
-/// that actually happened — but "only grows when a validator misbehaves" is
+/// that actually happened - but "only grows when a validator misbehaves" is
 /// still monotonic.
 ///
 /// 4096 is far above any plausible operational need: at one slash per epoch it
@@ -201,7 +201,7 @@ pub struct PermissionlessRegistry {
     ///
     /// Consensus state: `root()` hashes every record, so the cap has to be
     /// applied identically on every node. Trimming from the front on insert is
-    /// deterministic — it depends only on the number of records, not on time,
+    /// deterministic - it depends only on the number of records, not on time,
     /// node age, or when a node joined.
     slashing_history: Vec<SlashingRecord>,
 }
@@ -329,7 +329,7 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// DeEd master verifier — alias to VERIFIER (RoleId 2)
+    /// DeEd master verifier - alias to VERIFIER (RoleId 2)
     pub fn register_master_verifier(
         &mut self,
         account: Address,
@@ -386,7 +386,7 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// Supply-chain attester (ATTESTER=7) — unified registry
+    /// Supply-chain attester (ATTESTER=7) - unified registry
     pub fn register_attester(
         &mut self,
         account: Address,
@@ -401,7 +401,7 @@ impl PermissionlessRegistry {
         )
     }
 
-    /// Lubot operator (RoleId 8) — must be preserved
+    /// Lubot operator (RoleId 8) - must be preserved
     pub fn register_lubot_operator(
         &mut self,
         account: Address,
@@ -652,8 +652,8 @@ impl PermissionlessRegistry {
             // from one that correctly found nothing to do. Consensus called
             // this and moved on believing the report had been handled.
             //
-            // Still `Ok(None)` — a failed slash must not abort block
-            // application, or one bad report would halt the chain — but it is
+            // Still `Ok(None)` - a failed slash must not abort block
+            // application, or one bad report would halt the chain - but it is
             // no longer silent. An operator seeing this line knows evidence
             // was accepted and then dropped.
             Err(reason) => {
@@ -1045,14 +1045,14 @@ mod tests {
         let relayer = addr(123);
 
         // Permissionless entry: anyone may bond the min stake and become an
-        // Active relayer — no whitelist, no admin gate (see README, "Permissionless").
+        // Active relayer - no whitelist, no admin gate (see README, "Permissionless").
         reg.register_relayer(relayer, MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         assert!(reg.is_active_relayer(&relayer));
         assert!(reg.ensure_active_relayer(&relayer).is_ok());
 
         // A griefing offence (slashing variant) slashes the relayer
-        // 100% and jails it — it can no longer relay.
+        // 100% and jails it - it can no longer relay.
         reg.slash(
             relayer,
             roles::RELAYER,
@@ -1120,8 +1120,8 @@ mod tests {
     /// naming an account that never held the role. All four call sites also
     /// use `let _ =`, so neither layer would have noticed.
     ///
-    /// It still returns `Ok(None)` — a failed slash must not abort block
-    /// application, or one bad report would halt the chain — but the refusal
+    /// It still returns `Ok(None)` - a failed slash must not abort block
+    /// application, or one bad report would halt the chain - but the refusal
     /// is logged now. This test pins the two cases apart at the source level,
     /// since a `tracing::warn!` is not observable from a unit test.
     #[test]
@@ -1164,7 +1164,7 @@ mod tests {
 
     /// The slashing history is capped, and the cap is deterministic.
     ///
-    /// Consensus state — `root()` hashes every record — so a cap that depended
+    /// Consensus state - `root()` hashes every record - so a cap that depended
     /// on time, node age, or when a node joined would make two nodes that saw
     /// the same slashes compute different registry roots. Trimming from the
     /// front on insert depends only on the count.
@@ -1253,7 +1253,7 @@ mod tests {
     /// A copy can drift. This test is the thing that stops it: it recomputes
     /// both expressions over the boundary values the proofs care about and
     /// fails if they ever disagree. If the registry's formula changes, update
-    /// `penalty_for` in `kani/src/lib.rs` in the same commit — the proofs are
+    /// `penalty_for` in `kani/src/lib.rs` in the same commit - the proofs are
     /// about production only for as long as the two match.
     #[test]
     fn bond_arithmetic_matches_the_kani_mirror() {

@@ -77,7 +77,7 @@ COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
 RUN useradd --create-home --shell /bin/bash budlum
 
 # Multi-node compose mount-point'leri (devnet-multinode-smoke): named volume
-# ilk mount'ta imaj dizin sahipliğini devralır — önceden budlum sahipli
+# ilk mount'ta imaj dizin sahipliğini devralır - önceden budlum sahipli
 # oluşturulmazsa container (USER budlum) storage init'te EACCES alır ve
 # restart-loop'a düşer (ilk CI koşusunda yakalanan defo, 2026-07-18).
 RUN mkdir -p /home/budlum/data /home/budlum/secrets \
@@ -99,6 +99,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 ENV RUST_LOG=info
 
 ENTRYPOINT ["budlum-core"]
-# Default: devnet (safety — mainnet requires explicit --network mainnet flag).
+# Default: devnet (safety - mainnet requires explicit --network mainnet flag).
 # See docs/budlum-ci-guvenlik-plani.md §2 (Dockerfile default mode).
 CMD ["--network", "devnet", "--port", "4001"]

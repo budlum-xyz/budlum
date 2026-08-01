@@ -2,7 +2,7 @@
 #
 # Inside the monorepo this file is redundant: rustup walks up from the current
 # directory and finds the root `rust-toolchain.toml` anyway. It matters when
-# `budzero/` is built on its own — a separate checkout, a container that copies
+# `budzero/` is built on its own - a separate checkout, a container that copies
 # only this subtree, or a `cargo` invocation whose working directory is here.
 # Without a pin those cases silently fall back to whatever toolchain the host
 # happens to default to, which is how an MSRV promise quietly stops being one.

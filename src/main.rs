@@ -252,7 +252,7 @@ async fn main() {
 
     //.1 tooling: `budlum-core keygen --type ed25519 --output <path>`
     // Ceremony dokümanı adımın karşılığı (önceden dokümanda olan ama
-    // Binary'de OLMAYAN bir komuttu — iddia-vs-kanıt matrisi kapanışı).
+    // Binary'de OLMAYAN bir komuttu - iddia-vs-kanıt matrisi kapanışı).
     if args.len() >= 2 && args[1] == "keygen" {
         let mut key_type = "ed25519".to_string();
         let mut output: Option<String> = None;
@@ -296,7 +296,7 @@ async fn main() {
         // Yalnızca PKCS#11 HSM içinde üretilir.
         if key_type != "ed25519" {
             eprintln!(
-                "CRITICAL: '{key_type}' anahtarları disk üzerinde üretilemez — BLS/PQ yalnızca PKCS#11 HSM içinde üretilir (mainnet politikası)."
+                "CRITICAL: '{key_type}' anahtarları disk üzerinde üretilemez - BLS/PQ yalnızca PKCS#11 HSM içinde üretilir (mainnet politikası)."
             );
             std::process::exit(1);
         }
@@ -313,7 +313,7 @@ async fn main() {
         });
         // NOT (karşı-dengesi): node çalışırken pubkey stdout'a
         // Yazılmaz; burada operatörün açıkça çağırdığı ayrı keygen CLI'si
-        // Sanctioned kanaldır — pubkey ve adres ceremony tabloları için
+        // Sanctioned kanaldır - pubkey ve adres ceremony tabloları için
         // Bilinçli yazdırılır. Secret key ve dosya yolu ASLA loglanmaz.
         let address = Address::from(keypair.public_key_bytes());
         println!("Ed25519 keypair generated (secret key written with 0600 permissions).");
@@ -782,7 +782,7 @@ async fn main() {
                 }
             }
             tracing::info!(
-                "BFT bootstrap domain {} activated — BFT finality adapter engaged",
+                "BFT bootstrap domain {} activated - BFT finality adapter engaged",
                 domain.id
             );
             continue;
@@ -862,7 +862,7 @@ async fn main() {
         chain_actor.run().await;
     });
 
-    // (2026-07-18,) ölü `_keys` bootstrap'ı gerçeğe bağlandı —
+    // (2026-07-18,) ölü `_keys` bootstrap'ı gerçeğe bağlandı -
     // Yüklenen validator anahtarının ADRESİ producer-aday zincirine düşer.
     // Davranış değişikliği yalnızca şu: anahtar yüklemesi başarılıysa adresi
     // Artık bir değişkende tutulur; imza/devnet'lik doğrulama kuralları aynı.
@@ -874,7 +874,7 @@ async fn main() {
             budlum_core::crypto::primitives::ValidatorKeys::load(&v_path)
                 .map_err(|e| {
                     tracing::warn!(
-                        "Validator key load failed ({v_path}): {e} — producersuz devam."
+                        "Validator key load failed ({v_path}): {e} - producersuz devam."
                     );
                 })
                 .ok()
@@ -910,12 +910,12 @@ async fn main() {
             std::process::exit(1);
         }
         // Genesis placeholder reddiyle (cli/commands.rs Rule 4)
-        // Simetrik fail-closed — dummy/placeholder marker içeren peer mainnet'te
+        // Simetrik fail-closed - dummy/placeholder marker içeren peer mainnet'te
         // DİAL EDİLMEZ. ceremony gerçek multiaddr'ları yazınca geçer.
         if let Some(bad) = budlum_core::core::chain_config::first_placeholder_peer(&bootstraps) {
             eprintln!("CRITICAL SECURITY FAILURE: Mainnet placeholder bootnode detected: {bad}");
             eprintln!(
-                "Dummy peer'lar production'da dial edilemez — ceremony ile gerçek multiaddr'lar yazılmalı."
+                "Dummy peer'lar production'da dial edilemez - ceremony ile gerçek multiaddr'lar yazılmalı."
             );
             std::process::exit(1);
         }
@@ -1037,14 +1037,14 @@ async fn main() {
         // Warning if the *resolved* `auth_required` is false. This block
         // Runs regardless of which constructor
         // (`RpcSecurityConfig::default`, `operator_default`,
-        // `from_env`) produced the config — the check is on the
+        // `from_env`) produced the config - the check is on the
         // Resolved value, not the code path. Without this, an operator
         // Who set `[rpc] auth_required = false` in their TOML (or
         // Relied on the prior NodeConfig default) would silently ship
         // An unauthenticated node.
         if !rpc_security.auth_required {
             tracing::warn!(
-                "[GUVENLIK] Public RPC auth_required=false calisiyor — tum state-degistiren metodlar kimlik dogrulamasiz aga acik! --rpc-auth-required=true (veya esdeger config) ile kapatin."
+                "[GUVENLIK] Public RPC auth_required=false calisiyor - tum state-degistiren metodlar kimlik dogrulamasiz aga acik! --rpc-auth-required=true (veya esdeger config) ile kapatin."
             );
         }
         // Same reasoning for an unrestricted IP allow-list. The runtime
@@ -1058,7 +1058,7 @@ async fn main() {
                 .all(|ip| ip == "127.0.0.1" || ip == "::1");
         if !has_localhost_only && !rpc_security.allowed_ips.is_empty() {
             tracing::warn!(
-                "[GUVENLIK] Public RPC allowed_ips genisletildi: {:?} — sadece guvenilir / ozel ag uzerinde calistirin.",
+                "[GUVENLIK] Public RPC allowed_ips genisletildi: {:?} - sadece guvenilir / ozel ag uzerinde calistirin.",
                 rpc_security.allowed_ips
             );
         }
@@ -1199,13 +1199,13 @@ async fn main() {
 
     // (2026-07-18,) Daemon blok-üretim döngüsü (PoS + PoW).
     // Kök neden (CI kanıtlı, multinode smoke job 87990206239): binary yalnız
-    // Interaktif stdin "mine" komutuyla blok üretiyordu — daemon/compose
+    // Interaktif stdin "mine" komutuyla blok üretiyordu - daemon/compose
     // Ağları genesis'te (height=0x0) donuyordu. Döngü, producer adresi
     // Yapılandırılmışsa PoS ve PoW'da çalışır. Üretici-uygunluk tek otorite
     // Olarak motor katmanında kalır: PoS'ta `preview_common` (aktif-validator
-    // + VRF liderlik — bunun için daemon'un PoSEngine'e enjekte edilmiş
+    // + VRF liderlik - bunun için daemon'un PoSEngine'e enjekte edilmiş
     // Validator_keys'e ihtiyacı vardır; adres-only 0x02 ile PoS üretimi
-    // YAPAMAZ, bakınız STATUS_ONLINE backlog) — PoW'da `mine` (difficulty
+    // YAPAMAZ, bakınız STATUS_ONLINE backlog) - PoW'da `mine` (difficulty
     // CLI bayrağından; smoke difficulty=0). Yayın gossipsub "blocks"
     // Kanalından; eşler aynı deterministik commit yolunu koşar.
     if consensus_type == ConsensusType::PoS || consensus_type == ConsensusType::PoW {
@@ -1231,7 +1231,7 @@ async fn main() {
             });
         } else {
             tracing::warn!(
-                "Daemon: producer adresi yapılandırılmadı (--validator-address / validator key) — node yalnızca doğrular ve senkronize olur."
+                "Daemon: producer adresi yapılandırılmadı (--validator-address / validator key) - node yalnızca doğrular ve senkronize olur."
             );
         }
     }

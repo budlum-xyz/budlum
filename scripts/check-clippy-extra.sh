@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-clippy-extra.sh — clippy pedantic+nursery izleme-ratchet kapısı
+# check-clippy-extra.sh - clippy pedantic+nursery izleme-ratchet kapısı
 # (izleme modu + ratchet ile güçlendirilmiş:
-#  Sayı ARTARSA fail — düşmesi serbest, yeni baseline bilinçli PR'la düşürülür)
+#  Sayı ARTARSA fail - düşmesi serbest, yeni baseline bilinçli PR'la düşürülür)
 #
 # Baseline kanıtı (2026-07-17, yerel, `98b0fd9` worktree):
 #   Cargo clippy --all-targets -- -W pedantic -W nursery → 217 uyarı, 20 lint
@@ -42,7 +42,7 @@ gate() {
   n=$(count_json "$json")
   echo "clippy-extra: $n | baseline: $BASELINE"
   if [ "$n" -gt "$BASELINE" ]; then
-    echo "FAIL: pedantic/nursery uyarı sayısı baseline'ı aştı (+$((n-BASELINE))) — yeni uyarı ratchet'e takıldı."
+    echo "FAIL: pedantic/nursery uyarı sayısı baseline'ı aştı (+$((n-BASELINE))) - yeni uyarı ratchet'e takıldı."
     return 1
   fi
   echo "OK: pedantic/nursery baseline altında/eşit (ratchet sağlam)."

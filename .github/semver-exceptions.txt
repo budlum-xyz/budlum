@@ -1,4 +1,4 @@
-# SEMVER EXCEPTIONS — budlum-core public API kırılması istisna listesi (ADIM-1, 2026-07-21)
+# SEMVER EXCEPTIONS - budlum-core public API kırılması istisna listesi (ADIM-1, 2026-07-21)
 #
 # Bu liste BOŞ kalmalıdır; boş liste = cargo-semver-checks kapısı tam
 # fail-closed çalışır (Madde 5: public API kırılması tespiti → FAIL).
@@ -9,7 +9,7 @@
 #     girdisi / karar notu) satırda referanslanır.
 #   * Format: <semver-checks lint adı veya API yüzeyi> | <gerekçe> | <onay kanıtı>
 #
-# Örnek (şablon — AKTİF DEĞİL, satır # ile yorumda tutulur):
+# Örnek (şablon - AKTİF DEĞİL, satır # ile yorumda tutulur):
 #   # method_missing: AccountState::legacy_probe | mainnet-öncesi bilinçli API
 #   #   temizliği, 0.x sürüm hattı | STATUS_ONLINE 2026-07-21 onayı
 #
@@ -17,7 +17,7 @@
 # satırlar istisna sayılır (bkz. scripts/check-semver.sh).
 #
 # ekip EIP-1559 fee distribution (ADIM G): yeni public metod.
-# AccountState::distribute_block_fees — block finalization'da fee dağıtımı.
+# AccountState::distribute_block_fees - block finalization'da fee dağıtımı.
 # cargo-semver-checks yeni metod eklediğini tespit eder; bu 0.x sürüm
 # hattında minor ekleme kabul edilir. Onay: STATUS_ONLINE 2026-07-21.
-AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (ADIM G) — yeni public metod, block finalization'a bağlandı | STATUS_ONLINE 2026-07-21 onayı
+AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (ADIM G) - yeni public metod, block finalization'a bağlandı | STATUS_ONLINE 2026-07-21 onayı

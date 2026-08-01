@@ -116,7 +116,7 @@ fn unbonding_relayer_can_still_submit() {
 #[test]
 fn system_bridge_path_bypasses_relayer_gate() {
     // The internal primitive (used by bridge lock/burn events) must NOT require
-    // Relayer registration — those messages come from authorized on-chain logic.
+    // Relayer registration - those messages come from authorized on-chain logic.
     let mut bc = fresh_chain();
     bc.submit_cross_domain_message(relayed_message(addr(0x05), 1))
         .unwrap();

@@ -122,7 +122,7 @@ pub mod security_auditor;
 pub mod socialfi;
 #[cfg(test)]
 pub mod target_700;
-// P0 mainnet-gap (2026-07-18): bridge negatif süiti — forgery /
+// P0 mainnet-gap (2026-07-18): bridge negatif süiti - forgery /
 // Replay / anchor-substitution / inactive-relayer / unknown-message reddi.
 // Yalnızca mevcut tanımlı red yollarını doğrular; protokol davranışı değişmez.
 #[cfg(test)]
@@ -167,7 +167,7 @@ pub mod slashing_matrix;
 // Determinism.yml bu modüldeki testten üretilen CONSENSUS_DIGEST satırını üç
 // Işletim sisteminde toplayıp byte-eşitlik ister.
 pub mod consensus_digest;
-// (2026-07-21) CI Genişletme Madde 1 — genesis
+// (2026-07-21) CI Genişletme Madde 1 - genesis
 // Reproducibility sondası (`genesis_hash_deterministic`, bkz. determinism.yml).
 #[cfg(test)]
 pub mod genesis_repro;

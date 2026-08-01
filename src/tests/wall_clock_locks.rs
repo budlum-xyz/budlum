@@ -6,8 +6,8 @@
 //! typo can all produce it. Unwrapping it turns a misconfigured clock into a
 //! process abort.
 //!
-//! The tree already knew this — `consensus/mod.rs` and `core/transaction.rs`
-//! used `unwrap_or_default()` — but 19 other call sites did not, including
+//! The tree already knew this - `consensus/mod.rs` and `core/transaction.rs`
+//! used `unwrap_or_default()` - but 19 other call sites did not, including
 //! `Block::new` on the consensus path and fourteen RPC handlers reachable
 //! from a public endpoint. These tests pin the convention so the two halves
 //! cannot drift apart again.

@@ -9,11 +9,11 @@
 //! 4. If valid, update the contract state root
 //!
 //! ## Design decisions
-//! - Proof verification is **deterministic** — same proof + inputs = same result
+//! - Proof verification is **deterministic** - same proof + inputs = same result
 //!   On every node. No randomness, no side effects.
-//! - Failed verification is a validation error, NOT a panic — the network
+//! - Failed verification is a validation error, NOT a panic - the network
 //!   Continues operating even with garbage proofs.
-//! - The verification gas cost is bounded by `proof.degree_bits` — larger
+//! - The verification gas cost is bounded by `proof.degree_bits` - larger
 //!   Proofs cost more gas, preventing DoS via huge proofs.
 
 use bud_proof::ProverAdapter;
@@ -193,7 +193,7 @@ impl ProofEnvelope {
     }
 }
 
-/// The proof verifier — stateless, deterministic.
+/// The proof verifier - stateless, deterministic.
 pub struct ProofVerifier;
 
 impl ProofVerifier {

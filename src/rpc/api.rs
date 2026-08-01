@@ -110,7 +110,7 @@ pub trait BudlumApi {
     // Kimlik doğrulamasız (imza/kanıt olmadan) bridge lock oluşturulamaz.
     // Bridge lock'lar artık yalnızca:
     //   1. Internal `Blockchain::lock_bridge_transfer` çağrıları (system
-    //      Path) — bu yorum, kod tabanındaki tek kalıntıdır.
+    //      Path) - bu yorum, kod tabanındaki tek kalıntıdır.
     //   2. (+ planı) `lock_bridge_transfer_with_proof` API'si
     //      (`verify_domain_event_proof` benzeri kanıt zorunlu).
     //
@@ -216,7 +216,7 @@ pub trait BudlumApi {
     /// Permanently unrecoverable. Returns the release epoch, which follows the
     /// `unbonding_epochs` governance parameter.
     ///
-    /// Operator-only, matching `bud_registryBondRelayer` — it is the same
+    /// Operator-only, matching `bud_registryBondRelayer` - it is the same
     /// Unsigned legacy administration surface, and the exit must not be easier
     /// To reach than the entry.
     #[method(name = "bud_registryBeginRoleBondUnbonding")]
@@ -760,7 +760,7 @@ pub trait BudlumApi {
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Query ZKVM execution proof for a (request, verifier) pair.
-    /// Results with execution proofs are "trustless" — verified by ZKVM
+    /// Results with execution proofs are "trustless" - verified by ZKVM
     /// Mathematics rather than by verifier reputation alone. This is the
     /// Core primitive for the Agentic Economy paradigm shift.
     #[method(name = "bud_aiExecutionProof")]

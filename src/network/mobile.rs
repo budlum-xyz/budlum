@@ -1,4 +1,4 @@
-//! P12-9: Mobile Self — Mobil düğüm profili ve kendi B.U.D.'nü barındır.
+//! P12-9: Mobile Self - Mobil düğüm profili ve kendi B.U.D.'nü barındır.
 //!
 //! Mobile Self, kullanıcıların kendi mobil cihazlarında Budlum düğümü
 //! Çalıştırmasını sağlar. Bu modül, mobil cihazların kısıtlı kaynaklarına
@@ -103,13 +103,13 @@ impl BatteryStatus {
 /// Güç modu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PowerMode {
-    /// Tam güç — tüm görevleri kabul et.
+    /// Tam güç - tüm görevleri kabul et.
     Full,
-    /// Normal — standart görevler.
+    /// Normal - standart görevler.
     Normal,
-    /// Tasarruf — sadece temel görevler.
+    /// Tasarruf - sadece temel görevler.
     PowerSaving,
-    /// Kritik — sadece dinleme, görev kabul etme.
+    /// Kritik - sadece dinleme, görev kabul etme.
     Critical,
 }
 
@@ -141,15 +141,15 @@ pub enum ConnectionType {
 /// NAT tipi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NatType {
-    /// NAT yok — genel IP.
+    /// NAT yok - genel IP.
     None,
-    /// Full Cone NAT — en izin verilen.
+    /// Full Cone NAT - en izin verilen.
     FullCone,
     /// Restricted Cone NAT.
     RestrictedCone,
     /// Port Restricted Cone NAT.
     PortRestrictedCone,
-    /// Symmetric NAT — en kısıtlayıcı.
+    /// Symmetric NAT - en kısıtlayıcı.
     Symmetric,
     /// Bilinmiyor.
     Unknown,
@@ -206,7 +206,7 @@ impl StorageStatus {
     }
 }
 
-/// Challenge policy — pil durumuna göre otomatik ayarlanır.
+/// Challenge policy - pil durumuna göre otomatik ayarlanır.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengePolicy {
     /// Maksimum challenge kabul sıklığı (epoch başına).

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Check-actionlint.sh —  workflow lint kapısı (vacuous-gate kanaryalı)
+# Check-actionlint.sh -  workflow lint kapısı (vacuous-gate kanaryalı)
 # Kullanım:
 #   Bash scripts/check-actionlint.sh # tüm workflow'ları lint'le
 #   Bash scripts/check-actionlint.sh --self-test # kanarya: bozuk workflow FAIL kanıtı

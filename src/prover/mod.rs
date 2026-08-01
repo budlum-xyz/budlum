@@ -1,8 +1,8 @@
 //! Permissionless ZK proof submission and the L1 ↔ BudZKVM bridge.
 //!
-//! ## Model (decided this turn: "Option B" — fully open submission)
+//! ## Model (decided this turn: "Option B" - fully open submission)
 //! Anyone may submit a proof; registration is NOT required to have a valid proof
-//! Accepted, because a STARK proof is self-verifying — the chain verifies the
+//! Accepted, because a STARK proof is self-verifying - the chain verifies the
 //! Math and never needs to trust the submitter. Registration (the `PROVER` role)
 //! Is *optional* and only affects **reward eligibility**.
 //!
@@ -67,7 +67,7 @@ impl ZkProofSubmission {
         program: &[u64],
     ) -> Hash32 {
         // SECURITY: serialize into a hash MUST NOT silently fall back
-        // To empty bytes — two different proofs whose serialization failed would
+        // To empty bytes - two different proofs whose serialization failed would
         // Collide to the same hash, breaking the replay-protection guarantee this
         // Function documents. bincode serialization of this plain data type is
         // Infeasible to fail from untrusted input (no fallible custom Serialize,
@@ -145,7 +145,7 @@ pub enum ProofError {
     /// STARK verification failed.
     InvalidProof(String),
     /// A different final state root was already accepted for this
-    /// `(domain, height)` — conflicting claim.
+    /// `(domain, height)` - conflicting claim.
     ConflictingClaim {
         domain_id: DomainId,
         target_height: u64,
@@ -233,9 +233,9 @@ impl ProofClaimRegistry {
 /// Result of [`ProofClaimRegistry::classify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimDecision {
-    /// No prior claim — accept as the first valid proof.
+    /// No prior claim - accept as the first valid proof.
     New,
-    /// Identical prior claim — idempotent.
+    /// Identical prior claim - idempotent.
     Duplicate,
 }
 

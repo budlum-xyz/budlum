@@ -1,4 +1,4 @@
-//! SocialFi modulu — kategorizasyonu: src/nft -> src/socialfi
+//! SocialFi modulu - kategorizasyonu: src/nft -> src/socialfi
 //! Rename'i (kullanici: scope_v1). Yalniz modul yolu degisti; RPC method
 //! String'leri ve tipler ayni (kamusal kirilma yok).
 pub mod types;
@@ -60,7 +60,7 @@ impl NftRegistry {
         if new_val < 0 {
             new_val = 0;
         }
-        // Clamp to u64::MAX — eskiden `as u64` truncate
+        // Clamp to u64::MAX - eskiden `as u64` truncate
         // Ediyordu (büyük delta_mcd değerinde sessiz overflow).
         if new_val > u64::MAX as i128 {
             new_val = u64::MAX as i128;

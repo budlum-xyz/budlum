@@ -1,4 +1,4 @@
-# osv-scanner.toml — OSV.dev tabanlı zafiyet taraması için gerekçeli istisnalar
+# osv-scanner.toml - OSV.dev tabanlı zafiyet taraması için gerekçeli istisnalar
 #
 # NEDEN AYRI BİR TARAYICI: cargo-audit ve cargo-deny yalnız RustSec advisory
 # veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
@@ -14,7 +14,7 @@
 #
 # 2026-07-28: üç zafiyet kaydı (yamux GHSA-vxx9-2994-q338, hickory
 # RUSTSEC-2026-0118 / RUSTSEC-2026-0119 / GHSA-q2qq-hmj6-3wpp) SİLİNDİ çünkü
-# yamalandılar — politikanın istediği şey buydu. Kök Cargo.toml libp2p'yi
+# yamalandılar - politikanın istediği şey buydu. Kök Cargo.toml libp2p'yi
 # 0.57.0 ağacına sabitliyor; bu yamux 0.14.0 ve hickory 0.26.1 getiriyor.
 # Aşağıda yalnız "unmaintained" bakım uyarıları kaldı; bunlar zafiyet değil.
 
@@ -23,14 +23,14 @@
 # "unmaintained"). Repo politikası bunları deny.toml'da `unmaintained = "none"`
 # ile FAIL saymaz; görünürlük CI'daki cargo audit raporundan sağlanır ve
 # org roadmap'te izlenir. OSV bunları da zafiyet gibi döndürdüğü için burada
-# aynı politikayı yansıtıyoruz — aksi halde iki araç birbiriyle çelişirdi.
+# aynı politikayı yansıtıyoruz - aksi halde iki araç birbiriyle çelişirdi.
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0089"
-reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) — deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
+reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) - deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
-reason = "bincode 1.x unmaintained — org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
+reason = "bincode 1.x unmaintained - org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0057"
@@ -50,8 +50,8 @@ reason = "pqcrypto-dilithium → pqcrypto-mldsa ile değiştirildi; PQ backend g
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0163"
-reason = "pqcrypto-internals unmaintained (upstream PQClean arşivleniyor) — PQ backend geçiş görevinde birlikte ele alınacak."
+reason = "pqcrypto-internals unmaintained (upstream PQClean arşivleniyor) - PQ backend geçiş görevinde birlikte ele alınacak."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0162"
-reason = "pqcrypto-traits unmaintained (upstream PQClean arşivleniyor) — PQ backend geçiş görevinde birlikte ele alınacak."
+reason = "pqcrypto-traits unmaintained (upstream PQClean arşivleniyor) - PQ backend geçiş görevinde birlikte ele alınacak."

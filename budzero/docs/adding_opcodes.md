@@ -99,11 +99,11 @@ fn proves_my_new_opcode() {
 
 Güncellenmesi gereken dosyalar:
 
-- `docs/isa_ve_bytecode.md` — Opcode formatı, discriminant ve stabilite durumu.
-- `docs/vm_trace_schema.md` — Yeni trace sütunları eklendiyse.
-- `docs/virtual_machine.md` — VM semantiği değiştiyse.
-- `docs/STABILIZATION.md` — Yeni production opcode'u eklendiyse.
-- `README.md` — Roadmap durumu.
+- `docs/isa_ve_bytecode.md` - Opcode formatı, discriminant ve stabilite durumu.
+- `docs/vm_trace_schema.md` - Yeni trace sütunları eklendiyse.
+- `docs/virtual_machine.md` - VM semantiği değiştiyse.
+- `docs/STABILIZATION.md` - Yeni production opcode'u eklendiyse.
+- `README.md` - Roadmap durumu.
 
 Değişikliği göndermeden önce `docs/development.md`'deki yerel CI eşdeğerini çalıştır:
 

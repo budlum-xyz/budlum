@@ -8,10 +8,10 @@
 //!
 //! ```text
 //! LocalDevnet
-//! ├── Domain 0: PoW (Permissionless) — mining, difficulty adjustment
-//! ├── Domain 1: PoS (Permissionless) — staking, epoch rotation
-//! ├── Domain 2: PoA (Permissioned)   — KYC validators, sealed blocks
-//! └── Domain 3: Bft (Permissionless) — sync committee, BLS quorum
+//! ├── Domain 0: PoW (Permissionless) - mining, difficulty adjustment
+//! ├── Domain 1: PoS (Permissionless) - staking, epoch rotation
+//! ├── Domain 2: PoA (Permissioned)   - KYC validators, sealed blocks
+//! └── Domain 3: Bft (Permissionless) - sync committee, BLS quorum
 //! ```
 //!
 //! Her domain kendi chain actor'üne, depolama alanına ve RPC endpoint'ine
@@ -92,7 +92,7 @@ impl DevnetDomainProfile {
     }
 }
 
-/// Devnet yapılandırması — `budlum.toml` [devnet] bölümü ve ek parametreler.
+/// Devnet yapılandırması - `budlum.toml` [devnet] bölümü ve ek parametreler.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevnetConfig {
     /// Base chain ID (öntanımlı: devnet chain id).
@@ -267,7 +267,7 @@ impl LocalDevnet {
         status.height = 0;
 
         tracing::info!(
-            "SDK Devnet: Domain {} ({}) started — RPC at 127.0.0.1:{}",
+            "SDK Devnet: Domain {} ({}) started - RPC at 127.0.0.1:{}",
             domain_id,
             status.config.name,
             status.config.rpc_port

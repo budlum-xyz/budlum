@@ -606,7 +606,7 @@ impl QcFaultProof {
                 // Verified) but cannot be challenged. For mainnet, consider
                 // Disabling ZK domain QC import until verifier is ready.
                 return Err(
-                    "ZK QC fault proof verifier not implemented — ZK domain attestations \
+                    "ZK QC fault proof verifier not implemented - ZK domain attestations \
                      cannot be challenged until ZK verifier integration. This is fail-closed: \
                      no invalid ZK attestation can be finalized via this path."
                         .into(),
@@ -950,7 +950,7 @@ mod tests {
     ///
     /// `validate_size` bounds the blob in bytes, not entries. With a one-byte
     /// signature an entry costs about 50 bytes, so roughly 20 000 fit under
-    /// `MAX_QC_BLOB_BYTES` — and every one of them used to be hashed by
+    /// `MAX_QC_BLOB_BYTES` - and every one of them used to be hashed by
     /// `verify_merkle_root` before the verification loop rejected the first
     /// one. Measured on this four-validator snapshot (debug build), 10 000
     /// entries cost 604 ms of CPU for a blob that can never verify.
@@ -986,7 +986,7 @@ mod tests {
     /// without the cost growing with the entry count.
     ///
     /// If the bound is ever removed this test still passes on correctness but
-    /// the timing assertion fails, which is the point — the finding was a CPU
+    /// the timing assertion fails, which is the point - the finding was a CPU
     /// exhaustion, not a wrong answer.
     #[test]
     fn oversized_blob_is_refused_in_constant_time() {
@@ -1033,7 +1033,7 @@ mod tests {
         assert!(
             large_us < small_us.saturating_mul(20) + 5_000,
             "rejecting 10000 entries took {large_us}us against {small_us}us for \
-             100 — the cost is scaling with the entry count again, so the \
+             100 - the cost is scaling with the entry count again, so the \
              bound is no longer running before verify_merkle_root"
         );
     }
@@ -1062,7 +1062,7 @@ mod tests {
     }
 
     /// A partial quorum (fewer entries than validators) must also still pass
-    /// structural verification — the bound is an upper limit, not an equality.
+    /// structural verification - the bound is an upper limit, not an equality.
     #[test]
     fn partial_signature_set_still_verifies() {
         let (snapshot, keys) = make_snapshot_with_pq_keys(4);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# check-required-tests-are-tests.sh — a gate's required test must be a test.
+# check-required-tests-are-tests.sh - a gate's required test must be a test.
 #
 # Eight gates name the tests they require by hand:
 #
@@ -12,7 +12,7 @@
 # and then assert each name appears as passing in a `cargo test` log. That is
 # a good gate, and it has one hole: it verifies the name RAN, by looking for
 # it in the log. If the function loses its `#[test]` attribute, it never runs,
-# never appears in the log, and the gate fails loudly — which is correct.
+# never appears in the log, and the gate fails loudly - which is correct.
 #
 # But the reverse is not covered. A gate whose log-scan is satisfied for the
 # wrong reason, or a required name that was never a test to begin with, or a
@@ -31,7 +31,7 @@
 # `total_bud_committed_counts_stake_and_unbonding` is a *required* name in
 # `check-economy-invariants.sh`. It stopped being a test, so the supply-
 # accounting invariant it pins stopped being checked. Only `-D dead-code`
-# caught it, and only because nothing else called the function — a required
+# caught it, and only because nothing else called the function - a required
 # test that happened to be called from somewhere would have gone unnoticed.
 #
 # So: every name in every `required_tests=(...)` must be attached to a
@@ -81,7 +81,7 @@ collect_marked_tests() {
 # Pull the identifiers out of a `required_tests=( ... )` array.
 # Only a line that is exactly `required_tests=(` opens a list, and only a line
 # that is exactly `)` closes it. The loose version of this matched the string
-# where it appears inside a comment — including in this file — and then ran to
+# where it appears inside a comment - including in this file - and then ran to
 # the end of the script collecting shell keywords as test names.
 collect_required_names() {
   local script="$1"
@@ -97,7 +97,7 @@ check_required() {
   local marked
   marked="$(collect_marked_tests "$root")"
 
-  [ -n "$marked" ] || fail "no #[test] functions found under $root — wrong root?"
+  [ -n "$marked" ] || fail "no #[test] functions found under $root - wrong root?"
 
   local scripts_with_lists=0
   local total=0
@@ -129,7 +129,7 @@ check_required() {
 
   # Guard against the gate passing on a tree where it found nothing to check.
   [ "$scripts_with_lists" -gt 0 ] \
-    || fail "no scripts/check-*.sh declares required_tests=() under $root — wrong root?"
+    || fail "no scripts/check-*.sh declares required_tests=() under $root - wrong root?"
 
   if [ "$missing_total" -gt 0 ]; then
     echo "" >&2
@@ -178,7 +178,7 @@ RS
     exit 1
   fi
 
-  # Drop the attribute off one required test — exactly the account.rs bug.
+  # Drop the attribute off one required test - exactly the account.rs bug.
   cat > "$tmp/src/lib.rs" <<'RS'
 fn a_real_test() {}
 RS

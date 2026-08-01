@@ -1,7 +1,7 @@
 #![no_main]
 
 // NOT: BlockHeader struct'ına yeni alan eklendiğinde bu hedef E0063 ile
-// Derlenemez. Alanlar burada TAM olarak doldurulmalıdır — CI'daki
+// Derlenemez. Alanlar burada TAM olarak doldurulmalıdır - CI'daki
 // "Fuzz Quick" kapısı bunu yakalar. (2026-07-16'da
 // Chain_id/nonce/epoch/slot/vrf_* eklendiğinde hedef çürümüştü.)
 

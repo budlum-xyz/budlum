@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scripts/audit-deps.sh — Rust dependency audit
+# Scripts/audit-deps.sh - Rust dependency audit
 #
 # Bu script `cargo audit` aracını çalıştırır ve bilinen güvenlik
 # Açıklarına karşı bağımlılıkları kontrol eder. ch12 §3.7 mainnet
@@ -72,9 +72,9 @@ cargo audit --file budzero/Cargo.lock --deny warnings > "$BUDZERO_RAW_OUT" 2>&1 
 # kayitli -- ama cargo audit tarafinda hicbir kosuda gorunmedi. Iki tarayici
 # ayni agaci tariyor ve yalniz birinin sonucu okunabiliyordu.
 echo ""
-echo "──────── cargo audit — root Cargo.lock ────────"
+echo "──────── cargo audit - root Cargo.lock ────────"
 cat "$ROOT_RAW_OUT"
-echo "──────── cargo audit — budzero/Cargo.lock ────────"
+echo "──────── cargo audit - budzero/Cargo.lock ────────"
 cat "$BUDZERO_RAW_OUT"
 echo "──────────────────────────────────────────────────"
 echo ""
@@ -107,13 +107,13 @@ echo ""
     echo "- Root lockfile exit code: $ROOT_AUDIT_EXIT"
     echo "- BudZero lockfile exit code: $BUDZERO_AUDIT_EXIT"
     echo ""
-    echo "## Ham çıktı — root Cargo.lock"
+    echo "## Ham çıktı - root Cargo.lock"
     echo ""
     echo "\`\`\`"
     head -50 "$ROOT_RAW_OUT" || true
     echo "\`\`\`"
     echo ""
-    echo "## Ham çıktı — budzero/Cargo.lock"
+    echo "## Ham çıktı - budzero/Cargo.lock"
     echo ""
     echo "\`\`\`"
     head -50 "$BUDZERO_RAW_OUT" || true

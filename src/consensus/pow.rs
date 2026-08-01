@@ -131,7 +131,7 @@ impl PoWEngine {
     }
     /// Accumulated proof-of-work across `chain`, in 256 bits.
     ///
-    /// Work per block is `16^difficulty` — one hex digit of leading zeroes per
+    /// Work per block is `16^difficulty` - one hex digit of leading zeroes per
     /// difficulty step. `adjusted_difficulty` clamps difficulty to 32, and
     /// `16^32` is exactly `2^128`, so the retarget ceiling sits precisely at
     /// the boundary of a `u128`. That is not a coincidence to design around;
@@ -158,7 +158,7 @@ impl PoWEngine {
     /// the difficulties a mature chain reaches.
     ///
     /// Scaling every term down by a shared constant would preserve ordering at
-    /// the top but destroy it at the bottom — devnet runs at difficulty 1 or 2,
+    /// the top but destroy it at the bottom - devnet runs at difficulty 1 or 2,
     /// and a shift large enough to save difficulty 32 flattens those to zero.
     /// Bitcoin carries chainwork in 256 bits for this reason, so this does too.
     #[must_use]
@@ -447,7 +447,7 @@ mod tests {
         assert!(block2.hash.starts_with("00"));
     }
 
-    /// (security audit §3) `validate_block` must be PURE — calling
+    /// (security audit §3) `validate_block` must be PURE - calling
     /// It twice on the same block must produce the same result AND
     /// Must not mutate the engine's `current_difficulty`. The
     /// Previous implementation mutated difficulty from inside
@@ -514,7 +514,7 @@ mod tests {
 
         // Build a synthetic chain of 4 blocks (adjustment boundary
         // At index 4, which is `is_multiple_of(4)`). Difficulty 1
-        // Mining is fast — we don't need the chain to be long.
+        // Mining is fast - we don't need the chain to be long.
         let mut chain: Vec<Block> = Vec::new();
         let mut genesis = Block::new(0, "0".repeat(64), vec![]);
         genesis.hash = genesis.calculate_hash();

@@ -1,4 +1,4 @@
-//! Benches/micro/timing_safe.rs — dudect-tarzı istatistiksel zamanlama regresyon testi.
+//! Benches/micro/timing_safe.rs - dudect-tarzı istatistiksel zamanlama regresyon testi.
 //!
 //! RPC kimlik doğrulamasındaki `constant_time_eq_str` karşılaştırmasının
 //! Gerçekten sabit-zamanlı kaldığını istatistiksel olarak denetler:
@@ -15,12 +15,12 @@
 //! Neden iki koşul: t-istatistiği "fark VAR MI" sorusunu cevaplar, "fark ÖNEMLİ
 //! Mİ" sorusunu değil. `measure_min_per_batch` batch minimumu aldığı için
 //! Varyans çok küçüktür; payda küçüldükçe t şişer. Ölçüm sıkılaştıkça kapı
-//! DAHA ÇOK kırmızı verir — sabit-zamanlılık iyileşse bile. Gerçek bir koşu:
+//! DAHA ÇOK kırmızı verir - sabit-zamanlılık iyileşse bile. Gerçek bir koşu:
 //!
 //!     kontrol (naif, SIZMALI): mean_first=19.05ns mean_last=41.41ns |t|=83.62
 //!     constant_time_eq_str   : mean_first=119.48ns mean_last=118.45ns |t|=7.62
 //!
-//! Naif uygulama 22.36 ns sızdırıyor; asıl fonksiyon 1.03 ns — 3 GHz'de üç
+//! Naif uygulama 22.36 ns sızdırıyor; asıl fonksiyon 1.03 ns - 3 GHz'de üç
 //! Çevrim, yani `Instant::now()` çözünürlüğü mertebesinde. Kapı bunu ihlal
 //! Saydı. Eşiği yükseltmek ratchet yükseltmenin zamanlama versiyonu olurdu;
 //! Doğrusu etki büyüklüğünü ölçmek. Oranın paydası uydurma bir sabit değil,
@@ -29,7 +29,7 @@
 //!
 //! İstatistik: dudect'in kullandığı Welch'in t-testi; ham ölçümler yerine
 //! Batch-minimum değerleri kullanılır (kesintiler ancak süre EKLER; minimum
-//! Alarak outlier'lar elenir — side-channel literatüründe standart robust
+//! Alarak outlier'lar elenir - side-channel literatüründe standart robust
 //! Yaklaşım). Eşik 4.5, dudect standardıdır.
 //!
 //! Çalıştırma:
@@ -241,7 +241,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     // Etki büyüklüğü: gözlenen fark, aynı koşudaki bilinen sızıntının kaçta
-    // Kaçı? Payda ölçülen kontroldür, sabit değil — ortam yavaşlarsa ikisi de
+    // Kaçı? Payda ölçülen kontroldür, sabit değil - ortam yavaşlarsa ikisi de
     // Yavaşlar ve oran anlamını korur.
     let ct_delta = (mean(&ct_a) - mean(&ct_b)).abs();
     let control_delta = (mean(&ctl_a) - mean(&ctl_b)).abs();
@@ -258,7 +258,7 @@ fn main() -> ExitCode {
     );
 
     // İki koşul birlikte: istatistiksel kanıt VE pratik büyüklük. Biri
-    // Diğerinin yerine geçmez — t tek başına 1 ns'i ihlal sayar, oran tek
+    // Diğerinin yerine geçmez - t tek başına 1 ns'i ihlal sayar, oran tek
     // Başına gürültülü bir ortamda büyük ama rastgele farkı geçirir.
     if t_ct.abs() >= T_THRESHOLD && effect_ratio >= EFFECT_RATIO_THRESHOLD {
         eprintln!(
@@ -274,7 +274,7 @@ fn main() -> ExitCode {
     if t_ct.abs() >= T_THRESHOLD {
         println!(
             "PASS: |t|={:.2} eşiğin üstünde ama fark kontrolün yalnızca {:.1}%'i \
-             ({ct_delta:.2}ns) — ölçüm gürültüsü, sızıntı değil.",
+             ({ct_delta:.2}ns) - ölçüm gürültüsü, sızıntı değil.",
             t_ct.abs(),
             effect_ratio * 100.0
         );

@@ -8,8 +8,8 @@
 //!
 //! Taking a validator off the chain is a much worse outcome than losing a
 //! peer-scoring update, so all of them now recover. These tests pin that the
-//! recovery is real — the state behind a poisoned lock is still readable and
-//! writable — and that no `process::exit` came back to this file.
+//! recovery is real - the state behind a poisoned lock is still readable and
+//! writable - and that no `process::exit` came back to this file.
 
 use std::fs;
 use std::path::PathBuf;
@@ -114,12 +114,12 @@ fn the_recovering_helper_exists_and_no_site_exits() {
 ///
 /// The three shapes and what each did on a poisoned lock:
 ///
-///   - `is_ok_and(..)` / `.map(..).unwrap_or(false)` — answered "not allowed",
+///   - `is_ok_and(..)` / `.map(..).unwrap_or(false)` - answered "not allowed",
 ///     so every rate-limit and handshake check denied, and the node dropped
 ///     all traffic while reporting itself healthy;
-///   - `if let Ok(mut pm)` — skipped the body, so misbehaviour went
+///   - `if let Ok(mut pm)` - skipped the body, so misbehaviour went
 ///     unreported, bans were never applied, and peers kept their reputation;
-///   - `match` — returned an empty list or an early return, so the ban list
+///   - `match` - returned an empty list or an early return, so the ban list
 ///     was never persisted (bans lost across restart) and banned peers were
 ///     never disconnected.
 ///

@@ -24,7 +24,7 @@ BudZKVM artık 31 opcode'luk **tamamen production-ready** bir ZKVM'dir. Tüm opc
 
 ## İçindekiler
 
-- [Giriş — ZKVM Nedir ve Neden Kendi ZKVM'imizi Yapıyoruz?](giris.md)
+- [Giriş - ZKVM Nedir ve Neden Kendi ZKVM'imizi Yapıyoruz?](giris.md)
 - [Komut Seti Mimarisi ve Bytecode (bud-isa)](isa_ve_bytecode.md)
 - [Sanal Makine İnşası (bud-vm)](virtual_machine.md)
   - [BudVM Trace Schema v2](vm_trace_schema.md)

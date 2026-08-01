@@ -1,4 +1,4 @@
-//! SocialFi boost dağılımı regresyon mühürleri (F4 — raporu bulgusu,
+//! SocialFi boost dağılımı regresyon mühürleri (F4 - raporu bulgusu,
 //! SocialFi test mühürü.
 //!
 //! Constitution §3: boost %4 B.U.D. operatörlerine, %16 creator'a, %80
@@ -10,7 +10,7 @@
 //! Drain'i ve burn fallback'ini kilitler.
 //!
 //! NOT: mempool zincir-seviyesi tx doğrulaması imza ister
-//! (`Transaction::verify` — imzasız tx sessizce blok dışı kalır). Bu yüzden
+//! (`Transaction::verify` - imzasız tx sessizce blok dışı kalır). Bu yüzden
 //! Aktörler gerçek `KeyPair` ile imzalar; nonce `bc.get_nonce` ile zincirden
 //! Okunur, nft_id registry'den okunur (id sayacı varsayımı yoktur).
 
@@ -55,7 +55,7 @@ fn deal_econ(fee_per_epoch: u64) -> StorageEconomicsParams {
     }
 }
 
-/// Format-geçerli test zarfı (dürüst marker — GERÇEK STARK kanıtı değil;
+/// Format-geçerli test zarfı (dürüst marker - GERÇEK STARK kanıtı değil;
 /// Storage_deal.rs test helper'ıyla birebir aynı minimal ProofEnvelope).
 fn valid_merkle_proof() -> Vec<u8> {
     let envelope = bud_proof::ProofEnvelope {
@@ -147,7 +147,7 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     // NFT id'si registry'den okunur (id sayacı varsayımı yok).
     let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
 
-    // Dağıtım delta olarak kilitlenir — genesis alokasyonu değişse bile sağlam.
+    // Dağıtım delta olarak kilitlenir - genesis alokasyonu değişse bile sağlam.
     let op1_pre = bc.state.get_balance(&op1);
     let op2_pre = bc.state.get_balance(&op2);
     boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
@@ -160,7 +160,7 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     assert_eq!(bc.state.get_balance(&alice), 999 + 40);
     // Booster: 1_000_000 - 250 (boost) - 1 (fee)
     assert_eq!(bc.state.get_balance(&bob), 999_749);
-    // Havuz blok sonunda boşaltıldı (drain) — sonraki bloğa borç kalmaz.
+    // Havuz blok sonunda boşaltıldı (drain) - sonraki bloğa borç kalmaz.
     assert_eq!(bc.state.pending_bud_boost_share, 0);
 }
 
@@ -182,7 +182,7 @@ async fn boost_without_active_deals_burns_share_and_drains_pool() {
     let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
     boost_nft(&mut bc, &bob_kp, nft_id, BOOST_AMOUNT);
 
-    // Aktif deal yok: creator %16'sını yine alır, %4 + %80 dürüst burn —
+    // Aktif deal yok: creator %16'sını yine alır, %4 + %80 dürüst burn -
     // Hiçbir operatör hesabı oluşmamalı ve havuz yine drain edilmeli.
     assert_eq!(bc.state.get_balance(&alice), 999 + 40);
     assert_eq!(bc.state.get_balance(&bob), 999_749);

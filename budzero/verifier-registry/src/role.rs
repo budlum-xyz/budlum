@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Open, extensible role identifier.
 ///
-/// The registry accepts **any** `RoleId` — new roles can be introduced by
+/// The registry accepts **any** `RoleId` - new roles can be introduced by
 /// Callers without modifying this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RoleId(pub u32);
@@ -46,7 +46,7 @@ impl std::fmt::Display for RoleId {
 
 /// Well-known protocol-level roles.
 ///
-/// These are *conveniences*, not an exhaustive list — the registry never
+/// These are *conveniences*, not an exhaustive list - the registry never
 /// Checks membership against this set.
 pub mod roles {
     use super::RoleId;
@@ -56,7 +56,7 @@ pub mod roles {
 
     /// Settlement / proof verifier.
     pub const VERIFIER: RoleId = RoleId(2);
-    /// Alias — same conceptual role as VERIFIER.
+    /// Alias - same conceptual role as VERIFIER.
     pub const MASTER_VERIFIER: RoleId = RoleId(2);
 
     /// Cross-domain message relayer.
@@ -71,14 +71,14 @@ pub mod roles {
     /// AI Inference Verifier.
     pub const AI_VERIFIER: RoleId = RoleId(6);
 
-    /// Attester — submits finality / checkpoint attestations.
+    /// Attester - submits finality / checkpoint attestations.
     /// Uses the same registry primitive as all other roles.
     pub const ATTESTER: RoleId = RoleId(7);
 
     /// Lubot decentralized AI operator (compute-bond, PoS'tan bağımsız).
     pub const LUBOT_OPERATOR: RoleId = RoleId(8);
 
-    /// SocialFi content validator — validates D-Web content authenticity.
+    /// SocialFi content validator - validates D-Web content authenticity.
     /// Unification: new role for SocialFi.
     pub const CONTENT_VALIDATOR: RoleId = RoleId(9);
 }

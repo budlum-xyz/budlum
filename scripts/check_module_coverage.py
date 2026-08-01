@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================================
-# check_module_coverage.py — modül-bazı coverage analizi
+# check_module_coverage.py - modül-bazı coverage analizi
 #
 # `cargo llvm-cov --json` çıktısındaki dosya özetlerini modül öneklerine
 # toplar (ağırlıklı: covered/count), tablo basar ve (varsa)
 # .github/module-coverage-baselines.json'daki tabanlara karşı KAPI uygular.
 #
 # Dürüst iki-adım tasarım (vacuous-gate YOK):
-#   1. Adım (bu dalga): RAPOR modu — her koşuda modül tablosu + JSON artifact.
+#   1. Adım (bu dalga): RAPOR modu - her koşuda modül tablosu + JSON artifact.
 #      Baselines dosyası YOKSA gate atlanır (SKIP marker'ı basılır, exit 0).
 #   2. Adım (sonraki dalga): ilk yeşil artifact'ten ÖLÇÜLMÜŞ tabanlar yazılır;
 #      o noktadan sonra düşüş FAIL olur (canary'li, ratchet yönü: yukarı).
@@ -162,13 +162,13 @@ def main() -> int:
     rows = analyze(cov)
     print_table(rows)
     if not os.path.exists(base_path):
-        print(f"SKIP: {base_path} yok — 1. adım (rapor modu). "
+        print(f"SKIP: {base_path} yok - 1. adım (rapor modu). "
               "İlk yeşil artifact'ten ölçülmüş tabanlar eklenecek (vacuous-gate YOK).")
         return 0
     with open(base_path) as fh:
         baselines = json.load(fh).get("module_line_floors", {})
     if not baselines:
-        print("SKIP: baselines boş — rapor modu.")
+        print("SKIP: baselines boş - rapor modu.")
         return 0
     return gate(rows, baselines)
 

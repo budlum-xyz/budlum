@@ -1,4 +1,4 @@
-//! P12-12: Developer OS / BudL SDK — Geliştirici deneyim katmanı.
+//! P12-12: Developer OS / BudL SDK - Geliştirici deneyim katmanı.
 //!
 //! Bu modül, Budlum üzerinde geliştirme yapmak isteyen protokol geliştiricilerine
 //! Yönelik araçlar sağlar:
@@ -24,7 +24,7 @@
 //!
 //! - SDK modülü `#![forbid(unsafe_code)]` kuralına tabidir (lib.rs seviyesi).
 //! - Tüm yapılandırmalar `budlum.toml` dosyasından deserialize edilir (serde + toml).
-//! - Fixture üreteçleri deterministiktir — aynı seed aynı fixture setini üretir.
+//! - Fixture üreteçleri deterministiktir - aynı seed aynı fixture setini üretir.
 //! - Devnet 4 domain'i ayrı process'lerde simüle eder (PoW, PoS, PoA, Bft).
 
 pub mod contracts;

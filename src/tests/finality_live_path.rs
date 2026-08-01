@@ -3,7 +3,7 @@
 //! Mevcut `finality_adversarial.rs` (12 test) düzeltmelerini
 //! (equivocation → slashing evidence, ingest-time imza doğrulama) kapsar.
 //! Bu dosya, **live-path pencerelerini** ve **dürüstlük sınırlarını** test
-//! Eder — son taramada eksik kalan senaryolar.
+//! Eder - son taramada eksik kalan senaryolar.
 //!
 //! ## Kapsam
 //!
@@ -87,7 +87,7 @@ fn sign_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address
     v
 }
 
-// 2.1 — Epoch değişimi (pencere izolasyonu)
+// 2.1 - Epoch değişimi (pencere izolasyonu)
 
 /// Farklı epoch'ların aggregator'ları birbirinden tamamen izole: epoch 1'de
 /// Oy veren bir voter, epoch 2'de aynı hash'e oy verse de yeni aggregator
@@ -110,7 +110,7 @@ fn live_path_epoch_change_isolates_votes() {
     let mut agg2 = FinalityAggregator::new(2, 20, "H2".into());
     agg2.set_validator_snapshot(snap2.clone());
 
-    // Epoch 2'de 1 validator oy verir — kendi penceresinde sayılır.
+    // Epoch 2'de 1 validator oy verir - kendi penceresinde sayılır.
     let pv2 = sign_prevote(&sks2[0], 2, 20, "H2", snap2.validators[0].address);
     agg2.add_prevote(pv2).expect("epoch 2 prevote");
     assert_eq!(agg2.prevotes.len(), 1);
@@ -118,9 +118,9 @@ fn live_path_epoch_change_isolates_votes() {
     assert_eq!(agg1.prevotes.len(), 3, "epoch 1 penceresi kirletilmemeli");
 }
 
-// 2.2 — Geç prevote (height uyumsuzluğu)
+// 2.2 - Geç prevote (height uyumsuzluğu)
 
-/// Aynı epoch içinde FARKLI checkpoint_height'e verilen oy reddedilir —
+/// Aynı epoch içinde FARKLI checkpoint_height'e verilen oy reddedilir -
 /// Aggregator'ın `checkpoint_height`'i sabit, farklı height'tan gelen oy
 /// Kabul edilmez (pencere sızıntısı yok).
 #[test]
@@ -150,7 +150,7 @@ fn live_path_prevote_with_wrong_height_rejected() {
     assert_eq!(agg.prevotes.len(), 1);
 }
 
-// 2.3 — Çift sign penceresi (aynı voter, aynı epoch, ardışık iki oy)
+// 2.3 - Çift sign penceresi (aynı voter, aynı epoch, ardışık iki oy)
 
 /// Aynı voter aynı epoch'ta aynı hash'e İKİ kez oy veremez (pencere
 /// Tek-oy kabul eder; ikincisi Duplicate ile reddedilir). Farklı hash'e ikinci
@@ -161,18 +161,18 @@ fn live_path_double_sign_window_is_tight() {
     let mut agg = FinalityAggregator::new(1, 10, "H".into());
     agg.set_validator_snapshot(snap.clone());
 
-    // 1. oy (canonical) — kabul.
+    // 1. oy (canonical) - kabul.
     let pv1 = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
     agg.add_prevote(pv1).expect("first prevote");
 
-    // 2. oy (AYNI voter, AYNI hash) — Duplicate, reddedilir.
+    // 2. oy (AYNI voter, AYNI hash) - Duplicate, reddedilir.
     let pv_dup = sign_prevote(&sks[0], 1, 10, "H", snap.validators[0].address);
     let err = agg
         .add_prevote(pv_dup)
         .expect_err("duplicate prevote reddedilmeli");
     assert!(err.contains("Duplicate"));
 
-    // 3. oy (AYNI voter, FARKLI hash) — hash mismatch + evidence.
+    // 3. oy (AYNI voter, FARKLI hash) - hash mismatch + evidence.
     let pv_conflict = sign_prevote(&sks[0], 1, 10, "H2", snap.validators[0].address);
     let _ = agg.add_prevote(pv_conflict); // reddedilir ama evidence üretir
     assert_eq!(agg.prevotes.len(), 1, "sadece ilk oy sayılmalı");
@@ -183,10 +183,10 @@ fn live_path_double_sign_window_is_tight() {
     );
 }
 
-// 2.4 — Snapshot hash çeşitliliği
+// 2.4 - Snapshot hash çeşitliliği
 
 /// Farklı validator setleri (farklı sıralama, farklı sayı) farklı snapshot
-/// Hash üretir — collision-free kabul. AYNI set aynı hash üretir
+/// Hash üretir - collision-free kabul. AYNI set aynı hash üretir
 /// (deterministik kabul).
 #[test]
 fn live_path_snapshot_hash_distinguishes_sets() {

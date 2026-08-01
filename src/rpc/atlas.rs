@@ -1,4 +1,4 @@
-//! P12-8: Budlum Atlas / bud.scan Evidence UI — Read-only evidence endpoints.
+//! P12-8: Budlum Atlas / bud.scan Evidence UI - Read-only evidence endpoints.
 //!
 //! Budlum Atlas, zincir üstü kanıt (evidence) verilerini sorgulamak için
 //! Read-only endpoint'ler sağlar. Bu modül, cüzdan bağlamı grafi
@@ -149,7 +149,7 @@ pub enum WalletEdgeType {
     PollenGrant,
 }
 
-/// Cüzdan bağlam grafi — bir adresin tüm zincir-üstü ilişkileri.
+/// Cüzdan bağlam grafi - bir adresin tüm zincir-üstü ilişkileri.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletContextGraph {
     /// Merkez adres.

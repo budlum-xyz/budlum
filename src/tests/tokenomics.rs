@@ -129,7 +129,7 @@ fn burn_strictly_reduces_supply_no_mint_offset() {
     let after = state.circulating_supply();
 
     assert!(burned > 0);
-    // Supply decreased by EXACTLY the burned amount — nothing minted it back.
+    // Supply decreased by EXACTLY the burned amount - nothing minted it back.
     assert_eq!(after, before - burned as u128);
     assert!(after < before);
 }
@@ -250,7 +250,7 @@ fn burn_reserve_cannot_bypass_schedule_with_transaction() {
     assert_eq!(state.get_balance(&addrs.burn_reserve), bud(40_000_000));
 }
 
-/// Default genesis (no tokenomics) is unchanged — regression guard for Decision B.
+/// Default genesis (no tokenomics) is unchanged - regression guard for Decision B.
 #[test]
 fn plain_genesis_has_no_tokenomics_wiring() {
     let state = GenesisConfig::new(45262).build_state();
@@ -310,8 +310,8 @@ fn fixed_supply_tokenomics_disables_epoch_yield_minting() {
 /// `seconds_per_epoch() * team_cliff_epochs` and assert the cliff had just
 /// opened. That number is synthetic: it is the value
 /// `epoch_at_timestamp` needs in order to return `cliff_epochs`, not a value
-/// production can produce. Production passes `block.timestamp` — absolute Unix
-/// time in milliseconds — so the same call returned about 5.5 billion, and the
+/// production can produce. Production passes `block.timestamp` - absolute Unix
+/// time in milliseconds - so the same call returned about 5.5 billion, and the
 /// cliff was long expired before the chain made its second block.
 ///
 /// The schedule is genesis-relative (`start_epoch = 0`), so the epoch counter
@@ -406,7 +406,7 @@ fn team_vesting_enforced_on_transfer() {
 
 /// F4 (Constitution §3): NftBoost 4% B.U.D. share accumulates in
 /// `pending_bud_boost_share` for later distribution to storage operators.
-/// REGRESSION LOCK — verifies the executor-side wiring.
+/// REGRESSION LOCK - verifies the executor-side wiring.
 #[test]
 fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
     let mut state = AccountState::new();
@@ -419,7 +419,7 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
     let cid = ContentId([0xABu8; 32]);
     let nft_id = state.nft_registry.mint(creator, cid, 1, None);
 
-    // Boost the NFT with 1000 — 4% = 40 should go to pending_bud_boost_share.
+    // Boost the NFT with 1000 - 4% = 40 should go to pending_bud_boost_share.
     let boost_amount: u64 = 1000;
     let tx = Transaction {
         from: booster,
@@ -461,7 +461,7 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
 /// `spendable_balance` read the team schedule at
 /// `tokenomics.epoch_at_timestamp(last_epoch_time)`. That function divides an
 /// absolute Unix timestamp by the epoch length, so it returns epochs elapsed
-/// since 1970 — around 5.5 billion. The schedule counts from genesis
+/// since 1970 - around 5.5 billion. The schedule counts from genesis
 /// (`team_vesting(0)` sets `start_epoch = 0`) with a cliff of 52_560 epochs.
 ///
 /// Measured with a canary before the fix, on `mainnet_genesis()`:
@@ -519,8 +519,8 @@ fn the_team_cliff_still_opens_after_its_epochs_elapse() {
 
 /// One epoch boundary must not burn a ten-year reserve.
 ///
-/// `advance_epoch` passed `block.timestamp` — absolute Unix time in
-/// milliseconds — to `process_timed_burn_at_time`, whose parameter is seconds
+/// `advance_epoch` passed `block.timestamp` - absolute Unix time in
+/// milliseconds - to `process_timed_burn_at_time`, whose parameter is seconds
 /// since genesis, with the genesis anchor hardcoded to `0`.
 ///
 /// Measured with a canary before the fix, on `mainnet_genesis()`:

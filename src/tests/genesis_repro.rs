@@ -1,4 +1,4 @@
-//! (2026-07-21 — kullanıcı görev listesi "CI sertleştirme")
+//! (2026-07-21 - kullanıcı görev listesi "CI sertleştirme")
 //! **Genesis reproducibility sondası (CI Genişletme Madde 1).**
 //!
 //! Arka plan: `.github/workflows/determinism.yml` içindeki
@@ -14,7 +14,7 @@
 //!     Timestamp, tx_root, validator_set_hash, state root, hesap sayısı,
 //!     Toplam dolaşım.
 //!   * Bloktaki `state_root` ile `build_state` root'unun eşitliği
-//!     (node'un boot'taki fail-closed genesis/DB doğrulamasının aynası —
+//!     (node'un boot'taki fail-closed genesis/DB doğrulamasının aynası -
 //!     Bkz. `Blockchain::new_with_genesis` startup kontrolü).
 //!   * Tam kurucu yolu: `Blockchain::new(...)` ile üretilen zincirin
 //!     Genesis bloğu, doğrudan `build_genesis_block` çıktısıyla birebir
@@ -51,7 +51,7 @@ fn probe_chain(chain_id: u64) -> Vec<String> {
     // Mismatch riski demektir).
     assert_eq!(
         block.state_root, rebuilt_root,
-        "genesis state_root({chain_id}) != build_state() root — boot doğrulaması kırılır"
+        "genesis state_root({chain_id}) != build_state() root - boot doğrulaması kırılır"
     );
 
     // Tam kurucu round-trip: kütüphane kurucusunun ürettiği zincirin genesis
