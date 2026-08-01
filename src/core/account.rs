@@ -1227,15 +1227,14 @@ impl AccountState {
         slash_ratio_fixed: u64,
         reason: &str,
     ) -> Option<u64> {
-        use crate::core::chain_config::FIXED_POINT_SCALE;
+        use crate::core::chain_config::slash_penalty;
 
         let validator = self.validators.get_mut(address)?;
         if validator.slashed {
             return Some(0);
         }
 
-        let penalty = ((validator.stake as u128 * slash_ratio_fixed as u128)
-            / FIXED_POINT_SCALE as u128) as u64;
+        let penalty = slash_penalty(validator.stake, slash_ratio_fixed);
         validator.stake = validator.stake.saturating_sub(penalty);
         validator.slashed = true;
         validator.active = false;

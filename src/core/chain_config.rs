@@ -249,6 +249,53 @@ pub const FINALITY_QUORUM_NUMERATOR: u64 = 2;
 pub const FINALITY_QUORUM_DENOMINATOR: u64 = 3;
 pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 pub const VRF_BASE_PROB: u64 = FIXED_POINT_SCALE;
+
+/// The penalty a slash of `slash_ratio_fixed` takes from `stake`, capped at
+/// the bond.
+///
+/// This expression used to be written out at three call sites, each spelling
+/// the narrowing differently, and they did not agree:
+///
+/// ```text
+/// registry (permissionless.rs)  ((stake as u128 * ratio as u128) / SCALE as u128) as u64
+/// account state (account.rs)    the same, character for character
+/// Kani mirror (kani/src/lib.rs) u64::try_from(...).expect("penalty is bounded by stake")
+/// ```
+///
+/// `as u64` truncates and `try_from().expect()` panics, so the two production
+/// copies wrapped where the mirror aborted. At `stake = u64::MAX` and
+/// `slash_ratio_fixed = FIXED_POINT_SCALE + 1` the quotient is just above
+/// `u64::MAX`, and truncation turned a 100.0001% slash into one that took
+/// about 1.8e13 from a bond of about 1.8e19: the offender kept 99.9999% of
+/// the stake. See B35.
+///
+/// `RegistryParams::validate` rejects a ratio above `FIXED_POINT_SCALE`, and
+/// every `set_params` path calls it, so the wrap was not reachable through
+/// governance. That is containment, not correctness: the guard was a single
+/// layer, the mirror test only compared the copies over ratios at or below
+/// the ceiling where they happen to agree, and nothing stopped a fourth copy
+/// from appearing without the guard in front of it.
+///
+/// The cap makes the bound hold whatever arrives here. It also makes the
+/// bound provable: the unclamped expression could not be discharged by a
+/// bitvector solver at 64-bit widths (a 128-bit symbolic product is a wall on
+/// its own, so removing only the division does not help), while the clamped
+/// form is proved in under a second and holds with no precondition on the
+/// ratio at all.
+#[must_use]
+pub fn slash_penalty(stake: u64, slash_ratio_fixed: u64) -> u64 {
+    let quotient =
+        (u128::from(stake) * u128::from(slash_ratio_fixed)) / u128::from(FIXED_POINT_SCALE);
+    if quotient > u128::from(u64::MAX) {
+        return stake;
+    }
+    let narrow = quotient as u64;
+    if narrow > stake {
+        stake
+    } else {
+        narrow
+    }
+}
 pub const QC_BLOB_TTL_EPOCHS: u64 = 10;
 pub const MAX_QC_BLOB_BYTES: usize = 1_048_576;
 pub const MAX_VOTES_PER_MSG: usize = 128;

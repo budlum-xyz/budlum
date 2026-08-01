@@ -15,7 +15,7 @@
 //!   Structure, so PoA's permissioned rules cannot leak in here.
 
 use crate::core::address::Address;
-use crate::core::chain_config::FIXED_POINT_SCALE;
+use crate::core::chain_config::{slash_penalty, FIXED_POINT_SCALE};
 use crate::registry::evidence::{EvidenceError, SlashingReport};
 use crate::registry::params::RegistryParams;
 use crate::registry::role::RoleId;
@@ -581,7 +581,7 @@ impl PermissionlessRegistry {
             });
         }
 
-        let penalty = penalty_for(reg.stake, slash_ratio_fixed);
+        let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
         reg.status = MemberStatus::Slashed;
 
@@ -1257,9 +1257,26 @@ mod tests {
     #[test]
     fn bond_arithmetic_matches_the_kani_mirror() {
         // Mirrors `kani/src/lib.rs::penalty_for`, kept literal on purpose.
+        //
+        // The previous version of this mirror was the pre-B35 expression,
+        // `u64::try_from(...).expect(...)`, and this test compared it against
+        // the registry's `as u64` over ratios in `[0, FIXED_POINT_SCALE]`.
+        // Over that range the two agree, so the test passed for as long as the
+        // bug existed. The ratios where they disagree are exactly the ones the
+        // sweep below did not contain, which is why the range now runs past
+        // the ceiling.
         fn kani_mirror(stake: u64, slash_ratio_fixed: u64) -> u64 {
-            u64::try_from((u128::from(stake) * u128::from(slash_ratio_fixed)) / 1_000_000u128)
-                .expect("penalty is bounded by stake, which is a u64")
+            let quotient =
+                (u128::from(stake) * u128::from(slash_ratio_fixed)) / 1_000_000u128;
+            if quotient > u128::from(u64::MAX) {
+                return stake;
+            }
+            let narrow = quotient as u64;
+            if narrow > stake {
+                stake
+            } else {
+                narrow
+            }
         }
 
         assert_eq!(
@@ -1277,6 +1294,11 @@ mod tests {
             u64::MAX - 1,
             u64::MAX,
         ];
+        // Ratios above the ceiling are included deliberately. `validate`
+        // refuses them, so they are not reachable through governance today,
+        // and that is the reason to test them here rather than the reason not
+        // to: the clamp is what holds if a path ever reaches this function
+        // without passing that guard, and an untested clamp is a comment.
         let ratios = [
             0u64,
             1,
@@ -1284,14 +1306,14 @@ mod tests {
             FIXED_POINT_SCALE / 2,
             FIXED_POINT_SCALE - 1,
             FIXED_POINT_SCALE,
+            FIXED_POINT_SCALE + 1,
+            2 * FIXED_POINT_SCALE,
+            u64::MAX,
         ];
 
         for stake in stakes {
             for ratio in ratios {
-                let registry = u64::try_from(
-                    (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE),
-                )
-                .expect("penalty is bounded by stake, which is a u64");
+                let registry = slash_penalty(stake, ratio);
                 assert_eq!(
                     registry,
                     kani_mirror(stake, ratio),
@@ -1306,5 +1328,24 @@ mod tests {
                 );
             }
         }
+
+        // The specific input that used to wrap. Written out rather than left
+        // to the sweep above, because this is the regression: the old
+        // expression returned 18_446_744_073_708 here, against a stake of
+        // 18_446_744_073_709_551_615. A 100.0001% slash took one part in a
+        // million of the bond and left the rest.
+        let wrapped = ((u128::from(u64::MAX) * u128::from(FIXED_POINT_SCALE + 1))
+            / u128::from(FIXED_POINT_SCALE)) as u64;
+        assert!(
+            wrapped < u64::MAX,
+            "this input no longer overflows a u64; if the widths changed, \
+             the clamp below is being asserted against nothing"
+        );
+        assert_eq!(
+            slash_penalty(u64::MAX, FIXED_POINT_SCALE + 1),
+            u64::MAX,
+            "a ratio one unit above the ceiling must take the whole bond, \
+             not wrap to a fraction of it"
+        );
     }
 }
