@@ -1,6 +1,6 @@
 //! Locks for the mempool's asymmetric-DoS defences.
 //!
-//! The ADAMS family of attacks (DETER, MemPurge, and the variants catalogued
+//! The ADAMS family of attacks (DETER, `MemPurge`, and the variants catalogued
 //! in the 2024 USENIX mempool study) all rest on the same footing: a mempool
 //! that admits transactions it cannot charge for. The classic shape is the
 //! *future* transaction - nonce well above the account's next - which can
@@ -123,7 +123,7 @@ fn a_sequential_batch_from_one_sender_is_admitted() {
 /// The projection debits each pending transaction's cost, so a sender cannot
 /// queue a batch that only the first transaction can afford.
 ///
-/// This is the MemPurge shape: overdraft transactions are admitted, then all
+/// This is the `MemPurge` shape: overdraft transactions are admitted, then all
 /// but the first turn out to be unpayable at mining time - again occupying
 /// slots for free.
 #[test]

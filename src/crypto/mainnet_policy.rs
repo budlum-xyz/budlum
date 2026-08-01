@@ -11,9 +11,9 @@ pub enum MainnetKeyPolicyViolation {
     NonPkcs11Backend,
     /// Explicit mock HSM backend attempted on mainnet.
     HsmMockBackend,
-    /// A software HSM (SoftHSM) was named on mainnet.
+    /// A software HSM (`SoftHSM`) was named on mainnet.
     ///
-    /// Distinct from `NonPkcs11Backend` because SoftHSM *is* a PKCS#11
+    /// Distinct from `NonPkcs11Backend` because `SoftHSM` *is* a PKCS#11
     /// provider: it speaks the same interface a hardware token does, and the
     /// CLI canonicalises `softhsm` to `pkcs11` before this check ever runs. So
     /// the string never reaches the policy, and a testnet profile promoted to
@@ -68,7 +68,7 @@ pub struct MainnetValidatorKeyConfig<'a> {
     /// `canonical_signer_backend` folds `softhsm` into `pkcs11`.
     ///
     /// Without this the policy cannot tell the two apart: by the time it runs,
-    /// a SoftHSM configuration is indistinguishable from a hardware one. Leave
+    /// a `SoftHSM` configuration is indistinguishable from a hardware one. Leave
     /// as `None` when there is no separate raw value to report.
     pub raw_signer_backend: Option<&'a str>,
     pub validator_key_file: Option<&'a str>,
@@ -81,6 +81,12 @@ pub struct MainnetValidatorKeyConfig<'a> {
 /// Fail-closed admission for **mainnet + role=validator**.
 ///
 /// Callers that are not mainnet validators must not invoke this.
+///
+/// # Errors
+///
+/// Returns the first [`MainnetKeyPolicyViolation`] the configuration trips:
+/// a software or mock backend, a non-PKCS#11 backend, a disk-backed key file,
+/// a missing module path or PIN environment variable, or an empty PIN.
 pub fn check_mainnet_validator_key_policy(
     cfg: &MainnetValidatorKeyConfig<'_>,
 ) -> Result<(), MainnetKeyPolicyViolation> {
@@ -103,11 +109,7 @@ pub fn check_mainnet_validator_key_policy(
     if backend != "pkcs11" {
         return Err(MainnetKeyPolicyViolation::NonPkcs11Backend);
     }
-    if cfg
-        .validator_key_file
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
-    {
+    if cfg.validator_key_file.is_some_and(|s| !s.is_empty()) {
         return Err(MainnetKeyPolicyViolation::DiskValidatorKeys);
     }
     let module = cfg.pkcs11_module_path.unwrap_or("");

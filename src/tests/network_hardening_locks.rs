@@ -6,7 +6,7 @@
 //!     `src/network/node.rs` holds ~20 lock sites; all but one already matched
 //!     on the result or exited deliberately, and the odd one out turned an
 //!     optional content fetch into a node-wide panic.
-//!   * Gossipsub's defaults are the network's DoS surface. They are currently
+//!   * `Gossipsub`'s defaults are the network's DoS surface. They are currently
 //!     accepted deliberately, and this file records which ones were checked so
 //!     "we never looked" cannot be confused with "we looked and accepted".
 
@@ -20,10 +20,7 @@ mod tests {
         body.lines()
             .enumerate()
             .map(|(i, line)| {
-                let no_comment = match line.find("//") {
-                    Some(at) => &line[..at],
-                    None => line,
-                };
+                let no_comment = line.find("//").map_or(line, |at| &line[..at]);
                 (i + 1, no_comment.trim().to_string())
             })
             .filter(|(_, l)| !l.is_empty())
@@ -58,7 +55,7 @@ mod tests {
         );
     }
 
-    /// The remote-content fetch path must survive a poisoned PeerManager.
+    /// The remote-content fetch path must survive a poisoned `PeerManager`.
     ///
     /// It used to survive by giving up: the arm matched on the lock result and
     /// answered "peer manager unavailable". That is better than panicking, but
@@ -198,8 +195,8 @@ mod tests {
     /// heartbeat *ticks*, not seconds, so that change stretched them by the
     /// same factor without anyone asking for it:
     ///
-    ///   check_explicit_peers_ticks = 300    5 min ->  50 min (mobile 150)
-    ///   opportunistic_graft_ticks  =  60    1 min ->  10 min (mobile  30)
+    ///   `check_explicit_peers_ticks` = 300    5 min ->  50 min (mobile 150)
+    ///   `opportunistic_graft_ticks`  =  60    1 min ->  10 min (mobile  30)
     ///
     /// Both are mesh repair. The first decides how long a dropped explicit
     /// peer - a bootstrap node, a configured sentry - goes unnoticed before a
