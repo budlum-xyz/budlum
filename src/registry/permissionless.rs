@@ -15,7 +15,7 @@
 //!   Structure, so PoA's permissioned rules cannot leak in here.
 
 use crate::core::address::Address;
-use crate::core::chain_config::{slash_penalty, FIXED_POINT_SCALE};
+use crate::core::chain_config::slash_penalty;
 use crate::registry::evidence::{EvidenceError, SlashingReport};
 use crate::registry::params::RegistryParams;
 use crate::registry::role::RoleId;
@@ -872,6 +872,7 @@ impl PermissionlessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::chain_config::FIXED_POINT_SCALE;
     use crate::registry::role::roles;
 
     fn addr(b: u8) -> Address {
