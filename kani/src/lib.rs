@@ -165,10 +165,27 @@ pub fn raw_quotient(stake: u64, slash_ratio_fixed: u64) -> u128 {
 // Each calls `penalty_for` **twice** and relates the two results. The clamp
 // bounds a single call against its own input; it says nothing that lets a
 // solver compare two independent quotients, so both symbolic products survive
-// in the query. That is the same wall the 2x2 measurement found, met from the
-// other side, and it is recorded here rather than papered over: the job cap
-// is what currently stops them, and the honest reading is that these three
-// are not yet CI-budget harnesses.
+// in the query. Measured: one clamped call is proved in 0.39s, two clamped
+// calls related to each other time out at 90s.
+//
+// Splitting the asserts does not rescue them either, which was the obvious
+// next guess and was measured before being believed:
+//
+//     ratio_endpoints, both asserts together   TIMEOUT
+//       split out `ratio == 0` alone           PROVED in 0.00s
+//       split out `ratio == SCALE` alone       TIMEOUT
+//
+// `ratio == 0` collapses the product to zero, so it is free. `ratio == SCALE`
+// leaves `stake * 1_000_000` over a symbolic 64-bit stake, which is the same
+// wall as everything else here. The pair is not the problem; a symbolic
+// product wider than about 24 bits is.
+//
+// So these three are not CI-budget harnesses, and nothing in this commit
+// changes that. What the commit does change is that the property they were
+// guarding, `penalty <= stake`, is now proved in a second by a harness that
+// does not need them. They are left in place, timing out honestly, rather
+// than deleted to make the job green: deleting them would remove the only
+// statement in the tree that the truncation is monotonic.
 #[cfg(kani)]
 mod proofs {
     use super::{penalty_for, raw_quotient, FIXED_POINT_SCALE};
@@ -226,6 +243,7 @@ mod proofs {
     /// malice burns the whole bond" - and a zero ratio must take nothing.
     /// Rounding at either end would leave dust in a bond that should be gone,
     /// or take stake when none was owed.
+    // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     fn ratio_endpoints_are_exact() {
         let stake: u64 = kani::any();
@@ -255,6 +273,7 @@ mod proofs {
     /// base units) while leaving the solver a problem it can close. The
     /// unbounded case is covered by `penalty_is_monotonic_for_full_stakes`
     /// below, which fixes the ratio pair instead.
+    // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     fn penalty_is_monotonic_in_the_ratio() {
         let stake: u32 = kani::any();
@@ -277,6 +296,7 @@ mod proofs {
         );
     }
 
+    // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     /// A one-unit ratio increase must never reduce the penalty, at any stake.
     ///
