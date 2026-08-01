@@ -2314,6 +2314,221 @@ mod tests {
         );
     }
 
+    /// A forged product must not verify.
+    ///
+    /// Found by asking a question the RISC Zero disclosure makes concrete: not
+    /// "is there a constraint" but "has a forgery against it ever been shown
+    /// to fail". RISC Zero's own corpus put 95 of 99 circuit bugs in the
+    /// under-constrained class, and the 2.0.x break was `remu`/`divu`, opcodes
+    /// with constraints written and no negative test behind them.
+    ///
+    /// Counted here: 35 opcodes have a positive round-trip test, 22 of them
+    /// had no forgery test at all. `Mul` and `Sub` are the two that carry
+    /// arithmetic into balances, so they go first.
+    ///
+    /// The AIR says `when(is_mul).assert_eq(rd_val_new, rs1_val * rs2_val)`.
+    /// This claims 6 * 7 == 41 and requires the verifier to refuse.
+    #[test]
+    fn rejects_a_forged_product() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 6),
+            inst(Opcode::Load, 3, 0, 0, 7),
+            inst(Opcode::Mul, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[1], 42, "the honest product must be 42");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let mut mul_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_MUL].as_canonical_u64() == 1 {
+                mul_row = Some(i);
+                break;
+            }
+        }
+        let mul_row = mul_row.expect("the trace must contain a Mul row");
+        let row_start = mul_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[row_start + COL_RD_VAL_NEW].as_canonical_u64(),
+            42,
+            "the honest trace must hold the real product before it is forged"
+        );
+
+        matrix.values[row_start + COL_RD_VAL_NEW] = Goldilocks::new(41);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a proof claiming 6 * 7 == 41 verified; the multiplication \
+             constraint is not holding"
+        );
+    }
+
+    /// A forged difference must not verify.
+    ///
+    /// Same class as the product above. `Sub` matters on its own because the
+    /// VM computes in the Goldilocks field, so a difference is not a machine
+    /// subtraction, and a balance debit that a prover can choose is the same
+    /// hazard as a mint.
+    #[test]
+    fn rejects_a_forged_difference() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 100),
+            inst(Opcode::Load, 3, 0, 0, 30),
+            inst(Opcode::Sub, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[1], 70, "the honest difference must be 70");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let mut sub_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_SUB].as_canonical_u64() == 1 {
+                sub_row = Some(i);
+                break;
+            }
+        }
+        let sub_row = sub_row.expect("the trace must contain a Sub row");
+        let row_start = sub_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[row_start + COL_RD_VAL_NEW].as_canonical_u64(),
+            70,
+            "the honest trace must hold the real difference before it is forged"
+        );
+
+        // 100 - 30 claimed as 100: a debit that took nothing.
+        matrix.values[row_start + COL_RD_VAL_NEW] = Goldilocks::new(100);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a proof claiming 100 - 30 == 100 verified; a debit that takes \
+             nothing is a mint with extra steps"
+        );
+    }
+
     /// A prover must not choose the quotient when the divisor is zero.
     ///
     /// The VM defines `x / 0 == 0`. The AIR's main division identity is
