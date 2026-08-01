@@ -17,6 +17,16 @@
 //! Both ISA profiles run on the same bytes. `Production` and `Experimental`
 //! gate different opcode sets, so a crash reachable only under one of them is
 //! a crash that a profile flag would hide.
+//!
+//! One thing this target will *not* report, checked before writing it: the
+//! parser holds three `unreachable!()` arms, at `parser.rs` 440, 456 and 488.
+//! Every one of them sits inside a `while matches!(self.peek(), ...)` whose
+//! pattern list is the same as the `match` immediately below it, so the
+//! unmatched arm really is unreachable and a fuzzer cannot drive it. That
+//! matters because a deliberate panic reached by a fuzzer is a false positive
+//! that costs triage time, and the usual advice is to audit for them first.
+//! These three are sound as written; if a token is ever added to one list and
+//! not the other, this target is what will find it.
 
 use libfuzzer_sys::fuzz_target;
 
