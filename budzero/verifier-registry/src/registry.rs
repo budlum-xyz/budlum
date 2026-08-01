@@ -13,7 +13,7 @@
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingReport};
-use crate::params::{slash_penalty, RegistryParams, FIXED_POINT_SCALE};
+use crate::params::{slash_penalty, RegistryParams};
 use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -624,6 +624,7 @@ impl VerifierRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::params::FIXED_POINT_SCALE;
     use crate::role::roles;
 
     fn addr(b: u8) -> Address {

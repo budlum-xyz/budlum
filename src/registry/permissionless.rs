@@ -1265,8 +1265,7 @@ mod tests {
         // sweep below did not contain, which is why the range now runs past
         // the ceiling.
         fn kani_mirror(stake: u64, slash_ratio_fixed: u64) -> u64 {
-            let quotient =
-                (u128::from(stake) * u128::from(slash_ratio_fixed)) / 1_000_000u128;
+            let quotient = (u128::from(stake) * u128::from(slash_ratio_fixed)) / 1_000_000u128;
             if quotient > u128::from(u64::MAX) {
                 return stake;
             }
