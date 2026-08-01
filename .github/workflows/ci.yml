@@ -33,6 +33,8 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -123,6 +125,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
+          shared-key: budzero
           workspaces: budzero
       - name: Format
         run: cargo fmt --all -- --check
@@ -148,6 +151,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Kapı kanaryası (vacuous değil kanıtı)
@@ -171,6 +176,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Economy invariant gate canary
@@ -195,6 +202,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Fork-choice gate canary
@@ -218,6 +227,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: StorageProvider gate canary
@@ -249,6 +260,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Node classification gate canary
@@ -273,6 +286,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Network hardening gate canary
@@ -314,6 +329,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: PoA compliance gate self-test
@@ -337,6 +354,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Governance invariant gate self-test
@@ -361,6 +380,7 @@ jobs:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
+          shared-key: wallet-core
           workspaces: wallet-core
       - name: Wallet Core gate self-test
         run: bash ./scripts/check-wallet-core-gate.sh --self-test
@@ -387,6 +407,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Kapi kanaryasi (vacuous degil kaniti)
@@ -414,6 +436,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: PoA izolasyon testleri (7 test, 5 sızma senaryosu)
@@ -440,6 +464,8 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: cargo audit (CVE = fail)
         run: bash ./scripts/audit-deps.sh
       - name: SBOM üret (CycloneDX)
@@ -693,6 +719,8 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: Statik tarama + kanarya
         run: |
           bash ./scripts/check-timing-safe.sh
@@ -779,6 +807,8 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
       - name: cargo-llvm-cov v0.8.7 + nextest 0.9.140 kur (sha256 pinli)
         run: |
           set -euo pipefail

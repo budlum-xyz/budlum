@@ -59,6 +59,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
 
       - name: cargo-vet kur (--locked, sürüm sabit)
         run: |

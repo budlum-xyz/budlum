@@ -63,6 +63,7 @@ jobs:
         run: rustup toolchain install nightly-2026-07-19 --profile minimal
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
+          shared-key: budlum-core
           # İki-checkout yerleşiminde workspace kökünde Cargo.toml yok;
           # Rust-cache'in `cargo metadata` çağrısı kökte patlar (Error logu).
           workspaces: ./current

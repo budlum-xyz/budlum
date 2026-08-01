@@ -94,7 +94,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: security-audit
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Build (CodeQL extraction)
@@ -115,7 +115,7 @@ jobs:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: security-audit
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Toolchain pins agree across workspaces
@@ -157,7 +157,7 @@ jobs:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: security-audit
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # Surum pinsizdi: `cargo install cargo-hack --locked` her kosuda o anki
@@ -203,7 +203,7 @@ jobs:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          shared-key: security-audit
+          shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Determinism test (genesis reproducibility)
