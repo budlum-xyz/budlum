@@ -129,6 +129,25 @@ slow_harness_names() {
   harness_names slow
 }
 
+# The module path `--exact` needs, derived from the source rather than typed
+# into the workflow.
+#
+# Kani rejects a bare name under `--exact` with "Please specify the
+# fully-qualified name of a harness", which is the good failure mode: a
+# mistyped prefix turns the job red instead of quietly matching nothing. It
+# still has to be right, and it is a fact about the tree, so it is read from
+# the tree.
+harness_module_path() {
+  local crate module
+  crate=$(grep -m1 '^name = ' "$(dirname "$PROOFS_FILE")/../Cargo.toml" \
+    | sed 's/name = "//; s/"//' | tr '-' '_')
+  module=$(grep -oE '^(pub )?mod [a-z_]+ \{' "$PROOFS_FILE" | head -1 \
+    | sed 's/^pub //; s/^mod //; s/ {//')
+  [ -n "$crate" ] || fail "could not read the crate name from kani/Cargo.toml"
+  [ -n "$module" ] || fail "could not find the module the harnesses live in"
+  printf '%s::%s' "$crate" "$module"
+}
+
 fast_harness_names() {
   harness_names fast
 }
@@ -170,6 +189,11 @@ fi
 
 if [ "${1:-}" = "--fast-names" ]; then
   fast_harness_names
+  exit 0
+fi
+
+if [ "${1:-}" = "--module-path" ]; then
+  harness_module_path
   exit 0
 fi
 

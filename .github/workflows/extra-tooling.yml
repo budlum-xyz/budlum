@@ -339,15 +339,23 @@ jobs:
       # yazilmaz: iki liste birbirinden sessizce ayrilabilir. Kani 0.67'de
       # `--exclude-harness` yok, `--harness` var ve tekrarlanabiliyor, o
       # yuzden secim dislama degil dahil etme yonunde.
+      #
+      # `--exact` tam nitelikli ad ister. Sade isimle cagirildiginda Kani
+      # dokuzunu da reddetti ("Please specify the fully-qualified name"),
+      # yani `--exact` bir on-ek eksikligini sessiz gecmiyor, bu iyi:
+      # yanlis yazilan bir isim harness'i atlamak yerine isi kirmizi yapar.
+      # Harness'ler `budlum_kani` crate'inin `proofs` modulunde.
       - name: Kani proofs (hizli set)
         working-directory: kani
         run: |
           set -euo pipefail
           mapfile -t fast < <(bash ../scripts/check-kani.sh --fast-names)
           [ "${#fast[@]}" -gt 0 ] || { echo "no fast harnesses found; the gate would be vacuous" >&2; exit 1; }
+          mod="$(bash ../scripts/check-kani.sh --module-path)"
+          echo "module path: $mod"
           args=()
           for h in "${fast[@]}"; do
-            [ -n "$h" ] && args+=(--harness "$h" --exact)
+            [ -n "$h" ] && args+=(--harness "$mod::$h" --exact)
           done
           echo "running ${#fast[@]} fast harnesses: ${fast[*]}"
           cargo kani "${args[@]}" --output-format terse 2>&1 | tee /tmp/kani.log
@@ -398,6 +406,7 @@ jobs:
           set -uo pipefail
           mapfile -t slow < <(bash ../scripts/check-kani.sh --slow-names)
           [ "${#slow[@]}" -gt 0 ] || { echo "no slow harnesses; nothing to measure" >&2; exit 1; }
+          mod="$(bash ../scripts/check-kani.sh --module-path)"
           {
             echo "| harness | result | seconds |"
             echo "| :-- | :-- | --: |"
@@ -405,7 +414,8 @@ jobs:
           rc_all=0
           for h in "${slow[@]}"; do
             start=$(date +%s)
-            timeout 6000 cargo kani --harness "$h" --exact --output-format terse \
+            timeout 6000 cargo kani --harness "$mod::$h" --exact \
+              --output-format terse \
               > "/tmp/$h.log" 2>&1
             rc=$?
             elapsed=$(( $(date +%s) - start ))
