@@ -16,7 +16,7 @@
 # halde. Sadece etiket 1.94.0'a cevrilse digest onu ezerdi; ikisi birlikte
 # degismek zorunda. `check-docker-toolchain-matches-pin.sh` bu ikisinin ve
 # rust-toolchain.toml'un ayni surumu gosterdigini her PR'da dogrular.
-FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS builder
+FROM rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
