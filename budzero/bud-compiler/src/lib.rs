@@ -1088,4 +1088,172 @@ mod tests {
             other => panic!("expected SemanticError, got: {other:?}"),
         }
     }
+
+    /// A type the spec advertises but the language does not have must say so.
+    ///
+    /// `BudL_SPEC.md` listed `u32`, `u128`, `Address` and `Hash32` in its type
+    /// table. Only the last two now exist. The first two fell through to
+    /// `Type::Struct(name)`, so an author writing `amount: u128` was told
+    /// "Undefined struct type 'u128'", which points at the struct machinery
+    /// instead of at the fact that the type is not real.
+    #[test]
+    fn a_reserved_type_name_says_the_type_does_not_exist() {
+        for (name, expect) in [
+            ("u32", "range-check"),
+            ("u128", "multi-limb"),
+            ("i64", "unsigned"),
+            ("String", "no string type"),
+        ] {
+            let source = format!(
+                r#"
+                contract C {{
+                    pub fn main(x: {name}) {{
+                        emit E(1);
+                    }}
+                }}
+            "#
+            );
+            let err = compile(&source, IsaProfile::Production)
+                .expect_err("a non-existent type must not compile");
+            match err {
+                CompileError::SemanticError(msg) => {
+                    assert!(
+                        msg.contains("is not a BudL type"),
+                        "{name}: expected a 'not a BudL type' diagnostic, got: {msg}"
+                    );
+                    assert!(
+                        msg.contains(expect),
+                        "{name}: the message should explain why, got: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("struct"),
+                        "{name}: must not be reported as a struct problem, got: {msg}"
+                    );
+                }
+                other => panic!("{name}: expected SemanticError, got: {other:?}"),
+            }
+        }
+    }
+
+    /// `Address` and `Hash32` are real types now, and a contract may use them.
+    ///
+    /// Before this they were treated as struct names, so both examples in
+    /// `BudL_SPEC.md` failed to compile with "Undefined struct type 'Address'".
+    #[test]
+    fn address_and_hash32_are_types_rather_than_phantom_structs() {
+        let source = r#"
+            contract C {
+                pub fn main(who: Address, digest: Hash32) {
+                    let a = who;
+                    let d = digest;
+                    emit E(1);
+                }
+            }
+        "#;
+        compile(source, IsaProfile::Production)
+            .expect("Address and Hash32 must be accepted as types");
+    }
+
+    /// Arithmetic on a 32-byte value is refused rather than truncated.
+    ///
+    /// A VM register holds 8 bytes. Permitting `+` on a 32-byte value would
+    /// compile to an operation on one limb of four and produce a number that
+    /// is not the sum of anything, which is exactly the class of silent wrong
+    /// answer that a type is supposed to prevent.
+    #[test]
+    fn arithmetic_on_an_opaque_32_byte_type_is_refused() {
+        for op in ["+", "-", "*", "/", "<", ">"] {
+            let source = format!(
+                r#"
+                contract C {{
+                    pub fn main(a: Address, b: Address) {{
+                        let c = a {op} b;
+                        emit E(1);
+                    }}
+                }}
+            "#
+            );
+            match compile(&source, IsaProfile::Production) {
+                Ok(_) => panic!("`a {op} b` on two Addresses compiled; the type is a label"),
+                Err(CompileError::SemanticError(msg)) => assert!(
+                    msg.contains("Address"),
+                    "`{op}` was rejected for the wrong reason: {msg}"
+                ),
+                Err(other) => panic!("`{op}`: expected a SemanticError, got: {other:?}"),
+            }
+        }
+    }
+
+    /// The canary for the test above: the rejection has to be about the type,
+    /// not an accident of parsing.
+    #[test]
+    fn the_opaque_type_rejection_names_the_type() {
+        let source = r#"
+            contract C {
+                pub fn main(a: Address, b: Address) {
+                    let c = a + b;
+                    emit E(1);
+                }
+            }
+        "#;
+        let err = compile(source, IsaProfile::Production)
+            .expect_err("adding two addresses must not compile");
+        match err {
+            CompileError::SemanticError(msg) => {
+                assert!(
+                    msg.contains("Address") && msg.contains("opaque"),
+                    "the diagnostic should name the type and say it is opaque, got: {msg}"
+                );
+            }
+            other => panic!("expected SemanticError, got: {other:?}"),
+        }
+    }
+
+    /// Equality and assignment stay available, or the types are useless.
+    #[test]
+    fn opaque_types_can_still_be_compared_and_copied() {
+        let source = r#"
+            contract C {
+                pub fn main(a: Address, b: Address) {
+                    let same = a == b;
+                    let copy = a;
+                    emit E(1);
+                }
+            }
+        "#;
+        compile(source, IsaProfile::Production)
+            .expect("equality and copying must remain legal for Address");
+    }
+
+    /// Every `budl` block in the specification has to compile.
+    ///
+    /// Both of them failed before this change: they declare `Address` fields
+    /// and call `caller()`, `sread_u64()` and `swrite_u64()`, none of which
+    /// existed. A specification whose own examples do not compile teaches the
+    /// wrong language, and nothing in CI noticed for as long as the examples
+    /// were only read by people.
+    #[test]
+    fn every_example_in_the_specification_compiles() {
+        let spec = include_str!("../../docs/BudL_SPEC.md");
+        let mut blocks = Vec::new();
+        let mut rest = spec;
+        while let Some(start) = rest.find("```budl\n") {
+            let after = &rest[start + 8..];
+            let Some(end) = after.find("```") else { break };
+            blocks.push(&after[..end]);
+            rest = &after[end + 3..];
+        }
+        assert!(
+            !blocks.is_empty(),
+            "no ```budl blocks found in BudL_SPEC.md; this test would be vacuous"
+        );
+        for (i, block) in blocks.iter().enumerate() {
+            if let Err(e) = compile(block, IsaProfile::Production) {
+                panic!(
+                    "BudL_SPEC.md example {i} does not compile: {e}\n\
+                     ---- source ----\n{block}"
+                );
+            }
+        }
+    }
 }

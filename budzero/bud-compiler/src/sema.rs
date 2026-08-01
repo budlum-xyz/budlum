@@ -7,10 +7,86 @@ pub enum Type {
     U64,
     Bool,
     Field,
+    /// An account address, opaque: it can be copied, compared and passed
+    /// around, and that is all.
+    ///
+    /// Arithmetic on it is a compile error rather than a silent truncation.
+    /// The VM has 64-bit registers, so a full 32-byte address needs four
+    /// words; allowing `+` would either need multi-limb codegen or would
+    /// quietly operate on one limb of four.
+    ///
+    /// **Measured limitation, stated rather than hidden:** codegen currently
+    /// lays out every struct field at `index * 8` bytes
+    /// (`codegen.rs`, `Expr::StructLiteral`), so an `Address` field occupies
+    /// one word, not four. The type therefore buys the *rules* today (no
+    /// arithmetic, not interchangeable with `Hash32`, distinct in a
+    /// signature) and not yet the *width*. Widening the layout is a separate
+    /// change to struct offsets and to the syscall that would return one;
+    /// naming the type first is what makes that change reviewable, and
+    /// `msg::sender()` deliberately still returns `u64` rather than pretending
+    /// otherwise.
+    Address,
+    /// A 32-byte hash. Same rules as [`Type::Address`], different meaning, and
+    /// deliberately not interchangeable with it: a hash used where an address
+    /// is expected is a bug worth catching.
+    Hash32,
     Struct(String),
     Void,
     Unknown,
 }
+
+impl Type {
+    /// Types that occupy 32 bytes and support no arithmetic.
+    #[must_use]
+    pub fn is_opaque_bytes32(&self) -> bool {
+        matches!(self, Type::Address | Type::Hash32)
+    }
+
+    /// The name to print in a diagnostic.
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            Type::U64 => "u64".into(),
+            Type::Bool => "bool".into(),
+            Type::Field => "field".into(),
+            Type::Address => "Address".into(),
+            Type::Hash32 => "Hash32".into(),
+            Type::Struct(n) => n.clone(),
+            Type::Void => "()".into(),
+            Type::Unknown => "?".into(),
+        }
+    }
+}
+
+/// Type names that a reader will reasonably expect to exist and that BudL
+/// does not have, mapped to what to say instead.
+///
+/// Without this list they fall through to `Type::Struct(name)` and the author
+/// is told "unknown struct type: u128", which is true and useless: it points
+/// at the struct machinery rather than at the fact that the type does not
+/// exist. `BudL_SPEC.md` listed `u32`, `u128`, `Address` and `Hash32` in its
+/// type table and used `Address` in both of its example contracts, so the
+/// documentation itself produced this error.
+///
+/// `u32` and `u128` are not simply unimplemented, they are not implementable
+/// as written: the VM computes in the Goldilocks field, and proving that a
+/// value fits in 32 bits needs range-check columns the AIR does not have.
+/// Naming them would be a label, not a guarantee.
+const RESERVED_TYPE_NAMES: &[(&str, &str)] = &[
+    ("u8", "BudL has one integer type, `u64`, and it is a Goldilocks field element"),
+    ("u16", "BudL has one integer type, `u64`, and it is a Goldilocks field element"),
+    ("u32", "BudL has one integer type, `u64`; a narrower type would need range-check columns the AIR does not have"),
+    ("u128", "BudL has one integer type, `u64`; a wider type would need multi-limb arithmetic the VM does not have"),
+    ("i8", "BudL integers are unsigned field elements"),
+    ("i16", "BudL integers are unsigned field elements"),
+    ("i32", "BudL integers are unsigned field elements"),
+    ("i64", "BudL integers are unsigned field elements"),
+    ("usize", "BudL has one integer type, `u64`"),
+    ("isize", "BudL has one integer type, `u64`"),
+    ("String", "BudL has no string type"),
+    ("str", "BudL has no string type"),
+    ("Vec", "BudL has no dynamic collections; a proof has to bound its own length"),
+];
 
 impl Type {
     fn from_str(s: &str) -> Result<Type, String> {
@@ -18,7 +94,18 @@ impl Type {
             "u64" => Ok(Type::U64),
             "bool" => Ok(Type::Bool),
             "field" => Ok(Type::Field),
-            _ => Ok(Type::Struct(s.to_string())), // Assume it's a struct type
+            "Address" => Ok(Type::Address),
+            "Hash32" => Ok(Type::Hash32),
+            _ => {
+                if let Some((_, why)) = RESERVED_TYPE_NAMES.iter().find(|(n, _)| *n == s) {
+                    return Err(format!("`{s}` is not a BudL type: {why}"));
+                }
+                // Anything else is taken as a struct name. Whether that struct
+                // exists is checked separately by `check_struct_type`, which
+                // is what turns a typo into an error rather than a silent
+                // phantom type.
+                Ok(Type::Struct(s.to_string()))
+            }
         }
     }
 }
@@ -67,7 +154,14 @@ impl SemanticAnalyzer {
         // Structs declared later in the contract.
         for s in &contract.structs {
             for f in &s.fields {
-                if let Ok(ty) = Type::from_str(&f.ty) {
+                let parsed = Type::from_str(&f.ty);
+                if let Err(why) = &parsed {
+                    errors.push(CompileError::SemanticError(format!(
+                        "field '{}.{}': {why}",
+                        s.name, f.name
+                    )));
+                }
+                if let Ok(ty) = parsed {
                     self.check_struct_type(
                         &ty,
                         &format!("field '{}.{}'", s.name, f.name),
@@ -81,7 +175,20 @@ impl SemanticAnalyzer {
         for f in &contract.functions {
             let mut params = Vec::new();
             for p in &f.params {
-                let ty = Type::from_str(&p.ty).unwrap_or(Type::Unknown);
+                // A rejected type name has to become an error here, not a
+                // silent `Unknown`. `Unknown` is treated as compatible with
+                // everything downstream, so swallowing it means `fn f(x: u32)`
+                // reports nothing at all and the reserved-name list is dead.
+                let ty = match Type::from_str(&p.ty) {
+                    Ok(ty) => ty,
+                    Err(why) => {
+                        errors.push(CompileError::SemanticError(format!(
+                            "parameter '{}' of function '{}': {why}",
+                            p.name, f.name
+                        )));
+                        Type::Unknown
+                    }
+                };
                 self.check_struct_type(
                     &ty,
                     &format!("parameter '{}' of function '{}'", p.name, f.name),
@@ -90,7 +197,16 @@ impl SemanticAnalyzer {
                 params.push(ty);
             }
             let ret_ty = if let Some(r) = &f.return_type {
-                let ty = Type::from_str(r).unwrap_or(Type::Unknown);
+                let ty = match Type::from_str(r) {
+                    Ok(ty) => ty,
+                    Err(why) => {
+                        errors.push(CompileError::SemanticError(format!(
+                            "return type of function '{}': {why}",
+                            f.name
+                        )));
+                        Type::Unknown
+                    }
+                };
                 self.check_struct_type(
                     &ty,
                     &format!("return type of function '{}'", f.name),
@@ -164,6 +280,10 @@ impl SemanticAnalyzer {
 
     fn analyze_function(&mut self, func: &Function, errors: &mut Vec<CompileError>) {
         let mut env = HashMap::new();
+        // `unwrap_or(Unknown)` is correct on this pass and only on this pass:
+        // the signature was already walked in `analyze`, which reported any
+        // bad type name once. Reporting again here would print the same
+        // diagnostic twice for one mistake.
         for param in &func.params {
             let ty = Type::from_str(&param.ty).unwrap_or(Type::Unknown);
             env.insert(param.name.clone(), ty);
@@ -466,6 +586,22 @@ impl SemanticAnalyzer {
                             errors.push(CompileError::SemanticError(format!(
                                 "Operator {:?} cannot be applied to {:?} (struct/void operands are not numeric)",
                                 op, ty
+                            )));
+                        }
+                        // `Address` and `Hash32` are 32 bytes; a VM register
+                        // holds 8. Permitting arithmetic would compile to an
+                        // operation on one limb of four and silently produce a
+                        // value that is not the sum of anything. Equality and
+                        // assignment stay allowed, which is what these types
+                        // are for.
+                        if ty.is_opaque_bytes32() {
+                            errors.push(CompileError::SemanticError(format!(
+                                "Operator {:?} cannot be applied to {} ({} is an opaque \
+                                 32-byte identity; compare it or pass it, do not compute \
+                                 with it)",
+                                op,
+                                ty.name(),
+                                ty.name()
                             )));
                         }
                     }

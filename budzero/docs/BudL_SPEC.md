@@ -69,44 +69,56 @@ member_access := expr '.' ident
 
 | BudL Tipi | Boyut | Açıklama |
 |-----------|-------|----------|
-| `u32` | 32-bit | Tamsayı (dizi index, sayaç) |
-| `u64` | 64-bit | Tamsayı (varsayılan) |
-| `u128` | 128-bit | Geniş tamsayı (tutar) |
+| `u64` | Goldilocks alan elemanı | Tek tamsayı tipi. Aşağıdaki uyarıyı oku |
+| `field` | Goldilocks alan elemanı | `u64` ile aynı temsil, niyeti açık yazar |
 | `bool` | 1-bit | Boolean (`true`/`false`) |
-| `Address` | 256-bit | Budlum adresi (32-byte) |
-| `Hash32` | 256-bit | SHA-256/Poseidon hash |
+| `Address` | 32-byte, opak | Budlum adresi. Kopyalanır, karşılaştırılır, hash'lenir |
+| `Hash32` | 32-byte, opak | Poseidon/SHA-256 hash. `Address` ile değiştirilemez |
 | `struct` | değişken | Kullanıcı tanımlı kompozit tip |
+
+> [!WARNING]
+> **`u64` bir makine tamsayısı değildir.** BudZKVM Goldilocks cisminde
+> çalışır, yani modül `P = 2^64 - 2^32 + 1`. `u64::MAX` ile `P` arasında
+> yaklaşık 4.29e9 değer vardır ve orada aritmetik sarmaz, **mod P'ye düşer**.
+> Para tutan bir alanda bu fark sessizdir. VM bunu kendi testlerinde
+> kilitliyor (`add_is_goldilocks_field_not_wrapping`).
+
+> [!NOTE]
+> `u32`, `u128` ve işaretli tipler **yok**, ve eksiklik değil kısıt.
+> Bir değerin 32 bite sığdığını kanıtlamak AIR'de range-check sütunları
+> ister, o sütunlar yok; range-check olmadan `u32` yazmak 64-bit bir
+> register'a etiket yapıştırmaktır. Derleyici bu adları kullanan bir
+> programı, nedenini söyleyerek reddeder.
+
+> [!NOTE]
+> `Address` ve `Hash32` **opaktır**: `==`, atama ve hash girdisi olmak
+> dışında bir şey yapamazlar. VM register'ı 8 byte, bu değerler 32 byte;
+> aritmetiğe izin vermek dört limb'den birinde işlem yapıp hiçbir şeyin
+> toplamı olmayan bir sayı üretirdi. Derleme hatası verir.
 
 ### Struct Örneği
 
 ```budl
-struct UserData {
-    owner: Address,
-    amount: u64,
-    nonce: u64,
-    tags: [u8; 32],  // fixed-size byte array (gelecek)
-}
-
 contract Token {
-    storage {
-        balances: Hash32,  // Merkle root of balance tree
-        total_supply: u64,
+    struct UserData {
+        owner: Address,
+        amount: u64,
+        nonce: u64,
     }
 
-    pub fn transfer(to: Address, amount: u64) -> bool {
-        let caller_addr = caller();
-        let caller_bal = sread_u64(caller_addr);
-        if (caller_bal < amount) {
-            return false;
-        }
-        swrite_u64(caller_addr, caller_bal - amount);
-        let to_bal = sread_u64(to);
-        swrite_u64(to, to_bal + amount);
-        emit Transfer(caller_addr, to, amount);
-        return true;
+    pub fn record(owner: Address, amount: u64) -> u64 {
+        let who = msg::sender();
+        let entry = UserData { owner: owner, amount: amount, nonce: 0 };
+        emit Recorded(amount);
+        return entry.amount;
     }
 }
 ```
+
+Bu örnek derlenir ve `every_example_in_the_specification_compiles` testi
+bunu her koşuda doğrular. Önceki sürümü derlenmiyordu: `caller()`,
+`sread_u64()` ve `swrite_u64()` diye fonksiyonlar yok, `[u8; 32]` diye bir
+tip yok, ve struct'lar `contract` gövdesinin içinde tanımlanır.
 
 ---
 
@@ -209,16 +221,37 @@ if total_gas > gas_limit → revert (Out Of Gas)
 
 ## 6. Stdlib (Planlanan)
 
+### Bugün çağrılabilen fonksiyonlar
+
+Bu liste derleyicinin gerçekten tanıdığı adlardır. Kaynak:
+`bud-compiler/src/sema.rs` (tip imzası) ve `codegen.rs` (opcode).
+
 | Fonksiyon | Opcode Mapping | Açıklama |
 |-----------|---------------|----------|
-| `hash(data: Vec<u8>) -> Hash32` | Poseidon | Hash hesapla |
-| `caller() -> Address` | Syscall(imm=1) | Çağıran adres |
-| `block_height() -> u64` | Syscall(imm=2) | Mevcut blok yüksekliği |
-| `timestamp() -> u64` | Syscall(imm=3) | Blok timestamp |
-| `chain_id() -> u64` | Syscall(imm=4) | Chain ID |
-| `verify_sig(msg, sig, pk) -> bool` | Syscall(imm=5) | Ed25519 imza doğrula |
-| `verify_merkle(root, leaf, proof) -> bool` | VerifyMerkle | 64-depth SMT |
-| `emit Event(...)` | Log | Event yayın |
+| `poseidon(a: u64, b: u64) -> u64` | Poseidon | İki alan elemanını hash'ler |
+| `msg::sender() -> u64` | Syscall(imm=1) | Çağıran |
+| `msg::nonce() -> u64` | Syscall(imm=3) | Çağıranın nonce'u |
+| `block::number() -> u64` | Syscall(imm=2) | Blok yüksekliği |
+| `verify_merkle_proof(root, leaf, path) -> u64` | VerifyMerkle | 64-derinlik SMT, mainnet'te kapalı |
+| `emit Event(...)` | Log | Event yayını (fonksiyon değil, deyim) |
+
+### Planlanan, henüz yok
+
+Aşağıdakiler **çağrılamaz**; bir öncekiyle karıştırılmasın diye ayrı tabloda.
+Önceki sürümde ikisi aynı tablodaydı ve spec'in kendi örnekleri olmayan
+fonksiyonları çağırıyordu.
+
+| Fonksiyon | Neden yok |
+|-----------|-----------|
+| `sread(key)` / `swrite(key, val)` | Opcode var, dilde yüzeyi yok |
+| `timestamp()` | Syscall numarası ayrılmadı |
+| `chain_id()` | Syscall numarası ayrılmadı |
+| `verify_sig(msg, sig, pk)` | Ed25519 doğrulama devresi yok |
+| `hash(bytes)` | Değişken uzunluklu girdi yok (`poseidon` iki alan elemanı alır) |
+
+`msg::sender()` bugün `u64` döner, `Address` değil. Adres 32 byte, register
+8 byte; syscall'ın dört limb döndürmesi ve çağrı yerinin bunu bir `Address`
+olarak bağlaması gerekir. O iş yapılana kadar imza dürüst tutuluyor.
 
 ---
 
@@ -226,28 +259,25 @@ if total_gas > gas_limit → revert (Out Of Gas)
 
 ```budl
 contract SimpleToken {
-    storage {
-        total_supply: u64,
-    }
-
     struct Balance {
         owner: Address,
         amount: u64,
     }
 
-    pub fn mint(to: Address, amount: u64) {
-        let caller_addr = caller();
-        let current = sread_u64(caller_addr);
-        swrite_u64(caller_addr, current + amount);
-        emit Mint(to, amount);
-    }
-
-    pub fn balance_of(addr: Address) -> u64 {
-        let bal = sread_u64(addr);
-        return bal;
+    pub fn mint(to: Address, amount: u64) -> u64 {
+        let who = msg::sender();
+        let height = block::number();
+        let entry = Balance { owner: to, amount: amount };
+        emit Mint(amount);
+        return entry.amount;
     }
 }
 ```
+
+Depolama (`sread`/`swrite`) opcode seviyesinde vardır ama **dilde henüz
+yüzeyi yoktur**: `sread_u64` diye bir fonksiyon çağıramazsın. Yukarıdaki
+örnek bu yüzden depolamaya dokunmuyor. §6'daki tablo hangi çağrının gerçek
+olduğunu söyler.
 
 ---
 
