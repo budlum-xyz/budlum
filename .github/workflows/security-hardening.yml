@@ -17,6 +17,10 @@ on:
     - cron: "30 5 * * 1"   # haftalık, Pazartesi 05:30 UTC
   workflow_dispatch:
 
+concurrency:
+  group: security-hardening-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
@@ -33,10 +37,23 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-hardening
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: cargo install cargo-machete
-        run: cargo install cargo-machete --locked
+      # Surum pinsizdi. extra-tooling.yml ayni araci 0.8.0'a pinliyor;
+      # ayni surum, ayni sha256 burada da kullaniliyor, yoksa iki workflow
+      # ayni adla farkli araclar calistirir.
+      - name: Install cargo-machete (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/machete.tar.gz \
+            https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
+          echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/machete.tar.gz -C /tmp
+          install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
+          cargo-machete --version
       - name: cargo machete (root)
         run: cargo machete --with-metadata || true
       - name: cargo machete (budzero)
@@ -55,6 +72,9 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-hardening
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-mutants
@@ -75,6 +95,9 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-hardening
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-supply-chain
@@ -97,6 +120,9 @@ jobs:
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
         with:
           toolchain: nightly
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: security-hardening
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: RUSTFLAGS -Zsanitizer=thread

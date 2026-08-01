@@ -18,6 +18,10 @@ on:
   workflow_dispatch:
 
 # Minimal permissions - bu workflow yalniz okur (build+scan+smoke).
+concurrency:
+  group: docker-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 

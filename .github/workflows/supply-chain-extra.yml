@@ -16,6 +16,10 @@ on:
   workflow_dispatch:
 
 # Yalnız okur.
+concurrency:
+  group: supply-chain-extra-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 

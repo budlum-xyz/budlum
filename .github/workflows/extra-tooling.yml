@@ -136,11 +136,27 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Install cargo-machete + cargo-shear (sürüm pinli)
+      # Kaynaktan derlemek yerine pinli binary. Repoda bu desen zaten var
+      # (gitleaks, grype, typos, actionlint), burada tutarli uygulaniyor.
+      # sha256'lar indirilip hesaplandi; machete'ninki upstream .sha256
+      # dosyasiyla da karsilastirildi ve birebir uyusuyor.
+      - name: Install cargo-machete + cargo-shear (sürüm + sha256 pinli)
         run: |
           set -euo pipefail
-          cargo install cargo-machete --version 0.8.0 --locked
-          cargo install cargo-shear --version 1.4.1 --locked
+          curl -sSfL -o /tmp/machete.tar.gz \
+            https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
+          echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/machete.tar.gz -C /tmp
+          install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
+
+          curl -sSfL -o /tmp/shear.tar.gz \
+            https://github.com/Boshen/cargo-shear/releases/download/v1.4.1/cargo-shear-x86_64-unknown-linux-musl.tar.gz
+          echo "0768ac346bb6ed097b237d75046fb357a43941e5c39f6ebf5746f96a4cb7fe03  /tmp/shear.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/shear.tar.gz -C /tmp
+          install -m755 "$(find /tmp -name cargo-shear -type f | head -1)" /usr/local/bin/cargo-shear
+
+          cargo-machete --version
+          cargo-shear --version
 
       # Kanarya: rapor modunda bile aracin gercekten calistigini dogrular.
       # Bilerek kullanilmayan bir bagimlilik iceren sentetik crate uretip
@@ -245,8 +261,15 @@ jobs:
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Install taplo (sürüm pinli)
-        run: cargo install taplo-cli --version 0.9.3 --locked
+      - name: Install taplo (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/taplo.gz \
+            https://github.com/tamasfe/taplo/releases/download/0.9.3/taplo-linux-x86_64.gz
+          echo "889efcfa067b179fda488427d3b13ce2d679537da8b9ed8138ba415db7da2a5e  /tmp/taplo.gz" | sha256sum -c -
+          gunzip -c /tmp/taplo.gz > /tmp/taplo
+          install -m755 /tmp/taplo /usr/local/bin/taplo
+          taplo --version
 
       # Kanarya: bozuk bir TOML üretip taplo'nun yakaladığını doğrular.
       - name: Kanarya - taplo alarmının çalıştığının kanıtı
