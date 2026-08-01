@@ -2314,6 +2314,145 @@ mod tests {
         );
     }
 
+    /// A prover must not choose the quotient when the divisor is zero.
+    ///
+    /// The VM defines `x / 0 == 0`. The AIR's main division identity is
+    ///
+    /// ```text
+    /// rd * rs2 - rs1 * (1 - div_zero) == 0
+    /// ```
+    ///
+    /// which is vacuous at `rs2 = 0`: both sides are zero for **any** `rd`.
+    /// A separate constraint pins it,
+    ///
+    /// ```text
+    /// when(is_div * div_zero).assert_zero(rd)
+    /// ```
+    ///
+    /// and that line carries a comment saying it exists so a malicious prover
+    /// cannot pick an arbitrary quotient. The comment was the only evidence.
+    /// Searching this file for a division-by-zero rejection returned nothing,
+    /// so the constraint had never been shown to reject anything.
+    ///
+    /// This forges exactly that: a trace where the divide-by-zero row claims a
+    /// non-zero result. Without the pinning constraint it verifies, because
+    /// the main identity cannot see it.
+    #[test]
+    fn rejects_a_forged_quotient_when_dividing_by_zero() {
+        // r2 = 7, r3 = 0, r1 = r2 / r3. The VM writes 0.
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Load, 3, 0, 0, 0),
+            inst(Opcode::Div, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the program itself must run");
+        assert_eq!(
+            vm.registers[1], 0,
+            "the VM defines division by zero as zero; if that changed, this \
+             test is pinning the wrong contract"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        // Find the Div row and confirm the trace really is the zero-divisor
+        // case, so a change in row layout turns this into a failure rather
+        // than a test that forges nothing.
+        let mut div_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_DIV].as_canonical_u64() == 1 {
+                div_row = Some(i);
+                break;
+            }
+        }
+        let div_row = div_row.expect("the trace must contain a Div row");
+        let row_start = div_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[row_start + COL_DIV_ZERO].as_canonical_u64(),
+            1,
+            "the div_zero flag must be set on this row, or the forgery below \
+             is aimed at the wrong constraint"
+        );
+        assert_eq!(
+            matrix.values[row_start + COL_RD_VAL_NEW].as_canonical_u64(),
+            0,
+            "the honest trace must write 0 before we forge a different value"
+        );
+
+        // The forgery: claim 7 / 0 == 12345.
+        matrix.values[row_start + COL_RD_VAL_NEW] = Goldilocks::new(12345);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        let res = Plonky3Adapter::verify(&envelope, &pi, &program);
+        assert!(
+            res.is_err(),
+            "a proof claiming 7 / 0 == 12345 verified. The main division \
+             identity is vacuous at rs2 = 0, so the only thing standing \
+             between a prover and an arbitrary quotient is \
+             `when(is_div * div_zero).assert_zero(rd)`, and it is not holding."
+        );
+    }
+
     /// A flipped direction bit must be refused.
     ///
     /// `merkle_bit` decides which side of the Poseidon pair the sibling goes
