@@ -111,8 +111,10 @@ fn a_sequential_batch_from_one_sender_is_admitted() {
     for nonce in 0..3u64 {
         bc.add_transaction(signed(&kp, to, 10, 1, nonce))
             .unwrap_or_else(|e| {
-                panic!("sequential nonce {nonce} was refused: {e}. The nonce \
-                        projection must walk the sender's pending transactions")
+                panic!(
+                    "sequential nonce {nonce} was refused: {e}. The nonce \
+                        projection must walk the sender's pending transactions"
+                )
             });
     }
     assert_eq!(bc.mempool.len(), 3);
@@ -167,10 +169,10 @@ fn the_pool_admission_path_still_validates_before_inserting() {
         .expect("Blockchain::add_transaction was renamed; re-derive this lock");
     let body = &src[at..at + 400];
 
-    let validate = body
-        .find("validate_pool_transaction")
-        .expect("Blockchain::add_transaction no longer validates before insertion - \
-                 the mempool cannot see account state, so nothing else checks the nonce");
+    let validate = body.find("validate_pool_transaction").expect(
+        "Blockchain::add_transaction no longer validates before insertion - \
+                 the mempool cannot see account state, so nothing else checks the nonce",
+    );
     let insert = body
         .find("self.mempool")
         .expect("Blockchain::add_transaction no longer reaches the mempool");
