@@ -71,8 +71,8 @@ pub enum ChainCommand {
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
-    AddBalance(Address, u64, oneshot::Sender<()>),
-    InitGenesis(Address, oneshot::Sender<()>),
+    AddBalance(Address, u64, oneshot::Sender<Result<(), String>>),
+    FundDevelopmentAccount(Address, oneshot::Sender<Result<(), String>>),
     StoragePrune([u8; 32]),
     GetStateSnapshotData(
         u64,
@@ -949,30 +949,49 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
-    pub async fn add_balance(&self, address: &Address, amount: u64) {
+    /// Credit an account outside consensus, on a development chain only.
+    ///
+    /// # Errors
+    ///
+    /// Refuses on mainnet. The old signature returned `()` and logged, so a
+    /// caller could not tell a credit from a no-op; a faucet that silently
+    /// does nothing is as misleading as one that silently works.
+    pub async fn credit_development_account(
+        &self,
+        address: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self
             .tx
             .send(ChainCommand::AddBalance(*address, amount, tx))
             .await
         {
-            tracing::error!(error = %e, "Failed to send AddBalance command to chain actor");
-            return;
+            return Err(format!("chain actor is gone: {e}"));
         }
-        if let Err(e) = rx.await {
-            tracing::error!(error = %e, "AddBalance response channel closed prematurely");
-        }
+        rx.await
+            .map_err(|e| format!("credit response channel closed: {e}"))?
     }
 
-    pub async fn init_genesis_account(&self, address: &Address) {
+    /// Top an account up to `GENESIS_BALANCE`, on a development chain only.
+    ///
+    /// Was `init_genesis_account`, which named a moment in the chain's life
+    /// that the body never checked.
+    ///
+    /// # Errors
+    ///
+    /// Refuses on mainnet.
+    pub async fn fund_development_account(&self, address: &Address) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.tx.send(ChainCommand::InitGenesis(*address, tx)).await {
-            tracing::error!(error = %e, "Failed to send InitGenesis command to chain actor");
-            return;
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::FundDevelopmentAccount(*address, tx))
+            .await
+        {
+            return Err(format!("chain actor is gone: {e}"));
         }
-        if let Err(e) = rx.await {
-            tracing::error!(error = %e, "InitGenesis response channel closed prematurely");
-        }
+        rx.await
+            .map_err(|e| format!("faucet response channel closed: {e}"))?
     }
 
     pub async fn storage_prune(&self, cid: [u8; 32]) {
@@ -2390,12 +2409,12 @@ impl ChainActor {
                     let _ = tx.send(res);
                 }
                 ChainCommand::AddBalance(addr, amount, tx) => {
-                    self.blockchain.state.add_balance(&addr, amount);
-                    let _ = tx.send(());
+                    let res = self.blockchain.credit_development_account(&addr, amount);
+                    let _ = tx.send(res);
                 }
-                ChainCommand::InitGenesis(addr, tx) => {
-                    self.blockchain.init_genesis_account(&addr);
-                    let _ = tx.send(());
+                ChainCommand::FundDevelopmentAccount(addr, tx) => {
+                    let res = self.blockchain.fund_development_account(&addr);
+                    let _ = tx.send(res);
                 }
                 ChainCommand::GetStateSnapshotData(height, tx) => {
                     let res = self.blockchain.get_state_snapshot(height);

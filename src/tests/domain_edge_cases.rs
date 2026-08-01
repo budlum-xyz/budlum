@@ -75,7 +75,7 @@ mod tests {
         let mut bc = setup_chain();
         let validator = addr(0x10);
 
-        bc.init_genesis_account(&validator);
+        bc.fund_development_account(&validator).expect("devnet faucet");
         // Validator registration via stake (permissionless)
         // The chain must accept stake-based registration
         // Validator set is managed by the permissionless registry, not

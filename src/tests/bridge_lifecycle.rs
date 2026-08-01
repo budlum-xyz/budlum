@@ -45,12 +45,12 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     let owner = addr(11);
     let recipient = addr(12);
     // Lock debits owner balance - fund accounts.
-    bc.init_genesis_account(&owner);
-    bc.init_genesis_account(&recipient);
+    bc.fund_development_account(&owner).expect("devnet faucet");
+    bc.fund_development_account(&recipient).expect("devnet faucet");
 
     // Bridge lock now debits owner balance, so the owner must
     // Have sufficient funds before locking.
-    bc.init_genesis_account(&owner);
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.state.add_balance(&owner, 1_000_000);
 
     // Step 3: lock via the internal path (the only path that exists
@@ -121,8 +121,8 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
 #[test]
 fn bridge_sweep_is_height_aware_and_idempotent() {
     let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
-    bc.init_genesis_account(&addr(11));
-    bc.init_genesis_account(&addr(12));
+    bc.fund_development_account(&addr(11)).expect("devnet faucet");
+    bc.fund_development_account(&addr(12)).expect("devnet faucet");
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
         let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
@@ -135,7 +135,7 @@ fn bridge_sweep_is_height_aware_and_idempotent() {
     let recipient = addr(12);
 
     // Bridge lock debits owner balance
-    bc.init_genesis_account(&owner);
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.state.add_balance(&owner, 1_000_000);
 
     // Two locks: one expiring at 100, one at 500.
@@ -211,8 +211,8 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
         45262,
         None,
     );
-    bc.init_genesis_account(&addr(11));
-    bc.init_genesis_account(&addr(12));
+    bc.fund_development_account(&addr(11)).expect("devnet faucet");
+    bc.fund_development_account(&addr(12)).expect("devnet faucet");
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
         let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
@@ -225,7 +225,7 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
     let recipient = addr(12);
 
     // Bridge lock debits owner balance
-    bc.init_genesis_account(&owner);
+    bc.fund_development_account(&owner).expect("devnet faucet");
     bc.state.add_balance(&owner, 1_000_000);
 
     let (_transfer, lock_event) = bc

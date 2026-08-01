@@ -178,3 +178,4 @@ pub mod hash_input_serialize_locks;
 // Chain ids must not collide with another chain's registry entry.
 #[cfg(test)]
 pub mod chain_id_registry_locks;
+pub mod consensus_bypass_locks;

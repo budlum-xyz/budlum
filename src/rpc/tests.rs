@@ -229,7 +229,7 @@ mod rpc_tests {
     async fn test_rpc_account_methods() {
         let (server, bc) = setup().await;
         let addr = Address::from_hex(&"01".repeat(32)).unwrap();
-        bc.init_genesis_account(&addr).await;
+        bc.fund_development_account(&addr).await.expect("devnet faucet");
 
         let balance = server.get_balance(addr.to_string()).await.unwrap();
         println!("bud_getBalance: {balance}");
@@ -242,7 +242,7 @@ mod rpc_tests {
         let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
         let from = Address::from(keypair.public_key_bytes());
 
-        bc.add_balance(&from, 1000).await;
+        bc.credit_development_account(&from, 1000).await.expect("devnet credit");
 
         let bob = Address::from_hex(&"02".repeat(32)).unwrap();
         let mut tx = Transaction::new(from, bob, 100, vec![]);
@@ -318,7 +318,7 @@ mod rpc_tests {
             .iter()
             .any(|r| r == "invalid_signature"));
 
-        bc.add_balance(&from, 1000).await;
+        bc.credit_development_account(&from, 1000).await.expect("devnet credit");
 
         let precheck2 = server.tx_precheck(tx.clone()).await.unwrap();
         assert_eq!(precheck2["accepted"], false);
@@ -506,7 +506,7 @@ mod rpc_tests {
         // Fund and register a relayer (staking == registration), then use it as
         // The message sender.
         let relayer = Address::from_hex(&"07".repeat(32)).unwrap();
-        chain.add_balance(&relayer, 5_000).await;
+        chain.credit_development_account(&relayer, 5_000).await.expect("devnet credit");
         server
             .registry_bond_relayer(format!("0x{}", relayer.to_hex()), 2_000)
             .await
@@ -590,8 +590,8 @@ mod rpc_tests {
         let payer = Address::from([8u8; 32]);
 
         // Give payer and operator enough balance for deal fees and bond
-        bc.add_balance(&payer, 100_000_000).await;
-        bc.add_balance(&op, 100_000_000).await;
+        bc.credit_development_account(&payer, 100_000_000).await.expect("devnet credit");
+        bc.credit_development_account(&op, 100_000_000).await.expect("devnet credit");
 
         let deal_res = server
             .storage_open_deal(
@@ -621,7 +621,7 @@ mod rpc_tests {
         // The watcher needs one. Before this change the field was documented as
         // Debited and never was, which let a freshly generated key with a zero
         // Balance open a challenge - exactly what this test was doing.
-        bc.add_balance(&watcher, 100_000).await;
+        bc.credit_development_account(&watcher, 100_000).await.expect("devnet credit");
         let open_msg = crate::core::hash::hash_fields_bytes(&[
             b"BUD_OPEN_CHALLENGE_V1",
             &deal_id.to_le_bytes(),
@@ -713,7 +713,7 @@ mod rpc_tests {
 
         let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
         let min_stake = 1_000u64; // PermissionlessRegistry default floor
-        chain.add_balance(&operator, min_stake * 2).await;
+        chain.credit_development_account(&operator, min_stake * 2).await.expect("devnet credit");
         chain
             .bond_storage_operator(operator, min_stake)
             .await
