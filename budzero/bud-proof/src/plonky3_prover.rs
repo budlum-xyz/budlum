@@ -360,6 +360,13 @@ fn trace_matrix(
         } else {
             bud_vm::field_inverse_goldilocks(step.dst_idx as u64)
         });
+        // Inverse witness deciding, in circuit, whether this row addresses
+        // memory. `Load rd, r0, imm` is load-immediate and touches none.
+        values[row_start + COL_RS1_IDX_INV] = Goldilocks::new(if step.src1_idx == 0 {
+            0
+        } else {
+            bud_vm::field_inverse_goldilocks(step.src1_idx as u64)
+        });
         values[row_start + COL_NEXT_PC] = Goldilocks::new(step.next_pc as u64);
         values[row_start + COL_CPU_ACTIVE] = Goldilocks::new(1);
 
@@ -1138,12 +1145,13 @@ fn aux_trace_generator(
             let m_val = row[COL_MEM_VAL];
             let m_is_write = row[COL_MEM_IS_WRITE];
 
-            let is_real_mem_op = (is_load + is_store)
-                * if rs1_idx != Goldilocks::ZERO {
-                    Goldilocks::ONE
-                } else {
-                    Goldilocks::ZERO
-                };
+            // Built from the same witness the AIR reads, not from a Rust
+            // comparison that happens to agree with it. The two spellings
+            // disagreed for every base register except r1, because the AIR
+            // multiplied by `rs1_idx` itself while this side produced a
+            // boolean.
+            let rs1_idx_z = rs1_idx * row[COL_RS1_IDX_INV];
+            let is_real_mem_op = (is_load + is_store) * rs1_idx_z;
             let is_stack_op = is_push + is_pop + is_call + is_ret;
             let is_storage_op = is_sread + is_swrite;
             // Merkle path reads join the demand side: an expansion row reads
@@ -1642,6 +1650,154 @@ mod tests {
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         prove_and_verify(program, |_| {});
+    }
+
+    /// The same round trip through a base register that is not `r1`.
+    ///
+    /// `proves_store_then_load_roundtrip` above passes and always did, and
+    /// that is the whole reason this one is here. The memory argument scaled
+    /// its demand side by `rs1_idx` itself rather than by "rs1 is not r0", so
+    /// the CPU side asked the bus for `rs1_idx` copies of a row the memory
+    /// table supplies once. With the pointer in `r1` the multiplier is one and
+    /// the argument balances; with it in `r7` the CPU side asks seven times
+    /// and no honest proof exists. A whole class of correct programs was
+    /// unprovable and every test picked `r1`.
+    ///
+    /// The register a compiler happens to allocate is not a soundness
+    /// boundary, so the completeness half is tested across several of them.
+    #[test]
+    fn proves_store_then_load_through_a_high_base_register() {
+        for base in [2u8, 7, 30] {
+            let program = vec![
+                inst(Opcode::Load, base, 0, 0, 0),  // r_base = 0 (address)
+                inst(Opcode::Load, 1, 0, 0, 42),    // r1 = 42 (value)
+                inst(Opcode::Store, 0, base, 1, 0), // mem[r_base] = r1
+                inst(Opcode::Load, 3, base, 0, 0),  // r3 = mem[r_base]
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            let mut vm = Vm::new(64);
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success, "base r{base} must execute");
+            assert_eq!(vm.registers[3], 42, "base r{base} must read 42 back");
+            prove_and_verify(program, |_| {});
+        }
+    }
+
+    /// A `Load` that names a base register must actually read memory.
+    ///
+    /// The soundness half of the same column. `Load rd, r0, imm` is
+    /// load-immediate and touches no memory; every other `Load` reads the word
+    /// at `rs1_val + imm`. The flag separating them is now
+    /// `rs1_idx * rs1_idx_inv`, and a prover that zeroes the inverse witness
+    /// is claiming a memory-addressing `Load` never went to the bus, which
+    /// would let the destination register take a value memory never held.
+    #[test]
+    fn rejects_a_load_that_denies_touching_memory() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 0),  // r1 = 0 (address)
+            inst(Opcode::Load, 2, 0, 0, 99), // r2 = 99
+            inst(Opcode::Store, 0, 1, 2, 0), // mem[r1] = 99
+            inst(Opcode::Load, 3, 1, 0, 0),  // r3 = mem[r1]
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[3], 99);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        // Find the reading Load: `is_load` with a non-zero base register.
+        let mut load_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_LOAD].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_RS1_IDX].as_canonical_u64() != 0
+            {
+                load_row = Some(i);
+                break;
+            }
+        }
+        let load_row = load_row.expect("the trace must contain a memory-reading Load");
+        let lr = load_row * TRACE_WIDTH;
+        assert_ne!(
+            matrix.values[lr + COL_RS1_IDX_INV].as_canonical_u64(),
+            0,
+            "the honest row must carry the inverse of its base register"
+        );
+
+        // The forgery: claim this Load never addressed memory, which switches
+        // it off the demand side of the memory argument.
+        matrix.values[lr + COL_RS1_IDX_INV] = Goldilocks::new(0);
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a Load denied addressing memory and the proof verified; the \
+             destination register can then take a value memory never held"
+        );
     }
 
     /// `Assert` had no prover coverage either, and BudL's `constrain(...)`

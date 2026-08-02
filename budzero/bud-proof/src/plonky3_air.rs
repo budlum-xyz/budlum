@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 737;
+pub const TRACE_WIDTH: usize = 738;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -419,6 +419,39 @@ pub const COL_REG_IS_INIT: usize = 735;
 /// change, not two, and is tracked with the memory one.
 pub const COL_REG_INIT_ACC: usize = 736;
 
+/// Inverse witness deciding, in circuit, whether a `Load` or `Store` row
+/// addresses memory at all.
+///
+/// `Load rd, r0, imm` is the machine's load-immediate: it puts `imm` in `rd`
+/// and touches no memory. Every other `Load` and every `Store` reads or writes
+/// the word at `rs1_val + imm`. The memory argument has to tell those apart,
+/// and the AIR was doing it with
+///
+/// ```text
+/// is_real_mem_op = (is_load + is_store) * rs1_idx
+/// ```
+///
+/// which is not a flag but a register number. On `Store r0, r7, r2` the
+/// demand side of the memory LogUp is scaled by seven while the memory table
+/// supplies the row once, and the prover mirrors the same line as a boolean.
+/// The two sides then disagree for every base register except `r1`, so the
+/// argument only balances on programs that happen to use `r1` as their
+/// pointer. Every other honest program is unprovable, and the imbalance is a
+/// prover-chosen quantity rather than a rejection, which is the wrong side of
+/// the soundness line to be guessing on.
+///
+/// This is the same shape as [`COL_RD_IDX_INV`] and is deliberately spelled
+/// the same way:
+///
+/// ```text
+/// z            = rs1_idx * rs1_idx_inv     (boolean)
+/// rs1_idx * (1 - z) == 0                   (rs1_idx != 0 forces z = 1)
+/// is_real_mem_op = (is_load + is_store) * z
+/// ```
+///
+/// so the multiplier is one or zero and never a register index.
+pub const COL_RS1_IDX_INV: usize = 737;
+
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
 /// Deliberately different from the memory constants. Sharing them would let a
@@ -796,9 +829,30 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_neq.clone())
             .assert_eq(rd_val_new.clone(), eq_neq_z.clone());
 
+        // `Load rd, r0, imm` is load-immediate: the destination takes the
+        // immediate and no memory is touched. Every other `Load` reads the
+        // word at `rs1_val + imm`, so this rule must be off for those rows.
+        //
+        // The guard used to be `is_load * (1 - rs1_idx)`, which is a register
+        // number subtracted from one rather than the boolean "rs1 is r0". At
+        // `rs1_idx = 7` the coefficient is `-6`, non-zero, so the rule fires on
+        // a row it was written to skip and demands `rd_val_new == imm` of a
+        // read that returns whatever memory held. No honest proof exists for
+        // it. The same expression is also what a prover would exploit in the
+        // other direction: the multiplier is a field element the prover
+        // supplies, so the rule that defines load-immediate is switched on and
+        // off by a value the circuit does not pin.
+        //
+        // `rs1_idx_z` is that boolean, derived through the inverse witness in
+        // `COL_RS1_IDX_INV` and pinned there. `1 - rs1_idx_z` is exactly
+        // "rs1 is r0".
         let rs1_idx: AB::Expr = cur[COL_RS1_IDX].into();
+        let rs1_idx_inv_cpu: AB::Expr = cur[COL_RS1_IDX_INV].into();
+        let rs1_idx_z_cpu = rs1_idx.clone() * rs1_idx_inv_cpu;
+        builder.assert_bool(rs1_idx_z_cpu.clone());
+        builder.assert_zero(rs1_idx.clone() * (one.clone() - rs1_idx_z_cpu.clone()));
         builder
-            .when(is_load.clone() * (one.clone() - rs1_idx.clone()))
+            .when(is_load.clone() * (one.clone() - rs1_idx_z_cpu.clone()))
             .assert_eq(rd_val_new.clone(), imm.clone());
 
         builder
@@ -1887,7 +1941,20 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
 
             // Memory LogUp (includes Load/Store/Push/Pop/Call/Ret + SRead/SWrite)
             let rs1_idx: AB::Expr = cur[COL_RS1_IDX].into();
-            let is_real_mem_op = (is_load.clone() + is_store.clone()) * rs1_idx.clone(); // If rs1 is 0, it's LoadImm
+            // `rs1_idx == 0` means load-immediate, which touches no memory.
+            // The multiplier has to be the *boolean* "rs1 is not r0", not the
+            // register number: scaling the demand side by seven because the
+            // pointer happened to live in r7 unbalances the argument against a
+            // memory table that supplies the row once. See `COL_RS1_IDX_INV`.
+            //
+            // Same witness the load-immediate rule above is guarded by, read
+            // again here rather than re-derived: two derivations of one flag
+            // is the shape that produced this bug in the first place.
+            let rs1_idx_inv: AB::Expr = cur[COL_RS1_IDX_INV].into();
+            let rs1_idx_z = rs1_idx.clone() * rs1_idx_inv;
+            builder.assert_bool(rs1_idx_z.clone());
+            builder.assert_zero(rs1_idx.clone() * (one.clone() - rs1_idx_z.clone()));
+            let is_real_mem_op = (is_load.clone() + is_store.clone()) * rs1_idx_z;
             let is_stack_op = is_push.clone() + is_pop.clone() + is_call.clone() + is_ret.clone();
             let is_storage_op = is_sread.clone() + is_swrite.clone();
             // A `VerifyMerkle` expansion row reads one sibling word from the
