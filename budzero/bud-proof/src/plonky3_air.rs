@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 740;
+pub const TRACE_WIDTH: usize = 741;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -498,6 +498,37 @@ pub const COL_RS1_IDX_INV: usize = 737;
 pub const COL_CMP_RS1_HI_INV: usize = 738;
 pub const COL_CMP_RS2_HI_INV: usize = 739;
 
+/// Inverse witness proving an `Assert` row's condition is non-zero.
+///
+/// The VM refuses only on zero: `Assert` halts when `src1_val == 0` and
+/// otherwise carries on, so every non-zero value passes. The AIR asked for
+/// `assert_one(rs1_val)`, which is a different rule: it demands exactly 1.
+///
+/// The two agree on the values every test happened to use, `0` and `1`,
+/// because `Eq` and the comparison opcodes produce those. They disagree on
+/// everything else, and BudL's `constrain(...)` lowers straight to this
+/// opcode, so `constrain(flags & MASK)` or `constrain(count)` is a contract
+/// the VM runs and no prover can prove.
+///
+/// The direction is completeness, not soundness: the AIR was stricter than
+/// the VM, so nothing false got through. Correct programs were rejected
+/// instead, which is the failure mode that looks like the tooling being
+/// broken rather than like an attack.
+///
+/// The rule the VM states is `rs1 != 0`, and that needs a witness:
+///
+/// ```text
+/// z = rs1_val * assert_inv     (boolean)
+/// rs1_val * (1 - z) == 0       (a non-zero condition forces z = 1)
+/// z == 1                       (on Assert rows: the condition is non-zero)
+/// ```
+///
+/// A separate column from [`COL_INV_ZERO`], which `Div`, `Inv` and `Not`
+/// already share. Those three are mutually exclusive with each other by the
+/// selector rules, and adding a fourth reader would work only for as long as
+/// that stays true.
+pub const COL_ASSERT_INV: usize = 740;
+
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
 /// Deliberately different from the memory constants. Sharing them would let a
@@ -924,7 +955,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + (one.clone() - jnz_cond.clone()) * (pc.clone() + one.clone()),
         );
 
-        builder.when(is_assert).assert_one(rs1_val.clone());
+        // Assert passes on any non-zero condition, which is what the VM does.
+        // See `COL_ASSERT_INV` for why `assert_one` was wrong.
+        {
+            let assert_inv: AB::Expr = cur[COL_ASSERT_INV].into();
+            let assert_z = rs1_val.clone() * assert_inv;
+            builder
+                .when(is_assert.clone())
+                .assert_bool(assert_z.clone());
+            builder
+                .when(is_assert.clone())
+                .assert_zero(rs1_val.clone() * (one.clone() - assert_z.clone()));
+            builder.when(is_assert).assert_one(assert_z);
+        }
 
         // (security audit) the `is_verify_merkle`
         // Selector is now a *deterministic* function of `COL_OPCODE`.

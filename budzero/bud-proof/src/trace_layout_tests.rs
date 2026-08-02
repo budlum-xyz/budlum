@@ -5,10 +5,10 @@
 //! Error.
 
 use crate::plonky3_air::{
-    COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM,
-    COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE,
-    COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV, COL_RS1_IDX_INV,
-    TRACE_WIDTH,
+    COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT,
+    COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
+    COL_POSEIDON_X4_BASE, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV,
+    COL_RS1_IDX_INV, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -248,6 +248,15 @@ fn all_ranges() -> Vec<ColRange> {
             name: "cmp_rs2_hi_inv",
             start: COL_CMP_RS2_HI_INV,
             end: COL_CMP_RS2_HI_INV + 1,
+        },
+        // Assert's condition witness. The AIR used to demand the condition be
+        // exactly 1 while the VM accepts any non-zero value, so every
+        // `constrain(...)` over something that is not a comparison result was
+        // unprovable.
+        ColRange {
+            name: "assert_inv",
+            start: COL_ASSERT_INV,
+            end: COL_ASSERT_INV + 1,
         },
     ]
 }
