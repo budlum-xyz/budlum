@@ -819,6 +819,20 @@ fn trace_matrix(
         if i < n_reg - 1 && events[i + 1].idx == e.idx {
             values[row_start + COL_REG_SAME] = Goldilocks::new(1);
         }
+
+        // Inverse witness pinning COL_REG_SAME to the equality it claims.
+        // Only meaningful while both this row and the next carry a register
+        // event, which is exactly where the AIR checks it; past the last event
+        // the next row is inactive and the constraint is gated off.
+        if i < n_reg - 1 {
+            let diff = events[i + 1].idx.wrapping_sub(e.idx);
+            let inv = if diff != 0 {
+                bud_vm::field_inverse_goldilocks(diff)
+            } else {
+                0
+            };
+            values[row_start + COL_REG_SAME_INV] = Goldilocks::new(inv);
+        }
     }
 
     for (i, e) in mem_events.iter().enumerate() {
@@ -2535,6 +2549,203 @@ mod tests {
             Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
             "a proof claiming 100 - 30 == 100 verified; a debit that takes \
              nothing is a mint with extra steps"
+        );
+    }
+
+    /// A register must not change value without a write.
+    ///
+    /// The register table is sorted by `(idx, clk, sub_clk)`, so the events
+    /// for one register land on consecutive rows and the AIR checks continuity
+    /// across each pair:
+    ///
+    /// ```text
+    /// r_active * nr_active * r_same * (1 - nr_write) * (nr_val - r_val) == 0
+    /// ```
+    ///
+    /// `r_same` means "the next row is about this same register". Nothing said
+    /// so. It had no booleanity constraint, no counterpart on the `1 - r_same`
+    /// side, and it does not appear anywhere in the LogUp argument, so it was
+    /// a free column whose only job was to switch the rule above on and off.
+    /// Writing zero cost the prover nothing and deleted the requirement that a
+    /// read return the value that was written.
+    ///
+    /// The memory table has the identical shape and is not vulnerable, which
+    /// is the reason this survived a direct reading of the file more than
+    /// once. There, `m_same = 0` is a claim that the next row is a different
+    /// address, and a separate constraint then requires the first read of a
+    /// new address to return zero. Lying costs the prover exactly the value it
+    /// was trying to invent. Registers have no first-touch rule, so the
+    /// counterpart was never written, and the flag was left free.
+    ///
+    /// The program here writes 5 into r1 and reads it back through an `Add`.
+    /// The forgery rewrites the read to 999 on both sides of the register bus
+    /// so the LogUp argument stays balanced, carries the lie into the `Add`
+    /// result so the arithmetic constraint is satisfied, and clears `r_same`
+    /// on the row before so continuity is not checked. Nothing was written to
+    /// r1 in between. Register values are the inputs to every arithmetic
+    /// constraint in the machine, so a prover who can do this chooses the
+    /// inputs of any computation it likes.
+    #[test]
+    fn rejects_a_register_that_changes_value_without_a_write() {
+        // r1 = 5; r2 = r1 + r0; halt.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Add, 2, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[1], 5,
+            "r1 must hold the value that was written"
+        );
+        assert_eq!(vm.registers[2], 5, "the honest sum is 5 + 0");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        // The two register-table rows for r1: the write from Load, then the
+        // read by Add. They are adjacent because the table is sorted by index
+        // first, and that adjacency is what `r_same` is about.
+        let mut write_row = None;
+        let mut read_row = None;
+        for i in 0..matrix.values.len() / TRACE_WIDTH {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() != 1 {
+                continue;
+            }
+            if matrix.values[row_start + COL_REG_IDX].as_canonical_u64() != 1 {
+                continue;
+            }
+            if matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64() == 1 {
+                write_row = Some(i);
+            } else if write_row.is_some() && read_row.is_none() {
+                read_row = Some(i);
+            }
+        }
+        let write_row = write_row.expect("the register table must hold the write to r1");
+        let read_row = read_row.expect("the register table must hold the read of r1");
+        assert_eq!(
+            read_row,
+            write_row + 1,
+            "the write and the read of r1 must be adjacent rows, otherwise \
+             r_same is not the flag governing this pair and the forgery below \
+             is aimed at the wrong place"
+        );
+
+        let write_start = write_row * TRACE_WIDTH;
+        let read_start = read_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[write_start + COL_REG_SAME].as_canonical_u64(),
+            1,
+            "the honest trace must mark the pair as belonging to one register"
+        );
+        assert_eq!(
+            matrix.values[read_start + COL_REG_VAL].as_canonical_u64(),
+            5,
+            "the honest read must return the value that was written"
+        );
+
+        // Find the Add row so the lie can be carried into the arithmetic too.
+        let mut add_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_ADD].as_canonical_u64() == 1 {
+                add_row = Some(i);
+                break;
+            }
+        }
+        let add_row = add_row.expect("the trace must contain an Add row");
+        let add_start = add_row * TRACE_WIDTH;
+
+        // The forgery. r1 becomes 999 at the point it is read, with no write
+        // anywhere between, and every other constraint is kept satisfied:
+        //
+        //   - both sides of the register bus move together, so the LogUp
+        //     argument stays balanced and does not catch it
+        //   - the Add result moves with its input, so rd == rs1 + rs2 holds
+        //   - r_same is cleared, so continuity is not checked
+        matrix.values[read_start + COL_REG_VAL] = Goldilocks::new(999);
+        matrix.values[add_start + COL_RS1_VAL] = Goldilocks::new(999);
+        matrix.values[add_start + COL_RD_VAL_NEW] = Goldilocks::new(999);
+        matrix.values[write_start + COL_REG_SAME] = Goldilocks::new(0);
+
+        // r2's own table row has to follow the value it was given, or the
+        // proof fails on the register bus rather than on continuity.
+        for i in 0..matrix.values.len() / TRACE_WIDTH {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_REG_IDX].as_canonical_u64() == 2
+                && matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64() == 1
+            {
+                matrix.values[row_start + COL_REG_VAL] = Goldilocks::new(999);
+            }
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a register went from 5 to 999 with no write in between and the \
+             proof verified; register continuity is then optional and the \
+             prover picks the inputs to every computation"
         );
     }
 

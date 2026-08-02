@@ -6,7 +6,8 @@
 
 use crate::plonky3_air::{
     COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
-    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, TRACE_WIDTH,
+    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_REG_SAME_INV,
+    TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -190,6 +191,15 @@ fn all_ranges() -> Vec<ColRange> {
             name: "merkle_key_rem",
             start: COL_MERKLE_KEY_REM,
             end: COL_MERKLE_KEY_REM + 1,
+        },
+        // Inverse witness pinning `reg_same` to `next_reg_idx == reg_idx`.
+        // Without it the column gated the register continuity constraints
+        // while being free itself, so a prover could write zero and let a
+        // register change value between a write and the next read.
+        ColRange {
+            name: "reg_same_inv",
+            start: COL_REG_SAME_INV,
+            end: COL_REG_SAME_INV + 1,
         },
     ]
 }
