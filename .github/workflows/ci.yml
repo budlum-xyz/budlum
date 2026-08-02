@@ -908,6 +908,17 @@ jobs:
         run: |
           bash ./scripts/check-fuzz-targets-are-wired.sh --self-test
           bash ./scripts/check-fuzz-targets-are-wired.sh
+      # Every per opcode rule in the AIR runs under `builder.when(is_<op>)`.
+      # Booleanity and the exclusivity sum force exactly one selector per row
+      # but never say which one, so 29 of the 35 were free: an honest Assert
+      # row could set is_mul instead and have the multiplication identity
+      # (0 == x * 0, since rd and rs2 are zero there) stand in for the
+      # assertion that was supposed to run. This gate keeps the next selector
+      # from being added unbound.
+      - name: AIR selector-opcode baglanmasi + kanarya
+        run: |
+          bash ./scripts/check-air-selectors-are-opcode-bound.sh --self-test
+          bash ./scripts/check-air-selectors-are-opcode-bound.sh
       # B35: the fixed-point slash expression was written out at five call
       # sites across two workspaces, and the narrowing was not spelled the same
       # way in all of them. `as u64` truncated where the Kani mirror panicked,

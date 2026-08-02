@@ -895,6 +895,7 @@ fn aux_trace_generator(
         let gamma = random_challenges[2];
 
         let b2 = beta * beta;
+        let b3 = b2 * beta;
 
         let mut s_reg = MyExtensionField::ZERO;
         let mut s_mem = MyExtensionField::ZERO;
@@ -1130,16 +1131,24 @@ fn aux_trace_generator(
                 s_mem -= (gamma - c_mem).inverse();
             }
 
-            // Program LogUp
+            // Program LogUp. The tuple is (pc, raw_inst, opcode); the opcode
+            // term is what binds COL_OPCODE to the committed program, so the
+            // prover side has to build the same three term sum the AIR checks.
             let raw_inst = row[COL_RAW_INST];
-            let term_cpu_prog =
-                alpha + beta * MyExtensionField::from(pc) + b2 * MyExtensionField::from(raw_inst);
+            let opcode_col = row[COL_OPCODE];
+            let term_cpu_prog = alpha
+                + beta * MyExtensionField::from(pc)
+                + b2 * MyExtensionField::from(raw_inst)
+                + b3 * MyExtensionField::from(opcode_col);
 
             let pre_pc = Goldilocks::from_u64(i as u64);
-            let pre_inst = Goldilocks::from_u64(program.get(i).copied().unwrap_or(0));
+            let pre_inst_word = program.get(i).copied().unwrap_or(0);
+            let pre_inst = Goldilocks::from_u64(pre_inst_word);
+            let pre_opcode = Goldilocks::from_u64(pre_inst_word & 0xFF);
             let term_pre_prog = alpha
                 + beta * MyExtensionField::from(pre_pc)
-                + b2 * MyExtensionField::from(pre_inst);
+                + b2 * MyExtensionField::from(pre_inst)
+                + b3 * MyExtensionField::from(pre_opcode);
 
             let diff_cpu_prog = gamma - term_cpu_prog;
             let diff_pre_prog = gamma - term_pre_prog;
@@ -2526,6 +2535,291 @@ mod tests {
             Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
             "a proof claiming 100 - 30 == 100 verified; a debit that takes \
              nothing is a mint with extra steps"
+        );
+    }
+
+    /// A prover must not relabel an instruction as a different one.
+    ///
+    /// Every per opcode rule in the AIR is written as
+    /// `builder.when(is_<op>).assert_...`, so a rule only runs on rows where
+    /// its selector is set. Booleanity and the exclusivity sum
+    /// (`is_cpu == 1`) together say exactly one selector is set per row. They
+    /// never said *which* one had to be set, and for 29 of the 35 selectors
+    /// nothing else did either. Six were bound by hand to their opcode when
+    /// the opcode they guard was audited; the rest were free witness columns.
+    ///
+    /// So this is the attack. Compile `constrain(x)`, which emits `Assert`,
+    /// run it honestly, then in the trace set `is_assert = 0` and
+    /// `is_mul = 1` on that row. Nothing about the row's data changes.
+    ///
+    /// It goes through because `Mul` demands
+    /// `rd_val_new == rs1_val * rs2_val`, and the honest `Assert` row carries
+    /// `rd_val_new = 0` with `rs2_val = 0`, so the identity reads `0 == x * 0`
+    /// and holds for every `rs1_val`. Both opcodes charge the same unit gas,
+    /// both are inside `is_real_op` so the exclusivity sum is still one, and
+    /// the register, memory and program arguments do not look at which
+    /// selector it was. `assert_one(rs1_val)`, the whole point of the
+    /// instruction, is simply never evaluated.
+    ///
+    /// The program below asserts a false claim: `r1 = 0`, then `Assert r1`.
+    /// The VM refuses it, exactly as it should. The forged trace claims the
+    /// same program ran and terminated, with the failing check relabelled as a
+    /// multiplication. If that verifies, then `constrain(...)` in BudL is
+    /// advisory and a prover can switch off any individual check while still
+    /// proving the honest program hash.
+    ///
+    /// The fix binds every selector to `COL_OPCODE`, and binds `COL_OPCODE`
+    /// itself to the committed program through the Program CTL, since the
+    /// column was free too and pinning selectors to a free column would only
+    /// move the forgery one step back.
+    #[test]
+    fn rejects_a_row_relabelled_as_a_different_opcode() {
+        // r1 = 0; assert(r1)  -- a claim that is false on purpose.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Assert, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(
+            !receipt.success,
+            "the VM must refuse an assertion on zero; if it does not, this \
+             test is proving nothing"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        // Find the Assert row by its opcode, not by its selector: the point of
+        // the test is that the two can disagree.
+        let mut assert_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_OPCODE].as_canonical_u64() == 0x18 {
+                assert_row = Some(i);
+                break;
+            }
+        }
+        let assert_row = assert_row.expect("the trace must contain an Assert row");
+        let row_start = assert_row * TRACE_WIDTH;
+
+        // The preconditions the forgery relies on. If any of these stops
+        // holding the substitution would fail for an unrelated reason and the
+        // test would pass while proving nothing, so they are asserted rather
+        // than assumed.
+        assert_eq!(
+            matrix.values[row_start + COL_IS_ASSERT].as_canonical_u64(),
+            1,
+            "the honest row must be marked as an Assert before it is relabelled"
+        );
+        assert_eq!(
+            matrix.values[row_start + COL_RS1_VAL].as_canonical_u64(),
+            0,
+            "the asserted register must hold zero, otherwise the check the \
+             forgery skips would have passed anyway"
+        );
+        assert_eq!(
+            matrix.values[row_start + COL_RS2_VAL].as_canonical_u64(),
+            0,
+            "rs2 must be zero for the Mul identity to read 0 == x * 0"
+        );
+        assert_eq!(
+            matrix.values[row_start + COL_RD_VAL_NEW].as_canonical_u64(),
+            0,
+            "rd must be zero for the Mul identity to read 0 == x * 0"
+        );
+
+        // The relabelling. Data untouched, only the two selectors move.
+        matrix.values[row_start + COL_IS_ASSERT] = Goldilocks::new(0);
+        matrix.values[row_start + COL_IS_MUL] = Goldilocks::new(1);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "an Assert row relabelled as a Mul verified; every constrain(...) \
+             in BudL is then optional, because the prover picks which rules \
+             apply to which row"
+        );
+    }
+
+    /// The opcode column must come from the committed program.
+    ///
+    /// The companion to the test above. Binding selectors to `COL_OPCODE` is
+    /// only worth something if `COL_OPCODE` is itself pinned down, and it was
+    /// not: the Program CTL carried `(pc, raw_inst)`, which tied the raw
+    /// instruction word to the program ROM and said nothing at all about the
+    /// opcode column sitting next to it. A prover could fetch the honest word
+    /// at `pc` and write a different opcode beside it, then set the selector
+    /// that matches the opcode it wrote, and both the CTL and the selector
+    /// binding would be satisfied.
+    ///
+    /// Here the Assert row keeps its honest `raw_inst` but has its opcode
+    /// column rewritten to `Mul`, with the selectors moved to agree. Only the
+    /// opcode term added to the CTL tuple catches this.
+    #[test]
+    fn rejects_an_opcode_column_that_disagrees_with_the_program() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Assert, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(!receipt.success, "the VM must refuse an assertion on zero");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        let mut assert_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_OPCODE].as_canonical_u64() == 0x18 {
+                assert_row = Some(i);
+                break;
+            }
+        }
+        let assert_row = assert_row.expect("the trace must contain an Assert row");
+        let row_start = assert_row * TRACE_WIDTH;
+
+        // The raw instruction word stays honest. That is the whole point: the
+        // Program CTL is satisfied on the (pc, raw_inst) part of the tuple,
+        // and only the opcode term can tell that the row is lying.
+        let honest_word = matrix.values[row_start + COL_RAW_INST].as_canonical_u64();
+        assert_eq!(
+            honest_word & 0xFF,
+            0x18,
+            "the honest instruction word must decode to Assert, otherwise the \
+             forgery below is not the substitution it claims to be"
+        );
+
+        matrix.values[row_start + COL_OPCODE] = Goldilocks::new(0x03);
+        matrix.values[row_start + COL_IS_ASSERT] = Goldilocks::new(0);
+        matrix.values[row_start + COL_IS_MUL] = Goldilocks::new(1);
+        assert_eq!(
+            matrix.values[row_start + COL_RAW_INST].as_canonical_u64(),
+            honest_word,
+            "the raw instruction word must be left alone by the forgery"
+        );
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a row whose opcode column disagrees with the committed program \
+             verified; binding selectors to that column would then be binding \
+             them to nothing"
         );
     }
 
