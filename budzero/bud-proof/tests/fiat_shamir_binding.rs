@@ -113,7 +113,20 @@ fn both_sides_absorb_the_same_items_before_the_first_challenge() {
             })
     };
 
-    for item in ["degree", "preprocessed_width", "trace", "public_values"] {
+    // `security_parameters` is in this list for the same reason the others
+    // are, and it was the last one missing. The FRI parameters decide the
+    // soundness error and the grinding cost: measured, the current set is
+    // roughly 316 bits, and `num_queries = 1` with `log_blowup = 1` and no
+    // grinding is one bit and produces a proof of the same shape. Least
+    // Authority's Plonky3 audit found exactly this, a challenger that absorbed
+    // neither the FRI config nor the degree. Our degrees were already here.
+    for item in [
+        "degree",
+        "preprocessed_width",
+        "security_parameters",
+        "trace",
+        "public_values",
+    ] {
         for (name, body) in [("prover", PROVER), ("verifier", VERIFIER)] {
             assert!(
                 absorbed_before_first_challenge(body, item),

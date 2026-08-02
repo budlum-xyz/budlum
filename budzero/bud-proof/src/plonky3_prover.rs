@@ -76,11 +76,24 @@ fn build_config() -> MyConfig {
         query_proof_of_work_bits: 16,
         mmcs: challenge_mmcs,
     };
+    // The parameters both sides absorb into the transcript, read back out of
+    // the same value handed to the PCS rather than written a second time. A
+    // hand-written copy is a second source of truth that can drift from the
+    // one that governs the proof, which is the whole failure this binding
+    // exists to prevent.
+    let security = vec![
+        fri_params.log_blowup as u64,
+        fri_params.max_log_arity as u64,
+        fri_params.log_final_poly_len as u64,
+        fri_params.num_queries as u64,
+        fri_params.commit_proof_of_work_bits as u64,
+        fri_params.query_proof_of_work_bits as u64,
+    ];
     let inner_challenger = HashChallenger::<u8, Keccak256Hash, 32>::new(vec![], Keccak256Hash {});
     let challenger = MyChallenger::new(inner_challenger);
     let dft = Radix2DitParallel::default();
     let pcs = MyPcs::new(dft, val_mmcs, fri_params);
-    MyConfig::new(pcs, challenger)
+    MyConfig::new_with_security(pcs, challenger, security)
 }
 
 fn register_events(trace: &[Step]) -> Vec<RegEvent> {
@@ -2064,6 +2077,85 @@ mod tests {
         ];
 
         prove_and_verify(program, |_| {});
+    }
+
+    /// A proof claiming an absurd degree must be rejected, not abort the node.
+    ///
+    /// `Proof::degree_bits` is deserialized out of the submitted bytes and was
+    /// fed straight into `1 << degree_bits`. The release profile sets
+    /// `overflow-checks = true` and `panic = "abort"`, so a shift past the word
+    /// width is a remote kill switch on any node that accepts proofs, reached
+    /// by flipping bytes rather than by producing anything valid.
+    ///
+    /// The envelope carries a separate `degree_bits` that the L1 bounds against
+    /// `MAX_DEGREE_BITS`. This is the other one, inside the serialized proof,
+    /// and nothing compared them. The test drives the crate's own entry point
+    /// so it covers every caller rather than the one that remembered to check.
+    ///
+    /// Found by CI on an unrelated branch: a fixed test that flips one byte of
+    /// a real proof started landing on this field once the transcript changed
+    /// the proof's byte layout. The panic was always reachable; which byte
+    /// reaches it is not stable.
+    #[test]
+    fn rejects_a_proof_claiming_an_impossible_degree() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        // Start from a real proof so everything except the degree is
+        // well-formed; a wholly random blob would be rejected by postcard
+        // before the shift is reached and would prove nothing.
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("the honest proof must be produced");
+        let mut p3_proof: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("a real proof must deserialize");
+
+        // 255 is past the word width, so `1 << degree_bits` overflows.
+        p3_proof.degree_bits = 255;
+        let forged = ProofEnvelope {
+            proof_bytes: postcard::to_allocvec(&p3_proof).unwrap(),
+            ..envelope
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&forged, &pi, &program).is_err(),
+            "a proof claiming 2^255 rows must be rejected; reaching the shift \
+             aborts the process under the release profile, which turns a \
+             corrupt proof into a way to stop a node"
+        );
     }
 
     #[test]

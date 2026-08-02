@@ -172,7 +172,12 @@ where
     challenger.observe(Val::<SC>::from_u8(log_ext_degree as u8));
     challenger.observe(Val::<SC>::from_u8(log_degree as u8));
     challenger.observe(Val::<SC>::from_usize(preprocessed_width));
-    // TODO: Might be best practice to include other instance data here; see verifier comment.
+    // The FRI parameters decide what this proof is worth, so they belong in
+    // the transcript with the degrees. See
+    // `StarkGenericConfig::security_parameters`. The verifier absorbs the same
+    // slice at the same point; a proof produced under weaker parameters than
+    // the verifier expects derives different challenges and fails.
+    challenger.observe_slice(&config.security_parameters());
 
     // Observe the Merkle root of the trace commitment.
     challenger.observe(trace_commit.clone());

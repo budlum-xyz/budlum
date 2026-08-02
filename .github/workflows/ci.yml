@@ -953,6 +953,19 @@ jobs:
         run: |
           bash ./scripts/check-cross-table-checks-use-last-row.sh --self-test
           bash ./scripts/check-cross-table-checks-use-last-row.sh
+      # The Fiat-Shamir transcript carried the degrees, the commitments and the
+      # public values, but not the FRI parameters, and those decide what a
+      # proof is worth: measured, log_blowup 3 with 100 queries and 16 grinding
+      # bits is roughly 316 bits, while 1 query with log_blowup 1 and no
+      # grinding is one bit and produces a proof of the same shape. Least
+      # Authority found this exact class in Plonky3. Absorbing them is half the
+      # fix; the other half is that the absorbed numbers must be read out of
+      # the FriParameters value in force rather than written down a second
+      # time, because two sources of truth for one parameter set drift.
+      - name: FRI parametreleri transcript'te ve turetilmis mi + kanarya
+        run: |
+          bash ./scripts/check-security-parameters-are-derived.sh --self-test
+          bash ./scripts/check-security-parameters-are-derived.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
