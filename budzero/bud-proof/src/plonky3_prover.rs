@@ -2219,10 +2219,47 @@ mod tests {
         assert!(receipt.success);
         assert_eq!(receipt.events, vec![9]);
 
-        let envelope = prove_and_verify(program, |vm| {
-            vm.registers[1] = 9;
-        });
-        assert!(!envelope.proof_bytes.is_empty());
+        // Not `prove_and_verify`: that helper hard-codes
+        // `event_digest: [0u8; 32]`, which is only correct for programs that
+        // emit nothing. Using it here would fail on the last-row digest
+        // binding and say nothing about the first-row constraint this test
+        // exists for.
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("the honest proof must build");
+        Plonky3Adapter::verify(&envelope, &pi, &program).expect(
+            "a program whose first instruction is a Log must be provable; the \
+             first-row constraint has to read `is_log * rs1`, not zero, \
+             because the prover folds row zero's own Log into the accumulator",
+        );
     }
 
     /// A proof claiming an absurd degree must be rejected, not abort the node.
