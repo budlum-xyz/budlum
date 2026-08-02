@@ -3,6 +3,15 @@ use p3_field::PrimeCharacteristicRing;
 
 pub const TRACE_WIDTH: usize = 733;
 
+/// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
+/// active flag, opcode byte.
+///
+/// The opcode byte is redundant with the raw word for anyone who can split a
+/// field element into bytes, which an AIR cannot do without a range check.
+/// Carrying it as its own column is what lets the Program CTL bind
+/// `COL_OPCODE` to the committed program.
+pub const PREPROCESSED_WIDTH: usize = 4;
+
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
 pub const COL_OPCODE: usize = 2;
@@ -278,7 +287,16 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
 
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<F>> {
         let degree = (3 * self.num_steps + 1).next_power_of_two().max(16);
-        let mut values = vec![F::ZERO; degree * 3]; // PC, RAW_INST, IS_ACTIVE
+        // PC, RAW_INST, IS_ACTIVE, OPCODE.
+        //
+        // `OPCODE` is the low byte of the encoded instruction, computed here
+        // from the program the verifier already committed to. It exists so the
+        // Program CTL tuple can carry the opcode as well as the whole word.
+        // See the selector-binding comment in `eval` for why carrying the whole
+        // word was not enough on its own: nothing tied `COL_OPCODE` back to
+        // `COL_RAW_INST`, and splitting the word inside the AIR would need a
+        // range check this machine does not have yet.
+        let mut values = vec![F::ZERO; degree * PREPROCESSED_WIDTH];
         for i in 0..degree {
             let pc = i as u64;
             let inst = self.program.get(i).copied().unwrap_or(0);
@@ -287,11 +305,15 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             } else {
                 F::ZERO
             };
-            values[i * 3] = F::from_u64(pc);
-            values[i * 3 + 1] = F::from_u64(inst);
-            values[i * 3 + 2] = active;
+            values[i * PREPROCESSED_WIDTH] = F::from_u64(pc);
+            values[i * PREPROCESSED_WIDTH + 1] = F::from_u64(inst);
+            values[i * PREPROCESSED_WIDTH + 2] = active;
+            values[i * PREPROCESSED_WIDTH + 3] = F::from_u64(inst & 0xFF);
         }
-        Some(p3_matrix::dense::RowMajorMatrix::new(values, 3))
+        Some(p3_matrix::dense::RowMajorMatrix::new(
+            values,
+            PREPROCESSED_WIDTH,
+        ))
     }
 
     fn preprocessed_next_row_columns(&self) -> Vec<usize> {
@@ -437,6 +459,77 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
 
         // 2. Selector Exclusivity
         builder.assert_eq(is_cpu.clone(), one.clone());
+
+        // 3. Selector <-> opcode binding, for every selector.
+        //
+        // Booleanity plus exclusivity says exactly one selector is set. It
+        // does not say *which* one, and until this constraint existed nothing
+        // else did either for 29 of the 35. Six had a binding written by hand
+        // (Poseidon 0x19, VerifyMerkle 0x1E, VerifyInference 0x1F,
+        // PrivacyCommit 0x20, NullifierCheck 0x21, SumConservation 0x22),
+        // each added when the opcode it guards was audited. The other 29 were
+        // free: a prover could take an honest `Assert` row and set
+        // `is_assert = 0, is_mul = 1` instead.
+        //
+        // That forgery passed everything. `Mul` demands
+        // `rd_val_new = rs1_val * rs2_val`, and an Assert row carries
+        // `rd_val_new = 0` with `rs2_val = 0`, so `0 = x * 0` holds for any
+        // `rs1_val`. Both opcodes fall through to the same unit gas cost, both
+        // sit inside `is_real_op` so exclusivity still sums to one, and
+        // neither the register nor the memory nor the program argument reads
+        // the selector in a way that would notice. The row that was supposed
+        // to enforce `assert_one(rs1_val)` simply stopped being an Assert row,
+        // and `constrain(...)` in BudL, which is what `Assert` compiles from,
+        // became a no-op the prover could switch off per call.
+        //
+        // The same substitution works the other way for anything whose
+        // constraint is satisfiable at the honest row's values, so this is not
+        // one bad pair, it is a missing invariant. Rather than write 29 more
+        // hand bindings and leave the next opcode to be added unbound by
+        // default, the sum below covers all of them at once: each selector
+        // multiplied by the difference between the row's opcode and the
+        // constant it stands for. Exactly one term is live per row, and it
+        // forces the opcode to match. A new selector added without a line here
+        // makes `is_cpu` sum to one while contributing nothing to the sum, and
+        // `check-air-selectors-are-opcode-bound.sh` fails the build for it.
+        let opcode_here: AB::Expr = cur[COL_OPCODE].into();
+        let op = |v: u64| AB::Expr::from(AB::F::from_u64(v));
+        let selector_opcode_binding = is_halt.clone() * (opcode_here.clone() - op(0x00))
+            + is_add.clone() * (opcode_here.clone() - op(0x01))
+            + is_sub.clone() * (opcode_here.clone() - op(0x02))
+            + is_mul.clone() * (opcode_here.clone() - op(0x03))
+            + is_div.clone() * (opcode_here.clone() - op(0x04))
+            + is_inv.clone() * (opcode_here.clone() - op(0x05))
+            + is_and.clone() * (opcode_here.clone() - op(0x06))
+            + is_or.clone() * (opcode_here.clone() - op(0x07))
+            + is_xor.clone() * (opcode_here.clone() - op(0x08))
+            + is_not.clone() * (opcode_here.clone() - op(0x09))
+            + is_eq.clone() * (opcode_here.clone() - op(0x0A))
+            + is_neq.clone() * (opcode_here.clone() - op(0x0B))
+            + is_lt.clone() * (opcode_here.clone() - op(0x0C))
+            + is_gt.clone() * (opcode_here.clone() - op(0x0D))
+            + is_lte.clone() * (opcode_here.clone() - op(0x0E))
+            + is_gte.clone() * (opcode_here.clone() - op(0x0F))
+            + is_jmp.clone() * (opcode_here.clone() - op(0x10))
+            + is_jnz.clone() * (opcode_here.clone() - op(0x11))
+            + is_call.clone() * (opcode_here.clone() - op(0x12))
+            + is_ret.clone() * (opcode_here.clone() - op(0x13))
+            + is_load.clone() * (opcode_here.clone() - op(0x14))
+            + is_store.clone() * (opcode_here.clone() - op(0x15))
+            + is_push.clone() * (opcode_here.clone() - op(0x16))
+            + is_pop.clone() * (opcode_here.clone() - op(0x17))
+            + is_assert.clone() * (opcode_here.clone() - op(0x18))
+            + is_poseidon.clone() * (opcode_here.clone() - op(0x19))
+            + is_log.clone() * (opcode_here.clone() - op(0x1A))
+            + is_sread.clone() * (opcode_here.clone() - op(0x1B))
+            + is_swrite.clone() * (opcode_here.clone() - op(0x1C))
+            + is_syscall.clone() * (opcode_here.clone() - op(0x1D))
+            + is_verify_merkle.clone() * (opcode_here.clone() - op(0x1E))
+            + is_verify_inference.clone() * (opcode_here.clone() - op(0x1F))
+            + is_privacy_commit.clone() * (opcode_here.clone() - op(0x20))
+            + is_nullifier_check.clone() * (opcode_here.clone() - op(0x21))
+            + is_sum_conservation.clone() * (opcode_here.clone() - op(0x22));
+        builder.assert_zero(selector_opcode_binding);
 
         builder
             .when_transition()
@@ -1548,17 +1641,40 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_active: AB::Expr = pre_cur[2].into();
 
             let raw_inst: AB::Expr = cur[COL_RAW_INST].into();
+            let pre_opcode: AB::Expr = pre_cur[3].into();
+            let opcode_col: AB::Expr = cur[COL_OPCODE].into();
 
             let pc_ext: AB::ExprEF = pc.into();
             let raw_inst_ext: AB::ExprEF = raw_inst.into();
             let pre_pc_ext: AB::ExprEF = pre_pc.into();
             let pre_inst_ext: AB::ExprEF = pre_inst.into();
+            let opcode_ext: AB::ExprEF = opcode_col.into();
+            let pre_opcode_ext: AB::ExprEF = pre_opcode.into();
 
-            // Tuple is (pc, raw_inst)
-            let term_cpu_prog =
-                alpha_expr.clone() + beta_expr.clone() * pc_ext + b2.clone() * raw_inst_ext;
-            let term_pre_prog =
-                alpha_expr.clone() + beta_expr.clone() * pre_pc_ext + b2.clone() * pre_inst_ext;
+            // Tuple is (pc, raw_inst, opcode).
+            //
+            // `opcode` joined the tuple to close the decode gap. `raw_inst`
+            // was already pinned to the committed program by this argument,
+            // but `COL_OPCODE` was a free witness column: no constraint
+            // anywhere related the two, so a prover could fetch the honest
+            // word at `pc` and still write any opcode it liked next to it.
+            // Every per opcode constraint keys off selectors, and the
+            // selectors key off `COL_OPCODE`, so that one free column was the
+            // hinge the whole instruction semantics hung on.
+            //
+            // The preprocessed side supplies `inst & 0xFF`, computed from the
+            // program the verifier committed to, so matching the tuple forces
+            // `COL_OPCODE` to be the real low byte. Doing the split inside the
+            // AIR instead would need a range check on the remaining 56 bits,
+            // and this machine has no range check machinery yet.
+            let term_cpu_prog = alpha_expr.clone()
+                + beta_expr.clone() * pc_ext
+                + b2.clone() * raw_inst_ext
+                + b3.clone() * opcode_ext;
+            let term_pre_prog = alpha_expr.clone()
+                + beta_expr.clone() * pre_pc_ext
+                + b2.clone() * pre_inst_ext
+                + b3.clone() * pre_opcode_ext;
 
             let diff_cpu_prog: AB::ExprEF = gamma_expr.clone() - term_cpu_prog;
             let diff_pre_prog: AB::ExprEF = gamma_expr.clone() - term_pre_prog;
