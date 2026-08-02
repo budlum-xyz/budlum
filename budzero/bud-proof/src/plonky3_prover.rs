@@ -316,11 +316,19 @@ fn trace_matrix(
         values[row_start + COL_RS2_IDX] = Goldilocks::new(step.src2_idx as u64);
         values[row_start + COL_RS1_VAL] = Goldilocks::new(step.src1_val);
         values[row_start + COL_RS2_VAL] = Goldilocks::new(step.src2_val);
-        values[row_start + COL_RD_VAL_NEW] = if step.dst_idx == 0 {
-            Goldilocks::new(0)
+        // The value the instruction computed, whatever its destination. This
+        // used to be forced to zero when the destination was r0, which kept
+        // the register bus honest but broke the per opcode rules: `Add r0,
+        // r1, r2` then asked the AIR for `0 == rs1 + rs2`, so any program
+        // writing to r0 could run and never be proved. The zeroing now happens
+        // where it belongs, on the register bus, gated by COL_RD_IDX_INV.
+        values[row_start + COL_RD_VAL_NEW] = Goldilocks::new(step.dst_val);
+        // Inverse witness deciding, in circuit, whether this row writes to r0.
+        values[row_start + COL_RD_IDX_INV] = Goldilocks::new(if step.dst_idx == 0 {
+            0
         } else {
-            Goldilocks::new(step.dst_val)
-        };
+            bud_vm::field_inverse_goldilocks(step.dst_idx as u64)
+        });
         values[row_start + COL_NEXT_PC] = Goldilocks::new(step.next_pc as u64);
         values[row_start + COL_CPU_ACTIVE] = Goldilocks::new(1);
 
@@ -1036,13 +1044,18 @@ fn aux_trace_generator(
                 rs2_val,
                 Goldilocks::ZERO,
             );
+            // A row targeting r0 publishes zero on the register bus whatever
+            // it computed, matching `rd_written` in the AIR. Building the
+            // honest side any other way leaves the argument unbalanced on
+            // every program that writes to r0.
+            let rd_idx_z = rd_idx * row[COL_RD_IDX_INV];
             let c_rd = register_term(
                 alpha,
                 beta,
                 Goldilocks::ZERO,
                 clk_rd,
                 rd_idx,
-                rd_val_new,
+                rd_val_new * rd_idx_z,
                 Goldilocks::ONE,
             );
             let c_reg = register_term(
@@ -2746,6 +2759,374 @@ mod tests {
             "a register went from 5 to 999 with no write in between and the \
              proof verified; register continuity is then optional and the \
              prover picks the inputs to every computation"
+        );
+    }
+
+    /// A register that was never written must read as zero.
+    ///
+    /// Every register continuity constraint is about two events for the same
+    /// register: value preserved between them, index agreeing between them.
+    /// None of them said anything about the *first* event in a block, so a
+    /// register that had never been written could be read as anything. Put the
+    /// invented value on both sides of the register bus and LogUp balances;
+    /// `r_same` is honestly zero because the previous row really is a
+    /// different register; nothing else looks.
+    ///
+    /// Registers start at zero in `bud-vm`, so this is a value conjured out of
+    /// nothing feeding straight into arithmetic. The memory table has carried
+    /// the equivalent rule from the start, in the same two pieces, which is
+    /// what made the gap on the register side easy to read past.
+    ///
+    /// Here r4 is never written. The honest trace reads it as zero; the
+    /// forgery reads it as 100 and carries that through the `Add` so every
+    /// arithmetic constraint still holds.
+    #[test]
+    fn rejects_a_read_of_a_register_that_was_never_written() {
+        // r3 = r4 + r0, and nothing ever writes r4.
+        let program = vec![
+            inst(Opcode::Add, 3, 4, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[3], 0,
+            "an unwritten register reads as zero, so the honest sum is zero"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+
+        // The register-table row for r4: its only appearance, a read.
+        let mut r4_row = None;
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_REG_IDX].as_canonical_u64() == 4
+            {
+                assert_eq!(
+                    matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64(),
+                    0,
+                    "r4 must only ever be read, otherwise this is not the case \
+                     the test is about"
+                );
+                assert!(
+                    r4_row.is_none(),
+                    "r4 must appear once, so the row really is the first touch"
+                );
+                r4_row = Some(i);
+            }
+        }
+        let r4_row = r4_row.expect("the register table must hold the read of r4");
+        let r4_start = r4_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[r4_start + COL_REG_VAL].as_canonical_u64(),
+            0,
+            "the honest read of an unwritten register returns zero"
+        );
+
+        let mut add_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_ADD].as_canonical_u64() == 1 {
+                add_row = Some(i);
+                break;
+            }
+        }
+        let add_start = add_row.expect("the trace must contain an Add row") * TRACE_WIDTH;
+
+        // The forgery: r4 reads as 100 although nothing wrote it. Both sides
+        // of the register bus move together and the sum follows its input, so
+        // LogUp balances and `rd == rs1 + rs2` still holds.
+        matrix.values[r4_start + COL_REG_VAL] = Goldilocks::new(100);
+        matrix.values[add_start + COL_RS1_VAL] = Goldilocks::new(100);
+        matrix.values[add_start + COL_RD_VAL_NEW] = Goldilocks::new(100);
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_REG_IDX].as_canonical_u64() == 3
+                && matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64() == 1
+            {
+                matrix.values[row_start + COL_REG_VAL] = Goldilocks::new(100);
+            }
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a register nothing had written read as 100 and the proof \
+             verified; every value in the machine can then be conjured from \
+             an untouched register"
+        );
+    }
+
+    /// A prover must not write to r0.
+    ///
+    /// r0 is the machine's constant zero. `bud-vm` enforces it directly and
+    /// the trace builder used to enforce it by writing zero into the value
+    /// column, but the AIR never did: `rd_idx` and `rd_val_new` met in exactly
+    /// one place, the register LogUp tuple, which pairs them without relating
+    /// them.
+    ///
+    /// r0 is a source of zero throughout the tree. `Assert` reads `rs2` from
+    /// it, register moves are written as `Add rd, rs, r0`, and the `Load`
+    /// immediate path is selected by `rs1_idx == 0`. A prover that can make r0
+    /// hold something else changes what all of those mean.
+    ///
+    /// The fix does not constrain `rd_val_new`, it constrains what the row
+    /// publishes on the register bus, so the arithmetic rules are untouched.
+    /// See the completeness test below for why that distinction matters.
+    #[test]
+    fn rejects_a_write_to_the_zero_register() {
+        // r0 = r1 + r2, which the machine must treat as discarding the result.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Add, 0, 1, 2, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[0], 0, "r0 must still be zero after the write");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+
+        // The register-table row where the Add writes to r0. Its honest value
+        // is zero: that is the rule being tested.
+        let mut r0_write = None;
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_REG_IDX].as_canonical_u64() == 0
+                && matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64() == 1
+            {
+                r0_write = Some(i);
+                break;
+            }
+        }
+        let r0_write = r0_write.expect("the register table must hold the write to r0");
+        let r0_start = r0_write * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[r0_start + COL_REG_VAL].as_canonical_u64(),
+            0,
+            "the honest trace must publish zero for a write to r0"
+        );
+
+        // The forgery: claim r0 now holds 12. The arithmetic row is left
+        // completely alone, so nothing but the r0 rule can catch this.
+        matrix.values[r0_start + COL_REG_VAL] = Goldilocks::new(12);
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "r0 was made to hold 12 and the proof verified; the machine's \
+             constant zero is then whatever the prover says it is"
+        );
+    }
+
+    /// A program that writes to r0 must still be provable.
+    ///
+    /// The completeness half of the test above, and the reason the r0 rule is
+    /// written against the register bus rather than against `COL_RD_VAL_NEW`.
+    ///
+    /// The trace builder used to write zero into `COL_RD_VAL_NEW` whenever the
+    /// destination was r0. That kept the register bus honest and made honest
+    /// programs unprovable: the AIR asks every `Add` row for
+    /// `rd_val_new == rs1_val + rs2_val`, so an `Add r0, r1, r2` with `r1 = 5`
+    /// and `r2 = 7` was asking it to accept `0 == 12`. The program ran fine
+    /// and could not be proved.
+    ///
+    /// `bud-compiler` does not emit writes to r0 today, so nothing in the tree
+    /// tripped over it, but hand written bytecode does and a change to
+    /// register allocation would. A soundness fix that closes a hole by making
+    /// valid programs unprovable has moved the problem, not fixed it, so both
+    /// directions are tested.
+    #[test]
+    fn proves_a_program_that_writes_to_the_zero_register() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Add, 0, 1, 2, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[0], 0,
+            "r0 must read as zero after a write to it"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("a program writing to r0 must be provable");
+
+        // The arithmetic row holds the real sum. If the trace builder went
+        // back to zeroing it, the per opcode rule would be asking for
+        // `0 == 12` and this program would stop being provable, so the value
+        // is checked rather than assumed.
+        let (matrix, _n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let mut add_row = None;
+        for i in 0..vm.trace.len() {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_ADD].as_canonical_u64() == 1 {
+                add_row = Some(i);
+                break;
+            }
+        }
+        let add_start = add_row.expect("the trace must contain an Add row") * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[add_start + COL_RD_VAL_NEW].as_canonical_u64(),
+            12,
+            "the arithmetic column must carry the real sum even when the \
+             destination is r0"
+        );
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "an honest program that writes to r0 was rejected; the r0 rule has \
+             been written against the wrong column"
         );
     }
 
