@@ -1497,7 +1497,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder
                 .when_transition()
                 .when(cpu_active.clone())
-                .assert_zero(nxt_event_0 - cur_event_0 - nxt_is_log * nxt_rs1);
+                .assert_zero(nxt_event_0 - cur_event_0.clone() - nxt_is_log * nxt_rs1);
 
             // The accumulator starts at zero.
             //
@@ -1520,9 +1520,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // `pc`, and all three LogUp running sums. This one was the
             // exception, and the sequence it accumulates is the one the L1
             // reads back as "what this execution announced".
-            builder.when_first_row().assert_zero(
-                cur_event_0.clone() - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into(),
-            );
+            builder
+                .when_first_row()
+                .assert_zero(cur_event_0 - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into());
 
             // The old comment here claimed a bounds check was unnecessary
             // because `public_inputs[40]` is a u32, so an out-of-range
