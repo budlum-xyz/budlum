@@ -1336,22 +1336,28 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_eq(acc_last, expected);
         }
 
-        // (1c) initial register image: last real row, the fold equals limbs 2
-        // and 3 of `initial_state_root`.
+        // (1c) initial register image: the fold equals limbs 2 and 3 of
+        // `initial_state_root`.
         //
         // Limbs 0 and 1 carry the memory image. Limbs 2 and 3 were carried
         // into the trace and compared against a column the prover filled from
         // the public input itself, so nothing else constrained them; the
         // register image goes there rather than widening the public input,
         // which is declared twice and constructed in 62 places.
+        //
+        // Checked on the very last row rather than on the last CPU row. The
+        // register table is not the same length as the CPU table: one step
+        // contributes three register events, so a two-instruction program has
+        // two CPU rows and three register rows, and the accumulator is still
+        // mid-fold when the CPU side reaches its Halt. Measured by CI, which
+        // failed `d2_proves_nullifier_check_invalid_secret` on exactly that
+        // shape. The prover holds the finished value across the padding, so
+        // the last row carries the whole commitment whichever table is longer.
         {
             let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();
             let expected = public_inputs[12].into()
                 + public_inputs[13].into() * AB::Expr::from(AB::F::from_u64(1u64 << 32));
-            builder
-                .when(is_halt.clone())
-                .when(cpu_active.clone())
-                .assert_eq(acc_last, expected);
+            builder.when_last_row().assert_eq(acc_last, expected);
         }
 
         // (1) initial_state_root: first row, COL_INIT_ROOT_0..7 == public[10..18]
