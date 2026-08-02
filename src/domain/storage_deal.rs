@@ -2072,6 +2072,19 @@ mod tests {
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
     }
 
+    /// One answer per challenge, whatever the answer was.
+    ///
+    /// The retry loop is the point: before `Mismatched` existed, a wrong
+    /// answer returned `Err`, recorded nothing, and let the operator keep
+    /// guessing. What must hold is that the first answer resolves the
+    /// challenge, not what the first answer resolved to.
+    ///
+    /// The outcome is asserted through `results` rather than through
+    /// `deal_status`, because the two are not the same claim. The deal is only
+    /// slashed when the answer was wrong, and while
+    /// `storage_challenge_proofs_are_checkable` reports false a proof-carrying
+    /// answer is not treated as wrong; that half is held by
+    /// `an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable`.
     #[test]
     fn a_mismatched_answer_resolves_the_challenge_so_it_cannot_be_retried() {
         let m = good_manifest();
@@ -2087,10 +2100,8 @@ mod tests {
             115,
             Some(&valid_merkle_proof()),
         )
-        .expect("first wrong answer resolves");
+        .expect("first answer resolves");
 
-        // The retry loop is the whole point: before the fix the operator
-        // could keep guessing because nothing was recorded.
         let err = reg
             .answer_challenge(
                 cid,
@@ -2101,7 +2112,11 @@ mod tests {
             )
             .expect_err("a resolved challenge must not accept a second answer");
         assert!(matches!(err, StorageError::ChallengeAlreadyResolved(_)));
-        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+        assert!(
+            reg.results.contains_key(&cid),
+            "the first answer must land in results, otherwise the challenge is \
+             still open and the operator can keep guessing"
+        );
     }
 
     #[test]
