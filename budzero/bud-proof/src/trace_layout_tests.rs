@@ -6,8 +6,8 @@
 
 use crate::plonky3_air::{
     COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
-    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_REG_SAME_INV,
-    TRACE_WIDTH,
+    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_RD_IDX_INV,
+    COL_REG_SAME_INV, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -200,6 +200,16 @@ fn all_ranges() -> Vec<ColRange> {
             name: "reg_same_inv",
             start: COL_REG_SAME_INV,
             end: COL_REG_SAME_INV + 1,
+        },
+        // Inverse witness deciding whether a row writes to r0. r0 is the
+        // machine's constant zero and the AIR did not enforce that: a prover
+        // could write to it, and honest programs that targeted it were
+        // unprovable because the trace builder zeroed the value column the
+        // per opcode rules constrain.
+        ColRange {
+            name: "rd_idx_inv",
+            start: COL_RD_IDX_INV,
+            end: COL_RD_IDX_INV + 1,
         },
     ]
 }

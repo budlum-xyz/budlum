@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 734;
+pub const TRACE_WIDTH: usize = 735;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, opcode byte.
@@ -317,6 +317,52 @@ pub const COL_MERKLE_KEY_REM: usize = 732;
 /// trace, so a `Eq` instruction and a register event share a row and would
 /// otherwise fight over the same witness.
 pub const COL_REG_SAME_INV: usize = 733;
+
+/// Inverse witness for `rd_idx`, used to decide in-circuit whether an
+/// instruction writes to r0.
+///
+/// r0 is the machine's constant zero. `bud-vm` enforces it directly
+/// (`self.registers[0] = 0` after every step) and the trace builder used to
+/// paper over it by writing `0` into `COL_RD_VAL_NEW` whenever `dst_idx == 0`.
+/// The AIR said nothing at all. Measured: `rd_idx` and `rd_val_new` appear
+/// together in exactly one place, the register LogUp tuple, which pairs them
+/// without relating them.
+///
+/// That left two problems facing opposite directions.
+///
+/// Soundness: a prover could write any value it liked to r0 and publish a
+/// matching register-table row. r0 is used across the tree as a source of
+/// zero, in `Assert rs2 = r0`, in `Add rd, rs, r0` register moves, in the
+/// `Load` immediate path keyed on `rs1_idx == 0`. A prover that can make r0
+/// non-zero rewrites what all of those mean.
+///
+/// Completeness: the trace builder's own workaround made honest programs
+/// unprovable. For `Add r0, r1, r2` the VM records `dst_val = 12`, the builder
+/// wrote `COL_RD_VAL_NEW = 0`, and the AIR asked for
+/// `rd_val_new == rs1_val + rs2_val`, that is `0 == 12`. Any program writing
+/// to r0 could be executed and never proved. `bud-compiler` does not emit such
+/// code today, so nothing in the tree hit it, but hand written bytecode does
+/// and a future change to register allocation would.
+///
+/// Both are closed by moving the rule off `COL_RD_VAL_NEW` and onto the value
+/// the row publishes on the register bus:
+///
+/// ```text
+/// z          = rd_idx * rd_idx_inv        (boolean)
+/// rd_idx * (1 - z) == 0                   (rd_idx != 0 forces z = 1)
+/// rd_is_zero = 1 - z
+/// bus value  = rd_val_new * (1 - rd_is_zero)
+/// ```
+///
+/// So an r0 row computes its arithmetic result honestly, satisfying whichever
+/// of the thirty-odd per opcode rules applies to it, and then contributes zero
+/// to the register argument. A prover that puts a non-zero value in the
+/// register table for r0 unbalances LogUp instead.
+///
+/// Gating the thirty rules on `rd_idx != 0` was the other option and was
+/// rejected: a new opcode added without the guard is unprovable when it
+/// targets r0, and nothing would say so.
+pub const COL_RD_IDX_INV: usize = 734;
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -1423,6 +1469,33 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when_transition()
             .assert_zero(r_active.clone() * nr_active.clone() * r_same.clone() * (nr_idx - r_idx));
 
+        // Not here yet: "the first read of a register returns zero".
+        //
+        // The memory table has that rule, in two pieces, and the register
+        // table has no equivalent, so a register nothing ever wrote can be
+        // read as any value a prover likes. Put the invented value on both
+        // sides of the register bus and LogUp balances, `r_same` is honestly
+        // zero because the previous row really is a different register, and
+        // nothing else looks.
+        //
+        // Writing the mirror of the memory rule here was tried and is wrong,
+        // because the two tables do not have the same relationship to their
+        // starting state. Memory rows that describe the pre-execution image
+        // are marked with `COL_MEM_IS_INIT` and folded into an accumulator the
+        // AIR checks against `public_inputs.initial_state_root`, so "not
+        // written in this trace" and "not part of the committed starting
+        // state" are distinguishable. Registers have no such marking and no
+        // such commitment: `Plonky3Adapter::prove` takes the trace and the
+        // program, and never sees the register file the VM started from. A
+        // constraint that assumes every register starts at zero therefore
+        // rejects any proof whose execution began from a non-zero register
+        // file, which is a real configuration.
+        //
+        // Closing this needs a committed initial register image, the same
+        // shape as the memory one, bound into the public inputs. That is a
+        // change to what a proof is about rather than a missing constraint,
+        // so it is not smuggled in here.
+
         let m_val: AB::Expr = cur[COL_MEM_VAL].into();
         let m_active: AB::Expr = cur[COL_MEM_ACTIVE].into();
         let m_same: AB::Expr = cur[COL_MEM_SAME].into();
@@ -1597,11 +1670,23 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 rs2_val.clone(),
                 zero.clone(),
             );
+            // r0 is the constant zero, so a row targeting it must publish zero
+            // on the register bus no matter what it computed. See
+            // `COL_RD_IDX_INV` for why the rule lives here rather than on
+            // `COL_RD_VAL_NEW`: putting it on the value column would make
+            // honest programs that write to r0 unprovable, because the per
+            // opcode rules constrain that same column.
+            let rd_idx_inv: AB::Expr = cur[COL_RD_IDX_INV].into();
+            let rd_idx_z = rd_idx.clone() * rd_idx_inv;
+            builder.assert_bool(rd_idx_z.clone());
+            builder.assert_zero(rd_idx.clone() * (one.clone() - rd_idx_z.clone()));
+            let rd_written = rd_val_new.clone() * rd_idx_z;
+
             let c_rd = term(
                 table_reg.clone(),
                 clk_rd,
                 rd_idx.clone(),
-                rd_val_new.clone(),
+                rd_written,
                 one.clone(),
             );
             let c_reg = term(
