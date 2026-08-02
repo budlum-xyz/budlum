@@ -1038,6 +1038,13 @@ impl StorageRegistry {
         // caller addressed the wrong deal, missed the deadline, or is not the
         // operator, none of which is evidence about stored bytes.
         let verification: Result<(), StorageError> = match (deal.storage_root, proof_bytes) {
+            // The verifier cannot state what an honest proof looks like, so
+            // its rejection is not evidence about the operator. Accepting the
+            // answer without moving the bond is the same position the chain
+            // held before challenge proofs existed; slashing on it would take
+            // bonds from operators doing their job. See
+            // `storage_challenge_proofs_are_checkable`.
+            (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),
             (Some(root), Some(proof)) => {
                 let context = StorageChallengeProofContext::from_registry(
                     chain_id,
@@ -1141,6 +1148,56 @@ impl StorageRegistry {
         })?;
 
         Ok(())
+    }
+
+    /// Whether this build can state, and therefore check, what an honest
+    /// storage challenge proof looks like.
+    ///
+    /// It cannot, and the honest answer is a constant rather than a silent
+    /// gap. Three of the public inputs
+    /// `storage_challenge_expected_program_and_inputs` names are values the
+    /// AIR does not produce for the program it names, so
+    /// `DefaultAdapter::verify` rejects every proof put through this path,
+    /// including a correct one:
+    ///
+    ///   * `initial_state_root` is given the storage root. Since the
+    ///     initial-image commitment landed, that field is the fold of the
+    ///     memory and register words a program reads before anything writes
+    ///     them. The program here reads 65 words from the path buffer, the key
+    ///     at `imm` and 64 siblings, plus two seeded registers. A storage root
+    ///     is none of those. `bud-cli` had the same mistake and it was fixed
+    ///     when the commitment landed; this caller was missed because no test
+    ///     ever ran a real proof through it.
+    ///   * `event_digest` is given the context digest. The AIR builds that
+    ///     field by summing the `rs1` of every `Log` row and this program has
+    ///     no `Log`, so the only value it accepts is zero.
+    ///   * `gas_used` is given 0. `VerifyMerkle` costs 10.
+    ///
+    /// Correcting those three is not enough, which is why this is a flag and
+    /// not a patch. To state the initial-image commitment the verifier needs
+    /// the 65 path words and the two seeded registers, and it holds none of
+    /// them: `answer_challenge` receives a `storage_root` and a `range_hash`,
+    /// and the `merkle_proof` stored on the deal is a `ProofEnvelope`, not the
+    /// `[leaf || siblings || path_bits]` its comment describes. Beyond that,
+    /// `storage_root` is 32 bytes while the VM's notion of a Merkle root is a
+    /// single 64-bit Goldilocks element, and no conversion between them is
+    /// defined anywhere in the tree.
+    ///
+    /// Deciding how the path reaches the verifier is a consensus-visible
+    /// change with several defensible answers, so it is not made here.
+    ///
+    /// What is fixed here is the damage. A verifier that rejects everything
+    /// was wired to a caller that treats rejection as a wrong answer and
+    /// slashes the operator's bond, so an operator storing the bytes
+    /// faithfully and answering correctly loses its bond. Until the path is
+    /// designed, this returns `false` and the challenge is answered without a
+    /// bond movement, which is the same position the chain was in before
+    /// challenge proofs existed.
+    ///
+    /// The flag is deliberately not configurable. An operator that could turn
+    /// it on would be turning on a verifier that rejects honest work.
+    pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {
+        false
     }
 
     fn storage_challenge_expected_program_and_inputs(
@@ -1937,15 +1994,24 @@ mod tests {
     /// `Mismatched` was declared for this case and produced nowhere in the
     /// tree. These tests hold it on the same economic terms as `Missed`.
     #[test]
-    fn an_unverifiable_proof_slashes_the_operator_instead_of_erroring() {
+    fn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
         let cid = reg
             .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
             .unwrap();
-        // Deserializes as a ProofEnvelope but does not verify against the
-        // deal's storage_root.
+        // Answering with a proof exercises the STARK verifier, and this build
+        // cannot state what an honest proof looks like, so its rejection is
+        // not evidence about the operator. See
+        // `storage_challenge_proofs_are_checkable`. The bond stays put; the
+        // no-proof case below is the one that still slashes, because a missing
+        // proof is a fact about the answer rather than a limitation of ours.
+        assert!(
+            !StorageRegistry::storage_challenge_proofs_are_checkable(),
+            "if the verifier can state an honest proof, this test must go back \
+             to asserting Mismatched"
+        );
         let res = reg
             .answer_challenge(
                 cid,
@@ -1955,6 +2021,48 @@ mod tests {
                 Some(&valid_merkle_proof()),
             )
             .expect("a wrong answer must resolve the challenge, not error out");
+        assert_eq!(res.outcome, ChallengeOutcome::Answered);
+        assert_eq!(res.slashed_bond, 0);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
+    }
+
+    /// The containment above must not reach the case it was not written for.
+    ///
+    /// An answer with no proof at all is a fact about the answer, not a
+    /// limitation of the verifier, so it still costs the bond. Without this
+    /// the flag would quietly turn every wrong answer free.
+    #[test]
+    fn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        let res = reg
+            .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
+            .expect("an answer with no proof resolves as mismatched");
+        assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
+        assert_eq!(res.slashed_bond, good_econ().operator_bond);
+        assert_eq!(deal_status(&reg, deal_id), DealStatus::Slashed);
+    }
+
+    /// A mismatched answer costs the same as silence.
+    ///
+    /// The point of producing `Mismatched` at all: before it, a wrong answer
+    /// returned `Err`, left the challenge unresolved and moved no bond, so it
+    /// was strictly cheaper than staying quiet.
+    #[test]
+    fn a_mismatched_answer_slashes_the_full_bond_like_a_missed_deadline() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .unwrap();
+        let res = reg
+            .answer_challenge(cid, ContentId([1u8; 32]), operator(), 115, None)
+            .unwrap();
         assert_eq!(res.outcome, ChallengeOutcome::Mismatched);
         assert_eq!(
             res.slashed_bond,
