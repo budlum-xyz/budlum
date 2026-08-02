@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 738;
+pub const TRACE_WIDTH: usize = 740;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -451,6 +451,52 @@ pub const COL_REG_INIT_ACC: usize = 736;
 ///
 /// so the multiplier is one or zero and never a register index.
 pub const COL_RS1_IDX_INV: usize = 737;
+
+/// Inverse witnesses proving a bit decomposition is the canonical one.
+///
+/// `Lt`, `Gt`, `Lte`, `Gte`, `And`, `Or` and `Xor` all work on the 64 bit
+/// columns rather than on the register value, and the only thing tying the
+/// bits to the value is
+///
+/// ```text
+/// sum(b_i * 2^i) == rs_val
+/// ```
+///
+/// with each `b_i` boolean. That is not enough. Goldilocks is
+/// `P = 2^64 - 2^32 + 1`, so `2^64 > P` and a 64 bit pattern can be at or
+/// above the modulus and wrap. Two different bit strings then reconstitute to
+/// the same field element:
+///
+/// ```text
+/// rs_val = 5
+///   honest      0x0000000000000005
+///   alternative 0xFFFFFFFF00000006   (= 5 + P, still below 2^64)
+/// ```
+///
+/// There are `2^64 - P = 2^32 - 1` values with a second representation. The
+/// comparison reads the bits, so the prover picks which answer it gets:
+/// against `rs2 = 100` the honest bits give `5 < 100 = 1` and the alternative
+/// sets the top bit and gives `0`. A contract checking `balance >= amount`
+/// through any of these opcodes has a check the prover decides.
+///
+/// The fix pins the decomposition to the canonical representative. A pattern
+/// is at or above the modulus exactly when its high 32 bits are all ones and
+/// its low 32 bits are not all zero, because `P = 0xFFFFFFFF_00000001`. With
+///
+/// ```text
+/// hi = sum(b_i * 2^(i-32))  for i in 32..64
+/// lo = sum(b_i * 2^i)       for i in 0..32
+/// d  = hi - 0xFFFFFFFF
+/// z  = d * d_inv            (boolean)
+/// d * (1 - z) == 0          (d nonzero forces z = 1)
+/// (1 - z) * lo == 0         (hi saturated forces lo = 0)
+/// ```
+///
+/// the excluded patterns are exactly the non-canonical ones and the constraint
+/// stays degree three. `d_inv` is the witness these columns carry, one per
+/// operand.
+pub const COL_CMP_RS1_HI_INV: usize = 738;
+pub const COL_CMP_RS2_HI_INV: usize = 739;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
@@ -2213,6 +2259,49 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let b_bit: AB::Expr = cur[COL_CMP_RS2_BASE + i].into();
             builder.when(is_cmp_or_bw.clone()).assert_bool(a_bit);
             builder.when(is_cmp_or_bw.clone()).assert_bool(b_bit);
+        }
+
+        // Canonicity: the decomposition must be the representative below the
+        // modulus.
+        //
+        // Booleanity and `sum(b_i * 2^i) == rs_val` leave `2^32 - 1` values
+        // with a second valid bit string, because `2^64 > P`. The comparison
+        // opcodes read the bits, so a prover holding a second representation
+        // chooses the answer. See `COL_CMP_RS1_HI_INV`.
+        //
+        // `P = 0xFFFFFFFF_00000001`, so a pattern is out of range exactly when
+        // its high half is saturated and its low half is not zero.
+        {
+            let hi_max = AB::Expr::from(AB::F::from_u64(0xFFFF_FFFF));
+            for (base, inv_col) in [
+                (COL_CMP_RS1_BASE, COL_CMP_RS1_HI_INV),
+                (COL_CMP_RS2_BASE, COL_CMP_RS2_HI_INV),
+            ] {
+                let mut hi: AB::Expr = AB::Expr::ZERO;
+                for i in 32..64 {
+                    let bit: AB::Expr = cur[base + i].into();
+                    hi += bit * AB::Expr::from(AB::F::from_u64(1u64 << (i - 32)));
+                }
+                let mut lo: AB::Expr = AB::Expr::ZERO;
+                for i in 0..32 {
+                    let bit: AB::Expr = cur[base + i].into();
+                    lo += bit * AB::Expr::from(AB::F::from_u64(1u64 << i));
+                }
+
+                let d = hi - hi_max.clone();
+                let d_inv: AB::Expr = cur[inv_col].into();
+                let z = d.clone() * d_inv;
+                builder.when(is_cmp_or_bw.clone()).assert_bool(z.clone());
+                // A nonzero difference forces z = 1, so z = 0 is only
+                // available when the high half really is saturated.
+                builder
+                    .when(is_cmp_or_bw.clone())
+                    .assert_zero(d * (AB::Expr::ONE - z.clone()));
+                // Saturated high half, so the low half has to be zero.
+                builder
+                    .when(is_cmp_or_bw.clone())
+                    .assert_zero((AB::Expr::ONE - z) * lo);
+            }
         }
 
         // Equality prefix flags are boolean (comparison only)

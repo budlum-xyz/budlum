@@ -978,6 +978,18 @@ jobs:
         run: |
           bash ./scripts/check-accumulators-pin-their-first-row.sh --self-test
           bash ./scripts/check-accumulators-pin-their-first-row.sh
+      # Lt/Gt/Lte/Gte and And/Or/Xor answer from 64 bit columns, and the only
+      # thing tying those to the register value was booleanity plus
+      # sum(b_i * 2^i) == val. Goldilocks is 2^64 - 2^32 + 1, so every value
+      # below 2^32 - 1 has a second valid bit string: 5 and 5 + P both
+      # reconstitute to 5, and the second sets the top bit. The comparison
+      # reads the bits, so the prover picked the answer, and a contract
+      # checking balance >= amount through any of these had a check the prover
+      # decided.
+      - name: bit ayristirmasi kanonik mi + kanarya
+        run: |
+          bash ./scripts/check-bit-decompositions-are-canonical.sh --self-test
+          bash ./scripts/check-bit-decompositions-are-canonical.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

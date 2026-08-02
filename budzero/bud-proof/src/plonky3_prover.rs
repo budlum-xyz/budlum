@@ -522,6 +522,29 @@ fn trace_matrix(
                 values[row_start + COL_CMP_RS2_BASE + i] = Goldilocks::new((b >> i) & 1);
             }
 
+            // Canonicity witnesses. The AIR needs the inverse of
+            // `high_half - 0xFFFFFFFF` to tell a saturated high half from any
+            // other, which is what rules out the second bit string every value
+            // below `2^32 - 1` would otherwise have. See `COL_CMP_RS1_HI_INV`.
+            //
+            // `a` and `b` come out of the VM as canonical u64s, so the
+            // difference is zero only for the genuinely saturated patterns and
+            // the inverse exists everywhere else.
+            for (val, inv_col) in [(a, COL_CMP_RS1_HI_INV), (b, COL_CMP_RS2_HI_INV)] {
+                let hi = val >> 32;
+                // In the field, not with `wrapping_sub`. Measured: for
+                // `hi = 0` the u64 wrap gives `0xFFFFFFFF00000001` while the
+                // field difference is `P - 0xFFFFFFFF`, and those are
+                // different elements, so the inverse would be the inverse of
+                // the wrong value and every honest comparison would fail.
+                let d = bud_vm::field_sub_goldilocks(hi, 0xFFFF_FFFF);
+                values[row_start + inv_col] = Goldilocks::new(if d == 0 {
+                    0
+                } else {
+                    bud_vm::field_inverse_goldilocks(d)
+                });
+            }
+
             if is_cmp {
                 let mut eq_cur = true;
                 for i in (0..64).rev() {
@@ -2077,6 +2100,175 @@ mod tests {
         ];
 
         prove_and_verify(program, |_| {});
+    }
+
+    /// A comparison cannot be answered from a non-canonical bit string.
+    ///
+    /// `Lt`, `Gt`, `Lte`, `Gte`, `And`, `Or` and `Xor` read the 64 bit columns
+    /// rather than the register value. The only thing tying the two together
+    /// was booleanity plus `sum(b_i * 2^i) == rs_val`, and that is satisfied by
+    /// two different bit strings for every value below `2^32 - 1`, because
+    /// Goldilocks is `2^64 - 2^32 + 1` and a 64 bit pattern can wrap.
+    ///
+    /// Here `rs1 = 5` and `rs2 = 100`, so the honest answer to `Lt` is 1. The
+    /// forgery rewrites `rs1`'s bits as `5 + P = 0xFFFFFFFF00000006`, which
+    /// reconstitutes to the same field element and sets the top bit, so the
+    /// bitwise comparison reads 5 as the larger operand and answers 0. A
+    /// contract checking `balance >= amount` through any of these opcodes has
+    /// a check the prover decides.
+    #[test]
+    fn rejects_a_comparison_read_from_a_wrapped_bit_string() {
+        const P: u64 = 18_446_744_069_414_584_321;
+
+        // r1 = 5; r2 = 100; r3 = (r1 < r2). The honest result is 1.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Load, 2, 0, 0, 100),
+            inst(Opcode::Lt, 3, 1, 2, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[3], 1, "5 < 100 honestly answers 1");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        let mut lt_row = None;
+        for i in 0..n_cpu {
+            if matrix.values[i * TRACE_WIDTH + COL_IS_LT].as_canonical_u64() == 1 {
+                lt_row = Some(i);
+                break;
+            }
+        }
+        let lt_row = lt_row.expect("the trace must contain an Lt row");
+        let at = lt_row * TRACE_WIDTH;
+
+        // The second representation of 5. Reconstitutes to the same field
+        // element, so `sum(b_i * 2^i) == rs1_val` still holds.
+        let wrapped = 5u64.wrapping_add(P);
+        assert_eq!(
+            (wrapped as u128) % (P as u128),
+            5,
+            "the wrapped pattern must be the same field element, otherwise the \
+             test is exercising a different hole"
+        );
+        for i in 0..64 {
+            matrix.values[at + COL_CMP_RS1_BASE + i] = Goldilocks::new((wrapped >> i) & 1);
+        }
+
+        // The equality prefix flags and the result follow the bits the
+        // comparison actually reads, so the forged row is internally
+        // consistent about answering 0.
+        let b = 100u64;
+        let mut eq = true;
+        for i in (0..64).rev() {
+            eq = eq && (((wrapped >> i) & 1) == ((b >> i) & 1));
+            matrix.values[at + COL_CMP_EQ_BASE + i] = Goldilocks::new(u64::from(eq));
+        }
+        matrix.values[at + COL_RD_VAL_NEW] = Goldilocks::new(0);
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a comparison answered from a wrapped bit string verified; every \
+             value below 2^32 has a second representation, so a balance check \
+             written with Lt is a check the prover decides"
+        );
+    }
+
+    /// Comparisons across the whole range must still be provable.
+    ///
+    /// The completeness half. Canonicity is enforced by excluding the patterns
+    /// with a saturated high half and a nonzero low half, and the value one
+    /// below the modulus sits right against that boundary: its high half *is*
+    /// saturated and its low half is zero, so it must be accepted. Writing the
+    /// rule as "the high half is never saturated" would have been simpler and
+    /// would have made that value unprovable.
+    #[test]
+    fn proves_comparisons_at_the_edge_of_the_field() {
+        const P: u64 = 18_446_744_069_414_584_321;
+        for (a, b) in [
+            (0u64, 1u64),
+            (5, 100),
+            (P - 1, 1),
+            (1, P - 1),
+            (P - 1, P - 1),
+        ] {
+            let program = vec![inst(Opcode::Lt, 3, 1, 2, 0), inst(Opcode::Halt, 0, 0, 0, 0)];
+            let mut vm = Vm::new(64);
+            vm.registers[1] = a;
+            vm.registers[2] = b;
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success, "Lt on ({a}, {b}) must execute");
+
+            prove_and_verify(program, move |vm| {
+                vm.registers[1] = a;
+                vm.registers[2] = b;
+            });
+        }
     }
 
     /// A prover cannot announce events the program never emitted.
