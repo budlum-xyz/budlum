@@ -1567,12 +1567,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             r_active.clone()
                 * nr_active.clone()
                 * r_same.clone()
-                * (one.clone() - nr_write)
-                * (nr_val - r_val),
+                * (one.clone() - nr_write.clone())
+                * (nr_val.clone() - r_val.clone()),
         );
-        builder
-            .when_transition()
-            .assert_zero(r_active.clone() * nr_active.clone() * r_same.clone() * (nr_idx - r_idx));
+        builder.when_transition().assert_zero(
+            r_active.clone() * nr_active.clone() * r_same.clone() * (nr_idx - r_idx.clone()),
+        );
 
         // The first read of a register returns zero, unless the row is part of
         // the committed initial register image.
