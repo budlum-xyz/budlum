@@ -829,9 +829,30 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_neq.clone())
             .assert_eq(rd_val_new.clone(), eq_neq_z.clone());
 
+        // `Load rd, r0, imm` is load-immediate: the destination takes the
+        // immediate and no memory is touched. Every other `Load` reads the
+        // word at `rs1_val + imm`, so this rule must be off for those rows.
+        //
+        // The guard used to be `is_load * (1 - rs1_idx)`, which is a register
+        // number subtracted from one rather than the boolean "rs1 is r0". At
+        // `rs1_idx = 7` the coefficient is `-6`, non-zero, so the rule fires on
+        // a row it was written to skip and demands `rd_val_new == imm` of a
+        // read that returns whatever memory held. No honest proof exists for
+        // it. The same expression is also what a prover would exploit in the
+        // other direction: the multiplier is a field element the prover
+        // supplies, so the rule that defines load-immediate is switched on and
+        // off by a value the circuit does not pin.
+        //
+        // `rs1_idx_z` is that boolean, derived through the inverse witness in
+        // `COL_RS1_IDX_INV` and pinned there. `1 - rs1_idx_z` is exactly
+        // "rs1 is r0".
         let rs1_idx: AB::Expr = cur[COL_RS1_IDX].into();
+        let rs1_idx_inv_cpu: AB::Expr = cur[COL_RS1_IDX_INV].into();
+        let rs1_idx_z_cpu = rs1_idx.clone() * rs1_idx_inv_cpu;
+        builder.assert_bool(rs1_idx_z_cpu.clone());
+        builder.assert_zero(rs1_idx.clone() * (one.clone() - rs1_idx_z_cpu.clone()));
         builder
-            .when(is_load.clone() * (one.clone() - rs1_idx.clone()))
+            .when(is_load.clone() * (one.clone() - rs1_idx_z_cpu.clone()))
             .assert_eq(rd_val_new.clone(), imm.clone());
 
         builder
@@ -1925,6 +1946,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // register number: scaling the demand side by seven because the
             // pointer happened to live in r7 unbalances the argument against a
             // memory table that supplies the row once. See `COL_RS1_IDX_INV`.
+            //
+            // Same witness the load-immediate rule above is guarded by, read
+            // again here rather than re-derived: two derivations of one flag
+            // is the shape that produced this bug in the first place.
             let rs1_idx_inv: AB::Expr = cur[COL_RS1_IDX_INV].into();
             let rs1_idx_z = rs1_idx.clone() * rs1_idx_inv;
             builder.assert_bool(rs1_idx_z.clone());

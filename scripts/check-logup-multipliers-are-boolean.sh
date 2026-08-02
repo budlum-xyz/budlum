@@ -165,6 +165,40 @@ for idx in INDEX_LOCALS:
             f"That is the shape the original bug hid in."
         )
 
+# Second shape of the same mistake: an index column used as a gate directly,
+# either as a multiplier inside `when(...)` or negated as `one - idx`.
+#
+# `is_load * (1 - rs1_idx)` was written to mean "this Load is load-immediate".
+# At `rs1_idx = 7` the coefficient is `-6`, so the rule fires on a row it was
+# written to skip and demands `rd_val_new == imm` of a read that returns
+# whatever memory held. Subtracting a register number from one does not
+# produce a boolean, and it fails in both directions for the same reason the
+# multiplier did.
+air_nc = re.sub(r"//[^\n]*", "", air_src)
+IDX_ALT = "|".join(re.escape(i) for i in INDEX_LOCALS)
+
+for m in re.finditer(rf"one\.clone\(\)\s*-\s*({IDX_ALT})\.clone\(\)", air_nc):
+    line = air_nc[: m.start()].count("\n") + 1
+    problems.append(
+        f"AIR line ~{line}: `{m.group(0)}` negates a register number rather "
+        f"than a boolean. At index 7 the coefficient is -6, not 0, so whatever "
+        f"this gates fires on rows it was written to skip. Use "
+        f"`one - {m.group(1)}_z` with the inverse witness."
+    )
+checked += 1
+
+for m in re.finditer(rf"\.when\(([^()]*(?:\([^()]*\)[^()]*)*)\)", air_nc):
+    body = m.group(1)
+    if re.search(rf"\b({IDX_ALT})\b(?!_)", body):
+        line = air_nc[: m.start()].count("\n") + 1
+        problems.append(
+            f"AIR line ~{line}: `.when({body.strip()[:70]})` gates a constraint "
+            f"on a raw register index. A gate has to be boolean; a register "
+            f"number switches the rule on with the wrong strength on every "
+            f"index but one."
+        )
+checked += 1
+
 if not checked:
     print("FAIL: gate checked nothing", file=sys.stderr)
     sys.exit(2)
@@ -283,7 +317,26 @@ self_test() {
     exit 1
   fi
 
-  # 7. A renamed activity term must fail loudly rather than check nothing.
+  # 7. The second shape: an index negated as `one - idx` used as a gate.
+  mk "$tmp/negidx" 'pub const COL_RS1_IDX_INV: usize = 737;
+        let rs1_idx: AB::Expr = cur[COL_RS1_IDX].into();
+        let rs1_idx_inv: AB::Expr = cur[COL_RS1_IDX_INV].into();
+        let rs1_idx_z = rs1_idx.clone() * rs1_idx_inv;
+        builder.assert_bool(rs1_idx_z.clone());
+        builder.assert_zero(rs1_idx.clone() * (one.clone() - rs1_idx_z.clone()));
+        builder
+            .when(is_load.clone() * (one.clone() - rs1_idx.clone()))
+            .assert_eq(rd_val_new.clone(), imm.clone());
+        let is_real_mem_op = (is_load.clone() + is_store.clone()) * rs1_idx_z;
+        let is_stack_op = is_push.clone() + is_pop.clone();
+        let is_storage_op = is_sread.clone() + is_swrite.clone();
+        let is_any_mem_op = is_real_mem_op.clone() + is_stack_op.clone() + is_storage_op.clone();' "$GOOD_PROVER"
+  if ( scan "$tmp/negidx" ) >/dev/null 2>&1; then
+    echo "VACUOUS GATE: a constraint gated on one minus a register index was accepted!" >&2
+    exit 1
+  fi
+
+  # 8. A renamed activity term must fail loudly rather than check nothing.
   mk "$tmp/renamed" 'pub const COL_RS1_IDX_INV: usize = 737;
         let rs1_idx: AB::Expr = cur[COL_RS1_IDX].into();
         let rs1_idx_inv: AB::Expr = cur[COL_RS1_IDX_INV].into();
@@ -296,14 +349,14 @@ self_test() {
     exit 1
   fi
 
-  # 8. A missing AIR must fail rather than pass by default.
+  # 9. A missing AIR must fail rather than pass by default.
   rm -rf "$tmp/empty"; mkdir -p "$tmp/empty"
   if ( scan "$tmp/empty" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: a tree with no AIR was accepted!" >&2
     exit 1
   fi
 
-  echo "logup multiplier gate self-test OK: a raw index in the AIR, a raw index in the prover, a missing booleanity, a free witness, an unmirrored flag, a renamed term and a missing AIR are all rejected; the corrected tree passes."
+  echo "logup multiplier gate self-test OK: a raw index in the AIR, a raw index in the prover, a missing booleanity, a free witness, an unmirrored flag, a negated register index used as a gate, a renamed term and a missing AIR are all rejected; the corrected tree passes."
 }
 
 if [ "${1:-}" = "--self-test" ]; then
