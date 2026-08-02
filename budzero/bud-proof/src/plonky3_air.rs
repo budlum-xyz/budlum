@@ -1407,7 +1407,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let r_val: AB::Expr = cur[COL_REG_VAL].into();
         let r_active: AB::Expr = cur[COL_REG_ACTIVE].into();
         let r_same: AB::Expr = cur[COL_REG_SAME].into();
-        let r_is_write: AB::Expr = cur[COL_REG_IS_WRITE].into();
         let nr_val: AB::Expr = nxt[COL_REG_VAL].into();
         let nr_active: AB::Expr = nxt[COL_REG_ACTIVE].into();
         let nr_write: AB::Expr = nxt[COL_REG_IS_WRITE].into();
@@ -1463,46 +1462,39 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             r_active.clone()
                 * nr_active.clone()
                 * r_same.clone()
-                * (one.clone() - nr_write.clone())
-                * (nr_val.clone() - r_val.clone()),
+                * (one.clone() - nr_write)
+                * (nr_val - r_val),
         );
         builder
             .when_transition()
             .assert_zero(r_active.clone() * nr_active.clone() * r_same.clone() * (nr_idx - r_idx));
 
-        // The first time a register is touched, a read of it must return zero.
+        // Not here yet: "the first read of a register returns zero".
         //
-        // Every constraint above is about continuity *between* two events for
-        // the same register. None of them said anything about the first event
-        // in a block, so a register that was never written could be read as
-        // any value the prover liked: put the value on both sides of the
-        // register bus and the LogUp argument balances, `r_same` is honestly
+        // The memory table has that rule, in two pieces, and the register
+        // table has no equivalent, so a register nothing ever wrote can be
+        // read as any value a prover likes. Put the invented value on both
+        // sides of the register bus and LogUp balances, `r_same` is honestly
         // zero because the previous row really is a different register, and
-        // nothing else looks. Registers start at zero in `bud-vm`, so that is
-        // a value invented out of nothing feeding straight into arithmetic.
+        // nothing else looks.
         //
-        // The memory table has had this rule from the start, in the same two
-        // pieces: one for the very first row of the trace, one for the
-        // transition into a new address block. This is the register mirror of
-        // it. The `is_init` exemption has no counterpart here on purpose:
-        // memory can be seeded from a committed initial image, registers
-        // cannot, they are always zero at the start of execution.
+        // Writing the mirror of the memory rule here was tried and is wrong,
+        // because the two tables do not have the same relationship to their
+        // starting state. Memory rows that describe the pre-execution image
+        // are marked with `COL_MEM_IS_INIT` and folded into an accumulator the
+        // AIR checks against `public_inputs.initial_state_root`, so "not
+        // written in this trace" and "not part of the committed starting
+        // state" are distinguishable. Registers have no such marking and no
+        // such commitment: `Plonky3Adapter::prove` takes the trace and the
+        // program, and never sees the register file the VM started from. A
+        // constraint that assumes every register starts at zero therefore
+        // rejects any proof whose execution began from a non-zero register
+        // file, which is a real configuration.
         //
-        // `r_same` carries the block boundary, and after the inverse witness
-        // above it means what it says, so `1 - r_same` is a sound way to spell
-        // "the next row starts a new register". Before that witness existed
-        // this constraint would have been worth nothing: a prover would clear
-        // `r_same` to dodge continuity and clear it again to dodge this.
-        builder
-            .when_first_row()
-            .assert_zero(r_active.clone() * (one.clone() - r_is_write.clone()) * r_val.clone());
-        builder.when_transition().assert_zero(
-            r_active.clone()
-                * nr_active.clone()
-                * (one.clone() - r_same.clone())
-                * (one.clone() - nr_write)
-                * nr_val,
-        );
+        // Closing this needs a committed initial register image, the same
+        // shape as the memory one, bound into the public inputs. That is a
+        // change to what a proof is about rather than a missing constraint,
+        // so it is not smuggled in here.
 
         let m_val: AB::Expr = cur[COL_MEM_VAL].into();
         let m_active: AB::Expr = cur[COL_MEM_ACTIVE].into();
