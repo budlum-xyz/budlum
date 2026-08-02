@@ -4,13 +4,21 @@ use p3_field::PrimeCharacteristicRing;
 pub const TRACE_WIDTH: usize = 735;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
-/// active flag, opcode byte.
+/// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
 ///
-/// The opcode byte is redundant with the raw word for anyone who can split a
-/// field element into bytes, which an AIR cannot do without a range check.
-/// Carrying it as its own column is what lets the Program CTL bind
-/// `COL_OPCODE` to the committed program.
-pub const PREPROCESSED_WIDTH: usize = 4;
+/// The decoded fields are redundant with the raw word for anyone who can split
+/// a field element into bit ranges, which an AIR cannot do without a range
+/// check this machine does not have. Carrying them as their own columns is
+/// what lets the Program CTL bind the CPU trace's decode columns to the
+/// committed program.
+///
+/// Instructions encode as
+/// `opcode | rd << 8 | rs1 << 13 | rs2 << 18 | imm << 23`, so each field is a
+/// shift and a mask away from the word. `imm` is deliberately not here: it is
+/// 32 bits and signed, and the CPU trace stores it as a field element with
+/// negative values wrapped, so matching it in the tuple needs a
+/// representation decision rather than a mask. It is tracked separately.
+pub const PREPROCESSED_WIDTH: usize = 7;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -376,15 +384,15 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
 
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<F>> {
         let degree = (3 * self.num_steps + 1).next_power_of_two().max(16);
-        // PC, RAW_INST, IS_ACTIVE, OPCODE.
+        // PC, RAW_INST, IS_ACTIVE, then the decoded fields OPCODE, RD, RS1,
+        // RS2.
         //
-        // `OPCODE` is the low byte of the encoded instruction, computed here
-        // from the program the verifier already committed to. It exists so the
-        // Program CTL tuple can carry the opcode as well as the whole word.
-        // See the selector-binding comment in `eval` for why carrying the whole
-        // word was not enough on its own: nothing tied `COL_OPCODE` back to
+        // Each decoded field is computed here from the program the verifier
+        // already committed to, so the Program CTL tuple can carry them. See
+        // the decode comment in `eval` for why carrying the whole word was not
+        // enough: nothing tied the CPU trace's decode columns back to
         // `COL_RAW_INST`, and splitting the word inside the AIR would need a
-        // range check this machine does not have yet.
+        // range check this machine does not have.
         let mut values = vec![F::ZERO; degree * PREPROCESSED_WIDTH];
         for i in 0..degree {
             let pc = i as u64;
@@ -398,6 +406,9 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             values[i * PREPROCESSED_WIDTH + 1] = F::from_u64(inst);
             values[i * PREPROCESSED_WIDTH + 2] = active;
             values[i * PREPROCESSED_WIDTH + 3] = F::from_u64(inst & 0xFF);
+            values[i * PREPROCESSED_WIDTH + 4] = F::from_u64((inst >> 8) & 0x1F);
+            values[i * PREPROCESSED_WIDTH + 5] = F::from_u64((inst >> 13) & 0x1F);
+            values[i * PREPROCESSED_WIDTH + 6] = F::from_u64((inst >> 18) & 0x1F);
         }
         Some(p3_matrix::dense::RowMajorMatrix::new(
             values,
@@ -1620,6 +1631,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let b3 = b2.clone() * beta_expr.clone();
             let b4 = b3.clone() * beta_expr.clone();
             let b5 = b4.clone() * beta_expr.clone();
+            let b6 = b5.clone() * beta_expr.clone();
 
             let term = |table_id: AB::Expr,
                         clk: AB::Expr,
@@ -1828,7 +1840,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
 
             let raw_inst: AB::Expr = cur[COL_RAW_INST].into();
             let pre_opcode: AB::Expr = pre_cur[3].into();
+            let pre_rd: AB::Expr = pre_cur[4].into();
+            let pre_rs1: AB::Expr = pre_cur[5].into();
+            let pre_rs2: AB::Expr = pre_cur[6].into();
             let opcode_col: AB::Expr = cur[COL_OPCODE].into();
+            let rd_idx_col: AB::Expr = cur[COL_RD_IDX].into();
+            let rs1_idx_col: AB::Expr = cur[COL_RS1_IDX].into();
+            let rs2_idx_col: AB::Expr = cur[COL_RS2_IDX].into();
 
             let pc_ext: AB::ExprEF = pc.into();
             let raw_inst_ext: AB::ExprEF = raw_inst.into();
@@ -1836,31 +1854,56 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_inst_ext: AB::ExprEF = pre_inst.into();
             let opcode_ext: AB::ExprEF = opcode_col.into();
             let pre_opcode_ext: AB::ExprEF = pre_opcode.into();
+            let rd_ext: AB::ExprEF = rd_idx_col.into();
+            let rs1_ext: AB::ExprEF = rs1_idx_col.into();
+            let rs2_ext: AB::ExprEF = rs2_idx_col.into();
+            let pre_rd_ext: AB::ExprEF = pre_rd.into();
+            let pre_rs1_ext: AB::ExprEF = pre_rs1.into();
+            let pre_rs2_ext: AB::ExprEF = pre_rs2.into();
 
-            // Tuple is (pc, raw_inst, opcode).
+            // Tuple is (pc, raw_inst, opcode, rd, rs1, rs2): the whole decode.
             //
-            // `opcode` joined the tuple to close the decode gap. `raw_inst`
-            // was already pinned to the committed program by this argument,
-            // but `COL_OPCODE` was a free witness column: no constraint
-            // anywhere related the two, so a prover could fetch the honest
-            // word at `pc` and still write any opcode it liked next to it.
-            // Every per opcode constraint keys off selectors, and the
-            // selectors key off `COL_OPCODE`, so that one free column was the
-            // hinge the whole instruction semantics hung on.
+            // `raw_inst` was pinned to the committed program by this argument
+            // from the start, and that looked like enough. It was not. The AIR
+            // never splits the word, so every field the CPU trace decodes out
+            // of it sat in a free witness column that nothing related back to
+            // the word beside it. A prover could fetch the honest instruction
+            // at `pc` and write whatever it liked into the decode columns.
             //
-            // The preprocessed side supplies `inst & 0xFF`, computed from the
-            // program the verifier committed to, so matching the tuple forces
-            // `COL_OPCODE` to be the real low byte. Doing the split inside the
-            // AIR instead would need a range check on the remaining 56 bits,
-            // and this machine has no range check machinery yet.
+            // `opcode` was the first field fixed, because the selectors key
+            // off it and that made instruction semantics itself forgeable.
+            // The register indices are the same hole one level down, and
+            // measurably worth money. Take `total = amount + fee` compiled to
+            // `Add r3, r2, r1`, and rewrite `rs2_idx` from 1 to 2: the row now
+            // computes `amount + amount`. The arithmetic constraint is
+            // satisfied because the value column follows the index, the
+            // register argument balances because r2 is genuinely read
+            // elsewhere, and the fee is never paid.
+            //
+            // The preprocessed side supplies each field masked out of the word
+            // the verifier committed to, so matching the tuple forces the CPU
+            // columns to be the real decode. Doing the split inside the AIR
+            // instead would need a range check on the remaining bits, and this
+            // machine has no range check machinery.
+            //
+            // `imm` is not in the tuple. It is 32 bits and signed, and the CPU
+            // trace stores negative immediates as wrapped field elements
+            // rather than as the raw bit pattern, so binding it needs a
+            // representation decision rather than a mask. Tracked separately.
             let term_cpu_prog = alpha_expr.clone()
                 + beta_expr.clone() * pc_ext
                 + b2.clone() * raw_inst_ext
-                + b3.clone() * opcode_ext;
+                + b3.clone() * opcode_ext
+                + b4.clone() * rd_ext
+                + b5.clone() * rs1_ext
+                + b6.clone() * rs2_ext;
             let term_pre_prog = alpha_expr.clone()
                 + beta_expr.clone() * pre_pc_ext
                 + b2.clone() * pre_inst_ext
-                + b3.clone() * pre_opcode_ext;
+                + b3.clone() * pre_opcode_ext
+                + b4.clone() * pre_rd_ext
+                + b5.clone() * pre_rs1_ext
+                + b6.clone() * pre_rs2_ext;
 
             let diff_cpu_prog: AB::ExprEF = gamma_expr.clone() - term_cpu_prog;
             let diff_pre_prog: AB::ExprEF = gamma_expr.clone() - term_pre_prog;
