@@ -205,15 +205,21 @@ fn build_public_inputs(
     vm: &Vm,
     receipt: &bud_vm::ExecutionReceipt,
 ) -> ExecutionPublicInputs {
-    // `initial_state_root` commits to the memory image the program started
-    // from. It used to be a hard-coded zero that nothing checked; the AIR now
-    // folds every pre-seeded word into a trace column and compares the two, so
-    // a guest that reads host-written weights can be proven, and cannot claim
-    // to have read different ones.
+    // `initial_state_root` commits to the state the program started from. It
+    // used to be a hard-coded zero that nothing checked; the AIR now folds
+    // every pre-seeded word and every pre-seeded register into trace columns
+    // and compares the two, so a guest that reads host-written weights can be
+    // proven, and cannot claim to have read different ones.
     //
-    // Programs that seed nothing fold to zero and keep the old value.
-    let initial_state_root =
-        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace));
+    // Both halves live in the same root: bytes 0..8 carry the memory image,
+    // bytes 8..16 the register file. Programs that seed neither fold to zero
+    // and keep the old value.
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
+    );
     // Public inputs must match BudZero AIR bindings.
     // `event_digest` is NOT a keccak of events, the AIR binds an additive
     // Log accumulator packed as eight little-endian u32 limbs (limb 0 holds

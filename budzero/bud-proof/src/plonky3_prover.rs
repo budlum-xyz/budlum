@@ -41,6 +41,9 @@ struct RegEvent {
     val: u64,
     is_write: bool,
     sub_clk: u8,
+    /// This row reads a register the trace never wrote, so it describes the
+    /// register file execution began from rather than anything execution did.
+    is_init: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +102,7 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
             val: step.src1_val,
             is_write: false,
             sub_clk: 1,
+            is_init: false,
         });
         events.push(RegEvent {
             clk,
@@ -106,6 +110,7 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
             val: step.src2_val,
             is_write: false,
             sub_clk: 2,
+            is_init: false,
         });
         events.push(RegEvent {
             clk,
@@ -113,11 +118,37 @@ fn register_events(trace: &[Step]) -> Vec<RegEvent> {
             val: if step.dst_idx == 0 { 0 } else { step.dst_val },
             is_write: true,
             sub_clk: 3,
+            is_init: false,
         });
     }
 
     events.sort_by_key(|e| (e.idx, e.clk, e.sub_clk));
+    // Mark the rows that describe the starting register file, now that the
+    // events are grouped by index. Same rule as the memory table: the first
+    // touch of an index, when that touch is a read of a non-zero value, is
+    // reading state the trace did not produce.
+    let mut prev_idx: Option<u64> = None;
+    for e in events.iter_mut() {
+        let first_at_idx = prev_idx != Some(e.idx);
+        prev_idx = Some(e.idx);
+        e.is_init = first_at_idx && !e.is_write && e.val != 0;
+    }
     events
+}
+
+/// The starting register values a trace reads, in the order the AIR folds
+/// them.
+///
+/// The companion to [`initial_memory_reads`]. Callers need both to compute
+/// `initial_state_root`: limbs 0 and 1 carry the memory image, limbs 2 and 3
+/// the register image, and getting either set or order wrong produces a proof
+/// the AIR rejects.
+pub fn initial_register_reads(trace: &[Step]) -> Vec<(u64, u64)> {
+    register_events(trace)
+        .into_iter()
+        .filter(|e| e.is_init)
+        .map(|e| (e.idx, e.val))
+        .collect()
 }
 
 /// Build the memory event list, marking the rows that describe pre-execution
@@ -823,6 +854,7 @@ fn trace_matrix(
             Goldilocks::new(0)
         };
         values[row_start + COL_REG_ACTIVE] = Goldilocks::new(1);
+        values[row_start + COL_REG_IS_INIT] = Goldilocks::new(u64::from(e.is_init));
 
         if i < n_reg - 1 && events[i + 1].idx == e.idx {
             values[row_start + COL_REG_SAME] = Goldilocks::new(1);
@@ -876,6 +908,24 @@ fn trace_matrix(
         }
         for r in mem_events.len()..num_rows {
             values[r * TRACE_WIDTH + COL_MEM_INIT_ACC] = acc;
+        }
+    }
+
+    // Same fold for the starting register file, into its own accumulator with
+    // its own constants.
+    {
+        let beta = Goldilocks::new(REG_INIT_BETA);
+        let gamma = Goldilocks::new(REG_INIT_GAMMA);
+        let mut acc = Goldilocks::ZERO;
+        for (i, e) in events.iter().enumerate() {
+            if e.is_init {
+                let term = Goldilocks::new(e.idx) * gamma + Goldilocks::new(e.val);
+                acc = if i == 0 { term } else { acc * beta + term };
+            }
+            values[i * TRACE_WIDTH + COL_REG_INIT_ACC] = acc;
+        }
+        for r in events.len()..num_rows {
+            values[r * TRACE_WIDTH + COL_REG_INIT_ACC] = acc;
         }
     }
 
@@ -1450,7 +1500,17 @@ mod tests {
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
-        let initial_root = [0u8; 32];
+        // Callers of this helper often seed registers with
+        // `vm.registers[n] = x` before running, so the trace reads values
+        // nothing in it wrote. Those reads are the starting register file and
+        // the AIR now requires the public inputs to commit to them, so the
+        // root is computed from the trace rather than assumed to be zero. A
+        // program that seeds nothing folds to zero and lands on the same
+        // all-zero root as before.
+        let initial_root = crate::adapter::initial_state_root_of(
+            crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+            crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
+        );
         let final_root = [0u8; 32];
 
         let program_bytes: Vec<u8> = program
@@ -1499,7 +1559,17 @@ mod tests {
 
         tamper(&mut vm.trace);
 
-        let initial_root = [0u8; 32];
+        // Callers of this helper often seed registers with
+        // `vm.registers[n] = x` before running, so the trace reads values
+        // nothing in it wrote. Those reads are the starting register file and
+        // the AIR now requires the public inputs to commit to them, so the
+        // root is computed from the trace rather than assumed to be zero. A
+        // program that seeds nothing folds to zero and lands on the same
+        // all-zero root as before.
+        let initial_root = crate::adapter::initial_state_root_of(
+            crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+            crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
+        );
         let final_root = [0u8; 32];
         let program_bytes: Vec<u8> = program
             .iter()
@@ -2789,6 +2859,232 @@ mod tests {
             "a register went from 5 to 999 with no write in between and the \
              proof verified; register continuity is then optional and the \
              prover picks the inputs to every computation"
+        );
+    }
+
+    /// A prover must not invent the register file the program started from.
+    ///
+    /// `Plonky3Adapter::prove` takes the trace, the public inputs and the
+    /// program. Until this commitment existed, the starting register file
+    /// appeared in none of them: a read of a register nothing had written was
+    /// reading state the proof said nothing about, so two runs beginning from
+    /// different register contents produced proofs the same public inputs
+    /// would accept.
+    ///
+    /// The first attempt at closing this asserted that such a read must return
+    /// zero. CI rejected 68 existing tests, correctly: that is an assumption
+    /// about the caller, not something the proof system can check. Memory
+    /// solved the same problem years earlier by marking seeded rows and
+    /// folding them into a commitment, and this is that mirror, in the same
+    /// public input the memory image already uses.
+    ///
+    /// Here the host seeds r4 before the program runs. The honest root commits
+    /// to `r4 = 100`; the forgery claims 999 while presenting that same root.
+    #[test]
+    fn rejects_an_invented_starting_register() {
+        // r3 = r4 + r0, and the host seeds r4 before the program runs.
+        let program = vec![
+            inst(Opcode::Add, 3, 4, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        vm.registers[4] = 100;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[3], 100, "the honest sum reads the seeded r4");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        // The honest root commits to r4 = 100. The forgery below claims r4 was
+        // something else while presenting this root, which is the whole point:
+        // the starting register file is now part of what the proof states.
+        let honest_root = crate::adapter::initial_state_root_of(
+            crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+            crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
+        );
+        assert_ne!(
+            honest_root, [0u8; 32],
+            "a seeded register must move the root off zero, otherwise the \
+             commitment is not covering it"
+        );
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: honest_root,
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+
+        let mut r4_row = None;
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_REG_IDX].as_canonical_u64() == 4
+            {
+                r4_row = Some(i);
+                break;
+            }
+        }
+        let r4_row = r4_row.expect("the register table must hold the read of r4");
+        let r4_start = r4_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[r4_start + COL_REG_IS_INIT].as_canonical_u64(),
+            1,
+            "the read of a register nothing wrote must be flagged as initial"
+        );
+
+        let mut add_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_ADD].as_canonical_u64() == 1 {
+                add_row = Some(i);
+                break;
+            }
+        }
+        let add_start = add_row.expect("the trace must contain an Add row") * TRACE_WIDTH;
+
+        // The forgery: claim the program started with r4 = 999 while
+        // presenting the root that commits to 100. Both sides of the register
+        // bus move together and the sum follows its input, so nothing but the
+        // initial-image commitment can catch it.
+        matrix.values[r4_start + COL_REG_VAL] = Goldilocks::new(999);
+        matrix.values[add_start + COL_RS1_VAL] = Goldilocks::new(999);
+        matrix.values[add_start + COL_RD_VAL_NEW] = Goldilocks::new(999);
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_REG_IDX].as_canonical_u64() == 3
+                && matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64() == 1
+            {
+                matrix.values[row_start + COL_REG_VAL] = Goldilocks::new(999);
+            }
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a proof claimed the program started with r4 = 999 while \
+             presenting a root that commits to 100, and it verified; the \
+             starting register file is then whatever the prover says"
+        );
+    }
+
+    /// A program that starts from a seeded register file must be provable.
+    ///
+    /// The completeness half. The first attempt at this rule asserted that a
+    /// register nothing wrote reads as zero, and CI rejected 68 existing tests
+    /// because that is an assumption about the caller the proof system cannot
+    /// check. The commitment is what makes the rule honest: a seeded register
+    /// is allowed, it just has to be declared.
+    #[test]
+    fn proves_a_program_that_starts_from_seeded_registers() {
+        let program = vec![
+            inst(Opcode::Add, 3, 4, 5, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        vm.registers[4] = 40;
+        vm.registers[5] = 2;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[3], 42);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        // Both seeded registers must be in the commitment, in the order the
+        // AIR folds them. Checked rather than assumed: if the helper stopped
+        // reporting them the root would silently go back to zero and this test
+        // would pass while proving nothing.
+        let reg_reads = initial_register_reads(&vm.trace);
+        assert_eq!(
+            reg_reads,
+            vec![(4, 40), (5, 2)],
+            "both seeded registers must be reported, sorted by index"
+        );
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&reg_reads),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("a program starting from seeded registers must be provable");
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "an honest run from a seeded register file was rejected; the \
+             initial register commitment is not matching the fold"
         );
     }
 
@@ -4289,7 +4585,12 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -4627,7 +4928,12 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -4741,7 +5047,12 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -4832,7 +5143,12 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash: [0u8; 32],
-            initial_state_root: [0u8; 32],
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -4931,7 +5247,12 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: [0u8; 32],
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
@@ -5089,7 +5410,12 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash: [0u8; 32],
-            initial_state_root: [0u8; 32],
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,
