@@ -1497,18 +1497,42 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder
                 .when_transition()
                 .when(cpu_active.clone())
-                .assert_zero(nxt_event_0 - cur_event_0 - nxt_is_log * nxt_rs1);
-            // Bounds check: COL_EVENT_DIGEST_0 < 2^32 - too expensive
-            // To do as a range proof; we instead require that the
-            // First column never carries a bit beyond the 32nd. This
-            // Is approximated by zero-extending the u32 limb: as long
-            // As the prover populates the column with values in 0..2^32
-            // (which it must, since the witness is constructed from
-            // U32 values), the constraint is satisfied. A malicious
-            // Prover trying to encode 2^32 + x would also satisfy
-            // The transition (since rs1_val's low 32 bits are 0 there)
-            // But the last-row binding to public_inputs[40] (which is
-            // A u32) would force the difference to surface.
+                .assert_zero(nxt_event_0 - cur_event_0.clone() - nxt_is_log * nxt_rs1);
+
+            // The accumulator starts at zero.
+            //
+            // Without this the transition above only fixes the *differences*
+            // between consecutive rows, never the starting point, so the whole
+            // sequence slides: a prover writes `D` on the first row, every
+            // transition still holds because each one is relative, and the
+            // last row carries `D + sum(logged values)`. The proof then states
+            // an `event_digest` for events the program never emitted, with `D`
+            // chosen freely.
+            //
+            // That field is not decorative. `storage_deal.rs` puts its whole
+            // replay context in it, deal and challenge and responder and epoch
+            // and chain, precisely so one shard proof cannot answer a
+            // different challenge. An unconstrained starting value is a prover
+            // choosing that context.
+            //
+            // Every other accumulator in this AIR already had its first row
+            // pinned: the memory image fold, the register image fold, `clk`,
+            // `pc`, and all three LogUp running sums. This one was the
+            // exception, and the sequence it accumulates is the one the L1
+            // reads back as "what this execution announced".
+            builder
+                .when_first_row()
+                .assert_zero(cur_event_0 - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into());
+
+            // The old comment here claimed a bounds check was unnecessary
+            // because `public_inputs[40]` is a u32, so an out-of-range
+            // accumulator would surface at the last-row binding. That stopped
+            // being true when `to_public_values` was corrected to read limb 0
+            // as a full 64-bit element: a Poseidon output logged by a contract
+            // exceeds 2^32 and truncating it made honest proofs fail. Limb 0
+            // is now a field element on both sides and there is no width to
+            // disagree about, which is why no range check is needed rather
+            // than the argument that was written here.
             for j in 1..8 {
                 let nxt_e: AB::Expr = nxt[COL_EVENT_DIGEST_0 + j].into();
                 let cur_e: AB::Expr = cur[COL_EVENT_DIGEST_0 + j].into();
