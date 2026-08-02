@@ -4333,8 +4333,13 @@ mod tests {
         let pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
-            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
-                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
+                ),
             ),
             final_state_root: [0u8; 32],
             sender: 0,
@@ -4716,8 +4721,13 @@ mod tests {
             // than asserting a zero root: a hard-coded value here would have
             // to be updated by hand every time the path changes, and getting
             // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
-                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
+                ),
             ),
             final_state_root: [0u8; 32],
             sender: 0,
@@ -4786,8 +4796,13 @@ mod tests {
             // than asserting a zero root: a hard-coded value here would have
             // to be updated by hand every time the path changes, and getting
             // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
-                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
+                ),
             ),
             final_state_root: [0u8; 32],
             sender: 0,
@@ -4856,8 +4871,13 @@ mod tests {
             // than asserting a zero root: a hard-coded value here would have
             // to be updated by hand every time the path changes, and getting
             // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
-                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
+                ),
             ),
             final_state_root: [0u8; 32],
             sender: 0,
@@ -5542,8 +5562,13 @@ mod tests {
             // than asserting a zero root: a hard-coded value here would have
             // to be updated by hand every time the path changes, and getting
             // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::memory_image_commitment_of_reads(
-                &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
+                ),
             ),
             final_state_root: [0u8; 32],
             sender: 0,
