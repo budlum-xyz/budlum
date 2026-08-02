@@ -258,10 +258,24 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
     // OodEvaluationMismatch, which made `prove` and `run` unusable.
     let event_digest = bud_proof::event_digest_from_events(&receipt.events);
 
+    // `initial_state_root` is the AIR's commitment to the state the program
+    // started from, not the state tree root. It carries the memory image in
+    // bytes 0..8 and the register file in bytes 8..16, both folded from what
+    // the trace actually read. Passing `pre_root` here produced a value the
+    // AIR compares against a fold it computes itself, so any run that seeded
+    // memory or registers was unprovable and any run that seeded neither
+    // happened to work because both sides were zero.
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
+    );
+
     let pi = ExecutionPublicInputs {
         chain_id: config.chain_id,
         program_hash: prog_hash,
-        initial_state_root: pre_root,
+        initial_state_root,
         final_state_root: post_root,
         sender: vm.context.sender,
         nonce: vm.context.nonce,

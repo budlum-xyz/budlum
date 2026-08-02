@@ -92,6 +92,56 @@ pub fn memory_image_commitment_of_reads(reads: &[(u64, u64)]) -> [u8; 32] {
     out
 }
 
+/// The starting register file a trace read, folded into bytes 8..16 of
+/// `initial_state_root`.
+///
+/// The register companion to [`memory_image_commitment_of_reads`]. Both halves
+/// live in the same public input because widening it would mean changing
+/// `ExecutionPublicInputs`, which is declared twice and constructed in 62
+/// places across the L1, the CLI, the benchmarks and the fuzz targets, for a
+/// commitment that fits in bytes the struct already carries and the AIR
+/// already compares.
+///
+/// Different fold constants from the memory side, deliberately. Sharing them
+/// would let a seeded value move between the two images without either
+/// accumulator changing, and "the register file is whatever memory says" is
+/// not a property worth shipping.
+///
+/// Like the memory commitment, this covers **what was read**, not the whole
+/// register file. A register the program never touches cannot influence the
+/// execution, so binding it would only make the commitment depend on padding.
+pub fn register_image_commitment_of_reads(reads: &[(u64, u64)]) -> [u8; 32] {
+    const P: u128 = 18_446_744_069_414_584_321;
+    const BETA: u128 = 0xD1B5_4A32_D192_ED03;
+    const GAMMA: u128 = 0xA24B_AED4_963E_E407;
+
+    let mut acc: u128 = 0;
+    for (i, (idx, val)) in reads.iter().enumerate() {
+        let term = ((*idx as u128) * GAMMA + *val as u128) % P;
+        acc = if i == 0 {
+            term
+        } else {
+            (acc * BETA + term) % P
+        };
+    }
+
+    let mut out = [0u8; 32];
+    out[8..16].copy_from_slice(&(acc as u64).to_le_bytes());
+    out
+}
+
+/// Combine the memory and register halves into one `initial_state_root`.
+///
+/// The two commitments occupy disjoint byte ranges, so this is a byte-wise
+/// merge rather than a hash. Callers that seed neither can keep passing
+/// `[0u8; 32]`: both folds are empty and both halves are zero.
+pub fn initial_state_root_of(memory: [u8; 32], registers: [u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[0..8].copy_from_slice(&memory[0..8]);
+    out[8..16].copy_from_slice(&registers[8..16]);
+    out
+}
+
 impl ExecutionPublicInputs {
     pub fn to_canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(176);

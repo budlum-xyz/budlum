@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 735;
+pub const TRACE_WIDTH: usize = 737;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -376,6 +376,57 @@ pub const COL_REG_SAME_INV: usize = 733;
 /// rejected: a new opcode added without the guard is unprovable when it
 /// targets r0, and nothing would say so.
 pub const COL_RD_IDX_INV: usize = 734;
+
+/// Marks a register-table row as describing state the program started from
+/// rather than state it produced.
+///
+/// The register table records reads and writes as execution goes. A read that
+/// happens before anything wrote that register is reading the *starting*
+/// register file, and until this column existed nothing said what that file
+/// contained. `Plonky3Adapter::prove` takes the trace, the public inputs and
+/// the program, and the starting register file appears in none of them: two
+/// runs beginning from different register contents produced proofs the same
+/// public inputs would accept.
+///
+/// Today that is not reachable, because the only production path constructs
+/// the VM through `Vm::new` and every register starts at zero. But that is a
+/// property of one constructor, not something the proof states, and a
+/// continuation mechanism or a call that carried registers across would make
+/// it reachable without touching the AIR.
+///
+/// This is the register mirror of [`COL_MEM_IS_INIT`], and it is deliberately
+/// the same shape: a flag on the first touch of an index when that touch is a
+/// read of a non-zero value, folded into an accumulator the AIR checks against
+/// a public input. Anything a prover invents about the starting registers has
+/// to survive that check.
+pub const COL_REG_IS_INIT: usize = 735;
+
+/// Running fold of every initial register row, checked against limbs 2 and 3
+/// of `public_inputs.initial_state_root` on the last real row.
+///
+/// The memory image occupies limbs 0 and 1 of the same public input. Limbs 2
+/// and 3 were carried into the trace and compared against a column the prover
+/// filled from the public input itself, so nothing else touched them; the
+/// register image goes there. Widening the public input instead would mean
+/// changing `ExecutionPublicInputs`, which is declared twice and constructed
+/// in 62 places across the L1, the CLI, the benchmarks and the fuzz targets,
+/// for a commitment that fits in space already reserved and already carried.
+///
+/// Same fold as [`COL_MEM_INIT_ACC`], with the same caveat: fixed constants
+/// rather than transcript challenges, so it binds accidental divergence and
+/// any substitution that does not solve the system, not an adversary willing
+/// to do that work. Replacing both sets of constants with challenges is one
+/// change, not two, and is tracked with the memory one.
+pub const COL_REG_INIT_ACC: usize = 736;
+
+/// Fold constants for [`COL_REG_INIT_ACC`].
+///
+/// Deliberately different from the memory constants. Sharing them would let a
+/// register row and a memory row with the same `(index, value)` produce the
+/// same contribution, so a prover could move a seeded value from one image to
+/// the other without changing either accumulator.
+pub const REG_INIT_BETA: u64 = 0xD1B5_4A32_D192_ED03;
+pub const REG_INIT_GAMMA: u64 = 0xA24B_AED4_963E_E407;
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -1285,6 +1336,30 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_eq(acc_last, expected);
         }
 
+        // (1c) initial register image: the fold equals limbs 2 and 3 of
+        // `initial_state_root`.
+        //
+        // Limbs 0 and 1 carry the memory image. Limbs 2 and 3 were carried
+        // into the trace and compared against a column the prover filled from
+        // the public input itself, so nothing else constrained them; the
+        // register image goes there rather than widening the public input,
+        // which is declared twice and constructed in 62 places.
+        //
+        // Checked on the very last row rather than on the last CPU row. The
+        // register table is not the same length as the CPU table: one step
+        // contributes three register events, so a two-instruction program has
+        // two CPU rows and three register rows, and the accumulator is still
+        // mid-fold when the CPU side reaches its Halt. Measured by CI, which
+        // failed `d2_proves_nullifier_check_invalid_secret` on exactly that
+        // shape. The prover holds the finished value across the padding, so
+        // the last row carries the whole commitment whichever table is longer.
+        {
+            let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();
+            let expected = public_inputs[12].into()
+                + public_inputs[13].into() * AB::Expr::from(AB::F::from_u64(1u64 << 32));
+            builder.when_last_row().assert_eq(acc_last, expected);
+        }
+
         // (1) initial_state_root: first row, COL_INIT_ROOT_0..7 == public[10..18]
         for j in 0..8 {
             builder
@@ -1442,6 +1517,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let r_val: AB::Expr = cur[COL_REG_VAL].into();
         let r_active: AB::Expr = cur[COL_REG_ACTIVE].into();
         let r_same: AB::Expr = cur[COL_REG_SAME].into();
+        let r_is_write: AB::Expr = cur[COL_REG_IS_WRITE].into();
         let nr_val: AB::Expr = nxt[COL_REG_VAL].into();
         let nr_active: AB::Expr = nxt[COL_REG_ACTIVE].into();
         let nr_write: AB::Expr = nxt[COL_REG_IS_WRITE].into();
@@ -1497,39 +1573,85 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             r_active.clone()
                 * nr_active.clone()
                 * r_same.clone()
-                * (one.clone() - nr_write)
-                * (nr_val - r_val),
+                * (one.clone() - nr_write.clone())
+                * (nr_val.clone() - r_val.clone()),
         );
-        builder
-            .when_transition()
-            .assert_zero(r_active.clone() * nr_active.clone() * r_same.clone() * (nr_idx - r_idx));
+        builder.when_transition().assert_zero(
+            r_active.clone() * nr_active.clone() * r_same.clone() * (nr_idx - r_idx.clone()),
+        );
 
-        // Not here yet: "the first read of a register returns zero".
+        // The first read of a register returns zero, unless the row is part of
+        // the committed initial register image.
         //
-        // The memory table has that rule, in two pieces, and the register
-        // table has no equivalent, so a register nothing ever wrote can be
-        // read as any value a prover likes. Put the invented value on both
-        // sides of the register bus and LogUp balances, `r_same` is honestly
-        // zero because the previous row really is a different register, and
-        // nothing else looks.
+        // Without this, a register nothing ever wrote could be read as any
+        // value a prover liked: put the invented value on both sides of the
+        // register bus and LogUp balances, `r_same` is honestly zero because
+        // the previous row really is a different register, and nothing else
+        // looks. Register values are the inputs to every arithmetic
+        // constraint, so that is money from nowhere.
         //
-        // Writing the mirror of the memory rule here was tried and is wrong,
-        // because the two tables do not have the same relationship to their
-        // starting state. Memory rows that describe the pre-execution image
-        // are marked with `COL_MEM_IS_INIT` and folded into an accumulator the
-        // AIR checks against `public_inputs.initial_state_root`, so "not
-        // written in this trace" and "not part of the committed starting
-        // state" are distinguishable. Registers have no such marking and no
-        // such commitment: `Plonky3Adapter::prove` takes the trace and the
-        // program, and never sees the register file the VM started from. A
-        // constraint that assumes every register starts at zero therefore
-        // rejects any proof whose execution began from a non-zero register
-        // file, which is a real configuration.
+        // The bare mirror of the memory rule was tried first and was wrong.
+        // Memory can distinguish "not written in this trace" from "not part of
+        // the committed starting state" because seeded rows carry
+        // `COL_MEM_IS_INIT` and fold into a commitment; registers had no such
+        // marking, so asserting zero rejected every proof whose execution
+        // began from a non-zero register file. CI found it by failing 68
+        // existing tests, and it was right to.
         //
-        // Closing this needs a committed initial register image, the same
-        // shape as the memory one, bound into the public inputs. That is a
-        // change to what a proof is about rather than a missing constraint,
-        // so it is not smuggled in here.
+        // `COL_REG_IS_INIT` supplies the missing half. A flagged row is exempt
+        // from the zero rule and instead has to appear in the accumulator the
+        // AIR checks against limbs 2 and 3 of `initial_state_root`, so the
+        // starting register file is now something the proof states rather than
+        // something the caller happens to have arranged.
+        let r_is_init: AB::Expr = cur[COL_REG_IS_INIT].into();
+        let nr_is_init: AB::Expr = nxt[COL_REG_IS_INIT].into();
+        builder.assert_bool(r_is_init.clone());
+        // An initial-image row describes the register file before the program
+        // ran, so it is a read by definition.
+        builder.assert_zero(r_is_init.clone() * r_is_write.clone());
+
+        builder.when_first_row().assert_zero(
+            r_active.clone()
+                * (one.clone() - r_is_write.clone())
+                * (one.clone() - r_is_init.clone())
+                * r_val.clone(),
+        );
+        builder.when_transition().assert_zero(
+            r_active.clone()
+                * nr_active.clone()
+                * (one.clone() - r_same.clone())
+                * (one.clone() - nr_write.clone())
+                * (one.clone() - nr_is_init.clone())
+                * nr_val.clone(),
+        );
+
+        // Fold every initial register row into the accumulator, the same shape
+        // the memory image uses:
+        //
+        //   acc' = acc                            when the next row is not seeded
+        //   acc' = acc*BETA + idx*GAMMA + val     when it is
+        //
+        // Different constants from the memory fold on purpose: shared ones
+        // would let a seeded value move between the two images without either
+        // accumulator changing.
+        {
+            let beta = AB::Expr::from(AB::F::from_u64(REG_INIT_BETA));
+            let gamma = AB::Expr::from(AB::F::from_u64(REG_INIT_GAMMA));
+            let acc: AB::Expr = cur[COL_REG_INIT_ACC].into();
+            let nacc: AB::Expr = nxt[COL_REG_INIT_ACC].into();
+            let nr_val_e: AB::Expr = nxt[COL_REG_VAL].into();
+            let nr_idx_e: AB::Expr = nxt[COL_REG_IDX].into();
+
+            builder.when_first_row().assert_eq(
+                acc.clone(),
+                r_is_init.clone() * (r_idx.clone() * gamma.clone() + r_val.clone()),
+            );
+
+            let folded = acc.clone() * beta + nr_idx_e * gamma + nr_val_e;
+            builder
+                .when_transition()
+                .assert_eq(nacc, acc.clone() + nr_is_init.clone() * (folded - acc));
+        }
 
         let m_val: AB::Expr = cur[COL_MEM_VAL].into();
         let m_active: AB::Expr = cur[COL_MEM_ACTIVE].into();

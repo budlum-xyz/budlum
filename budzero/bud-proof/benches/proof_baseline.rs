@@ -53,10 +53,22 @@ fn main() {
         assert!(receipt.success, "baseline VM execution failed");
         trace_rows = vm.trace.len();
 
+        // The benchmark seeds r2 and r3 before running, so the trace reads a
+        // register file it did not write. The AIR requires the public inputs
+        // to commit to that, so the root is folded from the trace.
+        let initial_state_root = bud_proof::initial_state_root_of(
+            bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                &vm.trace,
+            )),
+            bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                &vm.trace,
+            )),
+        );
+
         let inputs = ExecutionPublicInputs {
             chain_id: 1,
             program_hash: program_hash(&program),
-            initial_state_root: [0u8; 32],
+            initial_state_root,
             final_state_root: [0u8; 32],
             sender: 0,
             nonce: 0,

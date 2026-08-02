@@ -7,7 +7,7 @@
 use crate::plonky3_air::{
     COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
     COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_RD_IDX_INV,
-    COL_REG_SAME_INV, TRACE_WIDTH,
+    COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -210,6 +210,20 @@ fn all_ranges() -> Vec<ColRange> {
             name: "rd_idx_inv",
             start: COL_RD_IDX_INV,
             end: COL_RD_IDX_INV + 1,
+        },
+        // The committed starting register file. Without these the register
+        // table could not tell "nothing wrote this yet" from "the program
+        // began with a value here", so either a prover invented starting
+        // values or honest runs from a seeded register file were unprovable.
+        ColRange {
+            name: "reg_is_init",
+            start: COL_REG_IS_INIT,
+            end: COL_REG_IS_INIT + 1,
+        },
+        ColRange {
+            name: "reg_init_acc",
+            start: COL_REG_INIT_ACC,
+            end: COL_REG_INIT_ACC + 1,
         },
     ]
 }

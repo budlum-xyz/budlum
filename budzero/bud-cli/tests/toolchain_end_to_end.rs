@@ -43,10 +43,20 @@ fn public_inputs_for(vm: &Vm, bytecode: &[u64], events: &[u64]) -> ExecutionPubl
         .iter()
         .flat_map(|&word| word.to_le_bytes().to_vec())
         .collect();
+    // The AIR folds every pre-seeded memory word and register into trace
+    // columns and compares them against this root, so it is computed from the
+    // trace rather than assumed to be zero. Programs that seed neither fold to
+    // zero and land on the same all-zero root.
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
+    );
     ExecutionPublicInputs {
         chain_id: 1,
         program_hash: keccak256(&bytecode_bytes),
-        initial_state_root: [0u8; 32],
+        initial_state_root,
         final_state_root: [0u8; 32],
         sender: vm.context.sender,
         nonce: vm.context.nonce,
