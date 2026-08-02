@@ -918,6 +918,9 @@ fn aux_trace_generator(
 
         let b2 = beta * beta;
         let b3 = b2 * beta;
+        let b4 = b3 * beta;
+        let b5 = b4 * beta;
+        let b6 = b5 * beta;
 
         let mut s_reg = MyExtensionField::ZERO;
         let mut s_mem = MyExtensionField::ZERO;
@@ -1158,24 +1161,37 @@ fn aux_trace_generator(
                 s_mem -= (gamma - c_mem).inverse();
             }
 
-            // Program LogUp. The tuple is (pc, raw_inst, opcode); the opcode
-            // term is what binds COL_OPCODE to the committed program, so the
-            // prover side has to build the same three term sum the AIR checks.
+            // Program LogUp. The tuple is (pc, raw_inst, opcode, rd, rs1, rs2):
+            // the whole decode. Those four terms are what bind the CPU trace's
+            // decode columns to the committed program, so the prover side has
+            // to build the same six term sum the AIR checks.
             let raw_inst = row[COL_RAW_INST];
             let opcode_col = row[COL_OPCODE];
+            let rd_col = row[COL_RD_IDX];
+            let rs1_col = row[COL_RS1_IDX];
+            let rs2_col = row[COL_RS2_IDX];
             let term_cpu_prog = alpha
                 + beta * MyExtensionField::from(pc)
                 + b2 * MyExtensionField::from(raw_inst)
-                + b3 * MyExtensionField::from(opcode_col);
+                + b3 * MyExtensionField::from(opcode_col)
+                + b4 * MyExtensionField::from(rd_col)
+                + b5 * MyExtensionField::from(rs1_col)
+                + b6 * MyExtensionField::from(rs2_col);
 
             let pre_pc = Goldilocks::from_u64(i as u64);
             let pre_inst_word = program.get(i).copied().unwrap_or(0);
             let pre_inst = Goldilocks::from_u64(pre_inst_word);
             let pre_opcode = Goldilocks::from_u64(pre_inst_word & 0xFF);
+            let pre_rd = Goldilocks::from_u64((pre_inst_word >> 8) & 0x1F);
+            let pre_rs1 = Goldilocks::from_u64((pre_inst_word >> 13) & 0x1F);
+            let pre_rs2 = Goldilocks::from_u64((pre_inst_word >> 18) & 0x1F);
             let term_pre_prog = alpha
                 + beta * MyExtensionField::from(pre_pc)
                 + b2 * MyExtensionField::from(pre_inst)
-                + b3 * MyExtensionField::from(pre_opcode);
+                + b3 * MyExtensionField::from(pre_opcode)
+                + b4 * MyExtensionField::from(pre_rd)
+                + b5 * MyExtensionField::from(pre_rs1)
+                + b6 * MyExtensionField::from(pre_rs2);
 
             let diff_cpu_prog = gamma - term_cpu_prog;
             let diff_pre_prog = gamma - term_pre_prog;
@@ -2759,6 +2775,186 @@ mod tests {
             "a register went from 5 to 999 with no write in between and the \
              proof verified; register continuity is then optional and the \
              prover picks the inputs to every computation"
+        );
+    }
+
+    /// A prover must not swap which register an instruction reads.
+    ///
+    /// The Program CTL pins `COL_RAW_INST` to the committed program, and that
+    /// reads like it settles the matter. It does not: the AIR never splits the
+    /// word, so every field the CPU trace decodes out of it sat in a free
+    /// witness column with nothing relating it back to the word beside it.
+    /// `COL_OPCODE` was the first field closed, because the selectors key off
+    /// it. The register indices are the same hole one level down.
+    ///
+    /// This is the shape it takes in money. A contract computing
+    /// `total = amount + fee` compiles to `Add r3, r2, r1` with the fee in r1.
+    /// Rewrite `rs2_idx` from 1 to 2 and the row computes `amount + amount`
+    /// instead. Every other constraint stays satisfied:
+    ///
+    /// - the arithmetic rule holds, because the value column moves with the
+    ///   index it names
+    /// - the register argument balances, because r2 is genuinely read on this
+    ///   row and its value is genuinely what is claimed
+    /// - the Program CTL used to balance, because `raw_inst` was untouched
+    ///
+    /// The fee is never paid and the proof verifies. The tuple now carries the
+    /// decoded fields alongside the word, so the CPU columns have to be the
+    /// real decode of the instruction actually fetched.
+    #[test]
+    fn rejects_a_swapped_source_register() {
+        // fee = 100, amount = 5, total = amount + fee.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 100),
+            inst(Opcode::Load, 2, 0, 0, 5),
+            inst(Opcode::Add, 3, 2, 1, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.registers[3], 105, "the honest total is amount plus fee");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+
+        let mut add_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_ADD].as_canonical_u64() == 1 {
+                add_row = Some(i);
+                break;
+            }
+        }
+        let add_row = add_row.expect("the trace must contain an Add row");
+        let add_start = add_row * TRACE_WIDTH;
+
+        // Preconditions, asserted rather than assumed: if the honest row does
+        // not look like this, the substitution below is not the one described.
+        assert_eq!(
+            matrix.values[add_start + COL_RS1_IDX].as_canonical_u64(),
+            2,
+            "rs1 must name the amount register"
+        );
+        assert_eq!(
+            matrix.values[add_start + COL_RS2_IDX].as_canonical_u64(),
+            1,
+            "rs2 must name the fee register"
+        );
+        assert_eq!(
+            matrix.values[add_start + COL_RS2_VAL].as_canonical_u64(),
+            100,
+            "the honest row must read the fee"
+        );
+        assert_eq!(
+            matrix.values[add_start + COL_RD_VAL_NEW].as_canonical_u64(),
+            105,
+            "the honest sum must include the fee"
+        );
+        let honest_word = matrix.values[add_start + COL_RAW_INST].as_canonical_u64();
+
+        // The forgery. rs2 now names r2 instead of r1, so the row adds the
+        // amount to itself and the fee is skipped. The value column follows
+        // the index it names and the result follows the sum, so the register
+        // argument balances and `rd == rs1 + rs2` still holds.
+        matrix.values[add_start + COL_RS2_IDX] = Goldilocks::new(2);
+        matrix.values[add_start + COL_RS2_VAL] = Goldilocks::new(5);
+        matrix.values[add_start + COL_RD_VAL_NEW] = Goldilocks::new(10);
+        assert_eq!(
+            matrix.values[add_start + COL_RAW_INST].as_canonical_u64(),
+            honest_word,
+            "the instruction word must be left alone; the whole point is that \
+             pinning it was not enough"
+        );
+
+        // The register table has to agree, or the proof fails on the register
+        // bus rather than on the decode binding. The Add row now reads r2
+        // twice, so the r1 read disappears and a second r2 read takes its
+        // place, and r3 receives the smaller sum.
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_REG_ACTIVE].as_canonical_u64() != 1 {
+                continue;
+            }
+            let idx = matrix.values[row_start + COL_REG_IDX].as_canonical_u64();
+            let is_write = matrix.values[row_start + COL_REG_IS_WRITE].as_canonical_u64();
+            let val = matrix.values[row_start + COL_REG_VAL].as_canonical_u64();
+            if idx == 1 && is_write == 0 && val == 100 {
+                // The fee read that no longer happens becomes a second read
+                // of the amount register.
+                matrix.values[row_start + COL_REG_IDX] = Goldilocks::new(2);
+                matrix.values[row_start + COL_REG_VAL] = Goldilocks::new(5);
+            }
+            if idx == 3 && is_write == 1 {
+                matrix.values[row_start + COL_REG_VAL] = Goldilocks::new(10);
+            }
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "an Add that was told to read the fee read the amount twice \
+             instead and the proof verified; a prover can then redirect any \
+             operand to any register and skip whatever the contract meant to \
+             charge"
         );
     }
 
