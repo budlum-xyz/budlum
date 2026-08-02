@@ -941,6 +941,18 @@ jobs:
         run: |
           bash ./scripts/check-logup-multipliers-are-boolean.sh --self-test
           bash ./scripts/check-logup-multipliers-are-boolean.sh
+      # The AIR packs the CPU, register and memory tables into one matrix and
+      # nothing keeps them the same length. A constraint reading a side table
+      # must fire on the last row, not on the last CPU row. The register image
+      # accumulator learned this the hard way: three register events per step
+      # made that table outrun the CPU table, the fold was still running when
+      # the CPU side halted, and four honest proofs stopped verifying. The
+      # memory image had the identical shape and survived only because no
+      # opcode currently emits two memory events in one step.
+      - name: tablolar arasi kontroller son satirda mi + kanarya
+        run: |
+          bash ./scripts/check-cross-table-checks-use-last-row.sh --self-test
+          bash ./scripts/check-cross-table-checks-use-last-row.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

@@ -1380,14 +1380,34 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // prover also filled with zeroes. It now carries the commitment to the
         // memory image the program started from, which is what lets a
         // host-seeded guest be proven at all.
+        //
+        // Checked on the very last row rather than on the last CPU row, for
+        // the reason spelled out under the register image below. The memory
+        // table is not the CPU table: its length is the number of memory
+        // events, and nothing in the AIR says that number is at most the
+        // number of CPU rows.
+        //
+        // It happens to be, today. Measured: four opcodes set `memory_addr`
+        // on their step (`Load`, `Store`, `VerifyMerkle`, `SumConservation`)
+        // and six push an extra event from the stack or storage buffers
+        // (`Push`, `Pop`, `Call`, `Ret`, `SRead`, `SWrite`); the two sets do
+        // not intersect, so one step contributes at most one memory event and
+        // `n_mem <= n_cpu` holds. That is a property of the current opcode
+        // table, not something this AIR states, and the register table taught
+        // us what the failure looks like: three register events per step made
+        // `n_reg > n_cpu`, the accumulator was still mid-fold when the CPU
+        // side reached its Halt, and four honest proofs stopped verifying.
+        // The opcode that pairs a `memory_addr` with a stack push would do
+        // the same here, silently, to a constraint nobody was editing.
+        //
+        // The prover holds the finished fold across the padding, so the last
+        // row carries the whole commitment whichever table is longer, and
+        // moving the check costs nothing while it stays true.
         {
             let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();
             let expected = public_inputs[10].into()
                 + public_inputs[11].into() * AB::Expr::from(AB::F::from_u64(1u64 << 32));
-            builder
-                .when(is_halt.clone())
-                .when(cpu_active.clone())
-                .assert_eq(acc_last, expected);
+            builder.when_last_row().assert_eq(acc_last, expected);
         }
 
         // (1c) initial register image: the fold equals limbs 2 and 3 of
