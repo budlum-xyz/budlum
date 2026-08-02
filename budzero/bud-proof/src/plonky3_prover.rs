@@ -2561,12 +2561,14 @@ mod tests {
     /// selector it was. `assert_one(rs1_val)`, the whole point of the
     /// instruction, is simply never evaluated.
     ///
-    /// The program below asserts a false claim: `r1 = 0`, then `Assert r1`.
-    /// The VM refuses it, exactly as it should. The forged trace claims the
-    /// same program ran and terminated, with the failing check relabelled as a
-    /// multiplication. If that verifies, then `constrain(...)` in BudL is
-    /// advisory and a prover can switch off any individual check while still
-    /// proving the honest program hash.
+    /// The program below runs an assertion that holds, so the row reaches the
+    /// trace in the first place. A failing assertion cannot be used here: the
+    /// VM returns from `step` before pushing the failing step, so there would
+    /// be no Assert row left to relabel. What the forgery then demonstrates is
+    /// that the rule stops being enforced on a row it governs, which is the
+    /// property that matters. A prover holding this capability picks, per row,
+    /// whether `assert_one(rs1_val)` applies, and would exercise it on exactly
+    /// the rows where the assertion is about to fail.
     ///
     /// The fix binds every selector to `COL_OPCODE`, and binds `COL_OPCODE`
     /// itself to the committed program through the Program CTL, since the
@@ -2574,18 +2576,18 @@ mod tests {
     /// move the forgery one step back.
     #[test]
     fn rejects_a_row_relabelled_as_a_different_opcode() {
-        // r1 = 0; assert(r1)  -- a claim that is false on purpose.
+        // r1 = 1; assert(r1); halt.
         let program = vec![
-            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Load, 1, 0, 0, 1),
             inst(Opcode::Assert, 0, 1, 0, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(1024);
         let receipt = vm.run_receipt(&program);
         assert!(
-            !receipt.success,
-            "the VM must refuse an assertion on zero; if it does not, this \
-             test is proving nothing"
+            receipt.success,
+            "the honest program must run to completion, otherwise the failing \
+             Assert never reaches the trace and there is nothing to relabel"
         );
 
         let program_bytes: Vec<u8> = program
@@ -2635,12 +2637,6 @@ mod tests {
             matrix.values[row_start + COL_IS_ASSERT].as_canonical_u64(),
             1,
             "the honest row must be marked as an Assert before it is relabelled"
-        );
-        assert_eq!(
-            matrix.values[row_start + COL_RS1_VAL].as_canonical_u64(),
-            0,
-            "the asserted register must hold zero, otherwise the check the \
-             forgery skips would have passed anyway"
         );
         assert_eq!(
             matrix.values[row_start + COL_RS2_VAL].as_canonical_u64(),
@@ -2693,9 +2689,9 @@ mod tests {
 
         assert!(
             Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
-            "an Assert row relabelled as a Mul verified; every constrain(...) \
-             in BudL is then optional, because the prover picks which rules \
-             apply to which row"
+            "an Assert row relabelled as a Mul verified; assert_one(rs1_val) \
+             is then something the prover turns off per row, and every \
+             constrain(...) in BudL is optional"
         );
     }
 
@@ -2716,13 +2712,17 @@ mod tests {
     #[test]
     fn rejects_an_opcode_column_that_disagrees_with_the_program() {
         let program = vec![
-            inst(Opcode::Load, 1, 0, 0, 0),
+            inst(Opcode::Load, 1, 0, 0, 1),
             inst(Opcode::Assert, 0, 1, 0, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
         let mut vm = Vm::new(1024);
         let receipt = vm.run_receipt(&program);
-        assert!(!receipt.success, "the VM must refuse an assertion on zero");
+        assert!(
+            receipt.success,
+            "the honest program must run to completion so the Assert row is in \
+             the trace to be tampered with"
+        );
 
         let program_bytes: Vec<u8> = program
             .iter()
