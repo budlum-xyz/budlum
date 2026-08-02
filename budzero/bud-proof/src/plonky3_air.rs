@@ -1511,6 +1511,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let r_val: AB::Expr = cur[COL_REG_VAL].into();
         let r_active: AB::Expr = cur[COL_REG_ACTIVE].into();
         let r_same: AB::Expr = cur[COL_REG_SAME].into();
+        let r_is_write: AB::Expr = cur[COL_REG_IS_WRITE].into();
         let nr_val: AB::Expr = nxt[COL_REG_VAL].into();
         let nr_active: AB::Expr = nxt[COL_REG_ACTIVE].into();
         let nr_write: AB::Expr = nxt[COL_REG_IS_WRITE].into();
