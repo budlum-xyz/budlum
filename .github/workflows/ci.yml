@@ -966,6 +966,18 @@ jobs:
         run: |
           bash ./scripts/check-security-parameters-are-derived.sh --self-test
           bash ./scripts/check-security-parameters-are-derived.sh
+      # A transition constrains the difference between consecutive rows and
+      # never says where the sequence starts. COL_EVENT_DIGEST_0 had only a
+      # transition and a last-row comparison, so the whole accumulator could
+      # slide: write D on the first row, every relative step still holds, and
+      # the proof announces an event digest for events that were never
+      # emitted. storage_deal.rs packs its entire replay context into that
+      # field. Every other accumulator in the AIR already pinned its first
+      # row, which is exactly why the missing one was easy to miss.
+      - name: akumulatorlerin ilk satiri sabit mi + kanarya
+        run: |
+          bash ./scripts/check-accumulators-pin-their-first-row.sh --self-test
+          bash ./scripts/check-accumulators-pin-their-first-row.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

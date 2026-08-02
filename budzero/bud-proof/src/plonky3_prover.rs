@@ -2079,6 +2079,152 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
+    /// A prover cannot announce events the program never emitted.
+    ///
+    /// `COL_EVENT_DIGEST_0` accumulates the `rs1` of every `Log` row. The only
+    /// constraints on it were the transition, which fixes differences between
+    /// consecutive rows, and the last-row binding to `public_inputs[40]`.
+    /// Nothing fixed where the sequence started, so the whole thing could
+    /// slide: write `D` on the first row, every relative step still holds, and
+    /// the last row carries `D + sum(logged)`. The proof then states an
+    /// `event_digest` for events that were never emitted.
+    ///
+    /// The field carries the replay context for storage challenges, so a
+    /// prover choosing it is a prover choosing which challenge a shard proof
+    /// answers.
+    #[test]
+    fn rejects_a_shifted_event_digest() {
+        // r1 = 5; Log r1; Halt. The honest digest is 5.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(receipt.events, vec![5], "the honest run logs exactly one 5");
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        // The forged public inputs announce a digest the program did not
+        // produce. `D` is what the prover adds to the first row.
+        const D: u64 = 0xDEAD_BEEF;
+        let mut event_digest = [0u8; 32];
+        event_digest[0..8].copy_from_slice(&(5u64 + D).to_le_bytes());
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest,
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+
+        // Slide the whole accumulator by D. Every transition still holds
+        // because each one only constrains a difference.
+        for i in 0..rows {
+            let at = i * TRACE_WIDTH + COL_EVENT_DIGEST_0;
+            matrix.values[at] += Goldilocks::new(D);
+        }
+        assert_eq!(
+            matrix.values[(n_cpu - 1) * TRACE_WIDTH + COL_EVENT_DIGEST_0].as_canonical_u64(),
+            5 + D,
+            "the slid trace must reach the forged digest, otherwise the test \
+             is not exercising the hole"
+        );
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a proof announcing an event digest the program never produced \
+             verified; the field carries the replay context for storage \
+             challenges, so choosing it chooses which challenge a proof answers"
+        );
+    }
+
+    /// A program whose very first instruction is a `Log` must still be
+    /// provable.
+    ///
+    /// The completeness half. Pinning the first row cannot be written as
+    /// "the accumulator is zero there": the prover folds the first row's own
+    /// `Log` into it, so a program that logs immediately starts at `rs1`, not
+    /// at zero. The constraint has to say `digest == is_log * rs1`, and this
+    /// test is what tells the two apart.
+    #[test]
+    fn proves_a_program_that_logs_on_its_first_instruction() {
+        // The seeded register means row 0 is the Log itself.
+        let program = vec![
+            inst(Opcode::Log, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.registers[1] = 9;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(receipt.events, vec![9]);
+
+        let envelope = prove_and_verify(program, |vm| {
+            vm.registers[1] = 9;
+        });
+        assert!(!envelope.proof_bytes.is_empty());
+    }
+
     /// A proof claiming an absurd degree must be rejected, not abort the node.
     ///
     /// `Proof::degree_bits` is deserialized out of the submitted bytes and was
