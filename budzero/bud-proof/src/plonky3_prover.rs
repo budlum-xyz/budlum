@@ -76,11 +76,24 @@ fn build_config() -> MyConfig {
         query_proof_of_work_bits: 16,
         mmcs: challenge_mmcs,
     };
+    // The parameters both sides absorb into the transcript, read back out of
+    // the same value handed to the PCS rather than written a second time. A
+    // hand-written copy is a second source of truth that can drift from the
+    // one that governs the proof, which is the whole failure this binding
+    // exists to prevent.
+    let security = vec![
+        fri_params.log_blowup as u64,
+        fri_params.max_log_arity as u64,
+        fri_params.log_final_poly_len as u64,
+        fri_params.num_queries as u64,
+        fri_params.commit_proof_of_work_bits as u64,
+        fri_params.query_proof_of_work_bits as u64,
+    ];
     let inner_challenger = HashChallenger::<u8, Keccak256Hash, 32>::new(vec![], Keccak256Hash {});
     let challenger = MyChallenger::new(inner_challenger);
     let dft = Radix2DitParallel::default();
     let pcs = MyPcs::new(dft, val_mmcs, fri_params);
-    MyConfig::new(pcs, challenger)
+    MyConfig::new_with_security(pcs, challenger, security)
 }
 
 fn register_events(trace: &[Step]) -> Vec<RegEvent> {

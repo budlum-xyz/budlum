@@ -340,11 +340,16 @@ where
         proof.degree_bits - config.is_zk() as usize,
     ));
     challenger.observe(Val::<SC>::from_usize(preprocessed_width));
-    // TODO: Might be best practice to include other instance data here in the transcript, like some
-    // Encoding of the AIR. This protects against transcript collisions between distinct instances.
-    // Practically speaking though, the only related known attack is from failing to include public
-    // Values. It's not clear if failing to include other instance data could enable a transcript
-    // Collision, since most such changes would completely change the set of satisfying witnesses.
+    // Same slice the prover absorbed, at the same point. The FRI parameters
+    // set the soundness error and the grinding cost, and until this line they
+    // were the one part of the instance the transcript did not cover. See
+    // `StarkGenericConfig::security_parameters`.
+    //
+    // Still not covered: an encoding of the AIR itself, which would protect
+    // against transcript collisions between distinct instances. The known
+    // attack in this family comes from omitting public values, and those are
+    // absorbed below.
+    challenger.observe_slice(&config.security_parameters());
     challenger.observe(commitments.trace.clone());
     if preprocessed_width > 0 {
         challenger.observe(preprocessed_commit.as_ref().unwrap().clone());
