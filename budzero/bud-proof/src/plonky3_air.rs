@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 733;
+pub const TRACE_WIDTH: usize = 734;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, opcode byte.
@@ -274,6 +274,49 @@ pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column - 1 on the *original* 
 /// additionally pins `key` to 64 bits, which the old code assumed but never
 /// checked.
 pub const COL_MERKLE_KEY_REM: usize = 732;
+
+/// Inverse witness for `next_reg_idx - reg_idx`, the column that makes
+/// [`COL_REG_SAME`] mean what its name says.
+///
+/// `COL_REG_SAME` gates the two constraints that give the register table its
+/// meaning: that a register keeps its value between a write and the next read,
+/// and that consecutive rows for one register agree on which register it is.
+/// Both are written as `r_active * nr_active * r_same * (...)`, so `r_same = 0`
+/// switches them off.
+///
+/// Nothing said when `r_same` was allowed to be zero. Not booleanity, not a
+/// counterpart constraint, and not the LogUp argument, which never reads the
+/// column at all. So the honest value was whatever the prover felt like
+/// writing, and writing zero on the row before a read removed the requirement
+/// that the read return what was written. Register values feed every
+/// arithmetic constraint in the machine, so that is a free hand over the
+/// inputs of any computation.
+///
+/// The memory table has the same shape and is not vulnerable, which is what
+/// made this easy to miss on a read. There, `m_same = 0` is not free: a
+/// separate constraint says the first read of a new address must return zero,
+/// and it is gated on `(1 - m_same)`. Claiming "different address" therefore
+/// costs the prover the value it wanted to invent. The register side has no
+/// such rule, because registers have no equivalent of "first touch reads
+/// zero", so the counterpart was never written and `r_same` was left with a
+/// cost of nothing.
+///
+/// With this column, `r_same` is pinned to the equality it claims:
+///
+/// ```text
+/// diff = nr_idx - r_idx
+/// z    = diff * diff_inv          (boolean)
+/// diff * (1 - z) == 0             (diff != 0 forces z = 1)
+/// r_same == 1 - z                 (so r_same = 1 exactly when diff = 0)
+/// ```
+///
+/// This is the same inverse-witness pattern already used for `Eq`/`Neq`
+/// ([`COL_EQ_DIFF_INV`]) and for the Merkle root comparison
+/// ([`COL_MERKLE_DIFF_INV`]). A separate column is needed rather than reusing
+/// one of those: the register table is laid out on the same rows as the CPU
+/// trace, so a `Eq` instruction and a register event share a row and would
+/// otherwise fight over the same witness.
+pub const COL_REG_SAME_INV: usize = 733;
 
 pub struct BudAir {
     pub num_steps: usize,
@@ -1324,6 +1367,51 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let r_idx: AB::Expr = cur[COL_REG_IDX].into();
         let nr_idx: AB::Expr = nxt[COL_REG_IDX].into();
 
+        // `r_same` says "the next row is about the same register". It gates
+        // both constraints below, so it has to mean that and not merely claim
+        // it. Before this block it claimed it: no booleanity, no counterpart
+        // constraint, and the LogUp argument never reads the column, so a
+        // prover could write zero on the row before a read and delete the
+        // requirement that the read return the value that was written.
+        //
+        // The memory table looks identical and is not vulnerable, which is why
+        // this survived several passes over the file. There, `m_same = 0`
+        // triggers "the first read of a new address returns zero", so lying
+        // costs the prover the value it was trying to invent. Registers have no
+        // first-touch rule, so nothing was ever written on the other side.
+        //
+        // Standard inverse witness, same shape as `Eq`/`Neq` above.
+        //
+        // Gated on both rows being active, matching the two constraints it
+        // feeds. Outside that window the register columns are padding and
+        // `r_same` is not read by anything, so demanding a value there would
+        // reject honest traces without buying any soundness. The gate cannot
+        // be used as an escape hatch either: `r_active` is the multiplicity on
+        // the supply side of the register LogUp, so understating it leaves the
+        // argument unbalanced and the proof fails there instead.
+        let reg_pair_live = r_active.clone() * nr_active.clone();
+        let reg_idx_diff = nr_idx.clone() - r_idx.clone();
+        let reg_same_inv: AB::Expr = cur[COL_REG_SAME_INV].into();
+        let reg_diff_z = reg_idx_diff.clone() * reg_same_inv;
+        builder
+            .when_transition()
+            .when(reg_pair_live.clone())
+            .assert_bool(reg_diff_z.clone());
+        builder
+            .when_transition()
+            .when(reg_pair_live.clone())
+            .assert_zero(reg_idx_diff * (one.clone() - reg_diff_z.clone()));
+        builder
+            .when_transition()
+            .when(reg_pair_live)
+            .assert_eq(r_same.clone(), one.clone() - reg_diff_z);
+        // Booleanity, stated rather than inferred. It follows from the
+        // equality above while that equality stands, but a flag whose only
+        // claim to being boolean is another constraint two lines up loses it
+        // silently the moment that constraint is edited. This is cheap and the
+        // column is load bearing.
+        builder.assert_bool(r_same.clone());
+
         builder.when_transition().assert_zero(
             r_active.clone()
                 * nr_active.clone()
@@ -1345,6 +1433,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let nm_addr: AB::Expr = nxt[COL_MEM_ADDR].into();
         let m_clk: AB::Expr = cur[COL_MEM_CLK].into();
         let m_is_write: AB::Expr = cur[COL_MEM_IS_WRITE].into();
+
+        // `m_same` was never exploitable the way `r_same` was, because the
+        // memory table constrains both of its sides: `m_same` gates value and
+        // address continuity, and `1 - m_same` gates "the first read of a new
+        // address returns zero". A value outside {0, 1} makes both live at
+        // once, which demands same address, same value, and that the value is
+        // zero, so it is strictly worse for a prover than telling the truth.
+        //
+        // Stating booleanity anyway. The argument above is a proof about the
+        // current shape of three constraints spread over forty lines, and the
+        // reader who edits one of them will not redo it. Making the flag
+        // boolean outright means they do not have to.
+        builder.assert_bool(m_same.clone());
 
         builder.when_transition().assert_zero(
             m_active.clone()

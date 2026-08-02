@@ -908,6 +908,17 @@ jobs:
         run: |
           bash ./scripts/check-fuzz-targets-are-wired.sh --self-test
           bash ./scripts/check-fuzz-targets-are-wired.sh
+      # COL_REG_SAME gated register continuity while being a free column
+      # itself: no booleanity, no constraint on the 1-r_same side, and absent
+      # from the LogUp argument. Writing zero before a read deleted the rule
+      # that a read returns what was written, and register values are the
+      # inputs to every arithmetic constraint. The memory table has the same
+      # shape and was never vulnerable, because there 1-m_same gates "first
+      # read of a new address returns zero", so the lie costs something.
+      - name: kisit kapatan bayraklar pinli mi + kanarya
+        run: |
+          bash ./scripts/check-gating-flags-are-pinned.sh --self-test
+          bash ./scripts/check-gating-flags-are-pinned.sh
       # Every per opcode rule in the AIR runs under `builder.when(is_<op>)`.
       # Booleanity and the exclusivity sum force exactly one selector per row
       # but never say which one, so 29 of the 35 were free: an honest Assert
