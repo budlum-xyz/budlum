@@ -5,9 +5,10 @@
 //! Error.
 
 use crate::plonky3_air::{
-    COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
-    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_RD_IDX_INV,
-    COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV, COL_RS1_IDX_INV, TRACE_WIDTH,
+    COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM,
+    COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE,
+    COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV, COL_RS1_IDX_INV,
+    TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -233,6 +234,20 @@ fn all_ranges() -> Vec<ColRange> {
             name: "rs1_idx_inv",
             start: COL_RS1_IDX_INV,
             end: COL_RS1_IDX_INV + 1,
+        },
+        // Canonicity witnesses for the comparison bit decomposition. Without
+        // them every value below 2^32 - 1 had a second valid bit string, and
+        // the comparison opcodes read the bits, so the prover chose the
+        // answer.
+        ColRange {
+            name: "cmp_rs1_hi_inv",
+            start: COL_CMP_RS1_HI_INV,
+            end: COL_CMP_RS1_HI_INV + 1,
+        },
+        ColRange {
+            name: "cmp_rs2_hi_inv",
+            start: COL_CMP_RS2_HI_INV,
+            end: COL_CMP_RS2_HI_INV + 1,
         },
     ]
 }
