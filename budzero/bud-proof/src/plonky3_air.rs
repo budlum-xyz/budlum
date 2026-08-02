@@ -14,11 +14,16 @@ pub const TRACE_WIDTH: usize = 735;
 ///
 /// Instructions encode as
 /// `opcode | rd << 8 | rs1 << 13 | rs2 << 18 | imm << 23`, so each field is a
-/// shift and a mask away from the word. `imm` is deliberately not here: it is
-/// 32 bits and signed, and the CPU trace stores it as a field element with
-/// negative values wrapped, so matching it in the tuple needs a
-/// representation decision rather than a mask. It is tracked separately.
-pub const PREPROCESSED_WIDTH: usize = 7;
+/// shift and a mask away from the word.
+///
+/// `imm` needed one extra step. It is a signed 32-bit value and the CPU trace
+/// stores it as a field element, wrapping negatives to `P - |imm|`, so the raw
+/// masked bits do not match what the trace holds. Measured: `imm = -1` masks
+/// to `4294967295` but the trace carries `P - 1 = 18446744069414584320`. The
+/// preprocessed side therefore applies the same reinterpretation the VM does,
+/// through `bud_isa::decode_any`, rather than reproducing the arithmetic here.
+/// One decoder, one answer.
+pub const PREPROCESSED_WIDTH: usize = 8;
 
 pub const COL_CLK: usize = 0;
 pub const COL_PC: usize = 1;
@@ -385,7 +390,7 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
     fn preprocessed_trace(&self) -> Option<p3_matrix::dense::RowMajorMatrix<F>> {
         let degree = (3 * self.num_steps + 1).next_power_of_two().max(16);
         // PC, RAW_INST, IS_ACTIVE, then the decoded fields OPCODE, RD, RS1,
-        // RS2.
+        // RS2, IMM.
         //
         // Each decoded field is computed here from the program the verifier
         // already committed to, so the Program CTL tuple can carry them. See
@@ -393,6 +398,13 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
         // enough: nothing tied the CPU trace's decode columns back to
         // `COL_RAW_INST`, and splitting the word inside the AIR would need a
         // range check this machine does not have.
+        //
+        // `imm` goes through `bud_isa::decode_any` rather than a mask written
+        // out here. The trace stores a negative immediate as `P - |imm|`, and
+        // reproducing that from the raw bits means repeating the sign
+        // reinterpretation the decoder already performs. Two copies of that
+        // rule is one copy too many: if they ever disagree the honest prover
+        // is the one that fails.
         let mut values = vec![F::ZERO; degree * PREPROCESSED_WIDTH];
         for i in 0..degree {
             let pc = i as u64;
@@ -402,6 +414,17 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             } else {
                 F::ZERO
             };
+            // A word that does not decode contributes zero for the immediate.
+            // Such a row can never be matched by a CPU row anyway: the VM
+            // refuses to step on it, so no trace row carries that pc.
+            let imm = bud_isa::Instruction::decode_any(inst)
+                .map(|d| d.imm)
+                .unwrap_or(0);
+            let imm_field = if imm < 0 {
+                F::ZERO - F::from_u64((-(imm as i64)) as u64)
+            } else {
+                F::from_u64(imm as u64)
+            };
             values[i * PREPROCESSED_WIDTH] = F::from_u64(pc);
             values[i * PREPROCESSED_WIDTH + 1] = F::from_u64(inst);
             values[i * PREPROCESSED_WIDTH + 2] = active;
@@ -409,6 +432,7 @@ impl<F: p3_field::Field> BaseAir<F> for BudAir {
             values[i * PREPROCESSED_WIDTH + 4] = F::from_u64((inst >> 8) & 0x1F);
             values[i * PREPROCESSED_WIDTH + 5] = F::from_u64((inst >> 13) & 0x1F);
             values[i * PREPROCESSED_WIDTH + 6] = F::from_u64((inst >> 18) & 0x1F);
+            values[i * PREPROCESSED_WIDTH + 7] = imm_field;
         }
         Some(p3_matrix::dense::RowMajorMatrix::new(
             values,
@@ -1632,6 +1656,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let b4 = b3.clone() * beta_expr.clone();
             let b5 = b4.clone() * beta_expr.clone();
             let b6 = b5.clone() * beta_expr.clone();
+            let b7 = b6.clone() * beta_expr.clone();
 
             let term = |table_id: AB::Expr,
                         clk: AB::Expr,
@@ -1843,10 +1868,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_rd: AB::Expr = pre_cur[4].into();
             let pre_rs1: AB::Expr = pre_cur[5].into();
             let pre_rs2: AB::Expr = pre_cur[6].into();
+            let pre_imm: AB::Expr = pre_cur[7].into();
             let opcode_col: AB::Expr = cur[COL_OPCODE].into();
             let rd_idx_col: AB::Expr = cur[COL_RD_IDX].into();
             let rs1_idx_col: AB::Expr = cur[COL_RS1_IDX].into();
             let rs2_idx_col: AB::Expr = cur[COL_RS2_IDX].into();
+            let imm_col: AB::Expr = cur[COL_IMM].into();
 
             let pc_ext: AB::ExprEF = pc.into();
             let raw_inst_ext: AB::ExprEF = raw_inst.into();
@@ -1860,6 +1887,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_rd_ext: AB::ExprEF = pre_rd.into();
             let pre_rs1_ext: AB::ExprEF = pre_rs1.into();
             let pre_rs2_ext: AB::ExprEF = pre_rs2.into();
+            let imm_ext: AB::ExprEF = imm_col.into();
+            let pre_imm_ext: AB::ExprEF = pre_imm.into();
 
             // Tuple is (pc, raw_inst, opcode, rd, rs1, rs2): the whole decode.
             //
@@ -1886,24 +1915,31 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // instead would need a range check on the remaining bits, and this
             // machine has no range check machinery.
             //
-            // `imm` is not in the tuple. It is 32 bits and signed, and the CPU
-            // trace stores negative immediates as wrapped field elements
-            // rather than as the raw bit pattern, so binding it needs a
-            // representation decision rather than a mask. Tracked separately.
+            // `imm` is the last field and took one extra step, because the
+            // trace does not hold the raw bits. A negative immediate is stored
+            // as `P - |imm|`, so the preprocessed side runs the word through
+            // `bud_isa::decode_any` and applies the same wrap rather than
+            // masking. It matters as much as the registers do: `storage_addr`
+            // is `storage_base + imm`, the Merkle path buffer address is
+            // `imm`, a Load or Store resolves to `rs1_val + imm`, and a jump
+            // target is `pc + imm`. An unbound immediate is a prover choosing
+            // which storage slot a contract writes to.
             let term_cpu_prog = alpha_expr.clone()
                 + beta_expr.clone() * pc_ext
                 + b2.clone() * raw_inst_ext
                 + b3.clone() * opcode_ext
                 + b4.clone() * rd_ext
                 + b5.clone() * rs1_ext
-                + b6.clone() * rs2_ext;
+                + b6.clone() * rs2_ext
+                + b7.clone() * imm_ext;
             let term_pre_prog = alpha_expr.clone()
                 + beta_expr.clone() * pre_pc_ext
                 + b2.clone() * pre_inst_ext
                 + b3.clone() * pre_opcode_ext
                 + b4.clone() * pre_rd_ext
                 + b5.clone() * pre_rs1_ext
-                + b6.clone() * pre_rs2_ext;
+                + b6.clone() * pre_rs2_ext
+                + b7.clone() * pre_imm_ext;
 
             let diff_cpu_prog: AB::ExprEF = gamma_expr.clone() - term_cpu_prog;
             let diff_pre_prog: AB::ExprEF = gamma_expr.clone() - term_pre_prog;

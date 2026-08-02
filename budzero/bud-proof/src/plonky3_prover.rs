@@ -921,6 +921,7 @@ fn aux_trace_generator(
         let b4 = b3 * beta;
         let b5 = b4 * beta;
         let b6 = b5 * beta;
+        let b7 = b6 * beta;
 
         let mut s_reg = MyExtensionField::ZERO;
         let mut s_mem = MyExtensionField::ZERO;
@@ -1170,13 +1171,15 @@ fn aux_trace_generator(
             let rd_col = row[COL_RD_IDX];
             let rs1_col = row[COL_RS1_IDX];
             let rs2_col = row[COL_RS2_IDX];
+            let imm_col = row[COL_IMM];
             let term_cpu_prog = alpha
                 + beta * MyExtensionField::from(pc)
                 + b2 * MyExtensionField::from(raw_inst)
                 + b3 * MyExtensionField::from(opcode_col)
                 + b4 * MyExtensionField::from(rd_col)
                 + b5 * MyExtensionField::from(rs1_col)
-                + b6 * MyExtensionField::from(rs2_col);
+                + b6 * MyExtensionField::from(rs2_col)
+                + b7 * MyExtensionField::from(imm_col);
 
             let pre_pc = Goldilocks::from_u64(i as u64);
             let pre_inst_word = program.get(i).copied().unwrap_or(0);
@@ -1185,13 +1188,24 @@ fn aux_trace_generator(
             let pre_rd = Goldilocks::from_u64((pre_inst_word >> 8) & 0x1F);
             let pre_rs1 = Goldilocks::from_u64((pre_inst_word >> 13) & 0x1F);
             let pre_rs2 = Goldilocks::from_u64((pre_inst_word >> 18) & 0x1F);
+            // Same decoder the AIR's preprocessed trace uses, so the signed
+            // immediate wraps the same way on both sides.
+            let pre_imm_signed = bud_isa::Instruction::decode_any(pre_inst_word)
+                .map(|d| d.imm)
+                .unwrap_or(0);
+            let pre_imm = if pre_imm_signed < 0 {
+                Goldilocks::ZERO - Goldilocks::from_u64((-(pre_imm_signed as i64)) as u64)
+            } else {
+                Goldilocks::from_u64(pre_imm_signed as u64)
+            };
             let term_pre_prog = alpha
                 + beta * MyExtensionField::from(pre_pc)
                 + b2 * MyExtensionField::from(pre_inst)
                 + b3 * MyExtensionField::from(pre_opcode)
                 + b4 * MyExtensionField::from(pre_rd)
                 + b5 * MyExtensionField::from(pre_rs1)
-                + b6 * MyExtensionField::from(pre_rs2);
+                + b6 * MyExtensionField::from(pre_rs2)
+                + b7 * MyExtensionField::from(pre_imm);
 
             let diff_cpu_prog = gamma - term_cpu_prog;
             let diff_pre_prog = gamma - term_pre_prog;
@@ -2775,6 +2789,226 @@ mod tests {
             "a register went from 5 to 999 with no write in between and the \
              proof verified; register continuity is then optional and the \
              prover picks the inputs to every computation"
+        );
+    }
+
+    /// A prover must not redirect a storage write to a different slot.
+    ///
+    /// The last field of the instruction word to be bound. `imm` decides more
+    /// than it looks: `SRead` and `SWrite` take their slot straight from it,
+    /// the Merkle path buffer address is it, a `Load` or `Store` resolves to
+    /// `rs1_val + imm`, and a jump target is `pc + imm`. While it was free, a
+    /// prover chose which storage slot a contract wrote to.
+    ///
+    /// Binding it needed one step the other fields did not. The trace stores a
+    /// negative immediate as `P - |imm|`, so the raw masked bits are not what
+    /// the CPU column holds: `imm = -1` masks to `4294967295` and the trace
+    /// carries `18446744069414584320`. The preprocessed side runs the word
+    /// through `bud_isa::decode_any` and applies the same wrap, so there is
+    /// one decoder rather than two copies of a sign rule that could drift
+    /// apart.
+    ///
+    /// Here the program writes a balance to slot 7. The forgery sends it to
+    /// slot 9 instead, leaving the value and the register bus untouched.
+    #[test]
+    fn rejects_a_redirected_storage_slot() {
+        // r1 = 500; storage[7] = r1.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 500),
+            inst(Opcode::SWrite, 0, 1, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.storage.get(&7).copied(),
+            Some(500),
+            "the honest run must write the balance to slot 7"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+
+        let mut swrite_row = None;
+        for i in 0..n_cpu {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IS_SWRITE].as_canonical_u64() == 1 {
+                swrite_row = Some(i);
+                break;
+            }
+        }
+        let swrite_row = swrite_row.expect("the trace must contain an SWrite row");
+        let sw_start = swrite_row * TRACE_WIDTH;
+
+        assert_eq!(
+            matrix.values[sw_start + COL_IMM].as_canonical_u64(),
+            7,
+            "the honest row must name slot 7"
+        );
+        let honest_word = matrix.values[sw_start + COL_RAW_INST].as_canonical_u64();
+
+        // The forgery: the same value, written to a slot the contract never
+        // named. The memory argument places storage at `storage_base + imm`,
+        // so the storage row has to move with the immediate or the proof
+        // fails on the bus instead of on the decode binding.
+        matrix.values[sw_start + COL_IMM] = Goldilocks::new(9);
+        assert_eq!(
+            matrix.values[sw_start + COL_RAW_INST].as_canonical_u64(),
+            honest_word,
+            "the instruction word must be left alone; pinning it was never the \
+             part that was missing"
+        );
+
+        for i in 0..rows {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_MEM_ACTIVE].as_canonical_u64() == 1
+                && matrix.values[row_start + COL_MEM_ADDR].as_canonical_u64() == STORAGE_BASE + 7
+            {
+                matrix.values[row_start + COL_MEM_ADDR] = Goldilocks::new(STORAGE_BASE + 9);
+            }
+        }
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a storage write aimed at slot 7 landed on slot 9 and the proof \
+             verified; a prover can then move any contract's state anywhere it \
+             likes"
+        );
+    }
+
+    /// A program with a negative immediate must still be provable.
+    ///
+    /// The completeness half of binding `imm`. Negative immediates are the
+    /// reason this field needed a decoder rather than a mask: the trace holds
+    /// `P - |imm|` while the raw bits say `4294967295`, so a preprocessed side
+    /// that masked instead of decoding would reject every honest program that
+    /// jumps backwards. Loops jump backwards.
+    #[test]
+    fn proves_a_program_with_a_negative_immediate() {
+        // r1 = 1; jump forward over a Halt; the skipped instruction is reached
+        // by a backward jump, so the program exercises a negative immediate.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 1),
+            inst(Opcode::Jmp, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Jmp, 0, 0, 0, -1),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(
+            receipt.success,
+            "the honest program must run; if it does not, this test proves \
+             nothing about negative immediates"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&inst| inst.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        // The backward jump has to actually be in the trace, or the test is
+        // about nothing. Its immediate is stored wrapped, so it is checked
+        // against the wrapped form rather than against -1.
+        let (matrix, _n) = trace_matrix(&vm.trace, &program, &pi);
+        let wrapped_minus_one = Goldilocks::ZERO - Goldilocks::new(1);
+        let mut saw_negative_imm = false;
+        for i in 0..vm.trace.len() {
+            let row_start = i * TRACE_WIDTH;
+            if matrix.values[row_start + COL_IMM] == wrapped_minus_one {
+                saw_negative_imm = true;
+                break;
+            }
+        }
+        assert!(
+            saw_negative_imm,
+            "the trace must contain a row whose immediate is the wrapped -1"
+        );
+
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("a program with a negative immediate must be provable");
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "an honest backward jump was rejected; the immediate binding is \
+             comparing raw bits against a wrapped field element"
         );
     }
 
