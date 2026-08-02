@@ -990,6 +990,16 @@ jobs:
         run: |
           bash ./scripts/check-bit-decompositions-are-canonical.sh --self-test
           bash ./scripts/check-bit-decompositions-are-canonical.sh
+      # The VM halts Assert only on a zero condition; the AIR demanded exactly
+      # 1. Those agree on 0 and 1 and nowhere else, and every test fed it a
+      # comparison result, which is 0 or 1. BudL constrain(...) lowers to this
+      # opcode, so constrain(flags & MASK) was a contract the VM ran and no
+      # prover could prove. A field element has no order, so "non-zero" needs
+      # an inverse witness rather than a comparison against a constant.
+      - name: sifir testleri ters tanik kullaniyor mu + kanarya
+        run: |
+          bash ./scripts/check-zero-tests-use-an-inverse-witness.sh --self-test
+          bash ./scripts/check-zero-tests-use-an-inverse-witness.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
