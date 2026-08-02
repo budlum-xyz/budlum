@@ -229,7 +229,6 @@ where
     verify_with_preprocessed(config, air, proof, public_values, None)
 }
 
-#[instrument(skip_all)]
 /// Upper bound on the `degree_bits` a proof may claim.
 ///
 /// This is a denial-of-service bound, not a soundness one: a proof claiming a
@@ -244,6 +243,7 @@ where
 /// beyond what any prover can hold in memory.
 pub const MAX_VERIFIER_DEGREE_BITS: usize = 32;
 
+#[instrument(skip_all)]
 pub fn verify_with_preprocessed<SC, A>(
     config: &SC,
     air: &A,
