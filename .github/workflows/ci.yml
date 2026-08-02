@@ -930,6 +930,17 @@ jobs:
         run: |
           bash ./scripts/check-air-selectors-are-opcode-bound.sh --self-test
           bash ./scripts/check-air-selectors-are-opcode-bound.sh
+      # The memory argument decided whether a CPU row demands a memory entry
+      # with `(is_load + is_store) * rs1_idx`, and rs1_idx is a register
+      # number. `Store r0, r7, r2` asked the bus for seven copies of a row the
+      # memory table supplies once, so every correct program whose pointer was
+      # not in r1 had no valid proof, and the multiplier feeding the argument
+      # was a prover-supplied field element rather than a flag. Every test in
+      # the tree happened to use r1.
+      - name: LogUp carpanlari boolean mi + kanarya
+        run: |
+          bash ./scripts/check-logup-multipliers-are-boolean.sh --self-test
+          bash ./scripts/check-logup-multipliers-are-boolean.sh
       # B35: the fixed-point slash expression was written out at five call
       # sites across two workspaces, and the narrowing was not spelled the same
       # way in all of them. `as u64` truncated where the Kani mirror panicked,

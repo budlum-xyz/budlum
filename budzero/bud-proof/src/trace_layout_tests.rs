@@ -7,7 +7,7 @@
 use crate::plonky3_air::{
     COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
     COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_RD_IDX_INV,
-    COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV, TRACE_WIDTH,
+    COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV, COL_RS1_IDX_INV, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -224,6 +224,15 @@ fn all_ranges() -> Vec<ColRange> {
             name: "reg_init_acc",
             start: COL_REG_INIT_ACC,
             end: COL_REG_INIT_ACC + 1,
+        },
+        // Inverse witness deciding whether a Load or Store addresses memory.
+        // The memory argument used to multiply its demand side by `rs1_idx`
+        // itself, so a pointer in r7 asked the bus for seven copies of a row
+        // the memory table supplies once.
+        ColRange {
+            name: "rs1_idx_inv",
+            start: COL_RS1_IDX_INV,
+            end: COL_RS1_IDX_INV + 1,
         },
     ]
 }
