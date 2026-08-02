@@ -941,6 +941,18 @@ jobs:
         run: |
           bash ./scripts/check-logup-multipliers-are-boolean.sh --self-test
           bash ./scripts/check-logup-multipliers-are-boolean.sh
+      # The storage challenge verifier named three public inputs the AIR does
+      # not produce for the program it names, so it rejected every proof
+      # including a correct one, and the caller reads a rejection as a wrong
+      # answer and takes the operator's bond. Every test was green because
+      # every one of them passed `test-mock-proof`, which the production path
+      # short-circuits. Designing how the Merkle path reaches the verifier is
+      # a consensus-visible decision; until it is made, the penalty must not
+      # fire on a rejection the chain cannot justify.
+      - name: kanitlanamayan yol ceza kesmesin + kanarya
+        run: |
+          bash ./scripts/check-uncheckable-proof-paths-do-not-slash.sh --self-test
+          bash ./scripts/check-uncheckable-proof-paths-do-not-slash.sh
       # B35: the fixed-point slash expression was written out at five call
       # sites across two workspaces, and the narrowing was not spelled the same
       # way in all of them. `as u64` truncated where the Kani mirror panicked,
