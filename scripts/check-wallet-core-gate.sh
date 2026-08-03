@@ -5,7 +5,7 @@ required_tests=(
   entropy_size_preserves_mnemonic_word_count
   wallet_generate_rejects_placeholder_entropy_in_production
   mnemonic_checksum_validation_rejects_invalid
-  binding_capabilities_include_mobile_and_browser_stubs
+  binding_capabilities_do_not_claim_a_wiring_that_is_absent
   binding_export_redacts_seed_and_counts_words
   binding_uniffi_feature_stub_exports_capabilities
   binding_wasm_feature_stub_exports_capabilities
