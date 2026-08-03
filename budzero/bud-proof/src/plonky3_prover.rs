@@ -2134,6 +2134,127 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
+    /// A `Pop` cannot invent a value the stack never held.
+    ///
+    /// `Pop` has the same shape as `Ret`: measured, the only builder
+    /// statements naming it are selector booleanity, the `pc + 1` step, and
+    /// the shared stack pointer rule. Nothing per opcode says what lands in
+    /// the destination register.
+    ///
+    /// The memory argument carries it. `Pop` demands a read at
+    /// `STACK_BASE + stack_ptr - 1` whose value is `COL_RD_VAL_NEW`, and the
+    /// matching `Push` supplied a write there carrying its `rs1`. Changing the
+    /// popped value unbalances the argument against what was pushed.
+    ///
+    /// Worth its own test for the same reason `Ret` was: the property lives in
+    /// a different subsystem from the opcode, so a change to the memory
+    /// argument could remove it without anything named `Pop` being touched.
+    #[test]
+    fn rejects_a_pop_that_invents_a_value() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 123),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Pop, 2, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[2], 123,
+            "the honest pop returns what was pushed"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        let mut pop_row = None;
+        for i in 0..n_cpu {
+            if matrix.values[i * TRACE_WIDTH + COL_IS_POP].as_canonical_u64() == 1 {
+                pop_row = Some(i);
+                break;
+            }
+        }
+        let pop_row = pop_row.expect("the trace must contain a Pop row");
+        let at = pop_row * TRACE_WIDTH;
+        assert_eq!(
+            matrix.values[at + COL_RD_VAL_NEW].as_canonical_u64(),
+            123,
+            "the honest row pops the pushed value"
+        );
+
+        // The forgery: pop something the stack never held.
+        matrix.values[at + COL_RD_VAL_NEW] = Goldilocks::new(999);
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a Pop returned a value nothing pushed and the proof verified; \
+             the stack would then be a place a prover can read anything from"
+        );
+    }
+
     /// Every syscall number the VM accepts must be provable.
     ///
     /// The AIR picked out each number with a polynomial that is zero on the
