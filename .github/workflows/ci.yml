@@ -1000,6 +1000,17 @@ jobs:
         run: |
           bash ./scripts/check-zero-tests-use-an-inverse-witness.sh --self-test
           bash ./scripts/check-zero-tests-use-an-inverse-witness.sh
+      # WalletBindingCapabilities reported uniffi_mobile: true and
+      # wasm_browser: true while the tree had no .udl file, no
+      # uniffi::export, and no #[wasm_bindgen] anywhere. Both binding modules
+      # held a single function returning that same struct. It is a capability
+      # descriptor, so something reads it to decide what it can call, and a
+      # flag that is true regardless of the work being done cannot be told
+      # apart from one that means the work is done.
+      - name: baglama iddiasi gercekle ortusuyor mu + kanarya
+        run: |
+          bash ./scripts/check-binding-claims-match-reality.sh --self-test
+          bash ./scripts/check-binding-claims-match-reality.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

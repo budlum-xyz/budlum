@@ -603,12 +603,36 @@ fn derive_view_key_rotated(seed: &[u8; 32], rotation_counter: u64) -> [u8; 32] {
 /// Mobile/browser binding ABI marker.
 pub const WALLET_BINDING_STUB_VERSION: &str = "task11.14-binding-stub-v1";
 
-/// Binding capability descriptor shared by mobile (UniFFI) and browser (WASM) stubs.
+/// What the mobile and browser bindings can actually do today.
+///
+/// The two flags used to be hard-coded `true`, which read as "mobile and
+/// browser are wired up". Measured, neither was: the `uniffi_bindings` module
+/// contains one function that returns this same struct, `wasm_bindings` is
+/// identical, there is no `.udl` file anywhere in the tree, and
+/// `#[wasm_bindgen]` appears on nothing. No wallet operation is exposed to
+/// either host. The struct was describing the presence of a module, not the
+/// presence of a binding.
+///
+/// That distinction matters because this is a capability descriptor. Something
+/// reading `uniffi_mobile == true` would reasonably conclude it can call the
+/// wallet from Kotlin or Swift, and it cannot. A flag that is always true
+/// carries no information and a caller cannot tell the difference between "not
+/// implemented" and "implemented and reporting itself".
+///
+/// The flags now say what is true: the feature gates compile, and no operation
+/// crosses them. `bindings_are_wired` is the field to flip when a `.udl` or a
+/// `#[wasm_bindgen]` export actually lands, and
+/// `check-binding-claims-match-reality.sh` fails if it is flipped without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletBindingCapabilities {
     pub stub_version: String,
-    pub uniffi_mobile: bool,
-    pub wasm_browser: bool,
+    /// The `uniffi` feature exists and compiles. It exports no wallet call.
+    pub uniffi_feature_compiles: bool,
+    /// The `wasm` feature exists and compiles. It exports no wallet call.
+    pub wasm_feature_compiles: bool,
+    /// True only when a real binding surface exists: a UniFFI interface
+    /// definition, or a `#[wasm_bindgen]` export of a wallet operation.
+    pub bindings_are_wired: bool,
     pub exports_seed_material: bool,
 }
 
@@ -617,8 +641,11 @@ impl WalletBindingCapabilities {
     pub fn current() -> Self {
         Self {
             stub_version: WALLET_BINDING_STUB_VERSION.to_string(),
-            uniffi_mobile: true,
-            wasm_browser: true,
+            uniffi_feature_compiles: true,
+            wasm_feature_compiles: true,
+            // No `.udl`, no `#[wasm_bindgen]` export. Flipping this without
+            // one is what the gate is there to catch.
+            bindings_are_wired: false,
             exports_seed_material: false,
         }
     }
@@ -1232,11 +1259,21 @@ mod tests {
     }
 
     #[test]
-    fn binding_capabilities_include_mobile_and_browser_stubs() {
+    fn binding_capabilities_do_not_claim_a_wiring_that_is_absent() {
         let caps = WalletBindingCapabilities::current();
         assert_eq!(caps.stub_version, WALLET_BINDING_STUB_VERSION);
-        assert!(caps.uniffi_mobile);
-        assert!(caps.wasm_browser);
+        // The feature gates exist and compile.
+        assert!(caps.uniffi_feature_compiles);
+        assert!(caps.wasm_feature_compiles);
+        // Nothing crosses them yet. This assertion is meant to fail the day a
+        // real binding lands, so the descriptor is updated in the same commit
+        // rather than staying wrong in the other direction.
+        assert!(
+            !caps.bindings_are_wired,
+            "bindings_are_wired is set, so a UniFFI interface or a \
+             #[wasm_bindgen] export must exist; update this test together with \
+             whichever one landed"
+        );
         assert!(!caps.exports_seed_material);
     }
 
@@ -1254,7 +1291,8 @@ mod tests {
     #[test]
     fn binding_uniffi_feature_stub_exports_capabilities() {
         let caps = uniffi_bindings::binding_capabilities();
-        assert!(caps.uniffi_mobile);
+        assert!(caps.uniffi_feature_compiles);
+        assert!(!caps.bindings_are_wired);
         assert!(!caps.exports_seed_material);
     }
 
@@ -1262,7 +1300,8 @@ mod tests {
     #[test]
     fn binding_wasm_feature_stub_exports_capabilities() {
         let caps = wasm_bindings::binding_capabilities();
-        assert!(caps.wasm_browser);
+        assert!(caps.wasm_feature_compiles);
+        assert!(!caps.bindings_are_wired);
         assert!(!caps.exports_seed_material);
     }
 
