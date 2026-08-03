@@ -479,8 +479,6 @@ fn trace_matrix(
             0x04 => values[row_start + COL_IS_DIV] = Goldilocks::new(1),
             0x05 => values[row_start + COL_IS_INV] = Goldilocks::new(1),
             0x06 => values[row_start + COL_IS_AND] = Goldilocks::new(1),
-            0x07 => values[row_start + COL_IS_OR] = Goldilocks::new(1),
-            0x08 => values[row_start + COL_IS_XOR] = Goldilocks::new(1),
             0x09 => values[row_start + COL_IS_NOT] = Goldilocks::new(1),
             0x0A => values[row_start + COL_IS_EQ] = Goldilocks::new(1),
             0x0B => values[row_start + COL_IS_NEQ] = Goldilocks::new(1),
@@ -523,9 +521,7 @@ fn trace_matrix(
             || opcode == bud_isa::Opcode::Gt
             || opcode == bud_isa::Opcode::Lte
             || opcode == bud_isa::Opcode::Gte;
-        let is_bw_bits = opcode == bud_isa::Opcode::And
-            || opcode == bud_isa::Opcode::Or
-            || opcode == bud_isa::Opcode::Xor;
+        let is_bw_bits = opcode == bud_isa::Opcode::And;
 
         if is_cmp || is_bw_bits {
             let a = step.src1_val;
@@ -1049,8 +1045,6 @@ fn aux_trace_generator(
             let is_div = row[COL_IS_DIV];
             let is_inv = row[COL_IS_INV];
             let is_and = row[COL_IS_AND];
-            let is_or = row[COL_IS_OR];
-            let is_xor = row[COL_IS_XOR];
             let is_not = row[COL_IS_NOT];
             let is_eq = row[COL_IS_EQ];
             let is_neq = row[COL_IS_NEQ];
@@ -1087,8 +1081,6 @@ fn aux_trace_generator(
                 + is_div
                 + is_inv
                 + is_and
-                + is_or
-                + is_xor
                 + is_not
                 + is_eq
                 + is_neq
@@ -2864,28 +2856,38 @@ mod tests {
         });
     }
 
+    /// The opcode slots `Or` and `Xor` used to occupy must not decode.
+    ///
+    /// They were removed because their results can leave the field: measured,
+    /// `(P-1) | (P-2) = 2^64 - 1`, which is above the modulus, and a register
+    /// holding that has no canonical bit decomposition, so any later
+    /// comparison on it is unprovable. `And` cannot do this, since its result
+    /// is at most the smaller operand.
+    ///
+    /// Removing an opcode is only real if the encoding stops accepting it.
+    /// Leaving `0x07` and `0x08` decodable would keep them reachable from
+    /// hand-written bytecode while the AIR no longer constrains them, which is
+    /// strictly worse than having left them in.
     #[test]
-    fn proves_bitwise_or() {
-        let program = vec![
-            inst(Opcode::Or, 1, 2, 3, 0), // 0b1100 | 0b1010 = 0b1110 = 14
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        prove_and_verify(program, |vm| {
-            vm.registers[2] = 0b1100;
-            vm.registers[3] = 0b1010;
-        });
-    }
-
-    #[test]
-    fn proves_bitwise_xor() {
-        let program = vec![
-            inst(Opcode::Xor, 1, 2, 3, 0), // 0b1100 ^ 0b1010 = 0b0110 = 6
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        prove_and_verify(program, |vm| {
-            vm.registers[2] = 0b1100;
-            vm.registers[3] = 0b1010;
-        });
+    fn rejects_the_withdrawn_bitwise_opcodes() {
+        for slot in [0x07u64, 0x08] {
+            assert!(
+                bud_isa::Instruction::decode_any(slot).is_err(),
+                "opcode {slot:#04x} still decodes; it was withdrawn because its \
+                 result can exceed the modulus, and an opcode the AIR does not \
+                 constrain must not be reachable"
+            );
+        }
+        // The neighbours are untouched, so this is not testing that decoding
+        // is broken in general.
+        assert!(
+            bud_isa::Instruction::decode_any(0x06).is_ok(),
+            "And must still decode"
+        );
+        assert!(
+            bud_isa::Instruction::decode_any(0x09).is_ok(),
+            "Not must still decode"
+        );
     }
 
     #[test]
