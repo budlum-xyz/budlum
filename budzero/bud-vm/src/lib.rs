@@ -331,18 +331,6 @@ impl Vm {
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
-            Opcode::Or => {
-                let result = src1_val | src2_val;
-                self.registers[dst_idx as usize] = result;
-                self.pc += 1;
-                (result, cur_pc + 1)
-            }
-            Opcode::Xor => {
-                let result = src1_val ^ src2_val;
-                self.registers[dst_idx as usize] = result;
-                self.pc += 1;
-                (result, cur_pc + 1)
-            }
             Opcode::Not => {
                 let result = if src1_val == 0 { 1 } else { 0 };
                 self.registers[dst_idx as usize] = result;

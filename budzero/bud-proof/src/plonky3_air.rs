@@ -60,8 +60,6 @@ pub const COL_REG_SAME: usize = 28;
 pub const COL_IS_DIV: usize = 29;
 pub const COL_IS_INV: usize = 30;
 pub const COL_IS_AND: usize = 31;
-pub const COL_IS_OR: usize = 32;
-pub const COL_IS_XOR: usize = 33;
 pub const COL_IS_NOT: usize = 34;
 pub const COL_IS_NEQ: usize = 35;
 pub const COL_IS_GT: usize = 36;
@@ -631,8 +629,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let is_div: AB::Expr = cur[COL_IS_DIV].into();
         let is_inv: AB::Expr = cur[COL_IS_INV].into();
         let is_and: AB::Expr = cur[COL_IS_AND].into();
-        let is_or: AB::Expr = cur[COL_IS_OR].into();
-        let is_xor: AB::Expr = cur[COL_IS_XOR].into();
         let is_not: AB::Expr = cur[COL_IS_NOT].into();
         let is_eq: AB::Expr = cur[COL_IS_EQ].into();
         let is_neq: AB::Expr = cur[COL_IS_NEQ].into();
@@ -674,8 +670,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_div.clone()
             + is_inv.clone()
             + is_and.clone()
-            + is_or.clone()
-            + is_xor.clone()
             + is_not.clone()
             + is_eq.clone()
             + is_neq.clone()
@@ -712,8 +706,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         builder.assert_bool(is_div.clone());
         builder.assert_bool(is_inv.clone());
         builder.assert_bool(is_and.clone());
-        builder.assert_bool(is_or.clone());
-        builder.assert_bool(is_xor.clone());
         builder.assert_bool(is_not.clone());
         builder.assert_bool(is_eq.clone());
         builder.assert_bool(is_neq.clone());
@@ -786,8 +778,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_div.clone() * (opcode_here.clone() - op(0x04))
             + is_inv.clone() * (opcode_here.clone() - op(0x05))
             + is_and.clone() * (opcode_here.clone() - op(0x06))
-            + is_or.clone() * (opcode_here.clone() - op(0x07))
-            + is_xor.clone() * (opcode_here.clone() - op(0x08))
             + is_not.clone() * (opcode_here.clone() - op(0x09))
             + is_eq.clone() * (opcode_here.clone() - op(0x0A))
             + is_neq.clone() * (opcode_here.clone() - op(0x0B))
@@ -2293,7 +2283,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // --- Comparison + Bitwise AIR constraints ---
         // Bit decomposition shared between comparison and bitwise (And/Or/Xor) opcodes
         let is_cmp = is_lt.clone() + is_gt.clone() + is_lte.clone() + is_gte.clone();
-        let is_bw_bits = is_and.clone() + is_or.clone() + is_xor.clone();
+        let is_bw_bits = is_and.clone();
         let is_cmp_or_bw = is_cmp.clone() + is_bw_bits.clone();
 
         // Booleanity of all bit decomposition columns
@@ -2388,22 +2378,21 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 let b_bit: AB::Expr = cur[COL_CMP_RS2_BASE + i].into();
                 and_sum += a_bit * b_bit * pow2;
             }
-            let two_val = AB::Expr::from(AB::F::from_u64(2));
-
             // And: rd = sum(a_i * b_i * 2^i)
+            //
+            // `Or` and `Xor` used to sit here as `rs1 + rs2 - and_sum` and
+            // `rs1 + rs2 - 2 * and_sum`. Both are exact over integers and both
+            // could leave the field: measured, `(P-1) | (P-2) = 2^64 - 1`,
+            // which is above the modulus, and the register then held a value
+            // no canonical bit decomposition can represent. Any later
+            // comparison on that register was unprovable.
+            //
+            // `And` has no such case. Its result is at most the smaller
+            // operand, so two canonical inputs always give a canonical
+            // result. That is why it is the one that stayed.
             builder
                 .when(is_and)
                 .assert_eq(rd_val_new.clone(), and_sum.clone());
-            // Or: rd = rs1 + rs2 - sum(a_i * b_i * 2^i)
-            builder.when(is_or).assert_eq(
-                rd_val_new.clone(),
-                rs1_val.clone() + rs2_val.clone() - and_sum.clone(),
-            );
-            // Xor: rd = rs1 + rs2 - 2 * sum(a_i * b_i * 2^i)
-            builder.when(is_xor).assert_eq(
-                rd_val_new.clone(),
-                rs1_val.clone() + rs2_val.clone() - two_val * and_sum,
-            );
         }
 
         // Not (logical NOT): rd = 1 if rs1 == 0, else rd = 0 (reuse COL_INV_ZERO as inverse witness)
