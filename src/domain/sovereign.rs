@@ -3,6 +3,9 @@
 //! The kit helps CBDC, public-sector, enterprise PoA and consortium domains
 //! Describe lifecycle and compliance evidence without leaking private KYC data
 //! Or merging PoA rules into the permissionless core registry.
+//!
+//! WIRING: unwired - the sovereign template set is defined but no domain
+//! registration path reads it.
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, DomainStatus, Hash32};

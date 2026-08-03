@@ -3,6 +3,9 @@
 //! The permissionless network must never inherit PoA-only compliance hooks. This
 //! Module therefore requires every state-changing operation to declare its
 //! Domain kind and fails closed for [`ComplianceDomainKind::Permissionless`].
+//!
+//! WIRING: unwired - no PoA transaction reaches the compliance recorder; the
+//! audit trail it exports is never written to.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};

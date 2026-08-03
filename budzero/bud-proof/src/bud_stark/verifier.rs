@@ -1,4 +1,7 @@
 //! See [`crate::prover`] for an overview of the protocol and a more detailed soundness analysis.
+//!
+//! WIRING: unwired - reached through the `verify` entry points re-exported by
+//! bud-proof, not by name from this workspace.
 
 use p3_air::symbolic::SymbolicAirBuilder;
 use p3_air::{Air, RowWindow};

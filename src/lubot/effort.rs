@@ -28,6 +28,8 @@
 //! validators the same way consensus rewards are, and the current repository
 //! ratios stand. This module exposes `EffortTier::as_ratio()` so a future fee
 //! schedule can scale against it without this type having to know the price.
+//!
+//! WIRING: unwired - effort tiers are defined but no inference request carries one.
 
 use serde::{Deserialize, Serialize};
 

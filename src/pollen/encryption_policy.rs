@@ -13,6 +13,10 @@
 //!
 //! Şifreleme parametreleri normal governance sürecinden daha yüksek bir
 //! Eşikle değiştirilir (güvenlik kritik).
+//!
+//! WIRING: unwired - the DAO-updatable policy is never consulted when an asset
+//! is registered or a grant is issued, which is why Pollen is still honest-
+//! storage-node soft enforcement.
 
 use crate::pollen::AssetId;
 use serde::{Deserialize, Serialize};

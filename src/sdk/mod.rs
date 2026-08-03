@@ -26,6 +26,9 @@
 //! - Tüm yapılandırmalar `budlum.toml` dosyasından deserialize edilir (serde + toml).
 //! - Fixture üreteçleri deterministiktir - aynı seed aynı fixture setini üretir.
 //! - Devnet 4 domain'i ayrı process'lerde simüle eder (PoW, PoS, PoA, Bft).
+//!
+//! WIRING: unwired - developer-facing surface, called by SDK consumers outside
+//! this tree rather than by the node.
 
 pub mod contracts;
 pub mod devnet;

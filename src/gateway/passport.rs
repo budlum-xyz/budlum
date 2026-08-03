@@ -2,6 +2,9 @@
 //!
 //! This module is intentionally read-only. It builds evidence-labelled profile
 //! Data for budlum.xyz without claiming that unproven data is verified.
+//!
+//! WIRING: unwired - the passport bundle validates itself; no gateway request
+//! is checked against a profile.
 
 use crate::bns::types::BnsResolved;
 use crate::core::address::Address;
