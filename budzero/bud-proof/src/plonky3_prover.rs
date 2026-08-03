@@ -2108,6 +2108,126 @@ mod tests {
         prove_and_verify(program, |_| {});
     }
 
+    /// A `Ret` cannot return to an address the matching `Call` did not push.
+    ///
+    /// `Ret` has almost no constraints of its own: measured, only booleanity
+    /// of its selector and the stack pointer step. Nothing in the per opcode
+    /// rules ties `next_pc` to anything, which is what made it worth testing.
+    ///
+    /// What holds it is the memory argument, one step removed. `Ret` demands a
+    /// read at `STACK_BASE + stack_ptr - 1` whose value is `COL_NEXT_PC`, and
+    /// `Call` supplies a write at the same address whose value is `pc + 1`.
+    /// Redirecting the return means either changing the value read, which
+    /// unbalances the argument against what `Call` wrote, or changing the
+    /// address, which reads somewhere the trace never wrote and hits the
+    /// first-read-zero rule.
+    ///
+    /// An indirect binding is still a binding, but it is the kind that gets
+    /// broken by a change to a different opcode, so it gets a test naming the
+    /// property rather than the mechanism.
+    #[test]
+    fn rejects_a_return_to_an_address_never_pushed() {
+        // Call jumps forward two, the body loads 7, Ret comes back to the Halt.
+        let program = vec![
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Ret, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        let mut ret_row = None;
+        for i in 0..n_cpu {
+            if matrix.values[i * TRACE_WIDTH + COL_IS_RET].as_canonical_u64() == 1 {
+                ret_row = Some(i);
+                break;
+            }
+        }
+        let ret_row = ret_row.expect("the trace must contain a Ret row");
+        let at = ret_row * TRACE_WIDTH;
+
+        let honest = matrix.values[at + COL_NEXT_PC].as_canonical_u64();
+        assert_eq!(honest, 1, "the honest Ret returns to the Halt at pc 1");
+
+        // The forgery: return into the called body instead, which skips the
+        // Halt and re-runs the load.
+        matrix.values[at + COL_NEXT_PC] = Goldilocks::new(2);
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a Ret returned somewhere its Call never pushed and the proof \
+             verified; control flow after a call would then be the prover's \
+             to choose"
+        );
+    }
+
     /// `Assert` must accept any non-zero condition, as the VM does.
     ///
     /// The VM halts only when the condition is zero. The AIR asked for
