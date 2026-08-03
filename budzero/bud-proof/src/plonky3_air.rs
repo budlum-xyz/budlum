@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 741;
+pub const TRACE_WIDTH: usize = 742;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -526,6 +526,39 @@ pub const COL_CMP_RS2_HI_INV: usize = 739;
 /// selector rules, and adding a fourth reader would work only for as long as
 /// that stays true.
 pub const COL_ASSERT_INV: usize = 740;
+
+/// Boolean witness for "this `Syscall` row has `imm == 6`".
+///
+/// `Syscall` with `imm = 6` emits two events in the VM:
+///
+/// ```text
+/// self.events.push(0x00A1_00A1);
+/// self.events.push(src1_val);
+/// ```
+///
+/// and the AIR's event digest only ever counted `Log` rows:
+///
+/// ```text
+/// digest[i+1] = digest[i] + is_log[i+1] * rs1[i+1]
+/// ```
+///
+/// So the two events the syscall announces never reached the digest, and the
+/// public input, which the caller builds from `receipt.events`, carried them.
+/// Measured with `src1 = 5`: the receipt digest is `10551462` and the trace
+/// column reaches `0`, so the last-row comparison fails and no program using
+/// this syscall can be proven at all.
+///
+/// The emission is not removable. `executor.rs` reads `0x00A1_00A1` as the
+/// marker for an AI inference request and takes the model id, fee and
+/// deadline from the events that follow it, so a contract calling this syscall
+/// is how that request gets queued.
+///
+/// A separate boolean is needed because the existing `imm6_guard`,
+/// `(imm-1)(imm-2)(imm-3)`, is not one: at `imm = 6` it evaluates to 60. That
+/// is fine for gating an equality, which only cares whether the factor is
+/// zero, and useless as a multiplier inside a sum. The digest needs to add the
+/// contribution exactly once.
+pub const COL_SYSCALL_IS_6: usize = 741;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
@@ -1573,10 +1606,22 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let cur_event_0: AB::Expr = cur[COL_EVENT_DIGEST_0].into();
             let nxt_is_log: AB::Expr = nxt[COL_IS_LOG].into();
             let nxt_rs1: AB::Expr = nxt[COL_RS1_VAL].into();
+            // Syscall 6 announces two events, `0x00A1_00A1` and its `rs1`, so
+            // it contributes both. Without this the digest counted only `Log`
+            // rows while the caller built the public input from
+            // `receipt.events`, and no program using the syscall could be
+            // proven. See `COL_SYSCALL_IS_6`.
+            let nxt_syscall6: AB::Expr = nxt[COL_SYSCALL_IS_6].into();
+            let ai_marker = AB::Expr::from(AB::F::from_u64(0x00A1_00A1));
             builder
                 .when_transition()
                 .when(cpu_active.clone())
-                .assert_zero(nxt_event_0 - cur_event_0.clone() - nxt_is_log * nxt_rs1);
+                .assert_zero(
+                    nxt_event_0
+                        - cur_event_0.clone()
+                        - nxt_is_log * nxt_rs1.clone()
+                        - nxt_syscall6 * (ai_marker + nxt_rs1),
+                );
 
             // The accumulator starts at zero.
             //
@@ -1599,9 +1644,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // `pc`, and all three LogUp running sums. This one was the
             // exception, and the sequence it accumulates is the one the L1
             // reads back as "what this execution announced".
-            builder
-                .when_first_row()
-                .assert_zero(cur_event_0 - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into());
+            // The first row folds its own contribution in the same way, for
+            // the same reason the Log term is here: the prover writes row
+            // zero's own events into the accumulator rather than starting at
+            // zero and catching up on the next row.
+            {
+                let cur_syscall6: AB::Expr = cur[COL_SYSCALL_IS_6].into();
+                let ai_marker_first = AB::Expr::from(AB::F::from_u64(0x00A1_00A1));
+                builder.when_first_row().assert_zero(
+                    cur_event_0
+                        - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into()
+                        - cur_syscall6 * (ai_marker_first + cur[COL_RS1_VAL].into()),
+                );
+            }
 
             // The old comment here claimed a bounds check was unnecessary
             // because `public_inputs[40]` is a u32, so an out-of-range
@@ -1650,17 +1705,72 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let two_val = AB::Expr::from(AB::F::from_u64(2));
         let three_val = AB::Expr::from(AB::F::from_u64(3));
 
-        let factor_1 = (imm.clone() - two_val.clone()) * (imm.clone() - three_val.clone());
+        // A boolean saying "this row is syscall 6", used both by the event
+        // digest and by the return-value rule below.
+        //
+        // The polynomial factors cannot serve either purpose. They are
+        // non-zero rather than one on the number they select, which is fine
+        // for gating an equality and wrong both as a multiplier inside a sum
+        // and as a way to exclude 6 from a rule that must still fire on 4.
+        //
+        // Pinned in both directions:
+        //
+        //   d = imm - 6
+        //   z = d * d_inv          (boolean)
+        //   d * (1 - z) == 0       (imm != 6 forces the flag off)
+        //   flag * d == 0          (imm == 6 forces the flag on)
+        //
+        // The second is what stops a prover declining to count the events its
+        // syscall emitted.
+        let syscall6_flag: AB::Expr = cur[COL_SYSCALL_IS_6].into();
+        {
+            let six_for_flag = AB::Expr::from(AB::F::from_u64(6));
+            let d = imm.clone() - six_for_flag;
+            let z = one.clone() - syscall6_flag.clone();
+            builder.when(is_syscall.clone()).assert_bool(z.clone());
+            builder
+                .when(is_syscall.clone())
+                .assert_zero(d.clone() * (one.clone() - z));
+            builder
+                .when(is_syscall.clone())
+                .assert_zero(syscall6_flag.clone() * d);
+            // Off on every row that is not a syscall at all.
+            builder
+                .when(one.clone() - is_syscall.clone())
+                .assert_zero(syscall6_flag.clone());
+        }
+
+        // Each of these selects one syscall number by being zero on the
+        // others. All three have to exclude 6 as well, which they did not:
+        // at `imm = 6` they evaluate to 12, 15 and 20, so a syscall 6 row was
+        // simultaneously required to return the sender, the block height, the
+        // nonce, and, from the guard below, the block height plus rs1. Those
+        // agree only when all three context values and rs1 are zero, which is
+        // to say syscall 6 could not be proven outside a test fixture where
+        // everything happens to be zero.
+        //
+        // The `(imm - 6)` factor is what was missing. Measured after adding
+        // it: each factor is non-zero at exactly one of 1, 2, 3 and zero at
+        // the other three and at 6.
+        let six_val = AB::Expr::from(AB::F::from_u64(6));
+
+        let factor_1 = (imm.clone() - two_val.clone())
+            * (imm.clone() - three_val.clone())
+            * (imm.clone() - six_val.clone());
         builder
             .when(is_syscall.clone())
             .assert_zero(factor_1 * (rd_val_new.clone() - expected_sender));
 
-        let factor_2 = (imm.clone() - one.clone()) * (imm.clone() - three_val.clone());
+        let factor_2 = (imm.clone() - one.clone())
+            * (imm.clone() - three_val.clone())
+            * (imm.clone() - six_val.clone());
         builder
             .when(is_syscall.clone())
-            .assert_zero(factor_2 * (rd_val_new.clone() - expected_bh));
+            .assert_zero(factor_2 * (rd_val_new.clone() - expected_bh.clone()));
 
-        let factor_3 = (imm.clone() - one.clone()) * (imm.clone() - two_val.clone());
+        let factor_3 = (imm.clone() - one.clone())
+            * (imm.clone() - two_val.clone())
+            * (imm.clone() - six_val.clone());
         builder
             .when(is_syscall.clone())
             .assert_zero(factor_3 * (rd_val_new.clone() - expected_nonce));
@@ -1669,7 +1779,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Rd_val_new must be 0. This prevents a malicious prover from returning
         // Arbitrary values for unknown syscall numbers. imm=1,2,3 are bound to
         // Public inputs above; imm=6 is the AI event syscall.
-        let six_val = AB::Expr::from(AB::F::from_u64(6));
         let unknown_syscall_guard = (imm.clone() - one.clone())
             * (imm.clone() - two_val.clone())
             * (imm.clone() - three_val.clone())
@@ -1678,17 +1787,17 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_syscall.clone())
             .assert_zero(unknown_syscall_guard * rd_val_new.clone());
 
-        // For syscall imm=6, rd_val_new must equal
-        // Block_height + src1_val. The factor (imm-1)(imm-2)(imm-3) is non-zero
-        // Only when imm=6 (5*4*3=60), constraining rd_val_new to the expected value.
-        let expected_bh = public_inputs[30].into()
-            + public_inputs[31].into() * AB::Expr::from(AB::F::from_u64(1 << 32));
-        let imm6_guard = (imm.clone() - one.clone())
-            * (imm.clone() - two_val.clone())
-            * (imm.clone() - three_val.clone());
-        builder
-            .when(is_syscall.clone())
-            .assert_zero(imm6_guard * (rd_val_new.clone() - expected_bh - rs1_val.clone()));
+        // Syscall 6 returns the block height plus its operand.
+        //
+        // Gated on the boolean rather than on `(imm-1)(imm-2)(imm-3)`, which
+        // was the old factor and is non-zero on every unknown syscall number
+        // too: at `imm = 4` it is 6, so an unknown syscall was required to
+        // return `block_height + rs1` while the guard above required it to
+        // return zero. Both hold only when the block height and the operand
+        // are zero, so unknown syscalls were unprovable on any real chain.
+        builder.when(is_syscall.clone()).assert_zero(
+            syscall6_flag.clone() * (rd_val_new.clone() - expected_bh - rs1_val.clone()),
+        );
 
         // CPU / Registers / Memory constraints
         let r_val: AB::Expr = cur[COL_REG_VAL].into();

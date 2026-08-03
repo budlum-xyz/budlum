@@ -355,6 +355,16 @@ fn trace_matrix(
             // proof.
             values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(step.src1_val);
         }
+        if op == 0x1D && step.instruction.imm == 6 {
+            // Syscall 6 announces two events, the AI inference marker and its
+            // rs1, so both go into the digest. The caller builds the public
+            // input from `receipt.events`, which contains exactly these two,
+            // and until the AIR counted them no program using this syscall
+            // could be proven. See `COL_SYSCALL_IS_6`.
+            values[row_start + COL_SYSCALL_IS_6] = Goldilocks::new(1);
+            values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(0x00A1_00A1);
+            values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(step.src1_val);
+        }
         values[row_start + COL_RD_IDX] = Goldilocks::new(step.dst_idx as u64);
         values[row_start + COL_RS1_IDX] = Goldilocks::new(step.src1_idx as u64);
         values[row_start + COL_RS2_IDX] = Goldilocks::new(step.src2_idx as u64);
@@ -2106,6 +2116,73 @@ mod tests {
         ];
 
         prove_and_verify(program, |_| {});
+    }
+
+    /// A program calling syscall 6 must be provable.
+    ///
+    /// The syscall emits two events in the VM, the AI inference marker
+    /// `0x00A1_00A1` and its `rs1`, and `executor.rs` reads exactly that
+    /// pattern to queue an inference request. The AIR's event digest only ever
+    /// counted `Log` rows, so the trace column reached zero while the caller
+    /// built the public input from `receipt.events` and got the sum of both.
+    /// Measured with `rs1 = 5`: the receipt digest is 10551462 against a
+    /// column holding 0, and the last-row comparison refuses.
+    ///
+    /// Completeness, like the `Assert` case: the AIR was not wrong about
+    /// anything false, it disagreed with the VM about what happened, and the
+    /// honest prover is the one that loses.
+    #[test]
+    fn proves_a_program_that_calls_the_inference_syscall() {
+        let program = vec![
+            inst(Opcode::Syscall, 2, 1, 0, 6),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.registers[1] = 5;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            receipt.events,
+            vec![0x00A1_00A1, 5],
+            "the syscall announces the marker and its operand, which is what \
+             executor.rs reads to queue an inference request"
+        );
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("the honest proof must build");
+        Plonky3Adapter::verify(&envelope, &pi, &program).expect(
+            "a program calling syscall 6 must be provable; the digest has to \
+             count the events the syscall announces, not only Log rows",
+        );
     }
 
     /// A `Ret` cannot return to an address the matching `Call` did not push.
