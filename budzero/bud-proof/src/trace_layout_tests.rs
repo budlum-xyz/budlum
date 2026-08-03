@@ -8,7 +8,7 @@ use crate::plonky3_air::{
     COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT,
     COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
     COL_POSEIDON_X4_BASE, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV,
-    COL_RS1_IDX_INV, TRACE_WIDTH,
+    COL_RS1_IDX_INV, COL_SYSCALL_IS_6, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -257,6 +257,14 @@ fn all_ranges() -> Vec<ColRange> {
             name: "assert_inv",
             start: COL_ASSERT_INV,
             end: COL_ASSERT_INV + 1,
+        },
+        // Boolean form of "this syscall row has imm == 6". The event digest
+        // needs a multiplier, and the existing imm6 guard is 60 at imm = 6
+        // rather than 1.
+        ColRange {
+            name: "syscall_is_6",
+            start: COL_SYSCALL_IS_6,
+            end: COL_SYSCALL_IS_6 + 1,
         },
     ]
 }

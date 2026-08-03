@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 741;
+pub const TRACE_WIDTH: usize = 742;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -526,6 +526,39 @@ pub const COL_CMP_RS2_HI_INV: usize = 739;
 /// selector rules, and adding a fourth reader would work only for as long as
 /// that stays true.
 pub const COL_ASSERT_INV: usize = 740;
+
+/// Boolean witness for "this `Syscall` row has `imm == 6`".
+///
+/// `Syscall` with `imm = 6` emits two events in the VM:
+///
+/// ```text
+/// self.events.push(0x00A1_00A1);
+/// self.events.push(src1_val);
+/// ```
+///
+/// and the AIR's event digest only ever counted `Log` rows:
+///
+/// ```text
+/// digest[i+1] = digest[i] + is_log[i+1] * rs1[i+1]
+/// ```
+///
+/// So the two events the syscall announces never reached the digest, and the
+/// public input, which the caller builds from `receipt.events`, carried them.
+/// Measured with `src1 = 5`: the receipt digest is `10551462` and the trace
+/// column reaches `0`, so the last-row comparison fails and no program using
+/// this syscall can be proven at all.
+///
+/// The emission is not removable. `executor.rs` reads `0x00A1_00A1` as the
+/// marker for an AI inference request and takes the model id, fee and
+/// deadline from the events that follow it, so a contract calling this syscall
+/// is how that request gets queued.
+///
+/// A separate boolean is needed because the existing `imm6_guard`,
+/// `(imm-1)(imm-2)(imm-3)`, is not one: at `imm = 6` it evaluates to 60. That
+/// is fine for gating an equality, which only cares whether the factor is
+/// zero, and useless as a multiplier inside a sum. The digest needs to add the
+/// contribution exactly once.
+pub const COL_SYSCALL_IS_6: usize = 741;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
@@ -1573,10 +1606,22 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let cur_event_0: AB::Expr = cur[COL_EVENT_DIGEST_0].into();
             let nxt_is_log: AB::Expr = nxt[COL_IS_LOG].into();
             let nxt_rs1: AB::Expr = nxt[COL_RS1_VAL].into();
+            // Syscall 6 announces two events, `0x00A1_00A1` and its `rs1`, so
+            // it contributes both. Without this the digest counted only `Log`
+            // rows while the caller built the public input from
+            // `receipt.events`, and no program using the syscall could be
+            // proven. See `COL_SYSCALL_IS_6`.
+            let nxt_syscall6: AB::Expr = nxt[COL_SYSCALL_IS_6].into();
+            let ai_marker = AB::Expr::from(AB::F::from_u64(0x00A1_00A1));
             builder
                 .when_transition()
                 .when(cpu_active.clone())
-                .assert_zero(nxt_event_0 - cur_event_0.clone() - nxt_is_log * nxt_rs1);
+                .assert_zero(
+                    nxt_event_0
+                        - cur_event_0.clone()
+                        - nxt_is_log * nxt_rs1.clone()
+                        - nxt_syscall6 * (ai_marker + nxt_rs1),
+                );
 
             // The accumulator starts at zero.
             //
@@ -1599,9 +1644,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // `pc`, and all three LogUp running sums. This one was the
             // exception, and the sequence it accumulates is the one the L1
             // reads back as "what this execution announced".
-            builder
-                .when_first_row()
-                .assert_zero(cur_event_0 - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into());
+            // The first row folds its own contribution in the same way, for
+            // the same reason the Log term is here: the prover writes row
+            // zero's own events into the accumulator rather than starting at
+            // zero and catching up on the next row.
+            {
+                let cur_syscall6: AB::Expr = cur[COL_SYSCALL_IS_6].into();
+                let ai_marker_first = AB::Expr::from(AB::F::from_u64(0x00A1_00A1));
+                builder.when_first_row().assert_zero(
+                    cur_event_0
+                        - cur[COL_IS_LOG].into() * cur[COL_RS1_VAL].into()
+                        - cur_syscall6 * (ai_marker_first + cur[COL_RS1_VAL].into()),
+                );
+            }
 
             // The old comment here claimed a bounds check was unnecessary
             // because `public_inputs[40]` is a u32, so an out-of-range
@@ -1689,6 +1744,39 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         builder
             .when(is_syscall.clone())
             .assert_zero(imm6_guard * (rd_val_new.clone() - expected_bh - rs1_val.clone()));
+
+        // The boolean form of "this row is syscall 6", for the event digest.
+        //
+        // `imm6_guard` above is not usable there: it is 60 at `imm = 6`, which
+        // is fine for gating an equality and wrong as a multiplier inside a
+        // sum. See `COL_SYSCALL_IS_6`.
+        //
+        // Pinned the same way every other flag in this AIR is, with an inverse
+        // witness on the difference:
+        //
+        //   d = imm - 6
+        //   z = d * d_inv          (boolean)
+        //   d * (1 - z) == 0       (a non-zero difference forces z = 1)
+        //   is_syscall_6 = 1 - z   (only 1 when imm is exactly 6)
+        let six_for_digest = AB::Expr::from(AB::F::from_u64(6));
+        let syscall6_flag: AB::Expr = cur[COL_SYSCALL_IS_6].into();
+        {
+            let d = imm.clone() - six_for_digest;
+            let z = one.clone() - syscall6_flag.clone();
+            builder.when(is_syscall.clone()).assert_bool(z.clone());
+            builder
+                .when(is_syscall.clone())
+                .assert_zero(d.clone() * (one.clone() - z.clone()));
+            // The other direction: a zero difference must force the flag on,
+            // or a prover simply declines to count the events it emitted.
+            builder
+                .when(is_syscall.clone())
+                .assert_zero(syscall6_flag.clone() * d);
+            // Off on every row that is not a syscall at all.
+            builder
+                .when(one.clone() - is_syscall.clone())
+                .assert_zero(syscall6_flag.clone());
+        }
 
         // CPU / Registers / Memory constraints
         let r_val: AB::Expr = cur[COL_REG_VAL].into();
