@@ -355,6 +355,22 @@ fn trace_matrix(
             // proof.
             values[row_start + COL_EVENT_DIGEST_0] += Goldilocks::new(step.src1_val);
         }
+        if op == 0x1D {
+            // One flag per known syscall number. The AIR reads these instead
+            // of the polynomial factors it used to build from `imm`, because
+            // a polynomial can say "not two or three or six" and cannot say
+            // "is one", and the difference is every unrecognised number. See
+            // `COL_SYSCALL_IS_1`.
+            for (number, col) in [
+                (1i32, COL_SYSCALL_IS_1),
+                (2, COL_SYSCALL_IS_2),
+                (3, COL_SYSCALL_IS_3),
+            ] {
+                if step.instruction.imm == number {
+                    values[row_start + col] = Goldilocks::new(1);
+                }
+            }
+        }
         if op == 0x1D && step.instruction.imm == 6 {
             // Syscall 6 announces two events, the AI inference marker and its
             // rs1, so both go into the digest. The caller builds the public
@@ -2116,6 +2132,76 @@ mod tests {
         ];
 
         prove_and_verify(program, |_| {});
+    }
+
+    /// Every syscall number the VM accepts must be provable.
+    ///
+    /// The AIR picked out each number with a polynomial that is zero on the
+    /// others, and those are correct about the four they name and wrong about
+    /// everything else. At `imm = 4` all four fired at once, so the row had to
+    /// return the sender, the block height, the nonce and zero simultaneously.
+    /// That holds only when the context is all zeroes, which is what every
+    /// fixture happens to be.
+    ///
+    /// The context here is deliberately non-zero, so the old polynomials would
+    /// fail on the unknown number while passing on 1, 2 and 3.
+    #[test]
+    fn proves_every_syscall_number_including_unknown_ones() {
+        for imm in [1i32, 2, 3, 4, 6, 99] {
+            let program = vec![
+                inst(Opcode::Syscall, 2, 1, 0, imm),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            let mut vm = Vm::new(64);
+            vm.registers[1] = 5;
+            vm.context.sender = 0xAAAA;
+            vm.context.block_height = 0xBBBB;
+            vm.context.nonce = 0xCCCC;
+            let receipt = vm.run_receipt(&program);
+            assert!(receipt.success, "the VM accepts syscall {imm}");
+
+            let program_bytes: Vec<u8> = program
+                .iter()
+                .flat_map(|&i| i.to_le_bytes().to_vec())
+                .collect();
+            let mut hasher = Keccak::v256();
+            hasher.update(&program_bytes);
+            let mut program_hash = [0u8; 32];
+            hasher.finalize(&mut program_hash);
+
+            let pi = ExecutionPublicInputs {
+                chain_id: 1,
+                program_hash,
+                initial_state_root: crate::adapter::initial_state_root_of(
+                    crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(
+                        &vm.trace,
+                    )),
+                    crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                        &vm.trace,
+                    )),
+                ),
+                final_state_root: [0u8; 32],
+                sender: vm.context.sender,
+                nonce: vm.context.nonce,
+                block_height: vm.context.block_height,
+                gas_limit: vm.gas_limit,
+                gas_used: vm.gas_used,
+                exit_code: 0,
+                trace_len: vm.trace.len() as u64,
+                event_digest: crate::event_digest_from_events(&receipt.events),
+            };
+
+            let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+                .unwrap_or_else(|e| panic!("syscall {imm} must build a proof: {e:?}"));
+            Plonky3Adapter::verify(&envelope, &pi, &program).unwrap_or_else(|e| {
+                panic!(
+                    "syscall {imm} must verify against a non-zero context: {e:?}. \
+                     A polynomial selector cannot say \"this row is syscall one\", \
+                     only \"not two or three or six\", and those differ on every \
+                     number the list does not mention"
+                )
+            });
+        }
     }
 
     /// A program calling syscall 6 must be provable.
