@@ -427,6 +427,20 @@ fn trace_matrix(
             values[row_start + COL_INV_ZERO] = Goldilocks::new(zero);
         }
 
+        if opcode == bud_isa::Opcode::Assert {
+            // The witness proving the condition is non-zero. The VM refuses
+            // only on zero, so any other value has an inverse and the AIR's
+            // `z = rs1 * assert_inv` comes out 1. A row that reaches here at
+            // all passed the VM, so `src1_val` is never zero, but the branch
+            // is written for both cases rather than relying on that.
+            let a = step.src1_val;
+            values[row_start + COL_ASSERT_INV] = Goldilocks::new(if a == 0 {
+                0
+            } else {
+                bud_vm::field_inverse_goldilocks(a)
+            });
+        }
+
         if opcode == bud_isa::Opcode::Eq || opcode == bud_isa::Opcode::Neq {
             let diff = step.src1_val.wrapping_sub(step.src2_val);
             let inv = if diff != 0 {
@@ -2100,6 +2114,145 @@ mod tests {
         ];
 
         prove_and_verify(program, |_| {});
+    }
+
+    /// `Assert` must accept any non-zero condition, as the VM does.
+    ///
+    /// The VM halts only when the condition is zero. The AIR asked for
+    /// `assert_one(rs1_val)`, which demands exactly 1, and the two agree only
+    /// on the values every existing test used: `0` and `1`, which is what
+    /// `Eq` and the comparisons produce. BudL's `constrain(...)` lowers to
+    /// this opcode, so `constrain(flags & MASK)` was a contract the VM ran and
+    /// no prover could prove.
+    ///
+    /// Completeness, not soundness: the AIR was stricter, so nothing false got
+    /// through. Correct programs were rejected, which reads as broken tooling
+    /// rather than as an attack, and is the reason it survived.
+    #[test]
+    fn proves_assert_on_conditions_that_are_not_one() {
+        for cond in [1u64, 2, 7, 0xFFFF, 18_446_744_069_414_584_320] {
+            let program = vec![
+                inst(Opcode::Assert, 0, 1, 0, 0),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            let mut vm = Vm::new(64);
+            vm.registers[1] = cond;
+            let receipt = vm.run_receipt(&program);
+            assert!(
+                receipt.success,
+                "the VM accepts any non-zero condition, including {cond}"
+            );
+
+            prove_and_verify(program, move |vm| {
+                vm.registers[1] = cond;
+            });
+        }
+    }
+
+    /// An `Assert` on a zero condition must still be unprovable.
+    ///
+    /// The soundness half of the same column. Relaxing `assert_one(rs1)` to
+    /// "non-zero" must not relax it to "anything": a prover that writes a
+    /// witness claiming the condition was non-zero when it was zero is
+    /// claiming an assertion held that did not.
+    #[test]
+    fn rejects_an_assert_that_claims_zero_is_non_zero() {
+        // The VM refuses to run this, so the trace is built from a passing
+        // program and the condition is zeroed afterwards, which is exactly
+        // what a prover forging a failed assertion would do.
+        let program = vec![
+            inst(Opcode::Assert, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.registers[1] = 1;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+
+        let mut assert_row = None;
+        for i in 0..n_cpu {
+            if matrix.values[i * TRACE_WIDTH + COL_IS_ASSERT].as_canonical_u64() == 1 {
+                assert_row = Some(i);
+                break;
+            }
+        }
+        let assert_row = assert_row.expect("the trace must contain an Assert row");
+        let at = assert_row * TRACE_WIDTH;
+
+        // The condition becomes zero, so the assertion did not hold. The
+        // witness is left as it was, claiming otherwise.
+        matrix.values[at + COL_RS1_VAL] = Goldilocks::new(0);
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "an Assert on a zero condition verified; relaxing the rule from \
+             `== 1` to `!= 0` must not relax it to `anything`"
+        );
     }
 
     /// A comparison cannot be answered from a non-canonical bit string.
