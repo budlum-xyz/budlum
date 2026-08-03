@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 742;
+pub const TRACE_WIDTH: usize = 745;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -559,6 +559,38 @@ pub const COL_ASSERT_INV: usize = 740;
 /// zero, and useless as a multiplier inside a sum. The digest needs to add the
 /// contribution exactly once.
 pub const COL_SYSCALL_IS_6: usize = 741;
+
+/// Boolean witnesses for the remaining syscall numbers.
+///
+/// The AIR picked out each syscall with a polynomial that is zero on the
+/// others:
+///
+/// ```text
+/// sender       (imm-2)(imm-3)(imm-6)
+/// block height (imm-1)(imm-3)(imm-6)
+/// nonce        (imm-1)(imm-2)(imm-6)
+/// unknown      (imm-1)(imm-2)(imm-3)(imm-6)
+/// ```
+///
+/// Those are correct about the four numbers they name and wrong about every
+/// other one. At `imm = 4` all four are non-zero, so the row is told to return
+/// the sender, and the block height, and the nonce, and zero, at the same
+/// time. They agree only when the three context values are zero, so a program
+/// containing an unknown syscall cannot be proven on a chain where the sender
+/// or the height or the nonce is anything but zero.
+///
+/// The VM is happy with those programs: an unrecognised `imm` returns zero and
+/// execution continues. So this is completeness again, and it hid for the same
+/// reason as the others, every fixture leaves the context zeroed.
+///
+/// A polynomial cannot fix it. What is wanted is "this row is syscall one",
+/// which is a boolean, and the polynomial is only ever "this row is not
+/// syscall two or three or six". Each number gets a witness pinned in both
+/// directions, the same shape as [`COL_SYSCALL_IS_6`], and the unknown case is
+/// then one minus the sum of the four.
+pub const COL_SYSCALL_IS_1: usize = 742;
+pub const COL_SYSCALL_IS_2: usize = 743;
+pub const COL_SYSCALL_IS_3: usize = 744;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
@@ -1702,9 +1734,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let expected_nonce = public_inputs[28].into()
             + public_inputs[29].into() * AB::Expr::from(AB::F::from_u64(1 << 32));
 
-        let two_val = AB::Expr::from(AB::F::from_u64(2));
-        let three_val = AB::Expr::from(AB::F::from_u64(3));
-
         // A boolean saying "this row is syscall 6", used both by the event
         // digest and by the return-value rule below.
         //
@@ -1740,52 +1769,73 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_zero(syscall6_flag.clone());
         }
 
-        // Each of these selects one syscall number by being zero on the
-        // others. All three have to exclude 6 as well, which they did not:
-        // at `imm = 6` they evaluate to 12, 15 and 20, so a syscall 6 row was
-        // simultaneously required to return the sender, the block height, the
-        // nonce, and, from the guard below, the block height plus rs1. Those
-        // agree only when all three context values and rs1 are zero, which is
-        // to say syscall 6 could not be proven outside a test fixture where
-        // everything happens to be zero.
+        // One boolean per known syscall number, each pinned in both
+        // directions, then the unknown case as one minus their sum.
         //
-        // The `(imm - 6)` factor is what was missing. Measured after adding
-        // it: each factor is non-zero at exactly one of 1, 2, 3 and zero at
-        // the other three and at 6.
-        let six_val = AB::Expr::from(AB::F::from_u64(6));
+        // These used to be polynomials, `(imm-2)(imm-3)(imm-6)` and its
+        // siblings. Those are correct about the four numbers they name and
+        // wrong about every other: at `imm = 4` all four are non-zero, so the
+        // row was required to return the sender, the block height, the nonce
+        // and zero simultaneously. They agree only when all three context
+        // values are zero, so a program containing an unknown syscall could
+        // not be proven on a chain where any of them is set. The VM accepts
+        // those programs, returning zero and carrying on, so this was
+        // completeness rather than soundness, and every fixture zeroes the
+        // context, which is why it survived.
+        //
+        // A polynomial cannot express "this row is syscall one". It can only
+        // express "this row is not two or three or six", and those differ on
+        // everything else. See `COL_SYSCALL_IS_1`.
+        let syscall_flags: Vec<(AB::Expr, u64)> = vec![
+            (cur[COL_SYSCALL_IS_1].into(), 1),
+            (cur[COL_SYSCALL_IS_2].into(), 2),
+            (cur[COL_SYSCALL_IS_3].into(), 3),
+        ];
+        for (flag, number) in &syscall_flags {
+            let d = imm.clone() - AB::Expr::from(AB::F::from_u64(*number));
+            let z = one.clone() - flag.clone();
+            builder.when(is_syscall.clone()).assert_bool(z.clone());
+            // A different immediate forces the flag off.
+            builder
+                .when(is_syscall.clone())
+                .assert_zero(d.clone() * (one.clone() - z));
+            // This immediate forces the flag on, so a prover cannot decline a
+            // rule by declining to admit which syscall it ran.
+            builder
+                .when(is_syscall.clone())
+                .assert_zero(flag.clone() * d);
+            // Off entirely on rows that are not syscalls.
+            builder
+                .when(one.clone() - is_syscall.clone())
+                .assert_zero(flag.clone());
+        }
 
-        let factor_1 = (imm.clone() - two_val.clone())
-            * (imm.clone() - three_val.clone())
-            * (imm.clone() - six_val.clone());
+        let is_sc1 = syscall_flags[0].0.clone();
+        let is_sc2 = syscall_flags[1].0.clone();
+        let is_sc3 = syscall_flags[2].0.clone();
+
         builder
             .when(is_syscall.clone())
-            .assert_zero(factor_1 * (rd_val_new.clone() - expected_sender));
+            .assert_zero(is_sc1 * (rd_val_new.clone() - expected_sender));
 
-        let factor_2 = (imm.clone() - one.clone())
-            * (imm.clone() - three_val.clone())
-            * (imm.clone() - six_val.clone());
         builder
             .when(is_syscall.clone())
-            .assert_zero(factor_2 * (rd_val_new.clone() - expected_bh.clone()));
+            .assert_zero(is_sc2 * (rd_val_new.clone() - expected_bh.clone()));
 
-        let factor_3 = (imm.clone() - one.clone())
-            * (imm.clone() - two_val.clone())
-            * (imm.clone() - six_val.clone());
         builder
             .when(is_syscall.clone())
-            .assert_zero(factor_3 * (rd_val_new.clone() - expected_nonce));
+            .assert_zero(is_sc3 * (rd_val_new.clone() - expected_nonce));
 
-        // For syscall with imm not in {1,2,3,6},
-        // Rd_val_new must be 0. This prevents a malicious prover from returning
-        // Arbitrary values for unknown syscall numbers. imm=1,2,3 are bound to
-        // Public inputs above; imm=6 is the AI event syscall.
-        let unknown_syscall_guard = (imm.clone() - one.clone())
-            * (imm.clone() - two_val.clone())
-            * (imm.clone() - three_val.clone())
-            * (imm.clone() - six_val);
+        // An unrecognised syscall returns zero, matching the VM's fallback
+        // arm. "Unrecognised" is exactly "none of the four flags is set",
+        // which the booleans can say and the polynomials could not.
+        let known_syscall = syscall_flags[0].0.clone()
+            + syscall_flags[1].0.clone()
+            + syscall_flags[2].0.clone()
+            + syscall6_flag.clone();
         builder
             .when(is_syscall.clone())
-            .assert_zero(unknown_syscall_guard * rd_val_new.clone());
+            .assert_zero((one.clone() - known_syscall) * rd_val_new.clone());
 
         // Syscall 6 returns the block height plus its operand.
         //

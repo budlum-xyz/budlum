@@ -8,7 +8,8 @@ use crate::plonky3_air::{
     COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT,
     COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
     COL_POSEIDON_X4_BASE, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV,
-    COL_RS1_IDX_INV, COL_SYSCALL_IS_6, TRACE_WIDTH,
+    COL_RS1_IDX_INV, COL_SYSCALL_IS_1, COL_SYSCALL_IS_2, COL_SYSCALL_IS_3, COL_SYSCALL_IS_6,
+    TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -265,6 +266,24 @@ fn all_ranges() -> Vec<ColRange> {
             name: "syscall_is_6",
             start: COL_SYSCALL_IS_6,
             end: COL_SYSCALL_IS_6 + 1,
+        },
+        // The other three syscall numbers. Polynomials could say "not two or
+        // three or six" and not "is one", so every unrecognised number was
+        // told to satisfy all four rules at once.
+        ColRange {
+            name: "syscall_is_1",
+            start: COL_SYSCALL_IS_1,
+            end: COL_SYSCALL_IS_1 + 1,
+        },
+        ColRange {
+            name: "syscall_is_2",
+            start: COL_SYSCALL_IS_2,
+            end: COL_SYSCALL_IS_2 + 1,
+        },
+        ColRange {
+            name: "syscall_is_3",
+            start: COL_SYSCALL_IS_3,
+            end: COL_SYSCALL_IS_3 + 1,
         },
     ]
 }
