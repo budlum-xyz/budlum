@@ -3,6 +3,9 @@
 //! Lubot AI çıktısı SocialFi'da **gerçek NFT** olarak yayımlanır (`NftRegistry::mint`);
 //! Sosyal NFT içeriği Lubot için kapalı-devre veri kaynağına dönüştürülür
 //! (`SocialDataRef`). İki yön de çalışır: Lubot → sosyal, sosyal → Lubot.
+//!
+//! WIRING: unwired - the SocialFi bridge is described but no transaction path
+//! mints a Lubot output as an NFT.
 
 use crate::core::address::Address;
 use crate::socialfi::NftRegistry;

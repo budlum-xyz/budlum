@@ -13,6 +13,9 @@
 //!
 //! Not: Bu modül sadece veri modeli ve sorgu altyapısı sağlar.
 //! RPC endpoint entegrasyonu ayrı bir adımda yapılacaktır.
+//!
+//! WIRING: unwired - the evidence endpoints are defined but no RPC method is
+//! registered against them.
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, Hash32};

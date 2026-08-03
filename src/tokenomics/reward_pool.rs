@@ -3,6 +3,10 @@
 //! Rewards are paid from a pre-allocated pool, not by minting new BUD. This
 //! Module keeps the schedule pure/deterministic so economy invariant tests can
 //! Reason about supply conservation before the full executor wiring lands.
+//!
+//! WIRING: unwired - deliberate - block emission is disabled, so the pool
+//! schedule is kept pure and unpaid; see the economy invariant
+//! `epoch_transition_does_not_mint_validator_yield`.
 
 use crate::core::address::Address;
 use crate::tokenomics::{bud, BUD_TOTAL_SUPPLY};

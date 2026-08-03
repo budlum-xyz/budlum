@@ -19,6 +19,9 @@
 //!   Headers' signatures) which then sets [`ProofProvenance::ConsensusVerified`].
 //!   The registry only applies a slash for reports whose provenance it trusts,
 //!   So it never has to understand every consensus flavour.
+//!
+//! WIRING: unwired - the typed slashing reports are constructed only from
+//! tests; the live slashing path builds its own.
 
 use crate::core::address::Address;
 use crate::registry::permissionless::SlashingCondition;

@@ -2,6 +2,10 @@
 //!
 //! Mobile devices may self-host B.U.D. data, but they must never be marketed as
 //! Always-online storage. Critical data should use paid replicas.
+//!
+//! WIRING: unwired - measured: nothing in the tree calls
+//! `recommendation_for_content` or `validate_against_profile`, so the rule
+//! that critical content needs a paid replica is written and never enforced.
 
 use crate::core::address::Address;
 use crate::storage::content_id::ContentId;

@@ -9,6 +9,9 @@
 //! A node is a "responsible host" for a shard if:
 //! 1. The shard is assigned to them via an on-chain `StorageDeal`.
 //! 2. The node's `PeerId` is among the K-closest peers to the CID in the DHT.
+//!
+//! WIRING: unwired - no node builds a ShardManager yet; shard assignment is
+//! still decided by the single-shard default.
 
 use crate::store::ContentId;
 use libp2p::PeerId;

@@ -6,6 +6,9 @@
 //! - Root: `SHA-256(BDLM_MERKLE_TRIE_V1 || raw_root)`
 //!
 //! Path bits are MSB-first (address bit 0 = root branch).
+//!
+//! WIRING: unwired - account state still hashes through the existing root;
+//! this trie is not the one consensus reads.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

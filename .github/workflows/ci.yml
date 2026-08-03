@@ -1011,6 +1011,17 @@ jobs:
         run: |
           bash ./scripts/check-binding-claims-match-reality.sh --self-test
           bash ./scripts/check-binding-claims-match-reality.sh
+      # A module can compile, lint, pass its own tests and still never run.
+      # `storage/mobile_self.rs` holds the rule that critical B.U.D. content
+      # needs a paid replica rather than a phone that is only sometimes online.
+      # It is written, it is tested, and no production caller reaches it, so
+      # nothing enforces it. Green tests are the strongest evidence for the
+      # wrong conclusion here: they pass because the function is correct, not
+      # because anything invokes it. Fifteen other modules measured the same.
+      - name: yetenek modulleri bagli mi + kanarya
+        run: |
+          bash ./scripts/check-capability-modules-are-wired.sh --self-test
+          bash ./scripts/check-capability-modules-are-wired.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

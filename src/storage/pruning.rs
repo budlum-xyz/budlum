@@ -3,6 +3,9 @@
 //! This is a pure policy layer. It lets CLI/config/RPC code share one
 //! Fail-closed interpretation of full/archive node roles before deeper pruning
 //! Mechanics are wired into storage.
+//!
+//! WIRING: unwired - no node consults the policy before pruning;
+//! `storage_prune` decides for itself.
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

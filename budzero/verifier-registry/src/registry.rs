@@ -10,6 +10,9 @@
 //!   Same address (cross-role slashing).
 //! - Evidence-gated slashing: only consensus-verified reports are acted on.
 //! - Deterministic `state_root` for snapshot/consensus commitment.
+//!
+//! WIRING: unwired - a separate crate consumed by downstream verifiers; the
+//! node keeps its own registry in src/registry/.
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingReport};
