@@ -1058,6 +1058,20 @@ jobs:
         run: |
           bash ./scripts/check-self-derived-ids-cover-every-field.sh --self-test
           bash ./scripts/check-self-derived-ids-cover-every-field.sh
+      # The id gate has a sibling hole. An id binds a field only to whoever
+      # re-derives it; the signature is what every node checks first, and
+      # `Transaction::signing_hash` builds its preimage by hand, so a field
+      # added to a struct, to the protobuf and to the conversions can miss the
+      # one place 700 lines away that commits it. Three had:
+      # `AiModelSpec.execution_weights_digest` and `.execution_dims`, which are
+      # what separate two models sharing an architecture, and
+      # `AiExecutionProof.public_inputs`, which is the claim the STARK is
+      # checked against. A relaying node could rewrite any of them and the
+      # signature still verified.
+      - name: telden gelen her alan imzalaniyor mu + kanarya
+        run: |
+          bash ./scripts/check-wire-fields-are-signed.sh --self-test
+          bash ./scripts/check-wire-fields-are-signed.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
