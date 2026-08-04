@@ -2166,7 +2166,8 @@ mod tests {
             k: 1,
             n: liar.shard_count,
         };
-        liar.manifest_id = crate::storage::manifest_id_from_parts(&liar.shards, &liar.erasure);
+        liar.manifest_id =
+            crate::storage::manifest_id_from_parts(&liar.shards, &liar.erasure, &liar.encryption);
         assert!(
             liar.verify_id().is_ok(),
             "the fixture must pass the weaker check, or it tests nothing"

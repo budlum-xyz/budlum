@@ -15,7 +15,8 @@ use crate::domain::storage_deal::{StorageEconomicsParams, StorageError, StorageR
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;
 use crate::storage::manifest::{
-    manifest_id_from_parts, ContentManifest, ErasureScheme, ShardKind, ShardRef,
+    manifest_id_from_parts, ContentCipher, ContentEncryption, ContentManifest, ErasureScheme,
+    ShardKind, ShardRef,
 };
 use crate::storage::{encode_object, reconstruct_object};
 
@@ -110,8 +111,8 @@ fn relabelling_a_shard_changes_the_manifest_id() {
     relabelled[0].kind = ShardKind::Parity;
 
     assert_ne!(
-        manifest_id_from_parts(&m.shards, &m.erasure),
-        manifest_id_from_parts(&relabelled, &m.erasure),
+        manifest_id_from_parts(&m.shards, &m.erasure, &m.encryption),
+        manifest_id_from_parts(&relabelled, &m.erasure, &m.encryption),
         "a shard's kind must be inside the commitment"
     );
 }
@@ -126,8 +127,8 @@ fn understating_k_changes_the_manifest_id() {
     let understated = ErasureScheme { k: 1, n: 6 };
 
     assert_ne!(
-        manifest_id_from_parts(&m.shards, &honest),
-        manifest_id_from_parts(&m.shards, &understated),
+        manifest_id_from_parts(&m.shards, &honest, &m.encryption),
+        manifest_id_from_parts(&m.shards, &understated, &m.encryption),
         "the erasure scheme must be inside the commitment"
     );
 
@@ -178,7 +179,7 @@ fn a_content_size_larger_than_the_stored_bytes_is_refused() {
 
     let mut lying = coded_manifest();
     lying.content_size = stored + 1;
-    lying.manifest_id = manifest_id_from_parts(&lying.shards, &lying.erasure);
+    lying.manifest_id = manifest_id_from_parts(&lying.shards, &lying.erasure, &lying.encryption);
     assert!(
         lying.validate_untrusted().is_err(),
         "the untrusted check must catch it even with a consistent id"
@@ -225,7 +226,7 @@ fn duplicate_shard_indices_are_refused() {
     let mut m = coded_manifest();
     m.shards[1].index = m.shards[0].index;
     m.total_size = m.shards.iter().map(|s| s.size as u64).sum();
-    m.manifest_id = manifest_id_from_parts(&m.shards, &m.erasure);
+    m.manifest_id = manifest_id_from_parts(&m.shards, &m.erasure, &m.encryption);
     assert!(
         m.validate_untrusted().is_err(),
         "two shards at the same index would make lookup ambiguous"
@@ -242,9 +243,162 @@ fn the_v2_commitment_differs_from_v1() {
     let scheme = ErasureScheme::replication(2);
     assert_ne!(
         crate::storage::manifest::manifest_id_from_shards(&shards),
-        manifest_id_from_parts(&shards, &scheme),
+        manifest_id_from_parts(&shards, &scheme, &ContentEncryption::Plaintext),
         "V2 must be domain-separated from V1"
     );
+}
+
+/// What the chain records about how content was protected.
+///
+/// The chain holds no bytes, so it cannot encrypt and cannot verify that
+/// anyone else did. What it can do is carry the uploader's statement inside
+/// the commitment, so the statement cannot be rewritten under a stable id.
+/// These lock that the statement is actually bound and actually checked as
+/// far as it can be.
+mod encryption_declaration {
+    use super::*;
+
+    #[test]
+    fn declaring_client_side_encryption_changes_the_manifest_id() {
+        // Measured before this field existed: the same shards uploaded as
+        // ciphertext and as plaintext produced one id, so the privacy claim
+        // was whatever the reader assumed.
+        let m = coded_manifest();
+        let plaintext = m.manifest_id;
+        let encrypted = m
+            .clone()
+            .with_encryption(ContentEncryption::ClientSide(ContentCipher::Aes256Gcm));
+
+        assert_ne!(
+            plaintext, encrypted.manifest_id,
+            "the encryption declaration must be inside the commitment"
+        );
+        assert!(
+            encrypted.verify_id().is_ok(),
+            "the recomputed id must verify against the declaration it covers"
+        );
+    }
+
+    #[test]
+    fn two_ciphers_are_two_different_objects() {
+        // A tag shared between ciphers would let a manifest be reinterpreted
+        // as naming a different construction at the same id.
+        let m = coded_manifest();
+        let gcm = m
+            .clone()
+            .with_encryption(ContentEncryption::ClientSide(ContentCipher::Aes256Gcm));
+        let chacha = m.with_encryption(ContentEncryption::ClientSide(
+            ContentCipher::ChaCha20Poly1305,
+        ));
+
+        assert_ne!(
+            gcm.manifest_id, chacha.manifest_id,
+            "each cipher must have its own commitment tag"
+        );
+    }
+
+    #[test]
+    fn rewriting_the_declaration_breaks_the_id() {
+        // The attack the binding exists to stop: register as encrypted, then
+        // serve a manifest reading plaintext at the same id, and a reader
+        // concludes the bytes it pulled were never protected.
+        let mut m = coded_manifest()
+            .with_encryption(ContentEncryption::ClientSide(ContentCipher::Aes256Gcm));
+        assert!(m.validate_untrusted().is_ok(), "the honest shape passes");
+
+        m.encryption = ContentEncryption::Plaintext;
+        let err = m
+            .validate_untrusted()
+            .expect_err("a rewritten declaration must not verify");
+        assert!(
+            err.contains("does not match"),
+            "the error should name the id mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_written_before_this_field_reads_as_plaintext() {
+        // Those manifests were written by a tree with no encryption in it.
+        // Defaulting them to a privacy claim would invent one nobody made.
+        let m = coded_manifest();
+        assert_eq!(
+            m.encryption,
+            ContentEncryption::Plaintext,
+            "the default must be the absence of a claim, not a claim"
+        );
+        assert!(!m.is_client_encrypted());
+        assert_eq!(m.encryption.commitment_tag(), 0);
+    }
+
+    #[test]
+    fn an_object_too_small_to_hold_an_auth_tag_cannot_claim_encryption() {
+        // Every named cipher appends a 16-byte tag, so even a zero-length
+        // plaintext encrypts to 16 bytes. Fewer than that was produced by
+        // none of them. This catches the client that forgets to encrypt and
+        // remembers to declare, which is the shape that ships.
+        let tiny = ContentManifest::from_bytes_sliced(b"12345", 5)
+            .expect("five bytes slice into one shard")
+            .with_encryption(ContentEncryption::ClientSide(ContentCipher::Aes256Gcm));
+
+        assert!(
+            tiny.content_size() < crate::storage::MIN_AEAD_CIPHERTEXT_BYTES,
+            "the fixture has to be below the tag length or it tests nothing"
+        );
+        let err = tiny
+            .validate_untrusted()
+            .expect_err("a 5-byte AEAD output does not exist");
+        assert!(
+            err.contains("authentication tag"),
+            "the error should say why, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_object_at_the_tag_length_is_accepted() {
+        // The inverse witness: the check must refuse impossible sizes and
+        // nothing else. Sixteen bytes is exactly an empty plaintext sealed,
+        // which is a real thing a client can upload.
+        let exact = ContentManifest::from_bytes_sliced(&[7u8; 16], 16)
+            .expect("sixteen bytes slice into one shard")
+            .with_encryption(ContentEncryption::ClientSide(
+                ContentCipher::XChaCha20Poly1305,
+            ));
+
+        assert_eq!(
+            exact.content_size(),
+            crate::storage::MIN_AEAD_CIPHERTEXT_BYTES
+        );
+        assert!(
+            exact.validate_untrusted().is_ok(),
+            "an object exactly the tag length is a sealed empty plaintext"
+        );
+        assert!(exact.is_client_encrypted());
+    }
+
+    #[test]
+    fn a_small_plaintext_object_is_untouched_by_the_tag_check() {
+        // The size floor applies to the claim, not to storage. A five-byte
+        // plaintext object is ordinary and must stay registrable.
+        let tiny = ContentManifest::from_bytes_sliced(b"12345", 5)
+            .expect("five bytes slice into one shard");
+        assert!(
+            tiny.validate_untrusted().is_ok(),
+            "the floor must not reach objects that claim nothing"
+        );
+    }
+
+    #[test]
+    fn the_declaration_carries_no_key_material() {
+        // A key field in a public commitment is a key published on a public
+        // chain. This locks the shape: the enum is two words wide at most,
+        // which no wrapped key fits into.
+        assert!(
+            std::mem::size_of::<ContentEncryption>() <= 2,
+            "ContentEncryption grew past a tag and a cipher byte; if a key, \
+             key id, wrapped key or nonce was added, it is now on chain in \
+             the clear"
+        );
+    }
 }
 
 /// Repair has to be decided per object, not per shard.

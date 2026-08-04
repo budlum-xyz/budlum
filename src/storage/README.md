@@ -127,6 +127,23 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
   Core lib suite içinde koşar (`cargo test --lib`; toplam sayı rozeti 755 lib,
   2026-07-18).
 
+## İçerik şifrelemesi: beyan var, zorlama yok
+
+`ContentManifest.encryption` yükleyicinin baytları parçalamadan önce ne
+yaptığını **beyan eder** ve beyan `manifest_id` içindedir, yani sabit bir
+kimlik altında yeniden yazılamaz. Varsayılan `Plaintext`, çünkü bu alandan
+önce yazılmış manifestler içinde hiç şifreleme bulunmayan bir ağaç tarafından
+yazıldı.
+
+Zincir bayt görmediği için hiçbir şeyin gerçekten şifrelendiğini
+doğrulayamaz. Doğrulayabildiği tek şey aritmetiktir: adlandırılan üç AEAD de
+16 baytlık etiket ekler, o yüzden `ClientSide` ilan edip 16 bayttan kısa olan
+bir nesne reddedilir. Bu dikkatsiz istemciyi yakalar, kararlı yalancıyı
+değil.
+
+Ayrıntı, neyin iddia edilmediği ve nedenleri: `docs/BUD_CONTENT_ENCRYPTION.md`.
+Kapı: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 kanarya).
+
 ## Yol haritası işaretleri
 
 - İzin katmanı: `AccessGrant` + `AccessRevocation` + sahip-imzalı provenance
