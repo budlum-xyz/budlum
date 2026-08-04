@@ -203,6 +203,24 @@ for path, src in sources.items():
             continue
         m = UPDATE.search(line)
         if not m:
+            # rustfmt wraps a long call, and the argument then sits on the
+            # next line:
+            #
+            #     hasher.update(
+            #         entry.validator_address.as_bytes(),
+            #     );
+            #
+            # Matching only within one line misses those, and a name-based
+            # gate that misses does not report a miss: it reports nothing.
+            # The sibling gate shipped with exactly this hole and passed the
+            # function it was written for. Join the continuation before
+            # giving up.
+            if line.rstrip().endswith(".update("):
+                joined = line.rstrip() + lines[i + 1].strip() if i + 1 < len(lines) else line
+                m = UPDATE.search(joined)
+                if m:
+                    expr = m.group(1)
+                    updates.append((i, joined, field_of(expr), expr))
             continue
         expr = m.group(1)
         updates.append((i, line, field_of(expr), expr))
@@ -215,7 +233,27 @@ for path, src in sources.items():
         i, line, field, expr = updates[k]
         j, next_line, next_field, _ = updates[k + 1]
         # Only adjacent updates: a gap means other bytes sit between them.
-        if j - i > 2:
+        #
+        # Measured in *update calls*, not raw line distance. A wrapped call
+        # spans three lines on its own, so a fixed line budget silently stops
+        # treating two neighbouring updates as neighbours the moment rustfmt
+        # breaks one of them. The lines between two consecutive updates are
+        # checked for another hasher feed instead: if there is none, they are
+        # adjacent however many lines the formatter used.
+        between = "\n".join(lines[i + 1:j])
+        if ".update(" in between:
+            continue
+        # Two updates are only neighbours if they feed the SAME hasher. The
+        # state root builds a per-validator digest in `h` and folds the
+        # results into `combined`; the last feed of one and the first feed of
+        # the next are textually adjacent and hash into different accumulators,
+        # so bytes cannot move between them. Comparing receivers keeps the
+        # gate from inventing a collision across that boundary.
+        def receiver_of(text):
+            rm = re.search(r"([A-Za-z_][\w.]*)\s*\.update\(", text)
+            return rm.group(1) if rm else None
+
+        if receiver_of(line) != receiver_of(next_line):
             continue
         if field not in variable_fields or next_field not in variable_fields:
             continue
@@ -446,6 +484,42 @@ pub fn digest(d: &Deal, hasher: &mut Sha3_256) {
     hasher.update(d.amount.to_le_bytes());
 }'
   expect_pass "$tmp/nopairs" "a tree whose variable-length fields are never adjacent" || return 1
+
+  # 10. The blind spot that shipped in the sibling gate: rustfmt wraps a long
+  #     call and the argument lands on the next line. A single-line match sees
+  #     nothing and reports nothing, which is the worst failure a gate has.
+  mk "$tmp/wrapped" 'pub struct Entry {
+    pub name: String,
+    pub sig: Vec<u8>,
+}
+pub fn leaf(e: &Entry, hasher: &mut Sha3_256) {
+    hasher.update(
+        e.name.as_bytes(),
+    );
+    hasher.update(&e.sig);
+}'
+  expect_finding "$tmp/wrapped" "a wrapped update() argument" || return 1
+
+  # 11. Two updates that feed DIFFERENT hashers are not neighbours, however
+  #     adjacent the lines are. The state root folds per-item digests into a
+  #     second accumulator exactly like this.
+  mk "$tmp/two_hashers" 'pub struct Item {
+    pub name: String,
+    pub sig: Vec<u8>,
+}
+pub fn root(items: &[Item]) -> [u8; 32] {
+    let mut combined = Sha256::new();
+    for item in items {
+        let mut h = Sha256::new();
+        h.update((item.name.len() as u64).to_le_bytes());
+        h.update(item.name.as_bytes());
+        h.update((item.sig.len() as u64).to_le_bytes());
+        h.update(&item.sig);
+        combined.update(h.finalize());
+    }
+    combined.finalize().into()
+}'
+  expect_pass "$tmp/two_hashers" "adjacent feeds into two different hashers" || return 1
 
   echo "hash-input length gate self-test OK: a raw pair, a mid-sequence raw \
 pair and a tree with no variable-length field at all are rejected; a prefixed \
