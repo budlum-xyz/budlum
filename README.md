@@ -10,7 +10,7 @@ finality proofs and records cross-domain value transfer as a cryptographic fact 
 `GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1879%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-1870%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.94.0-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE.md)
 
