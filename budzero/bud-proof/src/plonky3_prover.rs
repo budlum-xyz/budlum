@@ -1679,6 +1679,313 @@ mod tests {
         );
     }
 
+    /// Ten opcodes were constrained in the AIR and never attacked.
+    ///
+    /// Coverage was measured per opcode by walking every `rejects_*` test body
+    /// for the `Opcode::` variants it builds, rather than by reading test
+    /// names. Names lie: `rejects_tampered_comparison_result` sounds like it
+    /// covers the comparison family and builds only `Lt`.
+    ///
+    /// A constraint with no forgery test is a constraint nobody has watched
+    /// fail. Each test below tampers exactly one witness value and asserts the
+    /// proof stops closing.
+    #[test]
+    fn rejects_a_forged_inverse() {
+        // `Inv` is checked by `rs1 * rd + inv_zero - 1 == 0`. A prover naming
+        // any other field element as the inverse breaks that product.
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Inv, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                trace[1].dst_val = trace[1].dst_val.wrapping_add(1);
+            },
+        );
+    }
+
+    /// `Inv` of zero is defined as zero by the VM, and the AIR carries a
+    /// separate `inv_zero` flag for it. Claiming a non-zero inverse for zero
+    /// is the forgery that flag exists to refuse.
+    #[test]
+    fn rejects_an_inverse_invented_for_zero() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 0),
+            inst(Opcode::Inv, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                trace[1].dst_val = 99;
+            },
+        );
+    }
+
+    /// `Not` is `1 - is_nonzero`, with `is_nonzero` proved boolean and pinned
+    /// by `rs1 * (1 - is_nonzero) == 0`. Flipping the result alone leaves the
+    /// witness pointing the other way.
+    #[test]
+    fn rejects_a_forged_logical_not() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 5),
+            inst(Opcode::Not, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // 5 is non-zero, so Not is 0. Claim 1.
+                trace[1].dst_val = 1;
+            },
+        );
+    }
+
+    /// `Eq` and `Neq` share one zero-test witness. `Eq` reads
+    /// `1 - z` and `Neq` reads `z`, so a forged `Eq` result contradicts the
+    /// same witness the difference pins.
+    #[test]
+    fn rejects_a_forged_equality() {
+        let program = vec![inst(Opcode::Eq, 1, 2, 3, 0), inst(Opcode::Halt, 0, 0, 0, 0)];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 42;
+                vm.registers[3] = 42;
+            },
+            |trace| {
+                // 42 == 42 is 1. Claim they differ.
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// The mirror of the above on the other side of the shared witness.
+    #[test]
+    fn rejects_a_forged_inequality() {
+        let program = vec![
+            inst(Opcode::Neq, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 7;
+                vm.registers[3] = 9;
+            },
+            |trace| {
+                // 7 != 9 is 1. Claim they match.
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// `Gt` reads the same 64-bit decomposition as `Lt` but takes the opposite
+    /// side. A test on `Lt` alone leaves the reversed reading unwatched.
+    #[test]
+    fn rejects_a_forged_greater_than() {
+        let program = vec![inst(Opcode::Gt, 1, 2, 3, 0), inst(Opcode::Halt, 0, 0, 0, 0)];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 3;
+                vm.registers[3] = 8;
+            },
+            |trace| {
+                // 3 > 8 is 0. Claim it holds.
+                trace[0].dst_val = 1;
+            },
+        );
+    }
+
+    /// `Lte` is the boundary case the strict comparisons do not reach: it must
+    /// answer 1 when the operands are equal.
+    #[test]
+    fn rejects_a_forged_less_or_equal_at_the_boundary() {
+        let program = vec![
+            inst(Opcode::Lte, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 6;
+                vm.registers[3] = 6;
+            },
+            |trace| {
+                // 6 <= 6 is 1. Claim it fails.
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// `Gte` at the same boundary, from the other direction.
+    #[test]
+    fn rejects_a_forged_greater_or_equal_at_the_boundary() {
+        let program = vec![
+            inst(Opcode::Gte, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 4;
+                vm.registers[3] = 4;
+            },
+            |trace| {
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// `Jmp` is `next_pc == pc + imm`. A rewritten destination is the
+    /// arbitrary-jump forgery that cost Polygon zkEVM a critical finding, where
+    /// a missing boolean constraint let a prover land anywhere in the ROM.
+    #[test]
+    fn rejects_a_jump_to_a_rewritten_destination() {
+        let program = vec![
+            inst(Opcode::Jmp, 0, 0, 0, 1),
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // The jump lands on pc + 1. Claim it landed somewhere else.
+                trace[0].next_pc = 2;
+            },
+        );
+    }
+
+    /// `Jnz` picks between two destinations by a condition proved boolean and
+    /// tied to `rs1` through an inverse witness. Forging the condition claims
+    /// the branch went the way the register does not support.
+    #[test]
+    fn rejects_a_branch_that_forges_its_condition() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 0),
+            inst(Opcode::Jnz, 0, 2, 0, 2),
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // r2 is zero, so the branch is not taken and next_pc is pc + 1.
+                // Claim it jumped.
+                trace[1].next_pc = 3;
+            },
+        );
+    }
+
+    /// The privacy three carry the sharpest forgeries in the instruction set,
+    /// because each one, forged, is money.
+    ///
+    /// `PrivacyCommit` hashes `(amount, blinding, recipient)` into the
+    /// commitment a shielded note is identified by. A prover who can name a
+    /// different hash for the same inputs mints a note whose stated amount is
+    /// not the amount the commitment binds.
+    #[test]
+    fn rejects_a_privacy_commitment_that_does_not_hash_its_inputs() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 1_000),
+            inst(Opcode::Load, 3, 0, 0, 424_242),
+            inst(Opcode::PrivacyCommit, 1, 2, 3, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // Same amount, same blinding, a commitment of the prover's choice.
+                trace[2].dst_val = trace[2].dst_val.wrapping_add(1);
+            },
+        );
+    }
+
+    /// `NullifierCheck` answers 1 only when the claimed nullifier equals
+    /// `Poseidon(secret)`. Forging that answer is double-spending: the same
+    /// note is spent twice because the second spend claims a nullifier it
+    /// cannot derive.
+    #[test]
+    fn rejects_a_nullifier_that_was_never_derived() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 12_345),
+            inst(Opcode::Load, 3, 0, 0, 6_789),
+            inst(Opcode::NullifierCheck, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[1], 0,
+            "an arbitrary claim is not the nullifier the secret derives"
+        );
+
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // The check failed honestly. Claim it passed.
+                trace[2].dst_val = 1;
+            },
+        );
+    }
+
+    /// `SumConservation` is the constraint that stops a shielded transfer from
+    /// printing value: inputs must equal outputs. Forging its answer inflates
+    /// the supply by exactly the difference.
+    #[test]
+    fn rejects_a_transfer_that_claims_unequal_sums_balance() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 500),
+            inst(Opcode::Load, 3, 0, 0, 900),
+            inst(Opcode::SumConservation, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[1], 0,
+            "500 in and 900 out does not conserve, so the honest answer is 0"
+        );
+
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // Claim 400 units appeared from nowhere and the sums balanced.
+                trace[2].dst_val = 1;
+            },
+        );
+    }
+
+    /// `Syscall` reads context the caller does not control. A forged answer is
+    /// a claim about the block or the sender that the public inputs contradict.
+    #[test]
+    fn rejects_a_syscall_that_forges_its_answer() {
+        let program = vec![
+            inst(Opcode::Syscall, 1, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                trace[0].dst_val = trace[0].dst_val.wrapping_add(1);
+            },
+        );
+    }
+
     /// `Syscall` had no prover coverage. It is constrained in the AIR (selector
     /// booleanity, exclusivity, a gas cost of 5) and reads context values, so a
     /// proof over it must close.
