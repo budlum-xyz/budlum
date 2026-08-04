@@ -4895,7 +4895,11 @@ impl Blockchain {
                     deal.operator,
                     deal.deal_start_epoch,
                     deal.deal_end_epoch,
-                    deal.clone(),
+                    // `all_deals` hands back `Vec<&StorageDeal>`, so `iter`
+                    // yields `&&StorageDeal` and a bare `.clone()` would copy
+                    // the reference, not the deal. The loop below outlives the
+                    // borrow on `self.state`, so it needs the owned value.
+                    (*deal).clone(),
                 )
             })
             .collect();
