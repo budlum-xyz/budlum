@@ -73,7 +73,7 @@ fn opening_a_deal_with_a_forged_manifest_is_refused() {
 
     let econ = StorageEconomicsParams {
         operator_bond: 1_000_000,
-        fee_per_epoch: 100,
+        fee_per_byte_epoch: 100,
     };
     let params = StorageDomainParams::default();
     let err = reg
@@ -283,7 +283,7 @@ mod repair_band {
         let mut reg = StorageRegistry::default();
         let econ = StorageEconomicsParams {
             operator_bond: 1_000_000,
-            fee_per_epoch: 100,
+            fee_per_byte_epoch: 100,
         };
         let params = StorageDomainParams::default();
         for (i, shard_id) in shard_ids.iter().enumerate() {

@@ -1022,6 +1022,16 @@ jobs:
         run: |
           bash ./scripts/check-capability-modules-are-wired.sh --self-test
           bash ./scripts/check-capability-modules-are-wired.sh
+      # B.U.D. storage cost `epochs * fee_per_epoch`, with no byte count in it,
+      # so a 1 KiB and a 16 MiB shard cost the same for the same duration. The
+      # client picks the size, so this was ordinary use rather than an attack.
+      # The size was never missing: `open_deal` already looks the shard up in
+      # the manifest to check membership, so `ShardRef.size` was in hand where
+      # the price was computed and simply went unread.
+      - name: depolama boyuta gore mi fiyatlaniyor + kanarya
+        run: |
+          bash ./scripts/check-storage-is-priced-by-size.sh --self-test
+          bash ./scripts/check-storage-is-priced-by-size.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

@@ -3,7 +3,7 @@ mod tests {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;
     use crate::core::address::Address;
-    use crate::domain::storage_deal::StorageEconomicsParams;
+    use crate::domain::storage_deal::{StorageEconomicsParams, FEE_RATE_SCALE};
     use crate::domain::storage_params::StorageDomainParams;
     use crate::storage::db::Storage;
     use crate::storage::manifest::ContentManifest;
@@ -45,9 +45,14 @@ mod tests {
                 .unwrap();
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
+        // Bir epoch'luk bedel 10 kalsın diye oran shard boyutundan türetiliyor:
+        // fiyat artık bayt başına, `10 * 1e9 / shard_bytes` tam olarak epoch
+        // başına 10 eder. Sabit 10 yazsaydık 8 baytlık shard yukarı
+        // yuvarlanıp 1 olurdu ve test fiyatı değil yuvarlamayı ölçerdi.
+        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
         let economics = StorageEconomicsParams {
             operator_bond: params.min_operator_bond,
-            fee_per_epoch: 10,
+            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
         };
         let proof = {
             let envelope = bud_proof::ProofEnvelope {
@@ -198,9 +203,10 @@ mod tests {
             ContentManifest::from_bytes_sliced(b"storage bond return payload", 8).unwrap();
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
+        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
         let economics = StorageEconomicsParams {
             operator_bond: params.min_operator_bond,
-            fee_per_epoch: 10,
+            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
         };
         let proof = {
             let envelope = bud_proof::ProofEnvelope {

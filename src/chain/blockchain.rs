@@ -4775,7 +4775,22 @@ impl Blockchain {
         if epochs == 0 {
             return Err("Deal duration must be > 0".into());
         }
-        let total_fee = epochs.saturating_mul(economics.fee_per_epoch);
+        // Price the deal by the bytes it actually covers. The shard is looked
+        // up here rather than trusting a caller-supplied size, so the escrow
+        // and the deal that `open_deal` records below are computed from the
+        // same manifest entry.
+        let shard_bytes = u64::from(
+            manifest
+                .shard(&shard_id)
+                .ok_or_else(|| {
+                    format!(
+                        "shard {shard_id:?} is not part of manifest {:?}",
+                        manifest.manifest_id
+                    )
+                })?
+                .size,
+        );
+        let total_fee = economics.total_fee(shard_bytes, epochs);
 
         // 2. Debit Payer (Client Escrow)
         if total_fee > 0 {
@@ -4868,7 +4883,7 @@ impl Blockchain {
         &mut self,
         current_epoch: u64,
     ) -> Result<(u32, u64), String> {
-        let deals: Vec<(u64, Address, u64, u64, u64)> = self
+        let deals: Vec<(u64, Address, u64, u64, StorageDeal)> = self
             .state
             .storage_registry
             .all_deals()
@@ -4880,21 +4895,21 @@ impl Blockchain {
                     deal.operator,
                     deal.deal_start_epoch,
                     deal.deal_end_epoch,
-                    deal.economics.fee_per_epoch,
+                    deal.clone(),
                 )
             })
             .collect();
 
         let mut rewarded = 0u32;
         let mut total = 0u64;
-        for (deal_id, operator, start_epoch, end_epoch, fee_per_epoch) in deals {
+        for (deal_id, operator, start_epoch, end_epoch, deal) in deals {
             let last_epoch = self
                 .storage_last_reward_epoch
                 .get(&deal_id)
                 .copied()
                 .unwrap_or(start_epoch);
             let reward_until = current_epoch.min(end_epoch);
-            if reward_until <= last_epoch || fee_per_epoch == 0 {
+            if reward_until <= last_epoch || deal.economics.fee_per_byte_epoch == 0 {
                 self.storage_last_reward_epoch
                     .entry(deal_id)
                     .or_insert(last_epoch);
@@ -4902,12 +4917,14 @@ impl Blockchain {
             }
 
             let epochs = reward_until.saturating_sub(last_epoch);
-            let amount = epochs.saturating_mul(fee_per_epoch);
+            // Same per-byte rate the payer escrowed at open time, applied to
+            // the epochs that have elapsed since the last accrual.
+            let amount = deal.total_fee(epochs);
             if amount == 0 {
                 continue;
             }
 
-            // ESCROW: Payer already locked fee_per_epoch in blockchain state when deal was opened.
+            // ESCROW: the payer locked this deal's whole fee when it was opened.
             // We mint/try_add_balance back to operator from the virtual locked escrow.
             if let Err(e) = self.state.try_add_balance(&operator, amount) {
                 tracing::error!("operator reward overflow for {operator}: {e}");
@@ -4951,7 +4968,10 @@ impl Blockchain {
             .all_deals()
             .iter()
             .filter(|deal| deal.is_active())
-            .map(|deal| (deal.operator, deal.economics.fee_per_epoch))
+            // Weight by what the deal is worth for one epoch, which is now a
+            // function of the bytes it holds: an operator storing more data
+            // carries more of the network and earns a larger share.
+            .map(|deal| (deal.operator, deal.total_fee(1)))
             .collect();
         let total_weight: u64 = deals.iter().map(|(_, weight)| weight).sum();
         if total_weight == 0 {

@@ -87,8 +87,57 @@ pub struct StorageEconomicsParams {
     /// Bond the operator must lock when opening the deal. In the same
     /// `u64` fixed-point unit as `ConsensusDomain::operator_bond`.
     pub operator_bond: u64,
-    /// Fee paid by the client to the operator per epoch.
-    pub fee_per_epoch: u64,
+    /// Price of storing one byte for one epoch, in base units scaled by
+    /// [`FEE_RATE_SCALE`].
+    ///
+    /// This used to be `fee_per_byte_epoch`, a flat price for the deal no matter
+    /// how large the shard was. A 1 KiB shard and a 16 MiB shard cost the
+    /// same, so the client picked the size and the operator carried it. The
+    /// deal already receives the manifest and looks the shard up in it, so
+    /// the byte count was available at every call site that computed a price
+    /// and simply went unread.
+    ///
+    /// Scaling exists because a useful per-byte-epoch price is far below one
+    /// base unit: at [`FEE_RATE_SCALE`] = 1e9, a rate of `1` prices a 1 GiB
+    /// shard at roughly one base unit per epoch. Integer division truncates,
+    /// so [`StorageEconomicsParams::total_fee`] multiplies by size and by
+    /// epochs before it divides, and never the other way round.
+    pub fee_per_byte_epoch: u64,
+}
+
+/// Fixed-point denominator for [`StorageEconomicsParams::fee_per_byte_epoch`].
+///
+/// A price per byte per epoch is a small number. Without a scale the only
+/// expressible rates are zero and "one base unit per byte per epoch", and the
+/// second is absurd: it charges a gigabyte more per epoch than the total
+/// supply. Every arithmetic path divides by this exactly once, at the end.
+pub const FEE_RATE_SCALE: u128 = 1_000_000_000;
+
+impl StorageEconomicsParams {
+    /// Total client fee for storing `shard_bytes` for `epochs` epochs.
+    ///
+    /// Multiplication happens in `u128` and before the single division, so a
+    /// rate worth less than one base unit per byte per epoch still adds up
+    /// over a large shard or a long deal instead of truncating on every term.
+    ///
+    /// The result is rounded **up**. Truncation is what made the flat price
+    /// wrong in the first place, and it comes back in a smaller form here:
+    /// integer division sends any deal whose true price is under one base
+    /// unit to zero, and a zero fee is free storage that an operator is still
+    /// obliged to serve and answer challenges for. Rounding up means a priced
+    /// deal always costs something. A deal that is genuinely free is written
+    /// as `fee_per_byte_epoch: 0`, which stays zero and says so.
+    ///
+    /// Saturates rather than wrapping. A deal priced beyond `u64` cannot be
+    /// escrowed anyway, and the caller checks the payer balance against the
+    /// value returned here, so a saturated total is refused at that check
+    /// rather than silently becoming a small number.
+    pub fn total_fee(&self, shard_bytes: u64, epochs: u64) -> u64 {
+        let scaled = (self.fee_per_byte_epoch as u128)
+            .saturating_mul(shard_bytes as u128)
+            .saturating_mul(epochs as u128);
+        u64::try_from(scaled.div_ceil(FEE_RATE_SCALE)).unwrap_or(u64::MAX)
+    }
 }
 
 /// A storage deal binding an operator to host a specific shard of a
@@ -122,6 +171,20 @@ pub struct StorageDeal {
     pub shard_id: ContentId,
     pub operator: Address,
     pub economics: StorageEconomicsParams,
+    /// Size of the shard this deal covers, in bytes, copied from the
+    /// manifest at open time.
+    ///
+    /// The deal is the thing that gets paid, challenged and slashed, and it
+    /// outlives the caller's copy of the manifest, so the number the price
+    /// was computed from has to travel with it. Reading the manifest again
+    /// later would price the deal against whatever the registry holds then,
+    /// not against what the payer agreed to.
+    ///
+    /// `0` is how deals written before per-byte pricing deserialize. Those
+    /// were priced flat, and [`StorageDeal::total_fee`] keeps charging them
+    /// nothing extra rather than repricing an agreement after the fact.
+    #[serde(default)]
+    pub shard_bytes: u64,
     /// 0 = primary replica, 1..N = additional replicas. A shard with a
     /// Single replica is `replica_index = 0`; replication = 3 means three
     /// Deals with `replica_index ∈ {0, 1, 2}` for the same `shard_id`.
@@ -134,6 +197,15 @@ pub struct StorageDeal {
 impl StorageDeal {
     pub fn is_active(&self) -> bool {
         self.status == DealStatus::Active
+    }
+
+    /// Client fee owed for `epochs` epochs of this deal.
+    ///
+    /// Reads `shard_bytes` recorded at open time rather than looking the
+    /// manifest up again, so the price cannot move under an agreement that
+    /// has already been escrowed.
+    pub fn total_fee(&self, epochs: u64) -> u64 {
+        self.economics.total_fee(self.shard_bytes, epochs)
     }
 
     /// Number of epochs the deal is scheduled to last. `0` is a
@@ -691,6 +763,18 @@ impl StorageRegistry {
             .verify_id()
             .map_err(|reason| StorageError::InvalidManifest { reason })?;
         self.validate_shard_membership(manifest, &shard_id)?;
+        // Membership was just checked, so the shard is present; take its size
+        // while the manifest is still in hand. Pricing reads this and not the
+        // registry copy, which a later manifest write could move.
+        let shard_bytes = u64::from(
+            manifest
+                .shard(&shard_id)
+                .ok_or(StorageError::UnknownShard {
+                    manifest_id: manifest.manifest_id,
+                    shard_id,
+                })?
+                .size,
+        );
         self.register_manifest(manifest);
 
         let deal_id = self.next_deal_id;
@@ -703,6 +787,7 @@ impl StorageRegistry {
             shard_id,
             operator,
             economics,
+            shard_bytes,
             replica_index,
             deal_start_epoch: start_epoch,
             deal_end_epoch: end_epoch,
@@ -1689,7 +1774,8 @@ pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
         &deal.shard_id.0,
         deal.operator.as_bytes(),
         &deal.economics.operator_bond.to_le_bytes(),
-        &deal.economics.fee_per_epoch.to_le_bytes(),
+        &deal.economics.fee_per_byte_epoch.to_le_bytes(),
+        &deal.shard_bytes.to_le_bytes(),
         &[deal.replica_index],
         &deal.deal_start_epoch.to_le_bytes(),
         &deal.deal_end_epoch.to_le_bytes(),
@@ -1732,8 +1818,142 @@ mod tests {
     fn good_econ() -> StorageEconomicsParams {
         StorageEconomicsParams {
             operator_bond: 5_000_000,
-            fee_per_epoch: 100,
+            fee_per_byte_epoch: 100,
         }
+    }
+
+    // === B64: storage is priced by the bytes it holds =====================
+
+    /// The regression this pricing replaced. `total_fee` used to be
+    /// `epochs * fee_per_epoch`, so a shard a thousand times larger cost the
+    /// same to store for the same time, and the client chose the size.
+    #[test]
+    fn a_larger_shard_costs_more_for_the_same_duration() {
+        let econ = StorageEconomicsParams {
+            operator_bond: 0,
+            fee_per_byte_epoch: FEE_RATE_SCALE as u64,
+        };
+        let small = econ.total_fee(1_024, 10);
+        let large = econ.total_fee(1_024 * 1_000, 10);
+        assert!(
+            large > small,
+            "a 1000x larger shard must not cost the same: {small} vs {large}"
+        );
+        assert_eq!(large, small * 1_000, "price must be linear in size");
+    }
+
+    #[test]
+    fn a_longer_deal_costs_more_for_the_same_shard() {
+        let econ = StorageEconomicsParams {
+            operator_bond: 0,
+            fee_per_byte_epoch: FEE_RATE_SCALE as u64,
+        };
+        assert_eq!(econ.total_fee(4_096, 20), econ.total_fee(4_096, 10) * 2);
+    }
+
+    /// Truncation is what made the flat price wrong; it must not return in a
+    /// smaller form. A priced deal always costs something, however small.
+    #[test]
+    fn a_priced_deal_is_never_free_through_rounding() {
+        let econ = StorageEconomicsParams {
+            operator_bond: 0,
+            // Far below one base unit per byte per epoch.
+            fee_per_byte_epoch: 1,
+        };
+        assert_eq!(
+            econ.total_fee(1, 1),
+            1,
+            "a one-byte, one-epoch priced deal must still cost a unit"
+        );
+    }
+
+    /// A deal that is genuinely free says so with a zero rate, and that stays
+    /// zero. Otherwise rounding up would invent a charge nobody agreed to.
+    #[test]
+    fn a_zero_rate_stays_free() {
+        let econ = StorageEconomicsParams {
+            operator_bond: 0,
+            fee_per_byte_epoch: 0,
+        };
+        assert_eq!(econ.total_fee(u64::MAX, u64::MAX), 0);
+    }
+
+    /// The product overflows `u64` long before it overflows the `u128` the
+    /// arithmetic runs in. Saturating keeps the caller's balance check
+    /// meaningful; wrapping would turn an unpayable deal into a cheap one.
+    #[test]
+    fn an_unpayable_deal_saturates_rather_than_wrapping() {
+        let econ = StorageEconomicsParams {
+            operator_bond: 0,
+            fee_per_byte_epoch: u64::MAX,
+        };
+        assert_eq!(econ.total_fee(u64::MAX, u64::MAX), u64::MAX);
+    }
+
+    /// The deal carries the size it was priced at. Reading the manifest again
+    /// later would price an agreement against whatever the registry holds
+    /// then, not against what the payer escrowed.
+    #[test]
+    fn opening_a_deal_records_the_shard_size_it_was_priced_at() {
+        let mut reg = StorageRegistry::new();
+        let m = good_manifest();
+        let shard = &m.shards[0];
+        let id = reg
+            .open_deal(
+                42,
+                &m,
+                shard.shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect("deal opens");
+        let deal = reg.get_deal(id).expect("deal exists");
+        assert_eq!(
+            deal.shard_bytes,
+            u64::from(shard.size),
+            "the deal must record the size it was priced at"
+        );
+        assert_eq!(
+            deal.total_fee(10),
+            good_econ().total_fee(u64::from(shard.size), 10),
+            "the deal must price itself from its own recorded size"
+        );
+    }
+
+    /// Two deals over shards of different sizes must not hash alike. The size
+    /// is what the price is computed from, so leaving it out of the leaf lets
+    /// the number the payer agreed to move without the commitment noticing.
+    #[test]
+    fn the_deal_leaf_commits_to_the_shard_size() {
+        let mut a = StorageDeal {
+            deal_id: 1,
+            domain_id: 42,
+            manifest_id: ContentId([7u8; 32]),
+            shard_id: ContentId([8u8; 32]),
+            operator: operator(),
+            economics: good_econ(),
+            shard_bytes: 1_024,
+            replica_index: 0,
+            deal_start_epoch: 10,
+            deal_end_epoch: 20,
+            status: DealStatus::Active,
+            merkle_proof: None,
+            storage_root: None,
+            merkle_depth: 64,
+        };
+        let before = storage_deal_leaf_hash(&a);
+        a.shard_bytes = 1_048_576;
+        assert_ne!(
+            before,
+            storage_deal_leaf_hash(&a),
+            "the leaf must change when the priced size changes"
+        );
     }
 
     /// Format-gecerli test zarfi (durust
