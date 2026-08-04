@@ -166,10 +166,26 @@ pub struct ProofTask {
     /// Son teslim epoch'u.
     pub deadline_epoch: u64,
     /// Görev durumu.
+    ///
+    /// IDENTITY: excluded - the status moves through the task's life
+    /// (`Pending` to `Assigned` to `Completed`), and the id has to survive
+    /// that: `complete_task` finds the task by `task_id` after `assign`
+    /// already changed the status. Hashing it would give the same task a
+    /// different id at every transition and no lookup would ever match.
     pub status: ProofTaskStatus,
     /// Ödül miktarı (u64 BUD birimi, 6 ondalık).
     pub reward: u64,
     /// Zorluk seviyesi (prover stake gereksinimi oranı, fixed-point).
+    ///
+    /// IDENTITY: excluded - `default_difficulty` derives it from `kind`,
+    /// which the id does cover, so the same kind always yields the same
+    /// value and there is nothing independent to bind. The field exists to
+    /// be read, not to be chosen: `ProofTask::new` is the only constructor
+    /// and it never takes a caller-supplied difficulty.
+    ///
+    /// This stops being true the moment anything writes to it. A per-task
+    /// difficulty override would be an unbound claim under a stable id, and
+    /// it would have to go into the preimage, which means a new task tag.
     pub difficulty: u64,
 }
 

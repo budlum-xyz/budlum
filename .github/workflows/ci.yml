@@ -1047,6 +1047,17 @@ jobs:
           bash ./scripts/check-evidence-provenance-is-checked.sh
           bash ./scripts/check-every-opcode-has-a-forgery-test.sh --self-test
           bash ./scripts/check-every-opcode-has-a-forgery-test.sh
+      # A self-derived id is a commitment to the fields it hashes and to
+      # nothing else. `AiInferenceRequest.effort` was added to the struct and
+      # to `calculate_id` in one change; had it landed in the struct alone,
+      # an operator could take a 5.0x request, rewrite the tier to 0.5x, keep
+      # the id it was handed, and claim the deep fee, with every test still
+      # green because the tests assert a round-trip and not that changing the
+      # tier changes the id.
+      - name: kendinden turetilen id her alani kapsiyor mu + kanarya
+        run: |
+          bash ./scripts/check-self-derived-ids-cover-every-field.sh --self-test
+          bash ./scripts/check-self-derived-ids-cover-every-field.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

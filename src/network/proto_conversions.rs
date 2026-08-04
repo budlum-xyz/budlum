@@ -192,6 +192,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .unwrap_or_default(),
                         submitted_at_block: req.submitted_at_block,
                         deadline_block: req.deadline_block,
+                        effort_tenths: u32::from(req.effort.tenths()),
                     },
                 )),
             ),
@@ -990,6 +991,19 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     callback,
                     submitted_at_block: payload.submitted_at_block,
                     deadline_block: payload.deadline_block,
+                    // A peer that predates the field sends 0. Reading that as
+                    // the baseline is what those requests meant, and it is the
+                    // same reading `#[serde(default)]` gives a stored one. Any
+                    // other value has to be a tier the range accepts, so a
+                    // peer cannot smuggle a 20x request past the check by
+                    // putting it on the wire.
+                    effort: if payload.effort_tenths == 0 {
+                        crate::lubot::effort::EffortTier::default()
+                    } else {
+                        let tenths = u16::try_from(payload.effort_tenths)
+                            .map_err(|_| "effort tier does not fit in u16".to_string())?;
+                        crate::lubot::effort::EffortTier::from_tenths(tenths)?
+                    },
                 })
             }
             pb::ProtoTransactionType::AiInferenceResult => {
@@ -2016,6 +2030,7 @@ mod tests {
                 callback: Some(to),
                 submitted_at_block: 10,
                 deadline_block: 110,
+                effort: crate::lubot::effort::EffortTier::default(),
             }),
             TransactionType::AiInferenceResult(crate::ai::types::AiInferenceResult {
                 request_id: crate::ai::types::AiRequestId([3u8; 32]),

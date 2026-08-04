@@ -101,6 +101,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
 
@@ -182,6 +183,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -289,6 +291,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
 
@@ -341,6 +344,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -411,6 +415,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -482,6 +487,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -566,6 +572,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -650,6 +657,7 @@ mod tests {
             callback: None,
             submitted_at_block: 50,
             deadline_block: 150,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
 
@@ -702,6 +710,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -775,6 +784,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -835,6 +845,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -918,6 +929,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -975,6 +987,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1043,6 +1056,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1097,6 +1111,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 5);
@@ -1187,6 +1202,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         assert!(registry.submit_request(req, 5).is_ok());
@@ -1240,6 +1256,7 @@ mod tests {
             callback: Some(callback_addr),
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1326,6 +1343,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1530,6 +1548,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1582,6 +1601,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 5);
@@ -1640,6 +1660,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 5).unwrap();
@@ -1865,6 +1886,7 @@ mod tests {
             callback: None,
             submitted_at_block: current_block,
             deadline_block,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         registry.submit_request(req, current_block).unwrap()
@@ -1890,6 +1912,7 @@ mod tests {
             callback,
             submitted_at_block: current_block,
             deadline_block,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         registry.submit_request(req, current_block).unwrap()
@@ -1951,6 +1974,7 @@ mod tests {
             callback: None,
             submitted_at_block: 111,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 111);
@@ -1977,6 +2001,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         // Override result_deadline_blocks to 200 so result_deadline=210 > deadline_block=110
@@ -2045,7 +2070,8 @@ mod tests {
             max_fee: 100,
             callback: None,
             submitted_at_block: 10,
-            deadline_block: 200, // Must be >= result_deadline so check #1 doesn't fire
+            deadline_block: 200, // Must be >= result_deadline so check #1 doesn't fire,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 10).unwrap();
@@ -2077,6 +2103,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 55,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let req_id = registry.submit_request(req, 10).unwrap();
@@ -2438,6 +2465,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 10);
@@ -2646,6 +2674,7 @@ mod tests {
             callback: None,
             submitted_at_block: 10,
             deadline_block: 110,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         let result = registry.submit_request(req, 10);

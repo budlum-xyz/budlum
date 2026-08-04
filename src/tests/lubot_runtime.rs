@@ -39,6 +39,7 @@ fn model_and_request(requester: Address) -> (AiModelSpec, AiInferenceRequest) {
         callback: None,
         submitted_at_block: 0,
         deadline_block: 100,
+        effort: crate::lubot::effort::EffortTier::default(),
     };
     request.request_id = request.calculate_id();
     (spec, request)
@@ -395,4 +396,161 @@ fn conflicting_signed_result_commits_evidence_and_burns_only_role8_bond() {
     assert!(!state
         .ai_registry
         .has_equivocated(&request.request_id, &operator));
+}
+
+/// The tier the requester signed is the tier the chain stores.
+///
+/// `AiInferenceRequest::effort` was added to `calculate_id` so an operator
+/// cannot accept deep work and answer it shallow while claiming the deeper
+/// fee. That only holds if the id really moves with the tier and the registry
+/// really refuses a request whose id does not derive from its own fields. Both
+/// halves are asserted here, because either one alone leaves the promise open.
+#[test]
+fn the_effort_tier_is_inside_the_request_identity() {
+    use crate::lubot::effort::EffortTier;
+
+    let requester = Address::from([0x51; 32]);
+    let (_spec, baseline) = model_and_request(requester);
+
+    let mut deep = baseline.clone();
+    deep.effort = EffortTier::from_tenths(50).expect("5.0x is a valid tier");
+    deep.request_id = deep.calculate_id();
+
+    assert_ne!(
+        baseline.request_id, deep.request_id,
+        "a 1.0x request and a 5.0x request must not share an id"
+    );
+    assert!(baseline.verify_id() && deep.verify_id());
+}
+
+/// Rewriting the tier after the fact must invalidate the id.
+///
+/// This is the attack the field exists to stop: take a signed `5.0x` request,
+/// change the tier to `0.5x`, do the cheap work, and claim the expensive fee.
+/// The id no longer derives from the fields, so `verify_id` fails and
+/// `submit_request` refuses.
+#[test]
+fn a_rewritten_effort_tier_is_rejected_by_the_registry() {
+    use crate::lubot::effort::EffortTier;
+
+    let requester = Address::from([0x52; 32]);
+    let (spec, mut request) = model_and_request(requester);
+    request.effort = EffortTier::from_tenths(50).expect("5.0x is a valid tier");
+    request.request_id = request.calculate_id();
+
+    let mut state = AccountState::new();
+    state.ai_registry.register_model(spec).expect("model");
+
+    // The operator downgrades the work it was asked for and keeps the id.
+    let mut downgraded = request.clone();
+    downgraded.effort = EffortTier::FASTEST;
+    assert!(
+        !downgraded.verify_id(),
+        "a request whose tier was rewritten must not verify"
+    );
+
+    let err = state
+        .ai_registry
+        .submit_request(downgraded, 0)
+        .expect_err("the registry must refuse a request whose id does not match its fields");
+    assert!(
+        err.contains("canonical preimage"),
+        "unexpected refusal reason: {err}"
+    );
+
+    // The untouched request is still accepted, so the refusal above is about
+    // the rewrite and not about the tier being present at all.
+    state
+        .ai_registry
+        .submit_request(request.clone(), 0)
+        .expect("the tier the requester signed must still be accepted");
+    assert_eq!(
+        state
+            .ai_registry
+            .requests
+            .get(&request.request_id)
+            .expect("stored")
+            .effort,
+        EffortTier::from_tenths(50).unwrap(),
+        "the stored request must carry the tier that was signed"
+    );
+}
+
+/// A request that predates the field reads as `1.0x`, not as zero.
+///
+/// `#[serde(default)]` and the wire-decode both map an absent tier to the
+/// baseline. Zero is not a legal tier, so reading it literally would produce a
+/// value `from_tenths` refuses, and a stored request would become unloadable.
+#[test]
+fn a_request_without_an_effort_field_reads_as_the_baseline() {
+    use crate::lubot::effort::EffortTier;
+
+    let requester = Address::from([0x53; 32]);
+    let (_spec, request) = model_and_request(requester);
+    let mut value = serde_json::to_value(&request).expect("serialize");
+    value
+        .as_object_mut()
+        .expect("request serializes as an object")
+        .remove("effort")
+        .expect("the field is there to remove");
+
+    let restored: AiInferenceRequest =
+        serde_json::from_value(value).expect("a request written before the field must still load");
+    assert_eq!(restored.effort, EffortTier::BASELINE);
+    assert_eq!(
+        restored.request_id, request.request_id,
+        "the baseline default must reproduce the same id"
+    );
+}
+
+/// The wire refuses a tier the type would refuse.
+///
+/// The proto field is a `uint32` and the Rust type is a bounded `u16`, so a
+/// peer can put `20.0x`, or `u32::MAX`, on the wire. Decoding has to apply the
+/// same range check the constructor does, otherwise the bound exists only for
+/// callers that go through Rust.
+#[test]
+fn an_out_of_range_effort_tier_is_refused_on_the_wire() {
+    use crate::lubot::effort::EffortTier;
+    use crate::network::proto_conversions::pb;
+
+    let requester = Address::from([0x54; 32]);
+    let (_spec, mut request) = model_and_request(requester);
+    request.effort = EffortTier::from_tenths(50).expect("5.0x");
+    request.request_id = request.calculate_id();
+
+    let tx = Transaction::new_with_chain_id(
+        requester,
+        Address::zero(),
+        0,
+        1,
+        0,
+        vec![],
+        DEFAULT_CHAIN_ID,
+        TransactionType::AiInferenceRequest(request),
+    );
+    let proto = pb::ProtoTransaction::from(&tx);
+
+    // Round-tripping unchanged keeps the tier.
+    let back = Transaction::try_from(proto.clone()).expect("valid tier round-trips");
+    match back.tx_type {
+        TransactionType::AiInferenceRequest(req) => {
+            assert_eq!(req.effort, EffortTier::from_tenths(50).unwrap());
+        }
+        other => panic!("wrong transaction type: {other:?}"),
+    }
+
+    for smuggled in [200u32, 101, u32::from(u16::MAX) + 1, u32::MAX] {
+        let mut tampered = proto.clone();
+        match tampered.type_payload {
+            Some(pb::proto_transaction::TypePayload::AiInferenceRequest(ref mut p)) => {
+                p.effort_tenths = smuggled;
+            }
+            _ => panic!("expected an AiInferenceRequest payload"),
+        }
+        assert!(
+            Transaction::try_from(tampered).is_err(),
+            "effort_tenths {smuggled} is outside 0.5x..=10.0x and must be refused"
+        );
+    }
 }

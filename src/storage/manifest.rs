@@ -61,9 +61,15 @@ impl ShardRef {
 
 /// A content manifest - the on-chain commitment to a sharded piece of
 /// Content. `manifest_id` is the canonical identity of the whole piece; it
-/// Is computed deterministically from `(owner, total_size, shards)` so two
-/// Clients sharding the same content the same way always produce the
+/// Is computed deterministically from the shard list and the erasure scheme,
+/// So two clients sharding the same content the same way always produce the
 /// Same `manifest_id`.
+///
+/// This doc used to say the id derived from `(owner, total_size, shards)`. It
+/// Never did: [`manifest_id_from_parts`] reads the shards and the scheme and
+/// Nothing else. The sentence read as a binding, so anyone counting what the
+/// Id protects counted `owner` among them. What each remaining field is or is
+/// Not inside the commitment is now recorded on the field itself.
 ///
 /// `owner` alanı F01 ile eklendi - veri sahipliği zincir-üstü
 /// Kanıtlanabilir (Data Owner identity). `#[serde(default)]` ile eski
@@ -139,9 +145,36 @@ pub struct ContentManifest {
     pub manifest_id: ContentId,
     /// F01: içerik sahibinin adresi. Zero-address = eski/pre-F01
     /// Manifest (backward-compat); yeni manifest'ler gerçek owner taşır.
+    ///
+    /// IDENTITY: excluded - the id is content-addressed on purpose. Two
+    /// uploaders sharding the same bytes the same way produce one id, which
+    /// is what makes deduplication possible at all; folding the owner in
+    /// would give the same content a different id per uploader and turn every
+    /// re-upload into a separate stored object.
+    ///
+    /// The cost is that ownership is not proven by the id: `register_manifest`
+    /// is first-writer-wins, so whoever registers first sets the recorded
+    /// owner for that content. Nothing in the tree reads this field to
+    /// authorise anything today, which is why that is survivable. Anything
+    /// that starts reading it for permission needs a separate signed claim,
+    /// not this field.
     #[serde(default)]
     pub owner: crate::core::address::Address,
+    /// Sum of the stored shard sizes.
+    ///
+    /// IDENTITY: excluded - derived from `shards`, which the id does cover.
+    /// `validate_untrusted` recomputes it from the shard list and refuses a
+    /// mismatch, so a manifest carrying a false total cannot be stored.
+    /// Hashing it as well would bind the same information twice and let a
+    /// consistent manifest fail the id check for an arithmetic reason the
+    /// error message would not explain.
     pub total_size: u64,
+    /// Number of shards.
+    ///
+    /// IDENTITY: excluded - the length of `shards`, which the id covers, and
+    /// `manifest_id_from_parts` already hashes that length as its first
+    /// field. `validate_untrusted` refuses a `shard_count` that disagrees
+    /// with the list.
     pub shard_count: u32,
     pub shards: Vec<ShardRef>,
     /// Redundancy scheme. Absent in manifests written before erasure coding;
@@ -162,6 +195,20 @@ pub struct ContentManifest {
     /// Zero means "not recorded", which is how every manifest written before
     /// this field deserializes; [`ContentManifest::content_size`] reads it as
     /// `total_size` in that case, which is what those manifests meant.
+    ///
+    /// IDENTITY: excluded - and this one is a real hole, not a derived value.
+    /// Two manifests with the same shards and the same scheme hash to one id
+    /// while disagreeing about where the object ends, and `register_manifest`
+    /// is first-writer-wins, so the first registration decides how much of
+    /// the last stripe a reconstructor returns. `validate_untrusted` bounds
+    /// it above by `total_size`, so the damage is capped at trailing padding
+    /// rather than at arbitrary bytes: `reconstruct_object` truncates to this
+    /// value, and every byte it can return is a byte the shards, which the id
+    /// does cover, actually hold.
+    ///
+    /// Closing it means a new manifest tag, since the preimage changes, and a
+    /// migration for every manifest already registered. That is a consensus
+    /// change and is not made in passing.
     #[serde(default)]
     pub content_size: u64,
 }
