@@ -33,8 +33,8 @@ pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
 };
 pub use manifest::{
-    manifest_id_from_parts, manifest_id_from_shards, ContentManifest, ErasureScheme, ShardKind,
-    ShardRef,
+    manifest_id_from_parts, manifest_id_from_shards, ContentCipher, ContentEncryption,
+    ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
     MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,
