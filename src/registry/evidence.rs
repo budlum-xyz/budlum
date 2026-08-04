@@ -20,10 +20,14 @@
 //!   The registry only applies a slash for reports whose provenance it trusts,
 //!   So it never has to understand every consensus flavour.
 //!
-//! `PermissionlessRegistry::slash_with_evidence` calls
-//! [`SlashingReport::is_actionable`] before any stake moves, so an
-//! externally submitted report is refused until the consensus layer marks it
-//! `ConsensusVerified`.
+//! WIRING: unwired - measured: `PermissionlessRegistry::slash_from_report`
+//! reads these reports and calls [`SlashingReport::is_actionable`], but
+//! nothing in production calls `slash_from_report` itself. The two live slash
+//! paths take a bare `SlashingCondition` from behind consensus, so no
+//! evidence currently flows through the typed route. The check is correct and
+//! guarded by `check-evidence-provenance-is-checked.sh`; what is missing is a
+//! production submitter, which needs the permissionless
+//! `slash-evidence-submit` endpoint to reach consensus verification first.
 
 use crate::core::address::Address;
 use crate::registry::permissionless::SlashingCondition;
