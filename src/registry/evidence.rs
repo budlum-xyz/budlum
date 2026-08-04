@@ -20,8 +20,10 @@
 //!   The registry only applies a slash for reports whose provenance it trusts,
 //!   So it never has to understand every consensus flavour.
 //!
-//! WIRING: unwired - the typed slashing reports are constructed only from
-//! tests; the live slashing path builds its own.
+//! `PermissionlessRegistry::slash_with_evidence` calls
+//! [`SlashingReport::is_actionable`] before any stake moves, so an
+//! externally submitted report is refused until the consensus layer marks it
+//! `ConsensusVerified`.
 
 use crate::core::address::Address;
 use crate::registry::permissionless::SlashingCondition;

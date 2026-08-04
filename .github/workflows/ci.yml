@@ -1043,6 +1043,8 @@ jobs:
         run: |
           bash ./scripts/check-untrusted-manifests-are-fully-validated.sh --self-test
           bash ./scripts/check-untrusted-manifests-are-fully-validated.sh
+          bash ./scripts/check-evidence-provenance-is-checked.sh --self-test
+          bash ./scripts/check-evidence-provenance-is-checked.sh
           bash ./scripts/check-every-opcode-has-a-forgery-test.sh --self-test
           bash ./scripts/check-every-opcode-has-a-forgery-test.sh
       # The storage challenge verifier named three public inputs the AIR does
