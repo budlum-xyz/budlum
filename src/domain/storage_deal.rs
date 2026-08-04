@@ -757,10 +757,24 @@ impl StorageRegistry {
         }
         // A deal-open carries its own copy of the manifest, and
         // `register_manifest` is first-writer-wins, so this path can seed the
-        // registry just as `RegisterStorageManifest` can. Check the id here
-        // too rather than trusting that the other entry point ran first.
+        // registry just as `RegisterStorageManifest` can. It has to apply the
+        // same check that entry point does.
+        //
+        // It used to call `verify_id` alone, which only proves the id was
+        // derived from the fields present, not that those fields agree with
+        // each other. `manifest_id` covers `k` and `n`, so an author who wants
+        // a false redundancy claim simply computes the id over the claim it
+        // wants: three data shards with no parity, declared `(k=1, n=3)`,
+        // hashes consistently and reports a loss tolerance of two. A repair
+        // trigger reads that and concludes the object survives two failures
+        // when it survives none.
+        //
+        // `validate_untrusted` is the check that catches it, by requiring the
+        // data-shard count to equal `k` and the parity count to equal `n - k`.
+        // `RegisterStorageManifest` already ran it; this path did not, and
+        // it is the one that also opens a paid deal against the manifest.
         manifest
-            .verify_id()
+            .validate_untrusted()
             .map_err(|reason| StorageError::InvalidManifest { reason })?;
         self.validate_shard_membership(manifest, &shard_id)?;
         // Membership was just checked, so the shard is present; take its size
@@ -1924,6 +1938,83 @@ mod tests {
             good_econ().total_fee(u64::from(shard.size), 10),
             "the deal must price itself from its own recorded size"
         );
+    }
+
+    // === B72: a deal-open must not accept a false redundancy claim ========
+
+    /// `manifest_id` covers `k` and `n`, so an author who wants a false
+    /// redundancy claim computes the id over the claim it wants and
+    /// `verify_id` passes. Three data shards with no parity, declared
+    /// `(k=1, n=3)`, reports a loss tolerance of two and survives none. The
+    /// deal-open path checked only the id, and it is the path that also takes
+    /// the payer's money and seeds the registry.
+    #[test]
+    fn a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have() {
+        let mut reg = StorageRegistry::new();
+        let honest = good_manifest();
+        let shard_id = honest.shards[0].shard_id;
+
+        // Same shards, all Data, but claiming one of three reconstructs.
+        let mut liar = honest.clone();
+        liar.erasure = crate::storage::ErasureScheme {
+            k: 1,
+            n: liar.shard_count,
+        };
+        liar.manifest_id = crate::storage::manifest_id_from_parts(&liar.shards, &liar.erasure);
+        assert!(
+            liar.verify_id().is_ok(),
+            "the fixture must pass the weaker check, or it tests nothing"
+        );
+        assert!(
+            liar.erasure.loss_tolerance() > 0,
+            "the fixture must actually claim a tolerance it cannot deliver"
+        );
+
+        let err = reg
+            .open_deal(
+                42,
+                &liar,
+                shard_id,
+                operator(),
+                0,
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("a false redundancy claim must not open a deal");
+        assert!(
+            matches!(err, StorageError::InvalidManifest { .. }),
+            "expected InvalidManifest, got {err:?}"
+        );
+        assert!(
+            reg.get_manifest(&liar.manifest_id).is_none(),
+            "a refused manifest must not reach the registry"
+        );
+    }
+
+    /// The honest manifest still opens. A check that refuses everything is
+    /// not a check.
+    #[test]
+    fn a_deal_open_still_accepts_a_coherent_manifest() {
+        let mut reg = StorageRegistry::new();
+        let m = good_manifest();
+        reg.open_deal(
+            42,
+            &m,
+            m.shards[0].shard_id,
+            operator(),
+            0,
+            10,
+            20,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .expect("a coherent manifest must still open a deal");
     }
 
     /// Two deals over shards of different sizes must not hash alike. The size

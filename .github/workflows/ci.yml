@@ -1032,6 +1032,17 @@ jobs:
         run: |
           bash ./scripts/check-storage-is-priced-by-size.sh --self-test
           bash ./scripts/check-storage-is-priced-by-size.sh
+      # Two entry points take a manifest an untrusted caller built.
+      # `RegisterStorageManifest` ran `validate_untrusted`; `open_deal` ran
+      # `verify_id` and stopped, and it is the path that also takes the payer's
+      # money. `verify_id` proves the id derives from the fields present, not
+      # that they agree: `manifest_id` covers k and n, so three data shards
+      # with no parity declared (k=1, n=3) hashes consistently and reports a
+      # loss tolerance of two on an object that survives nothing.
+      - name: guvenilmeyen manifest tam denetleniyor mu + kanarya
+        run: |
+          bash ./scripts/check-untrusted-manifests-are-fully-validated.sh --self-test
+          bash ./scripts/check-untrusted-manifests-are-fully-validated.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
