@@ -4,7 +4,7 @@
 //! Constitution §3: boost %4 B.U.D. operatörlerine, %16 creator'a, %80
 //! Protocol'e. Mevcut birleşik semantik (5322e00 + 7f054d7): executor
 //! Bud_share'i `pending_bud_boost_share`'de biriktirir; blok commit sonrası
-//! `distribute_bud_boost_share` bunu aktif deal'lerin fee_per_epoch ağırlığına
+//! `distribute_bud_boost_share` bunu aktif deal'lerin fee_per_byte_epoch ağırlığına
 //! Göre dağıtır (yuvarlama tozu ilk deal'in operatörüne), aktif deal yoksa
 //! Dürüst burn. Bu testler ağırlıklı dağıtımı, dust determinizmini, pending
 //! Drain'i ve burn fallback'ini kilitler.
@@ -20,7 +20,7 @@ use crate::core::address::Address;
 
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::crypto::primitives::KeyPair;
-use crate::domain::storage_deal::StorageEconomicsParams;
+use crate::domain::storage_deal::{StorageEconomicsParams, FEE_RATE_SCALE};
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;
 use crate::storage::db::Storage;
@@ -48,10 +48,10 @@ fn domain_params() -> StorageDomainParams {
     }
 }
 
-fn deal_econ(fee_per_epoch: u64) -> StorageEconomicsParams {
+fn deal_econ(fee_per_byte_epoch: u64) -> StorageEconomicsParams {
     StorageEconomicsParams {
         operator_bond: 5_000_000,
-        fee_per_epoch,
+        fee_per_byte_epoch,
     }
 }
 
@@ -136,10 +136,15 @@ async fn boost_share_distributes_by_deal_fee_weight_with_dust_to_first() {
     bc.state.add_balance(&alice, 1000);
     bc.state.add_balance(&bob, 1_000_000);
 
-    // Aktif deal'ler: op1 fee=100, op2 fee=300 (toplam ağırlık 400).
+    // Aktif deal'ler: ağırlık artık `total_fee(1)`, yani bir epoch'luk bedel,
+    // ve o bedel shard boyutuna bağlı. Shard 4 bayt, ölçek 1e9, dolayısıyla
+    // 100 ağırlık için oran 100 * 1e9 / 4 = 25e9 olmalı. Oranları buradan
+    // türetiyoruz ki testin ölçtüğü şey 100/300 payı olarak kalsın.
     let manifest = ContentManifest::from_bytes_sliced(b"boost pool content", 4).unwrap();
-    open_weighted_deal(&mut bc, &manifest, op1, 0, 100);
-    open_weighted_deal(&mut bc, &manifest, op2, 1, 300);
+    let shard_bytes = u64::from(manifest.shards[0].size);
+    let rate_for = |weight: u64| weight * (FEE_RATE_SCALE as u64) / shard_bytes;
+    open_weighted_deal(&mut bc, &manifest, op1, 0, rate_for(100));
+    open_weighted_deal(&mut bc, &manifest, op2, 1, rate_for(300));
 
     mint_nft(&mut bc, &alice_kp, ContentId([0x77; 32]));
     assert_eq!(bc.state.get_balance(&alice), 999);

@@ -57,7 +57,7 @@ fn good_manifest() -> ContentManifest {
 fn good_econ() -> StorageEconomicsParams {
     StorageEconomicsParams {
         operator_bond: 5_000_000,
-        fee_per_epoch: 100,
+        fee_per_byte_epoch: 100,
     }
 }
 

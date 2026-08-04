@@ -618,7 +618,7 @@ mod rpc_tests {
                 100,
                 crate::domain::storage_deal::StorageEconomicsParams {
                     operator_bond: 2_000_000,
-                    fee_per_epoch: 10,
+                    fee_per_byte_epoch: 10,
                 },
                 crate::domain::storage_params::StorageDomainParams::default(),
                 Some(valid_merkle_proof()),
