@@ -713,8 +713,18 @@ impl StateSnapshotV2 {
         }
         hasher.update(self.schema_version.to_le_bytes());
         hasher.update(self.height.to_le_bytes());
-        hasher.update(self.block_hash.as_bytes());
-        hasher.update(self.genesis_hash.as_bytes());
+        // Two `String`s back to back. Both hold hex digests today, so both
+        // are 64 characters in practice, but neither is a fixed-width type and
+        // nothing on the restore path enforces a length: a snapshot arriving
+        // from a peer can carry any pair whose concatenation matches. Prefix
+        // the lengths rather than rely on a convention the type does not
+        // encode.
+        let block_hash = self.block_hash.as_bytes();
+        hasher.update((block_hash.len() as u64).to_le_bytes());
+        hasher.update(block_hash);
+        let genesis_hash = self.genesis_hash.as_bytes();
+        hasher.update((genesis_hash.len() as u64).to_le_bytes());
+        hasher.update(genesis_hash);
         hasher.update(self.chain_id.to_le_bytes());
 
         let mut balance_keys: Vec<_> = self.balances.keys().collect();
@@ -1013,6 +1023,58 @@ mod tests {
         assert!(dir.path().join("snapshot_10.json").exists());
         assert!(dir.path().join("snapshot_20.json").exists());
         assert!(dir.path().join("snapshot_30.json.reorg").exists());
+    }
+
+    /// A character cannot move from `block_hash` into `genesis_hash`.
+    ///
+    /// `calculate_digest` appended the two `String`s with nothing between
+    /// them. Both hold hex digests in practice, but neither is a fixed-width
+    /// type and no restore path enforces a length, so a snapshot arriving from
+    /// a peer could carry any pair whose concatenation matched an honest one
+    /// and reproduce the digest `verify()` checks.
+    #[test]
+    fn a_snapshot_cannot_shift_bytes_between_its_two_hash_fields() {
+        let account_state = AccountState::new();
+        let honest = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 7,
+                block_hash: "aabb".to_string(),
+                genesis_hash: "ccdd".to_string(),
+                chain_id: 42,
+                finalized_height: 0,
+                finalized_hash: "ee".to_string(),
+                finality_certificates: vec![],
+            },
+        );
+        let shifted = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 7,
+                // The same eight characters, split one place to the left.
+                block_hash: "aab".to_string(),
+                genesis_hash: "bccdd".to_string(),
+                chain_id: 42,
+                finalized_height: 0,
+                finalized_hash: "ee".to_string(),
+                finality_certificates: vec![],
+            },
+        );
+
+        let honest_concat = format!("{}{}", honest.block_hash, honest.genesis_hash);
+        let shifted_concat = format!("{}{}", shifted.block_hash, shifted.genesis_hash);
+        assert_eq!(
+            honest_concat, shifted_concat,
+            "the fixture must actually be a re-split, or this test proves \
+             nothing about the boundary"
+        );
+
+        assert_ne!(
+            honest.calculate_digest(),
+            shifted.calculate_digest(),
+            "two snapshots whose hash fields concatenate alike must not share \
+             a digest; `verify()` is what a syncing node checks"
+        );
     }
 
     #[test]

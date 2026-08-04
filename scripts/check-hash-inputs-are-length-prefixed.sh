@@ -171,6 +171,21 @@ if not variable_fields:
 
 UPDATE = re.compile(r"\.update\(\s*&?([A-Za-z_][\w.]*)")
 
+# Method calls that convert a field to bytes rather than naming a new field.
+# `self.block_hash.as_bytes()` ends in `as_bytes`, and taking the last path
+# segment as the field name resolves it to a method, which no struct declares,
+# so the pair was silently skipped. That is exactly how a name-based gate goes
+# quiet: it does not report a miss, it reports nothing.
+ACCESSORS = ("as_bytes", "as_slice", "as_str", "as_ref", "to_vec", "0")
+
+
+def field_of(expr):
+    """The struct field an update expression names, past any accessor call."""
+    parts = expr.split(".")
+    while len(parts) > 1 and parts[-1] in ACCESSORS:
+        parts.pop()
+    return parts[-1]
+
 problems = []
 checked_inputs = 0
 adjacent_pairs = 0
@@ -190,8 +205,7 @@ for path, src in sources.items():
         if not m:
             continue
         expr = m.group(1)
-        field = expr.split(".")[-1]
-        updates.append((i, line, field, expr))
+        updates.append((i, line, field_of(expr), expr))
 
     for _, _, field, _ in updates:
         if field in variable_fields:
