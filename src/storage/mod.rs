@@ -16,6 +16,7 @@
 //! `domain/` because the data shapes it owns are consensus types, not
 //! Transport types).
 
+pub mod assignment;
 pub mod content_id;
 pub mod db;
 pub mod erasure;
@@ -27,6 +28,9 @@ pub mod provider;
 pub mod pruning;
 pub mod traits;
 
+pub use assignment::{
+    assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
+};
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
 pub use erasure::{encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon};
 pub use lifecycle::{
