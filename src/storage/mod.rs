@@ -28,7 +28,9 @@ pub mod pruning;
 pub mod traits;
 
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
-pub use erasure::{encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon};
+pub use erasure::{
+    encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
+};
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
 };

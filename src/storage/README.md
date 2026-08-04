@@ -143,6 +143,32 @@ değil.
 
 Ayrıntı, neyin iddia edilmediği ve nedenleri: `docs/BUD_CONTENT_ENCRYPTION.md`.
 Kapı: `scripts/check-content-encryption-is-declared-and-bound.sh` (14 kanarya).
+## Kodlama denetimi: parity gerçekten parity mi
+
+Erişim challenge'ı "bu baytlar hâlâ sende mi" diye sorar. "Bu baytlar doğru
+parity mi" diye SORAMAZ, çünkü zincir shard içeriğini hiç görmez. Parity
+shard'ı için ödeme alan bir operatör o `ContentId` altında ne isterse
+saklayabilir ve her erişim challenge'ını geçer. Fark, o parity'ye ihtiyaç
+duyulan onarımda ortaya çıkar, yani nesnenin en kaldıramayacağı anda.
+
+Reed-Solomon sembol bazlı çalıştığı için tek bir bayt sütunu ilişkinin
+eksiksiz bir örneğidir. `derive_coding_audit` blok entropisinden bir parity
+indeksi ve sütun türetir, `verify_coding_audit` cevabı kodlayıcının kendi
+üreteciyle karşılaştırır. Maliyet `k` data baytı + 1 parity baytı, nesne ne
+kadar büyük olursa olsun.
+
+Geçmek, ilişkinin O SÜTUNDA tuttuğunu söyler, daha fazlasını değil.
+Sütunların `f` oranını bozan bir operatör her turda `f` olasılıkla yakalanır,
+`r` tur sonra ayakta kalma olasılığı `(1 - f)^r`. Bu olasılıksal bir araçtır
+ve başka türlü anlatmak yanlış olur.
+
+Neyi kanıtlamaz: operatörün bir şey SAKLADIĞINI. Parity elinde hiçbir şey
+tutmayan biri tarafından anlık hesaplanabilir. Replikasyonlu nesneler
+denetlenmez, reddedilir: her shard data ise `i` yoktur ve "geçti" demek hiç
+yapılmamış bir denetimi rapor etmek olur.
+
+Ayrıntı ve olasılık tablosu: `docs/BUD_STORAGE_ROADMAP.md` Gap 3b.
+Kapı: `scripts/check-coding-audit-samples-the-relationship.sh` (13 kanarya).
 
 ## Yol haritası işaretleri
 

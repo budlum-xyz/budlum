@@ -375,6 +375,66 @@ impl ReedSolomon {
         Ok(parity)
     }
 
+    /// The generator coefficient a coding audit multiplies by.
+    ///
+    /// `parity_index` counts parity shards from zero, so parity shard 0 is
+    /// generator row `k`. `data_index` is the data shard, which is the
+    /// column. Returns `None` for an index outside the scheme rather than
+    /// panicking, because the indices reaching this come from a challenge an
+    /// untrusted caller opened.
+    #[must_use]
+    pub fn parity_coefficient(&self, parity_index: usize, data_index: usize) -> Option<u8> {
+        if parity_index >= self.m || data_index >= self.k {
+            return None;
+        }
+        Some(self.generator.get(self.k + parity_index, data_index))
+    }
+
+    /// Whether one byte column of a code word is correctly encoded.
+    ///
+    /// This is the whole coding audit. Reed-Solomon works symbol-wise: column
+    /// `c` of parity shard `i` is `XOR_j coeff(i, j) * data_j[c]` and nothing
+    /// else. So a single column proves or disproves that relationship at that
+    /// position without the verifier ever holding a whole shard.
+    ///
+    /// `data_column` is byte `c` of each of the `k` data shards, in shard
+    /// order. `parity_byte` is byte `c` of parity shard `parity_index`.
+    ///
+    /// # What this does and does not prove
+    ///
+    /// A pass proves the relationship holds *at that column*. It does not
+    /// prove the whole shard is encoded correctly, and this is not a
+    /// weakness to apologise for, it is the point: an operator who
+    /// miscomputed a fraction `f` of the columns fails a uniformly random
+    /// column with probability `f`, so repeated audits drive the survival
+    /// probability of a cheat to `(1 - f)^rounds`. That is the same
+    /// probabilistic bargain provable-data-possession schemes make, where
+    /// Ateniese's original measurement was that 460 sampled blocks out of
+    /// 10,000 detect corruption with 99% confidence.
+    ///
+    /// It also does not prove the operator *stores* anything. A retrieval
+    /// challenge does that. These are different questions and answering one
+    /// does not answer the other: an operator can hold bytes that are not
+    /// valid parity, and can compute valid parity on demand without holding
+    /// anything.
+    #[must_use]
+    pub fn column_is_correctly_encoded(
+        &self,
+        parity_index: usize,
+        data_column: &[u8],
+        parity_byte: u8,
+    ) -> bool {
+        if data_column.len() != self.k || parity_index >= self.m {
+            return false;
+        }
+        let mut acc = 0u8;
+        for (j, byte) in data_column.iter().enumerate() {
+            let coeff = self.generator.get(self.k + parity_index, j);
+            acc ^= gf_mul(coeff, *byte);
+        }
+        acc == parity_byte
+    }
+
     /// Rebuild all `n` shards from any `k` survivors.
     ///
     /// `present` is indexed by shard index over the whole code word (data
@@ -759,6 +819,156 @@ mod tests {
         assert!(
             matches!(err, ErasureError::IntegrityFailure { .. }),
             "expected an integrity failure, got {err:?}"
+        );
+    }
+
+    /// The coding audit, on a correctly encoded object.
+    #[test]
+    fn every_column_of_an_honest_encoding_verifies() {
+        let data: Vec<u8> = (0..=200u8).cycle().take(400).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let rs = ReedSolomon::for_scheme(&scheme).unwrap();
+        let stripe = enc.shards[0].len();
+
+        for parity_index in 0..rs.parity_shards() {
+            for c in 0..stripe {
+                let column: Vec<u8> = (0..rs.data_shards()).map(|j| enc.shards[j][c]).collect();
+                let parity_byte = enc.shards[rs.data_shards() + parity_index][c];
+                assert!(
+                    rs.column_is_correctly_encoded(parity_index, &column, parity_byte),
+                    "honest column {c} of parity {parity_index} must verify"
+                );
+            }
+        }
+    }
+
+    /// A single flipped bit in one parity byte fails at that column.
+    ///
+    /// This is what makes sampling worth anything: the audit is not a
+    /// checksum over the shard, it is the coding relationship itself, so a
+    /// corruption anywhere the audit lands is caught exactly.
+    #[test]
+    fn a_single_wrong_parity_byte_fails_its_column() {
+        let data: Vec<u8> = (0..=200u8).cycle().take(400).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let rs = ReedSolomon::for_scheme(&scheme).unwrap();
+
+        let c = 17;
+        let column: Vec<u8> = (0..rs.data_shards()).map(|j| enc.shards[j][c]).collect();
+        let honest = enc.shards[rs.data_shards()][c];
+        assert!(rs.column_is_correctly_encoded(0, &column, honest));
+        assert!(
+            !rs.column_is_correctly_encoded(0, &column, honest ^ 1),
+            "one flipped bit must fail the column"
+        );
+    }
+
+    /// An operator who miscomputed a fraction of the columns is caught at a
+    /// rate equal to that fraction.
+    ///
+    /// The measurement the whole scheme rests on. Ateniese's original PDP
+    /// paper reports 460 sampled blocks out of 10,000 detecting a 1%
+    /// deletion with 99% confidence; this is the same arithmetic on one
+    /// object, checked rather than asserted.
+    #[test]
+    fn sampling_catches_a_cheat_at_the_rate_it_cheats() {
+        let data: Vec<u8> = (0..=250u8).cycle().take(1000).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let rs = ReedSolomon::for_scheme(&scheme).unwrap();
+        let stripe = enc.shards[0].len();
+
+        // The operator keeps the first tenth honest and corrupts the rest.
+        let honest_until = stripe / 10;
+        let mut caught = 0usize;
+        for c in 0..stripe {
+            let column: Vec<u8> = (0..rs.data_shards()).map(|j| enc.shards[j][c]).collect();
+            let mut byte = enc.shards[rs.data_shards()][c];
+            if c >= honest_until {
+                byte ^= 0x5A;
+            }
+            if !rs.column_is_correctly_encoded(0, &column, byte) {
+                caught += 1;
+            }
+        }
+        let corrupted = stripe - honest_until;
+        assert_eq!(
+            caught, corrupted,
+            "every corrupted column must fail and no honest one may"
+        );
+        assert!(
+            caught * 10 >= stripe * 8,
+            "a nine-tenths cheat must be caught on far more than half the columns"
+        );
+    }
+
+    /// The audit reads one byte per data shard, not one shard.
+    ///
+    /// The bandwidth claim, asserted rather than described: a `(4, 6)` audit
+    /// costs five bytes regardless of how large the object is.
+    #[test]
+    fn an_audit_costs_one_byte_per_data_shard() {
+        let small = encode_object(&[7u8; 40], ErasureScheme { k: 4, n: 6 }).unwrap();
+        let large = encode_object(&[7u8; 40_000], ErasureScheme { k: 4, n: 6 }).unwrap();
+        let rs = ReedSolomon::for_scheme(&ErasureScheme { k: 4, n: 6 }).unwrap();
+
+        assert!(large.shards[0].len() > small.shards[0].len() * 100);
+        for enc in [&small, &large] {
+            let column: Vec<u8> = (0..rs.data_shards()).map(|j| enc.shards[j][0]).collect();
+            assert_eq!(
+                column.len(),
+                4,
+                "the audit reads k bytes whatever the object size"
+            );
+            assert!(rs.column_is_correctly_encoded(0, &column, enc.shards[4][0]));
+        }
+    }
+
+    /// Indices outside the scheme are refused rather than panicking.
+    ///
+    /// These arrive from a challenge an untrusted caller opened, so an
+    /// out-of-range index is input, not a bug.
+    #[test]
+    fn an_index_outside_the_scheme_is_refused() {
+        let rs = ReedSolomon::new(4, 2).unwrap();
+        assert!(rs.parity_coefficient(0, 0).is_some());
+        assert!(
+            rs.parity_coefficient(2, 0).is_none(),
+            "only two parity shards"
+        );
+        assert!(
+            rs.parity_coefficient(0, 4).is_none(),
+            "only four data shards"
+        );
+        assert!(
+            !rs.column_is_correctly_encoded(2, &[0, 0, 0, 0], 0),
+            "an out-of-range parity index cannot report a passing audit"
+        );
+    }
+
+    /// A column of the wrong width is refused, not padded.
+    ///
+    /// Accepting a short column and treating the missing shards as zero would
+    /// let an operator answer an audit it cannot answer, because zero is a
+    /// valid byte and the relationship would still be checkable.
+    #[test]
+    fn a_column_of_the_wrong_width_is_refused() {
+        let rs = ReedSolomon::new(4, 2).unwrap();
+        assert!(!rs.column_is_correctly_encoded(0, &[1, 2, 3], 0));
+        assert!(!rs.column_is_correctly_encoded(0, &[1, 2, 3, 4, 5], 0));
+    }
+
+    /// Replication has no coding relationship to audit.
+    #[test]
+    fn replication_offers_no_parity_coefficient() {
+        let rs = ReedSolomon::new(3, 0).unwrap();
+        assert_eq!(rs.parity_shards(), 0);
+        assert!(rs.parity_coefficient(0, 0).is_none());
+        assert!(
+            !rs.column_is_correctly_encoded(0, &[1, 2, 3], 0),
+            "an object with no parity must not report a passing audit"
         );
     }
 
