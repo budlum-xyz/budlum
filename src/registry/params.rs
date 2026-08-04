@@ -112,21 +112,106 @@ pub struct RegistryParams {
     /// A transfer that cannot cover the floor is rejected rather than relayed
     /// at a loss.
     pub bridge_relayer_min_fee: u64,
+
+    /// Protocol cut of a plain value transfer, in parts-per-million of the
+    /// amount moved.
+    ///
+    /// The flat fee alone does not see the amount at all: `validate_transaction`
+    /// only requires `tx.fee >= base_fee`, and `tx.amount` appears solely in the
+    /// overflow guard and the balance check. Someone moving one base unit and
+    /// someone moving a quadrillion paid exactly the same, which is the transfer
+    /// twin of the storage deal that charged the same for 1 KiB and 16 MiB.
+    ///
+    /// `0` keeps the previous behaviour exactly, which is what every existing
+    /// network runs until governance says otherwise.
+    pub transfer_fee_ppm: u64,
+
+    /// Protocol cut of a swap, in parts-per-million.
+    ///
+    /// Separate from `transfer_fee_ppm` because a swap consumes more of the
+    /// network than a transfer does and the two are priced independently in the
+    /// economic model. No swap transaction type exists yet; the parameter is
+    /// here so the rate is decided once, in the same place as its siblings,
+    /// rather than appearing as a literal at whatever call site lands first.
+    pub swap_fee_ppm: u64,
+
+    /// Protocol cut of an outbound bridge transfer, in parts-per-million.
+    ///
+    /// Distinct from `bridge_relayer_fee_ppm`, which pays the relayer out of an
+    /// *arriving* asset. This one is the protocol's own cut on the way out, and
+    /// the two are not interchangeable: one is compensation for work done, the
+    /// other is revenue.
+    pub bridge_fee_ppm: u64,
 }
 
 impl RegistryParams {
     /// Resolve the slash ratio for a given condition.
-    pub fn slash_ratio(&self, condition: super::permissionless::SlashingCondition) -> u64 {
-        use super::permissionless::SlashingCondition::*;
+    #[must_use]
+    pub const fn slash_ratio(&self, condition: super::permissionless::SlashingCondition) -> u64 {
+        // Spelled out rather than glob-imported: `enum_glob_use` pulls three
+        // bare names into scope that read like locals at the match arms, and
+        // a fourth condition added later would land here silently.
         match condition {
-            DoubleSign => self.double_sign_slash_ratio_fixed,
-            LivenessFault => self.liveness_slash_ratio_fixed,
-            MaliciousBehaviour => self.malicious_slash_ratio_fixed,
+            super::permissionless::SlashingCondition::DoubleSign => {
+                self.double_sign_slash_ratio_fixed
+            }
+            super::permissionless::SlashingCondition::LivenessFault => {
+                self.liveness_slash_ratio_fixed
+            }
+            super::permissionless::SlashingCondition::MaliciousBehaviour => {
+                self.malicious_slash_ratio_fixed
+            }
         }
+    }
+
+    /// Proportional protocol cut for a value-bearing transaction.
+    ///
+    /// Returns the fee the protocol requires *in addition to nothing*: the
+    /// caller compares it against `base_fee` and charges the larger of the two.
+    /// That is the same shape `split_bridge_fee` already uses, and it exists
+    /// for the same reason. A pure percentage rounds to zero below
+    /// `PPM_DENOMINATOR / rate` units, so at any usable rate the smallest
+    /// transfers travel free and an attacker splits one large transfer into
+    /// many small ones to pay nothing. The floor is what makes every
+    /// transaction cost something regardless of size.
+    ///
+    /// Rounding is up, for the reason storage pricing rounds up: integer
+    /// division is exactly how a real charge silently becomes zero. A rate of
+    /// zero is the only way to express "free", and it stays zero.
+    ///
+    /// `u128` throughout because `amount * rate` overflows `u64` for any
+    /// amount above roughly 18 trillion at a 1% rate, and the whole point of
+    /// this function is that large amounts pay proportionally.
+    #[must_use]
+    pub fn proportional_fee(&self, amount: u64, rate_ppm: u64) -> u64 {
+        if rate_ppm == 0 || amount == 0 {
+            return 0;
+        }
+        let scaled = u128::from(amount).saturating_mul(u128::from(rate_ppm));
+        u64::try_from(scaled.div_ceil(u128::from(PPM_DENOMINATOR))).unwrap_or(u64::MAX)
+    }
+
+    /// The fee a value transfer of `amount` must carry, given a flat floor.
+    ///
+    /// The larger of the flat floor and the proportional cut. Never the sum:
+    /// charging both would mean the floor is paid twice on every large
+    /// transfer, which is not what the economic model describes.
+    #[must_use]
+    pub fn required_transfer_fee(&self, amount: u64, base_fee: u64) -> u64 {
+        base_fee.max(self.proportional_fee(amount, self.transfer_fee_ppm))
     }
 
     /// Protocol-level bounds for governance-tunable registry params.
     /// Prevents extreme values (e.g. zero unbonding, >100% slash ratios).
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending parameter's name and bound when a value would
+    /// disable a protection while appearing configured: a stake floor below
+    /// 100, an unbonding window of zero or above 100,000 epochs, a slash
+    /// ratio above `FIXED_POINT_SCALE`, a fee rate at or above 100% (which
+    /// credits the recipient nothing while debiting the sender everything),
+    /// or an invalid-vote threshold above 100,000, which no epoch can reach.
     pub fn validate(&self) -> Result<(), String> {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
@@ -149,6 +234,19 @@ impl RegistryParams {
         if self.bridge_relayer_fee_ppm >= PPM_DENOMINATOR {
             return Err("bridge_relayer_fee_ppm must be below 100%".into());
         }
+        // A protocol cut at or above 100% takes the whole amount, and on a
+        // transfer that means the recipient is credited nothing while the
+        // sender is debited everything. Refuse the rate rather than discover
+        // it one transfer at a time.
+        for (name, rate) in [
+            ("transfer_fee_ppm", self.transfer_fee_ppm),
+            ("swap_fee_ppm", self.swap_fee_ppm),
+            ("bridge_fee_ppm", self.bridge_fee_ppm),
+        ] {
+            if rate >= PPM_DENOMINATOR {
+                return Err(format!("{name} must be below 100%"));
+            }
+        }
         // Zero is a documented off-switch ("set to 0 to disable
         // invalid-vote-spam slashing entirely"), so the floor is not 1. The
         // ceiling is: a threshold above one epoch's worth of votes can never
@@ -164,7 +262,7 @@ impl RegistryParams {
 
 impl Default for RegistryParams {
     fn default() -> Self {
-        RegistryParams {
+        Self {
             // Aligned with `PoSConfig::min_stake` and `ConsensusParams.min_stake`
             // (1000) so the registry and the validator set share one stake
             // Floor and never disagree.
@@ -214,6 +312,13 @@ impl Default for RegistryParams {
             // transfer, large enough that splitting a bridge into dust costs
             // more than doing it in one message.
             bridge_relayer_min_fee: 10,
+            // Proportional cuts start disabled. Turning one on changes what
+            // every transfer costs, so it is a governance decision made on a
+            // live network with real volume, not a default inherited by every
+            // devnet. Zero here reproduces the flat-fee behaviour byte for byte.
+            transfer_fee_ppm: 0,
+            swap_fee_ppm: 0,
+            bridge_fee_ppm: 0,
         }
     }
 }
@@ -232,12 +337,46 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 12 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // 15 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        //
+        // The count moved from 12 when the three proportional rates were
+        // added. That is the state-format change the `# Adding a field` note
+        // describes, made deliberately: snapshots written before them cannot
+        // be loaded afterwards and the state root moves. Acceptable
+        // pre-mainnet, where the chain is reset between releases.
+        //
+        // The number is written out rather than derived from the struct,
+        // which is the whole point. A test computing the expected length from
+        // the type would agree with any shape the type happens to have and
+        // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            12 * 8 + 1,
+            15 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
+        );
+    }
+
+    /// The pin has to be a pin, not a restatement of whatever the struct is.
+    ///
+    /// A shape test that passes for every possible struct is the vacuous case
+    /// this guards against: it would have stayed green through the three
+    /// fields that broke snapshot compatibility, which is exactly the moment
+    /// it exists to catch.
+    #[test]
+    fn the_shape_pin_would_notice_another_field() {
+        let encoded =
+            bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
+        assert_ne!(
+            encoded.len(),
+            16 * 8 + 1,
+            "a sixteenth u64 field would have to update the pin above, which \
+             is the signal that snapshot compatibility broke"
+        );
+        assert_ne!(
+            encoded.len(),
+            14 * 8 + 1,
+            "removing a field is equally a state-format change"
         );
     }
 
@@ -364,6 +503,152 @@ mod tests {
         assert!(
             p.validate().is_ok(),
             "just under 100% is a policy choice, not an error"
+        );
+    }
+
+    // === B73: a value transfer is priced by the value it moves ===========
+
+    /// The regression. `validate_transaction` required only `fee >= base_fee`,
+    /// and `tx.amount` reached pricing nowhere, so one base unit and a
+    /// quadrillion cost the same.
+    #[test]
+    fn a_larger_transfer_requires_a_larger_fee() {
+        let p = RegistryParams {
+            transfer_fee_ppm: 200, // 0.02%
+            ..RegistryParams::default()
+        };
+        let small = p.required_transfer_fee(1_000_000, 1);
+        let large = p.required_transfer_fee(1_000_000_000, 1);
+        assert!(
+            large > small,
+            "a 1000x larger transfer must not cost the same: {small} vs {large}"
+        );
+        assert_eq!(large, small * 1_000, "the cut must be linear in the amount");
+    }
+
+    /// The default has to reproduce the previous behaviour exactly. Every
+    /// network running today priced transfers flat, and turning a cut on for
+    /// all of them by shipping a new binary is not a governance decision.
+    #[test]
+    fn the_default_rate_leaves_the_flat_fee_untouched() {
+        let p = RegistryParams::default();
+        assert_eq!(p.transfer_fee_ppm, 0);
+        for amount in [0u64, 1, 1_000_000, u64::MAX] {
+            assert_eq!(
+                p.required_transfer_fee(amount, 7),
+                7,
+                "a zero rate must charge exactly the flat floor"
+            );
+        }
+    }
+
+    /// The floor is what stops the split. A pure percentage rounds to zero
+    /// below `PPM_DENOMINATOR / rate` units, so without it an attacker moves a
+    /// large amount as many small ones and pays nothing.
+    #[test]
+    fn splitting_a_transfer_does_not_reduce_the_total_fee() {
+        let p = RegistryParams {
+            transfer_fee_ppm: 200,
+            ..RegistryParams::default()
+        };
+        let base_fee = 1;
+        let whole = 1_000_000_000u64;
+        let pieces = 1_000u64;
+
+        let one_shot = p.required_transfer_fee(whole, base_fee);
+        let per_piece = p.required_transfer_fee(whole / pieces, base_fee);
+        let split_total = per_piece.saturating_mul(pieces);
+
+        assert!(
+            split_total >= one_shot,
+            "splitting must not be cheaper: {split_total} < {one_shot}"
+        );
+    }
+
+    /// Truncation is how a real charge silently becomes zero. Storage pricing
+    /// rounds up for this reason and so does this.
+    #[test]
+    fn a_priced_transfer_is_never_free_through_rounding() {
+        let p = RegistryParams {
+            transfer_fee_ppm: 1, // 0.0001%
+            ..RegistryParams::default()
+        };
+        assert_eq!(
+            p.proportional_fee(1, p.transfer_fee_ppm),
+            1,
+            "a one-unit transfer at a nonzero rate must still cost a unit"
+        );
+    }
+
+    /// `amount * rate` leaves `u64` long before it leaves the `u128` the
+    /// arithmetic runs in. Saturating keeps the balance check meaningful.
+    #[test]
+    fn an_enormous_transfer_saturates_rather_than_wrapping() {
+        let p = RegistryParams {
+            transfer_fee_ppm: PPM_DENOMINATOR - 1,
+            ..RegistryParams::default()
+        };
+        let fee = p.required_transfer_fee(u64::MAX, 1);
+        assert!(fee > 0, "must not wrap to a small number");
+        // The interesting bound is the lower one: `amount * rate` leaves `u64`
+        // here, so the saturating path must return something large rather than
+        // a wrapped small number. Comparing against `u64::MAX` on a `u64` is
+        // vacuously true and clippy is right to refuse it.
+        assert!(
+            fee > u64::MAX / 2,
+            "a near-100% cut on u64::MAX must saturate high, got {fee}"
+        );
+    }
+
+    /// A cut at or above 100% credits the recipient nothing while debiting the
+    /// sender everything.
+    #[test]
+    fn a_proportional_rate_at_or_above_one_hundred_percent_is_refused() {
+        let at_hundred = [
+            RegistryParams {
+                transfer_fee_ppm: PPM_DENOMINATOR,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                swap_fee_ppm: PPM_DENOMINATOR,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                bridge_fee_ppm: PPM_DENOMINATOR,
+                ..RegistryParams::default()
+            },
+        ];
+        for p in at_hundred {
+            assert!(p.validate().is_err(), "100% cut must be refused");
+        }
+        let p = RegistryParams {
+            transfer_fee_ppm: PPM_DENOMINATOR - 1,
+            ..RegistryParams::default()
+        };
+        assert!(
+            p.validate().is_ok(),
+            "just under 100% is a policy choice, not an error"
+        );
+    }
+
+    /// The three rates are separate parameters on purpose: a swap consumes
+    /// more of the network than a transfer, and the protocol cut on an
+    /// outbound bridge is not the relayer's compensation on an inbound one.
+    #[test]
+    fn the_three_proportional_rates_are_independent() {
+        let p = RegistryParams {
+            transfer_fee_ppm: 200,
+            swap_fee_ppm: 400,
+            bridge_fee_ppm: 800,
+            ..RegistryParams::default()
+        };
+        let amount = 10_000_000u64;
+        assert_eq!(p.proportional_fee(amount, p.transfer_fee_ppm), 2_000);
+        assert_eq!(p.proportional_fee(amount, p.swap_fee_ppm), 4_000);
+        assert_eq!(p.proportional_fee(amount, p.bridge_fee_ppm), 8_000);
+        assert_ne!(
+            p.bridge_fee_ppm, p.bridge_relayer_fee_ppm,
+            "the protocol cut and the relayer's compensation are different things"
         );
     }
 

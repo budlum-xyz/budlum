@@ -31,9 +31,9 @@ pub use sovereign::{
     SovereignDomainRegistry, SovereignDomainTemplate,
 };
 pub use storage_deal::{
-    storage_deal_leaf_hash, ChallengeOutcome, ChallengeResult, DealStatus, RetrievalChallenge,
-    RetrievalChallengeRequest, RetrievalResponse, StorageDeal, StorageEconomicsParams,
-    StorageError, StorageRegistry,
+    storage_deal_leaf_hash, ChallengeOutcome, ChallengeResult, DealStatus, OperatorClass,
+    RetrievalChallenge, RetrievalChallengeRequest, RetrievalResponse, StorageDeal,
+    StorageEconomicsParams, StorageError, StorageRegistry, MISSED_CHALLENGE_COOLDOWN_SECS,
 };
 pub use storage_params::{
     storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,

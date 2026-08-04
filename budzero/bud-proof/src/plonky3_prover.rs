@@ -3042,6 +3042,121 @@ mod tests {
         );
     }
 
+    /// A jump whose target lies past the end of the program must not verify.
+    ///
+    /// The VM refuses to step on such a pc (`if self.pc >= program.len()`), but
+    /// the AIR places no bound on `COL_PC` at all: the jump constraint says
+    /// `next_pc = pc + imm` and nothing says the result addresses a real
+    /// instruction. SP1 Hypercube shipped the neighbouring version of this,
+    /// where JALR computed its target without the specified `& ~1`; Polygon
+    /// zkEVM shipped the severe one, where a missing boolean constraint let a
+    /// prover reach an arbitrary ROM address and mint balance.
+    ///
+    /// What closes it here is not a range check but the Program CTL. Every CPU
+    /// row has to match a preprocessed row on `(pc, raw_inst, ...)`, and the
+    /// preprocessed table carries `IS_ACTIVE = 0` at every index from
+    /// `program.len()` upward. A CPU row at such a pc contributes to the LogUp
+    /// sum with nothing on the other side to cancel it, so the running sum
+    /// cannot close and the proof is refused.
+    ///
+    /// That is a real defence and also an indirect one: it lives in a
+    /// different constraint from the jump it protects, and nothing in the jump
+    /// constraint mentions it. This test is what ties the two together.
+    /// Someone optimising the Program CTL, or relaxing `IS_ACTIVE`, would
+    /// otherwise reopen arbitrary control flow without editing a line that
+    /// looks like it has anything to do with jumps.
+    #[test]
+    fn rejects_a_jump_past_the_end_of_the_program() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: crate::event_digest_from_events(&receipt.events),
+        };
+
+        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
+        assert!(n_cpu >= 2, "the fixture needs at least two CPU rows");
+
+        // Send the first row's successor outside the program and move the
+        // second row to match, so the `nxt_pc == next_pc` transition still
+        // holds and only the Program CTL has anything to object to.
+        let outside = program.len() as u64 + 5;
+        matrix.values[COL_NEXT_PC] = Goldilocks::new(outside);
+        matrix.values[TRACE_WIDTH + COL_PC] = Goldilocks::new(outside);
+
+        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
+        let air = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let config = build_config();
+        let public_values = to_public_values(&pi);
+        let degree_bits = p3_util::log2_strict_usize(matrix.height());
+        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
+        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
+
+        let p3_proof = prove_with_preprocessed(
+            &config,
+            &air,
+            matrix.clone(),
+            Some(crate::plonky3_prover::aux_trace_generator(
+                matrix.clone(),
+                n_cpu,
+                program.clone(),
+            )),
+            &public_values,
+            preprocessed_ref,
+        );
+        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
+        let envelope = ProofEnvelope {
+            proof_format_version: 1,
+            backend: "Plonky3-Keccak-Goldilocks".to_string(),
+            p3_version: "0.5.2".to_string(),
+            fri_params_id: "test_fri_params".to_string(),
+            public_inputs_hash: pi.hash(),
+            proof_bytes,
+            degree_bits: degree_bits as u32,
+        };
+
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            "a CPU row executed at a pc past the end of the program and the \
+             proof verified. Nothing in the AIR bounds `COL_PC`; the Program \
+             CTL is the only thing between a prover and arbitrary control \
+             flow, and it just stopped being that."
+        );
+    }
+
     /// `Assert` must accept any non-zero condition, as the VM does.
     ///
     /// The VM halts only when the condition is zero. The AIR asked for

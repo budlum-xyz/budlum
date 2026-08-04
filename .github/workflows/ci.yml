@@ -1085,6 +1085,48 @@ jobs:
         run: |
           bash ./scripts/check-hash-inputs-are-length-prefixed.sh --self-test
           bash ./scripts/check-hash-inputs-are-length-prefixed.sh
+      # `validate_transaction` required only `fee >= base_fee`, and `tx.amount`
+      # reached pricing nowhere: it appeared in the overflow guard and the
+      # balance check and nowhere else. Moving one base unit and moving a
+      # quadrillion cost the same. This is the transfer twin of the storage
+      # deal that charged the same for 1 KiB and 16 MiB.
+      - name: deger transferleri degere gore mi fiyatlaniyor + kanarya
+        run: |
+          bash ./scripts/check-value-transfers-are-priced-by-value.sh --self-test
+          bash ./scripts/check-value-transfers-are-priced-by-value.sh
+      # `cargo test --workspace` says every test that ran passed; it says
+      # nothing about which tests exist. The forgery tests are the only
+      # evidence the AIR constrains anything, and one deleted in a refactor
+      # leaves the suite exactly as green. `rejects_a_jump_past_the_end_of_the
+      # _program` is the reason: nothing in the AIR bounds COL_PC, and what
+      # refuses an out-of-range jump is the Program CTL, in a constraint that
+      # never mentions jumps. SP1 shipped the neighbouring bug, Polygon zkEVM
+      # the severe one.
+      - name: forgery testleri isim-kilitli mi + kanarya
+        run: |
+          bash ./scripts/check-forgery-tests-are-named.sh --self-test
+          bash ./scripts/check-forgery-tests-are-named.sh
+      # `src/storage/README.md` listed under maturity warnings that redundancy
+      # was replication and there was no parity shard concept. By then
+      # `ShardKind::Parity` existed, `ErasureScheme` was on the manifest and
+      # `erasure.rs` was a working Reed-Solomon coder with sixteen tests;
+      # BUD_STORAGE_ROADMAP.md recorded the same gap as closed. Two documents,
+      # one tree, opposite answers. A caveat list is only useful while every
+      # entry on it is true.
+      - name: readme kodun sahip oldugunu inkar etmiyor mu + kanarya
+        run: |
+          bash ./scripts/check-readme-does-not-deny-shipped-code.sh --self-test
+          bash ./scripts/check-readme-does-not-deny-shipped-code.sh
+      # Two storage rules with the same failure mode: the data exists, the
+      # tests pass, and nothing on the operator's path reads it. An operator
+      # that misses a challenge sits out six hours, and a mobile operator may
+      # hold a second copy but never the first. `mobile_self.rs` already
+      # showed how this ends: it held the rule that critical content needs a
+      # paid replica, had tests, and was never called by anything.
+      - name: depolama cezalari uygulaniyor mu + kanarya
+        run: |
+          bash ./scripts/check-storage-penalties-are-enforced.sh --self-test
+          bash ./scripts/check-storage-penalties-are-enforced.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
