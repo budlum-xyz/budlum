@@ -1963,6 +1963,50 @@ mod tests {
         );
     }
 
+    /// Read the stack pointer out of the column the constraint reads.
+    ///
+    /// `Step::stack_pointer` is the depth *after* the instruction ran.
+    /// `trace_matrix` converts it back to the depth *before* the instruction,
+    /// because that is the value `COL_STACK_PTR` holds and the value the
+    /// transition constraint is written against. The two differ by one on
+    /// exactly the rows that matter: after the first `Call` the VM field says
+    /// 1 while the column says the 0 that `when_first_row` pins.
+    ///
+    /// A test that reads the VM field is measuring a neighbouring number and
+    /// calling it the constrained one. This helper takes the column, padding
+    /// rows included, since the constraint applies to every row of the matrix
+    /// and not only to the rows that came from the VM.
+    fn stack_pointer_column(program: &[u64]) -> (Vec<u64>, usize) {
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(program);
+        assert!(
+            receipt.success,
+            "the honest program must run, or the column proves nothing"
+        );
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (matrix, n_cpu) = trace_matrix(&vm.trace, program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+        let column = (0..rows)
+            .map(|i| matrix.values[i * TRACE_WIDTH + COL_STACK_PTR].as_canonical_u64())
+            .collect();
+        (column, n_cpu)
+    }
+
     /// The stack pointer has no explicit upper bound, and does not need one.
     ///
     /// Carried as an open finding for a long time: `COL_STACK_PTR` is
@@ -1985,9 +2029,10 @@ mod tests {
     /// checks, so the bound is whatever the caller committed to rather than
     /// something the prover picks.
     ///
-    /// This test is that reading, written down. A change that lets a row push
-    /// twice, or that drops the first-row pin, fails here instead of waiting
-    /// for someone to rederive the argument.
+    /// This test is that reading, written down, and it reads the column rather
+    /// than the VM field beside it: see `stack_pointer_column`. A change that
+    /// lets a row push twice, or that drops the first-row pin, fails here
+    /// instead of waiting for someone to rederive the argument.
     #[test]
     fn the_stack_pointer_cannot_outrun_the_trace() {
         // Nested calls drive the pointer as fast as the machine allows.
@@ -2000,30 +2045,36 @@ mod tests {
             inst(Opcode::Halt, 0, 0, 0, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
-        let mut vm = Vm::new(64);
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
+        let (column, n_cpu) = stack_pointer_column(&program);
 
         assert_eq!(
-            vm.trace[0].stack_pointer, 0,
+            column[0], 0,
             "the first row starts at zero, which is what `when_first_row` pins"
         );
 
-        let mut previous = vm.trace[0].stack_pointer;
-        for (row, step) in vm.trace.iter().enumerate() {
-            let delta = step.stack_pointer as i64 - previous as i64;
+        for row in 1..column.len() {
+            let delta = column[row] as i64 - column[row - 1] as i64;
             assert!(
                 (-1..=1).contains(&delta),
                 "row {row} moved the stack pointer by {delta}; the transition \
                  allows at most one, and the bound is derived from that"
             );
-            previous = step.stack_pointer;
         }
 
+        for (row, depth) in column.iter().enumerate() {
+            assert!(
+                *depth <= row as u64,
+                "row {row} holds depth {depth}, past the row index; starting \
+                 at zero and rising by at most one is what bounds it"
+            );
+        }
+
+        // The program has to actually drive the pointer, or the two checks
+        // above hold over a column of zeros and mean nothing.
         assert!(
-            vm.trace.iter().all(|s| s.stack_pointer <= vm.trace.len()),
-            "the pointer stayed inside the row count, which is the bound the \
-             three constraints produce together"
+            column.iter().take(n_cpu).any(|d| *d > 0),
+            "the nested calls never raised the pointer, so this test measured \
+             an idle column"
         );
     }
 
@@ -2031,7 +2082,7 @@ mod tests {
     ///
     /// The inverse witness for the test above: if the pointer could exceed the
     /// row count, this is the program that would show it, because every row
-    /// takes the increment.
+    /// after the first takes the increment.
     #[test]
     fn a_trace_of_pushes_stops_at_the_row_count() {
         let program = vec![
@@ -2042,20 +2093,18 @@ mod tests {
             inst(Opcode::Push, 0, 1, 0, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
-        let mut vm = Vm::new(64);
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
+        let (column, n_cpu) = stack_pointer_column(&program);
 
-        let peak = vm
-            .trace
-            .iter()
-            .map(|s| s.stack_pointer)
-            .max()
-            .expect("the trace has rows");
+        let peak = column.iter().copied().max().expect("the matrix has rows");
         assert_eq!(peak, 4, "four pushes reach four, not more");
         assert!(
-            peak <= vm.trace.len(),
-            "the peak stayed under the row count"
+            peak <= n_cpu as u64,
+            "the peak stayed under the row count the VM produced"
+        );
+        assert!(
+            column[n_cpu..].iter().all(|d| *d == peak),
+            "padding must carry the last depth forward; a padding row that \
+             drops it would be a transition the constraint forbids"
         );
     }
 
