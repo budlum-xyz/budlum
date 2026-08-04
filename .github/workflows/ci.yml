@@ -1052,6 +1052,18 @@ jobs:
         run: |
           bash ./scripts/check-value-transfers-are-priced-by-value.sh --self-test
           bash ./scripts/check-value-transfers-are-priced-by-value.sh
+      # `cargo test --workspace` says every test that ran passed; it says
+      # nothing about which tests exist. The forgery tests are the only
+      # evidence the AIR constrains anything, and one deleted in a refactor
+      # leaves the suite exactly as green. `rejects_a_jump_past_the_end_of_the
+      # _program` is the reason: nothing in the AIR bounds COL_PC, and what
+      # refuses an out-of-range jump is the Program CTL, in a constraint that
+      # never mentions jumps. SP1 shipped the neighbouring bug, Polygon zkEVM
+      # the severe one.
+      - name: forgery testleri isim-kilitli mi + kanarya
+        run: |
+          bash ./scripts/check-forgery-tests-are-named.sh --self-test
+          bash ./scripts/check-forgery-tests-are-named.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
