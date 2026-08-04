@@ -40,10 +40,38 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
    çözer; B.U.D.'da böyle bir kodlama **yok**. Ayrıntı ve yol haritası:
    `docs/BUD_STORAGE_ROADMAP.md`.
 
-5. **Yedeklilik erasure coding değil, replikasyon.** `ShardRef` yalnız
-   `(index, shard_id, size)` taşır; parity shard kavramı yok. Dayanıklılık
-   replika başına tam kopya maliyetiyle geliyor ve bir operatör slash
-   edildiğinde kaybolan yedekliliği onaran bir yol tanımlı değil.
+5. **Erasure coding var, parity üretimi üretim akışına bağlı değil.**
+   `ShardRef` artık `kind` (`Data` / `Parity`) taşıyor ve `ContentManifest`
+   bir `ErasureScheme { k, n }` taşıyor; `src/storage/erasure.rs` GF(2^8)
+   üzerinde gerçek bir Reed-Solomon kodlayıcıdır ve `(4,6)` bir kodun on beş
+   iki-kayıp deseninin tamamını test eder.
+
+   Açık kalan iki nokta var ve ikisi de dayanıklılık vaadine dokunur.
+
+   Birincisi: parity baytlarını **kimse hesaplamıyor**. `encode_object` ve
+   `to_manifest` üretim ağacında hiçbir yerden çağrılmıyor; manifest zincire
+   istemciden hazır geliyor. Modülün başındaki `WIRING: unwired` işareti bunu
+   söylüyor.
+
+   İkincisi, ve daha derini: zincir shard **baytlarını hiç görmez**, yalnızca
+   hash'lerini görür. `validate_untrusted` sayıların tutarlılığını denetler
+   (Data sayısı `k`, Parity sayısı `n - k`), ama bir parity shard'ın gerçekten
+   doğru parity olup olmadığını denetleyemez. Rastgele altı bayt dizisiyle
+   `(k=4, n=6)` beyan eden bir manifest bugün kabul edilir; hata ancak
+   gerçekten kayıp olduğunda, yani iş işten geçtikten sonra görünür.
+
+   Bu ikinci nokta bir eksik satır değil, bir tasarım kalemi. Ethereum'un
+   danksharding'i aynı soruyla karşılaştı ve iki yol tanımladı: hile kanıtı
+   (fraud proof), yani baytları indiren bir tarafın yanlış kodlamayı
+   ispatlaması; ya da polinom taahhüdü (KZG) / FRI, yani kodlamanın doğruluğunu
+   veriyi indirmeden ispatlayan bir kanıt. B.U.D.'un mevcut challenge
+   mekanizması birinciye yakın duruyor: `RetrievalChallenge` zaten bir bayt
+   aralığı isteyip hash'ini doğruluyor.
+
+   Onarım tarafı ölçüldü ve hesap doğru: `objects_needing_repair` payda olarak
+   ayrı shard sayısını alıyor, replika sayısını değil, ve `k`'nin altına düşmüş
+   nesneleri onarım kuyruğuna değil alarm listesine koyuyor. Ancak bu
+   fonksiyonları çağıran bir üretim yolu ve bir RPC ucu henüz yok.
 
 6. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
    erişim için ödediği "tüketici erişim" ekonomisi ayrı bir katman

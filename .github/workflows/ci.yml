@@ -1064,6 +1064,17 @@ jobs:
         run: |
           bash ./scripts/check-forgery-tests-are-named.sh --self-test
           bash ./scripts/check-forgery-tests-are-named.sh
+      # `src/storage/README.md` listed under maturity warnings that redundancy
+      # was replication and there was no parity shard concept. By then
+      # `ShardKind::Parity` existed, `ErasureScheme` was on the manifest and
+      # `erasure.rs` was a working Reed-Solomon coder with sixteen tests;
+      # BUD_STORAGE_ROADMAP.md recorded the same gap as closed. Two documents,
+      # one tree, opposite answers. A caveat list is only useful while every
+      # entry on it is true.
+      - name: readme kodun sahip oldugunu inkar etmiyor mu + kanarya
+        run: |
+          bash ./scripts/check-readme-does-not-deny-shipped-code.sh --self-test
+          bash ./scripts/check-readme-does-not-deny-shipped-code.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
