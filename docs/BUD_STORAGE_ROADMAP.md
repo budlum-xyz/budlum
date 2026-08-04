@@ -112,11 +112,43 @@ each other's live challenges in real time, within the deadline, for every
 challenge. That is a running cost and a detectable pattern rather than a
 one-off setup.
 
-## Gap 3: erasure coding: **closed**
+## Gap 3: erasure coding: **schema and coder closed, coding correctness open**
 
 `ShardRef` now carries a `kind` (`Data` or `Parity`) and `ContentManifest`
 carries an `ErasureScheme { k, n }`: any `k` of the `n` shards reconstruct the
 object.
+
+Two things are not closed, and calling the whole gap closed hid both.
+
+**Nothing computes the parity in production.** `encode_object` and
+`to_manifest` are called from tests only; the manifest reaches the chain
+already built by a client. The module carries a `WIRING: unwired` marker
+saying so.
+
+**The chain cannot check that a parity shard is parity.** It never sees shard
+bytes, only their `ContentId` hashes. `validate_untrusted` verifies the counts
+line up, data shards equal `k` and parity shards equal `n - k`, and stops
+there, because checking the arithmetic would mean holding the bytes. Six
+random byte strings declared `(k=4, n=6)` are accepted today. The manifest is
+internally consistent, the id derives correctly, and reconstruction fails only
+when a real loss makes someone try it, which is after the point of the
+redundancy.
+
+This is the same question Celestia answers with Bad Encoding Fraud Proofs: a
+full node that holds the data reconstructs it, finds the commitment does not
+match, and publishes a proof that light nodes can check. The cost there is
+that the proof is proportional to the data, which is why they moved to a
+two-dimensional code, one row or column suffices. The alternative family is a
+polynomial commitment or a FRI proof that the leaves are close to a
+Reed-Solomon codeword, which proves correct coding without downloading
+anything.
+
+B.U.D. is closer to the first shape than it looks. `RetrievalChallenge`
+already asks an operator for a byte range and verifies the hash of what comes
+back, so the machinery for "someone holds the bytes and can be asked" exists.
+What is missing is a challenge whose subject is the coding relation across
+shards rather than the contents of one shard. That is a design item, and it
+belongs on this list rather than inside a gap marked closed.
 
 The saving is the point of the gap. For the same loss tolerance:
 
