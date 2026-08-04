@@ -14,8 +14,8 @@
 //!
 //! Each field is a `Vec<u8>` whose length is not written down. Concatenation
 //! without lengths is not injective: a 96-byte BLS key followed by a 48-byte
-//! PoP produces the same bytes as a 144-byte BLS key followed by an empty PoP,
-//! and the same bytes again as an empty BLS key followed by a 144-byte PoP.
+//! `PoP` produces the same bytes as a 144-byte BLS key followed by an empty `PoP`,
+//! and the same bytes again as an empty BLS key followed by a 144-byte `PoP`.
 //! Every one of those hashes identically.
 //!
 //! The four sites are `AccountState::calculate_state_root`,
@@ -35,7 +35,7 @@
 //! So a snapshot carrying `bls = real_bls || real_pop, pop = []` reproduces the
 //! honest state root exactly, passes `verify()`, passes the block-hash and
 //! state-root comparisons in `apply_v2_snapshot`, and installs a validator set
-//! in which that validator has no PoP. `is_consensus_ready` then excludes it
+//! in which that validator has no `PoP`. `is_consensus_ready` then excludes it
 //! from `build_validator_snapshot_from_state`, so the restoring node computes a
 //! different active set and a different `set_hash` from its peers while both
 //! agree on the state root. That is a partition with no error message pointing
@@ -87,7 +87,7 @@ fn update_with_length_sha2(hasher: &mut impl sha2::Digest, bytes: &[u8]) {
 ///
 /// `vrf` is `None` at the two sites whose preimage never carried it
 /// (`ValidatorSetSnapshot::compute_hash` and the `StateSnapshotV2` validator
-/// loop both hash BLS, PoP and PQ only). Passing `None` keeps those preimages
+/// loop both hash BLS, `PoP` and PQ only). Passing `None` keeps those preimages
 /// at three fields rather than silently widening them, which would be a second
 /// consensus change riding along with this one.
 pub fn update_consensus_keys_sha3(
@@ -140,8 +140,8 @@ mod tests {
 
     /// The collision this module exists to close, in the shape it had.
     ///
-    /// A 96-byte BLS key and a 48-byte PoP concatenate to the same 144 bytes as
-    /// a 144-byte BLS key and an empty PoP. Under the old encoding both hashed
+    /// A 96-byte BLS key and a 48-byte `PoP` concatenate to the same 144 bytes as
+    /// a 144-byte BLS key and an empty `PoP`. Under the old encoding both hashed
     /// identically; under this one they must not.
     #[test]
     fn refolding_a_key_into_its_neighbour_changes_the_digest() {
@@ -166,7 +166,7 @@ mod tests {
         );
     }
 
-    /// And the other direction: the whole pair folded into the PoP.
+    /// And the other direction: the whole pair folded into the `PoP`.
     #[test]
     fn folding_the_other_way_also_changes_the_digest() {
         let bls = vec![2u8; 96];
