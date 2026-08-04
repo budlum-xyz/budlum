@@ -1072,6 +1072,19 @@ jobs:
         run: |
           bash ./scripts/check-wire-fields-are-signed.sh --self-test
           bash ./scripts/check-wire-fields-are-signed.sh
+      # Four consensus digests appended a validator's key fields with nothing
+      # between them. Concatenation without lengths is not injective: a
+      # 96-byte BLS key plus a 48-byte PoP is byte-identical to a 144-byte BLS
+      # key plus an empty PoP. `Validator` crosses the wire inside a snapshot
+      # with all four fields `#[serde(default)]` and the restore copies them
+      # verbatim, so a peer could reproduce an honest state root while
+      # installing a validator with no PoP, which `is_consensus_ready` then
+      # drops from the active set. Same root, different validator set, no
+      # error naming the cause.
+      - name: hash girdileri uzunluk onekli mi + kanarya
+        run: |
+          bash ./scripts/check-hash-inputs-are-length-prefixed.sh --self-test
+          bash ./scripts/check-hash-inputs-are-length-prefixed.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong

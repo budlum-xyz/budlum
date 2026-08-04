@@ -53,9 +53,17 @@ impl ValidatorSetSnapshot {
         for v in sorted_validators {
             hasher.update(v.address.0);
             hasher.update(v.stake.to_le_bytes());
-            hasher.update(&v.bls_public_key);
-            hasher.update(&v.pop_signature);
-            hasher.update(&v.pq_public_key);
+            // Length-prefixed, and the loop is why: without lengths the last
+            // field of one validator and the first of the next could trade
+            // bytes across the boundary. See
+            // `crate::crypto::key_set_preimage`.
+            crate::crypto::key_set_preimage::update_consensus_keys_sha3(
+                &mut hasher,
+                None,
+                &v.bls_public_key,
+                &v.pop_signature,
+                &v.pq_public_key,
+            );
         }
         hex::encode(hasher.finalize())
     }

@@ -75,9 +75,15 @@ impl StateSnapshot {
             hasher.update([v.slashed as u8]);
             hasher.update([v.jailed as u8]);
             hasher.update(v.jail_until.to_le_bytes());
-            hasher.update(&v.bls_public_key);
-            hasher.update(&v.pop_signature);
-            hasher.update(&v.pq_public_key);
+            // Length-prefixed; see `crate::crypto::key_set_preimage` for the
+            // re-splitting collision the raw concatenation allowed.
+            crate::crypto::key_set_preimage::update_consensus_keys_sha3(
+                &mut hasher,
+                None,
+                &v.bls_public_key,
+                &v.pop_signature,
+                &v.pq_public_key,
+            );
         }
         hasher.update(self.finalized_height.to_le_bytes());
         hasher.update(self.finalized_hash.as_bytes());
@@ -735,9 +741,18 @@ impl StateSnapshotV2 {
             hasher.update([v.slashed as u8]);
             hasher.update([v.jailed as u8]);
             hasher.update(v.jail_until.to_le_bytes());
-            hasher.update(&v.bls_public_key);
-            hasher.update(&v.pop_signature);
-            hasher.update(&v.pq_public_key);
+            // Length-prefixed. This digest is what a syncing node checks a
+            // downloaded snapshot against, and `Validator` crosses the wire
+            // with all four key fields `#[serde(default)]`, so the re-split
+            // was reachable from a peer. See
+            // `crate::crypto::key_set_preimage`.
+            crate::crypto::key_set_preimage::update_consensus_keys_sha3(
+                &mut hasher,
+                None,
+                &v.bls_public_key,
+                &v.pop_signature,
+                &v.pq_public_key,
+            );
         }
 
         for entry in &self.unbonding_queue {
