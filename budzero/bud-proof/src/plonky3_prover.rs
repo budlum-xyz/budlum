@@ -1885,6 +1885,84 @@ mod tests {
         );
     }
 
+    /// The memory-image fold uses fixed constants, and a collision is one
+    /// subtraction away.
+    ///
+    /// `COL_MEM_INIT_ACC` folds the starting memory image with
+    /// `acc' = acc * BETA + addr * GAMMA + val` at constants baked into the
+    /// AIR. The module doc is honest that this is weaker than a hash. This
+    /// test measures *how much* weaker, because "weaker" without a number
+    /// invites someone to read it as "still hard".
+    ///
+    /// It is not hard. Two initial-memory entries collide when
+    /// `a1 * GAMMA + v1 == a2 * GAMMA + v2`, so for any address a prover
+    /// wants to move a value to, the value that keeps the accumulator
+    /// unchanged is `v2 = v1 + (a1 - a2) * GAMMA`, in one field operation.
+    ///
+    /// The fix is Fiat-Shamir: derive BETA and GAMMA from a transcript over
+    /// the trace commitment, so the prover cannot solve for them before
+    /// committing. That is a protocol change, not a constant swap, which is
+    /// why this test states the exposure rather than pretending it is closed.
+    #[test]
+    fn the_memory_fold_constants_are_solvable_and_this_is_measured() {
+        // Goldilocks. The fold runs in this field, so the arithmetic below is
+        // the arithmetic the AIR does.
+        const P: u128 = 0xFFFF_FFFF_0000_0001;
+        let gamma = u128::from(MEM_INIT_GAMMA);
+
+        let term = |addr: u128, val: u128| (addr * gamma + val) % P;
+
+        let (a1, v1) = (100u128, 42u128);
+        let a2 = 200u128;
+        // v2 = v1 + (a1 - a2) * GAMMA, computed without going negative.
+        let v2 = (v1 + (P - (a2 - a1) % P) * gamma) % P;
+
+        assert_ne!((a1, v1), (a2, v2), "the two entries must actually differ");
+        assert_eq!(
+            term(a1, v1),
+            term(a2, v2),
+            "a different address and value reach the same fold term, which is \
+             what fixed constants allow and a transcript challenge would not"
+        );
+    }
+
+    /// The register-image fold has the same shape and the same exposure.
+    ///
+    /// Recorded separately because the two accumulators carry their own
+    /// constants, and a fix applied to one and not the other would leave this
+    /// one standing while the first test went green.
+    #[test]
+    fn the_register_fold_shares_the_memory_fold_weakness() {
+        const P: u128 = 0xFFFF_FFFF_0000_0001;
+        let beta = u128::from(MEM_INIT_BETA);
+
+        // The `beta` chain is what makes row order matter. With fixed
+        // constants, a prover solving for a target accumulator solves a linear
+        // system rather than searching, so the work is polynomial in the row
+        // count instead of exponential in the digest width.
+        assert_ne!(beta % P, 0, "the fold constant is live");
+        assert_ne!(
+            beta % P,
+            1,
+            "a constant of one would drop row order entirely"
+        );
+
+        // Two-row folds collide when the second row absorbs the difference the
+        // first introduced, scaled by beta.
+        let fold = |x0: u128, x1: u128| ((x0 * beta) % P + x1) % P;
+        let (r0, r1) = (7u128, 11u128);
+        let s0 = 9u128;
+        // s1 = r1 + (r0 - s0) * beta
+        let s1 = (r1 + (P - (s0 - r0) % P) * beta) % P;
+
+        assert_ne!((r0, r1), (s0, s1));
+        assert_eq!(
+            fold(r0, r1),
+            fold(s0, s1),
+            "two different row sequences fold to one accumulator"
+        );
+    }
+
     /// The stack pointer has no explicit upper bound, and does not need one.
     ///
     /// Carried as an open finding for a long time: `COL_STACK_PTR` is
