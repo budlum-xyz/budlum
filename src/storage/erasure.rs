@@ -315,15 +315,18 @@ impl ReedSolomon {
         Self::new(scheme.k as usize, scheme.parity_count() as usize)
     }
 
-    pub fn data_shards(&self) -> usize {
+    #[must_use]
+    pub const fn data_shards(&self) -> usize {
         self.k
     }
 
-    pub fn parity_shards(&self) -> usize {
+    #[must_use]
+    pub const fn parity_shards(&self) -> usize {
         self.m
     }
 
-    pub fn total_shards(&self) -> usize {
+    #[must_use]
+    pub const fn total_shards(&self) -> usize {
         self.k + self.m
     }
 
@@ -538,6 +541,7 @@ pub struct EncodedObject {
 
 impl EncodedObject {
     /// Which shards are data and which are parity, in code-word order.
+    #[must_use]
     pub fn kinds(&self) -> Vec<ShardKind> {
         (0..self.shards.len())
             .map(|i| {
