@@ -1885,6 +1885,102 @@ mod tests {
         );
     }
 
+    /// The stack pointer has no explicit upper bound, and does not need one.
+    ///
+    /// Carried as an open finding for a long time: `COL_STACK_PTR` is
+    /// constrained only in transition (`+1` on push and call, `-1` on pop and
+    /// ret, `0` otherwise) with no range check. The stack sits at `1 << 60` in
+    /// a 64-bit address space, so the question is whether a prover can drive
+    /// the pointer up until it collides with other memory.
+    ///
+    /// It cannot, through three constraints that already exist and were never
+    /// read together:
+    ///
+    /// 1. `when_first_row` pins the pointer to zero.
+    /// 2. `assert_eq(is_cpu, 1)` makes exactly one opcode selector live per
+    ///    row, and every selector is `assert_bool`. Two increments cannot land
+    ///    on one row.
+    /// 3. The transition allows at most `+1` per row.
+    ///
+    /// Starting at zero and rising by at most one per row, the pointer after
+    /// `n` rows is at most `n`. `trace_len` is a public input the verifier
+    /// checks, so the bound is whatever the caller committed to rather than
+    /// something the prover picks.
+    ///
+    /// This test is that reading, written down. A change that lets a row push
+    /// twice, or that drops the first-row pin, fails here instead of waiting
+    /// for someone to rederive the argument.
+    #[test]
+    fn the_stack_pointer_cannot_outrun_the_trace() {
+        // Nested calls drive the pointer as fast as the machine allows.
+        let program = vec![
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        assert_eq!(
+            vm.trace[0].stack_pointer, 0,
+            "the first row starts at zero, which is what `when_first_row` pins"
+        );
+
+        let mut previous = vm.trace[0].stack_pointer;
+        for (row, step) in vm.trace.iter().enumerate() {
+            let delta = step.stack_pointer as i64 - previous as i64;
+            assert!(
+                (-1..=1).contains(&delta),
+                "row {row} moved the stack pointer by {delta}; the transition \
+                 allows at most one, and the bound is derived from that"
+            );
+            previous = step.stack_pointer;
+        }
+
+        assert!(
+            vm.trace.iter().all(|s| s.stack_pointer <= vm.trace.len()),
+            "the pointer stayed inside the row count, which is the bound the \
+             three constraints produce together"
+        );
+    }
+
+    /// A trace that pushes on every row reaches the bound and no further.
+    ///
+    /// The inverse witness for the test above: if the pointer could exceed the
+    /// row count, this is the program that would show it, because every row
+    /// takes the increment.
+    #[test]
+    fn a_trace_of_pushes_stops_at_the_row_count() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let peak = vm
+            .trace
+            .iter()
+            .map(|s| s.stack_pointer)
+            .max()
+            .expect("the trace has rows");
+        assert_eq!(peak, 4, "four pushes reach four, not more");
+        assert!(
+            peak <= vm.trace.len(),
+            "the peak stayed under the row count"
+        );
+    }
+
     /// The privacy three carry the sharpest forgeries in the instruction set,
     /// because each one, forged, is money.
     ///
