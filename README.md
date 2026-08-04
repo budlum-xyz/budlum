@@ -11,7 +11,7 @@ finality proofs and records cross-domain value transfer as a cryptographic fact 
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
 <<<<<<< HEAD
-[![Tests](https://img.shields.io/badge/tests-1896%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-1904%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
 =======
 >>>>>>> a81d938 (Move the test badge to what this branch's run measured)
 [![Rust](https://img.shields.io/badge/rust-1.94.0-orange?logo=rust)](rust-toolchain.toml)
