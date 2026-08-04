@@ -146,12 +146,21 @@ pub struct RegistryParams {
 
 impl RegistryParams {
     /// Resolve the slash ratio for a given condition.
-    pub fn slash_ratio(&self, condition: super::permissionless::SlashingCondition) -> u64 {
-        use super::permissionless::SlashingCondition::*;
+    #[must_use]
+    pub const fn slash_ratio(&self, condition: super::permissionless::SlashingCondition) -> u64 {
+        // Spelled out rather than glob-imported: `enum_glob_use` pulls three
+        // bare names into scope that read like locals at the match arms, and
+        // a fourth condition added later would land here silently.
         match condition {
-            DoubleSign => self.double_sign_slash_ratio_fixed,
-            LivenessFault => self.liveness_slash_ratio_fixed,
-            MaliciousBehaviour => self.malicious_slash_ratio_fixed,
+            super::permissionless::SlashingCondition::DoubleSign => {
+                self.double_sign_slash_ratio_fixed
+            }
+            super::permissionless::SlashingCondition::LivenessFault => {
+                self.liveness_slash_ratio_fixed
+            }
+            super::permissionless::SlashingCondition::MaliciousBehaviour => {
+                self.malicious_slash_ratio_fixed
+            }
         }
     }
 
@@ -173,6 +182,7 @@ impl RegistryParams {
     /// `u128` throughout because `amount * rate` overflows `u64` for any
     /// amount above roughly 18 trillion at a 1% rate, and the whole point of
     /// this function is that large amounts pay proportionally.
+    #[must_use]
     pub fn proportional_fee(&self, amount: u64, rate_ppm: u64) -> u64 {
         if rate_ppm == 0 || amount == 0 {
             return 0;
@@ -186,12 +196,22 @@ impl RegistryParams {
     /// The larger of the flat floor and the proportional cut. Never the sum:
     /// charging both would mean the floor is paid twice on every large
     /// transfer, which is not what the economic model describes.
+    #[must_use]
     pub fn required_transfer_fee(&self, amount: u64, base_fee: u64) -> u64 {
         base_fee.max(self.proportional_fee(amount, self.transfer_fee_ppm))
     }
 
     /// Protocol-level bounds for governance-tunable registry params.
     /// Prevents extreme values (e.g. zero unbonding, >100% slash ratios).
+    ///
+    /// # Errors
+    ///
+    /// Returns the offending parameter's name and bound when a value would
+    /// disable a protection while appearing configured: a stake floor below
+    /// 100, an unbonding window of zero or above 100,000 epochs, a slash
+    /// ratio above `FIXED_POINT_SCALE`, a fee rate at or above 100% (which
+    /// credits the recipient nothing while debiting the sender everything),
+    /// or an invalid-vote threshold above 100,000, which no epoch can reach.
     pub fn validate(&self) -> Result<(), String> {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
@@ -242,7 +262,7 @@ impl RegistryParams {
 
 impl Default for RegistryParams {
     fn default() -> Self {
-        RegistryParams {
+        Self {
             // Aligned with `PoSConfig::min_stake` and `ConsensusParams.min_stake`
             // (1000) so the registry and the validator set share one stake
             // Floor and never disagree.
@@ -317,12 +337,46 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 12 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // 15 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        //
+        // The count moved from 12 when the three proportional rates were
+        // added. That is the state-format change the `# Adding a field` note
+        // describes, made deliberately: snapshots written before them cannot
+        // be loaded afterwards and the state root moves. Acceptable
+        // pre-mainnet, where the chain is reset between releases.
+        //
+        // The number is written out rather than derived from the struct,
+        // which is the whole point. A test computing the expected length from
+        // the type would agree with any shape the type happens to have and
+        // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            12 * 8 + 1,
+            15 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
+        );
+    }
+
+    /// The pin has to be a pin, not a restatement of whatever the struct is.
+    ///
+    /// A shape test that passes for every possible struct is the vacuous case
+    /// this guards against: it would have stayed green through the three
+    /// fields that broke snapshot compatibility, which is exactly the moment
+    /// it exists to catch.
+    #[test]
+    fn the_shape_pin_would_notice_another_field() {
+        let encoded =
+            bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
+        assert_ne!(
+            encoded.len(),
+            16 * 8 + 1,
+            "a sixteenth u64 field would have to update the pin above, which \
+             is the signal that snapshot compatibility broke"
+        );
+        assert_ne!(
+            encoded.len(),
+            14 * 8 + 1,
+            "removing a field is equally a state-format change"
         );
     }
 

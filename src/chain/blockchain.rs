@@ -787,6 +787,7 @@ impl Blockchain {
     /// divides. Reading the chain rather than the host clock is deliberate:
     /// two nodes applying the same block have to reach the same answer, and
     /// `SystemTime::now()` guarantees they will not.
+    #[must_use]
     pub fn current_unix_secs(&self) -> u64 {
         u64::try_from(self.last_block().timestamp / 1_000).unwrap_or(u64::MAX)
     }

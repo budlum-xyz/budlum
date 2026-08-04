@@ -136,8 +136,9 @@ impl OperatorClass {
     /// The primary is the copy a reader reaches for first and the one a repair
     /// rebuilds from when the others are gone. A device that is online when
     /// its owner is awake cannot be that.
-    pub fn may_hold_primary(self) -> bool {
-        matches!(self, OperatorClass::AlwaysOn)
+    #[must_use]
+    pub const fn may_hold_primary(self) -> bool {
+        matches!(self, Self::AlwaysOn)
     }
 }
 
@@ -823,6 +824,7 @@ impl StorageRegistry {
     /// Reads without mutating so a query path can call it. Expired entries
     /// are reported as free here and removed by
     /// [`StorageRegistry::prune_expired_cooldowns`].
+    #[must_use]
     pub fn operator_cooldown_until(&self, operator: &Address, now_unix_secs: u64) -> Option<u64> {
         self.operator_cooldowns
             .get(operator)
@@ -864,6 +866,7 @@ impl StorageRegistry {
     /// What `operator` declared. Defaults to [`OperatorClass::AlwaysOn`],
     /// which is what every operator registered before this existed was
     /// implicitly claiming by taking primary replicas.
+    #[must_use]
     pub fn operator_class(&self, operator: &Address) -> OperatorClass {
         self.operator_classes
             .get(operator)
