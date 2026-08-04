@@ -130,8 +130,12 @@ pub fn update_consensus_keys_sha2(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::Sha256;
-    use sha3::Sha3_256;
+    // Both `Digest` traits, under distinct names: `new` and `finalize` are
+    // trait methods, and the two crates each define their own trait. Importing
+    // either one unqualified would shadow the other and only half the tests
+    // would compile.
+    use sha2::{Digest as Sha2Digest, Sha256};
+    use sha3::{Digest as Sha3Digest, Sha3_256};
 
     /// The collision this module exists to close, in the shape it had.
     ///
