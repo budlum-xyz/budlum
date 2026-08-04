@@ -19,8 +19,8 @@ use crate::domain::{
     hash_finality_proof, BftFinalityAdapter, ConsensusDomain, ConsensusDomainRegistry,
     ConsensusKind, DomainCommitment, DomainCommitmentRegistry, DomainFinalityAdapter, DomainId,
     DomainPluginRegistry, DomainStatus, FinalityProof, FinalityStatus, PoAFinalityAdapter,
-    PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, ZkFinalityAdapter, AI_INFERENCE_ADAPTER,
-    POW_HEADER_CHAIN_ADAPTER,
+    PoSFinalityAdapter, PoWHeaderChainFinalityAdapter, StorageDeal, ZkFinalityAdapter,
+    AI_INFERENCE_ADAPTER, POW_HEADER_CHAIN_ADAPTER,
 };
 use crate::execution::executor::Executor;
 use crate::mempool::pool::Mempool;
