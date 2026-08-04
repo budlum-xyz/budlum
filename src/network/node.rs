@@ -1292,11 +1292,19 @@ impl Node {
                                    let remote = endpoint.get_remote_address();
                                    let subnet = ipv4_slash24(remote);
                                    // H5.1 eclipse bound before admitting.
+                                   // Through the recovering helper, not a raw
+                                   // `lock()`. A poisoned mutex made this
+                                   // `unwrap_or(true)`, which turns the /24
+                                   // eclipse bound OFF at exactly the moment
+                                   // something has already gone wrong: one
+                                   // operator could then fill the peer table
+                                   // from a single subnet and surround the
+                                   // node. The rest of this file recovers the
+                                   // guard and keeps enforcing; these four
+                                   // sites were the ones that did not.
                                    let admit = self
-                                       .peer_manager
-                                       .lock()
-                                       .map(|pm| pm.can_admit_subnet(subnet))
-                                       .unwrap_or(true);
+                                       .peer_manager_lock()
+                                       .can_admit_subnet(subnet);
                                    if !admit {
                                        warn!(
                                            "Eclipse bound: rejecting {} from {:?} (/24 limit)",
@@ -1308,10 +1316,8 @@ impl Node {
                                    // H5.2 outbound diversity: outbound bağlantılar için ek /24 sınırı.
                                    if endpoint.is_dialer() {
                                        let ob_admit = self
-                                           .peer_manager
-                                           .lock()
-                                           .map(|pm| pm.can_admit_outbound_subnet(subnet))
-                                           .unwrap_or(true);
+                                           .peer_manager_lock()
+                                           .can_admit_outbound_subnet(subnet);
                                        if !ob_admit {
                                            warn!(
                                                "Outbound diversity: rejecting outbound {} from {:?}",
@@ -1321,17 +1327,14 @@ impl Node {
                                            continue;
                                        }
                                    }
-                                   let newly_connected = self
-                                       .peer_manager
-                                       .lock()
-                                       .map(|mut pm| {
-                                           let c = pm.note_connected(peer_id, subnet);
-                                           if c && endpoint.is_dialer() {
-                                               let _ = pm.note_outbound_connected(peer_id, subnet);
-                                           }
-                                           c
-                                       })
-                                       .unwrap_or(true);
+                                   let newly_connected = {
+                                       let mut pm = self.peer_manager_lock();
+                                       let c = pm.note_connected(peer_id, subnet);
+                                       if c && endpoint.is_dialer() {
+                                           let _ = pm.note_outbound_connected(peer_id, subnet);
+                                       }
+                                       c
+                                   };
                                    let count = if newly_connected {
                                        self.peer_count.fetch_add(1, Ordering::SeqCst) + 1
                                    } else {
@@ -1408,15 +1411,16 @@ impl Node {
                                    }
                                }
                                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                   let was_connected = self
-                                       .peer_manager
-                                       .lock()
-                                       .map(|mut pm| {
-                                           let d = pm.note_disconnected(&peer_id);
-                                           let _ = pm.note_outbound_disconnected(&peer_id);
-                                           d
-                                       })
-                                       .unwrap_or(true);
+                                   // Same treatment: a poisoned lock used to
+                                   // report every close as a real disconnect,
+                                   // which drifts `peer_count` in the opposite
+                                   // direction from the connect path above.
+                                   let was_connected = {
+                                       let mut pm = self.peer_manager_lock();
+                                       let d = pm.note_disconnected(&peer_id);
+                                       let _ = pm.note_outbound_disconnected(&peer_id);
+                                       d
+                                   };
                                    if was_connected {
                                        self.peer_count
                                            .fetch_update(

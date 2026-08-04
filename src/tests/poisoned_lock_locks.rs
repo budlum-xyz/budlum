@@ -104,6 +104,73 @@ fn the_recovering_helper_exists_and_no_site_exits() {
     );
 }
 
+/// A poisoned lock must not switch a security bound OFF.
+///
+/// `node.rs` recovered from poisoning in 76 places through
+/// `peer_manager_lock`, and in four it did not: the eclipse bound, the
+/// outbound-diversity bound, and both peer-count bookkeeping sites read
+/// `.lock().map(..).unwrap_or(true)`.
+///
+/// `true` is the permissive answer for all four. Once the mutex is poisoned,
+/// `can_admit_subnet` stops rejecting, so a single operator can fill the peer
+/// table from one /24 and surround the node, and `peer_count` drifts in both
+/// directions because connect and disconnect both report success.
+///
+/// The failure mode is the worst kind: the protection disappears exactly when
+/// something has already gone wrong, and nothing logs that it did. Denying a
+/// peer costs a connection; admitting every peer costs the node's view of the
+/// chain.
+#[test]
+fn a_poisoned_lock_does_not_open_a_security_bound() {
+    let src =
+        fs::read_to_string(repo_root().join("src/network/node.rs")).expect("node.rs is readable");
+
+    let offenders: Vec<(usize, &str)> = src
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("unwrap_or(true)"))
+        .filter(|(_, line)| {
+            let t = line.trim_start();
+            !t.starts_with("///") && !t.starts_with("//")
+        })
+        .map(|(i, line)| (i + 1, line.trim()))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "a lock failure must not answer `true` to a bound that decides whether \
+         to admit a peer; take the guard through `peer_manager_lock` so the \
+         bound keeps being enforced:\n  {}",
+        offenders
+            .iter()
+            .map(|(n, l)| format!("{n}: {l}"))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+}
+
+/// The eclipse bound is reached through the recovering helper.
+///
+/// The test above is a prohibition; this one is the positive statement, so
+/// that deleting the calls entirely cannot be mistaken for a fix.
+#[test]
+fn the_eclipse_bound_is_asked_through_the_recovering_helper() {
+    let src =
+        fs::read_to_string(repo_root().join("src/network/node.rs")).expect("node.rs is readable");
+
+    // Whitespace-insensitive: rustfmt wraps the receiver chain, and a test
+    // that pins the exact indentation breaks on the next reformat while
+    // proving nothing about the call.
+    let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("peer_manager_lock() . can_admit_subnet (")
+            || flat.contains("peer_manager_lock() .can_admit_subnet(")
+            || flat.contains("peer_manager_lock().can_admit_subnet("),
+        "`can_admit_subnet` must be called through `peer_manager_lock`, so a \
+         poisoned mutex still enforces the /24 eclipse bound"
+    );
+}
+
 /// A poisoned lock must not silently deny every peer.
 ///
 /// This was recorded as a known gap rather than fixed, with a test that froze

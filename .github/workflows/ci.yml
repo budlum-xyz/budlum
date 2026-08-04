@@ -1097,6 +1097,16 @@ jobs:
         run: |
           bash ./scripts/check-refusals-do-not-mutate-first.sh --self-test
           bash ./scripts/check-refusals-do-not-mutate-first.sh
+      # `node.rs` recovers from a poisoned PeerManager mutex in 76 places and
+      # in four it did not: the /24 eclipse bound, the outbound-diversity
+      # bound and both peer-count sites read `.lock()..unwrap_or(true)`, and
+      # `true` is the permissive answer. One panic anywhere near the peer
+      # table therefore switched the eclipse bound OFF, letting a single
+      # operator fill the table from one subnet and surround the node.
+      - name: kilit hatasi bir siniri acmasin + kanarya
+        run: |
+          bash ./scripts/check-lock-failures-do-not-open-a-bound.sh --self-test
+          bash ./scripts/check-lock-failures-do-not-open-a-bound.sh
       # `validate_transaction` required only `fee >= base_fee`, and `tx.amount`
       # reached pricing nowhere: it appeared in the overflow guard and the
       # balance check and nowhere else. Moving one base unit and moving a
