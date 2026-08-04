@@ -1055,6 +1055,31 @@ impl StorageRegistry {
         if replica_index == 0 && !self.operator_class(&operator).may_hold_primary() {
             return Err(StorageError::MobileOperatorCannotHoldPrimary(operator));
         }
+        // The owner's own declaration about this content, asked here because
+        // this is the only place a replica is actually placed.
+        //
+        // `MobileSelfContentPolicy` lets an owner say "this is critical, do
+        // not put it on a phone until `n` paid replicas exist".
+        // `check_self_host_allowed` was written to enforce that and tested
+        // six ways, and nothing in production called it: the policy could be
+        // declared, stored, hashed into the state root, and then ignored by
+        // the one path it was meant to govern. A rule nothing reads is not a
+        // rule.
+        //
+        // Asked only for a mobile operator, because that is what the policy
+        // is about. An always-on operator taking a replica is the case the
+        // owner was trying to get more of.
+        //
+        // Honest about the half that is still missing: `check` is wired here,
+        // but `declare_self_host_policy` has no transaction behind it yet, so
+        // `self_host_policies` is empty on a live chain and this call returns
+        // `Ok(())` every time. What it buys today is that the check runs on
+        // the placement path, so the day a declaration can reach the chain it
+        // is already being read. Wiring the declaration needs a transaction
+        // type, which is a consensus-surface decision.
+        if self.operator_class(&operator) == OperatorClass::Mobile {
+            self.check_self_host_allowed(&manifest.manifest_id, &shard_id)?;
+        }
         // A deal-open carries its own copy of the manifest, and
         // `register_manifest` is first-writer-wins, so this path can seed the
         // registry just as `RegisterStorageManifest` can. It has to apply the
