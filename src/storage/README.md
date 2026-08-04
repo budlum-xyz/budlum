@@ -73,10 +73,43 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
    nesneleri onarım kuyruğuna değil alarm listesine koyuyor. Ancak bu
    fonksiyonları çağıran bir üretim yolu ve bir RPC ucu henüz yok.
 
-6. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
+6. **Kaçırılan meydan okumanın bedeli iki parçalıdır.** Teminatın yanması bir
+   kereye mahsus bir maliyettir ve operatör onu fiyatlayabilir: başarısız ol,
+   öde, yeniden kaydol, yine başarısız ol. Bu yüzden ikinci bir bedel var:
+   `MISSED_CHALLENGE_COOLDOWN_SECS`, altı saat. Bu süre boyunca operatör yeni
+   anlaşma açamaz. Mevcut anlaşmaları kesilmez; kesilseydi o shard'lar anında
+   yetersiz yedekli hale gelir ve ceza operatörü değil kullanıcıyı vururdu.
+
+   Süre saniye cinsinden yazılıdır, epoch cinsinden değil. Bir epoch
+   `slot_duration_secs * epoch_length_slots` demek ve ikisi de yönetişim
+   parametresi; "67 epoch" diye yazılmış bir ceza, o iki düğmeden biri
+   ayarlandığında sessizce dört saate ya da on ikiye dönerdi.
+
+   Ceza `begin_operator_cooldown` ile uzatılır, asla kısaltılmaz. İkinci bir
+   başarısızlık süreyi sıfırlamaz; iki tarihten geç olanı alınır, çünkü bu
+   kasten tekrar başarısız olarak oynanamayan tek sıralamadır.
+
+   Zincir bir makinenin diskine uzanıp hiçbir şey silemez. Yapabildiği şey,
+   operatörün kendi yazılımının okuduğu bir yerde, artık ona ait olmayan
+   shard'ları söylemektir: `stale_shards_for`. Bir düğüm kesintiden döndüğünde
+   bunu sorar ve bulduğunu siler. Storj'un bloom filtresiyle aynı biçim: ağ
+   neyin durması gerektiğini söyler, düğüm gerisini kaldırır.
+
+7. **Telefon birincil kopya tutamaz.** `OperatorClass` iki değer alır,
+   `AlwaysOn` (varsayılan) ve `Mobile`. Yalnızca birincisi
+   `replica_index = 0` alabilir. Birincil, bir okuyucunun ilk uzandığı ve bir
+   onarımın yeniden kurarken kaynak aldığı kopyadır; sahibi uyanıkken çevrimiçi
+   olan bir cihaz bu olamaz.
+
+   Sınıf operatörün kendi beyanıdır ve zincir bunu doğrulayamaz. Doğrulamaya
+   çalışmıyor da: yaptığı şey operatörü beyanına bağlamak. `AlwaysOn` diyerek
+   birincil replikaya uzanan bir telefon, bir birincilin yükümlülüklerini kabul
+   etmiş olur ve ilk uyuduğunda teminatını kaybeder.
+
+8. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
    erişim için ödediği "tüketici erişim" ekonomisi ayrı bir katman
    olarak tasarlanır.
-7. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
+9. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
    `slashedBondDisposition = "burn_from_operator_liquid_balance_best_effort"`
    olarak RPC'de görünür; bu final mainnet tokenomics kararı değildir.
 

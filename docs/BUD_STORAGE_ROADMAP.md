@@ -257,6 +257,61 @@ predicate; nobody calls it on a slash yet, and nothing opens the replacement
 deal. That work depends on the coder, since a repair with no parity to rebuild
 from is just a re-upload.
 
+## Gap 6: what a failure costs: **closed**
+
+Losing the bond was the whole punishment for missing a challenge, and a bond
+is a price. An operator can pay it, re-register, and fail again; the cost is
+linear in failures and buys the network nothing back.
+
+A second cost now runs alongside it. `MISSED_CHALLENGE_COOLDOWN_SECS` keeps
+the operator out of new deals for six hours. Existing deals continue, because
+cutting them would leave those shards under-replicated immediately and the
+punishment would land on the client rather than the operator.
+
+The constant is in seconds rather than epochs. An epoch is
+`slot_duration_secs * epoch_length_slots`, both governance parameters, so a
+cooldown expressed in epochs would silently become four hours or twelve the
+next time either was tuned. A punishment whose severity moves with an
+unrelated timing knob cannot be reasoned about.
+
+`begin_operator_cooldown` extends and never shortens. A second failure while
+one is running takes the later of the two expiries, which is the only
+ordering that cannot be gamed by failing again on purpose.
+
+Both maps are hashed into the registry root. They decide who may open a deal,
+so two nodes disagreeing about them would accept different blocks.
+
+### Data that is no longer yours
+
+The chain cannot reach into a machine and erase anything. What it can do is
+state, where the operator's own software reads it, which shards are no longer
+that operator's to serve: `stale_shards_for`. A node coming back from an
+outage asks and deletes what it finds. Storj's bloom filter has the same
+shape: the network says what should still be there and the node removes the
+rest.
+
+It is derived, not stored. A list written at slash time would go stale the
+moment a replacement deal handed the same operator the same shard again, and
+an operator deleting data it now legitimately holds is worse than one keeping
+data it should not.
+
+### Phones cannot hold the primary
+
+`OperatorClass` is `AlwaysOn` or `Mobile`, and only the first may take
+`replica_index = 0`. The primary is the copy a reader reaches for first and a
+repair rebuilds from; a device online when its owner is awake cannot be that.
+
+The class is self-declared and unverifiable. The chain does not try to verify
+it, it holds the operator to the claim: declaring `AlwaysOn` to reach a
+primary means accepting a primary's obligations, and a phone that does so
+loses its bond the first time it sleeps through a challenge.
+
+**Still open.** Nothing declares a class yet. `set_operator_class` cannot
+simply be wired to a caller, because one account reclassifying another as
+mobile would lock it out of primary replicas; it needs a signed transaction
+type, which is its own change. Until then every operator is `AlwaysOn` by
+default and the mobile rule is enforceable but unexercised.
+
 ## Gap 5: challenge economics: **measured and partly closed**
 
 ### What the measurement showed
