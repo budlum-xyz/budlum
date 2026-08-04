@@ -780,6 +780,18 @@ impl Blockchain {
             }
         }
     }
+    /// Wall-clock seconds according to the chain, taken from the newest
+    /// block's timestamp.
+    ///
+    /// Block timestamps are milliseconds since the unix epoch, so this
+    /// divides. Reading the chain rather than the host clock is deliberate:
+    /// two nodes applying the same block have to reach the same answer, and
+    /// `SystemTime::now()` guarantees they will not.
+    #[must_use]
+    pub fn current_unix_secs(&self) -> u64 {
+        u64::try_from(self.last_block().timestamp / 1_000).unwrap_or(u64::MAX)
+    }
+
     pub fn last_block(&self) -> &Block {
         self.chain.last().expect("Chain should never be empty")
     }
@@ -4770,6 +4782,26 @@ impl Blockchain {
         merkle_proof: Option<Vec<u8>>,
         storage_root: Option<crate::domain::Hash32>,
     ) -> Result<u64, String> {
+        // An operator that missed a challenge sits out six hours. Checked
+        // here rather than inside `open_deal` because this is the layer that
+        // knows wall time: `StorageRegistry` works in epochs, and an epoch is
+        // two governance parameters multiplied together.
+        //
+        // The registry holds the record and answers the question; the
+        // enforcement lives beside the escrow and the bond, which is where
+        // every other economic refusal already is.
+        let now_unix = self.current_unix_secs();
+        if let Some(until) = self
+            .state
+            .storage_registry
+            .operator_cooldown_until(&operator, now_unix)
+        {
+            return Err(format!(
+                "operator {operator} missed a challenge and cannot take                  storage work until unix {until} ({} seconds left)",
+                until.saturating_sub(now_unix)
+            ));
+        }
+
         // 1. Calculate total client fee escrow needed
         let epochs = end_epoch.saturating_sub(start_epoch);
         if epochs == 0 {
@@ -4883,6 +4915,20 @@ impl Blockchain {
         &mut self,
         current_epoch: u64,
     ) -> Result<(u32, u64), String> {
+        // Drop cooldowns that have run out while we are here. This is the
+        // accounting tick that already runs every epoch, and the map is
+        // hashed into the state root: without a prune it would grow with
+        // every failure the network ever saw, and every node would pay
+        // storage forever to remember a six-hour punishment.
+        let now_unix = self.current_unix_secs();
+        let pruned = self
+            .state
+            .storage_registry
+            .prune_expired_cooldowns(now_unix);
+        if pruned > 0 {
+            tracing::debug!(pruned, "expired storage operator cooldowns dropped");
+        }
+
         let deals: Vec<(u64, Address, u64, u64, StorageDeal)> = self
             .state
             .storage_registry
@@ -5283,6 +5329,26 @@ impl Blockchain {
     ) -> Result<u64, String> {
         self.storage_slashed_bond_total =
             self.storage_slashed_bond_total.saturating_add(slashed_bond);
+
+        // Losing the bond is a cost an operator can price in: fail, pay,
+        // register again, fail again. The cooldown is what makes flapping
+        // expensive in the dimension that hurts, which is time on the network
+        // earning fees.
+        //
+        // The clock is wall time rather than epochs. An epoch is
+        // `slot_duration_secs * epoch_length_slots`, both governance
+        // parameters, so a cooldown expressed in epochs would quietly become
+        // four hours or twelve the next time either is tuned.
+        let now_unix = self.current_unix_secs();
+        let cooldown_until = self
+            .state
+            .storage_registry
+            .begin_operator_cooldown(operator, now_unix);
+        tracing::info!(
+            %operator,
+            cooldown_until,
+            "storage operator missed a challenge and is in cooldown"
+        );
 
         let burned = self.state.burn_from(&operator, slashed_bond);
         if burned > 0 {

@@ -1033,10 +1033,32 @@ impl AccountState {
         if tx.priority_fee != 0 {
             return Err("flat-fee mode requires priority_fee == 0".into());
         }
-        if tx.fee < self.base_fee {
+        // The flat floor, and above it the proportional cut on a value
+        // transfer. `required_transfer_fee` takes the larger of the two, never
+        // the sum.
+        //
+        // Until this existed the amount was invisible to pricing: `tx.amount`
+        // appeared only in the overflow guard and the balance check, so moving
+        // one base unit and moving a quadrillion cost the same. The rate
+        // defaults to zero, which reproduces the old behaviour exactly, and
+        // governance turns it on per network.
+        //
+        // Only `Transfer` is priced this way. The other transaction types that
+        // carry an `amount` mean different things by it: `Stake` moves value
+        // into a bond the sender still owns, `Unstake` moves it back, and
+        // charging a percentage of a bond every time it is adjusted would tax
+        // participation rather than value movement.
+        let required_fee = match tx.tx_type {
+            TransactionType::Transfer => self
+                .registry
+                .params()
+                .required_transfer_fee(tx.amount, self.base_fee),
+            _ => self.base_fee,
+        };
+        if tx.fee < required_fee {
             return Err(format!(
-                "Fee too low: fee {} < base_fee {}",
-                tx.fee, self.base_fee
+                "Fee too low: fee {} < required {} (base_fee {}, amount {})",
+                tx.fee, required_fee, self.base_fee, tx.amount
             ));
         }
         // Overflow guard (security): reject amount+fee > u64::MAX explicitly.
@@ -1551,6 +1573,21 @@ impl AccountState {
                 params.max_invalid_votes_per_epoch = value
                     .parse::<u64>()
                     .map_err(|e| format!("invalid max_invalid_votes_per_epoch: {e}"))?;
+            }
+            "transfer_fee_ppm" => {
+                params.transfer_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid transfer_fee_ppm: {e}"))?;
+            }
+            "swap_fee_ppm" => {
+                params.swap_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid swap_fee_ppm: {e}"))?;
+            }
+            "bridge_fee_ppm" => {
+                params.bridge_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid bridge_fee_ppm: {e}"))?;
             }
             other => return Err(format!("unknown registry parameter: {other}")),
         }

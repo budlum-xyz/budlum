@@ -78,6 +78,9 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "bridge_relayer_fee_ppm",
     "bridge_relayer_min_fee",
     "max_invalid_votes_per_epoch",
+    "transfer_fee_ppm",
+    "swap_fee_ppm",
+    "bridge_fee_ppm",
 ];
 
 pub fn is_governance_parameter_whitelisted(key: &str) -> bool {
@@ -125,6 +128,21 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
             params.max_invalid_votes_per_epoch = value
                 .parse::<u64>()
                 .map_err(|e| format!("invalid max_invalid_votes_per_epoch: {e}"))?;
+        }
+        "transfer_fee_ppm" => {
+            params.transfer_fee_ppm = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid transfer_fee_ppm: {e}"))?;
+        }
+        "swap_fee_ppm" => {
+            params.swap_fee_ppm = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid swap_fee_ppm: {e}"))?;
+        }
+        "bridge_fee_ppm" => {
+            params.bridge_fee_ppm = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid bridge_fee_ppm: {e}"))?;
         }
         "malicious_slash_ratio_fixed" => {
             params.malicious_slash_ratio_fixed = value

@@ -112,11 +112,43 @@ each other's live challenges in real time, within the deadline, for every
 challenge. That is a running cost and a detectable pattern rather than a
 one-off setup.
 
-## Gap 3: erasure coding: **closed**
+## Gap 3: erasure coding: **schema and coder closed, coding correctness open**
 
 `ShardRef` now carries a `kind` (`Data` or `Parity`) and `ContentManifest`
 carries an `ErasureScheme { k, n }`: any `k` of the `n` shards reconstruct the
 object.
+
+Two things are not closed, and calling the whole gap closed hid both.
+
+**Nothing computes the parity in production.** `encode_object` and
+`to_manifest` are called from tests only; the manifest reaches the chain
+already built by a client. The module carries a `WIRING: unwired` marker
+saying so.
+
+**The chain cannot check that a parity shard is parity.** It never sees shard
+bytes, only their `ContentId` hashes. `validate_untrusted` verifies the counts
+line up, data shards equal `k` and parity shards equal `n - k`, and stops
+there, because checking the arithmetic would mean holding the bytes. Six
+random byte strings declared `(k=4, n=6)` are accepted today. The manifest is
+internally consistent, the id derives correctly, and reconstruction fails only
+when a real loss makes someone try it, which is after the point of the
+redundancy.
+
+This is the same question Celestia answers with Bad Encoding Fraud Proofs: a
+full node that holds the data reconstructs it, finds the commitment does not
+match, and publishes a proof that light nodes can check. The cost there is
+that the proof is proportional to the data, which is why they moved to a
+two-dimensional code, one row or column suffices. The alternative family is a
+polynomial commitment or a FRI proof that the leaves are close to a
+Reed-Solomon codeword, which proves correct coding without downloading
+anything.
+
+B.U.D. is closer to the first shape than it looks. `RetrievalChallenge`
+already asks an operator for a byte range and verifies the hash of what comes
+back, so the machinery for "someone holds the bytes and can be asked" exists.
+What is missing is a challenge whose subject is the coding relation across
+shards rather than the contents of one shard. That is a design item, and it
+belongs on this list rather than inside a gap marked closed.
 
 The saving is the point of the gap. For the same loss tolerance:
 
@@ -224,6 +256,61 @@ operator bond. Both directions are pinned by tests.
 predicate; nobody calls it on a slash yet, and nothing opens the replacement
 deal. That work depends on the coder, since a repair with no parity to rebuild
 from is just a re-upload.
+
+## Gap 6: what a failure costs: **closed**
+
+Losing the bond was the whole punishment for missing a challenge, and a bond
+is a price. An operator can pay it, re-register, and fail again; the cost is
+linear in failures and buys the network nothing back.
+
+A second cost now runs alongside it. `MISSED_CHALLENGE_COOLDOWN_SECS` keeps
+the operator out of new deals for six hours. Existing deals continue, because
+cutting them would leave those shards under-replicated immediately and the
+punishment would land on the client rather than the operator.
+
+The constant is in seconds rather than epochs. An epoch is
+`slot_duration_secs * epoch_length_slots`, both governance parameters, so a
+cooldown expressed in epochs would silently become four hours or twelve the
+next time either was tuned. A punishment whose severity moves with an
+unrelated timing knob cannot be reasoned about.
+
+`begin_operator_cooldown` extends and never shortens. A second failure while
+one is running takes the later of the two expiries, which is the only
+ordering that cannot be gamed by failing again on purpose.
+
+Both maps are hashed into the registry root. They decide who may open a deal,
+so two nodes disagreeing about them would accept different blocks.
+
+### Data that is no longer yours
+
+The chain cannot reach into a machine and erase anything. What it can do is
+state, where the operator's own software reads it, which shards are no longer
+that operator's to serve: `stale_shards_for`. A node coming back from an
+outage asks and deletes what it finds. Storj's bloom filter has the same
+shape: the network says what should still be there and the node removes the
+rest.
+
+It is derived, not stored. A list written at slash time would go stale the
+moment a replacement deal handed the same operator the same shard again, and
+an operator deleting data it now legitimately holds is worse than one keeping
+data it should not.
+
+### Phones cannot hold the primary
+
+`OperatorClass` is `AlwaysOn` or `Mobile`, and only the first may take
+`replica_index = 0`. The primary is the copy a reader reaches for first and a
+repair rebuilds from; a device online when its owner is awake cannot be that.
+
+The class is self-declared and unverifiable. The chain does not try to verify
+it, it holds the operator to the claim: declaring `AlwaysOn` to reach a
+primary means accepting a primary's obligations, and a phone that does so
+loses its bond the first time it sleeps through a challenge.
+
+**Still open.** Nothing declares a class yet. `set_operator_class` cannot
+simply be wired to a caller, because one account reclassifying another as
+mobile would lock it out of primary replicas; it needs a signed transaction
+type, which is its own change. Until then every operator is `AlwaysOn` by
+default and the mobile rule is enforceable but unexercised.
 
 ## Gap 5: challenge economics: **measured and partly closed**
 

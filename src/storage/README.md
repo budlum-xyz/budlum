@@ -40,15 +40,76 @@ Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları burada yaşa
    çözer; B.U.D.'da böyle bir kodlama **yok**. Ayrıntı ve yol haritası:
    `docs/BUD_STORAGE_ROADMAP.md`.
 
-5. **Yedeklilik erasure coding değil, replikasyon.** `ShardRef` yalnız
-   `(index, shard_id, size)` taşır; parity shard kavramı yok. Dayanıklılık
-   replika başına tam kopya maliyetiyle geliyor ve bir operatör slash
-   edildiğinde kaybolan yedekliliği onaran bir yol tanımlı değil.
+5. **Erasure coding var, parity üretimi üretim akışına bağlı değil.**
+   `ShardRef` artık `kind` (`Data` / `Parity`) taşıyor ve `ContentManifest`
+   bir `ErasureScheme { k, n }` taşıyor; `src/storage/erasure.rs` GF(2^8)
+   üzerinde gerçek bir Reed-Solomon kodlayıcıdır ve `(4,6)` bir kodun on beş
+   iki-kayıp deseninin tamamını test eder.
 
-6. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
+   Açık kalan iki nokta var ve ikisi de dayanıklılık vaadine dokunur.
+
+   Birincisi: parity baytlarını **kimse hesaplamıyor**. `encode_object` ve
+   `to_manifest` üretim ağacında hiçbir yerden çağrılmıyor; manifest zincire
+   istemciden hazır geliyor. Modülün başındaki `WIRING: unwired` işareti bunu
+   söylüyor.
+
+   İkincisi, ve daha derini: zincir shard **baytlarını hiç görmez**, yalnızca
+   hash'lerini görür. `validate_untrusted` sayıların tutarlılığını denetler
+   (Data sayısı `k`, Parity sayısı `n - k`), ama bir parity shard'ın gerçekten
+   doğru parity olup olmadığını denetleyemez. Rastgele altı bayt dizisiyle
+   `(k=4, n=6)` beyan eden bir manifest bugün kabul edilir; hata ancak
+   gerçekten kayıp olduğunda, yani iş işten geçtikten sonra görünür.
+
+   Bu ikinci nokta bir eksik satır değil, bir tasarım kalemi. Ethereum'un
+   danksharding'i aynı soruyla karşılaştı ve iki yol tanımladı: hile kanıtı
+   (fraud proof), yani baytları indiren bir tarafın yanlış kodlamayı
+   ispatlaması; ya da polinom taahhüdü (KZG) / FRI, yani kodlamanın doğruluğunu
+   veriyi indirmeden ispatlayan bir kanıt. B.U.D.'un mevcut challenge
+   mekanizması birinciye yakın duruyor: `RetrievalChallenge` zaten bir bayt
+   aralığı isteyip hash'ini doğruluyor.
+
+   Onarım tarafı ölçüldü ve hesap doğru: `objects_needing_repair` payda olarak
+   ayrı shard sayısını alıyor, replika sayısını değil, ve `k`'nin altına düşmüş
+   nesneleri onarım kuyruğuna değil alarm listesine koyuyor. Ancak bu
+   fonksiyonları çağıran bir üretim yolu ve bir RPC ucu henüz yok.
+
+6. **Kaçırılan meydan okumanın bedeli iki parçalıdır.** Teminatın yanması bir
+   kereye mahsus bir maliyettir ve operatör onu fiyatlayabilir: başarısız ol,
+   öde, yeniden kaydol, yine başarısız ol. Bu yüzden ikinci bir bedel var:
+   `MISSED_CHALLENGE_COOLDOWN_SECS`, altı saat. Bu süre boyunca operatör yeni
+   anlaşma açamaz. Mevcut anlaşmaları kesilmez; kesilseydi o shard'lar anında
+   yetersiz yedekli hale gelir ve ceza operatörü değil kullanıcıyı vururdu.
+
+   Süre saniye cinsinden yazılıdır, epoch cinsinden değil. Bir epoch
+   `slot_duration_secs * epoch_length_slots` demek ve ikisi de yönetişim
+   parametresi; "67 epoch" diye yazılmış bir ceza, o iki düğmeden biri
+   ayarlandığında sessizce dört saate ya da on ikiye dönerdi.
+
+   Ceza `begin_operator_cooldown` ile uzatılır, asla kısaltılmaz. İkinci bir
+   başarısızlık süreyi sıfırlamaz; iki tarihten geç olanı alınır, çünkü bu
+   kasten tekrar başarısız olarak oynanamayan tek sıralamadır.
+
+   Zincir bir makinenin diskine uzanıp hiçbir şey silemez. Yapabildiği şey,
+   operatörün kendi yazılımının okuduğu bir yerde, artık ona ait olmayan
+   shard'ları söylemektir: `stale_shards_for`. Bir düğüm kesintiden döndüğünde
+   bunu sorar ve bulduğunu siler. Storj'un bloom filtresiyle aynı biçim: ağ
+   neyin durması gerektiğini söyler, düğüm gerisini kaldırır.
+
+7. **Telefon birincil kopya tutamaz.** `OperatorClass` iki değer alır,
+   `AlwaysOn` (varsayılan) ve `Mobile`. Yalnızca birincisi
+   `replica_index = 0` alabilir. Birincil, bir okuyucunun ilk uzandığı ve bir
+   onarımın yeniden kurarken kaynak aldığı kopyadır; sahibi uyanıkken çevrimiçi
+   olan bir cihaz bu olamaz.
+
+   Sınıf operatörün kendi beyanıdır ve zincir bunu doğrulayamaz. Doğrulamaya
+   çalışmıyor da: yaptığı şey operatörü beyanına bağlamak. `AlwaysOn` diyerek
+   birincil replikaya uzanan bir telefon, bir birincilin yükümlülüklerini kabul
+   etmiş olur ve ilk uyuduğunda teminatını kaybeder.
+
+8. **Ekonomi yönü sağlayıcıdır:** operatörler saklama karşılığı ödeme alır; AI'nin
    erişim için ödediği "tüketici erişim" ekonomisi ayrı bir katman
    olarak tasarlanır.
-7. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
+9. **Slashed-bond akışı:** devnet ara muhasebesinde missed-challenge sonrası
    `slashedBondDisposition = "burn_from_operator_liquid_balance_best_effort"`
    olarak RPC'de görünür; bu final mainnet tokenomics kararı değildir.
 
