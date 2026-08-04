@@ -1574,6 +1574,21 @@ impl AccountState {
                     .parse::<u64>()
                     .map_err(|e| format!("invalid max_invalid_votes_per_epoch: {e}"))?;
             }
+            "transfer_fee_ppm" => {
+                params.transfer_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid transfer_fee_ppm: {e}"))?;
+            }
+            "swap_fee_ppm" => {
+                params.swap_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid swap_fee_ppm: {e}"))?;
+            }
+            "bridge_fee_ppm" => {
+                params.bridge_fee_ppm = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid bridge_fee_ppm: {e}"))?;
+            }
             other => return Err(format!("unknown registry parameter: {other}")),
         }
         params.validate()?;

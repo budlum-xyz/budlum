@@ -459,8 +459,10 @@ mod tests {
     /// quadrillion cost the same.
     #[test]
     fn a_larger_transfer_requires_a_larger_fee() {
-        let mut p = RegistryParams::default();
-        p.transfer_fee_ppm = 200; // 0.02%
+        let p = RegistryParams {
+            transfer_fee_ppm: 200, // 0.02%
+            ..RegistryParams::default()
+        };
         let small = p.required_transfer_fee(1_000_000, 1);
         let large = p.required_transfer_fee(1_000_000_000, 1);
         assert!(
@@ -491,8 +493,10 @@ mod tests {
     /// large amount as many small ones and pays nothing.
     #[test]
     fn splitting_a_transfer_does_not_reduce_the_total_fee() {
-        let mut p = RegistryParams::default();
-        p.transfer_fee_ppm = 200;
+        let p = RegistryParams {
+            transfer_fee_ppm: 200,
+            ..RegistryParams::default()
+        };
         let base_fee = 1;
         let whole = 1_000_000_000u64;
         let pieces = 1_000u64;
@@ -511,8 +515,10 @@ mod tests {
     /// rounds up for this reason and so does this.
     #[test]
     fn a_priced_transfer_is_never_free_through_rounding() {
-        let mut p = RegistryParams::default();
-        p.transfer_fee_ppm = 1; // 0.0001%
+        let p = RegistryParams {
+            transfer_fee_ppm: 1, // 0.0001%
+            ..RegistryParams::default()
+        };
         assert_eq!(
             p.proportional_fee(1, p.transfer_fee_ppm),
             1,
@@ -524,28 +530,47 @@ mod tests {
     /// arithmetic runs in. Saturating keeps the balance check meaningful.
     #[test]
     fn an_enormous_transfer_saturates_rather_than_wrapping() {
-        let mut p = RegistryParams::default();
-        p.transfer_fee_ppm = PPM_DENOMINATOR - 1;
+        let p = RegistryParams {
+            transfer_fee_ppm: PPM_DENOMINATOR - 1,
+            ..RegistryParams::default()
+        };
         let fee = p.required_transfer_fee(u64::MAX, 1);
         assert!(fee > 0, "must not wrap to a small number");
-        assert!(fee <= u64::MAX);
+        // The interesting bound is the lower one: `amount * rate` leaves `u64`
+        // here, so the saturating path must return something large rather than
+        // a wrapped small number. Comparing against `u64::MAX` on a `u64` is
+        // vacuously true and clippy is right to refuse it.
+        assert!(
+            fee > u64::MAX / 2,
+            "a near-100% cut on u64::MAX must saturate high, got {fee}"
+        );
     }
 
     /// A cut at or above 100% credits the recipient nothing while debiting the
     /// sender everything.
     #[test]
     fn a_proportional_rate_at_or_above_one_hundred_percent_is_refused() {
-        for field in 0..3 {
-            let mut p = RegistryParams::default();
-            match field {
-                0 => p.transfer_fee_ppm = PPM_DENOMINATOR,
-                1 => p.swap_fee_ppm = PPM_DENOMINATOR,
-                _ => p.bridge_fee_ppm = PPM_DENOMINATOR,
-            }
+        let at_hundred = [
+            RegistryParams {
+                transfer_fee_ppm: PPM_DENOMINATOR,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                swap_fee_ppm: PPM_DENOMINATOR,
+                ..RegistryParams::default()
+            },
+            RegistryParams {
+                bridge_fee_ppm: PPM_DENOMINATOR,
+                ..RegistryParams::default()
+            },
+        ];
+        for p in at_hundred {
             assert!(p.validate().is_err(), "100% cut must be refused");
         }
-        let mut p = RegistryParams::default();
-        p.transfer_fee_ppm = PPM_DENOMINATOR - 1;
+        let p = RegistryParams {
+            transfer_fee_ppm: PPM_DENOMINATOR - 1,
+            ..RegistryParams::default()
+        };
         assert!(
             p.validate().is_ok(),
             "just under 100% is a policy choice, not an error"
@@ -557,10 +582,12 @@ mod tests {
     /// outbound bridge is not the relayer's compensation on an inbound one.
     #[test]
     fn the_three_proportional_rates_are_independent() {
-        let mut p = RegistryParams::default();
-        p.transfer_fee_ppm = 200;
-        p.swap_fee_ppm = 400;
-        p.bridge_fee_ppm = 800;
+        let p = RegistryParams {
+            transfer_fee_ppm: 200,
+            swap_fee_ppm: 400,
+            bridge_fee_ppm: 800,
+            ..RegistryParams::default()
+        };
         let amount = 10_000_000u64;
         assert_eq!(p.proportional_fee(amount, p.transfer_fee_ppm), 2_000);
         assert_eq!(p.proportional_fee(amount, p.swap_fee_ppm), 4_000);

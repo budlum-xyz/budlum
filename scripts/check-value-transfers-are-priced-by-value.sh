@@ -40,9 +40,13 @@
 #      a zero-cost transfer at a nonzero rate is a free ride the network still
 #      pays for. A genuinely free transfer is a zero rate.
 #
-#   6. The rates are governance-tunable. A fee that can only change by shipping
-#      a binary is not a parameter, and every other economic rate here is
-#      already on the whitelist.
+#   6. The rates are governance-tunable, in *both* places that decide it. The
+#      whitelist in governance.rs says which keys are allowed; a second `match`
+#      in account.rs decides which keys actually apply. Adding a rate to the
+#      first and forgetting the second gives a parameter governance accepts and
+#      then rejects with "unknown registry parameter", which is exactly what
+#      happened here and what `every_whitelisted_governance_parameter_can_be_
+#      applied` caught in CI.
 #
 #   7. The named regressions exist and are real `#[test]` functions.
 #
@@ -204,13 +208,28 @@ elif "required_transfer_fee" not in validate_tx:
         "which reads as a working proportional fee to anyone grepping for one."
     )
 
-# 6. Governance can move the rates.
+# 6. Governance can move the rates, in both places that decide it.
 for rate in RATES:
     checked += 1
     if f'"{rate}"' not in gov_code:
         problems.append(
             f"`{rate}` is not on the governance whitelist. An economic rate that "
             "can only change by shipping a binary is not a parameter."
+        )
+    checked += 1
+    apply_fn = body_of(account_code, r"fn apply_registry_parameter_update\s*\(")
+    if apply_fn is None:
+        problems.append(
+            "cannot find `apply_registry_parameter_update`; if it moved, update "
+            "this gate in the same commit so the second half of the whitelist "
+            "stays watched."
+        )
+    elif f'"{rate}"' not in apply_fn:
+        problems.append(
+            f"`{rate}` is whitelisted but `apply_registry_parameter_update` has "
+            "no arm for it. Governance would accept the proposal and then fail "
+            "to apply it with `unknown registry parameter`. Two matches decide "
+            "this, and both have to know the key."
         )
 
 # 7. The regressions must exist as real tests.
@@ -347,10 +366,21 @@ open(os.path.join(root, "src/registry/params.rs"), "w").write(
 apply_line = "self.registry.params().required_transfer_fee(tx.amount, self.base_fee)"
 if mode == "unapplied":
     apply_line = "self.base_fee"
+
+# The second match: which keys governance can actually apply. A rate on the
+# whitelist with no arm here is accepted and then refused at apply time.
+arms = ['"transfer_fee_ppm"', '"swap_fee_ppm"', '"bridge_fee_ppm"']
+if mode == "half_governed":
+    arms = arms[:2]
+apply_match = "".join("            %s => {}\n" % a for a in arms)
 open(os.path.join(root, "src/core/account.rs"), "w").write(
     "impl AccountState {\n"
     "    pub fn validate_transaction_with_context(&self) -> Result<(), String> {\n"
-    "        let required = %s;\n        Ok(())\n    }\n}\n" % apply_line
+    "        let required = %s;\n        Ok(())\n    }\n"
+    "    fn apply_registry_parameter_update(&mut self, key: &str) -> Result<(), String> {\n"
+    "        match key {\n%s"
+    "            other => return Err(format!(\"unknown registry parameter: {other}\")),\n"
+    "        }\n        Ok(())\n    }\n}\n" % (apply_line, apply_match)
 )
 
 wl = '"transfer_fee_ppm", "swap_fee_ppm", "bridge_fee_ppm",'
@@ -401,7 +431,14 @@ PYB
   build "$tmp/notest" missing_test
   expect_finding "$tmp/notest" "a missing regression test" || return 1
 
-  echo "value pricing gate self-test OK: 9 canaries"
+  # 10. A rate reaches the governance whitelist and not the match that applies
+  #     it. Governance accepts the proposal, then fails with "unknown registry
+  #     parameter". Two matches decide this and both have to know the key; the
+  #     first version of this change knew only one, and CI caught it.
+  build "$tmp/halfgov" half_governed
+  expect_finding "$tmp/halfgov" "a rate whitelisted but never applied" || return 1
+
+  echo "value pricing gate self-test OK: 10 canaries"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
