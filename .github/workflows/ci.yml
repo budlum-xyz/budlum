@@ -1085,6 +1085,18 @@ jobs:
         run: |
           bash ./scripts/check-hash-inputs-are-length-prefixed.sh --self-test
           bash ./scripts/check-hash-inputs-are-length-prefixed.sh
+      # `settle_agent_payment_immediate` removed the payment from the live map
+      # and then decided whether to accept it. One refusal put it back and the
+      # other did not, so a second settle reported failure and consumed the
+      # entry on its way out. Nothing rolls that back: `apply_block_checked`
+      # propagates with `?`. The same shape cost `reclaim_agent_payment` worse
+      # than that, since its success path then removed a second time and
+      # unwrapped a `None`, and it stranded a storage operator's only chance
+      # to answer a challenge before the deadline took its bond.
+      - name: reddetmeden once mutasyon var mi + kanarya
+        run: |
+          bash ./scripts/check-refusals-do-not-mutate-first.sh --self-test
+          bash ./scripts/check-refusals-do-not-mutate-first.sh
       # `validate_transaction` required only `fee >= base_fee`, and `tx.amount`
       # reached pricing nowhere: it appeared in the overflow guard and the
       # balance check and nowhere else. Moving one base unit and moving a

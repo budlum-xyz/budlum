@@ -487,16 +487,32 @@ impl ProofMarketState {
             .ok_or("Task not found in active tasks")?;
 
         receipt.validate_for_task(&self.active_tasks[idx])?;
-        let mut task = self.active_tasks.remove(idx);
-        task.complete()?;
+
+        // Every refusal is decided while the task is still in `active_tasks`.
+        //
+        // This used to remove the task first. The receipt-limit check and the
+        // completion counter both sit after it, so a full receipt queue or a
+        // saturated counter returned `Err` with the task already gone: not
+        // active, not completed, and no receipt recorded. The prover's work
+        // vanished through a path that reported failure, and nothing rolls
+        // back, since `apply_block_checked` propagates with `?`.
         if self.pending_receipts.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
             return Err("ProofMarketState pending receipt limit exceeded".into());
         }
-        self.pending_receipts.push(receipt);
-        self.total_tasks_completed = self
+        let total_tasks_completed = self
             .total_tasks_completed
             .checked_add(1)
             .ok_or_else(|| "ProofMarketState total_tasks_completed overflow".to_string())?;
+        // `complete` is the last thing that can refuse, and it needs the task
+        // by value. Take a copy, ask it, and only commit the removal once it
+        // has agreed.
+        let mut task = self.active_tasks[idx].clone();
+        task.complete()?;
+
+        // Past every refusal: nothing below this line can fail.
+        self.active_tasks.remove(idx);
+        self.pending_receipts.push(receipt);
+        self.total_tasks_completed = total_tasks_completed;
         Ok(())
     }
 

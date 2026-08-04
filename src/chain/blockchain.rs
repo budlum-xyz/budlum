@@ -4474,6 +4474,11 @@ impl Blockchain {
         Ok(())
     }
 
+    /// PARTIAL: allowed - draining the queue is the operation, not a lookup.
+    /// The certificates are taken out on purpose and each is handled; the
+    /// error only reports that one of them failed, and `handle_finality_cert`
+    /// requeues the single cert whose QC is still missing. Putting the whole
+    /// batch back would duplicate the ones that succeeded.
     fn process_pending_finality_certs(&mut self, checkpoint_height: u64) -> Result<(), String> {
         let Some(certs) = self.pending_finality_certs.remove(&checkpoint_height) else {
             return Ok(());
