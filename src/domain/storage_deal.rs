@@ -80,6 +80,67 @@ pub enum DealStatus {
     Expired,
 }
 
+/// How long an operator that lost a challenge stays out of the storage
+/// business, in seconds.
+///
+/// Six hours. The number is in seconds rather than epochs on purpose: an
+/// epoch is `slot_duration_secs * epoch_length_slots`, both governance
+/// parameters, so a cooldown written as "67 epochs" would silently become
+/// four hours or twelve the next time either is tuned. A punishment whose
+/// severity depends on an unrelated timing knob is not a punishment anyone
+/// can reason about.
+///
+/// Six hours is long enough that a machine flapping in and out costs its
+/// operator real income, and short enough that a genuine outage does not end
+/// a business. Storj measures downtime in days before suspension, but Storj
+/// suspends on a rolling *score*; this is a single missed challenge, which is
+/// a sharper signal and deserves a lighter, immediate response.
+///
+/// # What a block producer can do to this clock
+///
+/// The cooldown is measured against block timestamps, and a producer chooses
+/// the timestamp of the block it makes. Consensus bounds that choice: a block
+/// dated further ahead than `MAX_FUTURE_BLOCK_TIME_MS` is rejected. So the
+/// worst a producer can do is move the chain's clock forward by that drift
+/// and shorten someone's cooldown by the same amount.
+///
+/// Six hours is chosen partly because it dwarfs that window. A punishment
+/// measured in seconds would be worth manipulating a timestamp for; one
+/// measured in hours is not, and the producer would have to keep doing it
+/// block after block while every other node watched the clock run ahead.
+pub const MISSED_CHALLENGE_COOLDOWN_SECS: u64 = 6 * 60 * 60;
+
+/// What kind of machine an operator says it is.
+///
+/// The chain cannot verify this, and does not try. What it can do is hold the
+/// operator to the class it claimed: a phone that says it is a phone accepts
+/// the phone rules, and a phone that lies its way into a primary replica
+/// carries a server's obligations and loses its bond when it sleeps.
+///
+/// The distinction exists because the two are not interchangeable. A phone is
+/// online when its owner happens to be using it. Putting the only copy of
+/// something there is not redundancy, it is a coin flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OperatorClass {
+    /// Continuously powered, on mains and a fixed connection.
+    #[default]
+    AlwaysOn,
+    /// A phone, tablet or laptop: online opportunistically, on battery, often
+    /// on a metered link.
+    Mobile,
+}
+
+impl OperatorClass {
+    /// Whether this class may hold `replica_index = 0`.
+    ///
+    /// The primary is the copy a reader reaches for first and the one a repair
+    /// rebuilds from when the others are gone. A device that is online when
+    /// its owner is awake cannot be that.
+    pub fn may_hold_primary(self) -> bool {
+        matches!(self, OperatorClass::AlwaysOn)
+    }
+}
+
 /// Storage economics parameters, scoped to a single deal. Per-domain
 /// Defaults are in `StorageDomainParams`; this is the per-deal view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,6 +502,24 @@ pub struct StorageRegistry {
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
+    /// When each operator that missed a challenge may take storage work
+    /// again, as a unix timestamp.
+    ///
+    /// Losing the bond is a one-off cost an operator can price in: fail,
+    /// pay, re-register, fail again. The cooldown is what makes flapping
+    /// expensive in the dimension that actually hurts, which is time on the
+    /// network earning fees. An entry is kept until it expires and is then
+    /// pruned, so the map stays proportional to recent failures rather than
+    /// to history.
+    #[serde(default)]
+    operator_cooldowns: BTreeMap<Address, u64>,
+    /// What each operator declared itself to be.
+    ///
+    /// Absent means [`OperatorClass::AlwaysOn`], which is what every operator
+    /// registered before this field was implicitly claiming by taking primary
+    /// replicas.
+    #[serde(default)]
+    operator_classes: BTreeMap<Address, OperatorClass>,
 }
 
 use std::collections::BTreeMap;
@@ -530,6 +609,19 @@ pub enum StorageError {
     UnknownReallocationTicket(u64),
     ReallocationNotPending(u64),
     ReplacementOperatorMatchesSlashed(Address),
+    /// The operator lost a challenge recently and is serving its cooldown.
+    ///
+    /// Carries the timestamp it may open deals again, so the caller can say
+    /// how long is left rather than only that the door is shut.
+    OperatorInCooldown {
+        operator: Address,
+        until_unix_secs: u64,
+    },
+    /// A mobile operator asked for `replica_index = 0`.
+    ///
+    /// The primary is the copy a reader reaches first and a repair rebuilds
+    /// from. A device that is online when its owner is awake cannot be it.
+    MobileOperatorCannotHoldPrimary(Address),
 }
 
 impl std::fmt::Display for StorageError {
@@ -548,6 +640,20 @@ impl std::fmt::Display for StorageError {
             StorageError::InsufficientBond { required, provided } => {
                 write!(f, "operator bond {provided} below required {required}")
             }
+            StorageError::OperatorInCooldown {
+                operator,
+                until_unix_secs,
+            } => write!(
+                f,
+                "operator {operator} missed a challenge and cannot take storage \
+                 work until unix {until_unix_secs}"
+            ),
+            StorageError::MobileOperatorCannotHoldPrimary(operator) => write!(
+                f,
+                "operator {operator} is registered as mobile and cannot hold \
+                 replica_index 0; a phone is online when its owner is, which \
+                 is not what a primary copy means"
+            ),
             StorageError::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
             StorageError::OpenerBondBelowRangeCost {
                 range_len,
@@ -626,6 +732,8 @@ impl StorageRegistry {
             && self.challenges.is_empty()
             && self.results.is_empty()
             && self.reallocations.is_empty()
+            && self.operator_cooldowns.is_empty()
+            && self.operator_classes.is_empty()
             && self.manifests.is_empty()
     }
 
@@ -636,6 +744,21 @@ impl StorageRegistry {
         hasher.update(self.next_deal_id.to_le_bytes());
         hasher.update(self.next_challenge_id.to_le_bytes());
         hasher.update(self.next_reallocation_id.to_le_bytes());
+        // Cooldowns and declared classes decide who may open a deal, so two
+        // nodes that disagree about them would accept different blocks. Both
+        // maps are `BTreeMap`, so iteration order is the key order and every
+        // node hashes the same bytes.
+        for (operator, until) in &self.operator_cooldowns {
+            hasher.update(operator.as_bytes());
+            hasher.update(until.to_le_bytes());
+        }
+        for (operator, class) in &self.operator_classes {
+            hasher.update(operator.as_bytes());
+            hasher.update([match class {
+                OperatorClass::AlwaysOn => 0u8,
+                OperatorClass::Mobile => 1u8,
+            }]);
+        }
         for deal in self.deals.values() {
             hasher.update(
                 bincode::serialize(deal)
@@ -681,6 +804,64 @@ impl StorageRegistry {
     /// The same `manifest_id` is a no-op (per the chain-only rule: the
     /// Canonical manifest lives in `ContentManifest`; this index only
     /// Tracks "is this manifest known to the storage domain?").
+    /// Record that `operator` may not take storage work until
+    /// `now_unix_secs + MISSED_CHALLENGE_COOLDOWN_SECS`.
+    ///
+    /// Idempotent in the direction that matters: a second failure extends the
+    /// cooldown, it never shortens one already running. An operator failing
+    /// twice in an hour should not find its second failure resetting the
+    /// clock to a shorter remaining time than its first.
+    pub fn begin_operator_cooldown(&mut self, operator: Address, now_unix_secs: u64) -> u64 {
+        let until = now_unix_secs.saturating_add(MISSED_CHALLENGE_COOLDOWN_SECS);
+        let entry = self.operator_cooldowns.entry(operator).or_insert(until);
+        *entry = (*entry).max(until);
+        *entry
+    }
+
+    /// When `operator` may take work again, or `None` if it is free now.
+    ///
+    /// Reads without mutating so a query path can call it. Expired entries
+    /// are reported as free here and removed by
+    /// [`StorageRegistry::prune_expired_cooldowns`].
+    pub fn operator_cooldown_until(&self, operator: &Address, now_unix_secs: u64) -> Option<u64> {
+        self.operator_cooldowns
+            .get(operator)
+            .copied()
+            .filter(|until| *until > now_unix_secs)
+    }
+
+    /// Drop cooldowns that have run out. Returns how many were removed.
+    ///
+    /// Without this the map grows with every failure the network ever saw,
+    /// and it is hashed into the state root, so it would cost every node
+    /// storage and bandwidth forever to remember a six-hour punishment.
+    pub fn prune_expired_cooldowns(&mut self, now_unix_secs: u64) -> usize {
+        let before = self.operator_cooldowns.len();
+        self.operator_cooldowns
+            .retain(|_, until| *until > now_unix_secs);
+        before - self.operator_cooldowns.len()
+    }
+
+    /// Declare what kind of machine an operator runs.
+    ///
+    /// Self-reported and unverifiable, which is fine: the chain holds the
+    /// operator to the class it claimed rather than trying to detect a lie.
+    /// Claiming `AlwaysOn` to reach a primary replica means accepting a
+    /// primary's obligations, and the bond answers for them.
+    pub fn set_operator_class(&mut self, operator: Address, class: OperatorClass) {
+        self.operator_classes.insert(operator, class);
+    }
+
+    /// What `operator` declared. Defaults to [`OperatorClass::AlwaysOn`],
+    /// which is what every operator registered before this existed was
+    /// implicitly claiming by taking primary replicas.
+    pub fn operator_class(&self, operator: &Address) -> OperatorClass {
+        self.operator_classes
+            .get(operator)
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub fn register_manifest(&mut self, manifest: &ContentManifest) {
         self.manifests
             .entry(manifest.manifest_id)
@@ -754,6 +935,19 @@ impl StorageRegistry {
                 required: domain_params.min_operator_bond,
                 provided: economics.operator_bond,
             });
+        }
+        // A mobile operator may hold a second or third copy and never the
+        // first. The primary is what a reader reaches for and what a repair
+        // rebuilds from; a device that is online when its owner is awake
+        // cannot be that, and putting the only copy there is a coin flip
+        // dressed as redundancy.
+        //
+        // The class is self-reported and the chain does not try to detect a
+        // lie. It holds the operator to the class it claimed: an operator
+        // that says `AlwaysOn` to reach a primary accepts a primary's
+        // obligations, and the bond answers for them when it sleeps.
+        if replica_index == 0 && !self.operator_class(&operator).may_hold_primary() {
+            return Err(StorageError::MobileOperatorCannotHoldPrimary(operator));
         }
         // A deal-open carries its own copy of the manifest, and
         // `register_manifest` is first-writer-wins, so this path can seed the
@@ -2015,6 +2209,144 @@ mod tests {
             Some([0x42u8; 32]),
         )
         .expect("a coherent manifest must still open a deal");
+    }
+
+    // === B75: a missed challenge costs six hours, not just the bond =======
+
+    /// The bond alone is a one-off cost an operator can price in. The
+    /// cooldown is the part that makes flapping expensive.
+    #[test]
+    fn a_missed_challenge_locks_the_operator_out_for_six_hours() {
+        let mut reg = StorageRegistry::new();
+        let now = 1_000_000u64;
+        let until = reg.begin_operator_cooldown(operator(), now);
+        assert_eq!(until, now + MISSED_CHALLENGE_COOLDOWN_SECS);
+        assert_eq!(MISSED_CHALLENGE_COOLDOWN_SECS, 21_600, "six hours");
+        assert_eq!(reg.operator_cooldown_until(&operator(), now), Some(until));
+    }
+
+    /// The clock has to actually run out. A cooldown that never lifts is a
+    /// ban, and this is not one.
+    #[test]
+    fn the_cooldown_lifts_when_it_expires() {
+        let mut reg = StorageRegistry::new();
+        let now = 1_000_000u64;
+        let until = reg.begin_operator_cooldown(operator(), now);
+        assert!(reg
+            .operator_cooldown_until(&operator(), until - 1)
+            .is_some());
+        assert!(reg.operator_cooldown_until(&operator(), until).is_none());
+        assert!(reg
+            .operator_cooldown_until(&operator(), until + 1)
+            .is_none());
+    }
+
+    /// A second failure extends the cooldown and never shortens it. Failing
+    /// twice must not leave less time to serve than failing once.
+    #[test]
+    fn a_second_failure_never_shortens_a_running_cooldown() {
+        let mut reg = StorageRegistry::new();
+        let first = reg.begin_operator_cooldown(operator(), 1_000_000);
+        // A failure recorded with an earlier timestamp, which is what a
+        // reordered or replayed event looks like.
+        let second = reg.begin_operator_cooldown(operator(), 999_000);
+        assert_eq!(second, first, "an earlier failure must not pull it in");
+        let third = reg.begin_operator_cooldown(operator(), 1_010_000);
+        assert!(third > first, "a later failure extends it");
+    }
+
+    /// The map is hashed into the state root, so it cannot grow with every
+    /// failure the network ever saw.
+    #[test]
+    fn expired_cooldowns_are_pruned() {
+        let mut reg = StorageRegistry::new();
+        let until = reg.begin_operator_cooldown(operator(), 1_000);
+        reg.begin_operator_cooldown(opener(), 1_000_000);
+        assert_eq!(reg.prune_expired_cooldowns(until), 1);
+        assert!(reg.operator_cooldown_until(&operator(), until).is_none());
+        assert!(reg.operator_cooldown_until(&opener(), 1_000_001).is_some());
+    }
+
+    /// Cooldowns decide who may open a deal, so two nodes disagreeing about
+    /// them would accept different blocks.
+    #[test]
+    fn a_cooldown_changes_the_registry_root() {
+        let mut reg = StorageRegistry::new();
+        let before = reg.root();
+        reg.begin_operator_cooldown(operator(), 1_000);
+        assert_ne!(before, reg.root(), "the cooldown must reach the root");
+    }
+
+    // === B76: a phone may hold a copy, never the only one =================
+
+    /// The primary is what a reader reaches for and a repair rebuilds from.
+    #[test]
+    fn a_mobile_operator_cannot_take_the_primary_replica() {
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(operator(), OperatorClass::Mobile);
+        let m = good_manifest();
+        let err = reg
+            .open_deal(
+                42,
+                &m,
+                m.shards[0].shard_id,
+                operator(),
+                0, // primary
+                10,
+                20,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("a phone must not hold the only copy");
+        assert!(
+            matches!(err, StorageError::MobileOperatorCannotHoldPrimary(_)),
+            "expected MobileOperatorCannotHoldPrimary, got {err:?}"
+        );
+    }
+
+    /// It may hold a second or third copy. A rule that refuses everything is
+    /// not a rule, it is a ban on mobile storage.
+    #[test]
+    fn a_mobile_operator_may_take_a_secondary_replica() {
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(operator(), OperatorClass::Mobile);
+        let m = good_manifest();
+        reg.open_deal(
+            42,
+            &m,
+            m.shards[0].shard_id,
+            operator(),
+            1, // secondary
+            10,
+            20,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+        .expect("a phone may hold a secondary copy");
+    }
+
+    /// An operator that declared nothing is `AlwaysOn`, which is what every
+    /// operator registered before this field was implicitly claiming.
+    #[test]
+    fn an_undeclared_operator_defaults_to_always_on() {
+        let reg = StorageRegistry::new();
+        assert_eq!(reg.operator_class(&operator()), OperatorClass::AlwaysOn);
+        assert!(OperatorClass::AlwaysOn.may_hold_primary());
+        assert!(!OperatorClass::Mobile.may_hold_primary());
+    }
+
+    /// The declared class decides who may hold a primary, so it belongs in
+    /// the root for the same reason the cooldown does.
+    #[test]
+    fn a_declared_class_changes_the_registry_root() {
+        let mut reg = StorageRegistry::new();
+        let before = reg.root();
+        reg.set_operator_class(operator(), OperatorClass::Mobile);
+        assert_ne!(before, reg.root());
     }
 
     /// Two deals over shards of different sizes must not hash alike. The size

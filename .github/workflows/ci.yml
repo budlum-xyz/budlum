@@ -1075,6 +1075,16 @@ jobs:
         run: |
           bash ./scripts/check-readme-does-not-deny-shipped-code.sh --self-test
           bash ./scripts/check-readme-does-not-deny-shipped-code.sh
+      # Two storage rules with the same failure mode: the data exists, the
+      # tests pass, and nothing on the operator's path reads it. An operator
+      # that misses a challenge sits out six hours, and a mobile operator may
+      # hold a second copy but never the first. `mobile_self.rs` already
+      # showed how this ends: it held the rule that critical content needs a
+      # paid replica, had tests, and was never called by anything.
+      - name: depolama cezalari uygulaniyor mu + kanarya
+        run: |
+          bash ./scripts/check-storage-penalties-are-enforced.sh --self-test
+          bash ./scripts/check-storage-penalties-are-enforced.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
