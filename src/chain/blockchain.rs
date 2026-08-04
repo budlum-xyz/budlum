@@ -4914,6 +4914,20 @@ impl Blockchain {
         &mut self,
         current_epoch: u64,
     ) -> Result<(u32, u64), String> {
+        // Drop cooldowns that have run out while we are here. This is the
+        // accounting tick that already runs every epoch, and the map is
+        // hashed into the state root: without a prune it would grow with
+        // every failure the network ever saw, and every node would pay
+        // storage forever to remember a six-hour punishment.
+        let now_unix = self.current_unix_secs();
+        let pruned = self
+            .state
+            .storage_registry
+            .prune_expired_cooldowns(now_unix);
+        if pruned > 0 {
+            tracing::debug!(pruned, "expired storage operator cooldowns dropped");
+        }
+
         let deals: Vec<(u64, Address, u64, u64, StorageDeal)> = self
             .state
             .storage_registry

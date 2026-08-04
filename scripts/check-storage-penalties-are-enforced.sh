@@ -133,7 +133,7 @@ elif ".max(" not in begin:
         "less than failing once."
     )
 
-# 4. The map is bounded.
+# 4. The map is bounded, and something actually calls the prune.
 checked += 1
 if not re.search(r"fn prune_expired_cooldowns\s*\(", deal_code):
     problems.append(
@@ -141,6 +141,14 @@ if not re.search(r"fn prune_expired_cooldowns\s*\(", deal_code):
         "so without a prune every node pays storage forever to remember a "
         "six-hour punishment."
     )
+else:
+    checked += 1
+    if "prune_expired_cooldowns" not in chain_code:
+        problems.append(
+            "`prune_expired_cooldowns` exists and no production path calls it. "
+            "A prune nothing runs bounds nothing; the map still grows with "
+            "every failure and still reaches the state root."
+        )
 
 # 5. Both maps reach the state root.
 checked += 1
@@ -358,6 +366,9 @@ open(os.path.join(root, "src/domain/storage_deal.rs"), "w").write(
     % (const, begin, prune, root_fn, od_checks, tests)
 )
 
+prune_call = "self.state.storage_registry.prune_expired_cooldowns(now_unix);"
+if mode == "prune_never_called":
+    prune_call = ""
 enforce = "self.state.storage_registry.operator_cooldown_until(&operator, now_unix)"
 if mode == "unenforced":
     enforce = "None::<u64>"
@@ -370,7 +381,9 @@ elif mode == "frozen_clock":
 open(os.path.join(root, "src/chain/blockchain.rs"), "w").write(
     "impl Blockchain {\n"
     "    pub fn open_storage_deal_with_escrow(&mut self) -> Result<u64, String> {\n"
-    "        let c = %s;\n        Ok(0)\n    }\n}\n" % enforce
+    "        let c = %s;\n        Ok(0)\n    }\n"
+    "    pub fn accrue_storage_operator_rewards(&mut self) {\n        %s\n    }\n}\n"
+    % (enforce, prune_call)
 )
 PYB
   }
@@ -426,11 +439,16 @@ PYB
   build "$tmp/frozen" frozen_clock
   expect_finding "$tmp/frozen" "a cooldown check against a frozen clock" || return 1
 
-  # 12. A regression test disappears.
+  # 12. The prune exists and no production path calls it. Bounded in theory,
+  #     unbounded in the tree.
+  build "$tmp/prunedead" prune_never_called
+  expect_finding "$tmp/prunedead" "a prune nothing calls" || return 1
+
+  # 13. A regression test disappears.
   build "$tmp/notest" missing_test
   expect_finding "$tmp/notest" "a missing regression test" || return 1
 
-  echo "storage penalty gate self-test OK: 12 canaries"
+  echo "storage penalty gate self-test OK: 13 canaries"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then

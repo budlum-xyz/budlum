@@ -848,6 +848,15 @@ impl StorageRegistry {
     /// operator to the class it claimed rather than trying to detect a lie.
     /// Claiming `AlwaysOn` to reach a primary replica means accepting a
     /// primary's obligations, and the bond answers for them.
+    ///
+    /// No production path calls this yet, so today every operator is
+    /// `AlwaysOn` and the primary rule refuses nobody. The rule itself is
+    /// live in `open_deal`; what is missing is the way an operator says it is
+    /// a phone. That needs a signed transaction, because otherwise anyone
+    /// could reclassify anyone else and lock them out of primary replicas,
+    /// and a signed transaction type is its own change. Recorded here rather
+    /// than left for a reader to discover: the enforcement is real and the
+    /// declaration is not there yet.
     pub fn set_operator_class(&mut self, operator: Address, class: OperatorClass) {
         self.operator_classes.insert(operator, class);
     }
