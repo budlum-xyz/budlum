@@ -52,6 +52,14 @@
 //! rule built on a lie is worse than none because it reports safety that is
 //! not there. What is enforceable here is that one address never holds two
 //! shards of the same object, which is checkable from state.
+//!
+//! WIRING: unwired - measured: no production path calls `assign_shard`,
+//! `assign_object` or `displaced_shards` yet. Placement is the piece the
+//! repair trigger and the coding audit both need, and neither is wired
+//! either, so wiring this alone would connect one end of a chain whose
+//! other end is still open. Recorded rather than left for a reader to
+//! discover: the arithmetic is real, the tests are real, and nothing in
+//! production reaches it.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
