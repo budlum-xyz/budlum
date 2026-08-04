@@ -441,6 +441,18 @@ pub struct StorageRegistry {
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
+    /// What each owner declared about content they intend to self-host.
+    ///
+    /// `MobileSelfContentPolicy` lets an owner mark content critical and name
+    /// how many paid replicas it needs. The type existed, was tested, and no
+    /// deal path read it, so a phone could take the only copy of something its
+    /// owner had already declared too important for a phone.
+    ///
+    /// Keyed by content, because the declaration is about the content rather
+    /// than about the device: the same phone may self-host a holiday photo and
+    /// be refused a legal document.
+    #[serde(default)]
+    pub self_host_policies: BTreeMap<ContentId, crate::storage::MobileSelfContentPolicy>,
 }
 
 use std::collections::BTreeMap;
@@ -507,6 +519,17 @@ pub enum StorageError {
     /// Manifest with the given `manifest_id` is not registered in the
     /// Storage domain.
     UnknownManifest(ContentId),
+    /// A self-hosting device was offered content its own declared profile
+    /// says it cannot carry alone.
+    ///
+    /// `MobileSelfContentPolicy` lets an owner mark content critical and name
+    /// how many paid replicas it needs. The rule existed and nothing read it,
+    /// so a phone could accept the only copy of something its owner had
+    /// already declared too important for a phone.
+    SelfHostRefusedByPolicy {
+        content_id: ContentId,
+        reason: String,
+    },
     /// B.U.D.: merkle_proof and storage_root are mandatory
     /// Now that VerifyMerkle production gate is open.
     MerkleProofRequired,
@@ -578,6 +601,10 @@ impl std::fmt::Display for StorageError {
                 write!(f, "challenge {id} already resolved")
             }
             StorageError::UnknownManifest(id) => write!(f, "unknown manifest {id}"),
+            StorageError::SelfHostRefusedByPolicy { content_id, reason } => write!(
+                f,
+                "self-hosting {content_id} refused by the owner's own policy: {reason}"
+            ),
             StorageError::MerkleProofRequired => write!(
                 f,
                 "merkle_proof and storage_root are mandatory (VerifyMerkle gate open)"
@@ -681,6 +708,73 @@ impl StorageRegistry {
     /// The same `manifest_id` is a no-op (per the chain-only rule: the
     /// Canonical manifest lives in `ContentManifest`; this index only
     /// Tracks "is this manifest known to the storage domain?").
+    /// Record what an owner declared about content they intend to self-host.
+    ///
+    /// The declaration is validated against the device profile that made it,
+    /// so a policy naming a different owner, or marking content critical while
+    /// asking for no paid replicas, is refused at the door rather than stored
+    /// and read later by something that trusts it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::SelfHostRefusedByPolicy`] when the policy and the
+    /// profile disagree, carrying the reason so the caller can show it.
+    pub fn declare_self_host_policy(
+        &mut self,
+        policy: crate::storage::MobileSelfContentPolicy,
+        profile: &crate::storage::MobileSelfProfile,
+    ) -> Result<(), StorageError> {
+        policy.validate_against_profile(profile).map_err(|reason| {
+            StorageError::SelfHostRefusedByPolicy {
+                content_id: policy.content_id,
+                reason,
+            }
+        })?;
+        self.self_host_policies.insert(policy.content_id, policy);
+        Ok(())
+    }
+
+    /// Whether this content may sit on a self-hosting device with the paid
+    /// replicas currently open for it.
+    ///
+    /// Returns `Ok(())` when no policy was declared, because content nobody
+    /// said anything about is not content anybody restricted. What it refuses
+    /// is the case the type was written for: an owner marked something
+    /// critical, asked for `n` paid replicas, and fewer than `n` exist.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::SelfHostRefusedByPolicy`] when self-hosting is off for
+    /// this content, or when the paid replicas the owner asked for are not
+    /// there.
+    pub fn check_self_host_allowed(
+        &self,
+        manifest_id: &ContentId,
+        content_id: &ContentId,
+    ) -> Result<(), StorageError> {
+        let Some(policy) = self.self_host_policies.get(content_id) else {
+            return Ok(());
+        };
+        if !policy.self_host_allowed {
+            return Err(StorageError::SelfHostRefusedByPolicy {
+                content_id: *content_id,
+                reason: "the owner turned self-hosting off for this content".into(),
+            });
+        }
+        let paid = self.active_replica_count(manifest_id, content_id);
+        let required = usize::from(policy.required_paid_replicas);
+        if paid < required {
+            return Err(StorageError::SelfHostRefusedByPolicy {
+                content_id: *content_id,
+                reason: format!(
+                    "the owner asked for {required} paid replica(s) before \
+                     self-hosting and {paid} are open"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     pub fn register_manifest(&mut self, manifest: &ContentManifest) {
         self.manifests
             .entry(manifest.manifest_id)
