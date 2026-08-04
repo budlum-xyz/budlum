@@ -59,6 +59,131 @@ impl ShardRef {
     }
 }
 
+/// Shortest output any AEAD named in [`ContentCipher`] can produce.
+///
+/// AES-256-GCM, ChaCha20-Poly1305 and XChaCha20-Poly1305 all append a 16-byte
+/// Poly1305 or GHASH tag, so even a zero-length plaintext encrypts to 16
+/// bytes. An object declaring client-side encryption and carrying fewer than
+/// that was not produced by any of them.
+pub const MIN_AEAD_CIPHERTEXT_BYTES: u64 = 16;
+
+/// How the bytes behind a manifest were protected before they left the
+/// uploader.
+///
+/// The chain never sees content, so it cannot encrypt anything and cannot
+/// check that anything was encrypted. What it can do is make the uploader
+/// *say* which of the two it did, and bind that statement to the manifest id
+/// so it cannot be edited afterwards by anyone, the uploader included.
+///
+/// Why a declaration is worth having when it cannot be verified:
+///
+/// * An operator holding a shard needs to know whether it is holding
+///   plaintext. `Plaintext` is a published fact about the object, not a
+///   silence that every reader resolves differently.
+/// * A reader that finds `ClientSide` and cannot decrypt learns it lacks the
+///   key, rather than concluding the bytes are corrupt.
+/// * Storj's pointer data is deliberately left unencrypted so repair can run
+///   without keys, and everything else is encrypted client-side. Separating
+///   the two states in the commitment is what lets repair stay key-free while
+///   content stays private.
+///
+/// What this deliberately does not do: it carries no key, no key id, no
+/// wrapped key and no nonce. A key material field in a public commitment is
+/// a key published on a public chain. Key delivery is the access-grant
+/// layer's job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ContentEncryption {
+    /// Nothing was encrypted. Every shard is readable by whoever holds it.
+    ///
+    /// This is the default so that manifests written before this field
+    /// deserialize to what they actually were, rather than to a privacy claim
+    /// nobody made.
+    #[default]
+    Plaintext,
+    /// The uploader encrypted the object before sharding, with a key the
+    /// chain does not hold and never sees.
+    ///
+    /// The named algorithm is a statement about what the uploader used, so a
+    /// reader knows what to attempt. It is not a promise the chain enforces.
+    ClientSide(ContentCipher),
+}
+
+/// The AEAD an uploader says it used.
+///
+/// Restricted to authenticated constructions on purpose. Unauthenticated
+/// modes let a storage node reshape ciphertext into something that still
+/// decrypts, which is the concrete break found in Icedrive's CBC mode by the
+/// 2024 "End-to-End Encrypted Cloud Storage in the Wild" study. Naming an
+/// unauthenticated cipher here would let a manifest advertise privacy while
+/// leaving integrity to the node holding the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContentCipher {
+    /// AES-256-GCM.
+    Aes256Gcm,
+    /// ChaCha20-Poly1305.
+    ChaCha20Poly1305,
+    /// XChaCha20-Poly1305, for uploaders generating nonces randomly across
+    /// many objects.
+    XChaCha20Poly1305,
+}
+
+impl ContentCipher {
+    /// Stable byte tag for the manifest commitment.
+    ///
+    /// Written out rather than derived from the variant order, because
+    /// reordering the enum would otherwise silently change every manifest id
+    /// ever computed.
+    #[must_use]
+    pub const fn commitment_tag(&self) -> u8 {
+        match self {
+            Self::Aes256Gcm => 1,
+            Self::ChaCha20Poly1305 => 2,
+            Self::XChaCha20Poly1305 => 3,
+        }
+    }
+}
+
+impl std::fmt::Display for ContentCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Aes256Gcm => write!(f, "aes-256-gcm"),
+            Self::ChaCha20Poly1305 => write!(f, "chacha20-poly1305"),
+            Self::XChaCha20Poly1305 => write!(f, "xchacha20-poly1305"),
+        }
+    }
+}
+
+impl ContentEncryption {
+    /// Stable byte tag for the manifest commitment.
+    ///
+    /// `Plaintext` is 0 so the default state has the lowest tag, but the byte
+    /// is always written: a commitment that omitted it for the default would
+    /// have to decide what an absent byte means, and "absent" is exactly the
+    /// ambiguity this field exists to remove.
+    #[must_use]
+    pub const fn commitment_tag(&self) -> u8 {
+        match self {
+            Self::Plaintext => 0,
+            Self::ClientSide(cipher) => cipher.commitment_tag(),
+        }
+    }
+
+    /// Whether the uploader claims the shards are ciphertext.
+    #[must_use]
+    pub const fn is_encrypted(&self) -> bool {
+        matches!(self, Self::ClientSide(_))
+    }
+}
+
+impl std::fmt::Display for ContentEncryption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plaintext => write!(f, "plaintext"),
+            Self::ClientSide(cipher) => write!(f, "client-side/{cipher}"),
+        }
+    }
+}
+
 /// A content manifest - the on-chain commitment to a sharded piece of
 /// Content. `manifest_id` is the canonical identity of the whole piece; it
 /// Is computed deterministically from the shard list and the erasure scheme,
@@ -211,6 +336,20 @@ pub struct ContentManifest {
     /// change and is not made in passing.
     #[serde(default)]
     pub content_size: u64,
+    /// What the uploader says it did to the bytes before sharding them.
+    ///
+    /// Absent in manifests written before this field, which deserialize to
+    /// [`ContentEncryption::Plaintext`]. That is the honest reading: those
+    /// manifests were written by a tree with no encryption in it at all, so
+    /// defaulting them to a privacy claim would invent one.
+    ///
+    /// Inside the commitment, so the claim cannot be edited after the fact.
+    /// A node that could flip `ClientSide` to `Plaintext` on a stored
+    /// manifest would be telling every later reader that ciphertext is
+    /// readable content; flipping it the other way would let a plaintext
+    /// object advertise a protection it never had.
+    #[serde(default)]
+    pub encryption: ContentEncryption,
 }
 
 impl ContentManifest {
@@ -240,7 +379,12 @@ impl ContentManifest {
         let shard_count = shards.len() as u32;
         let owner = crate::core::address::Address::zero();
         let erasure = ErasureScheme::replication(shard_count);
-        let manifest_id = manifest_id_from_parts(&shards, &erasure);
+        // Bytes handed to this constructor are whatever the caller had. It is
+        // not encryption, and saying otherwise here would put a claim in the
+        // commitment that no one made. Callers that did encrypt say so with
+        // `with_encryption`.
+        let encryption = ContentEncryption::Plaintext;
+        let manifest_id = manifest_id_from_parts(&shards, &erasure, &encryption);
         Ok(ContentManifest {
             manifest_id,
             owner,
@@ -248,6 +392,7 @@ impl ContentManifest {
             shard_count,
             erasure,
             content_size: total,
+            encryption,
             shards,
         })
     }
@@ -283,7 +428,7 @@ impl ContentManifest {
             ));
         }
         self.content_size = content_size;
-        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure);
+        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure, &self.encryption);
         Ok(self)
     }
 
@@ -297,7 +442,7 @@ impl ContentManifest {
     /// with a squatted entry that `register_manifest` would then keep,
     /// because registration is idempotent and first-writer-wins.
     pub fn verify_id(&self) -> Result<(), String> {
-        let expected = manifest_id_from_parts(&self.shards, &self.erasure);
+        let expected = manifest_id_from_parts(&self.shards, &self.erasure, &self.encryption);
         if expected != self.manifest_id {
             return Err(format!(
                 "manifest_id {} does not match the {} its contents derive",
@@ -369,6 +514,27 @@ impl ContentManifest {
                 self.erasure.k
             ));
         }
+        // An encryption claim is mostly unverifiable from a manifest: the
+        // chain holds no bytes, so it cannot tell ciphertext from anything
+        // else. One thing it can tell is that an object too small to hold an
+        // authentication tag is not the output of any AEAD. Both ciphers
+        // named here produce a 16-byte tag, so a `ClientSide` object shorter
+        // than that is a claim the arithmetic refuses.
+        //
+        // This catches the careless case, not the determined one; an author
+        // who wants a false claim pads. It is worth having because the
+        // careless case is the one that ships: a client that forgets to
+        // encrypt but remembers to declare produces exactly this shape when
+        // the object is small.
+        if self.encryption.is_encrypted() && self.content_size() < MIN_AEAD_CIPHERTEXT_BYTES {
+            return Err(format!(
+                "manifest declares {} but content_size {} is below the \
+                 {MIN_AEAD_CIPHERTEXT_BYTES}-byte authentication tag every \
+                 named cipher appends",
+                self.encryption,
+                self.content_size()
+            ));
+        }
         self.verify_id()
     }
 
@@ -410,7 +576,7 @@ impl ContentManifest {
             ));
         }
         self.erasure = erasure;
-        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure);
+        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure, &self.encryption);
         Ok(self)
     }
 
@@ -434,6 +600,32 @@ impl ContentManifest {
             return false;
         }
         live < self.erasure.k.saturating_add(margin)
+    }
+
+    /// Declare how the object was protected before it was sharded.
+    ///
+    /// This changes `manifest_id`, which is the point: the declaration is part
+    /// of what the id commits to, so the same shards uploaded as ciphertext
+    /// and as plaintext are two different objects on chain rather than one
+    /// object whose privacy claim depends on who is reading.
+    ///
+    /// No key travels with this call. The uploader keeps the key; delivering
+    /// it to a reader is the access-grant layer's job, not the manifest's.
+    #[must_use]
+    pub fn with_encryption(mut self, encryption: ContentEncryption) -> Self {
+        self.encryption = encryption;
+        self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure, &self.encryption);
+        self
+    }
+
+    /// Whether the uploader declared the shards to be ciphertext.
+    ///
+    /// A holder of a shard reads this to know whether it is holding readable
+    /// content. The chain cannot verify the claim, so this reports what was
+    /// declared and nothing more.
+    #[must_use]
+    pub const fn is_client_encrypted(&self) -> bool {
+        self.encryption.is_encrypted()
     }
 
     /// F01: gerçek owner'ı set et (from_shards sonrası). `manifest_id` owner'a
@@ -510,9 +702,20 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// Both were outside the commitment, so two manifests with the same id could
 /// disagree about them, and whichever registered first would define the
 /// entry. Binding them makes the id mean the whole claim.
-pub fn manifest_id_from_parts(shards: &[ShardRef], erasure: &ErasureScheme) -> ContentId {
+///
+/// V3 adds the encryption declaration for the same reason. Whether the shards
+/// are ciphertext or readable content changes what every holder of them is
+/// allowed to assume, and leaving it outside the commitment would let the
+/// claim be rewritten under a stable id: register `ClientSide`, then serve a
+/// manifest reading `Plaintext` at the same id, and a reader concludes the
+/// bytes it pulled were never protected.
+pub fn manifest_id_from_parts(
+    shards: &[ShardRef],
+    erasure: &ErasureScheme,
+    encryption: &ContentEncryption,
+) -> ContentId {
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
-    buf.extend_from_slice(b"BDLM_MANIFEST_V2");
+    buf.extend_from_slice(b"BDLM_MANIFEST_V3");
     buf.extend_from_slice(&(shards.len() as u32).to_le_bytes());
     for s in shards {
         buf.extend_from_slice(&s.index.to_le_bytes());
@@ -525,7 +728,8 @@ pub fn manifest_id_from_parts(shards: &[ShardRef], erasure: &ErasureScheme) -> C
     }
     buf.extend_from_slice(&erasure.k.to_le_bytes());
     buf.extend_from_slice(&erasure.n.to_le_bytes());
-    ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V2", &buf]))
+    buf.push(encryption.commitment_tag());
+    ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V3", &buf]))
 }
 
 #[cfg(test)]

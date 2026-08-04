@@ -1679,6 +1679,11 @@ impl BudlumApiServer for RpcServer {
             "manifestId": format!("0x{}", hex::encode(manifest_id.0)),
             "totalSize": manifest.total_size,
             "shardCount": manifest.shard_count,
+            // Echoed back so the caller can see what the chain committed to,
+            // rather than what it believes it sent. The declaration is inside
+            // `manifestId`, so a mismatch here means the manifest that
+            // registered is not the one the caller built.
+            "encryption": manifest.encryption.to_string(),
         }))
     }
 
@@ -1769,6 +1774,11 @@ impl BudlumApiServer for RpcServer {
                 "found": true,
                 "totalSize": manifest.total_size,
                 "shardCount": manifest.shard_count,
+                // An operator deciding whether to serve these bytes, and a
+                // reader deciding whether a failed parse means "wrong key" or
+                // "corrupt shard", both need the declaration. Without it here
+                // the only honest answer either could give is "unknown".
+                "encryption": manifest.encryption.to_string(),
                 "shards": shards,
             }));
         }

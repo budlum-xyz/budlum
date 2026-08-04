@@ -1149,6 +1149,8 @@ jobs:
         run: |
           bash ./scripts/check-storage-penalties-are-enforced.sh --self-test
           bash ./scripts/check-storage-penalties-are-enforced.sh
+          bash ./scripts/check-content-encryption-is-declared-and-bound.sh --self-test
+          bash ./scripts/check-content-encryption-is-declared-and-bound.sh
       # The storage challenge verifier named three public inputs the AIR does
       # not produce for the program it names, so it rejected every proof
       # including a correct one, and the caller reads a rejection as a wrong
