@@ -221,7 +221,7 @@ for call in re.finditer(
 # 6. The tag must be written out per variant, not derived from ordering.
 #    `as u8` over the enum would make variant order part of consensus.
 checked += 1
-tagfn = body_of(manifest_code, r"pub fn commitment_tag\s*\(&self\)\s*->\s*u8")
+tagfn = body_of(manifest_code, r"pub (?:const )?fn commitment_tag\s*\(&self\)\s*->\s*u8")
 if tagfn is None:
     problems.append("`commitment_tag` is gone; the commitment has no stable byte.")
 else:
@@ -347,17 +347,17 @@ else:
 """
 
 if tag_mode == "cast":
-    tagfn = """    pub fn commitment_tag(&self) -> u8 {
+    tagfn = """    pub const fn commitment_tag(&self) -> u8 {
         *self as u8
     }
 """
 elif tag_mode == "gone":
     tagfn = ""
 else:
-    tagfn = """    pub fn commitment_tag(&self) -> u8 {
+    tagfn = """    pub const fn commitment_tag(&self) -> u8 {
         match self {
-            ContentEncryption::Plaintext => 0,
-            ContentEncryption::ClientSide(c) => c.commitment_tag(),
+            Self::Plaintext => 0,
+            Self::ClientSide(c) => c.commitment_tag(),
         }
     }
 """

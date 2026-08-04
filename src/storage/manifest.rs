@@ -133,11 +133,12 @@ impl ContentCipher {
     /// Written out rather than derived from the variant order, because
     /// reordering the enum would otherwise silently change every manifest id
     /// ever computed.
-    pub fn commitment_tag(&self) -> u8 {
+    #[must_use]
+    pub const fn commitment_tag(&self) -> u8 {
         match self {
-            ContentCipher::Aes256Gcm => 1,
-            ContentCipher::ChaCha20Poly1305 => 2,
-            ContentCipher::XChaCha20Poly1305 => 3,
+            Self::Aes256Gcm => 1,
+            Self::ChaCha20Poly1305 => 2,
+            Self::XChaCha20Poly1305 => 3,
         }
     }
 }
@@ -145,9 +146,9 @@ impl ContentCipher {
 impl std::fmt::Display for ContentCipher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContentCipher::Aes256Gcm => write!(f, "aes-256-gcm"),
-            ContentCipher::ChaCha20Poly1305 => write!(f, "chacha20-poly1305"),
-            ContentCipher::XChaCha20Poly1305 => write!(f, "xchacha20-poly1305"),
+            Self::Aes256Gcm => write!(f, "aes-256-gcm"),
+            Self::ChaCha20Poly1305 => write!(f, "chacha20-poly1305"),
+            Self::XChaCha20Poly1305 => write!(f, "xchacha20-poly1305"),
         }
     }
 }
@@ -159,24 +160,26 @@ impl ContentEncryption {
     /// is always written: a commitment that omitted it for the default would
     /// have to decide what an absent byte means, and "absent" is exactly the
     /// ambiguity this field exists to remove.
-    pub fn commitment_tag(&self) -> u8 {
+    #[must_use]
+    pub const fn commitment_tag(&self) -> u8 {
         match self {
-            ContentEncryption::Plaintext => 0,
-            ContentEncryption::ClientSide(cipher) => cipher.commitment_tag(),
+            Self::Plaintext => 0,
+            Self::ClientSide(cipher) => cipher.commitment_tag(),
         }
     }
 
     /// Whether the uploader claims the shards are ciphertext.
-    pub fn is_encrypted(&self) -> bool {
-        matches!(self, ContentEncryption::ClientSide(_))
+    #[must_use]
+    pub const fn is_encrypted(&self) -> bool {
+        matches!(self, Self::ClientSide(_))
     }
 }
 
 impl std::fmt::Display for ContentEncryption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContentEncryption::Plaintext => write!(f, "plaintext"),
-            ContentEncryption::ClientSide(cipher) => write!(f, "client-side/{cipher}"),
+            Self::Plaintext => write!(f, "plaintext"),
+            Self::ClientSide(cipher) => write!(f, "client-side/{cipher}"),
         }
     }
 }
@@ -561,6 +564,7 @@ impl ContentManifest {
     ///
     /// No key travels with this call. The uploader keeps the key; delivering
     /// it to a reader is the access-grant layer's job, not the manifest's.
+    #[must_use]
     pub fn with_encryption(mut self, encryption: ContentEncryption) -> Self {
         self.encryption = encryption;
         self.manifest_id = manifest_id_from_parts(&self.shards, &self.erasure, &self.encryption);
@@ -572,7 +576,8 @@ impl ContentManifest {
     /// A holder of a shard reads this to know whether it is holding readable
     /// content. The chain cannot verify the claim, so this reports what was
     /// declared and nothing more.
-    pub fn is_client_encrypted(&self) -> bool {
+    #[must_use]
+    pub const fn is_client_encrypted(&self) -> bool {
         self.encryption.is_encrypted()
     }
 
