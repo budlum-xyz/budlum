@@ -138,6 +138,20 @@ find_ai_storage_reach() {
 }
 
 # --------------------------------------------------------------- self test
+# Is the public-class refusal actually reached from the declaration path?
+#
+# `check_may_be_public` refuses correctly and refused correctly for the whole
+# time nothing called it. A refusal that no path reaches is a comment: the
+# gate above proved the function says no, and paid content was registering as
+# plaintext anyway. Registration is the only moment the check can help,
+# because a plaintext ContentId is the hash of the bytes, so the leak is
+# available the instant the id lands on chain and unlisting does not undo it.
+find_declaration_call() {
+  local actor="$1"
+  [ -f "$actor" ] || { echo "0"; return; }
+  sed -e 's://.*::' "$actor" | grep -c 'check_content_may_be_public' || true
+}
+
 if [ "${1:-}" = "--self-test" ]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
@@ -292,6 +306,31 @@ EOF
     || fail "canary 11: an endpoint with no shard id must not be flagged"
   canaries=$((canaries + 1))
 
+  # Canary: the refusal exists but nothing on the declaration path calls it.
+  # This is the exact state the tree was in, and every earlier canary passed
+  # while it was true, because they all asked whether the function refuses
+  # rather than whether anything asks it to.
+  printf '%s\n' \
+    'ChainCommand::RegisterStorageManifest { manifest, response } => {' \
+    '    if let Err(e) = manifest.validate_untrusted() { continue; }' \
+    '    self.blockchain.state.storage_registry.register_manifest(&manifest);' \
+    '}' > "$tmp/uncalled.rs"
+  if [ "$(find_declaration_call "$tmp/uncalled.rs")" != "0" ]; then
+    fail "canary: a declaration path that never calls the refusal was not detected"
+  fi
+  canaries=$((canaries + 1))
+
+  # And the healthy shape must pass, or the check is just a ban on the file.
+  printf '%s\n' \
+    'if matches!(manifest.encryption, ContentEncryption::Plaintext) {' \
+    '    if let Err(e) = self.blockchain.state.marketplace' \
+    '        .check_content_may_be_public(&manifest.manifest_id) { continue; }' \
+    '}' > "$tmp/called.rs"
+  if [ "$(find_declaration_call "$tmp/called.rs")" = "0" ]; then
+    fail "canary: a declaration path that does call the refusal was rejected"
+  fi
+  canaries=$((canaries + 1))
+
   echo "paid content gate self-test OK: $canaries canaries"
   exit 0
 fi
@@ -317,6 +356,12 @@ fi
 
 [ "$(find_in_root "$OFFERS_SRC")" != "0" ] \
   || fail "protected_content is not hashed into the registry root"
+
+ACTOR_SRC="$ROOT/src/chain/chain_actor.rs"
+[ "$(find_declaration_call "$ACTOR_SRC")" != "0" ] \
+  || fail "nothing calls check_content_may_be_public on the declaration path: \
+paid content can register as plaintext and be deduplicated, which is the leak \
+the refusal exists to prevent"
 
 RPC_SRC="$ROOT/src/rpc/server.rs"
 if [ -f "$RPC_SRC" ]; then

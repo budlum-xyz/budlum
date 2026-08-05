@@ -476,4 +476,60 @@ mod tests {
         g.bind(mid(1), aid(9), addr(5), addr(5)).unwrap();
         assert_ne!(g.root(), empty);
     }
+
+    // --- the declaration path, which is where this refusal has to run ---
+
+    #[test]
+    fn the_public_refusal_names_the_asset_that_caused_it() {
+        // A registration that fails has to tell the uploader which asset is
+        // in the way. "Refused" alone leaves an operator guessing whether the
+        // binding is theirs, stale, or someone else's.
+        let mut gate = ProtectedContent::default();
+        gate.bind(mid(1), aid(7), addr(9), addr(9)).unwrap();
+
+        match gate.check_may_be_public(&mid(1)) {
+            Err(ContentGateError::ProtectedCannotBePublic {
+                manifest_id,
+                asset_id,
+            }) => {
+                assert_eq!(manifest_id, mid(1));
+                assert_eq!(asset_id, aid(7));
+            }
+            other => panic!("expected a named refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unbound_content_may_still_register_as_plaintext() {
+        // The refusal has to stay narrow. Most content is not for sale, and a
+        // check that refused everything would push honest uploads into
+        // needless encryption and take deduplication away from the class that
+        // benefits from it most.
+        let gate = ProtectedContent::default();
+        assert!(gate.check_may_be_public(&mid(2)).is_ok());
+    }
+
+    #[test]
+    fn the_refusal_survives_the_asset_being_delisted() {
+        // Measured reasoning rather than a guess: the leak is the id itself.
+        // Once a plaintext ContentId is on chain, anyone holding a candidate
+        // file can confirm it, so withdrawing the listing afterwards does not
+        // withdraw the confirmation. The binding therefore has to keep
+        // refusing after the sale is over, which is the same property that
+        // makes bindings permanent.
+        let mut gate = ProtectedContent::default();
+        gate.bind(mid(3), aid(4), addr(1), addr(1)).unwrap();
+        assert!(gate.check_may_be_public(&mid(3)).is_err());
+
+        // Re-binding to the same asset is idempotent, so a retried
+        // registration is not an error. What matters is that it does not
+        // clear the binding: the refusal still holds afterwards.
+        assert!(gate.bind(mid(3), aid(4), addr(1), addr(1)).is_ok());
+        assert!(gate.check_may_be_public(&mid(3)).is_err());
+
+        // And it cannot be moved to a different asset, which would be the
+        // way to launder a binding away.
+        assert!(gate.bind(mid(3), aid(5), addr(1), addr(1)).is_err());
+        assert!(gate.check_may_be_public(&mid(3)).is_err());
+    }
 }
