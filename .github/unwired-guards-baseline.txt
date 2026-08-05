@@ -1,0 +1,32 @@
+15
+# Guards no production path reaches.
+#
+# Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
+# refuse/deny/guard is a refusal by its own naming. Fifteen of them are
+# reachable only from tests, which means they protect the tests.
+#
+# The number may only go down. Wiring one up, or moving it into a module that
+# honestly declares `WIRING: unwired`, lowers it; lower this file in the same
+# pull request or the gain is given back silently.
+#
+# Not a hard zero on purpose: fifteen modules cannot be wired in one
+# reviewable change, and a gate that demands that gets switched off. A number
+# that can only fall gets paid down.
+#
+# The fifteen, at the time this baseline was set:
+#
+#   src/ai/execution/guest.rs               validate_gas_budget
+#   src/ai/execution/verify.rs              verify_execution_proof_structural
+#   src/ai/execution/verify.rs              verify_execution_proof_full
+#   src/budlumxyz/mod.rs                    verify_app
+#   src/core/block.rs                       verify_signature_with_pubkey
+#   src/cross_domain/evm/adapter.rs         verify_deposit
+#   src/cross_domain/evm/sync_committee.rs  verify_sync_aggregate
+#   src/crypto/pkcs11.rs                    check_mainnet_policy
+#   src/crypto/pkcs11.rs                    validate_vendor_mechanism
+#   src/domain/storage_deal.rs              verify_coding_audit
+#   src/domain/storage_deal.rs              verify_answer_challenge_zk_proof
+#   src/execution/proof_verifier.rs         validate_envelope_structure
+#   src/lubot/mod.rs                        validate_inference_grant
+#   src/lubot/verify.rs                     verify_inference_stark
+#   src/settlement/proof_market.rs          enforce_max_sizes
