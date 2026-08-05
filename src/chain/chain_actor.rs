@@ -2051,7 +2051,8 @@ impl ChainHandle {
         // actor being unreachable is not evidence that content is public,
         // and defaulting the other way would open the paywall whenever the
         // chain task is busy.
-        rx.await.unwrap_or(Some(crate::pollen::AssetId::zero()))
+        rx.await
+            .unwrap_or_else(|_| Some(crate::pollen::AssetId::zero()))
     }
 
     pub async fn pollen_get_data_assets(&self) -> Vec<crate::pollen::DataAsset> {

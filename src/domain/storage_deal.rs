@@ -687,20 +687,20 @@ pub enum StorageError {
 impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StorageError::UnknownShard {
+            Self::UnknownShard {
                 manifest_id,
                 shard_id,
             } => write!(f, "shard {} not in manifest {}", shard_id, manifest_id),
-            StorageError::InvalidManifest { reason } => {
+            Self::InvalidManifest { reason } => {
                 write!(f, "manifest rejected: {reason}")
             }
-            StorageError::InvalidEpochRange { start, end } => {
+            Self::InvalidEpochRange { start, end } => {
                 write!(f, "deal epoch range {start}..{end} invalid")
             }
-            StorageError::InsufficientBond { required, provided } => {
+            Self::InsufficientBond { required, provided } => {
                 write!(f, "operator bond {provided} below required {required}")
             }
-            StorageError::OperatorInCooldown {
+            Self::OperatorInCooldown {
                 operator,
                 until_unix_secs,
             } => write!(
@@ -708,14 +708,14 @@ impl std::fmt::Display for StorageError {
                 "operator {operator} missed a challenge and cannot take storage \
                  work until unix {until_unix_secs}"
             ),
-            StorageError::MobileOperatorCannotHoldPrimary(operator) => write!(
+            Self::MobileOperatorCannotHoldPrimary(operator) => write!(
                 f,
                 "operator {operator} is registered as mobile and cannot hold \
                  replica_index 0; a phone is online when its owner is, which \
                  is not what a primary copy means"
             ),
-            StorageError::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
-            StorageError::OpenerBondBelowRangeCost {
+            Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
+            Self::OpenerBondBelowRangeCost {
                 range_len,
                 required,
                 provided,
@@ -724,36 +724,36 @@ impl std::fmt::Display for StorageError {
                 "opener_bond {provided} below {required} required for a \
                  {range_len}-byte challenge range"
             ),
-            StorageError::UnknownDeal(id) => write!(f, "unknown deal {id}"),
-            StorageError::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
-            StorageError::DealNotActive(id) => write!(f, "deal {id} is not Active"),
-            StorageError::NotTheOperator { expected, provided } => {
+            Self::UnknownDeal(id) => write!(f, "unknown deal {id}"),
+            Self::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
+            Self::DealNotActive(id) => write!(f, "deal {id} is not Active"),
+            Self::NotTheOperator { expected, provided } => {
                 write!(
                     f,
                     "response signed by {provided} but deal operator is {expected}"
                 )
             }
-            StorageError::DeadlineElapsed {
+            Self::DeadlineElapsed {
                 deadline_epoch,
                 now_epoch,
             } => write!(
                 f,
                 "challenge deadline {deadline_epoch} elapsed at epoch {now_epoch}"
             ),
-            StorageError::ChallengeAlreadyResolved(id) => {
+            Self::ChallengeAlreadyResolved(id) => {
                 write!(f, "challenge {id} already resolved")
             }
-            StorageError::UnknownManifest(id) => write!(f, "unknown manifest {id}"),
-            StorageError::SelfHostRefusedByPolicy { content_id, reason } => write!(
+            Self::UnknownManifest(id) => write!(f, "unknown manifest {id}"),
+            Self::SelfHostRefusedByPolicy { content_id, reason } => write!(
                 f,
                 "self-hosting {content_id} refused by the owner's own policy: {reason}"
             ),
-            StorageError::NoParityToAudit { manifest_id } => write!(
+            Self::NoParityToAudit { manifest_id } => write!(
                 f,
                 "manifest {manifest_id} has no parity shards, so there is no \
                  coding relationship to audit"
             ),
-            StorageError::ParityColumnMismatch {
+            Self::ParityColumnMismatch {
                 manifest_id,
                 parity_index,
                 column,
@@ -762,17 +762,17 @@ impl std::fmt::Display for StorageError {
                 "parity shard {parity_index} of manifest {manifest_id} is not \
                  the parity the generator requires at column {column}"
             ),
-            StorageError::MerkleProofRequired => write!(
+            Self::MerkleProofRequired => write!(
                 f,
                 "merkle_proof and storage_root are mandatory (VerifyMerkle gate open)"
             ),
-            StorageError::InvalidMerkleProof(ref reason) => {
+            Self::InvalidMerkleProof(ref reason) => {
                 write!(f, "invalid merkle proof - {reason}")
             }
-            StorageError::TooManyOpenChallenges { deal_id, max } => {
+            Self::TooManyOpenChallenges { deal_id, max } => {
                 write!(f, "too many open challenges for deal {deal_id} (max {max})")
             }
-            StorageError::ChallengeRateLimited {
+            Self::ChallengeRateLimited {
                 operator,
                 manifest_id,
                 minimum_next_epoch,
@@ -780,13 +780,13 @@ impl std::fmt::Display for StorageError {
                 f,
                 "operator {operator} was recently challenged for manifest {manifest_id}; retry at epoch {minimum_next_epoch}"
             ),
-            StorageError::UnknownReallocationTicket(id) => {
+            Self::UnknownReallocationTicket(id) => {
                 write!(f, "unknown storage reallocation ticket {id}")
             }
-            StorageError::ReallocationNotPending(id) => {
+            Self::ReallocationNotPending(id) => {
                 write!(f, "storage reallocation ticket {id} is not pending")
             }
-            StorageError::ReplacementOperatorMatchesSlashed(operator) => write!(
+            Self::ReplacementOperatorMatchesSlashed(operator) => write!(
                 f,
                 "replacement operator {operator} matches the slashed operator"
             ),

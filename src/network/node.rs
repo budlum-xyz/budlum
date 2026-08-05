@@ -650,7 +650,7 @@ impl Node {
     /// an archive node. `PruningPolicy::validate` should be called on the
     /// policy before it reaches here; this only stores it.
     #[must_use]
-    pub fn with_pruning_policy(mut self, policy: crate::storage::PruningPolicy) -> Self {
+    pub const fn with_pruning_policy(mut self, policy: crate::storage::PruningPolicy) -> Self {
         self.pruning_policy = Some(policy);
         self
     }
@@ -1184,7 +1184,7 @@ impl Node {
                                        let policy_permits = self
                                            .pruning_policy
                                            .as_ref()
-                                           .is_none_or(|p| p.should_prune_historical_state());
+                                           .is_none_or(crate::storage::PruningPolicy::should_prune_historical_state);
                                        if !policy_permits {
                                            if let Some(ref policy) = self.pruning_policy {
                                                info!(

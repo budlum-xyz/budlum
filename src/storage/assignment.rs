@@ -93,13 +93,13 @@ pub enum AssignmentError {
 impl std::fmt::Display for AssignmentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AssignmentError::NotEnoughValidators { needed, available } => write!(
+            Self::NotEnoughValidators { needed, available } => write!(
                 f,
                 "shard placement needs {needed} distinct validators but only \
                  {available} are eligible; placing two shards of one object on \
                  one address would make a single departure cost two shards"
             ),
-            AssignmentError::ZeroReplicas => {
+            Self::ZeroReplicas => {
                 write!(f, "a shard must be placed on at least one validator")
             }
         }
@@ -288,7 +288,7 @@ mod tests {
         let c = candidates(20);
         let before = assign_shard(&shard(3), &[9u8; 32], &c, 6).unwrap();
 
-        let mut grown = c.clone();
+        let mut grown = c;
         grown.push(ShardCandidate {
             address: Address([99u8; 32]),
             stake: 1_000,

@@ -215,7 +215,7 @@ impl Meter {
     /// Charge `n` steps. Returns the error rather than panicking, so an
     /// exhausted budget is an answer a caller can report rather than a crash
     /// in a read path.
-    fn charge(&mut self, n: u32) -> Result<(), GenerateError> {
+    const fn charge(&mut self, n: u32) -> Result<(), GenerateError> {
         self.used = self.used.saturating_add(n);
         if self.used > self.budget {
             return Err(GenerateError::BudgetExhausted {
