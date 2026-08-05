@@ -120,6 +120,10 @@ jobs:
         run: bash ./scripts/check-repair-fires-on-loss.sh --self-test
       - name: Onarim kayipta atesliyor
         run: bash ./scripts/check-repair-fires-on-loss.sh
+      - name: Turetilmis icerik kanaryasi
+        run: bash ./scripts/check-derived-content-stays-byte-exact.sh --self-test
+      - name: Turetilmis icerik bayt-kesin
+        run: bash ./scripts/check-derived-content-stays-byte-exact.sh
 
 
   budzero:

@@ -19,6 +19,7 @@
 pub mod assignment;
 pub mod content_id;
 pub mod db;
+pub mod derived;
 pub mod dictionary;
 pub mod erasure;
 pub mod fixed_point;
@@ -36,6 +37,9 @@ pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
 };
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
+pub use derived::{
+    DerivedError, DerivedSpec, DerivedTransform, DERIVED_BLOCK_PIXELS, DERIVED_SPEC_BYTES,
+};
 pub use dictionary::{
     DictionaryEntry, DictionaryError, DictionaryRegistry, DICTIONARY_GRACE_EPOCHS,
     MAX_DICTIONARY_BYTES,
