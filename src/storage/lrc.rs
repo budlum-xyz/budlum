@@ -127,7 +127,7 @@ impl LrcLayout {
     ///
     /// [`LrcError::NoDataShards`], [`LrcError::NoLocalGroups`],
     /// [`LrcError::MoreGroupsThanShards`] and [`LrcError::GroupTooLarge`].
-    pub fn new_lrc_group(
+    pub const fn new_lrc_group(
         data_shards: u32,
         local_groups: u32,
         global_parity: u32,
@@ -153,7 +153,7 @@ impl LrcLayout {
                 max: MAX_GROUP_SHARDS,
             });
         }
-        Ok(LrcLayout {
+        Ok(Self {
             data_shards,
             local_groups,
             global_parity,
@@ -190,7 +190,7 @@ impl LrcLayout {
     /// # Errors
     ///
     /// [`LrcError::ShardOutOfRange`] for an index past the data shards.
-    pub fn local_group_of(&self, index: u32) -> Result<u32, LrcError> {
+    pub const fn local_group_of(&self, index: u32) -> Result<u32, LrcError> {
         if index >= self.data_shards {
             return Err(LrcError::ShardOutOfRange {
                 index,

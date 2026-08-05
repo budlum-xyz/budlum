@@ -209,7 +209,7 @@ struct Meter {
 
 impl Meter {
     const fn new(budget: u32) -> Self {
-        Meter { used: 0, budget }
+        Self { used: 0, budget }
     }
 
     /// Charge `n` steps. Returns the error rather than panicking, so an
@@ -339,8 +339,8 @@ struct SeedStream {
 }
 
 impl SeedStream {
-    fn new(seed: &[u8; 32]) -> Self {
-        SeedStream {
+    const fn new(seed: &[u8; 32]) -> Self {
+        Self {
             seed: *seed,
             counter: 0,
             buf: [0u8; 32],
@@ -631,31 +631,35 @@ mod tests {
         let base = spec(GeneratorId::Avatar, 1, 3072, 100_000);
         let d = generated_spec_digest(&base);
 
-        let mut other_gen = base.clone();
-        other_gen.generator = GeneratorId::Gradient;
+        let mut swapped_generator = base.clone();
+        swapped_generator.generator = GeneratorId::Gradient;
         assert_ne!(
             d,
-            generated_spec_digest(&other_gen),
+            generated_spec_digest(&swapped_generator),
             "generator not covered"
         );
 
-        let mut other_seed = base.clone();
-        other_seed.seed = [2u8; 32];
-        assert_ne!(d, generated_spec_digest(&other_seed), "seed not covered");
-
-        let mut other_len = base.clone();
-        other_len.output_len = 3073;
+        let mut different_seed = base.clone();
+        different_seed.seed = [2u8; 32];
         assert_ne!(
             d,
-            generated_spec_digest(&other_len),
+            generated_spec_digest(&different_seed),
+            "seed not covered"
+        );
+
+        let mut longer_output = base.clone();
+        longer_output.output_len = 3073;
+        assert_ne!(
+            d,
+            generated_spec_digest(&longer_output),
             "output_len not covered"
         );
 
-        let mut other_budget = base;
-        other_budget.step_budget = 100_001;
+        let mut larger_budget = base;
+        larger_budget.step_budget = 100_001;
         assert_ne!(
             d,
-            generated_spec_digest(&other_budget),
+            generated_spec_digest(&larger_budget),
             "step_budget not covered"
         );
     }

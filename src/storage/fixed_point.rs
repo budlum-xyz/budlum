@@ -61,10 +61,12 @@ pub fn fixed_mul(a: i64, b: i64) -> i64 {
     i64::try_from(shifted).unwrap_or(if shifted < 0 { i64::MIN } else { i64::MAX })
 }
 
-/// Divide. Returns zero for a zero divisor rather than panicking: a
-/// generator is untrusted input, and a panic in a read path is a denial
-/// of service. Zero is a defined, reproducible answer, which is what
-/// determinism needs.
+/// Divide, returning zero for a zero divisor.
+///
+/// Zero rather than a panic because a generator is untrusted input and a
+/// panic in a read path is a denial of service. Zero is defined and
+/// reproducible, which is what determinism needs; being mathematically
+/// undefined is not the property that matters here.
 #[must_use]
 pub fn fixed_div(a: i64, b: i64) -> i64 {
     if b == 0 {
