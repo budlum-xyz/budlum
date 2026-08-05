@@ -217,8 +217,14 @@ impl ModalitySet {
     }
 
     /// Add a modality to the set.
+    ///
+    /// Named `with_modality` rather than `with`: the bare word appears in
+    /// English prose in most files in this tree, and the wiring gate counts
+    /// name matches to decide whether a module is reachable. Measured, the
+    /// short name made this module report as wired against sentences like
+    /// "a node built with the other one".
     #[must_use]
-    pub fn with(self, kind: PerceptionKind) -> Self {
+    pub fn with_modality(self, kind: PerceptionKind) -> Self {
         Self(self.0 | Self::bit(kind))
     }
 
@@ -357,10 +363,10 @@ mod tests {
         // unit for three of the four: a compressed image is small on disk and
         // enormous decoded.
         let all = ModalitySet::none()
-            .with(PerceptionKind::Text)
-            .with(PerceptionKind::Image)
-            .with(PerceptionKind::Audio)
-            .with(PerceptionKind::Video);
+            .with_modality(PerceptionKind::Text)
+            .with_modality(PerceptionKind::Image)
+            .with_modality(PerceptionKind::Audio)
+            .with_modality(PerceptionKind::Video);
 
         for kind in [
             PerceptionKind::Text,
@@ -416,8 +422,8 @@ mod tests {
     #[test]
     fn declaring_a_modality_twice_does_not_double_count() {
         let set = ModalitySet::none()
-            .with(PerceptionKind::Image)
-            .with(PerceptionKind::Image);
+            .with_modality(PerceptionKind::Image)
+            .with_modality(PerceptionKind::Image);
         assert_eq!(set.declared_count(), 1);
         assert!(set.declares_modality(PerceptionKind::Image));
         assert!(!set.declares_modality(PerceptionKind::Text));
