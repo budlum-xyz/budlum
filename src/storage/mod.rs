@@ -20,6 +20,7 @@ pub mod assignment;
 pub mod content_id;
 pub mod db;
 pub mod erasure;
+pub mod generated;
 pub mod lifecycle;
 pub mod manifest;
 pub mod merkle_trie;
@@ -34,6 +35,10 @@ pub use assignment::{
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
 pub use erasure::{
     encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
+};
+pub use generated::{
+    generate, generate_and_verify, generated_spec_digest, ContentSource, GenerateError,
+    GeneratedSpec, GeneratorId, MAX_GENERATED_BYTES,
 };
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,

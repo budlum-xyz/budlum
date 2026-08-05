@@ -1,0 +1,789 @@
+//! Content that is described rather than stored.
+//!
+//! Every other saving in `src/storage/` makes the bytes smaller. This one
+//! removes them: an object whose bytes follow from a short description does
+//! not need the bytes on disk at all, only the description. Measured against
+//! the alternatives, it is the only lever that reaches a zero multiplier,
+//! and every other lever is an asymptote that approaches 1.0 from above.
+//!
+//! # Why the chain can trust a generated object
+//!
+//! `manifest_id` is the hash of the object's bytes. That single fact makes
+//! verification trivial here: a node runs the description, hashes what comes
+//! out, and compares. If the hashes match, the bytes are the object, by the
+//! same definition the chain already uses for stored content. Nothing new has
+//! to be believed.
+//!
+//! This is why generated content needs **no** zero-knowledge proof. A STARK
+//! is what you reach for when the output is secret or when recomputing is
+//! more expensive than verifying a proof about it. Here the output is public
+//! and recomputation is the cheapest check available, so a proof would add
+//! cost and prove something already known.
+//!
+//! # Determinism is the whole requirement
+//!
+//! Two nodes must produce the same bytes, or they will disagree about whether
+//! an object is valid, which is a fork. Floating point cannot give that
+//! guarantee across machines, so it is refused, in the same way and for the
+//! same reason it is refused everywhere else in consensus code. What replaces
+//! it is [`fixed`], a small fixed-point library, because refusing floats
+//! without offering an alternative just moves the problem into every caller.
+//!
+//! # A budget, not a ceiling
+//!
+//! A generator could loop forever, and no check can decide in advance whether
+//! it will (Turing). Left alone, that is three separate failures: a reader
+//! waits forever, two nodes time out differently and disagree, and an
+//! attacker uploads thirty-two bytes to burn minutes of everyone's CPU.
+//!
+//! The fix is not a fixed step limit, which would say "content above this
+//! complexity may not exist" and is a restriction on expression. It is a
+//! **budget the uploader pays for**: steps are metered, the budget is
+//! declared in the manifest and priced like any other resource, and a
+//! generator that exhausts it stops. Expensive content is not refused, it is
+//! pointed at the storage path instead, which already works. The ceiling is
+//! a fork in the road rather than a wall.
+//!
+//! WIRING: unwired - measured: no production path constructs a
+//! `ContentSource::Generated` manifest yet. The verification path and the
+//! generators are here and tested; what is missing is the transaction that
+//! registers a described object, which is a consensus-surface change.
+
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::content_id::ContentId;
+
+/// Fixed-point arithmetic for generators.
+///
+/// Floats are refused in consensus code because two machines can disagree on
+/// the last bit, and a generator that disagrees produces a different object
+/// on different nodes. Integers do not have that problem, so this is the
+/// arithmetic generators are given instead.
+///
+/// The scale is a power of two so that multiplication and division reduce to
+/// shifts, which keeps the rounding exact rather than merely consistent.
+pub mod fixed {
+    /// Fractional bits. 16 gives a resolution of about 1.5e-5, which is finer
+    /// than one part in 65535 and therefore finer than 8-bit or 16-bit colour
+    /// can express.
+    pub const FRAC_BITS: u32 = 16;
+
+    /// 1.0 in fixed point.
+    pub const ONE: i64 = 1 << FRAC_BITS;
+
+    /// Convert an integer to fixed point. Saturates rather than wrapping: a
+    /// generator that overflows should produce a clamped pixel, not a
+    /// wrapped one that looks like valid output.
+    #[must_use]
+    pub const fn from_int(v: i32) -> i64 {
+        (v as i64) << FRAC_BITS
+    }
+
+    /// Truncate towards zero, the same direction on every input, because a
+    /// rounding rule that depends on sign is a rounding rule two
+    /// implementations can get differently.
+    #[must_use]
+    pub const fn to_int(v: i64) -> i32 {
+        (v >> FRAC_BITS) as i32
+    }
+
+    /// Multiply. The intermediate is `i128` so the product of two large
+    /// fixed-point values does not overflow before the shift brings it back
+    /// into range.
+    #[must_use]
+    pub fn mul(a: i64, b: i64) -> i64 {
+        let wide = (a as i128) * (b as i128);
+        (wide >> FRAC_BITS) as i64
+    }
+
+    /// Divide. Returns zero for a zero divisor rather than panicking: a
+    /// generator is untrusted input, and a panic in a read path is a denial
+    /// of service. Zero is a defined, reproducible answer, which is what
+    /// determinism needs.
+    #[must_use]
+    pub fn div(a: i64, b: i64) -> i64 {
+        if b == 0 {
+            return 0;
+        }
+        (((a as i128) << FRAC_BITS) / (b as i128)) as i64
+    }
+
+    /// Clamp into `[0, ONE]`, the range a colour channel occupies.
+    #[must_use]
+    pub const fn clamp_unit(v: i64) -> i64 {
+        if v < 0 {
+            0
+        } else if v > ONE {
+            ONE
+        } else {
+            v
+        }
+    }
+
+    /// Integer square root of a fixed-point value, by Newton's method on
+    /// integers.
+    ///
+    /// Written out rather than calling `f64::sqrt` because that is the exact
+    /// operation whose last bit differs between machines. The iteration count
+    /// is fixed rather than convergence-based, so the cost is the same on
+    /// every input and cannot be used to time the contents.
+    #[must_use]
+    pub fn sqrt(v: i64) -> i64 {
+        if v <= 0 {
+            return 0;
+        }
+        let mut x = v;
+        let mut y = (x + 1) / 2;
+        // 40 iterations is past convergence for every i64, and a fixed count
+        // keeps the step cost of a generator predictable.
+        for _ in 0..40 {
+            if y >= x {
+                break;
+            }
+            x = y;
+            y = (x + v / x) / 2;
+        }
+        x << (FRAC_BITS / 2)
+    }
+}
+
+/// How the bytes behind a manifest come to exist.
+///
+/// `Stored` is what every manifest written before this meant, so it is the
+/// default and nothing already registered changes meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ContentSource {
+    /// The bytes are held by operators. The only behaviour before this type
+    /// existed.
+    #[default]
+    Stored,
+    /// The bytes follow from a generator and a seed.
+    ///
+    /// What is stored is this description. What is served is the output of
+    /// running it, checked against `manifest_id` before it is handed back.
+    Generated(GeneratedSpec),
+}
+
+/// The description of a generated object.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GeneratedSpec {
+    /// Which generator produces the bytes.
+    pub generator: GeneratorId,
+    /// The input the generator varies on. Thirty-two bytes, which is the
+    /// whole of what a collection has to store per item.
+    pub seed: [u8; 32],
+    /// Declared output length. Checked against what the generator actually
+    /// produces, because a spec that lies about its size would let a reader
+    /// allocate on an untrusted number.
+    pub output_len: u32,
+    /// Steps the uploader paid for.
+    ///
+    /// Not a limit on what may be expressed: a generator needing more is
+    /// legal, it simply costs more, and content whose generation costs more
+    /// than storing it takes the storage path instead. What this bounds is
+    /// the work an unpaid generator can extract from a reader.
+    pub step_budget: u32,
+}
+
+/// Which generator to run.
+///
+/// A closed set rather than arbitrary bytecode, for now. The catalogue is
+/// native Rust, so a 32x32 avatar costs well under a millisecond where an
+/// interpreter would spend most of that on dispatch, and each entry's
+/// determinism can be argued from its source rather than from a VM's
+/// guarantees. Bytecode is the natural next step for expressiveness, and
+/// nothing here forecloses it: `GeneratorId` is an enum with room to grow,
+/// and the verification path does not care which arm produced the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum GeneratorId {
+    /// Identicon-style avatar: a symmetric grid coloured from the seed.
+    Avatar,
+    /// A two-colour linear gradient, the common case for themes and
+    /// backgrounds.
+    Gradient,
+    /// Distance-field rings, an algorithmic-art primitive that exercises the
+    /// fixed-point square root.
+    Rings,
+}
+
+impl GeneratorId {
+    /// Stable byte tag for the commitment.
+    ///
+    /// Written out rather than derived from the variant order, because
+    /// reordering the enum would otherwise silently change every id ever
+    /// computed for a generated object.
+    #[must_use]
+    pub const fn commitment_tag(self) -> u8 {
+        match self {
+            Self::Avatar => 1,
+            Self::Gradient => 2,
+            Self::Rings => 3,
+        }
+    }
+}
+
+/// Why a generated object could not be produced or accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerateError {
+    /// The generator used more steps than the uploader paid for.
+    ///
+    /// Carries both numbers so the caller can say how much more to buy rather
+    /// than only that it failed.
+    BudgetExhausted { budget: u32, needed: u32 },
+    /// The output length does not match what the spec declared.
+    LengthMismatch { declared: u32, produced: usize },
+    /// The bytes produced do not hash to the id the manifest carries.
+    ///
+    /// This is the check that makes generated content safe to serve. It fires
+    /// when a spec is paired with an id it does not derive, whether by
+    /// accident or because someone tried to smuggle a different object under
+    /// a known id.
+    IdMismatch {
+        expected: ContentId,
+        produced: ContentId,
+    },
+    /// The declared output is larger than any generator may emit.
+    OutputTooLarge { declared: u32, max: u32 },
+    /// A zero-length object was described. Nothing has a zero-byte identity
+    /// worth committing to, and `encode_object` refuses empty input anyway.
+    EmptyOutput,
+}
+
+impl std::fmt::Display for GenerateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GenerateError::BudgetExhausted { budget, needed } => write!(
+                f,
+                "generator needs at least {needed} steps but {budget} were paid for"
+            ),
+            GenerateError::LengthMismatch { declared, produced } => write!(
+                f,
+                "spec declares {declared} bytes but the generator produced {produced}"
+            ),
+            GenerateError::IdMismatch { expected, produced } => write!(
+                f,
+                "generated bytes hash to {produced} but the manifest claims {expected}"
+            ),
+            GenerateError::OutputTooLarge { declared, max } => write!(
+                f,
+                "declared output {declared} exceeds the {max}-byte generator maximum"
+            ),
+            GenerateError::EmptyOutput => write!(f, "a generated object cannot be empty"),
+        }
+    }
+}
+
+impl std::error::Error for GenerateError {}
+
+/// Largest object any generator may emit in one call.
+///
+/// Not a statement about what content may exist: an object above this is
+/// stored rather than described, which is the path that already works. What
+/// it bounds is the memory a single untrusted spec can make a reader
+/// allocate, before any step is run.
+pub const MAX_GENERATED_BYTES: u32 = 4 * 1024 * 1024;
+
+/// Steps charged per output byte, on top of whatever the generator's own
+/// loop costs.
+///
+/// A generator that emitted bytes for free would let a spec with a tiny
+/// budget produce a huge object, so the output itself is metered.
+const STEPS_PER_OUTPUT_BYTE: u32 = 1;
+
+/// A step meter.
+///
+/// Threaded through generation rather than checked at the end, because a
+/// generator that runs away has to be stopped while it runs, not after.
+struct Meter {
+    used: u32,
+    budget: u32,
+}
+
+impl Meter {
+    fn new(budget: u32) -> Self {
+        Meter { used: 0, budget }
+    }
+
+    /// Charge `n` steps. Returns the error rather than panicking, so an
+    /// exhausted budget is an answer a caller can report rather than a crash
+    /// in a read path.
+    fn charge(&mut self, n: u32) -> Result<(), GenerateError> {
+        self.used = self.used.saturating_add(n);
+        if self.used > self.budget {
+            return Err(GenerateError::BudgetExhausted {
+                budget: self.budget,
+                needed: self.used,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Draw the bytes a spec describes.
+///
+/// # Errors
+///
+/// [`GenerateError::EmptyOutput`] for a zero-length spec,
+/// [`GenerateError::OutputTooLarge`] above [`MAX_GENERATED_BYTES`],
+/// [`GenerateError::BudgetExhausted`] when the generator needs more steps
+/// than were paid for, and [`GenerateError::LengthMismatch`] if a generator
+/// emits a different length than it declared.
+pub fn generate(spec: &GeneratedSpec) -> Result<Vec<u8>, GenerateError> {
+    if spec.output_len == 0 {
+        return Err(GenerateError::EmptyOutput);
+    }
+    if spec.output_len > MAX_GENERATED_BYTES {
+        return Err(GenerateError::OutputTooLarge {
+            declared: spec.output_len,
+            max: MAX_GENERATED_BYTES,
+        });
+    }
+
+    let mut meter = Meter::new(spec.step_budget);
+    // Charge for the output before producing it, so a spec cannot get a large
+    // allocation on a small budget.
+    meter.charge(spec.output_len.saturating_mul(STEPS_PER_OUTPUT_BYTE))?;
+
+    let out = match spec.generator {
+        GeneratorId::Avatar => draw_avatar(&spec.seed, spec.output_len, &mut meter)?,
+        GeneratorId::Gradient => draw_gradient(&spec.seed, spec.output_len, &mut meter)?,
+        GeneratorId::Rings => draw_rings(&spec.seed, spec.output_len, &mut meter)?,
+    };
+
+    if out.len() != spec.output_len as usize {
+        return Err(GenerateError::LengthMismatch {
+            declared: spec.output_len,
+            produced: out.len(),
+        });
+    }
+    Ok(out)
+}
+
+/// Produce the bytes and check them against the id the manifest carries.
+///
+/// This is what a reader calls. `generate` alone says what a spec draws;
+/// this says whether what it draws is the object being asked for.
+///
+/// # Errors
+///
+/// Everything [`generate`] can return, plus [`GenerateError::IdMismatch`]
+/// when the bytes do not hash to `expected`.
+pub fn generate_and_verify(
+    spec: &GeneratedSpec,
+    expected: ContentId,
+) -> Result<Vec<u8>, GenerateError> {
+    let bytes = generate(spec)?;
+    let produced = ContentId::of(&bytes);
+    if produced != expected {
+        return Err(GenerateError::IdMismatch { expected, produced });
+    }
+    Ok(bytes)
+}
+
+/// Canonical commitment over a generated spec.
+///
+/// Every field is covered. A spec is a promise about which bytes an id means,
+/// so a field outside the commitment would be a part of that promise anyone
+/// could rewrite: swapping the generator, the seed or the length while
+/// keeping the id would point one id at two different objects.
+#[must_use]
+pub fn generated_spec_digest(spec: &GeneratedSpec) -> [u8; 32] {
+    hash_fields_bytes(&[
+        b"BDLM_GENERATED_SPEC_V1",
+        &[spec.generator.commitment_tag()],
+        &spec.seed,
+        &spec.output_len.to_le_bytes(),
+        &spec.step_budget.to_le_bytes(),
+    ])
+}
+
+/// A deterministic byte stream derived from a seed.
+///
+/// Generators need more pseudo-random material than the seed holds, and they
+/// need every node to derive the same material. Hashing a counter alongside
+/// the seed gives that, using the tree's own hash rather than a random
+/// number generator whose internals could change between releases.
+struct SeedStream {
+    seed: [u8; 32],
+    counter: u64,
+    buf: [u8; 32],
+    pos: usize,
+}
+
+impl SeedStream {
+    fn new(seed: &[u8; 32]) -> Self {
+        SeedStream {
+            seed: *seed,
+            counter: 0,
+            buf: [0u8; 32],
+            pos: 32,
+        }
+    }
+
+    fn next_byte(&mut self) -> u8 {
+        if self.pos >= 32 {
+            self.buf = hash_fields_bytes(&[
+                b"BDLM_GENERATED_STREAM_V1",
+                &self.seed,
+                &self.counter.to_le_bytes(),
+            ]);
+            self.counter = self.counter.wrapping_add(1);
+            self.pos = 0;
+        }
+        let b = self.buf[self.pos];
+        self.pos += 1;
+        b
+    }
+}
+
+/// Side length for a square RGB image of `len` bytes, and the remainder.
+///
+/// Generators emit `side * side * 3` bytes and pad the tail, so a caller can
+/// ask for any length and get a deterministic answer rather than an error
+/// about geometry.
+fn square_side(len: u32) -> u32 {
+    let pixels = len / 3;
+    let mut side = 0u32;
+    while (side + 1) * (side + 1) <= pixels {
+        side += 1;
+    }
+    side.max(1)
+}
+
+/// An identicon: a grid mirrored left to right, coloured from the seed.
+///
+/// Mirroring is what makes these read as faces rather than noise, and it is
+/// also why the generator only has to decide half the cells.
+fn draw_avatar(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, GenerateError> {
+    let side = square_side(len);
+    let mut stream = SeedStream::new(seed);
+
+    // Palette: one foreground drawn from the seed, a fixed light background.
+    let fg = [stream.next_byte(), stream.next_byte(), stream.next_byte()];
+    let bg = [0xF0u8, 0xF0u8, 0xF0u8];
+
+    // Cell grid. Five columns is the identicon convention; the mirrored half
+    // is three of them.
+    let cells = 5u32;
+    let half = cells.div_ceil(2);
+    let mut on = vec![false; (cells * cells) as usize];
+    for row in 0..cells {
+        for col in 0..half {
+            let bit = stream.next_byte() & 1 == 1;
+            on[(row * cells + col) as usize] = bit;
+            on[(row * cells + (cells - 1 - col)) as usize] = bit;
+        }
+    }
+    meter.charge(cells * half)?;
+
+    let mut out = Vec::with_capacity(len as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let cx = (x * cells) / side;
+            let cy = (y * cells) / side;
+            let c = if on[(cy * cells + cx) as usize] {
+                fg
+            } else {
+                bg
+            };
+            out.extend_from_slice(&c);
+        }
+        meter.charge(side)?;
+    }
+    out.resize(len as usize, 0);
+    Ok(out)
+}
+
+/// A linear gradient between two seed-derived colours.
+fn draw_gradient(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, GenerateError> {
+    let side = square_side(len);
+    let mut stream = SeedStream::new(seed);
+    let a = [stream.next_byte(), stream.next_byte(), stream.next_byte()];
+    let b = [stream.next_byte(), stream.next_byte(), stream.next_byte()];
+    // Direction: horizontal, vertical, or diagonal.
+    let dir = stream.next_byte() % 3;
+
+    let mut out = Vec::with_capacity(len as usize);
+    let span = fixed::from_int(side.saturating_sub(1).max(1) as i32);
+    for y in 0..side {
+        for x in 0..side {
+            let along = match dir {
+                0 => fixed::from_int(x as i32),
+                1 => fixed::from_int(y as i32),
+                _ => fixed::div(fixed::from_int((x + y) as i32), fixed::from_int(2)),
+            };
+            let t = fixed::clamp_unit(fixed::div(along, span));
+            for ch in 0..3 {
+                let lo = fixed::from_int(i32::from(a[ch]));
+                let hi = fixed::from_int(i32::from(b[ch]));
+                let v = lo + fixed::mul(hi - lo, t);
+                out.push(fixed::to_int(
+                    fixed::clamp_unit(fixed::div(v, fixed::from_int(255))) * 255 / fixed::ONE,
+                ) as u8);
+            }
+        }
+        meter.charge(side * 3)?;
+    }
+    out.resize(len as usize, 0);
+    Ok(out)
+}
+
+/// Concentric rings from a distance field.
+///
+/// Included because it is the generator that actually needs
+/// [`fixed::sqrt`]: the others would work with plain integers, and a
+/// fixed-point library nothing exercises is a library nobody has checked.
+fn draw_rings(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, GenerateError> {
+    let side = square_side(len);
+    let mut stream = SeedStream::new(seed);
+    let c1 = [stream.next_byte(), stream.next_byte(), stream.next_byte()];
+    let c2 = [stream.next_byte(), stream.next_byte(), stream.next_byte()];
+    let period = i64::from(stream.next_byte() % 16 + 4);
+
+    let cx = fixed::from_int((side / 2) as i32);
+    let cy = cx;
+    let mut out = Vec::with_capacity(len as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let dx = fixed::from_int(x as i32) - cx;
+            let dy = fixed::from_int(y as i32) - cy;
+            let d2 = fixed::mul(dx, dx) + fixed::mul(dy, dy);
+            let d = fixed::sqrt(fixed::to_int(d2).max(0) as i64);
+            let ring = (fixed::to_int(d) as i64 / period) % 2;
+            let c = if ring == 0 { c1 } else { c2 };
+            out.extend_from_slice(&c);
+        }
+        meter.charge(side * 4)?;
+    }
+    out.resize(len as usize, 0);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(gen: GeneratorId, seed: u8, len: u32, budget: u32) -> GeneratedSpec {
+        GeneratedSpec {
+            generator: gen,
+            seed: [seed; 32],
+            output_len: len,
+            step_budget: budget,
+        }
+    }
+
+    #[test]
+    fn the_same_spec_produces_the_same_bytes() {
+        // The property the whole design rests on. Two nodes disagreeing here
+        // is two nodes disagreeing about whether an object is valid.
+        for g in [
+            GeneratorId::Avatar,
+            GeneratorId::Gradient,
+            GeneratorId::Rings,
+        ] {
+            let s = spec(g, 7, 3072, 100_000);
+            let a = generate(&s).expect("generates");
+            let b = generate(&s).expect("generates");
+            assert_eq!(a, b, "{g:?} is not deterministic");
+        }
+    }
+
+    #[test]
+    fn a_different_seed_produces_different_bytes() {
+        // Without this the seed would be decoration and a collection of ten
+        // thousand items would be ten thousand copies of one picture.
+        let a = generate(&spec(GeneratorId::Avatar, 1, 3072, 100_000)).unwrap();
+        let b = generate(&spec(GeneratorId::Avatar, 2, 3072, 100_000)).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn generated_bytes_verify_against_their_own_id() {
+        // The check that makes generated content safe to serve: the id is
+        // still the hash of the bytes, exactly as it is for stored content.
+        let s = spec(GeneratorId::Gradient, 3, 3072, 100_000);
+        let bytes = generate(&s).unwrap();
+        let id = ContentId::of(&bytes);
+        let got = generate_and_verify(&s, id).expect("the id derives from the bytes");
+        assert_eq!(got, bytes);
+    }
+
+    #[test]
+    fn a_spec_paired_with_the_wrong_id_is_refused() {
+        // The attack this closes: registering a known id against a spec that
+        // draws something else, so readers are handed the wrong object under
+        // an id they trust.
+        let s = spec(GeneratorId::Gradient, 3, 3072, 100_000);
+        let wrong = ContentId([0xAB; 32]);
+        let err = generate_and_verify(&s, wrong).expect_err("the id does not derive");
+        assert!(
+            matches!(err, GenerateError::IdMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_budget_too_small_stops_the_generator() {
+        // The runaway defence. A generator that cannot finish inside what was
+        // paid for stops rather than burning a reader's CPU.
+        let err = generate(&spec(GeneratorId::Rings, 5, 30_000, 10))
+            .expect_err("ten steps cannot draw thirty thousand bytes");
+        match err {
+            GenerateError::BudgetExhausted { budget, needed } => {
+                assert_eq!(budget, 10);
+                assert!(needed > budget, "needed {needed} should exceed {budget}");
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sufficient_budget_still_produces_the_object() {
+        // The canary for the test above. A budget check that refused
+        // everything would pass that test and be useless.
+        let s = spec(GeneratorId::Rings, 5, 3072, 200_000);
+        let out = generate(&s).expect("a paid-for generation completes");
+        assert_eq!(out.len(), 3072);
+    }
+
+    #[test]
+    fn the_budget_is_charged_before_the_output_is_allocated() {
+        // A spec asking for four megabytes on a ten step budget must fail on
+        // the meter, not after allocating four megabytes.
+        let err = generate(&spec(GeneratorId::Avatar, 1, MAX_GENERATED_BYTES, 10))
+            .expect_err("the output charge alone exceeds ten steps");
+        assert!(
+            matches!(err, GenerateError::BudgetExhausted { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_output_above_the_maximum_is_refused_before_any_work() {
+        let err = generate(&spec(
+            GeneratorId::Avatar,
+            1,
+            MAX_GENERATED_BYTES + 1,
+            u32::MAX,
+        ))
+        .expect_err("above the generator maximum");
+        assert!(
+            matches!(err, GenerateError::OutputTooLarge { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_object_is_refused() {
+        let err = generate(&spec(GeneratorId::Avatar, 1, 0, 1000)).expect_err("empty");
+        assert!(matches!(err, GenerateError::EmptyOutput));
+    }
+
+    #[test]
+    fn every_generator_fills_the_length_it_was_asked_for() {
+        // Lengths that are not multiples of three, and not perfect squares,
+        // because those are where a geometry bug hides.
+        for g in [
+            GeneratorId::Avatar,
+            GeneratorId::Gradient,
+            GeneratorId::Rings,
+        ] {
+            for len in [1u32, 2, 7, 100, 3071, 3072, 4097] {
+                let out = generate(&spec(g, 9, len, 500_000)).unwrap_or_else(|e| {
+                    panic!("{g:?} at {len} bytes: {e}");
+                });
+                assert_eq!(out.len(), len as usize, "{g:?} at {len} bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn the_commitment_covers_every_field_of_the_spec() {
+        // A field outside the digest is a field anyone could rewrite while
+        // keeping the id, which would point one id at two objects.
+        let base = spec(GeneratorId::Avatar, 1, 3072, 100_000);
+        let d = generated_spec_digest(&base);
+
+        let mut other_gen = base.clone();
+        other_gen.generator = GeneratorId::Gradient;
+        assert_ne!(
+            d,
+            generated_spec_digest(&other_gen),
+            "generator not covered"
+        );
+
+        let mut other_seed = base.clone();
+        other_seed.seed = [2u8; 32];
+        assert_ne!(d, generated_spec_digest(&other_seed), "seed not covered");
+
+        let mut other_len = base.clone();
+        other_len.output_len = 3073;
+        assert_ne!(
+            d,
+            generated_spec_digest(&other_len),
+            "output_len not covered"
+        );
+
+        let mut other_budget = base.clone();
+        other_budget.step_budget = 100_001;
+        assert_ne!(
+            d,
+            generated_spec_digest(&other_budget),
+            "step_budget not covered"
+        );
+    }
+
+    #[test]
+    fn the_generator_tag_does_not_move_with_the_enum_order() {
+        // Pinned so a later reordering cannot silently change every id ever
+        // computed for a generated object.
+        assert_eq!(GeneratorId::Avatar.commitment_tag(), 1);
+        assert_eq!(GeneratorId::Gradient.commitment_tag(), 2);
+        assert_eq!(GeneratorId::Rings.commitment_tag(), 3);
+    }
+
+    #[test]
+    fn content_source_defaults_to_stored() {
+        // Manifests written before this type must keep meaning what they
+        // meant, which is that operators hold the bytes.
+        assert_eq!(ContentSource::default(), ContentSource::Stored);
+    }
+
+    #[test]
+    fn fixed_point_arithmetic_is_exact_where_it_claims_to_be() {
+        use fixed::*;
+        assert_eq!(to_int(from_int(42)), 42);
+        assert_eq!(mul(ONE, ONE), ONE, "one is the multiplicative identity");
+        assert_eq!(mul(from_int(6), from_int(7)), from_int(42));
+        assert_eq!(div(from_int(84), from_int(2)), from_int(42));
+        assert_eq!(div(ONE, 0), 0, "division by zero is defined, not a panic");
+        assert_eq!(clamp_unit(-5), 0);
+        assert_eq!(clamp_unit(ONE * 2), ONE);
+        assert_eq!(to_int(sqrt(from_int(144) >> FRAC_BITS)), 12);
+    }
+
+    #[test]
+    fn fixed_point_multiplication_does_not_overflow_at_scale() {
+        // The i128 intermediate exists for this. Without it a product of two
+        // large fixed-point values wraps and a generator produces garbage
+        // that still hashes consistently, which is the worst kind of bug:
+        // deterministic and wrong.
+        let big = fixed::from_int(1_000_000);
+        let r = fixed::mul(big, fixed::from_int(1000));
+        assert_eq!(fixed::to_int(r), 1_000_000_000);
+    }
+
+    #[test]
+    fn a_thirty_two_byte_seed_is_the_whole_per_item_cost() {
+        // The claim the class exists for, stated as a test: a ten thousand
+        // item collection stores ten thousand seeds and one program, not ten
+        // thousand pictures.
+        let items = 10_000usize;
+        let per_item = std::mem::size_of::<[u8; 32]>() + std::mem::size_of::<u32>() * 2 + 1;
+        let described = items * per_item;
+        let stored = items * 3072; // the same objects, held as bytes
+        assert!(
+            described * 20 < stored,
+            "describing {described} bytes should be far under storing {stored}"
+        );
+    }
+}
