@@ -25,8 +25,11 @@ pub mod effort;
 pub mod executor;
 pub mod inference;
 pub mod metrics;
-/// What a model may read, and in what form. Reading only: Lubot does not
-/// generate images or video.
+// What a model may read, and in what form. Reading only: Lubot does not
+// generate images or video. Written as a plain comment rather than `///`:
+// a doc comment here makes rustdoc resolve the module's own `//!` header in
+// this file's scope instead of the module's, and an intra-doc link to a type
+// defined next door then fails to resolve.
 pub mod perception;
 pub mod query;
 pub mod social;
