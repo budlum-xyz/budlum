@@ -532,7 +532,7 @@ impl MarketplaceRegistry {
     /// # Errors
     ///
     /// A missing or inactive asset, and anything
-    /// [`ProtectedContent::bind`] refuses.
+    /// [`crate::pollen::content_gate::ProtectedContent::bind`] refuses.
     pub fn bind_content_to_asset(
         &mut self,
         manifest_id: ContentId,
