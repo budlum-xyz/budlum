@@ -418,6 +418,16 @@ pub enum ChainCommand {
     PollenGetDataAssets {
         response: oneshot::Sender<Vec<crate::pollen::DataAsset>>,
     },
+    /// Which Pollen asset sells the bytes behind a manifest, if any.
+    ///
+    /// The RPC layer needs this before it hands out a shard list: shard ids
+    /// are what a reader fetches bytes with, so publishing them for content
+    /// someone is selling is publishing the content itself to anyone who
+    /// skips the payment path.
+    PollenAssetForContent {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::pollen::AssetId>>,
+    },
     PollenGetAccessGrants {
         response: oneshot::Sender<Vec<crate::pollen::AccessGrant>>,
     },
@@ -2023,6 +2033,27 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Which Pollen asset sells this content, if any. `None` means the
+    /// content is not listed and reading it needs no grant.
+    pub async fn pollen_asset_for_content(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Option<crate::pollen::AssetId> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenAssetForContent {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        // A failed round trip reads as "listed" rather than "free": the
+        // actor being unreachable is not evidence that content is public,
+        // and defaulting the other way would open the paywall whenever the
+        // chain task is busy.
+        rx.await.unwrap_or(Some(crate::pollen::AssetId::zero()))
+    }
+
     pub async fn pollen_get_data_assets(&self) -> Vec<crate::pollen::DataAsset> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -3321,6 +3352,18 @@ impl ChainActor {
                         .cloned()
                         .collect();
                     let _ = response.send(offers);
+                }
+                ChainCommand::PollenAssetForContent {
+                    manifest_id,
+                    response,
+                } => {
+                    let asset = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .protected_content
+                        .asset_for(&manifest_id);
+                    let _ = response.send(asset);
                 }
                 ChainCommand::PollenGetDataAssets { response } => {
                     let assets: Vec<_> = self

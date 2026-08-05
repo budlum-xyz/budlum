@@ -73,6 +73,42 @@ find_in_root() {
   awk '/pub fn root\(/,/^    }/' "$file" | grep -cE 'protected_content' || true
 }
 
+# 6. Every RPC endpoint that publishes a shard id asks Pollen first.
+#
+# Shard ids are the handles a reader fetches bytes with, so an endpoint
+# printing them for listed content hands out the content to anyone who skips
+# the payment path.
+#
+# Measured per *endpoint*, not per textual occurrence. An `async fn` that
+# reaches a shard id, either directly or through a `_to_json` helper, has to
+# contain a `pollen_asset_for_content` call. Counting occurrences instead
+# would double-count a guarded endpoint that emits twice, and would demand a
+# Pollen lookup inside a pure formatter, which cannot see the manifest.
+#
+# Returns the names of unguarded endpoints, empty when all are guarded.
+find_unguarded_endpoints() {
+  local file="$1"
+  awk '
+    /^    async fn / {
+      name=$0; sub(/.*async fn /,"",name); sub(/\(.*/,"",name)
+      inbody=1; emits=0; guards=0; depth=0
+    }
+    inbody {
+      if ($0 ~ /"shardId":/ || $0 ~ /_to_json\(&/) emits=1
+      if ($0 ~ /pollen_asset_for_content/) guards=1
+      if ($0 ~ /^    }$/) {
+        if (emits && !guards) print name
+        inbody=0
+      }
+    }
+  ' "$file"
+}
+
+count_pollen_asks() {
+  local file="$1"
+  grep -cE 'pollen_asset_for_content' "$file" || true
+}
+
 # --------------------------------------------------------------- self test
 if [ "${1:-}" = "--self-test" ]; then
   tmp="$(mktemp -d)"
@@ -164,6 +200,41 @@ EOF
   [ -z "$(find_unbind "$tmp/c8.rs")" ] || fail "canary 8: a clean file must not be flagged"
   canaries=$((canaries + 1))
 
+  # Canary 9: an endpoint printing shard ids with no Pollen check is caught.
+  cat > "$tmp/c9.rs" <<'EOF'
+    async fn leaky(&self, id: String) -> Result<Value, E> {
+        Ok(json!({ "shardId": hex::encode(s.shard_id.0) }))
+    }
+EOF
+  [ -n "$(find_unguarded_endpoints "$tmp/c9.rs")" ] \
+    || fail "canary 9: an endpoint publishing shard ids with no Pollen check was not detected"
+  canaries=$((canaries + 1))
+
+  # Canary 10: one that does ask must pass, so the rule is not banning shard
+  # ids outright. Operators need them for content nobody is selling.
+  cat > "$tmp/c10.rs" <<'EOF'
+    async fn guarded(&self, id: String) -> Result<Value, E> {
+        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
+        let shards = if protecting_asset.is_some() { vec![] } else {
+            vec![json!({ "shardId": hex::encode(s.shard_id.0) })]
+        };
+        Ok(json!({ "shards": shards }))
+    }
+EOF
+  [ -z "$(find_unguarded_endpoints "$tmp/c10.rs")" ] \
+    || fail "canary 10: a guarded endpoint must pass"
+  canaries=$((canaries + 1))
+
+  # Canary 11: an endpoint touching no shard id is not asked to guard.
+  cat > "$tmp/c11.rs" <<'EOF'
+    async fn unrelated(&self) -> Result<Value, E> {
+        Ok(json!({ "height": 1 }))
+    }
+EOF
+  [ -z "$(find_unguarded_endpoints "$tmp/c11.rs")" ] \
+    || fail "canary 11: an endpoint with no shard id must not be flagged"
+  canaries=$((canaries + 1))
+
   echo "paid content gate self-test OK: $canaries canaries"
   exit 0
 fi
@@ -189,5 +260,15 @@ fi
 
 [ "$(find_in_root "$OFFERS_SRC")" != "0" ] \
   || fail "protected_content is not hashed into the registry root"
+
+RPC_SRC="$ROOT/src/rpc/server.rs"
+if [ -f "$RPC_SRC" ]; then
+  unguarded="$(find_unguarded_endpoints "$RPC_SRC")"
+  if [ -n "$unguarded" ]; then
+    echo "$unguarded" >&2
+    fail "RPC endpoint(s) publish shard ids without asking Pollen: the handles for \
+fetching paid bytes are served to anyone"
+  fi
+fi
 
 echo "OK: paid content needs a live grant, stays out of the public class, and is bound permanently"

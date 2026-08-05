@@ -1758,17 +1758,33 @@ impl BudlumApiServer for RpcServer {
         manifest_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let id = parse_content_id(&manifest_id)?;
+
+        // Shard ids are the handles a reader fetches bytes with, so listing
+        // them for content someone is selling hands out the content to
+        // anyone willing to skip the payment path. Pollen decides that, and
+        // it is asked before anything is serialised.
+        //
+        // The manifest's shape stays public: size and shard count leak
+        // nothing a buyer could not see in the listing, and an operator
+        // needs them to decide whether to serve. What is withheld is the
+        // shard list itself.
+        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
+
         if let Some(manifest) = self.chain.get_storage_manifest(id).await {
-            let shards: Vec<serde_json::Value> = manifest
-                .shards
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "shardId": format!("0x{}", hex::encode(s.shard_id.0)),
-                        "size": s.size,
+            let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
+                Vec::new()
+            } else {
+                manifest
+                    .shards
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "shardId": format!("0x{}", hex::encode(s.shard_id.0)),
+                            "size": s.size,
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
             return Ok(serde_json::json!({
                 "manifestId": format!("0x{}", hex::encode(id.0)),
                 "found": true,
@@ -1779,24 +1795,40 @@ impl BudlumApiServer for RpcServer {
                 // "corrupt shard", both need the declaration. Without it here
                 // the only honest answer either could give is "unknown".
                 "encryption": manifest.encryption.to_string(),
+                // Told plainly rather than by an empty list, so a caller
+                // knows to present a grant instead of concluding the object
+                // has no shards.
+                "protected": protecting_asset.is_some(),
+                "protectingAsset": protecting_asset
+                    .map(|a| format!("0x{}", hex::encode(a.0))),
                 "shards": shards,
             }));
         }
 
+        // The fallback path reaches the same shard ids through the deal
+        // records, so it has to answer to the same rule. Closing one and
+        // leaving the other would move the leak rather than fix it.
         let deals = self.chain.get_storage_deals_by_manifest(id).await;
-        let shards: Vec<serde_json::Value> = deals
-            .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-                    "size": d.shard_id.0.len(),
+        let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
+            Vec::new()
+        } else {
+            deals
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
+                        "size": d.shard_id.0.len(),
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
         Ok(serde_json::json!({
             "manifestId": format!("0x{}", hex::encode(id.0)),
-            "found": !shards.is_empty(),
-            "dealsObserved": shards.len(),
+            "found": !deals.is_empty(),
+            "dealsObserved": deals.len(),
+            "protected": protecting_asset.is_some(),
+            "protectingAsset": protecting_asset
+                .map(|a| format!("0x{}", hex::encode(a.0))),
             "shards": shards,
         }))
     }
@@ -1807,13 +1839,27 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         let id = parse_content_id(&manifest_id)?;
         let deals_raw = self.chain.get_storage_deals_by_manifest(id).await;
-        let deals: Vec<serde_json::Value> = deals_raw
-            .into_iter()
-            .map(|deal| storage_deal_to_json(&deal))
-            .collect();
+        // A deal record carries its shard id, which is the handle bytes are
+        // fetched with, so this endpoint leaks the same thing
+        // `storage_get_manifest` does and answers to the same rule. The
+        // count stays public: how many operators hold an object is an
+        // economic fact a buyer can already read from the listing.
+        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
+        let count = deals_raw.len();
+        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
+            Vec::new()
+        } else {
+            deals_raw
+                .into_iter()
+                .map(|deal| storage_deal_to_json(&deal))
+                .collect()
+        };
         Ok(serde_json::json!({
             "manifestId": format!("0x{}", hex::encode(id.0)),
-            "count": deals.len(),
+            "count": count,
+            "protected": protecting_asset.is_some(),
+            "protectingAsset": protecting_asset
+                .map(|a| format!("0x{}", hex::encode(a.0))),
             "deals": deals,
         }))
     }
@@ -1826,14 +1872,27 @@ impl BudlumApiServer for RpcServer {
         let mid = parse_content_id(&manifest_id)?;
         let sid = parse_content_id(&shard_id)?;
         let deals_raw = self.chain.get_storage_deals_by_shard(mid, sid).await;
-        let deals: Vec<serde_json::Value> = deals_raw
-            .into_iter()
-            .map(|deal| storage_deal_to_json(&deal))
-            .collect();
+        // Closed for the same reason as the two endpoints above. This one
+        // matters even though the caller already knows the shard id: the
+        // deal record names the operators holding it, which is the second
+        // half of fetching bytes without paying.
+        let protecting_asset = self.chain.pollen_asset_for_content(mid).await;
+        let count = deals_raw.len();
+        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
+            Vec::new()
+        } else {
+            deals_raw
+                .into_iter()
+                .map(|deal| storage_deal_to_json(&deal))
+                .collect()
+        };
         Ok(serde_json::json!({
             "manifestId": format!("0x{}", hex::encode(mid.0)),
             "shardId": format!("0x{}", hex::encode(sid.0)),
-            "count": deals.len(),
+            "count": count,
+            "protected": protecting_asset.is_some(),
+            "protectingAsset": protecting_asset
+                .map(|a| format!("0x{}", hex::encode(a.0))),
             "deals": deals,
         }))
     }
