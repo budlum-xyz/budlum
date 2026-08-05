@@ -2951,6 +2951,35 @@ impl ChainActor {
                         let _ = response.send(Err(format!("invalid manifest: {e}")));
                         continue;
                     }
+                    // Paid content may not register as plaintext.
+                    //
+                    // `check_content_may_be_public` was written for this
+                    // moment and its doc comment says "called on the
+                    // declaration path", but nothing called it: the refusal
+                    // existed and never ran. Registration is the only place
+                    // it can run, because the damage is done at registration
+                    // rather than at read time. A plaintext `ContentId` is
+                    // the hash of the bytes, so anyone holding a candidate
+                    // file can confirm it is the listed asset, and anyone
+                    // holding most of one can brute force the rest. Once
+                    // that id is on chain the leak is already available, and
+                    // unlisting the asset afterwards does not take it back.
+                    if matches!(
+                        manifest.encryption,
+                        crate::storage::ContentEncryption::Plaintext
+                    ) {
+                        if let Err(e) = self
+                            .blockchain
+                            .state
+                            .marketplace
+                            .check_content_may_be_public(&manifest.manifest_id)
+                        {
+                            let _ = response.send(Err(format!(
+                                "refusing to register paid content as plaintext: {e}"
+                            )));
+                            continue;
+                        }
+                    }
                     let manifest_id = manifest.manifest_id;
                     self.blockchain
                         .state
