@@ -324,6 +324,22 @@ pub struct StorageChallengeProofContext {
     pub response_epoch: u64,
 }
 
+/// What a coding audit asks about: one parity shard, one byte column.
+///
+/// Deliberately not a stored type. It is derived from entropy and the
+/// manifest whenever an audit is opened, so there is no second copy of the
+/// selection that could drift from the one the verifier recomputes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingAudit {
+    pub manifest_id: ContentId,
+    /// Counts parity shards from zero, so 0 is generator row `k`.
+    pub parity_index: u32,
+    /// Byte offset within the shard, the same for every shard in the code
+    /// word because Reed-Solomon works symbol-wise across equal-length
+    /// shards.
+    pub column: u64,
+}
+
 pub struct StorageChallengeRangeInput<'a> {
     pub entropy: &'a Hash32,
     pub deal: &'a StorageDeal,
@@ -610,6 +626,26 @@ pub enum StorageError {
         content_id: ContentId,
         reason: String,
     },
+    /// A coding audit was opened against an object with no parity shards.
+    ///
+    /// There is no relationship to check: under plain replication every
+    /// shard is data, and `XOR_j coeff(i, j) * data_j[c]` has no `i` to
+    /// range over. Refusing is the honest answer. Returning "correct" would
+    /// report a passing audit on an object that was never audited.
+    NoParityToAudit {
+        manifest_id: ContentId,
+    },
+    /// The audit's answer did not satisfy the coding relationship.
+    ///
+    /// Column `column` of parity shard `parity_index` is not what the
+    /// generator says it must be, given the data bytes at that column. The
+    /// operator either miscomputed the parity or is serving bytes that are
+    /// not the parity it was paid to hold.
+    ParityColumnMismatch {
+        manifest_id: ContentId,
+        parity_index: u32,
+        column: u64,
+    },
     /// B.U.D.: merkle_proof and storage_root are mandatory
     /// Now that VerifyMerkle production gate is open.
     MerkleProofRequired,
@@ -711,6 +747,20 @@ impl std::fmt::Display for StorageError {
             StorageError::SelfHostRefusedByPolicy { content_id, reason } => write!(
                 f,
                 "self-hosting {content_id} refused by the owner's own policy: {reason}"
+            ),
+            StorageError::NoParityToAudit { manifest_id } => write!(
+                f,
+                "manifest {manifest_id} has no parity shards, so there is no \
+                 coding relationship to audit"
+            ),
+            StorageError::ParityColumnMismatch {
+                manifest_id,
+                parity_index,
+                column,
+            } => write!(
+                f,
+                "parity shard {parity_index} of manifest {manifest_id} is not \
+                 the parity the generator requires at column {column}"
             ),
             StorageError::MerkleProofRequired => write!(
                 f,
@@ -1224,6 +1274,148 @@ impl StorageRegistry {
             opener,
             request.opener_bond,
         )
+    }
+
+    /// Which parity shard and which byte column a coding audit should ask
+    /// about, derived from entropy the opener cannot choose.
+    ///
+    /// The retrieval challenge asks "do you still have these bytes". This
+    /// asks a different question: "are the parity bytes you hold actually
+    /// parity". An operator can pass the first while failing the second, by
+    /// storing whatever it likes under the parity shard's `ContentId`. It
+    /// would only be discovered during a repair, which is the one moment the
+    /// object cannot afford it.
+    ///
+    /// Reed-Solomon works symbol-wise, so one byte column is a complete,
+    /// self-contained instance of the relationship: parity byte `c` of shard
+    /// `i` is `XOR_j coeff(i, j) * data_j[c]`. That makes an audit cost `k`
+    /// data bytes plus one parity byte no matter how large the object is,
+    /// against a full check that would read every data shard end to end.
+    ///
+    /// Selection is derived from `entropy` rather than chosen by the opener,
+    /// for the reason the retrieval range already is: an opener who picks the
+    /// column picks one the operator has, and an operator who knows the
+    /// column in advance stores only that column.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::NoParityToAudit`] when the object is replicated. There
+    /// is no `i` to range over, and reporting a pass would report an audit
+    /// that never happened.
+    pub fn derive_coding_audit(
+        entropy: &Hash32,
+        manifest: &ContentManifest,
+        challenge_id: u64,
+    ) -> Result<CodingAudit, StorageError> {
+        let parity_count = manifest.erasure.parity_count();
+        if parity_count == 0 {
+            return Err(StorageError::NoParityToAudit {
+                manifest_id: manifest.manifest_id,
+            });
+        }
+        // Every shard in a code word is the padded stripe length, so any
+        // shard's size is the column count. Taking the minimum rather than
+        // the first is defensive: a manifest that passed `validate_untrusted`
+        // has equal-length shards, but this reads sizes from an untrusted
+        // structure and a short shard would make a column index out of range
+        // for the operator holding it.
+        let columns = manifest
+            .shards
+            .iter()
+            .map(|s| u64::from(s.size))
+            .min()
+            .unwrap_or(0);
+        if columns == 0 {
+            return Err(StorageError::NoParityToAudit {
+                manifest_id: manifest.manifest_id,
+            });
+        }
+        let digest = hash_fields_bytes(&[
+            b"BDLM_STORAGE_CODING_AUDIT_V1",
+            entropy,
+            manifest.manifest_id.as_bytes(),
+            &challenge_id.to_le_bytes(),
+            &manifest.erasure.k.to_le_bytes(),
+            &manifest.erasure.n.to_le_bytes(),
+        ]);
+        let parity_index = u32::try_from(
+            u64::from_le_bytes(
+                digest[..8]
+                    .try_into()
+                    .expect("32-byte digest has an 8-byte prefix"),
+            ) % u64::from(parity_count),
+        )
+        .expect("a value reduced modulo a u32 fits in u32");
+        let column = u64::from_le_bytes(
+            digest[8..16]
+                .try_into()
+                .expect("32-byte digest has a second 8-byte word"),
+        ) % columns;
+        Ok(CodingAudit {
+            manifest_id: manifest.manifest_id,
+            parity_index,
+            column,
+        })
+    }
+
+    /// Check an answered coding audit against the generator.
+    ///
+    /// `data_column` is byte `audit.column` of each data shard in shard
+    /// order; `parity_byte` is the same column of parity shard
+    /// `audit.parity_index`.
+    ///
+    /// # What a pass means
+    ///
+    /// That the relationship holds at that column, and nothing wider. An
+    /// operator who miscomputed a fraction `f` of columns fails a uniformly
+    /// random one with probability `f`, so `r` audits leave a cheat standing
+    /// with probability `(1 - f)^r`. Ateniese's provable-data-possession
+    /// paper measured the same trade at 460 sampled blocks out of 10,000
+    /// detecting a 1% deletion with 99% confidence. This is a probabilistic
+    /// instrument and calling it anything else would be a false claim.
+    ///
+    /// It says nothing about whether the operator *stores* the shard. That
+    /// is the retrieval challenge's question. An operator can hold bytes that
+    /// are not valid parity, and can compute valid parity on demand while
+    /// holding nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownManifest`] if the audit names a manifest this
+    /// registry does not hold, [`StorageError::NoParityToAudit`] if the
+    /// object is replicated or the indices fall outside the scheme, and
+    /// [`StorageError::ParityColumnMismatch`] when the answer does not
+    /// satisfy the relationship.
+    pub fn verify_coding_audit(
+        &self,
+        audit: &CodingAudit,
+        data_column: &[u8],
+        parity_byte: u8,
+    ) -> Result<(), StorageError> {
+        let manifest = self
+            .manifests
+            .get(&audit.manifest_id)
+            .ok_or(StorageError::UnknownManifest(audit.manifest_id))?;
+        let coder = crate::storage::ReedSolomon::for_scheme(&manifest.erasure).map_err(|_| {
+            StorageError::NoParityToAudit {
+                manifest_id: audit.manifest_id,
+            }
+        })?;
+        let parity_index = audit.parity_index as usize;
+        if coder.parity_coefficient(parity_index, 0).is_none() {
+            return Err(StorageError::NoParityToAudit {
+                manifest_id: audit.manifest_id,
+            });
+        }
+        if coder.column_is_correctly_encoded(parity_index, data_column, parity_byte) {
+            Ok(())
+        } else {
+            Err(StorageError::ParityColumnMismatch {
+                manifest_id: audit.manifest_id,
+                parity_index: audit.parity_index,
+                column: audit.column,
+            })
+        }
     }
 
     pub fn derive_challenge_range(

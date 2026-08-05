@@ -234,6 +234,72 @@ manifest claiming `k = 1` when four shards are needed reads as safe at one
 surviving shard, so no repair ever opens and the object is lost quietly. Both
 are now bound by `manifest_id_from_parts` under `BDLM_MANIFEST_V2`.
 
+## Gap 3b: is the parity actually parity: **sampled**
+
+Gap 3 gave the chain a coder and bound `(k, n)` into `manifest_id`. Neither
+answers a question that only appears once parity exists: an operator paid to
+hold parity shard `i` can store anything at all under that shard's
+`ContentId`, and a retrieval challenge cannot tell.
+
+The retrieval challenge asks whether the operator still has the bytes. That
+is a different question from whether those bytes satisfy
+
+```
+parity_i[c] == XOR_j coeff(i, j) * data_j[c]
+```
+
+An operator storing garbage passes every retrieval challenge it is given. The
+discovery happens during the repair that needed the parity, which is the one
+moment the object cannot afford it.
+
+### What was built
+
+Reed-Solomon works symbol-wise, so a single byte column is a complete,
+self-contained instance of the relationship. `derive_coding_audit` reduces
+block entropy into a parity index and a column; `verify_coding_audit` runs
+the answer through the same coder the encoder uses.
+
+```
+audit cost:  k data bytes + 1 parity byte
+full check:  every data shard, end to end
+```
+
+A `(4, 6)` audit reads five bytes whether the object is 800 bytes or 800 MB.
+
+### What a pass means, exactly
+
+That the relationship holds at that column. An operator who miscomputed a
+fraction `f` of columns fails a uniformly random one with probability `f`, so
+`r` rounds leave a cheat standing with probability `(1 - f)^r`:
+
+| corrupted fraction | 1 round | 50 rounds |
+|---|---|---|
+| 1% | 1.0% | 39.5% |
+| 5% | 5.0% | 92.3% |
+| 10% | 10.0% | 99.5% |
+
+This is the trade provable-data-possession schemes have always made. Ateniese
+et al. measured it as 460 sampled blocks out of 10,000 detecting a 1%
+deletion with 99% confidence.
+
+### What it does not do
+
+It does not prove the operator *stores* anything. Parity can be computed on
+demand by someone holding nothing, and bytes can be held that are not parity.
+The two questions are separate and answering one does not answer the other.
+
+It also refuses replicated objects rather than passing them. There is no `i`
+to range over when every shard is data, and a pass there would report an
+audit that never happened, on the objects with no redundancy to lose.
+
+### Still open
+
+Nothing opens these audits on a schedule yet. `derive_coding_audit` and
+`verify_coding_audit` are the mechanism; a production path that samples live
+deals is the next step, along with what a failed audit costs the operator.
+Recorded here rather than left for a reader to find: the arithmetic is real
+and the trigger is not there yet.
+
 ## Gap 4: repair trigger: **expressible now**
 
 With `k` known, "how much redundancy is left" is a number, and repair becomes a
