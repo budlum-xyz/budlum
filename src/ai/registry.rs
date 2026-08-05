@@ -1291,6 +1291,23 @@ impl AiRegistry {
         claimant: &Address,
         current_block: u64,
     ) -> Result<u64, String> {
+        // Both refusals are decided while the payment is still in the map,
+        // and the payment is taken out exactly once.
+        //
+        // This used to `remove` up front and then check. A reclaim by the
+        // wrong sender, or one made before expiry, returned `Err` with the
+        // payment already gone: the funds could never be reclaimed afterwards,
+        // because the entry the next attempt would look up no longer existed.
+        // Nothing rolls that back, since `apply_block_checked` propagates the
+        // error with `?`.
+        //
+        // The success path was worse. It removed a second time and unwrapped
+        // the result, and by then the first removal had already emptied the
+        // slot, so the `unwrap` was on a `None`. A reclaim that passed both
+        // checks panicked the node. It survived review because the test that
+        // covers it asserts the refusal and the success separately, on two
+        // registries, and neither ordering reaches the second remove with the
+        // first one still in effect.
         let payment = self
             .agent_payments
             .get(payment_id)
@@ -1304,7 +1321,11 @@ impl AiRegistry {
             ));
         }
         let amount = payment.amount;
-        let payment = self.agent_payments.remove(payment_id).unwrap();
+        // Past every refusal: one removal, and it cannot fail.
+        let payment = self
+            .agent_payments
+            .remove(payment_id)
+            .ok_or_else(|| String::from("Agent payment: payment_id not found"))?;
         self.archive_settled_payment(payment, current_block, AiPaymentEscrowStatus::Reclaimed);
         Ok(amount)
     }
@@ -1316,13 +1337,22 @@ impl AiRegistry {
         payment_id: &[u8; 32],
         settled_at_block: u64,
     ) -> Result<(), String> {
+        // Every refusal is decided before the payment leaves the live map.
+        //
+        // This used to `remove` first and then check. The escrowed branch put
+        // the payment back; the already-settled branch did not, so a second
+        // settle reported failure and consumed the live entry on its way out.
+        // Nothing could release or reclaim it afterwards: the entry was gone
+        // and the caller had been told the call failed.
+        //
+        // Reachable from `executor.rs`, which credits the recipient and then
+        // calls this. `apply_block_checked` propagates the error with `?` and
+        // rolls nothing back, so a torn write here stays torn.
         let payment = self
             .agent_payments
-            .remove(payment_id)
+            .get(payment_id)
             .ok_or_else(|| String::from("Agent payment: payment_id not found for settle"))?;
         if payment.is_escrowed() {
-            // Should not be called for escrowed payments, put back and error.
-            self.agent_payments.insert(payment.payment_id, payment);
             return Err(String::from(
                 "Agent payment: escrowed payment cannot use immediate settle",
             ));
@@ -1330,6 +1360,11 @@ impl AiRegistry {
         if self.settled_agent_payments.contains_key(payment_id) {
             return Err(String::from("Agent payment: already settled"));
         }
+        // Past every refusal: now the removal cannot strand anything.
+        let payment = self
+            .agent_payments
+            .remove(payment_id)
+            .ok_or_else(|| String::from("Agent payment: payment_id not found for settle"))?;
         let receipt = AiAgentPaymentSettlement::from_payment(
             &payment,
             settled_at_block,

@@ -55,7 +55,23 @@ HASHING = re.compile(
     r'(root|calculate_state_root|leaf_hash|compute_hash|state_root|digest)\b'
 )
 # `for <binding> in self.<field>.values()` and friends.
-ITER = re.compile(r'for\s+[^\s]+\s+in\s+(?:&)?self\.([a-z_][a-z0-9_]*)\.(?:values|keys|iter)\(\)')
+#
+# The binding is matched with `.+?` rather than `[^\s]+` because the most
+# common way to walk a map is `for (key, value) in ...`, and a no-space
+# pattern cannot cross the space inside that tuple. With `[^\s]+` this gate
+# saw `for e in self.x.iter()` and missed every `for (k, v) in self.x`, which
+# is the shape almost every `root()` in this tree actually uses. A gate that
+# matches nothing reports nothing.
+#
+# The bare `&self.field` form is included too: iterating a map directly is
+# the same hazard as calling `.iter()` on it, and it is how most of these
+# loops are written.
+# Whitespace is allowed around every `.` because the joined window that
+# recovers a wrapped `for` header leaves `self .entries .iter()`.
+ITER = re.compile(
+    r'for\s+.+?\s+in\s+(?:&)?self\s*\.\s*([a-z_][a-z0-9_]*)'
+    r'(?:\s*\.\s*(?:values|keys|iter)\s*\(\))?\s*[{&]'
+)
 
 findings = []
 scanned = 0
@@ -95,12 +111,53 @@ for dirpath, _, filenames in os.walk(root):
                 continue
             scanned += line.count('{')
             depth += line.count('{') - line.count('}')
-            it = ITER.search(line)
+            # rustfmt splits a long `for` header across lines:
+            #
+            #     for (k, v) in self
+            #         .entries
+            #         .iter()
+            #
+            # Matching one line at a time sees `for (k, v) in self` and stops,
+            # so the field name is never read and the loop is invisible. Join
+            # the next two lines before searching.
+            # Four lines, not three: rustfmt puts the opening brace of the
+            # loop body on its own line after the receiver chain, and the
+            # pattern needs that brace to know the header ended.
+            #
+            #     for (k, v) in self      <- i
+            #         .entries            <- i+1
+            #         .iter()             <- i+2
+            #     {                       <- i+3
+            window = ' '.join(
+                l.strip() for l in lines[i:min(i + 4, len(lines))]
+            )
+            it = ITER.search(line) or ITER.search(window)
             if it:
                 field = it.group(1)
                 kind = declared.get(field)
                 if kind in ('HashMap', 'HashSet'):
-                    findings.append((path, i + 1, fname, field, kind))
+                    # Order matters only when the loop FOLDS into a shared
+                    # accumulator. A loop that writes each entry to its own
+                    # slot, `cached_leaves[pos] = ..` with `pos` from a sorted
+                    # binary search, produces the same array whichever order it
+                    # visits, because no two iterations touch the same cell.
+                    #
+                    # `calculate_state_root` does exactly that, and calling it
+                    # a divergence would be an alarm that is not true. A gate
+                    # that cries wolf teaches people to skip it, which costs
+                    # more than the check is worth.
+                    body = '\n'.join(lines[i:i + 40])
+                    end = body.find('\n        }')
+                    if end != -1:
+                        body = body[:end]
+                    folds = re.search(
+                        r'\w+\s*\.\s*update\(|\w+\s*\.\s*push\(|'
+                        r'\w+\s*[-+^|]=|\w+\s*=\s*\w+\s*[-+^|]',
+                        body,
+                    )
+                    writes_own_slot = re.search(r'\w+\s*\[\s*\w+\s*\]\s*=', body)
+                    if folds and not writes_own_slot:
+                        findings.append((path, i + 1, fname, field, kind))
             if depth <= 0 and i > start:
                 inside, fname = False, None
 
@@ -173,7 +230,83 @@ RS
     exit 1
   fi
 
-  echo "Consensus-map ordering self-test OK: a hashed HashMap is rejected, an ordered map and a non-hashing HashMap both pass."
+  # Tuple destructuring is how almost every map in this tree is walked, and
+  # the first version of this gate could not see it: the binding pattern was
+  # matched with `[^\s]+`, which cannot cross the space in `(k, v)`. The gate
+  # reported the tree clean because it was looking at nothing.
+  cat > "$tmp/src/ok.rs" <<'RS'
+pub struct Registry {
+    entries: HashMap<u64, u64>,
+}
+impl Registry {
+    pub fn root(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        for (k, v) in &self.entries {
+            hasher.update(k.to_le_bytes());
+            hasher.update(v.to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
+}
+RS
+  if (scan "$tmp" >/dev/null 2>&1); then
+    echo "VACUOUS GATE: a HashMap walked as (key, value) pairs was accepted!" >&2
+    exit 1
+  fi
+
+  # And the same shape wrapped across lines by the formatter.
+  cat > "$tmp/src/ok.rs" <<'RS'
+pub struct Registry {
+    entries: HashMap<u64, u64>,
+}
+impl Registry {
+    pub fn root(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        for (k, v) in self
+            .entries
+            .iter()
+        {
+            hasher.update(k.to_le_bytes());
+            hasher.update(v.to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
+}
+RS
+  if (scan "$tmp" >/dev/null 2>&1); then
+    echo "VACUOUS GATE: a wrapped HashMap iterator was accepted!" >&2
+    exit 1
+  fi
+
+  # A loop that writes each entry to its own slot is order-independent: no
+  # two iterations touch the same cell, so the result is identical whichever
+  # order the map yields. `calculate_state_root` does this, and calling it a
+  # divergence would be an alarm that is not true.
+  cat > "$tmp/src/ok.rs" <<'RS'
+pub struct Registry {
+    dirty: HashSet<u64>,
+    leaves: Vec<[u8; 32]>,
+}
+impl Registry {
+    pub fn calculate_state_root(&mut self) -> [u8; 32] {
+        for key in &self.dirty {
+            let pos = *key as usize;
+            let mut h = Sha256::new();
+            h.update(key.to_le_bytes());
+            self.leaves[pos] = h.finalize().into();
+        }
+        self.leaves[0]
+    }
+}
+RS
+  if ! (scan "$tmp" >/dev/null 2>&1); then
+    echo "FAIL: gate flagged a loop that writes each entry to its own slot" >&2
+    exit 1
+  fi
+
+  echo "Consensus-map ordering self-test OK: a hashed HashMap, one walked as \
+(key, value) pairs and one wrapped across lines are all rejected; an ordered \
+map, a non-hashing HashMap and a write-to-own-slot loop all pass."
 }
 
 if [ "${1:-}" = "--self-test" ]; then

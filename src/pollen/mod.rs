@@ -284,6 +284,9 @@ mod tests {
 /// Pollen Data Rights / AccessGrant v2 primitives.
 pub mod data_rights;
 pub mod encryption_policy;
+
+/// The read gate that keeps paid content behind the payment that bought it.
+pub mod content_gate;
 pub use data_rights::{
     AccessGrant, AccessGrantStatus, AiDataInputRef, DataAsset, DataAssetStatus, EncryptionPolicy,
     SaleAuthorization, SaleAuthorizationId, POLLEN_AI_INPUT_REF_PREFIX,
@@ -291,4 +294,5 @@ pub use data_rights::{
 
 /// AI Data Marketplace (satıcı-teklifi ekonomisi) - geçiş modülü.
 pub mod offers;
+pub use content_gate::{ContentGateError, ProtectedContent};
 pub use offers::{DataOffer, MarketplaceRegistry, PollenPurchaseReceipt};

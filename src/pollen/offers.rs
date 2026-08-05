@@ -218,6 +218,16 @@ pub struct MarketplaceRegistry {
     /// Not decrypt keys or read-grant bypasses.
     #[serde(default)]
     pub encryption_policies: BTreeMap<u32, EncryptionPolicy>,
+    /// Which stored objects are sold through Pollen.
+    ///
+    /// Pollen governed permission and B.U.D. governed bytes, and the two had
+    /// no connection: the same content could be sold here and fetched from
+    /// storage by anyone holding the `manifest_id`, with the second path
+    /// asking nothing. This binds them, so a read of listed content needs a
+    /// live grant and the content can never enter the deduplicated public
+    /// class where its existence could be confirmed without payment.
+    #[serde(default)]
+    pub protected_content: crate::pollen::content_gate::ProtectedContent,
 }
 
 impl MarketplaceRegistry {
@@ -513,6 +523,112 @@ impl MarketplaceRegistry {
         Ok(Some(reference.grant_id))
     }
 
+    /// Put stored content behind an asset's paywall.
+    ///
+    /// Looks the asset's owner up here rather than trusting a caller-supplied
+    /// address, because the whole point of the check is that one account
+    /// cannot list another account's content.
+    ///
+    /// # Errors
+    ///
+    /// A missing or inactive asset, and anything
+    /// [`crate::pollen::content_gate::ProtectedContent::bind`] refuses.
+    pub fn bind_content_to_asset(
+        &mut self,
+        manifest_id: ContentId,
+        asset_id: AssetId,
+        caller: Address,
+    ) -> Result<(), String> {
+        let asset = self
+            .data_assets
+            .get(&asset_id)
+            .ok_or("cannot sell content under an asset that does not exist")?;
+        if !asset.is_active() {
+            return Err("cannot sell content under a revoked asset".into());
+        }
+        let owner = asset.owner;
+        self.protected_content
+            .bind(manifest_id, asset_id, owner, caller)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Whether `reader` may read the bytes behind `manifest_id` right now.
+    ///
+    /// This is the storage layer's question, answered with Pollen's rules.
+    /// Unlisted content is free, which is the common case. Listed content
+    /// needs a grant that is live *for this reader* and covers *this asset*,
+    /// and both halves are checked against the same `AccessGrant` state the
+    /// AI path uses, rather than a second copy that could drift from it.
+    ///
+    /// # Errors
+    ///
+    /// A string describing which condition failed, so a gateway can tell a
+    /// caller whether to buy access or to renew it.
+    pub fn authorize_content_read(
+        &self,
+        manifest_id: &ContentId,
+        reader: &Address,
+        grant_id: Option<&GrantId>,
+        current_block: u64,
+    ) -> Result<(), String> {
+        let Some(required) = self.protected_content.asset_for(manifest_id) else {
+            return Ok(());
+        };
+        let Some(grant_id) = grant_id else {
+            return Err(format!(
+                "content {manifest_id} is sold as Pollen asset {} and needs an access grant",
+                hex::encode(required.0)
+            ));
+        };
+        let grant = self
+            .access_grants
+            .get(grant_id)
+            .ok_or("access denied: AccessGrant not found")?;
+        // The asset check comes before the liveness check on purpose: a
+        // reader presenting a valid grant for the wrong asset should be told
+        // it is the wrong asset, not that their grant expired.
+        if grant.asset_id != required {
+            return Err(format!(
+                "access denied: grant covers asset {} but the content belongs to {}",
+                hex::encode(grant.asset_id.0),
+                hex::encode(required.0)
+            ));
+        }
+        let asset = self
+            .data_assets
+            .get(&required)
+            .ok_or("access denied: DataAsset not found")?;
+        if !asset.is_active() {
+            return Err("access denied: DataAsset revoked".into());
+        }
+        if grant.owner != asset.owner {
+            return Err("access denied: grant owner mismatch".into());
+        }
+        if !grant.is_active_for(reader, current_block) {
+            return Err(
+                "access denied: AccessGrant inactive, expired, exhausted, or wrong grantee".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse to let sold content enter the deduplicated public class.
+    ///
+    /// Called on the declaration path. Deduplication keys on content, so a
+    /// listed asset in the public class can be confirmed, or have a missing
+    /// field brute-forced, by anyone who can guess most of it. Those are the
+    /// confirmation-of-a-file and learn-the-remaining-information attacks,
+    /// and paid content is the target they are written for.
+    ///
+    /// # Errors
+    ///
+    /// When the content is bound to an asset.
+    pub fn check_content_may_be_public(&self, manifest_id: &ContentId) -> Result<(), String> {
+        self.protected_content
+            .check_may_be_public(manifest_id)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn consume_ai_read_grant(
         &mut self,
         grant_id: &GrantId,
@@ -567,6 +683,10 @@ impl MarketplaceRegistry {
             hasher.update(version.to_le_bytes());
             hasher.update(policy.calculate_leaf());
         }
+        // Decides who may read paid content, so two nodes disagreeing about
+        // it would accept different blocks.
+        hasher.update(b"protected_content");
+        hasher.update(self.protected_content.root());
         hasher.finalize().into()
     }
 }

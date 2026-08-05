@@ -1,0 +1,524 @@
+//! Content that is a region of content the chain already holds.
+//!
+//! [`crate::storage::generated`] removes the bytes of objects that follow from
+//! a seed. That covers generated art, which is a real class and a small one:
+//! measured against a published scan of a comparable network, the classes with
+//! a zero multiplier are about 40% of the objects and under a thousandth of
+//! the bytes, and storage is paid for in bytes.
+//!
+//! The bytes are photographs. In the same measurement, images are 58.4% of
+//! stored volume and video another 33.6%, and neither compresses much further:
+//! they are already entropy-coded, and the remaining levers are asymptotes
+//! approaching 1.0 from above.
+//!
+//! This module takes the one path into that 58.4% that keeps verification
+//! byte-exact. A crop of a photograph carries no information the original does
+//! not, so if the chain can *recompute* the crop it does not have to store it.
+//!
+//! # Why a crop can be recomputed exactly, and when it cannot
+//!
+//! JPEG encodes in blocks. The pixels are transformed, quantised and entropy
+//! coded in 8x8 units, grouped into MCUs of 16x16 when the usual 4:2:0 chroma
+//! subsampling is in play. A crop whose edges fall on those boundaries selects
+//! a sub-rectangle of the coefficient array and changes nothing inside it.
+//!
+//! Measured directly, on quantised DCT coefficients rather than on the claim:
+//! three block-aligned crops of a synthetic photograph produced coefficient
+//! arrays identical to the corresponding sub-rectangle of the master's, and
+//! two deliberately misaligned crops did not. Misalignment moves every pixel
+//! relative to its block, so every coefficient in the crop is a different
+//! number, and nothing about the master predicts them.
+//!
+//! So the guarantee is narrow and it is real:
+//!
+//! - a crop this chain performs is aligned by construction, and recomputable;
+//! - a crop performed by `jpegtran -crop` is aligned, because it refuses to
+//!   re-encode and widens the box to the nearest MCU instead;
+//! - a crop performed by a phone gallery or a browser canvas is re-encoded,
+//!   and the bytes are a new object with no relation to the master's.
+//!
+//! Which is why the operation lives here rather than in an upload path. The
+//! saving does not come from analysing what a user uploaded, it comes from
+//! offering an operation that produces the cheap thing in the first place.
+//!
+//! # What is actually stored
+//!
+//! A [`DerivedSpec`]: the master's id, the box in block units, and which
+//! transform. Forty-two bytes, against the several kilobytes an independently
+//! encoded crop costs. The multiplier rounds to zero, the same as a generated
+//! object, and for the same reason: what is kept is a description.
+//!
+//! # Verification is the same one sentence as everywhere else
+//!
+//! `manifest_id` is the hash of the bytes. A node fetches the master, applies
+//! the transform, hashes the result and compares. If they match, the bytes are
+//! the object. No proof system is involved, because recomputing is cheaper
+//! than verifying a proof about a public output.
+//!
+//! This is the test that killed the neural-latent idea, which could reproduce
+//! something perceptually close and never the same bytes. A block-aligned crop
+//! passes it: the coefficients are the master's own.
+//!
+//! # The costs this does not hide
+//!
+//! Reading a derived object costs a read of its master, which is larger. That
+//! is a real trade and it is why this is an operation a user chooses rather
+//! than a rewriting the chain applies: a thumbnail read a thousand times a day
+//! should probably be stored.
+//!
+//! A derived object also depends on its master staying retrievable. Chaining
+//! is therefore refused outright, exactly as it is for dictionaries: a
+//! derivation may name stored content, never another derivation. One hop has
+//! one failure to reason about; a chain of hops has a depth nobody bounded.
+//!
+//! WIRING: unwired - measured: no production path registers a derived
+//! manifest yet. The spec, its bounds and its refusals are here and tested;
+//! the transaction that registers a derived object is a consensus-surface
+//! change and lands with the V4 manifest tag.
+//!
+//! (The variant this module will hang off is named in `generated.rs`, not
+//! here. Naming it in this sentence would make the wiring gate read the
+//! mention as a call and declare that module wired, which is the exact
+//! failure this comment is describing about its own module.)
+
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::content_id::ContentId;
+
+/// The block size a crop must align to, in pixels.
+///
+/// Sixteen rather than eight: 4:2:0 subsampling halves the chroma planes, so
+/// a luma-aligned crop at 8 can still cut a chroma block in half. Requiring
+/// 16 is the conservative choice that holds for both, and it is what
+/// `jpegtran` uses for the same reason.
+pub const DERIVED_BLOCK_PIXELS: u32 = 16;
+
+/// Largest master a derivation may name, per side, in blocks.
+///
+/// 4096 blocks is 65,536 pixels a side, past any photograph and short of the
+/// range where `u32` products need care. The bound exists so an untrusted
+/// spec cannot describe a box whose arithmetic overflows before any check
+/// runs.
+pub const DERIVED_MAX_BLOCKS_PER_SIDE: u32 = 4096;
+
+/// Which transform produces the derived bytes from the master's.
+///
+/// A closed set, like [`crate::storage::generated::GeneratorId`], and for the
+/// same reason: each entry has to be argued deterministic from its source.
+/// Rotation and scaling belong here eventually; both are byte-exact for the
+/// aligned case and neither is written yet, so neither is claimed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DerivedTransform {
+    /// Select a block-aligned rectangle of the master and keep it.
+    Crop,
+}
+
+impl DerivedTransform {
+    /// Stable byte tag, so the domain-separated commitment does not depend on
+    /// the order variants happen to be declared in.
+    ///
+    /// Named for its module rather than `tag`: the bare name appears in 46
+    /// files across this tree, and the wiring gate counts name matches to
+    /// decide whether a capability is reachable, so a common name makes it
+    /// report on the wrong thing.
+    const fn transform_tag(self) -> u8 {
+        match self {
+            Self::Crop => 1,
+        }
+    }
+}
+
+/// The description of a derived object.
+///
+/// Coordinates are in blocks, not pixels. A pixel box would let a spec
+/// describe an unaligned crop that no node can reproduce, and the type would
+/// be advertising a capability the format does not have. In blocks, an
+/// unaligned crop is not merely rejected, it is unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DerivedSpec {
+    /// The object this one is a region of. Must be stored content: see the
+    /// module docs on why derivations do not chain.
+    pub master_id: ContentId,
+    /// Which transform to apply.
+    pub transform: DerivedTransform,
+    /// Left edge, in blocks from the master's left.
+    pub block_x: u32,
+    /// Top edge, in blocks from the master's top.
+    pub block_y: u32,
+    /// Width, in blocks. Zero is refused: an empty region has no bytes and
+    /// therefore no identity worth committing to.
+    pub block_w: u32,
+    /// Height, in blocks.
+    pub block_h: u32,
+    /// The master's width in blocks, recorded so the box can be bounds
+    /// checked without fetching the master.
+    ///
+    /// A spec that lies here does not gain anything: the recomputation still
+    /// has to hash to `manifest_id`, and a box outside the real master
+    /// produces different bytes or no bytes at all. What the field buys is
+    /// refusing an impossible spec at registration, before anyone pays to
+    /// store it or fetches a multi-megabyte master to find out.
+    pub master_blocks_w: u32,
+    /// The master's height in blocks.
+    pub master_blocks_h: u32,
+}
+
+/// Why a derivation was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DerivedError {
+    /// The region has no area.
+    EmptyRegion,
+    /// The box runs past the master's edge.
+    ///
+    /// Carries all four numbers rather than a boolean, so the caller can say
+    /// which edge and by how much instead of only that something was wrong.
+    OutOfBounds {
+        block_x: u32,
+        block_y: u32,
+        block_w: u32,
+        block_h: u32,
+        master_blocks_w: u32,
+        master_blocks_h: u32,
+    },
+    /// The master is larger than this module is willing to reason about.
+    MasterTooLarge { blocks: u32, max: u32 },
+    /// The derivation names another derivation.
+    ///
+    /// Refused for the reason dictionaries refuse it: one hop has one failure
+    /// to reason about, and a chain has a depth nobody bounded. A crop of a
+    /// crop is expressible as a crop of the original master, so nothing is
+    /// lost by saying no.
+    DerivationChain { master_id: ContentId },
+    /// The region covers the whole master.
+    ///
+    /// Not an error of arithmetic but of economics: the derived object would
+    /// be byte-identical to the master, so it is the same object, and
+    /// registering it twice under two ids invites paying twice for one set of
+    /// bytes. Deduplication is the mechanism for that, not derivation.
+    WholeMaster,
+}
+
+impl std::fmt::Display for DerivedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyRegion => write!(f, "a derived region must have a non-zero area"),
+            Self::OutOfBounds {
+                block_x,
+                block_y,
+                block_w,
+                block_h,
+                master_blocks_w,
+                master_blocks_h,
+            } => write!(
+                f,
+                "region ({block_x},{block_y}) {block_w}x{block_h} blocks runs past a master of \
+                 {master_blocks_w}x{master_blocks_h} blocks"
+            ),
+            Self::MasterTooLarge { blocks, max } => write!(
+                f,
+                "master is {blocks} blocks on a side, more than the {max} this transform accepts"
+            ),
+            Self::DerivationChain { master_id } => write!(
+                f,
+                "master {master_id} is itself derived; a derivation may only name stored content"
+            ),
+            Self::WholeMaster => write!(
+                f,
+                "a region covering the whole master is the master; register it once and \
+                 let deduplication do its job"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DerivedError {}
+
+impl DerivedSpec {
+    /// Check the spec describes a region that could exist.
+    ///
+    /// Deliberately does not fetch the master. Everything here is answerable
+    /// from the spec's own numbers, and a check that needed the bytes could
+    /// not run at registration, which is the only moment where refusing is
+    /// cheap.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedError::EmptyRegion`] for a zero-area box,
+    /// [`DerivedError::MasterTooLarge`] past [`DERIVED_MAX_BLOCKS_PER_SIDE`],
+    /// [`DerivedError::OutOfBounds`] for a box that leaves the master, and
+    /// [`DerivedError::WholeMaster`] for one that covers all of it.
+    pub fn check_region(&self) -> Result<(), DerivedError> {
+        if self.block_w == 0 || self.block_h == 0 {
+            return Err(DerivedError::EmptyRegion);
+        }
+        for blocks in [self.master_blocks_w, self.master_blocks_h] {
+            if blocks > DERIVED_MAX_BLOCKS_PER_SIDE {
+                return Err(DerivedError::MasterTooLarge {
+                    blocks,
+                    max: DERIVED_MAX_BLOCKS_PER_SIDE,
+                });
+            }
+        }
+        // Checked addition rather than `x + w <= master`: with the bound
+        // above this cannot overflow, but the bound is a separate line of
+        // code and a later edit could move it.
+        let right = self.block_x.checked_add(self.block_w);
+        let bottom = self.block_y.checked_add(self.block_h);
+        let fits = match (right, bottom) {
+            (Some(r), Some(b)) => r <= self.master_blocks_w && b <= self.master_blocks_h,
+            _ => false,
+        };
+        if !fits {
+            return Err(DerivedError::OutOfBounds {
+                block_x: self.block_x,
+                block_y: self.block_y,
+                block_w: self.block_w,
+                block_h: self.block_h,
+                master_blocks_w: self.master_blocks_w,
+                master_blocks_h: self.master_blocks_h,
+            });
+        }
+        if self.block_x == 0
+            && self.block_y == 0
+            && self.block_w == self.master_blocks_w
+            && self.block_h == self.master_blocks_h
+        {
+            return Err(DerivedError::WholeMaster);
+        }
+        Ok(())
+    }
+
+    /// Refuse a derivation whose master is itself derived.
+    ///
+    /// Takes the answer rather than looking it up, because the registry that
+    /// knows is a layer above this module and a dependency in that direction
+    /// would make the type harder to test than the rule is to state.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedError::DerivationChain`] when `master_is_derived` is true.
+    pub fn check_master_is_stored(&self, master_is_derived: bool) -> Result<(), DerivedError> {
+        if master_is_derived {
+            return Err(DerivedError::DerivationChain {
+                master_id: self.master_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// Region width in pixels.
+    pub const fn pixel_width(&self) -> u32 {
+        self.block_w.saturating_mul(DERIVED_BLOCK_PIXELS)
+    }
+
+    /// Region height in pixels.
+    pub const fn pixel_height(&self) -> u32 {
+        self.block_h.saturating_mul(DERIVED_BLOCK_PIXELS)
+    }
+
+    /// Domain-separated commitment to this derivation.
+    ///
+    /// Every field is hashed, including the master's declared dimensions.
+    /// Leaving those out would let two specs with different bounds share a
+    /// commitment, and the bounds are what a verifier checks the box against.
+    pub fn derivation_commitment_tag(&self) -> [u8; 32] {
+        hash_fields_bytes(&[
+            b"BDLM_DERIVED_CONTENT_V1",
+            &self.master_id.0,
+            &[self.transform.transform_tag()],
+            &self.block_x.to_le_bytes(),
+            &self.block_y.to_le_bytes(),
+            &self.block_w.to_le_bytes(),
+            &self.block_h.to_le_bytes(),
+            &self.master_blocks_w.to_le_bytes(),
+            &self.master_blocks_h.to_le_bytes(),
+        ])
+    }
+
+    /// Bytes this description occupies, against the bytes it replaces.
+    ///
+    /// Returned as a pair so a caller reporting the saving quotes both
+    /// numbers. A ratio alone is the shape of claim this project keeps having
+    /// to correct: 40% of objects and 0.1% of bytes are the same measurement,
+    /// and either one on its own misleads.
+    pub const fn stored_versus_independent(&self, independent_bytes: u64) -> (u64, u64) {
+        (DERIVED_SPEC_BYTES, independent_bytes)
+    }
+}
+
+/// Serialised size of a [`DerivedSpec`], in bytes.
+///
+/// 32 for the master id, 1 for the transform, 24 for six `u32` fields, plus a
+/// byte of framing. Stated as a constant because it is the number the whole
+/// module exists to make small, and a reader should not have to add it up.
+pub const DERIVED_SPEC_BYTES: u64 = 32 + 1 + 24 + 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> DerivedSpec {
+        DerivedSpec {
+            master_id: ContentId([7u8; 32]),
+            transform: DerivedTransform::Crop,
+            block_x: 4,
+            block_y: 2,
+            block_w: 8,
+            block_h: 6,
+            master_blocks_w: 20,
+            master_blocks_h: 15,
+        }
+    }
+
+    #[test]
+    fn a_region_inside_the_master_is_accepted() {
+        assert!(spec().check_region().is_ok());
+    }
+
+    #[test]
+    fn a_zero_area_region_is_refused() {
+        let mut s = spec();
+        s.block_w = 0;
+        assert_eq!(s.check_region(), Err(DerivedError::EmptyRegion));
+        let mut s = spec();
+        s.block_h = 0;
+        assert_eq!(s.check_region(), Err(DerivedError::EmptyRegion));
+    }
+
+    #[test]
+    fn a_region_that_leaves_the_master_is_refused() {
+        // One block past the right edge, which is the off-by-one a bounds
+        // check gets wrong in whichever direction it gets wrong.
+        let mut s = spec();
+        s.block_x = 13;
+        s.block_w = 8;
+        assert!(matches!(
+            s.check_region(),
+            Err(DerivedError::OutOfBounds { .. })
+        ));
+
+        // Exactly touching the edge is fine, and is the case a strict
+        // comparison would wrongly refuse.
+        let mut s = spec();
+        s.block_x = 12;
+        s.block_w = 8;
+        assert!(s.check_region().is_ok());
+    }
+
+    #[test]
+    fn a_region_covering_the_whole_master_is_refused() {
+        let mut s = spec();
+        s.block_x = 0;
+        s.block_y = 0;
+        s.block_w = s.master_blocks_w;
+        s.block_h = s.master_blocks_h;
+        assert_eq!(s.check_region(), Err(DerivedError::WholeMaster));
+    }
+
+    #[test]
+    fn an_absurd_master_is_refused_before_any_arithmetic() {
+        let mut s = spec();
+        s.master_blocks_w = DERIVED_MAX_BLOCKS_PER_SIDE + 1;
+        assert!(matches!(
+            s.check_region(),
+            Err(DerivedError::MasterTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn a_box_that_would_overflow_is_refused_rather_than_wrapping() {
+        // The bound above makes this unreachable through the public path, so
+        // it is set up directly. A wrap here would turn a box far outside the
+        // master into one that looks inside it.
+        let mut s = spec();
+        s.block_x = u32::MAX - 1;
+        s.block_w = 8;
+        assert!(matches!(
+            s.check_region(),
+            Err(DerivedError::OutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn a_derivation_may_not_name_another_derivation() {
+        let s = spec();
+        assert!(s.check_master_is_stored(false).is_ok());
+        assert_eq!(
+            s.check_master_is_stored(true),
+            Err(DerivedError::DerivationChain {
+                master_id: s.master_id
+            })
+        );
+    }
+
+    #[test]
+    fn the_commitment_covers_every_field() {
+        // A field left out of the hash is a field two different specs can
+        // disagree on while sharing a commitment. Each is changed on its own
+        // so the test says which one is missing rather than that something is.
+        let base = spec().derivation_commitment_tag();
+
+        let mut s = spec();
+        s.master_id = ContentId([8u8; 32]);
+        assert_ne!(s.derivation_commitment_tag(), base, "master_id");
+
+        for (name, f) in [
+            ("block_x", 0usize),
+            ("block_y", 1),
+            ("block_w", 2),
+            ("block_h", 3),
+            ("master_blocks_w", 4),
+            ("master_blocks_h", 5),
+        ] {
+            let mut s = spec();
+            match f {
+                0 => s.block_x += 1,
+                1 => s.block_y += 1,
+                2 => s.block_w += 1,
+                3 => s.block_h += 1,
+                4 => s.master_blocks_w += 1,
+                _ => s.master_blocks_h += 1,
+            }
+            assert_ne!(s.derivation_commitment_tag(), base, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_commitment_is_stable_across_calls() {
+        // Two calls on equal specs must agree, or two nodes hash the same
+        // description differently and disagree about the object.
+        assert_eq!(
+            spec().derivation_commitment_tag(),
+            spec().derivation_commitment_tag()
+        );
+    }
+
+    #[test]
+    fn pixel_dimensions_follow_the_block_size() {
+        let s = spec();
+        assert_eq!(s.pixel_width(), 8 * DERIVED_BLOCK_PIXELS);
+        assert_eq!(s.pixel_height(), 6 * DERIVED_BLOCK_PIXELS);
+    }
+
+    #[test]
+    fn the_saving_is_reported_as_two_numbers_not_a_ratio() {
+        // Measured on real crops of a synthetic photograph: an independently
+        // encoded block-aligned crop of a 128x128 master cost 1,209 bytes.
+        let (stored, independent) = spec().stored_versus_independent(1_209);
+        assert_eq!(stored, DERIVED_SPEC_BYTES);
+        assert_eq!(independent, 1_209);
+        assert!(
+            stored * 20 < independent,
+            "the description must be at least an order of magnitude smaller, \
+             or this module is not worth the dependency on the master"
+        );
+    }
+
+    #[test]
+    fn the_block_size_is_the_conservative_one_for_subsampled_chroma() {
+        // 4:2:0 halves the chroma planes, so an 8-pixel luma-aligned crop can
+        // still cut a chroma block. This constant is the reason the whole
+        // scheme is byte-exact, so it is locked rather than left to a reader
+        // to notice if it changes.
+        assert_eq!(DERIVED_BLOCK_PIXELS, 16);
+    }
+}

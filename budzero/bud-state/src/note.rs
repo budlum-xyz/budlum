@@ -92,6 +92,9 @@ impl NoteRegistry {
     /// (çifte-harcama önleme). Commitment canlı set'ten çıkarılır, nullifier
     /// Spent set'e eklenir. Harcanan commitment KAMUYA açıklanmaz, çağıran
     /// Sum-conservation constraint ile mülkiyeti kanıtlar.
+    /// PARTIAL: allowed - the `remove` here *is* the liveness check. It
+    /// returns false when the commitment was never live, and that branch has
+    /// removed nothing; the branch that removed something cannot then refuse.
     pub fn spend(&mut self, nullifier: Hash, commitment: Hash) -> Result<(), String> {
         if self.spent_nullifiers.contains(&nullifier) {
             return Err("double-spend: nullifier already spent".into());

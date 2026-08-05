@@ -12,24 +12,38 @@
 //! | `1.1x` … `9.9x` | progressively deeper |
 //! | `10.0x` | deepest - needs dedicated hardware |
 //!
-//! Two rules make the tier meaningful rather than decorative:
+//! Two rules make the tier meaningful rather than decorative. Exactly one of
+//! them is enforced by the tree today, and the split is stated here rather
+//! than left for a reader to discover:
 //!
-//! 1. **Declared capability gates eligibility.** An operator advertises the
-//!    highest tier its hardware can serve. A request above that ceiling is not
-//!    routable to it. If *no* verifier in the registry advertises `10.0x`, then
-//!    a `10.0x` request cannot be served at all, it fails closed rather than
-//!    being silently downgraded to a cheaper answer.
-//! 2. **The tier is part of the request identity.** It is folded into the
-//!    canonical request hash, so an operator cannot accept a `5.0x` request and
-//!    answer it with `0.5x` work while claiming the higher fee: the commitment
-//!    it signs binds the tier it was asked for.
+//! 1. **The tier is part of the request identity. Enforced.**
+//!    `AiInferenceRequest::effort` is hashed into `calculate_id` under
+//!    `BDLM_AI_REQUEST_ID_V2`, `request_id` is inside the transaction signing
+//!    preimage, and `AiRegistry::submit_request` refuses a request whose id
+//!    does not derive from the fields it carries. So an operator cannot accept
+//!    a `5.0x` request, answer it with `0.5x` work, and claim the higher fee:
+//!    the tier is inside what the requester signed, and rewriting it in flight
+//!    invalidates the id.
+//!
+//! 2. **Declared capability gates eligibility. Not enforced.**
+//!    [`tier_is_servable`] expresses the rule: an operator advertises the
+//!    highest tier its hardware can serve, and a request above every declared
+//!    ceiling must fail closed rather than be silently downgraded to a cheaper
+//!    answer. Nothing in the tree calls it, because no operator has anywhere to
+//!    advertise a ceiling: `LubotOperatorBond` carries an amount and nothing
+//!    else, and `AiRegistry` stores no per-operator capability. Wiring it needs
+//!    a place for the declaration to live, which is a consensus-surface
+//!    decision and not one to take in passing.
+//!
+//! Until then a `10.0x` request is admitted and priced as `10.0x`, and the only
+//! thing stopping a `0.5x` machine from answering it is that the answer has to
+//! agree with `agreement_threshold` other operators. That is a real check, but
+//! it is agreement, not capability, and the two are not the same.
 //!
 //! Deliberately *not* decided here: the fee multiplier. Lubot costs are paid to
 //! validators the same way consensus rewards are, and the current repository
 //! ratios stand. This module exposes `EffortTier::as_ratio()` so a future fee
 //! schedule can scale against it without this type having to know the price.
-//!
-//! WIRING: unwired - effort tiers are defined but no inference request carries one.
 
 use serde::{Deserialize, Serialize};
 

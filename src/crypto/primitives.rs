@@ -586,11 +586,44 @@ impl ValidatorKeys {
     /// (`tur15-pr-6`) Enforce that on `Mainnet`, `ValidatorKeys` loaded from disk
     /// MUST NOT contain plaintext `bls_key` or `pq_key` secret key material unless an external HSM
     /// Backend is explicitly bound or `allow_plaintext_bls_pq_for_testing` is set.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when mainnet keys
+    /// carry BLS or post-quantum secrets in the clear.
     pub fn validate_mainnet_disk_policy(&self, is_mainnet: bool) -> Result<(), CryptoError> {
         if is_mainnet && (self.pq_key.is_some() || self.bls_key.is_some()) {
             return Err(CryptoError::PlaintextDiskKeysForbiddenOnMainnet);
         }
         Ok(())
+    }
+
+    /// Load keys from disk and apply the mainnet policy to what came back.
+    ///
+    /// [`ValidatorKeys::validate_mainnet_disk_policy`] existed, was tested,
+    /// and no production path ever called it. A rule nothing reaches is not a
+    /// weaker rule than one that fires, it is a comment: the callers in
+    /// `main.rs` each re-derived their own version of it, one of them left the
+    /// network out entirely, and the disagreement was invisible because there
+    /// was no single place the answer came from.
+    ///
+    /// This is that place. Callers say which network they are on and get keys
+    /// that are legal for it, or an error. Anyone who needs the raw bytes can
+    /// still call [`ValidatorKeys::load`], but they are now choosing to, in a
+    /// line that says so.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`ValidatorKeys::load`] returns, or
+    /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when the file is
+    /// legal to read and illegal to use on this network.
+    pub fn load_for_network<P: AsRef<Path>>(
+        path: P,
+        is_mainnet: bool,
+    ) -> Result<Self, CryptoError> {
+        let keys = Self::load(path)?;
+        keys.validate_mainnet_disk_policy(is_mainnet)?;
+        Ok(keys)
     }
 }
 impl KeyPair {

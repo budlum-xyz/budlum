@@ -157,6 +157,25 @@ ENUM_BODY = re.compile(
 )
 
 
+def strip_doc_links(src):
+    """Drop rustdoc intra-doc links, `[\`path::Name\`]`.
+
+    A bracketed doc link names a symbol in order to point a reader at it; it
+    is never a call. Measured: `derived.rs` explains its design by referring
+    to `[\`crate::storage::generated::GeneratorId\`]`, and that one sentence
+    made this gate report `generated.rs` as wired and its honest
+    `WIRING: unwired` marker as stale. A gate that reads a cross-reference as
+    evidence of a call will eventually let a module claim to be wired because
+    somebody mentioned it in prose.
+
+    Deliberately narrower than stripping whole comments. Tried that first and
+    it hid two modules that really are wired: plain comments sit inside
+    function bodies, often right next to the call being measured, so removing
+    them is the same error pointing the other way.
+    """
+    return re.sub(r"\[`[^`\]]*`\]", " ", src)
+
+
 def strip_use_statements(src):
     """Drop `use` and `pub use` items.
 
@@ -236,7 +255,8 @@ production = [p for p in files if not is_test_path(p)]
 # What counts as evidence of a call: the file with its imports and re-exports
 # removed.
 evidence = {
-    p: strip_enum_bodies(strip_use_statements(b)) for p, b in bodies.items()
+    p: strip_enum_bodies(strip_use_statements(strip_doc_links(b)))
+    for p, b in bodies.items()
 }
 
 # A name defined by more than one production module cannot identify a callee.
@@ -417,6 +437,19 @@ pub use capability::{alpha, beta, gamma};'
   # 4. Wired and still marked: a stale marker understating the module.
   mk "$tmp/stale" "$MARKED" "$CALLS"
   expect_finding "$tmp/stale" "a stale unwired marker on a wired module" || return 1
+
+  # 5. A doc link is not a call. Measured: one `[`path::Name`]` cross-reference
+  #    in a neighbouring module's prose was enough to make this gate declare an
+  #    honestly unwired module wired and its marker stale. The caller here does
+  #    nothing but mention the module in a doc comment.
+  local MENTIONS_ONLY='pub mod capability;
+/// See [`capability::alpha`] for the closed set this mirrors.
+pub fn drive() -> u8 { 0 }'
+  mk "$tmp/mention" "$MARKED" "$MENTIONS_ONLY"
+  if ! ( scan "$tmp/mention" ) >/dev/null 2>&1; then
+    echo "GATE IS WRONG: a doc-comment mention was counted as a call!" >&2
+    return 1
+  fi
 
   # 5. A test-only caller must not count as wiring, which is the exact shape
   #    that made mobile_self.rs look finished.

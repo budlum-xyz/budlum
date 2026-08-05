@@ -401,6 +401,294 @@ mod encryption_declaration {
     }
 }
 
+/// What an owner said about content they intend to self-host.
+///
+/// `MobileSelfContentPolicy` let an owner mark content critical and name how
+/// many paid replicas it needs. The type was written, tested, and read by
+/// nothing, so a phone could take the only copy of something its owner had
+/// already declared too important for a phone.
+mod self_host_policy {
+    use super::*;
+    use crate::domain::storage_deal::OperatorClass;
+    use crate::storage::{MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile};
+
+    fn owner() -> crate::core::address::Address {
+        crate::core::address::Address([3u8; 32])
+    }
+
+    fn profile() -> MobileSelfProfile {
+        MobileSelfProfile {
+            owner: owner(),
+            device_commitment: [9u8; 32],
+            availability: MobileAvailabilityClass::Opportunistic,
+            max_storage_bytes: 1024,
+            metered_network_ok: false,
+            battery_saver_aware: true,
+            last_seen_block: 10,
+        }
+    }
+
+    fn policy(critical: bool, replicas: u16, allowed: bool) -> MobileSelfContentPolicy {
+        MobileSelfContentPolicy {
+            content_id: ContentId([5u8; 32]),
+            owner: owner(),
+            critical,
+            required_paid_replicas: replicas,
+            self_host_allowed: allowed,
+        }
+    }
+
+    #[test]
+    fn a_declaration_that_contradicts_itself_is_refused() {
+        // Critical content with no paid replicas is the shape the type was
+        // written to catch, and nothing was calling the check.
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .declare_self_host_policy(policy(true, 0, true), &profile())
+            .expect_err("critical content needs paid replicas");
+        assert!(matches!(err, StorageError::SelfHostRefusedByPolicy { .. }));
+    }
+
+    #[test]
+    fn a_declaration_for_someone_elses_content_is_refused() {
+        let mut reg = StorageRegistry::new();
+        let mut p = policy(false, 0, true);
+        p.owner = crate::core::address::Address([99u8; 32]);
+        assert!(reg.declare_self_host_policy(p, &profile()).is_err());
+    }
+
+    #[test]
+    fn a_coherent_declaration_is_recorded() {
+        // The inverse witness: the check must refuse contradictions and
+        // nothing else, or every declaration would fail and the feature would
+        // be off while looking enforced.
+        let mut reg = StorageRegistry::new();
+        assert!(reg
+            .declare_self_host_policy(policy(true, 2, true), &profile())
+            .is_ok());
+    }
+
+    #[test]
+    fn content_nobody_declared_anything_about_is_allowed() {
+        // Absence of a policy is not a restriction. Reading it as one would
+        // turn a feature nobody opted into into a network-wide refusal.
+        let reg = StorageRegistry::new();
+        assert!(reg
+            .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([2u8; 32]))
+            .is_ok());
+    }
+
+    #[test]
+    fn self_hosting_turned_off_is_refused() {
+        let mut reg = StorageRegistry::new();
+        reg.declare_self_host_policy(policy(false, 0, false), &profile())
+            .expect("a non-critical declaration with no replicas is coherent");
+
+        let err = reg
+            .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([5u8; 32]))
+            .expect_err("the owner turned self-hosting off");
+        assert!(matches!(err, StorageError::SelfHostRefusedByPolicy { .. }));
+    }
+
+    #[test]
+    fn critical_content_without_its_paid_replicas_is_refused() {
+        // The finding, stated as a test: the owner asked for two paid
+        // replicas before self-hosting, and none are open.
+        let mut reg = StorageRegistry::new();
+        reg.declare_self_host_policy(policy(true, 2, true), &profile())
+            .expect("the declaration is coherent");
+
+        let err = reg
+            .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([5u8; 32]))
+            .expect_err("no paid replicas are open");
+        match err {
+            StorageError::SelfHostRefusedByPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("paid replica"),
+                    "the reason should name what is missing, got: {reason}"
+                );
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    /// Open a deal through the real path, so the test measures what a caller
+    /// reaches rather than what the check does when called directly.
+    ///
+    /// Every earlier test in this module calls `check_self_host_allowed`
+    /// itself, which proves the check is correct and proves nothing about
+    /// whether anything runs it. That distinction is the finding: the check
+    /// was correct and tested six ways for as long as no production path
+    /// called it.
+    fn open_for(
+        reg: &mut StorageRegistry,
+        manifest: &ContentManifest,
+        shard_id: ContentId,
+        operator: crate::core::address::Address,
+        replica_index: u8,
+    ) -> Result<u64, StorageError> {
+        reg.open_deal(
+            42,
+            manifest,
+            shard_id,
+            operator,
+            replica_index,
+            100,
+            200,
+            StorageEconomicsParams {
+                operator_bond: 1_000_000,
+                fee_per_byte_epoch: 100,
+            },
+            &StorageDomainParams::default(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+    }
+
+    /// The owner's declaration, keyed to a shard of a real manifest rather
+    /// than the placeholder id the direct-call tests use.
+    fn policy_for(shard_id: ContentId, critical: bool, replicas: u16) -> MobileSelfContentPolicy {
+        let mut p = policy(critical, replicas, true);
+        p.content_id = shard_id;
+        p
+    }
+
+    #[test]
+    fn a_phone_cannot_take_a_replica_the_owner_reserved_for_paid_operators() {
+        // The finding, exercised where it bites: the owner marked this
+        // content critical and asked for two paid replicas first, none are
+        // open, and a phone offers to hold it. Before the check was wired,
+        // this call returned a deal id.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
+            .expect("two paid replicas for critical content is a coherent ask");
+
+        let err = open_for(&mut reg, &manifest, shard_id, phone, 1)
+            .expect_err("the owner's own policy has to refuse this placement");
+        match err {
+            StorageError::SelfHostRefusedByPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("paid replica"),
+                    "the refusal should name what is missing, got: {reason}"
+                );
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+
+        // A refusal that already wrote something is not a refusal. `open_deal`
+        // takes `&mut self`, so this is the half of the property a matching
+        // error type does not cover.
+        assert!(
+            reg.deals_for_shard(&manifest.manifest_id, &shard_id)
+                .is_empty(),
+            "a refused deal must not be recorded"
+        );
+        assert!(
+            reg.get_manifest(&manifest.manifest_id).is_none(),
+            "a refused deal must not seed the manifest registry either"
+        );
+    }
+
+    #[test]
+    fn an_always_on_operator_is_not_asked_about_the_self_host_policy() {
+        // First canary. The policy is about phones. Refusing an always-on
+        // operator would block the very replicas the owner was asking for,
+        // and the gate would be passing by rejecting everything.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let server = crate::core::address::Address([8u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
+            .expect("the declaration is coherent");
+
+        open_for(&mut reg, &manifest, shard_id, server, 1)
+            .expect("an always-on operator is what the owner asked for");
+    }
+
+    #[test]
+    fn a_phone_is_allowed_when_no_policy_names_the_content() {
+        // Second canary. Content nobody restricted is not restricted content;
+        // `check_self_host_allowed` returns `Ok(())` with no policy declared,
+        // and wiring it must not turn that into a refusal.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+
+        open_for(&mut reg, &manifest, shard_id, phone, 1)
+            .expect("no declaration means no restriction");
+    }
+
+    #[test]
+    fn a_phone_is_allowed_once_the_paid_replicas_the_owner_asked_for_exist() {
+        // Third canary, and the one that proves the check reads live state
+        // rather than refusing every phone. Same policy, same phone, two paid
+        // replicas now open: the condition the owner set is met, so the
+        // placement goes through.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
+            .expect("the declaration is coherent");
+
+        open_for(
+            &mut reg,
+            &manifest,
+            shard_id,
+            crate::core::address::Address([1u8; 32]),
+            0,
+        )
+        .expect("first paid replica");
+        open_for(
+            &mut reg,
+            &manifest,
+            shard_id,
+            crate::core::address::Address([2u8; 32]),
+            1,
+        )
+        .expect("second paid replica");
+        assert_eq!(
+            reg.active_replica_count(&manifest.manifest_id, &shard_id),
+            2,
+            "the two paid replicas the policy requires are open"
+        );
+
+        open_for(&mut reg, &manifest, shard_id, phone, 2)
+            .expect("the owner's condition is met, so the phone may hold a copy");
+    }
+
+    #[test]
+    fn a_phone_still_cannot_take_the_primary_even_with_the_policy_satisfied() {
+        // The two mobile rules are independent and both have to hold. The
+        // policy is the owner's choice about this content; the primary rule is
+        // the protocol's, and satisfying the first does not buy the second.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+
+        let err = open_for(&mut reg, &manifest, shard_id, phone, 0)
+            .expect_err("a phone cannot hold replica_index 0");
+        assert!(
+            matches!(err, StorageError::MobileOperatorCannotHoldPrimary(_)),
+            "expected the primary refusal, got {err:?}"
+        );
+    }
+}
+
 /// The coding audit: proving parity is parity without holding a shard.
 ///
 /// A retrieval challenge asks whether the operator still has the bytes. It
@@ -796,5 +1084,250 @@ mod repair_band {
             "a (3,3) object at full health has none"
         );
         assert_eq!(replicated.live_shard_count(&replicated_id), 3);
+    }
+
+    // --- the repair margin, and the trigger that reads it -----------------
+
+    #[test]
+    fn the_repair_margin_scales_with_the_parity_budget() {
+        use crate::storage::manifest::ErasureScheme;
+
+        // A third of parity, rounded up, so a scheme with any parity at all
+        // repairs before its last shard of headroom is gone.
+        assert_eq!(ErasureScheme { k: 10, n: 16 }.repair_margin(), 2);
+        assert_eq!(ErasureScheme { k: 20, n: 26 }.repair_margin(), 2);
+        assert_eq!(ErasureScheme { k: 500, n: 535 }.repair_margin(), 12);
+        assert_eq!(ErasureScheme { k: 2000, n: 2062 }.repair_margin(), 21);
+
+        // Narrow schemes floor at 2 rather than at the 1 a third would give.
+        // `needs_repair` fires on `k <= live < k + margin`, so a margin of 1
+        // is a band of exactly `live == k`, which is where the next loss is
+        // already fatal. A test caught this; the measured risk at that
+        // setting is 9.6e-02 against 1.8e-05 at 2.
+        assert_eq!(ErasureScheme { k: 4, n: 6 }.repair_margin(), 2);
+        assert_eq!(ErasureScheme { k: 4, n: 7 }.repair_margin(), 2);
+
+        // One parity shard gets 1, because that is all the scheme holds.
+        // Asking for headroom it does not have would put it in the band
+        // permanently.
+        assert_eq!(ErasureScheme { k: 4, n: 5 }.repair_margin(), 1);
+
+        // Replication has no parity to spend, so it asks for no headroom.
+        // `needs_repair` still fires at `live == k`, which for replication is
+        // every copy but one being gone.
+        assert_eq!(ErasureScheme { k: 3, n: 3 }.repair_margin(), 0);
+    }
+
+    #[test]
+    fn a_margin_can_never_exceed_the_parity_a_scheme_actually_has() {
+        use crate::storage::manifest::ErasureScheme;
+
+        // The property that makes the rule safe to apply blindly: asking for
+        // more headroom than the scheme holds would put every object in the
+        // band permanently, which is the failure mode of a fixed margin on a
+        // narrow code.
+        for k in 1..40u32 {
+            for parity in 0..40u32 {
+                let scheme = ErasureScheme { k, n: k + parity };
+                let margin = scheme.repair_margin();
+                assert!(
+                    margin <= parity,
+                    "k={k} parity={parity} asked for margin {margin}"
+                );
+                // And the band is never degenerate where the scheme can
+                // afford otherwise: a margin of 1 with parity to spare means
+                // the repair starts at `live == k`.
+                if parity >= 2 {
+                    assert!(
+                        margin >= 2,
+                        "k={k} parity={parity} left only {margin} of headroom"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_object_is_judged_against_its_own_scheme() {
+        // The reason the sweep cannot take a single margin: two objects with
+        // different schemes, both one shard down, disagree about whether that
+        // is a repair case.
+        let (mut wide, wide_id, wide_shards) = registry_with_object(4, 6);
+        lose_shard(&mut wide, &wide_id, &wide_shards[0]);
+
+        let band = wide.objects_below_own_repair_margin();
+        assert_eq!(band.len(), 1, "(4,6) with 5 live is inside its own margin");
+        assert_eq!(
+            band[0],
+            (wide_id, 5, 4, 2),
+            "two parity shards floor the margin at 2, so the band is 4..6"
+        );
+
+        // A (3,3) object has no parity, so it asks for no headroom and
+        // `k <= live < k + 0` is empty: replication never enters the band.
+        // That is the honest answer rather than a convenient one. Repair
+        // means rebuilding a lost shard from surviving ones, and replication
+        // has nothing to rebuild from, only copies to make. Reporting it as
+        // repairable would promise a mechanism that does not apply to it.
+        let (mut replicated, replicated_id, replicated_shards) = registry_with_object(3, 3);
+        assert!(
+            replicated.objects_below_own_repair_margin().is_empty(),
+            "replication has no parity budget, so it has no repair band"
+        );
+
+        // And the moment it loses anything it is unrecoverable, which is the
+        // contrast: the coded object had headroom to spend, this one never
+        // did.
+        lose_shard(&mut replicated, &replicated_id, &replicated_shards[0]);
+        assert!(replicated.objects_below_own_repair_margin().is_empty());
+        assert_eq!(
+            replicated.unrecoverable_objects().len(),
+            1,
+            "one lost copy of a (3,3) object is already past saving"
+        );
+    }
+
+    #[test]
+    fn an_unrecoverable_object_is_not_reported_as_repairable() {
+        let (mut reg, manifest_id, shard_ids) = registry_with_object(4, 6);
+        for shard_id in shard_ids.iter().take(3) {
+            lose_shard(&mut reg, &manifest_id, shard_id);
+        }
+        assert_eq!(reg.live_shard_count(&manifest_id), 3, "below k = 4");
+
+        assert!(
+            reg.objects_below_own_repair_margin().is_empty(),
+            "there is nothing to rebuild from, so this is not a repair case"
+        );
+        assert_eq!(
+            reg.unrecoverable_objects().len(),
+            1,
+            "it belongs on the alarm path instead"
+        );
+    }
+
+    // --- renewal, and the ticket a lapsed term now opens -------------------
+
+    #[test]
+    fn the_incumbent_may_renew_inside_the_window_and_not_before() {
+        use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;
+
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal = reg.all_deals()[0].clone();
+        let opens = deal.deal_end_epoch - RENEWAL_WINDOW_EPOCHS;
+
+        // Too early: a renewal accepted before the window would let an
+        // operator lock a price in ahead of the term it applies to.
+        assert!(reg
+            .renew_deal(deal.deal_id, deal.operator, opens - 1, 50)
+            .is_err());
+
+        // Inside the window the term extends, and the economics are the same
+        // agreement running longer.
+        let new_end = reg
+            .renew_deal(deal.deal_id, deal.operator, opens, 50)
+            .expect("the incumbent may renew inside the window");
+        assert_eq!(new_end, deal.deal_end_epoch + 50);
+        let after = reg.get_deal(deal.deal_id).unwrap();
+        assert_eq!(after.economics, deal.economics, "renewal is not a reprice");
+    }
+
+    #[test]
+    fn nobody_but_the_incumbent_can_renew() {
+        use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;
+
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal = reg.all_deals()[0].clone();
+        let opens = deal.deal_end_epoch - RENEWAL_WINDOW_EPOCHS;
+
+        let stranger = crate::core::address::Address([0xAB; 32]);
+        assert!(
+            reg.renew_deal(deal.deal_id, stranger, opens, 50).is_err(),
+            "renewal extends someone else's obligation, so only they may take it"
+        );
+    }
+
+    #[test]
+    fn a_deal_that_matures_unrenewed_opens_a_reallocation_ticket() {
+        // The asymmetry this closes: the slash path always opened a ticket,
+        // the expiry path did not, so an operator that served its whole term
+        // and left honestly dropped a shard with nothing arranged.
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal_id = reg.all_deals()[0].deal_id;
+        let before = reg.all_reallocation_tickets().len();
+
+        reg.expire_deal(deal_id, 200).expect("the term is over");
+        let ticket_id = reg
+            .open_expiry_reallocation(deal_id, 200)
+            .expect("an unheld shard needs a replacement");
+
+        assert_eq!(reg.all_reallocation_tickets().len(), before + 1);
+        let ticket = reg.get_reallocation_ticket(ticket_id).unwrap();
+        assert_eq!(ticket.failed_deal_id, deal_id);
+        assert_eq!(
+            ticket.status,
+            crate::domain::storage_deal::ReallocationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn expiry_tickets_do_not_bar_the_operator_that_let_the_term_lapse() {
+        // A slashed operator is barred from the replacement because it failed
+        // a challenge. An operator whose term simply ran out failed nothing,
+        // and it is the cheapest possible replacement: it still has the bytes.
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal_id = reg.all_deals()[0].deal_id;
+        let incumbent = reg.get_deal(deal_id).unwrap().operator;
+
+        reg.expire_deal(deal_id, 200).unwrap();
+        let ticket_id = reg.open_expiry_reallocation(deal_id, 200).unwrap();
+        let ticket = reg.get_reallocation_ticket(ticket_id).unwrap();
+
+        assert_ne!(
+            ticket.slashed_operator, incumbent,
+            "letting a term lapse is not a slash, and must not be recorded as one"
+        );
+    }
+
+    #[test]
+    fn the_expiry_ticket_is_opened_once_however_often_the_sweep_runs() {
+        // The sweep runs every block. A second ticket for the same deal would
+        // have two operators paid to hold one shard.
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal_id = reg.all_deals()[0].deal_id;
+        reg.expire_deal(deal_id, 200).unwrap();
+
+        assert!(reg.open_expiry_reallocation(deal_id, 200).is_some());
+        assert!(
+            reg.open_expiry_reallocation(deal_id, 201).is_none(),
+            "the second sweep must find the ticket already open"
+        );
+        assert!(
+            reg.open_expiry_reallocation(deal_id, 500).is_none(),
+            "and must keep finding it, however much later"
+        );
+    }
+
+    #[test]
+    fn a_deal_inside_its_renewal_window_is_offered_before_it_matures() {
+        use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;
+
+        let (reg, _, _) = registry_with_object(4, 6);
+        let end = reg.all_deals()[0].deal_end_epoch;
+
+        assert!(
+            reg.deals_in_renewal_window(end - RENEWAL_WINDOW_EPOCHS - 1)
+                .is_empty(),
+            "before the window nothing is offered"
+        );
+        assert_eq!(
+            reg.deals_in_renewal_window(end - 1).len(),
+            6,
+            "inside the window every live deal is offered its extension"
+        );
+        assert!(
+            reg.deals_in_renewal_window(end).is_empty(),
+            "at maturity the offer has expired and the ticket path takes over"
+        );
     }
 }

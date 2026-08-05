@@ -16,10 +16,16 @@
 //! `domain/` because the data shapes it owns are consensus types, not
 //! Transport types).
 
+pub mod assignment;
 pub mod content_id;
 pub mod db;
+pub mod derived;
+pub mod dictionary;
 pub mod erasure;
+pub mod fixed_point;
+pub mod generated;
 pub mod lifecycle;
+pub mod lrc;
 pub mod manifest;
 pub mod merkle_trie;
 pub mod mobile_self;
@@ -27,13 +33,28 @@ pub mod provider;
 pub mod pruning;
 pub mod traits;
 
+pub use assignment::{
+    assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
+};
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
+pub use derived::{
+    DerivedError, DerivedSpec, DerivedTransform, DERIVED_BLOCK_PIXELS, DERIVED_SPEC_BYTES,
+};
+pub use dictionary::{
+    DictionaryEntry, DictionaryError, DictionaryRegistry, DICTIONARY_GRACE_EPOCHS,
+    MAX_DICTIONARY_BYTES,
+};
 pub use erasure::{
     encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
+};
+pub use generated::{
+    generate_and_verify, generate_content, generated_spec_digest, ContentSource, GenerateError,
+    GeneratedSpec, GeneratorId, MAX_GENERATED_BYTES,
 };
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
 };
+pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
     manifest_id_from_parts, manifest_id_from_shards, ContentCipher, ContentEncryption,
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,

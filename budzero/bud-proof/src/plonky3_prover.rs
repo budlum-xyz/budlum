@@ -1679,6 +1679,536 @@ mod tests {
         );
     }
 
+    /// Ten opcodes were constrained in the AIR and never attacked.
+    ///
+    /// Coverage was measured per opcode by walking every `rejects_*` test body
+    /// for the `Opcode::` variants it builds, rather than by reading test
+    /// names. Names lie: `rejects_tampered_comparison_result` sounds like it
+    /// covers the comparison family and builds only `Lt`.
+    ///
+    /// A constraint with no forgery test is a constraint nobody has watched
+    /// fail. Each test below tampers exactly one witness value and asserts the
+    /// proof stops closing.
+    #[test]
+    fn rejects_a_forged_inverse() {
+        // `Inv` is checked by `rs1 * rd + inv_zero - 1 == 0`. A prover naming
+        // any other field element as the inverse breaks that product.
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 7),
+            inst(Opcode::Inv, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                trace[1].dst_val = trace[1].dst_val.wrapping_add(1);
+            },
+        );
+    }
+
+    /// `Inv` of zero is defined as zero by the VM, and the AIR carries a
+    /// separate `inv_zero` flag for it. Claiming a non-zero inverse for zero
+    /// is the forgery that flag exists to refuse.
+    #[test]
+    fn rejects_an_inverse_invented_for_zero() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 0),
+            inst(Opcode::Inv, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                trace[1].dst_val = 99;
+            },
+        );
+    }
+
+    /// `Not` is `1 - is_nonzero`, with `is_nonzero` proved boolean and pinned
+    /// by `rs1 * (1 - is_nonzero) == 0`. Flipping the result alone leaves the
+    /// witness pointing the other way.
+    #[test]
+    fn rejects_a_forged_logical_not() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 5),
+            inst(Opcode::Not, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // 5 is non-zero, so Not is 0. Claim 1.
+                trace[1].dst_val = 1;
+            },
+        );
+    }
+
+    /// `Eq` and `Neq` share one zero-test witness. `Eq` reads
+    /// `1 - z` and `Neq` reads `z`, so a forged `Eq` result contradicts the
+    /// same witness the difference pins.
+    #[test]
+    fn rejects_a_forged_equality() {
+        let program = vec![inst(Opcode::Eq, 1, 2, 3, 0), inst(Opcode::Halt, 0, 0, 0, 0)];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 42;
+                vm.registers[3] = 42;
+            },
+            |trace| {
+                // 42 == 42 is 1. Claim they differ.
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// The mirror of the above on the other side of the shared witness.
+    #[test]
+    fn rejects_a_forged_inequality() {
+        let program = vec![
+            inst(Opcode::Neq, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 7;
+                vm.registers[3] = 9;
+            },
+            |trace| {
+                // 7 != 9 is 1. Claim they match.
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// `Gt` reads the same 64-bit decomposition as `Lt` but takes the opposite
+    /// side. A test on `Lt` alone leaves the reversed reading unwatched.
+    #[test]
+    fn rejects_a_forged_greater_than() {
+        let program = vec![inst(Opcode::Gt, 1, 2, 3, 0), inst(Opcode::Halt, 0, 0, 0, 0)];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 3;
+                vm.registers[3] = 8;
+            },
+            |trace| {
+                // 3 > 8 is 0. Claim it holds.
+                trace[0].dst_val = 1;
+            },
+        );
+    }
+
+    /// `Lte` is the boundary case the strict comparisons do not reach: it must
+    /// answer 1 when the operands are equal.
+    #[test]
+    fn rejects_a_forged_less_or_equal_at_the_boundary() {
+        let program = vec![
+            inst(Opcode::Lte, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 6;
+                vm.registers[3] = 6;
+            },
+            |trace| {
+                // 6 <= 6 is 1. Claim it fails.
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// `Gte` at the same boundary, from the other direction.
+    #[test]
+    fn rejects_a_forged_greater_or_equal_at_the_boundary() {
+        let program = vec![
+            inst(Opcode::Gte, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |vm| {
+                vm.registers[2] = 4;
+                vm.registers[3] = 4;
+            },
+            |trace| {
+                trace[0].dst_val = 0;
+            },
+        );
+    }
+
+    /// `Jmp` is `next_pc == pc + imm`. A rewritten destination is the
+    /// arbitrary-jump forgery that cost Polygon zkEVM a critical finding, where
+    /// a missing boolean constraint let a prover land anywhere in the ROM.
+    #[test]
+    fn rejects_a_jump_to_a_rewritten_destination() {
+        let program = vec![
+            inst(Opcode::Jmp, 0, 0, 0, 1),
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // The jump lands on pc + 1. Claim it landed somewhere else.
+                trace[0].next_pc = 2;
+            },
+        );
+    }
+
+    /// `Jnz` picks between two destinations by a condition proved boolean and
+    /// tied to `rs1` through an inverse witness. Forging the condition claims
+    /// the branch went the way the register does not support.
+    #[test]
+    fn rejects_a_branch_that_forges_its_condition() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 0),
+            inst(Opcode::Jnz, 0, 2, 0, 2),
+            inst(Opcode::Load, 1, 0, 0, 5),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // r2 is zero, so the branch is not taken and next_pc is pc + 1.
+                // Claim it jumped.
+                trace[1].next_pc = 3;
+            },
+        );
+    }
+
+    /// The memory-image fold uses fixed constants, and a collision is one
+    /// subtraction away.
+    ///
+    /// `COL_MEM_INIT_ACC` folds the starting memory image with
+    /// `acc' = acc * BETA + addr * GAMMA + val` at constants baked into the
+    /// AIR. The module doc is honest that this is weaker than a hash. This
+    /// test measures *how much* weaker, because "weaker" without a number
+    /// invites someone to read it as "still hard".
+    ///
+    /// It is not hard. Two initial-memory entries collide when
+    /// `a1 * GAMMA + v1 == a2 * GAMMA + v2`, so for any address a prover
+    /// wants to move a value to, the value that keeps the accumulator
+    /// unchanged is `v2 = v1 + (a1 - a2) * GAMMA`, in one field operation.
+    ///
+    /// The fix is Fiat-Shamir: derive BETA and GAMMA from a transcript over
+    /// the trace commitment, so the prover cannot solve for them before
+    /// committing. That is a protocol change, not a constant swap, which is
+    /// why this test states the exposure rather than pretending it is closed.
+    #[test]
+    fn the_memory_fold_constants_are_solvable_and_this_is_measured() {
+        // Goldilocks. The fold runs in this field, so the arithmetic below is
+        // the arithmetic the AIR does.
+        const P: u128 = 0xFFFF_FFFF_0000_0001;
+        let gamma = u128::from(MEM_INIT_GAMMA);
+
+        let term = |addr: u128, val: u128| (addr * gamma + val) % P;
+
+        let (a1, v1) = (100u128, 42u128);
+        let a2 = 200u128;
+        // v2 = v1 + (a1 - a2) * GAMMA, computed without going negative.
+        let v2 = (v1 + (P - (a2 - a1) % P) * gamma) % P;
+
+        assert_ne!((a1, v1), (a2, v2), "the two entries must actually differ");
+        assert_eq!(
+            term(a1, v1),
+            term(a2, v2),
+            "a different address and value reach the same fold term, which is \
+             what fixed constants allow and a transcript challenge would not"
+        );
+    }
+
+    /// The register-image fold has the same shape and the same exposure.
+    ///
+    /// Recorded separately because the two accumulators carry their own
+    /// constants, and a fix applied to one and not the other would leave this
+    /// one standing while the first test went green.
+    #[test]
+    fn the_register_fold_shares_the_memory_fold_weakness() {
+        const P: u128 = 0xFFFF_FFFF_0000_0001;
+        let beta = u128::from(MEM_INIT_BETA);
+
+        // The `beta` chain is what makes row order matter. With fixed
+        // constants, a prover solving for a target accumulator solves a linear
+        // system rather than searching, so the work is polynomial in the row
+        // count instead of exponential in the digest width.
+        assert_ne!(beta % P, 0, "the fold constant is live");
+        assert_ne!(
+            beta % P,
+            1,
+            "a constant of one would drop row order entirely"
+        );
+
+        // Two-row folds collide when the second row absorbs the difference the
+        // first introduced, scaled by beta.
+        let fold = |x0: u128, x1: u128| ((x0 * beta) % P + x1) % P;
+        let (r0, r1) = (7u128, 11u128);
+        let s0 = 9u128;
+        // s1 = r1 + (r0 - s0) * beta
+        let s1 = (r1 + (P - (s0 - r0) % P) * beta) % P;
+
+        assert_ne!((r0, r1), (s0, s1));
+        assert_eq!(
+            fold(r0, r1),
+            fold(s0, s1),
+            "two different row sequences fold to one accumulator"
+        );
+    }
+
+    /// Read the stack pointer out of the column the constraint reads.
+    ///
+    /// `Step::stack_pointer` is the depth *after* the instruction ran.
+    /// `trace_matrix` converts it back to the depth *before* the instruction,
+    /// because that is the value `COL_STACK_PTR` holds and the value the
+    /// transition constraint is written against. The two differ by one on
+    /// exactly the rows that matter: after the first `Call` the VM field says
+    /// 1 while the column says the 0 that `when_first_row` pins.
+    ///
+    /// A test that reads the VM field is measuring a neighbouring number and
+    /// calling it the constrained one. This helper takes the column, padding
+    /// rows included, since the constraint applies to every row of the matrix
+    /// and not only to the rows that came from the VM.
+    fn stack_pointer_column(program: &[u64]) -> (Vec<u64>, usize) {
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(program);
+        assert!(
+            receipt.success,
+            "the honest program must run, or the column proves nothing"
+        );
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [0u8; 32],
+            initial_state_root: [0u8; 32],
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+        };
+
+        let (matrix, n_cpu) = trace_matrix(&vm.trace, program, &pi);
+        let rows = matrix.values.len() / TRACE_WIDTH;
+        let column = (0..rows)
+            .map(|i| matrix.values[i * TRACE_WIDTH + COL_STACK_PTR].as_canonical_u64())
+            .collect();
+        (column, n_cpu)
+    }
+
+    /// The stack pointer has no explicit upper bound, and does not need one.
+    ///
+    /// Carried as an open finding for a long time: `COL_STACK_PTR` is
+    /// constrained only in transition (`+1` on push and call, `-1` on pop and
+    /// ret, `0` otherwise) with no range check. The stack sits at `1 << 60` in
+    /// a 64-bit address space, so the question is whether a prover can drive
+    /// the pointer up until it collides with other memory.
+    ///
+    /// It cannot, through three constraints that already exist and were never
+    /// read together:
+    ///
+    /// 1. `when_first_row` pins the pointer to zero.
+    /// 2. `assert_eq(is_cpu, 1)` makes exactly one opcode selector live per
+    ///    row, and every selector is `assert_bool`. Two increments cannot land
+    ///    on one row.
+    /// 3. The transition allows at most `+1` per row.
+    ///
+    /// Starting at zero and rising by at most one per row, the pointer after
+    /// `n` rows is at most `n`. `trace_len` is a public input the verifier
+    /// checks, so the bound is whatever the caller committed to rather than
+    /// something the prover picks.
+    ///
+    /// This test is that reading, written down, and it reads the column rather
+    /// than the VM field beside it: see `stack_pointer_column`. A change that
+    /// lets a row push twice, or that drops the first-row pin, fails here
+    /// instead of waiting for someone to rederive the argument.
+    #[test]
+    fn the_stack_pointer_cannot_outrun_the_trace() {
+        // Nested calls drive the pointer as fast as the machine allows.
+        let program = vec![
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Call, 0, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (column, n_cpu) = stack_pointer_column(&program);
+
+        assert_eq!(
+            column[0], 0,
+            "the first row starts at zero, which is what `when_first_row` pins"
+        );
+
+        for row in 1..column.len() {
+            let delta = column[row] as i64 - column[row - 1] as i64;
+            assert!(
+                (-1..=1).contains(&delta),
+                "row {row} moved the stack pointer by {delta}; the transition \
+                 allows at most one, and the bound is derived from that"
+            );
+        }
+
+        for (row, depth) in column.iter().enumerate() {
+            assert!(
+                *depth <= row as u64,
+                "row {row} holds depth {depth}, past the row index; starting \
+                 at zero and rising by at most one is what bounds it"
+            );
+        }
+
+        // The program has to actually drive the pointer, or the two checks
+        // above hold over a column of zeros and mean nothing.
+        assert!(
+            column.iter().take(n_cpu).any(|d| *d > 0),
+            "the nested calls never raised the pointer, so this test measured \
+             an idle column"
+        );
+    }
+
+    /// A trace that pushes on every row reaches the bound and no further.
+    ///
+    /// The inverse witness for the test above: if the pointer could exceed the
+    /// row count, this is the program that would show it, because every row
+    /// after the first takes the increment.
+    #[test]
+    fn a_trace_of_pushes_stops_at_the_row_count() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Push, 0, 1, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (column, n_cpu) = stack_pointer_column(&program);
+
+        let peak = column.iter().copied().max().expect("the matrix has rows");
+        assert_eq!(peak, 4, "four pushes reach four, not more");
+        assert!(
+            peak <= n_cpu as u64,
+            "the peak stayed under the row count the VM produced"
+        );
+        assert!(
+            column[n_cpu..].iter().all(|d| *d == peak),
+            "padding must carry the last depth forward; a padding row that \
+             drops it would be a transition the constraint forbids"
+        );
+    }
+
+    /// The privacy three carry the sharpest forgeries in the instruction set,
+    /// because each one, forged, is money.
+    ///
+    /// `PrivacyCommit` hashes `(amount, blinding, recipient)` into the
+    /// commitment a shielded note is identified by. A prover who can name a
+    /// different hash for the same inputs mints a note whose stated amount is
+    /// not the amount the commitment binds.
+    #[test]
+    fn rejects_a_privacy_commitment_that_does_not_hash_its_inputs() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 1_000),
+            inst(Opcode::Load, 3, 0, 0, 424_242),
+            inst(Opcode::PrivacyCommit, 1, 2, 3, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // Same amount, same blinding, a commitment of the prover's choice.
+                trace[2].dst_val = trace[2].dst_val.wrapping_add(1);
+            },
+        );
+    }
+
+    /// `NullifierCheck` answers 1 only when the claimed nullifier equals
+    /// `Poseidon(secret)`. Forging that answer is double-spending: the same
+    /// note is spent twice because the second spend claims a nullifier it
+    /// cannot derive.
+    #[test]
+    fn rejects_a_nullifier_that_was_never_derived() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 12_345),
+            inst(Opcode::Load, 3, 0, 0, 6_789),
+            inst(Opcode::NullifierCheck, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[1], 0,
+            "an arbitrary claim is not the nullifier the secret derives"
+        );
+
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // The check failed honestly. Claim it passed.
+                trace[2].dst_val = 1;
+            },
+        );
+    }
+
+    /// `SumConservation` is the constraint that stops a shielded transfer from
+    /// printing value: inputs must equal outputs. Forging its answer inflates
+    /// the supply by exactly the difference.
+    #[test]
+    fn rejects_a_transfer_that_claims_unequal_sums_balance() {
+        let program = vec![
+            inst(Opcode::Load, 2, 0, 0, 500),
+            inst(Opcode::Load, 3, 0, 0, 900),
+            inst(Opcode::SumConservation, 1, 2, 3, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(
+            vm.registers[1], 0,
+            "500 in and 900 out does not conserve, so the honest answer is 0"
+        );
+
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                // Claim 400 units appeared from nowhere and the sums balanced.
+                trace[2].dst_val = 1;
+            },
+        );
+    }
+
+    /// `Syscall` reads context the caller does not control. A forged answer is
+    /// a claim about the block or the sender that the public inputs contradict.
+    #[test]
+    fn rejects_a_syscall_that_forges_its_answer() {
+        let program = vec![
+            inst(Opcode::Syscall, 1, 0, 0, 2),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_fails_after_tamper(
+            program,
+            |_| {},
+            |trace| {
+                trace[0].dst_val = trace[0].dst_val.wrapping_add(1);
+            },
+        );
+    }
+
     /// `Syscall` had no prover coverage. It is constrained in the AIR (selector
     /// booleanity, exclusivity, a gas cost of 5) and reads context values, so a
     /// proof over it must close.

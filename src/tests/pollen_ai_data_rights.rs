@@ -50,6 +50,7 @@ fn request(
         callback: None,
         submitted_at_block: 0,
         deadline_block: 10,
+        effort: crate::lubot::effort::EffortTier::default(),
     };
     req.request_id = req.calculate_id();
     req

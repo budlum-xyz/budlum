@@ -4474,6 +4474,11 @@ impl Blockchain {
         Ok(())
     }
 
+    /// PARTIAL: allowed - draining the queue is the operation, not a lookup.
+    /// The certificates are taken out on purpose and each is handled; the
+    /// error only reports that one of them failed, and `handle_finality_cert`
+    /// requeues the single cert whose QC is still missing. Putting the whole
+    /// batch back would duplicate the ones that succeeded.
     fn process_pending_finality_certs(&mut self, checkpoint_height: u64) -> Result<(), String> {
         let Some(certs) = self.pending_finality_certs.remove(&checkpoint_height) else {
             return Ok(());
@@ -5480,6 +5485,21 @@ impl Blockchain {
                 }
             };
             expired += 1;
+            // The shard this deal was holding is now unheld. The slash path
+            // has always opened a ticket here; the expiry path did not, so an
+            // operator that served its term and left honestly dropped a shard
+            // with nothing arranged to replace it. Opening the ticket before
+            // the bond is returned means the sweep cannot credit a bond and
+            // then fail to record the gap.
+            if let Some(ticket_id) = self
+                .state
+                .storage_registry
+                .open_expiry_reallocation(deal_id, current_epoch)
+            {
+                tracing::info!(
+                    "B.U.D. deal {deal_id} matured unrenewed; reallocation ticket {ticket_id} opened at epoch {current_epoch}"
+                );
+            }
             if bond == 0 {
                 continue;
             }

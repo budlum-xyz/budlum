@@ -539,6 +539,21 @@ impl PermissionlessRegistry {
         Ok(reg.stake)
     }
 
+    /// Cut stake for a condition the caller has already established.
+    ///
+    /// This takes a bare `SlashingCondition` and trusts it. That is correct
+    /// for the two callers it has, both of which sit behind consensus:
+    /// `Account::apply_slashing` mirrors a slash the consensus layer already
+    /// decided, and the executor path slashes a Lubot bond on an equivocation
+    /// the same block proved.
+    ///
+    /// It is the wrong entry point for anything carrying a
+    /// [`crate::registry::evidence::SlashingReport`], because a report has a
+    /// provenance field and this signature cannot see it. Use
+    /// [`Self::slash_from_report`], which refuses a report the consensus
+    /// layer has not marked `ConsensusVerified`. An externally submitted
+    /// report passes structural validation, so a path that only checks shape
+    /// would cut real stake on an unverified claim.
     pub fn slash(
         &mut self,
         account: Address,

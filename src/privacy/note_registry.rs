@@ -120,29 +120,57 @@ impl L1NoteRegistry {
                 return Err("output commitment already live".into());
             }
         }
-        // Spend
-        for (i, (commitment, nullifier)) in
-            spent_commitments.iter().zip(nullifiers.iter()).enumerate()
-        {
-            // Verify nullifier derivation proof if provided
-            if !nullifier_proofs.is_empty() {
+        // Every remaining refusal, decided before a single note moves.
+        //
+        // These three checks used to live inside the spend loop, after the
+        // `remove`. On input two of three, inputs one and two were already out
+        // of `live_commitments` when the error returned, and the caller does
+        // not roll back: `apply_block_checked` propagates with `?` and leaves
+        // the state as it found it. The notes were then neither live nor
+        // spent, which is value destroyed by a path that reported failure.
+        //
+        // A private transfer is all-or-nothing by nature, so the ordering has
+        // to say so: refuse while everything is still in place, then move.
+        if !nullifier_proofs.is_empty() {
+            for (i, (commitment, nullifier)) in
+                spent_commitments.iter().zip(nullifiers.iter()).enumerate()
+            {
                 let proof = &nullifier_proofs[i];
                 let expected_nullifier = Self::derive_nullifier(commitment, proof);
                 if *nullifier != expected_nullifier {
                     return Err(format!("nullifier derivation proof invalid for input {i}"));
                 }
             }
-            if !self.live_commitments.remove(commitment) {
+        }
+        // Inputs must be live and distinct. The old loop got distinctness for
+        // free, because the second `remove` of the same commitment returned
+        // false and refused. Checking with `contains` does not, so the
+        // duplicate has to be refused explicitly or one note would be spent
+        // twice in a single transfer against a single removal.
+        let mut seen_in = BTreeSet::new();
+        for commitment in spent_commitments {
+            if !seen_in.insert(*commitment) {
+                return Err("duplicate input commitment".into());
+            }
+            if !self.live_commitments.contains(commitment) {
                 return Err("spend: commitment not in live set".into());
             }
-            // Bounded nullifier set - fail-closed
-            if self.spent_nullifiers.len() >= MAX_SPENT_NULLIFIERS {
-                return Err(format!(
-                    "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
-                    self.spent_nullifiers.len(),
-                    MAX_SPENT_NULLIFIERS
-                ));
-            }
+        }
+        // Bounded nullifier set - fail-closed. Counted for the whole transfer
+        // rather than one input at a time: a transfer that would cross the
+        // ceiling partway through must be refused before it starts, not after
+        // it has consumed the inputs it had room for.
+        if self.spent_nullifiers.len().saturating_add(nullifiers.len()) > MAX_SPENT_NULLIFIERS {
+            return Err(format!(
+                "spent nullifier set full ({}/{}) - chain must compact before more private transfers",
+                self.spent_nullifiers.len(),
+                MAX_SPENT_NULLIFIERS
+            ));
+        }
+
+        // Past every refusal: the transfer now runs to completion.
+        for (commitment, nullifier) in spent_commitments.iter().zip(nullifiers.iter()) {
+            self.live_commitments.remove(commitment);
             self.spent_nullifiers.insert(*nullifier);
         }
         for c in output_commitments {
@@ -213,6 +241,67 @@ mod tests {
         assert!(!r.contains_commitment(&h(1)));
         assert!(r.contains_commitment(&h(2)));
         assert!(r.is_nullifier_spent(&h(10)));
+    }
+
+    /// A refused transfer must leave every input exactly where it was.
+    ///
+    /// The three remaining checks used to sit inside the spend loop, after
+    /// `live_commitments.remove`. On input two of three, the first two notes
+    /// were already gone when the error returned, and nothing rolls back:
+    /// `apply_block_checked` propagates with `?`. The notes ended up neither
+    /// live nor spent, which is value destroyed by a path that said it failed.
+    #[test]
+    fn a_refused_transfer_does_not_consume_the_inputs_it_got_to() {
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(h(1)).unwrap();
+        r.insert_note(h(2)).unwrap();
+
+        // Three inputs, the third of which is not live. The first two are.
+        let err = r
+            .apply_transfer(&[h(1), h(2), h(3)], &[h(10), h(11), h(12)], &[h(20)])
+            .expect_err("an input that is not live must refuse the transfer");
+        assert!(err.contains("not in live set"), "got: {err}");
+
+        assert!(
+            r.contains_commitment(&h(1)) && r.contains_commitment(&h(2)),
+            "the inputs the loop would have reached first must still be live"
+        );
+        assert!(
+            !r.is_nullifier_spent(&h(10)) && !r.is_nullifier_spent(&h(11)),
+            "and none of their nullifiers may be recorded as spent"
+        );
+        assert!(
+            !r.contains_commitment(&h(20)),
+            "nor may the outputs have been created"
+        );
+
+        // And the transfer still works once the inputs are all live, which is
+        // what proves the refusal above was about liveness and not a wedge.
+        r.insert_note(h(3)).unwrap();
+        r.apply_transfer(&[h(1), h(2), h(3)], &[h(10), h(11), h(12)], &[h(20)])
+            .expect("all three live now");
+        assert!(r.contains_commitment(&h(20)));
+    }
+
+    /// The same note twice in one transfer is one removal against two spends.
+    ///
+    /// The old loop refused this for free: the second `remove` of the same
+    /// commitment returned false. Deciding liveness with `contains` does not,
+    /// so the duplicate is refused explicitly. Without that check this test is
+    /// the one that fails, and it fails by *succeeding* at a double spend.
+    #[test]
+    fn the_same_input_twice_is_refused() {
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(h(1)).unwrap();
+
+        let err = r
+            .apply_transfer(&[h(1), h(1)], &[h(10), h(11)], &[h(20)])
+            .expect_err("one note cannot be spent twice in a single transfer");
+        assert!(err.contains("duplicate input"), "got: {err}");
+        assert!(
+            r.contains_commitment(&h(1)),
+            "and the refusal must not have consumed it"
+        );
     }
 
     #[test]

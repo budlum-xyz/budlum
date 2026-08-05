@@ -898,10 +898,17 @@ impl AccountState {
             }
             hasher.update(validator.address.as_bytes());
             hasher.update(validator.stake.to_le_bytes());
-            hasher.update(&validator.vrf_public_key);
-            hasher.update(&validator.bls_public_key);
-            hasher.update(&validator.pop_signature);
-            hasher.update(&validator.pq_public_key);
+            // Length-prefixed: four `Vec<u8>` appended raw are not injective,
+            // so a 96-byte BLS key plus a 48-byte PoP hashed the same as a
+            // 144-byte BLS key plus an empty one. See
+            // `crate::crypto::key_set_preimage`.
+            crate::crypto::key_set_preimage::update_consensus_keys_sha3(
+                &mut hasher,
+                Some(&validator.vrf_public_key),
+                &validator.bls_public_key,
+                &validator.pop_signature,
+                &validator.pq_public_key,
+            );
         }
         Ok(hex::encode(hasher.finalize()))
     }
@@ -1960,10 +1967,18 @@ impl AccountState {
             h.update(val.last_proposed_block.unwrap_or(0).to_le_bytes());
             h.update(val.votes_for.to_le_bytes());
             h.update(val.votes_against.to_le_bytes());
-            h.update(&val.vrf_public_key);
-            h.update(&val.bls_public_key);
-            h.update(&val.pop_signature);
-            h.update(&val.pq_public_key);
+            // Length-prefixed. This is the state root two nodes compare to
+            // decide they are on the same chain, and the raw concatenation it
+            // used to build let a restored snapshot reproduce an honest root
+            // while carrying a validator with its PoP folded into its BLS key.
+            // See `crate::crypto::key_set_preimage`.
+            crate::crypto::key_set_preimage::update_consensus_keys_sha2(
+                &mut h,
+                Some(&val.vrf_public_key),
+                &val.bls_public_key,
+                &val.pop_signature,
+                &val.pq_public_key,
+            );
             validator_hashes.push(h.finalize());
         }
         let validators_root = if validator_hashes.is_empty() {

@@ -418,6 +418,16 @@ pub enum ChainCommand {
     PollenGetDataAssets {
         response: oneshot::Sender<Vec<crate::pollen::DataAsset>>,
     },
+    /// Which Pollen asset sells the bytes behind a manifest, if any.
+    ///
+    /// The RPC layer needs this before it hands out a shard list: shard ids
+    /// are what a reader fetches bytes with, so publishing them for content
+    /// someone is selling is publishing the content itself to anyone who
+    /// skips the payment path.
+    PollenAssetForContent {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::pollen::AssetId>>,
+    },
     PollenGetAccessGrants {
         response: oneshot::Sender<Vec<crate::pollen::AccessGrant>>,
     },
@@ -2023,6 +2033,28 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Which Pollen asset sells this content, if any. `None` means the
+    /// content is not listed and reading it needs no grant.
+    pub async fn pollen_asset_for_content(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Option<crate::pollen::AssetId> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenAssetForContent {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        // A failed round trip reads as "listed" rather than "free": the
+        // actor being unreachable is not evidence that content is public,
+        // and defaulting the other way would open the paywall whenever the
+        // chain task is busy.
+        rx.await
+            .unwrap_or_else(|_| Some(crate::pollen::AssetId::zero()))
+    }
+
     pub async fn pollen_get_data_assets(&self) -> Vec<crate::pollen::DataAsset> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2124,6 +2156,38 @@ impl ChainActor {
             Ok((expired, returned)) if expired > 0 => tracing::info!("B.U.D. storage maintenance expired {expired} matured deals at epoch {current_epoch} (returned_bond={returned})"),
             Ok(_) => {}
             Err(error) => tracing::warn!("B.U.D. expired-deal finalization failed at height {block_height}: {error}"),
+        }
+
+        // The repair band. `objects_needing_repair` has existed since erasure
+        // coding landed and nothing called it, which meant the real repair
+        // window was unbounded: an object could sit one shard above `k` for as
+        // long as it liked and no maintenance pass would notice. The sweep now
+        // reads it, per object, against that object's own scheme.
+        let repair_band = self
+            .blockchain
+            .state
+            .storage_registry
+            .objects_below_own_repair_margin();
+        for (manifest_id, live, k, margin) in &repair_band {
+            tracing::warn!(
+                "B.U.D. object {} is in the repair band at epoch {current_epoch}: {live} shards live, k={k}, margin={margin}",
+                hex::encode(manifest_id.0)
+            );
+        }
+
+        // Objects already past saving are logged separately and loudly. Left
+        // inside the band above they would read as "a repair is coming", and
+        // no repair is coming: below `k` there is nothing to rebuild from.
+        let unrecoverable = self
+            .blockchain
+            .state
+            .storage_registry
+            .unrecoverable_objects();
+        for (manifest_id, live, k) in &unrecoverable {
+            tracing::error!(
+                "B.U.D. object {} is UNRECOVERABLE at epoch {current_epoch}: {live} shards live, k={k}; no repair can restore it",
+                hex::encode(manifest_id.0)
+            );
         }
 
         let under_replicated = self
@@ -3321,6 +3385,18 @@ impl ChainActor {
                         .cloned()
                         .collect();
                     let _ = response.send(offers);
+                }
+                ChainCommand::PollenAssetForContent {
+                    manifest_id,
+                    response,
+                } => {
+                    let asset = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .protected_content
+                        .asset_for(&manifest_id);
+                    let _ = response.send(asset);
                 }
                 ChainCommand::PollenGetDataAssets { response } => {
                     let assets: Vec<_> = self
