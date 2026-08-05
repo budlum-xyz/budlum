@@ -401,6 +401,294 @@ mod encryption_declaration {
     }
 }
 
+/// What an owner said about content they intend to self-host.
+///
+/// `MobileSelfContentPolicy` let an owner mark content critical and name how
+/// many paid replicas it needs. The type was written, tested, and read by
+/// nothing, so a phone could take the only copy of something its owner had
+/// already declared too important for a phone.
+mod self_host_policy {
+    use super::*;
+    use crate::domain::storage_deal::OperatorClass;
+    use crate::storage::{MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile};
+
+    fn owner() -> crate::core::address::Address {
+        crate::core::address::Address([3u8; 32])
+    }
+
+    fn profile() -> MobileSelfProfile {
+        MobileSelfProfile {
+            owner: owner(),
+            device_commitment: [9u8; 32],
+            availability: MobileAvailabilityClass::Opportunistic,
+            max_storage_bytes: 1024,
+            metered_network_ok: false,
+            battery_saver_aware: true,
+            last_seen_block: 10,
+        }
+    }
+
+    fn policy(critical: bool, replicas: u16, allowed: bool) -> MobileSelfContentPolicy {
+        MobileSelfContentPolicy {
+            content_id: ContentId([5u8; 32]),
+            owner: owner(),
+            critical,
+            required_paid_replicas: replicas,
+            self_host_allowed: allowed,
+        }
+    }
+
+    #[test]
+    fn a_declaration_that_contradicts_itself_is_refused() {
+        // Critical content with no paid replicas is the shape the type was
+        // written to catch, and nothing was calling the check.
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .declare_self_host_policy(policy(true, 0, true), &profile())
+            .expect_err("critical content needs paid replicas");
+        assert!(matches!(err, StorageError::SelfHostRefusedByPolicy { .. }));
+    }
+
+    #[test]
+    fn a_declaration_for_someone_elses_content_is_refused() {
+        let mut reg = StorageRegistry::new();
+        let mut p = policy(false, 0, true);
+        p.owner = crate::core::address::Address([99u8; 32]);
+        assert!(reg.declare_self_host_policy(p, &profile()).is_err());
+    }
+
+    #[test]
+    fn a_coherent_declaration_is_recorded() {
+        // The inverse witness: the check must refuse contradictions and
+        // nothing else, or every declaration would fail and the feature would
+        // be off while looking enforced.
+        let mut reg = StorageRegistry::new();
+        assert!(reg
+            .declare_self_host_policy(policy(true, 2, true), &profile())
+            .is_ok());
+    }
+
+    #[test]
+    fn content_nobody_declared_anything_about_is_allowed() {
+        // Absence of a policy is not a restriction. Reading it as one would
+        // turn a feature nobody opted into into a network-wide refusal.
+        let reg = StorageRegistry::new();
+        assert!(reg
+            .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([2u8; 32]))
+            .is_ok());
+    }
+
+    #[test]
+    fn self_hosting_turned_off_is_refused() {
+        let mut reg = StorageRegistry::new();
+        reg.declare_self_host_policy(policy(false, 0, false), &profile())
+            .expect("a non-critical declaration with no replicas is coherent");
+
+        let err = reg
+            .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([5u8; 32]))
+            .expect_err("the owner turned self-hosting off");
+        assert!(matches!(err, StorageError::SelfHostRefusedByPolicy { .. }));
+    }
+
+    #[test]
+    fn critical_content_without_its_paid_replicas_is_refused() {
+        // The finding, stated as a test: the owner asked for two paid
+        // replicas before self-hosting, and none are open.
+        let mut reg = StorageRegistry::new();
+        reg.declare_self_host_policy(policy(true, 2, true), &profile())
+            .expect("the declaration is coherent");
+
+        let err = reg
+            .check_self_host_allowed(&ContentId([1u8; 32]), &ContentId([5u8; 32]))
+            .expect_err("no paid replicas are open");
+        match err {
+            StorageError::SelfHostRefusedByPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("paid replica"),
+                    "the reason should name what is missing, got: {reason}"
+                );
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+    }
+
+    /// Open a deal through the real path, so the test measures what a caller
+    /// reaches rather than what the check does when called directly.
+    ///
+    /// Every earlier test in this module calls `check_self_host_allowed`
+    /// itself, which proves the check is correct and proves nothing about
+    /// whether anything runs it. That distinction is the finding: the check
+    /// was correct and tested six ways for as long as no production path
+    /// called it.
+    fn open_for(
+        reg: &mut StorageRegistry,
+        manifest: &ContentManifest,
+        shard_id: ContentId,
+        operator: crate::core::address::Address,
+        replica_index: u8,
+    ) -> Result<u64, StorageError> {
+        reg.open_deal(
+            42,
+            manifest,
+            shard_id,
+            operator,
+            replica_index,
+            100,
+            200,
+            StorageEconomicsParams {
+                operator_bond: 1_000_000,
+                fee_per_byte_epoch: 100,
+            },
+            &StorageDomainParams::default(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        )
+    }
+
+    /// The owner's declaration, keyed to a shard of a real manifest rather
+    /// than the placeholder id the direct-call tests use.
+    fn policy_for(shard_id: ContentId, critical: bool, replicas: u16) -> MobileSelfContentPolicy {
+        let mut p = policy(critical, replicas, true);
+        p.content_id = shard_id;
+        p
+    }
+
+    #[test]
+    fn a_phone_cannot_take_a_replica_the_owner_reserved_for_paid_operators() {
+        // The finding, exercised where it bites: the owner marked this
+        // content critical and asked for two paid replicas first, none are
+        // open, and a phone offers to hold it. Before the check was wired,
+        // this call returned a deal id.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
+            .expect("two paid replicas for critical content is a coherent ask");
+
+        let err = open_for(&mut reg, &manifest, shard_id, phone, 1)
+            .expect_err("the owner's own policy has to refuse this placement");
+        match err {
+            StorageError::SelfHostRefusedByPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("paid replica"),
+                    "the refusal should name what is missing, got: {reason}"
+                );
+            }
+            other => panic!("wrong error: {other:?}"),
+        }
+
+        // A refusal that already wrote something is not a refusal. `open_deal`
+        // takes `&mut self`, so this is the half of the property a matching
+        // error type does not cover.
+        assert!(
+            reg.deals_for_shard(&manifest.manifest_id, &shard_id)
+                .is_empty(),
+            "a refused deal must not be recorded"
+        );
+        assert!(
+            reg.get_manifest(&manifest.manifest_id).is_none(),
+            "a refused deal must not seed the manifest registry either"
+        );
+    }
+
+    #[test]
+    fn an_always_on_operator_is_not_asked_about_the_self_host_policy() {
+        // First canary. The policy is about phones. Refusing an always-on
+        // operator would block the very replicas the owner was asking for,
+        // and the gate would be passing by rejecting everything.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let server = crate::core::address::Address([8u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
+            .expect("the declaration is coherent");
+
+        open_for(&mut reg, &manifest, shard_id, server, 1)
+            .expect("an always-on operator is what the owner asked for");
+    }
+
+    #[test]
+    fn a_phone_is_allowed_when_no_policy_names_the_content() {
+        // Second canary. Content nobody restricted is not restricted content;
+        // `check_self_host_allowed` returns `Ok(())` with no policy declared,
+        // and wiring it must not turn that into a refusal.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+
+        open_for(&mut reg, &manifest, shard_id, phone, 1)
+            .expect("no declaration means no restriction");
+    }
+
+    #[test]
+    fn a_phone_is_allowed_once_the_paid_replicas_the_owner_asked_for_exist() {
+        // Third canary, and the one that proves the check reads live state
+        // rather than refusing every phone. Same policy, same phone, two paid
+        // replicas now open: the condition the owner set is met, so the
+        // placement goes through.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
+            .expect("the declaration is coherent");
+
+        open_for(
+            &mut reg,
+            &manifest,
+            shard_id,
+            crate::core::address::Address([1u8; 32]),
+            0,
+        )
+        .expect("first paid replica");
+        open_for(
+            &mut reg,
+            &manifest,
+            shard_id,
+            crate::core::address::Address([2u8; 32]),
+            1,
+        )
+        .expect("second paid replica");
+        assert_eq!(
+            reg.active_replica_count(&manifest.manifest_id, &shard_id),
+            2,
+            "the two paid replicas the policy requires are open"
+        );
+
+        open_for(&mut reg, &manifest, shard_id, phone, 2)
+            .expect("the owner's condition is met, so the phone may hold a copy");
+    }
+
+    #[test]
+    fn a_phone_still_cannot_take_the_primary_even_with_the_policy_satisfied() {
+        // The two mobile rules are independent and both have to hold. The
+        // policy is the owner's choice about this content; the primary rule is
+        // the protocol's, and satisfying the first does not buy the second.
+        let manifest = coded_manifest();
+        let shard_id = manifest.shards[1].shard_id;
+        let phone = crate::core::address::Address([7u8; 32]);
+
+        let mut reg = StorageRegistry::new();
+        reg.set_operator_class(phone, OperatorClass::Mobile);
+
+        let err = open_for(&mut reg, &manifest, shard_id, phone, 0)
+            .expect_err("a phone cannot hold replica_index 0");
+        assert!(
+            matches!(err, StorageError::MobileOperatorCannotHoldPrimary(_)),
+            "expected the primary refusal, got {err:?}"
+        );
+    }
+}
+
 /// The coding audit: proving parity is parity without holding a shard.
 ///
 /// A retrieval challenge asks whether the operator still has the bytes. It

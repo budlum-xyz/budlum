@@ -218,10 +218,20 @@ impl StorageProvider for InMemoryStorageProvider {
         challenge_id: ChallengeId,
         proof: StorageProof,
     ) -> Result<ProviderChallengeResult, StorageProviderError> {
+        // The challenge is dropped only once the answer is known to be good.
+        //
+        // This used to `remove` first. All three refusals below then returned
+        // with the challenge already gone, so an operator that sent a
+        // malformed proof, or whose chunk was momentarily unavailable, lost
+        // the ability to answer at all: the retry found no challenge, and the
+        // deadline ran out into `finalize_missed_challenge`, which takes the
+        // bond. A wrong answer is supposed to cost the bond on its merits, not
+        // by deleting the operator's second chance.
         let (deal_id, challenge) = self
             .challenges
-            .remove(&challenge_id)
+            .get(&challenge_id)
             .ok_or(StorageProviderError::MissingChallenge(challenge_id))?;
+        let (deal_id, challenge) = (*deal_id, challenge.clone());
         if proof.deal_id != deal_id || proof.challenge_id != challenge_id {
             return Err(StorageProviderError::ProofChallengeMismatch);
         }
@@ -240,6 +250,8 @@ impl StorageProvider for InMemoryStorageProvider {
         if proof.range_hash != expected {
             return Err(StorageProviderError::ProofRangeMismatch);
         }
+        // Past every refusal: the answer stands, so the challenge is closed.
+        self.challenges.remove(&challenge_id);
         Ok(ProviderChallengeResult {
             challenge_id,
             deal_id,

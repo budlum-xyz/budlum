@@ -50,6 +50,10 @@ impl BnsRegistry {
         }
     }
 
+    /// PARTIAL: allowed - the removal is an eviction that has already
+    /// succeeded when the refusal below fires. The `Err` is the branch where
+    /// nothing was evicted: no expired name existed, so the registry is at
+    /// capacity and nothing was taken out. The two are exclusive.
     pub fn register(
         &mut self,
         name: String,

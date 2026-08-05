@@ -108,6 +108,7 @@ mod tests {
             callback: None,
             submitted_at_block: 1,
             deadline_block: 1000,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         let exec = LubotExecutorRequest::from_inference_request(&req);
         assert_eq!(exec.request_id, AiRequestId([1; 32]));

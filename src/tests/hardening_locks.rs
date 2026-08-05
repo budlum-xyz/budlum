@@ -132,6 +132,72 @@ mod tests {
         assert!(reuse.is_err(), "settled payment_id must not be reusable");
     }
 
+    /// A refused settle must not consume the payment on its way out.
+    ///
+    /// `settle_agent_payment_immediate` used to `remove` the payment first and
+    /// check afterwards. The escrowed branch put it back; the already-settled
+    /// branch did not. So a second settle returned `Err` and took the live
+    /// entry with it, leaving nothing for `release` or `reclaim` to find while
+    /// the caller had been told the call failed.
+    ///
+    /// It is reachable: `executor.rs` credits the recipient and then calls
+    /// this, and `apply_block_checked` propagates the error with `?` without
+    /// rolling anything back.
+    #[test]
+    fn a_refused_settle_leaves_the_live_payment_alone() {
+        let mut registry = AiRegistry::new();
+        let escrowed = payment(0x81, addr(0xE1), addr(0xE2), 700, true);
+        registry.submit_agent_payment(escrowed.clone(), 10).unwrap();
+
+        let refused = registry.settle_agent_payment_immediate(&escrowed.payment_id, 11);
+        assert!(
+            refused.is_err(),
+            "an escrowed payment must not settle immediately"
+        );
+        assert!(
+            registry.get_agent_payment(&escrowed.payment_id).is_some(),
+            "a refusal must leave the payment where it was; this branch always \
+             did, and it is here so the two branches cannot drift apart again"
+        );
+        assert!(
+            registry
+                .get_settled_agent_payment(&escrowed.payment_id)
+                .is_none(),
+            "a refused settle must not write a receipt"
+        );
+    }
+
+    /// The branch that did lose it: settling twice.
+    #[test]
+    fn settling_twice_refuses_without_stranding_the_receipt() {
+        let mut registry = AiRegistry::new();
+        let pay = payment(0x82, addr(0xF1), addr(0xF2), 900, false);
+        registry.submit_agent_payment(pay.clone(), 10).unwrap();
+
+        registry
+            .settle_agent_payment_immediate(&pay.payment_id, 11)
+            .expect("the first settle succeeds");
+        let receipt_after_first = registry
+            .get_settled_agent_payment(&pay.payment_id)
+            .cloned()
+            .expect("the first settle writes a receipt");
+
+        let second = registry.settle_agent_payment_immediate(&pay.payment_id, 12);
+        assert!(second.is_err(), "the second settle must be refused");
+
+        let receipt_after_second = registry
+            .get_settled_agent_payment(&pay.payment_id)
+            .expect("the receipt from the first settle must survive the refusal");
+        assert_eq!(
+            receipt_after_first.settled_at_block, receipt_after_second.settled_at_block,
+            "a refused second settle must not rewrite the receipt"
+        );
+        assert_eq!(
+            receipt_after_first.amount, receipt_after_second.amount,
+            "nor its amount"
+        );
+    }
+
     /// REGRESSION: reclaim archives settlement (audit trail).
     #[test]
     fn reclaim_archives_settlement() {

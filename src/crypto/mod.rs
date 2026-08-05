@@ -1,4 +1,5 @@
 pub mod domain_tags;
+pub mod key_set_preimage;
 pub mod mainnet_policy;
 pub mod pkcs11;
 pub mod primitives;

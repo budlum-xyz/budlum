@@ -174,6 +174,7 @@ mod tests {
             callback: None,
             submitted_at_block: 0,
             deadline_block: 10,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         let res = AiInferenceResult {
             request_id: req.request_id,

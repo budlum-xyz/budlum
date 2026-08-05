@@ -241,12 +241,36 @@ pub struct AiInferenceRequest {
     pub callback: Option<Address>,
     pub submitted_at_block: u64,
     pub deadline_block: u64,
+    /// How much work the requester is paying for.
+    ///
+    /// `src/lubot/effort.rs` promised two rules and could keep neither while
+    /// no request carried a tier. The second of them is why this field is
+    /// inside `calculate_id`: without that, an operator could accept a `5.0x`
+    /// request, answer it with `0.5x` work, and claim the higher fee, because
+    /// nothing it signed bound the depth it was asked for.
+    ///
+    /// `#[serde(default)]` reads a request written before this field as
+    /// `1.0x`, which is what those requests meant: the baseline was the only
+    /// amount of work anyone could ask for.
+    #[serde(default)]
+    pub effort: crate::lubot::effort::EffortTier,
 }
 
 impl AiInferenceRequest {
+    /// The canonical identity of a request.
+    ///
+    /// V2 adds the effort tier. V1 hashed everything about a request except
+    /// how much work it was paying for, which meant an operator could accept
+    /// a `5.0x` request, do `0.5x` of work, and claim the `5.0x` fee: nothing
+    /// it signed bound the depth. The tier is inside the commitment for the
+    /// same reason `max_fee` is.
+    ///
+    /// The domain tag moves with it. Adding a field under the old tag would
+    /// let a V1 id and a V2 id collide across different meanings, which is
+    /// the failure the tag exists to prevent.
     pub fn calculate_id(&self) -> AiRequestId {
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_AI_REQUEST_ID_V1");
+        hasher.update(b"BDLM_AI_REQUEST_ID_V2");
         hasher.update(self.requester.as_bytes());
         hasher.update(self.model_id.0);
         hasher.update(self.input_commitment);
@@ -260,6 +284,7 @@ impl AiInferenceRequest {
         }
         hasher.update(self.submitted_at_block.to_le_bytes());
         hasher.update(self.deadline_block.to_le_bytes());
+        hasher.update(self.effort.as_bytes());
         AiRequestId(hasher.finalize().into())
     }
 

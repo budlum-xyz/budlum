@@ -1083,6 +1083,28 @@ fn encode_model_spec(spec: &crate::ai::types::AiModelSpec, out: &mut Vec<u8>) {
         }
         None => put_u8(out, 0),
     }
+    // The weights digest is what separates two models that share an
+    // architecture: the guest program for a fixed-point MLP is a function of
+    // the layer shape alone, so `execution_program_hash` cannot tell them
+    // apart, and `verify_execution_proof_structural_with_model` refuses a
+    // proof whose digest is not the registered one. Leaving it out of the
+    // preimage let a relaying node rewrite a signed registration to name a
+    // different weight set, and the signature still verified.
+    put_option_fixed32(out, spec.execution_weights_digest);
+    // Same reasoning for the dims. `guest_program_for_model` rebuilds the
+    // exact instruction words a proof is checked against from this field
+    // alone, so rewriting it in flight changes which program the chain
+    // verifies against without touching the signature.
+    match &spec.execution_dims {
+        Some(dims) => {
+            put_u8(out, 1);
+            put_u64(out, dims.len() as u64);
+            for dim in dims {
+                put_u32(out, u32::from(*dim));
+            }
+        }
+        None => put_u8(out, 0),
+    }
 }
 fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {
     match tx_type {
@@ -1173,6 +1195,12 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_option_address(out, req.callback);
             put_u64(out, req.submitted_at_block);
             put_u64(out, req.deadline_block);
+            // The tier is how much work the requester is paying for.
+            // `calculate_id` hashes it, so a rewrite already breaks
+            // `verify_id`, but the envelope has to bind it too: the signature
+            // is what a node checks first, and a preimage that omits a field
+            // the wire carries is a field a relaying node may edit.
+            put_u32(out, u32::from(req.effort.tenths()));
         }
         TransactionType::AiInferenceResult(res) => {
             put_fixed(out, &res.request_id.0);
@@ -1249,6 +1277,31 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_bytes(out, &proof.proof_bytes);
             put_u64(out, proof.steps);
             put_u64(out, proof.gas_used);
+            // Both of these are what the verifier checks the proof against.
+            // `weights_digest` is compared with the model's registered digest
+            // and `public_inputs` is the bundle
+            // `verify_execution_proof_stark` hashes against the envelope, so a
+            // node that could rewrite either could point a signed attachment
+            // at a different claim.
+            put_option_fixed32(out, proof.weights_digest);
+            match &proof.public_inputs {
+                Some(pi) => {
+                    put_u8(out, 1);
+                    put_u64(out, pi.chain_id);
+                    put_fixed(out, &pi.program_hash);
+                    put_fixed(out, &pi.initial_state_root);
+                    put_fixed(out, &pi.final_state_root);
+                    put_u64(out, pi.sender);
+                    put_u64(out, pi.nonce);
+                    put_u64(out, pi.block_height);
+                    put_u64(out, pi.gas_limit);
+                    put_u64(out, pi.gas_used);
+                    put_u64(out, pi.exit_code);
+                    put_u64(out, pi.trace_len);
+                    put_fixed(out, &pi.event_digest);
+                }
+                None => put_u8(out, 0),
+            }
         }
     }
 }
@@ -1319,6 +1372,213 @@ mod v29_signing_tests {
         };
         keys.vrf_public_key[0] ^= 1;
         assert!(!tx.verify());
+    }
+
+    /// A model registration names its weights and its architecture, and the
+    /// signature has to cover both.
+    ///
+    /// `execution_weights_digest` is what separates two models that share a
+    /// layer shape: the guest program for a fixed-point MLP depends on the
+    /// architecture alone, so `execution_program_hash` cannot tell them apart,
+    /// and `verify_execution_proof_structural_with_model` refuses a proof
+    /// whose digest is not the registered one. Until this commit the preimage
+    /// skipped it while the protobuf carried it, so a relaying node could
+    /// point a signed registration at a different weight set and the
+    /// signature still verified.
+    #[test]
+    fn model_weights_digest_tampering_invalidates_signature() {
+        let spec = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId([9u8; 32]),
+            model_hash: [8u8; 32],
+            owner: test_addr_from_byte(3u8),
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 64,
+            max_output_ref_bytes: 64,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some([7u8; 32]),
+            execution_class: 1,
+            execution_weights_digest: Some([1u8; 32]),
+            execution_dims: Some(vec![4, 1]),
+        };
+        let mut tx = signed_variant(TransactionType::AiModelRegister(spec.clone()));
+        let TransactionType::AiModelRegister(registered) = &mut tx.tx_type else {
+            unreachable!();
+        };
+        registered.execution_weights_digest = Some([2u8; 32]);
+        assert!(
+            !tx.verify(),
+            "a rewritten weights digest names a different weight set under the \
+             same signature"
+        );
+
+        // And the architecture, for the same reason: `guest_program_for_model`
+        // rebuilds the instruction words a proof is checked against from the
+        // dims alone.
+        let mut tx = signed_variant(TransactionType::AiModelRegister(spec));
+        let TransactionType::AiModelRegister(registered) = &mut tx.tx_type else {
+            unreachable!();
+        };
+        registered.execution_dims = Some(vec![8, 1]);
+        assert!(
+            !tx.verify(),
+            "a rewritten dims list changes which program the chain verifies \
+             a proof against"
+        );
+    }
+
+    /// The effort tier is inside the request id and now inside the envelope.
+    ///
+    /// `calculate_id` hashes the tier, so rewriting it already breaks
+    /// `verify_id` inside `submit_request`. That is the second door. The
+    /// signature is the first one a node checks, and a preimage that omits a
+    /// field the wire carries is a field a relaying node may edit before
+    /// anything looks at the id.
+    #[test]
+    fn inference_request_effort_tampering_invalidates_signature() {
+        let mut req = crate::ai::types::AiInferenceRequest {
+            request_id: crate::ai::types::AiRequestId([0u8; 32]),
+            requester: test_addr_from_byte(4u8),
+            model_id: crate::ai::types::AiModelId([5u8; 32]),
+            input_commitment: [6u8; 32],
+            input_ref: crate::ai::types::BoundedBytes::empty(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 1,
+            deadline_block: 100,
+            effort: crate::lubot::effort::EffortTier::DEEPEST,
+        };
+        req.request_id = req.calculate_id();
+        assert!(req.verify_id(), "the fixture must start honest");
+
+        let mut tx = signed_variant(TransactionType::AiInferenceRequest(req));
+        let TransactionType::AiInferenceRequest(submitted) = &mut tx.tx_type else {
+            unreachable!();
+        };
+        submitted.effort = crate::lubot::effort::EffortTier::FASTEST;
+        assert!(
+            !tx.verify(),
+            "an operator that can rewrite 10.0x to 0.5x in flight does the \
+             cheap work and claims the deep fee"
+        );
+    }
+
+    /// An execution proof carries the two values the verifier checks it
+    /// against, so both belong in the preimage.
+    #[test]
+    fn execution_proof_claims_are_signed() {
+        let public_inputs = crate::ai::types::AiExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: [7u8; 32],
+            initial_state_root: [2u8; 32],
+            final_state_root: [3u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: 1_000,
+            gas_used: 500,
+            exit_code: 0,
+            trace_len: 16,
+            event_digest: [0u8; 32],
+        };
+        let proof = crate::ai::types::AiExecutionProof {
+            model_id: crate::ai::types::AiModelId([5u8; 32]),
+            input_commitment: [6u8; 32],
+            output_commitment: [4u8; 32],
+            program_hash: [7u8; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 16,
+            gas_used: 500,
+            weights_digest: Some([1u8; 32]),
+            public_inputs: Some(public_inputs),
+        };
+
+        let mut tx = signed_variant(TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId([0u8; 32]),
+            proof: proof.clone(),
+        });
+        let TransactionType::AiAttachExecutionProof {
+            proof: attached, ..
+        } = &mut tx.tx_type
+        else {
+            unreachable!();
+        };
+        attached.weights_digest = Some([9u8; 32]);
+        assert!(
+            !tx.verify(),
+            "the digest is what the model is compared against; rewriting it \
+             aims the proof at a different registration"
+        );
+
+        let mut tx = signed_variant(TransactionType::AiAttachExecutionProof {
+            request_id: crate::ai::types::AiRequestId([0u8; 32]),
+            proof,
+        });
+        let TransactionType::AiAttachExecutionProof {
+            proof: attached, ..
+        } = &mut tx.tx_type
+        else {
+            unreachable!();
+        };
+        if let Some(pi) = attached.public_inputs.as_mut() {
+            pi.initial_state_root = [9u8; 32];
+        }
+        assert!(
+            !tx.verify(),
+            "the public inputs are the claim the STARK is checked against"
+        );
+    }
+
+    /// The absent case has to be distinguishable from the present one.
+    ///
+    /// `put_option_fixed32` writes a tag byte before the value, so `None` and
+    /// `Some` cannot collide. A preimage that skipped the tag would let a
+    /// registration with no digest and one with a digest of all-zeroes hash
+    /// alike.
+    #[test]
+    fn an_absent_optional_field_is_not_the_same_preimage_as_a_present_one() {
+        let base = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId([9u8; 32]),
+            model_hash: [8u8; 32],
+            owner: test_addr_from_byte(3u8),
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 64,
+            max_output_ref_bytes: 64,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+            execution_dims: None,
+        };
+        let mut absent = Vec::new();
+        encode_model_spec(&base, &mut absent);
+
+        let mut zeroed = base.clone();
+        zeroed.execution_weights_digest = Some([0u8; 32]);
+        let mut present = Vec::new();
+        encode_model_spec(&zeroed, &mut present);
+        assert_ne!(
+            absent, present,
+            "no digest and an all-zero digest must not share a preimage"
+        );
+
+        let mut empty_dims = base;
+        empty_dims.execution_dims = Some(Vec::new());
+        let mut empty = Vec::new();
+        encode_model_spec(&empty_dims, &mut empty);
+        assert_ne!(
+            absent, empty,
+            "no dims and an empty dims list must not share a preimage"
+        );
     }
 
     #[test]

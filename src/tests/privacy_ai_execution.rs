@@ -218,6 +218,7 @@ fn ai_require_execution_proof_blocks_finalize_without_proof() {
         callback: None,
         submitted_at_block: 1,
         deadline_block: 50,
+        effort: crate::lubot::effort::EffortTier::default(),
     };
     req.request_id = req.calculate_id();
     reg.submit_request(req.clone(), 1).unwrap();

@@ -317,6 +317,7 @@ mod relayer_escrow_silent_failure_regression {
             callback: None,
             submitted_at_block: current_block,
             deadline_block,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
         registry.submit_request(req, current_block).unwrap()

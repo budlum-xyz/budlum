@@ -65,6 +65,7 @@ pub fn build_lubot_request(
         callback: None,
         submitted_at_block,
         deadline_block,
+        effort: crate::lubot::effort::EffortTier::default(),
     };
     // Canonical request_id'yi hesapla → verify_id geçer.
     req.request_id = req.calculate_id();

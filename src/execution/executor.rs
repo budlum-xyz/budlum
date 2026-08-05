@@ -436,6 +436,7 @@ impl Executor {
                         callback: Some(tx.from),
                         submitted_at_block: state.current_block_height,
                         deadline_block,
+                        effort: crate::lubot::effort::EffortTier::default(),
                     };
                     req.request_id = req.calculate_id();
                     let current_block = state.current_block_height;

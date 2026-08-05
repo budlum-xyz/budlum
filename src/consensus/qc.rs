@@ -86,10 +86,29 @@ impl QcBlob {
         }
     }
 
+    /// The Merkle leaf for one signature entry.
+    ///
+    /// Both trailing fields are length-prefixed. `validator_address` is a
+    /// `String` and `dilithium_signature` a `Vec<u8>`, appended with nothing
+    /// between them, so a character could be moved from the end of the address
+    /// into the front of the signature and the leaf would not change. Measured:
+    /// a 66-character address and a 4595-byte signature produce the same digest
+    /// as a 65-character address and a 4596-byte signature.
+    ///
+    /// That leaf is what `verify_inclusion` rebuilds from a fault proof, and a
+    /// verdict from it reaches `slash_validator` at the malicious-behaviour
+    /// ratio, so a second `(address, signature)` pair hashing to an accepted
+    /// leaf is a second story a fault proof can tell about the same slot.
+    ///
+    /// See `crate::crypto::key_set_preimage` for the same failure in the
+    /// validator key set.
     fn leaf_hash(entry: &PqSignatureEntry) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
         hasher.update(entry.validator_index.to_le_bytes());
-        hasher.update(entry.validator_address.as_bytes());
+        let address = entry.validator_address.as_bytes();
+        hasher.update((address.len() as u64).to_le_bytes());
+        hasher.update(address);
+        hasher.update((entry.dilithium_signature.len() as u64).to_le_bytes());
         hasher.update(&entry.dilithium_signature);
         let result = hasher.finalize();
         let mut arr = [0u8; 32];
@@ -720,6 +739,112 @@ mod tests {
         assert_eq!(blob.checkpoint_height, 100);
         assert!(!blob.merkle_root.is_empty());
         assert!(blob.verify_merkle_root());
+    }
+
+    /// A character cannot move from the address into the signature.
+    ///
+    /// `leaf_hash` appended a `String` and a `Vec<u8>` with nothing between
+    /// them, so the last character of the address and the first byte of the
+    /// signature sat on an ambiguous boundary. Two different entries produced
+    /// one leaf. `verify_inclusion` rebuilds that leaf from a fault proof and
+    /// a verdict from it reaches `slash_validator` at the malicious-behaviour
+    /// ratio, so the collision let one accepted leaf carry two stories about
+    /// the same slot.
+    ///
+    /// The shift is done by hand rather than through `sign_attestation`,
+    /// because no honest signer produces the forged pair: the point is that
+    /// the *digest* cannot tell them apart, not that a signer would try.
+    #[test]
+    fn a_leaf_cannot_shift_bytes_from_the_address_into_the_signature() {
+        let honest = PqSignatureEntry {
+            validator_index: 7,
+            validator_address: "0xabcdef".to_string(),
+            dilithium_signature: vec![1, 2, 3, 4],
+        };
+
+        // Move the last address character to the front of the signature. The
+        // concatenation is byte-identical; only the split differs.
+        let mut shifted_signature = vec![b'f'];
+        shifted_signature.extend_from_slice(&honest.dilithium_signature);
+        let shifted = PqSignatureEntry {
+            validator_index: honest.validator_index,
+            validator_address: "0xabcde".to_string(),
+            dilithium_signature: shifted_signature,
+        };
+
+        // The premise: without lengths these two are the same bytes.
+        let mut honest_concat = honest.validator_address.as_bytes().to_vec();
+        honest_concat.extend_from_slice(&honest.dilithium_signature);
+        let mut shifted_concat = shifted.validator_address.as_bytes().to_vec();
+        shifted_concat.extend_from_slice(&shifted.dilithium_signature);
+        assert_eq!(
+            honest_concat, shifted_concat,
+            "the fixture must actually be a re-split, or this test proves \
+             nothing about the boundary"
+        );
+
+        assert_ne!(
+            QcBlob::leaf_hash(&honest),
+            QcBlob::leaf_hash(&shifted),
+            "two entries whose fields concatenate alike must not share a leaf"
+        );
+    }
+
+    /// The same boundary, seen through the Merkle root a blob commits to.
+    #[test]
+    fn a_re_split_entry_changes_the_merkle_root() {
+        let honest = vec![PqSignatureEntry {
+            validator_index: 0,
+            validator_address: "0xdeadbeef".to_string(),
+            dilithium_signature: vec![9; 32],
+        }];
+        let mut shifted_signature = vec![b'f'];
+        shifted_signature.extend_from_slice(&honest[0].dilithium_signature);
+        let shifted = vec![PqSignatureEntry {
+            validator_index: 0,
+            validator_address: "0xdeadbee".to_string(),
+            dilithium_signature: shifted_signature,
+        }];
+
+        assert_ne!(
+            QcBlob::compute_merkle_root(&honest),
+            QcBlob::compute_merkle_root(&shifted),
+            "the root is what `verify_merkle_root` checks a blob against"
+        );
+    }
+
+    /// An empty signature and an empty address are distinguishable from each
+    /// other and from the honest pair, or the length prefix is decoration.
+    #[test]
+    fn empty_fields_do_not_collapse_into_each_other() {
+        let both = PqSignatureEntry {
+            validator_index: 1,
+            validator_address: String::new(),
+            dilithium_signature: Vec::new(),
+        };
+        let address_only = PqSignatureEntry {
+            validator_index: 1,
+            validator_address: "ab".to_string(),
+            dilithium_signature: Vec::new(),
+        };
+        let signature_only = PqSignatureEntry {
+            validator_index: 1,
+            validator_address: String::new(),
+            dilithium_signature: vec![b'a', b'b'],
+        };
+
+        let leaves = [
+            QcBlob::leaf_hash(&both),
+            QcBlob::leaf_hash(&address_only),
+            QcBlob::leaf_hash(&signature_only),
+        ];
+        assert_ne!(leaves[0], leaves[1]);
+        assert_ne!(leaves[0], leaves[2]);
+        assert_ne!(
+            leaves[1], leaves[2],
+            "`ab` in the address and `ab` in the signature are different \
+             entries and must be different leaves"
+        );
     }
 
     #[test]

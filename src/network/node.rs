@@ -325,6 +325,23 @@ pub struct Node {
     pub mdns_enabled: bool,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     pub storage_node: Option<Arc<bud_node::BudBitswap>>,
+    /// What this node is allowed to delete, and whether it may delete at all.
+    ///
+    /// The hard-prune worker used to call `store().delete()` the moment an
+    /// `NftBurn` produced a content id, without asking what kind of node it
+    /// was running on. `PruningPolicy::validate` refuses an archive node that
+    /// prunes, and refuses a pruning node with no finalized-snapshot
+    /// retention, but nothing consulted it: the policy existed, was tested,
+    /// and no deletion path read it.
+    ///
+    /// An archive node exists to be the copy of last resort. One misconfigured
+    /// into deleting is worse than one that never existed, because the network
+    /// counted on it.
+    ///
+    /// `None` keeps the previous behaviour for nodes that never set a policy,
+    /// which is every test and ephemeral devnet node. A node that stores
+    /// content in production should set one.
+    pub pruning_policy: Option<crate::storage::PruningPolicy>,
     pub shard_manager: Option<Arc<bud_node::ShardManager>>,
     pub mobile_mode: bool,
 }
@@ -620,9 +637,22 @@ impl Node {
             mdns_enabled,
             metrics: None,
             storage_node,
+            pruning_policy: None,
             shard_manager,
             mobile_mode,
         })
+    }
+
+    /// Set what this node is allowed to delete.
+    ///
+    /// Without this the hard-prune worker deletes whenever an `NftBurn`
+    /// names content it holds, which is right for a full node and wrong for
+    /// an archive node. `PruningPolicy::validate` should be called on the
+    /// policy before it reaches here; this only stores it.
+    #[must_use]
+    pub fn with_pruning_policy(mut self, policy: crate::storage::PruningPolicy) -> Self {
+        self.pruning_policy = Some(policy);
+        self
     }
 
     pub fn new_with_bootstrap(
@@ -1135,7 +1165,36 @@ impl Node {
                                    NodeCommand::StoragePrune { cid } => {
                                        // Hard Pruning worker - physical deletion from local B.U.D. store.
                                        // Only triggered by local Executor (not via P2P gossip), per SECURITY_AUDIT_HACKER.md.
-                                       if let Some(ref storage_node) = self.storage_node {
+                                       //
+                                       // Ask the policy first. An archive node exists to be the
+                                       // copy of last resort, and `PruningPolicy::validate`
+                                       // already refuses one that prunes. That refusal meant
+                                       // nothing while no deletion path consulted it: the check
+                                       // was written, tested, and unreachable.
+                                       //
+                                       // A node with no policy configured keeps the previous
+                                       // behaviour, so this cannot quietly stop deletions that
+                                       // were working. What it stops is an archive node deleting
+                                       // the copy the network was counting on.
+                                       // `continue` would target whichever loop the compiler
+                                       // finds nearest, and this arm sits inside a `select!`
+                                       // inside the event loop. A boolean read before the
+                                       // deletion block keeps the control flow local and
+                                       // obvious.
+                                       let policy_permits = self
+                                           .pruning_policy
+                                           .as_ref()
+                                           .is_none_or(|p| p.should_prune_historical_state());
+                                       if !policy_permits {
+                                           if let Some(ref policy) = self.pruning_policy {
+                                               info!(
+                                                   cid = %hex::encode(cid),
+                                                   mode = policy.mode.label(),
+                                                   "B.U.D. hard prune refused: this node's pruning policy does not \
+                                                    permit deleting stored content"
+                                               );
+                                           }
+                                       } else if let Some(ref storage_node) = self.storage_node {
                                            let content_id = bud_node::store::ContentId(cid);
                                            match storage_node.store().delete(&content_id) {
                                                Ok(()) => {
@@ -1233,11 +1292,19 @@ impl Node {
                                    let remote = endpoint.get_remote_address();
                                    let subnet = ipv4_slash24(remote);
                                    // H5.1 eclipse bound before admitting.
+                                   // Through the recovering helper, not a raw
+                                   // `lock()`. A poisoned mutex made this
+                                   // `unwrap_or(true)`, which turns the /24
+                                   // eclipse bound OFF at exactly the moment
+                                   // something has already gone wrong: one
+                                   // operator could then fill the peer table
+                                   // from a single subnet and surround the
+                                   // node. The rest of this file recovers the
+                                   // guard and keeps enforcing; these four
+                                   // sites were the ones that did not.
                                    let admit = self
-                                       .peer_manager
-                                       .lock()
-                                       .map(|pm| pm.can_admit_subnet(subnet))
-                                       .unwrap_or(true);
+                                       .peer_manager_lock()
+                                       .can_admit_subnet(subnet);
                                    if !admit {
                                        warn!(
                                            "Eclipse bound: rejecting {} from {:?} (/24 limit)",
@@ -1249,10 +1316,8 @@ impl Node {
                                    // H5.2 outbound diversity: outbound bağlantılar için ek /24 sınırı.
                                    if endpoint.is_dialer() {
                                        let ob_admit = self
-                                           .peer_manager
-                                           .lock()
-                                           .map(|pm| pm.can_admit_outbound_subnet(subnet))
-                                           .unwrap_or(true);
+                                           .peer_manager_lock()
+                                           .can_admit_outbound_subnet(subnet);
                                        if !ob_admit {
                                            warn!(
                                                "Outbound diversity: rejecting outbound {} from {:?}",
@@ -1262,17 +1327,14 @@ impl Node {
                                            continue;
                                        }
                                    }
-                                   let newly_connected = self
-                                       .peer_manager
-                                       .lock()
-                                       .map(|mut pm| {
-                                           let c = pm.note_connected(peer_id, subnet);
-                                           if c && endpoint.is_dialer() {
-                                               let _ = pm.note_outbound_connected(peer_id, subnet);
-                                           }
-                                           c
-                                       })
-                                       .unwrap_or(true);
+                                   let newly_connected = {
+                                       let mut pm = self.peer_manager_lock();
+                                       let c = pm.note_connected(peer_id, subnet);
+                                       if c && endpoint.is_dialer() {
+                                           let _ = pm.note_outbound_connected(peer_id, subnet);
+                                       }
+                                       c
+                                   };
                                    let count = if newly_connected {
                                        self.peer_count.fetch_add(1, Ordering::SeqCst) + 1
                                    } else {
@@ -1349,15 +1411,16 @@ impl Node {
                                    }
                                }
                                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                   let was_connected = self
-                                       .peer_manager
-                                       .lock()
-                                       .map(|mut pm| {
-                                           let d = pm.note_disconnected(&peer_id);
-                                           let _ = pm.note_outbound_disconnected(&peer_id);
-                                           d
-                                       })
-                                       .unwrap_or(true);
+                                   // Same treatment: a poisoned lock used to
+                                   // report every close as a real disconnect,
+                                   // which drifts `peer_count` in the opposite
+                                   // direction from the connect path above.
+                                   let was_connected = {
+                                       let mut pm = self.peer_manager_lock();
+                                       let d = pm.note_disconnected(&peer_id);
+                                       let _ = pm.note_outbound_disconnected(&peer_id);
+                                       d
+                                   };
                                    if was_connected {
                                        self.peer_count
                                            .fetch_update(

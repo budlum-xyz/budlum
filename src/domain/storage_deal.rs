@@ -519,6 +519,18 @@ pub struct StorageRegistry {
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
+    /// What each owner declared about content they intend to self-host.
+    ///
+    /// `MobileSelfContentPolicy` lets an owner mark content critical and name
+    /// how many paid replicas it needs. The type existed, was tested, and no
+    /// deal path read it, so a phone could take the only copy of something its
+    /// owner had already declared too important for a phone.
+    ///
+    /// Keyed by content, because the declaration is about the content rather
+    /// than about the device: the same phone may self-host a holiday photo and
+    /// be refused a legal document.
+    #[serde(default)]
+    pub self_host_policies: BTreeMap<ContentId, crate::storage::MobileSelfContentPolicy>,
     /// When each operator that missed a challenge may take storage work
     /// again, as a unix timestamp.
     ///
@@ -603,6 +615,17 @@ pub enum StorageError {
     /// Manifest with the given `manifest_id` is not registered in the
     /// Storage domain.
     UnknownManifest(ContentId),
+    /// A self-hosting device was offered content its own declared profile
+    /// says it cannot carry alone.
+    ///
+    /// `MobileSelfContentPolicy` lets an owner mark content critical and name
+    /// how many paid replicas it needs. The rule existed and nothing read it,
+    /// so a phone could accept the only copy of something its owner had
+    /// already declared too important for a phone.
+    SelfHostRefusedByPolicy {
+        content_id: ContentId,
+        reason: String,
+    },
     /// A coding audit was opened against an object with no parity shards.
     ///
     /// There is no relationship to check: under plain replication every
@@ -721,6 +744,10 @@ impl std::fmt::Display for StorageError {
                 write!(f, "challenge {id} already resolved")
             }
             StorageError::UnknownManifest(id) => write!(f, "unknown manifest {id}"),
+            StorageError::SelfHostRefusedByPolicy { content_id, reason } => write!(
+                f,
+                "self-hosting {content_id} refused by the owner's own policy: {reason}"
+            ),
             StorageError::NoParityToAudit { manifest_id } => write!(
                 f,
                 "manifest {manifest_id} has no parity shards, so there is no \
@@ -855,6 +882,73 @@ impl StorageRegistry {
     /// The same `manifest_id` is a no-op (per the chain-only rule: the
     /// Canonical manifest lives in `ContentManifest`; this index only
     /// Tracks "is this manifest known to the storage domain?").
+    /// Record what an owner declared about content they intend to self-host.
+    ///
+    /// The declaration is validated against the device profile that made it,
+    /// so a policy naming a different owner, or marking content critical while
+    /// asking for no paid replicas, is refused at the door rather than stored
+    /// and read later by something that trusts it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::SelfHostRefusedByPolicy`] when the policy and the
+    /// profile disagree, carrying the reason so the caller can show it.
+    pub fn declare_self_host_policy(
+        &mut self,
+        policy: crate::storage::MobileSelfContentPolicy,
+        profile: &crate::storage::MobileSelfProfile,
+    ) -> Result<(), StorageError> {
+        policy.validate_against_profile(profile).map_err(|reason| {
+            StorageError::SelfHostRefusedByPolicy {
+                content_id: policy.content_id,
+                reason,
+            }
+        })?;
+        self.self_host_policies.insert(policy.content_id, policy);
+        Ok(())
+    }
+
+    /// Whether this content may sit on a self-hosting device with the paid
+    /// replicas currently open for it.
+    ///
+    /// Returns `Ok(())` when no policy was declared, because content nobody
+    /// said anything about is not content anybody restricted. What it refuses
+    /// is the case the type was written for: an owner marked something
+    /// critical, asked for `n` paid replicas, and fewer than `n` exist.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::SelfHostRefusedByPolicy`] when self-hosting is off for
+    /// this content, or when the paid replicas the owner asked for are not
+    /// there.
+    pub fn check_self_host_allowed(
+        &self,
+        manifest_id: &ContentId,
+        content_id: &ContentId,
+    ) -> Result<(), StorageError> {
+        let Some(policy) = self.self_host_policies.get(content_id) else {
+            return Ok(());
+        };
+        if !policy.self_host_allowed {
+            return Err(StorageError::SelfHostRefusedByPolicy {
+                content_id: *content_id,
+                reason: "the owner turned self-hosting off for this content".into(),
+            });
+        }
+        let paid = self.active_replica_count(manifest_id, content_id);
+        let required = usize::from(policy.required_paid_replicas);
+        if paid < required {
+            return Err(StorageError::SelfHostRefusedByPolicy {
+                content_id: *content_id,
+                reason: format!(
+                    "the owner asked for {required} paid replica(s) before \
+                     self-hosting and {paid} are open"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Record that `operator` may not take storage work until
     /// `now_unix_secs + MISSED_CHALLENGE_COOLDOWN_SECS`.
     ///
@@ -1010,6 +1104,31 @@ impl StorageRegistry {
         // obligations, and the bond answers for them when it sleeps.
         if replica_index == 0 && !self.operator_class(&operator).may_hold_primary() {
             return Err(StorageError::MobileOperatorCannotHoldPrimary(operator));
+        }
+        // The owner's own declaration about this content, asked here because
+        // this is the only place a replica is actually placed.
+        //
+        // `MobileSelfContentPolicy` lets an owner say "this is critical, do
+        // not put it on a phone until `n` paid replicas exist".
+        // `check_self_host_allowed` was written to enforce that and tested
+        // six ways, and nothing in production called it: the policy could be
+        // declared, stored, hashed into the state root, and then ignored by
+        // the one path it was meant to govern. A rule nothing reads is not a
+        // rule.
+        //
+        // Asked only for a mobile operator, because that is what the policy
+        // is about. An always-on operator taking a replica is the case the
+        // owner was trying to get more of.
+        //
+        // Honest about the half that is still missing: `check` is wired here,
+        // but `declare_self_host_policy` has no transaction behind it yet, so
+        // `self_host_policies` is empty on a live chain and this call returns
+        // `Ok(())` every time. What it buys today is that the check runs on
+        // the placement path, so the day a declaration can reach the chain it
+        // is already being read. Wiring the declaration needs a transaction
+        // type, which is a consensus-surface decision.
+        if self.operator_class(&operator) == OperatorClass::Mobile {
+            self.check_self_host_allowed(&manifest.manifest_id, &shard_id)?;
         }
         // A deal-open carries its own copy of the manifest, and
         // `register_manifest` is first-writer-wins, so this path can seed the

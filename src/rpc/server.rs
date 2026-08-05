@@ -3110,6 +3110,7 @@ impl BudlumApiServer for RpcServer {
             callback: cb,
             submitted_at_block: current_height,
             deadline_block,
+            effort: crate::lubot::effort::EffortTier::default(),
         };
         req.request_id = req.calculate_id();
 
