@@ -17,16 +17,6 @@
 //! prefix for the same reason: a measurement that cannot tell two modules
 //! apart reports the wrong one as dead.
 
-/// Fixed-point arithmetic for generators.
-///
-/// Floats are refused in consensus code because two machines can disagree on
-/// the last bit, and a generator that disagrees produces a different object
-/// on different nodes. Integers do not have that problem, so this is the
-/// arithmetic generators are given instead.
-///
-/// The scale is a power of two so that multiplication and division reduce to
-/// shifts, which keeps the rounding exact rather than merely consistent.
-
 /// Fractional bits. 16 gives a resolution of about 1.5e-5, which is finer
 /// than one part in 65535 and therefore finer than 8-bit or 16-bit colour
 /// can express.
