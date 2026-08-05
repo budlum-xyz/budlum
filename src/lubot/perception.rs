@@ -103,7 +103,7 @@ impl PerceptionKind {
     /// The ceiling for this modality, in the unit that modality is measured
     /// in.
     ///
-    /// The unit differs per variant on purpose; see [`PerceptionKind::unit`]
+    /// The unit differs per variant on purpose; see [`PerceptionKind::perception_unit`]
     /// for the name of it. A single shared number would have to be bytes,
     /// and bytes are the wrong unit for three of the four.
     pub const fn max_units(self) -> u32 {
@@ -255,7 +255,7 @@ pub struct PerceptionRequest {
     pub content_id: ContentId,
     /// What kind of reading this is.
     pub kind: PerceptionKind,
-    /// How much, in the unit of [`PerceptionKind::unit`].
+    /// How much, in the unit of [`PerceptionKind::perception_unit`].
     pub declared_units: u32,
 }
 
