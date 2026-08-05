@@ -124,6 +124,10 @@ jobs:
         run: bash ./scripts/check-derived-content-stays-byte-exact.sh --self-test
       - name: Turetilmis icerik bayt-kesin
         run: bash ./scripts/check-derived-content-stays-byte-exact.sh
+      - name: Iddia birimi kanaryasi
+        run: bash ./scripts/check-reduction-claims-state-both-units.sh --self-test
+      - name: Iddia iki birimi de soyluyor
+        run: bash ./scripts/check-reduction-claims-state-both-units.sh
 
 
   budzero:
