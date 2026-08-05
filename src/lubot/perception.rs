@@ -441,7 +441,7 @@ mod tests {
         ];
         let mut set = ModalitySet::none();
         for (i, kind) in kinds.iter().enumerate() {
-            set = set.with(*kind);
+            set = set.with_modality(*kind);
             assert_eq!(set.declared_count(), i as u32 + 1);
         }
         for kind in kinds {
