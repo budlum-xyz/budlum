@@ -109,6 +109,34 @@ count_pollen_asks() {
   grep -cE 'pollen_asset_for_content' "$file" || true
 }
 
+# 7. The AI runtime cannot reach storage bytes except through Pollen.
+#
+# Measured today: nothing under `src/ai/` mentions a manifest or a content
+# id, so a model receives `input_ref` as opaque bytes and has no path to
+# fetch an object. That is what makes the prefix-less branch of
+# `validate_ai_read_ref` safe: a request with no Pollen prefix cannot reach
+# protected bytes because it cannot reach any bytes.
+#
+# The safety is a property of the wiring, not a written rule, and the moment
+# someone connects the AI path to storage for a good reason, the prefix-less
+# branch becomes a way around every paywall. Pinned now, while the tree is
+# already clean and the check costs nothing to satisfy.
+find_ai_storage_reach() {
+  local dir="$1"
+  [ -d "$dir" ] || return 0
+  local f
+  # Per file, not per line: the authorisation call and the fetch sit on
+  # different lines, so a line-scoped exclusion would flag the very shape the
+  # rule wants. A file that reaches storage has to also mention Pollen.
+  while IFS= read -r f; do
+    if grep -qE 'get_storage_manifest|storage_registry|reconstruct_object|deals_by_shard' "$f" \
+       && ! grep -qiE 'pollen|authorize_content_read' "$f"; then
+      grep -nE 'get_storage_manifest|storage_registry|reconstruct_object|deals_by_shard' \
+        "$f" | sed "s|^|$f:|"
+    fi
+  done < <(find "$dir" -name '*.rs' 2>/dev/null)
+}
+
 # --------------------------------------------------------------- self test
 if [ "${1:-}" = "--self-test" ]; then
   tmp="$(mktemp -d)"
@@ -225,6 +253,35 @@ EOF
     || fail "canary 10: a guarded endpoint must pass"
   canaries=$((canaries + 1))
 
+  # Canary 12: an AI module reaching storage directly is caught.
+  mkdir -p "$tmp/ai12"
+  cat > "$tmp/ai12/m.rs" <<'EOF'
+    let manifest = chain.get_storage_manifest(id).await;
+EOF
+  [ -n "$(find_ai_storage_reach "$tmp/ai12")" ] \
+    || fail "canary 12: an AI module reaching storage was not detected"
+  canaries=$((canaries + 1))
+
+  # Canary 13: reaching it *through* Pollen is allowed, or the rule would
+  # forbid the very integration it exists to require.
+  mkdir -p "$tmp/ai13"
+  cat > "$tmp/ai13/m.rs" <<'EOF'
+    let ok = pollen.authorize_content_read(&id, &who, grant, block)?;
+    let manifest = chain.get_storage_manifest(id).await;
+EOF
+  [ -z "$(find_ai_storage_reach "$tmp/ai13")" ] \
+    || fail "canary 13: a Pollen-mediated storage read must be allowed"
+  canaries=$((canaries + 1))
+
+  # Canary 14: an AI module touching no storage at all is clean.
+  mkdir -p "$tmp/ai14"
+  cat > "$tmp/ai14/m.rs" <<'EOF'
+    let out = model.infer(&request.input_ref);
+EOF
+  [ -z "$(find_ai_storage_reach "$tmp/ai14")" ] \
+    || fail "canary 14: an AI module with no storage reach must not be flagged"
+  canaries=$((canaries + 1))
+
   # Canary 11: an endpoint touching no shard id is not asked to guard.
   cat > "$tmp/c11.rs" <<'EOF'
     async fn unrelated(&self) -> Result<Value, E> {
@@ -269,6 +326,13 @@ if [ -f "$RPC_SRC" ]; then
     fail "RPC endpoint(s) publish shard ids without asking Pollen: the handles for \
 fetching paid bytes are served to anyone"
   fi
+fi
+
+reach="$(find_ai_storage_reach "$ROOT/src/ai")"
+if [ -n "$reach" ]; then
+  echo "$reach" >&2
+  fail "the AI runtime reaches storage without going through Pollen: a request with no \
+Pollen prefix would read protected bytes"
 fi
 
 echo "OK: paid content needs a live grant, stays out of the public class, and is bound permanently"
