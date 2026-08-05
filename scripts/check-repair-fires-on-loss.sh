@@ -82,6 +82,24 @@ check_margin_scales_with_the_scheme() {
     || fail "repair_margin no longer derives from the parity budget.
   A constant margin means two different things on (10,16) and LRC k=2000."
 
+  # Two definitions are required, and checking only that the name exists
+  # somewhere would accept either one alone. `ErasureScheme::repair_margin`
+  # holds the rule; `ContentManifest::repair_margin` forwards it, and exists
+  # so no call site reaches through to `erasure` and substitutes its own
+  # number. Measured while writing this gate: deleting the forwarder left the
+  # name present once and the gate passed, while the tree no longer compiled.
+  local definitions
+  definitions="$(grep -c 'fn repair_margin' <<<"$code" || true)"
+  [ "$definitions" -ge 2 ] || fail "repair_margin is defined $definitions time(s), expected 2.
+  ErasureScheme holds the rule and ContentManifest forwards it. With only
+  one of them, either the rule is gone or every caller has to reach through
+  to \`erasure\` itself, which is how a per-scheme rule becomes a constant."
+
+  grep -A 4 'fn repair_margin' <<<"$code" | grep -q 'self.erasure.repair_margin()' \
+    || fail "ContentManifest::repair_margin does not forward to the scheme.
+  A forwarder that computes its own answer is a second rule, and two rules
+  drift."
+
   local reg
   reg="$(code_of "$(registry_file)")"
   grep -A 20 'fn objects_below_own_repair_margin' <<<"$reg" | grep -q 'repair_margin()' \
@@ -177,28 +195,45 @@ if [ "${1:-}" = "--self-test" ]; then
     's|self.parity_count()|2u32|g' \
     check_margin_scales_with_the_scheme
 
-  # Canary 4: unrecoverable objects get folded back into the band.
+  # Canary 4: the forwarder is deleted and the rule left behind. Found by
+  # sabotage: with only the name check, this passed while the tree failed to
+  # compile, which is a gate reporting on code that does not exist.
+  break_and_expect_failure \
+    "a deleted ContentManifest::repair_margin forwarder" \
+    "src/storage/manifest.rs" \
+    '0,/fn repair_margin/{b};s|pub fn repair_margin|pub fn CANARY_REMOVED_forwarder|' \
+    check_margin_scales_with_the_scheme
+
+  # Canary 5: the forwarder survives but computes its own answer, which is
+  # the subtler version: two rules that drift apart.
+  break_and_expect_failure \
+    "a forwarder that answers for itself instead of asking the scheme" \
+    "src/storage/manifest.rs" \
+    's|self.erasure.repair_margin()|2u32|' \
+    check_margin_scales_with_the_scheme
+
+  # Canary 6: unrecoverable objects get folded back into the band.
   break_and_expect_failure \
     "unrecoverable objects hidden inside the repair band" \
     "src/chain/chain_actor.rs" \
     's|unrecoverable_objects|CANARY_REMOVED_unrecoverable|g' \
     check_unrecoverable_is_separate
 
-  # Canary 5: expiry stops opening a ticket, the asymmetry that was measured.
+  # Canary 7: expiry stops opening a ticket, the asymmetry that was measured.
   break_and_expect_failure \
     "expiry that drops a shard without a ticket" \
     "src/chain/blockchain.rs" \
     's|open_expiry_reallocation|CANARY_REMOVED_expiry|g' \
     check_expiry_opens_a_ticket
 
-  # Canary 6: renewal is removed, which makes every expiry cost a transfer.
+  # Canary 8: renewal is removed, which makes every expiry cost a transfer.
   break_and_expect_failure \
     "expiry with no renewal path" \
     "src/domain/storage_deal.rs" \
     's|fn renew_deal|fn CANARY_REMOVED_renew|g' \
     check_expiry_opens_a_ticket
 
-  # Canary 7: the per-object scan stops asking the manifest and hardcodes
+  # Canary 9: the per-object scan stops asking the manifest and hardcodes
   # one number, which is how a per-scheme rule quietly becomes a constant.
   break_and_expect_failure \
     "a per-object scan that stopped asking each scheme" \
@@ -206,14 +241,15 @@ if [ "${1:-}" = "--self-test" ]; then
     's|manifest.repair_margin()|2u32|g' \
     check_margin_scales_with_the_scheme
 
-  # 8. The tree as committed must pass, or the gate rejects every pull
+  # 10. The tree as committed must pass, or the gate rejects every pull
   #    request for reasons unrelated to its diff.
   run_all || { echo "BROKEN GATE: the committed tree was rejected!" >&2; exit 1; }
 
   echo "repair trigger gate self-test OK: $canaries canaries."
   echo "  An unwired trigger, a constant margin, a margin detached from parity,"
-  echo "  hidden unrecoverable objects, a ticketless expiry, a missing renewal"
-  echo "  path and a scan that stopped asking each scheme are all rejected;"
+  echo "  a deleted forwarder, a forwarder that answers for itself, hidden"
+  echo "  unrecoverable objects, a ticketless expiry, a missing renewal path"
+  echo "  and a scan that stopped asking each scheme are all rejected;"
   echo "  the tree as committed passes."
   exit 0
 fi

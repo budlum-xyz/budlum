@@ -643,6 +643,17 @@ impl ContentManifest {
         live < self.erasure.k.saturating_add(margin)
     }
 
+    /// The headroom this object's own scheme asks for, forwarded from
+    /// [`ErasureScheme::repair_margin`].
+    ///
+    /// The sweep holds manifests, not schemes, and reaching through to
+    /// `erasure` at every call site would let one of them quietly substitute
+    /// a different number. Named here so a caller cannot ask the question
+    /// any way but the right one.
+    pub fn repair_margin(&self) -> u32 {
+        self.erasure.repair_margin()
+    }
+
     /// Declare how the object was protected before it was sharded.
     ///
     /// This changes `manifest_id`, which is the point: the declaration is part
