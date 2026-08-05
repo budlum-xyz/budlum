@@ -186,7 +186,7 @@ pub struct DictionaryRegistry {
 
 impl DictionaryRegistry {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn empty_registry() -> Self {
         Self::default()
     }
 
@@ -199,7 +199,7 @@ impl DictionaryRegistry {
     /// # Errors
     ///
     /// [`DictionaryError::Empty`] and [`DictionaryError::TooLarge`].
-    pub fn register(&mut self, id: ContentId, size: u64) -> Result<(), DictionaryError> {
+    pub fn register_dictionary(&mut self, id: ContentId, size: u64) -> Result<(), DictionaryError> {
         if size == 0 {
             return Err(DictionaryError::Empty);
         }
@@ -219,13 +219,13 @@ impl DictionaryRegistry {
 
     /// Whether a dictionary is registered and usable.
     #[must_use]
-    pub fn contains(&self, id: &ContentId) -> bool {
+    pub fn has_dictionary(&self, id: &ContentId) -> bool {
         self.entries.contains_key(id)
     }
 
     /// Current reference count, or `None` if unregistered.
     #[must_use]
-    pub fn refs(&self, id: &ContentId) -> Option<u32> {
+    pub fn reference_count(&self, id: &ContentId) -> Option<u32> {
         self.entries.get(id).map(|e| e.refs)
     }
 
@@ -242,7 +242,7 @@ impl DictionaryRegistry {
     /// [`DictionaryError::UnknownDictionary`],
     /// [`DictionaryError::DictionaryChain`] and
     /// [`DictionaryError::Retiring`].
-    pub fn check_reference(
+    pub fn check_dictionary_reference(
         &self,
         id: &ContentId,
         referrer_is_dictionary: bool,
@@ -268,8 +268,8 @@ impl DictionaryRegistry {
     ///
     /// # Errors
     ///
-    /// Everything [`DictionaryRegistry::check_reference`] returns.
-    pub fn acquire(
+    /// Everything [`DictionaryRegistry::check_dictionary_reference`] returns.
+    pub fn acquire_dictionary(
         &mut self,
         id: &ContentId,
         referrer_is_dictionary: bool,
@@ -292,7 +292,7 @@ impl DictionaryRegistry {
     /// Unknown dictionaries are ignored rather than refused: this runs on a
     /// cleanup path, and a cleanup that fails on already-absent state turns
     /// a retry into an error.
-    pub fn release(&mut self, id: &ContentId, now_epoch: u64) {
+    pub fn release_dictionary(&mut self, id: &ContentId, now_epoch: u64) {
         let Some(entry) = self.entries.get_mut(id) else {
             return;
         };
@@ -308,7 +308,11 @@ impl DictionaryRegistry {
     ///
     /// [`DictionaryError::StillReferenced`] while objects depend on it, and
     /// [`DictionaryError::GraceNotElapsed`] before the window closes.
-    pub fn delete(&mut self, id: &ContentId, now_epoch: u64) -> Result<(), DictionaryError> {
+    pub fn delete_dictionary(
+        &mut self,
+        id: &ContentId,
+        now_epoch: u64,
+    ) -> Result<(), DictionaryError> {
         let Some(entry) = self.entries.get(id) else {
             return Ok(());
         };
@@ -338,7 +342,7 @@ impl DictionaryRegistry {
 
     /// Dictionaries whose grace window has closed.
     #[must_use]
-    pub fn deletable(&self, now_epoch: u64) -> Vec<ContentId> {
+    pub fn deletable_dictionaries(&self, now_epoch: u64) -> Vec<ContentId> {
         self.entries
             .iter()
             .filter(|(_, e)| e.refs == 0 && e.deletable_at_epoch.is_some_and(|at| now_epoch >= at))
@@ -347,12 +351,12 @@ impl DictionaryRegistry {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn dictionary_count(&self) -> usize {
         self.entries.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub fn has_no_dictionaries(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -363,7 +367,7 @@ impl DictionaryRegistry {
     /// when a dictionary may be deleted, and a deletion two nodes disagree
     /// about is an object one of them can no longer read.
     #[must_use]
-    pub fn root(&self) -> [u8; 32] {
+    pub fn dictionary_root(&self) -> [u8; 32] {
         let mut buf = Vec::with_capacity(8 + self.entries.len() * 52);
         buf.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
         for (id, e) in &self.entries {
@@ -387,19 +391,19 @@ mod tests {
 
     #[test]
     fn a_registered_dictionary_can_be_referenced() {
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false)
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false)
             .expect("a registered dictionary takes a reference");
-        assert_eq!(r.refs(&did(1)), Some(1));
+        assert_eq!(r.reference_count(&did(1)), Some(1));
     }
 
     #[test]
     fn an_unregistered_dictionary_is_refused() {
         // Accepting it would register an object nobody can ever decompress.
-        let r = DictionaryRegistry::new();
+        let r = DictionaryRegistry::empty_registry();
         let err = r
-            .check_reference(&did(9), false)
+            .check_dictionary_reference(&did(9), false)
             .expect_err("unregistered dictionary");
         assert!(
             matches!(err, DictionaryError::UnknownDictionary { .. }),
@@ -411,10 +415,10 @@ mod tests {
     fn a_dictionary_cannot_reference_another_dictionary() {
         // Chains make a read depend on an unknown number of fetches, and a
         // cycle makes it depend on an infinite number.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
         let err = r
-            .check_reference(&did(1), true)
+            .check_dictionary_reference(&did(1), true)
             .expect_err("dictionaries do not chain");
         assert!(
             matches!(err, DictionaryError::DictionaryChain { .. }),
@@ -424,9 +428,9 @@ mod tests {
 
     #[test]
     fn an_empty_dictionary_is_refused() {
-        let mut r = DictionaryRegistry::new();
+        let mut r = DictionaryRegistry::empty_registry();
         assert!(matches!(
-            r.register(did(1), 0).expect_err("empty"),
+            r.register_dictionary(did(1), 0).expect_err("empty"),
             DictionaryError::Empty
         ));
     }
@@ -434,9 +438,9 @@ mod tests {
     #[test]
     fn an_oversized_dictionary_is_refused() {
         // Its size lands on the latency of every first read.
-        let mut r = DictionaryRegistry::new();
+        let mut r = DictionaryRegistry::empty_registry();
         let err = r
-            .register(did(1), MAX_DICTIONARY_BYTES + 1)
+            .register_dictionary(did(1), MAX_DICTIONARY_BYTES + 1)
             .expect_err("above the maximum");
         assert!(
             matches!(err, DictionaryError::TooLarge { .. }),
@@ -448,29 +452,29 @@ mod tests {
     fn registering_twice_is_not_an_error() {
         // A replayed transaction must not fail on state that is already what
         // it asked for.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.register(did(1), 4096).expect("idempotent");
-        assert_eq!(r.len(), 1);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.register_dictionary(did(1), 4096).expect("idempotent");
+        assert_eq!(r.dictionary_count(), 1);
     }
 
     #[test]
     fn the_last_release_opens_a_grace_window_rather_than_deleting() {
         // The race this closes really happens: a manifest naming a dictionary
         // can be in flight while the last existing reference retires.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false).unwrap();
-        r.release(&did(1), 100);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        r.release_dictionary(&did(1), 100);
 
-        assert!(r.contains(&did(1)), "the dictionary is still here");
-        assert_eq!(r.refs(&did(1)), Some(0));
+        assert!(r.has_dictionary(&did(1)), "the dictionary is still here");
+        assert_eq!(r.reference_count(&did(1)), Some(0));
         assert!(
-            r.deletable(100).is_empty(),
+            r.deletable_dictionaries(100).has_no_dictionaries(),
             "not deletable during the window"
         );
         assert_eq!(
-            r.deletable(100 + DICTIONARY_GRACE_EPOCHS),
+            r.deletable_dictionaries(100 + DICTIONARY_GRACE_EPOCHS),
             vec![did(1)],
             "deletable once the window closes"
         );
@@ -480,13 +484,13 @@ mod tests {
     fn a_retiring_dictionary_refuses_new_references() {
         // Otherwise a dictionary being retired is resurrected on every
         // arrival and the retirement never completes.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false).unwrap();
-        r.release(&did(1), 100);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        r.release_dictionary(&did(1), 100);
 
         let err = r
-            .acquire(&did(1), false)
+            .acquire_dictionary(&did(1), false)
             .expect_err("a retiring dictionary takes no new references");
         assert!(
             matches!(err, DictionaryError::Retiring { .. }),
@@ -498,60 +502,66 @@ mod tests {
     fn a_referenced_dictionary_cannot_be_deleted() {
         // Deleting it would make every referencing object unreadable, which
         // is a data loss the chain would have caused itself.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false).unwrap();
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
 
-        let err = r.delete(&did(1), 10_000).expect_err("still referenced");
+        let err = r
+            .delete_dictionary(&did(1), 10_000)
+            .expect_err("still referenced");
         match err {
             DictionaryError::StillReferenced { refs, .. } => assert_eq!(refs, 1),
             other => panic!("wrong error: {other:?}"),
         }
-        assert!(r.contains(&did(1)), "a refused delete must not remove it");
+        assert!(
+            r.has_dictionary(&did(1)),
+            "a refused delete must not remove it"
+        );
     }
 
     #[test]
     fn deletion_before_the_grace_window_closes_is_refused() {
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false).unwrap();
-        r.release(&did(1), 100);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        r.release_dictionary(&did(1), 100);
 
-        let err = r.delete(&did(1), 101).expect_err("too early");
+        let err = r.delete_dictionary(&did(1), 101).expect_err("too early");
         assert!(
             matches!(err, DictionaryError::GraceNotElapsed { .. }),
             "got {err:?}"
         );
-        assert!(r.contains(&did(1)));
+        assert!(r.has_dictionary(&did(1)));
     }
 
     #[test]
     fn deletion_after_the_window_succeeds() {
         // The canary for the two tests above: a delete that always refused
         // would pass both and leave the registry growing forever.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false).unwrap();
-        r.release(&did(1), 100);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        r.release_dictionary(&did(1), 100);
 
-        r.delete(&did(1), 100 + DICTIONARY_GRACE_EPOCHS)
+        r.delete_dictionary(&did(1), 100 + DICTIONARY_GRACE_EPOCHS)
             .expect("the window has closed and nothing references it");
-        assert!(!r.contains(&did(1)));
+        assert!(!r.has_dictionary(&did(1)));
     }
 
     #[test]
     fn a_reference_during_the_window_cancels_the_retirement() {
         // Measured through `deletable` rather than a field, because what
         // matters is that the dictionary stops being a deletion candidate.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        r.acquire(&did(1), false).unwrap();
-        r.acquire(&did(1), false).unwrap();
-        r.release(&did(1), 100);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        r.release_dictionary(&did(1), 100);
 
-        assert_eq!(r.refs(&did(1)), Some(1), "one reference is left");
+        assert_eq!(r.reference_count(&did(1)), Some(1), "one reference is left");
         assert!(
-            r.deletable(100 + DICTIONARY_GRACE_EPOCHS).is_empty(),
+            r.deletable_dictionaries(100 + DICTIONARY_GRACE_EPOCHS)
+                .has_no_dictionaries(),
             "a live reference keeps it out of the deletion set"
         );
     }
@@ -560,23 +570,23 @@ mod tests {
     fn releasing_an_unknown_dictionary_is_silent() {
         // Cleanup paths get retried, and a retry that errors on absent state
         // turns a no-op into a failure.
-        let mut r = DictionaryRegistry::new();
-        r.release(&did(7), 100);
-        assert!(r.is_empty());
+        let mut r = DictionaryRegistry::empty_registry();
+        r.release_dictionary(&did(7), 100);
+        assert!(r.has_no_dictionaries());
     }
 
     #[test]
     fn the_root_is_order_independent() {
         // Two nodes inserting in different orders must reach the same root.
-        let mut a = DictionaryRegistry::new();
-        let mut b = DictionaryRegistry::new();
+        let mut a = DictionaryRegistry::empty_registry();
+        let mut b = DictionaryRegistry::empty_registry();
         for i in [3u8, 1, 2] {
-            a.register(did(i), 1024 * u64::from(i)).unwrap();
+            a.register_dictionary(did(i), 1024 * u64::from(i)).unwrap();
         }
         for i in [2u8, 3, 1] {
-            b.register(did(i), 1024 * u64::from(i)).unwrap();
+            b.register_dictionary(did(i), 1024 * u64::from(i)).unwrap();
         }
-        assert_eq!(a.root(), b.root());
+        assert_eq!(a.dictionary_root(), b.dictionary_root());
     }
 
     #[test]
@@ -584,11 +594,11 @@ mod tests {
         // The count decides when a dictionary may be deleted, so two nodes
         // disagreeing about it disagree about whether an object stays
         // readable. A root blind to it would let that happen silently.
-        let mut r = DictionaryRegistry::new();
-        r.register(did(1), 4096).unwrap();
-        let before = r.root();
-        r.acquire(&did(1), false).unwrap();
-        assert_ne!(r.root(), before);
+        let mut r = DictionaryRegistry::empty_registry();
+        r.register_dictionary(did(1), 4096).unwrap();
+        let before = r.dictionary_root();
+        r.acquire_dictionary(&did(1), false).unwrap();
+        assert_ne!(r.dictionary_root(), before);
     }
 
     #[test]

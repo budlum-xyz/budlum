@@ -26,7 +26,7 @@
 //! an object is valid, which is a fork. Floating point cannot give that
 //! guarantee across machines, so it is refused, in the same way and for the
 //! same reason it is refused everywhere else in consensus code. What replaces
-//! it is [`fixed`], a small fixed-point library, because refusing floats
+//! it is [`crate::storage::fixed_point`], a small fixed-point library, because refusing floats
 //! without offering an alternative just moves the problem into every caller.
 //!
 //! # A budget, not a ceiling
@@ -51,100 +51,9 @@
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;
-
-/// Fixed-point arithmetic for generators.
-///
-/// Floats are refused in consensus code because two machines can disagree on
-/// the last bit, and a generator that disagrees produces a different object
-/// on different nodes. Integers do not have that problem, so this is the
-/// arithmetic generators are given instead.
-///
-/// The scale is a power of two so that multiplication and division reduce to
-/// shifts, which keeps the rounding exact rather than merely consistent.
-pub mod fixed {
-    /// Fractional bits. 16 gives a resolution of about 1.5e-5, which is finer
-    /// than one part in 65535 and therefore finer than 8-bit or 16-bit colour
-    /// can express.
-    pub const FRAC_BITS: u32 = 16;
-
-    /// 1.0 in fixed point.
-    pub const ONE: i64 = 1 << FRAC_BITS;
-
-    /// Convert an integer to fixed point. Saturates rather than wrapping: a
-    /// generator that overflows should produce a clamped pixel, not a
-    /// wrapped one that looks like valid output.
-    #[must_use]
-    pub const fn from_int(v: i32) -> i64 {
-        (v as i64) << FRAC_BITS
-    }
-
-    /// Truncate towards zero, the same direction on every input, because a
-    /// rounding rule that depends on sign is a rounding rule two
-    /// implementations can get differently.
-    #[must_use]
-    pub const fn to_int(v: i64) -> i32 {
-        (v >> FRAC_BITS) as i32
-    }
-
-    /// Multiply. The intermediate is `i128` so the product of two large
-    /// fixed-point values does not overflow before the shift brings it back
-    /// into range.
-    #[must_use]
-    pub fn mul(a: i64, b: i64) -> i64 {
-        let wide = (a as i128) * (b as i128);
-        (wide >> FRAC_BITS) as i64
-    }
-
-    /// Divide. Returns zero for a zero divisor rather than panicking: a
-    /// generator is untrusted input, and a panic in a read path is a denial
-    /// of service. Zero is a defined, reproducible answer, which is what
-    /// determinism needs.
-    #[must_use]
-    pub fn div(a: i64, b: i64) -> i64 {
-        if b == 0 {
-            return 0;
-        }
-        (((a as i128) << FRAC_BITS) / (b as i128)) as i64
-    }
-
-    /// Clamp into `[0, ONE]`, the range a colour channel occupies.
-    #[must_use]
-    pub const fn clamp_unit(v: i64) -> i64 {
-        if v < 0 {
-            0
-        } else if v > ONE {
-            ONE
-        } else {
-            v
-        }
-    }
-
-    /// Integer square root of a fixed-point value, by Newton's method on
-    /// integers.
-    ///
-    /// Written out rather than calling `f64::sqrt` because that is the exact
-    /// operation whose last bit differs between machines. The iteration count
-    /// is fixed rather than convergence-based, so the cost is the same on
-    /// every input and cannot be used to time the contents.
-    #[must_use]
-    pub fn sqrt(v: i64) -> i64 {
-        if v <= 0 {
-            return 0;
-        }
-        let mut x = v;
-        let mut y = (x + 1) / 2;
-        // 40 iterations is past convergence for every i64, and a fixed count
-        // keeps the step cost of a generator predictable.
-        for _ in 0..40 {
-            if y >= x {
-                break;
-            }
-            x = y;
-            y = (x + v / x) / 2;
-        }
-        x << (FRAC_BITS / 2)
-    }
-}
+use crate::storage::fixed_point::{
+    fixed_clamp_unit, fixed_div, fixed_from_int, fixed_mul, fixed_sqrt, fixed_to_int, FIXED_ONE,
+};
 
 /// How the bytes behind a manifest come to exist.
 ///
@@ -212,7 +121,7 @@ impl GeneratorId {
     /// reordering the enum would otherwise silently change every id ever
     /// computed for a generated object.
     #[must_use]
-    pub const fn commitment_tag(self) -> u8 {
+    pub const fn generator_commitment_tag(self) -> u8 {
         match self {
             Self::Avatar => 1,
             Self::Gradient => 2,
@@ -327,7 +236,7 @@ impl Meter {
 /// [`GenerateError::BudgetExhausted`] when the generator needs more steps
 /// than were paid for, and [`GenerateError::LengthMismatch`] if a generator
 /// emits a different length than it declared.
-pub fn generate(spec: &GeneratedSpec) -> Result<Vec<u8>, GenerateError> {
+pub fn generate_content(spec: &GeneratedSpec) -> Result<Vec<u8>, GenerateError> {
     if spec.output_len == 0 {
         return Err(GenerateError::EmptyOutput);
     }
@@ -360,18 +269,18 @@ pub fn generate(spec: &GeneratedSpec) -> Result<Vec<u8>, GenerateError> {
 
 /// Produce the bytes and check them against the id the manifest carries.
 ///
-/// This is what a reader calls. `generate` alone says what a spec draws;
+/// This is what a reader calls. `generate_content` alone says what a spec draws;
 /// this says whether what it draws is the object being asked for.
 ///
 /// # Errors
 ///
-/// Everything [`generate`] can return, plus [`GenerateError::IdMismatch`]
+/// Everything [`generate_content`] can return, plus [`GenerateError::IdMismatch`]
 /// when the bytes do not hash to `expected`.
 pub fn generate_and_verify(
     spec: &GeneratedSpec,
     expected: ContentId,
 ) -> Result<Vec<u8>, GenerateError> {
-    let bytes = generate(spec)?;
+    let bytes = generate_content(spec)?;
     let produced = ContentId::of(&bytes);
     if produced != expected {
         return Err(GenerateError::IdMismatch { expected, produced });
@@ -389,7 +298,7 @@ pub fn generate_and_verify(
 pub fn generated_spec_digest(spec: &GeneratedSpec) -> [u8; 32] {
     hash_fields_bytes(&[
         b"BDLM_GENERATED_SPEC_V1",
-        &[spec.generator.commitment_tag()],
+        &[spec.generator.generator_commitment_tag()],
         &spec.seed,
         &spec.output_len.to_le_bytes(),
         &spec.step_budget.to_le_bytes(),
@@ -503,21 +412,21 @@ fn draw_gradient(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>
     let dir = stream.next_byte() % 3;
 
     let mut out = Vec::with_capacity(len as usize);
-    let span = fixed::from_int(side.saturating_sub(1).max(1) as i32);
+    let span = fixed_from_int(side.saturating_sub(1).max(1) as i32);
     for y in 0..side {
         for x in 0..side {
             let along = match dir {
-                0 => fixed::from_int(x as i32),
-                1 => fixed::from_int(y as i32),
-                _ => fixed::div(fixed::from_int((x + y) as i32), fixed::from_int(2)),
+                0 => fixed_from_int(x as i32),
+                1 => fixed_from_int(y as i32),
+                _ => fixed_div(fixed_from_int((x + y) as i32), fixed_from_int(2)),
             };
-            let t = fixed::clamp_unit(fixed::div(along, span));
+            let t = fixed_clamp_unit(fixed_div(along, span));
             for ch in 0..3 {
-                let lo = fixed::from_int(i32::from(a[ch]));
-                let hi = fixed::from_int(i32::from(b[ch]));
-                let v = lo + fixed::mul(hi - lo, t);
-                out.push(fixed::to_int(
-                    fixed::clamp_unit(fixed::div(v, fixed::from_int(255))) * 255 / fixed::ONE,
+                let lo = fixed_from_int(i32::from(a[ch]));
+                let hi = fixed_from_int(i32::from(b[ch]));
+                let v = lo + fixed_mul(hi - lo, t);
+                out.push(fixed_to_int(
+                    fixed_clamp_unit(fixed_div(v, fixed_from_int(255))) * 255 / FIXED_ONE,
                 ) as u8);
             }
         }
@@ -530,7 +439,7 @@ fn draw_gradient(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>
 /// Concentric rings from a distance field.
 ///
 /// Included because it is the generator that actually needs
-/// [`fixed::sqrt`]: the others would work with plain integers, and a
+/// [`fixed_sqrt`]: the others would work with plain integers, and a
 /// fixed-point library nothing exercises is a library nobody has checked.
 fn draw_rings(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, GenerateError> {
     let side = square_side(len);
@@ -539,16 +448,16 @@ fn draw_rings(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, G
     let c2 = [stream.next_byte(), stream.next_byte(), stream.next_byte()];
     let period = i64::from(stream.next_byte() % 16 + 4);
 
-    let cx = fixed::from_int((side / 2) as i32);
+    let cx = fixed_from_int((side / 2) as i32);
     let cy = cx;
     let mut out = Vec::with_capacity(len as usize);
     for y in 0..side {
         for x in 0..side {
-            let dx = fixed::from_int(x as i32) - cx;
-            let dy = fixed::from_int(y as i32) - cy;
-            let d2 = fixed::mul(dx, dx) + fixed::mul(dy, dy);
-            let d = fixed::sqrt(fixed::to_int(d2).max(0) as i64);
-            let ring = (fixed::to_int(d) as i64 / period) % 2;
+            let dx = fixed_from_int(x as i32) - cx;
+            let dy = fixed_from_int(y as i32) - cy;
+            let d2 = fixed_mul(dx, dx) + fixed_mul(dy, dy);
+            let d = fixed_sqrt(fixed_to_int(d2).max(0) as i64);
+            let ring = (fixed_to_int(d) as i64 / period) % 2;
             let c = if ring == 0 { c1 } else { c2 };
             out.extend_from_slice(&c);
         }
@@ -581,8 +490,8 @@ mod tests {
             GeneratorId::Rings,
         ] {
             let s = spec(g, 7, 3072, 100_000);
-            let a = generate(&s).expect("generates");
-            let b = generate(&s).expect("generates");
+            let a = generate_content(&s).expect("generates");
+            let b = generate_content(&s).expect("generates");
             assert_eq!(a, b, "{g:?} is not deterministic");
         }
     }
@@ -591,8 +500,8 @@ mod tests {
     fn a_different_seed_produces_different_bytes() {
         // Without this the seed would be decoration and a collection of ten
         // thousand items would be ten thousand copies of one picture.
-        let a = generate(&spec(GeneratorId::Avatar, 1, 3072, 100_000)).unwrap();
-        let b = generate(&spec(GeneratorId::Avatar, 2, 3072, 100_000)).unwrap();
+        let a = generate_content(&spec(GeneratorId::Avatar, 1, 3072, 100_000)).unwrap();
+        let b = generate_content(&spec(GeneratorId::Avatar, 2, 3072, 100_000)).unwrap();
         assert_ne!(a, b);
     }
 
@@ -601,7 +510,7 @@ mod tests {
         // The check that makes generated content safe to serve: the id is
         // still the hash of the bytes, exactly as it is for stored content.
         let s = spec(GeneratorId::Gradient, 3, 3072, 100_000);
-        let bytes = generate(&s).unwrap();
+        let bytes = generate_content(&s).unwrap();
         let id = ContentId::of(&bytes);
         let got = generate_and_verify(&s, id).expect("the id derives from the bytes");
         assert_eq!(got, bytes);
@@ -625,7 +534,7 @@ mod tests {
     fn a_budget_too_small_stops_the_generator() {
         // The runaway defence. A generator that cannot finish inside what was
         // paid for stops rather than burning a reader's CPU.
-        let err = generate(&spec(GeneratorId::Rings, 5, 30_000, 10))
+        let err = generate_content(&spec(GeneratorId::Rings, 5, 30_000, 10))
             .expect_err("ten steps cannot draw thirty thousand bytes");
         match err {
             GenerateError::BudgetExhausted { budget, needed } => {
@@ -641,7 +550,7 @@ mod tests {
         // The canary for the test above. A budget check that refused
         // everything would pass that test and be useless.
         let s = spec(GeneratorId::Rings, 5, 3072, 200_000);
-        let out = generate(&s).expect("a paid-for generation completes");
+        let out = generate_content(&s).expect("a paid-for generation completes");
         assert_eq!(out.len(), 3072);
     }
 
@@ -649,7 +558,7 @@ mod tests {
     fn the_budget_is_charged_before_the_output_is_allocated() {
         // A spec asking for four megabytes on a ten step budget must fail on
         // the meter, not after allocating four megabytes.
-        let err = generate(&spec(GeneratorId::Avatar, 1, MAX_GENERATED_BYTES, 10))
+        let err = generate_content(&spec(GeneratorId::Avatar, 1, MAX_GENERATED_BYTES, 10))
             .expect_err("the output charge alone exceeds ten steps");
         assert!(
             matches!(err, GenerateError::BudgetExhausted { .. }),
@@ -659,7 +568,7 @@ mod tests {
 
     #[test]
     fn an_output_above_the_maximum_is_refused_before_any_work() {
-        let err = generate(&spec(
+        let err = generate_content(&spec(
             GeneratorId::Avatar,
             1,
             MAX_GENERATED_BYTES + 1,
@@ -674,7 +583,7 @@ mod tests {
 
     #[test]
     fn an_empty_object_is_refused() {
-        let err = generate(&spec(GeneratorId::Avatar, 1, 0, 1000)).expect_err("empty");
+        let err = generate_content(&spec(GeneratorId::Avatar, 1, 0, 1000)).expect_err("empty");
         assert!(matches!(err, GenerateError::EmptyOutput));
     }
 
@@ -688,7 +597,7 @@ mod tests {
             GeneratorId::Rings,
         ] {
             for len in [1u32, 2, 7, 100, 3071, 3072, 4097] {
-                let out = generate(&spec(g, 9, len, 500_000)).unwrap_or_else(|e| {
+                let out = generate_content(&spec(g, 9, len, 500_000)).unwrap_or_else(|e| {
                     panic!("{g:?} at {len} bytes: {e}");
                 });
                 assert_eq!(out.len(), len as usize, "{g:?} at {len} bytes");
@@ -736,9 +645,9 @@ mod tests {
     fn the_generator_tag_does_not_move_with_the_enum_order() {
         // Pinned so a later reordering cannot silently change every id ever
         // computed for a generated object.
-        assert_eq!(GeneratorId::Avatar.commitment_tag(), 1);
-        assert_eq!(GeneratorId::Gradient.commitment_tag(), 2);
-        assert_eq!(GeneratorId::Rings.commitment_tag(), 3);
+        assert_eq!(GeneratorId::Avatar.generator_commitment_tag(), 1);
+        assert_eq!(GeneratorId::Gradient.generator_commitment_tag(), 2);
+        assert_eq!(GeneratorId::Rings.generator_commitment_tag(), 3);
     }
 
     #[test]
@@ -748,29 +657,10 @@ mod tests {
         assert_eq!(ContentSource::default(), ContentSource::Stored);
     }
 
-    #[test]
-    fn fixed_point_arithmetic_is_exact_where_it_claims_to_be() {
-        use fixed::*;
-        assert_eq!(to_int(from_int(42)), 42);
-        assert_eq!(mul(ONE, ONE), ONE, "one is the multiplicative identity");
-        assert_eq!(mul(from_int(6), from_int(7)), from_int(42));
-        assert_eq!(div(from_int(84), from_int(2)), from_int(42));
-        assert_eq!(div(ONE, 0), 0, "division by zero is defined, not a panic");
-        assert_eq!(clamp_unit(-5), 0);
-        assert_eq!(clamp_unit(ONE * 2), ONE);
-        assert_eq!(to_int(sqrt(from_int(144) >> FRAC_BITS)), 12);
-    }
-
-    #[test]
-    fn fixed_point_multiplication_does_not_overflow_at_scale() {
-        // The i128 intermediate exists for this. Without it a product of two
-        // large fixed-point values wraps and a generator produces garbage
-        // that still hashes consistently, which is the worst kind of bug:
-        // deterministic and wrong.
-        let big = fixed::from_int(1_000_000);
-        let r = fixed::mul(big, fixed::from_int(1000));
-        assert_eq!(fixed::to_int(r), 1_000_000_000);
-    }
+    // The fixed-point arithmetic itself is tested in
+    // `crate::storage::fixed_point`, where the module lives. Duplicating
+    // those assertions here would mean two places to update and one of them
+    // going stale.
 
     #[test]
     fn a_thirty_two_byte_seed_is_the_whole_per_item_cost() {

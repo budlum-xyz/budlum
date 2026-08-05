@@ -21,6 +21,7 @@ pub mod content_id;
 pub mod db;
 pub mod dictionary;
 pub mod erasure;
+pub mod fixed_point;
 pub mod generated;
 pub mod lifecycle;
 pub mod lrc;
@@ -43,7 +44,7 @@ pub use erasure::{
     encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
 };
 pub use generated::{
-    generate, generate_and_verify, generated_spec_digest, ContentSource, GenerateError,
+    generate_and_verify, generate_content, generated_spec_digest, ContentSource, GenerateError,
     GeneratedSpec, GeneratorId, MAX_GENERATED_BYTES,
 };
 pub use lifecycle::{

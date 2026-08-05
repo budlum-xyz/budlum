@@ -158,13 +158,13 @@ impl LrcLayout {
 
     /// Every shard in the group: data, then local parity, then global.
     #[must_use]
-    pub fn total_shards(&self) -> u32 {
+    pub fn lrc_total_shards(&self) -> u32 {
         self.data_shards + self.local_groups + self.global_parity
     }
 
     /// Parity shards, local and global together.
     #[must_use]
-    pub fn parity_shards(&self) -> u32 {
+    pub fn lrc_parity_shards(&self) -> u32 {
         self.local_groups + self.global_parity
     }
 
@@ -174,10 +174,10 @@ impl LrcLayout {
     /// Integer because a multiplier that differed in its last bit between
     /// machines would make two nodes disagree about what a group costs.
     #[must_use]
-    pub fn overhead_per_mille(&self) -> u32 {
+    pub fn lrc_overhead_per_mille(&self) -> u32 {
         // total * 1000 / data, in u64 so a large group cannot overflow the
         // multiplication before the divide.
-        let scaled = u64::from(self.total_shards()) * 1000 / u64::from(self.data_shards);
+        let scaled = u64::from(self.lrc_total_shards()) * 1000 / u64::from(self.data_shards);
         u32::try_from(scaled).unwrap_or(u32::MAX)
     }
 
@@ -250,7 +250,7 @@ impl LrcLayout {
     /// to be committed. Two nodes disagreeing about a group's shape would
     /// disagree about which shards protect which.
     #[must_use]
-    pub fn digest(&self) -> [u8; 32] {
+    pub fn lrc_layout_digest(&self) -> [u8; 32] {
         hash_fields_bytes(&[
             b"BDLM_LRC_LAYOUT_V1",
             &self.data_shards.to_le_bytes(),
@@ -273,9 +273,9 @@ mod tests {
             (2000, 50, 12, 1031),
             (100, 10, 6, 1160),
         ] {
-            let layout = LrcLayout::new(k, l, g).unwrap();
+            let layout = LrcLayout::build(k, l, g).unwrap();
             assert_eq!(
-                layout.overhead_per_mille(),
+                layout.lrc_overhead_per_mille(),
                 expect,
                 "k={k} L={l} G={g} should cost {expect} per mille"
             );
@@ -286,10 +286,10 @@ mod tests {
     fn a_wider_group_costs_less_redundancy() {
         // The claim the module exists for, as a monotone property rather than
         // a single measured point.
-        let small = LrcLayout::new(100, 10, 6).unwrap();
-        let large = LrcLayout::new(2000, 50, 12).unwrap();
+        let small = LrcLayout::build(100, 10, 6).unwrap();
+        let large = LrcLayout::build(2000, 50, 12).unwrap();
         assert!(
-            large.overhead_per_mille() < small.overhead_per_mille(),
+            large.lrc_overhead_per_mille() < small.lrc_overhead_per_mille(),
             "a wider group should cost less per byte"
         );
     }
@@ -298,12 +298,12 @@ mod tests {
     fn repair_reads_stay_local_however_wide_the_group_gets() {
         // The property that separates this from shared group parity, where
         // repairing one shard means reading everything.
-        let narrow = LrcLayout::new(100, 10, 6).unwrap();
-        let wide = LrcLayout::new(2000, 200, 12).unwrap();
+        let narrow = LrcLayout::build(100, 10, 6).unwrap();
+        let wide = LrcLayout::build(2000, 200, 12).unwrap();
         assert_eq!(narrow.single_repair_reads(), 10);
         assert_eq!(wide.single_repair_reads(), 10);
         assert!(
-            wide.overhead_per_mille() < narrow.overhead_per_mille(),
+            wide.lrc_overhead_per_mille() < narrow.lrc_overhead_per_mille(),
             "the wide group is cheaper at the same repair cost"
         );
     }
@@ -312,7 +312,7 @@ mod tests {
     fn every_data_shard_lands_in_exactly_one_local_group() {
         // A shard in two groups would be repaired twice; a shard in none
         // would never be repaired at all, and nothing would report it.
-        let layout = LrcLayout::new(97, 7, 3).unwrap();
+        let layout = LrcLayout::build(97, 7, 3).unwrap();
         let mut seen = vec![0u32; 97];
         for g in 0..layout.local_groups {
             for m in layout.local_group_members(g) {
@@ -328,7 +328,7 @@ mod tests {
     fn membership_and_lookup_agree() {
         // Two routes to the same answer, checked against each other, because
         // placement uses one and repair uses the other.
-        let layout = LrcLayout::new(97, 7, 3).unwrap();
+        let layout = LrcLayout::build(97, 7, 3).unwrap();
         for i in 0..97 {
             let g = layout.local_group_of(i).unwrap();
             assert!(
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_shard_outside_the_group_is_refused() {
-        let layout = LrcLayout::new(10, 2, 2).unwrap();
+        let layout = LrcLayout::build(10, 2, 2).unwrap();
         let err = layout
             .local_group_of(10)
             .expect_err("index 10 of 10 shards");
@@ -355,7 +355,7 @@ mod tests {
         // Without local groups this is the shared-parity scheme, which was
         // measured and rejected: repairing one shard reads everything.
         assert!(matches!(
-            LrcLayout::new(100, 0, 6).expect_err("no local groups"),
+            LrcLayout::build(100, 0, 6).expect_err("no local groups"),
             LrcError::NoLocalGroups
         ));
     }
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn more_local_groups_than_shards_is_refused() {
         // An empty group's parity protects nothing and still costs a shard.
-        let err = LrcLayout::new(4, 8, 2).expect_err("more groups than shards");
+        let err = LrcLayout::build(4, 8, 2).expect_err("more groups than shards");
         assert!(
             matches!(err, LrcError::MoreGroupsThanShards { .. }),
             "got {err:?}"
@@ -373,14 +373,14 @@ mod tests {
     #[test]
     fn an_empty_group_is_refused() {
         assert!(matches!(
-            LrcLayout::new(0, 1, 1).expect_err("no data"),
+            LrcLayout::build(0, 1, 1).expect_err("no data"),
             LrcError::NoDataShards
         ));
     }
 
     #[test]
     fn a_group_above_the_maximum_is_refused() {
-        let err = LrcLayout::new(MAX_GROUP_SHARDS, 10, 10).expect_err("too large");
+        let err = LrcLayout::build(MAX_GROUP_SHARDS, 10, 10).expect_err("too large");
         assert!(matches!(err, LrcError::GroupTooLarge { .. }), "got {err:?}");
     }
 
@@ -388,16 +388,16 @@ mod tests {
     fn a_valid_wide_group_is_accepted() {
         // The canary for the four refusals above. A constructor that refused
         // everything would pass all of them and be useless.
-        let layout = LrcLayout::new(2000, 50, 12).expect("a measured layout is valid");
-        assert_eq!(layout.total_shards(), 2062);
-        assert_eq!(layout.parity_shards(), 62);
+        let layout = LrcLayout::build(2000, 50, 12).expect("a measured layout is valid");
+        assert_eq!(layout.lrc_total_shards(), 2062);
+        assert_eq!(layout.lrc_parity_shards(), 62);
     }
 
     #[test]
     fn the_guaranteed_tolerance_is_never_the_optimistic_one() {
         // These are different numbers and confusing them would publish a
         // durability claim the scheme does not keep.
-        let layout = LrcLayout::new(500, 25, 10).unwrap();
+        let layout = LrcLayout::build(500, 25, 10).unwrap();
         assert_eq!(layout.guaranteed_loss_tolerance(), 11);
         assert_eq!(layout.best_case_loss_tolerance(), 35);
         assert!(layout.guaranteed_loss_tolerance() < layout.best_case_loss_tolerance());
@@ -407,21 +407,21 @@ mod tests {
     fn the_digest_covers_every_field() {
         // A field outside the digest is a field two nodes could disagree
         // about while agreeing on the group's identity.
-        let base = LrcLayout::new(100, 10, 6).unwrap();
-        let d = base.digest();
+        let base = LrcLayout::build(100, 10, 6).unwrap();
+        let d = base.lrc_layout_digest();
         assert_ne!(
             d,
-            LrcLayout::new(101, 10, 6).unwrap().digest(),
+            LrcLayout::build(101, 10, 6).unwrap().lrc_layout_digest(),
             "data_shards"
         );
         assert_ne!(
             d,
-            LrcLayout::new(100, 11, 6).unwrap().digest(),
+            LrcLayout::build(100, 11, 6).unwrap().lrc_layout_digest(),
             "local_groups"
         );
         assert_ne!(
             d,
-            LrcLayout::new(100, 10, 7).unwrap().digest(),
+            LrcLayout::build(100, 10, 7).unwrap().lrc_layout_digest(),
             "global_parity"
         );
     }
@@ -434,7 +434,7 @@ mod tests {
         let rs_16_multiplier = 1600u32;
         let rs_16_repair_reads = 10u32;
 
-        let lrc = LrcLayout::new(2000, 200, 12).unwrap();
+        let lrc = LrcLayout::build(2000, 200, 12).unwrap();
         assert_eq!(lrc.single_repair_reads(), rs_16_repair_reads);
 
         // Redundancy is the part above 1000, since 1000 per mille is the data
@@ -443,7 +443,7 @@ mod tests {
         // both by the 1000 they share, and an earlier version of this test
         // did exactly that and asserted a threshold it could not meet.
         let rs_redundancy = rs_16_multiplier - 1000;
-        let lrc_redundancy = lrc.overhead_per_mille() - 1000;
+        let lrc_redundancy = lrc.lrc_overhead_per_mille() - 1000;
         assert!(
             lrc_redundancy * 5 < rs_redundancy,
             "LRC at equal repair cost should spend under a fifth of the redundancy: \
