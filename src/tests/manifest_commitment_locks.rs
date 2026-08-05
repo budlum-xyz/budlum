@@ -401,6 +401,203 @@ mod encryption_declaration {
     }
 }
 
+/// The coding audit: proving parity is parity without holding a shard.
+///
+/// A retrieval challenge asks whether the operator still has the bytes. It
+/// cannot ask whether those bytes are *correct* parity, because the chain
+/// never sees shard contents. An operator can therefore pass every retrieval
+/// challenge while storing garbage under the parity shard's `ContentId`, and
+/// the object is only discovered to be unrecoverable during the repair that
+/// needed it.
+mod coding_audit {
+    use super::*;
+    use crate::storage::{encode_object as enc_obj, ReedSolomon};
+
+    /// Registry holding a coded object, plus the encoding, so a test can play
+    /// both the chain and the operator.
+    fn coded_registry() -> (
+        StorageRegistry,
+        crate::storage::EncodedObject,
+        ContentManifest,
+    ) {
+        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let encoded = enc_obj(&data, ErasureScheme { k: 4, n: 6 })
+            .expect("a (4,6) code over 800 bytes encodes");
+        let manifest = encoded
+            .to_manifest()
+            .expect("the encoding describes a manifest it can deliver");
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest(&manifest);
+        (reg, encoded, manifest)
+    }
+
+    /// Byte `column` of every data shard, in shard order.
+    fn data_column(encoded: &crate::storage::EncodedObject, column: u64) -> Vec<u8> {
+        (0..encoded.scheme.k as usize)
+            .map(|j| encoded.shards[j][column as usize])
+            .collect()
+    }
+
+    #[test]
+    fn an_honest_operator_passes_the_audit() {
+        let (reg, encoded, manifest) = coded_registry();
+        let audit = StorageRegistry::derive_coding_audit(&[9u8; 32], &manifest, 1)
+            .expect("a coded object has parity to audit");
+
+        let column = data_column(&encoded, audit.column);
+        let parity_byte = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
+            [audit.column as usize];
+
+        assert!(
+            reg.verify_coding_audit(&audit, &column, parity_byte)
+                .is_ok(),
+            "an honestly encoded object must pass"
+        );
+    }
+
+    #[test]
+    fn an_operator_serving_garbage_parity_fails() {
+        // The whole point: this operator holds bytes, so it answers every
+        // retrieval challenge. The bytes are not parity.
+        let (reg, encoded, manifest) = coded_registry();
+        let audit = StorageRegistry::derive_coding_audit(&[9u8; 32], &manifest, 1).unwrap();
+        let column = data_column(&encoded, audit.column);
+        let honest = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
+            [audit.column as usize];
+
+        let err = reg
+            .verify_coding_audit(&audit, &column, honest ^ 0xFF)
+            .expect_err("parity that is not parity must be refused");
+        assert!(
+            matches!(err, StorageError::ParityColumnMismatch { .. }),
+            "the error must name the mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_flipped_bit_is_caught() {
+        let (reg, encoded, manifest) = coded_registry();
+        let audit = StorageRegistry::derive_coding_audit(&[3u8; 32], &manifest, 7).unwrap();
+        let column = data_column(&encoded, audit.column);
+        let honest = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
+            [audit.column as usize];
+
+        assert!(reg.verify_coding_audit(&audit, &column, honest).is_ok());
+        assert!(
+            reg.verify_coding_audit(&audit, &column, honest ^ 1)
+                .is_err(),
+            "one bit is enough; the audit checks the relationship, not a checksum"
+        );
+    }
+
+    #[test]
+    fn a_replicated_object_has_nothing_to_audit() {
+        // Refusing is the honest answer. Reporting a pass would report an
+        // audit that never happened, on the objects that need one most:
+        // replication has no redundancy to lose.
+        let m = ContentManifest::from_bytes_sliced(b"three shards of plain replication", 12)
+            .expect("the bytes slice into shards");
+        assert_eq!(m.erasure.parity_count(), 0);
+
+        let err = StorageRegistry::derive_coding_audit(&[1u8; 32], &m, 1)
+            .expect_err("there is no coding relationship to sample");
+        assert!(matches!(err, StorageError::NoParityToAudit { .. }));
+    }
+
+    #[test]
+    fn the_selection_is_not_the_openers_to_make() {
+        // If the opener chose the column it would choose one the operator
+        // has, and an operator knowing the column in advance stores only that
+        // column. Different entropy has to move the selection.
+        let (_, _, manifest) = coded_registry();
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..40u8 {
+            let a = StorageRegistry::derive_coding_audit(&[seed; 32], &manifest, 1).unwrap();
+            seen.insert((a.parity_index, a.column));
+        }
+        assert!(
+            seen.len() > 20,
+            "40 seeds produced only {} distinct selections; the choice is \
+             barely moving and an operator could store the few columns it hits",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn the_same_entropy_selects_the_same_column() {
+        // Every node verifying the audit has to recompute the same selection,
+        // or they disagree about what was asked.
+        let (_, _, manifest) = coded_registry();
+        let a = StorageRegistry::derive_coding_audit(&[42u8; 32], &manifest, 5).unwrap();
+        let b = StorageRegistry::derive_coding_audit(&[42u8; 32], &manifest, 5).unwrap();
+        assert_eq!(a, b, "selection must be a function of its inputs alone");
+    }
+
+    #[test]
+    fn the_selection_lands_inside_the_object() {
+        // An out-of-range column is an audit no honest operator can answer,
+        // which would slash the honest and let the dishonest through.
+        let (_, encoded, manifest) = coded_registry();
+        let stripe = encoded.shards[0].len() as u64;
+        let parity_count = manifest.erasure.parity_count();
+
+        for seed in 0..64u8 {
+            let a = StorageRegistry::derive_coding_audit(&[seed; 32], &manifest, u64::from(seed))
+                .unwrap();
+            assert!(a.column < stripe, "column {} is past the shard", a.column);
+            assert!(a.parity_index < parity_count);
+        }
+    }
+
+    #[test]
+    fn an_audit_costs_k_bytes_not_a_shard() {
+        // The claim that makes sampling worth doing, measured rather than
+        // described.
+        let (_, encoded, manifest) = coded_registry();
+        let audit = StorageRegistry::derive_coding_audit(&[11u8; 32], &manifest, 2).unwrap();
+        let column = data_column(&encoded, audit.column);
+
+        assert_eq!(column.len(), manifest.erasure.k as usize);
+        assert!(
+            column.len() + 1 < encoded.shards[0].len(),
+            "the audit must read less than one shard, not more"
+        );
+    }
+
+    #[test]
+    fn the_coder_agrees_with_the_registry() {
+        // Two paths reach the same relationship: the coder directly, and the
+        // registry through the manifest it stored. They must not disagree,
+        // because a repair uses one and the audit uses the other.
+        let (reg, encoded, manifest) = coded_registry();
+        let rs = ReedSolomon::for_scheme(&manifest.erasure).unwrap();
+        let audit = StorageRegistry::derive_coding_audit(&[77u8; 32], &manifest, 3).unwrap();
+        let column = data_column(&encoded, audit.column);
+        let parity_byte = encoded.shards[manifest.erasure.k as usize + audit.parity_index as usize]
+            [audit.column as usize];
+
+        assert_eq!(
+            rs.column_is_correctly_encoded(audit.parity_index as usize, &column, parity_byte),
+            reg.verify_coding_audit(&audit, &column, parity_byte)
+                .is_ok(),
+        );
+    }
+
+    #[test]
+    fn an_audit_against_an_unregistered_manifest_is_refused() {
+        let (reg, _, _) = coded_registry();
+        let audit = crate::domain::storage_deal::CodingAudit {
+            manifest_id: ContentId([0xEE; 32]),
+            parity_index: 0,
+            column: 0,
+        };
+        assert!(matches!(
+            reg.verify_coding_audit(&audit, &[0, 0, 0, 0], 0),
+            Err(StorageError::UnknownManifest(_))
+        ));
+    }
+}
+
 /// Repair has to be decided per object, not per shard.
 ///
 /// `under_replicated_shards` counts copies of each shard against a fixed
