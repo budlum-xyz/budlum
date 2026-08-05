@@ -341,7 +341,9 @@ async fn every_chain_is_refused_when_no_adapter_is_registered() {
 #[tokio::test]
 async fn an_adapter_that_fails_its_own_verifier_produces_no_result() {
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(ContradictoryAdapter));
+    registry
+        .register(Box::new(ContradictoryAdapter))
+        .expect("test adapter must be fit to relay");
     let err =
         RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
             .await
@@ -358,7 +360,9 @@ async fn a_zero_external_root_is_refused_before_signing() {
     // already signed and broadcast. Catching it here keeps a provably
     // worthless claim off the wire and out of the relayer's own history.
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(ZeroRootAdapter));
+    registry
+        .register(Box::new(ZeroRootAdapter))
+        .expect("test adapter must be fit to relay");
     let err =
         RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
             .await
@@ -370,7 +374,9 @@ async fn a_zero_external_root_is_refused_before_signing() {
 #[tokio::test]
 async fn a_result_tagged_for_a_different_chain_is_refused() {
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(ChainSwappingAdapter));
+    registry
+        .register(Box::new(ChainSwappingAdapter))
+        .expect("test adapter must be fit to relay");
     let err =
         RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
             .await
@@ -434,7 +440,9 @@ async fn a_malformed_receipt_proof_from_an_adapter_is_refused() {
     }
 
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(GarbageProofAdapter));
+    registry
+        .register(Box::new(GarbageProofAdapter))
+        .expect("test adapter must be fit to relay");
     let err =
         RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
             .await
@@ -449,9 +457,11 @@ async fn an_internally_consistent_adapter_observation_is_accepted() {
     // works - otherwise this would be a gate that rejects everything and
     // proves nothing.
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(HonestAdapter {
-        chain: ExternalChain::Ethereum,
-    }));
+    registry
+        .register(Box::new(HonestAdapter {
+            chain: ExternalChain::Ethereum,
+        }))
+        .expect("test adapter must be fit to relay");
     let result =
         RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
             .await
@@ -501,9 +511,11 @@ async fn an_adapter_observation_does_not_satisfy_the_executor_result_leaf() {
     use crate::execution::executor::Executor;
 
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(HonestAdapter {
-        chain: ExternalChain::Ethereum,
-    }));
+    registry
+        .register(Box::new(HonestAdapter {
+            chain: ExternalChain::Ethereum,
+        }))
+        .expect("test adapter must be fit to relay");
     let result =
         RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
             .await

@@ -94,6 +94,24 @@ pub trait ChainAdapter: Send + Sync {
         expected_tx_hash: &str,
     ) -> Result<(), AdapterError>;
 
+    /// Is this adapter configured well enough to be trusted with real value?
+    ///
+    /// Asked once, when the adapter is registered, rather than at each
+    /// deposit. An adapter that answers no is refused registration, so a
+    /// misconfigured one cannot sit in the registry advertising support for a
+    /// chain it cannot verify.
+    ///
+    /// The default answers yes, because most adapters carry no configuration
+    /// that can be wrong. An adapter that does carry some, like the EVM one
+    /// with its bridge address and confirmation depth, overrides this.
+    ///
+    /// # Errors
+    ///
+    /// A message naming what is misconfigured.
+    fn check_fit_for_relay(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
     /// Submit a transaction to the external chain.
     ///
     /// Returns the transaction hash on the external chain.
@@ -125,9 +143,20 @@ impl AdapterRegistry {
         }
     }
 
-    /// Register a chain adapter.
-    pub fn register(&mut self, adapter: Box<dyn ChainAdapter>) {
+    /// Register a chain adapter that is fit to relay.
+    ///
+    /// The fitness check runs here rather than at deposit time, so a
+    /// misconfigured adapter never reaches the registry. Doing it the other
+    /// way round means the node starts, advertises support for a chain, and
+    /// only refuses once a user has already paid to bridge.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`ChainAdapter::check_fit_for_relay`] reports.
+    pub fn register(&mut self, adapter: Box<dyn ChainAdapter>) -> Result<(), AdapterError> {
+        adapter.check_fit_for_relay()?;
         self.adapters.push(adapter);
+        Ok(())
     }
 
     /// Find the adapter for a given chain type.

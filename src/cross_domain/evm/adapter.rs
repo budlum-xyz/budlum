@@ -67,6 +67,47 @@ impl EvmChainAdapter {
         }
     }
 
+    /// Is this adapter configured well enough to be trusted with deposits?
+    ///
+    /// Two ways an adapter can exist and be useless, both of which look fine
+    /// at the call site:
+    ///
+    /// * a zero bridge address, which `test_default` supplies. Every receipt
+    ///   leaf binds to `bridge_address`, so a zero address binds to nothing
+    ///   in particular and the node advertises Ethereum support while
+    ///   pointing at no contract.
+    /// * zero required confirmations, which accepts a deposit from a block
+    ///   that can still be reorged away. The bridge would mint against a
+    ///   transaction that later did not happen.
+    ///
+    /// Kept separate from the constructor because a test adapter is a
+    /// legitimate thing to build; what is not legitimate is relaying with
+    /// one. The registry wiring calls this, so the refusal happens once at
+    /// setup rather than being re-derived at each deposit.
+    ///
+    /// # Errors
+    ///
+    /// A message naming which of the two is wrong.
+    pub fn check_fit_for_relay(&self) -> Result<(), String> {
+        if self.bridge_address.iter().all(|b| *b == 0) {
+            return Err(
+                "EVM adapter has a zero bridge address: every receipt leaf binds to this \
+                 address, so the node would advertise Ethereum support while pointing at no \
+                 contract"
+                    .into(),
+            );
+        }
+        if self.required_confirmations == 0 {
+            return Err(
+                "EVM adapter requires zero confirmations: a deposit from a block that can \
+                 still be reorged away would be minted against a transaction that did not \
+                 happen"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Default (test/devnet) - placeholder bridge address + topic0.
     pub fn test_default() -> Self {
         Self::new(vec![0u8; 20], DEFAULT_DEPOSIT_TOPIC0)
@@ -116,6 +157,14 @@ impl ChainAdapter for EvmChainAdapter {
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    Kriptografik leaf bağı. Saldırgan farklı bir tx_hash ile aynı
     ///    Proof'u ileri süremez; cross-bridge proof da reddedilir.
+    /// Refuse registration for an adapter that cannot bind a receipt.
+    ///
+    /// Delegates to the inherent check so there is one definition of "fit",
+    /// not two that can drift.
+    fn check_fit_for_relay(&self) -> Result<(), AdapterError> {
+        EvmChainAdapter::check_fit_for_relay(self).map_err(AdapterError::ProofVerificationFailed)
+    }
+
     fn verify_receipt_proof(
         &self,
         proof: &MerkleProof,
@@ -264,6 +313,53 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_bridge_address_cannot_be_registered() {
+        // `test_default` builds an adapter with a zero bridge address, which
+        // is a legitimate thing for a test to do and not a legitimate thing
+        // to relay with: every receipt leaf binds to `bridge_address`, so a
+        // zero address binds to nothing in particular.
+        let adapter = EvmChainAdapter::test_default();
+        let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
+        assert!(err.contains("zero bridge address"), "got: {err}");
+
+        let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
+        assert!(
+            registry
+                .register(Box::new(EvmChainAdapter::test_default()))
+                .is_err(),
+            "a zero-address adapter must not reach the registry: the node would \
+             advertise Ethereum support while pointing at no contract"
+        );
+    }
+
+    #[test]
+    fn zero_confirmations_cannot_be_registered() {
+        // A deposit from a block that can still be reorged away would be
+        // minted against a transaction that did not happen.
+        let mut adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
+
+        adapter.required_confirmations = 0;
+        let err = EvmChainAdapter::check_fit_for_relay(&adapter).unwrap_err();
+        assert!(err.contains("zero confirmations"), "got: {err}");
+    }
+
+    #[test]
+    fn a_configured_adapter_registers() {
+        // The refusal has to stay narrow, or it is just a ban on Ethereum.
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        assert!(EvmChainAdapter::check_fit_for_relay(&adapter).is_ok());
+
+        let mut registry = crate::cross_domain::chain_adapter::AdapterRegistry::new();
+        registry
+            .register(Box::new(EvmChainAdapter::new(
+                vec![7u8; 20],
+                DEFAULT_DEPOSIT_TOPIC0,
+            )))
+            .expect("a configured adapter must register");
+    }
+
+    #[test]
     fn verify_receipt_proof_minimal_ok() {
         // Tam fix: leaf = hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address).
         let adapter = EvmChainAdapter::test_default();
@@ -396,6 +492,14 @@ mod tests {
     /// the code compiles, the tests pass, the comment says the safe path
     /// exists, and the weak path is what actually runs. This test makes the
     /// gap explicit and breaks when either half of it changes.
+    ///
+    /// What has since been added is not a fix for that gap but a floor under
+    /// it. `AdapterRegistry::register` now asks each adapter whether it is
+    /// fit to relay, and the EVM one refuses a zero bridge address or zero
+    /// confirmations. That stops the worst version of the wiring mistake, an
+    /// adapter that verifies nothing because it points nowhere, without
+    /// pretending the trait path checks what `verify_deposit` checks. It
+    /// still does not.
     #[test]
     fn the_full_receipt_verification_path_is_still_unreachable_from_production() {
         let adapter_src = include_str!("adapter.rs");
