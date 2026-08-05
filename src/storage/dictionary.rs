@@ -274,7 +274,7 @@ impl DictionaryRegistry {
         id: &ContentId,
         referrer_is_dictionary: bool,
     ) -> Result<(), DictionaryError> {
-        self.check_reference(id, referrer_is_dictionary)?;
+        self.check_dictionary_reference(id, referrer_is_dictionary)?;
         let entry = self
             .entries
             .get_mut(id)
@@ -470,7 +470,7 @@ mod tests {
         assert!(r.has_dictionary(&did(1)), "the dictionary is still here");
         assert_eq!(r.reference_count(&did(1)), Some(0));
         assert!(
-            r.deletable_dictionaries(100).has_no_dictionaries(),
+            r.deletable_dictionaries(100).is_empty(),
             "not deletable during the window"
         );
         assert_eq!(
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(r.reference_count(&did(1)), Some(1), "one reference is left");
         assert!(
             r.deletable_dictionaries(100 + DICTIONARY_GRACE_EPOCHS)
-                .has_no_dictionaries(),
+                .is_empty(),
             "a live reference keeps it out of the deletion set"
         );
     }
