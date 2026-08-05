@@ -124,6 +124,10 @@ jobs:
         run: bash ./scripts/check-repair-fires-on-loss.sh --self-test
       - name: Onarim kayipta atesliyor
         run: bash ./scripts/check-repair-fires-on-loss.sh
+      - name: Lubot algi kanaryasi
+        run: bash ./scripts/check-lubot-reads-but-does-not-generate.sh --self-test
+      - name: Lubot okur, uretmez
+        run: bash ./scripts/check-lubot-reads-but-does-not-generate.sh
       - name: Turetilmis icerik kanaryasi
         run: bash ./scripts/check-derived-content-stays-byte-exact.sh --self-test
       - name: Turetilmis icerik bayt-kesin

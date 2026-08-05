@@ -25,6 +25,9 @@ pub mod effort;
 pub mod executor;
 pub mod inference;
 pub mod metrics;
+/// What a model may read, and in what form. Reading only: Lubot does not
+/// generate images or video.
+pub mod perception;
 pub mod query;
 pub mod social;
 pub mod storage;
@@ -84,13 +87,36 @@ pub fn operator_eligible(registry: &AiRegistry, operator: &Address) -> bool {
 
 // Pollen hardening: kapalı-devre inference grant doğrulaması
 
-/// Kapalı-devre: bir `AccessGrant` Lubot çıkarımı için geçerli mi?
-/// (grantee eşleşmesi + active + süresi dolmamış + read kotası var).
+/// Is an `AccessGrant` usable for a Lubot inference right now?
+///
+/// Delegates to [`AccessGrant::is_active_for`], which is the same predicate
+/// the production read path uses through
+/// `MarketplaceRegistry::validate_ai_read_ref`. It did not always: this
+/// function used to re-implement the four conditions itself, and while it was
+/// doing so nothing called it. A second copy of a permission rule is worse
+/// than no copy, because the two drift and it stops being obvious which one
+/// decides. The copy here was already the weaker of the two, since it never
+/// checked that the grant belonged to the asset's owner.
+///
+/// What stays here is the Lubot-facing wording of the refusal. An operator
+/// told "grant not active" by the AI layer should not have to work out which
+/// of Pollen's internal conditions it tripped.
+///
+/// # Errors
+///
+/// A message naming the condition that failed.
 pub fn validate_inference_grant(
     grant: &AccessGrant,
     consumer: &Address,
     now_block: u64,
 ) -> Result<(), String> {
+    if grant.is_active_for(consumer, now_block) {
+        return Ok(());
+    }
+    // The predicate above is the authority on whether the grant is usable.
+    // These branches only decide which sentence to return, so a refusal
+    // cannot disagree with it: they are read after the single yes/no, never
+    // instead of it.
     if grant.grantee != *consumer {
         return Err("Lubot: grant not issued to this consumer".into());
     }
@@ -103,7 +129,10 @@ pub fn validate_inference_grant(
     if grant.reads_used >= grant.max_reads {
         return Err("Lubot: grant read quota exhausted".into());
     }
-    Ok(())
+    // `is_active_for` refused for a reason this function does not enumerate.
+    // Refusing anyway is the only fail-closed answer: the alternative is to
+    // return Ok for a grant the authority just rejected.
+    Err("Lubot: grant refused by Pollen".into())
 }
 
 // Pollen hardening: training-data grant (yeni - bulk eğitim okuma)
@@ -240,6 +269,83 @@ mod tests {
 
     fn addr(b: u8) -> Address {
         Address([b; 32])
+    }
+
+    fn inference_grant(max_reads: u32, expires: u64) -> AccessGrant {
+        build_lubot_inference_grant(
+            crate::pollen::AssetId([1; 32]),
+            addr(2),
+            addr(3),
+            100,
+            0,
+            expires,
+            max_reads,
+            [0; 32],
+        )
+    }
+
+    // --- the single permission rule, and the wording around it -----------
+
+    #[test]
+    fn lubot_agrees_with_pollen_on_every_grant_state() {
+        // The point of delegating: the two must never disagree. If this
+        // module ever answers differently from the predicate the production
+        // read path uses, one of them is deciding something the other does
+        // not know about, and which one applies depends on which door the
+        // request came through.
+        let mut cases = vec![
+            inference_grant(3, 1000),
+            inference_grant(0, 1000), // no reads left
+            inference_grant(3, 0),    // already expired
+        ];
+        let mut revoked = inference_grant(3, 1000);
+        revoked.status = AccessGrantStatus::Revoked;
+        cases.push(revoked);
+        let mut used_up = inference_grant(1, 1000);
+        used_up.record_read().unwrap();
+        cases.push(used_up);
+
+        for (i, grant) in cases.iter().enumerate() {
+            for now in [0u64, 1, 500, 1001] {
+                for consumer in [addr(3), addr(9)] {
+                    let pollen = grant.is_active_for(&consumer, now);
+                    let lubot = validate_inference_grant(grant, &consumer, now).is_ok();
+                    assert_eq!(
+                        pollen, lubot,
+                        "case {i} at block {now}: Pollen says {pollen}, Lubot says {lubot}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_condition_that_failed() {
+        // Delegation must not cost the operator the reason. "Refused" alone
+        // leaves them guessing whether to buy a new grant, wait, or give up.
+        let expired = inference_grant(3, 10);
+        let err = validate_inference_grant(&expired, &addr(3), 11).unwrap_err();
+        assert!(err.contains("expired"), "got: {err}");
+
+        let exhausted = inference_grant(0, 1000);
+        let err = validate_inference_grant(&exhausted, &addr(3), 1).unwrap_err();
+        assert!(err.contains("quota"), "got: {err}");
+
+        let stranger = inference_grant(3, 1000);
+        let err = validate_inference_grant(&stranger, &addr(9), 1).unwrap_err();
+        assert!(err.contains("consumer"), "got: {err}");
+    }
+
+    #[test]
+    fn a_grant_at_its_last_block_is_still_usable() {
+        // `is_active_for` uses `<=`, so the expiry block itself is inside the
+        // window. The old copy here used `>` on the other side of the
+        // comparison and agreed by accident; pinning it means a future edit
+        // to either side shows up as a failure rather than a silent
+        // off-by-one on the last block of every grant.
+        let g = inference_grant(3, 10);
+        assert!(validate_inference_grant(&g, &addr(3), 10).is_ok());
+        assert!(validate_inference_grant(&g, &addr(3), 11).is_err());
     }
 
     #[test]
