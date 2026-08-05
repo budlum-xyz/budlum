@@ -77,13 +77,13 @@ pub enum LrcError {
 impl std::fmt::Display for LrcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LrcError::NoDataShards => write!(f, "an LRC group needs at least one data shard"),
-            LrcError::NoLocalGroups => write!(
+            Self::NoDataShards => write!(f, "an LRC group needs at least one data shard"),
+            Self::NoLocalGroups => write!(
                 f,
                 "an LRC group needs at least one local group, or every repair reads \
                  the whole group"
             ),
-            LrcError::MoreGroupsThanShards {
+            Self::MoreGroupsThanShards {
                 data_shards,
                 local_groups,
             } => write!(
@@ -91,10 +91,10 @@ impl std::fmt::Display for LrcError {
                 "{local_groups} local groups over {data_shards} data shards leaves a \
                  group empty, whose parity protects nothing and still costs a shard"
             ),
-            LrcError::GroupTooLarge { shards, max } => {
+            Self::GroupTooLarge { shards, max } => {
                 write!(f, "{shards} shards exceeds the {max} a repair can hold")
             }
-            LrcError::ShardOutOfRange { index, data_shards } => write!(
+            Self::ShardOutOfRange { index, data_shards } => write!(
                 f,
                 "shard {index} is outside a group of {data_shards} data shards"
             ),
@@ -162,13 +162,13 @@ impl LrcLayout {
 
     /// Every shard in the group: data, then local parity, then global.
     #[must_use]
-    pub fn lrc_total_shards(&self) -> u32 {
+    pub const fn lrc_total_shards(&self) -> u32 {
         self.data_shards + self.local_groups + self.global_parity
     }
 
     /// Parity shards, local and global together.
     #[must_use]
-    pub fn lrc_parity_shards(&self) -> u32 {
+    pub const fn lrc_parity_shards(&self) -> u32 {
         self.local_groups + self.global_parity
     }
 
@@ -223,7 +223,7 @@ impl LrcLayout {
     /// The whole point of the local groups: this stays near `k / L` however
     /// large the group grows.
     #[must_use]
-    pub fn single_repair_reads(&self) -> u32 {
+    pub const fn single_repair_reads(&self) -> u32 {
         self.data_shards.div_ceil(self.local_groups)
     }
 
@@ -235,7 +235,7 @@ impl LrcLayout {
     /// recover, because each local group independently absorbs one, but that
     /// depends on where the losses fall and a durability claim should not.
     #[must_use]
-    pub fn guaranteed_loss_tolerance(&self) -> u32 {
+    pub const fn guaranteed_loss_tolerance(&self) -> u32 {
         self.global_parity + 1
     }
 
@@ -244,7 +244,7 @@ impl LrcLayout {
     /// Reported separately from the guaranteed figure so the two are never
     /// confused: this is the lucky case, not the promise.
     #[must_use]
-    pub fn best_case_loss_tolerance(&self) -> u32 {
+    pub const fn best_case_loss_tolerance(&self) -> u32 {
         self.local_groups + self.global_parity
     }
 

@@ -97,7 +97,7 @@ pub enum ContentGateError {
 impl std::fmt::Display for ContentGateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContentGateError::GrantRequired {
+            Self::GrantRequired {
                 manifest_id,
                 asset_id,
             } => write!(
@@ -105,7 +105,7 @@ impl std::fmt::Display for ContentGateError {
                 "content {manifest_id} is sold as Pollen asset {} and needs a live access grant",
                 hex::encode(asset_id.0)
             ),
-            ContentGateError::GrantForDifferentAsset {
+            Self::GrantForDifferentAsset {
                 presented,
                 required,
             } => write!(
@@ -114,7 +114,7 @@ impl std::fmt::Display for ContentGateError {
                 hex::encode(presented.0),
                 hex::encode(required.0)
             ),
-            ContentGateError::AlreadyBound {
+            Self::AlreadyBound {
                 manifest_id,
                 bound_to,
             } => write!(
@@ -122,7 +122,7 @@ impl std::fmt::Display for ContentGateError {
                 "content {manifest_id} is already sold as asset {}",
                 hex::encode(bound_to.0)
             ),
-            ContentGateError::ProtectedCannotBePublic {
+            Self::ProtectedCannotBePublic {
                 manifest_id,
                 asset_id,
             } => write!(
@@ -132,7 +132,7 @@ impl std::fmt::Display for ContentGateError {
                  confirmed without payment",
                 hex::encode(asset_id.0)
             ),
-            ContentGateError::NotTheAssetOwner { expected, provided } => write!(
+            Self::NotTheAssetOwner { expected, provided } => write!(
                 f,
                 "asset is owned by {expected} but the binding was signed by {provided}"
             ),
@@ -275,13 +275,12 @@ impl ProtectedContent {
     /// [`ContentGateError::ProtectedCannotBePublic`] when the content is
     /// bound to an asset.
     pub fn check_may_be_public(&self, manifest_id: &ContentId) -> Result<(), ContentGateError> {
-        match self.asset_for(manifest_id) {
-            None => Ok(()),
-            Some(asset_id) => Err(ContentGateError::ProtectedCannotBePublic {
+        self.asset_for(manifest_id).map_or(Ok(()), |asset_id| {
+            Err(ContentGateError::ProtectedCannotBePublic {
                 manifest_id: *manifest_id,
                 asset_id,
-            }),
-        }
+            })
+        })
     }
 
     /// Domain-tagged digest for the state root.

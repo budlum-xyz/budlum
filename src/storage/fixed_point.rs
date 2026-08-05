@@ -33,12 +33,19 @@ pub const fn fixed_from_int(v: i32) -> i64 {
     (v as i64) << FIXED_FRAC_BITS
 }
 
-/// Truncate towards zero, the same direction on every input, because a
+/// Convert fixed point back to an integer.
+///
+/// Truncates towards zero, the same direction on every input, because a
 /// rounding rule that depends on sign is a rounding rule two
 /// implementations can get differently.
 #[must_use]
-pub const fn fixed_to_int(v: i64) -> i32 {
-    (v >> FIXED_FRAC_BITS) as i32
+pub fn fixed_to_int(v: i64) -> i32 {
+    // Saturating rather than a plain cast. A fixed-point value larger than
+    // `i32::MAX` cannot be represented, and wrapping it would hand a
+    // generator a small positive number where it computed a huge one, which
+    // is the deterministic-and-wrong failure this module exists to avoid.
+    let shifted = v >> FIXED_FRAC_BITS;
+    i32::try_from(shifted).unwrap_or(if shifted < 0 { i32::MIN } else { i32::MAX })
 }
 
 /// Multiply. The intermediate is `i128` so the product of two large
@@ -46,8 +53,12 @@ pub const fn fixed_to_int(v: i64) -> i32 {
 /// into range.
 #[must_use]
 pub fn fixed_mul(a: i64, b: i64) -> i64 {
-    let wide = (a as i128) * (b as i128);
-    (wide >> FIXED_FRAC_BITS) as i64
+    let wide = i128::from(a) * i128::from(b);
+    // Saturating for the same reason as `fixed_to_int`: a wrapped product is
+    // deterministic and wrong, and every node would agree on the wrong
+    // answer with nothing reporting a fault.
+    let shifted = wide >> FIXED_FRAC_BITS;
+    i64::try_from(shifted).unwrap_or(if shifted < 0 { i64::MIN } else { i64::MAX })
 }
 
 /// Divide. Returns zero for a zero divisor rather than panicking: a
@@ -59,7 +70,8 @@ pub fn fixed_div(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 0;
     }
-    (((a as i128) << FIXED_FRAC_BITS) / (b as i128)) as i64
+    let q = (i128::from(a) << FIXED_FRAC_BITS) / i128::from(b);
+    i64::try_from(q).unwrap_or(if q < 0 { i64::MIN } else { i64::MAX })
 }
 
 /// Clamp into `[0, FIXED_ONE]`, the range a colour channel occupies.
@@ -91,7 +103,7 @@ pub fn fixed_sqrt(v: i64) -> i64 {
         return 0;
     }
     let mut x = v;
-    let mut y = (x + 1) / 2;
+    let mut y = x.midpoint(1);
     // 40 iterations is past convergence for every i64, and a fixed count
     // keeps the step cost of a generator predictable.
     for _ in 0..40 {
@@ -99,7 +111,7 @@ pub fn fixed_sqrt(v: i64) -> i64 {
             break;
         }
         x = y;
-        y = (x + v / x) / 2;
+        y = x.midpoint(v / x);
     }
     // `<< FIXED_FRAC_BITS`, not half of it. Newton's iteration above runs on
     // plain integers, so `x` is already the integer square root and needs the
@@ -178,9 +190,18 @@ mod tests {
 
     #[test]
     fn square_root_matches_integer_expectations() {
-        for v in [0i64, 1, 4, 9, 144, 10_000] {
+        // Expected values written out rather than computed with `f64::sqrt`.
+        // A module that exists because floats are not reproducible should
+        // not check itself against one.
+        for (v, expect) in [
+            (0i64, 0i32),
+            (1, 1),
+            (4, 2),
+            (9, 3),
+            (144, 12),
+            (10_000, 100),
+        ] {
             let r = fixed_to_int(fixed_sqrt(v));
-            let expect = (v as f64).sqrt() as i32;
             assert!(
                 (r - expect).abs() <= 1,
                 "sqrt({v}) gave {r}, expected about {expect}"

@@ -112,24 +112,24 @@ pub enum DictionaryError {
 impl std::fmt::Display for DictionaryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DictionaryError::UnknownDictionary { dictionary_id } => write!(
+            Self::UnknownDictionary { dictionary_id } => write!(
                 f,
                 "dictionary {dictionary_id} is not registered; an object compressed \
                  against it could never be read"
             ),
-            DictionaryError::DictionaryChain { dictionary_id } => write!(
+            Self::DictionaryChain { dictionary_id } => write!(
                 f,
                 "dictionary {dictionary_id} cannot itself use a dictionary; one level \
                  keeps a read bounded"
             ),
-            DictionaryError::TooLarge { size, max } => {
+            Self::TooLarge { size, max } => {
                 write!(
                     f,
                     "dictionary is {size} bytes, above the {max}-byte maximum"
                 )
             }
-            DictionaryError::Empty => write!(f, "a dictionary cannot be empty"),
-            DictionaryError::Retiring {
+            Self::Empty => write!(f, "a dictionary cannot be empty"),
+            Self::Retiring {
                 dictionary_id,
                 deletable_at_epoch,
             } => write!(
@@ -137,7 +137,7 @@ impl std::fmt::Display for DictionaryError {
                 "dictionary {dictionary_id} is retiring at epoch {deletable_at_epoch} \
                  and cannot take new references"
             ),
-            DictionaryError::StillReferenced {
+            Self::StillReferenced {
                 dictionary_id,
                 refs,
             } => write!(
@@ -145,7 +145,7 @@ impl std::fmt::Display for DictionaryError {
                 "dictionary {dictionary_id} still has {refs} reference(s); deleting it \
                  would make those objects unreadable"
             ),
-            DictionaryError::GraceNotElapsed {
+            Self::GraceNotElapsed {
                 dictionary_id,
                 deletable_at_epoch,
                 now_epoch,
@@ -606,11 +606,19 @@ mod tests {
         // The claim the design rests on, as arithmetic: a dictionary is paid
         // for once and divided across everything that uses it.
         let dict = 32_768u64;
-        for (objects, limit) in [(1_000u64, 33.0), (1_000_000, 0.04), (1_000_000_000, 0.001)] {
-            let per = dict as f64 / objects as f64;
+        // Integer arithmetic rather than floats, for the same reason the
+        // generators use fixed point: a test that measures in floats is a
+        // test whose last bit can differ between machines.
+        //
+        // Compared in millibytes so the sub-byte cases stay expressible.
+        for (objects, limit_millibytes) in
+            [(1_000u64, 33_000u64), (1_000_000, 40), (1_000_000_000, 1)]
+        {
+            let per_millibytes = dict * 1000 / objects;
             assert!(
-                per < limit,
-                "at {objects} objects the dictionary costs {per} bytes each, expected under {limit}"
+                per_millibytes < limit_millibytes,
+                "at {objects} objects the dictionary costs {per_millibytes} millibytes each, \
+                 expected under {limit_millibytes}"
             );
         }
     }
