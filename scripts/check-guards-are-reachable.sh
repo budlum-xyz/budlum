@@ -73,6 +73,48 @@ for base, dirs, files in os.walk(src):
         prod[p] = open(p, encoding="utf-8", errors="replace").read()
 
 
+def strip_test_mod(text):
+    """Remove `#[cfg(test)] mod ... { ... }`, brace matched.
+
+    Splitting on the first `#[cfg(test)]` is the obvious version and it is
+    wrong. Measured on `blockchain.rs`: the attribute first appears on a
+    constant at byte 2450 of 283822, so the naive split discarded 99% of the
+    file, including the call to `verify_against_blob` at byte 120480. The
+    scan would then have reported a guard as unreachable while a handler two
+    frames from an RPC endpoint was calling it, and the whole point of this
+    gate is to be trusted about exactly that.
+    """
+    out = []
+    i = 0
+    while True:
+        at = text.find("#[cfg(test)]", i)
+        if at == -1:
+            out.append(text[i:])
+            break
+        out.append(text[i:at])
+        brace = text.find("{", at)
+        if brace == -1:
+            break
+        depth, j = 0, brace
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        # A `#[cfg(test)]` on an item with no block, such as a constant, has
+        # its own `;` before the next `{`. Skip only the attribute in that
+        # case, not the rest of the file.
+        semi = text.find(";", at)
+        if semi != -1 and (brace == -1 or semi < brace):
+            i = semi + 1
+        else:
+            i = j + 1
+    return "".join(out)
+
+
 def code(text):
     """Production code with test modules and doc comments removed.
 
@@ -80,8 +122,7 @@ def code(text):
     call: measured, `derived.rs` mentioning `generated::GeneratorId` in prose
     was enough to make a different gate report that module as wired.
     """
-    text = text.split("#[cfg(test)]")[0]
-    return re.sub(r"^[ \t]*//[/!].*$", "", text, flags=re.MULTILINE)
+    return re.sub(r"^[ \t]*//[/!].*$", "", strip_test_mod(text), flags=re.MULTILINE)
 
 
 GUARD = re.compile(
@@ -91,7 +132,7 @@ GUARD = re.compile(
 
 unreached = []
 for path, text in prod.items():
-    body = text.split("#[cfg(test)]")[0]
+    body = strip_test_mod(text)
     # A module that declares itself unwired is already honest about this.
     if "WIRING: unwired" in text:
         continue
@@ -219,28 +260,54 @@ pub fn drive() {}'
     || fail "canary 5: a test-only caller was treated as production"
   canaries=$((canaries + 1))
 
-  # 6. The ratchet must fail upward. A baseline of 0 against a tree with one
+  # 6. `#[cfg(test)]` on a constant must not swallow the rest of the file.
+  #    Measured on `blockchain.rs`: the attribute first appears on a constant
+  #    at byte 2450 of 283822, so splitting on it discarded 99% of the file
+  #    and hid the call to `verify_against_blob` at byte 120480. The scan
+  #    reported five guards as unreachable that a live RPC path invokes.
+  mk "$tmp/cfgconst" "$GUARD_FN" 'pub mod guarded;
+#[cfg(test)]
+pub const TEST_ONLY: u64 = 1;
+pub fn drive() { let _ = guarded::check_thing_is_allowed(1); }'
+  [ "$(count_of "$tmp/cfgconst")" = "0" ] \
+    || fail "canary 6: a #[cfg(test)] constant hid the production caller below it"
+  canaries=$((canaries + 1))
+
+  # 7. And a real test module must still be excluded, or the fix for canary 6
+  #    would have gone too far the other way.
+  mk "$tmp/cfgmod" "$GUARD_FN" 'pub mod guarded;
+pub fn drive() {}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() { let _ = crate::guarded::check_thing_is_allowed(1); }
+}'
+  [ "$(count_of "$tmp/cfgmod")" = "1" ] \
+    || fail "canary 7: a caller inside #[cfg(test)] mod was counted as production"
+  canaries=$((canaries + 1))
+
+  # 8. The ratchet must fail upward. A baseline of 0 against a tree with one
   #    unreached guard has to be a failure, not a warning.
   mk "$tmp/rise" "$GUARD_FN" "$SILENT"
   if ( BUDLUM_ROOT="$tmp/rise" \
        BASELINE_FILE="$tmp/rise/.github/unwired-guards-baseline.txt" \
        bash "$0" ) >/dev/null 2>&1; then
-    fail "canary 6: a rise above the baseline was accepted"
+    fail "canary 8: a rise above the baseline was accepted"
   fi
   canaries=$((canaries + 1))
 
-  # 7. And it must fail downward too, so a gain is written down instead of
+  # 9. And it must fail downward too, so a gain is written down instead of
   #    being silently available to spend later.
   mk "$tmp/fall" "$GUARD_FN" "$CALLS"
   printf '3\n' > "$tmp/fall/.github/unwired-guards-baseline.txt"
   if ( BUDLUM_ROOT="$tmp/fall" \
        BASELINE_FILE="$tmp/fall/.github/unwired-guards-baseline.txt" \
        bash "$0" ) >/dev/null 2>&1; then
-    fail "canary 7: a stale, too-loose baseline was accepted"
+    fail "canary 9: a stale, too-loose baseline was accepted"
   fi
   canaries=$((canaries + 1))
 
-  # 8. The tree as committed must pass.
+  # 10. The tree as committed must pass.
   gate >/dev/null || fail "the committed tree does not match its own baseline"
   canaries=$((canaries + 1))
 
