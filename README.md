@@ -9,8 +9,8 @@ PoW, PoS, PoA, BFT and ZK domains each keep their own consensus; Budlum verifies
 finality proofs and records cross-domain value transfer as a cryptographic fact on a single
 `GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants.
 
-[![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-1992%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml)
+[![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-1992%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.94.0-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE.md)
 
@@ -309,8 +309,12 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 - **Determinism.** State roots and block hashes must be reproducible. A dedicated gate proves
   no hashing function iterates an unordered collection, a `HashMap` in a state-root path is
   a chain halt waiting for two nodes to disagree, and the gate catches it at review time.
-- **The badge cannot lie.** The test count on this page is compared against what the run
-  actually measured, and a mismatch fails the pull request that caused it.
+- **The badges cannot lie.** Every badge on this page is checked against the file it
+  points at: the test count against what the run measured, the Rust version against
+  `rust-toolchain.toml`, the licence against the SPDX id in `Cargo.toml`, and the CI badge
+  against the branch and event it is required to name, because an unfiltered badge reports
+  the newest run on any branch when the default branch has none. A mismatch fails the pull
+  request that caused it.
 - **Tests must be tests.** Every name a gate declares as required is checked to actually carry
   `#[test]`, a required test that silently stopped existing would otherwise pass forever.
 - **Formal methods.** [Kani](kani) model-checks arithmetic invariants; `cargo fuzz` targets
