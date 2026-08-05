@@ -104,6 +104,10 @@ jobs:
         run: bash ./scripts/check-badges-are-current.sh --self-test
       - name: Rozet guncel mi (README = olculen test sayisi)
         run: bash ./scripts/check-badges-are-current.sh /tmp/libtests.log
+      - name: Cakisma isareti kanaryasi
+        run: bash ./scripts/check-no-conflict-markers-are-committed.sh --self-test
+      - name: Cakisma isareti agacta yok
+        run: bash ./scripts/check-no-conflict-markers-are-committed.sh
 
 
   budzero:
