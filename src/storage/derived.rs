@@ -71,10 +71,15 @@
 //! derivation may name stored content, never another derivation. One hop has
 //! one failure to reason about; a chain of hops has a depth nobody bounded.
 //!
-//! WIRING: unwired - measured: no production path constructs a
-//! `ContentSource::Derived` manifest yet. The spec, its bounds and its
-//! refusals are here and tested; the transaction that registers a derived
-//! object is a consensus-surface change and lands with the V4 manifest tag.
+//! WIRING: unwired - measured: no production path registers a derived
+//! manifest yet. The spec, its bounds and its refusals are here and tested;
+//! the transaction that registers a derived object is a consensus-surface
+//! change and lands with the V4 manifest tag.
+//!
+//! (The variant this module will hang off is named in `generated.rs`, not
+//! here. Naming it in this sentence would make the wiring gate read the
+//! mention as a call and declare that module wired, which is the exact
+//! failure this comment is describing about its own module.)
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;

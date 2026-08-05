@@ -867,7 +867,23 @@ async fn main() {
     // Davranış değişikliği yalnızca şu: anahtar yüklemesi başarılıysa adresi
     // Artık bir değişkende tutulur; imza/devnet'lik doğrulama kuralları aynı.
     // (combinator biçimi: clippy pedantic/nursery ratchet'i için)
-    let validator_keys_address: Option<Address> = (consensus_type == ConsensusType::PoS)
+    //
+    // The mainnet guard is repeated here rather than assumed. The load above
+    // refuses a disk-backed key file on mainnet, but only inside the PoS
+    // engine arm, and `ValidatorKeys::validate_mainnet_disk_policy` was never
+    // called from any production path at all: it exists, it is tested, and
+    // nothing reaches it. So on mainnet this second load would open the same
+    // file the first one refused, and hand back an address derived from
+    // plaintext BLS and post-quantum secrets sitting on disk.
+    //
+    // The other mainnet key rules in this binary are also spelled
+    // `network == Mainnet && role == "validator"`, which leaves a node started
+    // with any other role reading the key file unchecked. Bootstrapping a
+    // producer candidate is a validator action whatever the role string says,
+    // so the check here is on the network alone.
+    let mainnet = config.network == budlum_core::core::chain_config::Network::Mainnet;
+    let validator_keys_address: Option<Address> = (!mainnet
+        && consensus_type == ConsensusType::PoS)
         .then_some(config.validator_key_file.clone())
         .flatten()
         .and_then(|v_path| {
