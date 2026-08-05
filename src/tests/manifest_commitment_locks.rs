@@ -1085,4 +1085,212 @@ mod repair_band {
         );
         assert_eq!(replicated.live_shard_count(&replicated_id), 3);
     }
+
+    // --- the repair margin, and the trigger that reads it -----------------
+
+    #[test]
+    fn the_repair_margin_scales_with_the_parity_budget() {
+        use crate::storage::manifest::ErasureScheme;
+
+        // A third of parity, rounded up, so a scheme with any parity at all
+        // repairs before its last shard of headroom is gone.
+        assert_eq!(ErasureScheme { k: 10, n: 16 }.repair_margin(), 2);
+        assert_eq!(ErasureScheme { k: 20, n: 26 }.repair_margin(), 2);
+        assert_eq!(ErasureScheme { k: 500, n: 535 }.repair_margin(), 12);
+        assert_eq!(ErasureScheme { k: 2000, n: 2062 }.repair_margin(), 21);
+
+        // One parity shard still gets a margin of one: the alternative is to
+        // start the repair at `live == k`, where the next loss is fatal.
+        assert_eq!(ErasureScheme { k: 4, n: 5 }.repair_margin(), 1);
+
+        // Replication has no parity to spend, so it asks for no headroom.
+        // `needs_repair` still fires at `live == k`, which for replication is
+        // every copy but one being gone.
+        assert_eq!(ErasureScheme { k: 3, n: 3 }.repair_margin(), 0);
+    }
+
+    #[test]
+    fn a_margin_can_never_exceed_the_parity_a_scheme_actually_has() {
+        use crate::storage::manifest::ErasureScheme;
+
+        // The property that makes the rule safe to apply blindly: asking for
+        // more headroom than the scheme holds would put every object in the
+        // band permanently, which is the failure mode of a fixed margin on a
+        // narrow code.
+        for k in 1..40u32 {
+            for parity in 0..40u32 {
+                let scheme = ErasureScheme { k, n: k + parity };
+                assert!(
+                    scheme.repair_margin() <= parity,
+                    "k={k} parity={parity} asked for margin {}",
+                    scheme.repair_margin()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_object_is_judged_against_its_own_scheme() {
+        // The reason the sweep cannot take a single margin: two objects with
+        // different schemes, both one shard down, disagree about whether that
+        // is a repair case.
+        let (mut wide, wide_id, wide_shards) = registry_with_object(4, 6);
+        lose_shard(&mut wide, &wide_id, &wide_shards[0]);
+
+        let band = wide.objects_below_own_repair_margin();
+        assert_eq!(band.len(), 1, "(4,6) with 5 live is inside its own margin");
+        assert_eq!(band[0], (wide_id, 5, 4, 1), "margin is ceil(2/3) = 1");
+
+        // A (3,3) object at full health is already at `live == k`, so it is in
+        // the band with no shard lost at all. A single margin applied to both
+        // objects would have to be wrong for one of them.
+        let (replicated, replicated_id, _) = registry_with_object(3, 3);
+        let replicated_band = replicated.objects_below_own_repair_margin();
+        assert_eq!(replicated_band.len(), 1);
+        assert_eq!(replicated_band[0], (replicated_id, 3, 3, 0));
+    }
+
+    #[test]
+    fn an_unrecoverable_object_is_not_reported_as_repairable() {
+        let (mut reg, manifest_id, shard_ids) = registry_with_object(4, 6);
+        for shard_id in shard_ids.iter().take(3) {
+            lose_shard(&mut reg, &manifest_id, shard_id);
+        }
+        assert_eq!(reg.live_shard_count(&manifest_id), 3, "below k = 4");
+
+        assert!(
+            reg.objects_below_own_repair_margin().is_empty(),
+            "there is nothing to rebuild from, so this is not a repair case"
+        );
+        assert_eq!(
+            reg.unrecoverable_objects().len(),
+            1,
+            "it belongs on the alarm path instead"
+        );
+    }
+
+    // --- renewal, and the ticket a lapsed term now opens -------------------
+
+    #[test]
+    fn the_incumbent_may_renew_inside_the_window_and_not_before() {
+        use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;
+
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal = reg.all_deals()[0].clone();
+        let opens = deal.deal_end_epoch - RENEWAL_WINDOW_EPOCHS;
+
+        // Too early: a renewal accepted before the window would let an
+        // operator lock a price in ahead of the term it applies to.
+        assert!(reg
+            .renew_deal(deal.deal_id, deal.operator, opens - 1, 50)
+            .is_err());
+
+        // Inside the window the term extends, and the economics are the same
+        // agreement running longer.
+        let new_end = reg
+            .renew_deal(deal.deal_id, deal.operator, opens, 50)
+            .expect("the incumbent may renew inside the window");
+        assert_eq!(new_end, deal.deal_end_epoch + 50);
+        let after = reg.get_deal(deal.deal_id).unwrap();
+        assert_eq!(after.economics, deal.economics, "renewal is not a reprice");
+    }
+
+    #[test]
+    fn nobody_but_the_incumbent_can_renew() {
+        use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;
+
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal = reg.all_deals()[0].clone();
+        let opens = deal.deal_end_epoch - RENEWAL_WINDOW_EPOCHS;
+
+        let stranger = crate::core::address::Address([0xAB; 32]);
+        assert!(
+            reg.renew_deal(deal.deal_id, stranger, opens, 50).is_err(),
+            "renewal extends someone else's obligation, so only they may take it"
+        );
+    }
+
+    #[test]
+    fn a_deal_that_matures_unrenewed_opens_a_reallocation_ticket() {
+        // The asymmetry this closes: the slash path always opened a ticket,
+        // the expiry path did not, so an operator that served its whole term
+        // and left honestly dropped a shard with nothing arranged.
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal_id = reg.all_deals()[0].deal_id;
+        let before = reg.all_reallocation_tickets().len();
+
+        reg.expire_deal(deal_id, 200).expect("the term is over");
+        let ticket_id = reg
+            .open_expiry_reallocation(deal_id, 200)
+            .expect("an unheld shard needs a replacement");
+
+        assert_eq!(reg.all_reallocation_tickets().len(), before + 1);
+        let ticket = reg.get_reallocation_ticket(ticket_id).unwrap();
+        assert_eq!(ticket.failed_deal_id, deal_id);
+        assert_eq!(
+            ticket.status,
+            crate::domain::storage_deal::ReallocationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn expiry_tickets_do_not_bar_the_operator_that_let_the_term_lapse() {
+        // A slashed operator is barred from the replacement because it failed
+        // a challenge. An operator whose term simply ran out failed nothing,
+        // and it is the cheapest possible replacement: it still has the bytes.
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal_id = reg.all_deals()[0].deal_id;
+        let incumbent = reg.get_deal(deal_id).unwrap().operator;
+
+        reg.expire_deal(deal_id, 200).unwrap();
+        let ticket_id = reg.open_expiry_reallocation(deal_id, 200).unwrap();
+        let ticket = reg.get_reallocation_ticket(ticket_id).unwrap();
+
+        assert_ne!(
+            ticket.slashed_operator, incumbent,
+            "letting a term lapse is not a slash, and must not be recorded as one"
+        );
+    }
+
+    #[test]
+    fn the_expiry_ticket_is_opened_once_however_often_the_sweep_runs() {
+        // The sweep runs every block. A second ticket for the same deal would
+        // have two operators paid to hold one shard.
+        let (mut reg, _, _) = registry_with_object(4, 6);
+        let deal_id = reg.all_deals()[0].deal_id;
+        reg.expire_deal(deal_id, 200).unwrap();
+
+        assert!(reg.open_expiry_reallocation(deal_id, 200).is_some());
+        assert!(
+            reg.open_expiry_reallocation(deal_id, 201).is_none(),
+            "the second sweep must find the ticket already open"
+        );
+        assert!(
+            reg.open_expiry_reallocation(deal_id, 500).is_none(),
+            "and must keep finding it, however much later"
+        );
+    }
+
+    #[test]
+    fn a_deal_inside_its_renewal_window_is_offered_before_it_matures() {
+        use crate::domain::storage_deal::RENEWAL_WINDOW_EPOCHS;
+
+        let (reg, _, _) = registry_with_object(4, 6);
+        let end = reg.all_deals()[0].deal_end_epoch;
+
+        assert!(
+            reg.deals_in_renewal_window(end - RENEWAL_WINDOW_EPOCHS - 1)
+                .is_empty(),
+            "before the window nothing is offered"
+        );
+        assert_eq!(
+            reg.deals_in_renewal_window(end - 1).len(),
+            6,
+            "inside the window every live deal is offered its extension"
+        );
+        assert!(
+            reg.deals_in_renewal_window(end).is_empty(),
+            "at maturity the offer has expired and the ticket path takes over"
+        );
+    }
 }

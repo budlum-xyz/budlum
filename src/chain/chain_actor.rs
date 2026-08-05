@@ -2158,6 +2158,38 @@ impl ChainActor {
             Err(error) => tracing::warn!("B.U.D. expired-deal finalization failed at height {block_height}: {error}"),
         }
 
+        // The repair band. `objects_needing_repair` has existed since erasure
+        // coding landed and nothing called it, which meant the real repair
+        // window was unbounded: an object could sit one shard above `k` for as
+        // long as it liked and no maintenance pass would notice. The sweep now
+        // reads it, per object, against that object's own scheme.
+        let repair_band = self
+            .blockchain
+            .state
+            .storage_registry
+            .objects_below_own_repair_margin();
+        for (manifest_id, live, k, margin) in &repair_band {
+            tracing::warn!(
+                "B.U.D. object {} is in the repair band at epoch {current_epoch}: {live} shards live, k={k}, margin={margin}",
+                hex::encode(manifest_id.0)
+            );
+        }
+
+        // Objects already past saving are logged separately and loudly. Left
+        // inside the band above they would read as "a repair is coming", and
+        // no repair is coming: below `k` there is nothing to rebuild from.
+        let unrecoverable = self
+            .blockchain
+            .state
+            .storage_registry
+            .unrecoverable_objects();
+        for (manifest_id, live, k) in &unrecoverable {
+            tracing::error!(
+                "B.U.D. object {} is UNRECOVERABLE at epoch {current_epoch}: {live} shards live, k={k}; no repair can restore it",
+                hex::encode(manifest_id.0)
+            );
+        }
+
         let under_replicated = self
             .blockchain
             .state

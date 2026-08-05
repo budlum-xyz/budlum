@@ -116,6 +116,10 @@ jobs:
         run: bash ./scripts/check-no-conflict-markers-are-committed.sh --self-test
       - name: Cakisma isareti agacta yok
         run: bash ./scripts/check-no-conflict-markers-are-committed.sh
+      - name: Onarim tetikleyicisi kanaryasi
+        run: bash ./scripts/check-repair-fires-on-loss.sh --self-test
+      - name: Onarim kayipta atesliyor
+        run: bash ./scripts/check-repair-fires-on-loss.sh
 
 
   budzero:

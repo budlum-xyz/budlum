@@ -5485,6 +5485,21 @@ impl Blockchain {
                 }
             };
             expired += 1;
+            // The shard this deal was holding is now unheld. The slash path
+            // has always opened a ticket here; the expiry path did not, so an
+            // operator that served its term and left honestly dropped a shard
+            // with nothing arranged to replace it. Opening the ticket before
+            // the bond is returned means the sweep cannot credit a bond and
+            // then fail to record the gap.
+            if let Some(ticket_id) = self
+                .state
+                .storage_registry
+                .open_expiry_reallocation(deal_id, current_epoch)
+            {
+                tracing::info!(
+                    "B.U.D. deal {deal_id} matured unrenewed; reallocation ticket {ticket_id} opened at epoch {current_epoch}"
+                );
+            }
             if bond == 0 {
                 continue;
             }

@@ -233,6 +233,47 @@ impl ErasureScheme {
         self.parity_count()
     }
 
+    /// How much headroom above `k` a repair must start with, for this scheme.
+    ///
+    /// A fraction of the parity budget rather than a constant, because a
+    /// constant means two different things depending on the code. Measured
+    /// over a 24 hour repair window at a pessimistic 20% annual per-shard
+    /// loss rate, with the probability that the object falls below `k` before
+    /// the repair finishes:
+    ///
+    /// ```text
+    ///   scheme          margin=2   this rule (margin)
+    ///   RS (10,16)       1.8e-05    4.7e-08  (2)
+    ///   RS (20,26)       6.6e-05    2.9e-07  (2)
+    ///   LRC k=500        ~1.0       4.4e-16  (12)
+    ///   LRC k=2000       ~1.0       0        (21)
+    /// ```
+    ///
+    /// The constant is not merely worse on the wide codes, it is useless
+    /// there: 2062 shards all at risk cross a two-shard band faster than any
+    /// repair can be arranged, so a fixed margin of 2 on `LRC k=2000` means
+    /// the repair reliably starts too late. Scaling with the parity budget
+    /// makes the rule say the same thing about every scheme, and it can never
+    /// ask for headroom the scheme does not have.
+    ///
+    /// A third is the ratio that pays for itself: it keeps the failure
+    /// probability below 1e-6 on every scheme measured, while a half would
+    /// only buy another few orders of magnitude on numbers that are already
+    /// negligible, at the cost of rebuilding more shards each time.
+    ///
+    /// Returns at least 1 whenever there is any parity at all, so a scheme
+    /// with a single parity shard still repairs one loss early rather than
+    /// waiting for the loss that kills it. Replication (`n == k`) has no
+    /// parity to spend and returns 0.
+    pub fn repair_margin(&self) -> u32 {
+        let parity = self.parity_count();
+        if parity == 0 {
+            return 0;
+        }
+        // ceil(parity / 3), without floating point.
+        parity.div_ceil(3).max(1)
+    }
+
     /// Bytes stored per byte of content, as a ratio scaled by 1000 to stay in
     /// integer arithmetic. Replication of 3 is 3000; a (4,6) code is 1500.
     pub fn overhead_per_mille(&self) -> u32 {

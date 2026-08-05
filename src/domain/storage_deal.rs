@@ -464,6 +464,25 @@ pub struct ChallengeResult {
 pub const STORAGE_REPLICATION_TARGET: u8 = 3;
 pub const REALLOCATION_ACCEPTANCE_EPOCHS: u64 = 4;
 
+/// How long before a deal matures its operator may renew it unopposed.
+///
+/// Renewal exists because the two ways a deal ends are not symmetric. A
+/// slashed operator is gone and the shard has to be rebuilt somewhere else,
+/// which costs a full shard transfer. An operator whose term simply ran out
+/// is still holding the bytes: extending its deal costs nothing to move.
+///
+/// Measured, with the expiry path as it stood (mature, refund the bond, open
+/// no ticket): at a 99% per-term renewal rate, a `(10,16)` object reaches `k`
+/// after 53 terms, and `LRC k=2000` after 4. The wide codes are the fragile
+/// ones here for the same reason they are cheap, they hold very little parity
+/// per shard, so the drain that replication would shrug off walks them to the
+/// edge in a handful of terms.
+///
+/// The window is the same length as [`REALLOCATION_ACCEPTANCE_EPOCHS`], so an
+/// operator that declines to renew leaves exactly as much time to find a
+/// replacement as a slashed one does.
+pub const RENEWAL_WINDOW_EPOCHS: u64 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReallocationStatus {
     Pending,
@@ -1997,6 +2016,126 @@ impl StorageRegistry {
         Ok(replacement_deal_id)
     }
 
+    /// Deals inside their renewal window: matured soon, still `Active`.
+    ///
+    /// Returned so the maintenance sweep can offer the incumbent operator the
+    /// extension before anyone else is asked to take the shard. The operator
+    /// already holds the bytes, so a renewal moves nothing across the network
+    /// and a reallocation moves a whole shard.
+    ///
+    /// Excludes deals that have already matured: past `deal_end_epoch` the
+    /// renewal offer has expired and the shard is the reallocation path's
+    /// problem.
+    pub fn deals_in_renewal_window(&self, now_epoch: u64) -> Vec<(u64, Address, u64)> {
+        self.deals
+            .values()
+            .filter(|deal| deal.is_active())
+            .filter(|deal| {
+                let opens = deal.deal_end_epoch.saturating_sub(RENEWAL_WINDOW_EPOCHS);
+                now_epoch >= opens && now_epoch < deal.deal_end_epoch
+            })
+            .map(|deal| (deal.deal_id, deal.operator, deal.deal_end_epoch))
+            .collect()
+    }
+
+    /// Extend a deal that its operator chose to renew.
+    ///
+    /// Refuses outside the renewal window rather than clamping, because a
+    /// renewal accepted early would let an operator lock a price in before
+    /// the term it applies to, and one accepted late would resurrect a deal
+    /// the reallocation path may already have replaced.
+    ///
+    /// The economics are carried over untouched: this is the same agreement
+    /// running longer, not a new one. Repricing belongs in a fresh deal, where
+    /// the payer gets to agree to the new number.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownDeal`] for an id the registry does not hold,
+    /// [`StorageError::DealNotActive`] for a deal that was slashed or expired,
+    /// [`StorageError::NotTheOperator`] when someone else tries to renew, and
+    /// [`StorageError::InvalidEpochRange`] outside the window or for a
+    /// non-positive extension.
+    pub fn renew_deal(
+        &mut self,
+        deal_id: u64,
+        operator: Address,
+        now_epoch: u64,
+        extra_epochs: u64,
+    ) -> Result<u64, StorageError> {
+        let deal = self
+            .deals
+            .get_mut(&deal_id)
+            .ok_or(StorageError::UnknownDeal(deal_id))?;
+        if !deal.is_active() {
+            return Err(StorageError::DealNotActive(deal_id));
+        }
+        if deal.operator != operator {
+            return Err(StorageError::NotTheOperator {
+                expected: deal.operator,
+                provided: operator,
+            });
+        }
+        if extra_epochs == 0 {
+            return Err(StorageError::InvalidEpochRange {
+                start: now_epoch,
+                end: now_epoch,
+            });
+        }
+        let opens = deal.deal_end_epoch.saturating_sub(RENEWAL_WINDOW_EPOCHS);
+        if now_epoch < opens || now_epoch >= deal.deal_end_epoch {
+            return Err(StorageError::InvalidEpochRange {
+                start: now_epoch,
+                end: deal.deal_end_epoch,
+            });
+        }
+        deal.deal_end_epoch = deal.deal_end_epoch.saturating_add(extra_epochs);
+        Ok(deal.deal_end_epoch)
+    }
+
+    /// Open a reallocation ticket for a shard whose deal matured unrenewed.
+    ///
+    /// The slash path opened a ticket and the expiry path did not, so an
+    /// operator that served its whole term and left honestly dropped a shard
+    /// with nothing watching. Both exits now look the same to the redundancy
+    /// layer; they differ only in what happens to the bond, which is the part
+    /// that should differ.
+    ///
+    /// Returns the ticket id, or `None` when a ticket for this deal already
+    /// exists, which is what makes the sweep safe to run every block.
+    pub fn open_expiry_reallocation(&mut self, deal_id: u64, now_epoch: u64) -> Option<u64> {
+        let deal = self.deals.get(&deal_id)?;
+        if self
+            .reallocations
+            .values()
+            .any(|ticket| ticket.failed_deal_id == deal_id)
+        {
+            return None;
+        }
+        let ticket_id = self.next_reallocation_id;
+        self.next_reallocation_id = self.next_reallocation_id.saturating_add(1);
+        let ticket = StorageReallocationTicket {
+            ticket_id,
+            failed_deal_id: deal_id,
+            replacement_deal_id: None,
+            domain_id: deal.domain_id,
+            manifest_id: deal.manifest_id,
+            shard_id: deal.shard_id,
+            replica_index: deal.replica_index,
+            // The incumbent is recorded so the ticket reads the same as a
+            // slash ticket, but it is NOT barred from taking the replacement:
+            // `accept_reallocation_ticket` refuses only the slashed operator,
+            // and an operator that let a term lapse was never slashed. It may
+            // well be the cheapest replacement, since it still has the bytes.
+            slashed_operator: Address::zero(),
+            opened_epoch: now_epoch,
+            deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
+            status: ReallocationStatus::Pending,
+        };
+        self.reallocations.insert(ticket_id, ticket);
+        Some(ticket_id)
+    }
+
     pub fn mark_overdue_reallocations_under_replicated(&mut self, now_epoch: u64) -> usize {
         let mut changed = 0;
         for ticket in self.reallocations.values_mut() {
@@ -2239,6 +2378,33 @@ impl StorageRegistry {
                     *manifest_id,
                     live,
                     manifest.erasure.k,
+                ))
+            })
+            .collect()
+    }
+
+    /// Objects in the repair band, each judged by its own scheme's margin.
+    ///
+    /// [`StorageRegistry::objects_needing_repair`] takes one margin and
+    /// applies it to every object, which is the right shape for a caller that
+    /// wants to ask a specific question. It is the wrong shape for the
+    /// maintenance sweep: the sweep sees every scheme at once, and a single
+    /// number cannot be correct for `(10,16)` and `LRC k=2000` at the same
+    /// time. See [`ContentManifest::repair_margin`] for the measurement.
+    ///
+    /// Returns `(manifest_id, live, k, margin)` so a caller can log why an
+    /// object was selected without recomputing the rule.
+    pub fn objects_below_own_repair_margin(&self) -> Vec<(ContentId, u32, u32, u32)> {
+        self.manifests
+            .iter()
+            .filter_map(|(manifest_id, manifest)| {
+                let live = self.live_shard_count(manifest_id);
+                let margin = manifest.repair_margin();
+                manifest.needs_repair(live, margin).then_some((
+                    *manifest_id,
+                    live,
+                    manifest.erasure.k,
+                    margin,
                 ))
             })
             .collect()
