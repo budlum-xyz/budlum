@@ -10,8 +10,8 @@
 //! # Reading only
 //!
 //! Lubot does not generate images or video, and nothing here opens a door to
-//! it. Every modality in [`PerceptionKind`] describes an input a model may
-//! consume. That is a scope decision rather than a technical limit: a
+//! it. Every modality in [`self::PerceptionKind`] describes an input a model
+//! may consume. That is a scope decision rather than a technical limit: a
 //! generation surface would need its own economics, its own abuse model and
 //! its own answer to "who owns the output", and none of those are settled.
 //! Declaring the boundary in the type keeps a later contributor from adding
