@@ -47,7 +47,7 @@
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
-use crate::pollen::data_rights::AssetId;
+use crate::pollen::AssetId;
 use crate::storage::content_id::ContentId;
 use std::collections::BTreeMap;
 
