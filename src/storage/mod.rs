@@ -23,6 +23,7 @@ pub mod dictionary;
 pub mod erasure;
 pub mod generated;
 pub mod lifecycle;
+pub mod lrc;
 pub mod manifest;
 pub mod merkle_trie;
 pub mod mobile_self;
@@ -48,6 +49,7 @@ pub use generated::{
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
 };
+pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
     manifest_id_from_parts, manifest_id_from_shards, ContentCipher, ContentEncryption,
     ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
