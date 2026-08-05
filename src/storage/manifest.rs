@@ -261,17 +261,26 @@ impl ErasureScheme {
     /// only buy another few orders of magnitude on numbers that are already
     /// negligible, at the cost of rebuilding more shards each time.
     ///
-    /// Returns at least 1 whenever there is any parity at all, so a scheme
-    /// with a single parity shard still repairs one loss early rather than
-    /// waiting for the loss that kills it. Replication (`n == k`) has no
-    /// parity to spend and returns 0.
+    /// Never returns 1 when the scheme can afford 2, which is the correction
+    /// a test caught: `needs_repair` fires on `k <= live < k + margin`, so a
+    /// margin of 1 narrows the band to exactly `live == k`. That is not a
+    /// small margin, it is no margin: the repair starts at the point where
+    /// the next loss is already fatal, which is the situation the margin
+    /// exists to avoid. The measured risk at that setting is 9.6e-02 for
+    /// `(10,16)`, six orders of magnitude worse than at 2.
+    ///
+    /// A scheme with a single parity shard gets 1 because that is all it has.
+    /// Replication (`n == k`) has no parity to spend and returns 0; for those
+    /// `needs_repair` still fires at `live == k`, which is every copy but one
+    /// being gone, and there is nothing better available.
     pub fn repair_margin(&self) -> u32 {
         let parity = self.parity_count();
         if parity == 0 {
             return 0;
         }
-        // ceil(parity / 3), without floating point.
-        parity.div_ceil(3).max(1)
+        // ceil(parity / 3), floored at 2 where the scheme can afford it, and
+        // never more than the parity actually held.
+        parity.div_ceil(3).max(2).min(parity)
     }
 
     /// Bytes stored per byte of content, as a ratio scaled by 1000 to stay in

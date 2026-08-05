@@ -1099,8 +1099,17 @@ mod repair_band {
         assert_eq!(ErasureScheme { k: 500, n: 535 }.repair_margin(), 12);
         assert_eq!(ErasureScheme { k: 2000, n: 2062 }.repair_margin(), 21);
 
-        // One parity shard still gets a margin of one: the alternative is to
-        // start the repair at `live == k`, where the next loss is fatal.
+        // Narrow schemes floor at 2 rather than at the 1 a third would give.
+        // `needs_repair` fires on `k <= live < k + margin`, so a margin of 1
+        // is a band of exactly `live == k`, which is where the next loss is
+        // already fatal. A test caught this; the measured risk at that
+        // setting is 9.6e-02 against 1.8e-05 at 2.
+        assert_eq!(ErasureScheme { k: 4, n: 6 }.repair_margin(), 2);
+        assert_eq!(ErasureScheme { k: 4, n: 7 }.repair_margin(), 2);
+
+        // One parity shard gets 1, because that is all the scheme holds.
+        // Asking for headroom it does not have would put it in the band
+        // permanently.
         assert_eq!(ErasureScheme { k: 4, n: 5 }.repair_margin(), 1);
 
         // Replication has no parity to spend, so it asks for no headroom.
@@ -1120,11 +1129,20 @@ mod repair_band {
         for k in 1..40u32 {
             for parity in 0..40u32 {
                 let scheme = ErasureScheme { k, n: k + parity };
+                let margin = scheme.repair_margin();
                 assert!(
-                    scheme.repair_margin() <= parity,
-                    "k={k} parity={parity} asked for margin {}",
-                    scheme.repair_margin()
+                    margin <= parity,
+                    "k={k} parity={parity} asked for margin {margin}"
                 );
+                // And the band is never degenerate where the scheme can
+                // afford otherwise: a margin of 1 with parity to spare means
+                // the repair starts at `live == k`.
+                if parity >= 2 {
+                    assert!(
+                        margin >= 2,
+                        "k={k} parity={parity} left only {margin} of headroom"
+                    );
+                }
             }
         }
     }
@@ -1139,15 +1157,34 @@ mod repair_band {
 
         let band = wide.objects_below_own_repair_margin();
         assert_eq!(band.len(), 1, "(4,6) with 5 live is inside its own margin");
-        assert_eq!(band[0], (wide_id, 5, 4, 1), "margin is ceil(2/3) = 1");
+        assert_eq!(
+            band[0],
+            (wide_id, 5, 4, 2),
+            "two parity shards floor the margin at 2, so the band is 4..6"
+        );
 
-        // A (3,3) object at full health is already at `live == k`, so it is in
-        // the band with no shard lost at all. A single margin applied to both
-        // objects would have to be wrong for one of them.
-        let (replicated, replicated_id, _) = registry_with_object(3, 3);
-        let replicated_band = replicated.objects_below_own_repair_margin();
-        assert_eq!(replicated_band.len(), 1);
-        assert_eq!(replicated_band[0], (replicated_id, 3, 3, 0));
+        // A (3,3) object has no parity, so it asks for no headroom and
+        // `k <= live < k + 0` is empty: replication never enters the band.
+        // That is the honest answer rather than a convenient one. Repair
+        // means rebuilding a lost shard from surviving ones, and replication
+        // has nothing to rebuild from, only copies to make. Reporting it as
+        // repairable would promise a mechanism that does not apply to it.
+        let (mut replicated, replicated_id, replicated_shards) = registry_with_object(3, 3);
+        assert!(
+            replicated.objects_below_own_repair_margin().is_empty(),
+            "replication has no parity budget, so it has no repair band"
+        );
+
+        // And the moment it loses anything it is unrecoverable, which is the
+        // contrast: the coded object had headroom to spend, this one never
+        // did.
+        lose_shard(&mut replicated, &replicated_id, &replicated_shards[0]);
+        assert!(replicated.objects_below_own_repair_margin().is_empty());
+        assert_eq!(
+            replicated.unrecoverable_objects().len(),
+            1,
+            "one lost copy of a (3,3) object is already past saving"
+        );
     }
 
     #[test]
