@@ -1091,6 +1091,8 @@ jobs:
           bash ./scripts/check-storage-penalties-are-enforced.sh
           bash ./scripts/check-content-encryption-is-declared-and-bound.sh --self-test
           bash ./scripts/check-content-encryption-is-declared-and-bound.sh
+          bash ./scripts/check-shard-placement-is-sticky-and-staked.sh --self-test
+          bash ./scripts/check-shard-placement-is-sticky-and-staked.sh
           bash ./scripts/check-coding-audit-samples-the-relationship.sh --self-test
           bash ./scripts/check-coding-audit-samples-the-relationship.sh
       # The storage challenge verifier named three public inputs the AIR does
