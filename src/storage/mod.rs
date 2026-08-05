@@ -19,6 +19,7 @@
 pub mod assignment;
 pub mod content_id;
 pub mod db;
+pub mod dictionary;
 pub mod erasure;
 pub mod generated;
 pub mod lifecycle;
@@ -33,6 +34,10 @@ pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
 };
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
+pub use dictionary::{
+    DictionaryEntry, DictionaryError, DictionaryRegistry, DICTIONARY_GRACE_EPOCHS,
+    MAX_DICTIONARY_BYTES,
+};
 pub use erasure::{
     encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
 };
