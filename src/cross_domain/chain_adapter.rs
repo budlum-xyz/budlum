@@ -277,7 +277,9 @@ pub mod test_adapter {
         let mut registry = AdapterRegistry::new();
         assert!(!registry.supports(&ExternalChain::Ethereum));
 
-        registry.register(Box::new(StubAdapter::new(ExternalChain::Ethereum)));
+        registry
+            .register(Box::new(StubAdapter::new(ExternalChain::Ethereum)))
+            .expect("stub adapter must be fit to relay");
         assert!(registry.supports(&ExternalChain::Ethereum));
         assert!(!registry.supports(&ExternalChain::Solana));
 
@@ -300,8 +302,12 @@ fn adapter_registry_multiple_adapters() {
     use self::test_adapter::StubAdapter;
 
     let mut registry = AdapterRegistry::new();
-    registry.register(Box::new(StubAdapter::new(ExternalChain::Ethereum)));
-    registry.register(Box::new(StubAdapter::new(ExternalChain::Solana)));
+    registry
+        .register(Box::new(StubAdapter::new(ExternalChain::Ethereum)))
+        .expect("stub adapter must be fit to relay");
+    registry
+        .register(Box::new(StubAdapter::new(ExternalChain::Solana)))
+        .expect("stub adapter must be fit to relay");
 
     assert!(registry.supports(&ExternalChain::Ethereum));
     assert!(registry.supports(&ExternalChain::Solana));
