@@ -282,6 +282,7 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 /// Pollen Data Rights / AccessGrant v2 primitives.
+pub mod content_gate;
 pub mod data_rights;
 pub mod encryption_policy;
 pub use data_rights::{
@@ -291,4 +292,5 @@ pub use data_rights::{
 
 /// AI Data Marketplace (satıcı-teklifi ekonomisi) - geçiş modülü.
 pub mod offers;
+pub use content_gate::{ContentGateError, ProtectedContent};
 pub use offers::{DataOffer, MarketplaceRegistry, PollenPurchaseReceipt};

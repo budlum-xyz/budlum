@@ -104,6 +104,10 @@ jobs:
         run: bash ./scripts/check-badges-are-current.sh --self-test
       - name: Rozet guncel mi (README = olculen test sayisi)
         run: bash ./scripts/check-badges-are-current.sh /tmp/libtests.log
+      - name: Odenmis icerik kanaryasi
+        run: bash ./scripts/check-paid-content-cannot-be-read-for-free.sh --self-test
+      - name: Odenmis icerik bedava okunamaz
+        run: bash ./scripts/check-paid-content-cannot-be-read-for-free.sh
       - name: Uretilebilir icerik kanaryasi
         run: bash ./scripts/check-generated-content-is-verifiable.sh --self-test
       - name: Uretilebilir icerik dogrulanabilir
