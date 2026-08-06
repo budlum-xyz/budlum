@@ -2857,23 +2857,43 @@ mod mobile_profile_wiring_tests {
     #[test]
     fn the_peer_cap_is_not_decided_a_second_time_in_this_file() {
         let src = include_str!("node.rs");
-        let ctor = src
-            .find("max_peers: if mobile_mode")
-            .map(|_| true)
-            .unwrap_or(false);
+        // Assembled at runtime rather than written as one literal. Spelled
+        // out, the needle appears in this test's own source, `include_str!`
+        // reads the whole file including these lines, and the test fails on
+        // itself. CI caught exactly that on the first run.
+        let needle = format!("max_peers: {} mobile_mode", "if");
+
+        // Measure the production half only. `include_str!` reads this test
+        // module too, and every string below also appears in the assertions
+        // themselves, so searching the whole file would let the test satisfy
+        // itself: it would pass on a tree where the wiring had been deleted
+        // and only these lines remained.
+        let production = src
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("this file keeps its tests behind #[cfg(test)]");
+
         assert!(
-            !ctor,
+            !production.contains(&needle),
             "the constructor is deciding the peer cap from the boolean again; \
              `ChallengePolicy::peer_budget` is the one table for this"
         );
         assert!(
-            src.contains("ChallengePolicy::peer_budget"),
+            production.contains("ChallengePolicy::peer_budget"),
             "the node must derive its peer cap from the mobile profile"
         );
         assert!(
-            src.contains("fn accepts_storage_work"),
+            production.contains("fn accepts_storage_work"),
             "the storage sweep must ask the profile whether the device takes \
              storage work at this power level"
+        );
+
+        // Canary: the split has to actually remove something, or the three
+        // assertions above silently went back to reading the whole file.
+        assert!(
+            production.len() < src.len(),
+            "the #[cfg(test)] split matched nothing, so this test is measuring \
+             its own source and proves nothing about the production path"
         );
     }
 
