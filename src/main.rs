@@ -532,17 +532,36 @@ async fn main() {
                 );
                 std::process::exit(1);
             };
-            if let Err(e) =
-                budlum_core::crypto::pkcs11::Pkcs11Signer::validate_vendor_mechanism_id(bls_raw)
-            {
-                eprintln!("CRITICAL: invalid PKCS#11 BLS mechanism id: {e}");
-                std::process::exit(1);
-            }
-            if let Err(e) =
-                budlum_core::crypto::pkcs11::Pkcs11Signer::validate_vendor_mechanism_id(pq_raw)
-            {
-                eprintln!("CRITICAL: invalid PKCS#11 PQ mechanism id: {e}");
-                std::process::exit(1);
+            // Parse and floor-check, then ask the vendor policy.
+            //
+            // `validate_vendor_mechanism_id` only proves the string is a
+            // number at or above `CKM_VENDOR_DEFINED`. That leaves two ways
+            // to configure a mainnet validator wrongly and be told nothing:
+            // a mechanism the capability table marks `mainnet_allowed:
+            // false`, and one outside the vendor's own documented range,
+            // which `validate_mechanism_id` refuses for YubiHSM2 above
+            // `0x8000_FFFF`. Both checks existed; neither had a caller.
+            let mechanisms = [("BLS", bls_raw), ("PQ", pq_raw)];
+            let known = budlum_core::crypto::pkcs11::yubihsm2_default_capabilities();
+            for (which, raw) in mechanisms {
+                let id =
+                    match budlum_core::crypto::pkcs11::Pkcs11Signer::validate_vendor_mechanism_id(
+                        raw,
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            eprintln!("CRITICAL: invalid PKCS#11 {which} mechanism id: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                if let Err(e) =
+                    budlum_core::crypto::pkcs11::check_mechanism_admissible_for_mainnet(id, &known)
+                {
+                    eprintln!(
+                        "CRITICAL: PKCS#11 {which} mechanism is not admissible for mainnet: {e}"
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         let signer_result = if strict_vendor_native {
