@@ -21,7 +21,6 @@
 #   src/budlumxyz/mod.rs                    verify_app
 #   src/core/block.rs                       verify_signature_with_pubkey
 #   src/cross_domain/evm/adapter.rs         verify_deposit
-#   src/cross_domain/evm/sync_committee.rs  verify_sync_aggregate
 #   src/crypto/pkcs11.rs                    check_mainnet_policy
 #   src/crypto/pkcs11.rs                    validate_vendor_mechanism
 #   src/domain/storage_deal.rs              verify_coding_audit
