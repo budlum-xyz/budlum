@@ -342,10 +342,16 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
 /// Chaos v2: CHAIN-HALT - tam sessizlik sonrası kurtarma.
 ///
 /// Mevcut 4 senaryo crash/fork/byzantine/restart kapsar; bu mühür ağın HİÇ
-/// Üretim yapmadığı sessiz dönemin dayanıklılığını kilitler: epoch-close
-/// Liveness hook'u üretime bağlı olduğundan (`maybe_observe_liveness_on_epoch_close`
-/// Yalnız blok üretiminde koşar) sessizlikte hiçbir sayaç kımıldamaz; üretici
-/// Geri dönünce zincir deterministik olarak kaldığı height'tan devam etmelidir.
+/// Üretim yapmadığı sessiz dönemin dayanıklılığını kilitler: sessizlikte
+/// Hiçbir sayaç kımıldamaz, üretici geri dönünce zincir deterministik olarak
+/// Kaldığı height'tan devam etmelidir.
+///
+/// Buradaki eski gerekçe ölçüldü ve yanlıştı: `maybe_observe_liveness_on_epoch_close`
+/// "yalnız blok üretiminde koşar" demiyordu, HİÇ koşmuyor. Hiçbir üretim
+/// Yolu onu çağırmıyor, dolayısıyla sessizlikte sayaçların kımıldamaması bu
+/// Testin kanıtladığı bir dayanıklılık değil, kancanın bağlı olmamasının yan
+/// Etkisi. Test hâlâ değerli (resume determinizmini kilitler), ama sebebi
+/// Bu değil. Boşluk `liveness_consensus.rs`'te açıkça sabitlendi.
 #[tokio::test]
 async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     let consensus = Arc::new(PoWEngine::new(0));

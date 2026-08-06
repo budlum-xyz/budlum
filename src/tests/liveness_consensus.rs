@@ -381,3 +381,103 @@ fn every_liveness_path_expects_the_same_validators() {
         "both entry points must exclude an inactive member identically"
     );
 }
+
+/// Liveness slashing is written, enabled by default, and unreachable.
+///
+/// Three things were measured and each contradicts something the tree says
+/// about itself.
+///
+/// `maybe_observe_liveness_on_epoch_close` documented itself as "the OBSERVE
+/// path: a report is recorded, but no slash is applied". It calls
+/// `slash_from_report` and then sets `slashed`, `jailed` and `active = false`
+/// whenever `liveness_slashing_enabled` is true, and that parameter defaults
+/// to true in `registry/params.rs`.
+///
+/// Its own header said it is "called from `produce_block` /
+/// `validate_and_add_block` at every epoch boundary", and
+/// `disaster_recovery.rs` reasoned from the hook running "yalnız blok
+/// üretiminde". Neither is so. `apply_system_effects` closes the epoch
+/// through `state.advance_epoch` and no production path reaches this
+/// function, so no validator has ever been jailed for absence on a running
+/// chain.
+///
+/// The two errors point opposite ways, which is why neither was caught: the
+/// documentation understates what the code does, so a reader checking safety
+/// is reassured, and a reader checking that it works finds a body that
+/// plainly slashes and stops there. Only asking "who calls this" finds it,
+/// and the guard-reachability gate does not, because the name begins with
+/// `maybe_`.
+///
+/// Wiring it is a consensus change: enabling it starts cutting stake at the
+/// first epoch close on every existing chain, against a `participated` set
+/// the signature leaves entirely to the caller. This test does not close the
+/// gap. It makes the gap fail loudly the moment either half moves, so the
+/// change is made deliberately rather than discovered.
+#[test]
+fn liveness_slashing_gap_is_pinned() {
+    let blockchain_src = include_str!("../chain/blockchain.rs");
+
+    // 1. The function still slashes, so calling it is not a free action.
+    let hook = blockchain_src
+        .split_once("pub fn maybe_observe_liveness_on_epoch_close(")
+        .map(|(_, after)| after)
+        .expect("the hook must still exist");
+    let hook = &hook[..hook.len().min(2500)];
+    assert!(
+        hook.contains("slash_from_report") && hook.contains("jailed = true"),
+        "the hook no longer cuts stake. If it became observe-only, the warning \\
+         in its doc comment and this test both need rewriting"
+    );
+
+    // 2. Nothing in production calls it. Searched outside `src/tests/`,
+    //    excluding the definition and doc comments, which is how the claim
+    //    survived for as long as it did.
+    let mut callers: Vec<&str> = Vec::new();
+    for (path, src) in [
+        ("chain/blockchain.rs", blockchain_src),
+        (
+            "chain/chain_actor.rs",
+            include_str!("../chain/chain_actor.rs"),
+        ),
+        (
+            "execution/executor.rs",
+            include_str!("../execution/executor.rs"),
+        ),
+        ("core/account.rs", include_str!("../core/account.rs")),
+        ("main.rs", include_str!("../main.rs")),
+    ] {
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains("pub fn maybe_observe_liveness_on_epoch_close") {
+                continue;
+            }
+            if trimmed.contains("maybe_observe_liveness_on_epoch_close(") {
+                callers.push(path);
+            }
+        }
+    }
+    assert!(
+        callers.is_empty(),
+        "the epoch-close liveness hook is now called from {callers:?}. That is \\
+         a consensus change: it begins cutting stake at the first epoch close \\
+         on every existing chain, against a `participated` set the caller \\
+         chooses. Confirm the participation source is real, then delete this \\
+         test and pin the new behaviour instead"
+    );
+
+    // 3. The canary. If the search above stopped matching for a mechanical
+    //    reason, step 2 would pass on a tree where the hook *is* wired, which
+    //    is the failure this whole test exists to prevent.
+    let sentinel = blockchain_src
+        .lines()
+        .filter(|l| l.contains("maybe_observe_liveness_on_epoch_close"))
+        .count();
+    assert!(
+        sentinel > 0,
+        "the name no longer appears in blockchain.rs at all, so step 2 proved \\
+         nothing; it was searching for a symbol that does not exist"
+    );
+}
