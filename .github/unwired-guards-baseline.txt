@@ -1,19 +1,24 @@
-14
+9
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
-# refuse/deny/guard is a refusal by its own naming. Fourteen of them are
+# refuse/deny/guard is a refusal by its own naming. Nine of them are
 # reachable only from tests, which means they protect the tests.
 #
 # The number may only go down. Wiring one up, or moving it into a module that
 # honestly declares `WIRING: unwired`, lowers it; lower this file in the same
 # pull request or the gain is given back silently.
 #
-# Not a hard zero on purpose: fourteen modules cannot be wired in one
-# reviewable change, and a gate that demands that gets switched off. A number
-# that can only fall gets paid down.
+# Not a hard zero on purpose. Some of what remains should not be wired at all:
+# `verify_answer_challenge_zk_proof` returns `Err` unconditionally on purpose,
+# because a Merkle proof not bound to its deal and challenge context is
+# replayable across storage deals and networks, and callers are meant to use
+# `answer_challenge`, which rebuilds that context from registry state. Calling
+# it would satisfy this gate and weaken the chain. A number that can only fall
+# gets paid down; a number driven to zero by wiring refusals that exist to
+# stay unwired is worse than the number it replaced.
 #
-# The fourteen, at the time this baseline was set:
+# The nine, at the time this baseline was set:
 #
 #   src/ai/execution/guest.rs               validate_gas_budget
 #   src/ai/execution/verify.rs              verify_execution_proof_structural
@@ -21,8 +26,6 @@
 #   src/budlumxyz/mod.rs                    verify_app
 #   src/core/block.rs                       verify_signature_with_pubkey
 #   src/cross_domain/evm/adapter.rs         verify_deposit
-#   src/crypto/pkcs11.rs                    check_mainnet_policy
-#   src/crypto/pkcs11.rs                    validate_vendor_mechanism
 #   src/domain/storage_deal.rs              verify_answer_challenge_zk_proof
 #   src/lubot/mod.rs                        validate_inference_grant
 #   src/lubot/verify.rs                     verify_inference_stark
