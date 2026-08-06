@@ -2700,14 +2700,17 @@ mod tests {
         let dev = test_addr_from_byte(9u8);
         state.add_balance(&dev, 1);
         let root_before = state.calculate_state_root();
-        let app_id = state.budlumxyz.register_app(
-            "HubApp".into(),
-            dev,
-            AppCategory::Infrastructure,
-            "https://example.bud".into(),
-            None,
-            1,
-        );
+        let app_id = state
+            .budlumxyz
+            .register_app(
+                "HubApp".into(),
+                dev,
+                AppCategory::Infrastructure,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         let root_after_register = state.calculate_state_root();
         assert_ne!(root_before, root_after_register);
 
@@ -2759,7 +2762,10 @@ mod tests {
         assert_ne!(root_before, root_after_bns);
 
         let cid = crate::storage::content_id::ContentId([0x11; 32]);
-        state.nft_registry.mint(owner, cid, 1, Some("alice".into()));
+        state
+            .nft_registry
+            .mint(owner, cid, 1, Some("alice".into()))
+            .expect("a fresh registry has no id to collide with");
         let root_after_nft = state.calculate_state_root();
         assert_ne!(root_after_bns, root_after_nft);
     }
@@ -2805,14 +2811,17 @@ mod tests {
     fn non_account_state_changes_root_even_when_accounts_empty() {
         let mut state = AccountState::new();
         let root_before = state.calculate_state_root();
-        state.budlumxyz.register_app(
-            "HeadlessState".into(),
-            test_addr_from_byte(8u8),
-            crate::budlumxyz::types::AppCategory::Other,
-            "https://headless.example".into(),
-            None,
-            1,
-        );
+        state
+            .budlumxyz
+            .register_app(
+                "HeadlessState".into(),
+                test_addr_from_byte(8u8),
+                crate::budlumxyz::types::AppCategory::Other,
+                "https://headless.example".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         let root_after = state.calculate_state_root();
         assert_ne!(root_before, root_after);
     }

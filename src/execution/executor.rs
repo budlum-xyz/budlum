@@ -593,9 +593,15 @@ impl Executor {
                     bincode::deserialize(&tx.data)
                         .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
+                // A duplicate id means the registry's counter disagrees with
+                // its own contents, which `mint` refuses rather than
+                // overwriting somebody's NFT. Surfaced as a validation error
+                // so the block is rejected instead of silently reassigning
+                // ownership.
                 state
                     .nft_registry
-                    .mint(tx.from, cid, state.epoch_index, author);
+                    .mint(tx.from, cid, state.epoch_index, author)
+                    .map_err(|e| BudlumError::validation("nft_mint_refused", e.to_string()))?;
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -1053,14 +1059,22 @@ impl Executor {
                         ),
                     ));
                 }
-                state.budlumxyz.register_app(
-                    name.clone(),
-                    tx.from,
-                    category.clone(),
-                    website_url.clone(),
-                    *manifest_id,
-                    state.epoch_index,
-                );
+                // A duplicate id means the registry's counter disagrees with
+                // its own contents. Refused rather than overwriting another
+                // developer's listing, and refused here, before the fee is
+                // taken below: charging for a registration that did not
+                // happen would be the worse of the two failures.
+                state
+                    .budlumxyz
+                    .register_app(
+                        name.clone(),
+                        tx.from,
+                        category.clone(),
+                        website_url.clone(),
+                        *manifest_id,
+                        state.epoch_index,
+                    )
+                    .map_err(|e| BudlumError::validation("hub_register_refused", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 // Balance check before deduction
                 let hub_total = tx
