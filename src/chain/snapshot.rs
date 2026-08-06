@@ -985,17 +985,32 @@ impl StateSnapshotV2 {
     }
 
     /// C4: snapshot'ı imzala (production loader/HSM signer).
+    ///
+    /// Order matters here, and it is the reason this function is not three
+    /// lines. `trust_policy` is inside the digest, so setting it after
+    /// signing would sign one digest and leave the struct describing a
+    /// different one: `verify_authentic` would then fail at `verify()` with
+    /// `DigestMismatch` before it ever checked the signature it was handed.
+    /// The policy is therefore committed first, the digest computed over the
+    /// final field set, and `snapshot_hash` refreshed to match, so that the
+    /// bytes that were signed and the bytes that will be verified are the
+    /// same bytes.
     pub fn sign_manifest(
         &mut self,
         secret_key: &ed25519_dalek::SigningKey,
         signer_pubkey: [u8; 32],
     ) {
         use ed25519_dalek::Signer;
+        self.trust_policy = SnapshotTrustPolicy::RequireSigned;
         let digest = self.calculate_digest();
         let signature = secret_key.sign(&digest).to_bytes();
         self.manifest_signer = Some(signer_pubkey);
         self.manifest_signature = Some(signature.to_vec());
-        self.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        // `manifest_signer`, `manifest_signature` and `snapshot_hash` are all
+        // outside the digest, so assigning them does not invalidate what was
+        // just signed. `trust_policy` is inside it, which is why the stored
+        // hash has to be recomputed after the policy moved.
+        self.snapshot_hash = hex::encode(digest);
     }
 }
 #[cfg(test)]
@@ -1461,6 +1476,67 @@ mod tests {
         assert_eq!(
             snapshot.verify_authentic(Some(&[wrong_pk])).unwrap_err(),
             SnapshotAuthError::SignatureInvalid
+        );
+    }
+
+    /// Signing must leave the snapshot self-consistent.
+    ///
+    /// This pins the failure mode that appeared the moment `trust_policy`
+    /// entered the digest. `sign_manifest` computed the digest, signed it,
+    /// and only then set the policy: the signature was over one field set
+    /// and `snapshot_hash` described another. `verify_authentic` calls
+    /// `verify()` first, so it returned `DigestMismatch` and never reached
+    /// the signature it had been given, which reads from the outside as a
+    /// corrupt snapshot rather than a broken signer.
+    ///
+    /// The general shape is worth naming, because the next field added to
+    /// the digest will hit it again: any writer that mutates a hashed field
+    /// after hashing has signed something that no longer exists. The
+    /// assertion below is deliberately about the round trip rather than
+    /// about field order, so it keeps holding whatever else joins the digest.
+    #[test]
+    fn signing_leaves_the_digest_consistent_with_what_was_signed() {
+        use ed25519_dalek::SigningKey;
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        let signing_key = SigningKey::from_bytes(&[3u8; 32]);
+        let pk = signing_key.verifying_key().to_bytes();
+        snapshot.sign_manifest(&signing_key, pk);
+
+        assert!(
+            snapshot.verify(),
+            "sign_manifest moved a hashed field, so the stored hash must be \
+             refreshed; otherwise the snapshot reports itself corrupt"
+        );
+        assert_eq!(
+            snapshot.trust_policy,
+            SnapshotTrustPolicy::RequireSigned,
+            "signing a manifest is what makes the signature mandatory"
+        );
+        assert!(
+            snapshot.verify_authentic(Some(&[pk])).is_ok(),
+            "the bytes that were signed and the bytes that get verified must \
+             be the same bytes"
+        );
+
+        // The canary: the digest still has to cover the policy. If this
+        // stops failing, the field left the digest and the downgrade attack
+        // is open again.
+        snapshot.trust_policy = SnapshotTrustPolicy::AllowUnsigned;
+        assert!(
+            !snapshot.verify(),
+            "trust_policy must stay inside the digest"
         );
     }
 
