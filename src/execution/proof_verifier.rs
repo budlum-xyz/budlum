@@ -498,4 +498,108 @@ mod tests {
         let backend_err = ProofVerifier::verify(&envelope, &inputs, &[], 1_000_000).unwrap_err();
         assert!(matches!(backend_err, ProofVerifyError::InvalidProof(_)));
     }
+
+    /// Every structural check has to be in one place, or copies drift.
+    ///
+    /// The executor's `AiAttachExecutionProof` arm had copied three of these
+    /// five by hand: size, degree bits and format version. It had not copied
+    /// the empty-backend refusal, and it had not copied the requirement that
+    /// `p3_version` and `fri_params_id` be present.
+    ///
+    /// Those two fields say which prover version and which FRI parameter set
+    /// a proof was produced under. An envelope that names neither cannot be
+    /// verified against anything, and it was reaching
+    /// `attach_execution_proof` and being recorded as attached evidence.
+    ///
+    /// This test enumerates all five, so the next person to copy them has to
+    /// copy five or fail here.
+    #[test]
+    fn structural_validation_refuses_each_missing_field() {
+        let inputs = make_inputs();
+        let good = make_envelope(&inputs);
+        ProofVerifier::validate_envelope_structure(&good)
+            .expect("the fixture must be well formed, or the negatives prove nothing");
+
+        let cases: Vec<(&str, ProofEnvelope)> = vec![
+            ("oversized proof", {
+                let mut e = good.clone();
+                e.proof_bytes = vec![0u8; MAX_PROOF_BYTES + 1];
+                e
+            }),
+            ("degree bits above the cap", {
+                let mut e = good.clone();
+                e.degree_bits = MAX_DEGREE_BITS + 1;
+                e
+            }),
+            ("format version below the floor", {
+                let mut e = good.clone();
+                e.proof_format_version = MIN_PROOF_FORMAT_VERSION - 1;
+                e
+            }),
+            ("no backend named", {
+                let mut e = good.clone();
+                e.backend = String::new();
+                e
+            }),
+            ("no prover version named", {
+                let mut e = good.clone();
+                e.p3_version = String::new();
+                e
+            }),
+            ("no FRI parameter set named", {
+                let mut e = good.clone();
+                e.fri_params_id = String::new();
+                e
+            }),
+        ];
+
+        for (what, envelope) in cases {
+            assert!(
+                ProofVerifier::validate_envelope_structure(&envelope).is_err(),
+                "an envelope with {what} must be refused; a caller that copied \
+                 only some of these checks would let it through"
+            );
+        }
+    }
+
+    /// The executor must call the shared check, not restate it.
+    ///
+    /// Measured against the source rather than asserted about behaviour,
+    /// because the failure mode is a copy that omits a check: the omission is
+    /// invisible at the copy site, since what is missing is not written
+    /// anywhere. This fails if the call is removed, and it fails if the
+    /// hand-written bounds come back alongside it.
+    #[test]
+    fn the_execution_proof_path_calls_the_shared_structural_check() {
+        let executor_src = include_str!("executor.rs");
+
+        assert!(
+            executor_src.contains("validate_envelope_structure("),
+            "the AiAttachExecutionProof arm must ask the verifier what a \
+             well-formed envelope is instead of restating three of its five \
+             checks by hand"
+        );
+
+        // And the two bounds it used to restate are no longer compared
+        // inline. Assembled at runtime so this assertion's own text cannot
+        // satisfy the search it performs.
+        //
+        // `MAX_PROOF_BYTES` is deliberately not in this list. It is checked
+        // before deserialization, and that is the one bound which cannot be
+        // delegated: the shared function takes a decoded envelope, and
+        // decoding is exactly the work that refusal avoids paying for.
+        for constant in [
+            "MIN_PROOF_FORMAT".to_string() + "_VERSION",
+            "MAX_DEGREE".to_string() + "_BITS",
+        ] {
+            assert!(
+                !executor_src.contains(&constant),
+                "{constant} is compared inline again. It belongs to \
+                 validate_envelope_structure, which also refuses an empty \
+                 backend and a missing p3_version or fri_params_id; a copy \
+                 that restates the bounds will not restate those, and the \
+                 omission is invisible at the copy site"
+            );
+        }
+    }
 }
