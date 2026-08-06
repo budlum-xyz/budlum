@@ -863,6 +863,18 @@ impl StateSnapshotV2 {
         hasher.finalize().into()
     }
 
+    /// Recompute `snapshot_hash` over the current field set.
+    ///
+    /// Exists for fixtures that mutate a hashed field by hand. `trust_policy`
+    /// is inside the digest, so a test that flips it and then calls
+    /// `verify_authentic` gets `DigestMismatch` and never reaches the check
+    /// it meant to exercise. Production code has no reason to call this: the
+    /// hash is written once at construction and again by `sign_manifest`,
+    /// which is the only writer that moves a hashed field.
+    pub fn reseal_after_manual_edit(&mut self) {
+        self.snapshot_hash = self.calculate_hash();
+    }
+
     fn calculate_hash(&self) -> String {
         hex::encode(self.calculate_digest())
     }
@@ -1433,6 +1445,11 @@ mod tests {
             },
         );
         snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        // The policy is inside the digest, so moving it invalidates the hash
+        // the fixture was built with. Refresh it, or `verify_authentic`
+        // returns DigestMismatch and never reaches the signer check this test
+        // is about.
+        snapshot.snapshot_hash = snapshot.calculate_hash();
         assert_eq!(
             snapshot.verify_authentic(None).unwrap_err(),
             SnapshotAuthError::MissingSigner
@@ -1473,6 +1490,10 @@ mod tests {
         snapshot.manifest_signer = Some(wrong_pk);
         snapshot.manifest_signature = Some(wrong_sig.to_vec());
         snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        // Same reason as above: the digest covers the policy, so the fixture
+        // has to be self-consistent before a signature can be the thing that
+        // fails.
+        snapshot.snapshot_hash = snapshot.calculate_hash();
         assert_eq!(
             snapshot.verify_authentic(Some(&[wrong_pk])).unwrap_err(),
             SnapshotAuthError::SignatureInvalid

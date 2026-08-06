@@ -91,7 +91,11 @@ mod tests {
     fn require_signed_fails_without_signature() {
         let mut snap = sample_snapshot();
         snap.trust_policy = SnapshotTrustPolicy::RequireSigned;
-        // From_state already filled snapshot_hash via private calculate_hash.
+        // trust_policy is hashed into the digest, so from_state's hash is
+        // stale the moment the policy moves. Re-sign the manifest with a
+        // throwaway key would also work; here the point is the missing
+        // signature, so the fixture is made consistent instead.
+        snap.reseal_after_manual_edit();
         let err = snap.verify_authentic(None).unwrap_err();
         assert!(
             matches!(

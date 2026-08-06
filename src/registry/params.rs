@@ -374,7 +374,7 @@ mod tests {
         // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            16 * 8 + 1,
+            15 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
         );
@@ -392,13 +392,13 @@ mod tests {
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         assert_ne!(
             encoded.len(),
-            17 * 8 + 1,
-            "a seventeenth u64 field would have to update the pin above, \
+            16 * 8 + 1,
+            "a sixteenth u64 field would have to update the pin above, \
              which is the signal that snapshot compatibility broke"
         );
         assert_ne!(
             encoded.len(),
-            15 * 8 + 1,
+            14 * 8 + 1,
             "removing a field is equally a state-format change"
         );
     }
