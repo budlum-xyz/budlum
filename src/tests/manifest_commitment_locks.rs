@@ -764,11 +764,22 @@ mod coding_audit {
     #[test]
     fn the_audit_column_is_derived_from_chain_entropy() {
         let actor_src = include_str!("../chain/chain_actor.rs");
+        // The match arm, not the enum variant and not the `ChainHandle`
+        // method: all three spell `ChainCommand::DeriveCodingAudit {` or
+        // something close to it, and `split_once` takes the first. Anchoring
+        // on the arm's own first field is what distinguishes it. Measured:
+        // CI failed on this, because the first match was the variant
+        // declaration, whose body has no entropy in it at all.
         let handler = actor_src
-            .split_once("ChainCommand::DeriveCodingAudit {")
+            .split_once("ChainCommand::DeriveCodingAudit {\n                    manifest_id,")
             .map(|(_, after)| after)
-            .expect("the handler must exist");
+            .expect("the DeriveCodingAudit match arm must exist");
         let handler = &handler[..handler.len().min(2000)];
+        assert!(
+            !handler.contains("challenge_id: u64,"),
+            "the anchor matched the enum variant again, whose body carries no \
+             entropy; the assertions below would be measuring a declaration"
+        );
 
         assert!(
             handler.contains("last_block().hash.as_bytes()"),
@@ -794,10 +805,11 @@ mod coding_audit {
     #[test]
     fn the_answer_handler_delegates_to_the_registry() {
         let actor_src = include_str!("../chain/chain_actor.rs");
+        // Same anchoring as above, for the same reason.
         let handler = actor_src
-            .split_once("ChainCommand::AnswerCodingAudit {")
+            .split_once("ChainCommand::AnswerCodingAudit {\n                    audit,")
             .map(|(_, after)| after)
-            .expect("the answer handler must exist");
+            .expect("the AnswerCodingAudit match arm must exist");
         let handler = &handler[..handler.len().min(1200)];
 
         assert!(
