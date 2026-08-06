@@ -49,6 +49,12 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 /// (`generate_receipt_proof`/`submit_transaction`/`wait_for_confirmation`)
 /// Relayer binary'sinde Ethereum RPC'ye bağlanır; bu impl'de offline-test
 /// Modu (StubAdapter deseni) - production RPC ayrı.
+///
+/// `Debug` so a caller can `expect` on a `Result` carrying one. All three
+/// fields are public configuration already: a contract address, an event
+/// topic and a confirmation count. There is no key material here to leak
+/// into a log line.
+#[derive(Debug)]
 pub struct EvmChainAdapter {
     /// Ethereum bridge kontrat adresi (deposit event emitter).
     pub bridge_address: Vec<u8>,
