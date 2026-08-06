@@ -74,27 +74,27 @@ impl RelayerWorker {
     /// worker has no way to observe an external chain, so it has nothing
     /// truthful to report.
     ///
-    /// # Nothing in production calls this
+    /// # Off unless the operator says what to point at
     ///
-    /// `main.rs` builds the worker with `RelayerWorker::new(...)` and a cursor
-    /// Path, and never calls `with_adapters`. The registry is therefore empty
-    /// On every deployed node, and `build_verified_result` answers
-    /// `AdapterError::UnsupportedChain` for **all eight** `ExternalChain`
-    /// Variants - Ethereum included, even though `EvmChainAdapter` exists and
-    /// Is the one real implementation.
+    /// This had no caller for a long time, and the reason was configuration:
+    /// `EvmChainAdapter::new` needs the bridge contract address and the
+    /// `Deposit` topic0, and the node carried a field for neither. The
+    /// registry was therefore empty on every deployed node, and
+    /// `build_verified_result` answered `AdapterError::UnsupportedChain` for
+    /// all eight `ExternalChain` variants, Ethereum included.
     ///
-    /// So outbound relay is not "Ethereum-only" as the adapter set suggests;
-    /// It is off. That is the safe direction to be wrong in, the failure is a
-    /// Refusal, not a forged result - but it means the outbound path has never
-    /// Run against a live chain, and no test covers a populated registry
-    /// Outside `chain_adapter.rs`'s stub.
+    /// `--evm-bridge-address` and `--evm-deposit-topic0` now exist, and
+    /// `main.rs` calls this with whatever `NodeConfig::evm_adapter` assembles
+    /// from them. A node that supplies neither still registers nothing and
+    /// still refuses every chain, which is deliberate: there is nothing safe
+    /// to default to. `test_default()` supplies a zero address, and every
+    /// receipt leaf binds to `bridge_address`, so a node defaulting to it
+    /// would advertise Ethereum support while pointing at no contract.
     ///
-    /// Wiring it needs configuration the node does not currently carry:
-    /// `EvmChainAdapter::new` wants the bridge contract address and the
-    /// `Deposit` topic0, and `RelayerConfig` has no field for either.
-    /// `test_default()` supplies a zero address, which would let a node
-    /// Advertise Ethereum support while pointing at nothing, worse than
-    /// Refusing.
+    /// `AdapterRegistry::register` asks each adapter whether it is fit to
+    /// relay before accepting it, so the zero-address and zero-confirmation
+    /// cases are refused at startup rather than discovered as a mint against
+    /// a transaction that never happened.
     #[must_use]
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;

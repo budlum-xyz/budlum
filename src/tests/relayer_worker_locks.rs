@@ -676,27 +676,20 @@ fn the_relay_cursor_scan_can_detect_a_violation() {
     );
 }
 
-/// Production builds the relay worker with an empty adapter registry, so every
-/// chain is refused - Ethereum included.
+/// An unconfigured worker refuses every external chain, and configuring one is
+/// now possible.
 ///
-/// `main.rs` calls `RelayerWorker::new(...).with_cursor_path(...)` and never
-/// `with_adapters`. `EvmChainAdapter` is the one real implementation and
-/// nothing constructs it outside its own tests. The result is that outbound
-/// relay is not "Ethereum-only" as the `ExternalChain` list suggests: it is
-/// off, for all eight variants.
+/// This test used to pin the stronger claim, that `main.rs` never calls
+/// `with_adapters` at all, and asked whoever wired it to confirm the config
+/// plumbing landed first. It has: `--evm-bridge-address`,
+/// `--evm-deposit-topic0` and `--evm-confirmations` exist, `evm_adapter()`
+/// assembles them or refuses, and `main.rs` registers the result.
 ///
-/// That is the safe direction to fail, a refusal, not a forged result, but
-/// it is worth pinning, because the difference between "off" and "Ethereum
-/// works" is invisible from the type signatures.
-///
-/// Wiring it needs config the node does not carry: `EvmChainAdapter::new`
-/// wants the bridge contract address and the `Deposit` topic0, and
-/// `RelayerConfig` has fields for neither. `test_default()` would supply a
-/// zero address, letting a node advertise Ethereum support while pointing at
-/// nothing - worse than refusing.
-///
-/// When the adapter is wired, the `main.rs` half of this fails and whoever
-/// wired it has to confirm the config plumbing landed with it.
+/// What stays pinned is the part that still matters. A node given no bridge
+/// configuration keeps refusing all eight chains rather than defaulting to
+/// something, because there is nothing safe to default to: a zero address
+/// binds every receipt leaf to no contract, and `test_default()` supplies
+/// exactly that. Off remains the behaviour you get by not asking.
 #[tokio::test]
 async fn an_unconfigured_worker_refuses_every_external_chain() {
     let empty = AdapterRegistry::new();
@@ -720,11 +713,196 @@ async fn an_unconfigured_worker_refuses_every_external_chain() {
         );
     }
 
-    // And production really does leave it empty.
+    // Production registers adapters only when told what to point at, and the
+    // configuration it needs exists.
     let main_src = include_str!("../main.rs");
     assert!(
-        !main_src.contains("with_adapters"),
-        "main.rs now registers adapters - confirm the bridge address and \
-         deposit topic0 are configurable, then drop this half of the test"
+        main_src.contains("with_adapters"),
+        "main.rs no longer registers adapters; outbound relay is off again and \
+         the config plumbing below is unreachable"
+    );
+
+    let cli_src = include_str!("../cli/commands.rs");
+    for flag in [
+        "evm_bridge_address",
+        "evm_deposit_topic0",
+        "evm_confirmations",
+    ] {
+        assert!(
+            cli_src.contains(flag),
+            "{flag} is gone, so an operator cannot say what the adapter points \
+             at and registering one would mean guessing"
+        );
+    }
+
+    // The default is still off. A node that was not told a bridge address
+    // must not acquire one.
+    let default_config = crate::cli::commands::NodeConfig::default();
+    assert!(
+        default_config
+            .evm_adapter()
+            .expect("an unconfigured node is not a misconfigured one")
+            .is_none(),
+        "a node given no bridge configuration must build no adapter, not a \
+         zero-address one that advertises Ethereum while pointing nowhere"
+    );
+}
+
+/// A node configuration carrying exactly the bridge settings a test needs.
+///
+/// Built with struct-update syntax rather than `default()` followed by field
+/// assignments: clippy refuses the latter, and it is right to, because a
+/// half-assigned config is the same shape as the bug these tests are about.
+fn config_with(
+    bridge: Option<&str>,
+    topic0: Option<&str>,
+    confirmations: Option<u32>,
+) -> crate::cli::commands::NodeConfig {
+    crate::cli::commands::NodeConfig {
+        evm_bridge_address: bridge.map(str::to_string),
+        evm_deposit_topic0: topic0.map(str::to_string),
+        evm_confirmations: confirmations,
+        ..Default::default()
+    }
+}
+
+fn bridge_address() -> String {
+    "0x".to_string() + &"aa".repeat(20)
+}
+
+fn deposit_topic0() -> String {
+    "0x".to_string() + &"bb".repeat(32)
+}
+
+/// Half a bridge configuration is refused, not completed by guessing.
+///
+/// A deposit log is matched on emitter address and topic0 together. Given one
+/// without the other, the only way to proceed is to invent the missing half,
+/// and both zero values are actively dangerous: a zero address binds every
+/// receipt leaf to no contract, and a zero topic0 matches the first log the
+/// contract ever emitted.
+#[test]
+fn a_half_configured_bridge_is_refused() {
+    let err = config_with(Some(&bridge_address()), None, None)
+        .evm_adapter()
+        .expect_err("an address with no topic must be refused");
+    assert!(
+        err.contains("evm-deposit-topic0"),
+        "the refusal must name the missing half, got: {err}"
+    );
+
+    let err = config_with(None, Some(&deposit_topic0()), None)
+        .evm_adapter()
+        .expect_err("a topic with no address must be refused");
+    assert!(
+        err.contains("evm-bridge-address"),
+        "the refusal must name the missing half, got: {err}"
+    );
+
+    // Both together, and it builds.
+    assert!(
+        config_with(Some(&bridge_address()), Some(&deposit_topic0()), None)
+            .evm_adapter()
+            .expect("a complete configuration must build")
+            .is_some(),
+        "the refusal has to stay narrow, or it is a ban on bridging"
+    );
+}
+
+/// Zero confirmations is refused at configuration time.
+///
+/// `check_fit_for_relay` already says why: a deposit from a block that can
+/// still be reorged away would be minted against a transaction that did not
+/// happen. This pins that the configuration path asks it, rather than
+/// re-deriving the rule and drifting from it.
+#[test]
+fn zero_confirmations_cannot_be_configured() {
+    let err = config_with(Some(&bridge_address()), Some(&deposit_topic0()), Some(0))
+        .evm_adapter()
+        .expect_err("zero confirmations must be refused before the registry");
+    assert!(
+        err.contains("confirmations"),
+        "the refusal must say which setting is wrong, got: {err}"
+    );
+
+    assert!(
+        config_with(Some(&bridge_address()), Some(&deposit_topic0()), Some(1))
+            .evm_adapter()
+            .is_ok(),
+        "one confirmation is a policy choice, not a malformed configuration"
+    );
+}
+
+/// A malformed address is refused rather than truncated or padded.
+#[test]
+fn a_bridge_address_of_the_wrong_length_is_refused() {
+    // 19 bytes: one short of an Ethereum address.
+    let short = "0x".to_string() + &"aa".repeat(19);
+    let err = config_with(Some(&short), Some(&deposit_topic0()), None)
+        .evm_adapter()
+        .expect_err("a 19-byte address is not an Ethereum address");
+    assert!(
+        err.contains("20 bytes"),
+        "the refusal must state the expected length, got: {err}"
+    );
+
+    assert!(
+        config_with(Some("nothex"), Some(&deposit_topic0()), None)
+            .evm_adapter()
+            .is_err(),
+        "a non-hex address must be refused, not silently decoded"
+    );
+}
+
+/// Registering the EVM adapter cannot manufacture a successful relay.
+///
+/// This is the question the configuration flags raise. `with_adapters` was
+/// unreachable, so the stubbed off-chain half of `EvmChainAdapter` was
+/// unreachable too; now an operator can register it, and the stub is what
+/// `build_verified_result` will call.
+///
+/// It must still refuse. `generate_receipt_proof` returns a placeholder leaf
+/// derived from `BDLM_EVM_STUB`, and `verify_receipt_proof` recomputes the
+/// leaf as `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`. The
+/// two do not agree, so the adapter rejects its own output and the worker
+/// submits nothing.
+///
+/// That is the property worth pinning: turning the bridge on gets a stalled
+/// transfer, never a signed claim about an Ethereum transaction that was
+/// never observed. If the stub is ever replaced with a real RPC client, this
+/// test fails and whoever replaced it has to say what now makes the result
+/// truthful.
+#[tokio::test]
+async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
+    use crate::cross_domain::evm::adapter::{EvmChainAdapter, DEFAULT_DEPOSIT_TOPIC0};
+
+    let mut registry = AdapterRegistry::new();
+    registry
+        .register(Box::new(EvmChainAdapter::new(
+            vec![0xaa; 20],
+            DEFAULT_DEPOSIT_TOPIC0,
+        )))
+        .expect("a properly configured adapter must register");
+
+    let err =
+        RelayerWorker::build_verified_result(&registry, &relay_request(ExternalChain::Ethereum))
+            .await
+            .expect_err(
+                "the off-chain half is still a stub; it must not produce a result the \
+             adapter is willing to verify",
+            );
+
+    assert!(
+        matches!(err, AdapterError::ProofVerificationFailed(_)),
+        "the refusal must come from verification, not from the chain being \
+         unsupported: got {err:?}"
+    );
+
+    // And the reason has to be the leaf binding, which is the check standing
+    // between a stub and a signed claim.
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Merkle") || msg.contains("leaf") || msg.contains("forgery"),
+        "the refusal must name the binding that failed, got: {msg}"
     );
 }

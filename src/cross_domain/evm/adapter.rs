@@ -49,6 +49,12 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 /// (`generate_receipt_proof`/`submit_transaction`/`wait_for_confirmation`)
 /// Relayer binary'sinde Ethereum RPC'ye bağlanır; bu impl'de offline-test
 /// Modu (StubAdapter deseni) - production RPC ayrı.
+///
+/// `Debug` so a caller can `expect` on a `Result` carrying one. All three
+/// fields are public configuration already: a contract address, an event
+/// topic and a confirmation count. There is no key material here to leak
+/// into a log line.
+#[derive(Debug)]
 pub struct EvmChainAdapter {
     /// Ethereum bridge kontrat adresi (deposit event emitter).
     pub bridge_address: Vec<u8>,
@@ -483,10 +489,15 @@ mod tests {
     /// `verify_deposit`, and until this test existed nothing referenced it
     /// outside its own definition - not even a test.
     ///
-    /// That is survivable today only because the adapter registry is empty in
-    /// production (`with_adapters` is never called, so every chain answers
-    /// `UnsupportedChain`) - the outbound path refuses rather than accepting a
-    /// weakly-verified deposit. `relayer_worker_locks.rs` pins that.
+    /// That was survivable while the adapter registry was empty in production,
+    /// because every chain answered `UnsupportedChain` and the outbound path
+    /// refused rather than accepting a weakly-verified deposit. It is no
+    /// longer empty by construction: `--evm-bridge-address` and
+    /// `--evm-deposit-topic0` let an operator register this adapter, and then
+    /// the trait path is what runs. The gap below is now reachable on a node
+    /// whose operator configured the bridge, which is exactly the ordering
+    /// this test warned about. `relayer_worker_locks.rs` pins the
+    /// configuration half.
     ///
     /// The danger is the order of events when someone wires the registry up:
     /// the code compiles, the tests pass, the comment says the safe path
