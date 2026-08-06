@@ -1029,6 +1029,51 @@ async fn main() {
         .or(local_signer_address)
         .or(validator_keys_address);
 
+    // A battery-powered node describes itself once, and every budget is
+    // derived from that description. `--mobile-mode` on its own used to mean
+    // exactly two things in `node.rs`, ten peers and slower timers, no matter
+    // what the battery said.
+    if config.mobile_mode {
+        // The profile names the device, and `validate` refuses a zero
+        // address, so a node with no validator key still needs one. The peer
+        // identity is the name this device already answers to on the network.
+        let device_address = cli_producer_address.unwrap_or_else(|| {
+            Address::from(budlum_core::core::hash::hash_fields_bytes(&[
+                b"BDLM_MOBILE_DEVICE_ID_V1",
+                node.peer_id.to_bytes().as_slice(),
+            ]))
+        });
+        let mut profile = budlum_core::network::mobile::MobileNodeProfile::new(
+            device_address,
+            budlum_core::network::mobile::DeviceType::Phone,
+        );
+        if let Err(e) = profile.try_update_battery(
+            config.mobile_battery_pct,
+            config.mobile_charging,
+            if config.mobile_charging {
+                u32::MAX
+            } else {
+                120
+            },
+        ) {
+            eprintln!("CRITICAL: --mobile-battery-pct is not a battery reading: {e}");
+            std::process::exit(1);
+        }
+        match node.with_mobile_profile(profile) {
+            Ok(configured) => {
+                node = configured;
+                println!(
+                    "Mobile profile applied: battery={}%, charging={}, peer budget={}",
+                    config.mobile_battery_pct, config.mobile_charging, node.max_peers
+                );
+            }
+            Err(e) => {
+                eprintln!("CRITICAL: mobile profile refused: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if config.rpc_enabled {
         let rpc_security = match RpcSecurityConfig::from_env(
             config.rpc_auth_required,

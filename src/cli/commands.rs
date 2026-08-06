@@ -149,6 +149,21 @@ pub struct NodeConfig {
     #[arg(long, default_value = "false")]
     pub mobile_mode: bool,
 
+    /// Battery level this node starts at, 0 to 100. Only read when
+    /// `--mobile-mode` is set.
+    ///
+    /// The peer cap, the storage sweep and the challenge budget are all
+    /// derived from it through `network::mobile::MobileNodeProfile`, so a
+    /// node started at 5% on battery holds four peers and declines storage
+    /// work, where `--mobile-mode` alone used to hold ten and sweep hourly
+    /// regardless.
+    #[arg(long, default_value = "100")]
+    pub mobile_battery_pct: u8,
+
+    /// Whether the device is on mains. Only read when `--mobile-mode` is set.
+    #[arg(long, default_value = "true")]
+    pub mobile_charging: bool,
+
     #[arg(long)]
     pub data_dir: Option<String>,
 
@@ -315,6 +330,8 @@ impl Default for NodeConfig {
             repair_db: false,
             role: "rpc".to_string(),
             mobile_mode: false,
+            mobile_battery_pct: 100,
+            mobile_charging: true,
             genesis_file: None,
             data_dir: None,
             snapshot_dir: None,
