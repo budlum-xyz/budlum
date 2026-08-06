@@ -344,6 +344,28 @@ pub struct Node {
     pub pruning_policy: Option<crate::storage::PruningPolicy>,
     pub shard_manager: Option<Arc<bud_node::ShardManager>>,
     pub mobile_mode: bool,
+    /// What this device says it can spend on being a peer.
+    ///
+    /// `network/mobile.rs` models this in four power modes and derives a
+    /// challenge policy from each. Nothing read it. This file answered the
+    /// same questions separately with `if mobile_mode { .. } else { .. }`, a
+    /// second table for one question, and the two disagreed in the case that
+    /// matters: at `PowerMode::Critical` the profile says accept no
+    /// challenges and no proof tasks, while the local table still budgeted
+    /// ten peers and an hourly sharding sweep, because it only knew "mobile"
+    /// and "not mobile".
+    ///
+    /// `None` is a mains-powered node and keeps the server budget.
+    /// `--mobile-mode` installs a profile, and [`Self::apply_power_mode`]
+    /// re-derives the budgets from it when the battery moves.
+    pub mobile_profile: Option<crate::network::mobile::MobileNodeProfile>,
+    /// The peer cap in force before any battery reading lowered it.
+    ///
+    /// Recorded once, when the profile is installed, so recharging restores
+    /// the budget the network profile and the operator agreed on rather than
+    /// leaving the node stuck at whatever its flattest battery earned it. It
+    /// is a ceiling and never a floor: a profile can only ask for fewer.
+    mobile_peer_ceiling: usize,
 }
 
 /// On-disk shape of the validator vote high-water marks.
@@ -640,7 +662,85 @@ impl Node {
             pruning_policy: None,
             shard_manager,
             mobile_mode,
+            mobile_profile: None,
+            mobile_peer_ceiling: MAX_PEERS,
         })
+    }
+
+    /// Declare that this node runs on a battery, and how full it is.
+    ///
+    /// The profile is the single description of what the device can spend;
+    /// every budget below is derived from it rather than chosen again here.
+    /// Refuses a profile that does not describe a device: a zero address or
+    /// a battery reporting over 100% means the caller assembled it wrong, and
+    /// a peer budget derived from nonsense is worse than the server default.
+    ///
+    /// # Errors
+    ///
+    /// The reason the profile is not a description of a device.
+    pub fn with_mobile_profile(
+        mut self,
+        profile: crate::network::mobile::MobileNodeProfile,
+    ) -> Result<Self, String> {
+        profile.validate()?;
+        self.mobile_mode = true;
+        // Lowers the cap, never raises it. `apply_network_security` and the
+        // operator's `--max-peers` have both already spoken by the time a
+        // profile is installed, and a battery is a reason to hold fewer
+        // connections than they allowed, never more.
+        self.mobile_peer_ceiling = self.max_peers;
+        self.max_peers = self
+            .max_peers
+            .min(crate::network::mobile::ChallengePolicy::peer_budget(
+                profile.battery.power_mode(),
+                MAX_PEERS,
+            ));
+        self.mobile_profile = Some(profile);
+        Ok(self)
+    }
+
+    /// Re-read the battery and move every budget with it.
+    ///
+    /// Returns the mode now in force, or `None` on a node with no profile,
+    /// which is every mains-powered one.
+    ///
+    /// The peer cap moves here because it is the largest continuous cost a
+    /// node pays: each connection is a keepalive, a gossip mesh slot and a
+    /// share of every broadcast. Leaving it fixed while the challenge budget
+    /// falls to zero, which is what this file did before, saves the work the
+    /// device was not doing anyway and none of the work it was.
+    pub fn apply_power_mode(
+        &mut self,
+        level_pct: u8,
+        charging: bool,
+        estimated_minutes: u32,
+    ) -> Option<crate::network::mobile::PowerMode> {
+        let ceiling = self.mobile_peer_ceiling;
+        let profile = self.mobile_profile.as_mut()?;
+        // A malformed reading leaves the previous budgets standing. The last
+        // good reading is a better basis than one the profile itself refuses.
+        profile
+            .try_update_battery(level_pct, charging, estimated_minutes)
+            .ok()?;
+        let mode = profile.battery.power_mode();
+        // Same direction as `with_mobile_profile`: charging the phone must
+        // not hand it more connections than the network profile allowed.
+        self.max_peers = ceiling.min(crate::network::mobile::ChallengePolicy::peer_budget(
+            mode, MAX_PEERS,
+        ));
+        Some(mode)
+    }
+
+    /// Whether this node should take on storage challenge work right now.
+    ///
+    /// A node with no profile is mains-powered and always may. A node with
+    /// one is asked, and the answer is the profile's, not a second opinion
+    /// formed here.
+    #[must_use]
+    pub fn accepts_storage_work(&self) -> bool {
+        self.mobile_profile
+            .as_ref()
+            .is_none_or(|p| p.challenge_policy.storage_attestation && p.can_accept_tasks())
     }
 
     /// Set what this node is allowed to delete.
@@ -949,6 +1049,14 @@ impl Node {
         } else {
             Duration::from_secs(600) // 10 mins on server
         });
+        if let Some(ref profile) = self.mobile_profile {
+            info!(
+                summary = %profile.summary(),
+                max_peers = self.max_peers,
+                storage_work = self.accepts_storage_work(),
+                "Mobile profile in force: peer and storage budgets derived from the battery"
+            );
+        }
         // The prevote high-water mark now lives on `self` so it can be
         // persisted; see `load_vote_history`.
         self.load_vote_history();
@@ -1107,7 +1215,18 @@ impl Node {
                            }
                        }
                        _ = storage_sharding_check_interval.tick() => {
-                           if let (Some(ref _bitswap), Some(ref _shard_manager)) = (&self.storage_node, &self.shard_manager) {
+                           // The profile decides, not this loop. A phone in
+                           // `PowerMode::Critical` sets `storage_attestation`
+                           // false and `max_proof_tasks` zero, and this sweep
+                           // ran anyway on the old two-way `mobile_mode`
+                           // split: the device declined the work and then
+                           // spent the radio looking for it.
+                           if !self.accepts_storage_work() {
+                               tracing::debug!(
+                                   "Storage: sharding health check skipped, the device profile \
+                                    declines storage work at this power level"
+                               );
+                           } else if let (Some(ref _bitswap), Some(ref _shard_manager)) = (&self.storage_node, &self.shard_manager) {
                                // This logic is for User Decision 5: mandatory_sharding.
                                // We check if there are deals near us that we aren't hosting.
                                // For now, we log the health.
@@ -2685,6 +2804,141 @@ mod vote_history_wiring_tests {
         assert!(
             !vote_guard.contains("persist_banned_peers"),
             "vote history must not inherit the ban list's opt-in gate"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mobile_profile_wiring_tests {
+    use super::MAX_PEERS;
+    use crate::core::address::Address;
+    use crate::network::mobile::{ChallengePolicy, DeviceType, MobileNodeProfile, PowerMode};
+
+    fn profile_at(level_pct: u8, charging: bool) -> MobileNodeProfile {
+        let mut profile = MobileNodeProfile::new(Address::from([7u8; 32]), DeviceType::Phone);
+        profile
+            .try_update_battery(level_pct, charging, if charging { u32::MAX } else { 90 })
+            .expect("a plausible battery reading");
+        profile
+    }
+
+    /// `mobile_mode` alone cannot express what the profile expresses.
+    ///
+    /// This is the defect in one assertion. The old code path had two
+    /// answers, mobile and not mobile, for a question the profile answers in
+    /// four. Two of those four collapsed onto the same peer budget, so a
+    /// device declining all work and a device doing half of it paid the same
+    /// connection bill.
+    #[test]
+    fn a_two_way_mobile_flag_cannot_carry_a_four_way_profile() {
+        let budgets: std::collections::BTreeSet<usize> = [
+            PowerMode::Full,
+            PowerMode::Normal,
+            PowerMode::PowerSaving,
+            PowerMode::Critical,
+        ]
+        .into_iter()
+        .map(|mode| ChallengePolicy::peer_budget(mode, MAX_PEERS))
+        .collect();
+
+        assert_eq!(
+            budgets.len(),
+            4,
+            "four power modes must produce four distinct peer budgets, or the \
+             boolean this replaced was sufficient after all"
+        );
+    }
+
+    /// The node must ask the profile rather than re-deciding.
+    ///
+    /// Measured against the source: a reappearing `if self.mobile_mode { 10 }`
+    /// is the exact shape of the second table this change removed, and it
+    /// would drift from the profile again the moment a fifth mode existed.
+    #[test]
+    fn the_peer_cap_is_not_decided_a_second_time_in_this_file() {
+        let src = include_str!("node.rs");
+        let ctor = src
+            .find("max_peers: if mobile_mode")
+            .map(|_| true)
+            .unwrap_or(false);
+        assert!(
+            !ctor,
+            "the constructor is deciding the peer cap from the boolean again; \
+             `ChallengePolicy::peer_budget` is the one table for this"
+        );
+        assert!(
+            src.contains("ChallengePolicy::peer_budget"),
+            "the node must derive its peer cap from the mobile profile"
+        );
+        assert!(
+            src.contains("fn accepts_storage_work"),
+            "the storage sweep must ask the profile whether the device takes \
+             storage work at this power level"
+        );
+    }
+
+    /// A profile lowers the cap and never raises it.
+    ///
+    /// The operator and the network security profile have both already set a
+    /// cap by the time a battery reading arrives. A phone plugged into mains
+    /// is not a reason to exceed either.
+    #[test]
+    fn a_charging_battery_does_not_raise_the_cap_someone_else_set() {
+        let charged = ChallengePolicy::peer_budget(PowerMode::Full, MAX_PEERS);
+        let operator_cap = 6usize;
+        assert!(
+            operator_cap < charged,
+            "the fixture only means something when the operator asked for less \
+             than a charging device would take"
+        );
+        assert_eq!(
+            operator_cap.min(charged),
+            operator_cap,
+            "installing a profile must clamp downward from the cap already in \
+             force, never upward"
+        );
+    }
+
+    /// Recharging restores the agreed budget, not the flattest one.
+    #[test]
+    fn recharging_returns_to_the_ceiling_rather_than_ratcheting_down() {
+        let ceiling = MAX_PEERS;
+        let flat = ceiling.min(ChallengePolicy::peer_budget(
+            profile_at(5, false).battery.power_mode(),
+            MAX_PEERS,
+        ));
+        let recharged = ceiling.min(ChallengePolicy::peer_budget(
+            profile_at(100, true).battery.power_mode(),
+            MAX_PEERS,
+        ));
+
+        assert!(flat < recharged, "a flat battery must cost connections");
+        assert_eq!(
+            recharged, ceiling,
+            "recharging must return to the ceiling recorded when the profile \
+             was installed, not stay at whatever the flattest reading earned"
+        );
+    }
+
+    /// A node with no profile is mains-powered and declines nothing.
+    #[test]
+    fn a_node_without_a_profile_still_takes_storage_work() {
+        // The refusal has to stay narrow, or it is a ban on storage.
+        let no_profile: Option<MobileNodeProfile> = None;
+        let accepts = no_profile
+            .as_ref()
+            .is_none_or(|p| p.challenge_policy.storage_attestation && p.can_accept_tasks());
+        assert!(
+            accepts,
+            "every mains-powered node has no profile, and must keep sweeping"
+        );
+
+        let critical = profile_at(5, false);
+        let declines = critical.challenge_policy.storage_attestation && critical.can_accept_tasks();
+        assert!(
+            !declines,
+            "a device at 5% declines storage attestation, so the sweep must \
+             not run and spend the radio looking for work it refuses"
         );
     }
 }
