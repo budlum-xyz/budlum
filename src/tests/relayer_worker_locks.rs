@@ -748,6 +748,32 @@ async fn an_unconfigured_worker_refuses_every_external_chain() {
     );
 }
 
+/// A node configuration carrying exactly the bridge settings a test needs.
+///
+/// Built with struct-update syntax rather than `default()` followed by field
+/// assignments: clippy refuses the latter, and it is right to, because a
+/// half-assigned config is the same shape as the bug these tests are about.
+fn config_with(
+    bridge: Option<&str>,
+    topic0: Option<&str>,
+    confirmations: Option<u32>,
+) -> crate::cli::commands::NodeConfig {
+    crate::cli::commands::NodeConfig {
+        evm_bridge_address: bridge.map(str::to_string),
+        evm_deposit_topic0: topic0.map(str::to_string),
+        evm_confirmations: confirmations,
+        ..Default::default()
+    }
+}
+
+fn bridge_address() -> String {
+    "0x".to_string() + &"aa".repeat(20)
+}
+
+fn deposit_topic0() -> String {
+    "0x".to_string() + &"bb".repeat(32)
+}
+
 /// Half a bridge configuration is refused, not completed by guessing.
 ///
 /// A deposit log is matched on emitter address and topic0 together. Given one
@@ -757,10 +783,7 @@ async fn an_unconfigured_worker_refuses_every_external_chain() {
 /// contract ever emitted.
 #[test]
 fn a_half_configured_bridge_is_refused() {
-    let mut config = crate::cli::commands::NodeConfig::default();
-
-    config.evm_bridge_address = Some("0x".to_string() + &"aa".repeat(20));
-    let err = config
+    let err = config_with(Some(&bridge_address()), None, None)
         .evm_adapter()
         .expect_err("an address with no topic must be refused");
     assert!(
@@ -768,9 +791,7 @@ fn a_half_configured_bridge_is_refused() {
         "the refusal must name the missing half, got: {err}"
     );
 
-    config.evm_bridge_address = None;
-    config.evm_deposit_topic0 = Some("0x".to_string() + &"bb".repeat(32));
-    let err = config
+    let err = config_with(None, Some(&deposit_topic0()), None)
         .evm_adapter()
         .expect_err("a topic with no address must be refused");
     assert!(
@@ -779,9 +800,8 @@ fn a_half_configured_bridge_is_refused() {
     );
 
     // Both together, and it builds.
-    config.evm_bridge_address = Some("0x".to_string() + &"aa".repeat(20));
     assert!(
-        config
+        config_with(Some(&bridge_address()), Some(&deposit_topic0()), None)
             .evm_adapter()
             .expect("a complete configuration must build")
             .is_some(),
@@ -797,12 +817,7 @@ fn a_half_configured_bridge_is_refused() {
 /// re-deriving the rule and drifting from it.
 #[test]
 fn zero_confirmations_cannot_be_configured() {
-    let mut config = crate::cli::commands::NodeConfig::default();
-    config.evm_bridge_address = Some("0x".to_string() + &"aa".repeat(20));
-    config.evm_deposit_topic0 = Some("0x".to_string() + &"bb".repeat(32));
-
-    config.evm_confirmations = Some(0);
-    let err = config
+    let err = config_with(Some(&bridge_address()), Some(&deposit_topic0()), Some(0))
         .evm_adapter()
         .expect_err("zero confirmations must be refused before the registry");
     assert!(
@@ -810,9 +825,10 @@ fn zero_confirmations_cannot_be_configured() {
         "the refusal must say which setting is wrong, got: {err}"
     );
 
-    config.evm_confirmations = Some(1);
     assert!(
-        config.evm_adapter().is_ok(),
+        config_with(Some(&bridge_address()), Some(&deposit_topic0()), Some(1))
+            .evm_adapter()
+            .is_ok(),
         "one confirmation is a policy choice, not a malformed configuration"
     );
 }
@@ -820,12 +836,9 @@ fn zero_confirmations_cannot_be_configured() {
 /// A malformed address is refused rather than truncated or padded.
 #[test]
 fn a_bridge_address_of_the_wrong_length_is_refused() {
-    let mut config = crate::cli::commands::NodeConfig::default();
-    config.evm_deposit_topic0 = Some("0x".to_string() + &"bb".repeat(32));
-
     // 19 bytes: one short of an Ethereum address.
-    config.evm_bridge_address = Some("0x".to_string() + &"aa".repeat(19));
-    let err = config
+    let short = "0x".to_string() + &"aa".repeat(19);
+    let err = config_with(Some(&short), Some(&deposit_topic0()), None)
         .evm_adapter()
         .expect_err("a 19-byte address is not an Ethereum address");
     assert!(
@@ -833,9 +846,10 @@ fn a_bridge_address_of_the_wrong_length_is_refused() {
         "the refusal must state the expected length, got: {err}"
     );
 
-    config.evm_bridge_address = Some("nothex".to_string());
     assert!(
-        config.evm_adapter().is_err(),
+        config_with(Some("nothex"), Some(&deposit_topic0()), None)
+            .evm_adapter()
+            .is_err(),
         "a non-hex address must be refused, not silently decoded"
     );
 }
