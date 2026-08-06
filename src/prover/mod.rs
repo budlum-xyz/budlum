@@ -25,12 +25,24 @@
 //! Reward). A later proof asserting a *different* `final_state_root` for the
 //! Same `(domain, height)` is rejected as a conflicting claim.
 
-pub mod market;
-
-pub use market::{
-    ProofMarketRegistry, ProofReceipt, ProofTask, ProofTaskId, ProofTaskKind, ProofTaskStatus,
-    ReceiptAcceptance,
-};
+//! ## The proof market lives in `settlement`, not here
+//!
+//! This module used to carry a second one: `prover::market`, with its own
+//! `ProofTask`, `ProofReceipt`, `ProofTaskKind` and `ProofTaskStatus`, spelled
+//! the same as `settlement::proof_market`'s and meaning something different.
+//! Neither was reached from production, so neither disagreement ever surfaced,
+//! and a reader who found one had no way to know the other existed.
+//!
+//! They disagreed about the things a market is: deadlines in blocks against
+//! deadlines in epochs, a reward committed to as a hash against a reward
+//! declared as an amount, a two-state lifecycle (`Open`/`Settled`) against a
+//! five-state one that can assign work to a named prover and expire it.
+//!
+//! `settlement::proof_market` is the survivor, because it is the one that can
+//! express the states a market actually passes through, and it is where the
+//! settlement root already reaches. The two ideas the deleted twin had and it
+//! did not, a slash condition bound into the task id and a minimum verifier
+//! stake, moved across rather than being deleted with it.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
