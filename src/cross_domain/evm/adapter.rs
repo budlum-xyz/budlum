@@ -505,13 +505,30 @@ mod tests {
         let adapter_src = include_str!("adapter.rs");
         let worker_src = include_str!("../../relayer/worker.rs");
 
+        // Measure the production half only.
+        //
+        // `include_str!` reads this test module too, and both strings below
+        // appear once in production and once in the assertion that searches
+        // for them. Searched whole-file, deleting `verify_deposit` outright
+        // would leave these assertions passing on the strength of their own
+        // text: the pin would survive the very change it exists to catch.
+        let adapter_prod = adapter_src
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("this file keeps its tests behind #[cfg(test)]");
+        assert!(
+            adapter_prod.len() < adapter_src.len(),
+            "the #[cfg(test)] split matched nothing, so the assertions below \
+             are reading their own source again"
+        );
+
         // `verify_deposit` exists and still wraps the full orchestrator.
         assert!(
-            adapter_src.contains("pub fn verify_deposit("),
+            adapter_prod.contains("pub fn verify_deposit("),
             "verify_deposit was removed or renamed; update this pin"
         );
         assert!(
-            adapter_src.contains("verify_evm_receipt(proof)?"),
+            adapter_prod.contains("verify_evm_receipt(proof)?"),
             "verify_deposit no longer runs the full verify_evm_receipt \
              orchestrator - the 'real safe path' claim in this file's header \
              needs rewriting"
