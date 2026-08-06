@@ -18,6 +18,9 @@
 use crate::cross_domain::evm::header::{verify_chain, EthHeader};
 use crate::cross_domain::evm::mpt::{self, MptError};
 use crate::cross_domain::evm::receipt::{self, EthReceipt, ReceiptError};
+use crate::cross_domain::evm::sync_committee::{
+    verify_sync_aggregate, SyncAggregate, SyncCommitteeError, SyncCommitteeState,
+};
 /// `verify_evm_receipt` hatası (her alt-adımın hatası sarmalanır).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
@@ -33,6 +36,12 @@ pub enum VerifyError {
     LogNotFound,
     /// Deposit payload beklene ile eşleşmedi (amount/asset/recipient).
     PayloadMismatch,
+    /// Sync-committee attestation over the target header failed.
+    ///
+    /// Only produced when the proof carries one. A proof that carries none is
+    /// accepted on N-confirmation alone, which is what every proof did before
+    /// this variant existed.
+    SyncCommittee(SyncCommitteeError),
 }
 
 impl std::fmt::Display for VerifyError {
@@ -44,6 +53,7 @@ impl std::fmt::Display for VerifyError {
             VerifyError::TxFailed => write!(f, "evm verify: transaction status=false"),
             VerifyError::LogNotFound => write!(f, "evm verify: deposit log not found"),
             VerifyError::PayloadMismatch => write!(f, "evm verify: deposit payload mismatch"),
+            VerifyError::SyncCommittee(e) => write!(f, "evm verify: sync-committee: {e}"),
         }
     }
 }
@@ -58,6 +68,11 @@ impl From<MptError> for VerifyError {
 impl From<ReceiptError> for VerifyError {
     fn from(e: ReceiptError) -> Self {
         VerifyError::Receipt(e)
+    }
+}
+impl From<SyncCommitteeError> for VerifyError {
+    fn from(e: SyncCommitteeError) -> Self {
+        VerifyError::SyncCommittee(e)
     }
 }
 
@@ -92,6 +107,41 @@ pub struct EvmDepositProof<'a> {
     pub emitter_address: &'a [u8],
     /// Deposit event imzas topic0 = keccak256("Deposit(...)").
     pub deposit_topic0: &'a [u8; 32],
+    /// Ethereum PoS attestation over the target header, when the relayer has
+    /// one.
+    ///
+    /// `None` keeps the previous behaviour exactly: finality rests on
+    /// `required_confirmations` alone, which is a bet that no reorg is that
+    /// deep rather than proof that none can be. Every existing caller passes
+    /// `None`, so nothing that verified before stops verifying now.
+    ///
+    /// `Some` is the stronger claim, and it is checked. This module's header
+    /// and `adapter.rs` have both said "F10.3 (sync-committee) kullanır"
+    /// since they were written, and neither did: `verify_sync_aggregate`
+    /// existed, was tested six ways, and no production path reached it. A
+    /// bridge whose documentation claims PoS finality and whose code counts
+    /// confirmations is claiming a guarantee it does not have.
+    ///
+    /// The `signing_message` is the caller's, because the Altair signing
+    /// domain is a chain parameter this module has no business inventing.
+    pub sync_attestation: Option<SyncAttestation<'a>>,
+}
+
+/// A sync-committee attestation bundled with the state that validates it.
+///
+/// Grouped rather than added as three loose `Option` fields, so it is
+/// impossible to supply an aggregate without the committee it must verify
+/// against, or a signing message without either.
+#[derive(Debug, Clone)]
+pub struct SyncAttestation<'a> {
+    /// Light-client state holding the 512 pubkeys for this period.
+    pub state: &'a SyncCommitteeState,
+    /// The bitmap and aggregate signature the relayer observed.
+    pub aggregate: &'a SyncAggregate,
+    /// Altair signing domain combined with the header hash. Caller-derived,
+    /// because the domain depends on the fork and the genesis validators
+    /// root, neither of which is knowable here.
+    pub signing_message: &'a [u8],
 }
 
 /// Ethereum deposit kanıtını baştan sona doğrular. Deterministik, network'süz.
@@ -125,6 +175,26 @@ pub fn verify_evm_receipt(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit
     let log = receipt
         .find_log(proof.emitter_address, proof.deposit_topic0)
         .ok_or(VerifyError::LogNotFound)?;
+
+    // 5b. PoS attestation, when the relayer supplied one.
+    //
+    // Runs after the cheap structural checks and before the caller is handed
+    // anything it could mint against. Verifying 342 BLS signatures is the
+    // most expensive step here by a wide margin, so a proof that is malformed
+    // in some cheaper way should not pay for it.
+    //
+    // Deliberately not mandatory. Making it so would refuse every proof the
+    // current relayer produces, and a bridge that refuses everything is
+    // indistinguishable from one that is switched off. What it does buy is
+    // that a proof which *claims* PoS finality has that claim checked rather
+    // than trusted.
+    if let Some(ref attestation) = proof.sync_attestation {
+        verify_sync_aggregate(
+            attestation.state,
+            attestation.aggregate,
+            attestation.signing_message,
+        )?;
+    }
 
     // 6. (Replay koruması caller domain'inde - tx_hash döner.)
     Ok(VerifiedDeposit {
@@ -269,6 +339,7 @@ mod tests {
             tx_hash: "0xabc123",
             emitter_address: &emitter,
             deposit_topic0: &topic0,
+            sync_attestation: None,
         };
         let verified = verify_evm_receipt(&proof).unwrap();
         assert_eq!(verified.tx_hash, "0xabc123");
@@ -292,6 +363,7 @@ mod tests {
             tx_hash: "0xdead",
             emitter_address: &emitter,
             deposit_topic0: &topic0,
+            sync_attestation: None,
         };
         assert_eq!(
             verify_evm_receipt(&proof).unwrap_err(),
@@ -315,6 +387,7 @@ mod tests {
             tx_hash: "0x1",
             emitter_address: &emitter,
             deposit_topic0: &topic0,
+            sync_attestation: None,
         };
         let err = verify_evm_receipt(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Header(_)));
@@ -339,6 +412,7 @@ mod tests {
             tx_hash: "0x1",
             emitter_address: &emitter,
             deposit_topic0: &topic0,
+            sync_attestation: None,
         };
         let err = verify_evm_receipt(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Header(_)));
@@ -361,6 +435,7 @@ mod tests {
             tx_hash: "0x1",
             emitter_address: &wrong_emitter,
             deposit_topic0: &topic0,
+            sync_attestation: None,
         };
         assert_eq!(
             verify_evm_receipt(&proof).unwrap_err(),
@@ -385,6 +460,7 @@ mod tests {
             tx_hash: "0x1",
             emitter_address: &emitter,
             deposit_topic0: &wrong_topic,
+            sync_attestation: None,
         };
         assert_eq!(
             verify_evm_receipt(&proof).unwrap_err(),
@@ -408,6 +484,7 @@ mod tests {
             tx_hash: "0x1",
             emitter_address: &emitter,
             deposit_topic0: &topic0,
+            sync_attestation: None,
         };
         let err = verify_evm_receipt(&proof).unwrap_err();
         assert!(matches!(err, VerifyError::Mpt(_)));
@@ -429,7 +506,195 @@ mod tests {
             tx_hash: "garbage",
             emitter_address: &garbage[0],
             deposit_topic0: &[0u8; 32],
+            sync_attestation: None,
         };
         let _ = verify_evm_receipt(&proof); // Err beklenir, panic YOK.
+    }
+
+    // ---- Sync-committee attestation ----
+
+    use crate::cross_domain::evm::sync_committee::{
+        BLS_PUBKEY_LEN, BLS_SIGNATURE_LEN, PARTICIPATION_THRESHOLD, SYNC_COMMITTEE_SIZE,
+    };
+
+    fn empty_committee() -> SyncCommitteeState {
+        SyncCommitteeState {
+            current_period: 0,
+            current_sync_committee: [[0u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+            next_sync_committee: [[0u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+        }
+    }
+
+    fn aggregate_with_participation(bits_set: bool) -> SyncAggregate {
+        SyncAggregate {
+            sync_committee_bits: if bits_set {
+                [0xFFu8; SYNC_COMMITTEE_SIZE / 8]
+            } else {
+                [0u8; SYNC_COMMITTEE_SIZE / 8]
+            },
+            sync_committee_signature: [0u8; BLS_SIGNATURE_LEN],
+        }
+    }
+
+    fn proof_with_attestation<'a>(
+        f: &'a Fixture,
+        confs: &'a [&'a [u8]],
+        emitter: &'a [u8],
+        topic0: &'a [u8; 32],
+        attestation: Option<SyncAttestation<'a>>,
+    ) -> EvmDepositProof<'a> {
+        EvmDepositProof {
+            target_header: &f.target_header,
+            confirmation_headers: confs,
+            required_confirmations: 3,
+            proof_nodes: &f.proof_nodes,
+            receipt_key: &f.receipt_key,
+            tx_hash: "0xabc123",
+            emitter_address: emitter,
+            deposit_topic0: topic0,
+            sync_attestation: attestation,
+        }
+    }
+
+    /// A proof carrying no attestation verifies exactly as it did before.
+    ///
+    /// The narrow half. Every relayer in the tree produces `None`, and making
+    /// the attestation mandatory would refuse all of them; a bridge that
+    /// refuses everything is indistinguishable from one switched off.
+    #[test]
+    fn a_proof_without_an_attestation_still_verifies_on_confirmations_alone() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        let f = build_fixture(&emitter, topic0, b"payload", true, 3);
+        let confs = conf_refs(&f);
+
+        let proof = proof_with_attestation(&f, &confs, &emitter, &topic0, None);
+        assert!(
+            verify_evm_receipt(&proof).is_ok(),
+            "N-confirmation finality must keep working; this is what every \
+             existing caller relies on"
+        );
+    }
+
+    /// A proof that claims PoS finality has the claim checked.
+    ///
+    /// This is the defect. `sync_committee.rs` implements Altair verification
+    /// and is tested six ways; `adapter.rs` said "F10.3 (sync-committee)
+    /// kullanır" in two places, and no production path called
+    /// `verify_sync_aggregate`. A bridge whose documentation claims proof of
+    /// stake finality and whose code counts confirmations is claiming a
+    /// guarantee it does not have: confirmations are a bet that no reorg goes
+    /// that deep, not evidence that none can.
+    #[test]
+    fn an_attestation_below_the_participation_threshold_is_rejected() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        let f = build_fixture(&emitter, topic0, b"payload", true, 3);
+        let confs = conf_refs(&f);
+
+        let state = empty_committee();
+        let aggregate = aggregate_with_participation(false);
+        let proof = proof_with_attestation(
+            &f,
+            &confs,
+            &emitter,
+            &topic0,
+            Some(SyncAttestation {
+                state: &state,
+                aggregate: &aggregate,
+                signing_message: b"altair-domain-and-header-hash",
+            }),
+        );
+
+        let err = verify_evm_receipt(&proof)
+            .expect_err("an attestation nobody signed must not pass as finality");
+        assert!(
+            matches!(
+                err,
+                VerifyError::SyncCommittee(SyncCommitteeError::InsufficientParticipation {
+                    participating: 0,
+                    threshold: PARTICIPATION_THRESHOLD,
+                })
+            ),
+            "the refusal must name the participation shortfall, got: {err}"
+        );
+    }
+
+    /// Participation alone is not enough; the signatures must verify.
+    ///
+    /// The bitmap is attacker-supplied. A committee of zero pubkeys with
+    /// every bit set claims full participation and verifies nothing, and the
+    /// count of *valid* signatures is what the threshold applies to.
+    #[test]
+    fn a_full_bitmap_over_unverifiable_signatures_is_rejected() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        let f = build_fixture(&emitter, topic0, b"payload", true, 3);
+        let confs = conf_refs(&f);
+
+        let state = empty_committee();
+        let aggregate = aggregate_with_participation(true);
+        assert_eq!(
+            aggregate.participation_count(),
+            SYNC_COMMITTEE_SIZE,
+            "the fixture only means something if the bitmap claims everyone signed"
+        );
+
+        let proof = proof_with_attestation(
+            &f,
+            &confs,
+            &emitter,
+            &topic0,
+            Some(SyncAttestation {
+                state: &state,
+                aggregate: &aggregate,
+                signing_message: b"altair-domain-and-header-hash",
+            }),
+        );
+
+        let err = verify_evm_receipt(&proof)
+            .expect_err("a bitmap claiming 512 signers over 512 zero keys must not pass");
+        assert!(
+            matches!(err, VerifyError::SyncCommittee(_)),
+            "the refusal must come from the attestation, got: {err}"
+        );
+    }
+
+    /// The attestation runs after the cheap checks, not before them.
+    ///
+    /// Verifying 342 BLS signatures is by far the most expensive step here. A
+    /// proof that is malformed in some cheaper way must be refused for that
+    /// reason, both because the message is more useful and because an
+    /// attacker must not be able to spend a node's CPU with a proof that a
+    /// byte comparison would have rejected.
+    #[test]
+    fn a_failed_transaction_is_refused_before_the_signatures_are_checked() {
+        let emitter = vec![0xcc; 20];
+        let topic0 = [0xab; 32];
+        // success = false: the receipt says the transaction reverted.
+        let f = build_fixture(&emitter, topic0, b"payload", false, 3);
+        let confs = conf_refs(&f);
+
+        let state = empty_committee();
+        let aggregate = aggregate_with_participation(false);
+        let proof = proof_with_attestation(
+            &f,
+            &confs,
+            &emitter,
+            &topic0,
+            Some(SyncAttestation {
+                state: &state,
+                aggregate: &aggregate,
+                signing_message: b"altair-domain-and-header-hash",
+            }),
+        );
+
+        let err = verify_evm_receipt(&proof).expect_err("a reverted transaction must be refused");
+        assert_eq!(
+            err,
+            VerifyError::TxFailed,
+            "the cheap structural refusal must win, so a malformed proof cannot \
+             make a node verify 342 BLS signatures before saying no"
+        );
     }
 }

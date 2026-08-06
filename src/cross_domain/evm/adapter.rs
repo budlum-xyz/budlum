@@ -5,7 +5,9 @@
 //! İki taraf:
 //!
 //! - **On-chain (verify_receipt_proof):** Budlum konsensüsünde deterministik.
-//!   F10.1 (MPT) + F10.2 (receipt/header/verify) + F10.3 (sync-committee) kullanır.
+//!   F10.1 (MPT) + F10.2 (receipt/header/verify) kullanır. Sync-committee
+//!   (F10.3) yalnızca `EvmDepositProof.sync_attestation` doluysa çalışır;
+//!   bu satır uzun süre "kullanır" diyordu ve hiçbir yol çağırmıyordu.
 //!   Network'süz - relayer proof üretir, Budlum verify eder.
 //!
 //! - **Off-chain (generate/submit/wait):** Relayer binary'sinde (`src/bin/
@@ -144,13 +146,16 @@ impl ChainAdapter for EvmChainAdapter {
     /// ON-CHAIN (Budlum konsensüsü): EVM receipt proof doğrula.
     ///
     /// Deterministik + network'süz. F10.1 (MPT) + F10.2 (receipt/header) +
-    /// F10.3 (sync-committee opsiyonel) kullanır. Relayer proof üretir.
+    /// Relayer proof üretir. Sync-committee bu trait yolunda hiç çalışmaz:
+    /// bu metot yalnızca Merkle proof + leaf bağı kontrol eder, tam paket
+    /// (`EvmDepositProof`) `verify_deposit`'e gider.
     ///
     /// **Wire format (sonrası):** `proof.leaf` =
     /// `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`;
     /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = tx_hash.
-    /// Header chain + sync-committee proof caller (`verify_evm_receipt`)
-    /// Tarafından sağlanır.
+    /// Header chain + sync-committee doğrulaması bu metotta DEĞİL,
+    /// `verify_evm_receipt` içindedir ve oraya yalnızca `verify_deposit`
+    /// gider.
     ///
     /// **** İki görevlı doğrulama -
     /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
