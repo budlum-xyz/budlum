@@ -516,6 +516,16 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
+    /// Proof tasks and unpaid receipts.
+    ///
+    /// `#[serde(default)]` like its neighbours: a snapshot taken before this
+    /// field existed comes back as an empty market, which is what such a
+    /// chain had. Round-tripped rather than rebuilt, because an assigned task
+    /// names the prover that took it and the epoch it was taken in, and a
+    /// restart that forgot both would silently release every prover from work
+    /// it had already committed to.
+    #[serde(default)]
+    pub proof_market: Option<crate::settlement::ProofMarketState>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 §7 (: Ed25519 tek-imza + trust-list + AllowUnsigned geçişi).
@@ -675,6 +685,7 @@ impl StateSnapshotV2 {
             bridge_state: Some(account_state.bridge_state.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
+            proof_market: Some(account_state.proof_market.clone()),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -801,6 +812,12 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.bridge_state);
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
+            // The proof market carries assigned tasks, each naming a prover
+            // and an epoch, and unpaid receipts, each naming an amount. A
+            // field that crosses the wire outside the digest is a field a
+            // peer can edit without invalidating the snapshot, which for this
+            // one means reassigning work or rewriting what is owed.
+            hash_opt_serializable(&mut hasher, &self.proof_market);
             // Finality_certificates: Vec - len-prefix + her elem serialize.
             let fc_bytes = bincode::serialize(&self.finality_certificates)
                 .expect("BUG: finality certificates must serialize for state root");

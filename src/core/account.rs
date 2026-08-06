@@ -304,6 +304,19 @@ pub struct AccountState {
     /// Populated by executor when `GovernanceAction::UnfreezeConsensusDomain` is executed,
     /// Drained by `Blockchain` after `apply_block_effects`.
     pub pending_domain_unfreezes: Vec<PendingDomainUnfreeze>,
+    /// Bounded proof tasks and the receipts that settle them.
+    ///
+    /// `settlement::proof_market` models a task's whole life, from pending
+    /// through assigned to completed or expired, and nothing reached any of
+    /// it. `enforce_max_sizes` in particular is the only bound on
+    /// accumulation, and a bound nothing calls is a comment: `add_task`
+    /// limits what arrives in one call and says nothing about a node that has
+    /// been up for a year.
+    ///
+    /// Swept once per epoch by `advance_epoch`. Included in the state root
+    /// only once non-empty, so a chain that has never opened a proof task
+    /// sees no root change from this field existing.
+    pub proof_market: crate::settlement::ProofMarketState,
 }
 impl AccountState {
     pub fn new() -> Self {
@@ -346,6 +359,7 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            proof_market: crate::settlement::ProofMarketState::new(),
         }
     }
     pub fn with_storage(storage: Storage) -> Self {
@@ -388,6 +402,7 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            proof_market: crate::settlement::ProofMarketState::new(),
         };
         if let Err(e) = state.load_from_storage() {
             tracing::error!("Could not load account state: {e}");
@@ -445,6 +460,7 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            proof_market: crate::settlement::ProofMarketState::new(),
         }
     }
 
@@ -521,6 +537,12 @@ impl AccountState {
             invalid_votes: snapshot.invalid_votes.clone().unwrap_or_default(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            // An assigned task names the prover that took it and the epoch it
+            // was taken in. A restart that dropped that would release every
+            // prover from work it had already committed to, so this is
+            // restored rather than started fresh; a snapshot from before the
+            // field existed restores as empty, which is what it was.
+            proof_market: snapshot.proof_market.clone().unwrap_or_default(),
         }
     }
 
@@ -1379,6 +1401,30 @@ impl AccountState {
 
         self.process_unbonding();
 
+        // Close the proof market's epoch: expire tasks past their deadline,
+        // drop receipts that have been paid, and hold both vectors under
+        // their ceiling.
+        //
+        // All three functions existed and none of them ran. `enforce_max_sizes`
+        // matters most: `add_task` bounds what arrives in a single call and
+        // says nothing about accumulation, so on a long-running node the only
+        // limit on `active_tasks` was how many tasks were ever opened.
+        //
+        // Swept before the timed burn below so an epoch that both expires
+        // tasks and burns reserve leaves the market consistent with the root
+        // taken at the end of this function.
+        let (expired, receipts_pruned) = self.proof_market.close_epoch(self.epoch_index);
+        if expired > 0 || receipts_pruned > 0 {
+            tracing::info!(
+                epoch = self.epoch_index,
+                expired,
+                receipts_pruned,
+                active_tasks = self.proof_market.active_tasks.len(),
+                pending_receipts = self.proof_market.pending_receipts.len(),
+                "Proof market epoch close"
+            );
+        }
+
         // Process relayer escrow releases
 
         // Ayaz economic decision (2026-07-25): epoch transitions never mint
@@ -2056,6 +2102,12 @@ impl AccountState {
         if !self.storage_registry.is_empty() {
             final_hasher.update(b"storage_v1");
             final_hasher.update(self.storage_registry.root());
+        }
+        // Gated on non-empty like its neighbours, so a chain that has never
+        // opened a proof task sees no root change from this field existing.
+        if !self.proof_market.is_empty() {
+            final_hasher.update(b"proof_market_v1");
+            final_hasher.update(self.proof_market.root());
         }
         if !self.bns_registry.is_empty() {
             final_hasher.update(b"bns_v1");

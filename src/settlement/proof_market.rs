@@ -187,18 +187,56 @@ pub struct ProofTask {
     /// difficulty override would be an unbound claim under a stable id, and
     /// it would have to go into the preimage, which means a new task tag.
     pub difficulty: u64,
+    /// What the assigned prover forfeits by answering wrongly, as a hash of
+    /// the condition rather than the condition itself.
+    ///
+    /// Carried over from the deleted `prover::market` twin, which had it and
+    /// this model did not. Without it a task says what it pays and never what
+    /// it costs to get wrong, so the only penalty for a bad proof is not
+    /// being paid, and a prover that answers everything at random loses
+    /// nothing it had.
+    ///
+    /// Zero means no slash condition was named, which `validate_shape`
+    /// refuses: a task nobody can be punished for failing is a request, not a
+    /// market position.
+    pub slash_condition_hash: Hash32,
+    /// The bond a prover must already hold before this task may be assigned
+    /// to it, in the same unit as `reward`.
+    ///
+    /// Also from the deleted twin. It is the other half of the slash
+    /// condition: naming what is forfeited is empty unless something was
+    /// staked to forfeit. Zero is allowed and means the task is open to any
+    /// prover, which is the right default for cheap tasks and the wrong one
+    /// for expensive ones, so `assign` reads it rather than assuming.
+    pub min_prover_stake: u64,
 }
 
 impl ProofTask {
     /// Yeni bir proof görevi oluşturur.
+    ///
+    /// `slash_condition_hash` names what the prover forfeits by answering
+    /// wrongly and `min_prover_stake` is the bond it must already hold. Both
+    /// go into the task id: a task whose penalty could be edited after the id
+    /// was published would let a creator advertise one risk and settle
+    /// against another.
     pub fn new(
         kind: ProofTaskKind,
         creator: Address,
         created_epoch: u64,
         deadline_epoch: u64,
         reward: u64,
+        slash_condition_hash: Hash32,
+        min_prover_stake: u64,
     ) -> Self {
-        let task_id = Self::compute_task_id(&kind, &creator, created_epoch, deadline_epoch, reward);
+        let task_id = Self::compute_task_id(
+            &kind,
+            &creator,
+            created_epoch,
+            deadline_epoch,
+            reward,
+            &slash_condition_hash,
+            min_prover_stake,
+        );
         let difficulty = Self::default_difficulty(&kind);
         Self {
             task_id,
@@ -209,6 +247,8 @@ impl ProofTask {
             status: ProofTaskStatus::Pending,
             reward,
             difficulty,
+            slash_condition_hash,
+            min_prover_stake,
         }
     }
 
@@ -219,15 +259,19 @@ impl ProofTask {
         created_epoch: u64,
         deadline_epoch: u64,
         reward: u64,
+        slash_condition_hash: &Hash32,
+        min_prover_stake: u64,
     ) -> [u8; 32] {
         let kind_bytes = kind.canonical_bytes();
         hash_fields_bytes(&[
-            b"BDLM_SETTLEMENT_PROOF_TASK_V1",
+            b"BDLM_SETTLEMENT_PROOF_TASK_V2",
             &kind_bytes,
             creator.as_bytes(),
             &created_epoch.to_le_bytes(),
             &deadline_epoch.to_le_bytes(),
             &reward.to_le_bytes(),
+            slash_condition_hash,
+            &min_prover_stake.to_le_bytes(),
         ])
     }
 
@@ -239,6 +283,8 @@ impl ProofTask {
                 self.created_epoch,
                 self.deadline_epoch,
                 self.reward,
+                &self.slash_condition_hash,
+                self.min_prover_stake,
             )
     }
 
@@ -255,6 +301,13 @@ impl ProofTask {
         }
         if self.reward == 0 {
             return Err("ProofTask reward must be >= 1".into());
+        }
+        if !nonzero_hash(&self.slash_condition_hash) {
+            return Err(
+                "ProofTask slash_condition_hash cannot be zero: a task nobody can be \
+                 punished for failing pays for a wrong answer as readily as a right one"
+                    .into(),
+            );
         }
         if !self.verify_id() {
             return Err("ProofTask task_id mismatch".into());
@@ -273,10 +326,30 @@ impl ProofTask {
     }
 
     /// Görevi bir prover'a atar.
-    pub fn assign(&mut self, prover: Address, current_epoch: u64) -> Result<(), String> {
+    ///
+    /// `prover_stake` is the bond that prover already holds. The task states
+    /// a `min_prover_stake` and it is read here, because assignment is the
+    /// only moment the requirement can still be enforced: once a prover is
+    /// assigned, the slash condition names something it may not have.
+    ///
+    /// A caller that genuinely does not gate on stake passes `u64::MAX`, which
+    /// is a visible decision at the call site rather than a silent one here.
+    pub fn assign(
+        &mut self,
+        prover: Address,
+        prover_stake: u64,
+        current_epoch: u64,
+    ) -> Result<(), String> {
         self.validate_shape()?;
         if prover == Address::zero() {
             return Err("ProofTask prover cannot be zero".into());
+        }
+        if prover_stake < self.min_prover_stake {
+            return Err(format!(
+                "prover holds {} and this task requires {} before assignment: the \
+                 slash condition is worth nothing against a prover with nothing staked",
+                prover_stake, self.min_prover_stake
+            ));
         }
         if self.status != ProofTaskStatus::Pending {
             return Err(format!(
@@ -455,6 +528,40 @@ impl ProofMarketState {
         Self::default()
     }
 
+    /// Nothing has ever been recorded here.
+    ///
+    /// Read by the state root, which keeps an empty market out of the hash so
+    /// existing chains do not see a root change for a feature they never used.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.active_tasks.is_empty()
+            && self.pending_receipts.is_empty()
+            && self.total_rewards_paid == 0
+            && self.total_tasks_completed == 0
+    }
+
+    /// Close out an epoch: expire what ran out of time, drop what has been
+    /// paid, and hold the whole thing under its memory ceiling.
+    ///
+    /// The three steps existed and none of them ran. `prune_expired` removes
+    /// tasks past their deadline, `prune_paid_receipts` removes receipts that
+    /// have been paid, and `enforce_max_sizes` is the only thing standing
+    /// between a long-running node and an `active_tasks` vector that only
+    /// grows. `add_task` bounds what arrives in one call; it says nothing
+    /// about accumulation, which is the failure that actually happens.
+    ///
+    /// Returns `(expired, receipts_pruned)` so the caller can log the work
+    /// rather than guess at it.
+    pub fn close_epoch(&mut self, current_epoch: u64) -> (usize, usize) {
+        // Order matters. Expiring first turns deadline-passed tasks into
+        // removable ones, so the ceiling below has less in-progress work it
+        // has to refuse to drop.
+        let expired = self.prune_expired(current_epoch);
+        let receipts_pruned = self.prune_paid_receipts();
+        self.enforce_max_sizes();
+        (expired, receipts_pruned)
+    }
+
     /// Yeni görev ekler.
     pub fn add_task(&mut self, task: ProofTask) -> Result<(), String> {
         task.validate_shape()?;
@@ -601,6 +708,11 @@ impl ProofMarketState {
             fields.push(task.creator.as_bytes().to_vec());
             fields.push(task.reward.to_le_bytes().to_vec());
             fields.push(task.deadline_epoch.to_le_bytes().to_vec());
+            // The penalty side of the task, alongside the payment side. A
+            // root that commits to what a task pays and not to what it costs
+            // to fail would let the two be disagreed about after the fact.
+            fields.push(task.slash_condition_hash.to_vec());
+            fields.push(task.min_prover_stake.to_le_bytes().to_vec());
         }
         for receipt in &self.pending_receipts {
             fields.push(receipt.task_id.to_vec());
@@ -621,6 +733,36 @@ mod tests {
         Address::from([byte; 32])
     }
 
+    /// A slash condition the task can be punished against.
+    ///
+    /// Non-zero on purpose: `validate_shape` refuses a zero one, because a
+    /// task nobody can be punished for failing pays for a wrong answer as
+    /// readily as a right one.
+    fn slash_condition() -> Hash32 {
+        [0xC0; 32]
+    }
+
+    /// `ProofTask::new` with the penalty fields defaulted, for the tests that
+    /// are about something else. Stake gate open (`0`) so those tests keep
+    /// measuring what they were written to measure.
+    fn task_with(
+        kind: ProofTaskKind,
+        creator: Address,
+        created_epoch: u64,
+        deadline_epoch: u64,
+        reward: u64,
+    ) -> ProofTask {
+        ProofTask::new(
+            kind,
+            creator,
+            created_epoch,
+            deadline_epoch,
+            reward,
+            slash_condition(),
+            0,
+        )
+    }
+
     fn task_kind() -> ProofTaskKind {
         ProofTaskKind::DomainCommitment {
             domain_id: 1,
@@ -630,19 +772,19 @@ mod tests {
     }
 
     fn assigned_task() -> ProofTask {
-        let mut task = ProofTask::new(task_kind(), test_address(1), 10, 100, 5_000);
-        task.assign(test_address(2), 15).unwrap();
+        let mut task = task_with(task_kind(), test_address(1), 10, 100, 5_000);
+        task.assign(test_address(2), 0, 15).unwrap();
         task
     }
 
     #[test]
     fn proof_task_lifecycle() {
-        let mut task = ProofTask::new(task_kind(), test_address(1), 10, 100, 5_000);
+        let mut task = task_with(task_kind(), test_address(1), 10, 100, 5_000);
         assert!(task.is_active());
         assert_eq!(task.status, ProofTaskStatus::Pending);
         task.validate_shape().unwrap();
 
-        task.assign(test_address(2), 15).unwrap();
+        task.assign(test_address(2), 0, 15).unwrap();
         assert!(matches!(task.status, ProofTaskStatus::Assigned { .. }));
 
         task.complete().unwrap();
@@ -657,39 +799,39 @@ mod tests {
             domain_height: 100,
             sequence: 0,
         };
-        let task = ProofTask::new(invalid_kind, test_address(1), 10, 100, 5_000);
+        let task = task_with(invalid_kind, test_address(1), 10, 100, 5_000);
         assert!(task.validate_shape().unwrap_err().contains("domain_id"));
 
-        let task = ProofTask::new(task_kind(), Address::zero(), 10, 100, 5_000);
+        let task = task_with(task_kind(), Address::zero(), 10, 100, 5_000);
         assert!(task.validate_shape().unwrap_err().contains("creator"));
     }
 
     #[test]
     fn proof_task_rejects_bad_deadline_reward_and_id() {
-        let task = ProofTask::new(task_kind(), test_address(1), 10, 10, 5_000);
+        let task = task_with(task_kind(), test_address(1), 10, 10, 5_000);
         assert!(task.validate_shape().unwrap_err().contains("deadline"));
 
-        let task = ProofTask::new(task_kind(), test_address(1), 10, 100, 0);
+        let task = task_with(task_kind(), test_address(1), 10, 100, 0);
         assert!(task.validate_shape().unwrap_err().contains("reward"));
 
-        let mut task = ProofTask::new(task_kind(), test_address(1), 10, 100, 5_000);
+        let mut task = task_with(task_kind(), test_address(1), 10, 100, 5_000);
         task.task_id = [9u8; 32];
         assert!(task.validate_shape().unwrap_err().contains("mismatch"));
     }
 
     #[test]
     fn proof_task_assignment_guards() {
-        let mut task = ProofTask::new(task_kind(), test_address(1), 10, 100, 5_000);
+        let mut task = task_with(task_kind(), test_address(1), 10, 100, 5_000);
         assert!(task
-            .assign(Address::zero(), 15)
+            .assign(Address::zero(), 0, 15)
             .unwrap_err()
             .contains("prover"));
         assert!(task
-            .assign(test_address(2), 9)
+            .assign(test_address(2), 0, 9)
             .unwrap_err()
             .contains("created_epoch"));
         assert!(task
-            .assign(test_address(2), 101)
+            .assign(test_address(2), 0, 101)
             .unwrap_err()
             .contains("expired"));
     }
@@ -738,7 +880,7 @@ mod tests {
     #[test]
     fn proof_market_state_workflow() {
         let mut market = ProofMarketState::new();
-        let mut task = ProofTask::new(
+        let mut task = task_with(
             ProofTaskKind::StorageAttestation {
                 deal_id: [4u8; 32],
                 challenge_epoch: 10,
@@ -749,7 +891,7 @@ mod tests {
             3_000,
         );
         let task_id = task.task_id;
-        task.assign(test_address(2), 15).unwrap();
+        task.assign(test_address(2), 0, 15).unwrap();
         market.add_task(task).unwrap();
         assert_eq!(market.active_tasks.len(), 1);
 
@@ -769,9 +911,9 @@ mod tests {
     #[test]
     fn complete_task_does_not_drop_task_on_invalid_receipt() {
         let mut market = ProofMarketState::new();
-        let mut task = ProofTask::new(task_kind(), test_address(1), 1, 100, 1_000);
+        let mut task = task_with(task_kind(), test_address(1), 1, 100, 1_000);
         let task_id = task.task_id;
-        task.assign(test_address(2), 10).unwrap();
+        task.assign(test_address(2), 0, 10).unwrap();
         market.add_task(task).unwrap();
         let bad_receipt = ProofReceipt::new(task_id, test_address(9), 20, [5u8; 32], 1_000);
         assert!(market.complete_task(task_id, bad_receipt).is_err());
@@ -782,8 +924,8 @@ mod tests {
     #[test]
     fn proof_market_prune_expired() {
         let mut market = ProofMarketState::new();
-        let mut t1 = ProofTask::new(task_kind(), test_address(1), 1, 5, 100);
-        let mut t2 = ProofTask::new(
+        let mut t1 = task_with(task_kind(), test_address(1), 1, 5, 100);
+        let mut t2 = task_with(
             ProofTaskKind::DomainCommitment {
                 domain_id: 2,
                 domain_height: 20,
@@ -794,8 +936,8 @@ mod tests {
             100,
             100,
         );
-        t1.assign(test_address(2), 2).unwrap();
-        t2.assign(test_address(3), 2).unwrap();
+        t1.assign(test_address(2), 0, 2).unwrap();
+        t2.assign(test_address(3), 0, 2).unwrap();
         market.add_task(t1).unwrap();
         market.add_task(t2).unwrap();
 
@@ -827,10 +969,223 @@ mod tests {
         ];
         let tasks: Vec<_> = kinds
             .into_iter()
-            .map(|k| ProofTask::new(k, test_address(1), 1, 100, 1_000))
+            .map(|k| task_with(k, test_address(1), 1, 100, 1_000))
             .collect();
         assert!(tasks[0].difficulty < tasks[1].difficulty); // ZK > DC
         assert!(tasks[1].difficulty > tasks[2].difficulty); // ZK > SC
         assert!(tasks[2].difficulty < tasks[3].difficulty); // SA > SC
+    }
+
+    /// A task that names no penalty must not be shaped like a valid one.
+    ///
+    /// The deleted `prover::market` twin bound a `slash_condition_hash` into
+    /// its task id and this model had no such field at all, so a settlement
+    /// task stated what it paid and never what it cost to get wrong. The only
+    /// consequence of a bad proof was not being paid, which a prover that
+    /// answers at random is entirely willing to accept.
+    #[test]
+    fn a_task_with_no_slash_condition_is_refused() {
+        let task = ProofTask::new(task_kind(), test_address(1), 10, 100, 5_000, [0u8; 32], 0);
+        let err = task
+            .validate_shape()
+            .expect_err("a task nobody can be punished for failing must not validate");
+        assert!(
+            err.contains("slash_condition_hash"),
+            "the refusal must name the missing penalty, got: {err}"
+        );
+
+        // And the narrow version still passes, or this is just a ban on tasks.
+        task_with(task_kind(), test_address(1), 10, 100, 5_000)
+            .validate_shape()
+            .expect("a task that names its penalty is valid");
+    }
+
+    /// The penalty is part of the task's identity, not an editable annotation.
+    ///
+    /// If the slash condition sat outside the id, a creator could publish a
+    /// task under one risk and settle it under another: same `task_id`, same
+    /// lookup, different consequence for the prover that already committed.
+    #[test]
+    fn the_slash_condition_and_stake_floor_are_bound_into_the_task_id() {
+        let base = task_with(task_kind(), test_address(1), 10, 100, 5_000);
+
+        let other_condition =
+            ProofTask::new(task_kind(), test_address(1), 10, 100, 5_000, [0xD1; 32], 0);
+        assert_ne!(
+            base.task_id, other_condition.task_id,
+            "changing what the prover forfeits must change the task id"
+        );
+
+        let other_stake = ProofTask::new(
+            task_kind(),
+            test_address(1),
+            10,
+            100,
+            5_000,
+            slash_condition(),
+            1_000,
+        );
+        assert_ne!(
+            base.task_id, other_stake.task_id,
+            "changing the bond a prover must hold must change the task id"
+        );
+
+        // Both must survive a round trip through `verify_id`, or the id binds
+        // fields the verifier does not re-derive.
+        assert!(other_condition.verify_id());
+        assert!(other_stake.verify_id());
+    }
+
+    /// Assignment reads the stake floor, or the floor is decoration.
+    ///
+    /// This is the half that makes the slash condition mean anything: naming
+    /// what is forfeited is empty unless something was staked to forfeit.
+    #[test]
+    fn a_prover_below_the_stake_floor_cannot_be_assigned() {
+        let mut task = ProofTask::new(
+            task_kind(),
+            test_address(1),
+            10,
+            100,
+            5_000,
+            slash_condition(),
+            10_000,
+        );
+
+        let err = task
+            .assign(test_address(2), 9_999, 15)
+            .expect_err("a prover one unit short of the floor must be refused");
+        assert!(
+            err.contains("10000") && err.contains("9999"),
+            "the refusal must state both numbers so the caller can act, got: {err}"
+        );
+        assert_eq!(
+            task.status,
+            ProofTaskStatus::Pending,
+            "a refused assignment must leave the task assignable"
+        );
+
+        task.assign(test_address(2), 10_000, 15)
+            .expect("a prover exactly at the floor must be accepted");
+        assert!(matches!(task.status, ProofTaskStatus::Assigned { .. }));
+    }
+
+    /// The root commits to the penalty side, not only the payment side.
+    #[test]
+    fn the_market_root_moves_when_the_penalty_changes() {
+        let mut lenient = ProofMarketState::new();
+        let mut strict = ProofMarketState::new();
+
+        let mut cheap = task_with(task_kind(), test_address(1), 1, 100, 1_000);
+        cheap.assign(test_address(2), 0, 10).unwrap();
+        let mut dear = ProofTask::new(
+            task_kind(),
+            test_address(1),
+            1,
+            100,
+            1_000,
+            slash_condition(),
+            50_000,
+        );
+        dear.assign(test_address(2), 50_000, 10).unwrap();
+
+        lenient.add_task(cheap).unwrap();
+        strict.add_task(dear).unwrap();
+
+        assert_ne!(
+            lenient.root(),
+            strict.root(),
+            "two markets differing only in what a failed prover forfeits must \
+             not hash to the same root"
+        );
+    }
+
+    /// The memory ceiling has to run somewhere, or it is a comment.
+    ///
+    /// `enforce_max_sizes` is the only bound on accumulation in this module.
+    /// `add_task` refuses a task when the vector is already at the cap, which
+    /// bounds a single call and says nothing about a node that has been up
+    /// for a year. Nothing called `enforce_max_sizes`, nothing called
+    /// `prune_expired`, and nothing called `prune_paid_receipts`.
+    #[test]
+    fn closing_an_epoch_expires_stale_tasks_and_drops_paid_receipts() {
+        let mut market = ProofMarketState::new();
+
+        let mut stale = task_with(task_kind(), test_address(1), 1, 5, 100);
+        stale.assign(test_address(2), 0, 2).unwrap();
+        let mut live = task_with(
+            ProofTaskKind::DomainCommitment {
+                domain_id: 2,
+                domain_height: 20,
+                sequence: 1,
+            },
+            test_address(1),
+            1,
+            900,
+            100,
+        );
+        live.assign(test_address(3), 0, 2).unwrap();
+        market.add_task(stale).unwrap();
+        market.add_task(live).unwrap();
+
+        // One receipt, paid, so the prune has something real to remove.
+        let live_id = market.active_tasks[1].task_id;
+        let receipt = ProofReceipt::new(live_id, test_address(3), 3, [7u8; 32], 100);
+        market.complete_task(live_id, receipt).unwrap();
+        market.pay_receipt(0).unwrap();
+        assert_eq!(market.pending_receipts.len(), 1);
+
+        let (expired, receipts_pruned) = market.close_epoch(500);
+
+        assert_eq!(expired, 1, "the task whose deadline passed must be expired");
+        assert_eq!(
+            receipts_pruned, 1,
+            "a receipt already paid must not sit in the pending vector forever"
+        );
+        assert!(
+            market.pending_receipts.is_empty(),
+            "nothing unpaid remains, so nothing pending should"
+        );
+    }
+
+    /// Closing an epoch must not throw away work in progress.
+    ///
+    /// The pruning has to be narrow or it is a way to lose a prover's work:
+    /// an assigned task inside its deadline represents someone computing
+    /// right now.
+    #[test]
+    fn closing_an_epoch_keeps_assigned_work_that_still_has_time() {
+        let mut market = ProofMarketState::new();
+        let mut running = task_with(task_kind(), test_address(1), 1, 900, 100);
+        running.assign(test_address(2), 0, 2).unwrap();
+        market.add_task(running).unwrap();
+
+        let (expired, _) = market.close_epoch(500);
+
+        assert_eq!(expired, 0, "a task with 400 epochs left has not expired");
+        assert_eq!(
+            market.active_tasks.len(),
+            1,
+            "an assigned task inside its deadline is a prover mid-computation \
+             and must survive the sweep"
+        );
+    }
+
+    /// An empty market must stay out of the state root.
+    ///
+    /// A chain that has never opened a proof task must not see its root move
+    /// because this field came into existence.
+    #[test]
+    fn an_untouched_market_is_empty_and_a_used_one_is_not() {
+        let mut market = ProofMarketState::new();
+        assert!(market.is_empty(), "a fresh market has recorded nothing");
+
+        let mut task = task_with(task_kind(), test_address(1), 1, 100, 1_000);
+        task.assign(test_address(2), 0, 2).unwrap();
+        market.add_task(task).unwrap();
+        assert!(
+            !market.is_empty(),
+            "a market holding an assigned task must reach the state root"
+        );
     }
 }
