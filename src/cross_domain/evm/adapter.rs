@@ -483,10 +483,15 @@ mod tests {
     /// `verify_deposit`, and until this test existed nothing referenced it
     /// outside its own definition - not even a test.
     ///
-    /// That is survivable today only because the adapter registry is empty in
-    /// production (`with_adapters` is never called, so every chain answers
-    /// `UnsupportedChain`) - the outbound path refuses rather than accepting a
-    /// weakly-verified deposit. `relayer_worker_locks.rs` pins that.
+    /// That was survivable while the adapter registry was empty in production,
+    /// because every chain answered `UnsupportedChain` and the outbound path
+    /// refused rather than accepting a weakly-verified deposit. It is no
+    /// longer empty by construction: `--evm-bridge-address` and
+    /// `--evm-deposit-topic0` let an operator register this adapter, and then
+    /// the trait path is what runs. The gap below is now reachable on a node
+    /// whose operator configured the bridge, which is exactly the ordering
+    /// this test warned about. `relayer_worker_locks.rs` pins the
+    /// configuration half.
     ///
     /// The danger is the order of events when someone wires the registry up:
     /// the code compiles, the tests pass, the comment says the safe path

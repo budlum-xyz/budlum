@@ -267,6 +267,39 @@ pub struct NodeConfig {
 
     #[arg(long, default_value = "true")]
     pub storage_mandatory_sharding: bool,
+
+    // --- Outbound bridge (relayer) ---
+    //
+    // `RelayerWorker::with_adapters` existed and nothing called it, because
+    // the node carried no way to say what an adapter should point at.
+    // `EvmChainAdapter::new` needs the bridge contract address and the
+    // `Deposit` event topic0, and there was no field for either, so the
+    // registry was empty on every deployed node and outbound relay answered
+    // `UnsupportedChain` for every chain.
+    /// Ethereum bridge contract address, hex, with or without `0x`.
+    ///
+    /// Absent means outbound relay stays off, which is the current behaviour
+    /// and the safe one: every receipt leaf binds to this address, so a node
+    /// that guesses would advertise Ethereum support while pointing at no
+    /// contract.
+    #[arg(long)]
+    pub evm_bridge_address: Option<String>,
+
+    /// `keccak256("Deposit(...)")` for the bridge contract, hex.
+    ///
+    /// Required alongside `--evm-bridge-address`; a deposit log is matched on
+    /// emitter and topic0 together, and a zero topic matches the first log the
+    /// contract ever emitted.
+    #[arg(long)]
+    pub evm_deposit_topic0: Option<String>,
+
+    /// Confirmations to wait before a deposit is treated as final.
+    ///
+    /// Defaults to the adapter's own `DEFAULT_CONFIRMATIONS`. Zero is refused
+    /// by `check_fit_for_relay`: a deposit from a block that can still be
+    /// reorged away would be minted against a transaction that did not happen.
+    #[arg(long)]
+    pub evm_confirmations: Option<u32>,
 }
 
 impl Default for NodeConfig {
@@ -350,6 +383,9 @@ impl Default for NodeConfig {
             storage_enabled: true,
             storage_replication_factor: 3,
             storage_mandatory_sharding: true,
+            evm_bridge_address: None,
+            evm_deposit_topic0: None,
+            evm_confirmations: None,
         }
     }
 }
@@ -960,6 +996,72 @@ impl NodeConfig {
     pub fn effective_max_peers(&self) -> usize {
         let profile_cap = self.network.security_config().max_peers.max(1);
         self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
+    }
+
+    /// Build the outbound EVM adapter this node was configured for, if any.
+    ///
+    /// `Ok(None)` means outbound relay stays off, which is what every node
+    /// does today. `Err` means the operator asked for it and got it wrong,
+    /// and the node must not start pretending to bridge: a half-configured
+    /// adapter is worse than none, because the registry advertises the chain
+    /// as supported.
+    ///
+    /// # Errors
+    ///
+    /// The half of the pair that is missing or unparseable, or the reason the
+    /// assembled adapter is not fit to relay.
+    pub fn evm_adapter(
+        &self,
+    ) -> Result<Option<crate::cross_domain::evm::adapter::EvmChainAdapter>, String> {
+        let (Some(addr_hex), Some(topic_hex)) = (
+            self.evm_bridge_address.as_deref(),
+            self.evm_deposit_topic0.as_deref(),
+        ) else {
+            // Both or neither. One alone is a configuration half-written, and
+            // the missing half is not something to guess: a zero address binds
+            // every receipt leaf to nothing, and a zero topic0 matches the
+            // first log the contract ever emitted.
+            return match (
+                self.evm_bridge_address.is_some(),
+                self.evm_deposit_topic0.is_some(),
+            ) {
+                (false, false) => Ok(None),
+                (true, false) => Err(
+                    "--evm-bridge-address was given without --evm-deposit-topic0: a deposit \
+                     log is matched on emitter and topic together"
+                        .into(),
+                ),
+                _ => Err(
+                    "--evm-deposit-topic0 was given without --evm-bridge-address: the topic \
+                     alone does not say which contract emitted it"
+                        .into(),
+                ),
+            };
+        };
+
+        let address = hex::decode(addr_hex.strip_prefix("0x").unwrap_or(addr_hex))
+            .map_err(|e| format!("--evm-bridge-address is not hex: {e}"))?;
+        if address.len() != 20 {
+            return Err(format!(
+                "--evm-bridge-address must be 20 bytes, got {}",
+                address.len()
+            ));
+        }
+        let topic = hex::decode(topic_hex.strip_prefix("0x").unwrap_or(topic_hex))
+            .map_err(|e| format!("--evm-deposit-topic0 is not hex: {e}"))?;
+        let topic0: [u8; 32] = topic.try_into().map_err(|v: Vec<u8>| {
+            format!("--evm-deposit-topic0 must be 32 bytes, got {}", v.len())
+        })?;
+
+        let mut adapter = crate::cross_domain::evm::adapter::EvmChainAdapter::new(address, topic0);
+        if let Some(confirmations) = self.evm_confirmations {
+            adapter.required_confirmations = confirmations;
+        }
+        // Ask the adapter itself rather than re-deriving the rules here. It
+        // refuses a zero address and zero confirmations, and this is the last
+        // point before the registry where refusing is still cheap.
+        adapter.check_fit_for_relay()?;
+        Ok(Some(adapter))
     }
 
     pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
