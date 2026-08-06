@@ -481,3 +481,63 @@ fn liveness_slashing_gap_is_pinned() {
          nothing; it was searching for a symbol that does not exist"
     );
 }
+
+/// The live epoch-close path and the unreachable one punish differently.
+///
+/// Two functions apply a liveness slash. `apply_epoch_close_liveness` runs
+/// on every real block at an epoch boundary. `maybe_observe_liveness_on_epoch_close`
+/// is reachable only from tests, as the test above pins.
+///
+/// They do not do the same thing. Both set `slashed` and clear `active`;
+/// only the unreachable one also sets `jailed`. That difference is not
+/// cosmetic:
+///
+/// * `jailed` is hashed into the state root, so the two paths produce
+///   different roots from the same evidence.
+/// * `AccountState::advance_epoch` releases a validator by testing
+///   `validator.jailed && validator.jail_until <= epoch_index`. A validator
+///   punished by the live path never has `jailed` set, so the release loop
+///   never sees it and the punishment has no expiry. `jail_until` stays 0,
+///   which would have released it immediately had the flag been set.
+/// * `effective_stake` already returns 0 for a `slashed` validator, so the
+///   stake is out either way. What differs is whether it can ever come back.
+///
+/// The net effect is that the only liveness slashing that actually runs is
+/// permanent, while the code path that documents a jail term is the one
+/// nothing calls. This test pins the asymmetry so that whoever wires the
+/// hook, or fixes the live path, has to decide which punishment is intended
+/// rather than inheriting one by accident.
+#[test]
+fn the_live_epoch_close_path_slashes_without_a_jail_term() {
+    use std::collections::HashSet;
+
+    let producer = addr(1);
+    let offender = addr(2);
+    let mut bc = chain_with_validators(producer, offender);
+    bc.state.registry.set_params(RegistryParams {
+        liveness_max_missed_epochs: 0,
+        liveness_slashing_enabled: true,
+        ..RegistryParams::default()
+    });
+
+    let only_producer: HashSet<Address> = std::iter::once(producer).collect();
+    bc.maybe_observe_liveness_on_epoch_close(1, &only_producer);
+
+    let v = bc
+        .state
+        .get_validator(&offender)
+        .expect("the offender is still in the validator map after a slash");
+
+    // The unreachable path is the one that jails.
+    assert!(v.slashed, "the hook slashes when slashing is enabled");
+    assert!(
+        v.jailed,
+        "the hook sets jailed; the live path does not, and that is the \
+         difference this test exists to record"
+    );
+    assert_eq!(
+        v.jail_until, 0,
+        "neither path sets a term, so a jailed validator is released at the \
+         next epoch boundary rather than serving one"
+    );
+}
