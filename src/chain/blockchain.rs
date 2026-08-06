@@ -1985,94 +1985,6 @@ impl Blockchain {
         Ok(outcome)
     }
 
-    /// Liveness hook for the real block flow, as designed. It says it is
-    /// "called from `produce_block` / `validate_and_add_block` at every epoch
-    /// boundary" and neither calls it; see below. The
-    /// "expected" set is the *current* active validator set (so PoA members,
-    /// Who never live in `AccountState.validators`, are correctly excluded).
-    /// The "participated" set is whatever producers the caller actually saw
-    /// Sign the epoch's blocks; here we approximate it with the producer of
-    /// The block that just closed the epoch.
-    ///
-    /// # This is not the OBSERVE path, and nothing calls it
-    ///
-    /// Two claims that were written here have been measured and are false.
-    ///
-    /// It said "a report is recorded, but no slash is applied". The body
-    /// below cuts stake through `slash_from_report` and then sets `slashed`,
-    /// `jailed` and `active = false` on the validator, whenever
-    /// `liveness_slashing_enabled` is true, which is the default in
-    /// `registry/params.rs`. `observe_liveness_epoch` is the observe-only
-    /// surface; this is not it.
-    ///
-    /// The name says "on epoch close", and `disaster_recovery.rs` states that
-    /// the hook "yalnız blok üretiminde koşar". No production path calls this
-    /// function at all. `apply_system_effects` closes the epoch by calling
-    /// `state.advance_epoch` and never reaches here, so no validator has ever
-    /// been jailed for absence on any running chain.
-    ///
-    /// The two errors point in opposite directions, which is why neither was
-    /// noticed: the documentation understates what the code does, and the
-    /// call graph understates nothing because there is no call. A reader
-    /// checking whether liveness slashing is safe finds a comment saying it
-    /// cannot slash; a reader checking whether it works finds a function that
-    /// plainly does. Both stop reading there.
-    ///
-    /// Wiring it is a consensus change and is deliberately not made here:
-    /// enabling it would begin cutting stake at the first epoch close on
-    /// every existing chain, against a `participated` set that this signature
-    /// leaves entirely to the caller. `liveness_slashing_gap_is_pinned` in
-    /// `src/tests/liveness_consensus.rs` fails when either half changes.
-    pub fn maybe_observe_liveness_on_epoch_close(
-        &mut self,
-        closed_epoch: u64,
-        participated: &std::collections::HashSet<Address>,
-    ) -> usize {
-        let params = *self.state.registry.params();
-        let threshold = params.liveness_max_missed_epochs;
-        let expected: Vec<Address> = self
-            .state
-            .validators
-            .keys()
-            .filter(|addr| {
-                self.state
-                    .registry
-                    .is_active(addr, crate::registry::role::roles::VALIDATOR)
-            })
-            .copied()
-            .collect();
-        // We want ABSENTEE (no-show) detection, so participated = false when
-        // The address is not in the set.
-        let reported = self.state.liveness.record_epoch(
-            closed_epoch,
-            &expected,
-            |addr| participated.contains(addr),
-            &params,
-        );
-        let count = reported.len();
-        // OBSERVE MODE: if `liveness_slashing_enabled` is false, we just return
-        // The report count. Otherwise we feed the report through the canonical
-        // `slash_from_report` path so the actual stake cut happens here.
-        if params.liveness_slashing_enabled {
-            let role = crate::registry::role::roles::VALIDATOR;
-            let _ = threshold; // (reserved: future per-threshold logic)
-            for report in &reported {
-                let _ = self.state.registry.slash_from_report(report);
-                // Mirror the slash into the on-chain validator set so the rest
-                // Of the node (consensus, RPC) sees a consistent view.
-                if let Some(v) = self.state.validators.get_mut(&report.offender) {
-                    if !v.slashed {
-                        v.slashed = true;
-                        v.active = false;
-                        v.jailed = true;
-                    }
-                }
-                let _ = role; // (reserved)
-            }
-        }
-        count
-    }
-
     /// Drive the liveness tracker over a synthetic epoch. Used by
     /// Tests and by the OBSERVE-only public surface. `participated` is the set
     /// Of validators that showed the expected participation; everyone else in
@@ -2080,10 +1992,9 @@ impl Blockchain {
     /// Slashing reports produced.
     ///
     /// OBSERVE ONLY: this never slashes, even when `liveness_slashing_enabled`
-    /// Is true. Real slashing is the job of `maybe_observe_liveness_on_epoch_close`
-    /// (the epoch-close hook) and of `record_liveness_epoch` (the explicit
-    /// Per-epoch driver). Tests asserting the OBSERVE mode default therefore
-    /// See no stake cut.
+    /// Is true. Real slashing is the job of `apply_epoch_close_liveness`, which
+    /// Runs on every real block at an epoch boundary. Tests asserting the
+    /// OBSERVE mode default therefore see no stake cut.
     pub fn observe_liveness_epoch(
         &mut self,
         epoch: u64,
@@ -2114,14 +2025,14 @@ impl Blockchain {
 
     /// Directly call `state.liveness.record_epoch` (exposed so tests
     /// That want to exercise the tracker in isolation can do so without going
-    /// Through `maybe_observe_liveness_on_epoch_close`).
+    /// Through `apply_epoch_close_liveness`).
     pub fn record_liveness_epoch(
         &mut self,
         epoch: u64,
         participated: &std::collections::HashSet<Address>,
     ) -> usize {
         let params = *self.state.registry.params();
-        // Same filter as `maybe_observe_liveness_on_epoch_close`. Taking every
+        // Same filter as `apply_epoch_close_liveness`. Taking every
         // Key of `validators` counts members that cannot sign, a slashed or
         // Jailed validator stays in the map (that is how `jail_until` is
         // Tracked) while `registry.is_active` has already gone false. Feeding
@@ -2148,7 +2059,7 @@ impl Blockchain {
         );
         // If liveness slashing is enabled, feed the produced reports through
         // The canonical `slash_from_report` path (mirroring what
-        // `maybe_observe_liveness_on_epoch_close` does at epoch close). Tests
+        // `apply_epoch_close_liveness` does at epoch close). Tests
         // That drive slashing explicitly via `record_liveness_epoch` therefore
         // See the same effect.
         if params.liveness_slashing_enabled {
@@ -3264,12 +3175,31 @@ impl Blockchain {
 
         // OBSERVE mode by default; only act when slashing is explicitly enabled.
         if params.liveness_slashing_enabled {
+            let jail_until = state
+                .epoch_index
+                .saturating_add(params.liveness_jail_epochs);
             for report in &reported {
                 let _ = state.registry.slash_from_report(report);
                 if let Some(validator) = state.validators.get_mut(&report.offender) {
                     if !validator.slashed {
                         validator.slashed = true;
                         validator.active = false;
+                        // The term, and the flag the release loop reads.
+                        //
+                        // `AccountState::advance_epoch` releases on
+                        // `jailed && jail_until <= epoch_index`. Cutting the
+                        // stake without setting `jailed` left the offender
+                        // invisible to that loop: a liveness penalty, which
+                        // is a penalty for being absent, became permanent.
+                        // Absence is also what a partition or a failed disk
+                        // looks like, so the punishment outlived the fault
+                        // it was measuring.
+                        //
+                        // `jailed` is hashed into the state root, so the two
+                        // slashing paths also disagreed on the root they
+                        // produced from identical evidence.
+                        validator.jailed = true;
+                        validator.jail_until = jail_until;
                     }
                 }
             }

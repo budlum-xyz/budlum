@@ -94,6 +94,19 @@ pub struct RegistryParams {
     /// Operator/governance explicitly enables it - the mechanism is fully wired
     /// And tested, but never auto-activates. Set to `true` to enable.
     pub liveness_slashing_enabled: bool,
+    /// How many epochs a liveness offender stays jailed.
+    ///
+    /// A liveness offence is absence, and absence is what a healthy validator
+    /// looks like during a network partition, a disk failure or a datacentre
+    /// reboot. Making that permanent punishes an outage the same way it
+    /// punishes abandonment, so the penalty carries a term: stake is cut
+    /// once, the validator is barred for this many epochs, and then
+    /// `AccountState::advance_epoch` releases it.
+    ///
+    /// The release depends on `jailed` being set. A path that slashes without
+    /// setting it produces a punishment the release loop never sees, which is
+    /// a permanent ban written by code that reads as temporary.
+    pub liveness_jail_epochs: u64,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
     ///
@@ -304,6 +317,10 @@ impl Default for RegistryParams {
             // Caught within one epoch. Governance-tunable per network.
             max_invalid_votes_per_epoch: 20,
             liveness_slashing_enabled: true,
+            // The term `AccountState::slash_validator` already applied as a
+            // hardcoded 7, now stated once so both slashing paths read the
+            // same number instead of one of them inventing it.
+            liveness_jail_epochs: 7,
             // 1% - the rate the three hardcoded call sites already used, now
             // stated once and tunable.
             bridge_relayer_fee_ppm: 10_000,

@@ -2,7 +2,7 @@
 //!
 //! These tests drive real block production through `Blockchain::produce_block`
 //! (which commits blocks and, at epoch boundaries, runs
-//! `maybe_observe_liveness_on_epoch_close`) - NOT the isolated
+//! `apply_epoch_close_liveness`) - NOT the isolated
 //! `state.record_liveness_epoch` call.
 //!
 //! Decision 2.3 = OBSERVE MODE: crossing the miss threshold is logged/reported
@@ -346,8 +346,8 @@ fn a_slashed_validator_stops_accruing_downtime() {
 
 /// All three liveness call sites must agree on who is expected to sign.
 ///
-/// `maybe_observe_liveness_on_epoch_close` filtered on `registry.is_active`
-/// from the start; `Blockchain::record_liveness_epoch` and
+/// `apply_epoch_close_liveness` filtered on `registry.is_active` from the
+/// start; `Blockchain::record_liveness_epoch` and
 /// `AccountState::record_liveness_epoch` did not. One filter in three places is
 /// how the two views drift, so this pins that they are the same set.
 #[test]
@@ -370,7 +370,7 @@ fn every_liveness_path_expects_the_same_validators() {
     let only_producer: HashSet<Address> = std::iter::once(producer).collect();
 
     let before = bc.state.liveness.missed_count(&offender);
-    bc.maybe_observe_liveness_on_epoch_close(10, &only_producer);
+    bc.observe_liveness_epoch(10, &only_producer);
     let after_observe = bc.state.liveness.missed_count(&offender);
     bc.record_liveness_epoch(11, &only_producer);
     let after_record = bc.state.liveness.missed_count(&offender);
@@ -382,162 +382,62 @@ fn every_liveness_path_expects_the_same_validators() {
     );
 }
 
-/// Liveness slashing is written, enabled by default, and unreachable.
+/// A liveness slash must carry a term the release loop can see.
 ///
-/// Three things were measured and each contradicts something the tree says
-/// about itself.
+/// Two functions used to apply this slash and they disagreed. The live one,
+/// `apply_epoch_close_liveness`, set `slashed` and cleared `active` but never
+/// set `jailed`. The unreachable hook set all three. Only the second shape is
+/// releasable: `AccountState::advance_epoch` frees a validator by testing
+/// `jailed && jail_until <= epoch_index`, so an offender punished without the
+/// flag was invisible to that loop and stayed out permanently.
 ///
-/// `maybe_observe_liveness_on_epoch_close` documented itself as "the OBSERVE
-/// path: a report is recorded, but no slash is applied". It calls
-/// `slash_from_report` and then sets `slashed`, `jailed` and `active = false`
-/// whenever `liveness_slashing_enabled` is true, and that parameter defaults
-/// to true in `registry/params.rs`.
+/// That made the only liveness slashing that actually ran a permanent ban,
+/// for an offence whose evidence is absence. Absence is also what a
+/// partition, a failed disk or a datacentre reboot looks like.
 ///
-/// Its own header said it is "called from `produce_block` /
-/// `validate_and_add_block` at every epoch boundary", and
-/// `disaster_recovery.rs` reasoned from the hook running "yalnız blok
-/// üretiminde". Neither is so. `apply_system_effects` closes the epoch
-/// through `state.advance_epoch` and no production path reaches this
-/// function, so no validator has ever been jailed for absence on a running
-/// chain.
-///
-/// The two errors point opposite ways, which is why neither was caught: the
-/// documentation understates what the code does, so a reader checking safety
-/// is reassured, and a reader checking that it works finds a body that
-/// plainly slashes and stops there. Only asking "who calls this" finds it,
-/// and the guard-reachability gate does not, because the name begins with
-/// `maybe_`.
-///
-/// Wiring it is a consensus change: enabling it starts cutting stake at the
-/// first epoch close on every existing chain, against a `participated` set
-/// the signature leaves entirely to the caller. This test does not close the
-/// gap. It makes the gap fail loudly the moment either half moves, so the
-/// change is made deliberately rather than discovered.
+/// The hook is gone and the live path now writes the term. This pins the
+/// shape rather than the call site, so it keeps holding if the slash moves.
 #[test]
-fn liveness_slashing_gap_is_pinned() {
-    let blockchain_src = include_str!("../chain/blockchain.rs");
-
-    // 1. The function still slashes, so calling it is not a free action.
-    let hook = blockchain_src
-        .split_once("pub fn maybe_observe_liveness_on_epoch_close(")
-        .map(|(_, after)| after)
-        .expect("the hook must still exist");
-    let hook = &hook[..hook.len().min(2500)];
-    assert!(
-        hook.contains("slash_from_report") && hook.contains("jailed = true"),
-        "the hook no longer cuts stake. If it became observe-only, the warning \\
-         in its doc comment and this test both need rewriting"
-    );
-
-    // 2. Nothing in production calls it. Searched outside `src/tests/`,
-    //    excluding the definition and doc comments, which is how the claim
-    //    survived for as long as it did.
-    let mut callers: Vec<&str> = Vec::new();
-    for (path, src) in [
-        ("chain/blockchain.rs", blockchain_src),
-        (
-            "chain/chain_actor.rs",
-            include_str!("../chain/chain_actor.rs"),
-        ),
-        (
-            "execution/executor.rs",
-            include_str!("../execution/executor.rs"),
-        ),
-        ("core/account.rs", include_str!("../core/account.rs")),
-        ("main.rs", include_str!("../main.rs")),
-    ] {
-        for line in src.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if trimmed.contains("pub fn maybe_observe_liveness_on_epoch_close") {
-                continue;
-            }
-            if trimmed.contains("maybe_observe_liveness_on_epoch_close(") {
-                callers.push(path);
-            }
-        }
-    }
-    assert!(
-        callers.is_empty(),
-        "the epoch-close liveness hook is now called from {callers:?}. That is \\
-         a consensus change: it begins cutting stake at the first epoch close \\
-         on every existing chain, against a `participated` set the caller \\
-         chooses. Confirm the participation source is real, then delete this \\
-         test and pin the new behaviour instead"
-    );
-
-    // 3. The canary. If the search above stopped matching for a mechanical
-    //    reason, step 2 would pass on a tree where the hook *is* wired, which
-    //    is the failure this whole test exists to prevent.
-    let sentinel = blockchain_src
-        .lines()
-        .filter(|l| l.contains("maybe_observe_liveness_on_epoch_close"))
-        .count();
-    assert!(
-        sentinel > 0,
-        "the name no longer appears in blockchain.rs at all, so step 2 proved \\
-         nothing; it was searching for a symbol that does not exist"
-    );
-}
-
-/// The live epoch-close path and the unreachable one punish differently.
-///
-/// Two functions apply a liveness slash. `apply_epoch_close_liveness` runs
-/// on every real block at an epoch boundary. `maybe_observe_liveness_on_epoch_close`
-/// is reachable only from tests, as the test above pins.
-///
-/// They do not do the same thing. Both set `slashed` and clear `active`;
-/// only the unreachable one also sets `jailed`. That difference is not
-/// cosmetic:
-///
-/// * `jailed` is hashed into the state root, so the two paths produce
-///   different roots from the same evidence.
-/// * `AccountState::advance_epoch` releases a validator by testing
-///   `validator.jailed && validator.jail_until <= epoch_index`. A validator
-///   punished by the live path never has `jailed` set, so the release loop
-///   never sees it and the punishment has no expiry. `jail_until` stays 0,
-///   which would have released it immediately had the flag been set.
-/// * `effective_stake` already returns 0 for a `slashed` validator, so the
-///   stake is out either way. What differs is whether it can ever come back.
-///
-/// The net effect is that the only liveness slashing that actually runs is
-/// permanent, while the code path that documents a jail term is the one
-/// nothing calls. This test pins the asymmetry so that whoever wires the
-/// hook, or fixes the live path, has to decide which punishment is intended
-/// rather than inheriting one by accident.
-#[test]
-fn the_live_epoch_close_path_slashes_without_a_jail_term() {
-    use std::collections::HashSet;
+fn a_liveness_slash_is_releasable() {
+    use crate::core::chain_config::epoch_len_for_chain_id;
 
     let producer = addr(1);
     let offender = addr(2);
     let mut bc = chain_with_validators(producer, offender);
+    let jail_epochs = 7;
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 0,
         liveness_slashing_enabled: true,
+        liveness_jail_epochs: jail_epochs,
         ..RegistryParams::default()
     });
 
-    let only_producer: HashSet<Address> = std::iter::once(producer).collect();
-    bc.maybe_observe_liveness_on_epoch_close(1, &only_producer);
+    // Drive real blocks so the epoch closes through the production path.
+    let epoch_length = epoch_len_for_chain_id(bc.chain_id);
+    produce_n(&mut bc, producer, epoch_length);
 
     let v = bc
         .state
         .get_validator(&offender)
-        .expect("the offender is still in the validator map after a slash");
+        .expect("a slashed validator stays in the map; that is where the term lives");
 
-    // The unreachable path is the one that jails.
-    assert!(v.slashed, "the hook slashes when slashing is enabled");
+    assert!(
+        v.slashed,
+        "the absentee is slashed once liveness slashing is enabled"
+    );
     assert!(
         v.jailed,
-        "the hook sets jailed; the live path does not, and that is the \
-         difference this test exists to record"
+        "without this flag advance_epoch never considers the validator for \
+         release, and a penalty for being absent becomes permanent"
+    );
+    assert!(
+        v.jail_until > bc.state.epoch_index,
+        "the term must end in the future, or the punishment is decorative"
     );
     assert_eq!(
-        v.jail_until, 0,
-        "neither path sets a term, so a jailed validator is released at the \
-         next epoch boundary rather than serving one"
+        v.jail_until,
+        bc.state.epoch_index.saturating_add(jail_epochs),
+        "the term comes from liveness_jail_epochs, so both slashing sites \
+         read one number instead of inventing their own"
     );
 }

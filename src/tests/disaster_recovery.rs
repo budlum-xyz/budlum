@@ -347,12 +347,13 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
 /// Hiçbir sayaç kımıldamaz, üretici geri dönünce zincir deterministik olarak
 /// Kaldığı height'tan devam etmelidir.
 ///
-/// Buradaki eski gerekçe ölçüldü ve yanlıştı: `maybe_observe_liveness_on_epoch_close`
-/// "yalnız blok üretiminde koşar" demiyordu, HİÇ koşmuyor. Hiçbir üretim
-/// Yolu onu çağırmıyor, dolayısıyla sessizlikte sayaçların kımıldamaması bu
-/// Testin kanıtladığı bir dayanıklılık değil, kancanın bağlı olmamasının yan
-/// Etkisi. Test hâlâ değerli (resume determinizmini kilitler), ama sebebi
-/// Bu değil. Boşluk `liveness_consensus.rs`'te açıkça sabitlendi.
+/// Buradaki eski gerekçe iki kez düzeltildi. Önce ölçüldü: sayaçların
+/// Sessizlikte kımıldamaması, kancanın hiç bağlı olmamasının yan etkisiydi.
+/// Sonra o boşluk kapandı; canlılık epoch kapanışını `apply_epoch_close_liveness`
+/// Yürütüyor ve blok üretilmeyen bir dönemde epoch sınırı da geçilmediği için
+/// Sayaç yine kımıldamıyor, ama bu sefer sebebi doğru: kapanacak bir epoch yok.
+/// Test resume determinizmini kilitler; canlılık davranışı
+/// `liveness_consensus.rs`'te sabitlenir.
 #[tokio::test]
 async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     let consensus = Arc::new(PoWEngine::new(0));

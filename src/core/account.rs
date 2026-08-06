@@ -862,7 +862,7 @@ impl AccountState {
         // Jailed validator remains in `self.validators` - that map holds
         // `jail_until` - while `registry.is_active` has already gone false.
         // Counting it absent accrues downtime for blocks it is barred from
-        // Signing (Cosmos SDK #1867). `Blockchain::maybe_observe_liveness_on_epoch_close`
+        // Signing (Cosmos SDK #1867). `Blockchain::apply_epoch_close_liveness`
         // Has always filtered this way; the other two paths did not.
         let expected: Vec<Address> = self
             .validators

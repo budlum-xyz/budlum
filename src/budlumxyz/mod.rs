@@ -17,10 +17,12 @@ pub struct BudlumxyzRegistry {
     pub next_app_id: u64,
     /// Authorized governors who can mark apps as governance-verified.
     ///
-    /// Empty set = any caller accepted. `GovernanceAction::AddBudlumxyzGovernor`
-    /// Does not exist - see [`BudlumxyzRegistry::mark_verified_by_governance`]
-    /// For why that is currently harmless and what has to change before it
-    /// Stops being harmless.
+    /// Empty set = nobody is a governor. No governance action populates this
+    /// yet, so on a real network the set is empty and
+    /// [`BudlumxyzRegistry::mark_verified_by_governance`] refuses every
+    /// caller. The badge itself still moves, through
+    /// [`BudlumxyzRegistry::mark_verified_by_proposal`], on the authority of
+    /// a counted vote rather than an address.
     #[serde(default)]
     pub authorized_governors: std::collections::HashSet<Address>,
 }
@@ -111,46 +113,30 @@ impl BudlumxyzRegistry {
         self.attest_app_as_developer(id, caller)
     }
 
-    /// DAO/governance verification path (sets trusted `verified` badge).
-    /// Currently restricted: only the developer can call until authorized_verifiers
-    /// Exists - and it still only sets developer_attested via verify_app.
-    /// Explicit governance action should call `mark_verified_by_governance`.
+    /// Award the `verified` badge to an explicitly configured governor.
     ///
-    /// Require an explicit caller identity for governance
-    /// Verification. Without this, any code path that reaches this function
-    /// Can set `verified = true` without authorization. The caller parameter
-    /// Is checked against an optional `authorized_governors` set; if the set
-    /// Is empty (devnet), any caller is accepted (matching current behavior).
+    /// # The empty set now denies
     ///
-    /// # The governance action this refers to does not exist yet
+    /// It used to admit. The check read
+    /// `if !set.is_empty() && !set.contains(caller)`, so an empty set skipped
+    /// the membership test and accepted everyone. Since no governance action
+    /// populates `authorized_governors`, the set is empty on every real
+    /// network and the gate stood open; it was harmless only because nothing
+    /// in production called this.
     ///
-    /// The doc on [`BudlumxyzRegistry::authorized_governors`] names
-    /// `GovernanceAction::AddBudlumxyzGovernor`. There is no such variant:
-    /// `GovernanceAction` has `WhitelistVerifier`, `DewhitelistVerifier`,
-    /// `SetEncryptionPolicy`, `SetConstitutionParameter` and
-    /// `UnfreezeConsensusDomain`, and nothing else. The only writers of
-    /// `authorized_governors` are tests.
+    /// Relying on unreachability to contain a fail-open check means the
+    /// hazard arrives with whoever wires the first caller, and it arrives
+    /// silently, because an open gate returns `Ok`. The default is inverted
+    /// here instead: with no governor configured, nobody is a governor.
     ///
-    /// So on any real network the set is empty, `is_empty()` short-circuits
-    /// The check, and every caller passes. That is fail-open on an
-    /// Authorization gate.
-    ///
-    /// It is not exploitable today, and that is the only reason this is a
-    /// Comment rather than a fix: nothing in production calls this function.
-    /// The single caller is `src/tests/hardening_h2_locks.rs`. The moment a
-    /// Transaction type or an RPC method reaches it, the empty set becomes a
-    /// Live authorization bypass.
-    ///
-    /// Whoever wires that call path must land the governance action in the
-    /// Same change, and flip this from "empty means everyone" to "empty means
-    /// No one" - a permission check that defaults to allow is the wrong shape
-    /// Regardless of how the set gets populated.
+    /// Turning this back on takes populating the set, which is the same work
+    /// as before, minus the trap.
     pub fn mark_verified_by_governance(
         &mut self,
         id: u64,
         caller: &Address,
     ) -> Result<(), BudlumxyzError> {
-        if !self.authorized_governors.is_empty() && !self.authorized_governors.contains(caller) {
+        if !self.authorized_governors.contains(caller) {
             return Err(BudlumxyzError::NotAuthorized);
         }
         let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
@@ -401,24 +387,19 @@ mod tests {
         assert_ne!(root_before, reg.root());
     }
 
-    /// `mark_verified_by_governance` fails open, and must stay unreachable
-    /// Until it does not.
+    /// An unconfigured governor set must deny, not admit.
     ///
-    /// The authorization check is `if !set.is_empty() && !set.contains(caller)`,
-    /// so an empty set accepts everyone. The doc says production populates the
-    /// Set "via governance action (e.g. `GovernanceAction::AddBudlumxyzGovernor`)".
-    /// That variant does not exist, so on every real network the set is empty
-    /// And the gate is open.
+    /// The check used to read `!set.is_empty() && !set.contains(caller)`, so
+    /// an empty set skipped the membership test entirely. No governance
+    /// action populates the set, so on every real network it was empty and
+    /// the gate was open; the only thing containing it was that nothing
+    /// called the function.
     ///
-    /// Harmless today for exactly one reason: nothing in production calls the
-    /// Function. This test pins that reason. If a transaction type, an RPC
-    /// Method or a chain command starts calling it, this fails and whoever
-    /// Wired it has to land the governance action, and invert the empty-set
-    /// Default - in the same change.
+    /// Containment by unreachability fails the moment someone wires a
+    /// caller, and it fails quietly, because an open gate returns `Ok`. The
+    /// default now denies, and this pins that.
     #[test]
-    fn governance_verification_stays_unreachable_while_it_fails_open() {
-        // The empty-set default really is permissive: an arbitrary caller
-        // succeeds. This is the property that makes reachability matter.
+    fn an_unconfigured_governor_set_denies_everyone() {
         let mut reg = BudlumxyzRegistry::new();
         let id = reg
             .register_app(
@@ -430,33 +411,35 @@ mod tests {
                 0,
             )
             .expect("a fresh registry has no id to collide with");
+
         assert!(reg.authorized_governors.is_empty());
         let stranger = Address::from([0xEE; 32]);
-        reg.mark_verified_by_governance(id, &stranger)
-            .expect("an empty governor set accepts any caller - that is the hazard");
-        assert!(reg.apps[&id].verified);
-
-        // And the named governance action still does not exist, so nothing can
-        // populate the set on a real network.
-        let governance_src = include_str!("../core/governance.rs");
         assert!(
-            !governance_src.contains("AddBudlumxyzGovernor"),
-            "the governance action now exists - populate the governor set and \
-             invert the empty-set default from allow to deny"
+            matches!(
+                reg.mark_verified_by_governance(id, &stranger),
+                Err(BudlumxyzError::NotAuthorized)
+            ),
+            "with no governor configured there is no governor, so the badge \
+             must not move"
         );
+        assert!(
+            !reg.apps[&id].verified,
+            "a refused authorization must leave no trace in the state root"
+        );
+
+        // Configuring a governor is what grants the authority, and it grants
+        // it to that address alone.
+        let gov = Address::from([7u8; 32]);
+        reg.authorized_governors.insert(gov);
+        assert!(matches!(
+            reg.mark_verified_by_governance(id, &stranger),
+            Err(BudlumxyzError::NotAuthorized)
+        ));
+        reg.mark_verified_by_governance(id, &gov)
+            .expect("the configured governor is authorized");
+        assert!(reg.apps[&id].verified);
     }
 
-    /// A counter that disagrees with the map must not overwrite a listing.
-    ///
-    /// The same defect as `NftRegistry::mint`, in a second registry: `insert`
-    /// overwrites, and the record it replaces belongs to another developer.
-    /// Their app disappears from `apps` while the id keeps resolving, now to
-    /// somebody else's listing, with no transaction from the developer who
-    /// lost it.
-    ///
-    /// Reachable through a restore: `apps` and `next_app_id` are separate
-    /// fields of `StateSnapshotV2`, so a snapshot whose counter sits below
-    /// its highest live id produces this on load.
     #[test]
     fn registering_onto_a_live_app_id_is_refused() {
         let mut reg = BudlumxyzRegistry::new();

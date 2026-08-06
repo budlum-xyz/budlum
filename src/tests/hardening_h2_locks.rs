@@ -62,6 +62,18 @@ mod tests {
         let app = hub.apps.get(&id).unwrap();
         assert!(app.developer_attested);
         assert!(!app.verified, "self-verify must not set verified badge");
+
+        // The governor set starts empty and an empty set now denies, so the
+        // developer cannot award itself the governance badge by calling the
+        // governance path either.
+        assert!(
+            hub.mark_verified_by_governance(id, &dev).is_err(),
+            "with no governor configured there is no governor"
+        );
+        assert!(!hub.apps.get(&id).unwrap().verified);
+
+        // Configuring one grants the authority to that address alone.
+        hub.authorized_governors.insert(dev);
         hub.mark_verified_by_governance(id, &dev).unwrap();
         assert!(hub.apps.get(&id).unwrap().verified);
     }
