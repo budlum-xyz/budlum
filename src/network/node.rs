@@ -649,7 +649,11 @@ impl Node {
             sync_state,
             sync_started_at,
             pending_bitswap_fetches: HashMap::new(),
-            max_peers: if mobile_mode { 10 } else { MAX_PEERS },
+            // The server budget. A battery-powered node lowers this through
+            // `with_mobile_profile`, which derives it from the power mode
+            // rather than from the boolean; deciding it twice is what let a
+            // phone at 5% hold the same ten connections as one on mains.
+            max_peers: MAX_PEERS,
             validator_address: None,
             last_precommit_height: 0,
             last_prevote_height: 0,
