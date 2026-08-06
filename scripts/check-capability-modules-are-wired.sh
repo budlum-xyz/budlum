@@ -176,6 +176,55 @@ def strip_doc_links(src):
     return re.sub(r"\[`[^`\]]*`\]", " ", src)
 
 
+def strip_string_literals(src):
+    """Blank out `"..."` literals, keeping comments.
+
+    A string is data, not a call. Measured on this tree: `prover/market.rs`
+    exports `prepare`, and `rpc/server.rs` carries the JSON note
+    `"prepare-only; no state mutation ..."`. That word inside a quoted string
+    was the entire evidence that a 560-line unwired module was reached. The
+    other one found the same way was `wallet-core/src/bip39_wordlist.rs`,
+    where the BIP-39 word list contains "expire" and "prepare" as English
+    words and matched two different modules.
+
+    Comments are deliberately kept. Stripping them was tried and measured
+    first: it hid four modules that really are wired (`pruning`, `mobile_self`,
+    `content_id`, `discovery`), because a plain comment usually sits inside a
+    function body right beside the call it describes, and removing the comment
+    removes the surrounding line's context that the regex was matching on.
+    Doc links are handled separately and more narrowly by `strip_doc_links`.
+    """
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        # Leave line comments alone, including any quote characters in them,
+        # so an apostrophe in prose cannot start a phantom string.
+        if c == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j == -1:
+                out.append(src[i:])
+                break
+            out.append(src[i:j])
+            i = j
+            continue
+        if c == '"':
+            i += 1
+            while i < n:
+                if src[i] == "\\":
+                    i += 2
+                    continue
+                if src[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            out.append(' "" ')
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def strip_use_statements(src):
     """Drop `use` and `pub use` items.
 
@@ -255,7 +304,7 @@ production = [p for p in files if not is_test_path(p)]
 # What counts as evidence of a call: the file with its imports and re-exports
 # removed.
 evidence = {
-    p: strip_enum_bodies(strip_use_statements(strip_doc_links(b)))
+    p: strip_enum_bodies(strip_use_statements(strip_doc_links(strip_string_literals(b))))
     for p, b in bodies.items()
 }
 
@@ -307,6 +356,18 @@ for path in production:
 
     mod_name = os.path.splitext(os.path.basename(path))[0]
 
+    # Function names must be followed by a call. A bare mention of `complete`
+    # or `assign` in a comment is not evidence that this module's `complete`
+    # ran, and those two words carried `settlement/proof_market.rs` as wired
+    # while nothing reached it. Types, constants and statics keep matching
+    # bare, because a `dyn` dispatch or a constant lookup leaves no
+    # parenthesis at the call site, which is the whole reason they are
+    # counted.
+    fn_names = {
+        m.group(1)
+        for m in re.finditer(r"\bpub (?:async )?fn ([a-z_][a-z0-9_]*)", body)
+    }
+
     callers = set()
     for other in production:
         if other == path:
@@ -325,6 +386,9 @@ for path in production:
                 + re.escape(fn)
                 + r"(?![a-zA-Z0-9_])"
             )
+            if fn in fn_names:
+                # `name(`, or `name::<T>(` for a turbofish.
+                pattern += r"\s*(?:::\s*<[^<>]*>\s*)?\("
             if re.search(pattern, other_body):
                 callers.add(fn)
         if callers:
@@ -548,7 +612,91 @@ pub fn drive() -> u8 {
     "an enum variant sharing a name with the module type counted as wiring" \
     || return 1
 
-  echo "capability wiring gate self-test OK: 9 canaries"
+  # 10. A word inside a string literal is not a call. Measured on this tree:
+  #     `prover/market.rs` exports `prepare`, and an RPC handler's JSON note
+  #     read "prepare-only; no state mutation ...". That word inside quotes
+  #     was the whole evidence that a 560-line unwired module was reached.
+  rm -rf "$tmp/instring"
+  mkdir -p "$tmp/instring/src"
+  printf '%s\n' 'pub fn prepare_only_here() -> u8 { 1 }
+pub fn beta_only_here() -> u8 { 2 }
+pub fn gamma_only_here() -> u8 { 3 }' >"$tmp/instring/src/capability.rs"
+  printf '%s\n' 'pub fn traceable_one() -> u8 { 1 }
+pub fn traceable_two() -> u8 { 2 }
+pub fn traceable_three() -> u8 { 3 }' >"$tmp/instring/src/measurable.rs"
+  printf '%s\n' 'pub mod capability;
+pub mod measurable;
+pub fn drive() -> u8 {
+    let note = "prepare_only_here: no state mutation is performed";
+    let _ = note;
+    measurable::traceable_one()
+}' >"$tmp/instring/src/lib.rs"
+  expect_finding "$tmp/instring" \
+    "a function name inside a string literal counted as wiring" \
+    || return 1
+
+  # 11. A bare mention of a function name in a comment is not a call either.
+  #     `settlement/proof_market.rs` exports `complete`, `assign` and
+  #     `expire`, and prose such as "Repair complete." in an unrelated module
+  #     was enough to report it wired while nothing reached it.
+  rm -rf "$tmp/incomment"
+  mkdir -p "$tmp/incomment/src"
+  printf '%s\n' 'pub fn complete_only_here() -> u8 { 1 }
+pub fn beta_only_here() -> u8 { 2 }
+pub fn gamma_only_here() -> u8 { 3 }' >"$tmp/incomment/src/capability.rs"
+  printf '%s\n' 'pub fn traceable_one() -> u8 { 1 }
+pub fn traceable_two() -> u8 { 2 }
+pub fn traceable_three() -> u8 { 3 }' >"$tmp/incomment/src/measurable.rs"
+  printf '%s\n' 'pub mod capability;
+pub mod measurable;
+pub fn drive() -> u8 {
+    // Repair complete_only_here, re-indexed every block.
+    measurable::traceable_one()
+}' >"$tmp/incomment/src/lib.rs"
+  expect_finding "$tmp/incomment" \
+    "a function name mentioned in a comment counted as wiring" \
+    || return 1
+
+  # 12. And the narrowing must not go too far. A genuine call still counts,
+  #     including through a turbofish, or canaries 10 and 11 would be
+  #     satisfied by a gate that had simply stopped seeing function calls.
+  rm -rf "$tmp/stillcalls"
+  mkdir -p "$tmp/stillcalls/src"
+  printf '%s\n' 'pub fn alpha_only_here() -> u8 { 1 }
+pub fn beta_only_here<T: Default>() -> u8 { 2 }
+pub fn gamma_only_here() -> u8 { 3 }' >"$tmp/stillcalls/src/capability.rs"
+  printf '%s\n' 'pub mod capability;
+pub fn drive() -> u8 {
+    capability::alpha_only_here() + capability::beta_only_here::<u8>()
+}' >"$tmp/stillcalls/src/lib.rs"
+  if ! ( scan "$tmp/stillcalls" ) >/dev/null 2>&1; then
+    echo "GATE IS WRONG: a real call, plain or turbofish, stopped counting!" >&2
+    return 1
+  fi
+
+  # 13. A type reached only by name must still count. `dyn` dispatch and
+  #     constant lookups leave no parenthesis behind, so the parenthesis rule
+  #     from canaries 10 and 11 must apply to functions only. `poa.rs` and
+  #     `proof_verifier.rs` are both reached this way on this tree.
+  rm -rf "$tmp/typeonly"
+  mkdir -p "$tmp/typeonly/src"
+  printf '%s\n' 'pub struct OnlyHereEngine;
+pub const ONLY_HERE_LIMIT: u64 = 7;
+pub fn alpha_only_here() -> u8 { 1 }
+pub fn beta_only_here() -> u8 { 2 }
+pub fn gamma_only_here() -> u8 { 3 }' >"$tmp/typeonly/src/capability.rs"
+  printf '%s\n' 'pub mod capability;
+pub fn drive() -> u64 {
+    let _engine: Option<capability::OnlyHereEngine> = None;
+    capability::ONLY_HERE_LIMIT
+}' >"$tmp/typeonly/src/lib.rs"
+  if ! ( scan "$tmp/typeonly" ) >/dev/null 2>&1; then
+    echo "GATE IS WRONG: a module reached only by type or constant name was" >&2
+    echo "accused; the parenthesis rule must apply to functions only." >&2
+    return 1
+  fi
+
+  echo "capability wiring gate self-test OK: 13 canaries"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then

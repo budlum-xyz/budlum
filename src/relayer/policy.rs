@@ -1,3 +1,9 @@
+//! WIRING: unwired - no transaction type carries an intent, no settlement path
+//! moves `paid_fee` to a winning solver, and no slash path punishes a bid that
+//! was committed and not honoured. Each of the three is a consensus change.
+//! The section below has said so in prose since this module was written; the
+//! marker makes the gate agree, because prose is not something a gate reads.
+//!
 //! Relayer Policy Layer primitives.
 //!
 //! This module models user intents and solver bids without introducing a
