@@ -37,13 +37,73 @@ self_test() {
   [[ -f "$exc" ]] || fail "self-test: missing .github/semver-exceptions.txt"
   grep -Fq "SEMVER EXCEPTIONS" "$exc" || fail "self-test: exceptions header missing"
   grep -Fiq "kullanıcı onayı" "$exc" || fail "self-test: exceptions policy line missing"
-  # 3) Gate fonksiyonları tanımlı mı?
-  grep -Fq "semver_checks_gate" "$repo_root/scripts/check-semver.sh" \
-    || fail "self-test: gate function missing"
-  # 4) Sınıflandırma kanaryası: INFRA kilidi mevcut mu (crash≠kırılma, istisna
-  #    Yalnız kırılma raporuna uygulanabilir; altyapı çökmesi maskelenemez).
-  grep -Fq "SEMVER_INFRA_PATTERN" "$repo_root/scripts/check-semver.sh" \
-    || fail "self-test: infra/crash classification missing"
+
+  # 3) Sınıflandırmayı GERÇEKTEN çalıştır.
+  #
+  # Bu bölüm eskiden kaynakta "SEMVER_INFRA_PATTERN geçiyor mu" diye dize
+  # arıyordu. Bir deseni yanlış yazmaya karşı hiçbir koruma vermez: desen
+  # hiç çalıştırılmıyordu. Kanarya, kapının FAIL EDEBİLDİĞİNİ kanıtlamalı.
+  local tmp
+  tmp="$(mktemp -d)"
+  local report="$tmp/report" empty_exc="$tmp/none" filled_exc="$tmp/some"
+  : > "$empty_exc"
+  printf '# yorum\n\n' >> "$empty_exc"
+  printf 'BDLM-1: bilinecek kirilma, kullanici onayli\n' > "$filled_exc"
+
+  # 3a) Altyapı crash'i: istisna dosyası DOLU olsa bile reddedilmeli.
+  #     Maskelenmesi kabul edilemez olan sınıf budur; crash "kırılma yok"
+  #     demek değil, "bilinemiyor" demektir.
+  #
+  #     Her crash örneği, YANINDA gerçek bir kırılma raporu ile birlikte
+  #     verilir. Sebep ölçüldü: crash tek başına verilirse, INFRA deseninden
+  #     düşse bile "ne rapor ne crash" kolu (3c) onu yakalar ve kanarya
+  #     yine geçer. Yani desen silinse fark edilmezdi. Rapor satırı eklemek
+  #     3c'yi devre dışı bırakır ve testi TAM OLARAK INFRA desenine bağlar:
+  #     desen eşleşmezse istisna uygulanır ve PASS olur, kanarya kırılır.
+  local infra_cases=(
+    'error: could not document `budlum-core`'
+    'error[E0432]: unresolved import'
+    'error: running cargo-metadata failed'
+    'error: failed to build rustdoc'
+    'error: no such command: `semver-checks`'
+  )
+  local case_line
+  for case_line in "${infra_cases[@]}"; do
+    {
+      printf '%s\n' "$case_line"
+      printf -- '--- failure struct_missing: pub struct removed\n'
+    } > "$report"
+    if classify_semver_report "$report" "$filled_exc" >/dev/null 2>&1; then
+      rm -rf "$tmp"
+      fail "self-test: altyapı hatası istisnayla maskelendi: $case_line"
+    fi
+  done
+
+  # 3c) Tanınmayan çıktı: ne rapor ne bilinen crash -> fail-closed.
+  printf 'beklenmedik bir sey\n' > "$report"
+  if classify_semver_report "$report" "$empty_exc" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    fail "self-test: sınıflandırılamayan çıktı geçirildi (fail-closed değil)"
+  fi
+
+  # 3d) Gerçek kırılma, istisnasız -> reddedilmeli.
+  printf -- '--- failure struct_missing: pub struct removed\n' > "$report"
+  if classify_semver_report "$report" "$empty_exc" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    fail "self-test: istisnasız kırılma geçirildi"
+  fi
+
+  # 3e) Gerçek kırılma + gerekçeli istisna -> geçmeli. Bu olmadan kapı
+  #     "her şeyi reddet" olurdu ve yukarıdaki dördü de bedavaya geçerdi.
+  printf -- '--- failure struct_missing: pub struct removed\n' > "$report"
+  if ! classify_semver_report "$report" "$filled_exc" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    fail "self-test: gerekçeli istisna kabul edilmedi (kapı her şeyi reddediyor)"
+  fi
+
+  rm -rf "$tmp"
+  echo "kanarya OK: crash maskelenmiyor, tanınmayan çıktı fail-closed, kırılma"
+  echo "  istisnasız FAIL / gerekçeli istisnayla PASS (kapı vacuous değil)."
 }
 
 semver_checks_gate() {
@@ -92,6 +152,25 @@ semver_checks_gate() {
   # Sınıftan gelir - (a) breakage raporu ("--- failure <lint>" +
   # "requires new major/minor version"), (b) altyapı hatası (rustdoc-json
   # Crash, cargo-doc/metadata başarısızlığı, E45xx derleme hatası).
+  classify_semver_report "$out" "$exc"
+  local verdict=$?
+  rm -f "$out"
+  return $verdict
+}
+
+# Sınıflandırma: rapor dosyası + istisna dosyası -> karar.
+#
+# Gate gövdesinden AYRILDI çünkü kanaryası bunu çalıştırabilsin. Eskiden bu
+# mantık `semver_checks_gate` içine gömülüydü ve `--self-test` yalnızca kendi
+# kaynağında dize arıyordu: "SEMVER_INFRA_PATTERN geçiyor mu". Bu, deseni
+# YANLIŞ yazmaya karşı hiçbir koruma vermez, çünkü desenin kendisi hiç
+# çalıştırılmıyordu. Bir kanarya, kapının fail edebildiğini KANITLAMALI;
+# kaynakta bir kelime aramak kanıt değildir.
+#
+# 0 = geç, 1 = reddet.
+classify_semver_report() {
+  local out="$1" exc="$2"
+
   # İstisnaların anlamı "(b-c) bilinen kırılmayı gerekçesiyle kabul"
   # Olduğundan maskelenmesi KABUL EDİLEMEZ şey altyapı crash'idir:
   # Crash = "kırılma olup olmadığı BİLİNEMEZ" (kanıt yok), sahte-yeşil olur.
@@ -100,25 +179,21 @@ semver_checks_gate() {
   if grep -Eq "$SEMVER_INFRA_PATTERN" "$out"; then
     echo "SEMVER GATE: FAIL - araç ALTYAPI hatasıyla sonuçsuz kaldı (crash≠kırılma; istisna uygulanamaz)." >&2
     echo "İstisna mekanizması yalnızca gerçek kırılma raporlarına uygulanır." >&2
-    rm -f "$out"
     return 1
   fi
   if ! grep -Eq '^--- (failure|warning)|requires new (major|minor) version' "$out"; then
     echo "SEMVER GATE: FAIL - çıktı ne kırılma raporu ne bilinen altyapı hatası (fail-closed sınıflandırma)." >&2
-    rm -f "$out"
     return 1
   fi
   if [ -f "$exc" ] && grep -vqE '^[[:space:]]*(#|$)' "$exc"; then
     echo "SEMVER GATE: PASS-İSTİSNA - .github/semver-exceptions.txt gerekçeli kabul içeriyor:"
     grep -vE '^[[:space:]]*(#|$)' "$exc" | sed 's/^/  ISTISNA: /'
-    rm -f "$out"
     return 0
   fi
 
   echo "SEMVER GATE: FAIL - public API kırılması istisnasız." >&2
   echo "Seçenekler: (a) kırılmayı geri al, (b) MAJOR/MINOR niyetliyse ve kullanıcı" >&2
   echo "onaylıysa .github/semver-exceptions.txt'e gerekçeli satır ekle." >&2
-  rm -f "$out"
   return 1
 }
 
