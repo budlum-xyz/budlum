@@ -39,4 +39,11 @@ pub enum BudlumxyzError {
     InvalidData,
     #[error("Not authorized for governance verification")]
     NotAuthorized,
+    /// `next_app_id` already names a registered app.
+    ///
+    /// Unreachable while the counter only increments; reachable from a
+    /// snapshot whose counter sits below its highest live id, because `apps`
+    /// and `next_app_id` are separate fields of `StateSnapshotV2`.
+    #[error("Duplicate app id")]
+    DuplicateAppId,
 }

@@ -38,8 +38,21 @@ impl BudlumxyzRegistry {
         website_url: String,
         manifest_id: Option<crate::storage::content_id::ContentId>,
         epoch: u64,
-    ) -> u64 {
+    ) -> Result<u64, BudlumxyzError> {
         let id = self.next_app_id;
+        // The same shape as `NftRegistry::mint`: `insert` overwrites, and the
+        // record it would overwrite belongs to a different developer. That
+        // developer's app disappears from `apps` while `next_app_id` moves
+        // on, so the id now resolves to somebody else's listing.
+        //
+        // `next_app_id` only increments, so this cannot happen within one
+        // run. `BudlumxyzRegistry` is restored wholesale from
+        // `StateSnapshotV2`, where `apps` and `next_app_id` are separate
+        // fields, and a snapshot whose counter sits below its highest live id
+        // produces exactly this.
+        if self.apps.contains_key(&id) {
+            return Err(BudlumxyzError::DuplicateAppId);
+        }
         let record = AppRecord {
             id,
             name,
@@ -53,7 +66,7 @@ impl BudlumxyzRegistry {
         };
         self.apps.insert(id, record);
         self.next_app_id += 1;
-        id
+        Ok(id)
     }
 
     pub fn update_app(
@@ -203,14 +216,16 @@ mod tests {
     fn register_and_attest_flow() {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
-        let id = reg.register_app(
-            "TestApp".into(),
-            dev,
-            AppCategory::SocialFi,
-            "https://example.bud".into(),
-            Some(ContentId([2u8; 32])),
-            1,
-        );
+        let id = reg
+            .register_app(
+                "TestApp".into(),
+                dev,
+                AppCategory::SocialFi,
+                "https://example.bud".into(),
+                Some(ContentId([2u8; 32])),
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         assert_eq!(id, 0);
         assert!(!reg.apps[&id].developer_attested);
         assert!(!reg.apps[&id].verified);
@@ -242,7 +257,9 @@ mod tests {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
         let gov = Address::from([5u8; 32]);
-        let id = reg.register_app("G".into(), dev, AppCategory::Other, "u".into(), None, 1);
+        let id = reg
+            .register_app("G".into(), dev, AppCategory::Other, "u".into(), None, 1)
+            .expect("a fresh registry has no id to collide with");
         reg.authorized_governors.insert(gov);
         assert!(reg.mark_verified_by_governance(id, &gov).is_ok());
         assert!(reg.apps[&id].verified);
@@ -256,7 +273,9 @@ mod tests {
     fn update_by_developer_succeeds() {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
-        let id = reg.register_app("U".into(), dev, AppCategory::DeFi, "u".into(), None, 1);
+        let id = reg
+            .register_app("U".into(), dev, AppCategory::DeFi, "u".into(), None, 1)
+            .expect("a fresh registry has no id to collide with");
         assert!(reg
             .update_app(id, &dev, Some("new".into()), Some(ContentId([3u8; 32])))
             .is_ok());
@@ -268,14 +287,16 @@ mod tests {
     fn root_changes_when_mutable_metadata_changes() {
         let mut reg = BudlumxyzRegistry::new();
         let dev = Address::from([1u8; 32]);
-        let id = reg.register_app(
-            "Rooted".into(),
-            dev,
-            AppCategory::Infrastructure,
-            "https://old.example".into(),
-            None,
-            1,
-        );
+        let id = reg
+            .register_app(
+                "Rooted".into(),
+                dev,
+                AppCategory::Infrastructure,
+                "https://old.example".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         let root_before = reg.root();
         reg.update_app(
             id,
@@ -314,14 +335,16 @@ mod tests {
         // The empty-set default really is permissive: an arbitrary caller
         // succeeds. This is the property that makes reachability matter.
         let mut reg = BudlumxyzRegistry::new();
-        let id = reg.register_app(
-            "app".into(),
-            Address::from([1u8; 32]),
-            AppCategory::Other,
-            "https://example.invalid".into(),
-            None,
-            0,
-        );
+        let id = reg
+            .register_app(
+                "app".into(),
+                Address::from([1u8; 32]),
+                AppCategory::Other,
+                "https://example.invalid".into(),
+                None,
+                0,
+            )
+            .expect("a fresh registry has no id to collide with");
         assert!(reg.authorized_governors.is_empty());
         let stranger = Address::from([0xEE; 32]);
         reg.mark_verified_by_governance(id, &stranger)
@@ -336,5 +359,73 @@ mod tests {
             "the governance action now exists - populate the governor set and \
              invert the empty-set default from allow to deny"
         );
+    }
+
+    /// A counter that disagrees with the map must not overwrite a listing.
+    ///
+    /// The same defect as `NftRegistry::mint`, in a second registry: `insert`
+    /// overwrites, and the record it replaces belongs to another developer.
+    /// Their app disappears from `apps` while the id keeps resolving, now to
+    /// somebody else's listing, with no transaction from the developer who
+    /// lost it.
+    ///
+    /// Reachable through a restore: `apps` and `next_app_id` are separate
+    /// fields of `StateSnapshotV2`, so a snapshot whose counter sits below
+    /// its highest live id produces this on load.
+    #[test]
+    fn registering_onto_a_live_app_id_is_refused() {
+        let mut reg = BudlumxyzRegistry::new();
+        let first = Address::from([1u8; 32]);
+        let second = Address::from([2u8; 32]);
+
+        let id = reg
+            .register_app(
+                "First".into(),
+                first,
+                AppCategory::SocialFi,
+                "https://first.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
+
+        // The shape a restored snapshot can carry: counter behind contents.
+        reg.next_app_id = id;
+
+        let err = reg
+            .register_app(
+                "Second".into(),
+                second,
+                AppCategory::DeFi,
+                "https://second.bud".into(),
+                None,
+                2,
+            )
+            .expect_err("registering onto a live id must be refused");
+        assert!(
+            matches!(err, BudlumxyzError::DuplicateAppId),
+            "the refusal must name the collision, got: {err:?}"
+        );
+
+        // The first developer still owns the listing. Without the refusal,
+        // `apps[&id]` would name `second` and `First` would be gone.
+        let app = reg.apps.get(&id).expect("the original app must survive");
+        assert_eq!(app.developer, first);
+        assert_eq!(app.name, "First");
+    }
+
+    /// The refusal must stay narrow, or it is a ban on registering.
+    #[test]
+    fn consecutive_registrations_still_work() {
+        let mut reg = BudlumxyzRegistry::new();
+        let dev = Address::from([3u8; 32]);
+
+        let a = reg
+            .register_app("A".into(), dev, AppCategory::Other, "a".into(), None, 1)
+            .expect("first registration");
+        let b = reg
+            .register_app("B".into(), dev, AppCategory::Other, "b".into(), None, 1)
+            .expect("second registration");
+        assert_ne!(a, b, "an incrementing counter must keep producing new ids");
     }
 }

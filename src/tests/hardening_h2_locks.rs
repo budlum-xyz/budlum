@@ -48,14 +48,16 @@ mod tests {
     fn developer_self_verify_is_not_dao_verified() {
         let mut hub = BudlumxyzRegistry::new();
         let dev = addr(0x42);
-        let id = hub.register_app(
-            "demo".into(),
-            dev,
-            AppCategory::Other,
-            "https://example.bud".into(),
-            None,
-            1,
-        );
+        let id = hub
+            .register_app(
+                "demo".into(),
+                dev,
+                AppCategory::Other,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         hub.verify_app(id, &dev).unwrap();
         let app = hub.apps.get(&id).unwrap();
         assert!(app.developer_attested);

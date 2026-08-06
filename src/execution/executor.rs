@@ -1059,14 +1059,22 @@ impl Executor {
                         ),
                     ));
                 }
-                state.budlumxyz.register_app(
-                    name.clone(),
-                    tx.from,
-                    category.clone(),
-                    website_url.clone(),
-                    *manifest_id,
-                    state.epoch_index,
-                );
+                // A duplicate id means the registry's counter disagrees with
+                // its own contents. Refused rather than overwriting another
+                // developer's listing, and refused here, before the fee is
+                // taken below: charging for a registration that did not
+                // happen would be the worse of the two failures.
+                state
+                    .budlumxyz
+                    .register_app(
+                        name.clone(),
+                        tx.from,
+                        category.clone(),
+                        website_url.clone(),
+                        *manifest_id,
+                        state.epoch_index,
+                    )
+                    .map_err(|e| BudlumError::validation("hub_register_refused", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 // Balance check before deduction
                 let hub_total = tx
