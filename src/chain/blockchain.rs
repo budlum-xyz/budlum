@@ -1985,14 +1985,44 @@ impl Blockchain {
         Ok(outcome)
     }
 
-    /// Real-block-flow liveness hook. Called from
-    /// `produce_block` / `validate_and_add_block` at every epoch boundary. The
+    /// Liveness hook for the real block flow, as designed. It says it is
+    /// "called from `produce_block` / `validate_and_add_block` at every epoch
+    /// boundary" and neither calls it; see below. The
     /// "expected" set is the *current* active validator set (so PoA members,
     /// Who never live in `AccountState.validators`, are correctly excluded).
     /// The "participated" set is whatever producers the caller actually saw
     /// Sign the epoch's blocks; here we approximate it with the producer of
-    /// The block that just closed the epoch. This is the OBSERVE path: a report
-    /// Is recorded, but no slash is applied.
+    /// The block that just closed the epoch.
+    ///
+    /// # This is not the OBSERVE path, and nothing calls it
+    ///
+    /// Two claims that were written here have been measured and are false.
+    ///
+    /// It said "a report is recorded, but no slash is applied". The body
+    /// below cuts stake through `slash_from_report` and then sets `slashed`,
+    /// `jailed` and `active = false` on the validator, whenever
+    /// `liveness_slashing_enabled` is true, which is the default in
+    /// `registry/params.rs`. `observe_liveness_epoch` is the observe-only
+    /// surface; this is not it.
+    ///
+    /// The name says "on epoch close", and `disaster_recovery.rs` states that
+    /// the hook "yalnız blok üretiminde koşar". No production path calls this
+    /// function at all. `apply_system_effects` closes the epoch by calling
+    /// `state.advance_epoch` and never reaches here, so no validator has ever
+    /// been jailed for absence on any running chain.
+    ///
+    /// The two errors point in opposite directions, which is why neither was
+    /// noticed: the documentation understates what the code does, and the
+    /// call graph understates nothing because there is no call. A reader
+    /// checking whether liveness slashing is safe finds a comment saying it
+    /// cannot slash; a reader checking whether it works finds a function that
+    /// plainly does. Both stop reading there.
+    ///
+    /// Wiring it is a consensus change and is deliberately not made here:
+    /// enabling it would begin cutting stake at the first epoch close on
+    /// every existing chain, against a `participated` set that this signature
+    /// leaves entirely to the caller. `liveness_slashing_gap_is_pinned` in
+    /// `src/tests/liveness_consensus.rs` fails when either half changes.
     pub fn maybe_observe_liveness_on_epoch_close(
         &mut self,
         closed_epoch: u64,
