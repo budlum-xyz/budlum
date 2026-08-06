@@ -405,7 +405,11 @@ fn a_liveness_slash_is_releasable() {
     let offender = addr(2);
     let mut bc = chain_with_validators(producer, offender);
     bc.state.registry.set_params(RegistryParams {
-        liveness_max_missed_epochs: 0,
+        // One missed epoch is enough to report. Zero would disable reporting
+        // entirely: `record_epoch` guards on `threshold > 0`, so a zero
+        // threshold produces no reports and nothing to slash, which reads as
+        // "slashing is off" rather than "slash on the first miss".
+        liveness_max_missed_epochs: 1,
         liveness_slashing_enabled: true,
         ..RegistryParams::default()
     });
