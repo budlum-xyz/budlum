@@ -46,6 +46,9 @@ enum ProtoTransactionType {
     LUBOT_OPERATOR_UNBOND = 40;
     LUBOT_OPERATOR_WITHDRAW = 41;
     REGISTER_CONSENSUS_KEYS = 42;
+    // The developer's own claim that an app record is theirs. Distinct from
+    // HUB_VERIFY_APP below: this proves ownership, not audit.
+    HUB_ATTEST_APP = 43;
 }
 
 message ProtoTransaction {
@@ -95,7 +98,18 @@ message ProtoTransaction {
         ProtoPrivacyNoteInsert privacy_note_insert = 45;
         ProtoAiAttachExecutionProof ai_attach_execution_proof = 46;
         ProtoConsensusKeyRegistration register_consensus_keys = 47;
+        ProtoHubAttestApp hub_attest_app = 48;
     }
+}
+
+// Developer self-attestation over an app record.
+//
+// Carries only the id: the signer is the transaction sender, and the
+// executor refuses unless that sender is the app's registered developer.
+// Putting the developer address in the payload would invite a caller to
+// name someone else and rely on the check being present.
+message ProtoHubAttestApp {
+    uint64 app_id = 1;
 }
 
 message ProtoConsensusKeyRegistration {

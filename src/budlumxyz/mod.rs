@@ -158,6 +158,27 @@ impl BudlumxyzRegistry {
         Ok(())
     }
 
+    /// Award the badge on the authority of a passed governance proposal.
+    ///
+    /// Separate entry point from [`Self::mark_verified_by_governance`],
+    /// which takes a caller and checks it against `authorized_governors`.
+    /// There is no caller here: the authority is the vote itself, already
+    /// counted, already delayed by the activation window, and already
+    /// recorded as a `Proposal` in the state root. Reusing the caller-checked
+    /// path would mean inventing an address to satisfy a check that a passed
+    /// proposal has no way to fail.
+    ///
+    /// # Errors
+    ///
+    /// [`BudlumxyzError::NotFound`] if the proposal names an app that does
+    /// not exist. Checked at execution rather than at submission, because an
+    /// app can be registered while the vote is open.
+    pub fn mark_verified_by_proposal(&mut self, id: u64) -> Result<(), BudlumxyzError> {
+        let app = self.apps.get_mut(&id).ok_or(BudlumxyzError::NotFound)?;
+        app.verified = true;
+        Ok(())
+    }
+
     pub fn list_apps(&self) -> Vec<AppRecord> {
         self.apps.values().cloned().collect()
     }
@@ -250,6 +271,70 @@ mod tests {
             Err(BudlumxyzError::NotDeveloper)
         ));
         assert_eq!(reg.list_apps().len(), 1);
+    }
+
+    /// The two badges must stay two badges.
+    ///
+    /// `developer_attested` says "the address that registered this record
+    /// claims it", which costs a signature the registrant already had.
+    /// `verified` says "a vote examined it". Collapsing them would let any
+    /// developer mint the badge that is supposed to mean somebody else
+    /// looked, which is the failure this split exists to prevent.
+    ///
+    /// Both bits are hashed into the registry state root, so a path that
+    /// sets one must not quietly set the other.
+    #[test]
+    fn self_attestation_does_not_award_the_governance_badge() {
+        let mut reg = BudlumxyzRegistry::new();
+        let dev = Address::from([1u8; 32]);
+        let id = reg
+            .register_app(
+                dev,
+                "App".into(),
+                AppCategory::DeFi,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
+
+        reg.attest_app_as_developer(id, &dev)
+            .expect("the registrant is the developer");
+        assert!(reg.apps[&id].developer_attested);
+        assert!(
+            !reg.apps[&id].verified,
+            "self-attestation must not reach the badge that means a vote \
+             examined the record"
+        );
+
+        // The proposal path is the only writer of `verified`, and it takes
+        // no caller: the authority is the counted vote, not an address.
+        reg.mark_verified_by_proposal(id)
+            .expect("the app exists, so the proposal names something real");
+        assert!(reg.apps[&id].verified);
+        assert!(
+            reg.apps[&id].developer_attested,
+            "governance verification must not clear the developer's own claim"
+        );
+    }
+
+    /// A proposal naming an app that does not exist must fail, not create one.
+    ///
+    /// The vote can be opened against any id, and nothing stops an id from
+    /// being wrong or from an app being removed while the vote runs. Silent
+    /// insertion here would let governance conjure a verified record that no
+    /// developer ever registered.
+    #[test]
+    fn a_proposal_for_a_missing_app_is_refused() {
+        let mut reg = BudlumxyzRegistry::new();
+        assert!(matches!(
+            reg.mark_verified_by_proposal(404),
+            Err(BudlumxyzError::NotFound)
+        ));
+        assert!(
+            reg.list_apps().is_empty(),
+            "a refused proposal must not leave a record behind"
+        );
     }
 
     #[test]

@@ -1545,6 +1545,23 @@ impl AccountState {
                 self.ai_registry.dewhitelist_verifier(address);
                 tracing::info!("Executing Governance: Dewhitelisted verifier {address}");
             }
+            ProposalType::VerifyHubApp { app_id } => {
+                // The badge `AppRecord.verified` was hashed into the state
+                // root from the start and no path could set it, so it was
+                // permanently false. This is that path, and it is a vote
+                // rather than a transaction because the point of `verified`
+                // is that somebody other than the developer stood behind it.
+                match self.budlumxyz.mark_verified_by_proposal(*app_id) {
+                    Ok(()) => {
+                        tracing::info!("Executing Governance: hub app {app_id} verified");
+                    }
+                    Err(e) => tracing::warn!(
+                        "Rejecting VerifyHubApp for app {app_id}: {e}. A proposal may \
+                         pass for an app that is later removed; the vote does not \
+                         create the record"
+                    ),
+                }
+            }
             ProposalType::SetEncryptionPolicy(policy) => {
                 match self.marketplace.set_encryption_policy(policy.clone()) {
                     Ok(()) => tracing::info!(

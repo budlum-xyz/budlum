@@ -470,12 +470,40 @@ pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u6
     structural.saturating_add(stark)
 }
 
-/// Validate that a proof's gas cost is within the request's max_fee budget.
-/// Returns `Ok(estimated_gas)` or `Err` if the proof is oversized.
+/// Refuse a proof this model cannot have produced honestly.
+///
+/// Two checks, and only one of them is wired. The distinction is measured,
+/// not stylistic.
+///
+/// The size bound is wired: `proof_bytes_len` against [`MAX_PROOF_BYTES`],
+/// bytes against bytes.
+///
+/// The gas comparison is NOT wired, deliberately, and the parameter is named
+/// `max_fee_same_unit_as_gas` to say why at every call site. `max_fee` on an
+/// `AiInferenceRequest` is a balance escrowed from the requester's account
+/// (`executor.rs` checks `sender_balance < max_fee` and deducts it). The
+/// values `estimate_full_gas` returns are gas units, and this tree has no
+/// conversion between the two: no `gas_price` multiplication reaches this
+/// path, and nothing turns a gas figure into a debit. Comparing them is a
+/// unit error that happens to typecheck because both are `u64`.
+///
+/// Measured before deciding: `GAS_BASE_STARK` alone is 10_000, while every
+/// `max_fee` in the tree is at most 500. Wiring the comparison would have
+/// rejected every valid inference request on the chain, and recalibrating the
+/// gas table until the numbers stopped colliding would be fitting the
+/// constants to the test fixtures rather than to any measurement of work.
+///
+/// Pricing verification is real work and belongs in a change that introduces
+/// a gas price. Until then, the caller passes `u64::MAX`, which is visible at
+/// the call site and cannot be mistaken for a budget that was checked.
+///
+/// # Errors
+///
+/// The bound the proof exceeded, naming both numbers.
 pub fn validate_gas_budget(
     spec: &FixedPointMlpSpec,
     proof_bytes_len: usize,
-    max_fee: u64,
+    max_fee_same_unit_as_gas: u64,
 ) -> Result<u64, String> {
     if proof_bytes_len > MAX_PROOF_BYTES {
         return Err(format!(
@@ -484,8 +512,11 @@ pub fn validate_gas_budget(
         ));
     }
     let gas = estimate_full_gas(spec, proof_bytes_len);
-    if gas > max_fee {
-        return Err(format!("estimated gas {gas} exceeds max_fee {max_fee}"));
+    if gas > max_fee_same_unit_as_gas {
+        return Err(format!(
+            "estimated gas {gas} exceeds the supplied ceiling \
+             {max_fee_same_unit_as_gas}"
+        ));
     }
     Ok(gas)
 }
@@ -493,6 +524,76 @@ pub fn validate_gas_budget(
 #[cfg(test)]
 mod gas_tests {
     use super::*;
+
+    /// The size bound is wired; the gas ceiling is not, and the names say so.
+    ///
+    /// Measured before deciding: `GAS_BASE_STARK` is 10_000 on its own, and
+    /// every `max_fee` in the tree is at most 500. `max_fee` is a balance
+    /// escrowed from the requester's account, `estimate_full_gas` returns gas
+    /// units, and nothing converts between them. Comparing them typechecks,
+    /// because both are `u64`, and is still a unit error that would reject
+    /// every valid inference request.
+    ///
+    /// This test pins the arithmetic that makes the claim true, so a future
+    /// change to the constants has to confront it.
+    #[test]
+    fn the_gas_estimate_is_not_denominated_in_the_request_fee() {
+        let spec = FixedPointMlpSpec {
+            dims: vec![4, 2],
+            weights: vec![0; 8],
+            biases: vec![0; 2],
+        };
+
+        // The largest fee any request in the tree carries.
+        let largest_max_fee_in_tree: u64 = 500;
+        let gas = estimate_full_gas(&spec, 1024);
+
+        assert!(
+            gas > largest_max_fee_in_tree,
+            "if the smallest possible gas estimate ever drops below the largest \
+             fee in the tree, the two might plausibly share a unit and this \
+             decision needs revisiting: gas={gas}, fee={largest_max_fee_in_tree}"
+        );
+        assert!(
+            GAS_BASE_STARK > largest_max_fee_in_tree,
+            "the STARK base alone exceeds every fee, which is what makes the \
+             comparison a unit error rather than a tight budget"
+        );
+
+        // And the wired half still refuses what it is meant to refuse.
+        let err = validate_gas_budget(&spec, MAX_PROOF_BYTES + 1, u64::MAX)
+            .expect_err("an oversized proof must be refused whatever the ceiling");
+        assert!(err.contains("MAX_PROOF_BYTES"), "got: {err}");
+
+        // A proof within bounds passes when no ceiling is asserted.
+        validate_gas_budget(&spec, 1024, u64::MAX)
+            .expect("a well-sized proof must pass when no gas ceiling is claimed");
+    }
+
+    /// The executor asks for the size bound and asserts no gas ceiling.
+    ///
+    /// Pinned at the source, because passing the real `max_fee` here is the
+    /// mistake this decision exists to prevent and it would look correct.
+    #[test]
+    fn the_execution_path_does_not_compare_gas_against_the_escrowed_fee() {
+        let executor_src = include_str!("../../execution/executor.rs");
+        let production = executor_src
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(executor_src);
+
+        let at = production
+            .find("validate_gas_budget(")
+            .expect("the executor must ask for the size bound");
+        let call = &production[at..(at + 200).min(production.len())];
+
+        assert!(
+            call.contains("u64::MAX"),
+            "the executor is supplying a real ceiling to a gas estimate. \
+             `max_fee` is an escrowed balance and the estimate is in gas \
+             units; there is no conversion between them in this tree"
+        );
+    }
 
     #[test]
     fn gas_scales_with_model_size() {

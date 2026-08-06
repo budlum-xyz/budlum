@@ -1104,6 +1104,24 @@ impl Executor {
                     })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::BudlumxyzAttestApp { app_id } => {
+                // Ownership proof, not audit. `attest_app_as_developer`
+                // refuses unless `tx.from` is the app's registered developer,
+                // and that refusal is the whole point of the transaction:
+                // before this existed, `developer_attested` and `verified`
+                // were hashed into the state root and no path could ever set
+                // either, so both were permanently false and the two bits
+                // were state that could not change.
+                state
+                    .budlumxyz
+                    .attest_app_as_developer(*app_id, &tx.from)
+                    .map_err(|e| BudlumError::validation("hub_attest_refused", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "hub attest fee underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::AiModelRegister(spec) => {
                 let mut spec = spec.clone();
                 if spec.owner != tx.from {
@@ -1810,6 +1828,41 @@ impl Executor {
                                 ));
                             }
                         }
+                    }
+
+                    // The model-shaped half of `validate_gas_budget`.
+                    //
+                    // Only the size bound is asked for, and the gas ceiling is
+                    // passed as `u64::MAX` on purpose. `max_fee` on the
+                    // request is a balance escrowed from the requester's
+                    // account; `estimate_full_gas` returns gas units; nothing
+                    // in this tree converts between them. Passing the real
+                    // `max_fee` here would compare a balance against a gas
+                    // figure, which typechecks because both are `u64` and is
+                    // still a unit error. Measured: `GAS_BASE_STARK` alone is
+                    // 10_000 and every `max_fee` in the tree is at most 500,
+                    // so it would reject every valid request.
+                    //
+                    // The `u64::MAX` is deliberately visible rather than
+                    // hidden behind a default, so nobody reads this as a
+                    // budget that was checked.
+                    if let Some(ref dims) = model_spec.execution_dims {
+                        let sizing = crate::ai::execution::FixedPointMlpSpec {
+                            dims: dims.clone(),
+                            weights: vec![
+                                0i32;
+                                dims.windows(2)
+                                    .map(|w| w[0] as usize * w[1] as usize)
+                                    .sum()
+                            ],
+                            biases: vec![0i32; dims.iter().skip(1).map(|d| *d as usize).sum()],
+                        };
+                        crate::ai::execution::validate_gas_budget(
+                            &sizing,
+                            proof.proof_bytes.len(),
+                            u64::MAX,
+                        )
+                        .map_err(|e| BudlumError::validation("ai_exec_proof_size", e))?;
                     }
                 }
                 if let Ok(envelope) =

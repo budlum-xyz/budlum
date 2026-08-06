@@ -1,8 +1,8 @@
-9
+8
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
-# refuse/deny/guard is a refusal by its own naming. Nine of them are
+# refuse/deny/guard is a refusal by its own naming. Eight of them are
 # reachable only from tests, which means they protect the tests.
 #
 # The number may only go down. Wiring one up, or moving it into a module that
@@ -18,9 +18,8 @@
 # gets paid down; a number driven to zero by wiring refusals that exist to
 # stay unwired is worse than the number it replaced.
 #
-# The nine, at the time this baseline was set:
+# The eight, at the time this baseline was set:
 #
-#   src/ai/execution/guest.rs               validate_gas_budget
 #   src/ai/execution/verify.rs              verify_execution_proof_structural
 #   src/ai/execution/verify.rs              verify_execution_proof_full
 #   src/budlumxyz/mod.rs                    verify_app
