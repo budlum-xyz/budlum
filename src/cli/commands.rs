@@ -1008,7 +1008,7 @@ impl NodeConfig {
     ///
     /// # Errors
     ///
-    /// The half of the pair that is missing or unparseable, or the reason the
+    /// The half of the pair that is missing or malformed, or the reason the
     /// assembled adapter is not fit to relay.
     pub fn evm_adapter(
         &self,
