@@ -2707,7 +2707,10 @@ mod tests {
         assert_ne!(root_before, root_after_bns);
 
         let cid = crate::storage::content_id::ContentId([0x11; 32]);
-        state.nft_registry.mint(owner, cid, 1, Some("alice".into()));
+        state
+            .nft_registry
+            .mint(owner, cid, 1, Some("alice".into()))
+            .expect("a fresh registry has no id to collide with");
         let root_after_nft = state.calculate_state_root();
         assert_ne!(root_after_bns, root_after_nft);
     }

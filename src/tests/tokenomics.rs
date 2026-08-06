@@ -417,7 +417,10 @@ fn f4_boost_share_accumulates_in_pending_bud_boost_share() {
 
     // Mint an NFT for the creator.
     let cid = ContentId([0xABu8; 32]);
-    let nft_id = state.nft_registry.mint(creator, cid, 1, None);
+    let nft_id = state
+        .nft_registry
+        .mint(creator, cid, 1, None)
+        .expect("a fresh registry has no id to collide with");
 
     // Boost the NFT with 1000 - 4% = 40 should go to pending_bud_boost_share.
     let boost_amount: u64 = 1000;

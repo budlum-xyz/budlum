@@ -40,7 +40,8 @@ mod tests {
             // Mint an NFT directly in state
             bc.state
                 .nft_registry
-                .mint(alice, cid, 0, Some("ayaz.bud".to_string()));
+                .mint(alice, cid, 0, Some("ayaz.bud".to_string()))
+                .expect("a fresh registry has no id to collide with");
 
             // Produce a block to persist state to storage
             let _ = bc.produce_block(Address::zero());
