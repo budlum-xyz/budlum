@@ -2582,6 +2582,59 @@ mod tests {
     }
 
     /// Out-of-range base fee proposals are rejected.
+    /// The `verified` badge must have exactly one writer.
+    ///
+    /// Two paths could reach it: `AccountState::execute_proposal`, which
+    /// reads the `ProposalType` directly, and the executor's
+    /// `GovernanceAction` loop. Only the first is live, because
+    /// `execute_passed_proposals` drops `ProposalType::VerifyHubApp` into
+    /// its `_ => None` arm and never emits the action.
+    ///
+    /// That is worth pinning rather than leaving to inspection. If someone
+    /// later adds the missing arm to `execute_passed_proposals` so the
+    /// action does get emitted, the same vote would be applied twice: once
+    /// here and once in the executor. This test fails at that moment, which
+    /// is the point at which the second writer has to be removed.
+    #[test]
+    fn a_passed_hub_verification_does_not_also_become_a_governance_action() {
+        use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
+        let mut state = AccountState::new();
+        let dev = test_addr_from_byte(1u8);
+        let app_id = state
+            .budlumxyz
+            .register_app(
+                "App".into(),
+                dev,
+                crate::budlumxyz::types::AppCategory::DeFi,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
+
+        let mut proposal = Proposal::new(1, dev, ProposalType::VerifyHubApp { app_id }, 0, 10);
+        state.execute_proposal(&proposal);
+        assert!(
+            state.budlumxyz.apps[&app_id].verified,
+            "execute_proposal is the live writer of the badge"
+        );
+
+        // The other path must stay silent. Marking the proposal Passed and
+        // draining the queue must not yield a VerifyHubApp action, because
+        // applying it would be the second write of one vote.
+        proposal.status = ProposalStatus::Passed;
+        state.governance.proposals.push(proposal);
+        let actions = state.governance.execute_passed_proposals();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::core::governance::GovernanceAction::VerifyHubApp { .. }
+            )),
+            "the badge already has a writer; emitting the action here would \
+             apply the same vote twice"
+        );
+    }
+
     #[test]
     fn change_base_fee_bounds() {
         use crate::core::governance::{Proposal, ProposalType};

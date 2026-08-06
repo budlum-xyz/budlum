@@ -1984,6 +1984,30 @@ impl Executor {
                 crate::core::governance::GovernanceAction::DewhitelistVerifier(addr) => {
                     state.ai_registry.dewhitelist_verifier(&addr);
                 }
+                crate::core::governance::GovernanceAction::VerifyHubApp { app_id } => {
+                    // Reachable only if `execute_passed_proposals` starts
+                    // emitting this action. Today it does not: the arm for
+                    // `ProposalType::VerifyHubApp` falls through to `_ =>
+                    // None`, and the badge is written by
+                    // `AccountState::execute_proposal`, which reads the
+                    // `ProposalType` directly and never goes through a
+                    // `GovernanceAction`.
+                    //
+                    // Two writers for one badge is the shape that produces a
+                    // double application, so this arm deliberately does not
+                    // write. It refuses instead, because the alternative is
+                    // an arm that looks like it applies the vote and
+                    // silently does nothing, which is worse than one that
+                    // stops the block.
+                    return Err(BudlumError::validation(
+                        "hub_verify_wrong_path",
+                        format!(
+                            "VerifyHubApp for app {app_id} arrived as a GovernanceAction; \
+                             the badge is written by AccountState::execute_proposal, so \
+                             emitting it here would apply the same vote twice"
+                        ),
+                    ));
+                }
                 crate::core::governance::GovernanceAction::SetEncryptionPolicy(policy) => {
                     // P12-4: DAO parameter-only update. This cannot grant decrypt
                     // Authority or bypass user-owned AccessGrant checks.

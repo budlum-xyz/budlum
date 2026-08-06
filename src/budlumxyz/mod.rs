@@ -289,8 +289,8 @@ mod tests {
         let dev = Address::from([1u8; 32]);
         let id = reg
             .register_app(
-                dev,
                 "App".into(),
+                dev,
                 AppCategory::DeFi,
                 "https://example.bud".into(),
                 None,
