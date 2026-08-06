@@ -222,6 +222,32 @@ pub struct ChallengePolicy {
 }
 
 impl ChallengePolicy {
+    /// How many peers a node in this mode should hold open.
+    ///
+    /// `node.rs` used to answer this with `if mobile_mode { 10 } else { 50 }`,
+    /// a second table for the same question this type already answers. Two
+    /// tables for one question drift: this one distinguishes four power modes
+    /// and that one distinguished two, so a phone at 5% battery and a phone on
+    /// mains held the same ten connections while every other budget on the
+    /// device had already been cut to zero.
+    ///
+    /// Derived from the work the mode admits rather than picked separately. A
+    /// node accepting no challenges and no proof tasks has nothing to gossip
+    /// about and needs only enough peers to follow the chain; one running at
+    /// full power carries the server budget.
+    #[must_use]
+    pub const fn peer_budget(mode: PowerMode, server_budget: usize) -> usize {
+        match mode {
+            PowerMode::Full => server_budget,
+            PowerMode::Normal => 20,
+            PowerMode::PowerSaving => 10,
+            // Not zero: a node that accepts no work still has to hear about
+            // blocks, or it stops being a node rather than becoming a frugal
+            // one.
+            PowerMode::Critical => 4,
+        }
+    }
+
     /// Pil durumuna göre challenge policy oluşturur.
     pub fn from_power_mode(mode: PowerMode) -> Self {
         match mode {
@@ -560,5 +586,96 @@ mod tests {
             .validate()
             .unwrap_err()
             .contains("address cannot be zero"));
+    }
+}
+
+#[cfg(test)]
+mod peer_budget_tests {
+    use super::*;
+
+    const SERVER_BUDGET: usize = 50;
+
+    /// The budget must fall as the device's own policy shuts work down.
+    ///
+    /// The defect this replaces: `node.rs` decided the peer cap with
+    /// `if mobile_mode { 10 } else { 50 }`, a two-way split against a
+    /// four-way profile. A phone on mains and a phone at 5% both held ten
+    /// connections, even though at 5% the profile already declines every
+    /// challenge and every proof task. The device paid the largest recurring
+    /// cost it has, an open connection, for work it had refused.
+    #[test]
+    fn peer_budget_falls_with_the_power_mode() {
+        let full = ChallengePolicy::peer_budget(PowerMode::Full, SERVER_BUDGET);
+        let normal = ChallengePolicy::peer_budget(PowerMode::Normal, SERVER_BUDGET);
+        let saving = ChallengePolicy::peer_budget(PowerMode::PowerSaving, SERVER_BUDGET);
+        let critical = ChallengePolicy::peer_budget(PowerMode::Critical, SERVER_BUDGET);
+
+        assert_eq!(
+            full, SERVER_BUDGET,
+            "a charging device pays the server budget"
+        );
+        assert!(
+            full > normal && normal > saving && saving > critical,
+            "each step down in power must cost connections: \
+             {full} > {normal} > {saving} > {critical}"
+        );
+        assert!(
+            critical > 0,
+            "a node that accepts no work must still hear about blocks, or it \
+             has stopped being a node rather than become a frugal one"
+        );
+    }
+
+    /// The two tables must agree about the case that made them disagree.
+    ///
+    /// Pinned as a relationship rather than as numbers: whenever the policy
+    /// says no challenges and no proof tasks, the peer budget has to be
+    /// strictly below the one for a device that is accepting work. The old
+    /// split could not express this, because it did not know the difference.
+    #[test]
+    fn a_device_that_declines_work_holds_fewer_peers_than_one_that_does_not() {
+        for mode in [
+            PowerMode::Full,
+            PowerMode::Normal,
+            PowerMode::PowerSaving,
+            PowerMode::Critical,
+        ] {
+            let policy = ChallengePolicy::from_power_mode(mode);
+            let budget = ChallengePolicy::peer_budget(mode, SERVER_BUDGET);
+            let accepting = policy.max_challenges_per_epoch > 0 || policy.max_proof_tasks > 0;
+            if accepting {
+                assert!(
+                    budget >= ChallengePolicy::peer_budget(PowerMode::PowerSaving, SERVER_BUDGET),
+                    "{mode:?} accepts work and must not be budgeted below a saving device"
+                );
+            } else {
+                assert!(
+                    budget < ChallengePolicy::peer_budget(PowerMode::PowerSaving, SERVER_BUDGET),
+                    "{mode:?} accepts no work at all and must cost less than one that does"
+                );
+            }
+        }
+    }
+
+    /// A flat battery must move the peer budget, not only the task budget.
+    #[test]
+    fn draining_the_battery_lowers_the_budget_the_profile_reports() {
+        let mut profile = MobileNodeProfile::new(Address::from([9u8; 32]), DeviceType::Phone);
+        let charged = ChallengePolicy::peer_budget(profile.battery.power_mode(), SERVER_BUDGET);
+
+        profile
+            .try_update_battery(5, false, 15)
+            .expect("5% on battery is a valid reading");
+        let flat = ChallengePolicy::peer_budget(profile.battery.power_mode(), SERVER_BUDGET);
+
+        assert!(
+            flat < charged,
+            "a battery going from full to 5% must cost connections: {charged} -> {flat}"
+        );
+        assert!(
+            !profile.can_accept_tasks(),
+            "the profile already declined every task at this level, which is \
+             why the peer budget had to move with it"
+        );
     }
 }
