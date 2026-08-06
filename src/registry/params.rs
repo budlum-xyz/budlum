@@ -12,6 +12,22 @@ use crate::chain::fee_market::PPM_DENOMINATOR;
 use crate::core::chain_config::FIXED_POINT_SCALE;
 use serde::{Deserialize, Serialize};
 
+/// How many epochs a liveness offender stays jailed.
+///
+/// A liveness offence is absence, and absence is what a healthy validator
+/// looks like during a partition, a disk failure or a datacentre reboot.
+/// Making that permanent punishes an outage the way it punishes abandonment,
+/// so the penalty carries a term: stake is cut once, the validator is barred
+/// for this many epochs, and `AccountState::advance_epoch` then releases it.
+///
+/// A constant rather than a `RegistryParams` field on purpose. That struct is
+/// serialised into the state root, so adding to it changes the shape every
+/// stored snapshot was written with, which is a migration rather than a fix.
+/// The number was already hardcoded in `AccountState::slash_validator`; this
+/// gives the two slashing sites one place to read it from without touching a
+/// consensus-critical layout.
+pub const LIVENESS_JAIL_EPOCHS: u64 = 7;
+
 /// Economic / timing parameters that gate participation and slashing.
 ///
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in
@@ -94,19 +110,6 @@ pub struct RegistryParams {
     /// Operator/governance explicitly enables it - the mechanism is fully wired
     /// And tested, but never auto-activates. Set to `true` to enable.
     pub liveness_slashing_enabled: bool,
-    /// How many epochs a liveness offender stays jailed.
-    ///
-    /// A liveness offence is absence, and absence is what a healthy validator
-    /// looks like during a network partition, a disk failure or a datacentre
-    /// reboot. Making that permanent punishes an outage the same way it
-    /// punishes abandonment, so the penalty carries a term: stake is cut
-    /// once, the validator is barred for this many epochs, and then
-    /// `AccountState::advance_epoch` releases it.
-    ///
-    /// The release depends on `jailed` being set. A path that slashes without
-    /// setting it produces a punishment the release loop never sees, which is
-    /// a permanent ban written by code that reads as temporary.
-    pub liveness_jail_epochs: u64,
     /// Relayer's cut of an inbound bridge transfer, in parts-per-million of the
     /// arriving amount.
     ///
@@ -317,10 +320,6 @@ impl Default for RegistryParams {
             // Caught within one epoch. Governance-tunable per network.
             max_invalid_votes_per_epoch: 20,
             liveness_slashing_enabled: true,
-            // The term `AccountState::slash_validator` already applied as a
-            // hardcoded 7, now stated once so both slashing paths read the
-            // same number instead of one of them inventing it.
-            liveness_jail_epochs: 7,
             // 1% - the rate the three hardcoded call sites already used, now
             // stated once and tunable.
             bridge_relayer_fee_ppm: 10_000,
@@ -357,10 +356,17 @@ mod tests {
         // 15 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
         //
         // The count moved from 12 when the three proportional rates were
-        // added. That is the state-format change the `# Adding a field` note
-        // describes, made deliberately: snapshots written before them cannot
-        // be loaded afterwards and the state root moves. Acceptable
-        // pre-mainnet, where the chain is reset between releases.
+        // added: a state-format change the `# Adding a field` note describes,
+        // made deliberately, since snapshots written before it cannot be
+        // loaded afterwards and the state root moves.
+        //
+        // This pin earned its place on the jail-term change. A
+        // `liveness_jail_epochs` field was added here to give a liveness
+        // slash an expiry; the gate answered that it breaks snapshot
+        // compatibility for a number that never varies per network. The term
+        // became `LIVENESS_JAIL_EPOCHS`, a constant, and this struct did not
+        // move. The gate turned a refactor into a decision, which is the
+        // whole reason it counts bytes by hand.
         //
         // The number is written out rather than derived from the struct,
         // which is the whole point. A test computing the expected length from
@@ -368,7 +374,7 @@ mod tests {
         // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            15 * 8 + 1,
+            16 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
         );
@@ -386,13 +392,13 @@ mod tests {
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         assert_ne!(
             encoded.len(),
-            16 * 8 + 1,
-            "a sixteenth u64 field would have to update the pin above, which \
-             is the signal that snapshot compatibility broke"
+            17 * 8 + 1,
+            "a seventeenth u64 field would have to update the pin above, \
+             which is the signal that snapshot compatibility broke"
         );
         assert_ne!(
             encoded.len(),
-            14 * 8 + 1,
+            15 * 8 + 1,
             "removing a field is equally a state-format change"
         );
     }

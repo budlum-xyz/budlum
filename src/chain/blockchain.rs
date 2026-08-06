@@ -2063,6 +2063,13 @@ impl Blockchain {
         // That drive slashing explicitly via `record_liveness_epoch` therefore
         // See the same effect.
         if params.liveness_slashing_enabled {
+            // Same term as `apply_epoch_close_liveness`. Setting `jailed`
+            // without `jail_until` leaves a validator that `advance_epoch`
+            // releases at the next boundary, which is not a term at all.
+            let jail_until = self
+                .state
+                .epoch_index
+                .saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS);
             for report in &reports {
                 let _ = self.state.registry.slash_from_report(report);
                 if let Some(v) = self.state.validators.get_mut(&report.offender) {
@@ -2070,6 +2077,7 @@ impl Blockchain {
                         v.slashed = true;
                         v.active = false;
                         v.jailed = true;
+                        v.jail_until = jail_until;
                     }
                 }
             }
@@ -3177,7 +3185,7 @@ impl Blockchain {
         if params.liveness_slashing_enabled {
             let jail_until = state
                 .epoch_index
-                .saturating_add(params.liveness_jail_epochs);
+                .saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS);
             for report in &reported {
                 let _ = state.registry.slash_from_report(report);
                 if let Some(validator) = state.validators.get_mut(&report.offender) {

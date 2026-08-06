@@ -399,23 +399,25 @@ fn every_liveness_path_expects_the_same_validators() {
 /// shape rather than the call site, so it keeps holding if the slash moves.
 #[test]
 fn a_liveness_slash_is_releasable() {
-    use crate::core::chain_config::epoch_len_for_chain_id;
+    use std::collections::HashSet;
 
     let producer = addr(1);
     let offender = addr(2);
     let mut bc = chain_with_validators(producer, offender);
-    let jail_epochs = 7;
     bc.state.registry.set_params(RegistryParams {
         liveness_max_missed_epochs: 0,
         liveness_slashing_enabled: true,
-        liveness_jail_epochs: jail_epochs,
         ..RegistryParams::default()
     });
 
-    // Drive real blocks so the epoch closes through the production path.
-    let epoch_length = epoch_len_for_chain_id(bc.chain_id);
-    produce_n(&mut bc, producer, epoch_length);
+    // Record one epoch in which the offender did not participate. This is the
+    // same `record_epoch` + `slash_from_report` sequence the epoch-close path
+    // runs; driving whole blocks would also exercise proposer selection and
+    // reward accounting, which is not what is under test here.
+    let participated: HashSet<Address> = std::iter::once(producer).collect();
+    bc.record_liveness_epoch(1, &participated);
 
+    let epoch = bc.state.epoch_index;
     let v = bc
         .state
         .get_validator(&offender)
@@ -430,14 +432,14 @@ fn a_liveness_slash_is_releasable() {
         "without this flag advance_epoch never considers the validator for \
          release, and a penalty for being absent becomes permanent"
     );
-    assert!(
-        v.jail_until > bc.state.epoch_index,
-        "the term must end in the future, or the punishment is decorative"
-    );
     assert_eq!(
         v.jail_until,
-        bc.state.epoch_index.saturating_add(jail_epochs),
-        "the term comes from liveness_jail_epochs, so both slashing sites \
+        epoch.saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS),
+        "the term comes from LIVENESS_JAIL_EPOCHS, so both slashing sites \
          read one number instead of inventing their own"
+    );
+    assert!(
+        v.jail_until > epoch,
+        "the term must end in the future, or the punishment is decorative"
     );
 }
