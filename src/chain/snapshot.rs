@@ -798,6 +798,40 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.governance);
             hash_opt_serializable(&mut hasher, &self.storage_registry);
             hash_opt_serializable(&mut hasher, &self.ai_registry);
+            // The private-note registry, which holds `spent_nullifiers`.
+            //
+            // Every other registry on this struct was already hashed here and
+            // this one was not, so it crossed the wire outside the digest: a
+            // peer serving a snapshot could drop nullifiers from the set and
+            // the snapshot still verified. A nullifier that is absent has not
+            // been spent, so the notes it retires become spendable again,
+            // which is double-spend of private value with no forged signature
+            // anywhere.
+            //
+            // `AccountState::calculate_state_root` already hashes
+            // `note_registry.state_root()`, so a restored node diverges from
+            // consensus at the next block rather than accepting the theft
+            // permanently. That makes this a fail-loud bug rather than a
+            // silent one; it does not make it acceptable, because the node
+            // has already served requests against the restored state by then.
+            hash_opt_serializable(&mut hasher, &self.note_registry);
+            // The policy that decides whether a signature is required at all.
+            //
+            // `verify_authentic` reads this field to choose between accepting
+            // an unsigned snapshot and demanding a trusted signer. Outside
+            // the digest, it was the one field an attacker most wanted to
+            // edit: flip `RequireSigned` to `AllowUnsigned` on a snapshot
+            // whose digest already matches, and `verify_authentic` returns
+            // `Ok(())` at the first match arm without ever looking at
+            // `manifest_signer` or `manifest_signature`. The signature
+            // requirement could be removed by the party it was meant to
+            // constrain.
+            //
+            // `manifest_signer`, `manifest_signature` and `snapshot_hash`
+            // stay out, and must: the first two are the signature over this
+            // digest and the third is the digest, so including any of them
+            // is a definition that cannot be satisfied.
+            hash_serializable(&mut hasher, &self.trust_policy);
             hash_opt_serializable(&mut hasher, &self.bridge_state);
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
@@ -1410,6 +1444,124 @@ mod tests {
         assert_eq!(
             snapshot.verify_authentic(Some(&[wrong_pk])).unwrap_err(),
             SnapshotAuthError::SignatureInvalid
+        );
+    }
+
+    /// Downgrading the trust policy must break the digest.
+    ///
+    /// `verify_authentic` reads `trust_policy` to decide whether a signature
+    /// is required at all, and the field was not hashed into
+    /// `calculate_digest`. Flipping `RequireSigned` to `AllowUnsigned` on a
+    /// snapshot whose digest already matched made `verify_authentic` return
+    /// `Ok(())` at the first match arm, without ever reading
+    /// `manifest_signer` or `manifest_signature`. The requirement could be
+    /// removed by exactly the party it existed to constrain.
+    #[test]
+    fn a_downgraded_trust_policy_no_longer_verifies() {
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        snapshot.snapshot_hash = snapshot.calculate_hash();
+        assert!(
+            snapshot.verify(),
+            "the fixture must be self-consistent, or the negative proves nothing"
+        );
+
+        // The attack: keep every byte, weaken only the policy.
+        snapshot.trust_policy = SnapshotTrustPolicy::AllowUnsigned;
+        assert!(
+            !snapshot.verify(),
+            "the policy that decides whether a signature is needed must be \
+             inside the digest it protects, or an unsigned snapshot can be \
+             passed off as one that was never required to be signed"
+        );
+        assert_eq!(
+            snapshot.verify_authentic(None).unwrap_err(),
+            SnapshotAuthError::DigestMismatch,
+            "the downgrade must be refused before the policy is consulted"
+        );
+    }
+
+    /// Dropping a spent nullifier must break the digest.
+    ///
+    /// `note_registry` holds `spent_nullifiers`, which is the replay
+    /// protection for private transfers. Every other registry on this struct
+    /// was hashed into the digest and this one was not, so a peer serving a
+    /// snapshot could remove nullifiers and the snapshot still verified. A
+    /// nullifier that is absent has not been spent, so the notes it retired
+    /// become spendable again: double-spend of private value with no forged
+    /// signature anywhere.
+    #[test]
+    fn removing_a_spent_nullifier_no_longer_verifies() {
+        let mut account_state = AccountState::new();
+        account_state
+            .note_registry
+            .insert_note([7u8; 32])
+            .expect("a fresh registry accepts a note");
+
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        assert!(snapshot.verify(), "the fixture must verify as issued");
+
+        // The attack: serve the same snapshot with the note registry emptied.
+        snapshot.note_registry = Some(crate::privacy::L1NoteRegistry::new());
+        assert!(
+            !snapshot.verify(),
+            "the note registry crossed the wire outside the digest, so a peer \
+             could drop nullifiers and the snapshot still verified"
+        );
+    }
+
+    /// The signature fields stay outside, and must.
+    ///
+    /// Guarding the fix from the obvious overcorrection. `manifest_signature`
+    /// and `manifest_signer` are the signature over this digest, and
+    /// `snapshot_hash` is the digest; hashing any of them defines a value
+    /// that cannot be computed.
+    #[test]
+    fn the_signature_over_the_digest_is_not_inside_it() {
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        let before = snapshot.calculate_digest();
+
+        snapshot.manifest_signer = Some([3u8; 32]);
+        snapshot.manifest_signature = Some(vec![9u8; 64]);
+        assert_eq!(
+            snapshot.calculate_digest(),
+            before,
+            "signing a snapshot must not change the digest that was signed"
         );
     }
 }
