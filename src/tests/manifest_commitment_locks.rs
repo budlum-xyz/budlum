@@ -726,6 +726,103 @@ mod coding_audit {
             .collect()
     }
 
+    /// The coding audit is reachable from the chain, not only from these tests.
+    ///
+    /// `derive_coding_audit` and `verify_coding_audit` were complete and
+    /// tested nine ways over, and unreachable: no `ChainCommand` opened an
+    /// audit and no handler checked an answer. Everything above this line
+    /// exercised them directly, which is precisely the shape that reads as
+    /// finished work while nothing in production can invoke it.
+    ///
+    /// Measured against the source, because what was missing is an edge in
+    /// the call graph and that is not observable from behaviour here.
+    #[test]
+    fn the_chain_can_open_and_answer_a_coding_audit() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+
+        for symbol in [
+            "DeriveCodingAudit",
+            "AnswerCodingAudit",
+            "derive_coding_audit(",
+            "verify_coding_audit(",
+        ] {
+            assert!(
+                actor_src.contains(symbol),
+                "{symbol} is missing from the chain actor; the audit is back to \
+                 being a capability nothing can invoke"
+            );
+        }
+    }
+
+    /// The audited column comes from chain entropy, never from the caller.
+    ///
+    /// Both halves fail in opposite directions. An opener who picks the
+    /// column picks one the operator is known to have, which makes the audit
+    /// theatre. An operator who learns the column in advance stores that
+    /// column and discards the rest, which is worse than storing nothing
+    /// honestly, because it passes.
+    #[test]
+    fn the_audit_column_is_derived_from_chain_entropy() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+        // The match arm, not the enum variant and not the `ChainHandle`
+        // method: all three spell `ChainCommand::DeriveCodingAudit {` or
+        // something close to it, and `split_once` takes the first. Anchoring
+        // on the arm's own first field is what distinguishes it. Measured:
+        // CI failed on this, because the first match was the variant
+        // declaration, whose body has no entropy in it at all.
+        let handler = actor_src
+            .split_once("ChainCommand::DeriveCodingAudit {\n                    manifest_id,")
+            .map(|(_, after)| after)
+            .expect("the DeriveCodingAudit match arm must exist");
+        let handler = &handler[..handler.len().min(2000)];
+        assert!(
+            !handler.contains("challenge_id: u64,"),
+            "the anchor matched the enum variant again, whose body carries no \
+             entropy; the assertions below would be measuring a declaration"
+        );
+
+        assert!(
+            handler.contains("last_block().hash.as_bytes()"),
+            "the audit entropy must include the chain's own contribution, or \
+             one party fixes the column alone"
+        );
+        assert!(
+            handler.contains("chain_id.to_le_bytes()"),
+            "the entropy must be chain-scoped, or an audit derived on one \
+             chain is replayable on another"
+        );
+        assert!(
+            !handler.contains("request.column"),
+            "a caller-supplied column would let the opener choose what to test"
+        );
+    }
+
+    /// The handler delegates rather than restating the relationship.
+    ///
+    /// A second copy of the generator check inside the actor would be the
+    /// same defect as the executor's copied envelope bounds: correct on the
+    /// day it was written and silently divergent afterwards.
+    #[test]
+    fn the_answer_handler_delegates_to_the_registry() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+        // Same anchoring as above, for the same reason.
+        let handler = actor_src
+            .split_once("ChainCommand::AnswerCodingAudit {\n                    audit,")
+            .map(|(_, after)| after)
+            .expect("the AnswerCodingAudit match arm must exist");
+        let handler = &handler[..handler.len().min(1200)];
+
+        assert!(
+            handler.contains("verify_coding_audit("),
+            "the handler must ask the registry, which owns the generator"
+        );
+        assert!(
+            !handler.contains("ParityColumnMismatch"),
+            "the handler is deciding the relationship itself; there must be \
+             one definition of what a passing audit is"
+        );
+    }
+
     #[test]
     fn an_honest_operator_passes_the_audit() {
         let (reg, encoded, manifest) = coded_registry();

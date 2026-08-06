@@ -313,6 +313,28 @@ pub enum ChainCommand {
         request: crate::domain::storage_deal::RetrievalChallengeRequest,
         response: oneshot::Sender<Result<u64, String>>,
     },
+    /// Derive a coding audit for a manifest against chain entropy.
+    ///
+    /// A retrieval challenge asks whether the operator still holds the bytes.
+    /// It cannot ask whether those bytes are valid parity, because the chain
+    /// never sees shard contents, so an operator can pass every retrieval
+    /// challenge while storing garbage under a parity shard's `ContentId` and
+    /// nobody finds out until the repair that needs it.
+    ///
+    /// `derive_coding_audit` and `verify_coding_audit` were written for that
+    /// and no chain path reached either.
+    DeriveCodingAudit {
+        manifest_id: crate::storage::ContentId,
+        challenge_id: u64,
+        response: oneshot::Sender<Result<crate::domain::storage_deal::CodingAudit, String>>,
+    },
+    /// Check an answered coding audit against the generator.
+    AnswerCodingAudit {
+        audit: crate::domain::storage_deal::CodingAudit,
+        data_column: Vec<u8>,
+        parity_byte: u8,
+        response: oneshot::Sender<Result<(), String>>,
+    },
     AnswerStorageChallenge {
         response_data: crate::domain::storage_deal::RetrievalResponse,
         response: oneshot::Sender<Result<crate::domain::storage_deal::ChallengeResult, String>>,
@@ -819,6 +841,54 @@ impl ChainHandle {
             .tx
             .send(ChainCommand::RegisterStorageManifest {
                 manifest,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Derive the coding audit for `manifest_id` at `challenge_id`.
+    ///
+    /// The column and parity index come from chain entropy, never from the
+    /// caller: an opener who picks the column picks one the operator has, and
+    /// an operator who knows the column in advance stores only that column.
+    pub async fn derive_coding_audit(
+        &self,
+        manifest_id: crate::storage::ContentId,
+        challenge_id: u64,
+    ) -> Result<crate::domain::storage_deal::CodingAudit, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::DeriveCodingAudit {
+                manifest_id,
+                challenge_id,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Check an answered coding audit.
+    ///
+    /// A pass means the Reed-Solomon relationship holds at that one column
+    /// and nothing wider. An operator who miscomputed a fraction `f` of
+    /// columns fails a uniformly random one with probability `f`.
+    pub async fn answer_coding_audit(
+        &self,
+        audit: crate::domain::storage_deal::CodingAudit,
+        data_column: Vec<u8>,
+        parity_byte: u8,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AnswerCodingAudit {
+                audit,
+                data_column,
+                parity_byte,
                 response: tx,
             })
             .await;
@@ -3045,6 +3115,70 @@ impl ChainActor {
                                 .map_err(|e| e.to_string())?;
                             Ok(challenge_id)
                         });
+                    let _ = response.send(res);
+                }
+                ChainCommand::DeriveCodingAudit {
+                    manifest_id,
+                    challenge_id,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    // Same entropy shape as the retrieval challenge above, and
+                    // for the same reason: the column has to be unpredictable
+                    // to both sides. An opener who picks it picks one the
+                    // operator has; an operator who learns it in advance
+                    // stores that column and discards the rest.
+                    //
+                    // The last block hash is the chain's own contribution, so
+                    // neither party fixes it alone.
+                    let entropy = crate::core::hash::hash_fields_bytes(&[
+                        b"BDLM_RPC_CODING_AUDIT_ENTROPY_V1",
+                        &self.blockchain.chain_id.to_le_bytes(),
+                        self.blockchain.last_block().hash.as_bytes(),
+                        manifest_id.as_bytes(),
+                        &challenge_id.to_le_bytes(),
+                    ]);
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_manifest(&manifest_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "no manifest {} in this registry, so there is no code word to \
+                                 audit",
+                                hex::encode(manifest_id.as_bytes())
+                            )
+                        })
+                        .and_then(|manifest| {
+                            crate::domain::storage_deal::StorageRegistry::derive_coding_audit(
+                                &entropy,
+                                manifest,
+                                challenge_id,
+                            )
+                            .map_err(|e| e.to_string())
+                        });
+                    let _ = response.send(res);
+                }
+                ChainCommand::AnswerCodingAudit {
+                    audit,
+                    data_column,
+                    parity_byte,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .verify_coding_audit(&audit, &data_column, parity_byte)
+                        .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
                 ChainCommand::AnswerStorageChallenge {
