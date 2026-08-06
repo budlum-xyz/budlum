@@ -132,7 +132,12 @@ pub struct EvmDepositProof<'a> {
 /// Grouped rather than added as three loose `Option` fields, so it is
 /// impossible to supply an aggregate without the committee it must verify
 /// against, or a signing message without either.
-#[derive(Debug, Clone)]
+/// `PartialEq`/`Eq` because `EvmDepositProof` derives them and an
+/// `Option<SyncAttestation>` field makes that requirement transitive. Both
+/// referents already satisfy it, so the comparison is the structural one a
+/// caller would expect: two attestations are equal when they name the same
+/// committee, the same aggregate and the same signing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncAttestation<'a> {
     /// Light-client state holding the 512 pubkeys for this period.
     pub state: &'a SyncCommitteeState,
