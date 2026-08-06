@@ -1757,6 +1757,12 @@ impl Executor {
                 // Attempt STARK verify of postcard envelope (fail closed if
                 // Bytes present but invalid). Without guest program words we
                 // Only check envelope deserializes + public_inputs_hash shape.
+                // Size bound before deserialization, which is the one bound
+                // that cannot be delegated: `validate_envelope_structure`
+                // takes a decoded envelope, and decoding is the work this
+                // refusal exists to avoid paying for. The other four
+                // structural checks run below, through the shared function,
+                // once there is something decoded to check.
                 if proof.proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES {
                     return Err(BudlumError::validation(
                         "ai_exec_proof_too_large",
@@ -1795,20 +1801,37 @@ impl Executor {
                 if let Ok(envelope) =
                     postcard::from_bytes::<bud_proof::ProofEnvelope>(&proof.proof_bytes)
                 {
-                    if envelope.proof_format_version
-                        < crate::execution::proof_verifier::MIN_PROOF_FORMAT_VERSION
-                    {
-                        return Err(BudlumError::validation(
-                            "ai_exec_format",
-                            "proof format version too old",
-                        ));
-                    }
-                    if envelope.degree_bits > crate::execution::proof_verifier::MAX_DEGREE_BITS {
-                        return Err(BudlumError::validation(
-                            "ai_exec_degree",
-                            "proof degree_bits too large",
-                        ));
-                    }
+                    // Ask the verifier what a well-formed envelope is, rather
+                    // than restating it here.
+                    //
+                    // `ProofVerifier::validate_envelope_structure` makes five
+                    // checks and this path had copied three of them by hand:
+                    // size, degree bits and format version. The two it did
+                    // not copy were the empty-backend refusal and the
+                    // requirement that `p3_version` and `fri_params_id` be
+                    // present, so an envelope naming no prover version and no
+                    // FRI parameter set reached `attach_execution_proof`.
+                    // Those two fields are how a verifier knows which
+                    // parameters a proof was produced under; an envelope that
+                    // omits them is not verifiable against anything, and it
+                    // was being recorded as attached evidence.
+                    //
+                    // Copied checks drift by omission, silently, and the
+                    // omission is invisible at the copy site because what is
+                    // missing is not written anywhere. One definition.
+                    let structural = crate::execution::proof_verifier::ProofEnvelope {
+                        proof_format_version: envelope.proof_format_version,
+                        backend: envelope.backend.clone(),
+                        p3_version: envelope.p3_version.clone(),
+                        fri_params_id: envelope.fri_params_id.clone(),
+                        public_inputs_hash: envelope.public_inputs_hash,
+                        proof_bytes: envelope.proof_bytes.clone(),
+                        degree_bits: envelope.degree_bits,
+                    };
+                    crate::execution::proof_verifier::ProofVerifier::validate_envelope_structure(
+                        &structural,
+                    )
+                    .map_err(|e| BudlumError::validation("ai_exec_envelope", e.to_string()))?;
                     // Backend allow-list. Structural envelopes are not proof
                     // Evidence by themselves; this transaction path only accepts
                     // Production Plonky3-backed envelopes and still fails closed

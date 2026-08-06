@@ -25,6 +25,5 @@
 #   src/crypto/pkcs11.rs                    validate_vendor_mechanism
 #   src/domain/storage_deal.rs              verify_coding_audit
 #   src/domain/storage_deal.rs              verify_answer_challenge_zk_proof
-#   src/execution/proof_verifier.rs         validate_envelope_structure
 #   src/lubot/mod.rs                        validate_inference_grant
 #   src/lubot/verify.rs                     verify_inference_stark
