@@ -968,6 +968,62 @@ mod coding_audit {
         );
     }
 
+    /// The answer picks the column the verifier checks.
+    ///
+    /// `derive_coding_audit` selects `(parity_index, column)` from chain
+    /// entropy precisely so neither side chooses it, and the doc on
+    /// `CodingAudit` says it is "deliberately not a stored type ... so there
+    /// is no second copy of the selection that could drift".
+    ///
+    /// On the RPC path there is a second copy. `ChainCommand::AnswerCodingAudit`
+    /// carries the whole `CodingAudit` struct up from the responder, and
+    /// `verify_coding_audit` never recomputes it: it reads `parity_index` to
+    /// pick the generator row and uses `column` only to fill in an error
+    /// message. So the byte offset the verifier checks is the offset the
+    /// answerer named.
+    ///
+    /// The consequence is narrow but it is the exact property entropy
+    /// selection exists to provide. An operator holding valid parity at one
+    /// column and garbage elsewhere can answer every audit at the column it
+    /// kept, because nothing binds the answer to the column that was asked.
+    /// The audit still proves the relationship holds somewhere; it stops
+    /// proving it holds at a place the operator could not predict, and the
+    /// `(1 - f)^rounds` argument in the module doc assumes exactly that
+    /// unpredictability.
+    ///
+    /// Not fixed here: closing it means either recomputing the selection
+    /// inside `verify_coding_audit` from the entropy and challenge id, or
+    /// carrying those instead of the derived struct, and that changes the
+    /// `ChainCommand` shape. Pinned so the gap is a decision rather than an
+    /// oversight.
+    #[test]
+    fn a_coding_audit_answer_is_not_bound_to_the_column_that_was_asked() {
+        let (reg, encoded, manifest) = coded_registry();
+        let asked = StorageRegistry::derive_coding_audit(&[42u8; 32], &manifest, 9)
+            .expect("a coded manifest has parity to audit");
+
+        // A different column of the same code word. Entropy chose `asked`;
+        // this is one the operator chose instead.
+        let substituted = (asked.column + 1) % u64::from(manifest.shards[0].size);
+        assert_ne!(substituted, asked.column, "the fixture needs two columns");
+
+        let forged = crate::domain::storage_deal::CodingAudit {
+            column: substituted,
+            ..asked
+        };
+        let column = data_column(&encoded, substituted);
+        let parity_byte = encoded.shards
+            [manifest.erasure.k as usize + forged.parity_index as usize][substituted as usize];
+
+        assert!(
+            reg.verify_coding_audit(&forged, &column, parity_byte)
+                .is_ok(),
+            "an answer at a self-chosen column passes today; when this starts \
+             failing the selection has been bound and this test should assert \
+             the refusal instead"
+        );
+    }
+
     #[test]
     fn an_audit_against_an_unregistered_manifest_is_refused() {
         let (reg, _, _) = coded_registry();
