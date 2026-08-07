@@ -19,6 +19,7 @@
 pub mod assignment;
 pub mod content_id;
 pub mod db;
+pub mod derivation_economics;
 pub mod derived;
 pub mod dictionary;
 pub mod erasure;
@@ -37,6 +38,10 @@ pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
 };
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
+pub use derivation_economics::{
+    breakeven_requests_per_year, policy_for as derivation_policy_for, DerivationCost,
+    DerivationEconomicsError, DerivationPolicy, HardwareRates, MAX_DERIVATION_BYTES,
+};
 pub use derived::{
     DerivedError, DerivedSpec, DerivedTransform, DERIVED_BLOCK_PIXELS, DERIVED_SPEC_BYTES,
 };
