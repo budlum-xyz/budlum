@@ -7,7 +7,42 @@ pub struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     _source: &'a str,
+    /// How many nested grammar productions are open right now.
+    ///
+    /// The parser is recursive descent, so a nested source construct is a
+    /// nested stack frame. Nothing in the grammar bounds that nesting, and a
+    /// bounded input can therefore describe an unbounded stack: the fuzzer
+    /// found it with a run of open parentheses, which drives `parse_primary`
+    /// back into `parse_expr` once per character.
+    ///
+    /// A stack overflow is not a `Result`. It aborts the process, so no
+    /// caller can catch it and the usual "returns an error on bad input"
+    /// contract does not hold. Counting the depth is what turns that abort
+    /// back into a value the caller can handle.
+    depth: u32,
 }
+
+/// How deeply source constructs may nest.
+///
+/// Chosen against the two failures it sits between, and sized for the
+/// tighter one.
+///
+/// One level of source nesting is five stack frames, not one: an expression
+/// descends through comparison, arithmetic, term and postfix parsing before
+/// `parse_primary` can recurse. Thirty-two levels is therefore 160 frames,
+/// which stays inside a quarter-megabyte stack even at two kilobytes a
+/// frame. The bound is set against the sanitiser build rather than the
+/// release one: that build caught the overflow, its frames are the largest
+/// and its stack the shallowest, and a limit that only held in release would
+/// let the crash straight back into the fuzzer.
+///
+/// The headroom above real programs is still large. The deepest hand-written
+/// contract in this tree nests seven levels.
+///
+/// It is a parser limit rather than a language limit. A contract that needs
+/// more nesting than this is not rejected by the chain, it is rejected by the
+/// front end, and the message says so.
+pub const MAX_NESTING_DEPTH: u32 = 32;
 
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Result<Self, CompileError> {
@@ -35,7 +70,32 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             _source: source,
+            depth: 0,
         })
+    }
+
+    /// Open one level of nesting, or refuse.
+    ///
+    /// Paired with [`Self::leave`]. Every production that can reach itself
+    /// again calls this first, so the count tracks stack frames rather than
+    /// any one syntactic form: it is the recursion that overflows, and which
+    /// keyword opened it does not change that.
+    fn enter(&mut self) -> Result<(), CompileError> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(CompileError::ParserError(format!(
+                "expression or statement nests deeper than {MAX_NESTING_DEPTH} levels"
+            )));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Close one level of nesting.
+    ///
+    /// Saturating, so a mismatched pair cannot wrap the counter to a huge
+    /// number and disable the limit for the rest of the parse.
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     fn peek(&self) -> &Token {
@@ -233,7 +293,21 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse a statement, counting the nesting it opens.
+    ///
+    /// Block-bearing statements recurse into this function for their bodies,
+    /// so nested blocks are a second route to the same overflow that nested
+    /// expressions take. Both routes share one counter: a source file that
+    /// alternates between them nests just as deep as one that does not, and
+    /// two separate budgets would each see half of it.
     fn parse_stmt(&mut self) -> Result<Stmt, CompileError> {
+        self.enter()?;
+        let parsed = self.parse_stmt_inner();
+        self.leave();
+        parsed
+    }
+
+    fn parse_stmt_inner(&mut self) -> Result<Stmt, CompileError> {
         match self.peek() {
             Token::Let => {
                 self.consume();
@@ -423,7 +497,21 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse an expression, counting the nesting it opens.
+    ///
+    /// The guard sits here rather than at `parse_primary` because this is the
+    /// function a nested construct comes back to: a parenthesis, a call
+    /// argument, an index. Counting at the point of re-entry means one
+    /// increment per stack frame that can recurse, which is the quantity that
+    /// has to stay bounded.
     fn parse_expr(&mut self) -> Result<Expr, CompileError> {
+        self.enter()?;
+        let parsed = self.parse_expr_inner();
+        self.leave();
+        parsed
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr, CompileError> {
         let mut left = self.parse_arith()?;
 
         while matches!(
@@ -640,5 +728,78 @@ impl<'a> Parser<'a> {
                 "Expected primary expression".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CompileError;
+
+    /// Build the source the fuzzer found, at a chosen nesting depth.
+    fn nested_parens(depth: usize) -> String {
+        format!(
+            "contract T {{ pub fn main() {{ let x = {}1{}; }} }}",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        )
+    }
+
+    #[test]
+    fn deeply_nested_parentheses_return_an_error_instead_of_overflowing() {
+        // The shape of the crashing input, an order of magnitude past the
+        // limit. Before the guard this aborted the process under the
+        // sanitiser, which is why the assertion is that a value comes back at
+        // all: `is_err` is the observable difference between a refusal and an
+        // abort.
+        let source = nested_parens(MAX_NESTING_DEPTH as usize * 10);
+        let mut parser = Parser::new(&source).expect("the input lexes");
+        let parsed = parser.parse_contract();
+        assert!(matches!(parsed, Err(CompileError::ParserError(_))));
+    }
+
+    #[test]
+    fn unbalanced_open_parentheses_also_return_rather_than_overflow() {
+        // The fuzzer's input does not have to close what it opens, and the
+        // run of opens is what drives the recursion. Closing brackets are
+        // the parser's problem after the depth guard, not before it.
+        let source = format!("contract T {{ pub fn main() {{ let x = {}", "(".repeat(4096));
+        let mut parser = Parser::new(&source).expect("the input lexes");
+        assert!(parser.parse_contract().is_err());
+    }
+
+    #[test]
+    fn nesting_within_the_limit_still_parses() {
+        // The bound has to leave real programs alone. Ten levels is deeper
+        // than any contract in this tree and well inside the limit.
+        let source = nested_parens(10);
+        let mut parser = Parser::new(&source).expect("the input lexes");
+        assert!(parser.parse_contract().is_ok());
+    }
+
+    #[test]
+    fn nested_blocks_share_the_expression_budget() {
+        // Statements recurse too. Were the two counted separately, a file
+        // alternating between them would reach twice the intended depth.
+        let opens = "if (1) {".repeat(MAX_NESTING_DEPTH as usize * 2);
+        let closes = "}".repeat(MAX_NESTING_DEPTH as usize * 2);
+        let source = format!("contract T {{ pub fn main() {{ {opens} {closes} }} }}");
+        let mut parser = Parser::new(&source).expect("the input lexes");
+        assert!(parser.parse_contract().is_err());
+    }
+
+    #[test]
+    fn the_counter_unwinds_so_sibling_expressions_do_not_accumulate() {
+        // `leave` has to run on the way out of every production, including
+        // the ones that returned an error deeper in. A leaked increment would
+        // make a long flat function fail once it had parsed enough siblings,
+        // which is a bug that only appears in large inputs.
+        let mut body = String::new();
+        for i in 0..500 {
+            body.push_str(&format!("let v{i} = ((({i})));"));
+        }
+        let source = format!("contract T {{ pub fn main() {{ {body} }} }}");
+        let mut parser = Parser::new(&source).expect("the input lexes");
+        assert!(parser.parse_contract().is_ok());
     }
 }
