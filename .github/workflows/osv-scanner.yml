@@ -83,10 +83,40 @@ jobs:
           fi
           echo "Kanarya yakalandı → OSV alarmı çalışıyor."
 
-      - name: Tarama - root + budzero lockfile (bulgu = fail)
+      # fuzz/Cargo.lock ve wallet-core/Cargo.lock buraya sonradan eklendi.
+      # Depoda dort kilit dosyasi var, tarama ikisini okuyordu. fuzz kilidi
+      # kok kilitle ayni 23 git paketini ve ayrica kendi libfuzzer zincirini
+      # tasiyor; wallet-core BIP39 ve SLIP-0010 anahtar turetmesini tasiyor,
+      # yani taranmayan iki agactan biri dogrudan anahtar ureten agacti.
+      # Fuzz kosucusu CI makinesinde ve gelistirici makinesinde calisir,
+      # cuzdan kodu ise kullanicinin tohumunu gorur; ikisi de "sadece test"
+      # degildir.
+      - name: Tarama - dort lockfile de (bulgu = fail)
         run: |
           set -euo pipefail
           osv-scanner scan source \
             --config=.quality/osv-scanner.toml \
             --lockfile=Cargo.lock \
-            --lockfile=budzero/Cargo.lock
+            --lockfile=budzero/Cargo.lock \
+            --lockfile=fuzz/Cargo.lock \
+            --lockfile=wallet-core/Cargo.lock
+
+      # Yukaridaki listenin eksilmemesi icin: depodaki her Cargo.lock taranmali.
+      # Yeni bir alt-crate eklendiginde kilidi sessizce kapsam disinda kalirsa
+      # bu adim kirmizi doner.
+      - name: Her lockfile tarandi mi
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r lock; do
+            rel="${lock#./}"
+            if ! grep -q -- "--lockfile=${rel}" .github/workflows/osv-scanner.yml; then
+              echo "TARANMIYOR: ${rel}"
+              missing=1
+            fi
+          done < <(find . -name Cargo.lock -not -path './target/*' -not -path '*/target/*')
+          if [ "$missing" -ne 0 ]; then
+            echo "Yukaridaki kilit dosyalari OSV taramasinin disinda."
+            exit 1
+          fi
+          echo "Depodaki her Cargo.lock OSV taramasinda."
