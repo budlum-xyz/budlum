@@ -245,6 +245,22 @@ impl MarketplaceRegistry {
             return Err("Price must be greater than zero".into());
         }
         let id = self.next_offer_id;
+        // Third instance of the same shape, after `NftRegistry::mint` and
+        // `BudlumxyzRegistry::register_app`: `insert` overwrites, and the
+        // record it replaces is another seller's offer. Theirs vanishes from
+        // `offers` while the id keeps resolving, now to this seller's price
+        // and content.
+        //
+        // Reachable the same way, through a restore: `offers` and
+        // `next_offer_id` are separate fields of the registry that
+        // `StateSnapshotV2` carries whole.
+        if self.offers.contains_key(&id) {
+            return Err(format!(
+                "offer id {id} is already live: the registry's counter is behind \
+                 its own contents, and minting over it would hand one seller's \
+                 listing to another"
+            ));
+        }
         let offer = DataOffer {
             id,
             seller,
@@ -993,5 +1009,55 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    /// A counter behind its own contents must not overwrite an offer.
+    ///
+    /// Third instance of the shape fixed in `NftRegistry::mint` and
+    /// `BudlumxyzRegistry::register_app`. The overwritten record is another
+    /// seller's: theirs disappears from `offers` while the id keeps
+    /// resolving, now to this seller's price and content, so a buyer paying
+    /// against that id pays the wrong party for the wrong thing.
+    ///
+    /// Reachable through a restore, not within one run: `offers` and
+    /// `next_offer_id` are separate fields of the registry `StateSnapshotV2`
+    /// carries whole.
+    #[test]
+    fn creating_an_offer_on_a_live_id_is_refused() {
+        let mut reg = MarketplaceRegistry::new();
+        let first = Address::from([1u8; 32]);
+        let second = Address::from([2u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xAB; 32]);
+
+        let id = reg
+            .create_offer(first, cid, 100)
+            .expect("a fresh registry has no id to collide with");
+
+        // The shape a restored snapshot can carry.
+        reg.next_offer_id = id;
+
+        let err = reg
+            .create_offer(second, cid, 999)
+            .expect_err("creating an offer on a live id must be refused");
+        assert!(
+            err.contains("already live"),
+            "the refusal must name the collision, got: {err}"
+        );
+
+        let offer = reg.get_offer(id).expect("the original offer must survive");
+        assert_eq!(offer.seller, first);
+        assert_eq!(offer.price, 100);
+    }
+
+    /// The refusal must stay narrow, or it is a ban on selling.
+    #[test]
+    fn consecutive_offers_still_work() {
+        let mut reg = MarketplaceRegistry::new();
+        let seller = Address::from([3u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+
+        let a = reg.create_offer(seller, cid, 10).expect("first offer");
+        let b = reg.create_offer(seller, cid, 20).expect("second offer");
+        assert_ne!(a, b, "an incrementing counter must keep producing new ids");
     }
 }

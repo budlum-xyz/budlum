@@ -34,7 +34,9 @@ fn nft_mint_table_distinct_ids() {
     let mut r = NftRegistry::new();
     let mut ids = Vec::new();
     for i in 1..=10u8 {
-        let id = r.mint(addr(i), cid(i), i as u64, None);
+        let id = r
+            .mint(addr(i), cid(i), i as u64, None)
+            .expect("an incrementing counter cannot collide");
         ids.push(id);
     }
     let mut sorted = ids.clone();

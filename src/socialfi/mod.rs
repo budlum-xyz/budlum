@@ -23,14 +23,36 @@ impl NftRegistry {
         Self::default()
     }
 
+    /// Mint an NFT at the next free id.
+    ///
+    /// # Errors
+    ///
+    /// [`NftError::DuplicateId`] when `next_id` already names a live NFT.
+    /// That variant existed and nothing ever produced it: `mint` took
+    /// `self.next_id`, called `BTreeMap::insert`, and `insert` overwrites.
+    /// The overwritten record is the previous owner's: their entry vanishes
+    /// from `nfts` while their address keeps the id in `ownership`, so
+    /// `get_nft` answers with the new owner and `burn` refuses the old one
+    /// as `NotOwner`. The asset is transferred by an id collision, with no
+    /// transfer transaction and no event.
+    ///
+    /// A counter that only ever increments cannot collide on its own, which
+    /// is why this was never reached in a single run. `NftRegistry` is
+    /// restored wholesale from `StateSnapshotV2`, and `nfts` and `next_id`
+    /// are separate fields of that structure: a snapshot whose counter sits
+    /// below its highest live id produces exactly this. Refusing here is
+    /// cheap; reconciling the two after the fact is not.
     pub fn mint(
         &mut self,
         owner: Address,
         cid: ContentId,
         epoch: u64,
         name: Option<String>,
-    ) -> u64 {
+    ) -> Result<u64, NftError> {
         let id = self.next_id;
+        if self.nfts.contains_key(&id) {
+            return Err(NftError::DuplicateId);
+        }
         let nft = Nft {
             id,
             owner,
@@ -43,7 +65,7 @@ impl NftRegistry {
         self.nfts.insert(id, nft);
         self.ownership.entry(owner).or_default().push(id);
         self.next_id += 1;
-        id
+        Ok(id)
     }
 
     pub fn add_tag(&mut self, id: u64, tag: String) -> Result<(), NftError> {
@@ -152,7 +174,7 @@ mod tests {
         let mut reg = NftRegistry::new();
         let owner = Address::from([1u8; 32]);
         let cid = crate::storage::content_id::ContentId([0xAB; 32]);
-        reg.mint(owner, cid, 0, None);
+        reg.mint(owner, cid, 0, None).expect("fresh registry");
         let nft_id = 0;
         // Mint starts at luminance=1000. Seed near the top so a modest positive
         // Delta crosses u64::MAX and must clamp (not wrap/truncate).
@@ -173,9 +195,77 @@ mod tests {
         let owner = Address::from([1u8; 32]);
         let new_owner = Address::from([2u8; 32]);
         let cid = crate::storage::content_id::ContentId([0xCD; 32]);
-        let id = reg.mint(owner, cid, 0, Some("alice".into()));
+        let id = reg
+            .mint(owner, cid, 0, Some("alice".into()))
+            .expect("fresh registry");
         let root_before = reg.root();
         reg.transfer(id, &owner, new_owner).unwrap();
         assert_ne!(root_before, reg.root());
+    }
+
+    /// A counter that disagrees with the map must not overwrite an NFT.
+    ///
+    /// `NftError::DuplicateId` existed and nothing produced it. `mint` read
+    /// `self.next_id` and called `BTreeMap::insert`, which overwrites. The
+    /// record replaced is the previous owner's: it disappears from `nfts`
+    /// while their address keeps the id in `ownership`, so `get_nft` answers
+    /// with the new owner and `burn` refuses the old one as `NotOwner`. An
+    /// asset changes hands with no transfer transaction and no event.
+    ///
+    /// An incrementing counter cannot collide with itself, which is why a
+    /// single run never reached it. `NftRegistry` is restored wholesale from
+    /// `StateSnapshotV2`, where `nfts` and `next_id` are separate fields, so
+    /// a snapshot whose counter sits below its highest live id produces
+    /// exactly this state.
+    #[test]
+    fn minting_onto_a_live_id_is_refused() {
+        let mut reg = NftRegistry::new();
+        let first = Address::from([1u8; 32]);
+        let second = Address::from([2u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xAB; 32]);
+
+        let id = reg.mint(first, cid, 0, None).expect("fresh registry");
+
+        // The shape a restored snapshot can carry: counter behind contents.
+        reg.next_id = id;
+
+        let err = reg
+            .mint(second, cid, 1, None)
+            .expect_err("minting onto a live id must be refused");
+        assert!(
+            matches!(err, NftError::DuplicateId),
+            "the refusal must name the collision, got: {err:?}"
+        );
+
+        // And the first owner still holds it. Without the refusal, `get_nft`
+        // would name `second` here while `ownership` still lists the id under
+        // `first`.
+        assert_eq!(
+            reg.get_nft(id)
+                .expect("the original NFT must survive")
+                .owner,
+            first,
+            "a refused mint must not have replaced the existing record"
+        );
+        reg.burn(id, &first)
+            .expect("the original owner must still be able to burn it");
+    }
+
+    /// The refusal must stay narrow, or it is a ban on minting.
+    #[test]
+    fn consecutive_mints_still_work() {
+        let mut reg = NftRegistry::new();
+        let owner = Address::from([3u8; 32]);
+        let cid = crate::storage::content_id::ContentId([0xCD; 32]);
+
+        let a = reg.mint(owner, cid, 0, None).expect("first mint");
+        let b = reg.mint(owner, cid, 1, None).expect("second mint");
+        assert_ne!(a, b, "an incrementing counter must keep producing new ids");
+
+        // Burning frees the map entry but not the id: the counter has moved
+        // past it, so a later mint does not land there either.
+        reg.burn(a, &owner).expect("owner may burn");
+        let c = reg.mint(owner, cid, 2, None).expect("mint after burn");
+        assert!(c > b, "ids must not be reused after a burn");
     }
 }

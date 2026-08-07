@@ -57,7 +57,8 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         | ProposalType::ParameterUpdate(_, _) => GOVERNANCE_PARAMETER_ACTIVATION_DELAY_EPOCHS,
 
         // Rules the rest of the system is written against.
-        ProposalType::SetEncryptionPolicy(_)
+        ProposalType::VerifyHubApp { .. }
+        | ProposalType::SetEncryptionPolicy(_)
         | ProposalType::SetConstitutionParameter(_)
         | ProposalType::UnfreezeConsensusDomain { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
@@ -186,6 +187,18 @@ pub enum ProposalType {
     /// - justification_hash: hash of frozen reason / evidence reference (e.g., hash of audit report / governance forum post)
     ///
     /// Anti-replay: proposal id itself is unique and executed only once (Passed->Executed).
+    /// Award the governance verification badge to a `budlum.xyz` app.
+    ///
+    /// Distinct from `BudlumxyzAttestApp`, which is the developer's own
+    /// ownership claim. This one is the audited badge, and it moves only
+    /// through a vote because the whole point of `verified` is that somebody
+    /// other than the developer stood behind it.
+    ///
+    /// `AppRecord.verified` was hashed into the state root from the start and
+    /// no path could set it, so it was permanently false. This is the path.
+    VerifyHubApp {
+        app_id: u64,
+    },
     UnfreezeConsensusDomain {
         domain_id: u32,
         expected_validator_set_hash: [u8; 32],
@@ -418,6 +431,12 @@ impl GovernanceState {
             ProposalType::ParameterUpdate(key, value) => {
                 validate_governance_parameter_update(key, value)?;
             }
+            ProposalType::VerifyHubApp { app_id } => {
+                // Existence is checked at execution, not here: an app can be
+                // registered while the vote is open, and refusing at proposal
+                // time would make the outcome depend on submission order.
+                let _ = app_id;
+            }
             ProposalType::SetEncryptionPolicy(policy) => policy.validate()?,
             ProposalType::SetConstitutionParameter(parameter) => parameter.validate_update()?,
             ProposalType::UnfreezeConsensusDomain {
@@ -604,6 +623,9 @@ pub enum GovernanceAction {
     DewhitelistVerifier(Address),
     SetEncryptionPolicy(crate::pollen::EncryptionPolicy),
     SetConstitutionParameter(ConstitutionParameter),
+    VerifyHubApp {
+        app_id: u64,
+    },
     UnfreezeConsensusDomain {
         domain_id: u32,
         expected_validator_set_hash: [u8; 32],

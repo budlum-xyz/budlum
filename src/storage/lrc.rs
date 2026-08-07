@@ -138,7 +138,26 @@ impl LrcLayout {
         if local_groups == 0 {
             return Err(LrcError::NoLocalGroups);
         }
-        if local_groups > data_shards {
+        // `local_groups > data_shards` is the obvious case, and it was the
+        // only one checked. It is not the whole condition.
+        //
+        // Membership is `index / per` with `per = data_shards.div_ceil(local_groups)`,
+        // so the number of groups that actually receive a shard is
+        // `(data_shards - 1) / per + 1`, which can be smaller than
+        // `local_groups` well before the groups outnumber the shards. At
+        // `k = 9, L = 4` the divide gives `per = 3`, the nine shards land in
+        // three groups, and the fourth is empty.
+        //
+        // That empty group still counts a local parity in
+        // `lrc_total_shards`, so `lrc_overhead_per_mille` charges for a shard
+        // that protects nothing and that no repair will ever read: the
+        // layout reports 1666 per mille against a real cost of 1555. The
+        // multiplier is the number this module exists to produce, so a
+        // layout that cannot produce it honestly is refused rather than
+        // silently mispriced.
+        let per = data_shards.div_ceil(local_groups);
+        let groups_with_shards = (data_shards - 1) / per + 1;
+        if local_groups > data_shards || groups_with_shards < local_groups {
             return Err(LrcError::MoreGroupsThanShards {
                 data_shards,
                 local_groups,
@@ -286,6 +305,55 @@ mod tests {
         }
     }
 
+    /// A layout must not charge for a parity shard it never produces.
+    ///
+    /// The validity check was `local_groups > data_shards`, which is the
+    /// obvious way to ask for an empty group and not the only one.
+    /// Membership is `index / data_shards.div_ceil(local_groups)`, so the
+    /// groups that actually receive a shard number
+    /// `(data_shards - 1) / per + 1`, and that can fall short of
+    /// `local_groups` long before the groups outnumber the shards.
+    ///
+    /// At `k = 9, L = 4` the divide gives three shards per group, the nine
+    /// land in three groups, and the fourth is empty. `lrc_total_shards`
+    /// still counted its parity, so the layout reported 1666 per mille
+    /// against a real cost of 1555: an overstatement, but of a shard that
+    /// protects nothing and that no repair reads.
+    ///
+    /// The multiplier is the number this module exists to produce. A layout
+    /// that cannot produce it honestly is refused.
+    #[test]
+    fn a_layout_with_an_empty_local_group_is_refused() {
+        assert!(
+            matches!(
+                LrcLayout::new_lrc_group(9, 4, 2),
+                Err(LrcError::MoreGroupsThanShards {
+                    data_shards: 9,
+                    local_groups: 4
+                })
+            ),
+            "nine shards over four groups fills three; the fourth parity \
+             would price a shard that is never written"
+        );
+
+        // The general property, rather than the one measured instance: every
+        // accepted layout must place a shard in every group it charges for.
+        for k in 1u32..=64 {
+            for l in 1u32..=k {
+                let Ok(layout) = LrcLayout::new_lrc_group(k, l, 2) else {
+                    continue;
+                };
+                for group in 0..layout.local_groups {
+                    assert!(
+                        !layout.local_group_members(group).is_empty(),
+                        "k={k} L={l} was accepted but group {group} is empty, \
+                         so its local parity is counted and never produced"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_wider_group_costs_less_redundancy() {
         // The claim the module exists for, as a monotone property rather than
@@ -422,7 +490,10 @@ mod tests {
         );
         assert_ne!(
             d,
-            LrcLayout::new_lrc_group(100, 11, 6)
+            // 20 rather than 11: at k=100 a group count of 11 leaves an empty
+            // group and is now refused, so the neighbour used to prove the
+            // field is covered has to be a layout that exists.
+            LrcLayout::new_lrc_group(100, 20, 6)
                 .unwrap()
                 .lrc_layout_digest(),
             "local_groups"

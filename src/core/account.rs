@@ -304,6 +304,19 @@ pub struct AccountState {
     /// Populated by executor when `GovernanceAction::UnfreezeConsensusDomain` is executed,
     /// Drained by `Blockchain` after `apply_block_effects`.
     pub pending_domain_unfreezes: Vec<PendingDomainUnfreeze>,
+    /// Bounded proof tasks and the receipts that settle them.
+    ///
+    /// `settlement::proof_market` models a task's whole life, from pending
+    /// through assigned to completed or expired, and nothing reached any of
+    /// it. `enforce_max_sizes` in particular is the only bound on
+    /// accumulation, and a bound nothing calls is a comment: `add_task`
+    /// limits what arrives in one call and says nothing about a node that has
+    /// been up for a year.
+    ///
+    /// Swept once per epoch by `advance_epoch`. Included in the state root
+    /// only once non-empty, so a chain that has never opened a proof task
+    /// sees no root change from this field existing.
+    pub proof_market: crate::settlement::ProofMarketState,
 }
 impl AccountState {
     pub fn new() -> Self {
@@ -346,6 +359,7 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            proof_market: crate::settlement::ProofMarketState::new(),
         }
     }
     pub fn with_storage(storage: Storage) -> Self {
@@ -388,6 +402,7 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            proof_market: crate::settlement::ProofMarketState::new(),
         };
         if let Err(e) = state.load_from_storage() {
             tracing::error!("Could not load account state: {e}");
@@ -445,6 +460,7 @@ impl AccountState {
             invalid_votes: crate::registry::InvalidVoteTracker::new(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            proof_market: crate::settlement::ProofMarketState::new(),
         }
     }
 
@@ -521,6 +537,12 @@ impl AccountState {
             invalid_votes: snapshot.invalid_votes.clone().unwrap_or_default(),
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
+            // An assigned task names the prover that took it and the epoch it
+            // was taken in. A restart that dropped that would release every
+            // prover from work it had already committed to, so this is
+            // restored rather than started fresh; a snapshot from before the
+            // field existed restores as empty, which is what it was.
+            proof_market: snapshot.proof_market.clone().unwrap_or_default(),
         }
     }
 
@@ -840,7 +862,7 @@ impl AccountState {
         // Jailed validator remains in `self.validators` - that map holds
         // `jail_until` - while `registry.is_active` has already gone false.
         // Counting it absent accrues downtime for blocks it is barred from
-        // Signing (Cosmos SDK #1867). `Blockchain::maybe_observe_liveness_on_epoch_close`
+        // Signing (Cosmos SDK #1867). `Blockchain::apply_epoch_close_liveness`
         // Has always filtered this way; the other two paths did not.
         let expected: Vec<Address> = self
             .validators
@@ -1379,6 +1401,30 @@ impl AccountState {
 
         self.process_unbonding();
 
+        // Close the proof market's epoch: expire tasks past their deadline,
+        // drop receipts that have been paid, and hold both vectors under
+        // their ceiling.
+        //
+        // All three functions existed and none of them ran. `enforce_max_sizes`
+        // matters most: `add_task` bounds what arrives in a single call and
+        // says nothing about accumulation, so on a long-running node the only
+        // limit on `active_tasks` was how many tasks were ever opened.
+        //
+        // Swept before the timed burn below so an epoch that both expires
+        // tasks and burns reserve leaves the market consistent with the root
+        // taken at the end of this function.
+        let (expired, receipts_pruned) = self.proof_market.close_epoch(self.epoch_index);
+        if expired > 0 || receipts_pruned > 0 {
+            tracing::info!(
+                epoch = self.epoch_index,
+                expired,
+                receipts_pruned,
+                active_tasks = self.proof_market.active_tasks.len(),
+                pending_receipts = self.proof_market.pending_receipts.len(),
+                "Proof market epoch close"
+            );
+        }
+
         // Process relayer escrow releases
 
         // Ayaz economic decision (2026-07-25): epoch transitions never mint
@@ -1498,6 +1544,23 @@ impl AccountState {
             ProposalType::DewhitelistVerifier { address } => {
                 self.ai_registry.dewhitelist_verifier(address);
                 tracing::info!("Executing Governance: Dewhitelisted verifier {address}");
+            }
+            ProposalType::VerifyHubApp { app_id } => {
+                // The badge `AppRecord.verified` was hashed into the state
+                // root from the start and no path could set it, so it was
+                // permanently false. This is that path, and it is a vote
+                // rather than a transaction because the point of `verified`
+                // is that somebody other than the developer stood behind it.
+                match self.budlumxyz.mark_verified_by_proposal(*app_id) {
+                    Ok(()) => {
+                        tracing::info!("Executing Governance: hub app {app_id} verified");
+                    }
+                    Err(e) => tracing::warn!(
+                        "Rejecting VerifyHubApp for app {app_id}: {e}. A proposal may \
+                         pass for an app that is later removed; the vote does not \
+                         create the record"
+                    ),
+                }
             }
             ProposalType::SetEncryptionPolicy(policy) => {
                 match self.marketplace.set_encryption_policy(policy.clone()) {
@@ -2057,6 +2120,12 @@ impl AccountState {
             final_hasher.update(b"storage_v1");
             final_hasher.update(self.storage_registry.root());
         }
+        // Gated on non-empty like its neighbours, so a chain that has never
+        // opened a proof task sees no root change from this field existing.
+        if !self.proof_market.is_empty() {
+            final_hasher.update(b"proof_market_v1");
+            final_hasher.update(self.proof_market.root());
+        }
         if !self.bns_registry.is_empty() {
             final_hasher.update(b"bns_v1");
             final_hasher.update(self.bns_registry.root());
@@ -2513,6 +2582,59 @@ mod tests {
     }
 
     /// Out-of-range base fee proposals are rejected.
+    /// The `verified` badge must have exactly one writer.
+    ///
+    /// Two paths could reach it: `AccountState::execute_proposal`, which
+    /// reads the `ProposalType` directly, and the executor's
+    /// `GovernanceAction` loop. Only the first is live, because
+    /// `execute_passed_proposals` drops `ProposalType::VerifyHubApp` into
+    /// its `_ => None` arm and never emits the action.
+    ///
+    /// That is worth pinning rather than leaving to inspection. If someone
+    /// later adds the missing arm to `execute_passed_proposals` so the
+    /// action does get emitted, the same vote would be applied twice: once
+    /// here and once in the executor. This test fails at that moment, which
+    /// is the point at which the second writer has to be removed.
+    #[test]
+    fn a_passed_hub_verification_does_not_also_become_a_governance_action() {
+        use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
+        let mut state = AccountState::new();
+        let dev = test_addr_from_byte(1u8);
+        let app_id = state
+            .budlumxyz
+            .register_app(
+                "App".into(),
+                dev,
+                crate::budlumxyz::types::AppCategory::DeFi,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
+
+        let mut proposal = Proposal::new(1, dev, ProposalType::VerifyHubApp { app_id }, 0, 10);
+        state.execute_proposal(&proposal);
+        assert!(
+            state.budlumxyz.apps[&app_id].verified,
+            "execute_proposal is the live writer of the badge"
+        );
+
+        // The other path must stay silent. Marking the proposal Passed and
+        // draining the queue must not yield a VerifyHubApp action, because
+        // applying it would be the second write of one vote.
+        proposal.status = ProposalStatus::Passed;
+        state.governance.proposals.push(proposal);
+        let actions = state.governance.execute_passed_proposals();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::core::governance::GovernanceAction::VerifyHubApp { .. }
+            )),
+            "the badge already has a writer; emitting the action here would \
+             apply the same vote twice"
+        );
+    }
+
     #[test]
     fn change_base_fee_bounds() {
         use crate::core::governance::{Proposal, ProposalType};
@@ -2648,14 +2770,17 @@ mod tests {
         let dev = test_addr_from_byte(9u8);
         state.add_balance(&dev, 1);
         let root_before = state.calculate_state_root();
-        let app_id = state.budlumxyz.register_app(
-            "HubApp".into(),
-            dev,
-            AppCategory::Infrastructure,
-            "https://example.bud".into(),
-            None,
-            1,
-        );
+        let app_id = state
+            .budlumxyz
+            .register_app(
+                "HubApp".into(),
+                dev,
+                AppCategory::Infrastructure,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         let root_after_register = state.calculate_state_root();
         assert_ne!(root_before, root_after_register);
 
@@ -2707,7 +2832,10 @@ mod tests {
         assert_ne!(root_before, root_after_bns);
 
         let cid = crate::storage::content_id::ContentId([0x11; 32]);
-        state.nft_registry.mint(owner, cid, 1, Some("alice".into()));
+        state
+            .nft_registry
+            .mint(owner, cid, 1, Some("alice".into()))
+            .expect("a fresh registry has no id to collide with");
         let root_after_nft = state.calculate_state_root();
         assert_ne!(root_after_bns, root_after_nft);
     }
@@ -2753,14 +2881,17 @@ mod tests {
     fn non_account_state_changes_root_even_when_accounts_empty() {
         let mut state = AccountState::new();
         let root_before = state.calculate_state_root();
-        state.budlumxyz.register_app(
-            "HeadlessState".into(),
-            test_addr_from_byte(8u8),
-            crate::budlumxyz::types::AppCategory::Other,
-            "https://headless.example".into(),
-            None,
-            1,
-        );
+        state
+            .budlumxyz
+            .register_app(
+                "HeadlessState".into(),
+                test_addr_from_byte(8u8),
+                crate::budlumxyz::types::AppCategory::Other,
+                "https://headless.example".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         let root_after = state.calculate_state_root();
         assert_ne!(root_before, root_after);
     }

@@ -127,6 +127,10 @@ jobs:
         run: bash ./scripts/check-guards-are-reachable.sh --self-test
       - name: Ulasilamayan kapi sayisi artmadi
         run: bash ./scripts/check-guards-are-reachable.sh
+      - name: Kendi kaynagini okuyan test kanaryasi
+        run: bash ./scripts/check-source-reading-tests-are-narrowed.sh --self-test
+      - name: Kendi kaynagini okuyan testler daraltilmis
+        run: bash ./scripts/check-source-reading-tests-are-narrowed.sh
       - name: Cakisma isareti kanaryasi
         run: bash ./scripts/check-no-conflict-markers-are-committed.sh --self-test
       - name: Cakisma isareti agacta yok

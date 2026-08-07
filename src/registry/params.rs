@@ -12,6 +12,22 @@ use crate::chain::fee_market::PPM_DENOMINATOR;
 use crate::core::chain_config::FIXED_POINT_SCALE;
 use serde::{Deserialize, Serialize};
 
+/// How many epochs a liveness offender stays jailed.
+///
+/// A liveness offence is absence, and absence is what a healthy validator
+/// looks like during a partition, a disk failure or a datacentre reboot.
+/// Making that permanent punishes an outage the way it punishes abandonment,
+/// so the penalty carries a term: stake is cut once, the validator is barred
+/// for this many epochs, and `AccountState::advance_epoch` then releases it.
+///
+/// A constant rather than a `RegistryParams` field on purpose. That struct is
+/// serialised into the state root, so adding to it changes the shape every
+/// stored snapshot was written with, which is a migration rather than a fix.
+/// The number was already hardcoded in `AccountState::slash_validator`; this
+/// gives the two slashing sites one place to read it from without touching a
+/// consensus-critical layout.
+pub const LIVENESS_JAIL_EPOCHS: u64 = 7;
+
 /// Economic / timing parameters that gate participation and slashing.
 ///
 /// `*_slash_ratio_fixed` values are `FIXED_POINT_SCALE`-scaled fractions in
@@ -340,10 +356,17 @@ mod tests {
         // 15 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
         //
         // The count moved from 12 when the three proportional rates were
-        // added. That is the state-format change the `# Adding a field` note
-        // describes, made deliberately: snapshots written before them cannot
-        // be loaded afterwards and the state root moves. Acceptable
-        // pre-mainnet, where the chain is reset between releases.
+        // added: a state-format change the `# Adding a field` note describes,
+        // made deliberately, since snapshots written before it cannot be
+        // loaded afterwards and the state root moves.
+        //
+        // This pin earned its place on the jail-term change. A
+        // `liveness_jail_epochs` field was added here to give a liveness
+        // slash an expiry; the gate answered that it breaks snapshot
+        // compatibility for a number that never varies per network. The term
+        // became `LIVENESS_JAIL_EPOCHS`, a constant, and this struct did not
+        // move. The gate turned a refactor into a decision, which is the
+        // whole reason it counts bytes by hand.
         //
         // The number is written out rather than derived from the struct,
         // which is the whole point. A test computing the expected length from
@@ -370,8 +393,8 @@ mod tests {
         assert_ne!(
             encoded.len(),
             16 * 8 + 1,
-            "a sixteenth u64 field would have to update the pin above, which \
-             is the signal that snapshot compatibility broke"
+            "a sixteenth u64 field would have to update the pin above, \
+             which is the signal that snapshot compatibility broke"
         );
         assert_ne!(
             encoded.len(),

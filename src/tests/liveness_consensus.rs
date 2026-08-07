@@ -2,7 +2,7 @@
 //!
 //! These tests drive real block production through `Blockchain::produce_block`
 //! (which commits blocks and, at epoch boundaries, runs
-//! `maybe_observe_liveness_on_epoch_close`) - NOT the isolated
+//! `apply_epoch_close_liveness`) - NOT the isolated
 //! `state.record_liveness_epoch` call.
 //!
 //! Decision 2.3 = OBSERVE MODE: crossing the miss threshold is logged/reported
@@ -346,8 +346,8 @@ fn a_slashed_validator_stops_accruing_downtime() {
 
 /// All three liveness call sites must agree on who is expected to sign.
 ///
-/// `maybe_observe_liveness_on_epoch_close` filtered on `registry.is_active`
-/// from the start; `Blockchain::record_liveness_epoch` and
+/// `apply_epoch_close_liveness` filtered on `registry.is_active` from the
+/// start; `Blockchain::record_liveness_epoch` and
 /// `AccountState::record_liveness_epoch` did not. One filter in three places is
 /// how the two views drift, so this pins that they are the same set.
 #[test]
@@ -370,7 +370,7 @@ fn every_liveness_path_expects_the_same_validators() {
     let only_producer: HashSet<Address> = std::iter::once(producer).collect();
 
     let before = bc.state.liveness.missed_count(&offender);
-    bc.maybe_observe_liveness_on_epoch_close(10, &only_producer);
+    bc.observe_liveness_epoch(10, &only_producer);
     let after_observe = bc.state.liveness.missed_count(&offender);
     bc.record_liveness_epoch(11, &only_producer);
     let after_record = bc.state.liveness.missed_count(&offender);
@@ -379,5 +379,71 @@ fn every_liveness_path_expects_the_same_validators() {
         (before, after_observe, after_record),
         (before, before, before),
         "both entry points must exclude an inactive member identically"
+    );
+}
+
+/// A liveness slash must carry a term the release loop can see.
+///
+/// Two functions used to apply this slash and they disagreed. The live one,
+/// `apply_epoch_close_liveness`, set `slashed` and cleared `active` but never
+/// set `jailed`. The unreachable hook set all three. Only the second shape is
+/// releasable: `AccountState::advance_epoch` frees a validator by testing
+/// `jailed && jail_until <= epoch_index`, so an offender punished without the
+/// flag was invisible to that loop and stayed out permanently.
+///
+/// That made the only liveness slashing that actually ran a permanent ban,
+/// for an offence whose evidence is absence. Absence is also what a
+/// partition, a failed disk or a datacentre reboot looks like.
+///
+/// The hook is gone and the live path now writes the term. This pins the
+/// shape rather than the call site, so it keeps holding if the slash moves.
+#[test]
+fn a_liveness_slash_is_releasable() {
+    use std::collections::HashSet;
+
+    let producer = addr(1);
+    let offender = addr(2);
+    let mut bc = chain_with_validators(producer, offender);
+    bc.state.registry.set_params(RegistryParams {
+        // One missed epoch is enough to report. Zero would disable reporting
+        // entirely: `record_epoch` guards on `threshold > 0`, so a zero
+        // threshold produces no reports and nothing to slash, which reads as
+        // "slashing is off" rather than "slash on the first miss".
+        liveness_max_missed_epochs: 1,
+        liveness_slashing_enabled: true,
+        ..RegistryParams::default()
+    });
+
+    // Record one epoch in which the offender did not participate. This is the
+    // same `record_epoch` + `slash_from_report` sequence the epoch-close path
+    // runs; driving whole blocks would also exercise proposer selection and
+    // reward accounting, which is not what is under test here.
+    let participated: HashSet<Address> = std::iter::once(producer).collect();
+    bc.record_liveness_epoch(1, &participated);
+
+    let epoch = bc.state.epoch_index;
+    let v = bc
+        .state
+        .get_validator(&offender)
+        .expect("a slashed validator stays in the map; that is where the term lives");
+
+    assert!(
+        v.slashed,
+        "the absentee is slashed once liveness slashing is enabled"
+    );
+    assert!(
+        v.jailed,
+        "without this flag advance_epoch never considers the validator for \
+         release, and a penalty for being absent becomes permanent"
+    );
+    assert_eq!(
+        v.jail_until,
+        epoch.saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS),
+        "the term comes from LIVENESS_JAIL_EPOCHS, so both slashing sites \
+         read one number instead of inventing their own"
+    );
+    assert!(
+        v.jail_until > epoch,
+        "the term must end in the future, or the punishment is decorative"
     );
 }

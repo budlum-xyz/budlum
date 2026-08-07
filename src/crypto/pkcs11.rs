@@ -718,6 +718,57 @@ pub fn yubihsm2_default_capabilities() -> Vec<Pkcs11VendorCapability> {
     ]
 }
 
+/// Decide whether a configured mechanism id may sign on mainnet.
+///
+/// Two functions existed for this and neither had a caller.
+/// `validate_vendor_mechanism` matched an id against a capability table, and
+/// `Pkcs11VendorCapability::check_mainnet_policy` refused a capability whose
+/// `mainnet_allowed` was false. `main.rs` checked only that the id parsed and
+/// sat at or above `CKM_VENDOR_DEFINED`, so a mechanism the table explicitly
+/// marks as not-for-mainnet was accepted, and so was one outside the vendor's
+/// own documented range: `validate_mechanism_id` refuses a YubiHSM2 id above
+/// `0x8000_FFFF` and nothing asked it.
+///
+/// The rule, as decided: an id the table knows is governed by the table's
+/// answer. An id the table does not know is admitted as `Generic` and put
+/// through the same policy, rather than refused outright, because a hard
+/// allow-list would exclude every HSM vendor nobody has enumerated yet, and
+/// that is a reason to add an entry, not a reason to refuse the operator's
+/// hardware.
+///
+/// What the fallback does not do is weaken the floor. A `Generic` capability
+/// still has to clear `CKM_VENDOR_DEFINED`, which is the one bound that holds
+/// for any PKCS#11 token: below it, the id belongs to a standard mechanism
+/// that means something else entirely, and asking a token to BLS-sign with
+/// the id of, say, `CKM_SHA256` is undefined behaviour in the firmware.
+///
+/// # Errors
+///
+/// The reason the mechanism may not sign here, naming the id.
+pub fn check_mechanism_admissible_for_mainnet(
+    mechanism_id: u64,
+    capabilities: &[Pkcs11VendorCapability],
+) -> Result<(), String> {
+    match validate_vendor_mechanism(mechanism_id, capabilities) {
+        Ok(known) => known.check_mainnet_policy(),
+        Err(_) => {
+            // Unknown to the table. Admitted as Generic and held to the same
+            // policy rather than waved through: `validate_mechanism_id` still
+            // applies the `CKM_VENDOR_DEFINED` floor.
+            let assumed = Pkcs11VendorCapability {
+                vendor: Pkcs11Vendor::Generic,
+                mechanism_id,
+                name: format!("unlisted vendor mechanism 0x{mechanism_id:08X}"),
+                // An unlisted mechanism is not thereby forbidden; it is
+                // unaudited. Saying otherwise here would make the fallback a
+                // refusal wearing a different name.
+                mainnet_allowed: true,
+            };
+            assumed.check_mainnet_policy()
+        }
+    }
+}
+
 /// Validate a mechanism ID against a set of known capabilities.
 /// Returns the matching capability or an error if unknown/invalid.
 pub fn validate_vendor_mechanism(
@@ -797,5 +848,84 @@ mod vendor_tests {
     fn reject_non_vendor_mechanism() {
         let caps = yubihsm2_default_capabilities();
         assert!(validate_vendor_mechanism(0x0001, &caps).is_err());
+    }
+
+    /// A mechanism the table forbids on mainnet is refused.
+    ///
+    /// `check_mainnet_policy` was written for exactly this and had no caller.
+    /// `main.rs` checked that the id parsed and cleared `CKM_VENDOR_DEFINED`,
+    /// so a capability the table explicitly marks `mainnet_allowed: false`
+    /// was accepted by a mainnet validator.
+    #[test]
+    fn a_mechanism_marked_not_for_mainnet_is_refused() {
+        let caps = vec![Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: YUBIHSM2_CKM_BLS_SIGN,
+            name: "deprecated-bls".into(),
+            mainnet_allowed: false,
+        }];
+
+        let err = check_mechanism_admissible_for_mainnet(YUBIHSM2_CKM_BLS_SIGN, &caps)
+            .expect_err("the table says this one may not sign on mainnet");
+        assert!(
+            err.contains("not allowed for mainnet"),
+            "the refusal must say the table forbade it, got: {err}"
+        );
+    }
+
+    /// A mechanism outside the vendor's documented range is refused.
+    ///
+    /// `validate_mechanism_id` refuses a YubiHSM2 id above `0x8000_FFFF` and
+    /// nothing asked it. Above that range the id is not a YubiHSM2 mechanism
+    /// at all, so what the token does with it is undefined.
+    #[test]
+    fn a_mechanism_outside_the_vendor_range_is_refused() {
+        let caps = vec![Pkcs11VendorCapability {
+            vendor: Pkcs11Vendor::YubiHsm2,
+            mechanism_id: 0x8001_0000,
+            name: "out-of-range".into(),
+            mainnet_allowed: true,
+        }];
+
+        assert!(
+            check_mechanism_admissible_for_mainnet(0x8001_0000, &caps).is_err(),
+            "an id above the vendor's own documented range must be refused \
+             even when the entry says mainnet is allowed"
+        );
+    }
+
+    /// An id the table does not list is admitted, and still held to the floor.
+    ///
+    /// The decision recorded for this: a hard allow-list would exclude every
+    /// HSM vendor nobody has enumerated yet, which is a reason to add an
+    /// entry rather than to refuse the operator's hardware. What the fallback
+    /// must not do is drop the one bound that holds for any PKCS#11 token.
+    #[test]
+    fn an_unlisted_mechanism_is_admitted_but_still_floored() {
+        let caps = yubihsm2_default_capabilities();
+
+        // Unlisted and above CKM_VENDOR_DEFINED: admitted as Generic.
+        check_mechanism_admissible_for_mainnet(0x8000_9999, &caps)
+            .expect("an unlisted vendor-defined mechanism is unaudited, not forbidden");
+
+        // Unlisted and below the floor: refused. Below `CKM_VENDOR_DEFINED`
+        // the id names a standard mechanism that means something else, and
+        // asking a token to BLS-sign with it is undefined in the firmware.
+        let err = check_mechanism_admissible_for_mainnet(0x1234, &caps)
+            .expect_err("an id below CKM_VENDOR_DEFINED is not a vendor mechanism");
+        assert!(
+            err.contains("CKM_VENDOR_DEFINED"),
+            "the refusal must name the floor it failed, got: {err}"
+        );
+    }
+
+    /// The known-good pair still passes, or this is a ban on HSMs.
+    #[test]
+    fn the_documented_yubihsm2_mechanisms_are_admissible() {
+        let caps = yubihsm2_default_capabilities();
+        for id in [YUBIHSM2_CKM_BLS_SIGN, YUBIHSM2_CKM_PQ_SIGN] {
+            check_mechanism_admissible_for_mainnet(id, &caps)
+                .expect("the vendor's own documented signing mechanisms must pass");
+        }
     }
 }

@@ -5,7 +5,9 @@
 //! İki taraf:
 //!
 //! - **On-chain (verify_receipt_proof):** Budlum konsensüsünde deterministik.
-//!   F10.1 (MPT) + F10.2 (receipt/header/verify) + F10.3 (sync-committee) kullanır.
+//!   F10.1 (MPT) + F10.2 (receipt/header/verify) kullanır. Sync-committee
+//!   (F10.3) yalnızca `EvmDepositProof.sync_attestation` doluysa çalışır;
+//!   bu satır uzun süre "kullanır" diyordu ve hiçbir yol çağırmıyordu.
 //!   Network'süz - relayer proof üretir, Budlum verify eder.
 //!
 //! - **Off-chain (generate/submit/wait):** Relayer binary'sinde (`src/bin/
@@ -49,6 +51,12 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 /// (`generate_receipt_proof`/`submit_transaction`/`wait_for_confirmation`)
 /// Relayer binary'sinde Ethereum RPC'ye bağlanır; bu impl'de offline-test
 /// Modu (StubAdapter deseni) - production RPC ayrı.
+///
+/// `Debug` so a caller can `expect` on a `Result` carrying one. All three
+/// fields are public configuration already: a contract address, an event
+/// topic and a confirmation count. There is no key material here to leak
+/// into a log line.
+#[derive(Debug)]
 pub struct EvmChainAdapter {
     /// Ethereum bridge kontrat adresi (deposit event emitter).
     pub bridge_address: Vec<u8>,
@@ -144,13 +152,16 @@ impl ChainAdapter for EvmChainAdapter {
     /// ON-CHAIN (Budlum konsensüsü): EVM receipt proof doğrula.
     ///
     /// Deterministik + network'süz. F10.1 (MPT) + F10.2 (receipt/header) +
-    /// F10.3 (sync-committee opsiyonel) kullanır. Relayer proof üretir.
+    /// Relayer proof üretir. Sync-committee bu trait yolunda hiç çalışmaz:
+    /// bu metot yalnızca Merkle proof + leaf bağı kontrol eder, tam paket
+    /// (`EvmDepositProof`) `verify_deposit`'e gider.
     ///
     /// **Wire format (sonrası):** `proof.leaf` =
     /// `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`;
     /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = tx_hash.
-    /// Header chain + sync-committee proof caller (`verify_evm_receipt`)
-    /// Tarafından sağlanır.
+    /// Header chain + sync-committee doğrulaması bu metotta DEĞİL,
+    /// `verify_evm_receipt` içindedir ve oraya yalnızca `verify_deposit`
+    /// gider.
     ///
     /// **** İki görevlı doğrulama -
     /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
@@ -483,10 +494,15 @@ mod tests {
     /// `verify_deposit`, and until this test existed nothing referenced it
     /// outside its own definition - not even a test.
     ///
-    /// That is survivable today only because the adapter registry is empty in
-    /// production (`with_adapters` is never called, so every chain answers
-    /// `UnsupportedChain`) - the outbound path refuses rather than accepting a
-    /// weakly-verified deposit. `relayer_worker_locks.rs` pins that.
+    /// That was survivable while the adapter registry was empty in production,
+    /// because every chain answered `UnsupportedChain` and the outbound path
+    /// refused rather than accepting a weakly-verified deposit. It is no
+    /// longer empty by construction: `--evm-bridge-address` and
+    /// `--evm-deposit-topic0` let an operator register this adapter, and then
+    /// the trait path is what runs. The gap below is now reachable on a node
+    /// whose operator configured the bridge, which is exactly the ordering
+    /// this test warned about. `relayer_worker_locks.rs` pins the
+    /// configuration half.
     ///
     /// The danger is the order of events when someone wires the registry up:
     /// the code compiles, the tests pass, the comment says the safe path
@@ -505,13 +521,30 @@ mod tests {
         let adapter_src = include_str!("adapter.rs");
         let worker_src = include_str!("../../relayer/worker.rs");
 
+        // Measure the production half only.
+        //
+        // `include_str!` reads this test module too, and both strings below
+        // appear once in production and once in the assertion that searches
+        // for them. Searched whole-file, deleting `verify_deposit` outright
+        // would leave these assertions passing on the strength of their own
+        // text: the pin would survive the very change it exists to catch.
+        let adapter_prod = adapter_src
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("this file keeps its tests behind #[cfg(test)]");
+        assert!(
+            adapter_prod.len() < adapter_src.len(),
+            "the #[cfg(test)] split matched nothing, so the assertions below \
+             are reading their own source again"
+        );
+
         // `verify_deposit` exists and still wraps the full orchestrator.
         assert!(
-            adapter_src.contains("pub fn verify_deposit("),
+            adapter_prod.contains("pub fn verify_deposit("),
             "verify_deposit was removed or renamed; update this pin"
         );
         assert!(
-            adapter_src.contains("verify_evm_receipt(proof)?"),
+            adapter_prod.contains("verify_evm_receipt(proof)?"),
             "verify_deposit no longer runs the full verify_evm_receipt \
              orchestrator - the 'real safe path' claim in this file's header \
              needs rewriting"

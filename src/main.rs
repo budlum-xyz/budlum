@@ -532,17 +532,36 @@ async fn main() {
                 );
                 std::process::exit(1);
             };
-            if let Err(e) =
-                budlum_core::crypto::pkcs11::Pkcs11Signer::validate_vendor_mechanism_id(bls_raw)
-            {
-                eprintln!("CRITICAL: invalid PKCS#11 BLS mechanism id: {e}");
-                std::process::exit(1);
-            }
-            if let Err(e) =
-                budlum_core::crypto::pkcs11::Pkcs11Signer::validate_vendor_mechanism_id(pq_raw)
-            {
-                eprintln!("CRITICAL: invalid PKCS#11 PQ mechanism id: {e}");
-                std::process::exit(1);
+            // Parse and floor-check, then ask the vendor policy.
+            //
+            // `validate_vendor_mechanism_id` only proves the string is a
+            // number at or above `CKM_VENDOR_DEFINED`. That leaves two ways
+            // to configure a mainnet validator wrongly and be told nothing:
+            // a mechanism the capability table marks `mainnet_allowed:
+            // false`, and one outside the vendor's own documented range,
+            // which `validate_mechanism_id` refuses for YubiHSM2 above
+            // `0x8000_FFFF`. Both checks existed; neither had a caller.
+            let mechanisms = [("BLS", bls_raw), ("PQ", pq_raw)];
+            let known = budlum_core::crypto::pkcs11::yubihsm2_default_capabilities();
+            for (which, raw) in mechanisms {
+                let id =
+                    match budlum_core::crypto::pkcs11::Pkcs11Signer::validate_vendor_mechanism_id(
+                        raw,
+                    ) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            eprintln!("CRITICAL: invalid PKCS#11 {which} mechanism id: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                if let Err(e) =
+                    budlum_core::crypto::pkcs11::check_mechanism_admissible_for_mainnet(id, &known)
+                {
+                    eprintln!(
+                        "CRITICAL: PKCS#11 {which} mechanism is not admissible for mainnet: {e}"
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         let signer_result = if strict_vendor_native {
@@ -1251,8 +1270,57 @@ async fn main() {
         // Existed and was never called, which left the fix inert in
         // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
-        let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
+        let mut relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
             .with_cursor_path(Some(cursor_path));
+
+        // Bind the outbound adapters this node was configured for.
+        //
+        // `with_adapters` existed and nothing called it, so the registry was
+        // empty on every deployed node and `build_verified_result` answered
+        // `UnsupportedChain` for all eight chains. That is the safe direction
+        // to be wrong in, a refusal rather than a forged result, but it meant
+        // outbound relay was off while the adapter set suggested otherwise.
+        //
+        // Still off unless the operator supplies a bridge address and topic0,
+        // because there is nothing safe to default them to. What changed is
+        // that saying so is now possible, and saying it wrong is refused here
+        // rather than discovered as a mint against a transaction that never
+        // happened.
+        match config.evm_adapter() {
+            Ok(Some(adapter)) => {
+                let mut registry = budlum_core::cross_domain::chain_adapter::AdapterRegistry::new();
+                match registry.register(Box::new(adapter)) {
+                    Ok(()) => {
+                        println!(
+                            "Relayer: EVM adapter registered (bridge {}, {} confirmations)",
+                            config.evm_bridge_address.as_deref().unwrap_or("?"),
+                            config.evm_confirmations.unwrap_or(
+                                budlum_core::cross_domain::evm::header::DEFAULT_CONFIRMATIONS
+                            )
+                        );
+                        relayer = relayer.with_adapters(Arc::new(registry));
+                    }
+                    Err(e) => {
+                        eprintln!("CRITICAL: the EVM adapter was refused by the registry: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::info!(
+                    "Relayer: no outbound chain adapter configured; the worker will observe \
+                     relay requests and refuse to submit results. Set --evm-bridge-address \
+                     and --evm-deposit-topic0 to enable the Ethereum bridge."
+                );
+            }
+            Err(e) => {
+                // A half-configured bridge is worse than none: the registry
+                // would advertise Ethereum as supported.
+                eprintln!("CRITICAL: outbound bridge configuration is invalid: {e}");
+                std::process::exit(1);
+            }
+        }
+
         tokio::spawn(async move {
             relayer.run().await;
         });
