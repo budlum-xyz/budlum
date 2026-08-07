@@ -5479,6 +5479,33 @@ impl Blockchain {
                 .expire_deal(deal_id, current_epoch)
             {
                 Ok(bond) => bond,
+                Err(crate::domain::storage_deal::StorageError::ExpiryWouldStrandContent {
+                    ..
+                }) => {
+                    // The term is over and the operator is owed its bond, but
+                    // letting go here would take the object below the replica
+                    // count a decode needs. The deal stays Active and the
+                    // ticket below still opens, so a replacement can be found
+                    // and this sweep can settle the bond on a later pass.
+                    //
+                    // Held rather than refused outright: the operator is not
+                    // at fault and is not being punished, it is being asked to
+                    // hold until someone takes over. Nothing here extends the
+                    // term, so `deals_in_renewal_window` keeps offering the
+                    // renewal and the reallocation path keeps looking.
+                    if let Some(ticket_id) = self
+                        .state
+                        .storage_registry
+                        .open_expiry_reallocation(deal_id, current_epoch)
+                    {
+                        tracing::warn!(
+                            "B.U.D. deal {deal_id} is past its term but is one of the last \
+                             carriers of its object; held Active, reallocation ticket \
+                             {ticket_id} opened at epoch {current_epoch}"
+                        );
+                    }
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
                     continue;
