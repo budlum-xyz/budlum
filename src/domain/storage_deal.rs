@@ -628,8 +628,8 @@ pub enum StorageError {
     /// Caller referenced a deal that is not `Active` (e.g. tried to
     /// Answer a challenge on a `Slashed` deal).
     DealNotActive(u64),
-    /// Expiring this deal would drop the shard below the replica count its
-    /// object needs to be readable.
+    /// Expiring this deal would take its object below the shard count a
+    /// decode needs.
     ///
     /// A term ending is not a reason to lose an object. The slash path takes
     /// a bond from someone who broke a promise; the expiry path takes nothing
@@ -637,13 +637,19 @@ pub enum StorageError {
     /// unreadable. The deal stays `Active`, unpaid, until a replacement
     /// carrier accepts the reallocation ticket the sweep already opened.
     ///
-    /// Measured on the chosen scheme (n=10, k=7, p=0.99): losing three
-    /// carriers takes availability from 5.70 nines to 1.17, and losing a
-    /// fourth means the object cannot be reconstructed at all.
+    /// Only raised when this deal is the last active replica of its shard
+    /// *and* the object is already down to `k` live shards. A shard with a
+    /// spare replica may always be let go, because the shard survives.
+    ///
+    /// Measured on the chosen scheme (n=10, k=7, p=0.99): losing three shards
+    /// takes availability from 5.70 nines to 1.17, and losing a fourth means
+    /// the object cannot be reconstructed at all.
     ExpiryWouldStrandContent {
         deal_id: u64,
         manifest_id: ContentId,
         shard_id: ContentId,
+        /// Live shards the object would be left with, not carriers of this
+        /// one shard: the decode threshold is counted in distinct shards.
         remaining_carriers: u32,
         floor: u32,
     },
@@ -783,9 +789,9 @@ impl std::fmt::Display for StorageError {
                 floor,
             } => write!(
                 f,
-                "expiring deal {deal_id} would leave shard {shard_id} of manifest \
-                 {manifest_id} with {remaining_carriers} carriers, below the {floor} \
-                 its object needs to stay readable"
+                "expiring deal {deal_id} would drop the last replica of shard {shard_id}, \
+                 leaving manifest {manifest_id} with {remaining_carriers} live shards, \
+                 below the {floor} a decode needs"
             ),
             Self::NotTheOperator { expected, provided } => {
                 write!(
@@ -2215,20 +2221,26 @@ impl StorageRegistry {
         if deal.status != DealStatus::Active {
             return Ok(0);
         }
-        // A term ending must not be a way to lose an object. Count what would
-        // still be holding this manifest afterwards, and refuse if the answer
-        // is below the floor.
+        // A term ending must not be a way to lose an object. The question is
+        // not how many carriers the manifest has in total: shards are not
+        // interchangeable, and a decode needs `k` *distinct* shards live. So
+        // ask what this deal's own shard would have left, and only refuse
+        // when letting go would take that shard to zero while the object is
+        // already down to the shards it cannot decode without.
         let (manifest_id, shard_id) = (deal.manifest_id, deal.shard_id);
-        let remaining = self.active_carriers_for_manifest(manifest_id, Some(deal_id));
-        let floor = self.permanence_floor(manifest_id);
-        if remaining < floor {
-            return Err(StorageError::ExpiryWouldStrandContent {
-                deal_id,
-                manifest_id,
-                shard_id,
-                remaining_carriers: remaining,
-                floor,
-            });
+        let shard_replicas = self.active_replica_count(&manifest_id, &shard_id);
+        if shard_replicas <= 1 {
+            let live = self.live_shard_count(&manifest_id);
+            let floor = self.permanence_floor(manifest_id);
+            if live <= floor {
+                return Err(StorageError::ExpiryWouldStrandContent {
+                    deal_id,
+                    manifest_id,
+                    shard_id,
+                    remaining_carriers: live.saturating_sub(1),
+                    floor,
+                });
+            }
         }
         let deal = self
             .deals
@@ -2239,31 +2251,8 @@ impl StorageRegistry {
         Ok(bond)
     }
 
-    /// How many distinct operators still hold an active deal for a manifest.
-    ///
-    /// `excluding` drops one deal from the count, so a caller can ask what
-    /// would remain if that deal ended. Counted by operator rather than by
-    /// deal: two deals held by one operator are one machine, and the failure
-    /// this floor exists to prevent is machines leaving.
-    pub fn active_carriers_for_manifest(
-        &self,
-        manifest_id: ContentId,
-        excluding: Option<u64>,
-    ) -> u32 {
-        let mut seen: BTreeMap<Address, ()> = BTreeMap::new();
-        for deal in self.deals.values() {
-            if deal.manifest_id != manifest_id || !deal.is_active() {
-                continue;
-            }
-            if Some(deal.deal_id) == excluding {
-                continue;
-            }
-            seen.insert(deal.operator, ());
-        }
-        u32::try_from(seen.len()).unwrap_or(u32::MAX)
-    }
-
-    /// The fewest carriers a manifest may fall to before an expiry is refused.
+    /// The fewest live shards a manifest may fall to before an expiry is
+    /// refused.
     ///
     /// Reads the manifest's own erasure parameters rather than a constant:
     /// the floor is the number of shards a decode needs, so an object coded
@@ -3170,11 +3159,11 @@ mod tests {
             reg.open_challenge(9999, 0, 1, 1, 2, opener(), 100),
             Err(StorageError::UnknownDeal(9999))
         ));
-        // Open one, then expire it, then try to challenge. A second carrier
+        // Open one, then expire it, then try to challenge. A second replica
         // is opened first so the expiry is about the deal's own status rather
         // than about stranding the object.
         let (deal_id, _) = open_one(&mut reg, &m);
-        open_second_carrier(&mut reg, &m);
+        open_second_replica(&mut reg, &m);
         reg.expire_deal(deal_id, 1000).unwrap();
         assert!(matches!(
             reg.open_challenge(deal_id, 0, 1, 1, 2, opener(), 100),
@@ -3583,13 +3572,13 @@ mod tests {
         assert!(matches!(err, StorageError::ChallengeAlreadyResolved(_)));
     }
 
-    /// Open a second deal on the same manifest under a different operator, so
-    /// the manifest has a carrier to spare.
-    fn open_second_carrier(reg: &mut StorageRegistry, m: &ContentManifest) -> u64 {
+    /// Open a second replica of the *same* shard under a different operator,
+    /// so letting the first go leaves the shard live.
+    fn open_second_replica(reg: &mut StorageRegistry, m: &ContentManifest) -> u64 {
         reg.open_deal(
             42,
             m,
-            m.shards[1].shard_id,
+            m.shards[0].shard_id,
             replacement_operator(),
             1,
             100,
@@ -3607,10 +3596,10 @@ mod tests {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
-        // A second carrier, so letting the first go does not strand the
-        // object. Without it this expiry is refused, which is the point of
-        // the test below.
-        open_second_carrier(&mut reg, &m);
+        // A second replica of the same shard, so letting the first go leaves
+        // the shard live. Without it this expiry is refused, which is the
+        // point of the test below.
+        open_second_replica(&mut reg, &m);
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Active);
         reg.expire_deal(deal_id, 200).unwrap();
         assert_eq!(deal_status(&reg, deal_id), DealStatus::Expired);
@@ -3622,6 +3611,12 @@ mod tests {
         // slash path takes a bond from someone who broke a promise; expiry
         // takes nothing from anyone, so nothing about it justifies making the
         // content unreadable.
+        //
+        // `good_manifest` is plain replication, so every shard is a data
+        // shard and losing any one of them is already fatal. Opening a deal
+        // on the first shard alone leaves the object at one live shard
+        // against a floor of two, which is exactly the case the floor exists
+        // for.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, shard_id) = open_one(&mut reg, &m);
@@ -3642,38 +3637,22 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_counts_operators_rather_than_deals() {
-        // Two deals held by one operator are one machine, and the failure the
-        // floor exists to prevent is machines leaving. Counting deals would
-        // let a single operator expire its way down to nothing.
+    fn a_shard_with_a_spare_replica_may_always_be_let_go() {
+        // The floor is about shards a decode needs, not about how busy any
+        // one operator is. When the shard survives the departure, nothing is
+        // at risk and the term may end normally.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
-        let (first, _) = open_one(&mut reg, &m);
-        let second = reg
-            .open_deal(
-                42,
-                &m,
-                m.shards[1].shard_id,
-                operator(),
-                1,
-                100,
-                200,
-                good_econ(),
-                &params(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-            )
-            .unwrap();
-        assert_eq!(reg.active_carriers_for_manifest(m.manifest_id, None), 1);
-        assert_eq!(
-            reg.active_carriers_for_manifest(m.manifest_id, Some(first)),
-            1,
-            "dropping one of two deals held by the same operator leaves that \
-             operator still carrying"
-        );
-        // Neither may leave: both are the same single carrier.
-        assert!(reg.expire_deal(first, 200).is_err());
-        assert!(reg.expire_deal(second, 200).is_err());
+        let (first, shard_id) = open_one(&mut reg, &m);
+        let second = open_second_replica(&mut reg, &m);
+        assert_eq!(reg.active_replica_count(&m.manifest_id, &shard_id), 2);
+
+        reg.expire_deal(first, 200).expect("the shard still has a replica");
+        // The one that is now alone may not follow it out.
+        assert!(matches!(
+            reg.expire_deal(second, 200),
+            Err(StorageError::ExpiryWouldStrandContent { .. })
+        ));
     }
 
     #[test]
@@ -3875,7 +3854,7 @@ mod tests {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
         let (deal_id, _) = open_one(&mut reg, &m);
-        open_second_carrier(&mut reg, &m);
+        open_second_replica(&mut reg, &m);
         reg.expire_deal(deal_id, 200).unwrap();
         assert_eq!(
             reg.lifecycle_state(deal_id),
