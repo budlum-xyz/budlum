@@ -13,6 +13,19 @@ use serde::{Deserialize, Serialize};
 pub const MAX_PROOF_MARKET_ACTIVE_TASKS: usize = 10_000;
 pub const MAX_PROOF_MARKET_PENDING_RECEIPTS: usize = 10_000;
 
+/// Furthest a task's deadline may sit beyond the epoch that created it.
+///
+/// A deadline needs a ceiling and not only a floor. `deadline_epoch` arrives
+/// on a submitted task, and requiring it merely to exceed `created_epoch`
+/// admits `u64::MAX`: a task that never expires, so `prune_expired` keeps it
+/// at every epoch and it holds one of the ten thousand slots forever.
+///
+/// The bound is a span rather than an absolute epoch so it stays correct as
+/// the chain advances. The value is the same order as the queue it protects:
+/// long enough that no honest prover is refused for asking for time, short
+/// enough that a squatted slot returns on its own.
+pub const MAX_PROOF_TASK_EPOCH_SPAN: u64 = 10_000;
+
 fn nonzero_hash(value: &Hash32) -> bool {
     *value != [0u8; 32]
 }
@@ -252,6 +265,20 @@ impl ProofTask {
         self.kind.validate()?;
         if self.deadline_epoch <= self.created_epoch {
             return Err("ProofTask deadline_epoch must be after created_epoch".into());
+        }
+        // A deadline also needs a ceiling, not only a floor. Without one a task
+        // may declare `deadline_epoch = u64::MAX`, which is a task that never
+        // expires: `prune_expired` keeps it at every epoch, so it occupies a
+        // slot in a queue capped at MAX_PROOF_MARKET_ACTIVE_TASKS forever, and
+        // ten thousand of them fill the market permanently for the price of the
+        // submissions. The ceiling is expressed as a span rather than an
+        // absolute epoch so it does not need updating as the chain advances.
+        let span = self.deadline_epoch.saturating_sub(self.created_epoch);
+        if span > MAX_PROOF_TASK_EPOCH_SPAN {
+            return Err(format!(
+                "ProofTask deadline_epoch is {span} epochs after created_epoch, \
+                 the maximum is {MAX_PROOF_TASK_EPOCH_SPAN}"
+            ));
         }
         if self.reward == 0 {
             return Err("ProofTask reward must be >= 1".into());
@@ -553,18 +580,29 @@ impl ProofMarketState {
     /// Growth on long-running nodes.
     /// Only prune expired/expired tasks - never drop
     /// In-progress tasks that still have time remaining.
-    pub fn enforce_max_sizes(&mut self) {
+    ///
+    /// `current_epoch` is the chain's epoch. It used to be derived from the
+    /// tasks themselves, as `max(deadline_epoch) - 1000`, which made the
+    /// retention window a function of attacker-supplied data: `deadline_epoch`
+    /// is a field on a submitted task and `validate_shape` only requires it to
+    /// exceed `created_epoch`, with no ceiling. One task carrying
+    /// `deadline_epoch = u64::MAX` moved the window to
+    /// `u64::MAX - 1000`, and every honest task in the queue then failed the
+    /// retain and was dropped in a single call.
+    ///
+    /// That inverted the guarantee in the sentence above. The function exists
+    /// to protect in-progress work from a memory cap, and the cheapest way to
+    /// destroy in-progress work was to trigger it.
+    ///
+    /// `prune_expired` on the same struct already takes `current_epoch` as an
+    /// argument and compares against it, so the two pruning paths disagreed
+    /// about what "expired" meant. They now use the same clock.
+    pub fn enforce_max_sizes(&mut self, current_epoch: u64) {
         if self.active_tasks.len() > MAX_PROOF_MARKET_ACTIVE_TASKS {
-            // V5-1: first remove only expired tasks
-            let current_max_epoch = self
-                .active_tasks
-                .iter()
-                .map(|t| t.deadline_epoch)
-                .max()
-                .unwrap_or(0);
+            // Expiry is measured against the chain, never against a value a
+            // submitter chose.
             let before = self.active_tasks.len();
-            self.active_tasks
-                .retain(|t| t.deadline_epoch >= current_max_epoch.saturating_sub(1000));
+            self.active_tasks.retain(|t| t.deadline_epoch >= current_epoch);
             let pruned_expired = before - self.active_tasks.len();
             if pruned_expired > 0 {
                 tracing::info!("Pruned {pruned_expired} expired tasks by deadline");
@@ -833,4 +871,135 @@ mod tests {
         assert!(tasks[1].difficulty > tasks[2].difficulty); // ZK > SC
         assert!(tasks[2].difficulty < tasks[3].difficulty); // SA > SC
     }
+
+    /// A task cannot declare a deadline arbitrarily far in the future.
+    ///
+    /// `deadline_epoch > created_epoch` was the only check, so `u64::MAX` was
+    /// admissible: a task that never expires, holding one of ten thousand
+    /// slots forever. Ten thousand such submissions fill the market
+    /// permanently.
+    #[test]
+    fn proof_task_rejects_deadline_beyond_max_span() {
+        let task = ProofTask::new(task_kind(), test_address(1), 10, u64::MAX, 5_000);
+        let err = task
+            .validate_shape()
+            .expect_err("a task that never expires must be refused");
+        assert!(
+            err.contains("deadline_epoch"),
+            "error should name the offending field, got: {err}"
+        );
+
+        // One epoch past the ceiling is refused.
+        let over = ProofTask::new(
+            task_kind(),
+            test_address(1),
+            10,
+            10 + MAX_PROOF_TASK_EPOCH_SPAN + 1,
+            5_000,
+        );
+        assert!(over.validate_shape().is_err());
+
+        // Exactly at the ceiling is allowed: the bound must not move the
+        // honest case.
+        let at = ProofTask::new(
+            task_kind(),
+            test_address(1),
+            10,
+            10 + MAX_PROOF_TASK_EPOCH_SPAN,
+            5_000,
+        );
+        at.validate_shape()
+            .expect("a deadline exactly at the ceiling is legitimate");
+    }
+
+    /// `enforce_max_sizes` measures expiry against the chain, not against the
+    /// tasks it is pruning.
+    ///
+    /// The window used to be `max(deadline_epoch) - 1000`, taken from the
+    /// queue itself. One task with a far-future deadline moved the window past
+    /// every honest task, so the function whose stated purpose is to protect
+    /// in-progress work destroyed all of it in one call. This drives that exact
+    /// shape and asserts the honest tasks survive.
+    #[test]
+    fn enforce_max_sizes_does_not_drop_live_tasks_for_one_far_deadline() {
+        let mut state = ProofMarketState::new();
+        let current_epoch = 10_000u64;
+
+        // Live tasks, all with deadlines comfortably ahead of the chain.
+        let live = MAX_PROOF_MARKET_ACTIVE_TASKS + 1;
+        for i in 0..live {
+            let kind = ProofTaskKind::DomainCommitment {
+                domain_id: 1,
+                domain_height: 100,
+                sequence: i as u64,
+            };
+            let task = ProofTask::new(
+                kind,
+                test_address(1),
+                current_epoch,
+                current_epoch + 500,
+                5_000,
+            );
+            state.active_tasks.push(task);
+        }
+
+        // The lever: one task whose deadline sits far beyond the rest. Pushed
+        // directly, because validate_shape now refuses it at the door; the
+        // point here is that enforce_max_sizes is safe even if one arrives.
+        let far_kind = ProofTaskKind::DomainCommitment {
+            domain_id: 1,
+            domain_height: 100,
+            sequence: u64::MAX,
+        };
+        state.active_tasks.push(ProofTask::new(
+            far_kind,
+            test_address(9),
+            current_epoch,
+            u64::MAX,
+            5_000,
+        ));
+
+        state.enforce_max_sizes(current_epoch);
+
+        assert_eq!(
+            state.active_tasks.len(),
+            live + 1,
+            "no live task may be dropped because another task claimed a far deadline"
+        );
+    }
+
+    /// The canary for the test above: expired tasks must actually be pruned,
+    /// or the assertion could pass by the function doing nothing at all.
+    #[test]
+    fn enforce_max_sizes_still_prunes_genuinely_expired_tasks() {
+        let mut state = ProofMarketState::new();
+        let current_epoch = 10_000u64;
+
+        for i in 0..(MAX_PROOF_MARKET_ACTIVE_TASKS + 50) {
+            let kind = ProofTaskKind::DomainCommitment {
+                domain_id: 1,
+                domain_height: 100,
+                sequence: i as u64,
+            };
+            // Deadline already behind the chain: expired by the only clock
+            // that counts.
+            state.active_tasks.push(ProofTask::new(
+                kind,
+                test_address(1),
+                1,
+                current_epoch - 1,
+                5_000,
+            ));
+        }
+
+        let before = state.active_tasks.len();
+        state.enforce_max_sizes(current_epoch);
+        assert_eq!(
+            state.active_tasks.len(),
+            0,
+            "expired tasks must be pruned, otherwise the sibling test is vacuous \
+             (before: {before})"
+        );
+    }
+
 }
