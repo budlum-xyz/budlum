@@ -1183,5 +1183,4 @@ mod tests {
             "an already-tracked peer must keep accruing penalties when the map is full"
         );
     }
-
 }
