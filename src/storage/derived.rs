@@ -874,10 +874,15 @@ mod tests {
         // The measured 320-pixel case: a re-encoded thumbnail of this master
         // cost 16,619 bytes, against a description of DERIVED_PREFIX_SPEC_BYTES.
         assert_eq!(DERIVED_PREFIX_SPEC_BYTES, DERIVED_SPEC_BYTES + 17);
-        assert!(
-            DERIVED_PREFIX_SPEC_BYTES * 200 < 16_619,
-            "a prefix description must stay negligible against an encoded thumbnail"
-        );
+        // Both sides are constants, so this is a compile-time claim and belongs
+        // in a const block: a runtime assert on constants can only fail after
+        // the binary that violates it has already been built and shipped.
+        const {
+            assert!(
+                DERIVED_PREFIX_SPEC_BYTES * 200 < 16_619,
+                "a prefix description must stay negligible against an encoded thumbnail"
+            );
+        }
     }
 
     #[test]
