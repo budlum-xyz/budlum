@@ -1,0 +1,95 @@
+# Git dependency audit record.
+#
+# What this file is for.
+#
+# A registry crate's `version` names an immutable published artefact, and every
+# scanner in this repository reasons from that name. A git dependency's version
+# is whatever its manifest said at that commit, and it does not move when the
+# code does. Measured on the pinned rust-libp2p tree, three consecutive commits
+# all declare `libp2p-gossipsub 0.50.0`:
+#
+#   8541b83b  no checked_add in backoff.rs, both overflow paths open
+#   a7d59cbf  insertion-side checked_add added, CHANGELOG opens 0.49.3
+#   5d47d9d5  heartbeat-side checked_add added, CHANGELOG opens 0.49.4
+#
+# One version string, three security postures. A scanner told
+# "libp2p-gossipsub 0.50.0" cannot tell them apart, and 0.50.0 has never been
+# published to crates.io, so no advisory version range covers it either.
+#
+# Nothing else closes this. cargo-vet classifies git dependencies as
+# non-auditable and excludes all of them from its audit count. Cargo writes no
+# checksum for git sources into the lockfile, so there is no artefact digest to
+# compare. cargo-audit, cargo-deny, osv-scanner and grype all match on name and
+# version, which is the field that carries no information here.
+#
+# So the check is done by reading the source at the pinned revision and writing
+# down what was read. That is weaker than a signature and stronger than nothing,
+# and unlike the version string it does not silently go stale: the gate refuses
+# any revision this file does not name, so moving the pin forces the reading to
+# be redone.
+#
+# scripts/check-git-deps-are-audited-by-commit.sh enforces the correspondence in
+# both directions.
+
+[[revision]]
+repository = "https://github.com/libp2p/rust-libp2p"
+rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"
+committed = "2026-07-27"
+
+# Why the tree is pinned to a revision at all: libp2p 0.57.0 is not on
+# crates.io, and the 0.56.0 release carries yamux and hickory-proto versions
+# with open advisories. The pin is the fix for those, not a convenience.
+reason = """
+libp2p 0.57.0 is unpublished; 0.56.0 pulls yamux and hickory-proto versions with
+open advisories. The pinned tree carries yamux 0.14.0 and hickory-proto 0.26.1
+from the registry, both patched.
+"""
+
+# Packages this revision supplies, across Cargo.lock, budzero/Cargo.lock and
+# fuzz/Cargo.lock. Recorded because the count is what a reviewer compares
+# against cargo-vet's audit total, which excludes every one of them.
+packages = 23
+
+# Advisories checked by reading the source at this revision, not by version
+# comparison.
+advisories = [
+  "CVE-2026-33040",  # GHSA-gc42-3jg7-rxr2, gossipsub PRUNE backoff, insertion side
+  "CVE-2026-34219",  # GHSA-xqmp-fxgv-xvq5, gossipsub PRUNE backoff, heartbeat side
+  "CVE-2026-32314",  # GHSA-vxx9-2994-q338, yamux
+  "RUSTSEC-2026-0118",  # hickory-proto
+  "RUSTSEC-2026-0119",  # hickory-proto
+]
+
+# The code carrying each fix, so the claim can be rechecked without repeating
+# the search.
+evidence = """
+protocols/gossipsub/src/backoff.rs at this revision has checked_add on both
+paths that the two advisories describe:
+
+  update_backoff  Instant::now().checked_add(time), oversized backoff logged
+                  and dropped rather than added. Closes CVE-2026-33040, landed
+                  in a7d59cbf ("backport 84153a5 to master", PR 6348).
+
+  heartbeat       backoff_time.checked_add(slack), overflow treated as expiry
+                  rather than panicking. Closes CVE-2026-34219, landed in
+                  5d47d9d5 ("port 55e4a64 onto master", PR 6359).
+
+Both commits precede this revision in the same history, so the pin contains
+them. Verified by reading the file at 38b8a2c0, not by comparing versions:
+the version field reads 0.50.0 at the vulnerable parent commit too.
+
+yamux and hickory-proto are not supplied by this tree. The pin causes the
+resolver to take yamux 0.14.0 and hickory-proto 0.26.1 from the registry, where
+the ordinary scanners do see them and where both are patched.
+"""
+
+# What this record does not establish.
+#
+# Reading the two files named above says those two advisories are addressed. It
+# says nothing about the other twenty-two packages this revision supplies, and
+# nothing about a compromise that leaves the advisory-relevant code untouched.
+# The revision hash pins what is built; it does not attest who wrote it.
+limits = """
+Covers the named advisories only. The remaining packages at this revision are
+pinned but unread, and no signature covers the tree.
+"""
