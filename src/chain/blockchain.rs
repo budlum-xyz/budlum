@@ -5453,6 +5453,32 @@ impl Blockchain {
     /// Returns a message when crediting a bond back would overflow the
     /// Operator's balance, or when the registry or economics state cannot be
     /// Persisted after the sweep.
+    /// Keep a matured deal alive because letting it go would strand its object.
+    ///
+    /// The term is over and the operator is owed its bond, but releasing the
+    /// last replica of a shard while the object sits at its decode threshold
+    /// would make the content unreadable. The deal stays `Active` and the
+    /// reallocation ticket opens, so a replacement can be found and a later
+    /// sweep can settle the bond.
+    ///
+    /// Held rather than punished: the operator is not at fault, it is being
+    /// asked to hold until someone takes over. Nothing here extends the term,
+    /// so the renewal offer keeps standing and the reallocation path keeps
+    /// looking.
+    fn hold_expiry_that_would_strand(&mut self, deal_id: u64, current_epoch: u64) {
+        if let Some(ticket_id) = self
+            .state
+            .storage_registry
+            .open_expiry_reallocation(deal_id, current_epoch)
+        {
+            tracing::warn!(
+                "B.U.D. deal {deal_id} is past its term but is one of the last carriers \
+                 of its object; held Active, reallocation ticket {ticket_id} opened at \
+                 epoch {current_epoch}"
+            );
+        }
+    }
+
     pub fn finalize_expired_storage_deals(
         &mut self,
         current_epoch: u64,
@@ -5479,6 +5505,12 @@ impl Blockchain {
                 .expire_deal(deal_id, current_epoch)
             {
                 Ok(bond) => bond,
+                Err(crate::domain::storage_deal::StorageError::ExpiryWouldStrandContent {
+                    ..
+                }) => {
+                    self.hold_expiry_that_would_strand(deal_id, current_epoch);
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
                     continue;

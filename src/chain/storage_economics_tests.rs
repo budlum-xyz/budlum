@@ -233,6 +233,32 @@ mod tests {
                 deal_end_epoch,
                 economics.clone(),
                 &params,
+                Some(proof.clone()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+
+        // A second replica of the same shard under a different operator.
+        // These tests are about what happens to a bond at the end of a term,
+        // and the registry refuses an expiry that would drop the last replica
+        // of a shard while the object is at its decode threshold. Without a
+        // spare the term could never end and there would be no bond to
+        // settle, which is a different property than the one under test.
+        let spare = Address::from([13u8; 32]);
+        blockchain.state.add_balance(&spare, 5_000_000);
+        blockchain.state.add_balance(&payer, 5_000_000);
+        blockchain
+            .open_storage_deal_with_escrow(
+                42,
+                &manifest,
+                shard_id,
+                spare,
+                payer,
+                1,
+                0,
+                deal_end_epoch.saturating_add(1_000),
+                economics.clone(),
+                &params,
                 Some(proof),
                 Some([0x42u8; 32]),
             )

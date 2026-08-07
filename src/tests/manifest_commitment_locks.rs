@@ -896,8 +896,13 @@ mod repair_band {
 
     /// Retire every deal holding `shard_id`, so the shard counts as lost.
     ///
-    /// Uses `expire_deal` rather than a test-only mutator: the point is that
-    /// the repair band reacts to the same state transitions the chain makes.
+    /// Uses the slash path rather than expiry. Both retire a deal, but they
+    /// answer different questions: expiry is a term ending, and the registry
+    /// refuses one that would take an object below the replica count a decode
+    /// needs, precisely so a lapsed term cannot lose content. These tests are
+    /// about what the repair band reports once shards are gone regardless of
+    /// how, and the ways content is actually lost are slashing and failure,
+    /// so that is the transition to drive them with.
     fn lose_shard(reg: &mut StorageRegistry, manifest_id: &ContentId, shard_id: &ContentId) {
         let deal_ids: Vec<u64> = reg
             .deals_for_shard(manifest_id, shard_id)
@@ -906,9 +911,18 @@ mod repair_band {
             .collect();
         assert!(!deal_ids.is_empty(), "the shard should have had a deal");
         for deal_id in deal_ids {
-            reg.expire_deal(deal_id, 200)
-                .unwrap_or_else(|e| panic!("deal {deal_id} should expire at epoch 200: {e}"));
+            let challenge_id = reg
+                .open_challenge(deal_id, 0, 1, 110, 120, opener_address(), 100)
+                .unwrap_or_else(|e| panic!("challenge on deal {deal_id} should open: {e}"));
+            reg.finalize_missed_challenge(challenge_id, 150)
+                .unwrap_or_else(|e| panic!("deal {deal_id} should slash at epoch 150: {e}"));
         }
+    }
+
+    /// A challenge opener distinct from every operator address the fixture
+    /// hands out, which are `[1; 32]` upwards.
+    fn opener_address() -> crate::core::address::Address {
+        crate::core::address::Address([0xFE; 32])
     }
 
     /// Register a coded manifest and open one deal per shard.
