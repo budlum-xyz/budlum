@@ -83,6 +83,7 @@
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;
+use std::collections::BTreeMap;
 
 /// The block size a crop must align to, in pixels.
 ///
@@ -195,6 +196,29 @@ pub enum DerivedError {
     /// registering it twice under two ids invites paying twice for one set of
     /// bytes. Deduplication is the mechanism for that, not derivation.
     WholeMaster,
+    /// Something tried to release a master that carries derivations.
+    ///
+    /// A derived object holds no bytes of its own: reading it means fetching
+    /// the master and recomputing. Letting the master go while a derivation
+    /// names it does not shrink storage, it destroys the derivation, and it
+    /// does so silently, because the derived manifest is still there and
+    /// still verifies as a manifest until someone tries to read it.
+    MasterStillDerived {
+        master_id: ContentId,
+        derivations: u32,
+    },
+    /// Release was attempted before the grace window closed.
+    MasterGraceNotElapsed {
+        master_id: ContentId,
+        releasable_at_epoch: u64,
+        now_epoch: u64,
+    },
+    /// A derivation named a master nothing is holding.
+    ///
+    /// Refused rather than accepted and resolved later: a derivation whose
+    /// master is not held can never be read, so registering it is selling
+    /// storage for an object that does not exist.
+    UnknownMaster { master_id: ContentId },
 }
 
 impl std::fmt::Display for DerivedError {
@@ -225,6 +249,26 @@ impl std::fmt::Display for DerivedError {
                 f,
                 "a region covering the whole master is the master; register it once and \
                  let deduplication do its job"
+            ),
+            Self::MasterStillDerived {
+                master_id,
+                derivations,
+            } => write!(
+                f,
+                "master {master_id} still carries {derivations} derivation(s); releasing it \
+                 would leave them unreadable while their manifests still look valid"
+            ),
+            Self::MasterGraceNotElapsed {
+                master_id,
+                releasable_at_epoch,
+                now_epoch,
+            } => write!(
+                f,
+                "master {master_id} is releasable at epoch {releasable_at_epoch}, not {now_epoch}"
+            ),
+            Self::UnknownMaster { master_id } => write!(
+                f,
+                "master {master_id} is not held; a derivation of it could never be read"
             ),
         }
     }
@@ -351,6 +395,192 @@ impl DerivedSpec {
 /// byte of framing. Stated as a constant because it is the number the whole
 /// module exists to make small, and a reader should not have to add it up.
 pub const DERIVED_SPEC_BYTES: u64 = 32 + 1 + 24 + 1;
+
+/// Epochs a master stays held after its last derivation is released.
+///
+/// The same shape and the same reason as `DICTIONARY_GRACE_EPOCHS`: a
+/// reference count reaching zero is a claim about this instant, and a
+/// derivation registered in the same block would otherwise race the release.
+/// The window makes the claim durable enough to act on.
+pub const MASTER_GRACE_EPOCHS: u64 = 1024;
+
+/// What a master is holding up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MasterEntry {
+    /// Derivations that name this master.
+    derivations: u32,
+    /// Set when the count reaches zero, cleared when it rises again.
+    releasable_at_epoch: Option<u64>,
+}
+
+/// Which masters are held, and what depends on them.
+///
+/// # Why this type exists
+///
+/// A derived object stores a description, not bytes. That is what makes the
+/// multiplier round to zero, and it is also what makes the object dependent:
+/// reading it means fetching the master and recomputing. `DerivedSpec` checks
+/// that a derivation is well formed at the moment it is registered, and
+/// nothing checked that the thing it depends on went on existing.
+///
+/// The gap matters because of how it fails. Releasing a master that carries
+/// derivations does not raise an error anywhere: the derived manifests are
+/// still present, still well formed, still hash to ids that look valid. They
+/// stop being readable, and the first sign of it is a read that cannot be
+/// served. There is no fallback, because for these objects the description is
+/// the only copy.
+///
+/// [`crate::storage::dictionary::DictionaryRegistry`] already solves exactly
+/// this for the objects that reference a shared dictionary, with a reference
+/// count, a grace window and a refusal to delete while references exist.
+/// Derivations have the same dependency and had none of it. This is that
+/// mechanism, applied to the other lever that reaches a zero multiplier.
+///
+/// # What it does not do
+///
+/// It refuses a release; it cannot refuse a disappearance. An operator that
+/// simply stops answering is a storage-proof and slashing question, handled
+/// elsewhere. What is closed here is the case where the chain's own
+/// accounting is what removes the master.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MasterRegistry {
+    entries: BTreeMap<ContentId, MasterEntry>,
+}
+
+impl MasterRegistry {
+    /// A registry holding nothing.
+    #[must_use]
+    pub fn empty_registry() -> Self {
+        Self::default()
+    }
+
+    /// Record that a master is held and may be derived from.
+    ///
+    /// Idempotent, so a replayed transaction is not an error and does not
+    /// reset a count.
+    pub fn hold_master(&mut self, master_id: ContentId) {
+        self.entries.entry(master_id).or_insert(MasterEntry {
+            derivations: 0,
+            releasable_at_epoch: None,
+        });
+    }
+
+    /// Whether a master is held.
+    #[must_use]
+    pub fn holds(&self, master_id: &ContentId) -> bool {
+        self.entries.contains_key(master_id)
+    }
+
+    /// How many derivations name this master, or `None` if it is not held.
+    #[must_use]
+    pub fn derivation_count(&self, master_id: &ContentId) -> Option<u32> {
+        self.entries.get(master_id).map(|e| e.derivations)
+    }
+
+    /// The epoch at which a pending release becomes possible, if one is
+    /// pending.
+    ///
+    /// Exposed because otherwise the window is unobservable, and an
+    /// unobservable field cannot be tested: a change that stopped cancelling
+    /// the window on a new derivation would produce identical results from
+    /// every other method, since they all gate on the count first. The bug
+    /// would be latent until the count next reached zero at a different
+    /// epoch than the stale window recorded.
+    #[must_use]
+    pub fn pending_release_epoch(&self, master_id: &ContentId) -> Option<u64> {
+        self.entries.get(master_id).and_then(|e| e.releasable_at_epoch)
+    }
+
+    /// Take a reference on behalf of a derivation.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedError::UnknownMaster`] when the master is not held. A
+    /// derivation of an absent master could never be read, so registering it
+    /// would be selling storage for an object that does not exist.
+    pub fn acquire_master(&mut self, master_id: &ContentId) -> Result<(), DerivedError> {
+        let Some(entry) = self.entries.get_mut(master_id) else {
+            return Err(DerivedError::UnknownMaster {
+                master_id: *master_id,
+            });
+        };
+        entry.derivations = entry.derivations.saturating_add(1);
+        // A master that is being derived from again is no longer on its way
+        // out. Leaving the window open would let a release land between the
+        // new derivation and the next epoch.
+        entry.releasable_at_epoch = None;
+        Ok(())
+    }
+
+    /// Drop a derivation's reference. When the last one goes, the window opens.
+    pub fn release_derivation(&mut self, master_id: &ContentId, now_epoch: u64) {
+        let Some(entry) = self.entries.get_mut(master_id) else {
+            return;
+        };
+        entry.derivations = entry.derivations.saturating_sub(1);
+        if entry.derivations == 0 {
+            entry.releasable_at_epoch = Some(now_epoch.saturating_add(MASTER_GRACE_EPOCHS));
+        }
+    }
+
+    /// Release a master nothing derives from any more.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedError::MasterStillDerived`] while derivations name it, and
+    /// [`DerivedError::MasterGraceNotElapsed`] before the window closes.
+    pub fn release_master(
+        &mut self,
+        master_id: &ContentId,
+        now_epoch: u64,
+    ) -> Result<(), DerivedError> {
+        let Some(entry) = self.entries.get(master_id) else {
+            return Ok(());
+        };
+        if entry.derivations > 0 {
+            return Err(DerivedError::MasterStillDerived {
+                master_id: *master_id,
+                derivations: entry.derivations,
+            });
+        }
+        match entry.releasable_at_epoch {
+            // Held but never derived from: there is nothing this registry is
+            // protecting, so it may go without waiting out a window.
+            None => {
+                self.entries.remove(master_id);
+                Ok(())
+            }
+            Some(at) if now_epoch < at => Err(DerivedError::MasterGraceNotElapsed {
+                master_id: *master_id,
+                releasable_at_epoch: at,
+                now_epoch,
+            }),
+            Some(_) => {
+                self.entries.remove(master_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Masters whose grace window has closed.
+    #[must_use]
+    pub fn releasable_masters(&self, now_epoch: u64) -> Vec<ContentId> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| {
+                e.derivations == 0 && e.releasable_at_epoch.is_some_and(|at| now_epoch >= at)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// How many masters are held.
+    #[must_use]
+    pub fn master_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -520,5 +750,167 @@ mod tests {
         // scheme is byte-exact, so it is locked rather than left to a reader
         // to notice if it changes.
         assert_eq!(DERIVED_BLOCK_PIXELS, 16);
+    }
+
+    fn master() -> ContentId {
+        ContentId([7u8; 32])
+    }
+
+    /// A master that carries derivations cannot be released.
+    ///
+    /// This is the failure the registry exists for, and its shape is what
+    /// makes it dangerous: releasing the master raises nothing anywhere. The
+    /// derived manifests stay present and well formed, and the first sign of
+    /// trouble is a read that cannot be served, with no stored copy behind it.
+    #[test]
+    fn a_master_carrying_derivations_is_not_released() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).expect("master is held");
+
+        let err = reg
+            .release_master(&master(), 10_000)
+            .expect_err("a master with a live derivation must not be released");
+        assert_eq!(
+            err,
+            DerivedError::MasterStillDerived {
+                master_id: master(),
+                derivations: 1,
+            }
+        );
+        assert!(reg.holds(&master()), "the refusal must also keep the master");
+    }
+
+    /// The canary for the test above: a master nothing derives from is
+    /// releasable, or the refusal could be the registry refusing everything.
+    #[test]
+    fn a_master_nothing_derives_from_is_released() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.release_master(&master(), 10_000)
+            .expect("nothing depends on it");
+        assert!(!reg.holds(&master()));
+        assert_eq!(reg.master_count(), 0);
+    }
+
+    /// Releasing the last derivation opens a window rather than the door.
+    ///
+    /// A count reaching zero is a claim about this instant. Without the
+    /// window, a derivation registered in the same block would race a release
+    /// that is already in flight.
+    #[test]
+    fn the_last_derivation_opens_a_grace_window() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).unwrap();
+        reg.release_derivation(&master(), 1_000);
+
+        let err = reg
+            .release_master(&master(), 1_000)
+            .expect_err("the window has not closed");
+        assert_eq!(
+            err,
+            DerivedError::MasterGraceNotElapsed {
+                master_id: master(),
+                releasable_at_epoch: 1_000 + MASTER_GRACE_EPOCHS,
+                now_epoch: 1_000,
+            }
+        );
+
+        // One epoch before the window closes, still refused.
+        assert!(reg
+            .release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS - 1)
+            .is_err());
+
+        // At the boundary, allowed. The bound must not be so wide that it
+        // never opens.
+        reg.release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS)
+            .expect("the window has closed");
+        assert!(!reg.holds(&master()));
+    }
+
+    /// Deriving again closes a window that was already open.
+    ///
+    /// Otherwise a release scheduled before the new derivation would still
+    /// fire after it, which is the race the window exists to prevent.
+    #[test]
+    fn a_new_derivation_cancels_a_pending_release() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).unwrap();
+        reg.release_derivation(&master(), 1_000);
+        assert_eq!(reg.releasable_masters(1_000 + MASTER_GRACE_EPOCHS).len(), 1);
+
+        reg.acquire_master(&master()).unwrap();
+        assert!(
+            reg.releasable_masters(1_000 + MASTER_GRACE_EPOCHS).is_empty(),
+            "a master being derived from again is not on its way out"
+        );
+        assert!(reg.release_master(&master(), u64::MAX).is_err());
+        // The window itself has to be gone, not merely masked by the count.
+        // Every other method gates on the count first, so a change that
+        // stopped clearing this field would pass the two assertions above and
+        // leave a stale epoch behind to fire the next time the count reached
+        // zero.
+        assert_eq!(
+            reg.pending_release_epoch(&master()),
+            None,
+            "a new derivation must clear the pending release, not just outvote it"
+        );
+    }
+
+    /// A derivation of a master nobody holds is refused at registration.
+    ///
+    /// Accepting it would sell storage for an object that can never be read:
+    /// there is no master to recompute from and no bytes of its own.
+    #[test]
+    fn a_derivation_of_an_unheld_master_is_refused() {
+        let mut reg = MasterRegistry::empty_registry();
+        let err = reg
+            .acquire_master(&master())
+            .expect_err("nothing is holding this master");
+        assert_eq!(err, DerivedError::UnknownMaster { master_id: master() });
+        assert_eq!(reg.derivation_count(&master()), None);
+    }
+
+    /// Counting survives many derivations of one master, which is the case
+    /// the class exists for: one photograph, many crops.
+    #[test]
+    fn many_derivations_hold_one_master_until_the_last_goes() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        for _ in 0..64 {
+            reg.acquire_master(&master()).unwrap();
+        }
+        assert_eq!(reg.derivation_count(&master()), Some(64));
+
+        for i in 0..63 {
+            reg.release_derivation(&master(), 1_000);
+            assert!(
+                reg.release_master(&master(), u64::MAX).is_err(),
+                "still derived after {} releases",
+                i + 1
+            );
+        }
+
+        reg.release_derivation(&master(), 1_000);
+        assert_eq!(reg.derivation_count(&master()), Some(0));
+        reg.release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS)
+            .expect("the last derivation is gone and the window has closed");
+    }
+
+    /// Holding is idempotent, so a replayed transaction cannot reset a count.
+    #[test]
+    fn holding_a_master_twice_does_not_reset_its_derivations() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).unwrap();
+        reg.hold_master(master());
+        assert_eq!(
+            reg.derivation_count(&master()),
+            Some(1),
+            "a replayed hold must not forget what depends on the master"
+        );
+        assert!(reg.release_master(&master(), u64::MAX).is_err());
     }
 }
