@@ -1985,64 +1985,6 @@ impl Blockchain {
         Ok(outcome)
     }
 
-    /// Real-block-flow liveness hook. Called from
-    /// `produce_block` / `validate_and_add_block` at every epoch boundary. The
-    /// "expected" set is the *current* active validator set (so PoA members,
-    /// Who never live in `AccountState.validators`, are correctly excluded).
-    /// The "participated" set is whatever producers the caller actually saw
-    /// Sign the epoch's blocks; here we approximate it with the producer of
-    /// The block that just closed the epoch. This is the OBSERVE path: a report
-    /// Is recorded, but no slash is applied.
-    pub fn maybe_observe_liveness_on_epoch_close(
-        &mut self,
-        closed_epoch: u64,
-        participated: &std::collections::HashSet<Address>,
-    ) -> usize {
-        let params = *self.state.registry.params();
-        let threshold = params.liveness_max_missed_epochs;
-        let expected: Vec<Address> = self
-            .state
-            .validators
-            .keys()
-            .filter(|addr| {
-                self.state
-                    .registry
-                    .is_active(addr, crate::registry::role::roles::VALIDATOR)
-            })
-            .copied()
-            .collect();
-        // We want ABSENTEE (no-show) detection, so participated = false when
-        // The address is not in the set.
-        let reported = self.state.liveness.record_epoch(
-            closed_epoch,
-            &expected,
-            |addr| participated.contains(addr),
-            &params,
-        );
-        let count = reported.len();
-        // OBSERVE MODE: if `liveness_slashing_enabled` is false, we just return
-        // The report count. Otherwise we feed the report through the canonical
-        // `slash_from_report` path so the actual stake cut happens here.
-        if params.liveness_slashing_enabled {
-            let role = crate::registry::role::roles::VALIDATOR;
-            let _ = threshold; // (reserved: future per-threshold logic)
-            for report in &reported {
-                let _ = self.state.registry.slash_from_report(report);
-                // Mirror the slash into the on-chain validator set so the rest
-                // Of the node (consensus, RPC) sees a consistent view.
-                if let Some(v) = self.state.validators.get_mut(&report.offender) {
-                    if !v.slashed {
-                        v.slashed = true;
-                        v.active = false;
-                        v.jailed = true;
-                    }
-                }
-                let _ = role; // (reserved)
-            }
-        }
-        count
-    }
-
     /// Drive the liveness tracker over a synthetic epoch. Used by
     /// Tests and by the OBSERVE-only public surface. `participated` is the set
     /// Of validators that showed the expected participation; everyone else in
@@ -2050,10 +1992,9 @@ impl Blockchain {
     /// Slashing reports produced.
     ///
     /// OBSERVE ONLY: this never slashes, even when `liveness_slashing_enabled`
-    /// Is true. Real slashing is the job of `maybe_observe_liveness_on_epoch_close`
-    /// (the epoch-close hook) and of `record_liveness_epoch` (the explicit
-    /// Per-epoch driver). Tests asserting the OBSERVE mode default therefore
-    /// See no stake cut.
+    /// Is true. Real slashing is the job of `apply_epoch_close_liveness`, which
+    /// Runs on every real block at an epoch boundary. Tests asserting the
+    /// OBSERVE mode default therefore see no stake cut.
     pub fn observe_liveness_epoch(
         &mut self,
         epoch: u64,
@@ -2084,14 +2025,14 @@ impl Blockchain {
 
     /// Directly call `state.liveness.record_epoch` (exposed so tests
     /// That want to exercise the tracker in isolation can do so without going
-    /// Through `maybe_observe_liveness_on_epoch_close`).
+    /// Through `apply_epoch_close_liveness`).
     pub fn record_liveness_epoch(
         &mut self,
         epoch: u64,
         participated: &std::collections::HashSet<Address>,
     ) -> usize {
         let params = *self.state.registry.params();
-        // Same filter as `maybe_observe_liveness_on_epoch_close`. Taking every
+        // Same filter as `apply_epoch_close_liveness`. Taking every
         // Key of `validators` counts members that cannot sign, a slashed or
         // Jailed validator stays in the map (that is how `jail_until` is
         // Tracked) while `registry.is_active` has already gone false. Feeding
@@ -2118,10 +2059,17 @@ impl Blockchain {
         );
         // If liveness slashing is enabled, feed the produced reports through
         // The canonical `slash_from_report` path (mirroring what
-        // `maybe_observe_liveness_on_epoch_close` does at epoch close). Tests
+        // `apply_epoch_close_liveness` does at epoch close). Tests
         // That drive slashing explicitly via `record_liveness_epoch` therefore
         // See the same effect.
         if params.liveness_slashing_enabled {
+            // Same term as `apply_epoch_close_liveness`. Setting `jailed`
+            // without `jail_until` leaves a validator that `advance_epoch`
+            // releases at the next boundary, which is not a term at all.
+            let jail_until = self
+                .state
+                .epoch_index
+                .saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS);
             for report in &reports {
                 let _ = self.state.registry.slash_from_report(report);
                 if let Some(v) = self.state.validators.get_mut(&report.offender) {
@@ -2129,6 +2077,7 @@ impl Blockchain {
                         v.slashed = true;
                         v.active = false;
                         v.jailed = true;
+                        v.jail_until = jail_until;
                     }
                 }
             }
@@ -3234,12 +3183,31 @@ impl Blockchain {
 
         // OBSERVE mode by default; only act when slashing is explicitly enabled.
         if params.liveness_slashing_enabled {
+            let jail_until = state
+                .epoch_index
+                .saturating_add(crate::registry::params::LIVENESS_JAIL_EPOCHS);
             for report in &reported {
                 let _ = state.registry.slash_from_report(report);
                 if let Some(validator) = state.validators.get_mut(&report.offender) {
                     if !validator.slashed {
                         validator.slashed = true;
                         validator.active = false;
+                        // The term, and the flag the release loop reads.
+                        //
+                        // `AccountState::advance_epoch` releases on
+                        // `jailed && jail_until <= epoch_index`. Cutting the
+                        // stake without setting `jailed` left the offender
+                        // invisible to that loop: a liveness penalty, which
+                        // is a penalty for being absent, became permanent.
+                        // Absence is also what a partition or a failed disk
+                        // looks like, so the punishment outlived the fault
+                        // it was measuring.
+                        //
+                        // `jailed` is hashed into the state root, so the two
+                        // slashing paths also disagreed on the root they
+                        // produced from identical evidence.
+                        validator.jailed = true;
+                        validator.jail_until = jail_until;
                     }
                 }
             }
@@ -5453,6 +5421,32 @@ impl Blockchain {
     /// Returns a message when crediting a bond back would overflow the
     /// Operator's balance, or when the registry or economics state cannot be
     /// Persisted after the sweep.
+    /// Keep a matured deal alive because letting it go would strand its object.
+    ///
+    /// The term is over and the operator is owed its bond, but releasing the
+    /// last replica of a shard while the object sits at its decode threshold
+    /// would make the content unreadable. The deal stays `Active` and the
+    /// reallocation ticket opens, so a replacement can be found and a later
+    /// sweep can settle the bond.
+    ///
+    /// Held rather than punished: the operator is not at fault, it is being
+    /// asked to hold until someone takes over. Nothing here extends the term,
+    /// so the renewal offer keeps standing and the reallocation path keeps
+    /// looking.
+    fn hold_expiry_that_would_strand(&mut self, deal_id: u64, current_epoch: u64) {
+        if let Some(ticket_id) = self
+            .state
+            .storage_registry
+            .open_expiry_reallocation(deal_id, current_epoch)
+        {
+            tracing::warn!(
+                "B.U.D. deal {deal_id} is past its term but is one of the last carriers \
+                 of its object; held Active, reallocation ticket {ticket_id} opened at \
+                 epoch {current_epoch}"
+            );
+        }
+    }
+
     pub fn finalize_expired_storage_deals(
         &mut self,
         current_epoch: u64,
@@ -5479,6 +5473,12 @@ impl Blockchain {
                 .expire_deal(deal_id, current_epoch)
             {
                 Ok(bond) => bond,
+                Err(crate::domain::storage_deal::StorageError::ExpiryWouldStrandContent {
+                    ..
+                }) => {
+                    self.hold_expiry_that_would_strand(deal_id, current_epoch);
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
                     continue;

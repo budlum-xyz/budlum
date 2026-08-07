@@ -593,9 +593,15 @@ impl Executor {
                     bincode::deserialize(&tx.data)
                         .map_err(|e| BudlumError::validation("nft_invalid_data", e.to_string()))?;
 
+                // A duplicate id means the registry's counter disagrees with
+                // its own contents, which `mint` refuses rather than
+                // overwriting somebody's NFT. Surfaced as a validation error
+                // so the block is rejected instead of silently reassigning
+                // ownership.
                 state
                     .nft_registry
-                    .mint(tx.from, cid, state.epoch_index, author);
+                    .mint(tx.from, cid, state.epoch_index, author)
+                    .map_err(|e| BudlumError::validation("nft_mint_refused", e.to_string()))?;
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -1053,14 +1059,22 @@ impl Executor {
                         ),
                     ));
                 }
-                state.budlumxyz.register_app(
-                    name.clone(),
-                    tx.from,
-                    category.clone(),
-                    website_url.clone(),
-                    *manifest_id,
-                    state.epoch_index,
-                );
+                // A duplicate id means the registry's counter disagrees with
+                // its own contents. Refused rather than overwriting another
+                // developer's listing, and refused here, before the fee is
+                // taken below: charging for a registration that did not
+                // happen would be the worse of the two failures.
+                state
+                    .budlumxyz
+                    .register_app(
+                        name.clone(),
+                        tx.from,
+                        category.clone(),
+                        website_url.clone(),
+                        *manifest_id,
+                        state.epoch_index,
+                    )
+                    .map_err(|e| BudlumError::validation("hub_register_refused", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 // Balance check before deduction
                 let hub_total = tx
@@ -1088,6 +1102,24 @@ impl Executor {
                     .ok_or_else(|| {
                         BudlumError::validation("balance_underflow", "hub register fee underflow")
                     })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::BudlumxyzAttestApp { app_id } => {
+                // Ownership proof, not audit. `attest_app_as_developer`
+                // refuses unless `tx.from` is the app's registered developer,
+                // and that refusal is the whole point of the transaction:
+                // before this existed, `developer_attested` and `verified`
+                // were hashed into the state root and no path could ever set
+                // either, so both were permanently false and the two bits
+                // were state that could not change.
+                state
+                    .budlumxyz
+                    .attest_app_as_developer(*app_id, &tx.from)
+                    .map_err(|e| BudlumError::validation("hub_attest_refused", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "hub attest fee underflow")
+                })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::AiModelRegister(spec) => {
@@ -1757,6 +1789,12 @@ impl Executor {
                 // Attempt STARK verify of postcard envelope (fail closed if
                 // Bytes present but invalid). Without guest program words we
                 // Only check envelope deserializes + public_inputs_hash shape.
+                // Size bound before deserialization, which is the one bound
+                // that cannot be delegated: `validate_envelope_structure`
+                // takes a decoded envelope, and decoding is the work this
+                // refusal exists to avoid paying for. The other four
+                // structural checks run below, through the shared function,
+                // once there is something decoded to check.
                 if proof.proof_bytes.len() > crate::execution::proof_verifier::MAX_PROOF_BYTES {
                     return Err(BudlumError::validation(
                         "ai_exec_proof_too_large",
@@ -1791,24 +1829,76 @@ impl Executor {
                             }
                         }
                     }
+
+                    // The model-shaped half of `validate_gas_budget`.
+                    //
+                    // Only the size bound is asked for, and the gas ceiling is
+                    // passed as `u64::MAX` on purpose. `max_fee` on the
+                    // request is a balance escrowed from the requester's
+                    // account; `estimate_full_gas` returns gas units; nothing
+                    // in this tree converts between them. Passing the real
+                    // `max_fee` here would compare a balance against a gas
+                    // figure, which typechecks because both are `u64` and is
+                    // still a unit error. Measured: `GAS_BASE_STARK` alone is
+                    // 10_000 and every `max_fee` in the tree is at most 500,
+                    // so it would reject every valid request.
+                    //
+                    // The `u64::MAX` is deliberately visible rather than
+                    // hidden behind a default, so nobody reads this as a
+                    // budget that was checked.
+                    if let Some(ref dims) = model_spec.execution_dims {
+                        let sizing = crate::ai::execution::FixedPointMlpSpec {
+                            dims: dims.clone(),
+                            weights: vec![
+                                0i32;
+                                dims.windows(2)
+                                    .map(|w| w[0] as usize * w[1] as usize)
+                                    .sum()
+                            ],
+                            biases: vec![0i32; dims.iter().skip(1).map(|d| *d as usize).sum()],
+                        };
+                        crate::ai::execution::validate_gas_budget(
+                            &sizing,
+                            proof.proof_bytes.len(),
+                            u64::MAX,
+                        )
+                        .map_err(|e| BudlumError::validation("ai_exec_proof_size", e))?;
+                    }
                 }
                 if let Ok(envelope) =
                     postcard::from_bytes::<bud_proof::ProofEnvelope>(&proof.proof_bytes)
                 {
-                    if envelope.proof_format_version
-                        < crate::execution::proof_verifier::MIN_PROOF_FORMAT_VERSION
-                    {
-                        return Err(BudlumError::validation(
-                            "ai_exec_format",
-                            "proof format version too old",
-                        ));
-                    }
-                    if envelope.degree_bits > crate::execution::proof_verifier::MAX_DEGREE_BITS {
-                        return Err(BudlumError::validation(
-                            "ai_exec_degree",
-                            "proof degree_bits too large",
-                        ));
-                    }
+                    // Ask the verifier what a well-formed envelope is, rather
+                    // than restating it here.
+                    //
+                    // `ProofVerifier::validate_envelope_structure` makes five
+                    // checks and this path had copied three of them by hand:
+                    // size, degree bits and format version. The two it did
+                    // not copy were the empty-backend refusal and the
+                    // requirement that `p3_version` and `fri_params_id` be
+                    // present, so an envelope naming no prover version and no
+                    // FRI parameter set reached `attach_execution_proof`.
+                    // Those two fields are how a verifier knows which
+                    // parameters a proof was produced under; an envelope that
+                    // omits them is not verifiable against anything, and it
+                    // was being recorded as attached evidence.
+                    //
+                    // Copied checks drift by omission, silently, and the
+                    // omission is invisible at the copy site because what is
+                    // missing is not written anywhere. One definition.
+                    let structural = crate::execution::proof_verifier::ProofEnvelope {
+                        proof_format_version: envelope.proof_format_version,
+                        backend: envelope.backend.clone(),
+                        p3_version: envelope.p3_version.clone(),
+                        fri_params_id: envelope.fri_params_id.clone(),
+                        public_inputs_hash: envelope.public_inputs_hash,
+                        proof_bytes: envelope.proof_bytes.clone(),
+                        degree_bits: envelope.degree_bits,
+                    };
+                    crate::execution::proof_verifier::ProofVerifier::validate_envelope_structure(
+                        &structural,
+                    )
+                    .map_err(|e| BudlumError::validation("ai_exec_envelope", e.to_string()))?;
                     // Backend allow-list. Structural envelopes are not proof
                     // Evidence by themselves; this transaction path only accepts
                     // Production Plonky3-backed envelopes and still fails closed
@@ -1893,6 +1983,30 @@ impl Executor {
                 }
                 crate::core::governance::GovernanceAction::DewhitelistVerifier(addr) => {
                     state.ai_registry.dewhitelist_verifier(&addr);
+                }
+                crate::core::governance::GovernanceAction::VerifyHubApp { app_id } => {
+                    // Reachable only if `execute_passed_proposals` starts
+                    // emitting this action. Today it does not: the arm for
+                    // `ProposalType::VerifyHubApp` falls through to `_ =>
+                    // None`, and the badge is written by
+                    // `AccountState::execute_proposal`, which reads the
+                    // `ProposalType` directly and never goes through a
+                    // `GovernanceAction`.
+                    //
+                    // Two writers for one badge is the shape that produces a
+                    // double application, so this arm deliberately does not
+                    // write. It refuses instead, because the alternative is
+                    // an arm that looks like it applies the vote and
+                    // silently does nothing, which is worse than one that
+                    // stops the block.
+                    return Err(BudlumError::validation(
+                        "hub_verify_wrong_path",
+                        format!(
+                            "VerifyHubApp for app {app_id} arrived as a GovernanceAction; \
+                             the badge is written by AccountState::execute_proposal, so \
+                             emitting it here would apply the same vote twice"
+                        ),
+                    ));
                 }
                 crate::core::governance::GovernanceAction::SetEncryptionPolicy(policy) => {
                     // P12-4: DAO parameter-only update. This cannot grant decrypt

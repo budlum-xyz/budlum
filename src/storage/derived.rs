@@ -41,12 +41,58 @@
 //! saving does not come from analysing what a user uploaded, it comes from
 //! offering an operation that produces the cheap thing in the first place.
 //!
+//! # The second transform: a prefix of a progressive master
+//!
+//! A progressively coded JPEG puts a whole picture in its first scan and
+//! sharpens it with every later one. Truncating the file therefore yields a
+//! full-size image at lower fidelity, not the top strip of a sharp one, and
+//! the truncation is a copy: no codec runs, so the output is byte-identical
+//! on every node by construction rather than by argument.
+//!
+//! Measured on five camera photographs, each stored as a 1600-pixel-wide
+//! progressive master, asking for a derivative and timing only the server:
+//!
+//! | how the derivative is produced | server CPU | bytes | SSIM vs master |
+//! |---|---|---|---|
+//! | prefix, 25% of the file | 0.00053 s | 118,634 | 0.7469 |
+//! | decode, scale to 720p, re-encode | 0.34234 s | 266,944 | 0.9022 |
+//! | decode, re-encode at quality 45 | 0.19395 s | 233,791 | 0.9042 |
+//!
+//! So the prefix is 640 times cheaper in CPU and loses 0.157 SSIM against a
+//! re-encode of comparable size. That is a real loss and it decides where the
+//! transform belongs. Matching the re-encode's quality needs 55% of the file,
+//! which measured 1.01x to 1.15x fatter than re-encoding to the same SSIM.
+//!
+//! **A prefix is therefore refused as a way to make quality rungs.** It wins
+//! where low fidelity is already the specification:
+//!
+//! | target | prefix bytes | prefix CPU | re-encode bytes | re-encode CPU |
+//! |---|---|---|---|---|
+//! | 320px thumbnail | 23,726 | 0.000008 s | 16,619 | 0.044374 s |
+//! | 640px feed preview | 47,453 | 0.000009 s | 62,499 | 0.049585 s |
+//! | 480px card image | 37,962 | 0.000007 s | 35,431 | 0.045705 s |
+//!
+//! Five thousand times the CPU, and at 640 pixels the prefix is smaller than
+//! the re-encode as well. A feed scrolling past a hundred posts is a hundred
+//! of these, which is the workload that decides whether serving costs
+//! anything.
+//!
+//! The master has to be progressive for any of this to hold. The same
+//! truncation of a baseline JPEG measured 0.335 to 0.567 SSIM, because
+//! baseline stores the image in raster order and a prefix is the top of it.
+//! Nothing in the type can check that, which is stated among the costs below.
+//!
+//! Cutting at a scan boundary was measured and is worse, not better: 0.0560
+//! to 0.0920 SSIM below cutting at an arbitrary offset, because a decoder
+//! uses the partial scan it finds. The span is a byte count for that reason.
+//!
 //! # What is actually stored
 //!
 //! A [`DerivedSpec`]: the master's id, the box in block units, and which
 //! transform. Forty-two bytes, against the several kilobytes an independently
 //! encoded crop costs. The multiplier rounds to zero, the same as a generated
-//! object, and for the same reason: what is kept is a description.
+//! object, and for the same reason: what is kept is a description. A prefix
+//! spends seventeen more on its span, see [`DERIVED_PREFIX_SPEC_BYTES`].
 //!
 //! # Verification is the same one sentence as everywhere else
 //!
@@ -71,6 +117,15 @@
 //! derivation may name stored content, never another derivation. One hop has
 //! one failure to reason about; a chain of hops has a depth nobody bounded.
 //!
+//! Whether a master is progressively coded is not checked here. The bounds a
+//! [`PrefixSpan`] can state are its own two lengths; the coding mode lives in
+//! bytes this type never sees. A prefix of a baseline master still verifies,
+//! because verification hashes the copied bytes and the copy is correct. It
+//! just looks like the top of the picture, and the caller that registered it
+//! chose that. Refusing it would need the master, and a check that needs the
+//! master cannot run at registration, which is the only moment refusing is
+//! cheap.
+//!
 //! WIRING: unwired - measured: no production path registers a derived
 //! manifest yet. The spec, its bounds and its refusals are here and tested;
 //! the transaction that registers a derived object is a consensus-surface
@@ -83,6 +138,7 @@
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;
+use std::collections::BTreeMap;
 
 /// The block size a crop must align to, in pixels.
 ///
@@ -110,6 +166,13 @@ pub const DERIVED_MAX_BLOCKS_PER_SIDE: u32 = 4096;
 pub enum DerivedTransform {
     /// Select a block-aligned rectangle of the master and keep it.
     Crop,
+    /// Keep a leading run of the master's bytes and stop.
+    ///
+    /// Only meaningful for a progressively coded master, where the early
+    /// bytes carry a whole picture at low fidelity rather than the top strip
+    /// of a sharp one. See [`DerivedSpec::prefix_bytes`] for what the length
+    /// means and the module docs for where the operation pays.
+    Prefix,
 }
 
 impl DerivedTransform {
@@ -123,7 +186,18 @@ impl DerivedTransform {
     const fn transform_tag(self) -> u8 {
         match self {
             Self::Crop => 1,
+            Self::Prefix => 2,
         }
+    }
+
+    /// Whether this transform reads a region of the master or a run of its
+    /// bytes.
+    ///
+    /// The two kinds validate against different fields, and a caller that
+    /// cannot tell them apart ends up bounds checking a byte length against
+    /// a block grid.
+    pub const fn is_byte_range(self) -> bool {
+        matches!(self, Self::Prefix)
     }
 }
 
@@ -160,6 +234,27 @@ pub struct DerivedSpec {
     pub master_blocks_w: u32,
     /// The master's height in blocks.
     pub master_blocks_h: u32,
+    /// For [`DerivedTransform::Prefix`], how many leading bytes of the master
+    /// the derived object is, and how long the master is.
+    ///
+    /// `None` for a region transform, where the box fields carry the meaning
+    /// instead. Keeping the two in one type rather than splitting the enum
+    /// costs an `Option` and buys one commitment, one bounds check and one
+    /// registration path for both kinds.
+    pub prefix: Option<PrefixSpan>,
+}
+
+/// A leading run of a master's bytes.
+///
+/// Both numbers are recorded for the same reason the master's block
+/// dimensions are: the box has to be checkable at registration, before anyone
+/// fetches a multi-megabyte master to discover the span runs off the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrefixSpan {
+    /// Bytes kept, counted from the master's first byte.
+    pub kept_bytes: u64,
+    /// The master's total length in bytes.
+    pub master_bytes: u64,
 }
 
 /// Why a derivation was refused.
@@ -195,6 +290,47 @@ pub enum DerivedError {
     /// registering it twice under two ids invites paying twice for one set of
     /// bytes. Deduplication is the mechanism for that, not derivation.
     WholeMaster,
+    /// Something tried to release a master that carries derivations.
+    ///
+    /// A derived object holds no bytes of its own: reading it means fetching
+    /// the master and recomputing. Letting the master go while a derivation
+    /// names it does not shrink storage, it destroys the derivation, and it
+    /// does so silently, because the derived manifest is still there and
+    /// still verifies as a manifest until someone tries to read it.
+    MasterStillDerived {
+        master_id: ContentId,
+        derivations: u32,
+    },
+    /// Release was attempted before the grace window closed.
+    MasterGraceNotElapsed {
+        master_id: ContentId,
+        releasable_at_epoch: u64,
+        now_epoch: u64,
+    },
+    /// A derivation named a master nothing is holding.
+    ///
+    /// Refused rather than accepted and resolved later: a derivation whose
+    /// master is not held can never be read, so registering it is selling
+    /// storage for an object that does not exist.
+    UnknownMaster { master_id: ContentId },
+    /// The spec's transform and its fields disagree about which kind it is.
+    ///
+    /// A `Prefix` with no span has nothing to copy; a `Crop` carrying one is
+    /// describing two derivations at once and a verifier would have to guess
+    /// which. Both are refused rather than resolved, because a guess here
+    /// produces bytes that hash to something nobody committed to.
+    TransformFieldsMismatch {
+        transform: DerivedTransform,
+        has_prefix: bool,
+    },
+    /// The prefix keeps no bytes, or keeps every byte the master has.
+    ///
+    /// Zero is [`Self::EmptyRegion`]'s argument in the other units. The whole
+    /// length is [`Self::WholeMaster`]'s: the derived bytes would be the
+    /// master's bytes, so it is the master.
+    PrefixSpanDegenerate { kept_bytes: u64, master_bytes: u64 },
+    /// The prefix runs past the end of the master.
+    PrefixPastEnd { kept_bytes: u64, master_bytes: u64 },
 }
 
 impl std::fmt::Display for DerivedError {
@@ -226,6 +362,50 @@ impl std::fmt::Display for DerivedError {
                 "a region covering the whole master is the master; register it once and \
                  let deduplication do its job"
             ),
+            Self::MasterStillDerived {
+                master_id,
+                derivations,
+            } => write!(
+                f,
+                "master {master_id} still carries {derivations} derivation(s); releasing it \
+                 would leave them unreadable while their manifests still look valid"
+            ),
+            Self::MasterGraceNotElapsed {
+                master_id,
+                releasable_at_epoch,
+                now_epoch,
+            } => write!(
+                f,
+                "master {master_id} is releasable at epoch {releasable_at_epoch}, not {now_epoch}"
+            ),
+            Self::UnknownMaster { master_id } => write!(
+                f,
+                "master {master_id} is not held; a derivation of it could never be read"
+            ),
+            Self::TransformFieldsMismatch {
+                transform,
+                has_prefix,
+            } => write!(
+                f,
+                "transform {transform:?} does not match its fields: prefix span \
+                 {}present",
+                if *has_prefix { "" } else { "not " }
+            ),
+            Self::PrefixSpanDegenerate {
+                kept_bytes,
+                master_bytes,
+            } => write!(
+                f,
+                "a prefix of {kept_bytes} bytes from a {master_bytes}-byte master is \
+                 either empty or the master itself"
+            ),
+            Self::PrefixPastEnd {
+                kept_bytes,
+                master_bytes,
+            } => write!(
+                f,
+                "a prefix of {kept_bytes} bytes runs past a master of {master_bytes} bytes"
+            ),
         }
     }
 }
@@ -247,6 +427,18 @@ impl DerivedSpec {
     /// [`DerivedError::OutOfBounds`] for a box that leaves the master, and
     /// [`DerivedError::WholeMaster`] for one that covers all of it.
     pub fn check_region(&self) -> Result<(), DerivedError> {
+        // The transform decides which fields carry the meaning, so the first
+        // check is that it agrees with what is actually here. Validating a
+        // byte length against a block grid is the failure this refuses.
+        if self.transform.is_byte_range() != self.prefix.is_some() {
+            return Err(DerivedError::TransformFieldsMismatch {
+                transform: self.transform,
+                has_prefix: self.prefix.is_some(),
+            });
+        }
+        if let Some(span) = self.prefix {
+            return Self::check_prefix_span(span);
+        }
         if self.block_w == 0 || self.block_h == 0 {
             return Err(DerivedError::EmptyRegion);
         }
@@ -287,6 +479,39 @@ impl DerivedSpec {
         Ok(())
     }
 
+    /// The bounds a prefix span has to satisfy.
+    ///
+    /// Split out rather than inlined because it is the whole of the byte-range
+    /// case and reads as one rule instead of three branches inside a function
+    /// whose other half is about rectangles.
+    fn check_prefix_span(span: PrefixSpan) -> Result<(), DerivedError> {
+        if span.kept_bytes > span.master_bytes {
+            return Err(DerivedError::PrefixPastEnd {
+                kept_bytes: span.kept_bytes,
+                master_bytes: span.master_bytes,
+            });
+        }
+        if span.kept_bytes == 0 || span.kept_bytes == span.master_bytes {
+            return Err(DerivedError::PrefixSpanDegenerate {
+                kept_bytes: span.kept_bytes,
+                master_bytes: span.master_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// How many bytes this derivation copies, for a prefix.
+    ///
+    /// `None` for a region transform, whose byte count is not knowable from
+    /// the spec: a crop's size depends on the master's coefficients, and
+    /// claiming a number here would be inventing one.
+    pub const fn prefix_bytes(&self) -> Option<u64> {
+        match self.prefix {
+            Some(span) => Some(span.kept_bytes),
+            None => None,
+        }
+    }
+
     /// Refuse a derivation whose master is itself derived.
     ///
     /// Takes the answer rather than looking it up, because the registry that
@@ -315,12 +540,27 @@ impl DerivedSpec {
         self.block_h.saturating_mul(DERIVED_BLOCK_PIXELS)
     }
 
+    /// The prefix span as three hashable values, present or not.
+    ///
+    /// A present/absent byte rather than skipping the fields when there is no
+    /// span: skipping would let a crop and a prefix whose numbers happened to
+    /// line up produce one tag. Lifted out of the commitment so that function
+    /// stays short enough to read as one list of fields, which is also what
+    /// the byte-exactness gate greps.
+    const fn prefix_commitment_fields(&self) -> (u8, u64, u64) {
+        match self.prefix {
+            Some(span) => (1, span.kept_bytes, span.master_bytes),
+            None => (0, 0, 0),
+        }
+    }
+
     /// Domain-separated commitment to this derivation.
     ///
     /// Every field is hashed, including the master's declared dimensions.
     /// Leaving those out would let two specs with different bounds share a
     /// commitment, and the bounds are what a verifier checks the box against.
     pub fn derivation_commitment_tag(&self) -> [u8; 32] {
+        let (present, kept, total) = self.prefix_commitment_fields();
         hash_fields_bytes(&[
             b"BDLM_DERIVED_CONTENT_V1",
             &self.master_id.0,
@@ -331,6 +571,9 @@ impl DerivedSpec {
             &self.block_h.to_le_bytes(),
             &self.master_blocks_w.to_le_bytes(),
             &self.master_blocks_h.to_le_bytes(),
+            &[present],
+            &kept.to_le_bytes(),
+            &total.to_le_bytes(),
         ])
     }
 
@@ -352,6 +595,201 @@ impl DerivedSpec {
 /// module exists to make small, and a reader should not have to add it up.
 pub const DERIVED_SPEC_BYTES: u64 = 32 + 1 + 24 + 1;
 
+/// Epochs a master stays held after its last derivation is released.
+///
+/// The same shape and the same reason as the dictionary registry's own grace
+/// window: a
+/// reference count reaching zero is a claim about this instant, and a
+/// derivation registered in the same block would otherwise race the release.
+/// The window makes the claim durable enough to act on.
+pub const MASTER_GRACE_EPOCHS: u64 = 1024;
+
+/// What a master is holding up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MasterEntry {
+    /// Derivations that name this master.
+    derivations: u32,
+    /// Set when the count reaches zero, cleared when it rises again.
+    releasable_at_epoch: Option<u64>,
+}
+
+/// Which masters are held, and what depends on them.
+///
+/// # Why this type exists
+///
+/// A derived object stores a description, not bytes. That is what makes the
+/// multiplier round to zero, and it is also what makes the object dependent:
+/// reading it means fetching the master and recomputing. `DerivedSpec` checks
+/// that a derivation is well formed at the moment it is registered, and
+/// nothing checked that the thing it depends on went on existing.
+///
+/// The gap matters because of how it fails. Releasing a master that carries
+/// derivations does not raise an error anywhere: the derived manifests are
+/// still present, still well formed, still hash to ids that look valid. They
+/// stop being readable, and the first sign of it is a read that cannot be
+/// served. There is no fallback, because for these objects the description is
+/// the only copy.
+///
+/// [`crate::storage::dictionary::DictionaryRegistry`] already solves exactly
+/// this for the objects that reference a shared dictionary, with a reference
+/// count, a grace window and a refusal to delete while references exist.
+/// Derivations have the same dependency and had none of it. This is that
+/// mechanism, applied to the other lever that reaches a zero multiplier.
+///
+/// # What it does not do
+///
+/// It refuses a release; it cannot refuse a disappearance. An operator that
+/// simply stops answering is a storage-proof and slashing question, handled
+/// elsewhere. What is closed here is the case where the chain's own
+/// accounting is what removes the master.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MasterRegistry {
+    entries: BTreeMap<ContentId, MasterEntry>,
+}
+
+impl MasterRegistry {
+    /// A registry holding nothing.
+    #[must_use]
+    pub fn empty_registry() -> Self {
+        Self::default()
+    }
+
+    /// Record that a master is held and may be derived from.
+    ///
+    /// Idempotent, so a replayed transaction is not an error and does not
+    /// reset a count.
+    pub fn hold_master(&mut self, master_id: ContentId) {
+        self.entries.entry(master_id).or_insert(MasterEntry {
+            derivations: 0,
+            releasable_at_epoch: None,
+        });
+    }
+
+    /// Whether a master is held.
+    #[must_use]
+    pub fn is_master_held(&self, master_id: &ContentId) -> bool {
+        self.entries.contains_key(master_id)
+    }
+
+    /// How many derivations name this master, or `None` if it is not held.
+    #[must_use]
+    pub fn derivation_count(&self, master_id: &ContentId) -> Option<u32> {
+        self.entries.get(master_id).map(|e| e.derivations)
+    }
+
+    /// The epoch at which a pending release becomes possible, if one is
+    /// pending.
+    ///
+    /// Exposed because otherwise the window is unobservable, and an
+    /// unobservable field cannot be tested: a change that stopped cancelling
+    /// the window on a new derivation would produce identical results from
+    /// every other method, since they all gate on the count first. The bug
+    /// would be latent until the count next reached zero at a different
+    /// epoch than the stale window recorded.
+    #[must_use]
+    pub fn pending_release_epoch(&self, master_id: &ContentId) -> Option<u64> {
+        self.entries
+            .get(master_id)
+            .and_then(|e| e.releasable_at_epoch)
+    }
+
+    /// Take a reference on behalf of a derivation.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedError::UnknownMaster`] when the master is not held. A
+    /// derivation of an absent master could never be read, so registering it
+    /// would be selling storage for an object that does not exist.
+    pub fn acquire_master(&mut self, master_id: &ContentId) -> Result<(), DerivedError> {
+        let Some(entry) = self.entries.get_mut(master_id) else {
+            return Err(DerivedError::UnknownMaster {
+                master_id: *master_id,
+            });
+        };
+        entry.derivations = entry.derivations.saturating_add(1);
+        // A master that is being derived from again is no longer on its way
+        // out. Leaving the window open would let a release land between the
+        // new derivation and the next epoch.
+        entry.releasable_at_epoch = None;
+        Ok(())
+    }
+
+    /// Drop a derivation's reference. When the last one goes, the window opens.
+    pub fn release_derivation(&mut self, master_id: &ContentId, now_epoch: u64) {
+        let Some(entry) = self.entries.get_mut(master_id) else {
+            return;
+        };
+        entry.derivations = entry.derivations.saturating_sub(1);
+        if entry.derivations == 0 {
+            entry.releasable_at_epoch = Some(now_epoch.saturating_add(MASTER_GRACE_EPOCHS));
+        }
+    }
+
+    /// Release a master nothing derives from any more.
+    ///
+    /// # Errors
+    ///
+    /// [`DerivedError::MasterStillDerived`] while derivations name it, and
+    /// [`DerivedError::MasterGraceNotElapsed`] before the window closes.
+    pub fn release_master(
+        &mut self,
+        master_id: &ContentId,
+        now_epoch: u64,
+    ) -> Result<(), DerivedError> {
+        let Some(entry) = self.entries.get(master_id) else {
+            return Ok(());
+        };
+        if entry.derivations > 0 {
+            return Err(DerivedError::MasterStillDerived {
+                master_id: *master_id,
+                derivations: entry.derivations,
+            });
+        }
+        match entry.releasable_at_epoch {
+            // Held but never derived from: there is nothing this registry is
+            // protecting, so it may go without waiting out a window.
+            None => {
+                self.entries.remove(master_id);
+                Ok(())
+            }
+            Some(at) if now_epoch < at => Err(DerivedError::MasterGraceNotElapsed {
+                master_id: *master_id,
+                releasable_at_epoch: at,
+                now_epoch,
+            }),
+            Some(_) => {
+                self.entries.remove(master_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Masters whose grace window has closed.
+    #[must_use]
+    pub fn releasable_masters(&self, now_epoch: u64) -> Vec<ContentId> {
+        self.entries
+            .iter()
+            .filter(|(_, e)| {
+                e.derivations == 0 && e.releasable_at_epoch.is_some_and(|at| now_epoch >= at)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// How many masters are held.
+    #[must_use]
+    pub fn master_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+/// Serialised size of a [`DerivedSpec`] carrying a [`PrefixSpan`], in bytes.
+///
+/// [`DERIVED_SPEC_BYTES`] plus a discriminant byte and two `u64` lengths. A
+/// prefix leaves the block fields at zero and pays for them anyway, which is
+/// sixteen bytes of waste against a scheme that splits the type in two, and
+/// cheaper than the second registration path that split would need.
+pub const DERIVED_PREFIX_SPEC_BYTES: u64 = DERIVED_SPEC_BYTES + 1 + 8 + 8;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +804,26 @@ mod tests {
             block_h: 6,
             master_blocks_w: 20,
             master_blocks_h: 15,
+            prefix: None,
+        }
+    }
+
+    /// A prefix spec, using the measured 320-pixel thumbnail case: 23,726
+    /// bytes kept of a 474,537-byte progressive master.
+    fn prefix_spec() -> DerivedSpec {
+        DerivedSpec {
+            master_id: ContentId([7u8; 32]),
+            transform: DerivedTransform::Prefix,
+            block_x: 0,
+            block_y: 0,
+            block_w: 0,
+            block_h: 0,
+            master_blocks_w: 0,
+            master_blocks_h: 0,
+            prefix: Some(PrefixSpan {
+                kept_bytes: 23_726,
+                master_bytes: 474_537,
+            }),
         }
     }
 
@@ -514,11 +972,327 @@ mod tests {
     }
 
     #[test]
+    fn a_prefix_inside_its_master_is_accepted() {
+        assert!(prefix_spec().check_region().is_ok());
+        assert_eq!(prefix_spec().prefix_bytes(), Some(23_726));
+        // A crop has no byte count to report: it depends on the master's
+        // coefficients, and a number here would be invented.
+        assert_eq!(spec().prefix_bytes(), None);
+    }
+
+    #[test]
+    fn a_transform_that_disagrees_with_its_fields_is_refused() {
+        // A prefix with nothing to copy.
+        let mut s = prefix_spec();
+        s.prefix = None;
+        assert_eq!(
+            s.check_region(),
+            Err(DerivedError::TransformFieldsMismatch {
+                transform: DerivedTransform::Prefix,
+                has_prefix: false,
+            })
+        );
+
+        // A crop carrying a span is describing two derivations at once, and
+        // this one would otherwise pass every box check it has.
+        let mut s = spec();
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 10,
+            master_bytes: 100,
+        });
+        assert_eq!(
+            s.check_region(),
+            Err(DerivedError::TransformFieldsMismatch {
+                transform: DerivedTransform::Crop,
+                has_prefix: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_degenerate_prefix_is_refused() {
+        // Keeping nothing is the empty region in the other units.
+        let mut s = prefix_spec();
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 0,
+            master_bytes: 474_537,
+        });
+        assert_eq!(
+            s.check_region(),
+            Err(DerivedError::PrefixSpanDegenerate {
+                kept_bytes: 0,
+                master_bytes: 474_537,
+            })
+        );
+
+        // Keeping all of it is the whole master, which is the master.
+        let mut s = prefix_spec();
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 474_537,
+            master_bytes: 474_537,
+        });
+        assert_eq!(
+            s.check_region(),
+            Err(DerivedError::PrefixSpanDegenerate {
+                kept_bytes: 474_537,
+                master_bytes: 474_537,
+            })
+        );
+    }
+
+    #[test]
+    fn a_prefix_past_the_end_is_refused_before_it_is_called_degenerate() {
+        // Ordering matters: one byte past the end is not the whole master,
+        // and reporting it as degenerate would name the wrong fault.
+        let mut s = prefix_spec();
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 474_538,
+            master_bytes: 474_537,
+        });
+        assert_eq!(
+            s.check_region(),
+            Err(DerivedError::PrefixPastEnd {
+                kept_bytes: 474_538,
+                master_bytes: 474_537,
+            })
+        );
+    }
+
+    #[test]
+    fn the_commitment_separates_a_prefix_from_a_crop() {
+        // Both fields of the span, and the fact that there is one at all,
+        // have to reach the hash. Two derivations that share a tag are two
+        // sets of bytes nobody can tell apart.
+        let base = prefix_spec().derivation_commitment_tag();
+        assert_ne!(base, spec().derivation_commitment_tag());
+
+        let mut s = prefix_spec();
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 23_727,
+            master_bytes: 474_537,
+        });
+        assert_ne!(s.derivation_commitment_tag(), base, "kept_bytes");
+
+        let mut s = prefix_spec();
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 23_726,
+            master_bytes: 474_538,
+        });
+        assert_ne!(s.derivation_commitment_tag(), base, "master_bytes");
+
+        // A crop whose zeroed span numbers match the absent case must still
+        // differ, which is what the presence byte is for.
+        let mut s = spec();
+        s.transform = DerivedTransform::Prefix;
+        s.prefix = Some(PrefixSpan {
+            kept_bytes: 0,
+            master_bytes: 0,
+        });
+        assert_ne!(
+            s.derivation_commitment_tag(),
+            spec().derivation_commitment_tag()
+        );
+    }
+
+    #[test]
+    fn the_two_transforms_are_told_apart_by_kind() {
+        assert!(DerivedTransform::Prefix.is_byte_range());
+        assert!(!DerivedTransform::Crop.is_byte_range());
+    }
+
+    #[test]
+    fn a_prefix_description_stays_far_smaller_than_the_bytes_it_replaces() {
+        // The measured 320-pixel case: a re-encoded thumbnail of this master
+        // cost 16,619 bytes, against a description of DERIVED_PREFIX_SPEC_BYTES.
+        assert_eq!(DERIVED_PREFIX_SPEC_BYTES, DERIVED_SPEC_BYTES + 17);
+        // Both sides are constants, so this is a compile-time claim and belongs
+        // in a const block: a runtime assert on constants can only fail after
+        // the binary that violates it has already been built and shipped.
+        const {
+            assert!(
+                DERIVED_PREFIX_SPEC_BYTES * 200 < 16_619,
+                "a prefix description must stay negligible against an encoded thumbnail"
+            );
+        }
+    }
+
+    #[test]
     fn the_block_size_is_the_conservative_one_for_subsampled_chroma() {
         // 4:2:0 halves the chroma planes, so an 8-pixel luma-aligned crop can
         // still cut a chroma block. This constant is the reason the whole
         // scheme is byte-exact, so it is locked rather than left to a reader
         // to notice if it changes.
         assert_eq!(DERIVED_BLOCK_PIXELS, 16);
+    }
+
+    fn master() -> ContentId {
+        ContentId([7u8; 32])
+    }
+
+    /// A master that carries derivations cannot be released.
+    ///
+    /// This is the failure the registry exists for, and its shape is what
+    /// makes it dangerous: releasing the master raises nothing anywhere. The
+    /// derived manifests stay present and well formed, and the first sign of
+    /// trouble is a read that cannot be served, with no stored copy behind it.
+    #[test]
+    fn a_master_carrying_derivations_is_not_released() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).expect("master is held");
+
+        let err = reg
+            .release_master(&master(), 10_000)
+            .expect_err("a master with a live derivation must not be released");
+        assert_eq!(
+            err,
+            DerivedError::MasterStillDerived {
+                master_id: master(),
+                derivations: 1,
+            }
+        );
+        assert!(
+            reg.is_master_held(&master()),
+            "the refusal must also keep the master"
+        );
+    }
+
+    /// The canary for the test above: a master nothing derives from is
+    /// releasable, or the refusal could be the registry refusing everything.
+    #[test]
+    fn a_master_nothing_derives_from_is_released() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.release_master(&master(), 10_000)
+            .expect("nothing depends on it");
+        assert!(!reg.is_master_held(&master()));
+        assert_eq!(reg.master_count(), 0);
+    }
+
+    /// Releasing the last derivation opens a window rather than the door.
+    ///
+    /// A count reaching zero is a claim about this instant. Without the
+    /// window, a derivation registered in the same block would race a release
+    /// that is already in flight.
+    #[test]
+    fn the_last_derivation_opens_a_grace_window() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).unwrap();
+        reg.release_derivation(&master(), 1_000);
+
+        let err = reg
+            .release_master(&master(), 1_000)
+            .expect_err("the window has not closed");
+        assert_eq!(
+            err,
+            DerivedError::MasterGraceNotElapsed {
+                master_id: master(),
+                releasable_at_epoch: 1_000 + MASTER_GRACE_EPOCHS,
+                now_epoch: 1_000,
+            }
+        );
+
+        // One epoch before the window closes, still refused.
+        assert!(reg
+            .release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS - 1)
+            .is_err());
+
+        // At the boundary, allowed. The bound must not be so wide that it
+        // never opens.
+        reg.release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS)
+            .expect("the window has closed");
+        assert!(!reg.is_master_held(&master()));
+    }
+
+    /// Deriving again closes a window that was already open.
+    ///
+    /// Otherwise a release scheduled before the new derivation would still
+    /// fire after it, which is the race the window exists to prevent.
+    #[test]
+    fn a_new_derivation_cancels_a_pending_release() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).unwrap();
+        reg.release_derivation(&master(), 1_000);
+        assert_eq!(reg.releasable_masters(1_000 + MASTER_GRACE_EPOCHS).len(), 1);
+
+        reg.acquire_master(&master()).unwrap();
+        assert!(
+            reg.releasable_masters(1_000 + MASTER_GRACE_EPOCHS)
+                .is_empty(),
+            "a master being derived from again is not on its way out"
+        );
+        assert!(reg.release_master(&master(), u64::MAX).is_err());
+        // The window itself has to be gone, not merely masked by the count.
+        // Every other method gates on the count first, so a change that
+        // stopped clearing this field would pass the two assertions above and
+        // leave a stale epoch behind to fire the next time the count reached
+        // zero.
+        assert_eq!(
+            reg.pending_release_epoch(&master()),
+            None,
+            "a new derivation must clear the pending release, not just outvote it"
+        );
+    }
+
+    /// A derivation of a master nobody holds is refused at registration.
+    ///
+    /// Accepting it would sell storage for an object that can never be read:
+    /// there is no master to recompute from and no bytes of its own.
+    #[test]
+    fn a_derivation_of_an_unheld_master_is_refused() {
+        let mut reg = MasterRegistry::empty_registry();
+        let err = reg
+            .acquire_master(&master())
+            .expect_err("nothing is holding this master");
+        assert_eq!(
+            err,
+            DerivedError::UnknownMaster {
+                master_id: master()
+            }
+        );
+        assert_eq!(reg.derivation_count(&master()), None);
+    }
+
+    /// Counting survives many derivations of one master, which is the case
+    /// the class exists for: one photograph, many crops.
+    #[test]
+    fn many_derivations_hold_one_master_until_the_last_goes() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        for _ in 0..64 {
+            reg.acquire_master(&master()).unwrap();
+        }
+        assert_eq!(reg.derivation_count(&master()), Some(64));
+
+        for i in 0..63 {
+            reg.release_derivation(&master(), 1_000);
+            assert!(
+                reg.release_master(&master(), u64::MAX).is_err(),
+                "still derived after {} releases",
+                i + 1
+            );
+        }
+
+        reg.release_derivation(&master(), 1_000);
+        assert_eq!(reg.derivation_count(&master()), Some(0));
+        reg.release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS)
+            .expect("the last derivation is gone and the window has closed");
+    }
+
+    /// Holding is idempotent, so a replayed transaction cannot reset a count.
+    #[test]
+    fn holding_a_master_twice_does_not_reset_its_derivations() {
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(master());
+        reg.acquire_master(&master()).unwrap();
+        reg.hold_master(master());
+        assert_eq!(
+            reg.derivation_count(&master()),
+            Some(1),
+            "a replayed hold must not forget what depends on the master"
+        );
+        assert!(reg.release_master(&master(), u64::MAX).is_err());
     }
 }

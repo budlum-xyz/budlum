@@ -20,6 +20,10 @@ required_tests=(
   chaos_reputation_fuzz_decay
   outbound_subnet_diversity_rejects_excess
   reputation_score_clamped_under_repeated_penalties
+  h5_score_map_ceiling_holds_on_every_entry_point
+  h5_score_map_ceiling_is_load_bearing
+  h5_ceiling_refuses_rather_than_evicting_a_ban
+  h5_tracked_peer_still_scored_when_map_is_full
 )
 
 fail() {

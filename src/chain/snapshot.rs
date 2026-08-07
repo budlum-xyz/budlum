@@ -516,6 +516,16 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
+    /// Proof tasks and unpaid receipts.
+    ///
+    /// `#[serde(default)]` like its neighbours: a snapshot taken before this
+    /// field existed comes back as an empty market, which is what such a
+    /// chain had. Round-tripped rather than rebuilt, because an assigned task
+    /// names the prover that took it and the epoch it was taken in, and a
+    /// restart that forgot both would silently release every prover from work
+    /// it had already committed to.
+    #[serde(default)]
+    pub proof_market: Option<crate::settlement::ProofMarketState>,
 
     // --- C4 (P2): manifest signature (schema-4 wire). ---
     // RFC_GAP1 §7 (: Ed25519 tek-imza + trust-list + AllowUnsigned geçişi).
@@ -675,6 +685,7 @@ impl StateSnapshotV2 {
             bridge_state: Some(account_state.bridge_state.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
+            proof_market: Some(account_state.proof_market.clone()),
             // `Registry`, `liveness`, and `invalid_votes` are no longer
             // Fields on `AccountState` (ghost-hunted). The struct fields were
             // Already removed above; the live state is recovered by routing
@@ -798,9 +809,49 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.governance);
             hash_opt_serializable(&mut hasher, &self.storage_registry);
             hash_opt_serializable(&mut hasher, &self.ai_registry);
+            // The private-note registry, which holds `spent_nullifiers`.
+            //
+            // Every other registry on this struct was already hashed here and
+            // this one was not, so it crossed the wire outside the digest: a
+            // peer serving a snapshot could drop nullifiers from the set and
+            // the snapshot still verified. A nullifier that is absent has not
+            // been spent, so the notes it retires become spendable again,
+            // which is double-spend of private value with no forged signature
+            // anywhere.
+            //
+            // `AccountState::calculate_state_root` already hashes
+            // `note_registry.state_root()`, so a restored node diverges from
+            // consensus at the next block rather than accepting the theft
+            // permanently. That makes this a fail-loud bug rather than a
+            // silent one; it does not make it acceptable, because the node
+            // has already served requests against the restored state by then.
+            hash_opt_serializable(&mut hasher, &self.note_registry);
+            // The policy that decides whether a signature is required at all.
+            //
+            // `verify_authentic` reads this field to choose between accepting
+            // an unsigned snapshot and demanding a trusted signer. Outside
+            // the digest, it was the one field an attacker most wanted to
+            // edit: flip `RequireSigned` to `AllowUnsigned` on a snapshot
+            // whose digest already matches, and `verify_authentic` returns
+            // `Ok(())` at the first match arm without ever looking at
+            // `manifest_signer` or `manifest_signature`. The signature
+            // requirement could be removed by the party it was meant to
+            // constrain.
+            //
+            // `manifest_signer`, `manifest_signature` and `snapshot_hash`
+            // stay out, and must: the first two are the signature over this
+            // digest and the third is the digest, so including any of them
+            // is a definition that cannot be satisfied.
+            hash_serializable(&mut hasher, &self.trust_policy);
             hash_opt_serializable(&mut hasher, &self.bridge_state);
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
+            // The proof market carries assigned tasks, each naming a prover
+            // and an epoch, and unpaid receipts, each naming an amount. A
+            // field that crosses the wire outside the digest is a field a
+            // peer can edit without invalidating the snapshot, which for this
+            // one means reassigning work or rewriting what is owed.
+            hash_opt_serializable(&mut hasher, &self.proof_market);
             // Finality_certificates: Vec - len-prefix + her elem serialize.
             let fc_bytes = bincode::serialize(&self.finality_certificates)
                 .expect("BUG: finality certificates must serialize for state root");
@@ -810,6 +861,18 @@ impl StateSnapshotV2 {
         }
 
         hasher.finalize().into()
+    }
+
+    /// Recompute `snapshot_hash` over the current field set.
+    ///
+    /// Exists for fixtures that mutate a hashed field by hand. `trust_policy`
+    /// is inside the digest, so a test that flips it and then calls
+    /// `verify_authentic` gets `DigestMismatch` and never reaches the check
+    /// it meant to exercise. Production code has no reason to call this: the
+    /// hash is written once at construction and again by `sign_manifest`,
+    /// which is the only writer that moves a hashed field.
+    pub fn reseal_after_manual_edit(&mut self) {
+        self.snapshot_hash = self.calculate_hash();
     }
 
     fn calculate_hash(&self) -> String {
@@ -934,17 +997,32 @@ impl StateSnapshotV2 {
     }
 
     /// C4: snapshot'ı imzala (production loader/HSM signer).
+    ///
+    /// Order matters here, and it is the reason this function is not three
+    /// lines. `trust_policy` is inside the digest, so setting it after
+    /// signing would sign one digest and leave the struct describing a
+    /// different one: `verify_authentic` would then fail at `verify()` with
+    /// `DigestMismatch` before it ever checked the signature it was handed.
+    /// The policy is therefore committed first, the digest computed over the
+    /// final field set, and `snapshot_hash` refreshed to match, so that the
+    /// bytes that were signed and the bytes that will be verified are the
+    /// same bytes.
     pub fn sign_manifest(
         &mut self,
         secret_key: &ed25519_dalek::SigningKey,
         signer_pubkey: [u8; 32],
     ) {
         use ed25519_dalek::Signer;
+        self.trust_policy = SnapshotTrustPolicy::RequireSigned;
         let digest = self.calculate_digest();
         let signature = secret_key.sign(&digest).to_bytes();
         self.manifest_signer = Some(signer_pubkey);
         self.manifest_signature = Some(signature.to_vec());
-        self.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        // `manifest_signer`, `manifest_signature` and `snapshot_hash` are all
+        // outside the digest, so assigning them does not invalidate what was
+        // just signed. `trust_policy` is inside it, which is why the stored
+        // hash has to be recomputed after the policy moved.
+        self.snapshot_hash = hex::encode(digest);
     }
 }
 #[cfg(test)]
@@ -1367,6 +1445,11 @@ mod tests {
             },
         );
         snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        // The policy is inside the digest, so moving it invalidates the hash
+        // the fixture was built with. Refresh it, or `verify_authentic`
+        // returns DigestMismatch and never reaches the signer check this test
+        // is about.
+        snapshot.snapshot_hash = snapshot.calculate_hash();
         assert_eq!(
             snapshot.verify_authentic(None).unwrap_err(),
             SnapshotAuthError::MissingSigner
@@ -1407,9 +1490,192 @@ mod tests {
         snapshot.manifest_signer = Some(wrong_pk);
         snapshot.manifest_signature = Some(wrong_sig.to_vec());
         snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        // Same reason as above: the digest covers the policy, so the fixture
+        // has to be self-consistent before a signature can be the thing that
+        // fails.
+        snapshot.snapshot_hash = snapshot.calculate_hash();
         assert_eq!(
             snapshot.verify_authentic(Some(&[wrong_pk])).unwrap_err(),
             SnapshotAuthError::SignatureInvalid
+        );
+    }
+
+    /// Signing must leave the snapshot self-consistent.
+    ///
+    /// This pins the failure mode that appeared the moment `trust_policy`
+    /// entered the digest. `sign_manifest` computed the digest, signed it,
+    /// and only then set the policy: the signature was over one field set
+    /// and `snapshot_hash` described another. `verify_authentic` calls
+    /// `verify()` first, so it returned `DigestMismatch` and never reached
+    /// the signature it had been given, which reads from the outside as a
+    /// corrupt snapshot rather than a broken signer.
+    ///
+    /// The general shape is worth naming, because the next field added to
+    /// the digest will hit it again: any writer that mutates a hashed field
+    /// after hashing has signed something that no longer exists. The
+    /// assertion below is deliberately about the round trip rather than
+    /// about field order, so it keeps holding whatever else joins the digest.
+    #[test]
+    fn signing_leaves_the_digest_consistent_with_what_was_signed() {
+        use ed25519_dalek::SigningKey;
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        let signing_key = SigningKey::from_bytes(&[3u8; 32]);
+        let pk = signing_key.verifying_key().to_bytes();
+        snapshot.sign_manifest(&signing_key, pk);
+
+        assert!(
+            snapshot.verify(),
+            "sign_manifest moved a hashed field, so the stored hash must be \
+             refreshed; otherwise the snapshot reports itself corrupt"
+        );
+        assert_eq!(
+            snapshot.trust_policy,
+            SnapshotTrustPolicy::RequireSigned,
+            "signing a manifest is what makes the signature mandatory"
+        );
+        assert!(
+            snapshot.verify_authentic(Some(&[pk])).is_ok(),
+            "the bytes that were signed and the bytes that get verified must \
+             be the same bytes"
+        );
+
+        // The canary: the digest still has to cover the policy. If this
+        // stops failing, the field left the digest and the downgrade attack
+        // is open again.
+        snapshot.trust_policy = SnapshotTrustPolicy::AllowUnsigned;
+        assert!(
+            !snapshot.verify(),
+            "trust_policy must stay inside the digest"
+        );
+    }
+
+    /// Downgrading the trust policy must break the digest.
+    ///
+    /// `verify_authentic` reads `trust_policy` to decide whether a signature
+    /// is required at all, and the field was not hashed into
+    /// `calculate_digest`. Flipping `RequireSigned` to `AllowUnsigned` on a
+    /// snapshot whose digest already matched made `verify_authentic` return
+    /// `Ok(())` at the first match arm, without ever reading
+    /// `manifest_signer` or `manifest_signature`. The requirement could be
+    /// removed by exactly the party it existed to constrain.
+    #[test]
+    fn a_downgraded_trust_policy_no_longer_verifies() {
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        snapshot.trust_policy = SnapshotTrustPolicy::RequireSigned;
+        snapshot.snapshot_hash = snapshot.calculate_hash();
+        assert!(
+            snapshot.verify(),
+            "the fixture must be self-consistent, or the negative proves nothing"
+        );
+
+        // The attack: keep every byte, weaken only the policy.
+        snapshot.trust_policy = SnapshotTrustPolicy::AllowUnsigned;
+        assert!(
+            !snapshot.verify(),
+            "the policy that decides whether a signature is needed must be \
+             inside the digest it protects, or an unsigned snapshot can be \
+             passed off as one that was never required to be signed"
+        );
+        assert_eq!(
+            snapshot.verify_authentic(None).unwrap_err(),
+            SnapshotAuthError::DigestMismatch,
+            "the downgrade must be refused before the policy is consulted"
+        );
+    }
+
+    /// Dropping a spent nullifier must break the digest.
+    ///
+    /// `note_registry` holds `spent_nullifiers`, which is the replay
+    /// protection for private transfers. Every other registry on this struct
+    /// was hashed into the digest and this one was not, so a peer serving a
+    /// snapshot could remove nullifiers and the snapshot still verified. A
+    /// nullifier that is absent has not been spent, so the notes it retired
+    /// become spendable again: double-spend of private value with no forged
+    /// signature anywhere.
+    #[test]
+    fn removing_a_spent_nullifier_no_longer_verifies() {
+        let mut account_state = AccountState::new();
+        account_state
+            .note_registry
+            .insert_note([7u8; 32])
+            .expect("a fresh registry accepts a note");
+
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        assert!(snapshot.verify(), "the fixture must verify as issued");
+
+        // The attack: serve the same snapshot with the note registry emptied.
+        snapshot.note_registry = Some(crate::privacy::L1NoteRegistry::new());
+        assert!(
+            !snapshot.verify(),
+            "the note registry crossed the wire outside the digest, so a peer \
+             could drop nullifiers and the snapshot still verified"
+        );
+    }
+
+    /// The signature fields stay outside, and must.
+    ///
+    /// Guarding the fix from the obvious overcorrection. `manifest_signature`
+    /// and `manifest_signer` are the signature over this digest, and
+    /// `snapshot_hash` is the digest; hashing any of them defines a value
+    /// that cannot be computed.
+    #[test]
+    fn the_signature_over_the_digest_is_not_inside_it() {
+        let account_state = AccountState::new();
+        let mut snapshot = StateSnapshotV2::from_state(
+            &account_state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "h".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        let before = snapshot.calculate_digest();
+
+        snapshot.manifest_signer = Some([3u8; 32]);
+        snapshot.manifest_signature = Some(vec![9u8; 64]);
+        assert_eq!(
+            snapshot.calculate_digest(),
+            before,
+            "signing a snapshot must not change the digest that was signed"
         );
     }
 }

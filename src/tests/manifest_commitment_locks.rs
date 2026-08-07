@@ -726,6 +726,103 @@ mod coding_audit {
             .collect()
     }
 
+    /// The coding audit is reachable from the chain, not only from these tests.
+    ///
+    /// `derive_coding_audit` and `verify_coding_audit` were complete and
+    /// tested nine ways over, and unreachable: no `ChainCommand` opened an
+    /// audit and no handler checked an answer. Everything above this line
+    /// exercised them directly, which is precisely the shape that reads as
+    /// finished work while nothing in production can invoke it.
+    ///
+    /// Measured against the source, because what was missing is an edge in
+    /// the call graph and that is not observable from behaviour here.
+    #[test]
+    fn the_chain_can_open_and_answer_a_coding_audit() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+
+        for symbol in [
+            "DeriveCodingAudit",
+            "AnswerCodingAudit",
+            "derive_coding_audit(",
+            "verify_coding_audit(",
+        ] {
+            assert!(
+                actor_src.contains(symbol),
+                "{symbol} is missing from the chain actor; the audit is back to \
+                 being a capability nothing can invoke"
+            );
+        }
+    }
+
+    /// The audited column comes from chain entropy, never from the caller.
+    ///
+    /// Both halves fail in opposite directions. An opener who picks the
+    /// column picks one the operator is known to have, which makes the audit
+    /// theatre. An operator who learns the column in advance stores that
+    /// column and discards the rest, which is worse than storing nothing
+    /// honestly, because it passes.
+    #[test]
+    fn the_audit_column_is_derived_from_chain_entropy() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+        // The match arm, not the enum variant and not the `ChainHandle`
+        // method: all three spell `ChainCommand::DeriveCodingAudit {` or
+        // something close to it, and `split_once` takes the first. Anchoring
+        // on the arm's own first field is what distinguishes it. Measured:
+        // CI failed on this, because the first match was the variant
+        // declaration, whose body has no entropy in it at all.
+        let handler = actor_src
+            .split_once("ChainCommand::DeriveCodingAudit {\n                    manifest_id,")
+            .map(|(_, after)| after)
+            .expect("the DeriveCodingAudit match arm must exist");
+        let handler = &handler[..handler.len().min(2000)];
+        assert!(
+            !handler.contains("challenge_id: u64,"),
+            "the anchor matched the enum variant again, whose body carries no \
+             entropy; the assertions below would be measuring a declaration"
+        );
+
+        assert!(
+            handler.contains("last_block().hash.as_bytes()"),
+            "the audit entropy must include the chain's own contribution, or \
+             one party fixes the column alone"
+        );
+        assert!(
+            handler.contains("chain_id.to_le_bytes()"),
+            "the entropy must be chain-scoped, or an audit derived on one \
+             chain is replayable on another"
+        );
+        assert!(
+            !handler.contains("request.column"),
+            "a caller-supplied column would let the opener choose what to test"
+        );
+    }
+
+    /// The handler delegates rather than restating the relationship.
+    ///
+    /// A second copy of the generator check inside the actor would be the
+    /// same defect as the executor's copied envelope bounds: correct on the
+    /// day it was written and silently divergent afterwards.
+    #[test]
+    fn the_answer_handler_delegates_to_the_registry() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+        // Same anchoring as above, for the same reason.
+        let handler = actor_src
+            .split_once("ChainCommand::AnswerCodingAudit {\n                    audit,")
+            .map(|(_, after)| after)
+            .expect("the AnswerCodingAudit match arm must exist");
+        let handler = &handler[..handler.len().min(1200)];
+
+        assert!(
+            handler.contains("verify_coding_audit("),
+            "the handler must ask the registry, which owns the generator"
+        );
+        assert!(
+            !handler.contains("ParityColumnMismatch"),
+            "the handler is deciding the relationship itself; there must be \
+             one definition of what a passing audit is"
+        );
+    }
+
     #[test]
     fn an_honest_operator_passes_the_audit() {
         let (reg, encoded, manifest) = coded_registry();
@@ -871,6 +968,62 @@ mod coding_audit {
         );
     }
 
+    /// The answer picks the column the verifier checks.
+    ///
+    /// `derive_coding_audit` selects `(parity_index, column)` from chain
+    /// entropy precisely so neither side chooses it, and the doc on
+    /// `CodingAudit` says it is "deliberately not a stored type ... so there
+    /// is no second copy of the selection that could drift".
+    ///
+    /// On the RPC path there is a second copy. `ChainCommand::AnswerCodingAudit`
+    /// carries the whole `CodingAudit` struct up from the responder, and
+    /// `verify_coding_audit` never recomputes it: it reads `parity_index` to
+    /// pick the generator row and uses `column` only to fill in an error
+    /// message. So the byte offset the verifier checks is the offset the
+    /// answerer named.
+    ///
+    /// The consequence is narrow but it is the exact property entropy
+    /// selection exists to provide. An operator holding valid parity at one
+    /// column and garbage elsewhere can answer every audit at the column it
+    /// kept, because nothing binds the answer to the column that was asked.
+    /// The audit still proves the relationship holds somewhere; it stops
+    /// proving it holds at a place the operator could not predict, and the
+    /// `(1 - f)^rounds` argument in the module doc assumes exactly that
+    /// unpredictability.
+    ///
+    /// Not fixed here: closing it means either recomputing the selection
+    /// inside `verify_coding_audit` from the entropy and challenge id, or
+    /// carrying those instead of the derived struct, and that changes the
+    /// `ChainCommand` shape. Pinned so the gap is a decision rather than an
+    /// oversight.
+    #[test]
+    fn a_coding_audit_answer_is_not_bound_to_the_column_that_was_asked() {
+        let (reg, encoded, manifest) = coded_registry();
+        let asked = StorageRegistry::derive_coding_audit(&[42u8; 32], &manifest, 9)
+            .expect("a coded manifest has parity to audit");
+
+        // A different column of the same code word. Entropy chose `asked`;
+        // this is one the operator chose instead.
+        let substituted = (asked.column + 1) % u64::from(manifest.shards[0].size);
+        assert_ne!(substituted, asked.column, "the fixture needs two columns");
+
+        let forged = crate::domain::storage_deal::CodingAudit {
+            column: substituted,
+            ..asked
+        };
+        let column = data_column(&encoded, substituted);
+        let parity_byte = encoded.shards
+            [manifest.erasure.k as usize + forged.parity_index as usize][substituted as usize];
+
+        assert!(
+            reg.verify_coding_audit(&forged, &column, parity_byte)
+                .is_ok(),
+            "an answer at a self-chosen column passes today; when this starts \
+             failing the selection has been bound and this test should assert \
+             the refusal instead"
+        );
+    }
+
     #[test]
     fn an_audit_against_an_unregistered_manifest_is_refused() {
         let (reg, _, _) = coded_registry();
@@ -896,8 +1049,13 @@ mod repair_band {
 
     /// Retire every deal holding `shard_id`, so the shard counts as lost.
     ///
-    /// Uses `expire_deal` rather than a test-only mutator: the point is that
-    /// the repair band reacts to the same state transitions the chain makes.
+    /// Uses the slash path rather than expiry. Both retire a deal, but they
+    /// answer different questions: expiry is a term ending, and the registry
+    /// refuses one that would take an object below the replica count a decode
+    /// needs, precisely so a lapsed term cannot lose content. These tests are
+    /// about what the repair band reports once shards are gone regardless of
+    /// how, and the ways content is actually lost are slashing and failure,
+    /// so that is the transition to drive them with.
     fn lose_shard(reg: &mut StorageRegistry, manifest_id: &ContentId, shard_id: &ContentId) {
         let deal_ids: Vec<u64> = reg
             .deals_for_shard(manifest_id, shard_id)
@@ -906,9 +1064,18 @@ mod repair_band {
             .collect();
         assert!(!deal_ids.is_empty(), "the shard should have had a deal");
         for deal_id in deal_ids {
-            reg.expire_deal(deal_id, 200)
-                .unwrap_or_else(|e| panic!("deal {deal_id} should expire at epoch 200: {e}"));
+            let challenge_id = reg
+                .open_challenge(deal_id, 0, 1, 110, 120, opener_address(), 100)
+                .unwrap_or_else(|e| panic!("challenge on deal {deal_id} should open: {e}"));
+            reg.finalize_missed_challenge(challenge_id, 150)
+                .unwrap_or_else(|e| panic!("deal {deal_id} should slash at epoch 150: {e}"));
         }
+    }
+
+    /// A challenge opener distinct from every operator address the fixture
+    /// hands out, which are `[1; 32]` upwards.
+    fn opener_address() -> crate::core::address::Address {
+        crate::core::address::Address([0xFE; 32])
     }
 
     /// Register a coded manifest and open one deal per shard.

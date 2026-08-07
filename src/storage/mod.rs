@@ -38,7 +38,8 @@ pub use assignment::{
 };
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
 pub use derived::{
-    DerivedError, DerivedSpec, DerivedTransform, DERIVED_BLOCK_PIXELS, DERIVED_SPEC_BYTES,
+    DerivedError, DerivedSpec, DerivedTransform, PrefixSpan, DERIVED_BLOCK_PIXELS,
+    DERIVED_PREFIX_SPEC_BYTES, DERIVED_SPEC_BYTES,
 };
 pub use dictionary::{
     DictionaryEntry, DictionaryError, DictionaryRegistry, DICTIONARY_GRACE_EPOCHS,

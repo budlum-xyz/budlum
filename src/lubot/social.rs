@@ -15,16 +15,21 @@ use super::SocialDataRef;
 
 /// Lubot AI çıktısını SocialFi'da NFT olarak mint et (gerçek `NftRegistry::mint`).
 /// `output` = Lubot çıkarım yanıtının baytları; ContentId = `ContentId::of(output)`.
-#[must_use]
+/// # Errors
+///
+/// Whatever `NftRegistry::mint` refuses, which today is a duplicate id: the
+/// registry's counter disagreeing with its own contents. Propagated rather
+/// than unwrapped, because minting over a live NFT hands somebody else's
+/// asset to this caller.
 pub fn lubot_output_to_nft(
     registry: &mut NftRegistry,
     owner: Address,
     output: &[u8],
     epoch: u64,
-) -> (u64, ContentId) {
+) -> Result<(u64, ContentId), crate::socialfi::NftError> {
     let cid = ContentId::of(output);
-    let nft_id = registry.mint(owner, cid, epoch, Some("lubot-ai".to_string()));
-    (nft_id, cid)
+    let nft_id = registry.mint(owner, cid, epoch, Some("lubot-ai".to_string()))?;
+    Ok((nft_id, cid))
 }
 
 /// Bir sosyal NFT içeriğini Lubot kapalı-devre veri kaynağına dönüştür.
@@ -54,7 +59,8 @@ mod tests {
     fn lubot_output_mints_real_social_nft() {
         let mut registry = NftRegistry::new();
         let owner = addr(1);
-        let (nft_id, cid) = lubot_output_to_nft(&mut registry, owner, b"lubot-ai-output", 10);
+        let (nft_id, cid) = lubot_output_to_nft(&mut registry, owner, b"lubot-ai-output", 10)
+            .expect("a fresh registry has no id to collide with");
         // NftRegistry ilk mint id 0'dan başlar (next_id=0).
         let first = nft_id;
 

@@ -225,6 +225,19 @@ pub enum TransactionType {
         website_url: String,
         manifest_id: Option<crate::storage::content_id::ContentId>,
     },
+    /// The developer's own claim that an app record is theirs.
+    ///
+    /// Sets `developer_attested`, and nothing else. It is ownership proof,
+    /// not audit: `verified` is the governance badge and moves only through
+    /// `ProposalType::VerifyHubApp`.
+    ///
+    /// Carries the id alone. The claimant is `tx.from`, already signed, and
+    /// the executor refuses unless that address is the app's registered
+    /// developer. A developer field in the payload would let a caller name
+    /// somebody else and depend on the check being present.
+    BudlumxyzAttestApp {
+        app_id: u64,
+    },
     /// (§1) Register AI model specification (`AiVerifier` attestation target).
     AiModelRegister(crate::ai::types::AiModelSpec),
     /// (§1) Submit AI inference attestation request.
@@ -756,6 +769,9 @@ impl Transaction {
                 schedule.transfer_gas * 5
             }
             TransactionType::BudlumxyzRegisterApp { .. } => schedule.contract_call_gas * 2,
+            // A flag flip on a record the sender already owns: one lookup and
+            // one boolean, nothing like the registration above.
+            TransactionType::BudlumxyzAttestApp { .. } => schedule.contract_call_gas,
             TransactionType::AiModelRegister(_) => schedule.contract_call_gas * 3,
             TransactionType::AiInferenceRequest(_) => schedule.contract_call_gas * 2,
             TransactionType::AiInferenceResult(_) => schedule.contract_call_gas,
@@ -951,6 +967,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::LubotOperatorUnbond => 40,
         TransactionType::LubotOperatorWithdraw => 41,
         TransactionType::RegisterConsensusKeys(_) => 42,
+        TransactionType::BudlumxyzAttestApp { .. } => 43,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1184,6 +1201,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
                 None => put_u8(out, 0),
             }
         }
+        TransactionType::BudlumxyzAttestApp { app_id } => put_u64(out, *app_id),
         TransactionType::AiModelRegister(spec) => encode_model_spec(spec, out),
         TransactionType::AiInferenceRequest(req) => {
             put_fixed(out, &req.request_id.0);

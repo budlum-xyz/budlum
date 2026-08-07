@@ -112,10 +112,25 @@ jobs:
         run: bash ./scripts/check-generated-content-is-verifiable.sh --self-test
       - name: Uretilebilir icerik dogrulanabilir
         run: bash ./scripts/check-generated-content-is-verifiable.sh
+      # Tarif edilen bir nesnede tarif TEK kopyadir. Jeneratoru degistiren bir
+      # duzenleme yanlis resim uretmez, artik hic uretilemeyen bir nesne uretir:
+      # id dogrulamayi birakir ve geri donulecek bayt diskte yoktur. Kendisiyle
+      # tutarlilik bunu yakalamaz, cunku karsilastirmanin iki tarafi birlikte
+      # kayar. Nitekim gradyan jeneratoru bastan beri bozuktu: fixed_to_int
+      # zaten olcegi birakmis bir degere uygulaniyordu, iki uc rengi de atiyor
+      # ve duz siyah cizyordu, tutarli bicimde hash'leyerek.
+      - name: Sifir-depolama vektor kanaryasi
+        run: bash ./scripts/check-zero-storage-bytes-are-frozen.sh --self-test
+      - name: Uretilen baytlar dondurulmus vektore bagli
+        run: bash ./scripts/check-zero-storage-bytes-are-frozen.sh
       - name: Ulasilamayan kapi kanaryasi
         run: bash ./scripts/check-guards-are-reachable.sh --self-test
       - name: Ulasilamayan kapi sayisi artmadi
         run: bash ./scripts/check-guards-are-reachable.sh
+      - name: Kendi kaynagini okuyan test kanaryasi
+        run: bash ./scripts/check-source-reading-tests-are-narrowed.sh --self-test
+      - name: Kendi kaynagini okuyan testler daraltilmis
+        run: bash ./scripts/check-source-reading-tests-are-narrowed.sh
       - name: Cakisma isareti kanaryasi
         run: bash ./scripts/check-no-conflict-markers-are-committed.sh --self-test
       - name: Cakisma isareti agacta yok
@@ -132,6 +147,16 @@ jobs:
         run: bash ./scripts/check-derived-content-stays-byte-exact.sh --self-test
       - name: Turetilmis icerik bayt-kesin
         run: bash ./scripts/check-derived-content-stays-byte-exact.sh
+      # Turetilmis bir nesne kendi baytini tutmaz: okumak master'i getirip
+      # yeniden hesaplamak demek. Master gidince depolama kucumez, turev yok
+      # olur, ve sessizce olur: turev manifesti hala duruyor, hala gecerli
+      # gorunuyor. Ilk isaret, karsilanamayan bir okuma. dictionary.rs ayni
+      # sekli referans sayaci ve zarif pencereyle cozuyordu; turevlerde ayni
+      # bagimlilik vardi ve bunlarin hicbiri yoktu.
+      - name: Turev kaliciligi kanaryasi
+        run: bash ./scripts/check-a-derivation-cannot-outlive-its-master.sh --self-test
+      - name: Bir turev master'indan uzun yasayamaz
+        run: bash ./scripts/check-a-derivation-cannot-outlive-its-master.sh
       - name: Iddia birimi kanaryasi
         run: bash ./scripts/check-reduction-claims-state-both-units.sh --self-test
       - name: Iddia iki birimi de soyluyor
@@ -1241,6 +1266,21 @@ jobs:
         run: |
           bash ./scripts/check-pinned-downloads-are-really-pinned.sh --self-test
           bash ./scripts/check-pinned-downloads-are-really-pinned.sh
+      # Bir git bagimliliginin surum alani, o commit'te manifest ne diyorsa
+      # odur ve kod degisince kimildamaz. Pinli rust-libp2p agacinda ucu ucuna
+      # uc commit de `libp2p-gossipsub 0.50.0` der: 8541b83b'de backoff.rs'te
+      # checked_add yok (iki tasma yolu da acik), a7d59cbf ekleme tarafini,
+      # 5d47d9d5 heartbeat tarafini kapatir. Tek surum dizesi, uc ayri guvenlik
+      # durusu. 0.50.0 crates.io'ya hic yayimlanmadi, dolayisiyla hicbir
+      # advisory araligi da onu kapsamiyor. cargo-vet git bagimliligini
+      # "denetlenemez" sayar ve 23 paketin hicbirini saymaz; Cargo git kaynagi
+      # icin kilide checksum yazmaz. Kalan tek yontem: pinli revizyonda kaynagi
+      # okuyup ne okundugunu yazmak, ve pin kimildadiginda okumayi tekrar
+      # zorlamak.
+      - name: git bagimliliklari commit bazinda denetlendi mi + kanarya
+        run: |
+          bash ./scripts/check-git-deps-are-audited-by-commit.sh --self-test
+          bash ./scripts/check-git-deps-are-audited-by-commit.sh
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;

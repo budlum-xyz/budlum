@@ -48,18 +48,32 @@ mod tests {
     fn developer_self_verify_is_not_dao_verified() {
         let mut hub = BudlumxyzRegistry::new();
         let dev = addr(0x42);
-        let id = hub.register_app(
-            "demo".into(),
-            dev,
-            AppCategory::Other,
-            "https://example.bud".into(),
-            None,
-            1,
-        );
+        let id = hub
+            .register_app(
+                "demo".into(),
+                dev,
+                AppCategory::Other,
+                "https://example.bud".into(),
+                None,
+                1,
+            )
+            .expect("a fresh registry has no id to collide with");
         hub.verify_app(id, &dev).unwrap();
         let app = hub.apps.get(&id).unwrap();
         assert!(app.developer_attested);
         assert!(!app.verified, "self-verify must not set verified badge");
+
+        // The governor set starts empty and an empty set now denies, so the
+        // developer cannot award itself the governance badge by calling the
+        // governance path either.
+        assert!(
+            hub.mark_verified_by_governance(id, &dev).is_err(),
+            "with no governor configured there is no governor"
+        );
+        assert!(!hub.apps.get(&id).unwrap().verified);
+
+        // Configuring one grants the authority to that address alone.
+        hub.authorized_governors.insert(dev);
         hub.mark_verified_by_governance(id, &dev).unwrap();
         assert!(hub.apps.get(&id).unwrap().verified);
     }

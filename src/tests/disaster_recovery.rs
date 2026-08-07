@@ -40,7 +40,8 @@ mod tests {
             // Mint an NFT directly in state
             bc.state
                 .nft_registry
-                .mint(alice, cid, 0, Some("ayaz.bud".to_string()));
+                .mint(alice, cid, 0, Some("ayaz.bud".to_string()))
+                .expect("a fresh registry has no id to collide with");
 
             // Produce a block to persist state to storage
             let _ = bc.produce_block(Address::zero());
@@ -342,10 +343,17 @@ async fn test_chaos_v2_ultimate_byzantine_recovery() {
 /// Chaos v2: CHAIN-HALT - tam sessizlik sonrası kurtarma.
 ///
 /// Mevcut 4 senaryo crash/fork/byzantine/restart kapsar; bu mühür ağın HİÇ
-/// Üretim yapmadığı sessiz dönemin dayanıklılığını kilitler: epoch-close
-/// Liveness hook'u üretime bağlı olduğundan (`maybe_observe_liveness_on_epoch_close`
-/// Yalnız blok üretiminde koşar) sessizlikte hiçbir sayaç kımıldamaz; üretici
-/// Geri dönünce zincir deterministik olarak kaldığı height'tan devam etmelidir.
+/// Üretim yapmadığı sessiz dönemin dayanıklılığını kilitler: sessizlikte
+/// Hiçbir sayaç kımıldamaz, üretici geri dönünce zincir deterministik olarak
+/// Kaldığı height'tan devam etmelidir.
+///
+/// Buradaki eski gerekçe iki kez düzeltildi. Önce ölçüldü: sayaçların
+/// Sessizlikte kımıldamaması, kancanın hiç bağlı olmamasının yan etkisiydi.
+/// Sonra o boşluk kapandı; canlılık epoch kapanışını `apply_epoch_close_liveness`
+/// Yürütüyor ve blok üretilmeyen bir dönemde epoch sınırı da geçilmediği için
+/// Sayaç yine kımıldamıyor, ama bu sefer sebebi doğru: kapanacak bir epoch yok.
+/// Test resume determinizmini kilitler; canlılık davranışı
+/// `liveness_consensus.rs`'te sabitlenir.
 #[tokio::test]
 async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     let consensus = Arc::new(PoWEngine::new(0));

@@ -149,6 +149,12 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::BudlumxyzAttestApp { app_id } => (
+                pb::ProtoTransactionType::HubAttestApp as i32,
+                Some(pb::proto_transaction::TypePayload::HubAttestApp(
+                    pb::ProtoHubAttestApp { app_id: *app_id },
+                )),
+            ),
             TransactionType::AiModelRegister(spec) => (
                 pb::ProtoTransactionType::AiModelRegister as i32,
                 Some(pb::proto_transaction::TypePayload::AiModelRegister(
@@ -900,6 +906,15 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     category: convert_proto_to_app_category(payload.category)?,
                     website_url: payload.website_url,
                     manifest_id,
+                }
+            }
+            pb::ProtoTransactionType::HubAttestApp => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::HubAttestApp(p)) => p,
+                    _ => return Err("Missing or mismatched BudlumxyzAttestApp payload".into()),
+                };
+                TransactionType::BudlumxyzAttestApp {
+                    app_id: payload.app_id,
                 }
             }
             pb::ProtoTransactionType::AiModelRegister => {
@@ -2002,6 +2017,7 @@ mod tests {
                 website_url: "https://budlum.ai".into(),
                 manifest_id: Some(crate::storage::content_id::ContentId([8u8; 32])),
             },
+            TransactionType::BudlumxyzAttestApp { app_id: 4242 },
             TransactionType::AiModelRegister(crate::ai::types::AiModelSpec {
                 model_id: crate::ai::types::AiModelId([1u8; 32]),
                 model_hash: [2u8; 32],
