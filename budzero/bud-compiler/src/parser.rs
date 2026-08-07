@@ -763,7 +763,10 @@ mod tests {
         // The fuzzer's input does not have to close what it opens, and the
         // run of opens is what drives the recursion. Closing brackets are
         // the parser's problem after the depth guard, not before it.
-        let source = format!("contract T {{ pub fn main() {{ let x = {}", "(".repeat(4096));
+        let source = format!(
+            "contract T {{ pub fn main() {{ let x = {}",
+            "(".repeat(4096)
+        );
         let mut parser = Parser::new(&source).expect("the input lexes");
         assert!(parser.parse_contract().is_err());
     }
