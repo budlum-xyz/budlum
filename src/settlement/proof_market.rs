@@ -602,7 +602,8 @@ impl ProofMarketState {
             // Expiry is measured against the chain, never against a value a
             // submitter chose.
             let before = self.active_tasks.len();
-            self.active_tasks.retain(|t| t.deadline_epoch >= current_epoch);
+            self.active_tasks
+                .retain(|t| t.deadline_epoch >= current_epoch);
             let pruned_expired = before - self.active_tasks.len();
             if pruned_expired > 0 {
                 tracing::info!("Pruned {pruned_expired} expired tasks by deadline");

@@ -488,7 +488,9 @@ impl MasterRegistry {
     /// epoch than the stale window recorded.
     #[must_use]
     pub fn pending_release_epoch(&self, master_id: &ContentId) -> Option<u64> {
-        self.entries.get(master_id).and_then(|e| e.releasable_at_epoch)
+        self.entries
+            .get(master_id)
+            .and_then(|e| e.releasable_at_epoch)
     }
 
     /// Take a reference on behalf of a derivation.
@@ -580,7 +582,6 @@ impl MasterRegistry {
         self.entries.len()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -778,7 +779,10 @@ mod tests {
                 derivations: 1,
             }
         );
-        assert!(reg.holds(&master()), "the refusal must also keep the master");
+        assert!(
+            reg.holds(&master()),
+            "the refusal must also keep the master"
+        );
     }
 
     /// The canary for the test above: a master nothing derives from is
@@ -843,7 +847,8 @@ mod tests {
 
         reg.acquire_master(&master()).unwrap();
         assert!(
-            reg.releasable_masters(1_000 + MASTER_GRACE_EPOCHS).is_empty(),
+            reg.releasable_masters(1_000 + MASTER_GRACE_EPOCHS)
+                .is_empty(),
             "a master being derived from again is not on its way out"
         );
         assert!(reg.release_master(&master(), u64::MAX).is_err());
@@ -869,7 +874,12 @@ mod tests {
         let err = reg
             .acquire_master(&master())
             .expect_err("nothing is holding this master");
-        assert_eq!(err, DerivedError::UnknownMaster { master_id: master() });
+        assert_eq!(
+            err,
+            DerivedError::UnknownMaster {
+                master_id: master()
+            }
+        );
         assert_eq!(reg.derivation_count(&master()), None);
     }
 

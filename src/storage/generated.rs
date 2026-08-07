@@ -830,7 +830,10 @@ mod tests {
         for seed in [1u8, 7, 42] {
             let bytes = generate_content(&spec(GeneratorId::Gradient, seed, 3072, 5_000_000))
                 .expect("generates");
-            let distinct = bytes.iter().collect::<std::collections::BTreeSet<_>>().len();
+            let distinct = bytes
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
             assert!(
                 distinct > 8,
                 "gradient at seed {seed} has only {distinct} distinct byte values, \
