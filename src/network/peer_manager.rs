@@ -278,16 +278,47 @@ impl PeerManager {
     pub fn subnet_connection_count(&self, subnet: [u8; 3]) -> usize {
         self.subnet_counts.get(&subnet).copied().unwrap_or(0)
     }
-    fn get_or_create(&mut self, peer_id: &PeerId) -> &mut PeerScore {
-        self.peers.entry(*peer_id).or_default()
-    }
-    pub fn check_rate_limit(&mut self, peer_id: &PeerId) -> bool {
-        // Refuse to grow the score map without bound (memory DoS).
+    /// Score entry for a peer, creating one if the map has room.
+    ///
+    /// Returns `None` when the peer is new and the map is at
+    /// `max_tracked_peers`. The bound lives here rather than at the call sites
+    /// because there are thirteen of them and it was written at one.
+    ///
+    /// What the single check protected was `check_rate_limit`. The other
+    /// twelve entry points, among them `report_invalid_block`,
+    /// `report_invalid_handshake`, `check_vote_rate_limit` and
+    /// `check_blob_rate_limit`, all inserted an entry for any `PeerId` handed
+    /// to them. A `PeerId` is a public key hash, so an attacker mints them for
+    /// free, and reaching those paths costs one malformed message each: the
+    /// cheapest of them is the invalid-handshake path, which by construction
+    /// runs before a peer has proved anything at all.
+    ///
+    /// The guarded path therefore capped the map at ten thousand entries while
+    /// twelve unguarded ones grew it without limit. Measured with a canary at
+    /// `max_tracked_peers = 8`: sixty-four distinct peers through
+    /// `report_invalid_handshake` left sixty-four entries.
+    ///
+    /// Refusal rather than eviction is deliberate. Evicting to make room would
+    /// let an attacker flush the entry holding a real peer's ban, which turns
+    /// a memory bound into a ban-clearing primitive. A peer already tracked is
+    /// always found, so refusing only ever costs a new entry, never an
+    /// accumulated penalty.
+    fn get_or_create(&mut self, peer_id: &PeerId) -> Option<&mut PeerScore> {
         if !self.peers.contains_key(peer_id) && self.peers.len() >= self.max_tracked_peers {
-            return false;
+            return None;
         }
+        Some(self.peers.entry(*peer_id).or_default())
+    }
+
+    /// Score entry for a peer whose entry is known to exist, or a refusal.
+    ///
+    /// Penalty paths use this so that hitting the ceiling reads as "this peer
+    /// is not tracked" rather than silently skipping the penalty.
+    pub fn check_rate_limit(&mut self, peer_id: &PeerId) -> bool {
         let refill = self.msg_refill_rate;
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return false;
+        };
         if !score.consume_token_with_rate(refill) {
             score.score = (score.score + RATE_LIMIT_PENALTY).max(MIN_SCORE);
             if score.score <= BAN_THRESHOLD {
@@ -302,7 +333,9 @@ impl PeerManager {
     }
 
     pub fn check_vote_rate_limit(&mut self, peer_id: &PeerId) -> bool {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return false;
+        };
         score.refill_tokens();
         if score.vote_tokens >= 1.0 {
             score.vote_tokens -= 1.0;
@@ -314,7 +347,9 @@ impl PeerManager {
     }
 
     pub fn check_blob_rate_limit(&mut self, peer_id: &PeerId) -> bool {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return false;
+        };
         score.refill_tokens();
         if score.blob_tokens >= 1.0 {
             score.blob_tokens -= 1.0;
@@ -325,7 +360,9 @@ impl PeerManager {
         }
     }
     pub fn report_invalid_block(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.invalid_blocks += 1;
         score.score = (score.score + INVALID_BLOCK_PENALTY).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
@@ -334,7 +371,9 @@ impl PeerManager {
         }
     }
     pub fn report_invalid_tx(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.invalid_txs += 1;
         score.score = (score.score + INVALID_TX_PENALTY).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
@@ -343,7 +382,9 @@ impl PeerManager {
         }
     }
     pub fn report_oversized_message(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.score = (score.score + OVERSIZED_MESSAGE_PENALTY).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
@@ -351,7 +392,9 @@ impl PeerManager {
         }
     }
     pub fn report_bad_behavior(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.score = (score.score - 10).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
@@ -359,13 +402,32 @@ impl PeerManager {
         }
     }
     pub fn report_good_behavior(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.valid_contributions += 1;
         score.score = (score.score + GOOD_BEHAVIOR_REWARD).min(MAX_SCORE);
         score.last_seen = Some(Instant::now());
     }
     pub fn ban_peer(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        // A ban that cannot be recorded is the one refusal that must not pass
+        // quietly. Every other caller of `get_or_create` is adjusting a score
+        // that only matters while the peer is tracked; this one is the record
+        // that keeps a peer out. Reaching the ceiling here means the map is
+        // full of peers an attacker minted, which is the state the operator
+        // has to know about, so it is logged at warn rather than dropped.
+        //
+        // The already-banned case is unaffected: a peer with an entry is
+        // always found, and only a peer with no entry at all can be refused.
+        let ceiling = self.max_tracked_peers;
+        let tracked = self.peers.len();
+        let Some(score) = self.get_or_create(peer_id) else {
+            warn!(
+                "Cannot ban peer {}: score map full at {}/{} entries, ban not recorded",
+                peer_id, tracked, ceiling
+            );
+            return;
+        };
         score.banned_until = Some(Instant::now() + BAN_DURATION);
         score.ban_expires_unix = Some(unix_now_secs().saturating_add(BAN_DURATION.as_secs()));
         warn!("Peer {} banned for {:?}", peer_id, BAN_DURATION);
@@ -386,7 +448,9 @@ impl PeerManager {
             .unwrap_or(false)
     }
     pub fn set_handshaked(&mut self, peer_id: &PeerId, status: bool) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.handshaked = status;
     }
     pub fn get_peer_info(&self, peer_id: &PeerId) -> Option<&PeerScore> {
@@ -431,7 +495,9 @@ impl PeerManager {
             .collect()
     }
     pub fn report_timeout(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.score = (score.score + TIMEOUT_PENALTY).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
@@ -439,7 +505,9 @@ impl PeerManager {
         }
     }
     pub fn report_slow_sync(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.score = (score.score + SLOW_SYNC_PENALTY).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
@@ -447,7 +515,9 @@ impl PeerManager {
         }
     }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
-        let score = self.get_or_create(peer_id);
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
         score.score = (score.score + INVALID_HANDSHAKE_PENALTY).max(MIN_SCORE);
         score.last_seen = Some(Instant::now());
         if score.score <= BAN_THRESHOLD {
@@ -996,4 +1066,122 @@ mod tests {
         // Same subnet must actually be admitted, not merely reported admissible.
         assert!(pm.note_outbound_connected(p4, Some(subnet)));
     }
+
+    /// Every entry point that creates a score respects `max_tracked_peers`.
+    ///
+    /// The ceiling used to be written at one of thirteen call sites. The
+    /// twelve others, reachable with one malformed message each, grew the map
+    /// without limit. This walks every public method that can create an entry
+    /// and asserts the map never exceeds the ceiling.
+    #[test]
+    fn h5_score_map_ceiling_holds_on_every_entry_point() {
+        let ceiling = 8usize;
+
+        // Each closure drives one entry point with a fresh peer.
+        type Drive = (&'static str, fn(&mut PeerManager, &PeerId));
+        let paths: &[Drive] = &[
+            ("check_rate_limit", |m, p| {
+                let _ = m.check_rate_limit(p);
+            }),
+            ("check_vote_rate_limit", |m, p| {
+                let _ = m.check_vote_rate_limit(p);
+            }),
+            ("check_blob_rate_limit", |m, p| {
+                let _ = m.check_blob_rate_limit(p);
+            }),
+            ("report_invalid_block", |m, p| m.report_invalid_block(p)),
+            ("report_invalid_tx", |m, p| m.report_invalid_tx(p)),
+            ("report_oversized_message", |m, p| {
+                m.report_oversized_message(p)
+            }),
+            ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
+            ("report_good_behavior", |m, p| m.report_good_behavior(p)),
+            ("report_timeout", |m, p| m.report_timeout(p)),
+            ("report_slow_sync", |m, p| m.report_slow_sync(p)),
+            ("report_invalid_handshake", |m, p| {
+                m.report_invalid_handshake(p)
+            }),
+            ("ban_peer", |m, p| m.ban_peer(p)),
+            ("set_handshaked", |m, p| m.set_handshaked(p, true)),
+        ];
+
+        for (name, drive) in paths {
+            let mut manager = PeerManager::new();
+            manager.max_tracked_peers = ceiling;
+            for _ in 0..(ceiling * 8) {
+                let peer = test_peer_id();
+                drive(&mut manager, &peer);
+            }
+            assert!(
+                manager.peers.len() <= ceiling,
+                "{name} grew the score map to {} entries, ceiling is {ceiling}",
+                manager.peers.len()
+            );
+        }
+    }
+
+    /// The canary for the test above: with the ceiling removed, an unguarded
+    /// path must actually overflow. A bound that holds because nothing pushes
+    /// on it proves nothing.
+    #[test]
+    fn h5_score_map_ceiling_is_load_bearing() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = usize::MAX;
+        for _ in 0..64 {
+            manager.report_invalid_handshake(&test_peer_id());
+        }
+        assert_eq!(
+            manager.peers.len(),
+            64,
+            "without a ceiling the map must grow once per peer, or the test above is vacuous"
+        );
+    }
+
+    /// Refusing at the ceiling must not evict an existing entry.
+    ///
+    /// Eviction would let an attacker flush a real peer's ban by minting
+    /// peer ids, turning a memory bound into a ban-clearing primitive.
+    #[test]
+    fn h5_ceiling_refuses_rather_than_evicting_a_ban() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+
+        let victim = test_peer_id();
+        manager.ban_peer(&victim);
+        assert!(manager.is_banned(&victim), "victim must start banned");
+
+        // Fill the map and keep pushing well past the ceiling.
+        for _ in 0..256 {
+            manager.report_invalid_handshake(&test_peer_id());
+        }
+
+        assert!(
+            manager.is_banned(&victim),
+            "a ban was evicted to make room, which is a ban-clearing primitive"
+        );
+        assert!(manager.peers.len() <= 4);
+    }
+
+    /// A peer already tracked keeps working after the map fills.
+    #[test]
+    fn h5_tracked_peer_still_scored_when_map_is_full() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+
+        let known = test_peer_id();
+        manager.report_invalid_tx(&known);
+        let before = manager.get_score(&known);
+
+        for _ in 0..64 {
+            manager.report_invalid_handshake(&test_peer_id());
+        }
+
+        manager.report_invalid_tx(&known);
+        assert_eq!(
+            manager.get_score(&known),
+            before + INVALID_TX_PENALTY,
+            "an already-tracked peer must keep accruing penalties when the map is full"
+        );
+    }
+
 }
