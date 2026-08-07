@@ -857,7 +857,10 @@ mod tests {
             kept_bytes: 0,
             master_bytes: 0,
         });
-        assert_ne!(s.derivation_commitment_tag(), spec().derivation_commitment_tag());
+        assert_ne!(
+            s.derivation_commitment_tag(),
+            spec().derivation_commitment_tag()
+        );
     }
 
     #[test]
