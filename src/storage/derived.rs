@@ -597,7 +597,8 @@ pub const DERIVED_SPEC_BYTES: u64 = 32 + 1 + 24 + 1;
 
 /// Epochs a master stays held after its last derivation is released.
 ///
-/// The same shape and the same reason as `DICTIONARY_GRACE_EPOCHS`: a
+/// The same shape and the same reason as the dictionary registry's own grace
+/// window: a
 /// reference count reaching zero is a claim about this instant, and a
 /// derivation registered in the same block would otherwise race the release.
 /// The window makes the claim durable enough to act on.
@@ -666,7 +667,7 @@ impl MasterRegistry {
 
     /// Whether a master is held.
     #[must_use]
-    pub fn holds(&self, master_id: &ContentId) -> bool {
+    pub fn is_master_held(&self, master_id: &ContentId) -> bool {
         self.entries.contains_key(master_id)
     }
 
@@ -1151,7 +1152,7 @@ mod tests {
             }
         );
         assert!(
-            reg.holds(&master()),
+            reg.is_master_held(&master()),
             "the refusal must also keep the master"
         );
     }
@@ -1164,7 +1165,7 @@ mod tests {
         reg.hold_master(master());
         reg.release_master(&master(), 10_000)
             .expect("nothing depends on it");
-        assert!(!reg.holds(&master()));
+        assert!(!reg.is_master_held(&master()));
         assert_eq!(reg.master_count(), 0);
     }
 
@@ -1201,7 +1202,7 @@ mod tests {
         // never opens.
         reg.release_master(&master(), 1_000 + MASTER_GRACE_EPOCHS)
             .expect("the window has closed");
-        assert!(!reg.holds(&master()));
+        assert!(!reg.is_master_held(&master()));
     }
 
     /// Deriving again closes a window that was already open.
