@@ -860,5 +860,4 @@ mod tests {
             "the ends of a gradient should differ: first channel {first}, last {last}"
         );
     }
-
 }
