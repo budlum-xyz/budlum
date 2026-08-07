@@ -3647,7 +3647,8 @@ mod tests {
         let second = open_second_replica(&mut reg, &m);
         assert_eq!(reg.active_replica_count(&m.manifest_id, &shard_id), 2);
 
-        reg.expire_deal(first, 200).expect("the shard still has a replica");
+        reg.expire_deal(first, 200)
+            .expect("the shard still has a replica");
         // The one that is now alone may not follow it out.
         assert!(matches!(
             reg.expire_deal(second, 200),
