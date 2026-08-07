@@ -247,6 +247,23 @@ fn clamp_u8(v: i32) -> u8 {
     u8::try_from(v.clamp(0, 255)).unwrap_or(u8::MAX)
 }
 
+/// Narrow an already-descaled fixed-point result to `i32`.
+///
+/// The gradient generator leaves fixed point by multiplying by 255 and
+/// dividing by `FIXED_ONE`, which yields a plain 0..=255 value in an `i64`.
+/// It is written as a conversion rather than a cast for the same reason as
+/// [`clamp_i32`]: a silent wrap here would produce a wrong colour that still
+/// hashed consistently, which is the failure this module exists to avoid.
+const fn clamp_i32_from_i64(v: i64) -> i32 {
+    if v > i32::MAX as i64 {
+        i32::MAX
+    } else if v < i32::MIN as i64 {
+        i32::MIN
+    } else {
+        v as i32
+    }
+}
+
 /// Draw the bytes a spec describes.
 ///
 /// # Errors
@@ -445,8 +462,22 @@ fn draw_gradient(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>
                 let from_channel = fixed_from_int(i32::from(a[ch]));
                 let to_channel = fixed_from_int(i32::from(b[ch]));
                 let v = from_channel + fixed_mul(to_channel - from_channel, t);
+                // `* 255 / FIXED_ONE` already takes the value out of fixed
+                // point: it turns a unit-range fixed number into a plain
+                // 0..=255 integer. Calling `fixed_to_int` on the result
+                // shifted it down by another sixteen bits, so every channel
+                // under 65536/255 became zero, which is every channel there
+                // is. Both endpoint colours are drawn from the seed and both
+                // were discarded: every gradient this generator has ever
+                // produced is solid black.
+                //
+                // It hashed consistently while doing it, so the determinism
+                // tests passed, the id matched, and the object verified. That
+                // is the same failure `fixed_sqrt` had, one function away, and
+                // the reason the frozen vectors in this module's tests now
+                // pin the bytes rather than only their agreement.
                 let scaled = fixed_clamp_unit(fixed_div(v, fixed_from_int(255))) * 255 / FIXED_ONE;
-                out.push(clamp_u8(fixed_to_int(scaled)));
+                out.push(clamp_u8(clamp_i32_from_i64(scaled)));
             }
         }
         meter.charge(side * 3)?;
@@ -699,4 +730,135 @@ mod tests {
             "describing {described} bytes should be far under storing {stored}"
         );
     }
+
+    /// The bytes each generator produces, frozen.
+    ///
+    /// Every other test in this module asks whether the generators agree with
+    /// *themselves*: same spec twice, same output. That property holds just as
+    /// well when the output is wrong, and it holds after a change that alters
+    /// every byte, because both sides of the comparison move together.
+    ///
+    /// For stored content that gap is harmless, because the bytes are the
+    /// bytes. For generated content it is the whole risk. `manifest_id` is the
+    /// hash of the output, so an edit that changes what a generator draws does
+    /// not produce a wrong picture, it produces an object that can no longer
+    /// be produced at all: the id stops verifying and the content is gone,
+    /// with nothing on disk to fall back to. Nobody would be alerted, because
+    /// every test still passes.
+    ///
+    /// These vectors close that. They are the recomputed ids of six
+    /// spec-and-output pairs, checked in. A change that alters any generator's
+    /// output turns this test red and forces the question to be answered out
+    /// loud: is this a bug fix, in which case the previously registered
+    /// objects are unreachable and need a migration, or is it accidental
+    /// drift, in which case it must be reverted.
+    ///
+    /// They were computed by reimplementing the generators independently and
+    /// comparing, not by pasting in whatever the code emitted. Pasting the
+    /// current output would freeze a bug as the specification, which is
+    /// exactly what happened to the gradient generator before it was found.
+    #[test]
+    fn generated_bytes_match_their_frozen_vectors() {
+        // (generator, seed byte, length, expected ContentId hex)
+        let vectors: &[(GeneratorId, u8, u32, &str)] = &[
+            (
+                GeneratorId::Avatar,
+                7,
+                3072,
+                "8f00038bd40a0c5876aa4e3f3329fd2848dd362c2dee2c94a947353e5530d1f8",
+            ),
+            (
+                GeneratorId::Avatar,
+                1,
+                192,
+                "62f5fc48635aa1d88374fd03bd4b9dcc62575b4c84fc9bda14564f7212a9ff80",
+            ),
+            (
+                GeneratorId::Gradient,
+                7,
+                3072,
+                "c1b284b5cd254c38bb54a0f87b2eb5dd2b85ea18592af7fb062b882b2a517a98",
+            ),
+            (
+                GeneratorId::Gradient,
+                1,
+                192,
+                "34bc5985b6faa2f482709c87a7e0168e0841e8062b82eb5207e279e6cade7a9f",
+            ),
+            (
+                GeneratorId::Rings,
+                7,
+                3072,
+                "32567d8d5e03be5576f392a7b9a0064e5ccceb45454bf8bfaaff564010fe1adf",
+            ),
+            (
+                GeneratorId::Rings,
+                1,
+                192,
+                "c00177049a620549a56915a182fae9131c94adc31b1b7d66e12880c37fc15642",
+            ),
+        ];
+
+        for (generator, seed_byte, len, expected_hex) in vectors {
+            let s = spec(*generator, *seed_byte, *len, 5_000_000);
+            let bytes = generate_content(&s)
+                .unwrap_or_else(|e| panic!("{generator:?} seed {seed_byte} len {len}: {e}"));
+            let got = ContentId::of(&bytes).to_string();
+            assert_eq!(
+                &got, expected_hex,
+                "{generator:?} at seed {seed_byte}, {len} bytes now produces different content. \
+                 If this is a deliberate fix, objects already registered under the old id can no \
+                 longer be regenerated and need a migration before the vector is updated."
+            );
+        }
+    }
+
+    /// A gradient has to actually vary.
+    ///
+    /// It did not. `scaled` leaves fixed point already, being a plain 0..=255
+    /// integer, and the code then called `fixed_to_int` on it, shifting away
+    /// another sixteen bits. Every channel below 65536/255 became zero, which
+    /// is every channel there is, so both seed-derived endpoint colours were
+    /// discarded and every gradient ever produced was solid black.
+    ///
+    /// It hashed consistently, verified against its id and passed the
+    /// determinism tests, because deterministic and wrong is still
+    /// deterministic. This asserts the output is a gradient rather than
+    /// asserting it agrees with itself.
+    #[test]
+    fn a_gradient_is_not_a_single_flat_colour() {
+        for seed in [1u8, 7, 42] {
+            let bytes = generate_content(&spec(GeneratorId::Gradient, seed, 3072, 5_000_000))
+                .expect("generates");
+            let distinct = bytes.iter().collect::<std::collections::BTreeSet<_>>().len();
+            assert!(
+                distinct > 8,
+                "gradient at seed {seed} has only {distinct} distinct byte values, \
+                 which means the interpolation is being discarded"
+            );
+            assert!(
+                bytes.iter().any(|b| *b != 0),
+                "gradient at seed {seed} is entirely zero"
+            );
+        }
+    }
+
+    /// The two endpoint colours a gradient is drawn from both reach the output.
+    ///
+    /// The canary for the test above. A generator that emitted seed-derived
+    /// noise would also have many distinct values while ignoring the gradient
+    /// entirely, so this checks the specific property: the first pixel is near
+    /// one endpoint and the last is near the other.
+    #[test]
+    fn a_gradient_runs_between_its_two_endpoint_colours() {
+        let bytes =
+            generate_content(&spec(GeneratorId::Gradient, 7, 3072, 5_000_000)).expect("generates");
+        let first = i32::from(bytes[0]);
+        let last = i32::from(bytes[bytes.len() - 3]);
+        assert!(
+            (first - last).abs() > 32,
+            "the ends of a gradient should differ: first channel {first}, last {last}"
+        );
+    }
+
 }

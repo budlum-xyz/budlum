@@ -112,6 +112,17 @@ jobs:
         run: bash ./scripts/check-generated-content-is-verifiable.sh --self-test
       - name: Uretilebilir icerik dogrulanabilir
         run: bash ./scripts/check-generated-content-is-verifiable.sh
+      # Tarif edilen bir nesnede tarif TEK kopyadir. Jeneratoru degistiren bir
+      # duzenleme yanlis resim uretmez, artik hic uretilemeyen bir nesne uretir:
+      # id dogrulamayi birakir ve geri donulecek bayt diskte yoktur. Kendisiyle
+      # tutarlilik bunu yakalamaz, cunku karsilastirmanin iki tarafi birlikte
+      # kayar. Nitekim gradyan jeneratoru bastan beri bozuktu: fixed_to_int
+      # zaten olcegi birakmis bir degere uygulaniyordu, iki uc rengi de atiyor
+      # ve duz siyah cizyordu, tutarli bicimde hash'leyerek.
+      - name: Sifir-depolama vektor kanaryasi
+        run: bash ./scripts/check-zero-storage-bytes-are-frozen.sh --self-test
+      - name: Uretilen baytlar dondurulmus vektore bagli
+        run: bash ./scripts/check-zero-storage-bytes-are-frozen.sh
       - name: Ulasilamayan kapi kanaryasi
         run: bash ./scripts/check-guards-are-reachable.sh --self-test
       - name: Ulasilamayan kapi sayisi artmadi
