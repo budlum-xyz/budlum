@@ -665,6 +665,10 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// constructs a `StorageProvider`, which is what a boundary looks like from
 /// the inside. It carries the marker now.
 ///
+/// `sharding.rs` came off after being read: `network/node.rs` builds a
+/// `ShardManager` at line 446 and `main.rs` supplies a mobile config, so its
+/// marker was simply stale.
+///
 /// The list is measured, not typed. A first draft carried twenty-one entries
 /// against twelve findings, because nine of them named modules whose only
 /// problem was a stale `WIRING` marker, and that class stopped firing once
@@ -672,7 +676,6 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// defect this branch found three times elsewhere: a number written down
 /// rather than counted. `no_pending_entry_is_dead` keeps them equal.
 const PENDING_REVIEW: &[&str] = &[
-    "budzero/bud-node/src/sharding.rs",
     "budzero/bud-state/src/note.rs",
     "src/registry/evidence.rs",
     "src/registry/poa_onboarding.rs",

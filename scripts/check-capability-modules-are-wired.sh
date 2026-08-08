@@ -497,7 +497,6 @@ if not checked:
 # because a suppression outliving the thing it suppressed is how a list stops
 # describing the tree.
 PENDING_REVIEW = (
-    "budzero/bud-node/src/sharding.rs",
     "budzero/bud-state/src/note.rs",
     "src/registry/evidence.rs",
     "src/registry/poa_onboarding.rs",
