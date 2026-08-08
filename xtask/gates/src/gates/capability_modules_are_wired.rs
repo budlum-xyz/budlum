@@ -341,8 +341,19 @@ fn pub_types(src: &str) -> BTreeSet<String> {
 /// not evidence that a function called `complete` ran. Types and constants
 /// match bare, because a `dyn` dispatch leaves no parenthesis behind.
 ///
-/// `Other::needle` does not count. `own_module::needle` does.
-fn mentions(haystack: &str, needle: &str, own_module: &str, require_call: bool) -> bool {
+/// `Other::needle` does not count. `own_module::needle` does, and so does
+/// `Type::needle` where `Type` is one of the module's own exports: an
+/// associated function is reached through its type, so `ContentId::of(...)`
+/// is a call into the module defining `ContentId`. Rejecting it lost
+/// `of_subrange_for_deal`, which `provider.rs` calls at line 183, well above
+/// its `mod tests`, and reported `content_id.rs` as unreached.
+fn mentions(
+    haystack: &str,
+    needle: &str,
+    own_module: &str,
+    require_call: bool,
+    own_types: &BTreeSet<String>,
+) -> bool {
     let chars: Vec<char> = haystack.chars().collect();
     let pat: Vec<char> = needle.chars().collect();
     let own: Vec<char> = format!("{own_module}::").chars().collect();
@@ -362,7 +373,16 @@ fn mentions(haystack: &str, needle: &str, own_module: &str, require_call: bool) 
         // that something else is this module.
         let mut qualified_elsewhere = false;
         if i >= 2 && chars[i - 1] == ':' && chars[i - 2] == ':' {
-            qualified_elsewhere = !(i >= own.len() && chars[i - own.len()..i] == own[..]);
+            let by_module = i >= own.len() && chars[i - own.len()..i] == own[..];
+            // Read the qualifier back and see whether it is a type this
+            // module exports.
+            let mut k = i - 2;
+            while k > 0 && is_ident_char(chars[k - 1]) {
+                k -= 1;
+            }
+            let qualifier: String = chars[k..i - 2].iter().collect();
+            let by_own_type = own_types.contains(&qualifier);
+            qualified_elsewhere = !(by_module || by_own_type);
         } else if i > 0 && is_ident_char(chars[i - 1]) {
             i += 1;
             continue;
@@ -508,8 +528,9 @@ fn measure(root: &Path) -> Result<Outcome, String> {
         if fns.len() < MIN_PUB_FNS {
             continue;
         }
+        let own_types = pub_types(body);
         let mut exported = fns.clone();
-        exported.extend(pub_types(body));
+        exported.extend(own_types.iter().cloned());
 
         let identifying: Vec<String> = exported
             .iter()
@@ -534,7 +555,7 @@ fn measure(root: &Path) -> Result<Outcome, String> {
             }
             let hay = &evidence[other];
             for n in &identifying {
-                if mentions(hay, n, &mod_name, fns.contains(n)) {
+                if mentions(hay, n, &mod_name, fns.contains(n), &own_types) {
                     wired = true;
                     break 'outer;
                 }
@@ -599,26 +620,33 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// script's verdict as the one that blocks, and this list only shrinks. An
 /// entry removed means somebody looked and either wired the module or added
 /// the marker.
+///
+/// Three entries came off it in the same commit that added it. Counting a
+/// call made through the module's own type, `ContentId::of_subrange_for_deal`
+/// and the like, resolved `content_id.rs`, `pruning.rs` and
+/// `discovery.rs` outright: two are genuinely called that way, and the
+/// dead-entry check below is what said so rather than a person rechecking.
+///
+/// Counting own-type calls also surfaced two the earlier pass had masked:
+/// `src/registry/evidence.rs` and `budzero/bud-node/src/sharding.rs` both
+/// declare `WIRING: unwired` while something reaches them.
+/// `permissionless.rs` calls `SlashingReport::consensus_invalid_relay_griefing`
+/// at line 1085, so at least the first marker is simply stale.
+///
+/// The list is measured, not typed. A first draft carried twenty-one entries
+/// against twelve findings, because nine of them named modules whose only
+/// problem was a stale `WIRING` marker, and that class stopped firing once
+/// the comment handling changed. Nine entries suppressing nothing is the same
+/// defect this branch found three times elsewhere: a number written down
+/// rather than counted. `no_pending_entry_is_dead` keeps them equal.
 const PENDING_REVIEW: &[&str] = &[
-    "budzero/bud-node/src/discovery.rs",
+    "budzero/bud-node/src/sharding.rs",
     "budzero/bud-state/src/note.rs",
-    "budzero/verifier-registry/src/registry.rs",
     "src/cross_domain/bridge_relayer.rs",
-    "src/domain/sovereign.rs",
-    "src/gateway/passport.rs",
-    "src/registry/poa_compliance.rs",
-    "src/relayer/policy.rs",
+    "src/registry/evidence.rs",
+    "src/registry/poa_onboarding.rs",
     "src/sdk/devnet.rs",
     "src/sdk/runner.rs",
-    "src/storage/assignment.rs",
-    "src/storage/content_id.rs",
-    "src/storage/derived.rs",
-    "src/storage/dictionary.rs",
-    "src/storage/generated.rs",
-    "src/storage/pruning.rs",
-    // Found once the sixteen above stopped masking them: the loop reports the
-    // first blocking finding per module, so removing one exposes the next.
-    "src/registry/poa_onboarding.rs",
     "src/storage/lifecycle.rs",
     "src/storage/living_threshold.rs",
     "src/storage/mobile_self.rs",
@@ -636,6 +664,34 @@ pub fn run(root: &Path) -> Result<String, String> {
         .problems
         .iter()
         .partition(|p| PENDING_REVIEW.iter().any(|m| p.starts_with(m)));
+
+    // An entry suppressing nothing is a claim nobody checked.
+    //
+    // The list exists to hold findings back while they are read. One that
+    // matches no finding is either a module somebody fixed without shortening
+    // the list, or a name that was never right. Either way the list has
+    // stopped describing the tree, and a list that has stopped describing the
+    // tree is how a suppression outlives the thing it suppressed.
+    let dead: Vec<&&str> = PENDING_REVIEW
+        .iter()
+        .filter(|m| !o.problems.iter().any(|p| p.starts_with(**m)))
+        .collect();
+    if !dead.is_empty() {
+        let mut msg = format!(
+            "{} PENDING_REVIEW entr(ies) match no finding:\n",
+            dead.len()
+        );
+        for d in &dead {
+            let _ = writeln!(msg, "  {d}");
+        }
+        let _ = write!(
+            msg,
+            "\nEach either got fixed without the list being shortened, or was never a \
+             finding. Remove them: an entry that suppresses nothing is a suppression \
+             nobody can audit, and the count in the summary stops meaning anything."
+        );
+        return Err(msg);
+    }
 
     if blocking.is_empty() {
         let mut msg = format!(
@@ -663,6 +719,29 @@ pub fn run(root: &Path) -> Result<String, String> {
     Err(msg)
 }
 
+/// Canaries for the name readers and the unwired marker.
+fn self_test_extraction(problems: &mut Vec<String>) {
+    // Name extraction.
+    let src = "pub fn one() {}\npub async fn two() {}\nfn private() {}\npub struct Three;\n";
+    let fns = pub_fns(src);
+    if !fns.contains("one") || !fns.contains("two") || fns.contains("private") {
+        problems.push(format!("BROKEN: pub_fns read {fns:?}"));
+    }
+    if !pub_types(src).contains("Three") {
+        problems.push(String::from("BROKEN: pub_types missed a struct"));
+    }
+
+    // The marker.
+    if !declares_unwired("//! WIRING: unwired - measured: nothing calls this\n") {
+        problems.push(String::from("BROKEN: an unwired marker was not recognised"));
+    }
+    if declares_unwired("//! this module is wired\n") {
+        problems.push(String::from(
+            "VACUOUS: a module without a marker declared one",
+        ));
+    }
+}
+
 /// # Errors
 ///
 /// The canaries that did not behave.
@@ -683,12 +762,19 @@ pub fn self_test() -> Result<String, String> {
         "alpha",
         "x",
         true,
+        &BTreeSet::new(),
     ) {
         problems.push(String::from("VACUOUS: a doc link counted as a call"));
     }
 
     // A mention in a string is not a call.
-    if mentions(&strip_noise("let s = \"alpha()\";\n"), "alpha", "x", true) {
+    if mentions(
+        &strip_noise("let s = \"alpha()\";\n"),
+        "alpha",
+        "x",
+        true,
+        &BTreeSet::new(),
+    ) {
         problems.push(String::from("VACUOUS: a string literal counted as a call"));
     }
 
@@ -698,6 +784,7 @@ pub fn self_test() -> Result<String, String> {
         "complete",
         "x",
         true,
+        &BTreeSet::new(),
     ) {
         problems.push(String::from(
             "VACUOUS: a bare mention counted as a function call",
@@ -705,53 +792,69 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // A real call is a call.
-    if !mentions("let v = alpha();", "alpha", "x", true) {
+    if !mentions("let v = alpha();", "alpha", "x", true, &BTreeSet::new()) {
         problems.push(String::from("BROKEN: a plain call was not seen"));
     }
     // Turbofish included.
-    if !mentions("let v = alpha::<u8>();", "alpha", "x", true) {
+    if !mentions(
+        "let v = alpha::<u8>();",
+        "alpha",
+        "x",
+        true,
+        &BTreeSet::new(),
+    ) {
         problems.push(String::from("BROKEN: a turbofish call was not seen"));
     }
     // Another module's member is not this module's function.
-    if mentions("Other::alpha();", "alpha", "x", true) {
+    if mentions("Other::alpha();", "alpha", "x", true, &BTreeSet::new()) {
         problems.push(String::from(
             "VACUOUS: Other::alpha counted as this module's alpha",
         ));
     }
     // This module named explicitly does count.
-    if !mentions("x::alpha();", "alpha", "x", true) {
+    if !mentions("x::alpha();", "alpha", "x", true, &BTreeSet::new()) {
         problems.push(String::from(
             "BROKEN: own_module::alpha was not counted as a call",
         ));
     }
+    // An associated function reached through this module's own type is a call
+    // into this module. Rejecting it reported content_id.rs as unreached while
+    // provider.rs was calling ContentId::of_subrange_for_deal in production.
+    let own: BTreeSet<String> = ["ContentId".to_string()].into_iter().collect();
+    if !mentions(
+        "ContentId::of_subrange_for_deal(b, 0, 8);",
+        "of_subrange_for_deal",
+        "content_id",
+        true,
+        &own,
+    ) {
+        problems.push(String::from(
+            "BROKEN: a call through the module's own type was not counted",
+        ));
+    }
+    // A type this module does not export still qualifies elsewhere.
+    if mentions("Other::alpha();", "alpha", "x", true, &own) {
+        problems.push(String::from(
+            "VACUOUS: Other::alpha counted despite Other not being an export",
+        ));
+    }
+
     // Types match bare, because dyn dispatch leaves no parenthesis.
-    if !mentions("let t: Alpha = read();", "Alpha", "x", false) {
+    if !mentions(
+        "let t: Alpha = read();",
+        "Alpha",
+        "x",
+        false,
+        &BTreeSet::new(),
+    ) {
         problems.push(String::from("BROKEN: a bare type mention was not seen"));
     }
     // A longer identifier is not a match.
-    if mentions("alphabet();", "alpha", "x", true) {
+    if mentions("alphabet();", "alpha", "x", true, &BTreeSet::new()) {
         problems.push(String::from("VACUOUS: alphabet matched alpha"));
     }
 
-    // Name extraction.
-    let src = "pub fn one() {}\npub async fn two() {}\nfn private() {}\npub struct Three;\n";
-    let fns = pub_fns(src);
-    if !fns.contains("one") || !fns.contains("two") || fns.contains("private") {
-        problems.push(format!("BROKEN: pub_fns read {fns:?}"));
-    }
-    if !pub_types(src).contains("Three") {
-        problems.push(String::from("BROKEN: pub_types missed a struct"));
-    }
-
-    // The marker.
-    if !declares_unwired("//! WIRING: unwired - measured: nothing calls this\n") {
-        problems.push(String::from("BROKEN: an unwired marker was not recognised"));
-    }
-    if declares_unwired("//! this module is wired\n") {
-        problems.push(String::from(
-            "VACUOUS: a module without a marker declared one",
-        ));
-    }
+    self_test_extraction(&mut problems);
 
     if !problems.is_empty() {
         return Err(problems.join("\n  "));
