@@ -53,8 +53,23 @@ jobs:
   zizmor:
     name: zizmor (GitHub Actions static analysis)
     runs-on: ubuntu-latest
-    # Statik analiz, bulsa da bulmasa da CI'ı kırmasın (bilgilendirici + SARIF).
-    continue-on-error: true
+    # BLOKLAR. Onceki hali `continue-on-error: true` tasiyordu, gerekce
+    # "bilgilendirici" idi. Bu gerekce olculmemisti: arac depoda varsayilan
+    # personada SIFIR bulgu veriyor, ve pedantic personadaki 73 bulgunun
+    # hicbiri medium ya da uzeri degil (44 informational, 28 low). Yani
+    # bloklamanin maliyeti su an sifir, ve yumusatma bedavaya bir kapiyi
+    # susturuyordu.
+    #
+    # Denetledigi sey de bu deponun en pahali giris yuzeyi. zizmor
+    # workflow'lardaki template injection, kimlik bilgisi sizintisi, cache
+    # zehirlenmesi ve sahte commit'leri ariyor; 2026 baharindaki tedarik
+    # zinciri dalgasi tam olarak bu yuzeyden girdi. Bir zincirin CI'i
+    # yayinladigi ikiliyi imzaliyor, yani buradaki bir yanlis yapilandirma
+    # zincirin kendisine ulasir.
+    #
+    # `--persona=regular`: pedantic'in urettigi 73 dusuk siddetli bulgu
+    # bloklamaz. Bir gun bloklamalari istenirse once duzeltilir, sonra
+    # persona yukseltilir; sirasi tersi olursa kapi yeniden yumusatilir.
     permissions:
       contents: read
       actions: read
@@ -69,7 +84,55 @@ jobs:
       # Min-severity, min-confidence, version, token, advanced-security,
       # Color, annotations, config, fail-on-no-inputs. Bilinmeyen girdiler
       # Sessizce yok sayilir, yani ayar hicbir zaman uygulanmiyordu.
+      # Kanarya: bilerek acik bir workflow yazilir ve zizmor'un onu bulmasi
+      # beklenir. Bulmazsa temiz rapor bir sey ifade etmez, ve bu kapi tam
+      # olarak temiz rapor uzerine kuruldugu icin kanarya olmadan
+      # bloklamasinin anlami olmazdi.
+      #
+      # Secilen acik `template-injection`: bir issue basligi dogrudan `run:`
+      # icine genisletiliyor, ki bu saldirganin runner'da komut calistirmasina
+      # yol acar. zizmor'un amiral kuralidir.
+      - name: zizmor kanaryasi (arac gercekten bulgu buluyor mu)
+        run: |
+          set -euo pipefail
+          pipx install zizmor==1.29.0
+          mkdir -p /tmp/zizmor-canary/.github/workflows
+          cat > /tmp/zizmor-canary/.github/workflows/bad.yml <<'EOF'
+          name: canary
+          on:
+            issues:
+              types: [opened]
+          permissions: {}
+          jobs:
+            bad:
+              runs-on: ubuntu-latest
+              steps:
+                - run: echo "${{ github.event.issue.title }}"
+          EOF
+          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda bir boru
+          # hattinda program sifirdan farkli cikarsa grep hic kosmaz ve
+          # kanarya kendi kabugunu olcer. Bu dalda ASan kanaryasi tam olarak
+          # boyle yanlis "temiz" raporlamisti.
+          set +e
+          zizmor --no-progress /tmp/zizmor-canary > /tmp/zizmor-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "KANARYA DUSTU: zizmor bilerek yazilmis template injection'i" >&2
+            echo "bulamadi, yani temiz bir rapor hicbir sey kanitlamaz." >&2
+            cat /tmp/zizmor-canary.log >&2
+            exit 1
+          fi
+          if grep -q "template-injection" /tmp/zizmor-canary.log; then
+            echo "kanarya OK: zizmor bilerek yazilmis enjeksiyonu yakaladi."
+          else
+            echo "KANARYA DUSTU: zizmor dustu ama sebep template-injection degil." >&2
+            cat /tmp/zizmor-canary.log >&2
+            exit 1
+          fi
       - uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
+        with:
+          persona: regular
 
   codeql:
     name: CodeQL (Rust SAST)

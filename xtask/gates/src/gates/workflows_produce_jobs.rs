@@ -209,6 +209,71 @@ fn collect_workflows(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Workflow files outside the one directory GitHub reads.
+///
+/// GitHub runs `.github/workflows` at the repository root and nowhere else. A
+/// workflow anywhere deeper is a file that looks like CI, reviews like CI and
+/// has never run once.
+///
+/// `budzero/.github/workflows/ci.yml` was exactly that. It declared format,
+/// check, clippy and test over the budzero workspace, it was maintained,
+/// somebody had gone through it pinning actions and setting
+/// `persist-credentials: false`, and the GitHub API listed eighteen workflows
+/// for this repository without it. Every one of those four checks was already
+/// running from the root `budzero` job, so nothing was unprotected, but a
+/// reader had no way to tell which of the two files was the live one, and the
+/// dead copy pinned no toolchain where the live one pins 1.94.0.
+///
+/// A vendored subtree keeping its upstream workflow is the ordinary way this
+/// appears, and it is worth catching precisely because it looks so normal.
+fn stray_workflow_dirs(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<String>) {
+        if depth > 4 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            // Build output and vendored dependency trees are not ours to
+            // police, and walking them is slow.
+            if name == "target" || name == "node_modules" || name == ".git" {
+                continue;
+            }
+            if name == ".github" {
+                let wf = p.join("workflows");
+                if wf.is_dir() && p.parent() != Some(root) {
+                    if let Ok(files) = std::fs::read_dir(&wf) {
+                        for f in files.flatten() {
+                            let fp = f.path();
+                            if fp.extension().is_some_and(|x| {
+                                x.eq_ignore_ascii_case("yml") || x.eq_ignore_ascii_case("yaml")
+                            }) {
+                                out.push(
+                                    fp.strip_prefix(root).unwrap_or(&fp).display().to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            walk(&p, root, depth + 1, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, root, 0, &mut out);
+    out.sort();
+    out
+}
+
 fn findings_for(wf: &Workflow, root: &Path) -> Vec<String> {
     let rel = wf
         .path
@@ -283,11 +348,22 @@ pub fn run(root: &Path) -> Result<String, String> {
         findings.extend(findings_for(&wf, root));
     }
 
+    for stray in stray_workflow_dirs(root) {
+        findings.push(format!(
+            "{stray} is a workflow GitHub never runs. Only `.github/workflows` at the \
+             repository root is read, so a file below that is CI in appearance only: it \
+             gets reviewed, pinned and maintained, and it has never executed. Either its \
+             checks are already running from the root, in which case the copy is a second \
+             answer to the question of which one is authoritative, or they are not, in \
+             which case nothing is checking them. Move it up or delete it."
+        ));
+    }
+
     if findings.is_empty() {
         return Ok(format!(
             "Workflow gate OK: {} workflows declaring {jobs_total} jobs, none empty, no \
-             reusable workflow called from a step, and all {pinned} step actions pinned \
-             to a commit SHA.",
+             reusable workflow called from a step, all {pinned} step actions pinned to a \
+             commit SHA, and no workflow file outside the directory GitHub reads.",
             files.len()
         ));
     }
@@ -428,6 +504,7 @@ jobs:
     }
 
     self_test_classifiers(&mut problems);
+    self_test_stray_workflows(&mut problems);
 
     if !problems.is_empty() {
         return Err(problems.join("\n  "));
@@ -436,6 +513,56 @@ jobs:
         "workflow gate self-test OK: a reusable workflow called from a step, a workflow \
          with no jobs, a job with no steps and a tag-pinned action are all refused; the \
          same reusable workflow at job level, a SHA-pinned action and a local action all \
-         pass.",
+         pass; a workflow in a nested `.github/workflows` is found and the root one is \
+         not mistaken for it.",
     ))
+}
+
+/// The stray-workflow reader, against a tree built for the purpose.
+///
+/// Reproduces the real case: a vendored subtree carrying its own
+/// `.github/workflows/ci.yml` while the root has a legitimate one. The root
+/// file must not be reported and the nested one must be.
+fn self_test_stray_workflows(problems: &mut Vec<String>) {
+    let base = std::env::temp_dir().join(format!(
+        "budlum-gate-stray-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let root_wf = base.join(".github/workflows");
+    let nested_wf = base.join("vendored/.github/workflows");
+    let buried = base.join("target/dep/.github/workflows");
+
+    for d in [&root_wf, &nested_wf, &buried] {
+        if std::fs::create_dir_all(d).is_err() {
+            problems.push(String::from(
+                "BROKEN: could not build the stray-workflow fixture",
+            ));
+            return;
+        }
+    }
+    let _ = std::fs::write(root_wf.join("ci.yml"), "name: X\n");
+    let _ = std::fs::write(nested_wf.join("ci.yml"), "name: Y\n");
+    let _ = std::fs::write(buried.join("ci.yml"), "name: Z\n");
+
+    let found = stray_workflow_dirs(&base);
+
+    if found.iter().any(|f| f.starts_with(".github")) {
+        problems.push(format!(
+            "BROKEN: the root workflow directory was reported as stray: {found:?}"
+        ));
+    }
+    if !found.iter().any(|f| f.contains("vendored")) {
+        problems.push(format!(
+            "VACUOUS: a nested `.github/workflows` was not found: {found:?}. This is the \
+             shape budzero carried, a maintained workflow GitHub never ran."
+        ));
+    }
+    if found.iter().any(|f| f.contains("target")) {
+        problems.push(format!("BROKEN: a build directory was walked: {found:?}"));
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
 }

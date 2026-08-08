@@ -59,13 +59,6 @@ struct Allowed {
 /// Measured, not typed: the gate refuses an entry that matches nothing.
 const ALLOWED: &[Allowed] = &[
     Allowed {
-        file: "security-audit.yml",
-        what: "zizmor",
-        reason: "the workflow static analyser reports findings the tree has not \
-                 triaged; the pinning and permission rules it would catch are \
-                 enforced by workflows-produce-jobs, which does block",
-    },
-    Allowed {
         file: "ci.yml",
         what: "budlum",
         reason: "clippy pedantic/nursery ratchet reports a count against a baseline; \
@@ -176,6 +169,17 @@ const MUST_BLOCK: &[(&str, &str, &str)] = &[
          clean report is indistinguishable from a binary that never ran. For a chain \
          a data race is not a flaky test: two nodes disagreeing about state because \
          of one is a fork.",
+    ),
+    (
+        "security-audit.yml",
+        "zizmor",
+        "zizmor audits the workflows themselves, which is the entry surface the 2026 \
+         supply-chain wave came through, and this repository's CI signs the binary it \
+         publishes, so a misconfiguration here reaches the chain. It was softened as \
+         `informational` on an unmeasured premise. Measured: zero findings at the \
+         default persona, and of the pedantic persona's findings none reach medium. \
+         Blocking costs nothing today, so softening it bought nothing and silenced a \
+         gate.",
     ),
     (
         "security-hardening.yml",
