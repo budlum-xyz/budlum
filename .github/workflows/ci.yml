@@ -923,7 +923,13 @@ jobs:
       - name: Modül coverage raporu - budlum (baselines 2. adımda, vacuous-gate YOK)
         run: python3 ./scripts/check_module_coverage.py coverage/cov.json
       - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
+        # `cd` cikis kodu kontrol edilmeden kullaniliyordu. Dizin bulunamazsa
+        # kabuk kokte kaliyor, sonraki komut ANA workspace'i olcuyor ve
+        # ciktiyi `budzero-cov.json` adiyla yaziyor: bir sonraki adim onu
+        # budzero'nun kapsami sanip raporluyor. Yanlis bir sayi degil, baska
+        # bir agacin sayisi, dogru dosya adiyla.
         run: |
+          set -euo pipefail
           cd budzero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
       - name: Modül coverage raporu - budzero (rapor modu)

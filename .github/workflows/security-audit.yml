@@ -120,10 +120,18 @@ jobs:
               runs-on: ubuntu-latest
               steps:
           EOF
-          # Uc parca: acilis, ifade govdesi, kapanis. Hicbiri tek basina
-          # GitHub'in genisletecegi bir sey degil.
-          printf '      - run: echo "%s%s%s"\n' \
-            '${' '{ github.event.issue.title }' '}' \
+          # Ifade karakter karakter kuruluyor. Suslu parantez `printf` bicim
+          # dizgesinde bile durmuyor, cunku shellcheck tek tirnak icindeki
+          # `${` dizisini genisletilmesi unutulmus bir degisken sanip SC2016
+          # veriyor, ve o uyari burada dogru degil: bu dizginin kabukta
+          # genislememesi zaten istenen sey. Uyariyi bastirmak yerine
+          # bastirilacak bir sey birakmiyoruz.
+          dollar="$(printf '\044')"   # $
+          ob="$(printf '\173')"       # {
+          cb="$(printf '\175')"       # }
+          expr_body="github.event.issue.title"
+          printf '      - run: echo "%s%s%s %s %s%s"\n' \
+            "$dollar" "$ob" "$ob" "$expr_body" "$cb" "$cb" \
             >> /tmp/zizmor-canary/.github/workflows/bad.yml
           # Kanaryanin kanaryasi: dosyada ifadenin GERCEKTEN durdugunu dogrula.
           # Bu satir olmadan bir sonraki genisletme kazasi yine sessizce
