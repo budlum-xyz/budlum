@@ -40,6 +40,7 @@
 use std::path::{Path, PathBuf};
 
 mod gates {
+    pub mod bns_names_are_safe_in_an_address_bar;
     pub mod mermaid;
     pub mod no_new_shell_gates;
 }
@@ -61,6 +62,12 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::mermaid::run,
         self_test: gates::mermaid::self_test,
+    },
+    Gate {
+        name: "bns-names",
+        replaces: None,
+        run: gates::bns_names_are_safe_in_an_address_bar::run,
+        self_test: gates::bns_names_are_safe_in_an_address_bar::self_test,
     },
     Gate {
         name: "no-new-shell-gates",
