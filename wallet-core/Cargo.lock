@@ -18,9 +18,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "budlum-note-packing"
+version = "0.1.0"
+
+[[package]]
 name = "budlum-wallet-core"
 version = "0.1.0"
 dependencies = [
+ "budlum-note-packing",
  "ed25519-dalek",
  "getrandom",
  "hex",

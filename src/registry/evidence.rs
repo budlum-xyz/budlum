@@ -20,14 +20,32 @@
 //!   The registry only applies a slash for reports whose provenance it trusts,
 //!   So it never has to understand every consensus flavour.
 //!
-//! WIRING: unwired - measured: `PermissionlessRegistry::slash_from_report`
-//! reads these reports and calls [`SlashingReport::is_actionable`], but
-//! nothing in production calls `slash_from_report` itself. The two live slash
-//! paths take a bare `SlashingCondition` from behind consensus, so no
-//! evidence currently flows through the typed route. The check is correct and
-//! guarded by `check-evidence-provenance-is-checked.sh`; what is missing is a
-//! production submitter, which needs the permissionless
-//! `slash-evidence-submit` endpoint to reach consensus verification first.
+//! ## The permissionless route
+//!
+//! `bud_submitSlashingReport` accepts a report from anybody. The RPC layer
+//! overwrites the caller's claimed provenance with
+//! [`ProofProvenance::Unverified`], because a submitter that could certify
+//! its own report could slash any validator it liked.
+//!
+//! That left a question the code answered badly for a while: an `Unverified`
+//! report is refused by [`SlashingReport::is_actionable`], and the refusal
+//! took the path that burns the anti-spam fee. The endpoint charged for every
+//! submission and could act on none of them, so a reporter holding genuine
+//! proof of an equivocation paid to be ignored, which is the opposite of the
+//! incentive a permissionless reporting channel needs.
+//!
+//! [`SlashingReport::verify_double_sign`] is the answer. A double-sign proof
+//! does not need a trusted sender: it carries two signatures by the offender
+//! over two different block hashes at one height, and only the offender's key
+//! can produce that pair. The chain checks the pair itself, before charging
+//! anything, and promotes the report to [`ProofProvenance::ConsensusVerified`]
+//! on the strength of the cryptography.
+//!
+//! The other conditions have no such self-contained proof. Liveness is a
+//! claim about what did not happen and invalid-relay conditions are claims
+//! about execution, so both need the context only consensus holds. Reports of
+//! those still arrive through the consensus path, and the RPC route refuses
+//! them rather than pretending it verified something.
 
 use crate::core::address::Address;
 use crate::registry::permissionless::SlashingCondition;
@@ -134,6 +152,21 @@ pub enum EvidenceError {
     InsufficientInvalidVoteCount,
     /// The registry was asked to act on an unverified report.
     Unverified,
+    /// A block hash is not 32 bytes of hex, so nothing signed it.
+    MalformedBlockHash,
+    /// A signature in the proof does not verify under the offender's key.
+    ///
+    /// This is the answer to a forged report: producing the pair requires the
+    /// offender's key, so a submitter who does not hold it cannot get past
+    /// this point no matter what it claims.
+    SignatureDoesNotVerify,
+    /// A double-sign proof names a role other than validator. Only a
+    /// validator produces the signed headers this proof is built from.
+    WrongRoleForProof,
+    /// [`SlashingReport::verify_double_sign`] was handed a proof that is not
+    /// a double-sign proof. The other conditions are not provable from the
+    /// report alone; see the note on the RPC path.
+    WrongProofForVerification,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -156,6 +189,18 @@ impl std::fmt::Display for EvidenceError {
             }
             EvidenceError::Unverified => {
                 write!(f, "cannot slash on an unverified evidence report")
+            }
+            EvidenceError::MalformedBlockHash => {
+                write!(f, "block hash is not 32 bytes of hex")
+            }
+            EvidenceError::SignatureDoesNotVerify => {
+                write!(f, "signature does not verify under the offender's key")
+            }
+            EvidenceError::WrongRoleForProof => {
+                write!(f, "double-sign proof names a role other than validator")
+            }
+            EvidenceError::WrongProofForVerification => {
+                write!(f, "proof is not a double-sign proof")
             }
         }
     }
@@ -439,6 +484,90 @@ impl SlashingReport {
             ProofProvenance::Unverified => Err(EvidenceError::Unverified),
         }
     }
+
+    /// Check a double-sign proof cryptographically and say whether it holds.
+    ///
+    /// This is what a submitter cannot fake and a node can check without any
+    /// context beyond the report itself: two signatures over two different
+    /// block hashes at one height, both valid under the offender's key.
+    ///
+    /// Equivocation is exactly that pair. A validator that signed one block
+    /// at height *h* produced one hash; a validator that signed two produced
+    /// two, and both signatures verify under its own key. Nobody else can
+    /// construct that pair, because constructing it requires the key.
+    ///
+    /// # What is verified and what is not
+    ///
+    /// Verified here: both hashes are well-formed, they differ, each
+    /// signature is a valid signature by `offender` over the corresponding
+    /// hash, and the report names the validator role.
+    ///
+    /// Not verified here: that either block was ever part of this chain. That
+    /// is deliberate and it is not a gap. A validator that signs two
+    /// conflicting blocks at one height has equivocated whether or not either
+    /// block was accepted, and requiring one of them to be canonical would
+    /// make the offence unreportable in the case that matters most, where the
+    /// validator withheld both and showed each to a different half of the
+    /// network.
+    ///
+    /// The height in the proof is carried for the record and for the
+    /// duplicate check the registry performs. It is not part of the signed
+    /// message, so it cannot be verified from the signatures alone, and this
+    /// function does not pretend otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError`] naming the first check that failed. A caller must
+    /// treat every error as "not proven" rather than "proven innocent": a
+    /// malformed report is not evidence of anything.
+    pub fn verify_double_sign(&self) -> Result<(), EvidenceError> {
+        self.validate_shape()?;
+
+        if self.role != roles::VALIDATOR {
+            return Err(EvidenceError::WrongRoleForProof);
+        }
+
+        let SlashingProof::DoubleSign {
+            block_hash_1,
+            block_hash_2,
+            signature_1,
+            signature_2,
+            ..
+        } = &self.proof
+        else {
+            return Err(EvidenceError::WrongProofForVerification);
+        };
+
+        // The hashes travel as hex because that is how a block carries its
+        // own. What was signed is the 32 raw bytes underneath, so a report
+        // whose hex does not decode to 32 bytes never had a signature over a
+        // block hash at all.
+        let h1 = decode_block_hash(block_hash_1)?;
+        let h2 = decode_block_hash(block_hash_2)?;
+
+        // `validate_shape` already rejected identical hex. This catches the
+        // same claim written two ways, e.g. differing only in case, which
+        // would otherwise present one signature twice as if it were two.
+        if h1 == h2 {
+            return Err(EvidenceError::NonConflictingHashes);
+        }
+
+        let key = self.offender.as_bytes();
+        crate::crypto::primitives::verify_signature(&h1, signature_1, key)
+            .map_err(|_| EvidenceError::SignatureDoesNotVerify)?;
+        crate::crypto::primitives::verify_signature(&h2, signature_2, key)
+            .map_err(|_| EvidenceError::SignatureDoesNotVerify)?;
+
+        Ok(())
+    }
+}
+
+/// Decode a block hash from the hex a report carries into the bytes that were
+/// signed.
+fn decode_block_hash(hex_hash: &str) -> Result<[u8; 32], EvidenceError> {
+    let raw = hex::decode(hex_hash).map_err(|_| EvidenceError::MalformedBlockHash)?;
+    raw.try_into()
+        .map_err(|_| EvidenceError::MalformedBlockHash)
 }
 
 #[cfg(test)]
@@ -590,5 +719,165 @@ mod tests {
         assert!(r.validate_shape().is_ok());
         assert_eq!(r.condition(), SlashingCondition::MaliciousBehaviour);
         assert!(r.is_actionable().is_ok());
+    }
+
+    // --- double-sign verification -------------------------------------------
+    //
+    // These decide whether the permissionless endpoint can be trusted to
+    // promote a report on its own. A report that verifies here is slashed
+    // without any operator in the loop, so the interesting cases are the
+    // forgeries, not the happy path.
+
+    /// Build a report whose signatures a real key actually produced.
+    fn signed_double_sign(
+        keys: &crate::crypto::primitives::KeyPair,
+        hash_1: [u8; 32],
+        hash_2: [u8; 32],
+    ) -> SlashingReport {
+        SlashingReport::new(
+            Address::from(keys.public_key_bytes()),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: hex::encode(hash_1),
+                block_hash_2: hex::encode(hash_2),
+                signature_1: keys.sign(&hash_1).to_vec(),
+                signature_2: keys.sign(&hash_2).to_vec(),
+            },
+            ProofProvenance::Unverified,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_real_equivocation_verifies_without_any_trusted_submitter() {
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let r = signed_double_sign(&keys, [1u8; 32], [2u8; 32]);
+
+        // Arrives unverified, and is provable anyway. That is the whole
+        // point: the proof carries its own authority.
+        assert_eq!(r.provenance, ProofProvenance::Unverified);
+        assert_eq!(r.verify_double_sign(), Ok(()));
+    }
+
+    #[test]
+    fn a_forged_report_against_an_innocent_validator_is_refused() {
+        // The attack the endpoint has to survive: name somebody else as the
+        // offender and hope the node takes the report at face value.
+        let victim = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let attacker = crate::crypto::primitives::KeyPair::generate().unwrap();
+
+        let mut r = signed_double_sign(&attacker, [1u8; 32], [2u8; 32]);
+        r.offender = Address::from(victim.public_key_bytes());
+
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::SignatureDoesNotVerify),
+            "signatures by one key must not slash the holder of another"
+        );
+    }
+
+    #[test]
+    fn a_report_with_invented_signatures_is_refused() {
+        // The cheapest forgery: real-looking hashes, garbage signatures.
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let r = SlashingReport::new(
+            Address::from(keys.public_key_bytes()),
+            roles::VALIDATOR,
+            SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: hex::encode([1u8; 32]),
+                block_hash_2: hex::encode([2u8; 32]),
+                signature_1: vec![0u8; 64],
+                signature_2: vec![0u8; 64],
+            },
+            ProofProvenance::Unverified,
+            None,
+        );
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::SignatureDoesNotVerify)
+        );
+    }
+
+    #[test]
+    fn one_signature_presented_twice_is_not_an_equivocation() {
+        // Signing a single block is not an offence. A report that shows the
+        // same hash twice is showing one signature, and the differing-hash
+        // check is what stops it counting as two.
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let r = signed_double_sign(&keys, [1u8; 32], [1u8; 32]);
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::NonConflictingHashes)
+        );
+    }
+
+    #[test]
+    fn the_same_hash_in_a_different_case_is_still_the_same_hash() {
+        // `validate_shape` compares the hex strings, so upper and lower case
+        // spellings of one hash pass it. Decoding first is what catches this:
+        // otherwise one signature over one block, written twice, would be
+        // accepted as proof of equivocation and slash an honest validator.
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let hash = [0xABu8; 32];
+        let mut r = signed_double_sign(&keys, hash, hash);
+        let SlashingProof::DoubleSign {
+            block_hash_1,
+            block_hash_2,
+            ..
+        } = &mut r.proof
+        else {
+            unreachable!()
+        };
+        *block_hash_1 = block_hash_1.to_lowercase();
+        *block_hash_2 = block_hash_2.to_uppercase();
+        assert_ne!(block_hash_1, block_hash_2, "the strings differ");
+        assert!(r.validate_shape().is_ok(), "so the shape check lets it by");
+
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::NonConflictingHashes),
+            "and the byte comparison catches it"
+        );
+    }
+
+    #[test]
+    fn a_hash_that_is_not_thirty_two_bytes_never_signed_a_block() {
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let mut r = signed_double_sign(&keys, [1u8; 32], [2u8; 32]);
+        let SlashingProof::DoubleSign { block_hash_1, .. } = &mut r.proof else {
+            unreachable!()
+        };
+        // The value the old tests used: two hex characters, one byte.
+        *block_hash_1 = "aa".into();
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::MalformedBlockHash)
+        );
+    }
+
+    #[test]
+    fn only_a_double_sign_proof_can_be_proven_from_the_report_alone() {
+        // Liveness is a claim about what did not happen over a window. There
+        // is no signature to check, so this route must refuse it rather than
+        // wave it through as verified.
+        let r = SlashingReport::consensus_liveness(addr(1), roles::VALIDATOR, 1, 10, 9, 10, None);
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::WrongProofForVerification)
+        );
+    }
+
+    #[test]
+    fn a_double_sign_proof_filed_under_another_role_is_refused() {
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let mut r = signed_double_sign(&keys, [1u8; 32], [2u8; 32]);
+        r.role = roles::RELAYER;
+        assert_eq!(
+            r.verify_double_sign(),
+            Err(EvidenceError::WrongRoleForProof),
+            "only a validator signs the headers this proof is built from"
+        );
     }
 }

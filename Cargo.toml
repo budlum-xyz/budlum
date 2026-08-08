@@ -125,6 +125,11 @@ bud-isa = { path = "budzero/bud-isa" }
 bud-vm = { path = "budzero/bud-vm" }
 bud-proof = { path = "budzero/bud-proof" }
 bud-node = { path = "budzero/bud-node" }
+# The node indexes commitments and nullifiers by the bytes the wallet packed.
+# That packing had three independent copies, one here, one in the wallet and
+# one in the zkVM state layer, and nothing forced them to stay equal. They now
+# read one definition.
+budlum-note-packing = { path = "note-packing" }
 
 [build-dependencies]
 prost-build = "0.14.3"

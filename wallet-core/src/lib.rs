@@ -7,20 +7,27 @@
 //!
 //! ## Kullanım
 //!
-//! ```rust,ignore
-//! Use budlum_wallet_core::{Wallet, WalletPrivacyConfig};
+//! `Wallet::generate` needs the `production` feature, which is what wires in
+//! the OS CSPRNG; without it the call fails closed rather than deriving a key
+//! from predictable entropy. The example below therefore starts from fixed
+//! entropy, which runs everywhere and never suggests that a wallet built this
+//! way is safe to hold funds.
 //!
-//! // Yeni wallet oluştur (12 kelime mnemonic)
-//! Let wallet = Wallet::generate(12).unwrap;
-//! Println!("Mnemonic: {}", wallet.mnemonic);
-//! Println!("Address: {}", wallet.address_hex);
+//! ```rust
+//! use budlum_wallet_core::{Wallet, WalletPrivacyConfig};
 //!
-//! // Transaction imzala
-//! Let sig = wallet.sign(b"message to sign");
+//! // Fixed entropy: reproducible, and never a real wallet.
+//! let mut wallet = Wallet::from_entropy(&[1u8; 16]).unwrap();
+//! assert_eq!(wallet.mnemonic().split_whitespace().count(), 12);
+//! assert_eq!(wallet.address_hex().len(), 64);
 //!
-//! // Opt-in note privacy (ağ seçeneği) - TEE kapalı
-//! Let mut w = Wallet::from_entropy(&[1u8; 16]).unwrap;
-//! W.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
+//! // Signing is what the wallet is for; the relayer it is handed to is not
+//! // trusted with anything but delivery.
+//! let sig = wallet.sign(b"message to sign");
+//! assert_eq!(sig.len(), 64);
+//!
+//! // Opt-in note privacy, TEE left off.
+//! wallet.set_privacy_config(WalletPrivacyConfig::note_privacy_only(true));
 //! ```
 //!
 //! ## Gizlilik
@@ -35,8 +42,8 @@ mod privacy_transfer;
 mod tee;
 
 pub use privacy_crypto::{
-    address_to_recipient_tag, field_from_hash, hash_from_field, poseidon4_hash, poseidon4_hash3,
-    privacy_commit, privacy_nullifier, DOMAIN_NULLIFIER,
+    address_to_recipient_tag, field_from_hash, hash_from_field, is_packed, poseidon4_hash,
+    poseidon4_hash3, privacy_commit, privacy_nullifier, DOMAIN_NULLIFIER,
 };
 pub use privacy_transfer::{
     derive_blinding, derive_spend_secret, PrivateNoteInput, PrivateNoteOutput,

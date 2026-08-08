@@ -15,6 +15,10 @@ sha3 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 zeroize = { version = "1", features = ["derive"] }
+# The wallet packs the field elements the chain will look up by. That packing
+# is the same rule the node and the zkVM state layer apply, so all three read
+# it from one place rather than each carrying a copy.
+budlum-note-packing = { path = "../note-packing" }
 
 # BIP39 mnemonic generation (minimal in-tree impl - no external dep for entropy→mnemonic)
 # SLIP-0010: Ed25519 HD derivation (hardened-only per RFC 8032)

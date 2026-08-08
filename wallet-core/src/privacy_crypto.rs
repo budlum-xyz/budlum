@@ -120,19 +120,12 @@ pub fn privacy_nullifier(secret: u64) -> u64 {
     poseidon4_hash(secret, DOMAIN_NULLIFIER)
 }
 
-/// Pack a field element into a 32-byte note hash (LE low 8 bytes; high zero).
-#[must_use]
-pub fn hash_from_field(fe: u64) -> [u8; 32] {
-    let mut h = [0u8; 32];
-    h[..8].copy_from_slice(&fe.to_le_bytes());
-    h
-}
-
-/// First 8 LE bytes as field element.
-#[must_use]
-pub fn field_from_hash(h: &[u8; 32]) -> u64 {
-    u64::from_le_bytes(h[..8].try_into().expect("32-byte hash"))
-}
+// Packing is `budlum-note-packing`'s single definition, re-exported under the
+// names the wallet already used. The chain indexes commitments and nullifiers
+// by exactly these bytes, so the wallet must not hold its own copy of the
+// rule: a one-byte divergence produces a nullifier the chain never recorded,
+// and the spend it was meant to prevent goes through.
+pub use budlum_note_packing::{field_from_hash, hash_from_field, is_packed};
 
 /// Map a 32-byte Budlum address into a Goldilocks field tag (first 8 LE bytes
 /// Reduced mod P). Used as PrivacyCommit recipient limb when full address

@@ -675,9 +675,13 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// the comment handling changed. Nine entries suppressing nothing is the same
 /// defect this branch found three times elsewhere: a number written down
 /// rather than counted. `no_pending_entry_is_dead` keeps them equal.
+/// `src/registry/evidence.rs` came off this list by being answered rather
+/// than reclassified. Its marker said a production submitter was missing; the
+/// submitter existed, `bud_submitSlashingReport`, and it could not produce a
+/// slash because every report reaching it was `Unverified` by construction.
+/// Reading the module is what surfaced that, which is what the list is for.
 const PENDING_REVIEW: &[&str] = &[
     "budzero/bud-state/src/note.rs",
-    "src/registry/evidence.rs",
     "src/registry/poa_onboarding.rs",
     "src/storage/living_threshold.rs",
 ];

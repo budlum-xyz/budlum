@@ -460,6 +460,7 @@ dependencies = [
  "bud-node",
  "bud-proof",
  "bud-vm",
+ "budlum-note-packing",
  "bytes",
  "clap",
  "criterion",
@@ -501,6 +502,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "budlum-note-packing"
+version = "0.1.0"
 
 [[package]]
 name = "bumpalo"

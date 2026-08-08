@@ -159,7 +159,17 @@ fn actionable_report_refunds_fee() {
 }
 
 #[test]
-fn unverified_report_burns_fee_and_does_not_slash() {
+fn an_unprovable_report_is_refused_before_the_fee_is_taken() {
+    // This used to assert the opposite, that the fee was burned, and the
+    // assertion was right about the code and wrong about what the code should
+    // do. Every externally submitted report arrived `Unverified`, every
+    // `Unverified` report was refused, and the refusal burned the fee. The
+    // endpoint could take money and could not produce a slash, so an honest
+    // reporter holding real proof paid to be ignored.
+    //
+    // A report that cannot be checked still must not slash anybody. What
+    // changed is that it no longer costs anything either: refusal happens
+    // before the debit.
     let mut bc = fresh_chain();
     let offender = addr(0x13);
     let reporter = addr(0x14);
@@ -181,12 +191,108 @@ fn unverified_report_burns_fee_and_does_not_slash() {
         ProofProvenance::Unverified,
         Some(reporter),
     );
-    // Rejected (not actionable).
     assert!(bc.submit_registry_slashing_report(report).is_err());
-    // Fee burned.
-    assert_eq!(bc.state.get_balance(&reporter), 0);
+    assert_eq!(
+        bc.state.get_balance(&reporter),
+        fee,
+        "an unprovable report must cost nothing: it proves nothing either way"
+    );
     // Offender untouched.
     assert!(bc.state.registry.is_active(&offender, roles::VALIDATOR));
+}
+
+#[test]
+fn a_provable_report_from_a_stranger_slashes_and_refunds() {
+    // The case the endpoint exists for and could not previously serve.
+    // Nobody vouches for the submitter; the pair of signatures does.
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
+    let reporter = addr(0x1A);
+
+    let mut bc = fresh_chain();
+    bc.state.add_validator(offender, 10_000);
+    bc.state.sync_validator_registration(&offender);
+    let fee = bc.state.registry.params().slashing_report_fee;
+    bc.state.add_balance(&reporter, fee);
+
+    let (h1, h2) = ([0x11u8; 32], [0x22u8; 32]);
+    let report = SlashingReport::new(
+        offender,
+        roles::VALIDATOR,
+        SlashingProof::DoubleSign {
+            height: 7,
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            signature_1: keys.sign(&h1).to_vec(),
+            signature_2: keys.sign(&h2).to_vec(),
+        },
+        ProofProvenance::Unverified,
+        Some(reporter),
+    );
+
+    let outcome = bc
+        .submit_registry_slashing_report(report)
+        .expect("a cryptographically sound equivocation must be actionable");
+    assert!(outcome.is_some(), "the equivocating validator is slashed");
+    assert_eq!(
+        bc.state.get_balance(&reporter),
+        fee,
+        "an honest reporter gets the fee back"
+    );
+}
+
+#[test]
+fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
+    // The report claims to be consensus-verified. It is not, and the
+    // signatures are somebody else's. If the endpoint believed either claim,
+    // slashing would be a thing any account could do to any validator for the
+    // price of the fee.
+    let victim_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let attacker_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let victim = Address::from(victim_keys.public_key_bytes());
+    let attacker = addr(0x1B);
+
+    let mut bc = fresh_chain();
+    bc.state.add_validator(victim, 10_000);
+    bc.state.sync_validator_registration(&victim);
+    let fee = bc.state.registry.params().slashing_report_fee;
+    bc.state.add_balance(&attacker, fee);
+    let stake_before = bc
+        .state
+        .registry
+        .get(&victim, roles::VALIDATOR)
+        .unwrap()
+        .stake;
+
+    let (h1, h2) = ([0x33u8; 32], [0x44u8; 32]);
+    let report = SlashingReport::new(
+        victim,
+        roles::VALIDATOR,
+        SlashingProof::DoubleSign {
+            height: 7,
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            // Signed by the attacker's key, filed against the victim.
+            signature_1: attacker_keys.sign(&h1).to_vec(),
+            signature_2: attacker_keys.sign(&h2).to_vec(),
+        },
+        // The RPC layer overwrites this to `Unverified`; asserted here to
+        // show the chain layer does not depend on the RPC layer to do so.
+        ProofProvenance::Unverified,
+        Some(attacker),
+    );
+
+    assert!(bc.submit_registry_slashing_report(report).is_err());
+    assert_eq!(
+        bc.state
+            .registry
+            .get(&victim, roles::VALIDATOR)
+            .unwrap()
+            .stake,
+        stake_before,
+        "an innocent validator keeps every unit of stake"
+    );
+    assert!(bc.state.registry.is_active(&victim, roles::VALIDATOR));
 }
 
 #[test]

@@ -9,3 +9,8 @@ license.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tiny-keccak = { version = "2.0", features = ["keccak"] }
+# The packing between a Goldilocks field element and a 32-byte note hash used
+# to be written out here, in the wallet, and consumed by the node registry.
+# Three copies of a rule the wallet and the chain must agree on byte for byte,
+# or a nullifier stops matching and a note is spent twice.
+budlum-note-packing = { path = "../../note-packing" }

@@ -2330,7 +2330,13 @@ impl Blockchain {
     ///   Report is rejected WITHOUT a state change.
     /// * If the report is ACTIONABLE (i.e. `slash_from_report` actually
     ///   Slashes the offender) the fee is refunded.
-    /// * If the report is REJECTED (e.g. unverified proof) the fee is
+    /// * A report arriving `Unverified` is checked cryptographically first,
+    ///   by [`crate::registry::evidence::SlashingReport::verify_double_sign`].
+    ///   If the pair of signatures holds it is promoted to
+    ///   `ConsensusVerified` and proceeds; if it does not, the report is
+    ///   refused before the fee is charged, so an unprovable report costs
+    ///   nothing and an honest one is not punished for arriving over RPC.
+    /// * If the report is REJECTED after the fee was taken the fee is
     ///   Burned - the report carries no economic protection, and the
     ///   Submitter is the only one with skin in the game.
     /// * If the report targets an account that simply isn't registered
@@ -2338,8 +2344,37 @@ impl Blockchain {
     ///   Is refunded (this matches `is_actionable` semantics).
     pub fn submit_registry_slashing_report(
         &mut self,
-        report: crate::registry::evidence::SlashingReport,
+        mut report: crate::registry::evidence::SlashingReport,
     ) -> Result<Option<crate::registry::permissionless::SlashOutcome>, String> {
+        // An externally submitted report arrives `Unverified`, because the RPC
+        // layer overwrites whatever provenance the caller claimed. Until this
+        // check existed, that was the end of the story: `is_actionable`
+        // refused every `Unverified` report, the refusal took the `Err` path
+        // below, and the `Err` path burns the fee. So the permissionless
+        // endpoint charged for every report and could not act on any of them,
+        // including correct ones. An honest reporter with real proof of an
+        // equivocation paid the fee and watched nothing happen.
+        //
+        // A double-sign proof does not need a trusted submitter. It carries
+        // two signatures by the offender over two different block hashes at
+        // one height, and only the offender's key can produce that pair. So
+        // the node checks the pair itself and promotes the report on the
+        // strength of the cryptography rather than the sender.
+        //
+        // This runs before the fee is charged, so a report that fails
+        // verification is refused without taking anything, and a report that
+        // passes reaches the registry as `ConsensusVerified`.
+        if report.provenance == crate::registry::ProofProvenance::Unverified {
+            report.verify_double_sign().map_err(|e| {
+                format!(
+                    "unverified report was not provable from its own contents: {e}. \
+                     Only a double-sign proof can be checked this way; other conditions \
+                     reach the registry through consensus, not this endpoint."
+                )
+            })?;
+            report.provenance = crate::registry::ProofProvenance::ConsensusVerified;
+        }
+
         let fee = self.state.registry.params().slashing_report_fee;
         let mut charged_fee = false;
         if let Some(reporter) = report.reporter {
