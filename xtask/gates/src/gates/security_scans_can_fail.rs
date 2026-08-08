@@ -111,6 +111,13 @@ const ALLOWED: &[Allowed] = &[
     },
     Allowed {
         file: "miri.yml",
+        what: "asan",
+        reason: "the canary deliberately runs a program with a memory error, so that \
+                 command is expected to exit non-zero; the decision is made by the grep \
+                 that follows and the sanitizer run itself blocks",
+    },
+    Allowed {
+        file: "miri.yml",
         what: "miri-crypto",
         reason: "the storage module under Miri is slow and not yet clean; the crypto \
                  module is the one that blocks",

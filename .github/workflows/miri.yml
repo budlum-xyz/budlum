@@ -137,10 +137,22 @@ jobs:
           EOF
           cd /tmp/asan-canary
           export RUSTFLAGS="-Zsanitizer=address"
-          if cargo +nightly-2026-07-19 run -Zbuild-std \
-               --target x86_64-unknown-linux-gnu 2>&1 \
-             | tee /tmp/asan-canary.log \
-             | grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope"; then
+          # Ciktiyi ONCE dosyaya al, SONRA ara.
+          #
+          # Ilk yazim `cargo run ... | tee log | grep -q ...` seklindeydi ve
+          # `set -euo pipefail` altinda calismadi: program ASan raporuyla
+          # sifirdan farkli cikinca pipefail boru hattini orada oldurdu, grep
+          # hic kosmadi, ve kanarya "yakalayamadi" dedi. ASan aslinda
+          # yakalamisti; logdaki shadow byte dokumu oradaydi. Yani kanarya
+          # araci degil kendi kabuk mantigini olcuyordu.
+          #
+          # `|| true` bilerek: bu komutun BASARISIZ olmasi bekleniyor, cunku
+          # kasitli bir bellek hatasi calistiriyor. Karar asagidaki grep'te
+          # veriliyor ve o blokluyor.
+          cargo +nightly-2026-07-19 run -Zbuild-std \
+            --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1 || true
+          if grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope" \
+               /tmp/asan-canary.log; then
             echo "kanarya OK: ASan bilerek yazilmis bellek hatasini yakaladi."
           else
             echo "KANARYA DUSTU: ASan bir bellek hatasini yakalayamadi, yani bu is" >&2
