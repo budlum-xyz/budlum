@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
     pub mod capability_modules_are_wired;
+    pub mod every_fuzz_target_is_run;
     pub mod mermaid;
     pub mod no_new_shell_gates;
     pub mod security_scans_can_fail;
@@ -103,6 +104,12 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::the_image_builds_what_the_manifest_declares::run,
         self_test: gates::the_image_builds_what_the_manifest_declares::self_test,
+    },
+    Gate {
+        name: "every-fuzz-target-is-run",
+        replaces: None,
+        run: gates::every_fuzz_target_is_run::run,
+        self_test: gates::every_fuzz_target_is_run::self_test,
     },
     Gate {
         name: "no-new-shell-gates",
