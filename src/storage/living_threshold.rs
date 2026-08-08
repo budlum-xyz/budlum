@@ -95,6 +95,30 @@ pub const ACCESS_HALF_LIFE_EPOCHS: u64 = 720;
 /// would disagree about what the network holds.
 pub const ACCESS_SCALE: u64 = 1_000_000;
 
+/// Largest object this will reason about, in bytes.
+///
+/// Sixty-four gibibytes is past any single object a manifest describes. The
+/// bound exists so a size arriving from a manifest is checked once, here,
+/// rather than argued at each multiplication: `checked_product` below refuses
+/// an overflow, but a refusal at the far end tells a caller only that the
+/// arithmetic gave up, while a refusal here tells it which input was wrong.
+///
+/// Carried across from `storage::derivation_economics`, an earlier module
+/// that computed the same crossing point without the decay, the hysteresis or
+/// the transition cost. It is not in the tree; this is the part of it worth
+/// keeping.
+pub const MAX_OBJECT_BYTES: u64 = 64 << 30;
+
+/// Largest per-byte reproduction cost this will reason about, in nanoseconds.
+///
+/// One second of processor time to reproduce a single byte. Past that the
+/// lever is not one anybody applies on a read path, and admitting the value
+/// only produces a threshold nobody acts on.
+pub const MAX_CPU_NANOS_PER_BYTE: u64 = NANOS_PER_SECOND;
+
+/// Nanoseconds in a second, for callers converting measured durations.
+pub const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
 /// How far past a threshold a rate must sit before the strategy changes.
 ///
 /// Expressed in sixteenths, and the same width in both directions: a rate
@@ -147,6 +171,10 @@ pub enum ThresholdError {
     LeverIsFree,
     /// Rates of zero make every comparison meaningless rather than cheap.
     RatesAreZero,
+    /// The object is past [`MAX_OBJECT_BYTES`].
+    ObjectTooLarge { bytes: u64 },
+    /// The lever is past [`MAX_CPU_NANOS_PER_BYTE`].
+    LeverTooSlow { cpu_nanos_per_byte: u64 },
     /// The product of size, rate and half-life leaves u128.
     ///
     /// Not a hypothetical. `[profile.release]` sets `overflow-checks = true`
@@ -173,6 +201,19 @@ impl std::fmt::Display for ThresholdError {
             Self::RatesAreZero => write!(
                 f,
                 "operator rates of zero cannot order two strategies against each other"
+            ),
+            Self::ObjectTooLarge { bytes } => write!(
+                f,
+                "an object of {bytes} bytes is past the {MAX_OBJECT_BYTES} this reasons \
+                 about; a size that large did not come from a manifest describing one object"
+            ),
+            Self::LeverTooSlow {
+                cpu_nanos_per_byte,
+            } => write!(
+                f,
+                "a lever costing {cpu_nanos_per_byte} nanoseconds per byte is past the \
+                 {MAX_CPU_NANOS_PER_BYTE} this reasons about; nobody reproduces bytes at \
+                 that price on a read path"
             ),
             Self::ProductLeavesU128 => write!(
                 f,
@@ -244,7 +285,9 @@ impl AccessEstimate {
 ///
 /// [`ThresholdError::LeverSavesNothing`] for a lever that does not shrink the
 /// object, [`ThresholdError::LeverIsFree`] for one claiming no processor cost,
-/// [`ThresholdError::RatesAreZero`] when the operator's rates are zero, and
+/// [`ThresholdError::RatesAreZero`] when the operator's rates are zero,
+/// [`ThresholdError::ObjectTooLarge`] and [`ThresholdError::LeverTooSlow`]
+/// for inputs past the bounds above, and
 /// [`ThresholdError::ProductLeavesU128`] when the factors given multiply past
 /// the type.
 pub fn break_even_rate_scaled(
@@ -262,6 +305,19 @@ pub fn break_even_rate_scaled(
     }
     if rates.disk_picodollars_per_byte_epoch == 0 || rates.cpu_picodollars_per_nano == 0 {
         return Err(ThresholdError::RatesAreZero);
+    }
+    // Bound the inputs before multiplying them. `checked_product` catches an
+    // overflow either way, but it reports that the arithmetic gave up rather
+    // than which number was wrong, and `object_bytes` arrives from a manifest.
+    if object_bytes > MAX_OBJECT_BYTES {
+        return Err(ThresholdError::ObjectTooLarge {
+            bytes: object_bytes,
+        });
+    }
+    if lever.cpu_nanos_per_byte > MAX_CPU_NANOS_PER_BYTE {
+        return Err(ThresholdError::LeverTooSlow {
+            cpu_nanos_per_byte: lever.cpu_nanos_per_byte,
+        });
     }
 
     // Saving over one half-life, in picodollars. u128 because bytes times a
@@ -746,42 +802,85 @@ mod tests {
     /// an error value rather than a crash, and it costs one comparison.
     #[test]
     fn a_product_that_leaves_u128_is_refused_rather_than_aborting() {
-        // Disk rate large enough that size times rate times half-life leaves
-        // the type on its own.
+        // Inside the input bounds, so the size check passes and the products
+        // are what refuse: the largest object this reasons about against a
+        // disk rate at the top of u64.
         let absurd_disk = OperatorRates {
             disk_picodollars_per_byte_epoch: u64::MAX,
             cpu_picodollars_per_nano: 694,
         };
         assert_eq!(
-            break_even_rate_scaled(described(), u64::MAX, absurd_disk),
+            break_even_rate_scaled(described(), MAX_OBJECT_BYTES, absurd_disk),
             Err(ThresholdError::ProductLeavesU128)
         );
 
         // The reproduction side, which carries the access rate as a fourth
         // factor and so leaves the type sooner than the saving side.
-        let absurd_lever = Lever {
+        let slow_lever = Lever {
             size_millionths: 0,
-            cpu_nanos_per_byte: u64::MAX,
+            cpu_nanos_per_byte: MAX_CPU_NANOS_PER_BYTE,
         };
         let mut hot = AccessEstimate::new(0);
         hot.scaled = u64::MAX;
         assert_eq!(
-            break_even_rate_scaled(absurd_lever, u64::MAX, rates()),
-            Err(ThresholdError::ProductLeavesU128)
-        );
-        assert_eq!(
-            decide(absurd_lever, u64::MAX, rates(), hot, 0, false, 0),
+            decide(
+                slow_lever,
+                MAX_OBJECT_BYTES,
+                absurd_disk,
+                hot,
+                0,
+                false,
+                0
+            ),
             Err(ThresholdError::ProductLeavesU128)
         );
 
         // The canary: an object a network would actually hold still answers.
-        // A refusal that fires on everything would satisfy the three above.
+        // A refusal that fires on everything would satisfy the two above.
         let real = break_even_rate_scaled(described(), 500_000, rates());
         assert!(
             real.is_ok(),
             "a 500 KB object at measured rates must still have a threshold, \
              or the overflow check is refusing the ordinary case: {real:?}"
         );
+    }
+
+    /// An input past the bounds is named, rather than reported as arithmetic
+    /// that gave up.
+    ///
+    /// `checked_product` would catch both of these anyway, and would say
+    /// `ProductLeavesU128`, which tells a caller that some multiplication
+    /// overflowed and not which of its numbers was wrong. `object_bytes`
+    /// arrives from a manifest, so the caller most in need of the answer is
+    /// the one validating somebody else's input.
+    #[test]
+    fn an_input_past_the_bounds_is_refused_by_name() {
+        assert_eq!(
+            break_even_rate_scaled(described(), MAX_OBJECT_BYTES + 1, rates()),
+            Err(ThresholdError::ObjectTooLarge {
+                bytes: MAX_OBJECT_BYTES + 1
+            })
+        );
+
+        let too_slow = Lever {
+            size_millionths: 0,
+            cpu_nanos_per_byte: MAX_CPU_NANOS_PER_BYTE + 1,
+        };
+        assert_eq!(
+            break_even_rate_scaled(too_slow, 500_000, rates()),
+            Err(ThresholdError::LeverTooSlow {
+                cpu_nanos_per_byte: MAX_CPU_NANOS_PER_BYTE + 1
+            })
+        );
+
+        // Exactly at each bound is inside it. A bound that refused its own
+        // value would be off by one and no test above would say so.
+        assert!(break_even_rate_scaled(described(), MAX_OBJECT_BYTES, rates()).is_ok());
+        let at_bound = Lever {
+            size_millionths: 0,
+            cpu_nanos_per_byte: MAX_CPU_NANOS_PER_BYTE,
+        };
+        assert!(break_even_rate_scaled(at_bound, 500_000, rates()).is_ok());
     }
 
     /// The arithmetic must not overflow on objects a network would hold.
