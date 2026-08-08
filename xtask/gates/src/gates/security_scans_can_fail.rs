@@ -116,21 +116,9 @@ const ALLOWED: &[Allowed] = &[
                  module is the one that blocks",
     },
     Allowed {
-        file: "security-audit.yml",
-        what: "cargo-hack",
-        reason: "feature-matrix build; the matrix is large and its failures have not \
-                 been triaged, so blocking would stop every PR on a known backlog",
-    },
-    Allowed {
         file: "security-hardening.yml",
         what: "machete",
         reason: "root-tree machete duplicates the blocking run in extra-tooling.yml",
-    },
-    Allowed {
-        file: "security-hardening.yml",
-        what: "mutants",
-        reason: "mutation testing over the whole tree does not finish in a PR budget; \
-                 it runs to a five-minute timeout and reports",
     },
     Allowed {
         file: "security-hardening.yml",
@@ -180,6 +168,29 @@ const MUST_BLOCK: &[(&str, &str, &str)] = &[
          default persona, and of the pedantic persona's findings none reach medium. \
          Blocking costs nothing today, so softening it bought nothing and silenced a \
          gate.",
+    ),
+    (
+        "security-audit.yml",
+        "cargo-hack",
+        "the feature matrix was softened as slow and untriaged, and both halves were \
+         wrong: the job has passed on every recent run and takes under two minutes, \
+         less than half the CodeQL job beside it. What it checks is not covered \
+         elsewhere. `--each-feature` compiles each feature alone, and a feature only \
+         ever built alongside the others can lose the code behind its own `#[cfg]` and \
+         still compile. `pq-ml-dsa` is the alternative signature backend and `p2p-mdns` \
+         is a non-production capability; neither is on in a default build, so this job \
+         is the only thing that builds them at all.",
+    ),
+    (
+        "security-hardening.yml",
+        "mutants",
+        "mutation testing measures whether the tests would notice a change, which no \
+         other gate here measures: a green suite can be made of tests that assert \
+         nothing. It carried both `continue-on-error` and `|| true`, and underneath \
+         them the tool was not running at all, dying on `unexpected argument \
+         '--test-timeout'` seconds after install while the job reported green. That is \
+         the most expensive form of softening, because it hides absence rather than \
+         failure.",
     ),
     (
         "security-hardening.yml",

@@ -208,8 +208,22 @@ jobs:
   cargo-hack:
     name: cargo-hack feature matrix
     runs-on: ubuntu-latest
-    # Özellik matrisi taraması - bilgilendirici; yavaş/yoğun olabilir.
-    continue-on-error: true
+    # BLOKLAR. Gerekce "bilgilendirici; yavas/yogun olabilir" idi ve iki
+    # yaninda da olculmemisti. Olculdu: is son uc kosuda GECTI ve 1 dakika
+    # 58 saniye surdu, ayni workflow'daki CodeQL'in yarisindan az. Yani
+    # yumusatma ne bir kirmizilik sakliyordu ne bir zaman kazandiriyordu;
+    # sadece kapiyi susturuyordu.
+    #
+    # Denetledigi sey de ucuz degil. `--each-feature` bir ozelligin TEK
+    # BASINA derlendigini dogrular. Ozellikler yalnizca hep birlikte
+    # denenirse, bir `#[cfg]` arkasindaki kod kaybolur ve agac yine derlenir:
+    # kusur ancak o ozellik yalniz acildiginda ortaya cikar. `pq-ml-dsa`
+    # tam olarak boyle bir ozellik, PQ imza arka ucunun alternatifi, ve
+    # `p2p-mdns` uretim disi bir yetenek. Ikisi de gunluk derlemede acik
+    # degil, yani onlari yalniz bu is deniyor.
+    #
+    # Kirmizi verirse anlami acik: bir ozellik kombinasyonu derlenmiyor,
+    # ki bu main'e girmemesi gereken tek sey.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -235,6 +249,52 @@ jobs:
           tar -xzf /tmp/cargo-hack.tar.gz -C /tmp
           install -m755 /tmp/cargo-hack /usr/local/bin/cargo-hack
           cargo hack --version
+      # Kanarya: bilerek TEK BASINA derlenmeyen bir ozellik yazilir ve
+      # `--each-feature`in onu bulmasi beklenir. Duz `cargo check` bu kusuru
+      # goremez, cunku ozellikler birlikte acildiginda eksik parca baska bir
+      # ozellikten gelir. Kanarya olmadan yesil bir matris, matrisin
+      # kostugunu degil, en fazla dusmedigini soylerdi.
+      - name: cargo-hack kanaryasi (matris gercekten yakaliyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/hack-canary/src
+          cat > /tmp/hack-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "hack-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [features]
+          default = []
+          alpha = []
+          beta = []
+          EOF
+          # `beta` tek basina acildiginda `helper` yok, cunku onu `alpha`
+          # tanimliyor. Ikisi birlikte acikken agac derlenir.
+          cat > /tmp/hack-canary/src/lib.rs <<'EOF'
+          #[cfg(feature = "alpha")]
+          pub fn helper() -> u32 { 1 }
+
+          #[cfg(feature = "beta")]
+          pub fn user() -> u32 { helper() }
+          EOF
+          cd /tmp/hack-canary
+          # Once duz check: ikisi birlikte acikken GECMELI. Gecmezse kanarya
+          # yanlis seyi olcuyor demektir.
+          cargo check --features alpha,beta --quiet
+          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda boru
+          # hattinda program sifirdan farkli cikarsa grep hic kosmaz.
+          set +e
+          cargo hack check --each-feature > /tmp/hack-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "KANARYA DUSTU: --each-feature tek basina derlenmeyen bir" >&2
+            echo "ozelligi yakalamadi, yani yesil matris bir sey kanitlamaz." >&2
+            tail -20 /tmp/hack-canary.log >&2
+            exit 1
+          fi
+          echo "kanarya OK: matris yalniz acildiginda kirilan ozelligi yakaladi."
       - name: Feature matrix check
         run: cargo hack check --each-feature --exclude-no-default-features --exclude-features pq-ml-dsa --locked
 

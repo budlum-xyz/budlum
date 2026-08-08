@@ -59,11 +59,26 @@ jobs:
       - name: cargo machete (budzero)
         run: cd budzero && cargo machete --with-metadata; true
 
+  # BLOKLAR. Onceki hali hem `continue-on-error: true` hem `|| true`
+  # tasiyordu, ve arac hic kosmuyordu:
+  #
+  #   error: unexpected argument '--test-timeout' found
+  #
+  # cargo-mutants 27.1.0'da bayrak `--timeout`. Komut saniyeler icinde
+  # argüman hatasiyla oluyordu, `|| true` cikis kodunu yutuyordu,
+  # `continue-on-error` geri kalani ortuyordu, ve is YESIL raporluyordu.
+  # Iki dakikalik bir "mutation testing" is'i aslinda arac kurulumundan
+  # ibaretti. Yumusatmanin en pahali bicimi bu: bir kapinin dusmesini degil,
+  # hic kosmadigini gizler.
+  #
+  # Olctugu sey de baska hicbir kapinin olcmedigi sey. Butun diger kapilar
+  # kodun ne yaptigini denetler; bu, testlerin bir degisikligi FARK EDIP
+  # etmedigini denetler. Yesil bir test paketi, hicbir seyi iddia etmeyen
+  # testlerden de olusabilir.
   mutants:
     name: cargo mutants (mutation testing)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,8 +94,67 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
-      - name: cargo mutants (bilgilendirici, 5 dk timeout)
-        run: cargo mutants --in-place --test-timeout 300 -- --lib || true
+      # Kanarya: bilerek hicbir seyi iddia etmeyen bir testle bir crate
+      # yazilir ve cargo-mutants'in hayatta kalan bir mutanti bildirmesi
+      # beklenir. Bildirmezse temiz bir rapor "testler saglam" demez, en
+      # fazla "arac kosmadi" der. Bu is tam olarak o durumda aylarca yesil
+      # kaldi, o yuzden kanarya burada bir formalite degil.
+      - name: mutants kanaryasi (arac gercekten hayatta kalan buluyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mutants-canary/src
+          cat > /tmp/mutants-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "mutants-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          # Test fonksiyonu cagiriyor ve sonucu hakkinda hicbir sey
+          # soylemiyor. `cargo test` yesil; govde nasil degisirse degissin
+          # yesil kalir, ki mutation testing tam olarak bunu bulmak icindir.
+          cat > /tmp/mutants-canary/src/lib.rs <<'EOF'
+          pub fn double(x: i32) -> i32 {
+              x * 2
+          }
+
+          #[cfg(test)]
+          mod tests {
+              #[test]
+              fn calls_it_and_asserts_nothing() {
+                  let _ = super::double(21);
+              }
+          }
+          EOF
+          cd /tmp/mutants-canary
+          cargo test --quiet
+          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda boru
+          # hattinda program sifirdan farkli cikarsa grep hic kosmaz.
+          set +e
+          cargo mutants --in-place --timeout 60 > /tmp/mutants-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "KANARYA DUSTU: hicbir seyi iddia etmeyen bir testin altinda" >&2
+            echo "hayatta kalan mutant bildirilmedi, yani arac ya kosmuyor ya" >&2
+            echo "da bir sey olcmuyor." >&2
+            tail -30 /tmp/mutants-canary.log >&2
+            exit 1
+          fi
+          if grep -qi "MISSED\|missed" /tmp/mutants-canary.log; then
+            echo "kanarya OK: arac bos testin altindaki mutanti hayatta buldu."
+          else
+            echo "KANARYA DUSTU: arac dustu ama sebep hayatta kalan mutant degil." >&2
+            tail -30 /tmp/mutants-canary.log >&2
+            exit 1
+          fi
+      # `--in-diff`: her kosuda tum agaci mutasyona ugratmak saatler surer ve
+      # bir PR'in degistirmedigi koda dair bulgu uretir. Bu dalin diff'i
+      # denetlenir, yani soru "bu degisiklik test edilmis mi" olur, ki
+      # cevaplanabilir tek soru odur.
+      - name: Diff'i cikar
+        run: git diff origin/${{ github.base_ref || 'main' }}... > /tmp/pr.diff || git diff HEAD~1 > /tmp/pr.diff
+      - name: cargo mutants (bu degisiklige dokunan kod)
+        run: cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
@@ -102,10 +176,66 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-supply-chain
         run: cargo install cargo-supply-chain --locked
+      # `publishers` her calistiginda crates.io'ya kraft basina ~2 saniyeden
+      # sorar ve 566 bagimlilikta bu 15 dakikalik timeout'u asiyordu: is
+      # iptal oluyor, hicbir cikti uretmiyordu. `update` ayni veriyi bir
+      # kerede toplu ceker, sonraki komutlar onbellekten okur.
+      - name: Yayıncı verisini topluca çek
+        run: cargo supply-chain update --cache-max-age 1w
       - name: cargo supply-chain publishers
-        run: cargo supply-chain publishers || true
+        run: cargo supply-chain publishers
       - name: cargo supply-chain crates
-        run: cargo supply-chain crates || true
+        run: cargo supply-chain crates
+      # Bu is'in bir esigi yoktu, o yuzden dusemiyordu ve `|| true`
+      # tasiyordu. Esik su: agac, YAYINCISI OLMAYAN bir bagimliliga
+      # ulasmamali. crates.io'da sahipsiz bir kraft, kimsenin
+      # devralamayacagi ve kimsenin yamayamayacagi bir kraftir; bir zincir
+      # icin bu bir surum gecikmesi degil, kapanmayacak bir aciktir.
+      #
+      # Sayi degil varlik denetleniyor: "kac yayinci" bir esik degildir,
+      # cunku dogru sayi bilinmez. "Sifir yayinci" ise her zaman yanlistir.
+      - name: Sahipsiz bağımlılık kapısı
+        run: |
+          set -euo pipefail
+          cargo supply-chain json --diffable > /tmp/supply-chain.json
+          python3 - <<'PY'
+          import json, sys
+
+          with open("/tmp/supply-chain.json") as f:
+              data = json.load(f)
+
+          # Sahibi olmayan kraftlar: ne bir kullanici ne bir takim
+          # yayinlayabiliyor. Boyle bir bagimlilik yamalanamaz.
+          orphans = []
+          for crate in data.get("crates_io_crates", []):
+              name = crate.get("name", "?")
+              owners = crate.get("owners", [])
+              if not owners:
+                  orphans.append(name)
+
+          total = len(data.get("crates_io_crates", []))
+          if total == 0:
+              print(
+                  "KAPI BOS KOSTU: cargo-supply-chain hicbir kraft bildirmedi, "
+                  "yani bu kontrol hicbir seyi denetlemedi.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          if orphans:
+              print(f"{len(orphans)} sahipsiz bagimlilik:", file=sys.stderr)
+              for o in sorted(orphans):
+                  print(f"  {o}", file=sys.stderr)
+              print(
+                  "\nSahipsiz bir kraft kimse tarafindan yamalanamaz. Bir aciik "
+                  "cikarsa bekleyecek kimse yok; bagimliligi degistirin ya da "
+                  "icerlestirin.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print(f"Sahipsiz bagimlilik yok: {total} crates.io kraftinin hepsinin yayincisi var.")
+          PY
 
   # BLOKLAR. Bir zincir icin veri yarisi kararsiz test degil: iki dugum bir
   # yarisin sonucuna gore farkli duruma varirsa bu bir catallanmadir.
