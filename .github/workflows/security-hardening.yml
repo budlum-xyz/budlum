@@ -151,8 +151,19 @@ jobs:
       # bir PR'in degistirmedigi koda dair bulgu uretir. Bu dalin diff'i
       # denetlenir, yani soru "bu degisiklik test edilmis mi" olur, ki
       # cevaplanabilir tek soru odur.
+      #
+      # Dal adi kabuga `${{ }}` ile genisletilmez. Bir dal adi neredeyse her
+      # seyi icerebilir ve `run:` icinde genisleyen bir ifade, o metni komut
+      # olarak calistirir: `$(...)` tasiyan bir dal adi bu adimda kod
+      # calistirir. zizmor bunu template-injection olarak yuksek guvenle
+      # bildirdi ve hakliydi. Deger ortam degiskeni uzerinden gecer, kabuk
+      # onu tirnak icinde veri olarak okur.
       - name: Diff'i cikar
-        run: git diff origin/${{ github.base_ref || 'main' }}... > /tmp/pr.diff || git diff HEAD~1 > /tmp/pr.diff
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          git diff "origin/${BASE_REF}..." > /tmp/pr.diff || git diff HEAD~1 > /tmp/pr.diff
       - name: cargo mutants (bu degisiklige dokunan kod)
         run: cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
 

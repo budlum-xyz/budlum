@@ -177,6 +177,19 @@ path = "benches/domain_throughput.rs"
 required-features = ["__bench_domain_throughput_disabled"]
 harness = false
 
+# `cfg(loom)` is set by RUSTFLAGS in the loom job, not by a Cargo feature, so
+# Cargo does not learn about it on its own and `-D warnings` turns the
+# resulting `unexpected_cfgs` into a build failure for every job that compiles
+# the test profile. Declaring it here is the fix the compiler itself suggests;
+# the alternative it offers, `#[allow(unexpected_cfgs)]`, would silence the
+# lint everywhere instead of teaching it one name.
+#
+# A Cargo feature would be the wrong shape: loom replaces `std::sync` types
+# wholesale at compile time, so it is a build configuration rather than
+# something a dependent could switch on.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [profile.release]
 overflow-checks = true
 panic = "abort"

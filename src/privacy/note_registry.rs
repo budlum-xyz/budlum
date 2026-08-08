@@ -261,6 +261,10 @@ mod tests {
     fn a_nullifier_packed_the_way_the_wallet_packs_it_is_found_by_the_registry() {
         let commitment = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
         let nullifier = budlum_note_packing::hash_from_field(0xDEAD_BEEF_CAFE_F00D);
+        // A private transfer consumes notes and creates notes; the registry
+        // refuses one with no output, so the change note is part of the
+        // shape being tested rather than scaffolding around it.
+        let change = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
 
         let mut r = L1NoteRegistry::new();
         r.insert_note(commitment).unwrap();
@@ -269,15 +273,23 @@ mod tests {
             "a commitment packed by the shared rule must be found by the registry"
         );
 
-        r.apply_transfer(&[commitment], &[nullifier], &[]).unwrap();
+        r.apply_transfer(&[commitment], &[nullifier], &[change])
+            .unwrap();
         assert!(
             r.is_nullifier_spent(&nullifier),
             "the nullifier the wallet would send must be the one the chain stored"
         );
+        assert!(
+            r.contains_commitment(&change),
+            "the output the wallet packed must be the one the chain now holds"
+        );
 
         // And the note cannot be spent twice, which is the guarantee that
         // silently disappears if the two packings drift apart.
-        assert!(r.apply_transfer(&[commitment], &[nullifier], &[]).is_err());
+        let second = budlum_note_packing::hash_from_field(0x9900_AABB_CCDD_EEFF);
+        assert!(r
+            .apply_transfer(&[commitment], &[nullifier], &[second])
+            .is_err());
     }
 
     /// A registry hash is a packed hash, not an arbitrary 32 bytes.

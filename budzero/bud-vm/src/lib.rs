@@ -541,8 +541,30 @@ impl Vm {
                 // Round). 64 follow-up "expansion" rows are pushed
                 // Immediately, one per Poseidon round, so the AIR can
                 // Verify the path row-by-row.
-                let path_end = path_addr.wrapping_add(8 * 65);
-                let result = if path_end <= self.memory.len() {
+                // `wrapping_add` made this bound decide the opposite of what
+                // it reads like. `path_addr` is `inst.imm`, which the program
+                // supplies, so a value within 520 of `usize::MAX` wraps the
+                // sum to a small number, the comparison passes, and the slice
+                // below is indexed at the unwrapped address. The fuzzer
+                // reached it in about one second:
+                //
+                //   range start index 18446744073709551110 out of range for
+                //   slice of length 8192
+                //
+                // A panic here is not a contained error. The VM executes
+                // untrusted contract bytecode, `run_receipt` is the
+                // non-panicking entry point every caller relies on, and the
+                // release profile is `panic = "abort"`, so this is a remote
+                // halt of any node that executes the instruction rather than
+                // a rejected transaction.
+                //
+                // `checked_add` gives the bound its stated meaning: an
+                // address whose window does not fit is out of range, which is
+                // what the wrapped value was pretending to prove.
+                let result = if path_addr
+                    .checked_add(8 * 65)
+                    .is_some_and(|end| end <= self.memory.len())
+                {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
                     let key = u64::from_le_bytes(bytes);
@@ -719,8 +741,18 @@ impl Vm {
         // Via index) so the AIR knows the path's key.
         if matches!(inst.opcode, Opcode::VerifyMerkle | Opcode::VerifyInference) {
             let path_addr = inst.imm as usize;
-            let path_end = path_addr.wrapping_add(8 * 65);
-            if path_end <= self.memory.len() {
+            // The same wrapped bound as the execution path, and it has to
+            // stay identical to it. These two read the same window for two
+            // different purposes, the value the register receives and the key
+            // the trace records, and a bound that admitted an address in one
+            // place and refused it in the other would leave the trace
+            // describing a read that did not happen. `VerifyInference` shares
+            // this path and so shared the defect, though only `VerifyMerkle`
+            // is reachable in the Production profile.
+            if path_addr
+                .checked_add(8 * 65)
+                .is_some_and(|end| end <= self.memory.len())
+            {
                 let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
                 let key = u64::from_le_bytes(bytes);
@@ -1621,6 +1653,90 @@ mod tests {
             imm,
         }
         .encode()
+    }
+
+    /// The address whose window wraps must be refused, not indexed.
+    ///
+    /// `VerifyMerkle` reads a 520-byte window at `inst.imm`. The bound used
+    /// `wrapping_add`, so an address near the top of the space wrapped to a
+    /// small sum, compared as in range, and then indexed the slice at the
+    /// unwrapped value. `vm_execute` found it in roughly a second of fuzzing.
+    ///
+    /// An unreadable window answers "not verified" and the program continues,
+    /// which is the opcode's existing contract for an address out of range.
+    /// The property under test is that the answer is a value rather than an
+    /// abort: under `panic = "abort"` the difference between the two is the
+    /// difference between a rejected proof and a halted node.
+    #[test]
+    fn verify_merkle_refuses_an_address_whose_window_wraps() {
+        // -1 as i32 sign-extends to usize::MAX, and usize::MAX + 520 wraps to
+        // 518, which is below any sane memory length. Before the fix this
+        // compared as in range and then indexed at the unwrapped address.
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, -1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(8192);
+        let receipt = vm.run_receipt(&program);
+        assert!(
+            receipt.success,
+            "the program must run to Halt rather than abort the process"
+        );
+        assert_eq!(
+            vm.registers[1], 0,
+            "a window that does not fit cannot have verified a path"
+        );
+    }
+
+    /// The same bound, one byte past the end rather than wrapped.
+    ///
+    /// Wrapping is the exotic case; this is the ordinary one, and it is what
+    /// shows the replacement still refuses for the plain reason too.
+    #[test]
+    fn verify_merkle_refuses_a_window_that_runs_past_the_end() {
+        let memory = 8192usize;
+        // The window is 520 bytes, so the last address that fits is
+        // memory - 520. One past that must not be read.
+        let too_far = i32::try_from(memory - 520 + 1).expect("fits in i32");
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, too_far),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(memory);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the program must still reach Halt");
+        assert_eq!(vm.registers[1], 0, "a window past the end must not be read");
+    }
+
+    /// The bound has to leave the legitimate case alone.
+    ///
+    /// A guard that refused everything would satisfy both tests above and
+    /// break the opcode. The last address whose window fits exactly must
+    /// still be read, which is the off-by-one the replacement could plausibly
+    /// get wrong in the other direction. An all-zero memory does not hash to
+    /// the zero root, so the answer is a truthful "not verified" reached by
+    /// actually walking the path, and the property recorded here is that the
+    /// read happened at all: it is the one address where refusing and
+    /// answering are indistinguishable in the register, so the trace is what
+    /// separates them.
+    #[test]
+    fn verify_merkle_still_reads_the_last_window_that_fits() {
+        let memory = 8192usize;
+        let last_fitting = i32::try_from(memory - 520).expect("fits in i32");
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, last_fitting),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(memory);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the program must reach Halt");
+        // Reading the window pushes the key into the trace and 64 expansion
+        // rows after it. A refused address pushes neither, so this is what
+        // tells the two apart.
+        assert!(
+            vm.trace.iter().any(|row| row.merkle_key.is_some()),
+            "the last window that fits must still be read"
+        );
     }
 
     #[test]
