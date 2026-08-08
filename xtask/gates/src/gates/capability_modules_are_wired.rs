@@ -680,11 +680,31 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// submitter existed, `bud_submitSlashingReport`, and it could not produce a
 /// slash because every report reaching it was `Unverified` by construction.
 /// Reading the module is what surfaced that, which is what the list is for.
-const PENDING_REVIEW: &[&str] = &[
-    "budzero/bud-state/src/note.rs",
-    "src/registry/poa_onboarding.rs",
-    "src/storage/living_threshold.rs",
-];
+///
+/// The list is now empty, and the last three came off the same way. Each was
+/// read, what it was waiting for was measured, and the answer was written
+/// into the module rather than into this list:
+///
+/// - `bud-state/src/note.rs` is the zkVM-side twin of the spent-nullifier
+///   set. The chain's set, `L1NoteRegistry`, is the one in production and
+///   mixes into the state root. What is missing is not a call but an opcode:
+///   `NullifierCheck` derives a nullifier and compares it to the claimed one,
+///   and asks no set whether it was already spent.
+/// - `registry/poa_onboarding.rs` is unwired, and so is the
+///   `PoaMembershipRegistry` beneath it. `PoAEngine` filters against a plain
+///   `Vec<Address>` populated only by `with_authorities`, which no production
+///   path calls, so the authority filter is empty and the compliant admission
+///   model is the one switched off.
+/// - `storage/living_threshold.rs` has no manifest field to read from or
+///   write to. `ContentManifest` carries neither an access counter nor a
+///   strategy, and an estimate every node must agree on cannot live on one
+///   node.
+///
+/// All three are consensus-surface decisions, which is the one thing this
+/// gate cannot resolve by reading harder. An empty list is the correct
+/// resting state: a finding is either fixed or declared, and `no_pending_
+/// entry_is_dead` means nothing can be parked here quietly.
+const PENDING_REVIEW: &[&str] = &[];
 
 /// # Errors
 ///

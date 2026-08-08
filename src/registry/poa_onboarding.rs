@@ -25,6 +25,31 @@
 //! [`PoaMembershipRegistry`], which is a disjoint data structure from
 //! [`crate::registry::permissionless::PermissionlessRegistry`]. The seal is
 //! Exercised by `tests::poa_isolation`.
+//!
+//! WIRING: unwired - measured, and the gap is wider than this module.
+//! Nothing in production constructs a [`PoAOnboarding`], and nothing
+//! constructs the [`PoaMembershipRegistry`] underneath it either: outside
+//! tests, the only mentions of that type are its own definition and two doc
+//! comments. `AccountState` does not hold either one, so no admission
+//! decision recorded here survives a restart or reaches consensus.
+//!
+//! What consensus actually asks is a different question. [`PoAEngine`] keeps
+//! a plain `Vec<Address>` of authorities, filters the permissionless active
+//! validator set against it, and treats an empty vector as "no filter". That
+//! vector is only ever populated through `with_authorities`, which no
+//! production path calls: `main.rs` builds the engine with `PoAEngine::new`
+//! at both sites. So the authority filter is empty in production, the
+//! permissionless active set passes through unfiltered, and the KYC horizon,
+//! the revocation path and the audit log written here decide nothing.
+//!
+//! Two admission models therefore exist side by side, and the compliant one
+//! is the one that is switched off. Closing this means choosing which is
+//! authoritative for the PoA domain and giving that one a home in
+//! `AccountState`, since a whitelist consensus consults has to be state that
+//! every node agrees on rather than a field on one node's engine. That is a
+//! consensus-surface decision, not a wiring change, which is why the marker
+//! says unwired rather than the module being deleted: the compliance
+//! lifecycle here is the part that is complete.
 
 use crate::core::address::Address;
 use crate::domain::types::DomainId;

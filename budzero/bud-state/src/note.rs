@@ -13,6 +13,27 @@
 //! Sum-conservation (Σinputs == Σoutputs, homomorfik) opcode/constraint
 //! Seviyesinde kanıtlanır (opcode 0x22); bu registry yalnızca note
 //! Yaşam-döngüsünü ve nullifier set'ini tutar.
+//!
+//! WIRING: unwired - measured. Zincirin harcanmış nullifier kümesi
+//! `src/privacy/note_registry.rs` içindeki `L1NoteRegistry`, ve üretimde
+//! çalışan o: `AccountState` onu tutuyor, `account.rs:2117` state-root'a
+//! karıştırıyor, `snapshot.rs` anlık görüntüye yazıyor. Buradaki
+//! `NoteRegistry` aynı kümenin zkVM tarafındaki ikizi ve hiçbir üretim yolu
+//! onu kurmuyor: `bud-state`'i yalnız `bud-cli` bağımlılık olarak alıyor ve
+//! oradan da sadece `State`, `StateBackend`, `Account` okunuyor.
+//!
+//! Eksik olan halka bir çağrı değil, bir opcode. Doküman bu tipi
+//! "nullifier-check opcode 0x21 için" diye tarif ediyor, ama `bud-vm`'deki
+//! `NullifierCheck` bir nullifier'ı yalnızca Poseidon ile TÜRETİP iddia
+//! edilenle karşılaştırıyor; harcanmış olup olmadığını hiçbir kümeye
+//! sormuyor. Yani VM "bu nullifier bu sırra ait mi" sorusunu cevaplıyor,
+//! "bu nullifier daha önce harcandı mı" sorusunu değil. İkinci soruyu bugün
+//! yalnız zincir tarafı cevaplıyor.
+//!
+//! Bu modülün kablolanması opcode'a devlet erişimi vermeyi gerektirir, ki o
+//! bir konsensüs yüzeyi kararıdır: VM'nin çifte harcamayı kendi başına
+//! reddetmesi, kanıt sisteminin nullifier kümesini de taahhüt etmesi
+//! demektir. O karar verilene kadar buradaki tip ölü değil, erken.
 
 use crate::Hash;
 use serde::{Deserialize, Serialize};
