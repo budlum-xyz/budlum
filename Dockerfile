@@ -38,6 +38,11 @@ COPY src/ ./src/
 COPY benches/ ./benches/
 COPY proto/ ./proto/
 COPY budzero/ ./budzero/
+# The packing between a field element and a 32-byte note hash. It is a path
+# dependency of the node, so a build without it does not fall back to
+# anything, it fails to resolve, which is how this line came to be missing
+# and be noticed the same hour.
+COPY note-packing/ ./note-packing/
 
 # Derleyici gercekten pinli surum mu: build'den ONCE, imaj icinde.
 # Bu satir olmasaydi yanlis derleyiciyle uretilmis bir binary sessizce

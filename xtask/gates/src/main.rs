@@ -46,6 +46,7 @@ mod gates {
     pub mod no_new_shell_gates;
     pub mod security_scans_can_fail;
     pub mod suppressions_are_justified;
+    pub mod the_image_builds_what_the_manifest_declares;
     pub mod workflows_produce_jobs;
 }
 
@@ -96,6 +97,12 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::workflows_produce_jobs::run,
         self_test: gates::workflows_produce_jobs::self_test,
+    },
+    Gate {
+        name: "image-builds-the-manifest",
+        replaces: None,
+        run: gates::the_image_builds_what_the_manifest_declares::run,
+        self_test: gates::the_image_builds_what_the_manifest_declares::self_test,
     },
     Gate {
         name: "no-new-shell-gates",

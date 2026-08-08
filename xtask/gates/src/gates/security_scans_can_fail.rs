@@ -167,15 +167,28 @@ const ALLOWED: &[Allowed] = &[
 /// One entry, and it is the reason this gate exists. Everything else on the
 /// list above is arguable; this one is not, because the failure it hides is a
 /// consensus failure rather than a test failure.
-const MUST_BLOCK: &[(&str, &str, &str)] = &[(
-    "security-hardening.yml",
-    "tsan",
-    "ThreadSanitizer carries continue-on-error on the job and `|| true` on the \
-     command, so it cannot fail in any circumstance, and it has no canary, so a \
-     clean report is indistinguishable from a binary that never ran. For a chain \
-     a data race is not a flaky test: two nodes disagreeing about state because \
-     of one is a fork.",
-)];
+const MUST_BLOCK: &[(&str, &str, &str)] = &[
+    (
+        "security-hardening.yml",
+        "tsan",
+        "ThreadSanitizer carries continue-on-error on the job and `|| true` on the \
+         command, so it cannot fail in any circumstance, and it has no canary, so a \
+         clean report is indistinguishable from a binary that never ran. For a chain \
+         a data race is not a flaky test: two nodes disagreeing about state because \
+         of one is a fork.",
+    ),
+    (
+        "security-hardening.yml",
+        "loom",
+        "loom is the half TSan cannot do. TSan reports the races it observed on the \
+         schedule the machine picked; loom runs every interleaving the memory model \
+         permits and so proves a lock inversion cannot happen. The consensus engine \
+         nests three pairs of its four locks, and an inversion there deadlocks a \
+         validator rather than crashing it, which is the failure a node cannot \
+         report about itself. Softening this job would leave the ordering resting \
+         on an argument in a comment again.",
+    ),
+];
 
 /// One softener found in a workflow.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

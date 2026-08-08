@@ -140,6 +140,12 @@ proptest = "1.5"
 tokio = { version = "1", features = ["full"] }
 hex = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
+# ThreadSanitizer reports a race it observed. loom proves the absence of one
+# by running every interleaving the memory model permits, which is the
+# difference between "we did not hit a deadlock" and "a deadlock cannot
+# happen". The consensus engine holds four locks and nests two pairs of them;
+# see `src/tests/consensus_lock_order_loom.rs`.
+loom = "0.7"
 
 [[bin]]
 name = "bench_sig_verify"

@@ -180,3 +180,116 @@ jobs:
           set -euo pipefail
           export RUSTFLAGS="-Zsanitizer=thread"
           cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1
+
+  # BLOKLAR. TSan gordugu yarisi bildirir, loom gormedigini kanitlar.
+  #
+  # Ikisi ayni seyi olcmez ve biri digerinin yerine gecmez. TSan makinenin o
+  # an sectigi zamanlamayi denetler, yani yesil bir kosu "denenen
+  # zamanlamalar temizdi" der. Bir kilit ters cevrilmesi icin iki is
+  # parcaciginin yanlis anda yanlis sirada varmasi gerekir, ki bu yuklu bir
+  # runner'in en az uretecegi zamanlamadir.
+  #
+  # loom modeli kosar: bellek modelinin izin verdigi HER serpistirme,
+  # tuketici olarak. Kilitlenmeyi beklemeyle degil, kosabilir is parcacigi
+  # kalmamis bir durum olarak tespit eder. Gecince siralama model icin
+  # kanitlanmis olur, bir kez gozlenmis degil.
+  #
+  # PoSEngine dort kilit tutuyor ve uc cagri yeri ikisini birden aliyor:
+  # seen_blocks -> checkpoints -> slashing_evidence. Kanitlanan bu zincirin
+  # dongusuz oldugu.
+  loom:
+    name: loom (konsensüs kilit sırası, tüketici model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Kanarya: bilerek ters sirada kilit alan bir model yazilir ve loom'un
+      # kilitlenmeyi bulmasi beklenir. Bulmazsa asil testlerin yesil olmasi
+      # siralamanin dogru oldugunu degil, en fazla loom'un kosmadigini
+      # soylerdi. `--cfg loom` unutuldugunda testler sessizce derlenmez ve
+      # hicbir sey kosmaz, kanarya tam olarak bu durumu yakalar.
+      - name: loom kanaryasi (arac gercekten kilitlenmeyi buluyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/loom-canary/src
+          cat > /tmp/loom-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "loom-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          loom = "0.7"
+          EOF
+          cat > /tmp/loom-canary/src/main.rs <<'EOF'
+          // Iki is parcacigi ayni iki kilidi TERS sirada aliyor. loom bunu
+          // bulmazsa asil kilit-sirasi testleri bir sey kanitlamaz.
+          use loom::sync::Mutex;
+          use loom::thread;
+          use std::sync::Arc;
+
+          fn main() {
+              loom::model(|| {
+                  let a = Arc::new(Mutex::new(0));
+                  let b = Arc::new(Mutex::new(0));
+
+                  let t1 = {
+                      let (a, b) = (Arc::clone(&a), Arc::clone(&b));
+                      thread::spawn(move || {
+                          let _x = a.lock().unwrap();
+                          let _y = b.lock().unwrap();
+                      })
+                  };
+                  let t2 = {
+                      let (a, b) = (Arc::clone(&a), Arc::clone(&b));
+                      thread::spawn(move || {
+                          let _y = b.lock().unwrap();
+                          let _x = a.lock().unwrap();
+                      })
+                  };
+                  t1.join().unwrap();
+                  t2.join().unwrap();
+              });
+          }
+          EOF
+          cd /tmp/loom-canary
+          # Bu komutun BASARISIZ olmasi bekleniyor: model kilitleniyor.
+          # Ciktiyi once dosyaya aliyoruz, cunku `set -euo pipefail` altinda
+          # bir boru hattinda program sifirdan farkli cikarsa grep hic
+          # kosmaz ve kanarya kendi kabugunu olcer.
+          set +e
+          RUSTFLAGS="--cfg loom" cargo run --release > /tmp/loom-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "KANARYA DUSTU: loom bilerek ters cevrilmis bir kilit sirasini" >&2
+            echo "kilitlenme olarak bildirmedi, yani asil testler bos kosuyor." >&2
+            tail -30 /tmp/loom-canary.log >&2
+            exit 1
+          fi
+          if grep -qi "deadlock" /tmp/loom-canary.log; then
+            echo "kanarya OK: loom bilerek ters cevrilmis siralamayi kilitlenme olarak buldu."
+          else
+            echo "KANARYA DUSTU: loom dustu ama sebep kilitlenme degil." >&2
+            tail -30 /tmp/loom-canary.log >&2
+            exit 1
+          fi
+      # `--cfg loom` olmadan model modulu derlenmez. Envanter testi bu
+      # bayraktan bagimsiz kosar ve modelin motoru hala tarif ettigini
+      # dogrular, o yuzden ayrica burada da cagriliyor.
+      - name: loom modeli (her serpistirme)
+        run: |
+          set -euo pipefail
+          RUSTFLAGS="--cfg loom" \
+            cargo test --lib --release consensus_lock_order_loom -- --nocapture

@@ -105,6 +105,8 @@ pub mod bns_expanded;
 #[cfg(test)]
 pub mod consensus_expanded;
 #[cfg(test)]
+pub mod consensus_lock_order_loom;
+#[cfg(test)]
 pub mod constitution_engine;
 #[cfg(test)]
 pub mod hard_prune;
