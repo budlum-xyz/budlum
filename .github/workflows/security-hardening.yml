@@ -107,11 +107,16 @@ jobs:
       - name: cargo supply-chain crates
         run: cargo supply-chain crates || true
 
+  # BLOKLAR. Bir zincir icin veri yarisi kararsiz test degil: iki dugum bir
+  # yarisin sonucuna gore farkli duruma varirsa bu bir catallanmadir.
+  #
+  # Onceki hali hem `continue-on-error: true` hem `|| true` tasiyordu, yani
+  # hicbir kosulda dusemezdi, ve kanaryasi yoktu: "veri yarisi yok" ile "ikili
+  # hic calismadi" ayirt edilemiyordu. Ikisi de kaldirildi, kanarya eklendi.
   tsan:
     name: ThreadSanitizer (data race detection)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,7 +130,53 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Kanarya: bilerek yarisan bir program yazilir ve TSan'in onu yakalamasi
+      # beklenir. Yakalamazsa arac calismiyor demektir ve temiz rapor bir sey
+      # ifade etmez. Kanarya olmadan bu is'in yesil olmasi, taramanin
+      # kostugunu degil, en fazla dusmedigini soylerdi.
+      - name: TSan kanaryasi (arac gercekten yakaliyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tsan-canary/src
+          cat > /tmp/tsan-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "tsan-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          cat > /tmp/tsan-canary/src/main.rs <<'EOF'
+          // Iki is parcacigi ayni adrese senkronizasyonsuz yaziyor. TSan bunu
+          // gormezse tarama guvenilmez.
+          fn main() {
+              let mut value = 0i64;
+              let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let a = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
+              });
+              let b = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
+              });
+              a.join().unwrap();
+              b.join().unwrap();
+              println!("{value}");
+          }
+          EOF
+          cd /tmp/tsan-canary
+          export RUSTFLAGS="-Zsanitizer=thread"
+          if cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu 2>&1 \
+             | tee /tmp/tsan-canary.log | grep -q "WARNING: ThreadSanitizer"; then
+            echo "kanarya OK: TSan bilerek yazilmis yarisi yakaladi."
+          else
+            echo "KANARYA DUSTU: TSan bir veri yarisini yakalayamadi, yani bu is" >&2
+            echo "temiz rapor verse de bir sey kanitlamaz." >&2
+            tail -20 /tmp/tsan-canary.log >&2
+            exit 1
+          fi
+
       - name: RUSTFLAGS -Zsanitizer=thread
         run: |
+          set -euo pipefail
           export RUSTFLAGS="-Zsanitizer=thread"
-          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1 || true
+          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1

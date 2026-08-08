@@ -44,6 +44,8 @@ mod gates {
     pub mod capability_modules_are_wired;
     pub mod mermaid;
     pub mod no_new_shell_gates;
+    pub mod security_scans_can_fail;
+    pub mod workflows_produce_jobs;
 }
 
 /// One gate, as the runner sees it.
@@ -75,6 +77,18 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::bns_names_are_safe_in_an_address_bar::run,
         self_test: gates::bns_names_are_safe_in_an_address_bar::self_test,
+    },
+    Gate {
+        name: "security-scans-can-fail",
+        replaces: None,
+        run: gates::security_scans_can_fail::run,
+        self_test: gates::security_scans_can_fail::self_test,
+    },
+    Gate {
+        name: "workflows-produce-jobs",
+        replaces: None,
+        run: gates::workflows_produce_jobs::run,
+        self_test: gates::workflows_produce_jobs::self_test,
     },
     Gate {
         name: "no-new-shell-gates",
