@@ -873,6 +873,77 @@ mod tests {
         assert!(break_even_rate_scaled(at_bound, 500_000, rates()).is_ok());
     }
 
+    /// Two transforms that were actually measured, and what they say about
+    /// the levers this module tests with.
+    ///
+    /// From `storage::derivation_economics`, an earlier module that is not in
+    /// the tree. It carried two timings taken on real data: extracting text
+    /// from a word-processor container produced 128,899 bytes in 4.3 ms, and
+    /// re-encoding a video frame at the master's quality produced 3,129,552
+    /// bytes in 25.32 s. As reproduction cost per byte that is 33 and 8,090
+    /// nanoseconds.
+    ///
+    /// The levers in the tests above cost 1 and 67. So one measured transform
+    /// lands between them and the other is two orders of magnitude past both,
+    /// which matters in a direction worth writing down: at 8,090 nanoseconds
+    /// per byte the crossing point for a 500 KB object is a twentieth of a
+    /// read per half-life. A video frame read once a year is still cheaper to
+    /// keep than to re-encode. The expensive end of the lever range is where
+    /// the answer stops being interesting, not where it gets harder.
+    ///
+    /// The point of pinning it here is that the two levers the other tests
+    /// use are not invented numbers chosen to make thresholds come out
+    /// ordered. They sit inside a range that was measured, and this test
+    /// fails if a future edit moves them outside it.
+    #[test]
+    fn the_measured_transforms_bracket_the_levers_these_tests_use() {
+        // Bytes produced per second of processor time, from the two timings.
+        // Integer arithmetic, like everything else here.
+        let text_nanos_per_byte = 4_300_000u64 / 128_899;
+        let frame_nanos_per_byte = 25_320_000_000u64 / 3_129_552;
+        assert_eq!(text_nanos_per_byte, 33);
+        assert_eq!(frame_nanos_per_byte, 8_090);
+
+        // Both are inside what this module will reason about, which is what
+        // makes MAX_CPU_NANOS_PER_BYTE a bound on nonsense rather than on
+        // real work.
+        assert!(frame_nanos_per_byte < MAX_CPU_NANOS_PER_BYTE);
+
+        let bytes = 500_000;
+        let text = Lever {
+            size_millionths: 0,
+            cpu_nanos_per_byte: text_nanos_per_byte,
+        };
+        let frame = Lever {
+            size_millionths: 0,
+            cpu_nanos_per_byte: frame_nanos_per_byte,
+        };
+        let text_at = break_even_rate_scaled(text, bytes, rates()).unwrap();
+        let frame_at = break_even_rate_scaled(frame, bytes, rates()).unwrap();
+
+        // The cheaper transform is worth describing for longer, by the ratio
+        // of their costs. Same shape as each_lever_has_its_own_crossing_point,
+        // on numbers nobody chose.
+        assert!(
+            text_at > frame_at * 200,
+            "measured transforms two orders of magnitude apart in cost must be two \
+             orders apart in threshold: text {text_at}, frame {frame_at}"
+        );
+
+        // The expensive one crosses below a single read per half-life, so a
+        // frame read once ever is still worth storing.
+        assert!(
+            frame_at < ACCESS_SCALE,
+            "re-encoding at 8,090 ns/byte should not pay off at any real read rate: \
+             {frame_at} scaled"
+        );
+
+        // And the levers the other tests use sit between the two measurements,
+        // rather than outside anything anyone has timed.
+        assert!(described().cpu_nanos_per_byte < text_nanos_per_byte);
+        assert!(recompressed().cpu_nanos_per_byte < frame_nanos_per_byte);
+    }
+
     /// The arithmetic must not overflow on objects a network would hold.
     #[test]
     fn a_very_large_object_does_not_overflow_the_threshold() {
