@@ -524,13 +524,55 @@ jobs:
 /// `.github/workflows/ci.yml` while the root has a legitimate one. The root
 /// file must not be reported and the nested one must be.
 fn self_test_stray_workflows(problems: &mut Vec<String>) {
-    let base = std::env::temp_dir().join(format!(
-        "budlum-gate-stray-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
+    // The fixture is built under this crate's own `target/`, not under the
+    // shared temp directory.
+    //
+    // The temp directory is writable by every user on the machine, so a name
+    // under it is a name somebody else can create first. `create_dir_all`, as
+    // this used to call, succeeds on a directory that already exists, which
+    // means the fixture would be built inside whatever was already standing
+    // there, including a symlink pointing somewhere else. Nothing secret is
+    // written here, but a self-test that can be made to write outside its own
+    // fixture is a self-test that can be made to lie about what it found.
+    //
+    // `target/` is owned by whoever runs the build and is where a build is
+    // already allowed to write. `create_dir` rather than `create_dir_all` for
+    // the fixture root, so an existing path is an error instead of something
+    // to write through, and the attempt counter keeps two concurrent runs
+    // from colliding.
+    let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("gate-fixtures");
+    if std::fs::create_dir_all(&scratch).is_err() {
+        problems.push(String::from(
+            "BROKEN: could not create the fixture parent under target/",
+        ));
+        return;
+    }
+    let mut base = std::path::PathBuf::new();
+    let mut made = false;
+    for attempt in 0..64u32 {
+        let candidate = scratch.join(format!(
+            "stray-{}-{}-{attempt}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        if std::fs::create_dir(&candidate).is_ok() {
+            base = candidate;
+            made = true;
+            break;
+        }
+    }
+    if !made {
+        problems.push(String::from(
+            "BROKEN: could not create a fresh fixture directory under target/. Every candidate \
+             name already existed, which means a previous run left them behind.",
+        ));
+        return;
+    }
+
     let root_wf = base.join(".github/workflows");
     let nested_wf = base.join("vendored/.github/workflows");
     let buried = base.join("target/dep/.github/workflows");
@@ -540,6 +582,7 @@ fn self_test_stray_workflows(problems: &mut Vec<String>) {
             problems.push(String::from(
                 "BROKEN: could not build the stray-workflow fixture",
             ));
+            let _ = std::fs::remove_dir_all(&base);
             return;
         }
     }
