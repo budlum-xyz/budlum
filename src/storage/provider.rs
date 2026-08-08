@@ -4,6 +4,17 @@
 //! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
 //! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
 //! Accounting in `domain::storage_deal`.
+//!
+//! WIRING: unwired - measured: nothing in the tree constructs a
+//! `StorageProvider`. That is what a boundary looks like from the inside. The
+//! trait describes what an off-chain implementation must do, and the
+//! implementation lives outside this repository by design; the only thing
+//! here is `InMemoryStorageProvider`, which exists so the trait has a
+//! deterministic reference behaviour to test against.
+//!
+//! Wiring it would mean the node choosing a provider at startup, which is a
+//! deployment decision rather than a consensus one, and taking it would put
+//! an off-chain dependency on a path that currently has none.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::domain::storage_deal::{ChallengeOutcome, RetrievalChallenge};

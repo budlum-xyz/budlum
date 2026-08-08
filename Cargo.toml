@@ -125,6 +125,11 @@ bud-isa = { path = "budzero/bud-isa" }
 bud-vm = { path = "budzero/bud-vm" }
 bud-proof = { path = "budzero/bud-proof" }
 bud-node = { path = "budzero/bud-node" }
+# The node indexes commitments and nullifiers by the bytes the wallet packed.
+# That packing had three independent copies, one here, one in the wallet and
+# one in the zkVM state layer, and nothing forced them to stay equal. They now
+# read one definition.
+budlum-note-packing = { path = "note-packing" }
 
 [build-dependencies]
 prost-build = "0.14.3"
@@ -135,6 +140,12 @@ proptest = "1.5"
 tokio = { version = "1", features = ["full"] }
 hex = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
+# ThreadSanitizer reports a race it observed. loom proves the absence of one
+# by running every interleaving the memory model permits, which is the
+# difference between "we did not hit a deadlock" and "a deadlock cannot
+# happen". The consensus engine holds four locks and nests two pairs of them;
+# see `src/tests/consensus_lock_order_loom.rs`.
+loom = "0.7"
 
 [[bin]]
 name = "bench_sig_verify"
@@ -165,6 +176,19 @@ name = "domain_throughput"
 path = "benches/domain_throughput.rs"
 required-features = ["__bench_domain_throughput_disabled"]
 harness = false
+
+# `cfg(loom)` is set by RUSTFLAGS in the loom job, not by a Cargo feature, so
+# Cargo does not learn about it on its own and `-D warnings` turns the
+# resulting `unexpected_cfgs` into a build failure for every job that compiles
+# the test profile. Declaring it here is the fix the compiler itself suggests;
+# the alternative it offers, `#[allow(unexpected_cfgs)]`, would silence the
+# lint everywhere instead of teaching it one name.
+#
+# A Cargo feature would be the wrong shape: loom replaces `std::sync` types
+# wholesale at compile time, so it is a build configuration rather than
+# something a dependent could switch on.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [profile.release]
 overflow-checks = true

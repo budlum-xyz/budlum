@@ -13,6 +13,27 @@
 //! Sum-conservation (Σinputs == Σoutputs, homomorfik) opcode/constraint
 //! Seviyesinde kanıtlanır (opcode 0x22); bu registry yalnızca note
 //! Yaşam-döngüsünü ve nullifier set'ini tutar.
+//!
+//! WIRING: unwired - measured. Zincirin harcanmış nullifier kümesi
+//! `src/privacy/note_registry.rs` içindeki `L1NoteRegistry`, ve üretimde
+//! çalışan o: `AccountState` onu tutuyor, `account.rs:2117` state-root'a
+//! karıştırıyor, `snapshot.rs` anlık görüntüye yazıyor. Buradaki
+//! `NoteRegistry` aynı kümenin zkVM tarafındaki ikizi ve hiçbir üretim yolu
+//! onu kurmuyor: `bud-state`'i yalnız `bud-cli` bağımlılık olarak alıyor ve
+//! oradan da sadece `State`, `StateBackend`, `Account` okunuyor.
+//!
+//! Eksik olan halka bir çağrı değil, bir opcode. Doküman bu tipi
+//! "nullifier-check opcode 0x21 için" diye tarif ediyor, ama `bud-vm`'deki
+//! `NullifierCheck` bir nullifier'ı yalnızca Poseidon ile TÜRETİP iddia
+//! edilenle karşılaştırıyor; harcanmış olup olmadığını hiçbir kümeye
+//! sormuyor. Yani VM "bu nullifier bu sırra ait mi" sorusunu cevaplıyor,
+//! "bu nullifier daha önce harcandı mı" sorusunu değil. İkinci soruyu bugün
+//! yalnız zincir tarafı cevaplıyor.
+//!
+//! Bu modülün kablolanması opcode'a devlet erişimi vermeyi gerektirir, ki o
+//! bir konsensüs yüzeyi kararıdır: VM'nin çifte harcamayı kendi başına
+//! reddetmesi, kanıt sisteminin nullifier kümesini de taahhüt etmesi
+//! demektir. O karar verilene kadar buradaki tip ölü değil, erken.
 
 use crate::Hash;
 use serde::{Deserialize, Serialize};
@@ -32,21 +53,12 @@ pub struct PrivacyNote {
     pub nullifier: Hash,
 }
 
-/// Pack a Goldilocks field element (VM/AIR commitment or nullifier) into Hash.
-#[must_use]
-pub fn hash_from_field(fe: u64) -> Hash {
-    let mut h = [0u8; 32];
-    h[..8].copy_from_slice(&fe.to_le_bytes());
-    h
-}
-
-/// Extract the field element from a Hash produced by `hash_from_field`.
-/// Non-canonical (non-zero high bytes) hashes return the low 8 bytes only -
-/// Callers that need strictness should compare full Hash equality instead.
-#[must_use]
-pub fn field_from_hash(h: &Hash) -> u64 {
-    u64::from_le_bytes(h[..8].try_into().expect("hash is 32 bytes"))
-}
+// The packing is defined in `budlum-note-packing` and re-exported here, so
+// the names this module has always exported keep working while there is only
+// one definition left. The wallet computes the nullifier the chain looks up;
+// if the two ever packed differently the lookup would miss and the note would
+// be spendable twice, which no test inside either crate could see.
+pub use budlum_note_packing::{field_from_hash, hash_from_field, is_packed};
 
 impl PrivacyNote {
     /// Construct from VM/AIR field elements (Poseidon outputs).

@@ -1,0 +1,12 @@
+[package]
+name = "budlum-note-packing"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The single definition of how a privacy note's field element is packed into a 32-byte hash"
+
+# No dependencies, on purpose. This crate is depended on by the node, the
+# wallet and the zkVM state layer, which are three separate workspaces. A
+# dependency here would have to be resolvable in all three, and the rule this
+# crate carries is eight bytes of little-endian packing: it does not need one.
+[dependencies]

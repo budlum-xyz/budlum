@@ -130,3 +130,15 @@ path = "fuzz_targets/budl_compile_then_run.rs"
 test = false
 doc = false
 bench = false
+
+# Bytecode the compiler did not write. `budl_compile_then_run` only reaches
+# the VM through codegen, so it never presents a jump past the end of the
+# program, a register index above the file or a `Ret` with an empty call
+# stack. The seeds for this target predate it by two years, sitting unread in
+# a corpus directory named after a target nobody wrote.
+[[bin]]
+name = "vm_execute"
+path = "fuzz_targets/vm_execute.rs"
+test = false
+doc = false
+bench = false

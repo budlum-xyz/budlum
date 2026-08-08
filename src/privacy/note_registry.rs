@@ -4,8 +4,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-/// 32-byte commitment or nullifier hash (wallet packs field elements LE).
-pub type NoteHash = [u8; 32];
+/// 32-byte commitment or nullifier hash.
+///
+/// The wallet produces these by packing a Goldilocks field element, and this
+/// registry looks them up by equality. Taking the type from the crate that
+/// defines the packing is what keeps the two ends describing the same bytes:
+/// a private alias here would let the packing rule change on one side while
+/// this side kept compiling, and the first symptom would be a nullifier that
+/// never matches, so a spent note stays spendable.
+pub type NoteHash = budlum_note_packing::NoteHash;
 
 /// Maximum live commitments to prevent unbounded state growth.
 /// At 65536 entries × 32 bytes = 2MB - well within node memory limits.
@@ -231,6 +238,89 @@ mod tests {
         let mut x = [0u8; 32];
         x[0] = b;
         x
+    }
+
+    /// The bytes the wallet packs are the bytes this registry looks up.
+    ///
+    /// This is the one property the privacy layer cannot check inside any
+    /// single crate. The wallet computes a nullifier from a field element and
+    /// sends the packed hash; consensus stores that hash and later answers
+    /// `is_nullifier_spent` by comparing it. If the two sides ever pack
+    /// differently, both keep passing their own tests, because each one packs
+    /// and unpacks with its own copy, and a round trip through a copy is
+    /// exactly what a divergent copy still does correctly.
+    ///
+    /// What breaks instead is the lookup between them: the chain never
+    /// recorded the hash the wallet is asking about, so a spent note reports
+    /// unspent and the double spend it exists to prevent goes through.
+    ///
+    /// The test spends a note using a hash packed by the shared definition
+    /// and then asks the registry about it, which is the crossing point the
+    /// unit tests on either side never touch.
+    #[test]
+    fn a_nullifier_packed_the_way_the_wallet_packs_it_is_found_by_the_registry() {
+        let commitment = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
+        let nullifier = budlum_note_packing::hash_from_field(0xDEAD_BEEF_CAFE_F00D);
+        // A private transfer consumes notes and creates notes; the registry
+        // refuses one with no output, so the change note is part of the
+        // shape being tested rather than scaffolding around it.
+        let change = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
+
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(commitment).unwrap();
+        assert!(
+            r.contains_commitment(&commitment),
+            "a commitment packed by the shared rule must be found by the registry"
+        );
+
+        r.apply_transfer(&[commitment], &[nullifier], &[change])
+            .unwrap();
+        assert!(
+            r.is_nullifier_spent(&nullifier),
+            "the nullifier the wallet would send must be the one the chain stored"
+        );
+        assert!(
+            r.contains_commitment(&change),
+            "the output the wallet packed must be the one the chain now holds"
+        );
+
+        // And the note cannot be spent twice, which is the guarantee that
+        // silently disappears if the two packings drift apart.
+        let second = budlum_note_packing::hash_from_field(0x9900_AABB_CCDD_EEFF);
+        assert!(r
+            .apply_transfer(&[commitment], &[nullifier], &[second])
+            .is_err());
+    }
+
+    /// A registry hash is a packed hash, not an arbitrary 32 bytes.
+    ///
+    /// `field_from_hash` reads the low eight bytes and drops the rest, so two
+    /// different foreign hashes sharing a low half read back as the same
+    /// field element. Nothing in the registry compares field elements, and
+    /// this test is what keeps it that way: identity here is the full hash.
+    #[test]
+    fn two_hashes_agreeing_on_the_low_half_are_still_two_notes() {
+        let a = budlum_note_packing::hash_from_field(7);
+        let mut b = a;
+        b[31] = 1;
+
+        assert_eq!(
+            budlum_note_packing::field_from_hash(&a),
+            budlum_note_packing::field_from_hash(&b),
+            "the field elements agree, which is precisely the trap"
+        );
+        assert!(budlum_note_packing::is_packed(&a));
+        assert!(!budlum_note_packing::is_packed(&b));
+
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(a).unwrap();
+        assert!(
+            !r.contains_commitment(&b),
+            "the registry must not confuse two notes that share a field element"
+        );
+        r.insert_note(b)
+            .expect("b is a different note and must be insertable");
+        assert_eq!(r.live_count(), 2);
     }
 
     #[test]

@@ -41,8 +41,14 @@ use std::path::{Path, PathBuf};
 
 mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
+    pub mod capability_modules_are_wired;
+    pub mod every_fuzz_target_is_run;
     pub mod mermaid;
     pub mod no_new_shell_gates;
+    pub mod security_scans_can_fail;
+    pub mod suppressions_are_justified;
+    pub mod the_image_builds_what_the_manifest_declares;
+    pub mod workflows_produce_jobs;
 }
 
 /// One gate, as the runner sees it.
@@ -58,6 +64,12 @@ struct Gate {
 
 const GATES: &[Gate] = &[
     Gate {
+        name: "capability-wiring",
+        replaces: Some("check-capability-modules-are-wired.sh"),
+        run: gates::capability_modules_are_wired::run,
+        self_test: gates::capability_modules_are_wired::self_test,
+    },
+    Gate {
         name: "mermaid",
         replaces: None,
         run: gates::mermaid::run,
@@ -68,6 +80,36 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::bns_names_are_safe_in_an_address_bar::run,
         self_test: gates::bns_names_are_safe_in_an_address_bar::self_test,
+    },
+    Gate {
+        name: "security-scans-can-fail",
+        replaces: None,
+        run: gates::security_scans_can_fail::run,
+        self_test: gates::security_scans_can_fail::self_test,
+    },
+    Gate {
+        name: "suppressions-are-justified",
+        replaces: None,
+        run: gates::suppressions_are_justified::run,
+        self_test: gates::suppressions_are_justified::self_test,
+    },
+    Gate {
+        name: "workflows-produce-jobs",
+        replaces: None,
+        run: gates::workflows_produce_jobs::run,
+        self_test: gates::workflows_produce_jobs::self_test,
+    },
+    Gate {
+        name: "image-builds-the-manifest",
+        replaces: None,
+        run: gates::the_image_builds_what_the_manifest_declares::run,
+        self_test: gates::the_image_builds_what_the_manifest_declares::self_test,
+    },
+    Gate {
+        name: "every-fuzz-target-is-run",
+        replaces: None,
+        run: gates::every_fuzz_target_is_run::run,
+        self_test: gates::every_fuzz_target_is_run::self_test,
     },
     Gate {
         name: "no-new-shell-gates",

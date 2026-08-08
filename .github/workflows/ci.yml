@@ -687,9 +687,18 @@ jobs:
             relayer_escrow
             zk_verifier
             budl_compile
+            vm_execute
           )
-          # Note: evm_rlp_decode + evm_mpt_verify remain nightly/manual (F10.1);
-          # Quick gate covers deserialize +  state/relayer/zk.
+          # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
+          # comment used to say "nightly/manual" while the nightly matrix did
+          # not list them either, so for as long as it stood the two targets
+          # compiled and never ran. `every-fuzz-target-is-run` now measures
+          # that instead of trusting the sentence.
+          #
+          # `vm_execute` runs here rather than only nightly: it caps the
+          # program at 4096 instructions and the gas at fifty thousand, so a
+          # loop terminates in milliseconds and the target keeps up with a
+          # sixty second budget.
           #
           # `budl_compile` runs here because the front end is cheap to drive:
           # it parses and type checks and returns. `budl_compile_then_run`
@@ -914,7 +923,13 @@ jobs:
       - name: Modül coverage raporu - budlum (baselines 2. adımda, vacuous-gate YOK)
         run: python3 ./scripts/check_module_coverage.py coverage/cov.json
       - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
+        # `cd` cikis kodu kontrol edilmeden kullaniliyordu. Dizin bulunamazsa
+        # kabuk kokte kaliyor, sonraki komut ANA workspace'i olcuyor ve
+        # ciktiyi `budzero-cov.json` adiyla yaziyor: bir sonraki adim onu
+        # budzero'nun kapsami sanip raporluyor. Yanlis bir sayi degil, baska
+        # bir agacin sayisi, dogru dosya adiyla.
         run: |
+          set -euo pipefail
           cd budzero
           cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
       - name: Modül coverage raporu - budzero (rapor modu)

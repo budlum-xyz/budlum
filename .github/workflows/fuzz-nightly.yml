@@ -41,6 +41,14 @@ jobs:
           # edilen bir program gas limitine kadar donebilir, o yuzden 60
           # saniyelik hizli butceye degil dort saatlik programa ait.
           - budl_compile_then_run
+          # Bu ikisi ne burada ne ci.yml'de listeliydi. ci.yml'deki bir yorum
+          # onlari "nightly/manual" diye tarif ediyordu ve bu matris onlari
+          # icermiyordu, yani hicbir zaman kosmadilar. Denetledikleri yuzey
+          # de kucuk degil: ikisi de girdiyi guvenilmeyen bir relayer'dan
+          # alir, RLP cozucusu ve MPT kanit dogrulayicisi koprunun disaridan
+          # beslenen tek parcasidir.
+          - evm_rlp_decode
+          - evm_mpt_verify
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

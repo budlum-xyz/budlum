@@ -77,6 +77,26 @@
 //! strategy for a real object, because that needs an access estimate carried
 //! in the manifest, which is a consensus-surface change and lands separately.
 //! So the decision function is reachable and the decision is not yet taken.
+//!
+//! WIRING: unwired - measured. [`AccessEstimate`] appears in exactly two
+//! places outside this file, both of them the re-export in
+//! `crate::storage`; nothing constructs one. [`ContentManifest`] carries no
+//! access counter and no strategy field, so there is nowhere to put the two
+//! values [`decide`] needs as input and nowhere to record the answer it
+//! returns.
+//!
+//! Both halves of that are the same consensus-surface change and neither can
+//! be done alone. An estimate every node has to agree on cannot live on one
+//! node, because two nodes holding different counts would decide differently
+//! about the same object and the network would stop agreeing on what it
+//! holds. The counter has to be a manifest field updated under the same
+//! rules as the rest of the manifest, which means a new field in a
+//! content-addressed structure, which means deciding whether it is part of
+//! the identity: fold it in and every read changes the content id, leave it
+//! out and it is state the id does not bind.
+//!
+//! The arithmetic is finished and does not depend on how that is answered,
+//! which is why it is here and correct while nothing calls it.
 
 /// Epochs over which an access estimate halves.
 ///

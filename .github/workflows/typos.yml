@@ -71,3 +71,67 @@ jobs:
 
       - name: Repo taraması (bulgu = fail)
         run: typos --config .quality/typos.toml --format long
+
+  trufflehog:
+    # gitleaks'in ustune ikinci bir katman: DOGRULAMA.
+    #
+    # gitleaks (ci.yml, tam gecmis, kanaryali, bloklar) desene bakar: bu dizgi
+    # bir AWS anahtarina benziyor mu. Dogru soru, ama tek basina iki hatayi
+    # birden yapar. Yanlis pozitif: ornek bir anahtar da desene uyar. Yanlis
+    # negatif: desene uymayan gercek bir sir gozden kacar.
+    #
+    # trufflehog bulduklarini SAGLAYICIYA SORAR. --only-verified ile yalniz
+    # canli oldugu kanitlanan sirlari raporlar. Yani bu is dustugunde soylenen
+    # sey "bir sey bir anahtara benziyor" degil, "bir anahtar su anda gecerli".
+    #
+    # Ikisi de gerekli ve biri digerinin yerini almiyor: gitleaks olu ya da
+    # iptal edilmis bir sirri da yakalar, ki o da sizmis demektir.
+    #
+    # BLOKLAR. Kanaryasi asagida.
+    name: Secret Verification (trufflehog, yalniz dogrulanmis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: trufflehog kur (surum + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/th.tar.gz \
+            https://github.com/trufflesecurity/trufflehog/releases/download/v3.90.10/trufflehog_3.90.10_linux_amd64.tar.gz
+          echo "32d349aea9b5b6644bb9a8ab8cb44314ce5912d730a16b1466511fc6c69a7ffc  /tmp/th.tar.gz" \
+            | sha256sum -c - || {
+              echo "sha256 tutmadi. Surum degistiyse hash bu dosyada guncellenmeli;" >&2
+              echo "indirilen hash'i kabul etmek pinlemeyi anlamsiz yapar." >&2
+              exit 1
+            }
+          mkdir -p /tmp/th && tar -xzf /tmp/th.tar.gz -C /tmp/th trufflehog
+          sudo install -m 0755 /tmp/th/trufflehog /usr/local/bin/trufflehog
+          trufflehog --version
+
+      # Kanarya: gecersiz bir anahtar --only-verified ile RAPORLANMAMALI.
+      # Raporlanirsa dogrulama calismiyor demektir ve bu is gitleaks'in
+      # tekrari olur, ikinci bir katman degil.
+      - name: Kanarya (dogrulama gercekten calisiyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/th-canary && cd /tmp/th-canary
+          git init -q .
+          # Bicimi dogru, kendisi gecersiz bir anahtar.
+          printf 'aws_key = "AKIA%s"\n' "IOSFODNN7EXAMPLE" > fake.txt
+          git add . && git -c user.email=ci@budlum.xyz -c user.name=ci commit -qm canary
+          if trufflehog git file://. --only-verified --fail --no-update 2>&1 \
+             | tee /tmp/th-canary.log | grep -q "Verified"; then
+            echo "KANARYA DUSTU: gecersiz bir anahtar dogrulanmis olarak raporlandi," >&2
+            echo "yani --only-verified filtrelemiyor ve bu is gitleaks'in tekrari." >&2
+            exit 1
+          fi
+          echo "kanarya OK: gecersiz anahtar dogrulanmis sayilmadi."
+
+      - name: Tam gecmis, yalniz dogrulanmis sirlar (bulgu = fail)
+        run: trufflehog git file://. --only-verified --fail --no-update

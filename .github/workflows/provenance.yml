@@ -1,0 +1,97 @@
+name: Provenance (SBOM attestation)
+
+# Bir SBOM, kimin urettigi bilinmiyorsa bir iddiadir.
+#
+# ci.yml zaten CycloneDX SBOM'u uretip artefakt olarak yukluyor. Onu indiren
+# biri icerigini okuyabiliyor ama su soruyu soramiyor: bu dosya gercekten bu
+# depodan, bu commit'ten, bu workflow'dan mi cikti? Imzasiz bir SBOM, elle
+# yazilmis bir SBOM'dan ayirt edilemez, ve tedarik zinciri saldirisinin isledigi
+# yer tam olarak burasi: kaynak temiz, uretilen artefakt degil.
+#
+# Bu workflow SBOM'u uretir ve GitHub'in attestation altyapisiyla imzalar.
+# Altyapi Sigstore kullaniyor: kisa omurlu sertifika Fulcio'dan, imza kaydi
+# Rekor seffaflik logundan geciyor, yani uzun omurlu bir anahtar tutulmuyor ve
+# imza olayi geri alinamaz bicimde kayda giriyor.
+#
+# Ne iddia edilmiyor: bu SLSA Build L3 degil. L3 yalitilmis bir yapi platformu
+# ister ve GitHub'in barindirilan runner'lari o yalitimi vermez. Bu, uretilen
+# dosyanin bu is tarafindan uretildigini soyleyen imzali bir beyandir, daha
+# fazlasi degil. Fazlasini iddia etmek sahte bir garanti olurdu, ve bu depo
+# bunu bir kez yasadi: extra-tooling.yml gecersiz provenance uretecek bir SLSA
+# job'i tasiyordu, kaldirildi ve yerine taklidi konulmadi.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sbom-attestation:
+    name: SBOM + imzali beyan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Attestation icin gerekli: id-token OIDC kimligini, attestations ise
+      # beyanin depoya yazilmasini saglar. Ikisi de bu is disinda verilmiyor.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+
+      - name: protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: SBOM uret (CycloneDX)
+        run: bash ./scripts/generate-sbom.sh
+
+      # Kanarya: imzalanacak dosya gercekten bir SBOM mu. Bos ya da bozuk bir
+      # dosyayi imzalamak, imzanin kendisini anlamsiz yapar; imza icerigin
+      # dogru oldugunu degil, bu isten ciktigini soyler.
+      - name: SBOM kanaryasi (imzalanacak sey bir SBOM mu)
+        run: |
+          set -euo pipefail
+          test -s sbom.cdx.json || { echo "SBOM bos ya da yok" >&2; exit 1; }
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("sbom.cdx.json"))
+          fmt = d.get("bomFormat")
+          comps = d.get("components") or []
+          if fmt != "CycloneDX":
+              print(f"bomFormat 'CycloneDX' degil: {fmt!r}", file=sys.stderr)
+              sys.exit(1)
+          # Depo yuzlerce bagimlilik tasiyor. Bir avuc bilesen, uretimin
+          # yarida kesildigini gosterir ve imzalanmasi yanlis olur.
+          if len(comps) < 50:
+              print(f"yalnizca {len(comps)} bilesen; uretim eksik", file=sys.stderr)
+              sys.exit(1)
+          print(f"kanarya OK: CycloneDX, {len(comps)} bilesen.")
+          PY
+
+      - name: SBOM'u imzala (Sigstore uzerinden beyan)
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.1.0
+        with:
+          subject-path: sbom.cdx.json
+
+      - name: SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-attested-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90

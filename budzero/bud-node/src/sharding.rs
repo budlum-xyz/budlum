@@ -10,8 +10,13 @@
 //! 1. The shard is assigned to them via an on-chain `StorageDeal`.
 //! 2. The node's `PeerId` is among the K-closest peers to the CID in the DHT.
 //!
-//! WIRING: unwired - no node builds a ShardManager yet; shard assignment is
-//! still decided by the single-shard default.
+//! Reached from node startup: `src/network/node.rs` builds a `ShardManager`
+//! at line 446 when a sharding config is present, and `src/main.rs` supplies
+//! `ShardingConfig::mobile_default()` for the mobile profile.
+//!
+//! It carried a marker saying no node builds one, which stopped being true
+//! when that call site landed and nothing removed it. A stale marker is worse
+//! than none: it tells the next reader not to look.
 
 use crate::store::ContentId;
 use libp2p::PeerId;

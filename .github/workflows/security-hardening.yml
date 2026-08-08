@@ -59,11 +59,26 @@ jobs:
       - name: cargo machete (budzero)
         run: cd budzero && cargo machete --with-metadata; true
 
+  # BLOKLAR. Onceki hali hem `continue-on-error: true` hem `|| true`
+  # tasiyordu, ve arac hic kosmuyordu:
+  #
+  #   error: unexpected argument '--test-timeout' found
+  #
+  # cargo-mutants 27.1.0'da bayrak `--timeout`. Komut saniyeler icinde
+  # argüman hatasiyla oluyordu, `|| true` cikis kodunu yutuyordu,
+  # `continue-on-error` geri kalani ortuyordu, ve is YESIL raporluyordu.
+  # Iki dakikalik bir "mutation testing" is'i aslinda arac kurulumundan
+  # ibaretti. Yumusatmanin en pahali bicimi bu: bir kapinin dusmesini degil,
+  # hic kosmadigini gizler.
+  #
+  # Olctugu sey de baska hicbir kapinin olcmedigi sey. Butun diger kapilar
+  # kodun ne yaptigini denetler; bu, testlerin bir degisikligi FARK EDIP
+  # etmedigini denetler. Yesil bir test paketi, hicbir seyi iddia etmeyen
+  # testlerden de olusabilir.
   mutants:
     name: cargo mutants (mutation testing)
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,14 +94,85 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-mutants
         run: cargo install cargo-mutants --locked
-      - name: cargo mutants (bilgilendirici, 5 dk timeout)
-        run: cargo mutants --in-place --test-timeout 300 -- --lib || true
+      # Kanarya: bilerek hicbir seyi iddia etmeyen bir testle bir crate
+      # yazilir ve cargo-mutants'in hayatta kalan bir mutanti bildirmesi
+      # beklenir. Bildirmezse temiz bir rapor "testler saglam" demez, en
+      # fazla "arac kosmadi" der. Bu is tam olarak o durumda aylarca yesil
+      # kaldi, o yuzden kanarya burada bir formalite degil.
+      - name: mutants kanaryasi (arac gercekten hayatta kalan buluyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mutants-canary/src
+          cat > /tmp/mutants-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "mutants-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          # Test fonksiyonu cagiriyor ve sonucu hakkinda hicbir sey
+          # soylemiyor. `cargo test` yesil; govde nasil degisirse degissin
+          # yesil kalir, ki mutation testing tam olarak bunu bulmak icindir.
+          cat > /tmp/mutants-canary/src/lib.rs <<'EOF'
+          pub fn double(x: i32) -> i32 {
+              x * 2
+          }
+
+          #[cfg(test)]
+          mod tests {
+              #[test]
+              fn calls_it_and_asserts_nothing() {
+                  let _ = super::double(21);
+              }
+          }
+          EOF
+          cd /tmp/mutants-canary
+          cargo test --quiet
+          # Ciktiyi once dosyaya al: `set -euo pipefail` altinda boru
+          # hattinda program sifirdan farkli cikarsa grep hic kosmaz.
+          set +e
+          cargo mutants --in-place --timeout 60 > /tmp/mutants-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "KANARYA DUSTU: hicbir seyi iddia etmeyen bir testin altinda" >&2
+            echo "hayatta kalan mutant bildirilmedi, yani arac ya kosmuyor ya" >&2
+            echo "da bir sey olcmuyor." >&2
+            tail -30 /tmp/mutants-canary.log >&2
+            exit 1
+          fi
+          if grep -qi "MISSED\|missed" /tmp/mutants-canary.log; then
+            echo "kanarya OK: arac bos testin altindaki mutanti hayatta buldu."
+          else
+            echo "KANARYA DUSTU: arac dustu ama sebep hayatta kalan mutant degil." >&2
+            tail -30 /tmp/mutants-canary.log >&2
+            exit 1
+          fi
+      # `--in-diff`: her kosuda tum agaci mutasyona ugratmak saatler surer ve
+      # bir PR'in degistirmedigi koda dair bulgu uretir. Bu dalin diff'i
+      # denetlenir, yani soru "bu degisiklik test edilmis mi" olur, ki
+      # cevaplanabilir tek soru odur.
+      #
+      # Dal adi kabuga `${{ }}` ile genisletilmez. Bir dal adi neredeyse her
+      # seyi icerebilir ve `run:` icinde genisleyen bir ifade, o metni komut
+      # olarak calistirir: `$(...)` tasiyan bir dal adi bu adimda kod
+      # calistirir. zizmor bunu template-injection olarak yuksek guvenle
+      # bildirdi ve hakliydi. Deger ortam degiskeni uzerinden gecer, kabuk
+      # onu tirnak icinde veri olarak okur.
+      - name: Diff'i cikar
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          git diff "origin/${BASE_REF}..." > /tmp/pr.diff || git diff HEAD~1 > /tmp/pr.diff
+      - name: cargo mutants (bu degisiklige dokunan kod)
+        run: cargo mutants --in-place --timeout 300 --in-diff /tmp/pr.diff -- --lib
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    continue-on-error: true
+    # `publishers` tek tek sorarken 15 dakikayi asiyordu; `update` toplu
+    # cektigi icin sure dusuyor, ama onbellek soguksa ilk cekim uzun surer.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,16 +188,77 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: cargo install cargo-supply-chain
         run: cargo install cargo-supply-chain --locked
+      # `publishers` her calistiginda crates.io'ya kraft basina ~2 saniyeden
+      # sorar ve 566 bagimlilikta bu 15 dakikalik timeout'u asiyordu: is
+      # iptal oluyor, hicbir cikti uretmiyordu. `update` ayni veriyi bir
+      # kerede toplu ceker, sonraki komutlar onbellekten okur.
+      - name: Yayıncı verisini topluca çek
+        run: cargo supply-chain update --cache-max-age 1w
       - name: cargo supply-chain publishers
-        run: cargo supply-chain publishers || true
+        run: cargo supply-chain publishers
       - name: cargo supply-chain crates
-        run: cargo supply-chain crates || true
+        run: cargo supply-chain crates
+      # Bu is'in bir esigi yoktu, o yuzden dusemiyordu ve `|| true`
+      # tasiyordu. Esik su: agac, YAYINCISI OLMAYAN bir bagimliliga
+      # ulasmamali. crates.io'da sahipsiz bir kraft, kimsenin
+      # devralamayacagi ve kimsenin yamayamayacagi bir kraftir; bir zincir
+      # icin bu bir surum gecikmesi degil, kapanmayacak bir aciktir.
+      #
+      # Sayi degil varlik denetleniyor: "kac yayinci" bir esik degildir,
+      # cunku dogru sayi bilinmez. "Sifir yayinci" ise her zaman yanlistir.
+      - name: Sahipsiz bağımlılık kapısı
+        run: |
+          set -euo pipefail
+          cargo supply-chain json --diffable > /tmp/supply-chain.json
+          python3 - <<'PY'
+          import json, sys
 
+          with open("/tmp/supply-chain.json") as f:
+              data = json.load(f)
+
+          # Sahibi olmayan kraftlar: ne bir kullanici ne bir takim
+          # yayinlayabiliyor. Boyle bir bagimlilik yamalanamaz.
+          orphans = []
+          for crate in data.get("crates_io_crates", []):
+              name = crate.get("name", "?")
+              owners = crate.get("owners", [])
+              if not owners:
+                  orphans.append(name)
+
+          total = len(data.get("crates_io_crates", []))
+          if total == 0:
+              print(
+                  "KAPI BOS KOSTU: cargo-supply-chain hicbir kraft bildirmedi, "
+                  "yani bu kontrol hicbir seyi denetlemedi.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          if orphans:
+              print(f"{len(orphans)} sahipsiz bagimlilik:", file=sys.stderr)
+              for o in sorted(orphans):
+                  print(f"  {o}", file=sys.stderr)
+              print(
+                  "\nSahipsiz bir kraft kimse tarafindan yamalanamaz. Bir aciik "
+                  "cikarsa bekleyecek kimse yok; bagimliligi degistirin ya da "
+                  "icerlestirin.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print(f"Sahipsiz bagimlilik yok: {total} crates.io kraftinin hepsinin yayincisi var.")
+          PY
+
+  # BLOKLAR. Bir zincir icin veri yarisi kararsiz test degil: iki dugum bir
+  # yarisin sonucuna gore farkli duruma varirsa bu bir catallanmadir.
+  #
+  # Onceki hali hem `continue-on-error: true` hem `|| true` tasiyordu, yani
+  # hicbir kosulda dusemezdi, ve kanaryasi yoktu: "veri yarisi yok" ile "ikili
+  # hic calismadi" ayirt edilemiyordu. Ikisi de kaldirildi, kanarya eklendi.
   tsan:
     name: ThreadSanitizer (data race detection)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,7 +272,166 @@ jobs:
           shared-key: budlum-core
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Kanarya: bilerek yarisan bir program yazilir ve TSan'in onu yakalamasi
+      # beklenir. Yakalamazsa arac calismiyor demektir ve temiz rapor bir sey
+      # ifade etmez. Kanarya olmadan bu is'in yesil olmasi, taramanin
+      # kostugunu degil, en fazla dusmedigini soylerdi.
+      - name: TSan kanaryasi (arac gercekten yakaliyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tsan-canary/src
+          cat > /tmp/tsan-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "tsan-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          cat > /tmp/tsan-canary/src/main.rs <<'EOF'
+          // Iki is parcacigi ayni adrese senkronizasyonsuz yaziyor. TSan bunu
+          // gormezse tarama guvenilmez.
+          fn main() {
+              let mut value = 0i64;
+              let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let a = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
+              });
+              let b = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
+              });
+              a.join().unwrap();
+              b.join().unwrap();
+              println!("{value}");
+          }
+          EOF
+          cd /tmp/tsan-canary
+          export RUSTFLAGS="-Zsanitizer=thread"
+          if cargo +nightly run -Zbuild-std --target x86_64-unknown-linux-gnu 2>&1 \
+             | tee /tmp/tsan-canary.log | grep -q "WARNING: ThreadSanitizer"; then
+            echo "kanarya OK: TSan bilerek yazilmis yarisi yakaladi."
+          else
+            echo "KANARYA DUSTU: TSan bir veri yarisini yakalayamadi, yani bu is" >&2
+            echo "temiz rapor verse de bir sey kanitlamaz." >&2
+            tail -20 /tmp/tsan-canary.log >&2
+            exit 1
+          fi
+
       - name: RUSTFLAGS -Zsanitizer=thread
         run: |
+          set -euo pipefail
           export RUSTFLAGS="-Zsanitizer=thread"
-          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1 || true
+          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -- --test-threads=1
+
+  # BLOKLAR. TSan gordugu yarisi bildirir, loom gormedigini kanitlar.
+  #
+  # Ikisi ayni seyi olcmez ve biri digerinin yerine gecmez. TSan makinenin o
+  # an sectigi zamanlamayi denetler, yani yesil bir kosu "denenen
+  # zamanlamalar temizdi" der. Bir kilit ters cevrilmesi icin iki is
+  # parcaciginin yanlis anda yanlis sirada varmasi gerekir, ki bu yuklu bir
+  # runner'in en az uretecegi zamanlamadir.
+  #
+  # loom modeli kosar: bellek modelinin izin verdigi HER serpistirme,
+  # tuketici olarak. Kilitlenmeyi beklemeyle degil, kosabilir is parcacigi
+  # kalmamis bir durum olarak tespit eder. Gecince siralama model icin
+  # kanitlanmis olur, bir kez gozlenmis degil.
+  #
+  # PoSEngine dort kilit tutuyor ve uc cagri yeri ikisini birden aliyor:
+  # seen_blocks -> checkpoints -> slashing_evidence. Kanitlanan bu zincirin
+  # dongusuz oldugu.
+  loom:
+    name: loom (konsensüs kilit sırası, tüketici model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: "1.94.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Kanarya: bilerek ters sirada kilit alan bir model yazilir ve loom'un
+      # kilitlenmeyi bulmasi beklenir. Bulmazsa asil testlerin yesil olmasi
+      # siralamanin dogru oldugunu degil, en fazla loom'un kosmadigini
+      # soylerdi. `--cfg loom` unutuldugunda testler sessizce derlenmez ve
+      # hicbir sey kosmaz, kanarya tam olarak bu durumu yakalar.
+      - name: loom kanaryasi (arac gercekten kilitlenmeyi buluyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/loom-canary/src
+          cat > /tmp/loom-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "loom-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          loom = "0.7"
+          EOF
+          cat > /tmp/loom-canary/src/main.rs <<'EOF'
+          // Iki is parcacigi ayni iki kilidi TERS sirada aliyor. loom bunu
+          // bulmazsa asil kilit-sirasi testleri bir sey kanitlamaz.
+          use loom::sync::Mutex;
+          use loom::thread;
+          use std::sync::Arc;
+
+          fn main() {
+              loom::model(|| {
+                  let a = Arc::new(Mutex::new(0));
+                  let b = Arc::new(Mutex::new(0));
+
+                  let t1 = {
+                      let (a, b) = (Arc::clone(&a), Arc::clone(&b));
+                      thread::spawn(move || {
+                          let _x = a.lock().unwrap();
+                          let _y = b.lock().unwrap();
+                      })
+                  };
+                  let t2 = {
+                      let (a, b) = (Arc::clone(&a), Arc::clone(&b));
+                      thread::spawn(move || {
+                          let _y = b.lock().unwrap();
+                          let _x = a.lock().unwrap();
+                      })
+                  };
+                  t1.join().unwrap();
+                  t2.join().unwrap();
+              });
+          }
+          EOF
+          cd /tmp/loom-canary
+          # Bu komutun BASARISIZ olmasi bekleniyor: model kilitleniyor.
+          # Ciktiyi once dosyaya aliyoruz, cunku `set -euo pipefail` altinda
+          # bir boru hattinda program sifirdan farkli cikarsa grep hic
+          # kosmaz ve kanarya kendi kabugunu olcer.
+          set +e
+          RUSTFLAGS="--cfg loom" cargo run --release > /tmp/loom-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "KANARYA DUSTU: loom bilerek ters cevrilmis bir kilit sirasini" >&2
+            echo "kilitlenme olarak bildirmedi, yani asil testler bos kosuyor." >&2
+            tail -30 /tmp/loom-canary.log >&2
+            exit 1
+          fi
+          if grep -qi "deadlock" /tmp/loom-canary.log; then
+            echo "kanarya OK: loom bilerek ters cevrilmis siralamayi kilitlenme olarak buldu."
+          else
+            echo "KANARYA DUSTU: loom dustu ama sebep kilitlenme degil." >&2
+            tail -30 /tmp/loom-canary.log >&2
+            exit 1
+          fi
+      # `--cfg loom` olmadan model modulu derlenmez. Envanter testi bu
+      # bayraktan bagimsiz kosar ve modelin motoru hala tarif ettigini
+      # dogrular, o yuzden ayrica burada da cagriliyor.
+      - name: loom modeli (her serpistirme)
+        run: |
+          set -euo pipefail
+          RUSTFLAGS="--cfg loom" \
+            cargo test --lib --release consensus_lock_order_loom -- --nocapture

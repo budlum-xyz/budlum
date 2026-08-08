@@ -381,6 +381,7 @@ dependencies = [
 name = "bud-state"
 version = "0.1.0"
 dependencies = [
+ "budlum-note-packing",
  "serde",
  "serde_json",
  "tiny-keccak",
@@ -395,6 +396,10 @@ dependencies = [
  "tiny-keccak",
  "tracing",
 ]
+
+[[package]]
+name = "budlum-note-packing"
+version = "0.1.0"
 
 [[package]]
 name = "bumpalo"
