@@ -189,7 +189,7 @@ EOF
     exit 1
   fi
 
-  echo "threshold-rate gate self-test OK: a mis-scaled rate, a rate with no unit, a \
+  echo "threshold-rate gate self-test OK: a wrongly scaled rate, a rate with no unit, a \
 missing or empty ordering test, floating point, narrow arithmetic, a missing decay test \
 and an absent module are all rejected; a correct module passes."
 }

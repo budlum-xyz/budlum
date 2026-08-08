@@ -170,7 +170,7 @@ mod tests {
     /// A grant that is live for `consumer` at `block`.
     fn test_grant(consumer: Address, block: u64) -> AccessGrant {
         AccessGrant::new_unsigned(
-            crate::pollen::data_rights::AssetId([9; 32]),
+            crate::pollen::AssetId([9; 32]),
             Address([8; 32]),
             consumer,
             consumer,

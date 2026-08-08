@@ -92,7 +92,7 @@ mod tests {
     fn build_lubot_tx_produces_ai_inference_type() {
         let from = Address([1; 32]);
         let grant = crate::pollen::data_rights::AccessGrant::new_unsigned(
-            crate::pollen::data_rights::AssetId([9; 32]),
+            crate::pollen::AssetId([9; 32]),
             Address([8; 32]),
             from,
             from,

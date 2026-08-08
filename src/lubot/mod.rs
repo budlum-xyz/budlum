@@ -407,7 +407,7 @@ mod tests {
 
         // Lubot transaction inşa et.
         let grant = AccessGrant::new_unsigned(
-            crate::pollen::data_rights::AssetId([9; 32]),
+            crate::pollen::AssetId([9; 32]),
             Address([8; 32]),
             owner,
             owner,
