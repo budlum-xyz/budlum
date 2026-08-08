@@ -145,6 +145,37 @@ EOT
       fail "revision ${rev:0:12} records no 'evidence' - name the file and symbol carrying each fix"
   done
 
+  # The package count must be the count, not a number somebody typed.
+  #
+  # `packages = N` is what the limits paragraph divides to reach "sixteen
+  # unread". If the revision starts supplying a package nobody counted, the
+  # arithmetic in the record is wrong in the direction that flatters it:
+  # more code, same claimed exposure. Counted here from the lockfile rather
+  # than trusted.
+  local claimed_n actual_n
+  claimed_n="$(sed -n 's/^packages[[:space:]]*=[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$record" | head -1)"
+  if [ -n "$claimed_n" ]; then
+    actual_n="$(find "$root" -name Cargo.lock -not -path '*/target/*' -print0 2>/dev/null |
+      xargs -0 -r awk '
+        /^\[\[package\]\]/ { name=""; src=""; next }
+        /^name = / { gsub(/[",]/,""); name=$3; next }
+        /^source = / { src=$0; next }
+        /^$/ { if (src ~ /rust-libp2p/ && name != "") print name; name=""; src="" }
+        END { if (src ~ /rust-libp2p/ && name != "") print name }
+      ' | sort -u | wc -l | tr -d ' ')"
+    if [ "$claimed_n" != "$actual_n" ]; then
+      echo "FAIL: the record says packages = $claimed_n and the lockfile supplies $actual_n." >&2
+      cat >&2 <<'EOT'
+
+That number is the denominator the limits paragraph reasons from: packages,
+minus the ones never compiled, minus the ones read, is what remains unread. A
+count that drifts makes the record understate the exposure while looking
+arithmetically sound.
+EOT
+      exit 1
+    fi
+  fi
+
   # A package claimed never to compile must actually never compile.
   #
   # The record narrows its own exposure by naming five packages that sit in
@@ -303,7 +334,31 @@ EOF
     exit 1
   fi
 
-  # 8. A package claimed never to compile, that compiles.
+  # 8. A package count that does not match the lockfile.
+  #
+  #    Synthetic tree: two git packages in the lockfile, a record claiming
+  #    one. The count is the denominator the limits paragraph divides, so a
+  #    drift there understates the exposure while the arithmetic still reads
+  #    as sound.
+  mkdir -p "$tmp/miscount"
+  cat > "$tmp/miscount/Cargo.lock" <<EOF
+[[package]]
+name = "libp2p-core"
+version = "0.44.0"
+source = "git+https://github.com/libp2p/rust-libp2p?rev=$REV#$REV"
+
+[[package]]
+name = "libp2p-swarm"
+version = "0.48.0"
+source = "git+https://github.com/libp2p/rust-libp2p?rev=$REV#$REV"
+EOF
+  mkrecord "$tmp/miscount" "${full[@]}" 'packages = 1'
+  if ( scan "$tmp/miscount" ) >/dev/null 2>&1; then
+    echo "VACUOUS GATE: a package count that disagrees with the lockfile was accepted!" >&2
+    exit 1
+  fi
+
+  # 9. A package claimed never to compile, that compiles.
   #
   #    Run against the real tree rather than a synthetic one: `cargo tree`
   #    answers a question about this workspace's feature resolution, and a
@@ -329,7 +384,7 @@ EOF
     fi
   fi
 
-  echo "git-dep audit gate self-test OK: unrecorded revisions, a moved pin, a stale entry, each missing field, an empty tree, a missing record and a package wrongly claimed never to compile are all rejected; a complete record passes."
+  echo "git-dep audit gate self-test OK: unrecorded revisions, a moved pin, a stale entry, each missing field, an empty tree, a missing record, a package count that disagrees with the lockfile and a package wrongly claimed never to compile are all rejected; a complete record passes."
 }
 
 if [ "${1:-}" = "--self-test" ]; then
