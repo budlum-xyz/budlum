@@ -92,6 +92,18 @@ jobs:
       # Secilen acik `template-injection`: bir issue basligi dogrudan `run:`
       # icine genisletiliyor, ki bu saldirganin runner'da komut calistirmasina
       # yol acar. zizmor'un amiral kuralidir.
+      #
+      # Acik ifade CALISMA ANINDA birlestiriliyor, dosyaya duz yazilmiyor.
+      # Sebebi olculdu: heredoc tirnakli olsa bile GitHub `${{ ... }}` ifadesini
+      # `run` blogunu kabuga VERMEDEN once genisletir, ve `issues` tetikleyicisi
+      # olmayan bir kosuda `github.event.issue.title` bos dizgeye genisler. Yani
+      # kanarya dosyaya `echo ""` yaziyordu: icinde hicbir acik olmayan bir
+      # workflow. zizmor dogru cevabi veriyordu, "No findings to report", ve
+      # kanarya bunu "arac calismiyor" diye okuyordu. Kanaryanin kendisi
+      # olcmek istedigi seyi yok ediyordu.
+      #
+      # `printf '%s%s%s'` ile parcalar kabukta birlesince GitHub'in gorecegi bir
+      # ifade kalmiyor ve dosyaya gercek acik dusuyor.
       - name: zizmor kanaryasi (arac gercekten bulgu buluyor mu)
         run: |
           set -euo pipefail
@@ -107,8 +119,21 @@ jobs:
             bad:
               runs-on: ubuntu-latest
               steps:
-                - run: echo "${{ github.event.issue.title }}"
           EOF
+          # Uc parca: acilis, ifade govdesi, kapanis. Hicbiri tek basina
+          # GitHub'in genisletecegi bir sey degil.
+          printf '      - run: echo "%s%s%s"\n' \
+            '${' '{ github.event.issue.title }' '}' \
+            >> /tmp/zizmor-canary/.github/workflows/bad.yml
+          # Kanaryanin kanaryasi: dosyada ifadenin GERCEKTEN durdugunu dogrula.
+          # Bu satir olmadan bir sonraki genisletme kazasi yine sessizce
+          # "arac bozuk" diye raporlanirdi.
+          if ! grep -q 'github.event.issue.title' /tmp/zizmor-canary/.github/workflows/bad.yml; then
+            echo "KANARYA KURULAMADI: acik ifade dosyaya yazilmadi, yani asagidaki" >&2
+            echo "olcum zizmor hakkinda degil bu adim hakkinda bir sey soylerdi." >&2
+            cat /tmp/zizmor-canary/.github/workflows/bad.yml >&2
+            exit 1
+          fi
           # Ciktiyi once dosyaya al: `set -euo pipefail` altinda bir boru
           # hattinda program sifirdan farkli cikarsa grep hic kosmaz ve
           # kanarya kendi kabugunu olcer. Bu dalda ASan kanaryasi tam olarak
