@@ -961,6 +961,19 @@ jobs:
         run: |
           bash ./scripts/check-gates-are-wired.sh --self-test
           bash ./scripts/check-gates-are-wired.sh
+      # Kapilar Rust'a tasiniyor. Bir kapi ana dala neyin girecegine karar
+      # verdigi icin guven sinirinin icinde, ve kabuk orasi icin kotu bir dil:
+      # yanlis yazilmis bir degisken hata degil bos dizgidir, yani bir kontrol
+      # hicbir seyi inceleyip OK diyebilir. Bu dalda iki kapi tam da yazilma
+      # sebebi olan kusuru kacirirken gecti. Rust surumu derlenmezse durur.
+      - name: Rust kapilari kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
+      - name: Rust kapilari
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
+      - name: Rust kapilari clippy (pedantic, allow yok)
+        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets
+      - name: Rust kapilari rustfmt
+        run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       # A typographic dash in a workflow `name:` silently unlists the job from
       # branch protection: it runs, it passes, and it stops counting. Three
       # required checks were carrying one. A hand count already missed them
