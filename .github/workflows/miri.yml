@@ -67,3 +67,76 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
         continue-on-error: true  # storage sled bağımlılığı Miri ile uyumsuz olabilir
+
+  careful:
+    # cargo-careful: Miri'nin yetismedigi yerde UB arar.
+    #
+    # Ikisi ayni seyi yapmiyor ve ikisi de gerekli. Miri MIR'i yorumluyor:
+    # cok kapsamli ama yavas, ve FFI ile sistem cagrisi iceren kodu
+    # calistiramiyor. cargo-careful gercek makinede kosuyor, standart
+    # kutuphaneyi debug_assertions ile derliyor ve rustc'ye ek calisma-ani
+    # kontrolleri koyduruyor. Yani Miri'nin giremedigi yollari kapsiyor,
+    # karsiliginda daha az UB sinifi goruyor.
+    #
+    # Bu agacta src/ ve budzero `#![forbid(unsafe_code)]` tasiyor, yani
+    # aranan sey birinci-taraf unsafe degil: bagimlilik zincirinden yuzeye
+    # cikan UB ve std'nin performans sebebiyle kapattigi iddialar.
+    #
+    # BLOKLAR. Kanaryasi var: bilerek hizalanmamis bir okuma yazilir ve
+    # careful'in onu yakalamasi beklenir. Yakalamazsa arac calismiyor
+    # demektir ve temiz kosu bir sey ifade etmez.
+    name: cargo-careful (UB, gercek makinede)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly, tarih-pinli)
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-16
+        with:
+          toolchain: nightly-2026-07-19
+          components: rust-src
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: careful
+      - name: protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo install cargo-careful
+        run: cargo install cargo-careful --locked --version 0.4.7
+
+      - name: Kanarya (arac gercekten yakaliyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/careful-canary/src
+          cat > /tmp/careful-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "careful-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          cat > /tmp/careful-canary/src/main.rs <<'EOF'
+          // Hizalanmamis okuma: std bunu yalnizca debug_assertions ile
+          // yakalar, ki cargo-careful'in std'yi oyle derlemesinin sebebi bu.
+          fn main() {
+              let buf = [0u8; 16];
+              let p = buf.as_ptr().wrapping_add(1).cast::<u32>();
+              let v = unsafe { p.read_unaligned() };
+              // read_unaligned guvenli; asil ihlali asagida yapiyoruz.
+              let bad = unsafe { std::ptr::read(p) };
+              println!("{v} {bad}");
+          }
+          EOF
+          cd /tmp/careful-canary
+          if cargo +nightly-2026-07-19 careful run 2>&1 | tee /tmp/careful.log \
+             | grep -qiE "misaligned|unaligned|undefined behavior"; then
+            echo "kanarya OK: cargo-careful hizalanmamis okumayi yakaladi."
+          else
+            echo "KANARYA DUSTU: cargo-careful bir UB'yi yakalayamadi, yani bu is" >&2
+            echo "temiz kossa da bir sey kanitlamaz." >&2
+            tail -20 /tmp/careful.log >&2
+            exit 1
+          fi
+
+      - name: cargo careful test (lib)
+        run: cargo +nightly-2026-07-19 careful test --lib
