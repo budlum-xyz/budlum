@@ -57,8 +57,9 @@ pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
 };
 pub use living_threshold::{
-    break_even_rate_scaled, decide, AccessEstimate, Decision, Lever, OperatorRates, ThresholdError,
-    ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
+    break_even_rate_scaled, decide, one_reproduction_picodollars, AccessEstimate, Decision, Lever,
+    OperatorRates, ThresholdError, ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
+    MAX_CPU_NANOS_PER_BYTE, MAX_OBJECT_BYTES, NANOS_PER_SECOND,
 };
 pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{

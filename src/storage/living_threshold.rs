@@ -366,6 +366,53 @@ pub fn break_even_rate_scaled(
     Ok(u64::try_from(scaled).unwrap_or(u64::MAX))
 }
 
+/// What one reproduction of an object costs, in picodollars.
+///
+/// The floor under any transition: applying a lever produces the object once
+/// to check the result, and reverting one produces it once to get the bytes
+/// back. A caller that has measured its own cost, including the write and any
+/// coordination, should pass that instead; this is the part nobody has to
+/// measure because it follows from the three numbers already here.
+///
+/// Offered because the alternative default is zero, and zero says moving is
+/// free. For a cheap lever the difference is nothing: describing a 500 KB
+/// object costs 347 million picodollars against 145 billion saved over a
+/// half-life, a ratio of 0.0024. For an expensive one it decides the answer:
+/// the same object under a video re-encode costs 2.8 trillion to produce
+/// against the same 145 billion saved, a ratio of 19.3, and the move never
+/// repays itself.
+///
+/// # Errors
+///
+/// [`ThresholdError::ObjectIsEmpty`], [`ThresholdError::ObjectTooLarge`] and
+/// [`ThresholdError::LeverTooSlow`] for inputs outside the bounds, and
+/// [`ThresholdError::ProductLeavesU128`] if the product leaves the type.
+pub fn one_reproduction_picodollars(
+    lever: Lever,
+    object_bytes: u64,
+    rates: OperatorRates,
+) -> Result<u64, ThresholdError> {
+    if object_bytes == 0 {
+        return Err(ThresholdError::ObjectIsEmpty);
+    }
+    if object_bytes > MAX_OBJECT_BYTES {
+        return Err(ThresholdError::ObjectTooLarge {
+            bytes: object_bytes,
+        });
+    }
+    if lever.cpu_nanos_per_byte > MAX_CPU_NANOS_PER_BYTE {
+        return Err(ThresholdError::LeverTooSlow {
+            cpu_nanos_per_byte: lever.cpu_nanos_per_byte,
+        });
+    }
+    let product = checked_product(&[
+        u128::from(object_bytes),
+        u128::from(lever.cpu_nanos_per_byte),
+        u128::from(rates.cpu_picodollars_per_nano),
+    ])?;
+    Ok(u64::try_from(product).unwrap_or(u64::MAX))
+}
+
 /// Multiply a list of factors, refusing rather than aborting on overflow.
 ///
 /// # Errors
@@ -397,13 +444,22 @@ pub enum Decision {
 /// Decide whether an object's strategy should change this epoch.
 ///
 /// `currently_applied` says which side the object is on now, which is what
-/// makes the hysteresis asymmetric: the band is applied against the direction
-/// of travel rather than around the threshold in the abstract.
+/// the band is applied against: it sits on the far side of the threshold from
+/// where the object already is, rather than around the crossing point in the
+/// abstract. The two widths are equal; see [`HYSTERESIS_SIXTEENTHS`].
 ///
 /// `transition_cost_picodollars` is charged against the saving the move would
 /// produce over one half-life. A move that cannot repay itself in that window
 /// is refused, which is what stops an object at the boundary from paying the
 /// cost every epoch and never recovering it.
+///
+/// Callers that have not measured their own transition cost should pass
+/// [`one_reproduction_picodollars`] rather than zero. Zero is not a neutral
+/// default, it is the claim that moving is free, and for an expensive lever it
+/// is wrong by a wide margin: at the measured 8,090 nanoseconds per byte of a
+/// re-encoded video frame, one reproduction costs about nineteen times what
+/// describing the object saves over a whole half-life, so with zero the rule
+/// applies the lever to an object nobody has read even once.
 ///
 /// # Errors
 ///
@@ -967,6 +1023,87 @@ mod tests {
         // rather than outside anything anyone has timed.
         assert!(described().cpu_nanos_per_byte < text_nanos_per_byte);
         assert!(recompressed().cpu_nanos_per_byte < frame_nanos_per_byte);
+    }
+
+    /// Zero is not a neutral transition cost, and for an expensive lever it
+    /// gives the wrong answer.
+    ///
+    /// `decide` takes the cost from its caller, and no caller measures it, so
+    /// the value in practice is whatever a caller defaults to. Zero looks
+    /// neutral and is not: it says moving is free.
+    ///
+    /// For the described lever the difference never shows, because one
+    /// reproduction is four thousandths of what a half-life saves. For the
+    /// measured video re-encode it decides the answer: one reproduction costs
+    /// about nineteen times the saving, so the move cannot repay itself, and
+    /// with a zero cost the rule applies the lever to an object nobody has
+    /// read at all.
+    #[test]
+    fn a_zero_transition_cost_moves_an_object_that_can_never_repay_the_move() {
+        let bytes = 500_000;
+        let frame = Lever {
+            size_millionths: 0,
+            cpu_nanos_per_byte: 8_090,
+        };
+        let cold = AccessEstimate::new(0);
+
+        let one = one_reproduction_picodollars(frame, bytes, rates()).unwrap();
+        let saved_per_half_life = u128::from(bytes)
+            * 1_000_000
+            * u128::from(rates().disk_picodollars_per_byte_epoch)
+            * u128::from(ACCESS_HALF_LIFE_EPOCHS)
+            / 1_000_000;
+        assert!(
+            u128::from(one) > saved_per_half_life * 19,
+            "one reproduction of a re-encoded frame should cost far more than a \
+             half-life of holding it: {one} against {saved_per_half_life}"
+        );
+
+        // Never read, and told the move is free: applied.
+        assert_eq!(
+            decide(frame, bytes, rates(), cold, 0, false, 0).unwrap(),
+            Decision::Apply
+        );
+        // Same object, charged one reproduction: held, because the move never
+        // pays for itself.
+        assert_eq!(
+            decide(frame, bytes, rates(), cold, 0, false, one).unwrap(),
+            Decision::Hold
+        );
+
+        // The canary: for a cheap lever the two agree, so this is a statement
+        // about expensive levers and not a rule that freezes everything.
+        let cheap_one = one_reproduction_picodollars(described(), bytes, rates()).unwrap();
+        assert_eq!(
+            decide(described(), bytes, rates(), cold, 0, false, 0).unwrap(),
+            decide(described(), bytes, rates(), cold, 0, false, cheap_one).unwrap(),
+        );
+    }
+
+    /// One reproduction follows from the three numbers already here.
+    #[test]
+    fn one_reproduction_is_size_times_cost_times_rate() {
+        let bytes = 500_000;
+        assert_eq!(
+            one_reproduction_picodollars(described(), bytes, rates()).unwrap(),
+            bytes * 1 * 694
+        );
+        assert_eq!(
+            one_reproduction_picodollars(recompressed(), bytes, rates()).unwrap(),
+            bytes * 67 * 694
+        );
+        // The bounds apply here too, or a manifest could reach the arithmetic
+        // through this door instead.
+        assert_eq!(
+            one_reproduction_picodollars(described(), 0, rates()),
+            Err(ThresholdError::ObjectIsEmpty)
+        );
+        assert_eq!(
+            one_reproduction_picodollars(described(), MAX_OBJECT_BYTES + 1, rates()),
+            Err(ThresholdError::ObjectTooLarge {
+                bytes: MAX_OBJECT_BYTES + 1
+            })
+        );
     }
 
     /// The arithmetic must not overflow on objects a network would hold.
