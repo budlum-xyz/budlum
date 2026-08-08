@@ -129,11 +129,31 @@ rather than a hardware difference; rented disk is about ten times owned disk:" >
     exit 1
   fi
 
-  # 7. A decaying estimate that cannot decay is a counter with extra steps.
+  # 7. The hysteresis band's documentation must match what the band does.
+  #
+  #    The constant said the band was asymmetric because leaving a lever
+  #    costs more than arriving at it. `decide` applied one width in both
+  #    directions. The asymmetry is real and is charged against the
+  #    transition cost, not the band, so the word describing a rule the
+  #    module does not have is the thing to keep out.
+  local hyst_doc
+  hyst_doc="$(sed -n '/How far past a threshold a rate must sit/,/HYSTERESIS_SIXTEENTHS: u64/p' "$target")"
+  [ -n "$hyst_doc" ] || fail "the hysteresis constant has no documentation"
+  if printf '%s' "$hyst_doc" | grep -qi 'band is asymmetric'; then
+    printf '%s' "$hyst_doc" | grep -qi 'same width' ||
+      fail "the hysteresis constant calls its band asymmetric. \`decide\` computes \
+one width and applies it in both directions, so a reader sizing an object against \
+that sentence is wrong on one side. The asymmetry belongs to the transition cost"
+  fi
+  grep -q 'fn the_dead_band_is_the_same_width_on_both_sides' "$target" ||
+    fail "no test pins the width of the dead band on each side of the crossing \
+point, so the constant's documentation and the code can drift apart again"
+
+  # 8. A decaying estimate that cannot decay is a counter with extra steps.
   grep -q 'fn an_access_estimate_halves_every_half_life' "$target" ||
     fail "no test shows the access estimate actually decaying"
 
-  # 8. The disagreement test must name the two answers it expects.
+  # 9. The disagreement test must name the two answers it expects.
   #
   #    `assert_ne!` passes for any two distinct answers, including the pair
   #    the other way round, which is what a sign error in `decide` produces.
@@ -182,6 +202,16 @@ fn each_lever_has_its_own_crossing_point() {
 #[test]
 fn an_access_estimate_halves_every_half_life() {
     assert_eq!(a.rate_scaled(HL), start / 2);
+}
+
+/// How far past a threshold a rate must sit before the strategy changes.
+///
+/// Expressed in sixteenths, and the same width in both directions.
+pub const HYSTERESIS_SIXTEENTHS: u64 = 4;
+
+#[test]
+fn the_dead_band_is_the_same_width_on_both_sides() {
+    assert_eq!(threshold - (threshold - band), (threshold + band) - threshold);
 }
 
 #[test]
@@ -279,6 +309,22 @@ EOF
     exit 1
   fi
 
+  # The band called asymmetric while the code applies one width both ways.
+  sed 's/Expressed in sixteenths, and the same width in both directions./Expressed in sixteenths. Leaving costs more, so the band is asymmetric./' \
+    "$good" > "$tmp/asym.rs"
+  if ( scan "$tmp/asym.rs" ) >/dev/null 2>&1; then
+    echo "VACUOUS GATE: a band documented as asymmetric that is not was accepted!" >&2
+    exit 1
+  fi
+
+  # No test pinning the band width.
+  sed 's/fn the_dead_band_is_the_same_width_on_both_sides/fn unpinned/' \
+    "$good" > "$tmp/noband.rs"
+  if ( scan "$tmp/noband.rs" ) >/dev/null 2>&1; then
+    echo "VACUOUS GATE: a module with no dead-band test was accepted!" >&2
+    exit 1
+  fi
+
   # Missing module.
   if ( scan "$tmp/absent.rs" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: a missing module was accepted!" >&2
@@ -287,8 +333,9 @@ EOF
 
   echo "threshold-rate gate self-test OK: a wrongly scaled pinned rate, a wrongly scaled \
 unpinned rate, a rate with no unit, a missing or empty ordering test, a disagreement test \
-that names neither answer, a missing disagreement test, floating point, narrow arithmetic, \
-a missing decay test and an absent module are all rejected; a correct module passes."
+that names neither answer, a missing disagreement test, a band documented as asymmetric \
+that is not, a missing dead-band test, floating point, narrow arithmetic, a missing decay \
+test and an absent module are all rejected; a correct module passes."
 }
 
 if [ "${1:-}" = "--self-test" ]; then

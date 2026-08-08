@@ -97,10 +97,20 @@ pub const ACCESS_SCALE: u64 = 1_000_000;
 
 /// How far past a threshold a rate must sit before the strategy changes.
 ///
-/// Expressed in sixteenths. A rate exactly at the crossing point is a
-/// coin-flip between two strategies of equal cost, and following it would
-/// move the object every epoch for no gain. Leaving costs more than
-/// arriving, so the band is asymmetric.
+/// Expressed in sixteenths, and the same width in both directions: a rate
+/// below three quarters of the crossing point applies the lever, one above
+/// five quarters reverts it, and the quarter either side is a dead band
+/// nothing moves in. A rate exactly at the crossing point is a coin-flip
+/// between two strategies of equal cost, and following it would move the
+/// object every epoch for no gain.
+///
+/// Symmetric here and asymmetric in [`decide`] are different questions, and
+/// only the second one is answered by this constant. Leaving a lever really
+/// does cost more than arriving at it, because the bytes have to be produced
+/// again rather than dropped. That asymmetry is charged where it is actually
+/// known, against `transition_cost_picodollars`, which the caller measures.
+/// Folding it into the band as well would charge it twice, at a ratio nobody
+/// measured.
 pub const HYSTERESIS_SIXTEENTHS: u64 = 4;
 
 /// A lever that trades bytes for processor time.
@@ -301,7 +311,8 @@ pub fn decide(
 
     // Hysteresis: the band sits on the far side of the threshold from where
     // the object already is, so a rate hovering at the crossing point does
-    // not move it.
+    // not move it. Same width both ways; the cost of moving is charged
+    // separately below, where a caller can measure it.
     let band = threshold / 16 * HYSTERESIS_SIXTEENTHS;
 
     if currently_applied {
@@ -615,6 +626,62 @@ mod tests {
             Decision::Apply,
             "the same 200 reads is far below the 4,181 crossing point of rented disk, \
              so the operator paying by the month describes the object instead"
+        );
+    }
+
+    /// The dead band is the same width on both sides of the crossing point.
+    ///
+    /// The constant's documentation said the band was asymmetric because
+    /// leaving a lever costs more than arriving at it. The code applied one
+    /// width in both directions, so the documentation described a rule the
+    /// module did not have, and a reader sizing an object against it would
+    /// have been wrong on one side. The asymmetry is real but it is charged
+    /// against `transition_cost_picodollars`, not against the band. This
+    /// pins which of the two the module actually does.
+    #[test]
+    fn the_dead_band_is_the_same_width_on_both_sides() {
+        let bytes = 500_000;
+        let threshold = break_even_rate_scaled(described(), bytes, rates()).unwrap();
+        let band = threshold / 16 * HYSTERESIS_SIXTEENTHS;
+
+        // Just inside the band on the low side: an unapplied object stays.
+        let mut just_under = AccessEstimate::new(0);
+        just_under.scaled = threshold - band + 1;
+        assert_eq!(
+            decide(described(), bytes, rates(), just_under, 0, false, 0).unwrap(),
+            Decision::Hold
+        );
+
+        // One step further down and it moves, which locates the low edge.
+        let mut past_under = AccessEstimate::new(0);
+        past_under.scaled = threshold - band - 1;
+        assert_eq!(
+            decide(described(), bytes, rates(), past_under, 0, false, 0).unwrap(),
+            Decision::Apply
+        );
+
+        // Just inside the band on the high side: an applied object stays.
+        let mut just_over = AccessEstimate::new(0);
+        just_over.scaled = threshold + band;
+        assert_eq!(
+            decide(described(), bytes, rates(), just_over, 0, true, 0).unwrap(),
+            Decision::Hold
+        );
+
+        // One step further up and it moves, which locates the high edge.
+        let mut past_over = AccessEstimate::new(0);
+        past_over.scaled = threshold + band + 1;
+        assert_eq!(
+            decide(described(), bytes, rates(), past_over, 0, true, 0).unwrap(),
+            Decision::Revert
+        );
+
+        // The two edges are equidistant. A future asymmetry has to change
+        // this line, which is the point of writing it down.
+        assert_eq!(
+            threshold - (threshold - band),
+            (threshold + band) - threshold,
+            "the band is documented as one width in both directions"
         );
     }
 
