@@ -159,8 +159,9 @@ jobs:
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    continue-on-error: true
+    # `publishers` tek tek sorarken 15 dakikayi asiyordu; `update` toplu
+    # cektigi icin sure dusuyor, ama onbellek soguksa ilk cekim uzun surer.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

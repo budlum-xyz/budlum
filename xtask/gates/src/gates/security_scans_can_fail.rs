@@ -121,12 +121,6 @@ const ALLOWED: &[Allowed] = &[
         reason: "root-tree machete duplicates the blocking run in extra-tooling.yml",
     },
     Allowed {
-        file: "security-hardening.yml",
-        what: "supply-chain",
-        reason: "publisher visibility is a listing of who can push a crate; there is \
-                 no threshold to fail against",
-    },
-    Allowed {
         file: "semver.yml",
         what: "semver-check",
         reason: "the diagnostic step records evidence; the semver gate blocks",
@@ -191,6 +185,18 @@ const MUST_BLOCK: &[(&str, &str, &str)] = &[
          '--test-timeout'` seconds after install while the job reported green. That is \
          the most expensive form of softening, because it hides absence rather than \
          failure.",
+    ),
+    (
+        "security-hardening.yml",
+        "supply-chain",
+        "the reason for softening it was that publisher visibility is a listing with no \
+         threshold to fail against. There is one, and it is not a count: a dependency \
+         with zero owners cannot be patched by anybody, so if an advisory lands against \
+         it there is nobody to wait for. The job now gates on that, and on the tool \
+         reporting no crates at all, because a check that inspected nothing must not \
+         pass. It also could not finish before: `publishers` asks crates.io once per \
+         crate and 566 dependencies ran past the timeout, so the job was cancelled \
+         without output while `|| true` and `continue-on-error` made that look green.",
     ),
     (
         "security-hardening.yml",
