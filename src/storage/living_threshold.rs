@@ -1084,13 +1084,15 @@ mod tests {
     #[test]
     fn one_reproduction_is_size_times_cost_times_rate() {
         let bytes = 500_000;
+        // Written from the inputs rather than as literals, so the assertion
+        // states the formula instead of restating a number computed once.
         assert_eq!(
             one_reproduction_picodollars(described(), bytes, rates()).unwrap(),
-            bytes * 1 * 694
+            bytes * described().cpu_nanos_per_byte * rates().cpu_picodollars_per_nano
         );
         assert_eq!(
             one_reproduction_picodollars(recompressed(), bytes, rates()).unwrap(),
-            bytes * 67 * 694
+            bytes * recompressed().cpu_nanos_per_byte * rates().cpu_picodollars_per_nano
         );
         // The bounds apply here too, or a manifest could reach the arithmetic
         // through this door instead.
