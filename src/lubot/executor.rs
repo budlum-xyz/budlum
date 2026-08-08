@@ -39,6 +39,15 @@ impl LubotExecutorRequest {
 /// Executor bu transaction'ı `TransactionType::AiInferenceRequest` olarak işler:
 /// (1) Pollen grant doğrulaması (kapalı-devre), (2) balance kontrolü, (3) ai_registry
 /// Submit, (4) grant tüketimi, (5) fee + max_fee kesintisi.
+///
+/// Birinci madde artık burada da geçerli: `grant` zorunlu bir argüman ve
+/// istek inşa edilmeden önce doğrulanıyor. Öncesinde bu cümle yalnızca
+/// executor'ın yapacağı işi tarif ediyordu, ve izinsiz bir istek nesnesi
+/// oraya varana kadar geçerli görünüyordu.
+///
+/// # Errors
+///
+/// Yetki geçerli değilse hangi koşulun düştüğünü söyleyen bir mesaj.
 #[allow(clippy::too_many_arguments)]
 pub fn build_lubot_transaction(
     from: Address,
@@ -51,6 +60,7 @@ pub fn build_lubot_transaction(
     chain_id: u64,
     current_block: u64,
     deadline_block: u64,
+    grant: &crate::pollen::data_rights::AccessGrant,
 ) -> Result<Transaction, String> {
     let req = inference::build_lubot_request(
         from,
@@ -59,6 +69,7 @@ pub fn build_lubot_transaction(
         max_fee,
         current_block,
         deadline_block,
+        grant,
     )?;
     Ok(Transaction::new_with_chain_id(
         from,
@@ -79,8 +90,20 @@ mod tests {
 
     #[test]
     fn build_lubot_tx_produces_ai_inference_type() {
+        let from = Address([1; 32]);
+        let grant = crate::pollen::data_rights::AccessGrant::new_unsigned(
+            crate::pollen::data_rights::AssetId([9; 32]),
+            Address([8; 32]),
+            from,
+            from,
+            0,
+            1,
+            10_000,
+            100,
+            [0; 32],
+        );
         let tx = build_lubot_transaction(
-            Address([1; 32]),
+            from,
             Address([2; 32]),
             AiModelId([3; 32]),
             b"input".to_vec(),
@@ -90,6 +113,7 @@ mod tests {
             45262,
             1,
             1000,
+            &grant,
         )
         .expect("build tx");
         // Transaction type must be AiInferenceRequest.

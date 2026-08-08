@@ -312,15 +312,19 @@ impl ConsensusEngine for PoAEngine {
                 .as_ref()
                 .ok_or_else(|| ConsensusError("Block has no producer".into()))?;
 
-            if producer != &expected.address {
+            // One call rather than two checks in sequence. The pair that used
+            // to be here, "is this the expected proposer" then "is the
+            // signature good", is exactly what
+            // `verify_signature_with_pubkey` is, and keeping a second copy of
+            // it at the call site meant the two could drift: a caller that
+            // remembered the signature and forgot the proposer would accept a
+            // validly signed block from the wrong authority for that slot.
+            // The function existed and nothing reached it.
+            if !block.verify_signature_with_pubkey(&expected.address) {
                 return Err(ConsensusError(format!(
-                    "Wrong proposer. Expected: {}, Got: {}",
-                    expected.address, producer
+                    "Block {} is not a valid signature from the expected proposer {}, got {}",
+                    block.index, expected.address, producer
                 )));
-            }
-
-            if !block.verify_signature() {
-                return Err(ConsensusError("Invalid block signature".into()));
             }
 
             info!(
@@ -495,5 +499,17 @@ mod tests {
         assert_eq!(block.producer.as_ref().unwrap(), &pubkey);
         assert!(block.signature.is_some());
         assert!(block.verify_signature());
+
+        // The bound check the validation path now makes in one call: a valid
+        // signature from the expected proposer passes, and the same valid
+        // signature checked against a different authority does not. Without
+        // the second half, a validly signed block from the wrong authority
+        // for that slot would be accepted.
+        assert!(block.verify_signature_with_pubkey(&pubkey));
+        let someone_else = Address([0xAB; 32]);
+        assert!(
+            !block.verify_signature_with_pubkey(&someone_else),
+            "a good signature from the wrong authority must still be refused"
+        );
     }
 }

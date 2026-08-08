@@ -10,6 +10,7 @@ use crate::ai::types::{
 };
 use crate::ai::AiRegistry;
 use crate::core::address::Address;
+use crate::pollen::data_rights::AccessGrant;
 use sha2::{Digest, Sha256};
 
 /// Bir Lubot modelini on-chain kaydet (AiModelSpec + register_model).
@@ -40,8 +41,21 @@ pub fn register_lubot_model(
 }
 
 /// Kapalı-devre Lubot çıkarım talebini inşa et (canonical request_id ile).
-/// `input_ref` = kullanılan veri referansı (AiDataInputRef encode'u veya opaque);
-/// Kapalı-devre grant doğrulaması `validate_inference_grant` ile ayrıca yapılır.
+///
+/// `input_ref` = kullanılan veri referansı (AiDataInputRef encode'u veya opaque).
+///
+/// `grant` = isteği yapanın o veriyi okuma yetkisi. Zorunlu bir argüman,
+/// çünkü izinsiz bir çıkarım isteğinin inşa edilebilmesi, sonradan
+/// reddedilse bile, yetkiyi bir kabul koşulu olmaktan çıkarıp bir sonraki
+/// katmanın hatırlamasına bağlı bir denetime çevirir. Bu dosyanın kendi
+/// yorumu doğrulamanın "ayrıca yapıldığını" söylüyordu ve
+/// [`crate::lubot::validate_inference_grant`] üretimde hiçbir yerden
+/// çağrılmıyordu; söylenen ile yapılan arasındaki fark buydu.
+///
+/// # Errors
+///
+/// Yetki geçerli değilse hangi koşulun düştüğünü söyleyen bir mesaj, ya da
+/// `input_ref` sınırı aşıyorsa `BoundedBytes`'ın reddi.
 pub fn build_lubot_request(
     requester: Address,
     model_id: AiModelId,
@@ -49,7 +63,12 @@ pub fn build_lubot_request(
     max_fee: u64,
     submitted_at_block: u64,
     deadline_block: u64,
+    grant: &AccessGrant,
 ) -> Result<AiInferenceRequest, String> {
+    // Yetki önce. Sınır kontrolünden de önce, çünkü izni olmayan birinin
+    // isteğinin neden reddedildiğini öğrenmesi, isteğin biçimi hakkında bilgi
+    // vermemeli.
+    crate::lubot::validate_inference_grant(grant, &requester, submitted_at_block)?;
     let bounded = BoundedBytes::try_new(input_ref.clone())?;
     let mut hasher = Sha256::new();
     hasher.update(b"LUBOT_INPUT_COMMIT_V1");
@@ -124,8 +143,17 @@ mod tests {
         assert_eq!(operator_bond(&registry, &operator), MIN_OPERATOR_BOND);
 
         // (3) Kapalı-devre request inşa + submit.
-        let req = build_lubot_request(requester, model_id, b"lubot-input".to_vec(), 1, 1, 1000)
-            .expect("build request");
+        let grant = test_grant(requester, 1);
+        let req = build_lubot_request(
+            requester,
+            model_id,
+            b"lubot-input".to_vec(),
+            1,
+            1,
+            1000,
+            &grant,
+        )
+        .expect("build request");
         assert!(req.verify_id(), "canonical request_id must verify");
         let req_id = registry.submit_request(req, 1).expect("submit request");
 
@@ -137,5 +165,82 @@ mod tests {
             outcome.is_ok(),
             "result submission should succeed: {outcome:?}"
         );
+    }
+
+    /// A grant that is live for `consumer` at `block`.
+    fn test_grant(consumer: Address, block: u64) -> AccessGrant {
+        AccessGrant::new_unsigned(
+            crate::pollen::data_rights::AssetId([9; 32]),
+            Address([8; 32]),
+            consumer,
+            consumer,
+            0,
+            block,
+            block + 10_000,
+            100,
+            [0; 32],
+        )
+    }
+
+    /// A request cannot be built without a live grant.
+    ///
+    /// The refusal has to happen here rather than at the executor: an
+    /// unauthorised request object that exists and looks valid until some
+    /// later layer remembers to check it is a permission rule that depends on
+    /// being remembered.
+    #[test]
+    fn a_request_without_a_live_grant_is_refused() {
+        let requester = Address([1; 32]);
+        let model_id = AiModelId([2; 32]);
+
+        // Issued to somebody else.
+        let other = test_grant(Address([7; 32]), 1);
+        let err = build_lubot_request(
+            requester,
+            model_id,
+            b"input".to_vec(),
+            1,
+            1,
+            1000,
+            &other,
+        )
+        .expect_err("a grant issued to another consumer must not build a request");
+        assert!(err.contains("consumer"), "got: {err}");
+
+        // Expired.
+        let mut expired = test_grant(requester, 1);
+        expired.expires_at_block = 5;
+        let err = build_lubot_request(
+            requester,
+            model_id,
+            b"input".to_vec(),
+            1,
+            50,
+            1000,
+            &expired,
+        )
+        .expect_err("an expired grant must not build a request");
+        assert!(err.contains("expired"), "got: {err}");
+
+        // Quota spent.
+        let mut spent = test_grant(requester, 1);
+        spent.reads_used = spent.max_reads;
+        let err = build_lubot_request(
+            requester,
+            model_id,
+            b"input".to_vec(),
+            1,
+            1,
+            1000,
+            &spent,
+        )
+        .expect_err("an exhausted grant must not build a request");
+        assert!(err.contains("quota"), "got: {err}");
+
+        // The canary: a live grant still builds, or the three refusals above
+        // could be satisfied by a function that refuses everything.
+        let live = test_grant(requester, 1);
+        build_lubot_request(requester, model_id, b"input".to_vec(), 1, 1, 1000, &live)
+            .expect("a live grant must still build a request");
     }
 }

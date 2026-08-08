@@ -58,7 +58,11 @@ mod tests {
                 1,
             )
             .expect("a fresh registry has no id to collide with");
-        hub.verify_app(id, &dev).unwrap();
+        // `verify_app` was a back-compat alias for this, named as though it
+        // were a third-party audit when it only records the developer's own
+        // claim. The production path always called the honest name; the alias
+        // was reachable from tests alone and is gone.
+        hub.attest_app_as_developer(id, &dev).unwrap();
         let app = hub.apps.get(&id).unwrap();
         assert!(app.developer_attested);
         assert!(!app.verified, "self-verify must not set verified badge");
