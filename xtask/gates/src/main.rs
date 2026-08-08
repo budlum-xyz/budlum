@@ -45,6 +45,7 @@ mod gates {
     pub mod mermaid;
     pub mod no_new_shell_gates;
     pub mod security_scans_can_fail;
+    pub mod suppressions_are_justified;
     pub mod workflows_produce_jobs;
 }
 
@@ -83,6 +84,12 @@ const GATES: &[Gate] = &[
         replaces: None,
         run: gates::security_scans_can_fail::run,
         self_test: gates::security_scans_can_fail::self_test,
+    },
+    Gate {
+        name: "suppressions-are-justified",
+        replaces: None,
+        run: gates::suppressions_are_justified::run,
+        self_test: gates::suppressions_are_justified::self_test,
     },
     Gate {
         name: "workflows-produce-jobs",
