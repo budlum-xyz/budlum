@@ -195,16 +195,8 @@ mod tests {
 
         // Issued to somebody else.
         let other = test_grant(Address([7; 32]), 1);
-        let err = build_lubot_request(
-            requester,
-            model_id,
-            b"input".to_vec(),
-            1,
-            1,
-            1000,
-            &other,
-        )
-        .expect_err("a grant issued to another consumer must not build a request");
+        let err = build_lubot_request(requester, model_id, b"input".to_vec(), 1, 1, 1000, &other)
+            .expect_err("a grant issued to another consumer must not build a request");
         assert!(err.contains("consumer"), "got: {err}");
 
         // Expired.
@@ -225,16 +217,8 @@ mod tests {
         // Quota spent.
         let mut spent = test_grant(requester, 1);
         spent.reads_used = spent.max_reads;
-        let err = build_lubot_request(
-            requester,
-            model_id,
-            b"input".to_vec(),
-            1,
-            1,
-            1000,
-            &spent,
-        )
-        .expect_err("an exhausted grant must not build a request");
+        let err = build_lubot_request(requester, model_id, b"input".to_vec(), 1, 1, 1000, &spent)
+            .expect_err("an exhausted grant must not build a request");
         assert!(err.contains("quota"), "got: {err}");
 
         // The canary: a live grant still builds, or the three refusals above

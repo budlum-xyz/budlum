@@ -567,32 +567,54 @@ mod tests {
         );
     }
 
-    /// Two operators with different hardware may reach different answers for
-    /// the same object, and both are right.
+    /// Two operators with different hardware reach different answers for the
+    /// same object, and both are right.
     ///
     /// A consensus rule forcing one answer would be pricing hardware it
     /// cannot see.
+    ///
+    /// The two disk rates are the measured 403 divided and multiplied by ten:
+    /// 0.029 $/TB/month for amortised disk an operator already owns, and 2.90
+    /// $/TB/month for disk it rents. Both stay at the same 1e6 scale as the
+    /// processor rate, because that is the whole point of the module and the
+    /// first version of this test got it wrong: it carried the processor rate
+    /// at 1e9 while the disk rates sat at 1e6, which pushed both thresholds a
+    /// thousandfold below the read rate and made both operators answer the
+    /// same way.
     #[test]
     fn operators_with_different_hardware_may_disagree() {
         let bytes = 500_000;
         let mut a = AccessEstimate::new(0);
         a.scaled = 200 * ACCESS_SCALE;
 
+        // 0.029 $/TB/month: disk bought years ago and already paid for.
         let cheap_disk = OperatorRates {
             disk_picodollars_per_byte_epoch: 40,
-            cpu_picodollars_per_nano: 694_000,
+            cpu_picodollars_per_nano: 694,
         };
+        // 2.90 $/TB/month: disk rented by the month.
         let dear_disk = OperatorRates {
             disk_picodollars_per_byte_epoch: 4_030,
-            cpu_picodollars_per_nano: 694_000,
+            cpu_picodollars_per_nano: 694,
         };
 
         let on_cheap = decide(described(), bytes, cheap_disk, a, 0, false, 0).unwrap();
         let on_dear = decide(described(), bytes, dear_disk, a, 0, false, 0).unwrap();
-        assert_ne!(
-            on_cheap, on_dear,
-            "an operator with dear disk should describe an object that an operator \
-             with cheap disk still stores"
+
+        // Named rather than merely different: `assert_ne!` alone would pass
+        // for any two distinct answers, including the pair the other way
+        // round, which is the answer a sign error produces.
+        assert_eq!(
+            on_cheap,
+            Decision::Hold,
+            "200 reads per half-life is above the 41.5 crossing point of cheap disk, \
+             so the operator that owns its disk keeps the bytes"
+        );
+        assert_eq!(
+            on_dear,
+            Decision::Apply,
+            "the same 200 reads is far below the 4,181 crossing point of rented disk, \
+             so the operator paying by the month describes the object instead"
         );
     }
 

@@ -20,12 +20,12 @@ pub mod assignment;
 pub mod content_id;
 pub mod db;
 pub mod derived;
-pub mod living_threshold;
 pub mod dictionary;
 pub mod erasure;
 pub mod fixed_point;
 pub mod generated;
 pub mod lifecycle;
+pub mod living_threshold;
 pub mod lrc;
 pub mod manifest;
 pub mod merkle_trie;
@@ -42,10 +42,6 @@ pub use derived::{
     DerivedError, DerivedSpec, DerivedTransform, PrefixSpan, DERIVED_BLOCK_PIXELS,
     DERIVED_PREFIX_SPEC_BYTES, DERIVED_SPEC_BYTES,
 };
-pub use living_threshold::{
-    break_even_rate_scaled, decide, AccessEstimate, Decision, Lever, OperatorRates,
-    ThresholdError, ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
-};
 pub use dictionary::{
     DictionaryEntry, DictionaryError, DictionaryRegistry, DICTIONARY_GRACE_EPOCHS,
     MAX_DICTIONARY_BYTES,
@@ -59,6 +55,10 @@ pub use generated::{
 };
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
+};
+pub use living_threshold::{
+    break_even_rate_scaled, decide, AccessEstimate, Decision, Lever, OperatorRates, ThresholdError,
+    ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
 };
 pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
