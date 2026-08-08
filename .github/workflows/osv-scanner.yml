@@ -99,7 +99,8 @@ jobs:
             --lockfile=Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \
-            --lockfile=wallet-core/Cargo.lock
+            --lockfile=wallet-core/Cargo.lock \
+            --lockfile=xtask/gates/Cargo.lock
 
       # Yukaridaki listenin eksilmemesi icin: depodaki her Cargo.lock taranmali.
       # Yeni bir alt-crate eklendiginde kilidi sessizce kapsam disinda kalirsa

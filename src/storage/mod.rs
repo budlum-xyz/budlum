@@ -25,6 +25,7 @@ pub mod erasure;
 pub mod fixed_point;
 pub mod generated;
 pub mod lifecycle;
+pub mod living_threshold;
 pub mod lrc;
 pub mod manifest;
 pub mod merkle_trie;
@@ -49,11 +50,16 @@ pub use erasure::{
     encode_object, reconstruct_object, EncodedObject, ErasureError, ReedSolomon, MAX_TOTAL_SHARDS,
 };
 pub use generated::{
-    generate_and_verify, generate_content, generated_spec_digest, ContentSource, GenerateError,
-    GeneratedSpec, GeneratorId, MAX_GENERATED_BYTES,
+    generate_and_verify, generate_content, generated_spec_digest, held_bytes, ContentSource,
+    GenerateError, GeneratedSpec, GeneratorId, MAX_GENERATED_BYTES,
 };
 pub use lifecycle::{
     transition as transition_storage_lifecycle, StorageLifecycleError, StorageLifecycleState,
+};
+pub use living_threshold::{
+    break_even_rate_scaled, decide, one_reproduction_picodollars, AccessEstimate, Decision, Lever,
+    OperatorRates, ThresholdError, ACCESS_HALF_LIFE_EPOCHS, ACCESS_SCALE, HYSTERESIS_SIXTEENTHS,
+    MAX_CPU_NANOS_PER_BYTE, MAX_OBJECT_BYTES, NANOS_PER_SECOND,
 };
 pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{

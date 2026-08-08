@@ -92,6 +92,35 @@ check_the_measurement_is_recorded() {
     || fail "the roadmap no longer records the size of the discrepancy.
   447 is the factor between the two units for one class, and it is the whole
   reason this rule exists."
+
+  # The factor has to follow from the table above it, not merely appear.
+  #
+  # Checking that the string 447 is present says nothing about whether the
+  # two percentages it divides still say what they said. The same shape of
+  # hole let a wrongly scaled rate through check-threshold-rates-share-one-
+  # scale.sh: that gate grepped for the correct number, found it in one
+  # place, and never looked at the others. So this one recomputes.
+  local json_row files_pct bytes_pct factor
+  json_row="$(grep -m1 -E '^\| *JSON' "$path" || true)"
+  [ -n "$json_row" ] \
+    || fail "the corpus table has no JSON row.
+  The 447 the rule rests on is the ratio of that row's two percentages, and
+  without the row the number is an assertion."
+
+  files_pct="$(printf '%s' "$json_row" | awk -F'|' '{gsub(/[ %]/,"",$3); print $3}')"
+  bytes_pct="$(printf '%s' "$json_row" | awk -F'|' '{gsub(/[ %]/,"",$4); print $4}')"
+
+  case "$files_pct" in ''|*[!0-9.]*) fail "the JSON row's file share is not a number: '$files_pct'";; esac
+  case "$bytes_pct" in ''|*[!0-9.]*) fail "the JSON row's byte share is not a number: '$bytes_pct'";; esac
+  [ "$(awk -v b="$bytes_pct" 'BEGIN{print (b>0)?1:0}')" = "1" ] \
+    || fail "the JSON row's byte share is zero, so there is no ratio to state."
+
+  factor="$(awk -v f="$files_pct" -v b="$bytes_pct" 'BEGIN{printf "%.0f", f/b}')"
+  [ "$factor" = "447" ] \
+    || fail "the roadmap states a factor of 447 but its own table divides to $factor.
+  The JSON row reads $files_pct% of files against $bytes_pct% of bytes. One of the
+  two was edited without the other, and a reader checking the arithmetic finds
+  the document disagreeing with itself. Whichever is right, both have to say it."
 }
 
 # 3. Code that reports a saving returns both numbers.
@@ -186,8 +215,28 @@ DOC
   expect_failure "a reporting function that stopped returning a pair" \
     check_code_reports_a_pair "$work"
 
-  # 7. A document that states both units must PASS, or the gate is just a
-  #    ban on discussing savings.
+  # 7. The table is edited and the factor is not. This is the case the gate
+  #    used to pass: 447 is still in the document, the row it comes from now
+  #    divides to 4, and the two contradict each other.
+  work="$(stage)"
+  sed -i '/^| *JSON/s#0\.09%#9.0%#' "$work/docs/BUD_STORAGE_ROADMAP.md"
+  expect_failure "a factor that no longer follows from its own table" \
+    check_the_measurement_is_recorded "$work"
+
+  # 8. The mirror image: the table stands and the factor is edited.
+  work="$(stage)"
+  sed -i 's|factor of 447\.|factor of 999.|' "$work/docs/BUD_STORAGE_ROADMAP.md"
+  expect_failure "a factor edited away from its own table" \
+    check_the_measurement_is_recorded "$work"
+
+  # 9. The row disappears, leaving the factor with nothing behind it.
+  work="$(stage)"
+  sed -i '/^| *JSON/d' "$work/docs/BUD_STORAGE_ROADMAP.md"
+  expect_failure "a factor with no table row behind it" \
+    check_the_measurement_is_recorded "$work"
+
+  # 10. A document that states both units must PASS, or the gate is just a
+  #     ban on discussing savings.
   work="$(stage)"
   cat > "$work/docs/BUD_STORAGE_ROADMAP.md" <<'DOC'
 # Roadmap
@@ -202,14 +251,16 @@ DOC
   fi
   ROOT="$real_root"
 
-  # 8. The tree as committed must pass.
+  # 11. The tree as committed must pass.
   run_all || { echo "BROKEN GATE: the committed tree was rejected!" >&2; exit 1; }
 
   echo "reduction claim gate self-test OK: $canaries canaries."
   echo "  An objects-only claim, a bytes-only claim, a missing citation, an"
-  echo "  erased discrepancy, a deleted reporting function and one that stopped"
-  echo "  returning a pair are all rejected; a claim stating both units passes,"
-  echo "  and so does the tree as committed."
+  echo "  erased discrepancy, a factor that no longer divides out of its own"
+  echo "  table, a factor edited away from a correct table, a missing table row,"
+  echo "  a deleted reporting function and one that stopped returning a pair are"
+  echo "  all rejected; a claim stating both units passes, and so does the tree"
+  echo "  as committed."
   exit 0
 fi
 

@@ -1,8 +1,8 @@
-8
+5
 # Guards no production path reaches.
 #
 # Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
-# refuse/deny/guard is a refusal by its own naming. Eight of them are
+# refuse/deny/guard is a refusal by its own naming. Five of them are
 # reachable only from tests, which means they protect the tests.
 #
 # The number may only go down. Wiring one up, or moving it into a module that
@@ -18,13 +18,47 @@
 # gets paid down; a number driven to zero by wiring refusals that exist to
 # stay unwired is worse than the number it replaced.
 #
-# The eight, at the time this baseline was set:
+# The five, and why each one is still here rather than wired:
 #
-#   src/ai/execution/verify.rs              verify_execution_proof_structural
-#   src/ai/execution/verify.rs              verify_execution_proof_full
-#   src/budlumxyz/mod.rs                    verify_app
-#   src/core/block.rs                       verify_signature_with_pubkey
-#   src/cross_domain/evm/adapter.rs         verify_deposit
-#   src/domain/storage_deal.rs              verify_answer_challenge_zk_proof
-#   src/lubot/mod.rs                        validate_inference_grant
-#   src/lubot/verify.rs                     verify_inference_stark
+#   src/ai/execution/verify.rs   verify_execution_proof_structural
+#   src/ai/execution/verify.rs   verify_execution_proof_full
+#   src/lubot/verify.rs          verify_inference_stark
+#       All three verify a STARK over an execution trace, and all three are
+#       blocked on the same gate: `MainnetActivation` ships with
+#       `verify_merkle_enabled: false` and `verify_inference_enabled: false`,
+#       pending external audit of the zkVM opcodes. Wiring them before that
+#       audit would put an unaudited proof system on the acceptance path,
+#       which is the opposite of what the gate is for. They move when the
+#       audit lands, not before.
+#
+#   src/cross_domain/evm/adapter.rs  verify_deposit
+#       The richer sibling of `verify_receipt_proof`: it takes a full relayer
+#       proof package (header chain, MPT nodes, receipt) where the wired path
+#       takes a receipt proof alone. The module's own safety invariant is that
+#       the on-chain verifier never touches the network, so wiring this one
+#       means first deciding who assembles the package and how its freshness
+#       is bounded. That is a bridge-design question, not a call site.
+#
+#   src/domain/storage_deal.rs   verify_answer_challenge_zk_proof
+#       Returns `Err` unconditionally, on purpose. A Merkle proof not bound to
+#       its deal and challenge context is replayable across storage deals and
+#       networks; callers are meant to use `answer_challenge`, which rebuilds
+#       that context from registry state. Calling this would satisfy the gate
+#       and weaken the chain.
+#
+# Three closed since this file was last written, recorded so the direction is
+# visible rather than only the number:
+#
+#   src/lubot/mod.rs             validate_inference_grant
+#       Wired into `build_lubot_request`, which now takes the grant as a
+#       required argument. Two doc comments already claimed the check was
+#       performed; nothing performed it.
+#
+#   src/core/block.rs            verify_signature_with_pubkey
+#       Wired into the PoA validation path, which was doing the same two
+#       checks inline and could have drifted from them.
+#
+#   src/budlumxyz/mod.rs         verify_app
+#       Deleted. A back-compat alias for `attest_app_as_developer`, named as
+#       though it were a third-party audit when it only records a developer's
+#       own claim. The production path always called the honest name.

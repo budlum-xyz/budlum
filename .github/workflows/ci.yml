@@ -153,6 +153,17 @@ jobs:
       # gorunuyor. Ilk isaret, karsilanamayan bir okuma. dictionary.rs ayni
       # sekli referans sayaci ve zarif pencereyle cozuyordu; turevlerde ayni
       # bagimlilik vardi ve bunlarin hicbiri yoktu.
+      # Bir depolama karari iki orani boler; yalniz oranlari onemli, yani ortak
+      # olcek sadelesir. Tehlike tam burada: olcegi bir orana uygulayip digerine
+      # uygulamamak her esigi o carpan kadar kaydirir ve hicbir sey yanlis
+      # gorunmez. Nitekim ilk yazimda islemci orani 1e9, disk orani 1e6 olcekteydi;
+      # tarif edilen icerik esigi olculen 418 yerine 0,4 okudu ve butun testler
+      # gecti, cunku testler esikleri birbiriyle karsilastiriyordu ve iki taraf da
+      # birlikte kaymisti. Rust disinda yeniden hesaplayarak yakalandi.
+      - name: Esik oranlari tek olcek kanaryasi
+        run: bash ./scripts/check-threshold-rates-share-one-scale.sh --self-test
+      - name: Esik oranlari tek olcekte
+        run: bash ./scripts/check-threshold-rates-share-one-scale.sh
       - name: Turev kaliciligi kanaryasi
         run: bash ./scripts/check-a-derivation-cannot-outlive-its-master.sh --self-test
       - name: Bir turev master'indan uzun yasayamaz
@@ -950,6 +961,19 @@ jobs:
         run: |
           bash ./scripts/check-gates-are-wired.sh --self-test
           bash ./scripts/check-gates-are-wired.sh
+      # Kapilar Rust'a tasiniyor. Bir kapi ana dala neyin girecegine karar
+      # verdigi icin guven sinirinin icinde, ve kabuk orasi icin kotu bir dil:
+      # yanlis yazilmis bir degisken hata degil bos dizgidir, yani bir kontrol
+      # hicbir seyi inceleyip OK diyebilir. Bu dalda iki kapi tam da yazilma
+      # sebebi olan kusuru kacirirken gecti. Rust surumu derlenmezse durur.
+      - name: Rust kapilari kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
+      - name: Rust kapilari
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
+      - name: Rust kapilari clippy (pedantic, allow yok)
+        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets
+      - name: Rust kapilari rustfmt
+        run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
       # A typographic dash in a workflow `name:` silently unlists the job from
       # branch protection: it runs, it passes, and it stops counting. Three
       # required checks were carrying one. A hand count already missed them

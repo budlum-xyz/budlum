@@ -1081,7 +1081,7 @@ flowchart LR
   Compliance --> Freeze[Asset freeze]
   Compliance --> TravelRule[Travel rule metadata hash]
   Compliance --> Audit[Append-only audit log]
-  Isolation[PoA isolated from permissionless domains] -. no shared registry .-> Permissionless
+  Isolation[PoA isolated from permissionless domains] -. no shared registry .-> Permissionless["Permissionless PoW / PoS / BFT domains"]
 ```
 
 ## 33. Validator lifecycle: multi-role architecture
@@ -1389,8 +1389,8 @@ flowchart LR
   Storage --> Critical[Critical content requires paid replica]
   Profile --> Opportunistic["Opportunistic hosting, not always-on"]
   Profile --> Scheduled[Scheduled replication windows]
-  Validation[Impossible battery state rejected] --> Battery
-  Validation[Zero bandwidth rejected] --> Network
+  BatteryCheck[Impossible battery state rejected] --> Battery
+  BandwidthCheck[Zero bandwidth rejected] --> Network
 ```
 
 ## 50. Encryption DAO policy lifecycle
@@ -1417,18 +1417,18 @@ flowchart TD
   MainBranch --> CodeManip[Code manipulation]
   PKCS11[PKCS11 data object] --> BLSExtract[BLS key extraction]
   BLSExtract --> FinalityForge[Finality forge]
-  BLSBias[BLS hash_to_g1 bias] --> FinalityManip[Finality manipulation]
+  BLSExtract --> FixH1["Closed: CKA_EXTRACTABLE false, key never leaves the token"]
+  BLSBias["BLS hash_to_g1 bias"] --> FinalityManip[Finality manipulation]
+  FinalityManip --> FixC1["Closed: dual SHA3-256 LO/HI, bias below the field modulus"]
   RPCNoAuth[RPC no auth] --> BridgeMint[Unauth bridge mint]
+  BridgeMint --> FixR2["Closed: require_operator on every mint path"]
   BridgeNoPayload[Bridge mint no payload check] --> FundInflation[Fund inflation]
+  FundInflation --> FixB2["Closed: payload_hash verified against the deposit"]
   SaturatingArith[saturating arithmetic] --> SilentLoss[Silent BUD loss]
+  SilentLoss --> FixE1["Closed: checked arithmetic, a refusal instead of a rounded balance"]
   BlindingTrunc[Blinding truncation] --> PrivacyBreak[Privacy break]
+  PrivacyBreak --> FixS1["Closed: register-based blinding, full-width factor"]
   NullifierCollision[Nullifier collision] --> DoubleSpend[Double-spend]
   PoseidonDesync[Poseidon constants desync] --> AllProofsFail[All proofs rejected]
   SeedMemory[Seed in memory] --> TotalLoss[Total fund loss]
-  C1 --> C1Fix[dual SHA3-256 LO/HI ✅]
-  H1 --> H1Fix[Extractable=false ✅]
-  R2 --> R2Fix[require_operator ✅]
-  S1 --> S1Fix[register-based blinding ✅]
-  B2 --> B2Fix[payload_hash verify ✅]
-  E1 --> E1Fix[checked arithmetic ✅]
 ```

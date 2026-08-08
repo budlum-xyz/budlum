@@ -50,6 +50,34 @@ from the registry, both patched.
 # against cargo-vet's audit total, which excludes every one of them.
 packages = 23
 
+# Of those twenty-three, five are in the lockfile and are never compiled.
+#
+# Measured with `cargo tree -e normal -i <pkg>` against the workspace as it is
+# configured, which answers "does anything reach this crate", not "is it
+# mentioned somewhere". All five print `nothing to print`:
+#
+#   libp2p-quic     no feature enables it; the transport list is tcp + dns
+#   libp2p-tls      reachable only through quic or an explicit tls transport
+#   libp2p-mdns     behind the `p2p-mdns` feature, off in every default and
+#                   release build, on purpose: hickory/mDNS advisories are
+#                   unreachable in validator, sentry, RPC and archive binaries
+#   libp2p-upnp     no feature enables it
+#   libp2p-metrics  no feature enables it
+#
+# A lockfile entry is not a dependency. Cargo writes every package the
+# resolver considered, including ones no feature selects, so counting lockfile
+# entries overstates what is built and therefore overstates what is unread.
+#
+# This matters for the limits below: the honest count of unread-and-reachable
+# packages is seventeen, not twenty-two.
+packages_never_compiled = [
+    "libp2p-quic",
+    "libp2p-tls",
+    "libp2p-mdns",
+    "libp2p-upnp",
+    "libp2p-metrics",
+]
+
 # Advisories checked by reading the source at this revision, not by version
 # comparison.
 advisories = [
@@ -89,7 +117,51 @@ the ordinary scanners do see them and where both are patched.
 # says nothing about the other twenty-two packages this revision supplies, and
 # nothing about a compromise that leaves the advisory-relevant code untouched.
 # The revision hash pins what is built; it does not attest who wrote it.
+# A second package read at this revision, chosen because it is where a peer
+# stops being anonymous.
+#
+# libp2p-noise carries the handshake, so it decides which remote identity a
+# connection is credited to. Everything downstream, peer scoring, gossipsub
+# message attribution, the allow and block lists, is only as good as that
+# decision.
+#
+# transports/noise/src/io/handshake.rs, State::finish:
+#
+#   id_pk           taken from the remote's payload, absent is
+#                   Error::AuthenticationFailed rather than an anonymous peer
+#   is_valid_sig    id_pk.verify over STATIC_KEY_DOMAIN concatenated with the
+#                   static DH public key. `is_some_and` on the Option, so a
+#                   missing signature is false rather than skipped, and the
+#                   next line turns false into Error::BadSignature
+#   domain sep      the "noise-libp2p-static-key:" prefix is inside the signed
+#                   bytes, so a signature made for another purpose does not
+#                   verify here
+#
+# The shape worth naming is that a missing signature and an invalid one take
+# the same exit. An `if let Some(s) = sig` that verified only when present
+# would authenticate a peer that sent none, and that is the mistake this code
+# does not make.
+noise_evidence = """
+transports/noise/src/io/handshake.rs at this revision refuses an absent remote
+identity with AuthenticationFailed, and verifies the static-key signature under
+a domain-separated prefix with `is_some_and`, so an omitted signature fails
+closed rather than being skipped.
+"""
+
 limits = """
-Covers the named advisories only. The remaining packages at this revision are
-pinned but unread, and no signature covers the tree.
+Covers the named advisories, and two files read in full. Of the twenty-three
+packages this revision supplies, five are never compiled (measured, see
+packages_never_compiled), two have been read (gossipsub backoff, noise
+handshake), and sixteen are pinned and unread. No signature covers the tree,
+and the revision hash pins what is built without attesting who wrote it.
+
+Sixteen is the number to reduce. An earlier wording said twenty-two, which
+counted lockfile entries rather than compiled crates and so overstated the
+exposure by five while understating how specific the remaining work is.
+
+Also checked at this revision: the lockfile resolves yamux to 0.14.0 from
+crates.io, so GHSA-vxx9-2994-q338 against yamux 0.12.1 does not apply to this
+build. That advisory is the one the OSV canary uses to prove the scanner is
+working, which is why it is worth stating that the real tree is not affected
+by it.
 """

@@ -158,7 +158,7 @@ ENUM_BODY = re.compile(
 
 
 def strip_doc_links(src):
-    """Drop rustdoc intra-doc links, `[\`path::Name\`]`.
+    r"""Drop rustdoc intra-doc links, `[\`path::Name\`]`.
 
     A bracketed doc link names a symbol in order to point a reader at it; it
     is never a call. Measured: `derived.rs` explains its design by referring

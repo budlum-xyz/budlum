@@ -1,0 +1,21 @@
+[package]
+name = "budlum-gates"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94.0"
+license = "Apache-2.0"
+description = "Repository gates, written in Rust rather than shell."
+publish = false
+
+# No dependencies on purpose. A gate that decides whether a commit is allowed
+# in is part of the trust boundary, and every crate it pulls in widens that
+# boundary. The standard library is enough for reading files and matching
+# text, which is all a gate does.
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

@@ -406,6 +406,17 @@ mod tests {
         assert!(super::operator_eligible(&registry, &operator));
 
         // Lubot transaction inşa et.
+        let grant = AccessGrant::new_unsigned(
+            crate::pollen::AssetId([9; 32]),
+            Address([8; 32]),
+            owner,
+            owner,
+            0,
+            1,
+            10_000,
+            100,
+            [0; 32],
+        );
         let tx = super::executor::build_lubot_transaction(
             owner,
             operator,
@@ -417,6 +428,7 @@ mod tests {
             45262,
             1,
             1000,
+            &grant,
         )
         .expect("build tx");
 

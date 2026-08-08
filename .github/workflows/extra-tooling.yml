@@ -190,17 +190,32 @@ jobs:
       # sıfırdan farklı çıkar, `set -e` altında job orada düşer. Yanlış
       # pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
       # kaydına alınır, ignore etmek serbest değil, gerekçe commit'te durur.
-      - name: Machete kapısı - root + budzero + fuzz + wallet-core
+      # Dizin listesi elle tutulmuyor. Elle tutulan liste, yeni bir crate
+      # eklendiginde sessizce eksik kalir: xtask/gates OSV taramasina
+      # eklenmemisti ve orada bunu yakalayan bir kapi vardi, burada yoktu.
+      # Simdi her Cargo.toml bulunuyor, yani yeni crate kendiliginden giriyor.
+      - name: Machete kapısı - depodaki her workspace
         run: |
           set -euo pipefail
           fail=0
-          for dir in . budzero fuzz wallet-core; do
+          scanned=0
+          while IFS= read -r manifest; do
+            dir="$(dirname "$manifest")"
+            # Alt crate'ler kendi workspace koklerinden taranir.
+            grep -q '^\[workspace\]' "$manifest" || grep -q '^\[package\]' "$manifest" || continue
             echo "── cargo machete: $dir ──"
+            scanned=$((scanned + 1))
             if ! (cd "$dir" && cargo machete); then
               echo "FAIL: $dir içinde kullanılmayan bağımlılık var." >&2
               fail=1
             fi
-          done
+          done < <(find . -name Cargo.toml -not -path './target/*' -not -path '*/target/*' \
+                     -not -path './node_modules/*' | sort)
+          if [ "$scanned" -lt 4 ]; then
+            echo "FAIL: yalnizca $scanned manifest tarandi; depo dordunden fazlasini tasiyor, yani bulma adimi bozuldu ve bu kapi hicbir seye bakmiyor." >&2
+            exit 1
+          fi
+          echo "cargo machete: $scanned manifest tarandi."
           exit "$fail"
 
       - name: Shear raporu (ikinci sezgi)

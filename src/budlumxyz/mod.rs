@@ -108,11 +108,6 @@ impl BudlumxyzRegistry {
         Ok(())
     }
 
-    /// Back-compat alias: self-verify == developer attestation only.
-    pub fn verify_app(&mut self, id: u64, caller: &Address) -> Result<(), BudlumxyzError> {
-        self.attest_app_as_developer(id, caller)
-    }
-
     /// Award the `verified` badge to an explicitly configured governor.
     ///
     /// # The empty set now denies
