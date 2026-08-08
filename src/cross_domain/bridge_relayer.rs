@@ -7,6 +7,13 @@
 //!
 //! This module ties `BridgeState`, `UniversalRelayer`, and
 //! `CrossDomainMessageRegistry` into a coherent pipeline.
+//!
+//! WIRING: unwired - measured: no production path drives this orchestration
+//! today. The three steps it sequences all exist and are reached
+//! individually; what is missing is the loop that runs them in order, which
+//! is a node-lifecycle concern rather than a consensus one. Wiring it means
+//! deciding who owns that loop and how it is scheduled, and that decision has
+//! not been made.
 
 use crate::core::address::Address;
 use crate::cross_domain::bridge::{BridgeError, BridgeState};

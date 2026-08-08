@@ -633,6 +633,14 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// `permissionless.rs` calls `SlashingReport::consensus_invalid_relay_griefing`
 /// at line 1085, so at least the first marker is simply stale.
 ///
+/// Three more came off after being read. `sdk/devnet.rs` and `sdk/runner.rs`
+/// are developer tooling: a person runs them, the tree does not, so measuring
+/// them for inbound calls asks the wrong question of the right heuristic.
+/// `cross_domain/bridge_relayer.rs` sequences three steps that are each
+/// reached individually; what is absent is the loop that orders them, which
+/// is a node-lifecycle decision nobody has made. All three now carry the
+/// marker.
+///
 /// The list is measured, not typed. A first draft carried twenty-one entries
 /// against twelve findings, because nine of them named modules whose only
 /// problem was a stale `WIRING` marker, and that class stopped firing once
@@ -642,11 +650,8 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 const PENDING_REVIEW: &[&str] = &[
     "budzero/bud-node/src/sharding.rs",
     "budzero/bud-state/src/note.rs",
-    "src/cross_domain/bridge_relayer.rs",
     "src/registry/evidence.rs",
     "src/registry/poa_onboarding.rs",
-    "src/sdk/devnet.rs",
-    "src/sdk/runner.rs",
     "src/storage/lifecycle.rs",
     "src/storage/living_threshold.rs",
     "src/storage/mobile_self.rs",

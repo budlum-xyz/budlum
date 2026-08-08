@@ -12,6 +12,11 @@
 //!   ├── test → Vec<TestResult>
 //!   └── deploy → Vec<DeployedContract>  (gelecekte)
 //! ```
+//!
+//! WIRING: unwired - measured: nothing calls this, for the same reason
+//! `sdk::devnet` is not called. `bud compile` and `bud test` are commands a
+//! developer invokes; the tree is the thing being compiled and tested, not
+//! the thing doing the calling.
 
 use crate::sdk::contracts::{BudlContract, CompiledContract, ContractError};
 use serde::{Deserialize, Serialize};

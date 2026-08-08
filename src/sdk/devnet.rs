@@ -16,6 +16,14 @@
 //!
 //! Her domain kendi chain actor'üne, depolama alanına ve RPC endpoint'ine
 //! Sahiptir. Settlement layer domain commit'leri birleştirir.
+//!
+//! WIRING: unwired - measured: nothing in the tree calls this, and nothing
+//! should. It is developer tooling: a person runs it to bring up four local
+//! consensus domains. The direction of the call is outward, from an operator
+//! into the node, so measuring it for inbound calls asks the wrong question.
+//! The gate counts it as a capability surface because it exports nine public
+//! functions, which is the right heuristic applied to the wrong kind of
+//! module.
 
 use crate::domain::{ConsensusKind, DomainId};
 use serde::{Deserialize, Serialize};
@@ -370,8 +378,7 @@ impl LocalDevnet {
             rpc_endpoints: self.rpc_endpoints(),
         };
 
-        serde_json::to_string_pretty(&report)
-            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+        serde_json::to_string_pretty(&report).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
     }
 }
 
