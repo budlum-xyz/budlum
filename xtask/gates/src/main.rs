@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 mod gates {
     pub mod bns_names_are_safe_in_an_address_bar;
+    pub mod capability_modules_are_wired;
     pub mod mermaid;
     pub mod no_new_shell_gates;
 }
@@ -57,6 +58,12 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "capability-wiring",
+        replaces: Some("check-capability-modules-are-wired.sh"),
+        run: gates::capability_modules_are_wired::run,
+        self_test: gates::capability_modules_are_wired::self_test,
+    },
     Gate {
         name: "mermaid",
         replaces: None,
