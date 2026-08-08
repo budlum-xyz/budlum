@@ -147,6 +147,14 @@ pub enum ThresholdError {
     LeverIsFree,
     /// Rates of zero make every comparison meaningless rather than cheap.
     RatesAreZero,
+    /// The product of size, rate and half-life leaves u128.
+    ///
+    /// Not a hypothetical. `[profile.release]` sets `overflow-checks = true`
+    /// and `panic = "abort"`, so an unchecked product here does not wrap
+    /// quietly and produce a wrong threshold: it kills the node. An object
+    /// size arrives from a manifest, which is somebody else's number, so the
+    /// arithmetic refuses rather than aborts.
+    ProductLeavesU128,
 }
 
 impl std::fmt::Display for ThresholdError {
@@ -165,6 +173,11 @@ impl std::fmt::Display for ThresholdError {
             Self::RatesAreZero => write!(
                 f,
                 "operator rates of zero cannot order two strategies against each other"
+            ),
+            Self::ProductLeavesU128 => write!(
+                f,
+                "the object size and rates given multiply past u128; no real object and \
+                 no real hardware reach this, so the inputs are wrong rather than large"
             ),
         }
     }
@@ -231,7 +244,9 @@ impl AccessEstimate {
 ///
 /// [`ThresholdError::LeverSavesNothing`] for a lever that does not shrink the
 /// object, [`ThresholdError::LeverIsFree`] for one claiming no processor cost,
-/// and [`ThresholdError::RatesAreZero`] when the operator's rates are zero.
+/// [`ThresholdError::RatesAreZero`] when the operator's rates are zero, and
+/// [`ThresholdError::ProductLeavesU128`] when the factors given multiply past
+/// the type.
 pub fn break_even_rate_scaled(
     lever: Lever,
     object_bytes: u64,
@@ -252,23 +267,49 @@ pub fn break_even_rate_scaled(
     // Saving over one half-life, in picodollars. u128 because bytes times a
     // rate times an epoch count overflows u64 for objects a network would
     // actually hold.
+    //
+    // Widening to u128 moves the ceiling; it does not remove it. Four u64
+    // factors reach 2^256 in principle, and `[profile.release]` sets
+    // `overflow-checks = true` with `panic = "abort"`, so leaving u128 aborts
+    // the process rather than wrapping into a wrong threshold. `object_bytes`
+    // comes from a manifest and the rates come from an operator's config, so
+    // neither is this module's number to trust. Every product is checked.
     let saved_fraction = u128::from(1_000_000 - lever.size_millionths);
-    let saved = u128::from(object_bytes)
-        * saved_fraction
-        * u128::from(rates.disk_picodollars_per_byte_epoch)
-        * u128::from(ACCESS_HALF_LIFE_EPOCHS)
-        / 1_000_000;
+    let saved = checked_product(&[
+        u128::from(object_bytes),
+        saved_fraction,
+        u128::from(rates.disk_picodollars_per_byte_epoch),
+        u128::from(ACCESS_HALF_LIFE_EPOCHS),
+    ])? / 1_000_000;
 
     // Cost of reproducing the object once.
-    let per_read = u128::from(object_bytes)
-        * u128::from(lever.cpu_nanos_per_byte)
-        * u128::from(rates.cpu_picodollars_per_nano);
+    let per_read = checked_product(&[
+        u128::from(object_bytes),
+        u128::from(lever.cpu_nanos_per_byte),
+        u128::from(rates.cpu_picodollars_per_nano),
+    ])?;
     if per_read == 0 {
         return Err(ThresholdError::LeverIsFree);
     }
 
-    let scaled = saved * u128::from(ACCESS_SCALE) / per_read;
+    let scaled = checked_product(&[saved, u128::from(ACCESS_SCALE)])? / per_read;
     Ok(u64::try_from(scaled).unwrap_or(u64::MAX))
+}
+
+/// Multiply a list of factors, refusing rather than aborting on overflow.
+///
+/// # Errors
+///
+/// [`ThresholdError::ProductLeavesU128`] when the running product would leave
+/// the type.
+fn checked_product(factors: &[u128]) -> Result<u128, ThresholdError> {
+    let mut acc: u128 = 1;
+    for f in factors {
+        acc = acc
+            .checked_mul(*f)
+            .ok_or(ThresholdError::ProductLeavesU128)?;
+    }
+    Ok(acc)
 }
 
 /// Whether an object should move to, or away from, a lever.
@@ -338,16 +379,20 @@ pub fn decide(
     // meant a strongly overheated object computed a negative gain, saturated
     // to zero, and was held on the grounds that moving would not pay.
     let saved_fraction = u128::from(1_000_000 - lever.size_millionths);
-    let storage_saved = u128::from(object_bytes)
-        * saved_fraction
-        * u128::from(rates.disk_picodollars_per_byte_epoch)
-        * u128::from(ACCESS_HALF_LIFE_EPOCHS)
-        / 1_000_000;
-    let reproduction = u128::from(rate)
-        * u128::from(object_bytes)
-        * u128::from(lever.cpu_nanos_per_byte)
-        * u128::from(rates.cpu_picodollars_per_nano)
-        / u128::from(ACCESS_SCALE);
+    let storage_saved = checked_product(&[
+        u128::from(object_bytes),
+        saved_fraction,
+        u128::from(rates.disk_picodollars_per_byte_epoch),
+        u128::from(ACCESS_HALF_LIFE_EPOCHS),
+    ])? / 1_000_000;
+    // The rate is a fourth factor here that `break_even_rate_scaled` does not
+    // carry, so this product leaves u128 sooner than that one does.
+    let reproduction = checked_product(&[
+        u128::from(rate),
+        u128::from(object_bytes),
+        u128::from(lever.cpu_nanos_per_byte),
+        u128::from(rates.cpu_picodollars_per_nano),
+    ])? / u128::from(ACCESS_SCALE);
     let gain = if currently_applied {
         reproduction.saturating_sub(storage_saved)
     } else {
@@ -682,6 +727,60 @@ mod tests {
             threshold - (threshold - band),
             (threshold + band) - threshold,
             "the band is documented as one width in both directions"
+        );
+    }
+
+    /// Widening to u128 moved the ceiling; it did not remove it.
+    ///
+    /// Four u64 factors reach past u128, and `[profile.release]` carries
+    /// `overflow-checks = true` with `panic = "abort"`, so a product that
+    /// leaves the type is not a wrong threshold quietly returned. It is the
+    /// node gone. `object_bytes` arrives from a manifest and the rates from
+    /// an operator's own config, so neither is this module's number to
+    /// trust, and the arithmetic refuses instead.
+    ///
+    /// The numbers below are not reachable by any object: at the measured
+    /// rates the smallest overflowing case needs a single object of roughly
+    /// four hundred terabytes together with a read estimate at the top of
+    /// u64. That is the point. The refusal exists so the unreachable case is
+    /// an error value rather than a crash, and it costs one comparison.
+    #[test]
+    fn a_product_that_leaves_u128_is_refused_rather_than_aborting() {
+        // Disk rate large enough that size times rate times half-life leaves
+        // the type on its own.
+        let absurd_disk = OperatorRates {
+            disk_picodollars_per_byte_epoch: u64::MAX,
+            cpu_picodollars_per_nano: 694,
+        };
+        assert_eq!(
+            break_even_rate_scaled(described(), u64::MAX, absurd_disk),
+            Err(ThresholdError::ProductLeavesU128)
+        );
+
+        // The reproduction side, which carries the access rate as a fourth
+        // factor and so leaves the type sooner than the saving side.
+        let absurd_lever = Lever {
+            size_millionths: 0,
+            cpu_nanos_per_byte: u64::MAX,
+        };
+        let mut hot = AccessEstimate::new(0);
+        hot.scaled = u64::MAX;
+        assert_eq!(
+            break_even_rate_scaled(absurd_lever, u64::MAX, rates()),
+            Err(ThresholdError::ProductLeavesU128)
+        );
+        assert_eq!(
+            decide(absurd_lever, u64::MAX, rates(), hot, 0, false, 0),
+            Err(ThresholdError::ProductLeavesU128)
+        );
+
+        // The canary: an object a network would actually hold still answers.
+        // A refusal that fires on everything would satisfy the three above.
+        let real = break_even_rate_scaled(described(), 500_000, rates());
+        assert!(
+            real.is_ok(),
+            "a 500 KB object at measured rates must still have a threshold, \
+             or the overflow check is refusing the ordinary case: {real:?}"
         );
     }
 

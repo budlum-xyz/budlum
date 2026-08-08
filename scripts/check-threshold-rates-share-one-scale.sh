@@ -93,10 +93,23 @@ and breaks no test, because the tests compare thresholds against each other"
     exit 1
   fi
 
-  # 5. The products must widen before multiplying.
+  # 5. The products must widen before multiplying, and the widened products
+  #    must still be checked.
+  #
+  #    u128 moves the ceiling, it does not remove it: four u64 factors reach
+  #    past it. `[profile.release]` carries overflow-checks = true and
+  #    panic = "abort", so a product that leaves u128 is not a wrong number
+  #    quietly returned, it is the node gone, on an object size that arrives
+  #    from somebody else's manifest.
   grep -q 'u128::from' "$target" ||
     fail "the arithmetic does not widen to u128; bytes times a rate times an epoch \
 count overflows u64 for objects a network would actually hold"
+  grep -q 'checked_mul' "$target" ||
+    fail "the u128 products are unchecked. Four u64 factors leave u128, and this \
+crate aborts on overflow in release rather than wrapping, so an object size from a \
+manifest can end the process. Refuse the product instead"
+  grep -q 'fn a_product_that_leaves_u128_is_refused_rather_than_aborting' "$target" ||
+    fail "no test shows a product past u128 returning an error rather than aborting"
 
   # 6. Every rate pair, not only the pinned one, must share a scale.
   #
@@ -192,6 +205,15 @@ fn rates() -> OperatorRates {
 
 fn widen() -> u128 {
     u128::from(1u64)
+}
+
+fn checked_product(factors: &[u128]) -> Result<u128, ThresholdError> {
+    acc.checked_mul(*f).ok_or(ThresholdError::ProductLeavesU128)
+}
+
+#[test]
+fn a_product_that_leaves_u128_is_refused_rather_than_aborting() {
+    assert_eq!(r, Err(ThresholdError::ProductLeavesU128));
 }
 
 #[test]
@@ -325,6 +347,22 @@ EOF
     exit 1
   fi
 
+  # Widened but unchecked products.
+  sed 's/    acc.checked_mul(\*f).ok_or(ThresholdError::ProductLeavesU128)/    acc * f/' \
+    "$good" > "$tmp/unchecked.rs"
+  if ( scan "$tmp/unchecked.rs" ) >/dev/null 2>&1; then
+    echo "VACUOUS GATE: unchecked u128 products were accepted!" >&2
+    exit 1
+  fi
+
+  # No test for the refusal.
+  sed 's/fn a_product_that_leaves_u128_is_refused_rather_than_aborting/fn other/' \
+    "$good" > "$tmp/noovf.rs"
+  if ( scan "$tmp/noovf.rs" ) >/dev/null 2>&1; then
+    echo "VACUOUS GATE: a module with no overflow-refusal test was accepted!" >&2
+    exit 1
+  fi
+
   # Missing module.
   if ( scan "$tmp/absent.rs" ) >/dev/null 2>&1; then
     echo "VACUOUS GATE: a missing module was accepted!" >&2
@@ -334,8 +372,9 @@ EOF
   echo "threshold-rate gate self-test OK: a wrongly scaled pinned rate, a wrongly scaled \
 unpinned rate, a rate with no unit, a missing or empty ordering test, a disagreement test \
 that names neither answer, a missing disagreement test, a band documented as asymmetric \
-that is not, a missing dead-band test, floating point, narrow arithmetic, a missing decay \
-test and an absent module are all rejected; a correct module passes."
+that is not, a missing dead-band test, floating point, narrow arithmetic, unchecked u128 \
+products, a missing overflow-refusal test, a missing decay test and an absent module are \
+all rejected; a correct module passes."
 }
 
 if [ "${1:-}" = "--self-test" ]; then
