@@ -3,8 +3,17 @@
 //! This module is intentionally read-only. It builds evidence-labelled profile
 //! Data for budlum.xyz without claiming that unproven data is verified.
 //!
-//! WIRING: unwired - the passport bundle validates itself; no gateway request
-//! is checked against a profile.
+//! Reached from the RPC surface: `rpc/server.rs` calls
+//! `validate_passport_name` at line 2873, `build_passport_profile` at 2889
+//! and `try_build_passport_proof_bundle` at 2936, all well above that file's
+//! `mod tests`. It carried a wiring marker claiming no gateway request is
+//! checked against a profile, which stopped being true when those call sites
+//! landed and nothing removed it. A stale marker is worse than none: it tells
+//! the next reader not to look.
+//!
+//! The sentence above deliberately does not spell the marker out. Both gates
+//! search for the literal text, so prose describing a marker reads as one,
+//! and this file tripped its own removal.
 
 use crate::bns::types::BnsResolved;
 use crate::core::address::Address;

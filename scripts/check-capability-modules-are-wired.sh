@@ -442,7 +442,20 @@ for path in production:
             hit = None
             for cand in re.finditer(pattern, other_body):
                 qualifier = cand.group(1)
-                if qualifier is None or qualifier == mod_name or qualifier in own_types:
+                # A type is usually addressed through the module that
+                # re-exports it: `crate::storage::StorageLifecycleState`
+                # reaches `storage/lifecycle.rs` with `storage` as the
+                # qualifier. The name is what identifies the module, and it
+                # only got here because it is unique to it. What stays
+                # rejected is `Other::name`, a member of a type, told apart
+                # by the capital.
+                by_a_type = qualifier is not None and qualifier[:1].isupper()
+                if (
+                    qualifier is None
+                    or qualifier == mod_name
+                    or qualifier in own_types
+                    or not by_a_type
+                ):
                     hit = cand
                     break
             if hit is not None:
@@ -488,10 +501,7 @@ PENDING_REVIEW = (
     "budzero/bud-state/src/note.rs",
     "src/registry/evidence.rs",
     "src/registry/poa_onboarding.rs",
-    "src/storage/lifecycle.rs",
     "src/storage/living_threshold.rs",
-    "src/storage/mobile_self.rs",
-    "src/storage/provider.rs",
 )
 
 held = [p for p in problems if any(p.startswith(m) for m in PENDING_REVIEW)]

@@ -382,7 +382,20 @@ fn mentions(
             }
             let qualifier: String = chars[k..i - 2].iter().collect();
             let by_own_type = own_types.contains(&qualifier);
-            qualified_elsewhere = !(by_module || by_own_type);
+            // A type is commonly addressed through the module that re-exports
+            // it rather than the one that defines it:
+            // `crate::storage::StorageLifecycleState` reaches
+            // `storage/lifecycle.rs`, and the qualifier is `storage`. The name
+            // itself is what identifies the module here, and it only reached
+            // this loop because it is unique to it, so a path qualifier that
+            // is neither the module nor one of its own types is still a use of
+            // this module's name and not somebody else's member.
+            //
+            // What must stay rejected is `Other::name` where `Other` is a
+            // type: that names a member of `Other`. Distinguished by case,
+            // which is the convention Rust enforces everywhere it matters.
+            let looks_like_a_type = qualifier.chars().next().is_some_and(char::is_uppercase);
+            qualified_elsewhere = !(by_module || by_own_type) && looks_like_a_type;
         } else if i > 0 && is_ident_char(chars[i - 1]) {
             i += 1;
             continue;
@@ -641,6 +654,17 @@ fn measure(root: &Path) -> Result<Outcome, String> {
 /// is a node-lifecycle decision nobody has made. All three now carry the
 /// marker.
 ///
+/// Three more resolved by a third matcher correction. A type is usually
+/// addressed through the module that re-exports it rather than the one that
+/// defines it: `crate::storage::StorageLifecycleState` reaches
+/// `storage/lifecycle.rs` while the qualifier reads `storage`, and
+/// `crate::storage::MobileSelfProfile` reaches `storage/mobile_self.rs` the
+/// same way. Both were being read as somebody else's member.
+///
+/// `storage/provider.rs` was read and is genuinely unreached: nothing
+/// constructs a `StorageProvider`, which is what a boundary looks like from
+/// the inside. It carries the marker now.
+///
 /// The list is measured, not typed. A first draft carried twenty-one entries
 /// against twelve findings, because nine of them named modules whose only
 /// problem was a stale `WIRING` marker, and that class stopped firing once
@@ -652,10 +676,7 @@ const PENDING_REVIEW: &[&str] = &[
     "budzero/bud-state/src/note.rs",
     "src/registry/evidence.rs",
     "src/registry/poa_onboarding.rs",
-    "src/storage/lifecycle.rs",
     "src/storage/living_threshold.rs",
-    "src/storage/mobile_self.rs",
-    "src/storage/provider.rs",
 ];
 
 /// # Errors
