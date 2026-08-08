@@ -44,6 +44,39 @@
 //! pointed at the storage path instead, which already works. The ceiling is
 //! a fork in the road rather than a wall.
 //!
+//! # What a challenge over described content proves
+//!
+//! Worth stating before anything is built on top of it, because it decides
+//! what the storage market is selling here.
+//!
+//! The recipe is in the manifest, so it is on chain, so everyone has it. A
+//! challenger asking an operator to produce bytes already holds every input
+//! needed to produce them itself. The operator has nothing the challenger
+//! lacks.
+//!
+//! So a challenge answered from a `Generated` source is not a proof of
+//! storage. It is a proof of computation, performed on demand, and three
+//! things follow that do not follow for `Stored` content:
+//!
+//! * What is being paid for is availability of compute, not custody of
+//!   bytes. There is no object to lose.
+//! * A slash cannot mean "you lost the data", because there is no data to
+//!   lose. It can only mean "you did not answer", which is a different fault
+//!   with a different burden: being briefly offline and having destroyed an
+//!   object are the same observation here and are not the same thing.
+//! * Replication does not apply. Three copies of stored bytes protect against
+//!   three failures; there are no copies of a recipe beyond the one the chain
+//!   already holds, so shard placement and repair traffic have nothing to act
+//!   on.
+//!
+//! None of that weakens the saving, which is real and total: nothing is
+//! stored. It does mean the deal, the penalty and the redundancy model for
+//! described content are separate questions from the ones `Stored` content
+//! answers, and answering them by analogy would get all three wrong.
+//!
+//! `Hybrid` sits between the two and inherits both halves: the prefix is
+//! custody and can be lost, the remainder is compute and cannot.
+//!
 //! WIRING: unwired - measured: no production path constructs a
 //! `ContentSource::Generated` manifest yet. The verification path and the
 //! generators are here and tested; what is missing is the transaction that
