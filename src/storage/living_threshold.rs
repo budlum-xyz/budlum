@@ -207,9 +207,7 @@ impl std::fmt::Display for ThresholdError {
                 "an object of {bytes} bytes is past the {MAX_OBJECT_BYTES} this reasons \
                  about; a size that large did not come from a manifest describing one object"
             ),
-            Self::LeverTooSlow {
-                cpu_nanos_per_byte,
-            } => write!(
+            Self::LeverTooSlow { cpu_nanos_per_byte } => write!(
                 f,
                 "a lever costing {cpu_nanos_per_byte} nanoseconds per byte is past the \
                  {MAX_CPU_NANOS_PER_BYTE} this reasons about; nobody reproduces bytes at \
@@ -823,15 +821,7 @@ mod tests {
         let mut hot = AccessEstimate::new(0);
         hot.scaled = u64::MAX;
         assert_eq!(
-            decide(
-                slow_lever,
-                MAX_OBJECT_BYTES,
-                absurd_disk,
-                hot,
-                0,
-                false,
-                0
-            ),
+            decide(slow_lever, MAX_OBJECT_BYTES, absurd_disk, hot, 0, false, 0),
             Err(ThresholdError::ProductLeavesU128)
         );
 
