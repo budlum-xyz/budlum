@@ -145,6 +145,53 @@ EOT
       fail "revision ${rev:0:12} records no 'evidence' - name the file and symbol carrying each fix"
   done
 
+  # A package claimed never to compile must actually never compile.
+  #
+  # The record narrows its own exposure by naming five packages that sit in
+  # the lockfile and are reached by nothing, so the count of unread-and-
+  # reachable crates is seventeen rather than twenty-two. That is a claim
+  # about the build, and a claim about the build that nothing checks goes
+  # stale the first time a feature is switched on. Enabling `quic` would pull
+  # in libp2p-quic and libp2p-tls, the record would still say they are never
+  # compiled, and the exposure would have grown while the paperwork said it
+  # had shrunk.
+  #
+  # `cargo tree -e normal -i <pkg>` answers "does anything reach this crate".
+  # It is skipped when cargo is unavailable or offline rather than passed,
+  # because a check that silently becomes a no-op is the failure this file
+  # exists to argue against; the skip is printed.
+  local claimed
+  claimed="$(sed -n '/packages_never_compiled[[:space:]]*=/,/\]/p' "$record" |
+    grep -oE '"[a-z0-9-]+"' | tr -d '"' || true)"
+
+  if [ -n "$claimed" ]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "SKIP: cargo is not on PATH, so packages_never_compiled was not verified." >&2
+    else
+      local pkg tree_out compiled=()
+      for pkg in $claimed; do
+        if ! tree_out="$(cargo tree -e normal -i "$pkg" 2>&1)"; then
+          echo "SKIP: cargo tree failed for $pkg, so the claim was not verified." >&2
+          compiled=()
+          break
+        fi
+        printf '%s' "$tree_out" | grep -q 'nothing to print' || compiled+=("$pkg")
+      done
+      if [ "${#compiled[@]}" -gt 0 ]; then
+        echo "FAIL: these packages are recorded as never compiled, and they compile:" >&2
+        printf '  - %s\n' "${compiled[@]}" >&2
+        cat >&2 <<'EOT'
+
+The record uses that list to narrow how many packages at this revision are
+unread. A package that started compiling is a package that started needing to
+be read, and the record now understates the exposure. Either drop it from
+packages_never_compiled and read it, or find out which feature pulled it in.
+EOT
+        exit 1
+      fi
+    fi
+  fi
+
   local n
   n="$(printf '%s\n' "$used" | sed '/^$/d' | wc -l | tr -d ' ')"
   echo "Git dependency audit OK: $n revision(s) built, each recorded with a date, the advisories checked and the code carrying each fix."
@@ -256,7 +303,33 @@ EOF
     exit 1
   fi
 
-  echo "git-dep audit gate self-test OK: unrecorded revisions, a moved pin, a stale entry, each missing field, an empty tree and a missing record are all rejected; a complete record passes."
+  # 8. A package claimed never to compile, that compiles.
+  #
+  #    Run against the real tree rather than a synthetic one: `cargo tree`
+  #    answers a question about this workspace's feature resolution, and a
+  #    fabricated lockfile has no features to resolve. The canary takes the
+  #    committed record, adds a package that demonstrably does compile, and
+  #    requires a refusal. Skipped, loudly, where cargo cannot run.
+  local root
+  root="${BUDLUM_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "SKIP: cargo is not on PATH, so the never-compiled canary did not run." >&2
+  elif ! grep -q 'packages_never_compiled' "$root/.github/git-dep-audit.toml"; then
+    echo "SKIP: the record carries no packages_never_compiled list to falsify." >&2
+  else
+    mkdir -p "$tmp/compiles/.github"
+    cp "$root/Cargo.lock" "$tmp/compiles/Cargo.lock"
+    # libp2p-gossipsub is compiled: the gossipsub feature is on in Cargo.toml
+    # and src/network reaches it. Claiming it never compiles must fail.
+    sed 's/^packages_never_compiled = \[/packages_never_compiled = [\n    "libp2p-gossipsub",/' \
+      "$root/.github/git-dep-audit.toml" > "$tmp/compiles/.github/git-dep-audit.toml"
+    if ( cd "$root" && scan "$tmp/compiles" ) >/dev/null 2>&1; then
+      echo "VACUOUS GATE: a package claimed never to compile, which compiles, was accepted!" >&2
+      exit 1
+    fi
+  fi
+
+  echo "git-dep audit gate self-test OK: unrecorded revisions, a moved pin, a stale entry, each missing field, an empty tree, a missing record and a package wrongly claimed never to compile are all rejected; a complete record passes."
 }
 
 if [ "${1:-}" = "--self-test" ]; then
