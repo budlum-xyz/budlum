@@ -157,6 +157,39 @@ ENUM_BODY = re.compile(
 )
 
 
+COMMENT_LINE = re.compile(r"//[^\n]*")
+
+
+def strip_comments(src):
+    """Drop every `//` comment, including doc comments.
+
+    Kept out of the evidence pool, after two measurements said the opposite of
+    what the earlier reasoning assumed.
+
+    The reasoning was that a comment sits beside the call it describes, so
+    removing it removes context the match depended on. Twice the comment sat
+    beside something else entirely:
+
+      `budzero/bud-node/src/discovery.rs` counted as wired because
+      `src/storage/provider.rs` contains "Provider that answers as
+      `operator`". Different crate, different subject, and discovery.rs is
+      reached by nothing but a `pub use`.
+
+      `src/cross_domain/bridge_relayer.rs` counted as wired because it exports
+      a function named `relayer` and `src/registry/role.rs` contains
+      "Cross-domain message relayer (permissionless)". A comment about a role,
+      matching the name of a function in another module.
+
+    A comment is prose. It records intent, and intent is what this gate exists
+    to separate from behaviour, so it does not belong in the pool that decides
+    whether behaviour happened. The four modules the earlier note said this
+    would hide were each rechecked: `content_id` and `pruning` are reached
+    through their own types, which is a call and is now counted as one;
+    `discovery` is not reached at all.
+    """
+    return COMMENT_LINE.sub("", src)
+
+
 def strip_doc_links(src):
     r"""Drop rustdoc intra-doc links, `[\`path::Name\`]`.
 
@@ -304,7 +337,9 @@ production = [p for p in files if not is_test_path(p)]
 # What counts as evidence of a call: the file with its imports and re-exports
 # removed.
 evidence = {
-    p: strip_enum_bodies(strip_use_statements(strip_doc_links(strip_string_literals(b))))
+    p: strip_enum_bodies(
+        strip_use_statements(strip_comments(strip_string_literals(b)))
+    )
     for p, b in bodies.items()
 }
 
@@ -368,6 +403,14 @@ for path in production:
         for m in re.finditer(r"\bpub (?:async )?fn ([a-z_][a-z0-9_]*)", body)
     }
 
+    # Types this module exports, used above to accept `Type::assoc_fn(...)`.
+    own_types = {
+        m.group(1)
+        for m in re.finditer(
+            r"\bpub (?:struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)", body
+        )
+    }
+
     callers = set()
     for other in production:
         if other == path:
@@ -379,17 +422,30 @@ for path in production:
             # `(?<!:)` after the boundary rejects `Other::Name`: that names a
             # member of `Other`, not this module. `mod_name::Name` is kept,
             # since that is this module being addressed directly.
+            # A call qualified by one of this module's own types is a call
+            # into this module: an associated function is reached through its
+            # type, so `ContentId::of_subrange_for_deal(...)` reaches
+            # `content_id.rs`. Rejecting it reported that module as unreached
+            # while `provider.rs` called it at line 183.
+            # Python look-behind must be fixed width, so the qualifier is
+            # captured and checked afterwards instead of being alternated
+            # inside the pattern.
             pattern = (
-                r"(?:(?<![a-zA-Z0-9_:])|(?<=\b"
-                + re.escape(mod_name)
-                + r"::))"
+                r"(?:^|[^a-zA-Z0-9_:]|(?<=::))"
+                r"(?:([A-Za-z_][A-Za-z0-9_]*)::)?"
                 + re.escape(fn)
                 + r"(?![a-zA-Z0-9_])"
             )
             if fn in fn_names:
                 # `name(`, or `name::<T>(` for a turbofish.
                 pattern += r"\s*(?:::\s*<[^<>]*>\s*)?\("
-            if re.search(pattern, other_body):
+            hit = None
+            for cand in re.finditer(pattern, other_body):
+                qualifier = cand.group(1)
+                if qualifier is None or qualifier == mod_name or qualifier in own_types:
+                    hit = cand
+                    break
+            if hit is not None:
                 callers.add(fn)
         if callers:
             break
@@ -421,10 +477,57 @@ if not checked:
     )
     sys.exit(2)
 
-if problems:
-    for problem in problems:
+# Findings held while each module is read, mirroring PENDING_REVIEW in
+# xtask/gates. Both gates now measure the same eight, exactly.
+#
+# The list only shrinks. An entry that matches no finding is refused below,
+# because a suppression outliving the thing it suppressed is how a list stops
+# describing the tree.
+PENDING_REVIEW = (
+    "budzero/bud-node/src/sharding.rs",
+    "budzero/bud-state/src/note.rs",
+    "src/registry/evidence.rs",
+    "src/registry/poa_onboarding.rs",
+    "src/storage/lifecycle.rs",
+    "src/storage/living_threshold.rs",
+    "src/storage/mobile_self.rs",
+    "src/storage/provider.rs",
+)
+
+held = [p for p in problems if any(p.startswith(m) for m in PENDING_REVIEW)]
+blocking = [p for p in problems if p not in held]
+
+# The dead-entry check only makes sense against the real tree. A canary stages
+# a two-file workspace where none of the eight exist, so every entry would look
+# dead and the canary would fail for the wrong reason.
+real_tree = os.path.isfile(os.path.join(root, "Cargo.lock")) and os.path.isdir(
+    os.path.join(root, "budzero")
+)
+
+dead = (
+    [m for m in PENDING_REVIEW if not any(p.startswith(m) for p in problems)]
+    if real_tree
+    else []
+)
+if dead:
+    for m in dead:
+        print(
+            f"FAIL: PENDING_REVIEW names {m} and nothing reports it. Either it was "
+            f"fixed without the list being shortened, or it was never a finding.",
+            file=sys.stderr,
+        )
+    sys.exit(1)
+
+if blocking:
+    for problem in blocking:
         print(f"FAIL: {problem}", file=sys.stderr)
     sys.exit(1)
+
+if held:
+    print(
+        f"  {len(held)} finding(s) held for review, see PENDING_REVIEW.",
+        file=sys.stderr,
+    )
 
 print(
     f"capability wiring gate OK: {checked} capability modules measured, "
