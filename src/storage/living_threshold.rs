@@ -171,6 +171,13 @@ pub enum ThresholdError {
     LeverIsFree,
     /// Rates of zero make every comparison meaningless rather than cheap.
     RatesAreZero,
+    /// An object of no bytes has nothing to save and nothing to reproduce.
+    ///
+    /// Refused rather than answered. Without this the zero falls through to
+    /// `per_read == 0` and comes back as [`ThresholdError::LeverIsFree`],
+    /// which sends a caller to look at its lever when the wrong number was
+    /// the size.
+    ObjectIsEmpty,
     /// The object is past [`MAX_OBJECT_BYTES`].
     ObjectTooLarge { bytes: u64 },
     /// The lever is past [`MAX_CPU_NANOS_PER_BYTE`].
@@ -201,6 +208,11 @@ impl std::fmt::Display for ThresholdError {
             Self::RatesAreZero => write!(
                 f,
                 "operator rates of zero cannot order two strategies against each other"
+            ),
+            Self::ObjectIsEmpty => write!(
+                f,
+                "an object of no bytes has no storage to save and no bytes to reproduce, \
+                 so no lever can be worth applying to it"
             ),
             Self::ObjectTooLarge { bytes } => write!(
                 f,
@@ -284,6 +296,7 @@ impl AccessEstimate {
 /// [`ThresholdError::LeverSavesNothing`] for a lever that does not shrink the
 /// object, [`ThresholdError::LeverIsFree`] for one claiming no processor cost,
 /// [`ThresholdError::RatesAreZero`] when the operator's rates are zero,
+/// [`ThresholdError::ObjectIsEmpty`] for an object of no bytes,
 /// [`ThresholdError::ObjectTooLarge`] and [`ThresholdError::LeverTooSlow`]
 /// for inputs past the bounds above, and
 /// [`ThresholdError::ProductLeavesU128`] when the factors given multiply past
@@ -307,6 +320,9 @@ pub fn break_even_rate_scaled(
     // Bound the inputs before multiplying them. `checked_product` catches an
     // overflow either way, but it reports that the arithmetic gave up rather
     // than which number was wrong, and `object_bytes` arrives from a manifest.
+    if object_bytes == 0 {
+        return Err(ThresholdError::ObjectIsEmpty);
+    }
     if object_bytes > MAX_OBJECT_BYTES {
         return Err(ThresholdError::ObjectTooLarge {
             bytes: object_bytes,
@@ -861,6 +877,15 @@ mod tests {
             Err(ThresholdError::LeverTooSlow {
                 cpu_nanos_per_byte: MAX_CPU_NANOS_PER_BYTE + 1
             })
+        );
+
+        // An empty object is its own answer, not a lever problem. Without
+        // the check the zero reaches `per_read == 0` and returns
+        // LeverIsFree, which names the wrong input: the lever is fine and
+        // the size is what nobody supplied.
+        assert_eq!(
+            break_even_rate_scaled(described(), 0, rates()),
+            Err(ThresholdError::ObjectIsEmpty)
         );
 
         // Exactly at each bound is inside it. A bound that refused its own
