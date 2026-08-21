@@ -63,7 +63,14 @@ where
             zps[ch_i]
                 * ch.iter()
                     .enumerate()
-                    .map(|(e_i, &c)| SC::Challenge::ith_basis_element(e_i).unwrap() * c)
+                    .map(|(e_i, &c)| {
+                        // `e_i` indexes the extension basis, whose length is
+                        // `DIMENSION`; the caller checked each chunk has that
+                        // many coefficients. Zero is the identity for the sum
+                        // below, so an out-of-range index contributes nothing
+                        // rather than taking the node down.
+                        SC::Challenge::ith_basis_element(e_i).map_or(SC::Challenge::ZERO, |b| b * c)
+                    })
                     .sum::<SC::Challenge>()
         })
         .sum::<SC::Challenge>()
@@ -395,7 +402,16 @@ where
     challenger.observe_slice(&config.security_parameters());
     challenger.observe(commitments.trace.clone());
     if preprocessed_width > 0 {
-        challenger.observe(preprocessed_commit.as_ref().unwrap().clone());
+        // `process_preprocessed_trace` only returns `Some` together with a
+        // non-zero width, so this is unreachable on that path. It is an
+        // `Err` rather than an `unwrap` because the guarantee lives in
+        // another function: a later edit there would turn a rejected proof
+        // into a panicking node, and a verifier panic is a liveness bug
+        // reachable by anyone who can submit a proof.
+        let commit = preprocessed_commit
+            .as_ref()
+            .ok_or(VerificationError::InvalidProofShape)?;
+        challenger.observe(commit.clone());
     }
     challenger.observe_slice(public_values);
 
@@ -452,7 +468,7 @@ where
                 opened_values
                     .trace_next
                     .clone()
-                    .expect("checked in shape validation"),
+                    .ok_or(VerificationError::InvalidProofShape)?,
             ));
         }
         (
@@ -460,13 +476,28 @@ where
             vec![(trace_domain, trace_points)],
         )
     };
-    let aux_round = commitments.aux_trace.clone().map(|commit| {
-        let mut aux_points = vec![(zeta, opened_values.aux_trace_local.clone().unwrap())];
-        if main_next {
-            aux_points.push((zeta_next, opened_values.aux_trace_next.clone().unwrap()));
+    // `valid_shape` above ties these to `has_aux_trace`, which is derived from
+    // the same `commitments.aux_trace`. Re-checking here keeps the rejection
+    // local to the value being read instead of depending on a check performed
+    // a hundred lines earlier.
+    let aux_round = match commitments.aux_trace.clone() {
+        Some(commit) => {
+            let local = opened_values
+                .aux_trace_local
+                .clone()
+                .ok_or(VerificationError::InvalidProofShape)?;
+            let mut aux_points = vec![(zeta, local)];
+            if main_next {
+                let next = opened_values
+                    .aux_trace_next
+                    .clone()
+                    .ok_or(VerificationError::InvalidProofShape)?;
+                aux_points.push((zeta_next, next));
+            }
+            Some((commit, vec![(trace_domain, aux_points)]))
         }
-        (commit, vec![(trace_domain, aux_points)])
-    });
+        None => None,
+    };
 
     coms_to_verify.push(trace_round);
     if let Some(ar) = aux_round {
@@ -486,14 +517,20 @@ where
 
     // Add preprocessed commitment verification if present
     if preprocessed_width > 0 {
-        let mut pre_points = vec![(zeta, opened_values.preprocessed_local.clone().unwrap())];
+        let local = opened_values
+            .preprocessed_local
+            .clone()
+            .ok_or(VerificationError::InvalidProofShape)?;
+        let mut pre_points = vec![(zeta, local)];
         if pre_next {
-            pre_points.push((zeta_next, opened_values.preprocessed_next.clone().unwrap()));
+            let next = opened_values
+                .preprocessed_next
+                .clone()
+                .ok_or(VerificationError::InvalidProofShape)?;
+            pre_points.push((zeta_next, next));
         }
-        coms_to_verify.push((
-            preprocessed_commit.unwrap(),
-            vec![(trace_domain, pre_points)],
-        ));
+        let commit = preprocessed_commit.ok_or(VerificationError::InvalidProofShape)?;
+        coms_to_verify.push((commit, vec![(trace_domain, pre_points)]));
     }
 
     pcs.verify(coms_to_verify, opening_proof, &mut challenger)

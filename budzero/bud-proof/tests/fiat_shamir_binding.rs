@@ -202,3 +202,86 @@ fn alpha_and_zeta_follow_their_commitments() {
         );
     }
 }
+
+// ── Verifier panic surface (2026-08-21) ──────────────────────────────────
+// A proof is attacker-supplied data. Anything the verifier reads out of it is
+// reachable by anyone who can submit one, so a panic there is not a crash in
+// one request: `panic = "abort"` in the release profile takes the whole node
+// down, and a node that aborts on a malformed proof is a liveness hole that
+// costs the attacker one message.
+//
+// The values below were guarded only indirectly - `valid_shape` and
+// `process_preprocessed_trace` rejected the mismatching cases a hundred lines
+// earlier, so the `unwrap`s were unreachable *at the time they were written*.
+// That is the fragile kind of correct: the guarantee lives in a different
+// function, and an edit there silently converts a rejected proof into a
+// panicking node. They now return `InvalidProofShape` at the point of use.
+
+/// No `unwrap`/`expect` may read proof-supplied data in the verifier.
+///
+/// Scoped to the verifier because that is the side that consumes untrusted
+/// input; the prover runs on data we produced ourselves.
+#[test]
+fn verifier_never_unwraps_attacker_supplied_values() {
+    let offenders: Vec<(usize, &str)> = code(VERIFIER)
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(".unwrap()") || l.contains(".expect("))
+        .map(|(i, l)| (i + 1, l.trim()))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "the verifier panics on malformed proof data at {offenders:?}. A proof \
+         is attacker-supplied; return `VerificationError::InvalidProofShape` \
+         instead so a bad proof is rejected rather than taking the node down"
+    );
+}
+
+/// The shape-validated optionals must be re-checked where they are read.
+///
+/// Pins the fix rather than the absence of a symbol: each of these fields is
+/// unwrapped from an `Option` whose `Some`-ness was established elsewhere, and
+/// the point of the change is that the rejection is now local.
+#[test]
+fn optional_openings_are_rejected_locally_not_assumed() {
+    for field in [
+        "aux_trace_local",
+        "aux_trace_next",
+        "preprocessed_local",
+        "preprocessed_next",
+        "trace_next",
+    ] {
+        let read = code(VERIFIER)
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(field))
+            .any(|(i, _)| {
+                // The `ok_or` sits within a few lines of the field read, since
+                // the read is a multi-line method chain.
+                code(VERIFIER)[i..(i + 4).min(code(VERIFIER).len())]
+                    .iter()
+                    .any(|l| l.contains("ok_or(VerificationError::InvalidProofShape)"))
+            });
+        assert!(
+            read,
+            "`{field}` is read out of the proof without a local \
+             `ok_or(VerificationError::InvalidProofShape)`; it would panic if \
+             the distant shape check ever stops covering it"
+        );
+    }
+}
+
+/// `degree_bits` comes out of the proof bytes and is used as a shift amount.
+#[test]
+fn degree_bits_is_bounded_before_it_is_shifted() {
+    let bound = first(VERIFIER, "> MAX_VERIFIER_DEGREE_BITS");
+    let shift = first(VERIFIER, "let degree = 1 << degree_bits");
+    assert!(
+        bound < shift,
+        "`degree_bits` is shifted at line {} before being bounded at line {}; \
+         a corrupt proof would overflow the shift and abort the node",
+        shift + 1,
+        bound + 1
+    );
+}
