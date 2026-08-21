@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 753;
+pub const TRACE_WIDTH: usize = 754;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -594,6 +594,15 @@ pub const COL_SYSCALL_IS_6: usize = 741;
 pub const COL_SYSCALL_IS_1: usize = 742;
 pub const COL_SYSCALL_IS_2: usize = 743;
 pub const COL_SYSCALL_IS_3: usize = 744;
+
+/// Program CTL cokluk taniki: satir `i` icin pc=`i`'nin CPU trace'inde kac kez
+/// calistirildigi.
+///
+/// Program CTL bir *lookup*, permutasyon degil. Dallanma varken bir komut hic
+/// calistirilmayabilir (atlanan dal) veya birden cok kez calistirilir (dongu
+/// govdesi). Sabit agirlik `pre_active` kullanildigi surece durust prover
+/// dengesiz LogUp toplami uretir ve `InvalidProof` alir.
+pub const COL_PROG_MULT: usize = 753;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
@@ -2365,6 +2374,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_pc: AB::Expr = pre_cur[0].into();
             let pre_inst: AB::Expr = pre_cur[1].into();
             let pre_active: AB::Expr = pre_cur[2].into();
+            // ROM tarafinin LogUp agirligi: pc'nin kac kez calistirildigi.
+            // Taahhut edilen ana trace'te durur -- dogrulayici trace'i
+            // gormedigi icin on-islenmis tabloya konamaz.
+            let prog_mult: AB::Expr = cur[COL_PROG_MULT].into();
 
             let raw_inst: AB::Expr = cur[COL_RAW_INST].into();
             let pre_opcode: AB::Expr = pre_cur[3].into();
@@ -2459,7 +2472,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let is_expand: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
             let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_expand);
             let prog_active_ext: AB::ExprEF = prog_active.into();
-            let pre_active_ext: AB::ExprEF = pre_active.into();
+            // Program disi satir hicbir sey odunc veremez: cokluk yalnizca
+            // gercek bir ROM satirinda (pre_active=1) sifirdan farkli olabilir.
+            // Aksi halde prover programda olmayan bir pc'ye agirlik yazarak
+            // dengeyi uydurabilirdi.
+            builder.assert_zero(prog_mult.clone() * (one.clone() - pre_active.clone()));
+            let pre_active_ext: AB::ExprEF = prog_mult.into();
 
             builder.when_transition().assert_zero_ext(
                 (s_prog_nxt.clone() - s_prog_cur.clone())
