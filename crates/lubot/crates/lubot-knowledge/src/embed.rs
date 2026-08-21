@@ -53,7 +53,7 @@ impl TfIdfEmbedder {
         let lower = text.to_lowercase();
         lower
             .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| t.len() >= 2 && !STOPWORDS.contains(&t))
+            .filter(|t| t.len() >= 2 && !STOPWORDS.contains(t))
             .map(ToString::to_string)
             .collect()
     }
@@ -74,10 +74,13 @@ impl TfIdfEmbedder {
         // Sıklığa göre sırala, boyut kadar tut.
         let mut ranked: Vec<(String, usize)> = doc_freq.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // `ranked` is still needed below to look up document frequencies, so
+        // borrow here instead of consuming it. `into_iter()` moved the vector
+        // and the later `ranked.iter()` then failed to compile.
         self.vocab = ranked
-            .into_iter()
+            .iter()
             .take(self.dimensions)
-            .map(|(t, _)| t)
+            .map(|(t, _)| t.clone())
             .collect();
         self.vocab_index = self
             .vocab
@@ -211,7 +214,9 @@ mod tests {
 
     #[test]
     fn cosine_zero_for_zero_vectors() {
-        assert_eq!(TfIdfEmbedder::cosine_similarity(&[], &[]), 0.0);
+        // `&[]` bir `&[_; 0]`; imza `&EmbeddingVector` (= `&Vec<f64>`) istiyor.
+        let empty: EmbeddingVector = Vec::new();
+        assert_eq!(TfIdfEmbedder::cosine_similarity(&empty, &empty), 0.0);
         let zero = vec![0.0; 8];
         assert_eq!(TfIdfEmbedder::cosine_similarity(&zero, &zero), 0.0);
     }

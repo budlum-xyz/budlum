@@ -32,10 +32,10 @@ pub fn validate_records(lines: &[String]) -> Result<Vec<InstructionRecord>, Sche
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
         let line_no = i + 1;
-        if line.as_bytes().len() > MAX_RECORD_BYTES {
+        if line.len() > MAX_RECORD_BYTES {
             return Err(SchemaError::TooLarge {
                 line: line_no,
-                bytes: line.as_bytes().len(),
+                bytes: line.len(),
                 max: MAX_RECORD_BYTES,
             });
         }

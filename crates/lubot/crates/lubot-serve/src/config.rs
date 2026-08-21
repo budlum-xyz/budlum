@@ -79,9 +79,8 @@ pub fn assert_served_name_is_ours(cfg: &ServeConfig) -> Result<(), String> {
 #[must_use]
 fn looks_like_multiplier(name: &str) -> bool {
     let lower = name.to_lowercase();
-    let mut chars = lower.chars().peekable();
     let mut in_number = false;
-    while let Some(c) = chars.next() {
+    for c in lower.chars() {
         if c.is_ascii_digit() || c == '.' || c == ',' {
             in_number = true;
         } else if c == 'x' && in_number {
@@ -115,16 +114,20 @@ mod tests {
 
     #[test]
     fn third_party_name_in_served_alias_is_rejected() {
-        let mut cfg = ServeConfig::default();
-        cfg.served_model_name = "lubot-deepseek-v1".to_string();
+        let cfg = ServeConfig {
+            served_model_name: "lubot-deepseek-v1".to_string(),
+            ..Default::default()
+        };
         assert!(assert_served_name_is_ours(&cfg).is_err());
     }
 
     #[test]
     fn multiplier_labels_are_rejected() {
         for bad in ["lubot-0.5x", "lubot-10x-v1", "lubot-2x"] {
-            let mut cfg = ServeConfig::default();
-            cfg.served_model_name = bad.to_string();
+            let cfg = ServeConfig {
+                served_model_name: bad.to_string(),
+                ..Default::default()
+            };
             assert!(assert_served_name_is_ours(&cfg).is_err(), "{bad} reddedilmeli");
         }
     }

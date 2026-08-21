@@ -70,7 +70,11 @@ fn is_jwt(v: &str) -> bool {
 }
 
 /// Bilinen sır biçimleri: (tür adı, tespit fonksiyonu).
-const VALUE_PATTERNS: &[(&str, fn(&str) -> bool)] = &[
+/// Bir degerin belirli bir sir turune benzeyip benzemedigini soyleyen
+/// yuklem. Tablo `(etiket, yuklem)` ciftlerinden olusur.
+type ValuePredicate = fn(&str) -> bool;
+
+const VALUE_PATTERNS: &[(&str, ValuePredicate)] = &[
     ("deepseek_key", is_deepseek_key),
     ("aws_access_key", is_aws_access_key),
     ("github_token", is_github_token),
@@ -191,7 +195,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
 fn redact_known_values(line: &str, report: &mut RedactionReport) -> String {
     let mut out = String::new();
     let mut current = String::new();
-    let mut flush = |current: &mut String, out: &mut String, report: &mut RedactionReport| {
+    let flush = |current: &mut String, out: &mut String, report: &mut RedactionReport| {
         if current.is_empty() {
             return;
         }
