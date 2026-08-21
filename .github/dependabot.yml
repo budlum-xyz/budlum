@@ -93,7 +93,9 @@ updates:
       # Lru/gossipsub/yamux dependencies are NOT hidden from Dependabot.
       - dependency-name: "hickory-proto"
   - package-ecosystem: "docker"
-    directory: "/"
+    # Dockerfile ops/ altinda; directory: "/" iken Dependabot
+    # "No Dockerfiles nor Kubernetes YAML found in /" ile HATA veriyordu.
+    directory: "/ops"
     schedule:
       interval: "weekly"
       day: "monday"
