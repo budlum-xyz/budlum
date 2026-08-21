@@ -1,0 +1,54 @@
+[package]
+name = "budscan"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Budscan - Budlum'un merkeziyetsiz tarayici cekirdegi: ad kurali, kanit dogrulamasi, icerik getiricileri ve arama."
+publish = false
+
+# budscan kendi workspace'idir. Sebep, kok manifest'in bagimlilik grafigi:
+# budlum-core libp2p/tokio/jsonrpsee tasiyor ve bunlarin hicbiri bir tarayici
+# cekirdeginin ihtiyaci degil. Ayri workspace, bu crate'in bagimlilik
+# yuzeyini dort kuture indiriyor ve bir tarayicinin guven sinirinda duran
+# kodun neyi cagirdigini okunabilir tutuyor.
+[workspace]
+
+[lib]
+name = "budscan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "budscan"
+path = "src/bin/budscan.rs"
+
+[dependencies]
+# Icerik adresleme: B.U.D. `ContentId` ve IPFS sha2-256 multihash icin SHA-256,
+# Arweave `data_root` icin SHA-384. Ikisi de ayni crate'ten gelir.
+sha2 = "0.10"
+# ENS namehash (EIP-137) Keccak-256'dir, SHA3-256 degil.
+sha3 = "0.10"
+hex = "0.4"
+# `evidence.rs` kanit kayitlarini Serialize/Deserialize turetiyor. Bir
+# serilestirici (serde_json vb.) burada BAGIMLILIK DEGIL: bicimi cagiran
+# secer. budscan yalniz veri modelini tanimlar, JSON'a kendi yazmaz.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Yalnızca testlerde: risk raporunun serde yuvarlak-geçiş doğrulaması.
+# Üretim bağımlılık yüzeyi değişmez (budscan kendi JSON yazmaz).
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

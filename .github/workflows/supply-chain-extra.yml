@@ -1,0 +1,162 @@
+name: Supply Chain Extra (udeps + geiger)
+
+on:
+  push:
+    branches: [ main ]
+  # Both jobs here are required checks on main. A required check that never
+  # runs on a pull request leaves every PR permanently "expected" and
+  # unmergeable, so this has to fire on PRs too. The path filter is gone for
+  # the same reason: a filtered-out run reports nothing rather than success,
+  # which branch protection reads as still-waiting.
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Haftalık hijyen taraması (cargo update etkileri + yeni dep'ler)
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+# Yalnız okur.
+concurrency:
+  group: supply-chain-extra-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  udeps:
+    name: "Udeps: kullanılmayan bağımlılık kapısı"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # udeps nightly-gerektirir (rustc private API); kurulum + çalıştırma aynı nightly'de.
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo-udeps kur (locked; crate.io sürümü log'da kanıtlı)
+        run: cargo +nightly install cargo-udeps --locked
+      - name: Kanarya (vacuous-gate koruması)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- udeps --self-test
+      # `|| true` used to swallow the tool's exit status entirely, so a
+      # cargo-udeps that died at startup produced an empty report and the gate
+      # read it as clean. The status is captured instead of discarded: a
+      # non-zero exit is tolerated only when the tool still emitted a
+      # parseable report (udeps exits non-zero *because* it found unused
+      # dependencies, which is a finding, not a failure).
+      - name: "Ölçüm + kapı (ratchet: baseline dışı bulgu = FAIL)"
+        run: |
+          set -euo pipefail
+
+          set +e
+          cargo +nightly udeps --all-targets > /tmp/udeps1.txt 2>&1
+          status1=$?
+          set -e
+          cat /tmp/udeps1.txt
+          if [ "$status1" -ne 0 ] && ! grep -q '^unused dependencies:' /tmp/udeps1.txt; then
+            echo "cargo-udeps parse edilebilir rapor üretmeden $status1 ile öldü." >&2
+            exit "$status1"
+          fi
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- udeps /tmp/udeps1.txt
+
+          cd budzero
+
+          set +e
+          cargo +nightly udeps --all-targets > /tmp/udeps2.txt 2>&1
+          status2=$?
+          set -e
+          cat /tmp/udeps2.txt
+          if [ "$status2" -ne 0 ] && ! grep -q '^unused dependencies:' /tmp/udeps2.txt; then
+            echo "cargo-udeps (budzero) parse edilebilir rapor üretmeden $status2 ile öldü." >&2
+            exit "$status2"
+          fi
+          cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- udeps /tmp/udeps2.txt
+
+  geiger:
+    name: "Geiger: unsafe görünürlük (first-party 0 kanıt katmanı)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo-geiger kur (locked; crate.io sürümü log'da kanıtlı)
+        run: cargo install cargo-geiger --locked
+      - name: Kanarya (vacuous-gate koruması)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- geiger --self-test
+      # `|| true` eskiden HER hatayı yutuyordu: tarama yarıda ölse bile kapı
+      # kırpılmış bir raporu temiz sayıyordu. Bunu kaldırmak doğruydu, ama ilk
+      # düzeltme fazla katıydı - cargo-geiger, tarama başarıyla tamamlansa da
+      # bağımlılıklarda `unsafe` bulduğunda "error: Found N warnings" yazıp
+      # non-zero dönüyor. Üçüncü taraf `unsafe`'i bu kapının konusu değil
+      # (first-party crate'ler zaten `#![forbid(unsafe_code)]`), dolayısıyla o
+      # çıkış kodu bir tarama hatası değil.
+      #
+      # Ayrım rapordan yapılır: rapor first-party satırı içeriyorsa tarama
+      # tamamlanmıştır ve kararı `budlum-gates geiger` verir; içermiyorsa
+      # tarama gerçekten ölmüştür ve kapı zaten hata döndürür (fp_seen == 0
+      # kolu). Böylece hem `|| true`nun sakladığı durum yakalanıyor hem de
+      # dependency `unsafe`'i yanlışlıkla ölümcül sayılmıyor.
+      - name: Ölçüm + first-party kapısı (budlum + budzero)
+        run: |
+          set -euo pipefail
+
+          set +e
+          cargo geiger --all-targets > /tmp/geiger1.txt 2>&1
+          status1=$?
+          set -e
+          cat /tmp/geiger1.txt
+          if [ "$status1" -ne 0 ] && ! grep -qE '(budlum-core|bud-[a-z]+) [0-9]' /tmp/geiger1.txt; then
+            echo "cargo-geiger taramayı tamamlamadan $status1 ile öldü:" >&2
+            echo "raporda tek bir first-party satırı yok." >&2
+            exit "$status1"
+          fi
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- geiger /tmp/geiger1.txt
+
+          # budzero ayrı bir workspace ve kökü VIRTUAL bir manifest (yalnızca
+          # [workspace], paket yok). cargo-geiger böyle bir kökte çalışmayı
+          # reddediyor: "is a virtual manifest, but this command requires
+          # running against an actual package". Yani bu adım bugüne kadar
+          # budzero'nun tek bir crate'ini bile taramamıştı - `|| true`
+          # döneminde bu sessizce geçiyordu, kapı fail-closed olunca ortaya
+          # çıktı.
+          #
+          # Çözüm crate crate taramak. Sekiz üyenin her biri gerçek bir paket;
+          # raporları birleştirilip tek kapıdan geçiriliyor, böylece bir
+          # crate'in taranmadan atlanması da fark edilir.
+          cd budzero
+          : > /tmp/geiger2.txt
+          for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-node bud-cli verifier-registry; do
+            set +e
+            # cargo-geiger MUTLAK yol istiyor: goreli verilirse
+            # "is not an absolute path. Please provide an absolute path."
+            # deyip 101 ile cikiyor.
+            cargo geiger --all-targets --manifest-path "$PWD/$crate/Cargo.toml" > "/tmp/geiger-$crate.txt" 2>&1
+            status2=$?
+            set -e
+            cat "/tmp/geiger-$crate.txt"
+            if [ "$status2" -ne 0 ] && ! grep -qE '(budlum-core|bud-[a-z]+|verifier-registry) [0-9]' "/tmp/geiger-$crate.txt"; then
+              echo "cargo-geiger ($crate) taramayı tamamlamadan $status2 ile öldü:" >&2
+              echo "raporda tek bir first-party satırı yok." >&2
+              exit "$status2"
+            fi
+            cat "/tmp/geiger-$crate.txt" >> /tmp/geiger2.txt
+          done
+          cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- geiger /tmp/geiger2.txt

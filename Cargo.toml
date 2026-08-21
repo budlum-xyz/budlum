@@ -1,0 +1,212 @@
+[package]
+name = "budlum-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+# : root cargo-deny `unlicensed = "deny"` kuralı kendi crate'imizi de
+# reddetmesin diye zorunlu. Repo kökündeki LICENSE.md (PolyForm Shield 1.0.0) ile aynı.
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[features]
+# NIST FIPS 204 FINAL: varsayilan PQ backend ML-DSA-65 (validator) + ML-DSA-87 (cuzdan).
+# Dilithium5 (round-3, eski) yalniz `pq-dilithium` acikca secilirse derlenir -
+# default DEGILDIR: yalnizca NIST final semalari etkinlestirilir.
+default = ["pq-ml-dsa", "wallet-ml-dsa"]
+pq-dilithium = ["dep:pqcrypto-dilithium", "dep:pqcrypto-traits"]
+pq-ml-dsa = ["dep:ml-dsa"]
+# User/wallet ML-DSA-87 signatures are always required (FIPS 204 Category 5).
+wallet-ml-dsa = ["dep:ml-dsa"]
+p2p-mdns = ["libp2p/mdns"]
+
+[dependencies]
+sha2 = "0.11"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+postcard = { version = "1.0", features = ["alloc"] }
+sled = "0.34"
+
+# P2P Networking
+tokio = { version = "1", features = ["full"] }
+# libp2p is taken from the rust-libp2p tree rather than crates.io.
+#
+# 0.57.0 is tagged upstream but unpublished, and it is the only build that
+# closes three advisories:
+#
+#   GHSA-vxx9-2994-q338  yamux < 0.13.10            (libp2p-yamux 0.47 linked
+#                                                    0.12.1 *and* 0.13.10)
+#   GHSA-3v94-mw7p-v465  hickory-proto <= 0.25.2    (no patched 0.25.x exists)
+#   GHSA-q2qq-hmj6-3wpp  hickory-proto <= 0.26.0    (fixed in 0.26.1)
+#
+# Neither dependency is optional: `dns` is what makes /dns4 bootstrap
+# multiaddrs dialable, and yamux is the muxer. libp2p-yamux 0.48.0 drops the
+# 0.12 path for yamux 0.14; libp2p-dns 0.45.0 moves to hickory 0.26.
+#
+# This is a direct git dependency rather than [patch.crates-io] on purpose:
+# tools that re-resolve the manifest in a scratch directory (cargo-semver-checks
+# among them) do not carry the patch table across, and then fail to select a
+# version for a requirement crates.io cannot satisfy.
+#
+# Pinned by full revision so the source cannot move. cargo-deny keeps
+# `unknown-git = "deny"` and allow-lists only this host.
+#
+# Revisit when 0.57.0 is published: swap back to a plain version requirement.
+# `advisory_reachability` pins the reason so the pin cannot be forgotten.
+libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd", features = [
+    "tokio",
+    "tcp",
+    # `dns` wraps the TCP transport in a resolving layer so that /dns4, /dns6
+    # and /dnsaddr multiaddrs are dialable. Without it libp2p-tcp rejects every
+    # name-based multiaddr with MultiaddrNotSupported, which silently breaks
+    # both the `--dial=/dns4/...` bootstrap path and any operator that
+    # configures a hostname peer instead of a raw IP.
+    "dns",
+    "noise",
+    "yamux",
+    "macros",
+    "ping",
+    "identify",
+    "gossipsub",
+    "kad",
+    "request-response",
+] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "3.0.0"
+rand = "0.10.1"
+sha3 = "0.12"
+prost = "0.14.3"
+bytes = "1.11.1"
+# bincode is held at 1.x deliberately. Its byte output is consensus input, not
+# just storage: `Block::calculate_hash` folds serialized slashing evidence into
+# the block hash, and the account state root folds serialized tokenomics,
+# timed_burn and burn_reserve_address. If a major bump changed the encoding of
+# any of those by a single byte, an upgraded node would derive a different hash
+# from byte-identical state and split the chain from the un-upgraded ones.
+#
+# RUSTSEC-2025-0141 marks 1.x unmaintained. That is an advisory about upstream
+# activity, not a vulnerability, and it is reported on every `cargo audit` run
+# rather than silenced. Moving off 1.x is a wire-format migration with a
+# coordinated activation height, not a dependency bump; Dependabot is told to
+# skip the major so the decision cannot be made by merging a PR.
+bincode = "1.3"
+schnorrkel = "0.11.5"
+bls12_381 = { version = "0.8.0", features = ["experimental"] }
+# bls12_381 0.8's published RFC 9380 API uses digest 0.9. Keep this explicit
+# alias separate from the application's sha2 0.11 dependency.
+sha2_09 = { package = "sha2", version = "0.9.9" }
+pqcrypto-dilithium = { version = "0.5.0", optional = true }
+pqcrypto-traits = { version = "0.3.5", optional = true }
+# ML-DSA is linked either as the optional validator PQ backend (`pq-ml-dsa`
+# feature) or as the always-on user/wallet signature crate. The same crate is
+# used by both, so the feature gates `dep:ml-dsa` and we mark it optional and
+# pull it in from `default` to keep it always present.
+ml-dsa = { version = "0.1.1", optional = true, features = ["alloc"] }
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rand_core = { version = "0.6", features = ["getrandom"] }
+prometheus = "0.14"
+toml = "1.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tower = "0.5"
+cryptoki = "0.12"
+secrecy = "0.10"
+subtle = "2"
+async-trait = "0.1"
+thiserror = "2"
+rayon = "1.10"
+# BudZero/BudZKVM is part of this repository as of . Keeping the
+# crates under `budzero/` preserves their own workspace while removing the
+# fragile sibling-checkout/pinned-repository requirement.
+bud-isa = { path = "budzero/bud-isa" }
+bud-vm = { path = "budzero/bud-vm" }
+bud-proof = { path = "budzero/bud-proof" }
+bud-node = { path = "budzero/bud-node" }
+# The node indexes commitments and nullifiers by the bytes the wallet packed.
+# That packing had three independent copies, one here, one in the wallet and
+# one in the zkVM state layer, and nothing forced them to stay equal. They now
+# read one definition.
+budlum-note-packing = { path = "crates/note-packing" }
+
+[build-dependencies]
+prost-build = "0.14.3"
+
+[dev-dependencies]
+tempfile = "3.10"
+proptest = "1.5"
+tokio = { version = "1", features = ["full"] }
+hex = "0.4"
+criterion = { version = "0.8", features = ["html_reports"] }
+# ThreadSanitizer reports a race it observed. loom proves the absence of one
+# by running every interleaving the memory model permits, which is the
+# difference between "we did not hit a deadlock" and "a deadlock cannot
+# happen". The consensus engine holds four locks and nests two pairs of them;
+# see `src/tests/consensus_lock_order_loom.rs`.
+loom = "0.7"
+
+[[bin]]
+name = "bench_sig_verify"
+path = "benches/micro/sig_verify.rs"
+
+[[bin]]
+name = "bench_merkle_update"
+path = "benches/micro/merkle_update.rs"
+
+[[bin]]
+name = "bench_merkle_scaling"
+path = "benches/micro/merkle_scaling.rs"
+
+[[bin]]
+name = "bench_internal_pipeline_tps"
+path = "benches/single_node/internal_pipeline_tps.rs"
+
+# : dudect-tarzı timing-safe regresyon testi. harness=false ile
+# stable toolchain'de `cargo bench --bench timing_safe` çalışır; CI kapısıdır.
+[[bench]]
+name = "timing_safe"
+path = "benches/micro/timing_safe.rs"
+harness = false
+
+# Domain throughput/latency benchmarks (criterion.rs)
+[[bench]]
+name = "domain_throughput"
+path = "benches/domain_throughput.rs"
+required-features = ["__bench_domain_throughput_disabled"]
+harness = false
+
+# `cfg(loom)` is set by RUSTFLAGS in the loom job, not by a Cargo feature, so
+# Cargo does not learn about it on its own and `-D warnings` turns the
+# resulting `unexpected_cfgs` into a build failure for every job that compiles
+# the test profile. Declaring it here is the fix the compiler itself suggests;
+# the alternative it offers, `#[allow(unexpected_cfgs)]`, would silence the
+# lint everywhere instead of teaching it one name.
+#
+# A Cargo feature would be the wrong shape: loom replaces `std::sync` types
+# wholesale at compile time, so it is a build configuration rather than
+# something a dependent could switch on.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[profile.release]
+# Release hardening (arastirma #196): panic=abort + overflow-checks + LTO +
+# codegen-units=1 + strip. Panic=abort unwind'i yasaklar (savunmasizlik
+# yuzeyi daraltir), overflow-checks tasma durumunda panic yerine hata
+# uretir, fat LTO + tek codegen birimi tum crate grafigini birlikte
+# optimize eder (sanal fonksiyon devirtualization, cross-crate inlining),
+# strip ise sembolleri kaldirir (reverse engineering yuzeyini kucultur ve
+# ikili boyutu dusurur). Build suresi artar ama calisma zamani davranisi
+# degismez: safe Rust semantigi derleyici optimizasyonundan bagimsizdir,
+# determinism gate'leri (Genesis Reproducibility, Cross-Platform Digest)
+# bunu CI'da dogrular.
+overflow-checks = true
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+

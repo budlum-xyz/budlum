@@ -1,0 +1,1486 @@
+use crate::core::address::Address;
+use crate::core::chain_config::Network;
+use clap::Parser;
+use std::path::Path;
+
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum, Default)]
+pub enum ConsensusType {
+    #[default]
+    #[value(name = "pow")]
+    PoW,
+    #[value(name = "pos")]
+    PoS,
+    #[value(name = "poa")]
+    PoA,
+}
+
+impl std::fmt::Display for ConsensusType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConsensusType::PoW => write!(f, "PoW (Proof of Work)"),
+            ConsensusType::PoS => write!(f, "PoS (Proof of Stake)"),
+            ConsensusType::PoA => write!(f, "PoA (Proof of Authority)"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum, Default)]
+pub enum PrivacyLevel {
+    #[default]
+    #[value(name = "none")]
+    None,
+    #[value(name = "stealth")]
+    Stealth,
+    #[value(name = "confidential")]
+    Confidential,
+    #[value(name = "full")]
+    Full,
+}
+
+impl std::fmt::Display for PrivacyLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrivacyLevel::None => write!(f, "None (Public)"),
+            PrivacyLevel::Stealth => write!(f, "Stealth Addresses"),
+            PrivacyLevel::Confidential => write!(f, "Confidential Transactions"),
+            PrivacyLevel::Full => write!(f, "Full Privacy"),
+        }
+    }
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(name = "budlum-core")]
+#[command(about = "Budlum privacy-focused blockchain node")]
+pub struct NodeConfig {
+    #[arg(long, default_value = "devnet")]
+    pub network: Network,
+
+    #[arg(long)]
+    pub consensus: Option<ConsensusType>,
+
+    #[arg(long, default_value = "2")]
+    pub difficulty: usize,
+
+    #[arg(long, default_value = "1000")]
+    pub min_stake: u64,
+
+    #[arg(long, default_value = "none")]
+    pub privacy: PrivacyLevel,
+
+    #[arg(long, default_value = "11")]
+    pub ring_size: usize,
+
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    #[arg(long)]
+    pub bootstrap: Option<String>,
+
+    #[arg(skip)]
+    pub bootnodes: Vec<String>,
+
+    #[arg(long, default_value = "./data/budlum.db")]
+    pub db_path: String,
+
+    #[arg(long, default_value = "./validators.json")]
+    pub validators_file: String,
+
+    #[arg(long)]
+    pub validator_address: Option<String>,
+
+    #[arg(long)]
+    pub dial: Option<String>,
+
+    #[arg(long)]
+    pub chain_id: Option<u64>,
+
+    #[arg(long)]
+    pub validator_key_file: Option<String>,
+
+    #[arg(long)]
+    pub gen_key: Option<String>,
+
+    #[arg(long, default_value = "127.0.0.1")]
+    pub rpc_host: String,
+
+    #[arg(long, default_value = "8545")]
+    pub rpc_port: u16,
+
+    #[arg(long)]
+    pub config: Option<String>,
+
+    #[arg(long, default_value = "9090")]
+    pub metrics_port: u16,
+
+    #[arg(skip)]
+    pub rpc_enabled: bool,
+
+    #[arg(skip)]
+    pub rpc_auth_required: bool,
+
+    #[arg(skip)]
+    pub rpc_api_key_env: Option<String>,
+
+    #[arg(skip)]
+    pub rpc_allowed_ips: Vec<String>,
+
+    #[arg(skip)]
+    pub rpc_cors_origins: Vec<String>,
+
+    #[arg(skip)]
+    pub rpc_rate_limit_per_minute: Option<u64>,
+
+    #[arg(long, default_value = "validators.json")]
+    pub validators_file_cli: Option<String>,
+
+    #[arg(long)]
+    pub check_db: bool,
+
+    #[arg(long)]
+    pub repair_db: bool,
+
+    /// Enable state-machine sharding (Whitepaper v1.3). A consensus
+    /// parameter: every node of the chain must run the same value.
+    #[arg(long)]
+    pub sharding_enabled: bool,
+
+    /// Number of shards partitioning the address space.
+    #[arg(long, default_value_t = 1)]
+    pub sharding_num_shards: u16,
+
+    /// First block height at which the shards commitment is mandatory.
+    #[arg(long, default_value_t = 0)]
+    pub sharding_activation_height: u64,
+
+    // Strict Config V2 Fields
+    #[arg(long, default_value = "rpc")]
+    pub role: String, // validator | sentry | seed | rpc | archive
+
+    #[arg(long)]
+    pub genesis_file: Option<String>,
+
+    #[arg(long, default_value = "false")]
+    pub mobile_mode: bool,
+
+    /// Battery level this node starts at, 0 to 100. Only read when
+    /// `--mobile-mode` is set.
+    ///
+    /// The peer cap, the storage sweep and the challenge budget are all
+    /// derived from it through `network::mobile::MobileNodeProfile`, so a
+    /// node started at 5% on battery holds four peers and declines storage
+    /// work, where `--mobile-mode` alone used to hold ten and sweep hourly
+    /// regardless.
+    #[arg(long, default_value = "100")]
+    pub mobile_battery_pct: u8,
+
+    /// Whether the device is on mains. Only read when `--mobile-mode` is set.
+    #[arg(long, default_value = "true")]
+    pub mobile_charging: bool,
+
+    #[arg(long)]
+    pub data_dir: Option<String>,
+
+    #[arg(long)]
+    pub snapshot_dir: Option<String>,
+
+    #[arg(long)]
+    pub backup_dir: Option<String>,
+
+    #[arg(long)]
+    pub backups_enabled: Option<bool>,
+
+    #[arg(long, default_value = "3600")]
+    pub backup_interval_secs: u64,
+
+    #[arg(long, default_value = "24")]
+    pub backup_retention_count: usize,
+
+    /// Write one verified backup and exit.
+    #[arg(long)]
+    pub backup_now: bool,
+
+    /// Restore a backup into `db_path` (which must be empty) and exit.
+    #[arg(long)]
+    pub restore_backup: Option<String>,
+
+    /// Migrate an existing database at path to ConsensusStateV2 schema (requires atomic backup first) and exit.
+    #[arg(long)]
+    pub migrate_v2: Option<String>,
+
+    #[arg(long)]
+    pub p2p_identity_file: Option<String>,
+
+    #[arg(long)]
+    pub dns_seeds: Vec<String>,
+
+    #[arg(long)]
+    pub max_peers: Option<usize>,
+
+    #[arg(long)]
+    pub banned_peer_db: Option<String>,
+
+    /// Where a validator's vote high-water marks are persisted.
+    ///
+    /// Defaults to `./data/<network>/vote-history.json`. Without them a
+    /// Restart re-signs heights this key has already voted at, which across a
+    /// Reorg is equivocation and costs half the bond.
+    #[arg(long)]
+    pub vote_history_db: Option<String>,
+
+    #[arg(long)]
+    pub mdns_enabled: Option<bool>,
+
+    #[arg(long)]
+    pub rpc_public_listener: Option<String>,
+
+    #[arg(long)]
+    pub rpc_operator_listener: Option<String>,
+
+    #[arg(long)]
+    pub rpc_trusted_proxies: Vec<String>,
+
+    #[arg(long)]
+    pub metrics_listener: Option<String>,
+
+    #[arg(long)]
+    pub signer_backend: Option<String>, // local | softhsm | pkcs11
+
+    /// The backend exactly as configured, before canonicalisation.
+    ///
+    /// `canonical_signer_backend` maps `softhsm` onto `pkcs11` so the signer
+    /// wiring has one name to match on. That is correct for construction and
+    /// wrong for policy: mainnet admission has to distinguish a hardware token
+    /// from a software one, and by the time it runs the difference is gone.
+    /// Not a CLI flag - it is filled in wherever the canonical value is set.
+    #[arg(skip)]
+    pub raw_signer_backend: Option<String>,
+
+    #[arg(long)]
+    pub pkcs11_module_path: Option<String>,
+
+    #[arg(long)]
+    pub pkcs11_slot_id: Option<u64>,
+
+    #[arg(long)]
+    pub pkcs11_token_pin_env: Option<String>,
+
+    #[arg(long, default_value = "./data/hsm/socket.sock")]
+    pub hsm_socket_path: String,
+
+    /// Vendor-native BLS mechanism ID for PKCS#11.
+    #[arg(long)]
+    pub pkcs11_bls_mechanism: Option<String>,
+    /// Vendor-native PQ mechanism ID for PKCS#11.
+    #[arg(long)]
+    pub pkcs11_pq_mechanism: Option<String>,
+
+    #[arg(long)]
+    pub features_governance: bool,
+
+    #[arg(long)]
+    pub features_zkvm_contracts: bool,
+
+    #[arg(long)]
+    pub features_pruning: bool,
+
+    #[arg(long)]
+    pub features_verify_merkle: bool,
+
+    // Storage Node Config (B.U.D.)
+    #[arg(long, default_value = "true")]
+    pub storage_enabled: bool,
+
+    #[arg(long, default_value = "3")]
+    pub storage_replication_factor: usize,
+
+    #[arg(long, default_value = "true")]
+    pub storage_mandatory_sharding: bool,
+
+    // --- Outbound bridge (relayer) ---
+    //
+    // `RelayerWorker::with_adapters` existed and nothing called it, because
+    // the node carried no way to say what an adapter should point at.
+    // `EvmChainAdapter::new` needs the bridge contract address and the
+    // `Deposit` event topic0, and there was no field for either, so the
+    // registry was empty on every deployed node and outbound relay answered
+    // `UnsupportedChain` for every chain.
+    /// Ethereum bridge contract address, hex, with or without `0x`.
+    ///
+    /// Absent means outbound relay stays off, which is the current behaviour
+    /// and the safe one: every receipt leaf binds to this address, so a node
+    /// that guesses would advertise Ethereum support while pointing at no
+    /// contract.
+    #[arg(long)]
+    pub evm_bridge_address: Option<String>,
+
+    /// `keccak256("Deposit(...)")` for the bridge contract, hex.
+    ///
+    /// Required alongside `--evm-bridge-address`; a deposit log is matched on
+    /// emitter and topic0 together, and a zero topic matches the first log the
+    /// contract ever emitted.
+    #[arg(long)]
+    pub evm_deposit_topic0: Option<String>,
+
+    /// Confirmations to wait before a deposit is treated as final.
+    ///
+    /// Defaults to the adapter's own `DEFAULT_CONFIRMATIONS`. Zero is refused
+    /// by `check_fit_for_relay`: a deposit from a block that can still be
+    /// reorged away would be minted against a transaction that did not happen.
+    #[arg(long)]
+    pub evm_confirmations: Option<u32>,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            network: Network::Devnet,
+            consensus: None,
+            difficulty: 2,
+            min_stake: 1000,
+            privacy: PrivacyLevel::None,
+            ring_size: 11,
+            port: None,
+            bootstrap: None,
+            bootnodes: Vec::new(),
+            db_path: "./data/budlum.db".to_string(),
+            validators_file: "./validators.json".to_string(),
+            validator_address: None,
+            dial: None,
+            chain_id: None,
+            validator_key_file: None,
+            gen_key: None,
+            rpc_host: "127.0.0.1".to_string(),
+            rpc_port: 8545,
+            config: None,
+            metrics_port: 9090,
+            rpc_enabled: true,
+            // (security audit §5 wiring) secure-by-default for
+            // NodeConfig::default. The previous `false` here meant
+            // `main.rs:557`'s `RpcSecurityConfig::from_env(config.rpc_auth_required, ...)`
+            // Silently opened a public, unauthenticated RPC at startup
+            // Unless an operator flipped this in a config file. The
+            // Operator can still set `auth_required = false` explicitly
+            // Via `[rpc] auth_required = false` in their TOML (or by
+            // Setting `BUDLUM_RPC_AUTH_REQUIRED=0` in env), but a
+            // Forgetful operator no longer ships an open node.
+            rpc_auth_required: true,
+            rpc_api_key_env: None,
+            // Same reasoning: empty `allowed_ips` means "allow all" in
+            // The runtime check, so we now default to localhost-only and
+            // Require an explicit opt-out to broaden.
+            rpc_allowed_ips: vec!["127.0.0.1".to_string(), "::1".to_string()],
+            rpc_cors_origins: Vec::new(),
+            rpc_rate_limit_per_minute: None,
+            validators_file_cli: None,
+            check_db: false,
+            repair_db: false,
+            sharding_enabled: false,
+            sharding_num_shards: 1,
+            sharding_activation_height: 0,
+            role: "rpc".to_string(),
+            mobile_mode: false,
+            mobile_battery_pct: 100,
+            mobile_charging: true,
+            genesis_file: None,
+            data_dir: None,
+            snapshot_dir: None,
+            backup_dir: None,
+            backups_enabled: None,
+            backup_interval_secs: 3600,
+            backup_retention_count: 24,
+            backup_now: false,
+            restore_backup: None,
+            migrate_v2: None,
+            p2p_identity_file: None,
+            dns_seeds: Vec::new(),
+            max_peers: None,
+            banned_peer_db: None,
+            vote_history_db: None,
+            mdns_enabled: None,
+            rpc_public_listener: None,
+            rpc_operator_listener: None,
+            rpc_trusted_proxies: Vec::new(),
+            metrics_listener: None,
+            signer_backend: None,
+            raw_signer_backend: None,
+            pkcs11_module_path: None,
+            pkcs11_slot_id: None,
+            pkcs11_token_pin_env: None,
+            hsm_socket_path: "./data/hsm/socket.sock".to_string(),
+            pkcs11_bls_mechanism: None,
+            pkcs11_pq_mechanism: None,
+            features_governance: false,
+            features_zkvm_contracts: false,
+            features_pruning: false,
+            features_verify_merkle: false,
+            storage_enabled: true,
+            storage_replication_factor: 3,
+            storage_mandatory_sharding: true,
+            evm_bridge_address: None,
+            evm_deposit_topic0: None,
+            evm_confirmations: None,
+        }
+    }
+}
+
+// Strict Config V2 typed configuration structure.
+// Any unknown field will throw a deserialization error.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct FileConfig {
+    pub network: Option<NetworkSection>,
+    pub node: Option<NodeSection>,
+    pub storage: Option<StorageSection>,
+    pub p2p: Option<P2pSection>,
+    pub rpc: Option<RpcSection>,
+    pub metrics: Option<MetricsSection>,
+    pub validator: Option<ValidatorSection>,
+    pub features: Option<FeaturesSection>,
+    pub consensus: Option<ConsensusSection>, // for integration of other sections
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSection {
+    pub profile: Option<String>,
+    pub chain_id: Option<u64>,
+    pub genesis_file: Option<String>,
+    pub name: Option<String>, // backwards-compatibility alias for profile in tests
+    pub port: Option<u16>,    // backwards-compatibility alias in tests
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSection {
+    pub role: Option<String>, // validator | sentry | seed | rpc | archive
+    /// Alias: full | archive. `archive` normalizes to role=archive;
+    /// `full` is compatible with validator/sentry/seed/rpc but not archive.
+    pub mode: Option<String>,
+    pub dial: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct StorageSection {
+    pub data_dir: Option<String>,
+    pub snapshot_dir: Option<String>,
+    pub backup_dir: Option<String>,
+    pub backups_enabled: Option<bool>,
+    pub backup_interval_secs: Option<u64>,
+    pub backup_retention_count: Option<usize>,
+    pub db_path: Option<String>, // backwards-compatibility alias
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct P2pSection {
+    pub identity_file: Option<String>,
+    pub bootnodes: Option<Vec<String>>,
+    pub dns_seeds: Option<Vec<String>>,
+    pub max_peers: Option<usize>,
+    pub banned_peer_db: Option<String>,
+    pub vote_history_db: Option<String>,
+    pub mdns_enabled: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RpcSection {
+    pub public_listener: Option<String>,
+    pub operator_listener: Option<String>,
+    pub trusted_proxies: Option<Vec<String>>,
+    pub enabled: Option<bool>,
+    pub api_key_env: Option<String>,
+    pub host: Option<String>, // backwards-compatibility
+    pub port: Option<u16>,    // backwards-compatibility
+    pub auth_required: Option<bool>,
+    pub allowed_ips: Option<Vec<String>>,
+    pub cors_origins: Option<Vec<String>>,
+    pub rate_limit_per_minute: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsSection {
+    pub listener: Option<String>,
+    pub port: Option<u16>, // backwards-compatibility
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatorSection {
+    pub signer: Option<SignerSection>,
+    pub key_file: Option<String>, // backwards-compatibility
+    pub backend: Option<String>,  // backwards-compatibility
+    pub address: Option<String>,  // backwards-compatibility
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SignerSection {
+    pub backend: Option<String>, // local | softhsm | pkcs11
+    pub pkcs11: Option<Pkcs11Section>,
+    pub hsm_socket_path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Pkcs11Section {
+    pub module_path: Option<String>,
+    pub slot_id: Option<u64>,
+    pub token_pin_env: Option<String>,
+    /// Vendor-native BLS mechanism ID.
+    /// Hex or decimal string (e.g. "0x80000001" or "2147483649").
+    /// If absent, BLS signing falls back to software (data object).
+    pub bls_mechanism: Option<String>,
+    /// Vendor-native PQ/Dilithium mechanism ID.
+    pub pq_mechanism: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct FeaturesSection {
+    pub governance: Option<bool>,
+    pub zkvm_contracts: Option<bool>,
+    pub pruning: Option<bool>,
+    /// F2 config-driven: VerifyMerkle staged rollout gate controlled via config
+    /// True = gate open (MainnetActivation::full), false = gate closed (default reject)
+    /// Default: true (gate opened, 4e2b920)
+    pub verify_merkle: Option<bool>,
+    /// Mobile mode (lightweight P2P/sharding)
+    pub mobile_mode: Option<bool>,
+    pub storage: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ConsensusSection {
+    #[serde(rename = "type")]
+    pub consensus_type: Option<String>,
+    pub min_stake: Option<u64>,
+    pub epoch_len: Option<u64>,
+}
+
+// Backwards-compatibility legacy config format.
+// If V2 config parsing fails due to unknown fields, we try legacy config only if it does not contain strict section markers.
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyFileConfig {
+    pub network: Option<String>,
+    pub consensus: Option<String>,
+    pub difficulty: Option<usize>,
+    pub min_stake: Option<u64>,
+    pub port: Option<u16>,
+    pub db_path: Option<String>,
+    pub rpc_host: Option<String>,
+    pub rpc_port: Option<u16>,
+    pub metrics_port: Option<u16>,
+    pub bootstrap: Option<String>,
+    pub validator_key_file: Option<String>,
+    pub validator_address: Option<String>,
+}
+
+impl NodeConfig {
+    pub fn load_with_file(&mut self) {
+        if let Some(path) = self.config.clone() {
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                eprintln!("CRITICAL ERROR: Failed to read config file at {path}: {e}");
+                std::process::exit(1);
+            });
+
+            // 1. Parse the file first, then overlay environment values.
+            match toml::from_str::<FileConfig>(&content) {
+                Ok(fc) => {
+                    self.apply_file_config(fc);
+                    println!("Loaded Strict Config V2 from: {path}");
+                }
+                Err(e) => {
+                    // Try to parse as legacy config to see if it is valid legacy format
+                    match toml::from_str::<LegacyFileConfig>(&content) {
+                        Ok(legacy) => {
+                            eprintln!("WARNING: Config parsed as legacy format, please migrate to Strict Config V2!");
+                            self.apply_legacy_config(legacy);
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "CRITICAL CONFIGURATION ERROR: Failed to parse TOML configuration."
+                            );
+                            eprintln!("Details: {e}");
+                            eprintln!("Ensure there are no unknown/invalid fields or wrong section blocks.");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Environment values override file configuration and also work without a config file.
+        self.load_from_env();
+
+        // Strict runtime rules apply equally to file-based and CLI-only starts.
+        self.validate_strict_rules();
+
+        // Node roles control whether public listeners may start.
+        self.apply_role_rules();
+    }
+
+    fn apply_file_config(&mut self, fc: FileConfig) {
+        if let Some(network) = fc.network {
+            let profile_name = network.profile.or(network.name);
+            if let Some(profile) = profile_name {
+                self.network = match profile.as_str() {
+                    "mainnet" => Network::Mainnet,
+                    "testnet" => Network::Testnet,
+                    "devnet" => Network::Devnet,
+                    other => {
+                        eprintln!("CRITICAL: Invalid network profile '{other}'");
+                        std::process::exit(1);
+                    }
+                };
+            }
+            if self.chain_id.is_none() {
+                self.chain_id = network.chain_id;
+            }
+            if self.port.is_none() {
+                self.port = network.port;
+            }
+            if self.genesis_file.is_none() {
+                self.genesis_file = network.genesis_file;
+            }
+        }
+
+        if let Some(node) = fc.node {
+            if let Some(role) = node.role {
+                match role.as_str() {
+                    "validator" | "sentry" | "seed" | "rpc" | "archive" => {
+                        self.role = role;
+                    }
+                    other => {
+                        eprintln!("CRITICAL: Invalid node role '{other}'");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if let Some(mode) = node.mode {
+                match mode.as_str() {
+                    "archive" => self.role = "archive".to_string(),
+                    "full" if self.role != "archive" => {}
+                    "full" => {
+                        eprintln!("CRITICAL: node.mode='full' conflicts with role='archive'");
+                        std::process::exit(1);
+                    }
+                    other => {
+                        eprintln!("CRITICAL: Invalid node mode '{other}'");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            if self.dial.is_none() {
+                self.dial = node.dial;
+            }
+        }
+
+        if let Some(storage) = fc.storage {
+            if let Some(data_dir) = storage.data_dir.or(storage.db_path) {
+                self.db_path = data_dir.clone();
+                self.data_dir = Some(data_dir);
+            }
+            if self.snapshot_dir.is_none() {
+                self.snapshot_dir = storage.snapshot_dir;
+            }
+            if self.backup_dir.is_none() {
+                self.backup_dir = storage.backup_dir;
+            }
+            if self.backups_enabled.is_none() {
+                self.backups_enabled = storage.backups_enabled;
+            }
+            if let Some(interval) = storage.backup_interval_secs {
+                self.backup_interval_secs = interval;
+            }
+            if let Some(retention) = storage.backup_retention_count {
+                self.backup_retention_count = retention;
+            }
+        }
+
+        if let Some(p2p) = fc.p2p {
+            if self.p2p_identity_file.is_none() {
+                self.p2p_identity_file = p2p.identity_file;
+            }
+            if self.bootnodes.is_empty() {
+                if let Some(addresses) = p2p.bootnodes {
+                    self.bootnodes.extend(addresses);
+                }
+            }
+            if self.dns_seeds.is_empty() {
+                if let Some(seeds) = p2p.dns_seeds {
+                    self.dns_seeds = seeds;
+                }
+            }
+            if self.max_peers.is_none() {
+                self.max_peers = p2p.max_peers;
+            }
+            if self.banned_peer_db.is_none() {
+                self.banned_peer_db = p2p.banned_peer_db;
+            }
+            if self.vote_history_db.is_none() {
+                self.vote_history_db = p2p.vote_history_db;
+            }
+            if self.mdns_enabled.is_none() {
+                self.mdns_enabled = p2p.mdns_enabled;
+            }
+            if self.bootstrap.is_none() {
+                self.bootstrap = self.bootnodes.first().cloned();
+            }
+        }
+
+        if let Some(rpc) = fc.rpc {
+            if let Some(enabled) = rpc.enabled {
+                self.rpc_enabled = enabled;
+            }
+            if let Some(api_key_env) = rpc.api_key_env {
+                self.rpc_api_key_env = Some(api_key_env);
+            }
+            if let Some(public_listener) = rpc.public_listener.or_else(|| {
+                if let (Some(h), Some(p)) = (&rpc.host, rpc.port) {
+                    Some(format!("{h}:{p}"))
+                } else {
+                    None
+                }
+            }) {
+                self.rpc_public_listener = Some(public_listener.clone());
+                if let Some((host, port)) = parse_listener(&public_listener) {
+                    self.rpc_host = host;
+                    self.rpc_port = port;
+                }
+            }
+            if self.rpc_operator_listener.is_none() {
+                self.rpc_operator_listener = rpc.operator_listener;
+            }
+            if self.rpc_trusted_proxies.is_empty() {
+                if let Some(proxies) = rpc.trusted_proxies {
+                    self.rpc_trusted_proxies = proxies;
+                }
+            }
+            if let Some(allowed) = rpc.allowed_ips {
+                self.rpc_allowed_ips = allowed;
+            }
+            if self.rpc_cors_origins.is_empty() {
+                if let Some(cors) = rpc.cors_origins {
+                    self.rpc_cors_origins = cors;
+                }
+            }
+            if self.rpc_rate_limit_per_minute.is_none() {
+                self.rpc_rate_limit_per_minute = rpc.rate_limit_per_minute;
+            }
+            if let Some(auth) = rpc.auth_required {
+                self.rpc_auth_required = auth;
+            }
+        }
+
+        if let Some(metrics) = fc.metrics {
+            if let Some(listener) = metrics
+                .listener
+                .or_else(|| metrics.port.map(|p| format!("0.0.0.0:{p}")))
+            {
+                self.metrics_listener = Some(listener.clone());
+                if let Some((_, port)) = parse_listener(&listener) {
+                    self.metrics_port = port;
+                }
+            }
+        }
+
+        if let Some(validator) = fc.validator {
+            let legacy_backend = validator.backend.clone();
+            if let Some(ref backend) = legacy_backend {
+                let canonical = canonical_signer_backend(backend).unwrap_or_else(|err| {
+                    eprintln!("CRITICAL: Invalid validator backend '{backend}': {err}");
+                    std::process::exit(1);
+                });
+                if let Some(existing) = self.signer_backend.as_deref() {
+                    let existing =
+                        canonical_signer_backend(existing).unwrap_or(existing.to_string());
+                    if existing != canonical {
+                        eprintln!(
+                            "CRITICAL: validator.backend conflicts with validator.signer.backend"
+                        );
+                        std::process::exit(1);
+                    }
+                } else {
+                    self.raw_signer_backend = Some(backend.clone());
+                    self.signer_backend = Some(canonical);
+                }
+            }
+            if let Some(signer) = validator.signer {
+                if let Some(backend) = signer.backend {
+                    let canonical = canonical_signer_backend(&backend).unwrap_or_else(|err| {
+                        eprintln!("CRITICAL: Invalid validator signer backend '{backend}': {err}");
+                        std::process::exit(1);
+                    });
+                    if let Some(existing) = self.signer_backend.as_deref() {
+                        let existing =
+                            canonical_signer_backend(existing).unwrap_or(existing.to_string());
+                        if existing != canonical {
+                            eprintln!(
+                                "CRITICAL: validator.backend conflicts with validator.signer.backend"
+                            );
+                            std::process::exit(1);
+                        }
+                    } else {
+                        self.raw_signer_backend = Some(backend.clone());
+                        self.signer_backend = Some(canonical);
+                    }
+                }
+                if let Some(pkcs11) = signer.pkcs11 {
+                    if self.pkcs11_module_path.is_none() {
+                        self.pkcs11_module_path = pkcs11.module_path;
+                    }
+                    if self.pkcs11_slot_id.is_none() {
+                        self.pkcs11_slot_id = pkcs11.slot_id;
+                    }
+                    if self.pkcs11_token_pin_env.is_none() {
+                        self.pkcs11_token_pin_env = pkcs11.token_pin_env;
+                    }
+                    // Vendor-native BLS/PQ mechanism IDs
+                    if self.pkcs11_bls_mechanism.is_none() {
+                        self.pkcs11_bls_mechanism = pkcs11.bls_mechanism;
+                    }
+                    if self.pkcs11_pq_mechanism.is_none() {
+                        self.pkcs11_pq_mechanism = pkcs11.pq_mechanism;
+                    }
+                }
+                if let Some(socket) = signer.hsm_socket_path {
+                    self.hsm_socket_path = socket;
+                }
+            }
+            if self.validator_key_file.is_none() {
+                self.validator_key_file = validator.key_file;
+            }
+            if self.validator_address.is_none() {
+                self.validator_address = validator.address;
+            }
+        }
+
+        if let Some(features) = fc.features {
+            if let Some(gov) = features.governance {
+                self.features_governance = gov;
+            }
+            if let Some(zkvm) = features.zkvm_contracts {
+                self.features_zkvm_contracts = zkvm;
+            }
+            if let Some(pruning) = features.pruning {
+                self.features_pruning = pruning;
+            }
+            if let Some(vm) = features.verify_merkle {
+                self.features_verify_merkle = vm;
+            }
+            if let Some(mobile) = features.mobile_mode {
+                self.mobile_mode = mobile;
+            }
+            if let Some(storage) = features.storage {
+                self.storage_enabled = storage;
+            }
+        }
+
+        if let Some(consensus) = fc.consensus {
+            if let Some(raw_type) = consensus.consensus_type.as_deref() {
+                let parsed = match raw_type {
+                    "pow" => ConsensusType::PoW,
+                    "pos" => ConsensusType::PoS,
+                    "poa" => ConsensusType::PoA,
+                    other => {
+                        eprintln!("CRITICAL: Invalid consensus.type '{other}'");
+                        std::process::exit(1);
+                    }
+                };
+                if self.consensus.is_none() {
+                    self.consensus = Some(parsed);
+                }
+            }
+            if let Some(epoch_len) = consensus.epoch_len {
+                let expected = self.network.consensus_params().epoch_len;
+                if epoch_len != expected {
+                    eprintln!(
+                        "CRITICAL: consensus.epoch_len={} is not a runtime override; network '{}' requires {}",
+                        epoch_len, self.network, expected
+                    );
+                    std::process::exit(1);
+                }
+            }
+            if self.min_stake == 1000 {
+                if let Some(min_stake) = consensus.min_stake {
+                    self.min_stake = min_stake;
+                }
+            }
+        }
+    }
+
+    fn apply_legacy_config(&mut self, legacy: LegacyFileConfig) {
+        if let Some(ref name) = legacy.network {
+            self.network = match name.as_str() {
+                "mainnet" => Network::Mainnet,
+                "testnet" => Network::Testnet,
+                "devnet" => Network::Devnet,
+                _ => self.network,
+            };
+        }
+        if self.consensus.is_none() {
+            self.consensus = legacy.consensus.as_deref().and_then(|s| match s {
+                "pow" => Some(ConsensusType::PoW),
+                "pos" => Some(ConsensusType::PoS),
+                "poa" => Some(ConsensusType::PoA),
+                _ => None,
+            });
+        }
+        if let Some(diff) = legacy.difficulty {
+            self.difficulty = diff;
+        }
+        if let Some(min_s) = legacy.min_stake {
+            self.min_stake = min_s;
+        }
+        if self.port.is_none() {
+            self.port = legacy.port;
+        }
+        if let Some(ref db) = legacy.db_path {
+            self.db_path = db.clone();
+        }
+        if let Some(ref rpc_h) = legacy.rpc_host {
+            self.rpc_host = rpc_h.clone();
+        }
+        if let Some(rpc_p) = legacy.rpc_port {
+            self.rpc_port = rpc_p;
+        }
+        if let Some(metrics_p) = legacy.metrics_port {
+            self.metrics_port = metrics_p;
+        }
+        if self.bootstrap.is_none() {
+            self.bootstrap = legacy.bootstrap;
+        }
+        if self.validator_key_file.is_none() {
+            self.validator_key_file = legacy.validator_key_file;
+        }
+        if self.validator_address.is_none() {
+            self.validator_address = legacy.validator_address;
+        }
+    }
+
+    // Load configuration values from Environment variables.
+    // Env has higher precedence than file configuration, so we only apply if not already set by Env.
+    fn load_from_env(&mut self) {
+        if let Ok(net) = std::env::var("BUDLUM_NETWORK") {
+            self.network = match net.as_str() {
+                "mainnet" => Network::Mainnet,
+                "testnet" => Network::Testnet,
+                "devnet" => Network::Devnet,
+                _ => self.network,
+            };
+        }
+        if let Ok(role) = std::env::var("BUDLUM_ROLE") {
+            self.role = role;
+        }
+        if let Ok(chain_id) = std::env::var("BUDLUM_CHAIN_ID") {
+            if let Ok(id) = chain_id.parse::<u64>() {
+                self.chain_id = Some(id);
+            }
+        }
+        if let Ok(db) = std::env::var("BUDLUM_DB_PATH") {
+            self.db_path = db;
+        }
+        if let Ok(key) = std::env::var("BUDLUM_VALIDATOR_KEY") {
+            self.validator_key_file = Some(key);
+        }
+        if let Ok(auth_required) = std::env::var("BUDLUM_RPC_AUTH_REQUIRED") {
+            self.rpc_auth_required = parse_env_bool(&auth_required).unwrap_or_else(|error| {
+                eprintln!("CRITICAL: invalid BUDLUM_RPC_AUTH_REQUIRED: {error}");
+                std::process::exit(1);
+            });
+        }
+        if let Ok(api_key_env) = std::env::var("BUDLUM_RPC_API_KEY_ENV") {
+            if !api_key_env.trim().is_empty() {
+                self.rpc_api_key_env = Some(api_key_env);
+            }
+        }
+        if let Ok(allowed_ips) = std::env::var("BUDLUM_RPC_ALLOWED_IPS") {
+            self.rpc_allowed_ips = allowed_ips
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+        }
+        if let Ok(limit) = std::env::var("BUDLUM_RPC_RATE_LIMIT_PER_MINUTE") {
+            let parsed = limit.parse::<u64>().unwrap_or_else(|error| {
+                eprintln!("CRITICAL: invalid BUDLUM_RPC_RATE_LIMIT_PER_MINUTE '{limit}': {error}");
+                std::process::exit(1);
+            });
+            if parsed == 0 {
+                eprintln!("CRITICAL: BUDLUM_RPC_RATE_LIMIT_PER_MINUTE must be non-zero");
+                std::process::exit(1);
+            }
+            self.rpc_rate_limit_per_minute = Some(parsed);
+        }
+        if let Ok(mobile) = std::env::var("BUDLUM_MOBILE_MODE") {
+            self.mobile_mode = mobile.to_lowercase() == "true" || mobile == "1";
+        }
+    }
+
+    /// Effective P2P connection ceiling. Explicit configuration may reduce the
+    /// Profile limit for incident response, but can never raise the public
+    /// Network's audited resource ceiling.
+    pub fn effective_max_peers(&self) -> usize {
+        let profile_cap = self.network.security_config().max_peers.max(1);
+        self.max_peers.unwrap_or(profile_cap).clamp(1, profile_cap)
+    }
+
+    /// Build the outbound EVM adapter this node was configured for, if any.
+    ///
+    /// `Ok(None)` means outbound relay stays off, which is what every node
+    /// does today. `Err` means the operator asked for it and got it wrong,
+    /// and the node must not start pretending to bridge: a half-configured
+    /// adapter is worse than none, because the registry advertises the chain
+    /// as supported.
+    ///
+    /// # Errors
+    ///
+    /// The half of the pair that is missing or malformed, or the reason the
+    /// assembled adapter is not fit to relay.
+    pub fn evm_adapter(
+        &self,
+    ) -> Result<Option<crate::cross_domain::evm::adapter::EvmChainAdapter>, String> {
+        let (Some(addr_hex), Some(topic_hex)) = (
+            self.evm_bridge_address.as_deref(),
+            self.evm_deposit_topic0.as_deref(),
+        ) else {
+            // Both or neither. One alone is a configuration half-written, and
+            // the missing half is not something to guess: a zero address binds
+            // every receipt leaf to nothing, and a zero topic0 matches the
+            // first log the contract ever emitted.
+            return match (
+                self.evm_bridge_address.is_some(),
+                self.evm_deposit_topic0.is_some(),
+            ) {
+                (false, false) => Ok(None),
+                (true, false) => Err(
+                    "--evm-bridge-address was given without --evm-deposit-topic0: a deposit \
+                     log is matched on emitter and topic together"
+                        .into(),
+                ),
+                _ => Err(
+                    "--evm-deposit-topic0 was given without --evm-bridge-address: the topic \
+                     alone does not say which contract emitted it"
+                        .into(),
+                ),
+            };
+        };
+
+        let address = hex::decode(addr_hex.strip_prefix("0x").unwrap_or(addr_hex))
+            .map_err(|e| format!("--evm-bridge-address is not hex: {e}"))?;
+        if address.len() != 20 {
+            return Err(format!(
+                "--evm-bridge-address must be 20 bytes, got {}",
+                address.len()
+            ));
+        }
+        let topic = hex::decode(topic_hex.strip_prefix("0x").unwrap_or(topic_hex))
+            .map_err(|e| format!("--evm-deposit-topic0 is not hex: {e}"))?;
+        let topic0: [u8; 32] = topic.try_into().map_err(|v: Vec<u8>| {
+            format!("--evm-deposit-topic0 must be 32 bytes, got {}", v.len())
+        })?;
+
+        let mut adapter = crate::cross_domain::evm::adapter::EvmChainAdapter::new(address, topic0);
+        if let Some(confirmations) = self.evm_confirmations {
+            adapter.required_confirmations = confirmations;
+        }
+        // Ask the adapter itself rather than re-deriving the rules here. It
+        // refuses a zero address and zero confirmations, and this is the last
+        // point before the registry where refusing is still cheap.
+        adapter.check_fit_for_relay()?;
+        Ok(Some(adapter))
+    }
+
+    pub fn pruning_policy(&self) -> Result<crate::storage::PruningPolicy, String> {
+        let mode = crate::storage::NodeMode::from_role(&self.role)
+            .ok_or_else(|| format!("unknown node role '{}'", self.role))?;
+        Ok(crate::storage::PruningPolicy {
+            mode,
+            pruning_enabled: self.features_pruning,
+            finalized_snapshot_retention: self.snapshot_dir.is_some(),
+            retention_blocks: if self.features_pruning {
+                100_000
+            } else {
+                u64::MAX
+            },
+            backups_enabled: self.backups_enabled == Some(true),
+            backup_dir_configured: self.backup_dir.is_some(),
+        })
+    }
+
+    // Strict validation rules for production environments (especially Mainnet profile)
+    fn validate_strict_rules(&self) {
+        if self.backup_interval_secs == 0 {
+            eprintln!("CRITICAL CONFIGURATION ERROR: backup_interval_secs must be non-zero.");
+            std::process::exit(1);
+        }
+        if self.backup_retention_count == 0 {
+            eprintln!("CRITICAL CONFIGURATION ERROR: backup_retention_count must be non-zero.");
+            std::process::exit(1);
+        }
+        let pruning_policy = match self.pruning_policy() {
+            Ok(policy) => policy,
+            Err(e) => {
+                eprintln!("CRITICAL CONFIGURATION ERROR: {e}.");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = pruning_policy.validate() {
+            eprintln!("CRITICAL CONFIGURATION ERROR: {e}.");
+            std::process::exit(1);
+        }
+
+        if let Some(chain_id) = self.chain_id {
+            let expected_chain_id = self.network.chain_id().value();
+            if chain_id != expected_chain_id {
+                eprintln!(
+                    "CRITICAL CONFIGURATION ERROR: Network profile '{}' requires chain ID {}, got {}.",
+                    self.network, expected_chain_id, chain_id
+                );
+                std::process::exit(1);
+            }
+        }
+
+        // MDNS is a compile-time opt-in intended only for isolated devnets.
+        // Rejecting it for both public profiles prevents a `p2p-mdns` build
+        // From opening the multicast parser/socket before runtime policy is
+        // Applied.
+        if self.network != Network::Devnet && self.mdns_enabled == Some(true) {
+            eprintln!(
+                "CRITICAL SECURITY FAILURE: mDNS discovery is permitted only on the Devnet profile!"
+            );
+            std::process::exit(1);
+        }
+
+        if self.network == Network::Mainnet {
+            // Rule 1 / H4.1: mainnet validators - pure policy (crypto::mainnet_policy).
+            if self.role == "validator" {
+                use crate::crypto::mainnet_policy::{
+                    check_mainnet_validator_key_policy, MainnetValidatorKeyConfig,
+                };
+                let cfg = MainnetValidatorKeyConfig {
+                    signer_backend: self.signer_backend.as_deref(),
+                    // `signer_backend` has already been through
+                    // `canonical_signer_backend`, which folds `softhsm` into
+                    // `pkcs11`. The policy needs the operator's own spelling to
+                    // tell a hardware token from a software one.
+                    raw_signer_backend: self.raw_signer_backend.as_deref(),
+                    validator_key_file: self.validator_key_file.as_deref(),
+                    pkcs11_module_path: self.pkcs11_module_path.as_deref(),
+                    pkcs11_token_pin_env: self.pkcs11_token_pin_env.as_deref(),
+                    resolve_pin_env: true,
+                };
+                if let Err(v) = check_mainnet_validator_key_policy(&cfg) {
+                    eprintln!("CRITICAL SECURITY FAILURE: {v}");
+                    std::process::exit(1);
+                }
+                println!(
+                    "INFO: Mainnet validator will use PKCS#11 HSM backend (module: {}, slot: {})",
+                    self.pkcs11_module_path.as_deref().unwrap_or(""),
+                    self.pkcs11_slot_id.unwrap_or(0)
+                );
+            }
+
+            // Rule 2: No empty bootnodes on mainnet!
+            if self.bootnodes.is_empty() && self.bootstrap.is_none() {
+                eprintln!("CRITICAL SECURITY FAILURE: Mainnet profile cannot start without explicit seed/bootnodes!");
+                std::process::exit(1);
+            }
+
+            // Rule 4: No placeholder genesis files on mainnet!
+            if let Some(ref genesis) = self.genesis_file {
+                if genesis.contains("placeholder")
+                    || genesis.contains("devnet")
+                    || genesis.contains("testnet")
+                {
+                    eprintln!("CRITICAL SECURITY FAILURE: Placeholder genesis config is STRICTLY PROHIBITED on Mainnet!");
+                    std::process::exit(1);
+                }
+            } else {
+                eprintln!("CRITICAL SECURITY FAILURE: Genesis configuration file must be specified for Mainnet profile!");
+                std::process::exit(1);
+            }
+
+            if self.features_governance || self.features_zkvm_contracts || self.features_pruning {
+                eprintln!("CRITICAL SECURITY FAILURE: governance, zkvm_contracts and pruning must remain disabled for Mainnet v1.");
+                std::process::exit(1);
+            }
+
+            // F-01: a non-empty bootnode list that still names the ceremony
+            // template (RFC 5737 / "placeholder") is not a launch config.
+            if let Some(bad) = crate::core::chain_config::first_placeholder_peer(&self.bootnodes) {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet bootnode is still a ceremony placeholder: {bad}"
+                );
+                std::process::exit(1);
+            }
+            if let Some(bad) = crate::core::chain_config::first_placeholder_peer(&self.dns_seeds) {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: mainnet DNS seed is still a ceremony placeholder: {bad}"
+                );
+                std::process::exit(1);
+            }
+
+            // F-13: the checked-in mainnet profile must not advertise an open
+            // VerifyMerkle gate. The VM ignores this flag today; refusing it
+            // here keeps a future wiring from silently enabling an unfinished
+            // verifier.
+            if self.features_verify_merkle {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: VerifyMerkle cannot be enabled on mainnet until storage challenge proofs are checkable"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Node role based rules to avoid opening unnecessary listeners.
+    fn apply_role_rules(&mut self) {
+        match self.role.as_str() {
+            "validator" | "sentry" | "seed" => {
+                // Disabled public listeners for non-public-facing nodes
+                self.rpc_enabled = false;
+                println!(
+                    "Node started as '{}' role. Disabling public JSON-RPC listeners for safety.",
+                    self.role
+                );
+            }
+            "rpc" | "archive" => {
+                // Public RPC enabled
+                self.rpc_enabled = true;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn load_validators(&self) -> Vec<String> {
+        let path = Path::new(&self.validators_file);
+        if !path.exists() {
+            println!(" Validators file not found: {}", self.validators_file);
+            return vec![];
+        }
+        match std::fs::read_to_string(path) {
+            Ok(content) => match serde_json::from_str::<ValidatorsConfig>(&content) {
+                Ok(config) => {
+                    println!(
+                        "Loaded {} validators from {}",
+                        config.validators.len(),
+                        self.validators_file
+                    );
+                    config.validators
+                }
+                Err(e) => {
+                    println!("Failed to parse validators file: {e}");
+                    vec![]
+                }
+            },
+            Err(e) => {
+                println!("Failed to read validators file: {e}");
+                vec![]
+            }
+        }
+    }
+
+    pub fn load_validator_addresses(&self) -> Vec<Address> {
+        self.load_validators()
+            .into_iter()
+            .filter_map(|validator| match Address::from_hex(&validator) {
+                Ok(address) => Some(address),
+                Err(err) => {
+                    println!("Skipping invalid validator address {validator}: {err}");
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+fn parse_env_bool(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!(
+            "expected one of true/false, 1/0, yes/no, or on/off; got '{value}'"
+        )),
+    }
+}
+
+fn canonical_signer_backend(value: &str) -> Result<String, String> {
+    match value {
+        "local" => Ok("local".to_string()),
+        "pkcs11" | "softhsm" => Ok("pkcs11".to_string()),
+        other => Err(format!(
+            "unsupported backend '{other}'; expected local, pkcs11, or softhsm"
+        )),
+    }
+}
+
+fn parse_listener(listener: &str) -> Option<(String, u16)> {
+    let parts: Vec<&str> = listener.split(':').collect();
+    if parts.len() == 2 {
+        let host = parts[0].to_string();
+        if let Ok(port) = parts[1].parse::<u16>() {
+            return Some((host, port));
+        }
+    }
+    None
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ValidatorsConfig {
+    validators: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_consensus_type_parsing() {
+        assert_eq!(ConsensusType::PoW as u8, 0);
+    }
+    #[test]
+    fn test_cli_migrate_v2_parsing() {
+        let args = vec!["budlum", "--migrate-v2", "./test.db"];
+        let cfg = NodeConfig::parse_from(args);
+        assert_eq!(cfg.migrate_v2, Some("./test.db".to_string()));
+    }
+
+    #[test]
+    fn cli_pruning_policy_archive_rejects_pruning() {
+        let mut cfg = NodeConfig {
+            role: "archive".into(),
+            features_pruning: true,
+            backups_enabled: Some(true),
+            backup_dir: Some("./backups".into()),
+            ..Default::default()
+        };
+        let policy = cfg.pruning_policy().unwrap();
+        assert!(policy.validate().unwrap_err().contains("archive nodes"));
+
+        cfg.features_pruning = false;
+        assert!(cfg.pruning_policy().unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn cli_pruning_policy_unknown_role_rejected() {
+        let cfg = NodeConfig {
+            role: "unknown".into(),
+            ..Default::default()
+        };
+        assert!(cfg
+            .pruning_policy()
+            .unwrap_err()
+            .contains("unknown node role"));
+    }
+
+    #[test]
+    fn cli_node_mode_archive_normalizes_role() {
+        let mut cfg = NodeConfig::default();
+        cfg.apply_file_config(FileConfig {
+            node: Some(NodeSection {
+                mode: Some("archive".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(cfg.role, "archive");
+        assert_eq!(
+            cfg.pruning_policy().unwrap().mode,
+            crate::storage::NodeMode::Archive
+        );
+    }
+
+    #[test]
+    fn cli_node_mode_full_keeps_validator_role() {
+        let mut cfg = NodeConfig::default();
+        cfg.apply_file_config(FileConfig {
+            node: Some(NodeSection {
+                role: Some("validator".into()),
+                mode: Some("full".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(cfg.role, "validator");
+        assert_eq!(
+            cfg.pruning_policy().unwrap().mode,
+            crate::storage::NodeMode::Full
+        );
+    }
+
+    #[test]
+    fn rpc_environment_boolean_parser_fails_closed() {
+        assert_eq!(parse_env_bool("true"), Ok(true));
+        assert_eq!(parse_env_bool("OFF"), Ok(false));
+        assert!(parse_env_bool("typo").is_err());
+    }
+
+    #[test]
+    fn rpc_allowed_ips_file_config_overrides_secure_default() {
+        let mut cfg = NodeConfig::default();
+        cfg.apply_file_config(FileConfig {
+            rpc: Some(RpcSection {
+                allowed_ips: Some(vec!["10.0.0.5".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(cfg.rpc_allowed_ips, vec!["10.0.0.5".to_string()]);
+    }
+
+    #[test]
+    fn max_peers_override_can_only_lower_network_profile_cap() {
+        let mut cfg = NodeConfig {
+            network: Network::Mainnet,
+            ..Default::default()
+        };
+        let cap = Network::Mainnet.security_config().max_peers;
+        cfg.max_peers = Some(cap + 500);
+        assert_eq!(cfg.effective_max_peers(), cap);
+        cfg.max_peers = Some(7);
+        assert_eq!(cfg.effective_max_peers(), 7);
+        cfg.max_peers = Some(0);
+        assert_eq!(cfg.effective_max_peers(), 1);
+    }
+
+    #[test]
+    fn validator_legacy_backend_alias_wires_to_pkcs11_signer_backend() {
+        let mut cfg = NodeConfig::default();
+        cfg.apply_file_config(FileConfig {
+            validator: Some(ValidatorSection {
+                backend: Some("softhsm".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(cfg.signer_backend.as_deref(), Some("pkcs11"));
+    }
+}
+
+#[cfg(test)]
+mod persona_config_tests {
+    use super::FileConfig;
+
+    #[test]
+    fn persona_configs_parse_as_strict_v2() {
+        for path in [
+            "config/personas/user-devnet.toml",
+            "config/personas/developer.toml",
+            "config/personas/enterprise-poa.toml",
+            "config/archive.toml",
+        ] {
+            let content =
+                std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            let fc: FileConfig =
+                toml::from_str(&content).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+            assert!(fc.network.is_some(), "{path} needs [network]");
+            assert!(fc.node.is_some(), "{path} needs [node]");
+        }
+    }
+}

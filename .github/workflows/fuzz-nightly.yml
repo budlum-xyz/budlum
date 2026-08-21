@@ -1,0 +1,103 @@
+name: Fuzz Nightly
+
+#  : uzun fuzz koşuları. Her gece 03:17 UTC'de her target
+# 4 saat fuzz'lanır; her target ayrı matrix job'ında koşar (GitHub job
+# Üst sınırı 6 saat → tek job'da 5×4h imkânsızdır, matrix zorunludur).
+# Corpus her koşuda cache'lenir ve sonraki koşuda geri yüklenir (büyüyen
+# Corpus = derinleşen kapsam). Crash bulunursa artifact olarak yüklenir
+# Ve job FAIL eder.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-deep:
+    name: Fuzz Deep - ${{ matrix.target }} (4h)
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - block_deserialize
+          - consensus_validate
+          - fuzz_blockchain_serialize
+          - snapshot_deserialize
+          - transaction_deserialize
+          - consensus_state_transition
+          - relayer_escrow
+          - zk_verifier
+          # Ikili fuzz'in agir yarisi. `budl_compile` PR kapisinda kosar,
+          # bu ise derleyicinin urettigi bytecode'u VM'de calistirir: kabul
+          # edilen bir program gas limitine kadar donebilir, o yuzden 60
+          # saniyelik hizli butceye degil dort saatlik programa ait.
+          - budl_compile_then_run
+          # Bu ikisi ne burada ne ci.yml'de listeliydi. ci.yml'deki bir yorum
+          # onlari "nightly/manual" diye tarif ediyordu ve bu matris onlari
+          # icermiyordu, yani hicbir zaman kosmadilar. Denetledikleri yuzey
+          # de kucuk degil: ikisi de girdiyi guvenilmeyen bir relayer'dan
+          # alir, RLP cozucusu ve MPT kanit dogrulayicisi koprunun disaridan
+          # beslenen tek parcasidir.
+          - evm_rlp_decode
+          - evm_mpt_verify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly - cargo-fuzz gereksinimi)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: nightly
+      - name: Override rust-toolchain.toml pin (nightly zorunlu)
+        run: rustup override set nightly
+      # Install protoc from the runner's package index rather than
+      # arduino/setup-protoc. That action resolves the release through an
+      # unauthenticated GitHub API call and the nightly matrix runs eight jobs
+      # at once from one runner IP, which exhausted the anonymous rate limit:
+      # "API rate limit exceeded for 68.220.60.145" made the zk_verifier job
+      # fail before it fuzzed anything. Every other workflow in this repo
+      # already installs protoc this way, so this also removes the last
+      # inconsistency.
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Corpus cache (target bazlı, yuvarlanan)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz 4 saat - ${{ matrix.target }}
+        # Cargo-fuzz repo kökünden çalışır (bkz. ci.yml fuzz-quick notu).
+        run: |
+          set -euo pipefail
+          cargo fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=14400 \
+            -timeout=25 \
+            -print_final_stats=1
+      - name: Crash artifact (varsa)
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-nightly-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
