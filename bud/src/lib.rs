@@ -162,7 +162,7 @@ pub mod bud_format_sartname;
 // kapısızdı: yukarıda iki `#[cfg(feature = "bud3")]` üst üste yazılmıştı
 // (öznitelik tekrarı derleyici için tek kapıya eşdeğerdir, fazladan olanı
 // sessizce yutulur) ve bu ikisi kapının DIŞINDA kalmıştı. Sonuç: default
-// (bud2) derlemede QR-video yüzeyi de geliyordu — 3.0 kapalıyken 3.0 kodu
+// (bud2) derlemede QR-video yüzeyi de geliyordu, yani 3.0 kapalıyken 3.0 kodu
 // derleniyordu. Tekrarlar kaldırıldı, iki modül ait olduğu kapıya alındı.
 #[cfg(feature = "bud3")]
 pub mod bud_format_sertlesme;

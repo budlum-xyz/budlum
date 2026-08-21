@@ -76,7 +76,7 @@ impl ExeSectionSplit {
         // Buradaki `if` iki dalında da `data[..split]` döndürüyordu (clippy
         // if_same_then_else): sıfır yoğunluğu ölçülüyor, karşılaştırılıyor ve
         // sonuç atılıyordu. Yani "içerik farkına göre ayır" yorumu koda
-        // karşılık gelmiyordu — ölü bir dallanma sabit davranışı içerik-duyarlı
+        // karşılık gelmiyordu: ölü bir dallanma sabit davranışı içerik-duyarlı
         // gösteriyordu. Ölçüm kaldırıldı; davranış (ve dolayısıyla kayıpsızlık)
         // birebir aynı: `decode` iki bölümü sırayla birleştirir.
         //

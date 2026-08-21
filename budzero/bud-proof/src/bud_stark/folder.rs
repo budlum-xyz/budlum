@@ -313,9 +313,7 @@ impl<SC: StarkGenericConfig> ExtensionBuilder for VerifierConstraintFolder<'_, S
     }
 }
 
-impl<SC: StarkGenericConfig> p3_air::PermutationAirBuilder
-    for VerifierConstraintFolder<'_, SC>
-{
+impl<SC: StarkGenericConfig> p3_air::PermutationAirBuilder for VerifierConstraintFolder<'_, SC> {
     type MP = AuxWindow<SC::Challenge>;
     type RandomVar = SC::Challenge;
     type PermutationVar = SC::Challenge;
