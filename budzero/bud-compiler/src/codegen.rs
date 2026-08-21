@@ -749,10 +749,13 @@ impl Codegen {
                             // On a struct that lacks the field, so this
                             // Is pure defense in depth.
                             if self.error.is_none() {
+                                // Unwrapping here would panic while building
+                                // the message for another error, turning a
+                                // rejected program into a dead compiler.
                                 self.error = Some(CompileError::CodegenError(format!(
                                     "Field '{}' not found in struct '{}'",
                                     field,
-                                    struct_type.as_ref().unwrap()
+                                    struct_type.as_deref().unwrap_or("<unknown>")
                                 )));
                             }
                             0

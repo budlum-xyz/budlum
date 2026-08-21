@@ -423,10 +423,14 @@ impl VerifierRegistry {
             }
             _ => return Err(RegistryError::NotActive { account, role }),
         }
+        // The `match` above already read this entry, so the key is present.
+        // Handled rather than unwrapped: this crate is consumed by verifiers
+        // whose release profile aborts on panic, and a future edit to that
+        // match must not be able to turn a missing key into a downed process.
         let reg = self
             .registrations
             .remove(&(role, account))
-            .expect("checked");
+            .ok_or(RegistryError::NotActive { account, role })?;
         Ok(reg.stake)
     }
 
@@ -613,6 +617,7 @@ impl VerifierRegistry {
 // ─── Unit Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::params::FIXED_POINT_SCALE;
@@ -620,6 +625,132 @@ mod tests {
 
     fn addr(b: u8) -> Address {
         Address::from([b; 32])
+    }
+
+    /// Withdrawing must never panic, whatever order the caller uses.
+    ///
+    /// The removal below used to be an `expect("checked")` that leaned on the
+    /// status match a few lines above. That was true, but the guarantee lived
+    /// away from the read. This walks every reachable status so the refusal is
+    /// asserted rather than assumed.
+    #[test]
+    fn withdraw_refuses_every_non_withdrawable_status_without_panicking() {
+        let account = addr(9);
+
+        // Never registered.
+        let mut reg = VerifierRegistry::new();
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, 100),
+            Err(RegistryError::NotRegistered { .. })
+        ));
+
+        // Registered and active: not unbonding yet.
+        reg.register_validator(account, 5_000, 0)
+            .expect("stake is above the minimum");
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, 100),
+            Err(RegistryError::NotActive { .. })
+        ));
+
+        // Unbonding but still locked.
+        let release = reg
+            .begin_unbonding(account, roles::VALIDATOR, 10)
+            .expect("an active registration can begin unbonding");
+        assert!(
+            release > 10,
+            "unbonding must lock the stake for some epochs"
+        );
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, release - 1),
+            Err(RegistryError::StillUnbonding { .. })
+        ));
+
+        // Released: the one path that pays out, and it pays the full stake.
+        assert_eq!(
+            reg.withdraw(account, roles::VALIDATOR, release),
+            Ok(5_000),
+            "a released registration returns the whole stake"
+        );
+
+        // Withdrawing twice must refuse, not double-pay.
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, release),
+            Err(RegistryError::NotRegistered { .. })
+        ));
+    }
+
+    /// Slashing the same registration twice must not burn the stake twice.
+    ///
+    /// This is the replay case: the same evidence arriving again must leave
+    /// the remaining stake untouched.
+    #[test]
+    fn slashing_twice_does_not_burn_the_remainder_again() {
+        let account = addr(11);
+        let mut reg = VerifierRegistry::new();
+        reg.register_validator(account, 10_000, 0)
+            .expect("stake is above the minimum");
+
+        let half = FIXED_POINT_SCALE / 2;
+        let first = reg
+            .slash(
+                account,
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                half,
+            )
+            .expect("an active registration can be slashed");
+        assert_eq!(first.penalty, 5_000);
+        assert_eq!(first.remaining_stake, 5_000);
+
+        let replay = reg.slash(
+            account,
+            roles::VALIDATOR,
+            SlashingCondition::DoubleSign,
+            half,
+        );
+        assert!(
+            matches!(replay, Err(RegistryError::AlreadySlashed { .. })),
+            "a replayed slash must be refused, got {replay:?}"
+        );
+
+        let after = reg
+            .get(&account, roles::VALIDATOR)
+            .expect("the registration still exists after being slashed");
+        assert_eq!(
+            after.stake, 5_000,
+            "the remaining stake must survive the replay untouched"
+        );
+    }
+
+    /// One address, several roles: slashing one jails all of them.
+    ///
+    /// The module header promises this, so it is asserted rather than trusted.
+    #[test]
+    fn slashing_one_role_jails_every_other_role_the_address_holds() {
+        let account = addr(12);
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(account, 5_000, 0)
+            .expect("stake is above the minimum");
+        reg.register_relayer(account, 3_000, 0)
+            .expect("stake is above the minimum");
+        reg.register_attester(account, 2_000, 0)
+            .expect("stake is above the minimum");
+
+        let half = FIXED_POINT_SCALE / 2;
+        reg.slash(
+            account,
+            roles::MASTER_VERIFIER,
+            SlashingCondition::DoubleSign,
+            half,
+        )
+        .expect("an active registration can be slashed");
+
+        for role in [roles::MASTER_VERIFIER, roles::RELAYER, roles::ATTESTER] {
+            assert!(
+                !reg.is_active(&account, role),
+                "role {role:?} stayed active after a cross-role slash"
+            );
+        }
     }
 
     #[test]

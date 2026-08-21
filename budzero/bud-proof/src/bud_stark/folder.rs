@@ -1,5 +1,5 @@
 use p3_air::{AirBuilder, ExtensionBuilder, RowWindow, WindowAccess};
-use p3_field::{Algebra, BasedVectorSpace};
+use p3_field::{Algebra, BasedVectorSpace, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::ViewPair;
 
@@ -47,7 +47,7 @@ fn recompose_aux_opening_row<SC: StarkGenericConfig>(row: &[SC::Challenge]) -> V
                 .iter()
                 .enumerate()
                 .map(|(i, &coeff)| {
-                    SC::Challenge::ith_basis_element(i).expect("basis index in range") * coeff
+                    SC::Challenge::ith_basis_element(i).map_or(SC::Challenge::ZERO, |b| b * coeff)
                 })
                 .sum()
         })

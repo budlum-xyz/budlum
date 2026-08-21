@@ -1,3 +1,7 @@
+// Integration test: an unwrap here is how the test reports a broken
+// invariant, so the workspace-wide panic gate does not apply.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! End-to-end coverage for the BudL toolchain: every checked-in `.bud` program
 //! must compile, execute, prove and verify.
 //!

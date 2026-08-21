@@ -5,6 +5,9 @@ edition = "2021"
 # : cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 bud-isa = { path = "../bud-isa" }
 serde = { version = "1.0", features = ["derive"] }
