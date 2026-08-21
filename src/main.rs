@@ -408,10 +408,7 @@ async fn main() {
 
     if config.check_db {
         let storage = Storage::new(&config.db_path).expect("Failed to open DB");
-        println!(
-            "Starting Database Integrity Audit on: {}",
-            config.db_path
-        );
+        println!("Starting Database Integrity Audit on: {}", config.db_path);
         match storage.check_integrity() {
             Ok(errors) => {
                 if errors.is_empty() {
