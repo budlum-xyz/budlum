@@ -143,6 +143,16 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate --self-test
       - name: Lubot okur, uretmez
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate
+      # crates/lubot ayri bir workspace: ana Cargo.toml uyesi degil, bu yuzden
+      # `cargo clippy --all-targets` ona hic ugramiyordu. Yalniz kaynak metnini
+      # okuyan yukaridaki kapi vardi. Sonuc: agac derlenmez hale geldi ve
+      # kimse gormedi (`&'static [u16]` serde ile turetilemiyordu,
+      # `ConnState: Default` eksikti, bir test `&[]` gonderiyordu). Derleme +
+      # test buraya baglandi ki bir daha sessizce bozulmasin.
+      - name: Lubot derlenir ve testleri geçer
+        run: |
+          cargo clippy --manifest-path crates/lubot/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/lubot/Cargo.toml
       - name: Turetilmis icerik kanaryasi
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test
       - name: Turetilmis icerik bayt-kesin
