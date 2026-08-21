@@ -1,0 +1,11 @@
+[package]
+name = "bud-isa"
+version = "0.1.0"
+edition = "2021"
+# : cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
+license.workspace = true
+
+[dependencies]
+
+[features]
+experimental = []

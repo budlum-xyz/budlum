@@ -1,0 +1,1307 @@
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
+
+use crate::chain::finality::ValidatorSetSnapshot;
+use crate::consensus::merkle_tree;
+use crate::core::chain_config::{MAX_QC_BLOB_BYTES, QC_BLOB_TTL_EPOCHS};
+use crate::crypto::primitives::PqKeyPair;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QcBlob {
+    pub epoch: u64,
+    pub checkpoint_height: u64,
+    pub checkpoint_hash: String,
+    pub pq_signatures: Vec<PqSignatureEntry>,
+    pub merkle_root: String,
+    pub created_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PqSignatureEntry {
+    pub validator_index: u32,
+    pub validator_address: String,
+    pub dilithium_signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QcFaultProof {
+    pub version: u8,
+    pub epoch: u64,
+    pub checkpoint_height: u64,
+    pub checkpoint_hash: String,
+    pub validator_index: u32,
+    pub validator_address: String,
+    pub kind: QcProofKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QcProofKind {
+    InvalidDilithiumV1 {
+        dilithium_signature: Vec<u8>,
+        merkle_proof: Vec<Vec<u8>>,
+        leaf_index: u32,
+    },
+    ZkInvalidAttestationV1 {
+        proof_bytes: Vec<u8>,
+        public_inputs: ZkQcPublicInputs,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZkQcPublicInputs {
+    pub merkle_root: String,
+    pub pq_public_key_hash: String,
+    pub attestation_commitment: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QcProofAction {
+    InvalidateFinality,
+    SlashValidator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QcProofVerdict {
+    pub action: QcProofAction,
+    pub invalidate_from_height: Option<u64>,
+    pub slash_validator: bool,
+}
+
+impl QcBlob {
+    pub fn new(
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        pq_signatures: Vec<PqSignatureEntry>,
+    ) -> Self {
+        let merkle_root = Self::compute_merkle_root(&pq_signatures);
+        QcBlob {
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            pq_signatures,
+            merkle_root,
+            created_epoch: epoch,
+        }
+    }
+
+    /// The Merkle leaf for one signature entry.
+    ///
+    /// Both trailing fields are length-prefixed. `validator_address` is a
+    /// `String` and `dilithium_signature` a `Vec<u8>`, appended with nothing
+    /// between them, so a character could be moved from the end of the address
+    /// into the front of the signature and the leaf would not change. Measured:
+    /// a 66-character address and a 4595-byte signature produce the same digest
+    /// as a 65-character address and a 4596-byte signature.
+    ///
+    /// That leaf is what `verify_inclusion` rebuilds from a fault proof, and a
+    /// verdict from it reaches `slash_validator` at the malicious-behaviour
+    /// ratio, so a second `(address, signature)` pair hashing to an accepted
+    /// leaf is a second story a fault proof can tell about the same slot.
+    ///
+    /// See `crate::crypto::key_set_preimage` for the same failure in the
+    /// validator key set.
+    fn leaf_hash(entry: &PqSignatureEntry) -> [u8; 32] {
+        let mut hasher = Sha3_256::new();
+        hasher.update(entry.validator_index.to_le_bytes());
+        let address = entry.validator_address.as_bytes();
+        hasher.update((address.len() as u64).to_le_bytes());
+        hasher.update(address);
+        hasher.update((entry.dilithium_signature.len() as u64).to_le_bytes());
+        hasher.update(&entry.dilithium_signature);
+        let result = hasher.finalize();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&result);
+        arr
+    }
+
+    fn leaves(signatures: &[PqSignatureEntry]) -> Vec<[u8; 32]> {
+        signatures.iter().map(Self::leaf_hash).collect()
+    }
+
+    pub fn compute_merkle_root(signatures: &[PqSignatureEntry]) -> String {
+        if signatures.is_empty() {
+            return String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            );
+        }
+
+        let layers =
+            merkle_tree::merkle_layers(&Self::leaves(signatures), merkle_tree::combine_sha3);
+        hex::encode(
+            layers
+                .last()
+                .and_then(|layer| layer.first())
+                .copied()
+                .unwrap_or([0u8; 32]),
+        )
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when the blob carries no PQ signatures or the leaf
+    /// index is out of range.
+    pub fn merkle_proof(&self, leaf_index: usize) -> Result<Vec<Vec<u8>>, String> {
+        if self.pq_signatures.is_empty() {
+            return Err("QcBlob has no PQ signatures".into());
+        }
+        if leaf_index >= self.pq_signatures.len() {
+            return Err(format!(
+                "Leaf index {} out of range for {} signatures",
+                leaf_index,
+                self.pq_signatures.len()
+            ));
+        }
+
+        let proof = merkle_tree::merkle_proof(
+            &Self::leaves(&self.pq_signatures),
+            leaf_index,
+            merkle_tree::combine_sha3,
+        )
+        .ok_or_else(|| "leaf index was bounds-checked above".to_string())?;
+        Ok(proof.into_iter().map(|digest| digest.to_vec()).collect())
+    }
+
+    pub fn is_expired(&self, current_epoch: u64) -> bool {
+        current_epoch > self.created_epoch + QC_BLOB_TTL_EPOCHS
+    }
+
+    pub fn validate_size(&self) -> Result<(), String> {
+        let estimated_size = self
+            .pq_signatures
+            .iter()
+            .map(|s| s.dilithium_signature.len() + s.validator_address.len() + 8)
+            .sum::<usize>();
+
+        if estimated_size > MAX_QC_BLOB_BYTES {
+            return Err(format!(
+                "QcBlob too large: {} bytes (max: {})",
+                estimated_size, MAX_QC_BLOB_BYTES
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn verify_merkle_root(&self) -> bool {
+        let computed = Self::compute_merkle_root(&self.pq_signatures);
+        computed == self.merkle_root
+    }
+
+    pub fn verify_against_snapshot(
+        &self,
+        snapshot: &ValidatorSetSnapshot,
+        required_signers: Option<&[usize]>,
+        current_epoch: Option<u64>,
+    ) -> Result<HashSet<usize>, String> {
+        if self.epoch != snapshot.epoch {
+            return Err(format!(
+                "QcBlob epoch mismatch: expected {}, got {}",
+                snapshot.epoch, self.epoch
+            ));
+        }
+        if self.checkpoint_height == 0 {
+            return Err("QcBlob checkpoint height must be > 0".into());
+        }
+        if self.checkpoint_hash.is_empty() {
+            return Err("QcBlob checkpoint hash is empty".into());
+        }
+        if let Some(epoch) = current_epoch {
+            if self.is_expired(epoch) {
+                return Err(format!(
+                    "QcBlob expired at epoch {} (created at {})",
+                    epoch, self.created_epoch
+                ));
+            }
+        }
+        // Bound the entry count against the validator set *before* paying for
+        // anything that scales with it.
+        //
+        // `validate_size` caps the blob in bytes, not in entries, and the
+        // per-entry overhead is small: with a 1-byte signature an entry costs
+        // about 50 bytes, so roughly 20 000 of them fit under
+        // `MAX_QC_BLOB_BYTES`. Every one of those is hashed by
+        // `verify_merkle_root` before the loop below reaches its first
+        // signature and rejects the blob. Measured on a four-validator
+        // snapshot (debug build):
+        //
+        //     entries    merkle      total
+        //         100     5.9 ms     6.3 ms
+        //       1 000    64.7 ms    63.6 ms
+        //      10 000     582 ms     604 ms
+        //
+        // A legitimate blob for that snapshot holds at most four entries. The
+        // duplicate check further down already makes more than one entry per
+        // validator useless, so anything above the validator count is provably
+        // unusable and can be refused in O(1).
+        //
+        // `check_blob_rate_limit` throttles how often a peer may send these,
+        // but it cannot make an individual message cheap; this check does.
+        if self.pq_signatures.len() > snapshot.validators.len() {
+            return Err(format!(
+                "QcBlob carries {} signature entries for a validator set of {} \
+                 (duplicates are rejected, so the extra entries cannot verify)",
+                self.pq_signatures.len(),
+                snapshot.validators.len()
+            ));
+        }
+        self.validate_size()?;
+        if !self.verify_merkle_root() {
+            return Err("QcBlob merkle root mismatch".into());
+        }
+
+        let mut verified_indices = HashSet::new();
+        for entry in &self.pq_signatures {
+            let idx = entry.validator_index as usize;
+            let validator = snapshot.validators.get(idx).ok_or_else(|| {
+                format!(
+                    "QcBlob references unknown validator index {}",
+                    entry.validator_index
+                )
+            })?;
+
+            if validator.address.to_string() != entry.validator_address {
+                return Err(format!(
+                    "QcBlob validator address mismatch at index {}: expected {}, got {}",
+                    entry.validator_index, validator.address, entry.validator_address
+                ));
+            }
+
+            if validator.pq_public_key.is_empty() {
+                return Err(format!(
+                    "Validator {} has no Dilithium public key",
+                    validator.address
+                ));
+            }
+
+            if !verified_indices.insert(idx) {
+                return Err(format!(
+                    "Duplicate PQ signature for validator index {}",
+                    entry.validator_index
+                ));
+            }
+
+            let message = pq_signing_message(
+                self.epoch,
+                self.checkpoint_height,
+                &self.checkpoint_hash,
+                entry.validator_index,
+            );
+            PqKeyPair::verify(
+                &validator.pq_public_key,
+                &message,
+                &entry.dilithium_signature,
+            )
+            .map_err(|e| {
+                format!(
+                    "Invalid Dilithium signature for validator {}: {}",
+                    validator.address, e
+                )
+            })?;
+        }
+
+        if let Some(required_signers) = required_signers {
+            for signer_idx in required_signers {
+                if !verified_indices.contains(signer_idx) {
+                    return Err(format!(
+                        "QcBlob missing PQ attestation for validator index {signer_idx}"
+                    ));
+                }
+            }
+        }
+
+        // (security audit §2) return the unique-verified
+        // Signer set so callers can enforce a quorum against the
+        // Post-deduplication count. The previous design only
+        // Returned ``; callers that wanted to count unique
+        // Signers (e.g. `import_qc_blob`'s BLS-quorum check) had to
+        // Re-walk the entries themselves, which was both wasteful
+        // And easy to get wrong (counting duplicates). Returning
+        // The set makes the contract explicit and gives every
+        // Caller access to the canonical unique count.
+        Ok(verified_indices)
+    }
+
+    pub fn detect_fault_proofs(&self, snapshot: &ValidatorSetSnapshot) -> Vec<QcFaultProof> {
+        let mut proofs = Vec::new();
+
+        for (leaf_index, entry) in self.pq_signatures.iter().enumerate() {
+            let Some(validator) = snapshot.validators.get(entry.validator_index as usize) else {
+                continue;
+            };
+            if validator.address.to_string() != entry.validator_address {
+                continue;
+            }
+            if validator.pq_public_key.is_empty() {
+                continue;
+            }
+
+            let message = pq_signing_message(
+                self.epoch,
+                self.checkpoint_height,
+                &self.checkpoint_hash,
+                entry.validator_index,
+            );
+            if PqKeyPair::verify(
+                &validator.pq_public_key,
+                &message,
+                &entry.dilithium_signature,
+            )
+            .is_err()
+            {
+                if let Ok(merkle_proof) = self.merkle_proof(leaf_index) {
+                    proofs.push(QcFaultProof::new_invalid_dilithium(
+                        self.epoch,
+                        self.checkpoint_height,
+                        self.checkpoint_hash.clone(),
+                        entry.validator_index,
+                        entry.validator_address.clone(),
+                        entry.dilithium_signature.clone(),
+                        merkle_proof,
+                        leaf_index as u32,
+                    ));
+                }
+            }
+        }
+
+        proofs
+    }
+}
+
+impl QcFaultProof {
+    pub const CURRENT_VERSION: u8 = 1;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_invalid_dilithium(
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        validator_index: u32,
+        validator_address: String,
+        dilithium_signature: Vec<u8>,
+        merkle_proof: Vec<Vec<u8>>,
+        leaf_index: u32,
+    ) -> Self {
+        QcFaultProof {
+            version: Self::CURRENT_VERSION,
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            validator_index,
+            validator_address,
+            kind: QcProofKind::InvalidDilithiumV1 {
+                dilithium_signature,
+                merkle_proof,
+                leaf_index,
+            },
+        }
+    }
+
+    pub fn new_zk_invalid_attestation(
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        validator_index: u32,
+        validator_address: String,
+        proof_bytes: Vec<u8>,
+        public_inputs: ZkQcPublicInputs,
+    ) -> Self {
+        QcFaultProof {
+            version: Self::CURRENT_VERSION,
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            validator_index,
+            validator_address,
+            kind: QcProofKind::ZkInvalidAttestationV1 {
+                proof_bytes,
+                public_inputs,
+            },
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn invalid_dilithium_fields(&self) -> Option<(&Vec<u8>, &Vec<Vec<u8>>, u32)> {
+        match &self.kind {
+            QcProofKind::InvalidDilithiumV1 {
+                dilithium_signature,
+                merkle_proof,
+                leaf_index,
+            } => Some((dilithium_signature, merkle_proof, *leaf_index)),
+            QcProofKind::ZkInvalidAttestationV1 { .. } => None,
+        }
+    }
+
+    pub fn verify_inclusion(&self, merkle_root: &str) -> Result<(), String> {
+        let (dilithium_signature, merkle_proof, leaf_index) =
+            self.invalid_dilithium_fields().ok_or_else(|| {
+                "Merkle inclusion is not available for this QC proof kind".to_string()
+            })?;
+
+        let mut current = QcBlob::leaf_hash(&PqSignatureEntry {
+            validator_index: self.validator_index,
+            validator_address: self.validator_address.clone(),
+            dilithium_signature: dilithium_signature.clone(),
+        });
+
+        let mut idx = leaf_index;
+        for proof_element in merkle_proof {
+            let mut hasher = Sha3_256::new();
+            if idx % 2 == 0 {
+                hasher.update(current);
+                hasher.update(proof_element);
+            } else {
+                hasher.update(proof_element);
+                hasher.update(current);
+            }
+            let result = hasher.finalize();
+            current.copy_from_slice(&result);
+            idx /= 2;
+        }
+
+        let computed_root = hex::encode(current);
+        if computed_root != merkle_root {
+            return Err(format!(
+                "Merkle proof invalid: computed {computed_root} != expected {merkle_root}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != Self::CURRENT_VERSION {
+            return Err(format!(
+                "Unsupported QC fault proof version {}",
+                self.version
+            ));
+        }
+        if self.checkpoint_height == 0 {
+            return Err("Empty checkpoint height".into());
+        }
+        if self.checkpoint_hash.is_empty() {
+            return Err("Empty checkpoint hash".into());
+        }
+        match &self.kind {
+            QcProofKind::InvalidDilithiumV1 {
+                dilithium_signature,
+                merkle_proof,
+                leaf_index,
+            } => {
+                if dilithium_signature.is_empty() {
+                    return Err("Empty Dilithium signature".into());
+                }
+                if merkle_proof.is_empty() && *leaf_index != 0 {
+                    return Err("Empty merkle proof".into());
+                }
+            }
+            QcProofKind::ZkInvalidAttestationV1 {
+                proof_bytes,
+                public_inputs,
+            } => {
+                if proof_bytes.is_empty() {
+                    return Err("Empty ZK QC proof".into());
+                }
+                if public_inputs.merkle_root.is_empty() {
+                    return Err("Empty ZK QC merkle root input".into());
+                }
+                if public_inputs.pq_public_key_hash.is_empty() {
+                    return Err("Empty ZK QC PQ public key hash input".into());
+                }
+                if public_inputs.attestation_commitment.is_empty() {
+                    return Err("Empty ZK QC attestation commitment input".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn verify_against_blob(
+        &self,
+        blob: &QcBlob,
+        snapshot: &ValidatorSetSnapshot,
+    ) -> Result<QcProofVerdict, String> {
+        self.validate()?;
+
+        if self.epoch != blob.epoch {
+            return Err("QC fault proof epoch mismatch".into());
+        }
+        if self.checkpoint_height != blob.checkpoint_height {
+            return Err("QC fault proof checkpoint height mismatch".into());
+        }
+        if self.checkpoint_hash != blob.checkpoint_hash {
+            return Err("QC fault proof checkpoint hash mismatch".into());
+        }
+
+        match &self.kind {
+            QcProofKind::InvalidDilithiumV1 {
+                dilithium_signature,
+                leaf_index,
+                ..
+            } => {
+                self.verify_inclusion(&blob.merkle_root)?;
+
+                let entry = blob
+                    .pq_signatures
+                    .get(*leaf_index as usize)
+                    .ok_or_else(|| format!("Leaf index {leaf_index} out of range"))?;
+                if entry.validator_index != self.validator_index
+                    || entry.validator_address != self.validator_address
+                    || entry.dilithium_signature != *dilithium_signature
+                {
+                    return Err("Fault proof leaf does not match blob contents".into());
+                }
+
+                let validator = snapshot
+                    .validators
+                    .get(self.validator_index as usize)
+                    .ok_or_else(|| format!("Unknown validator index {}", self.validator_index))?;
+                if validator.address.to_string() != self.validator_address {
+                    return Err("Fault proof validator address mismatch".into());
+                }
+                if validator.pq_public_key.is_empty() {
+                    return Err("Validator has no Dilithium public key".into());
+                }
+
+                let message = pq_signing_message(
+                    self.epoch,
+                    self.checkpoint_height,
+                    &self.checkpoint_hash,
+                    self.validator_index,
+                );
+                if PqKeyPair::verify(&validator.pq_public_key, &message, dilithium_signature)
+                    .is_ok()
+                {
+                    return Err("Fault proof targets a valid Dilithium signature".into());
+                }
+            }
+            QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } => {
+                if public_inputs.merkle_root != blob.merkle_root {
+                    return Err("ZK QC public input merkle root mismatch".into());
+                }
+                // ZK QC fault proof verifier
+                // Is not yet implemented. This is a deliberate fail-closed guard:
+                // ZK domain finality attestations CANNOT be invalidated via fault
+                // Proofs until a proper ZK verifier (e.g., Groth16/PLONK circuit
+                // Verification) is integrated. This prevents forged ZK attestations
+                // From being finalized without verification, at the cost of also
+                // Preventing legitimate fault challenges.
+                //
+                // Tracking: Implement ZK verifier in consensus::zk_verifier module,
+                // Then replace this stub with actual proof verification.
+                // Security impact: ZK domain QC blobs are accepted (BLS quorum
+                // Verified) but cannot be challenged. For mainnet, consider
+                // Disabling ZK domain QC import until verifier is ready.
+                return Err(
+                    "ZK QC fault proof verifier not implemented - ZK domain attestations \
+                     cannot be challenged until ZK verifier integration. This is fail-closed: \
+                     no invalid ZK attestation can be finalized via this path."
+                        .into(),
+                );
+            }
+        }
+
+        Ok(QcProofVerdict {
+            action: QcProofAction::InvalidateFinality,
+            invalidate_from_height: Some(self.checkpoint_height),
+            // A valid QC fault proof is the strongest
+            // Possible evidence of malicious consensus participation (the
+            // Validator signed an invalid Dilithium signature that was
+            // Included in a QC blob). Not slashing means zero cost for
+            // This attack. The slash is applied by apply_qc_fault_verdict
+            // Using MaliciousBehaviour ratio from RegistryParams.
+            slash_validator: true,
+        })
+    }
+}
+
+pub fn pq_signing_message(
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    validator_index: u32,
+) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"BUDLUM_PQ_QC");
+    msg.extend_from_slice(&epoch.to_le_bytes());
+    msg.extend_from_slice(&checkpoint_height.to_le_bytes());
+    msg.extend_from_slice(checkpoint_hash.as_bytes());
+    msg.extend_from_slice(&validator_index.to_le_bytes());
+    msg
+}
+
+pub fn sign_attestation(
+    pq_key: &PqKeyPair,
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    validator_index: u32,
+    validator_address: String,
+) -> Result<PqSignatureEntry, String> {
+    let message = pq_signing_message(epoch, checkpoint_height, checkpoint_hash, validator_index);
+    let signature = pq_key
+        .sign(&message)
+        .map_err(|e| format!("Dilithium sign failed: {e}"))?;
+    Ok(PqSignatureEntry {
+        validator_index,
+        validator_address,
+        dilithium_signature: signature,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chain::finality::ValidatorEntry;
+    use crate::core::address::Address;
+
+    fn make_snapshot_with_pq_keys(n: usize) -> (ValidatorSetSnapshot, Vec<PqKeyPair>) {
+        let mut validators = Vec::new();
+        let mut keys = Vec::new();
+
+        for i in 0..n {
+            let pq_key = PqKeyPair::generate();
+            let address = Address::from([(i as u8) + 1; 32]);
+            validators.push(ValidatorEntry {
+                address,
+                stake: 1_000,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: pq_key.public_key_bytes().to_vec(),
+            });
+            keys.push(pq_key);
+        }
+
+        (ValidatorSetSnapshot::new(1, validators), keys)
+    }
+
+    fn make_signed_entries(
+        snapshot: &ValidatorSetSnapshot,
+        keys: &[PqKeyPair],
+        checkpoint_hash: &str,
+    ) -> Vec<PqSignatureEntry> {
+        snapshot
+            .validators
+            .iter()
+            .enumerate()
+            .map(|(idx, validator)| {
+                sign_attestation(
+                    &keys[idx],
+                    snapshot.epoch,
+                    100,
+                    checkpoint_hash,
+                    idx as u32,
+                    validator.address.to_string(),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_qc_blob_creation() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries = make_signed_entries(&snapshot, &keys, "cp_hash");
+        let blob = QcBlob::new(1, 100, "cp_hash".into(), entries);
+        assert_eq!(blob.epoch, 1);
+        assert_eq!(blob.checkpoint_height, 100);
+        assert!(!blob.merkle_root.is_empty());
+        assert!(blob.verify_merkle_root());
+    }
+
+    /// A character cannot move from the address into the signature.
+    ///
+    /// `leaf_hash` appended a `String` and a `Vec<u8>` with nothing between
+    /// them, so the last character of the address and the first byte of the
+    /// signature sat on an ambiguous boundary. Two different entries produced
+    /// one leaf. `verify_inclusion` rebuilds that leaf from a fault proof and
+    /// a verdict from it reaches `slash_validator` at the malicious-behaviour
+    /// ratio, so the collision let one accepted leaf carry two stories about
+    /// the same slot.
+    ///
+    /// The shift is done by hand rather than through `sign_attestation`,
+    /// because no honest signer produces the forged pair: the point is that
+    /// the *digest* cannot tell them apart, not that a signer would try.
+    #[test]
+    fn a_leaf_cannot_shift_bytes_from_the_address_into_the_signature() {
+        let honest = PqSignatureEntry {
+            validator_index: 7,
+            validator_address: "0xabcdef".to_string(),
+            dilithium_signature: vec![1, 2, 3, 4],
+        };
+
+        // Move the last address character to the front of the signature. The
+        // concatenation is byte-identical; only the split differs.
+        let mut shifted_signature = vec![b'f'];
+        shifted_signature.extend_from_slice(&honest.dilithium_signature);
+        let shifted = PqSignatureEntry {
+            validator_index: honest.validator_index,
+            validator_address: "0xabcde".to_string(),
+            dilithium_signature: shifted_signature,
+        };
+
+        // The premise: without lengths these two are the same bytes.
+        let mut honest_concat = honest.validator_address.as_bytes().to_vec();
+        honest_concat.extend_from_slice(&honest.dilithium_signature);
+        let mut shifted_concat = shifted.validator_address.as_bytes().to_vec();
+        shifted_concat.extend_from_slice(&shifted.dilithium_signature);
+        assert_eq!(
+            honest_concat, shifted_concat,
+            "the fixture must actually be a re-split, or this test proves \
+             nothing about the boundary"
+        );
+
+        assert_ne!(
+            QcBlob::leaf_hash(&honest),
+            QcBlob::leaf_hash(&shifted),
+            "two entries whose fields concatenate alike must not share a leaf"
+        );
+    }
+
+    /// The same boundary, seen through the Merkle root a blob commits to.
+    #[test]
+    fn a_re_split_entry_changes_the_merkle_root() {
+        let honest = vec![PqSignatureEntry {
+            validator_index: 0,
+            validator_address: "0xdeadbeef".to_string(),
+            dilithium_signature: vec![9; 32],
+        }];
+        let mut shifted_signature = vec![b'f'];
+        shifted_signature.extend_from_slice(&honest[0].dilithium_signature);
+        let shifted = vec![PqSignatureEntry {
+            validator_index: 0,
+            validator_address: "0xdeadbee".to_string(),
+            dilithium_signature: shifted_signature,
+        }];
+
+        assert_ne!(
+            QcBlob::compute_merkle_root(&honest),
+            QcBlob::compute_merkle_root(&shifted),
+            "the root is what `verify_merkle_root` checks a blob against"
+        );
+    }
+
+    /// An empty signature and an empty address are distinguishable from each
+    /// other and from the honest pair, or the length prefix is decoration.
+    #[test]
+    fn empty_fields_do_not_collapse_into_each_other() {
+        let both = PqSignatureEntry {
+            validator_index: 1,
+            validator_address: String::new(),
+            dilithium_signature: Vec::new(),
+        };
+        let address_only = PqSignatureEntry {
+            validator_index: 1,
+            validator_address: "ab".to_string(),
+            dilithium_signature: Vec::new(),
+        };
+        let signature_only = PqSignatureEntry {
+            validator_index: 1,
+            validator_address: String::new(),
+            dilithium_signature: vec![b'a', b'b'],
+        };
+
+        let leaves = [
+            QcBlob::leaf_hash(&both),
+            QcBlob::leaf_hash(&address_only),
+            QcBlob::leaf_hash(&signature_only),
+        ];
+        assert_ne!(leaves[0], leaves[1]);
+        assert_ne!(leaves[0], leaves[2]);
+        assert_ne!(
+            leaves[1], leaves[2],
+            "`ab` in the address and `ab` in the signature are different \
+             entries and must be different leaves"
+        );
+    }
+
+    #[test]
+    fn test_merkle_root_deterministic() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries = make_signed_entries(&snapshot, &keys, "cp_hash");
+        let root1 = QcBlob::compute_merkle_root(&entries);
+        let root2 = QcBlob::compute_merkle_root(&entries);
+        assert_eq!(root1, root2);
+    }
+
+    #[test]
+    fn test_merkle_root_changes_with_data() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries1 = make_signed_entries(&snapshot, &keys, "cp_hash");
+        let mut entries2 = entries1.clone();
+        entries2[0].dilithium_signature[0] ^= 0xFF;
+        let root1 = QcBlob::compute_merkle_root(&entries1);
+        let root2 = QcBlob::compute_merkle_root(&entries2);
+        assert_ne!(root1, root2);
+    }
+
+    #[test]
+    fn test_empty_merkle_root() {
+        let root = QcBlob::compute_merkle_root(&[]);
+        assert_eq!(root.len(), 64);
+        assert!(root.chars().all(|c| c == '0'));
+    }
+
+    #[test]
+    fn test_blob_expiry() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(2);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(1, 100, "cp".into(), entries);
+        assert!(!blob.is_expired(5));
+        assert!(!blob.is_expired(11));
+        assert!(blob.is_expired(12));
+    }
+
+    #[test]
+    fn test_blob_size_validation() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(1, 100, "cp".into(), entries);
+        assert!(blob.validate_size().is_ok());
+    }
+
+    #[test]
+    fn test_qc_blob_verify_against_snapshot() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(3);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+        assert!(blob
+            .verify_against_snapshot(&snapshot, Some(&[0, 1, 2]), Some(snapshot.epoch))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_detect_fault_proof_for_invalid_signature() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(2);
+        let mut entries = make_signed_entries(&snapshot, &keys, "cp");
+        entries[1].dilithium_signature[0] ^= 0xAA;
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+        let proofs = blob.detect_fault_proofs(&snapshot);
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(proofs[0].validator_index, 1);
+        let verdict = proofs[0].verify_against_blob(&blob, &snapshot).unwrap();
+        assert_eq!(verdict.action, QcProofAction::InvalidateFinality);
+        assert_eq!(verdict.invalidate_from_height, Some(100));
+        // InvalidDilithium is proven malicious → slash.
+        assert!(verdict.slash_validator);
+    }
+
+    #[test]
+    fn test_fault_proof_rejects_valid_signature() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(1);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+        let proof = QcFaultProof::new_invalid_dilithium(
+            snapshot.epoch,
+            100,
+            "cp".into(),
+            0,
+            snapshot.validators[0].address.to_string(),
+            blob.pq_signatures[0].dilithium_signature.clone(),
+            blob.merkle_proof(0).unwrap(),
+            0,
+        );
+        assert!(proof.verify_against_blob(&blob, &snapshot).is_err());
+    }
+
+    #[test]
+    fn test_zk_qc_fault_proof_is_versioned_but_stubbed() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(1);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+        let proof = QcFaultProof::new_zk_invalid_attestation(
+            snapshot.epoch,
+            100,
+            "cp".into(),
+            0,
+            snapshot.validators[0].address.to_string(),
+            vec![1, 2, 3],
+            ZkQcPublicInputs {
+                merkle_root: blob.merkle_root.clone(),
+                pq_public_key_hash: "pq_pk_hash".into(),
+                attestation_commitment: "attestation_commitment".into(),
+            },
+        );
+
+        let result = proof.verify_against_blob(&blob, &snapshot);
+        assert!(result
+            .unwrap_err()
+            .contains("ZK QC fault proof verifier not implemented"));
+    }
+
+    #[test]
+    fn test_pq_signing_message_deterministic() {
+        let msg1 = pq_signing_message(1, 100, "hash", 0);
+        let msg2 = pq_signing_message(1, 100, "hash", 0);
+        assert_eq!(msg1, msg2);
+
+        let msg3 = pq_signing_message(2, 100, "hash", 0);
+        assert_ne!(msg1, msg3);
+
+        let msg4 = pq_signing_message(1, 101, "hash", 0);
+        assert_ne!(msg1, msg4);
+    }
+
+    #[test]
+    fn test_single_entry_merkle() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(1);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(1, 100, "cp".into(), entries);
+        assert!(blob.verify_merkle_root());
+    }
+
+    /// (security audit §2) `verify_against_snapshot` returns
+    /// The set of unique verified signers, and rejects duplicate
+    /// Entries. Together these let the caller (e.g. `import_qc_blob`)
+    /// Enforce a BLS quorum against the *post-deduplication* count
+    /// Rather than the raw `pq_signatures.len`. This test pins
+    /// Both halves of the contract.
+    #[test]
+    fn verify_against_snapshot_returns_unique_set_and_rejects_duplicates() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let mut entries = make_signed_entries(&snapshot, &keys, "cp");
+
+        // Replace validator 3's entry with a second copy of validator 0's.
+        // The duplicate has the same validator_index, address and signature
+        // as entries[0], so it verifies cryptographically and must be caught
+        // by the deduplication check instead.
+        //
+        // The entry *count* stays at four deliberately. Appending a fifth
+        // would now be refused earlier by the entry-count bound, which is a
+        // different rejection: this test is about deduplication, so it has to
+        // reach that code path.
+        entries[3] = entries[0].clone();
+        assert_eq!(
+            entries.len(),
+            snapshot.validators.len(),
+            "the count bound must not be what rejects this blob"
+        );
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+
+        let result = blob.verify_against_snapshot(&snapshot, None, Some(snapshot.epoch));
+        assert!(
+            result.is_err(),
+            "duplicate PQ signature must be rejected even if it verifies cryptographically"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Duplicate PQ signature"),
+            "error must surface the deduplication rationale, got: {}",
+            err
+        );
+
+        // The same call without the duplicate must succeed and
+        // Return a set of exactly 4 unique validator indices.
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+        let verified = blob
+            .verify_against_snapshot(&snapshot, None, Some(snapshot.epoch))
+            .expect("clean blob must verify");
+        assert_eq!(verified.len(), 4, "expected 4 unique verified signers");
+        for idx in 0..4 {
+            assert!(
+                verified.contains(&idx),
+                "expected validator index {} in verified set",
+                idx
+            );
+        }
+    }
+
+    /// (security audit §4) the QcFaultProof can be built
+    /// From a real QcBlob and verified end-to-end. This is the
+    /// Proof surface that the new permissionless RPC endpoint
+    /// `bud_submitQcFaultProof` exposes; the test pins that the
+    /// Construction and verification contract still works after
+    /// Changes.
+    #[test]
+    fn qc_fault_proof_construction_and_verification_e2e() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(2);
+        let mut entries = make_signed_entries(&snapshot, &keys, "cp");
+        // Corrupt validator 1's dilithium signature so the blob
+        // Has a verifiable fault.
+        entries[1].dilithium_signature[0] ^= 0xAA;
+        let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
+
+        let proofs = blob.detect_fault_proofs(&snapshot);
+        assert_eq!(proofs.len(), 1, "exactly one fault should be detected");
+        let proof = &proofs[0];
+
+        // Verify the proof against the blob end-to-end.
+        let verdict = proof
+            .verify_against_blob(&blob, &snapshot)
+            .expect("valid fault proof must verify");
+        assert_eq!(verdict.action, QcProofAction::InvalidateFinality);
+        assert_eq!(verdict.invalidate_from_height, Some(100));
+        // Invalid Dilithium fault is slashable.
+        assert!(verdict.slash_validator);
+    }
+
+    /// A blob may not carry more signature entries than the validator set has
+    /// members, and the check must happen before anything that scales with the
+    /// entry count.
+    ///
+    /// `validate_size` bounds the blob in bytes, not entries. With a one-byte
+    /// signature an entry costs about 50 bytes, so roughly 20 000 fit under
+    /// `MAX_QC_BLOB_BYTES` - and every one of them used to be hashed by
+    /// `verify_merkle_root` before the verification loop rejected the first
+    /// one. Measured on this four-validator snapshot (debug build), 10 000
+    /// entries cost 604 ms of CPU for a blob that can never verify.
+    #[test]
+    fn rejects_more_signature_entries_than_validators() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let valid = make_signed_entries(&snapshot, &keys, "cp");
+
+        let mut entries = valid.clone();
+        // One extra entry is enough to be unusable: the duplicate check below
+        // would reject it anyway, so there is no reason to hash it first.
+        entries.push(valid[0].clone());
+
+        let blob = QcBlob {
+            epoch: snapshot.epoch,
+            checkpoint_height: 100,
+            checkpoint_hash: "cp".into(),
+            merkle_root: QcBlob::compute_merkle_root(&entries),
+            pq_signatures: entries,
+            created_epoch: snapshot.epoch,
+        };
+
+        let err = blob
+            .verify_against_snapshot(&snapshot, None, None)
+            .expect_err("more entries than validators must be refused");
+        assert!(
+            err.contains("signature entries for a validator set of"),
+            "rejection must name the count mismatch, got: {err}"
+        );
+    }
+
+    /// The expensive-path canary: a blob stuffed with entries must be refused
+    /// without the cost growing with the entry count.
+    ///
+    /// If the bound is ever removed this test still passes on correctness but
+    /// the timing assertion fails, which is the point, the finding was a CPU
+    /// exhaustion, not a wrong answer.
+    #[test]
+    fn oversized_blob_is_refused_in_constant_time() {
+        let (snapshot, _keys) = make_snapshot_with_pq_keys(4);
+
+        let build = |n: usize| -> QcBlob {
+            let entries: Vec<PqSignatureEntry> = (0..n)
+                .map(|i| PqSignatureEntry {
+                    validator_index: (i % 4) as u32,
+                    validator_address: snapshot.validators[i % 4].address.to_string(),
+                    dilithium_signature: vec![0u8; 1],
+                })
+                .collect();
+            QcBlob {
+                epoch: snapshot.epoch,
+                checkpoint_height: 100,
+                checkpoint_hash: "cp".into(),
+                // Deliberately not the real root: the entry-count check must
+                // fire before the merkle root is even computed.
+                merkle_root: String::new(),
+                pq_signatures: entries,
+                created_epoch: snapshot.epoch,
+            }
+        };
+
+        let small = build(100);
+        let large = build(10_000);
+
+        let t = std::time::Instant::now();
+        assert!(small
+            .verify_against_snapshot(&snapshot, None, None)
+            .is_err());
+        let small_us = t.elapsed().as_micros().max(1);
+
+        let t = std::time::Instant::now();
+        assert!(large
+            .verify_against_snapshot(&snapshot, None, None)
+            .is_err());
+        let large_us = t.elapsed().as_micros().max(1);
+
+        // Before the fix this ratio tracked the entry count (100x more
+        // entries cost about 100x more time). A generous ceiling still
+        // catches a regression to per-entry work.
+        assert!(
+            large_us < small_us.saturating_mul(20) + 5_000,
+            "rejecting 10000 entries took {large_us}us against {small_us}us for \
+             100 - the cost is scaling with the entry count again, so the \
+             bound is no longer running before verify_merkle_root"
+        );
+    }
+
+    /// The bound must not reject a legitimate blob: exactly one entry per
+    /// validator has to keep working.
+    #[test]
+    fn full_validator_set_still_verifies() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let entries = make_signed_entries(&snapshot, &keys, "cp");
+        assert_eq!(entries.len(), snapshot.validators.len());
+
+        let blob = QcBlob {
+            epoch: snapshot.epoch,
+            checkpoint_height: 100,
+            checkpoint_hash: "cp".into(),
+            merkle_root: QcBlob::compute_merkle_root(&entries),
+            pq_signatures: entries,
+            created_epoch: snapshot.epoch,
+        };
+
+        let verified = blob
+            .verify_against_snapshot(&snapshot, None, None)
+            .expect("a blob with one entry per validator must verify");
+        assert_eq!(verified.len(), 4);
+    }
+
+    /// A partial quorum (fewer entries than validators) must also still pass
+    /// structural verification - the bound is an upper limit, not an equality.
+    #[test]
+    fn partial_signature_set_still_verifies() {
+        let (snapshot, keys) = make_snapshot_with_pq_keys(4);
+        let mut entries = make_signed_entries(&snapshot, &keys, "cp");
+        entries.truncate(3);
+
+        let blob = QcBlob {
+            epoch: snapshot.epoch,
+            checkpoint_height: 100,
+            checkpoint_hash: "cp".into(),
+            merkle_root: QcBlob::compute_merkle_root(&entries),
+            pq_signatures: entries,
+            created_epoch: snapshot.epoch,
+        };
+
+        let verified = blob
+            .verify_against_snapshot(&snapshot, None, None)
+            .expect("a partial but honest signature set must verify");
+        assert_eq!(verified.len(), 3);
+    }
+
+    /// The production QC tree stays in step with the Kani bounded model.
+    ///
+    /// `kani/src/lib.rs` model-checks the tree shape on a fixed-array bounded
+    /// model with a non-commutative abstract combine. This test replicates
+    /// that bounded model literally (the same sibling rule, the same parity
+    /// ordering, the same in-place fold) and asserts it agrees with the
+    /// production `merkle_tree` module on the same leaves, and that the
+    /// SHA3 binding used by `QcBlob` produces the roots `compute_merkle_root`
+    /// commits to. A drift on either side fails here, exactly like
+    /// `bond_arithmetic_matches_the_kani_mirror` holds `penalty_for` in step.
+    #[test]
+    fn qc_merkle_matches_the_kani_mirror() {
+        // The Kani mirror combine (`combine_nodes_u64`): rotate-xor, order
+        // sensitive on purpose.
+        fn kani_combine(left: u64, right: u64) -> u64 {
+            left.rotate_left(17) ^ right.rotate_right(7)
+        }
+        // The Kani sibling rule, verbatim.
+        fn kani_sibling(index: usize, layer_len: usize) -> usize {
+            if index.is_multiple_of(2) {
+                (index + 1).min(layer_len.saturating_sub(1))
+            } else {
+                index.saturating_sub(1)
+            }
+        }
+        // The Kani in-place parent fold, verbatim.
+        fn kani_fold(layer: &mut [u64; 4], len: usize) -> usize {
+            let mut i = 0;
+            let mut out = 0;
+            while i < len {
+                let left = layer[i];
+                let right = if i + 1 < len { layer[i + 1] } else { left };
+                layer[out] = kani_combine(left, right);
+                i += 2;
+                out += 1;
+            }
+            out
+        }
+        // The Kani root + rebuild, verbatim.
+        fn kani_root(leaves: &[u64; 4], len: usize) -> Option<u64> {
+            if len == 0 {
+                return None;
+            }
+            let mut work = *leaves;
+            let mut layer_len = len;
+            while layer_len > 1 {
+                layer_len = kani_fold(&mut work, layer_len);
+            }
+            Some(work[0])
+        }
+        fn kani_rebuild(leaves: &[u64; 4], len: usize, index: usize) -> Option<u64> {
+            if len == 0 || index >= len {
+                return None;
+            }
+            let mut work = *leaves;
+            let mut layer_len = len;
+            let mut idx = index;
+            let mut cur = work[idx];
+            while layer_len > 1 {
+                let sibling = work[kani_sibling(idx, layer_len)];
+                cur = if idx.is_multiple_of(2) {
+                    kani_combine(cur, sibling)
+                } else {
+                    kani_combine(sibling, cur)
+                };
+                idx /= 2;
+                layer_len = kani_fold(&mut work, layer_len);
+            }
+            Some(cur)
+        }
+
+        // Pack a u64 leaf into the production's 32-byte digest (low bytes,
+        // rest zero) and unpack a 32-byte digest back to u64 the same way.
+        fn to_digest(v: u64) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out[..8].copy_from_slice(&v.to_le_bytes());
+            out
+        }
+        fn from_digest(d: [u8; 32]) -> u64 {
+            u64::from_le_bytes(d[..8].try_into().expect("8 bytes"))
+        }
+
+        // The production tree over packed u64 leaves with the Kani combine
+        // shape: every production node is exactly the packed Kani node.
+        fn u64_combine(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+            to_digest(kani_combine(from_digest(*left), from_digest(*right)))
+        }
+
+        let samples = [
+            [1u64, 2, 3, 4],
+            [9u64, 7, 5, 3],
+            [u64::MAX, 0, 42, 17],
+            [5u64, 6, 0, 0],
+        ];
+        for sample in samples {
+            for len in 0..=4usize {
+                let mut leaves = [0u64; 4];
+                leaves[..len].copy_from_slice(&sample[..len]);
+                let root = kani_root(&leaves, len);
+                let prod_leaves: Vec<[u8; 32]> =
+                    sample[..len].iter().map(|v| to_digest(*v)).collect();
+                let prod_root = if prod_leaves.is_empty() {
+                    None
+                } else {
+                    Some(from_digest(crate::consensus::merkle_tree::merkle_root(
+                        &prod_leaves,
+                        u64_combine,
+                    )))
+                };
+                assert_eq!(root, prod_root, "root disagreement at len {len}");
+                for index in 0..len {
+                    let rebuilt = kani_rebuild(&leaves, len, index);
+                    let prod_rebuilt = crate::consensus::merkle_tree::merkle_rebuild_root(
+                        &prod_leaves,
+                        index,
+                        u64_combine,
+                    )
+                    .map(from_digest);
+                    assert_eq!(
+                        rebuilt, prod_rebuilt,
+                        "rebuild disagreement at len {len}, index {index}"
+                    );
+                    assert_eq!(rebuilt, root, "rebuild != root at len {len}, index {index}");
+                }
+            }
+        }
+    }
+}

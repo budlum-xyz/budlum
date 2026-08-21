@@ -1,0 +1,65 @@
+[package]
+name = "budlum-wallet-core"
+version = "0.1.0"
+edition = "2021"
+description = "Budlum wallet core - BIP39 mnemonic, FIPS 204 ML-DSA-87 post-quantum key derivation and transaction signing"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[lib]
+name = "budlum_wallet_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# FIPS 204 ML-DSA-87 (NIST Category 5, formerly CRYSTALS-Dilithium5).
+# Pure Rust (RustCrypto), replaces Ed25519/SLIP-0010 as the user-facing
+# signature scheme. The node already links the same family via the
+# `pq-ml-dsa` validator feature; the wallet pins Category 5 (256-bit
+# quantum security) rather than inheriting Category 3.
+ml-dsa = { version = "0.1.1", features = ["alloc", "zeroize"] }
+sha3 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+# The wallet packs the field elements the chain will look up by. That packing
+# is the same rule the node and the zkVM state layer apply, so all three read
+# it from one place rather than each carrying a copy.
+budlum-note-packing = { path = "../note-packing" }
+
+# BIP39 mnemonic generation (minimal in-tree impl - no external dep for entropy→mnemonic)
+# Key derivation is ML-DSA-87 seed-based (FIPS 204) hardened only.
+
+[package.metadata.cargo-machete]
+# wasm-bindgen `wasm` feature'i ile aktiflesen opsiyonel bir bagimliliktir
+# (asagidaki [features] bolumune bakin). cargo-machete feature-gated opsiyonel
+# dep'leri varsayilan derlemede goremedigi icin "kullanilmiyor" sanir; bu bir
+# yanlis pozitiftir, bagimlilik `--features wasm` ile derlendiginde kullanilir.
+ignored = ["wasm-bindgen"]
+
+[features]
+default = []
+# Production wallet generation: enables real OS CSPRNG (getrandom) for entropy.
+# WITHOUT this feature, Wallet::generate fails-closed to prevent
+# deterministic/placeholder entropy from reaching production.
+production = ["dep:getrandom"]
+# UniFFI bindings (mobile: Kotlin/Swift)
+uniffi = []
+# WASM bindings (browser)
+wasm = ["wasm-bindgen"]
+
+[dependencies.getrandom]
+version = "0.2"
+optional = true
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+# wallet-core is a separate workspace and does not inherit the root manifest's
+# profile. It handles balances and amounts, where a silent release-mode wrap is
+# worse than a crash. Mirrors the root Cargo.toml.
+[profile.release]
+overflow-checks = true
+panic = "abort"

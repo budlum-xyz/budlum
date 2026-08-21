@@ -1,0 +1,39 @@
+7142
+# ---------------------------------------------------------------------------
+# G2 pedantic/nursery ratchet baseline.
+# Bu dosyanin ILK bare-sayi satiri baseline'dir (scripts/check-clippy-extra.sh
+# `grep -E '^[0-9]+$' | head -1` ile okur); asagisi gerekcedir.
+#
+# 2026-08-11 - 7108 -> 7142 (MSRV 1.97.0 yukseltmesi: +34 yeni pedantic/nursery lint)
+# 2026-07-26 - 217 -> 7108 (ekip)
+#
+# BU BIR GEVSETME DEGIL; ratchet'in ILK GERCEK OLCUMU.
+#
+# Neden 217 olu bir sayiydi:
+#   - Ratchet adimi (`Clippy pedantic/nursery ratchet`) kendinden onceki
+#     `Clippy` adimina baglidir. `Clippy` adimi `main`'de ve her branch'te
+#     kirmizi oldugu icin ratchet adimi HIC CALISMADI - son 20 tamamlanmis CI
+#     kosusunun 20'sinde de `skipped` (kanit: run 30200010164, 30202231034,
+#     30206161047, 30206496472 ... hepsi ratchet:skipped).
+#   - 217 degeri 2026-07-17'de `98b0fd9` worktree'sinde YEREL olarak
+#     olculmustu. O tarihten sonra kod tabani buyudu, ama sayi CI tarafindan
+#     bir kez bile dogrulanmadi.
+#   - Ayrica olcum komutu `... || true` ile calisir: derleme abort ederse
+#     JSON kismi kalir ve sayi yapay olarak dusuk cikar. 217, lib-test
+#     derlemesinin erken abort ettigi bir agactan gelmis olabilir.
+#
+# 7108 nasil olculdu:
+#   `Clippy` adimi ilk kez YESILE cekildi (97 lib + 167 lib-test
+#   hatasi -> 0). Bunun sonucunda ratchet adimi tarihte ilk kez gercekten
+#   calisti ve tam agac uzerinde 7108 pedantic+nursery uyarisi raporladi
+#   (kanit: CI run 30207198554, `clippy-extra: 7108 | baseline: 217`).
+#
+# Onemli: ratchet mantigi degistirilmedi, gevsetilmedi, atlanmadi. Kapi hala
+# "sayi ARTARSA fail" olarak calisir; artik gercek bir tabana karsi calisiyor.
+# Bu tabandan sonraki her yeni pedantic/nursery uyarisi CI'da yakalanir.
+#
+# Takip (ayri gorev): 7108 kademeli dusurulmeli. Baskin lint'ler daha once
+# uninlined_format_args / cast_precision_loss / cast_sign_loss ailesiydi;
+# bunlar buyuk olcude mekanik olarak duzeltilebilir. Her dusurmede bu dosya
+# bilincli bir PR ile guncellenir (script "dusmesi serbest" mantigiyla yazildi).
+# ---------------------------------------------------------------------------
