@@ -452,7 +452,7 @@ flowchart TD
     PosCommit["DomainCommitment: validators_root + epoch"]
     PosProof["FinalityProof::PoS: BLS certificate"]
     PosVerify[verify: cert.verify BLS aggregate signature]
-    PosVerify --> SignerCheck[signers ⊆ validator_set]
+    PosVerify --> SignerCheck["signers subset of validator_set"]
     SignerCheck --> Threshold["2/3+ stake threshold"]
     PosVRF[VRF: calculate_seed -> validator selection]
     PosVRF --> SeedRisk[C2: poison fallback -> predictable seed]
@@ -653,7 +653,7 @@ flowchart TD
     Postcard --> Deserialize[postcard deserialize ProofEnvelope]
     Deserialize --> PUBHash[public_inputs_hash match]
     Deserialize --> DegreeCheck["degree_bits <= MAX_DEGREE_BITS"]
-    Deserialize --> BackendCheck[backend ∈ Plonky3 test]
+    Deserialize --> BackendCheck["backend in Plonky3 test"]
     Deserialize --> FRIVerify[FRI verification]
     FRIVerify --> Result{valid?}
     Result -->|yes| Accept[ACCEPT: proof verified]
@@ -1045,7 +1045,7 @@ flowchart TB
   Peers --> MaxPeers[MAX_PEERS = 50]
   Peers --> Subnet[max_peers_per_subnet /24 = 4]
   Peers --> Score[Reputation scoring]
-  Score --> Ban[Ban threshold <= -100]
+  Score --> Ban["Ban threshold <= -100"]
   Node --> Snap[Snapshot sync]
   Snap --> Chunks[MAX_SNAPSHOT_CHUNKS = 4096]
   Snap --> Concurrent[MAX_CONCURRENT_SNAPSHOTS = 10]
@@ -1122,7 +1122,7 @@ flowchart TD
     StorageSlash --> Jailed
     Jailed --> Release[Jail release]
     Release --> Active
-    Liveness[Missed epochs > threshold] --> LivenessSlash[Liveness report -> slash all roles]
+    Liveness["Missed epochs > threshold"] --> LivenessSlash[Liveness report -> slash all roles]
     CrossRole[Slash one role -> jail ALL roles]
   end
 
