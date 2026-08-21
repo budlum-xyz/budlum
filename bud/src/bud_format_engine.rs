@@ -234,7 +234,7 @@ fn engine_store_with(
     // 1) format algıla + içerik sınıfı
     let detected = catalog_detect(data);
     let format_name = detected.map(|e| e.name).unwrap_or("Unknown");
-    let codec: FormatCodec = detected.map(|e| codec_of(e)).unwrap_or(FormatCodec::Unknown);
+    let codec: FormatCodec = detected.map(codec_of).unwrap_or(FormatCodec::Unknown);
     let kind = codec.structural_kind();
     let class = class_of(kind);
     // 2) içerik sınıfı transformu (columnar JSON / logfield LOG - en değerli ikisi)
@@ -271,7 +271,7 @@ fn engine_store_with(
         let sp = FastCdcSplit::split(&transformed, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK)?;
         sp.chunks
             .into_iter()
-            .zip(sp.chunk_ids.into_iter())
+            .zip(sp.chunk_ids)
             .map(|(d, id)| StructuralChunk { content_id: id, data: d })
             .collect()
     } else {

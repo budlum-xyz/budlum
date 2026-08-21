@@ -2,8 +2,8 @@
 //!
 //! K92: zaman serisi sıkıştırması 10-12x (ardışık zaman damgası farkı
 //! + XOR kayan nokta değerleri). B.U.D. telemetri/ölçüm verisi için domain transformu:
-//! (ts, value) çiftlerini zaman farkı + XOR bit akışına çevirir - zstd'nin
-//! göremediği yüksek entropili float farklarını görür.
+//!   (ts, value) çiftlerini zaman farkı + XOR bit akışına çevirir - zstd'nin
+//!   göremediği yüksek entropili float farklarını görür.
 //!
 //! Kayıpsız: encode → decode = orijinal (K38). Panik'siz, no unsafe, deterministik.
 //!
@@ -107,12 +107,12 @@ impl TimeSeriesColumnar {
             } else if (-63..=63).contains(&delta) {
                 w.write_bit(true);
                 w.write_bit(false);
-                w.write_bits((delta as i64 + 63) as u64, 7);
+                w.write_bits((delta + 63) as u64, 7);
             } else if (-255..=255).contains(&delta) {
                 w.write_bit(true);
                 w.write_bit(true);
                 w.write_bit(false);
-                w.write_bits((delta as i64 + 255) as u64, 9);
+                w.write_bits((delta + 255) as u64, 9);
             } else {
                 w.write_bit(true);
                 w.write_bit(true);

@@ -76,6 +76,12 @@ pub struct SecondPreimageResistantMerkle {
     pub domain_tag: &'static str,
 }
 
+impl Default for SecondPreimageResistantMerkle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecondPreimageResistantMerkle {
     pub fn new() -> Self { Self { domain_tag: "BDLM_BUD_MERKLE_V1" } }
 
@@ -110,6 +116,12 @@ impl SecondPreimageResistantMerkle {
 pub struct DictLoopDetector {
     pub visited: HashSet<[u8; 32]>,
     pub depth: usize,
+}
+
+impl Default for DictLoopDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DictLoopDetector {

@@ -117,13 +117,13 @@ mod tests {
     #[test]
     fn resolution_mismatch_detected() {
         let core = FidelityCore::new(vec![1,2,3], 1920, 1080);
-        let err = core.verify_fidelity(&vec![1,2,3], (1280,720)).unwrap_err();
+        let err = core.verify_fidelity(&[1,2,3], (1280,720)).unwrap_err();
         assert!(matches!(err, FidelityError::ResolutionMismatch{..}));
     }
     #[test]
     fn hash_mismatch_detected() {
         let core = FidelityCore::new(vec![1,2,3], 100, 100);
-        let err = core.verify_fidelity(&vec![4,5,6], (100,100)).unwrap_err();
+        let err = core.verify_fidelity(&[4,5,6], (100,100)).unwrap_err();
         assert_eq!(err, FidelityError::HashMismatch);
     }
 }

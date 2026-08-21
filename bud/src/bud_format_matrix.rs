@@ -148,12 +148,11 @@ pub fn matrix_honesty_check() -> bool {
                     return false;
                 }
             }
-            "culling" => {
+            "culling"
                 // culling 2.52 × ek dedup: toplam korpus dedup tavanını aşamaz
-                if e.multiplier > CORPUS_DEDUP_MEASURED {
+                if e.multiplier > CORPUS_DEDUP_MEASURED => {
                     return false;
                 }
-            }
             _ => {}
         }
     }

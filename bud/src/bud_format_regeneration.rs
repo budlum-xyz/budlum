@@ -247,7 +247,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0x5247_454E_2026_0816);
-        let mut buf = vec![0u8; 128];
+        let mut buf = [0u8; 128];
         for _ in 0..2000 {
             let len = (rng.next() % 128) as usize;
             for b in &mut buf[..len] {

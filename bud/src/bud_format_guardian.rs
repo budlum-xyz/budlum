@@ -3,11 +3,11 @@
 //! fikirler3.0 tezi: "disk uyur, CPU uyanır, bekçi gezer, tarife uyanıklığa bağlanır."
 //! Bu modül Y-fikirlerinin bud iskeletindeki kod karşılığıdır:
 //! - Y1  Gezici Bekçi: her epoch bekçi N içerikten birini seçer, PACT'i yeniden
-//!      üretir ve commitment'a karşı doğrular (üretim sınavı - PoR yerine).
+//!   üretir ve commitment'a karşı doğrular (üretim sınavı - PoR yerine).
 //! - Y12 Bekçi seçimi: commit-reveal + deterministik PRF (aynı geçmiş → aynı seçim).
 //! - Y14 Bekçi alt-rolü: opt-in bayrağı (yeni RoleId açmadan).
 //! - Y9  Rejeneratif cihaz ağı: mini-bekçi kaydı (shard denetimi + kusur sayacı).
-//! Sayılar program çıktısıdır; elle yazılmaz (2.0 kuralı). N=26 tablosu DV'den.
+//!   Sayılar program çıktısıdır; elle yazılmaz (2.0 kuralı). N=26 tablosu DV'den.
 
 #![forbid(unsafe_code)]
 
@@ -134,6 +134,21 @@ pub fn guardian_digest(g: &Guardian) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Y1 ÖLÇÜM: üretim sınavı maliyeti vs PoR sınavı maliyeti (program çıktısı).
+/// `produce_sec`: PACT'i yeniden üretme süresi · `por_sec`: karşılık gelen PoR.
+/// Kriter (fikirler2.0 İ2): üretim maliyeti PoR'un %1'inden az olmalı.
+pub fn production_vs_por_ratio(produce_sec: f64, por_sec: f64) -> f64 {
+    if por_sec <= 0.0 {
+        return f64::INFINITY;
+    }
+    produce_sec / por_sec
+}
+
+/// Y1 kabul: oran < 0.01 (%1) mı?
+pub fn production_cheaper_than_por(produce_sec: f64, por_sec: f64) -> bool {
+    production_vs_por_ratio(produce_sec, por_sec) < 0.01
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,19 +224,4 @@ mod tests {
         let g = Guardian::new([5u8; 32], GuardianRole::Operator);
         assert_eq!(guardian_digest(&g), guardian_digest(&g));
     }
-}
-
-/// Y1 ÖLÇÜM: üretim sınavı maliyeti vs PoR sınavı maliyeti (program çıktısı).
-/// `produce_sec`: PACT'i yeniden üretme süresi · `por_sec`: karşılık gelen PoR.
-/// Kriter (fikirler2.0 İ2): üretim maliyeti PoR'un %1'inden az olmalı.
-pub fn production_vs_por_ratio(produce_sec: f64, por_sec: f64) -> f64 {
-    if por_sec <= 0.0 {
-        return f64::INFINITY;
-    }
-    produce_sec / por_sec
-}
-
-/// Y1 kabul: oran < 0.01 (%1) mı?
-pub fn production_cheaper_than_por(produce_sec: f64, por_sec: f64) -> bool {
-    production_vs_por_ratio(produce_sec, por_sec) < 0.01
 }

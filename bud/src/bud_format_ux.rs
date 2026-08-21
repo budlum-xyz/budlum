@@ -5,7 +5,7 @@
 //! 2) "Uzun videoya ne oluyor?" - akışlı segmentleme + kare sayısı/tur.
 //! 3) "0.016'ya düşürdükten sonra QR video + tarif acayip az alan kaplamıyor mu?"
 //!    - ekonomik çelişki denetimi: tarif alanı ~120 B ise validatör yükü ~0;
-//!    o zaman kullanıcı NE için öder? Cevap: NFT oluşturma ücreti (creation fee).
+//!      o zaman kullanıcı NE için öder? Cevap: NFT oluşturma ücreti (creation fee).
 //! 4) "Kullanıcı sadece NFT oluştururken ücret versin" - creation-fee modeli.
 //!
 //! Tüm sayılar program çıktısıdır; elle yazılmaz (şartname kuralı).

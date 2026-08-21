@@ -155,12 +155,18 @@ pub mod bud_format_optical_transfer;
 #[cfg(feature = "bud3")]
 pub mod bud_format_tarif;
 #[cfg(feature = "bud3")]
-#[cfg(feature = "bud3")]
 pub mod bud_format_qrmatrix;
 #[cfg(feature = "bud3")]
-#[cfg(feature = "bud3")]
 pub mod bud_format_sartname;
+// `bud_format_sertlesme` ve `bud_format_qrvideo` 3.0 modülleridir ama
+// kapısızdı: yukarıda iki `#[cfg(feature = "bud3")]` üst üste yazılmıştı
+// (öznitelik tekrarı derleyici için tek kapıya eşdeğerdir, fazladan olanı
+// sessizce yutulur) ve bu ikisi kapının DIŞINDA kalmıştı. Sonuç: default
+// (bud2) derlemede QR-video yüzeyi de geliyordu — 3.0 kapalıyken 3.0 kodu
+// derleniyordu. Tekrarlar kaldırıldı, iki modül ait olduğu kapıya alındı.
+#[cfg(feature = "bud3")]
 pub mod bud_format_sertlesme;
+#[cfg(feature = "bud3")]
 pub mod bud_format_qrvideo;
 #[cfg(feature = "bud3")]
 pub mod bud_format_ux;

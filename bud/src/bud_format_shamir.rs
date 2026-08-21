@@ -121,9 +121,9 @@ impl ShamirShare {
                     num = gf.mul(num, xj);
                     den = gf.mul(den, gf.add(xj, xi)); // xj - xi = xj ^ xi (GF toplama)
                 }
-                let li = match gf.inv(den) {
-                    Some(d) => gf.mul(num, d),
-                    None => return None,
+                let li = {
+                    let d = gf.inv(den)?;
+                    gf.mul(num, d)
                 };
                 acc = gf.add(acc, gf.mul(yi, li));
             }

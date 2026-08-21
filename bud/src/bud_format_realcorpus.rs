@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn gercek_font_engine_kayipsiz() {
-        let mut adaylar = vec![
+        let adaylar = vec![
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",

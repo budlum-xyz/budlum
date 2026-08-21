@@ -321,7 +321,7 @@ impl BudV2Header {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_V2");
         for c in chunks {
-            h.update(&c.content_id);
+            h.update(c.content_id);
         }
         let digest: [u8; 32] = h.finalize().into();
         let total_len: u64 = chunks.iter().map(|c| c.data.len() as u64).sum();
@@ -577,11 +577,52 @@ impl BudV2File {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_V2");
         for c in &self.chunks {
-            h.update(&c.content_id);
+            h.update(c.content_id);
         }
         let digest: [u8; 32] = h.finalize().into();
         digest == self.header.content_id.digest
     }
+}
+
+/// K35 compaction: min boyut altındaki parçaları birleştir (kayıpsız).
+/// Küçük-nesne amplifikasyonu (K21/K35, S.61 MinIO/Ceph dersi) çözümü:
+/// çok küçük parçalar dedup/kanıt verimini düşürür; bitişik min-altı parçalar
+/// tek parçada toplanır. `structural_join` ile hâlâ birebir orijinal.
+pub fn structural_split_compact(kind: StructuralKind, data: &[u8], min_chunk: usize) -> Vec<StructuralChunk> {
+    let raw = structural_split(kind, data);
+    if raw.is_empty() {
+        return raw;
+    }
+    let mut out: Vec<StructuralChunk> = Vec::new();
+    let mut acc: Vec<u8> = Vec::new();
+    for c in raw {
+        if acc.is_empty() && c.data.len() >= min_chunk {
+            // büyük parça doğrudan
+            out.push(c);
+        } else if acc.len() + c.data.len() <= min_chunk.max(1) {
+            acc.extend_from_slice(&c.data);
+        } else {
+            // akümülatörü boşalt, sonra yeni parça başlat
+            if !acc.is_empty() {
+                let v = std::mem::take(&mut acc);
+                out.push(StructuralChunk { content_id: content_id(&v), data: v });
+            }
+            if c.data.len() >= min_chunk {
+                out.push(c);
+            } else {
+                acc = c.data;
+            }
+        }
+    }
+    if !acc.is_empty() {
+        out.push(StructuralChunk { content_id: content_id(&acc), data: acc });
+    }
+    out
+}
+
+/// Parça sayısı (tanı testi için yardımcı).
+pub fn structural_chunks(kind: StructuralKind, data: &[u8]) -> usize {
+    structural_split(kind, data).len()
 }
 
 #[cfg(test)]
@@ -1129,7 +1170,7 @@ mod tests {
                 (self.next() & 0xff) as u8
             }
         }
-        let mut rng = Rng(0xF0_0D_2026_0816_00F0);
+        let mut rng = Rng(0xF00D_2026_0816_00F0);
         let mut buf = vec![0u8; 256];
         for round in 0..4000u32 {
             let len = (rng.next() % 256) as usize;
@@ -1151,45 +1192,4 @@ mod tests {
             }
         }
     }
-}
-
-/// K35 compaction: min boyut altındaki parçaları birleştir (kayıpsız).
-/// Küçük-nesne amplifikasyonu (K21/K35, S.61 MinIO/Ceph dersi) çözümü:
-/// çok küçük parçalar dedup/kanıt verimini düşürür; bitişik min-altı parçalar
-/// tek parçada toplanır. `structural_join` ile hâlâ birebir orijinal.
-pub fn structural_split_compact(kind: StructuralKind, data: &[u8], min_chunk: usize) -> Vec<StructuralChunk> {
-    let raw = structural_split(kind, data);
-    if raw.is_empty() {
-        return raw;
-    }
-    let mut out: Vec<StructuralChunk> = Vec::new();
-    let mut acc: Vec<u8> = Vec::new();
-    for c in raw {
-        if acc.is_empty() && c.data.len() >= min_chunk {
-            // büyük parça doğrudan
-            out.push(c);
-        } else if acc.len() + c.data.len() <= min_chunk.max(1) {
-            acc.extend_from_slice(&c.data);
-        } else {
-            // akümülatörü boşalt, sonra yeni parça başlat
-            if !acc.is_empty() {
-                let v = std::mem::take(&mut acc);
-                out.push(StructuralChunk { content_id: content_id(&v), data: v });
-            }
-            if c.data.len() >= min_chunk {
-                out.push(c);
-            } else {
-                acc = c.data;
-            }
-        }
-    }
-    if !acc.is_empty() {
-        out.push(StructuralChunk { content_id: content_id(&acc), data: acc });
-    }
-    out
-}
-
-/// Parça sayısı (tanı testi için yardımcı).
-pub fn structural_chunks(kind: StructuralKind, data: &[u8]) -> usize {
-    structural_split(kind, data).len()
 }

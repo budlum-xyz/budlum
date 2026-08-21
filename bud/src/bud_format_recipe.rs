@@ -75,13 +75,6 @@ pub fn recipe_digest(c: &RecipeCandidate) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha3::Digest;
-
-    fn hof(b: &[u8]) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(b);
-        h.finalize().into()
-    }
 
     #[test]
     fn y15_integer_only_sinir() {

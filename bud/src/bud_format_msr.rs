@@ -8,8 +8,8 @@
 //! - MDS: herhangi 2 düğüm → 4 sembolün tamamı (kayıpsız decode)
 //! - EXACT REPAIR: ölü düğüm, 3 sağlam düğümden β=1 paket (TOPLAM 3 paket)
 //!   indirerek BİREBİR onarılır - düz erasure onarımı k·α=4 paket ister → %25 az
-//! Onarım katsayıları koda gömülü DEĞİL; her onarım λ·D = hedef çözülerek
-//! üretilir (generic) ve test her denemede doğrular.
+//!   Onarım katsayıları koda gömülü DEĞİL; her onarım λ·D = hedef çözülerek
+//!   üretilir (generic) ve test her denemede doğrular.
 
 #![forbid(unsafe_code)]
 
@@ -242,7 +242,7 @@ pub fn msr_digest(nodes: &[[u8; 2]; N]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(MSR_MAGIC);
     for n in nodes {
-        h.update(&n);
+        h.update(n);
     }
     h.finalize().into()
 }
@@ -250,7 +250,7 @@ pub fn msr_digest(nodes: &[[u8; 2]; N]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::{RngCore, SeedableRng};
+    use rand_core::RngCore;
 
     #[test]
     fn msr_mds_decode_her_iki_dugum() {

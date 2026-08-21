@@ -27,6 +27,12 @@ pub struct SegmentLedger {
     pub total_bytes: u64,
 }
 
+impl Default for SegmentLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SegmentLedger {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_SEGMENT_V1";
 

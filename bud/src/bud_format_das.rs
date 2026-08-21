@@ -33,7 +33,7 @@ pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
     // ikili merkle (tek sayıda → son yaprak çoğaltılır)
     let mut level = leaves;
     while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let mut h = Sha3_256::new();
             h.update(b"BDLM_BUD_DAS_NODE_V1");
@@ -80,11 +80,11 @@ impl DasProof {
         let mut idx = leaf_index;
         let mut path = Vec::new();
         while level.len() > 1 {
-            let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+            let sibling_idx = if idx.is_multiple_of(2) { idx + 1 } else { idx - 1 };
             let sibling = if sibling_idx < level.len() { level[sibling_idx] } else { level[idx] };
             path.push(sibling);
             // üst seviyeye geç
-            let mut next = Vec::with_capacity((level.len() + 1) / 2);
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for pair in level.chunks(2) {
                 let mut h = Sha3_256::new();
                 h.update(b"BDLM_BUD_DAS_NODE_V1");
@@ -114,7 +114,7 @@ impl DasProof {
         for sibling in &self.path {
             let mut nh = Sha3_256::new();
             nh.update(b"BDLM_BUD_DAS_NODE_V1");
-            if idx % 2 == 0 {
+            if idx.is_multiple_of(2) {
                 nh.update(cur);
                 nh.update(*sibling);
             } else {

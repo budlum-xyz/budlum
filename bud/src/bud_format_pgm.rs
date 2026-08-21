@@ -41,7 +41,13 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
         loop {
             let mut grown = false;
             let jj = j + 1;
-            while jj < keys.len() {
+            // `while` idi ama gövdenin her yolu `break` ediyor ve `jj` gövde
+            // içinde hiç değişmiyor: koşul yeniden değerlendirilmiyordu, yani
+            // bu bir döngü değil tek geçişli daldı (clippy::never_loop).
+            // Gerçek yineleme DIŞ `loop`'ta: orada `j = jj` ile ilerleyip
+            // `grown` bayrağıyla tekrar giriliyor. `if` yazmak yapıyı olduğu
+            // gibi gösterir; davranış birebir aynı.
+            if jj < keys.len() {
                 // uç noktalardan yeniden uydur (i ve jj)
                 let dx = (keys[jj] - keys[i]).max(1) as f64;
                 let na = (offsets[jj] as f64 - offsets[i] as f64) / dx;
@@ -58,15 +64,16 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
                     }
                     em = em.max(err);
                 }
-                if !ok {
-                    break;
+                // Parça jj'ye kadar eps içinde kaldıysa bir adım büyüt ve dış
+                // `loop` baştan denesin; kalmadıysa `grown` false kalır ve
+                // aşağıdaki kontrol dış döngüyü bitirir.
+                if ok {
+                    a = na;
+                    b = nb;
+                    max_err = em;
+                    j = jj;
+                    grown = true;
                 }
-                a = na;
-                b = nb;
-                max_err = em;
-                j = jj;
-                grown = true;
-                break; // bir adım büyüt, baştan dene (her nokta tekrar uydurur)
             }
             if !grown {
                 break;

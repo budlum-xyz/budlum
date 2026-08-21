@@ -40,7 +40,7 @@ impl CropDerivation {
 
     /// MCU hizalama kontrolü: kırpma kenarları 16'nın katında mı?
     pub fn is_mcu_aligned(x: u32, y: u32, w: u32, h: u32) -> bool {
-        x % MCU_SIZE == 0 && y % MCU_SIZE == 0 && w % MCU_SIZE == 0 && h % MCU_SIZE == 0
+        x.is_multiple_of(MCU_SIZE) && y.is_multiple_of(MCU_SIZE) && w.is_multiple_of(MCU_SIZE) && h.is_multiple_of(MCU_SIZE)
     }
 
     /// Yeni kırpma kaydı (hizalama otomatik hesaplanır).

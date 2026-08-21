@@ -81,6 +81,50 @@ pub fn verify_witness(steps: &[WitnessStep], expected_root: &[u8; 32]) -> bool {
     &witness_root(steps) == expected_root
 }
 
+/// STARK-dostu ALAN İZİ: her adımı Goldilocks asal alanına (p = 2^64 - 2^32 + 1)
+/// indirgenmiş 10 alan elemanına çevirir → nexus/SP1 devresi doğrudan tüketir.
+/// Satır: [op, arg, in0..in3, out0..out3] - digest 32 bayt → 4×u64 (LE) mod p.
+pub const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001; // 2^64 - 2^32 + 1
+
+fn mod_p(w: u64) -> u64 {
+    // w < 2^64; p ≈ 2^64 - 2^32 → w - p tek çıkarmada (w >= p ise)
+    let mut x = w;
+    if x >= GOLDILOCKS_P {
+        x -= GOLDILOCKS_P;
+    }
+    x
+}
+
+pub fn witness_to_field_trace(steps: &[WitnessStep]) -> Vec<[u64; 10]> {
+    let mut rows = Vec::with_capacity(steps.len());
+    for s in steps {
+        let mut row = [0u64; 10];
+        row[0] = s.op as u64;
+        row[1] = mod_p(s.arg);
+        for (k, w) in s.input_digest.chunks_exact(8).enumerate() {
+            row[2 + k] = mod_p(u64::from_le_bytes(w.try_into().unwrap()));
+        }
+        for (k, w) in s.output_digest.chunks_exact(8).enumerate() {
+            row[6 + k] = mod_p(u64::from_le_bytes(w.try_into().unwrap()));
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Alan izi satır sayısı (devre boyutu göstergesi) + kök (bağlama).
+pub fn field_trace_meta(rows: &[[u64; 10]]) -> (usize, [u8; 32]) {
+    let mut h = Sha3_256::new();
+    h.update(b"BDLM_ZK_FIELDTRACE_V1");
+    h.update((rows.len() as u32).to_le_bytes());
+    for r in rows {
+        for w in r {
+            h.update(w.to_le_bytes());
+        }
+    }
+    (rows.len(), h.finalize().into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,48 +178,4 @@ mod tests {
             assert!(!verify_witness(&bozuk, &orijinal_kok), "bozuk iz orijinal kökle eşleşmemeli");
         }
     }
-}
-
-/// STARK-dostu ALAN İZİ: her adımı Goldilocks asal alanına (p = 2^64 - 2^32 + 1)
-/// indirgenmiş 10 alan elemanına çevirir → nexus/SP1 devresi doğrudan tüketir.
-/// Satır: [op, arg, in0..in3, out0..out3] - digest 32 bayt → 4×u64 (LE) mod p.
-pub const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001; // 2^64 - 2^32 + 1
-
-fn mod_p(w: u64) -> u64 {
-    // w < 2^64; p ≈ 2^64 - 2^32 → w - p tek çıkarmada (w >= p ise)
-    let mut x = w;
-    if x >= GOLDILOCKS_P {
-        x -= GOLDILOCKS_P;
-    }
-    x
-}
-
-pub fn witness_to_field_trace(steps: &[WitnessStep]) -> Vec<[u64; 10]> {
-    let mut rows = Vec::with_capacity(steps.len());
-    for s in steps {
-        let mut row = [0u64; 10];
-        row[0] = s.op as u64;
-        row[1] = mod_p(s.arg);
-        for (k, w) in s.input_digest.chunks_exact(8).enumerate() {
-            row[2 + k] = mod_p(u64::from_le_bytes(w.try_into().unwrap()));
-        }
-        for (k, w) in s.output_digest.chunks_exact(8).enumerate() {
-            row[6 + k] = mod_p(u64::from_le_bytes(w.try_into().unwrap()));
-        }
-        rows.push(row);
-    }
-    rows
-}
-
-/// Alan izi satır sayısı (devre boyutu göstergesi) + kök (bağlama).
-pub fn field_trace_meta(rows: &[[u64; 10]]) -> (usize, [u8; 32]) {
-    let mut h = Sha3_256::new();
-    h.update(b"BDLM_ZK_FIELDTRACE_V1");
-    h.update((rows.len() as u32).to_le_bytes());
-    for r in rows {
-        for w in r {
-            h.update(w.to_le_bytes());
-        }
-    }
-    (rows.len(), h.finalize().into())
 }

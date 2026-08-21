@@ -50,7 +50,7 @@ impl VideoSuggestion {
     /// - Static: AV1, çok uzun GOP (240+), düşük scenecut (10) → 1300-1600x
     /// - LowMotion: AV1, uzun GOP (120), orta scenecut (30) → ~150-250x
     /// - HighMotion: AV1, orta GOP (60), yüksek scenecut (60) → ~70-200x
-    /// (H.264/HEVC alternatifleri tabloda; AV1 ölçümde lossless'ta da lider - K84)
+    ///   (H.264/HEVC alternatifleri tabloda; AV1 ölçümde lossless'ta da lider - K84)
     pub fn for_class(class: VideoContentClass) -> Self {
         match class {
             VideoContentClass::Static => Self::new(VideoCodec::Av1, 240, 10, false, 1300.0, 1600.0),
@@ -91,7 +91,7 @@ pub fn classify_content(yuv: &[u8], w: usize, h: usize, frames: usize) -> Option
         let mut diff: u64 = 0;
         let mut cnt: u64 = 0;
         for i in (0..frame_bytes).step_by(64) {
-            diff += (a[i] as i64 - b[i] as i64).unsigned_abs() as u64;
+            diff += (a[i] as i64 - b[i] as i64).unsigned_abs();
             cnt += 1;
         }
         let _ = cnt; // örnekleme sayacı (istatistik için kullanılabilir)

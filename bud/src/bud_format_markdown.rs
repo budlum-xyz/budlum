@@ -204,7 +204,7 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn read_str<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<String> {
+fn read_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
     if bytes.len() < *pos + 4 {
         return None;
     }

@@ -5,7 +5,7 @@
 //!   - İmza: ML-DSA-87 (FIPS 204, Category 5) - Dilithium5 (round-3) RED.
 //!   - KEM : ML-KEM-768 (FIPS 205, Category 3).
 //!   - Hash: SHA3-256 (Grover 128-bit) - BLAKE3 opsiyonel.
-//! Ed25519/AES-128/SHA2-256 (eski) her zaman RED (KQ kapısı).
+//!     Ed25519/AES-128/SHA2-256 (eski) her zaman RED (KQ kapısı).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Suite {
@@ -65,7 +65,7 @@ mod tests {
         assert!(s.is_quantum_resistant().is_ok());
     }
     #[test]
-    fn dilithium5_round3_RED() {
+    fn dilithium5_round3_reddedilir() {
         // NIST final DEĞİL - politika gereği RED
         let s = QuantumSuite::from_suite(Suite::Dilithium5Aes256Blake3);
         assert!(s.is_quantum_resistant().is_err(), "Dilithium5 (round-3) RED olmali");

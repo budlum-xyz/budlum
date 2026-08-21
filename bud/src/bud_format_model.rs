@@ -54,7 +54,7 @@ impl ModelFloatSplit {
             FloatKind::Bf16 => 2usize,
             FloatKind::Fp32 => 4usize,
         };
-        if raw.is_empty() || raw.len() % width != 0 {
+        if raw.is_empty() || !raw.len().is_multiple_of(width) {
             return None;
         }
         let count = raw.len() / width;
@@ -68,13 +68,13 @@ impl ModelFloatSplit {
             FloatKind::Fp32 => 23usize,
         };
         let rest_total_bits = count * (1 + mantissa_bits);
-        let mut rest_bits = vec![0u8; (rest_total_bits + 7) / 8];
+        let mut rest_bits = vec![0u8; rest_total_bits.div_ceil(8)];
         for i in 0..count {
             let off = i * width;
             // üs = bayt 1 (big-endian IEEE: bayt 0 = işaret+üs yüksek, bayt 1 = üs düşük+mantissa)
             // IEEE: b0 = sign + exp[7:1], b1 = exp[0] + mantissa(MSB'ler)
             let sign = (raw[off] >> 7) & 1;
-            let exp_hi = (raw[off] & 0x7F) as u8; // exp[7:1]
+            let exp_hi = raw[off] & 0x7F; // exp[7:1]
             let exp_lo = (raw[off + 1] >> 7) & 1; // exp[0]
             let exp = (exp_hi << 1) | exp_lo;
             exponents.push(exp);
@@ -317,7 +317,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0x4D4F_444C_2026_0816);
-        let mut buf = vec![0u8; 200];
+        let mut buf = [0u8; 200];
         for _ in 0..2000 {
             let len = (rng.next() % 200) as usize;
             for b in &mut buf[..len] {

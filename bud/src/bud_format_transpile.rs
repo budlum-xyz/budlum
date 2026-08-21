@@ -19,7 +19,7 @@ impl BashTranspile {
     }
 
     pub fn ratio(&self) -> f64 {
-        if self.script.len()==0 { return 1.0; }
+        if self.script.is_empty() { return 1.0; }
         self.original_size as f64 / self.script.len() as f64
     }
 

@@ -66,6 +66,11 @@ impl Expansion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B.U.D. 2.0'in TEK FIYAT tavani: 0.016 $/TB/ay. Sabit olarak yazildi ki
+    /// testler ayni sayiyi tekrarlamak yerine tek yerden okusun.
+    const CEILING: f64 = 0.016;
+
     #[test]
     fn physical_60m_external_bench() {
         let m = PriceModel::default();
@@ -103,7 +108,40 @@ mod tests {
     }
     #[test]
     fn media_device_only_holds() {
-        // device cost 0 <=0.016 her zaman OK
-        assert!(0.0 <= 0.016);
+        // Bu test `assert!(0.0 <= 0.016)` idi: iki DERLEME ZAMANI SABİTİNİ
+        // karşılaştırıyordu, modeli hiç çağırmıyordu (clippy
+        // assertions_on_constants). Yani "cihaz-içi içerik tavanı tutar"
+        // iddiası test edilmiş görünüyor ama hiçbir şey doğrulanmıyordu:
+        // fiyat modeli tamamen bozulsa bile bu test yeşil kalırdı.
+        //
+        // Cihaz-içi yerleşimin anlamı, kiralanan fiziksel kapasitenin sıfır
+        // olmasıdır (bayt kullanıcının kendi cihazında durur). Model
+        // üzerinden ifadesi: fiziksel maliyet kalemleri sıfırlanınca satılan
+        // maliyet de sıfır olmalı ve tavanın altında kalmalı.
+        let cihaz = PriceModel {
+            disk_usd_per_tb: 0.0,
+            power_w_per_tb: 0.0,
+            other_usd: 0.0,
+            ..PriceModel::default()
+        };
+        assert_eq!(
+            cihaz.physical_usd_per_tb_month(),
+            0.0,
+            "cihaz-içi yerleşimde kiralanan fiziksel kapasite yoktur"
+        );
+
+        // Erasure ve oran ne olursa olsun 0 x e / r = 0 -> tavanın altında.
+        let maliyet = cihaz.cost_sold(1.5, 2.0).expect("geçerli oran");
+        assert_eq!(maliyet, 0.0, "sıfır fiziksel maliyet sıfır satılan maliyet verir");
+        assert!(maliyet <= CEILING, "cihaz-içi maliyet 0.016 tavanının altında");
+
+        // Kanarya: aynı çağrı GERÇEK bir donanım modelinde sıfır DEĞİLDİR.
+        // Bu satır olmasa test, modeli her zaman 0 döndüren bir regresyonu da
+        // kabul ederdi.
+        let gercek = PriceModel::default();
+        assert!(
+            gercek.physical_usd_per_tb_month() > 0.0,
+            "varsayılan donanım modeli sıfır maliyet üretmemeli"
+        );
     }
 }
