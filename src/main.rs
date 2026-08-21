@@ -616,7 +616,13 @@ async fn main() {
     let consensus: Arc<dyn ConsensusEngine> = match consensus_type {
         ConsensusType::PoW => {
             println!("PoW mode - difficulty: {}", config.difficulty);
-            Arc::new(PoWEngine::new(config.difficulty))
+            // Retarget hedefi ureticinin gercek tick araligina kalibre edilir;
+            // aksi halde varsayilan 10 sn hedef devnet'in 1 sn slotunu "10x
+            // hizli" sayar ve zorlugu her 100 blokta 4 katina cikarir.
+            Arc::new(PoWEngine::calibrated(
+                config.difficulty,
+                config.network.slot_ms(),
+            ))
         }
         ConsensusType::PoS => {
             println!("PoS mode - min stake: {}", config.min_stake);
@@ -844,7 +850,10 @@ async fn main() {
                 if consensus_type == ConsensusType::PoW {
                     consensus.clone()
                 } else {
-                    Arc::new(PoWEngine::new(config.difficulty))
+                    Arc::new(PoWEngine::calibrated(
+                        config.difficulty,
+                        config.network.slot_ms(),
+                    ))
                 }
             }
             ConsensusKind::PoS => {
