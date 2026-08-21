@@ -5167,7 +5167,7 @@ impl Blockchain {
         }
         let mut unfrozen = 0;
         for req in pending {
-            let domain_id = req.domain_id as crate::domain::DomainId;
+            let domain_id = req.domain_id;
             let Some(domain) = self.domain_registry.get(domain_id) else {
                 tracing::warn!("UnfreezeGovernance: domain {domain_id} not found");
                 continue;
