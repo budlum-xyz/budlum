@@ -1,0 +1,109 @@
+
+# cargo-vet config file
+
+[cargo-vet]
+version = "0.10"
+
+[imports.bytecode-alliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+
+[imports.embark-studios]
+url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/main/audits.toml"
+
+[imports.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+
+[imports.isrg]
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
+
+[imports.mozilla]
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+
+[imports.zcash]
+url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+
+# --- git kaynaklı libp2p ağacı: crates.io karşılığı olarak denetle ---
+#
+# libp2p, crates.io yerine rust-libp2p ağacından alınıyor (Cargo.toml:32).
+# cargo-vet bir git bağımlılığının hangi crates.io paketine karşılık geldiğini
+# kendiliğinden bilemez, bu yüzden denetim kayıtlarını (mozilla/google/isrg
+# import'ları dahil) o paketlere bağlayamıyor ve "There are some issues with
+# your policy.audit-as-crates-io entries" diyerek TARAMAYI HİÇ ÇALIŞTIRMIYOR.
+#
+# Bu, kapının doğru yakaladığı bir durumdu: `cargo vet check` ne denetimsiz
+# bağımlılık sayısı ne de "Vetting Succeeded!" basmıştı, kapı da çıktıyı temiz
+# saymayı reddetti. Eksik olan kapı değil, aşağıdaki eşlemeydi.
+#
+# `audit-as-crates-io = true`, "bu git checkout'u aynı isimli crates.io
+# paketiyle bir say" demektir; mevcut denetimler yeniden kullanılabilir hale
+# gelir. Yeni bir güven varsayımı eklemez: sürümler Cargo.lock'ta pinli ve
+# hangi commit'ten geldikleri raporda görünüyor.
+
+[policy."libp2p"]
+audit-as-crates-io = true
+
+[policy."libp2p-allow-block-list"]
+audit-as-crates-io = true
+
+[policy."libp2p-connection-limits"]
+audit-as-crates-io = true
+
+[policy."libp2p-core"]
+audit-as-crates-io = true
+
+[policy."libp2p-dns"]
+audit-as-crates-io = true
+
+[policy."libp2p-gossipsub"]
+audit-as-crates-io = true
+
+[policy."libp2p-identify"]
+audit-as-crates-io = true
+
+[policy."libp2p-kad"]
+audit-as-crates-io = true
+
+[policy."libp2p-mdns"]
+audit-as-crates-io = true
+
+[policy."libp2p-metrics"]
+audit-as-crates-io = true
+
+[policy."libp2p-noise"]
+audit-as-crates-io = true
+
+[policy."libp2p-ping"]
+audit-as-crates-io = true
+
+[policy."libp2p-quic"]
+audit-as-crates-io = true
+
+[policy."libp2p-request-response"]
+audit-as-crates-io = true
+
+[policy."libp2p-swarm"]
+audit-as-crates-io = true
+
+[policy."libp2p-swarm-derive"]
+audit-as-crates-io = true
+
+[policy."libp2p-tcp"]
+audit-as-crates-io = true
+
+[policy."libp2p-tls"]
+audit-as-crates-io = true
+
+[policy."libp2p-upnp"]
+audit-as-crates-io = true
+
+[policy."libp2p-yamux"]
+audit-as-crates-io = true
+
+[policy."multistream-select"]
+audit-as-crates-io = true
+
+[policy."prost-codec"]
+audit-as-crates-io = true
+
+[policy."rw-stream-sink"]
+audit-as-crates-io = true

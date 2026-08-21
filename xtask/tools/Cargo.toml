@@ -1,0 +1,20 @@
+[package]
+name = "budlum-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Repository tooling, written in Rust rather than shell."
+publish = false
+
+# Bagimlilik yok, ve bu kasitli. Bu crate'in isi surec calistirmak, dosya
+# yazmak ve cikis kodu dondurmek; ucu de std'de var. `xtask/gates` syn'i
+# bir gerekceyle aldi (AST dogrulugu); burada oyle bir gerekce yok.
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

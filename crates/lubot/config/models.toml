@@ -1,0 +1,30 @@
+# Lubot model kademeleri (2026-08-13 kararı):
+#   lubot-light  <- DeepSeek-V4-Flash-Base tabanli
+#   lubot-normal <- DeepSeek-V4-Pro-Base tabanli
+# Çarpan/kat kademe etiketleri (0.5x, 10x vb.) Lubot'ta KULLANILMAZ.
+# Ağırlık repo adlari (ucuncu taraf) atif geregi oldugu gibi korunur.
+
+[tiers]
+light = "deepseek-ai/DeepSeek-V4-Flash-Base"
+normal = "deepseek-ai/DeepSeek-V4-Pro-Base"
+
+[default]
+# 2026-08-13: yontem = LoRA SFT; varsayilan kademe = light.
+# K2 karari geregi ilk ince ayar oncesinde kademe secimi yeniden onaylanir.
+tier = "light"
+license = "MIT"
+fine_tune_source = "BaseModel"
+method = "LoRA"
+adapter_dtype = "BF16"
+
+[candidates.light]
+base_repo = "deepseek-ai/DeepSeek-V4-Flash-Base"
+license = "MIT"
+fine_tune_source = "BaseModel"
+note = "284B toplam / 13B aktif; LoRA zemini coklu H100 (TP8) sinifi"
+
+[candidates.normal]
+base_repo = "deepseek-ai/DeepSeek-V4-Pro-Base"
+license = "MIT"
+fine_tune_source = "BaseModel"
+note = "1.6T toplam / 49B aktif; checkpoint yaklasik 862 GB; veri merkezi filosu"

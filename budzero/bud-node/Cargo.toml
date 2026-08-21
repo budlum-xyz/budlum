@@ -1,0 +1,36 @@
+[package]
+name = "bud-node"
+version = "0.1.0"
+edition = "2021"
+# : cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
+license.workspace = true
+
+[dependencies]
+futures = { version = "0.3", features = ["std"] }
+# Async runtime
+libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd", features = [
+    "tokio",
+    "tcp",
+    "noise",
+    "yamux",
+    "macros",
+    "identify",
+    "kad",
+    "request-response",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+# Bitswap wire codec; pinned to the same major as the L1 crate so a node can
+# speak to peers built from either tree.
+bincode = "1"
+
+# Logging
+tracing = "0.1"
+
+# Utilities
+thiserror = "2"
+hex = "0.4"
+sha2 = "0.11"
+
+[dev-dependencies]
