@@ -145,6 +145,19 @@ impl MarkdownSplit {
         }
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
+        // `count` SALDIRGAN KONTROLLU bir sayidir ve dogrudan `with_capacity`'e
+        // verilirse 45 baytlik bir blob 8,6 GB ayirma talebi uretir (olculdu:
+        // "memory allocation of 8589934590 bytes failed" -> SIGABRT; crate
+        // panic="abort" ile derlendiginden dugum aninda olur). Ustteki SHA3
+        // butunluk kontrolu bunu ENGELLEMEZ: ozet anahtarsizdir ve DOMAIN
+        // sabiti publictir, yani gecerli ozetli blob uretmek serbesttir.
+        //
+        // Tavan girdinin KENDI uzunlugundan turetilir: her bolum en az 1 bayt
+        // tip + 4 bayt uzunluk = 5 bayt tuketir. Boylece ayirma her zaman
+        // girdiyle orantili kalir ve ayri bir sihirli sabit bakim yuku olmaz.
+        if count > payload_len.saturating_sub(pos) / 5 {
+            return None;
+        }
         let mut sections = Vec::with_capacity(count);
         let mut contents = Vec::with_capacity(count);
         for _ in 0..count {
@@ -162,6 +175,10 @@ impl MarkdownSplit {
         }
         let tree_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
+        // Ayni gerekce: her baslik en az 4 baytlik uzunluk alani tuketir.
+        if tree_count > payload_len.saturating_sub(pos) / 4 {
+            return None;
+        }
         let mut heading_tree = Vec::with_capacity(tree_count);
         for _ in 0..tree_count {
             let h = read_str(bytes, &mut pos)?;
@@ -220,6 +237,77 @@ fn read_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// RAM DENETIMI (2026-08-21): sisirilmis `count` alani ile kucuk bir blob,
+    /// govdede karsiligi olmamasina ragmen devasa bir on-ayirma tetikliyordu.
+    /// Olculen: 45 baytlik girdi -> 8.589.934.590 baytlik ayirma talebi ->
+    /// SIGABRT (crate panic="abort"). SHA3 butunluk alani KORUMAZ: ozet
+    /// anahtarsiz, DOMAIN sabiti public, yani gecerli ozetli blob uretilebilir.
+    #[test]
+    fn sisirilmis_bolum_sayisi_ayirmadan_once_reddedilir() {
+        use sha3::{Digest, Sha3_256};
+        let mut b = Vec::new();
+        b.extend_from_slice(&MD_MAGIC);
+        b.push(MD_VERSION);
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut h = Sha3_256::new();
+        h.update(MarkdownSplit::DOMAIN);
+        h.update(&b);
+        b.extend_from_slice(&h.finalize());
+
+        // Ozet GECERLI -- yani ret, bozuk ozetten degil, tavandan gelmeli.
+        assert!(
+            MarkdownSplit::from_blob(&b).is_none(),
+            "govdesi olmayan u32::MAX bolum sayisi reddedilmeli"
+        );
+    }
+
+    /// Kanarya: tavan gecerli girdiyi reddetmemeli (asiri sikilastirma kontrolu).
+    #[test]
+    fn gercek_markdown_tavandan_etkilenmez() {
+        let md = "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde\n";
+        let split = MarkdownSplit::encode(md).expect("encode");
+        let blob = split.to_blob();
+        let geri = MarkdownSplit::from_blob(&blob).expect("gecerli blob kabul edilmeli");
+        assert_eq!(geri.sections, split.sections, "bolum turleri birebir");
+        assert_eq!(geri.contents, split.contents, "bolum icerikleri birebir");
+        assert_eq!(geri.heading_tree, split.heading_tree, "baslik agaci birebir");
+    }
+
+    /// BULGU (2026-08-21): bu transform KAYIPSIZ DEGILDIR -- `decode` bolumleri
+    /// `join("\n")` ile birlestirir, bos satirlar ve sondaki yeni satir kalici
+    /// olarak kaybolur:
+    ///
+    ///   girdi : "# Baslik\n\nParagraf.\n"
+    ///   cikti : "# Baslik\nParagraf."
+    ///
+    /// Mevcut `md_blob_roundtrip` bunu goremiyordu: yalnizca bolum SAYISINI
+    /// karsilastiriyor, baytlari karsilastirmiyordu.
+    ///
+    /// ETKI SU AN SINIRLI: transform uretim boru hattina BAGLI DEGIL --
+    /// `bud_format_engine::TransformKind` yalnizca None/Columnar/LogField tanir,
+    /// `engine_store` markdown'i hic cagirmaz. Yani depolanan veri bugun bu
+    /// yoldan kayba ugramaz. Ancak tur `lib.rs`'te disa acik, bir cagiran onu
+    /// kayipsiz sanabilir.
+    ///
+    /// Test davranisi OLDUGU GIBI kilitler: boru hattina baglanmadan once
+    /// `decode`'un ayiricilari koruyacak sekilde duzeltilmesi gerektigi buradan
+    /// gorunur. Yesil kalan bir "kayipsiz" iddiasi birakmaktansa gercegi yaziyoruz.
+    #[test]
+    fn markdown_transformu_ayiricilari_kaybeder_bilinen_sinir() {
+        let md = "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde\n";
+        let split = MarkdownSplit::encode(md).expect("encode");
+        let geri = split.decode();
+
+        assert_ne!(
+            geri, md,
+            "bu transform bayt-birebir DEGIL; esitlik beklenirse sinir kalkmis demektir"
+        );
+        assert_eq!(
+            geri, "# Baslik\nParagraf metni.\n## Alt baslik\n- madde",
+            "kayip tam olarak ayiricilarda: bos satirlar ve sondaki yeni satir"
+        );
+    }
     use super::*;
 
     fn sample_md() -> String {

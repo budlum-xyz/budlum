@@ -102,6 +102,18 @@ impl SegmentLedger {
         }
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
+        // `count` saldirgan kontrollu; dogrudan ayirmak 45 baytlik blobla
+        // 103 GB talep uretiyordu (olculdu: "memory allocation of
+        // 103079215080 bytes failed" -> SIGABRT, panic="abort" ile dugum olur).
+        // Ustteki SHA3 kontrolu korumaz: anahtarsiz ozet + public DOMAIN
+        // sabiti, gecerli blob uretmek serbest.
+        //
+        // Her kayit en az 4 bayt uzunluk + 32 bayt ozet = 36 bayt tuketir;
+        // tavan girdinin kendi uzunlugundan turetildigi icin ayirma daima
+        // girdiyle orantili kalir.
+        if count > payload_len.saturating_sub(pos) / 36 {
+            return None;
+        }
         let mut entries = Vec::with_capacity(count);
         let mut total: u64 = 0;
         for _ in 0..count {
@@ -142,6 +154,38 @@ impl SegmentLedger {
 
 #[cfg(test)]
 mod tests {
+
+    /// RAM DENETIMI (2026-08-21): sisirilmis `count`, 45 baytlik girdiyle
+    /// 103.079.215.080 baytlik ayirma talebi uretiyordu -> SIGABRT.
+    /// SHA3 alani korumaz (anahtarsiz ozet + public DOMAIN).
+    #[test]
+    fn sisirilmis_kayit_sayisi_ayirmadan_once_reddedilir() {
+        use sha3::{Digest, Sha3_256};
+        let mut b = Vec::new();
+        b.extend_from_slice(&SEGMENT_MAGIC);
+        b.push(SEGMENT_VERSION);
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut h = Sha3_256::new();
+        h.update(SegmentLedger::DOMAIN);
+        h.update(&b);
+        b.extend_from_slice(&h.finalize());
+
+        assert!(
+            SegmentLedger::from_blob(&b).is_none(),
+            "govdesi olmayan u32::MAX kayit sayisi reddedilmeli"
+        );
+    }
+
+    /// Kanarya: tavan gercek defteri reddetmemeli.
+    #[test]
+    fn gercek_defter_tavandan_etkilenmez() {
+        let mut seg = SegmentLedger::new();
+        seg.append(b"birinci kayit").expect("append");
+        seg.append(b"ikinci kayit").expect("append");
+        let blob = seg.to_blob();
+        let geri = SegmentLedger::from_blob(&blob).expect("gecerli blob kabul edilmeli");
+        assert_eq!(geri.root(), seg.root(), "kok ozet degismez");
+    }
     use super::*;
 
     #[test]
