@@ -193,6 +193,37 @@ harness = false
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
+# Sertlestirme kapisi. Her biri once olculdu, ihlaller duzeltildi, sonra
+# deny'e alindi; yani bu liste hedef degil, korunan mevcut durumdur.
+# Olcum: cargo check --lib, RUSTFLAGS ile ayni lintler -W olarak kosuldu.
+#
+# unsafe_op_in_unsafe_fn  0 ihlal  (forbid(unsafe_code) zaten var, bu ikinci kilit)
+# trivial_casts           0 ihlal
+# trivial_numeric_casts   1 ihlal  -> blockchain.rs:5170 duzeltildi
+# unused_import_braces    0 ihlal
+# single_use_lifetimes    2 ihlal  -> folder.rs 236/316 duzeltildi
+# missing_abi             0 ihlal
+# non_ascii_idents        0 ihlal  (Turkce yorum serbest, TANIMLAYICI degil)
+unsafe_op_in_unsafe_fn = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unused_import_braces = "deny"
+single_use_lifetimes = "deny"
+missing_abi = "deny"
+non_ascii_idents = "deny"
+
+# Bilerek ALLOW birakilanlar. "warn" DEGIL: CI `clippy --all-targets -D warnings`
+# kosuyor, yani warn birakmak bu iki lint'i hataya cevirip kapiyi kirardi.
+#
+# unused_qualifications: 157 ihlal, tamami budzero/bud-vm'deki uretilmis kod
+#   deseninden geliyor. Deny 157 satirlik mekanik degisiklik demek; olculdu,
+#   kapsam disi birakildi.
+# deprecated_in_future: 2 ihlal, ikisi de Atomic::fetch_update (node.rs
+#   1525/1600). 1.99'da try_update olacak ama MSRV 1.97; simdi degistirmek
+#   MSRV kapisini kirar. Surum yukseltilince kapatilacak.
+unused_qualifications = "allow"
+deprecated_in_future = "allow"
+
 [profile.release]
 # Release hardening (arastirma #196): panic=abort + overflow-checks + LTO +
 # codegen-units=1 + strip. Panic=abort unwind'i yasaklar (savunmasizlik
