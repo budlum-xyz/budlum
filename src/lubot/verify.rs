@@ -1,21 +1,36 @@
 //! STARK doğrulama + proof üretimi yardımcıları (bud-proof `DefaultAdapter`).
 //!
-//! **Bu modül hiçbir üretim yolundan çağrılmıyor.** Şu an yalnızca bu
-//! dosyadaki testler `verify_inference_stark` / `generate_and_verify_proof`
-//! fonksiyonlarını kullanır; zincir üzerindeki çıkarım doğrulaması bu koddan
-//! geçmez.
+//! **Bu modül üretim yolu DEĞİLDİR, ama "doğrulama bağlı değil" demek de
+//! artık yanlıştır.** Zincir üzerindeki çıkarım doğrulaması bu dosyadan
+//! geçmez; işlem yolu `src/ai/execution/verify.rs` içindeki
+//! `verify_execution_proof_stark`'ı çağırır ve STARK'ı gerçekten doğrular
+//! (`src/execution/executor.rs`, `require_execution_proof` olan modeller
+//! için). `ai_exec_verifier_unavailable` reddi kaldırılmıştır: model
+//! `execution_program_hash` kaydeder, `AiExecutionProof::public_inputs`
+//! kanıtın üretildiği girdileri taşır, düğüm guest programı
+//! `guest_program_for_model` ile yeniden kurar. Fail-closed davranış sürüyor,
+//! fakat artık düğümde eksik olanı değil kanıtta eksik olanı adlandırıyor
+//! (`ai_exec_no_public_inputs`, `ai_exec_no_program_hash`,
+//! `ai_exec_program_hash`, `ai_exec_exit_code`, `ai_exec_stark`).
 //!
-//! Gerçek işlem yolu `src/execution/executor.rs` içindedir ve orada
-//! `require_execution_proof` isteyen modeller **fail-closed** reddedilir
-//! (`ai_exec_verifier_unavailable`), çünkü işlem yolunda doğrulayıcıya
-//! verilecek guest program + kanonik public-input paketi yoktur. Yapısal
-//! kontroller (`verify_execution_proof_structural_with_model`) çalışır,
-//! STARK doğrulaması çalışmaz.
+//! Buradaki iki fonksiyon o yolun **yardımcı/iskele** karşılıklarıdır ve
+//! bilerek çağrısızdır; `src/tests/ai_verification_status_locks.rs`
+//! (`stark_verification_helpers_have_no_production_callers`) bir çağrı
+//! eklenirse testi kırar. Güncel tablo: `docs/AI_VERIFICATION_STATUS.md`.
 //!
-//! Dolayısıyla "doğrulanabilir çıkarım" bugün **kanıtlanmış bir özellik
-//! değildir**; bu modül o özellik bağlandığında kullanılacak iskelettir.
-//! Bağlanması için gereken: model kaydında guest program sözcüklerinin
-//! saklanması ve işlem yolunda `ExecutionPublicInputs`'in yeniden türetilmesi.
+//! **İki yol birbirinin yerine geçmez** — bağlamadan önce bilinmesi gerekenler:
+//!
+//! - **Serileştirme farkı:** burada `ProofEnvelope` `bincode` ile açılır,
+//!   üretim yolu `postcard` kullanır. Aynı bayt dizisi ikisinde birden
+//!   çözülmez.
+//! - **`program_hash` farkı:** üretim `stark_program_hash_from_words`
+//!   (etiketsiz Keccak-256) kullanır; `program_hash_from_words` (SHA3-256 +
+//!   `BDLM_AI_GUEST_PROGRAM_V1` etiketi) ise yalnız kayıt kimliğidir. İkisi
+//!   karıştırıldığında doğrulama her seferinde düşer.
+//! - **`build_public_inputs` uzlaşma için güvenli değildir:** `chain_id`'yi
+//!   sabit `1`, durum köklerini ve digest'leri sıfır yazar. Yalnız bu
+//!   dosyanın testleri için geçerlidir; işlem yolu girdileri kanıttan alıp
+//!   kayda karşı bağlar.
 
 use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_vm::Vm;
