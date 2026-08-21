@@ -278,9 +278,10 @@ pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
         .collect()
 }
 
-fn trace_matrix(
+#[doc(hidden)]
+pub fn trace_matrix(
     trace: &[Step],
-    _program: &[u64],
+    program: &[u64],
     public_inputs: &ExecutionPublicInputs,
 ) -> (RowMajorMatrix<Goldilocks>, usize) {
     let events = register_events(trace);
@@ -291,6 +292,34 @@ fn trace_matrix(
     let num_rows = (3 * n_cpu + 1).next_power_of_two().max(16);
 
     let mut values = vec![Goldilocks::new(0); num_rows * TRACE_WIDTH];
+
+    // Program CTL cokluk taniki. Satir `i`, pc=`i`'nin kac kez calistirildigini
+    // tasir; ROM tarafinin LogUp agirligi budur.
+    //
+    // VerifyMerkle genisletme satirlari orijinal adimla ayni (pc, raw_inst)
+    // demetini yeniden kullanir ve CTL onlari `is_expand` ile disarida birakir,
+    // dolayisiyla burada da sayilmazlar.
+    {
+        let prog_len = program.len();
+        let mut mult = vec![0u64; prog_len];
+        for step in trace {
+            // Genisletme satirlari orijinal adimla ayni (pc, raw_inst) demetini
+            // yeniden kullanir; CTL onlari `is_expand` ile disladigi icin
+            // cokluga da katilmazlar. Katilsalardi tek bir VerifyMerkle adimi
+            // 65 kez sayilirdi.
+            if step.merkle_is_expand || step.inference_is_expand {
+                continue;
+            }
+            if step.pc < prog_len {
+                mult[step.pc] += 1;
+            }
+        }
+        for (pc, count) in mult.iter().enumerate() {
+            if pc < num_rows {
+                values[pc * TRACE_WIDTH + COL_PROG_MULT] = Goldilocks::new(*count);
+            }
+        }
+    }
 
     let mut running_gas = 0u64;
 
@@ -1443,8 +1472,15 @@ fn aux_trace_generator(
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
+            // ROM tarafi agirligi cokluk sutunudur, sabit 1 degil. Dallanmali
+            // programda bir pc hic calistirilmaz (atlanan dal) veya birden cok
+            // kez calistirilir (dongu govdesi); sabit 1 bu iki durumda da
+            // dengeyi bozar ve durust prover `InvalidProof` alir.
             if i < program.len() {
-                s_prog -= diff_pre_prog.inverse();
+                let mult = row[COL_PROG_MULT];
+                if mult != Goldilocks::ZERO {
+                    s_prog -= diff_pre_prog.inverse() * MyExtensionField::from(mult);
+                }
             }
 
             aux_values[(i + 1) * 3] = s_reg;
@@ -1456,7 +1492,8 @@ fn aux_trace_generator(
     })
 }
 
-fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
+#[doc(hidden)]
+pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     let mut vals = Vec::new();
 
     vals.push(Goldilocks::from_u64(pi.chain_id & 0xFFFF_FFFF));

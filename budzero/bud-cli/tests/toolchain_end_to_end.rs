@@ -13,15 +13,18 @@ use bud_proof::{event_digest_from_events, ExecutionPublicInputs, ProverAdapter};
 use bud_vm::Vm;
 use tiny_keccak::{Hasher, Keccak};
 
-/// Straight-line programs: these must survive the whole pipeline.
-const PROVABLE_PROGRAMS: &[&str] = &["example.bud", "example2.bud", "test_prover.bud"];
-
-/// Programs whose control flow skips an instruction.
+/// Programs that must survive the whole pipeline.
 ///
-/// The Program CTL LogUp in `plonky3_air` pairs every CPU row with exactly one
-/// preprocessed program row, so an instruction that is never executed leaves an
-/// unmatched row and verification fails. They must still compile and execute.
-const BRANCHING_PROGRAMS: &[&str] = &["example_loop.bud", "control_flow.bud"];
+/// Dallanmali programlar da buraya aittir: Program CTL artik bir *lookup*,
+/// permutasyon degil. `COL_PROG_MULT` her ROM satirinin kac kez calistirildigini
+/// tasidigi icin atlanan komut (0 kez) ve dongu govdesi (N kez) dengeyi bozmaz.
+const PROVABLE_PROGRAMS: &[&str] = &[
+    "example.bud",
+    "example2.bud",
+    "test_prover.bud",
+    "example_loop.bud",
+    "control_flow.bud",
+];
 
 fn workspace_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -132,45 +135,6 @@ fn hashing_the_event_list_breaks_verification_of_an_emitting_program() {
         bud_proof::Plonky3Adapter::verify(&bad, &pi, &bytecode).is_err(),
         "a hashed event digest must not satisfy the AIR binding"
     );
-}
-
-/// Branching programs must still compile and execute; only proving is blocked.
-#[test]
-fn branching_programs_execute_but_cannot_be_proved_yet() {
-    let root = workspace_root();
-    for name in BRANCHING_PROGRAMS {
-        let source = std::fs::read_to_string(root.join(name))
-            .unwrap_or_else(|e| panic!("{name}: cannot read: {e}"));
-        let bytecode = bud_compiler::compile(&source, IsaProfile::Production)
-            .unwrap_or_else(|e| panic!("{name}: compile failed: {e:?}"));
-
-        let mut vm = Vm::new(1024);
-        let receipt = vm.run_receipt(&bytecode);
-        assert!(
-            receipt.success,
-            "{name}: execution must still succeed: {:?}",
-            receipt.error
-        );
-
-        let visited: std::collections::HashSet<usize> =
-            vm.trace.iter().map(|step| step.pc).collect();
-        assert!(
-            visited.len() < bytecode.len(),
-            "{name}: this list is for programs that leave an instruction unexecuted \
-             ({} of {} program counters visited)",
-            visited.len(),
-            bytecode.len()
-        );
-
-        let pi = public_inputs_for(&vm, &bytecode, &receipt.events);
-        let envelope = bud_proof::Plonky3Adapter::prove(&vm.trace, &pi, &bytecode)
-            .unwrap_or_else(|e| panic!("{name}: prove failed: {e:?}"));
-        assert!(
-            bud_proof::Plonky3Adapter::verify(&envelope, &pi, &bytecode).is_err(),
-            "{name}: verified unexpectedly - the Program CTL branch gap looks fixed, \
-             update BudL_SPEC.md and move this program to PROVABLE_PROGRAMS"
-        );
-    }
 }
 
 /// The checked-in `state.json` is the default state file for `bud-cli`, so it

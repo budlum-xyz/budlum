@@ -39,8 +39,8 @@ use tiny_keccak::{Hasher, Keccak};
 /// katladigi bellek+register goruntusudur; elle sabit vermek
 /// `PublicInputsMismatch` uretir.
 fn derle_yurut_kanitla(kaynak: &str) -> Result<(), String> {
-    let bytecode = compile(kaynak, IsaProfile::Experimental)
-        .map_err(|e| format!("derleme hatasi: {e:?}"))?;
+    let bytecode =
+        compile(kaynak, IsaProfile::Experimental).map_err(|e| format!("derleme hatasi: {e:?}"))?;
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
@@ -116,8 +116,7 @@ contract SadeceIf {
     }
 }
 "#;
-    derle_yurut_kanitla(kaynak)
-        .expect("derleyicinin urettigi kosullu dallanma kanitlanabilmeli");
+    derle_yurut_kanitla(kaynak).expect("derleyicinin urettigi kosullu dallanma kanitlanabilmeli");
 }
 
 /// BULGU: `while` dongusu iceren program kanitlanamiyor.
