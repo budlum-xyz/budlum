@@ -52,7 +52,7 @@ pub struct BlockHeader {
 /// the value feeds a block hash that every node recomputes: aborting here
 /// would stop the whole set rather than one node, and a fixed marker keeps
 /// the hash identical everywhere.
-const EVIDENCE_SERIALIZE_FAILED: &[u8] = b"BDLM_SLASHING_EVIDENCE_SERIALIZE_FAILED";
+const EVIDENCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/slashing-evidence";
 
 impl BlockHeader {
     pub fn from_block(block: &Block) -> Self {

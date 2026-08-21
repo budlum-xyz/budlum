@@ -138,7 +138,7 @@ pub enum OperatorClass {
 /// state root, and every node computes the same root, so aborting on it would
 /// take down the whole validator set at once rather than a single node.
 /// Hashing a fixed marker keeps the root deterministic across nodes.
-const SERIALIZE_FAILED: &[u8] = b"BDLM_STORAGE_REGISTRY_SERIALIZE_FAILED";
+const SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/storage-registry";
 
 impl OperatorClass {
     /// Whether this class may hold `replica_index = 0`.

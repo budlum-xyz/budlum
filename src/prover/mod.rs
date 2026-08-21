@@ -86,7 +86,7 @@ impl ZkProofSubmission {
         // Writing to a Vec), so a failure is a deterministic programming error we
         // Fail-fast on rather than hide.
         let proof_bytes = bincode::serialize(proof)
-            .unwrap_or_else(|_| b"BDLM_PROOF_ENVELOPE_SERIALIZE_FAILED".to_vec());
+            .unwrap_or_else(|_| b"budlum/serialize-failed/proof-envelope".to_vec());
         let pi_bytes = public_inputs.to_canonical_bytes();
         let mut program_bytes = Vec::with_capacity(program.len() * 8);
         for word in program {

@@ -43,7 +43,7 @@ pub struct GasSchedule {
 /// non-empty marker rather than a panic: these bytes feed hashes that every
 /// node recomputes, so aborting would stop the set, while empty bytes would
 /// let two different values hash alike.
-const TX_SERIALIZE_FAILED: &[u8] = b"BDLM_TRANSACTION_SERIALIZE_FAILED";
+const TX_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/transaction";
 
 impl crate::core::chain_config::Network {
     pub fn gas_schedule(&self) -> GasSchedule {

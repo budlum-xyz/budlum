@@ -25,7 +25,7 @@ pub struct StateSnapshot {
 /// without the panic: these are plain data types whose serialization cannot
 /// fail, and a state root is computed by every node, so aborting on it would
 /// stop the whole set rather than one node.
-const SNAPSHOT_SERIALIZE_FAILED: &[u8] = b"BDLM_SNAPSHOT_SERIALIZE_FAILED";
+const SNAPSHOT_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/snapshot";
 
 impl StateSnapshot {
     pub fn from_state(

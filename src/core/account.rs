@@ -51,7 +51,7 @@ pub struct Account {
 /// Derived `Serialize` on owned data cannot fail. Not a panic because every
 /// node recomputes this root: an abort would stop the whole validator set at
 /// once, and a fixed marker keeps the root identical across nodes.
-const STATE_SERIALIZE_FAILED: &[u8] = b"BDLM_ACCOUNT_STATE_SERIALIZE_FAILED";
+const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
 
 impl Account {
     pub fn new(public_key: Address) -> Self {

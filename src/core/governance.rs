@@ -245,7 +245,7 @@ pub struct Proposal {
 ///
 /// Cannot fire for these derived-`Serialize` owned types. Kept non-panicking
 /// because the call site computes a governance root shared by every node.
-const GOVERNANCE_SERIALIZE_FAILED: &[u8] = b"BDLM_GOVERNANCE_SERIALIZE_FAILED";
+const GOVERNANCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/governance";
 
 impl Proposal {
     pub fn new(
