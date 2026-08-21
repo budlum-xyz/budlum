@@ -82,7 +82,7 @@ mod tests {
     fn av2_durum_dogru() {
         // `assert!(SABIT.alan, ...)` clippy::assertions_on_constants tetikler:
         // koşul derleme zamanında bilinir. Niyet "bu alanlar şu değerde
-        // KİLİTLİ" olduğundan `assert_eq!` doğru ifade — beklenen değeri
+        // KİLİTLİ" olduğundan `assert_eq!` doğru ifade: beklenen değeri
         // açıkça yazar ve alan değişirse hata mesajı ne olduğunu gösterir.
         let durum = AV2_CURRENT;
         assert!(durum.spec_released, "AV2 v1.0.0 2026-05-28 çıktı");

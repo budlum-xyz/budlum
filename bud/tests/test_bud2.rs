@@ -1,12 +1,12 @@
 //! B.U.D. 2.0 değişmez testleri.
 //!
-//! Bu dosya `#[test] fn placeholder() { assert!(true); }` idi — hiçbir şey
+//! Bu dosya `#[test] fn placeholder() { assert!(true); }` idi: hiçbir şey
 //! doğrulamayan, ama yeşil görünen bir kayıt. `assert!(true)` clippy'nin
 //! `assertions_on_constants` kapısına takılıyordu ve takılması doğruydu: boş
 //! bir test, testi olmayan koddan daha kötüdür, çünkü kapsama varmış izlenimi
 //! bırakır.
 //!
-//! Yerine 2.0 şartnamesinin **1. değişmezi** koşuluyor: KAYIPSIZLIK — orijinal
+//! Yerine 2.0 şartnamesinin **1. değişmezi** koşuluyor: KAYIPSIZLIK, yani orijinal
 //! baytlar birebir geri üretilir. Testler `engine_store`/`engine_restore_container`
 //! turunu farklı içerik sınıflarında sürer, çünkü boru hattı sınıfa göre farklı
 //! transform seçer (columnar / logfield / none) ve kayıpsızlık kırılacaksa
@@ -23,7 +23,7 @@ fn roundtrip_bayt_esit(data: &[u8], etiket: &str) {
         .unwrap_or_else(|| panic!("{etiket}: engine_store None döndürdü"));
 
     // `res.container` KONTEYNER baytlarıdır (engine blob'u değil), bu yüzden
-    // `engine_restore_container` kullanılır — `bud` CLI de aynısını çağırır.
+    // `engine_restore_container` kullanılır; `bud` CLI de aynısını çağırır.
     let geri = engine_restore_container(&res.container, res.transform_kind as u8, false)
         .unwrap_or_else(|| panic!("{etiket}: engine_restore_container None döndürdü"));
 
@@ -109,7 +109,7 @@ fn bos_girdi_reddedilir_sessizce_bozulmaz() {
 #[test]
 fn olculen_oran_boyutlardan_tutarlidir() {
     // K19: oran İDDİA edilmez, boyutlardan ÖLÇÜLÜR. Kayıtlı oranın gerçekten
-    // original_len/stored_len olduğunu doğrula — ölçüm üstü iddia kapısının
+    // original_len/stored_len olduğunu doğrula, ölçüm üstü iddia kapısının
     // dayandığı sayı bu.
     let mut satirlar = Vec::new();
     for i in 0..300 {
