@@ -1,3 +1,7 @@
+// Integration test: an unwrap here is how the test reports a broken
+// invariant, so the workspace-wide panic gate does not apply.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Fiat-Shamir binding order in the in-tree STARK.
 //!
 //! Six zkVMs were found in March 2026 to share one root cause: a

@@ -4,6 +4,9 @@
 //! This module; otherwise CI will fail with an overlap or out-of-bounds
 //! Error.
 
+// An unwrap here is how these layout tests report a broken invariant.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use crate::plonky3_air::{
     COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT,
     COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,

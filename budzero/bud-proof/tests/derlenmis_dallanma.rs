@@ -1,3 +1,7 @@
+// Integration test: an unwrap here is how the test reports a broken
+// invariant, so the workspace-wide panic gate does not apply.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! BULGU: derleyicinin urettigi kosullu dallanma kanitlanamiyor.
 //!
 //! Olculdu (canli `bud-cli run`): dallanma iceren HER program

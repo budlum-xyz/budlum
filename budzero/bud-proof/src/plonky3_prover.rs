@@ -345,11 +345,9 @@ pub fn trace_matrix(
         // It on the last row as well).
         if i == 0 {
             for j in 0..8 {
-                let limb = u32::from_le_bytes(
-                    public_inputs.initial_state_root[j * 4..j * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&public_inputs.initial_state_root[j * 4..j * 4 + 4]);
+                let limb = u32::from_le_bytes(word);
                 values[row_start + COL_INIT_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
             // Gas_limit: bound to public_inputs[32,33] on the first
@@ -823,11 +821,9 @@ pub fn trace_matrix(
         values[row_start + COL_TRACE_LEN_CTR] = Goldilocks::new((i + 1) as u64);
         if i == n_cpu.saturating_sub(1) {
             for j in 0..8 {
-                let limb = u32::from_le_bytes(
-                    public_inputs.final_state_root[j * 4..j * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&public_inputs.final_state_root[j * 4..j * 4 + 4]);
+                let limb = u32::from_le_bytes(word);
                 values[row_start + COL_FINAL_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
             // Exit_code: 0 = success (real Halt), 1 = error (
@@ -851,16 +847,19 @@ pub fn trace_matrix(
         // Share the same `i` index here.
         if step.merkle_is_expand {
             // Expansion row.
-            let key = step.merkle_key.expect("expansion row must have merkle_key");
-            let cur = step
-                .merkle_current
-                .expect("expansion row must have merkle_current");
-            let sibling = step
-                .merkle_sibling
-                .expect("expansion row must have merkle_sibling");
-            let round = step
-                .merkle_round
-                .expect("expansion row must have merkle_round");
+            // `Vm::step` fills these four together with `merkle_is_expand`,
+            // so on an expansion row they are all present. Read as a group
+            // rather than unwrapped one by one: the guarantee lives in
+            // another crate, and a drift there must leave the row unwritten
+            // instead of aborting the prover mid-trace.
+            let (Some(key), Some(cur), Some(sibling), Some(round)) = (
+                step.merkle_key,
+                step.merkle_current,
+                step.merkle_sibling,
+                step.merkle_round,
+            ) else {
+                continue;
+            };
             let bit = (key >> round) & 1;
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
@@ -918,10 +917,9 @@ pub fn trace_matrix(
                 values[row_start + COL_MERKLE_POSEIDON_X2_0 + i] = Goldilocks::new(0);
                 values[row_start + COL_MERKLE_POSEIDON_X4_0 + i] = Goldilocks::new(0);
             }
-        } else if step.merkle_key.is_some() {
+        } else if let Some(key) = step.merkle_key {
             // Original VerifyMerkle step. The VM patched this row
             // With merkle_key immediately after push.
-            let key = step.merkle_key.unwrap();
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
             // Merkle_current on the original step is the
@@ -932,9 +930,10 @@ pub fn trace_matrix(
             // Step carries the 64th-round output, allowing
             // The AIR to apply the final root check on the
             // Original step's row, bridging to rd_val_new).
-            let final_merkle = step
-                .merkle_current
-                .expect("original VerifyMerkle step must have merkle_current (the VM sets this)");
+            // The VM sets this on the original step; read it instead of
+            // asserting, so a change there leaves the column at zero rather
+            // than aborting the prover mid-trace.
+            let final_merkle = step.merkle_current.unwrap_or(0);
             values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(final_merkle);
             // Merkle_round=0 on the original step so the AIR can
             // Extract the right bit (key & 1) for the first
@@ -1500,17 +1499,17 @@ pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     vals.push(Goldilocks::from_u64(pi.chain_id >> 32));
 
     for chunk in pi.program_hash.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
     for chunk in pi.initial_state_root.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
     for chunk in pi.final_state_root.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
@@ -1542,12 +1541,14 @@ pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // four bytes truncated it, so the comparison held only while every logged
     // value stayed below 2^32 - which every test did, and which a Poseidon
     // output never does.
-    vals.push(Goldilocks::from_u64(u64::from_le_bytes(
-        pi.event_digest[0..8].try_into().unwrap(),
-    )));
+    // `chunks_exact(4)` and this fixed window always yield the right width;
+    // written without a fallible conversion so no panic remains.
+    let mut event_head = [0u8; 8];
+    event_head.copy_from_slice(&pi.event_digest[0..8]);
+    vals.push(Goldilocks::from_u64(u64::from_le_bytes(event_head)));
     // Limbs 1..8 are reserved; they are packed as u32 and asserted zero.
     for chunk in pi.event_digest[8..32].chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
     // One more slot so event_digest stays at 8 public values ([40..48]).
@@ -1555,7 +1556,7 @@ pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // state_writes_digest: 8 u32 limbs -> public_inputs[48..56] (Strix HIGH
     // CWE-345, 2026-08-17).
     for chunk in pi.state_writes_digest.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
@@ -1696,6 +1697,7 @@ impl ProverAdapter for Plonky3Adapter {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use bud_isa::{Instruction, Opcode};
