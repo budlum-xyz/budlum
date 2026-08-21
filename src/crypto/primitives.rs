@@ -131,20 +131,17 @@ impl BlsKeypair {
         let mut sk_bytes = [0u8; 32];
         sk_bytes.copy_from_slice(&bytes[0..32]);
         let sk_opt = Scalar::from_bytes(&sk_bytes);
-        if sk_opt.is_none().into() {
-            return Err(CryptoError::InvalidKey("Invalid BLS secret key".into()));
-        }
-        let sk = sk_opt.unwrap();
+        // `Option::from` consumes the `CtOption` once; the previous form
+        // branched on `is_none()` and then called `unwrap()`, which reads the
+        // choice a second time and panics if the two ever disagree.
+        let sk: Scalar = Option::from(sk_opt)
+            .ok_or_else(|| CryptoError::InvalidKey("Invalid BLS secret key".into()))?;
 
         let mut pk_bytes = [0u8; 96];
         pk_bytes.copy_from_slice(&bytes[32..128]);
         let pk_affine = G2Affine::from_compressed(&pk_bytes);
-        if pk_affine.is_none().into() {
-            return Err(CryptoError::InvalidKey(
-                "Invalid BLS public key encoding".into(),
-            ));
-        }
-        let _pk_checked = pk_affine.unwrap();
+        let _pk_checked: G2Affine = Option::from(pk_affine)
+            .ok_or_else(|| CryptoError::InvalidKey("Invalid BLS public key encoding".into()))?;
 
         let expected = G2Affine::from(G2Projective::generator() * sk);
         if expected.to_compressed() != pk_bytes {
@@ -412,11 +409,16 @@ impl PqKeyPair {
         panic!("PQ backend not available: enable `pq-dilithium` or `pq-ml-dsa` feature")
     }
 
-    pub fn from_bytes(public_key: &[u8], secret_key: &[u8]) -> Result<Self, CryptoError> {
-        Ok(Self {
-            public_key: public_key.to_vec(),
-            secret_key: secret_key.to_vec(),
-        })
+    pub fn from_bytes(_public_key: &[u8], _secret_key: &[u8]) -> Result<Self, CryptoError> {
+        // Fail closed, like every other method on this stub. Returning `Ok`
+        // here used to hand back a `PqKeyPair` whose bytes had never been
+        // checked against any scheme, so a caller compiled without a PQ
+        // backend could hold what looks like a validated PQ key and only
+        // discover otherwise when it tried to sign or verify.
+        Err(CryptoError::InvalidKey(
+            "PQ key loading not available: enable `pq-dilithium` or `pq-ml-dsa` feature"
+                .to_string(),
+        ))
     }
 
     pub fn public_key_bytes(&self) -> &[u8] {
@@ -519,7 +521,12 @@ impl ValidatorKeys {
         let vrf_key = SchnorrkelKeypair::from_bytes(&bytes[32..128])
             .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
 
+        // `cursor` is only advanced by the PQ branches below; with every PQ
+        // feature off nothing writes to it, so the `mut` is conditional too.
+        #[cfg(any(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
         let mut cursor = 128;
+        #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
+        let cursor = 128;
         #[cfg(feature = "pq-dilithium")]
         let pq_key = if bytes.len() > cursor
             && bytes.len()
