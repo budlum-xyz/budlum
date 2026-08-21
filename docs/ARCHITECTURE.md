@@ -1432,3 +1432,60 @@ flowchart TD
   PoseidonDesync[Poseidon constants desync] --> AllProofsFail[All proofs rejected]
   SeedMemory[Seed in memory] --> TotalLoss[Total fund loss]
 ```
+
+## 52. Panik sinirlari: dogrulayici ve dugum canliligi
+
+Release profili `panic = "abort"` kullanir. Bunun sonucu tek cumleyle: uretim
+kodundaki her `unwrap`/`expect`, tetiklenebilirse, bir canlilik acigidir. Bir
+es tek bozuk mesaj gonderip dugumu durdurabiliyorsa saldirgan hicbir kripto
+varsayimi kirmadan agi yavaslatir.
+
+Bu yuzden `unwrap_used` ve `expect_used` calisma alani genelinde `deny`
+(kok `Cargo.toml`, `[lints.clippy]`). Kapi acilmadan once olculdu: uretim
+yolunda 150 ihlal vardi, hepsi kapatildi. Kapinin kendisi de sinandi -
+uretim koduna gecici bir `unwrap` eklendiginde `clippy --lib -D warnings`
+101 ile duser, kaldirildiginda 0 doner.
+
+Muafiyetler dar ve gerekcelidir:
+
+| Yer | Neden muaf |
+|---|---|
+| `#[cfg(test)]` moduller, `#[test]` fonksiyonlar | Testte panik dogru davranistir: bozulan degismezi bildirme yolu odur. |
+| `build.rs` | Derleme zamani calisir, kosan dugum degil; protobuf uretimi basarisizsa derleme sesli durmalidir. |
+| `benches/` | Olcum kosucusu; kurulum adimi duserse olcum durmalidir. |
+| `Blockchain::last_block` | `&Block` dondurur, geri donulecek sahipli deger yok; zincir insada genesis ile tohumlanir. Tek tek isaretlenmistir. |
+
+Ihlallerin nasil kapatildigi, uc desende toplanir:
+
+1. **Saldirgan girdisi ayristirma.** Koruma varsa ama *uzaktaysa*, yerellestir.
+   `verify_bls_sig` icinde `is_none()` denetimi ile `unwrap()` arasinda bir
+   ifade mesafesi vardi; `CtOption::into_option()` ikisini tek adimda birlestirir,
+   boylece bozuk anahtar yalnizca `Err` olabilir. Ayni sey STARK dogrulayicisi
+   icin gecerlidir: sekil denetimi `valid_shape` icinde yapiliyordu, okuma ise
+   yuzlerce satir otede; okuma noktasi artik kendi denetimini tasir.
+2. **Durum koku hesaplari.** Bunlar her dugumde ayni sekilde kosar. Panik burada
+   tek dugumu degil butun kumeyi ayni anda dusurur. Serilestirme hatasi (turetilmis
+   `Serialize` icin gerceklesemez) artik sabit bir isaretci baytina duser:
+   `BDLM_*_SERIALIZE_FAILED`. Bos bayt kullanilmaz - iki farkli durumun ayni
+   hash'e dusmesi, hicbir yerde hata gorunmeden catallanma demektir.
+3. **Sabit sinirli aritmetik.** `digest[..8].try_into().expect(...)` gibi
+   ifadeler, dilim uzunlugu zaten sabit oldugu icin, sabit boyutlu dizi
+   okumasina cevrildi (`copy_from_slice`). Boyle bir yerde akil yurutulecek
+   panik hic kalmaz.
+
+Islem kabul yolu ozellikle onemlidir: `Mempool` icinde bir degistirme (RBF)
+adayinin hedefi ayni haritadan okunuyordu, yani `unwrap` guvenliydi - ama
+herhangi bir es islem gondererek bu yolu tetikleyebilir. Artik reddedilen bir
+islem olarak raporlanir.
+
+```mermaid
+flowchart TD
+  Peer["Es: bayt dizisi"] --> Parse["Ayristirma"]
+  Parse -->|"eskiden: unwrap"| Abort["panic = abort: dugum olur"]
+  Parse -->|"simdi: into_option / ok_or"| Reject["Err: mesaj reddedilir, dugum yasar"]
+  Root["Durum koku hesabi"] -->|"eskiden: expect"| AllDown["Tum kume ayni anda duser"]
+  Root -->|"simdi: sabit isaretci"| Deterministic["Kok belirlenimli kalir"]
+  Gate["clippy: unwrap_used / expect_used = deny"] --> Parse
+  Gate --> Root
+  Gate --> Proof["Yeni ihlal CI'da kirmizi"]
+```
