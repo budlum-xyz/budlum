@@ -63,12 +63,21 @@ pub fn wal_restore(t: &[u8]) -> Option<Vec<Vec<u8>>> {
         return None;
     }
     let mut pos = 5usize;
-    let n = u32::from_le_bytes(t[pos..pos + 4].try_into().ok()?) as usize;
+    // `t[pos..pos + 4]` dogrudan dilimleniyordu: 5-8 baytlik bir girdi
+    // PANIKLETIYORDU (dilimleme panigi Option'a dusmez). `get` ile alinarak
+    // sinir kontrolu ifadeye tasindi.
+    let n = u32::from_le_bytes(t.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
     if t.get(pos) != Some(&0xF1) {
         return None;
     }
     pos += 1;
+    // `n` saldirgan kontrollu ve bu bicimde butunluk ozeti YOK -- markdown ve
+    // segment'teki ayni sinif sorunun en acik hali. Her uzunluk en az 1 baytlik
+    // varint tuketir, dolayisiyla kayit sayisi kalan bayttan buyuk olamaz.
+    if n > t.len().saturating_sub(pos) {
+        return None;
+    }
     let mut lens = Vec::with_capacity(n);
     for _ in 0..n {
         lens.push(varint_read(t, &mut pos)?);
@@ -98,6 +107,33 @@ pub fn wal_digest(t: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+
+    /// RAM DENETIMI (2026-08-21): `wal_restore` iki ayri sinif hata tasiyordu --
+    /// (1) `t[pos..pos+4]` sinir kontrolsuz dilimleniyordu, 5-8 baytlik girdi
+    /// PANIKLETIYORDU; (2) `n` alani tavansiz `with_capacity`'e gidiyordu ve bu
+    /// bicimde butunluk ozeti de yok.
+    #[test]
+    fn kisa_girdi_paniklemez() {
+        for len in 0..12usize {
+            let mut t = b"WAL1|".to_vec();
+            t.truncate(len.min(5));
+            while t.len() < len {
+                t.push(0);
+            }
+            let _ = wal_restore(&t);
+        }
+    }
+
+    #[test]
+    fn sisirilmis_kayit_sayisi_reddedilir() {
+        let mut t = b"WAL1|".to_vec();
+        t.extend_from_slice(&u32::MAX.to_le_bytes());
+        t.push(0xF1);
+        assert!(
+            wal_restore(&t).is_none(),
+            "govdesi olmayan u32::MAX kayit sayisi reddedilmeli"
+        );
+    }
     use super::*;
 
     #[test]
