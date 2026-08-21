@@ -517,6 +517,7 @@ fn encode_action(action: &RelayerActionKind, hasher: &mut Sha256) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

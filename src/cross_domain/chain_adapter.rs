@@ -187,6 +187,7 @@ impl Default for AdapterRegistry {
 /// Stub adapter for testing and development.
 /// Generates deterministic proofs that pass verification.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub mod test_adapter {
     use super::*;
     use crate::core::hash::hash_fields_bytes;
@@ -290,6 +291,7 @@ pub mod test_adapter {
 }
 
 #[test]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn adapter_registry_empty_supported_chains() {
     let registry = AdapterRegistry::new();
     assert!(registry.supported_chains().is_empty());
@@ -298,6 +300,7 @@ fn adapter_registry_empty_supported_chains() {
 }
 
 #[test]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn adapter_registry_multiple_adapters() {
     use self::test_adapter::StubAdapter;
 
@@ -318,6 +321,7 @@ fn adapter_registry_multiple_adapters() {
 }
 
 #[test]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn adapter_error_display() {
     let err = AdapterError::UnsupportedChain(ExternalChain::Bitcoin);
     assert!(err.to_string().contains("Bitcoin"));

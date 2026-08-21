@@ -262,7 +262,11 @@ impl BudlRunner {
         let proof_gen = ProofFixtureGenerator::new(seed, 4);
         let proof_fixtures = proof_gen.generate();
         let proof_path = self.fixtures_dir.join("proof_fixtures.json");
-        let proof_json = serde_json::to_string_pretty(&proof_fixtures).unwrap();
+        let proof_json =
+                serde_json::to_string_pretty(&proof_fixtures).map_err(|e| RunnerError::Io {
+                    path: proof_path.clone(),
+                    source: std::io::Error::other(e),
+                })?;
         std::fs::write(&proof_path, proof_json).map_err(|e| RunnerError::Io {
             path: proof_path.clone(),
             source: e,
@@ -273,14 +277,22 @@ impl BudlRunner {
         let (asset_fixtures, grant_fixtures) = pollen_gen.generate_all();
 
         let asset_path = self.fixtures_dir.join("pollen_asset_fixtures.json");
-        let asset_json = serde_json::to_string_pretty(&asset_fixtures).unwrap();
+        let asset_json =
+                serde_json::to_string_pretty(&asset_fixtures).map_err(|e| RunnerError::Io {
+                    path: asset_path.clone(),
+                    source: std::io::Error::other(e),
+                })?;
         std::fs::write(&asset_path, asset_json).map_err(|e| RunnerError::Io {
             path: self.fixtures_dir.clone(),
             source: e,
         })?;
 
         let grant_path = self.fixtures_dir.join("pollen_grant_fixtures.json");
-        let grant_json = serde_json::to_string_pretty(&grant_fixtures).unwrap();
+        let grant_json =
+                serde_json::to_string_pretty(&grant_fixtures).map_err(|e| RunnerError::Io {
+                    path: grant_path.clone(),
+                    source: std::io::Error::other(e),
+                })?;
         std::fs::write(&grant_path, grant_json).map_err(|e| RunnerError::Io {
             path: grant_path.clone(),
             source: e,
@@ -290,7 +302,11 @@ impl BudlRunner {
         let relayer_gen = RelayerIntentFixtureGenerator::new(seed, 5);
         let relayer_fixtures = relayer_gen.generate();
         let relayer_path = self.fixtures_dir.join("relayer_intent_fixtures.json");
-        let relayer_json = serde_json::to_string_pretty(&relayer_fixtures).unwrap();
+        let relayer_json =
+                serde_json::to_string_pretty(&relayer_fixtures).map_err(|e| RunnerError::Io {
+                    path: relayer_path.clone(),
+                    source: std::io::Error::other(e),
+                })?;
         std::fs::write(&relayer_path, relayer_json).map_err(|e| RunnerError::Io {
             path: relayer_path.clone(),
             source: e,
@@ -332,6 +348,7 @@ impl std::fmt::Display for FixtureOutput {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

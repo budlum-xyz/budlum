@@ -136,6 +136,7 @@ pub fn check_mainnet_validator_key_policy(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

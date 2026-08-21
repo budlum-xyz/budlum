@@ -2,6 +2,7 @@
 // Yeni API ile yeniden yazılacak.
 #![cfg(false)]
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod settlement_prod_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;
@@ -1982,6 +1983,7 @@ mod settlement_prod_tests {
 /// REAL STARK proof (produced by `execution::zkvm::prove_bytecode`) - replacing
 /// The deleted fake-hash acceptance test.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod zk_finality_real_proof {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;

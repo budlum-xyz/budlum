@@ -2,6 +2,7 @@
 //! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::bns::registry::BnsRegistry;
     use crate::core::address::Address;

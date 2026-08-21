@@ -10,11 +10,11 @@ pub type EmbeddingVector = Vec<f64>;
 
 /// İngilizce + Türkçe sık geçen sözcükler (gömme gürültüsünü azaltır).
 const STOPWORDS: &[&str] = &[
-    "the", "is", "in", "it", "of", "and", "or", "to", "a", "an", "for", "on", "with", "as",
-    "at", "be", "this", "that", "are", "was", "were", "by", "from", "not", "but", "if", "so",
-    "do", "we", "he", "she", "they", "you", "i", "my", "its", "our", "has", "have", "had",
-    "will", "would", "can", "could", "may", "should", "all", "no", "than", "when", "then",
-    "bir", "bu", "ve", "veya", "icin", "ile", "degil", "ama", "sonra", "gibi", "cok", "daha",
+    "the", "is", "in", "it", "of", "and", "or", "to", "a", "an", "for", "on", "with", "as", "at",
+    "be", "this", "that", "are", "was", "were", "by", "from", "not", "but", "if", "so", "do", "we",
+    "he", "she", "they", "you", "i", "my", "its", "our", "has", "have", "had", "will", "would",
+    "can", "could", "may", "should", "all", "no", "than", "when", "then", "bir", "bu", "ve",
+    "veya", "icin", "ile", "degil", "ama", "sonra", "gibi", "cok", "daha",
 ];
 
 /// Varsayılan gömme boyutu.
@@ -92,8 +92,14 @@ impl TfIdfEmbedder {
             .vocab
             .iter()
             .map(|t| {
-                let df = ranked.iter().find(|(term, _)| term == t).map_or(1, |(_, f)| *f);
-                (t.clone(), ((n_docs as f64 + 1.0) / (df as f64 + 1.0)).ln() + 1.0)
+                let df = ranked
+                    .iter()
+                    .find(|(term, _)| term == t)
+                    .map_or(1, |(_, f)| *f);
+                (
+                    t.clone(),
+                    ((n_docs as f64 + 1.0) / (df as f64 + 1.0)).ln() + 1.0,
+                )
             })
             .collect();
         self.fitted = true;
@@ -202,7 +208,10 @@ mod tests {
     #[test]
     fn deterministic_embeddings() {
         let mut e = TfIdfEmbedder::new(32);
-        e.fit(&["budlum depolama katmani".to_string(), "lubot cikarim".to_string()]);
+        e.fit(&[
+            "budlum depolama katmani".to_string(),
+            "lubot cikarim".to_string(),
+        ]);
         assert_eq!(e.embed("budlum depolama"), e.embed("budlum depolama"));
     }
 

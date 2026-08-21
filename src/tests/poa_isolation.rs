@@ -9,6 +9,7 @@
 //! 5. Error message leak - Hata mesajları PoA detaylarını ifşa etmemeli
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod poa_isolation_tests {
     use crate::core::account::AccountState;
     use crate::core::address::Address;

@@ -142,7 +142,7 @@ fn digit_count(mut n: u64) -> usize {
 fn crc32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, entry) in table.iter_mut().enumerate() {
-        let mut c = u32::try_from(i).expect("table index < 256");
+        let mut c = i as u32; // 0..256 loop index; cannot truncate.
         for _ in 0..8 {
             c = if c & 1 != 0 {
                 0xEDB8_8320 ^ (c >> 1)
@@ -161,9 +161,7 @@ fn crc32(data: &[u8]) -> u32 {
 
 /// Write a PNG chunk: length, type, data, CRC.
 fn png_chunk(out: &mut Vec<u8>, chunk_type: [u8; 4], data: &[u8]) {
-    let len = u32::try_from(data.len())
-        .expect("chunk < 4 GiB")
-        .to_be_bytes();
+    let len = u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes();
     out.extend_from_slice(&len);
     out.extend_from_slice(&chunk_type);
     out.extend_from_slice(data);
@@ -190,10 +188,10 @@ fn zlib_stored(data: &[u8]) -> Vec<u8> {
         let final_block = pos + 65535 >= data.len();
         let block_len = (data.len() - pos).min(65535);
         out.push(u8::from(final_block));
-        let len16 = u16::try_from(block_len)
-            .expect("stored block <= 65535")
-            .to_le_bytes();
-        let nlen16 = (!u16::try_from(block_len).expect("stored block <= 65535")).to_le_bytes();
+        // `block_len` is `min(.., 65535)` just above, so both fit.
+        let block16 = u16::try_from(block_len).unwrap_or(u16::MAX);
+        let len16 = block16.to_le_bytes();
+        let nlen16 = (!block16).to_le_bytes();
         out.extend_from_slice(&len16);
         out.extend_from_slice(&nlen16);
         out.extend_from_slice(&data[pos..pos + block_len]);
@@ -258,7 +256,7 @@ fn square_side(output_len: u32) -> Result<u16, RenderError> {
     if side * side != n || side == 0 || side > u64::from(u16::MAX) {
         return Err(RenderError::MissingParam("square side"));
     }
-    Ok(u16::try_from(side).expect("square side <= u16::MAX checked above"))
+    u16::try_from(side).map_err(|_| RenderError::MissingParam("square side"))
 }
 
 fn render_svg(spec: &GeneratedSpec, pixels: &[u8]) -> Result<Vec<u8>, RenderError> {
@@ -311,8 +309,8 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     for y in 0..dest_side {
         raw.push(0u8); // filter type: None
         for x in 0..dest_side {
-            let sx = usize::try_from(x * source_side / dest_side).expect("pixel index fits");
-            let sy = usize::try_from(y * source_side / dest_side).expect("pixel index fits");
+            let sx = usize::try_from(x * source_side / dest_side).unwrap_or(0);
+            let sy = usize::try_from(y * source_side / dest_side).unwrap_or(0);
             let si = sy * usize::from(side) + sx;
             let b = pixels.get(si).copied().unwrap_or(0);
             raw.extend_from_slice(&[b, b, b]);
@@ -369,6 +367,7 @@ pub fn render_and_verify(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::storage::content_id::ContentId;

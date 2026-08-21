@@ -583,6 +583,7 @@ fn status_with_domain(tag: &[u8], domain: DomainId) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -659,6 +660,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod bridge_fee_split {
     use super::split_bridge_fee;
 

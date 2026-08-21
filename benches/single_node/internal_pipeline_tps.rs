@@ -1,3 +1,7 @@
+// Benchmark harness, not node code: this binary measures throughput and is
+// never part of a running validator. A failed setup step should stop the
+// measurement loudly rather than be threaded through `Result`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use budlum_core::chain::blockchain::Blockchain;
 use budlum_core::chain::chain_actor::ChainActor;
 use budlum_core::consensus::pos::{PoSConfig, PoSEngine};

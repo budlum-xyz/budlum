@@ -1501,6 +1501,7 @@ impl BlockchainStorage for Storage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::account::Account;
@@ -1703,6 +1704,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod storage_decode_locks {
     /// The decoder must accept exactly one wire format.
     ///

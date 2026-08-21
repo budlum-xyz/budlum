@@ -177,6 +177,7 @@ pub const PPM_DENOMINATOR: u64 = 1_000_000;
 pub const DEFAULT_TREASURY_RATE_PPM: u64 = 10_000;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

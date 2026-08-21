@@ -85,8 +85,8 @@ impl TaskMemory {
             failures: Vec::new(),
         };
         if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("hafıza okunamadı: {e}"))?;
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("hafıza okunamadı: {e}"))?;
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;

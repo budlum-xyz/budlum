@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod chaos_tests {
     use crate::chain::blockchain::{Blockchain, MAX_REORG_DEPTH};
     use crate::consensus::pow::PoWEngine;

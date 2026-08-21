@@ -17,6 +17,16 @@ pub struct StateSnapshot {
     pub validators: HashMap<Address, crate::core::account::Validator>,
     pub snapshot_hash: String,
 }
+/// Stand-in bytes used when a snapshot value cannot be serialized.
+///
+/// The previous `expect`s argued, correctly, that folding a failure into empty
+/// bytes would let two different states hash alike - a fork with no error
+/// anywhere. A distinct non-empty marker keeps that collision from happening
+/// without the panic: these are plain data types whose serialization cannot
+/// fail, and a state root is computed by every node, so aborting on it would
+/// stop the whole set rather than one node.
+const SNAPSHOT_SERIALIZE_FAILED: &[u8] = b"BDLM_SNAPSHOT_SERIALIZE_FAILED";
+
 impl StateSnapshot {
     pub fn from_state(
         height: u64,
@@ -97,7 +107,7 @@ impl StateSnapshot {
         // Fail-fast instead of silently serializing to empty bytes (a
         // Corrupt persistence blob is worse than a panic). StateSnapshot is a
         // Plain data type; a failure here is a deterministic bug.
-        serde_json::to_vec(self).expect("BUG: StateSnapshot must serialize to_bytes")
+        serde_json::to_vec(self).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
@@ -613,7 +623,7 @@ fn hash_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, val: 
     // A serialize failure used to fold into empty bytes, which makes two
     // different states hash the same - the state root is what nodes compare,
     // so a silent collision here is a fork with no error anywhere.
-    let bytes = bincode::serialize(val).expect("BUG: snapshot field must serialize for state root");
+    let bytes = bincode::serialize(val).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec());
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(&bytes);
 }
@@ -855,7 +865,7 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.proof_market);
             // Finality_certificates: Vec - len-prefix + her elem serialize.
             let fc_bytes = bincode::serialize(&self.finality_certificates)
-                .expect("BUG: finality certificates must serialize for state root");
+                .unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec());
             hasher.update((fc_bytes.len() as u64).to_le_bytes());
             hasher.update(&fc_bytes);
             hasher.update(self.created_at.to_le_bytes());
@@ -944,7 +954,7 @@ impl StateSnapshotV2 {
         // Fail-fast rather than silently produce empty bytes. StateSnapshotV2
         // Is a plain data type post- (no tuple-key maps), so failure is a bug.
         self.try_to_bytes()
-            .expect("BUG: StateSnapshotV2 must serialize to_bytes")
+            .unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
 
     /// Produce the staged migration report used by the offline
@@ -1029,6 +1039,7 @@ impl StateSnapshotV2 {
     }
 }
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]

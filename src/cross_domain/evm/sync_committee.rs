@@ -179,6 +179,7 @@ pub fn rotate_period(state: &mut SyncCommitteeState) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

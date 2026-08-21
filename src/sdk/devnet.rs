@@ -94,9 +94,7 @@ impl DevnetDomainProfile {
 
     /// RPC dinleme adresini döndürür (localhost:port).
     pub fn rpc_addr(&self) -> SocketAddr {
-        format!("127.0.0.1:{}", self.rpc_port)
-            .parse()
-            .expect("valid socket addr")
+        SocketAddr::from(([127, 0, 0, 1], self.rpc_port))
     }
 }
 
@@ -383,6 +381,7 @@ impl LocalDevnet {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

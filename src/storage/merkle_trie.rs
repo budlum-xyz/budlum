@@ -221,6 +221,7 @@ fn prefix_eq(a: &[u8; 32], b: &[u8; 32], bits: usize) -> bool {
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

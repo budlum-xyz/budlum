@@ -143,6 +143,7 @@ impl ReplayNonceStore {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -175,6 +176,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod audit_replay_regression {
     use super::*;
 
@@ -202,6 +204,7 @@ mod audit_replay_regression {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod v4_prune_tests {
     use super::*;
 

@@ -6,6 +6,7 @@
 //! 3. Burn + mint toplamı her zaman tutarlı
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::core::account::AccountState;
     use crate::core::address::Address;

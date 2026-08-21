@@ -773,7 +773,9 @@ fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
         .status(status)
         .header("content-type", HeaderValue::from_static("text/plain"))
         .body(HttpBody::from(body))
-        .expect("static RPC security response is valid")
+        // Every argument is a literal, so the builder cannot reject this.
+        // An RPC error response must never be what kills a node.
+        .unwrap_or_else(|_| HttpResponse::new(HttpBody::from(body)))
 }
 
 fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorObjectOwned> {
@@ -4226,6 +4228,7 @@ impl BudlumApiServer for RpcServer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};

@@ -230,6 +230,7 @@ fn resolve_poa(candidates: &[ForkCandidate]) -> Result<ResolvedHead, ForkChoiceE
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

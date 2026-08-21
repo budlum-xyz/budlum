@@ -126,6 +126,7 @@ pub fn fixed_sqrt(v: i64) -> i64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

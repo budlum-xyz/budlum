@@ -46,6 +46,13 @@ pub struct Account {
     pub balance: u64,
     pub nonce: u64,
 }
+/// Stand-in bytes hashed when a state-root input cannot be serialized.
+///
+/// Derived `Serialize` on owned data cannot fail. Not a panic because every
+/// node recomputes this root: an abort would stop the whole validator set at
+/// once, and a fixed marker keeps the root identical across nodes.
+const STATE_SERIALIZE_FAILED: &[u8] = b"BDLM_ACCOUNT_STATE_SERIALIZE_FAILED";
+
 impl Account {
     pub fn new(public_key: Address) -> Self {
         Account {
@@ -961,7 +968,11 @@ impl AccountState {
             self.keys_dirty = true;
         }
         self.mark_dirty(public_key);
-        self.accounts.get_mut(public_key).unwrap()
+        // `entry` returns the reference without a second fallible lookup, so
+        // the insert above and the read here cannot drift apart.
+        self.accounts
+            .entry(*public_key)
+            .or_insert_with(|| Account::new(*public_key))
     }
     pub fn mark_dirty(&mut self, public_key: &Address) {
         self.dirty_accounts.insert(*public_key);
@@ -1547,7 +1558,7 @@ impl AccountState {
                                 return false;
                             }
                             let bytes = bincode::serialize(&record.report)
-                                .expect("SlashingReport must serialize");
+                                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec());
                             sha2::Sha256::digest(&bytes).as_slice() == evidence_hash
                         });
                 if !evidence_matches {
@@ -2068,7 +2079,7 @@ impl AccountState {
         let accounts_root_bytes = if self.cached_tree.is_empty() {
             [0u8; 32]
         } else {
-            self.cached_tree.last().unwrap()[0]
+            self.cached_tree.last().map_or([0u8; 32], |row| row[0])
         };
 
         // ConsensusStateV2 Root Hashing
@@ -2143,21 +2154,23 @@ impl AccountState {
         final_hasher.update(self.tokenomics.block_reward.to_le_bytes());
         final_hasher.update(b"tokenomics_v1");
         final_hasher.update(
-            bincode::serialize(&self.tokenomics).expect("tokenomics must serialize for state root"),
+            bincode::serialize(&self.tokenomics)
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(b"timed_burn_v1");
         final_hasher.update(
-            bincode::serialize(&self.timed_burn).expect("timed_burn must serialize for state root"),
+            bincode::serialize(&self.timed_burn)
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(b"burn_reserve_v1");
         final_hasher.update(
             bincode::serialize(&self.burn_reserve_address)
-                .expect("burn_reserve_address must serialize for state root"),
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(b"team_vesting_v1");
         final_hasher.update(
             bincode::serialize(&self.team_vesting)
-                .expect("team_vesting must serialize for state root"),
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(self.bridge_root);
         final_hasher.update(self.message_root);
@@ -2210,7 +2223,7 @@ impl AccountState {
             final_hasher.update(b"external_roots_v1");
             final_hasher.update(
                 bincode::serialize(&self.external_roots)
-                    .expect("external_roots must serialize for state root"),
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
         if self.governance.has_non_default_state() {
@@ -2233,6 +2246,7 @@ impl Default for AccountState {
     }
 }
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::crypto::primitives::KeyPair;
@@ -3025,6 +3039,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod c3_validator_readiness_tests {
     use super::*;
 

@@ -14,7 +14,11 @@ pub enum SchemaError {
     /// `user` veya `assistant` boş.
     EmptyField { line: usize, field: &'static str },
     /// Kayıt bayt sınırını aşıyor (tek örnek şişmesi).
-    TooLarge { line: usize, bytes: usize, max: usize },
+    TooLarge {
+        line: usize,
+        bytes: usize,
+        max: usize,
+    },
     /// JSONL satırı çözülemedi (jsonl::decode hatası).
     Unparsable { line: usize, detail: String },
 }
@@ -68,9 +72,7 @@ pub fn tr_ratio_estimate(records: &[InstructionRecord]) -> f64 {
     if records.is_empty() {
         return 0.0;
     }
-    let tr_markers = [
-        'ğ', 'Ğ', 'ü', 'Ü', 'ş', 'Ş', 'ı', 'İ', 'ö', 'Ö', 'ç', 'Ç',
-    ];
+    let tr_markers = ['ğ', 'Ğ', 'ü', 'Ü', 'ş', 'Ş', 'ı', 'İ', 'ö', 'Ö', 'ç', 'Ç'];
     let mut tr = 0usize;
     for r in records {
         let text: String = format!("{} {}", r.user, r.assistant);

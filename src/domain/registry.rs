@@ -262,6 +262,7 @@ pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::domain::plugin::default_domain;

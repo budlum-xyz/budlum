@@ -1338,6 +1338,7 @@ struct ValidatorsConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]
@@ -1464,6 +1465,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod persona_config_tests {
     use super::FileConfig;
 

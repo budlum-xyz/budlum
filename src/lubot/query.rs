@@ -35,6 +35,7 @@ pub fn prepare_lubot_overview(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::lubot::metrics::LubotMetrics;

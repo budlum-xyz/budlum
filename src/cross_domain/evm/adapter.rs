@@ -279,6 +279,7 @@ fn derive_receipt_leaf(tx_hash: &str, bridge_address: &[u8]) -> Hash32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

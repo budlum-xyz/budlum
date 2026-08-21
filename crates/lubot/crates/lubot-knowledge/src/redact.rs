@@ -45,8 +45,7 @@ fn is_github_token(v: &str) -> bool {
             || v.starts_with("ghu_")
             || v.starts_with("ghs_")
             || v.starts_with("ghr_"))
-        && v.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn is_slack_token(v: &str) -> bool {
@@ -186,9 +185,7 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
     report.add("key_value");
     let sep_str = &line[pos..pos + 1];
     let q = quote.map_or("", |_| "\"");
-    format!(
-        "{key}{sep_str}{lead_ws}{q}{REDACTION_TOKEN}{q}{tail}"
-    )
+    format!("{key}{sep_str}{lead_ws}{q}{REDACTION_TOKEN}{q}{tail}")
 }
 
 /// Satır içindeki bilinen sır biçimlerini maskele (kelime sınırı korunur).
