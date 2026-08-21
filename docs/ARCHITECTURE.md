@@ -1208,7 +1208,7 @@ flowchart LR
   Content --> Shards[Off-chain sharding]
   Shards --> ShardRef["ShardRef: shard_id + size"]
   Hash --> Manifest["ContentManifest: shards + metadata + owner"]
-  Manifest --> ManifestId[ManifestId = deterministic hash]
+  Manifest --> ManifestId["Manifest::id() = deterministic hash"]
   ManifestId --> Chain[On-chain registration]
   Chain --> Deal[Storage deal per shard]
   Deal --> Operator[Storage operator bonds]
@@ -1252,8 +1252,8 @@ flowchart LR
 ```mermaid
 flowchart LR
   Developer[Developer address] --> Register[register_app auto-increment ID]
-  Register --> Manifest["AppManifest: URL + metadata"]
-  Manifest --> Update[update_app URL/manifest]
+  Register --> Record["AppRecord: website_url + manifest_id"]
+  Record --> Update[update_app URL/manifest]
   Register --> SelfVerify[verify_app developer self-verify]
   SelfVerify --> Attested[developer_attested = true]
   Attested --> Verified[verified = true DAO override reserved]
@@ -1350,7 +1350,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Template[SovereignDomainTemplate] --> Class[SovereignClass enum]
+  Template[SovereignDomainTemplate] --> Class[SovereignDomainClass enum]
   Class --> PoA[EnterprisePoa -> requires PoA consensus]
   Class --> Custom[Custom class label validated]
   Template --> Compliance[ComplianceEvidence hash/root only]
