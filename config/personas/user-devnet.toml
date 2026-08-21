@@ -1,0 +1,41 @@
+# Persona: end user / hobbyist - sync, verify, optional light use on devnet.
+# Not a validator. Localhost RPC only.
+
+[network]
+profile = "devnet"
+chain_id = 1337
+genesis_file = "./config/devnet-genesis.json"
+
+[node]
+role = "rpc"
+
+[storage]
+data_dir = "./data/user-devnet/budlum.db"
+snapshot_dir = "./data/user-devnet/snapshots"
+backup_dir = "./data/user-devnet/backups"
+backups_enabled = false
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/user-devnet-node-id.key"
+bootnodes = []
+dns_seeds = []
+max_peers = 25
+banned_peer_db = "./data/user-devnet/banned-peers.json"
+mdns_enabled = true
+
+[rpc]
+public_listener = "127.0.0.1:8545"
+enabled = true
+auth_required = false
+allowed_ips = ["127.0.0.1", "::1"]
+trusted_proxies = []
+
+[metrics]
+listener = "127.0.0.1:9090"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false

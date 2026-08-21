@@ -1,0 +1,23 @@
+# cargo-fuzz hedefi (cargo +nightly fuzz check/run ile çalıştırılır)
+# CI'da ayrı turda koşulur (bud2-ci.yml notu: "fuzz/kani ayri CI turu icin acik kalem")
+[package]
+name = "bud-core-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bud-core = { path = ".." }
+
+[[bin]]
+name = "fuzz_bud_format"
+path = "fuzz_bud_format.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

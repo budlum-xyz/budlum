@@ -1,0 +1,111 @@
+# Grype - zafiyet taraması + EPSS önceliklendirme, bulgular Security sekmesine
+#
+# NEDEN MEVCUT TARAYICILARIN ÜSTÜNE: repoda zaten cargo-audit (RustSec),
+# Cargo-deny (RustSec) ve OSV-Scanner (OSV.dev toplayıcısı) var. Grype iki şey
+# Ekliyor:
+#
+#   1) EPSS skoru. "Bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir
+#      Cevabı; ne RustSec'te ne OSV.dev'de var. Önceliklendirme farkı yaratır:
+#      Ilk koşuda yamux CVE-2026-32314 CVSS 8.7 ama EPSS %0.5 (36. persentil)
+#      Olarak raporlandı, yüksek şiddet, düşük sömürülme olasılığı. Bu ayrım
+#      Olmadan bütün "high" bulgular aynı aciliyette görünür.
+#
+#   2) SARIF çıktısı. Şu an Security sekmesine yalnız CodeQL, Semgrep ve zizmor
+#      Yazıyor; repodaki Trivy fs taraması SARIF üretmiyor (yalnız exit-code ile
+#      Job'ı kırıyor), yani bağımlılık bulgularını tek bir yerden izlemek mümkün
+#      Değil. Grype bu boşluğu kapatıyor.
+#
+# Kapı politikası: high ve üzeri FAIL (`continue-on-error` YOK). İstisnalar
+# .quality/grype.yaml içinde ve .quality/osv-scanner.toml'daki gerekçelerin birebir aynısı -
+# Iki tarayıcının aynı bulguda çelişmesi kapının güvenilirliğini aşındırır.
+#
+# Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
+
+name: Grype
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Haftalık: yeni advisory kod değişmeden de yayınlanır.
+    - cron: "0 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grype-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  grype:
+    name: Grype (NVD + GHSA + EPSS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: grype v0.116.0 kur (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/grype.tar.gz \
+            https://github.com/anchore/grype/releases/download/v0.116.0/grype_0.116.0_linux_amd64.tar.gz
+          echo "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5  /tmp/grype.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/grype-bin
+          tar -xzf /tmp/grype.tar.gz -C /tmp/grype-bin grype
+          sudo install -m 0755 /tmp/grype-bin/grype /usr/local/bin/grype
+          grype version
+
+      # Vacuous-gate koruması: "No vulnerabilities found" hem temiz bir ağacı
+      # Hem de veritabanını indirememiş / hiç çalışmamış bir taramayı
+      # Gösterebilir. Kanarya, bilinen savunmasız bir sürüm içeren sentetik bir
+      # Lockfile üretip tarayıcının onu YAKALADIĞINI kanıtlar. Repo config'i
+      # Bilinçli olarak devre dışı (--config ile boş dosya), aksi halde
+      # .quality/grype.yaml'daki yamux istisnası kanaryayı da susturur ve kapı kendi
+      # Kendini kandırır.
+      - name: Kanarya - Grype alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/grype-canary
+          printf 'ignore: []\n' > /tmp/grype-canary/empty.yaml
+          cat > /tmp/grype-canary/Cargo.lock <<'CANARY'
+          version = 3
+
+          [[package]]
+          name = "canary-app"
+          version = "0.1.0"
+          dependencies = ["yamux"]
+
+          [[package]]
+          name = "yamux"
+          version = "0.12.1"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          CANARY
+          if grype dir:/tmp/grype-canary --fail-on high --config /tmp/grype-canary/empty.yaml -o table; then
+            echo "HATA: Grype kanaryayı (yamux 0.12.1 / GHSA-vxx9-2994-q338) yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → Grype alarmı çalışıyor."
+
+      - name: Tarama - SARIF üret
+        run: grype dir:. --config .quality/grype.yaml -o sarif --file grype.sarif
+
+      - name: SARIF yükle (Security sekmesi)
+        if: always()
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          sarif_file: grype.sarif
+          category: grype
+
+      # SARIF yüklendikten SONRA kapı: yükleme adımı atlanmadan bulgular
+      # Security sekmesine düşsün, ardından job kırmızıya dönsün.
+      - name: Kapı - high ve üzeri bulgu = fail
+        run: grype dir:. --config .quality/grype.yaml --fail-on high -o table

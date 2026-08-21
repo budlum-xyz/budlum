@@ -1,0 +1,1420 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  budlum:
+    name: Budlum Core
+    runs-on: ubuntu-latest
+    # Rozet self-commit'i (Q5, loop guard'lı) yalnız bu job'da write ister;
+    # Diğer tüm job'lar global minimalde (contents: read) kalır.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1  # zizmor: ignore[artipacked] rozet botu self-commit icin GITHUB_TOKEN kasitli
+        with:
+          persist-credentials: true
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+          components: clippy, rustfmt
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy pedantic/nursery ratchet (izleme modu)
+        # Uyarı gorunurlugu + sayi-artisina karsi ratchet (baseline 191,
+        # Kanit .github/clippy-extra-baseline.txt). Sifira indirme kademeli/azimli.
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra --self-test
+          cargo clippy --all-targets --message-format=json -- -W clippy::pedantic -W clippy::nursery > /tmp/clippy-extra.json 2>/dev/null || true
+          # Diagnostic only: the ratchet reports a count, and the JSON it counts
+          # lives in the runner's /tmp, so a trip leaves nothing to inspect.
+          # This prints the per-lint tally and every first-party file:line.
+          # It writes nothing and runs before the gate, so it cannot change the
+          # verdict.
+          python3 ./ops/scripts/clippy-extra-report.py /tmp/clippy-extra.json
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra /tmp/clippy-extra.json
+      - name: "Feature matrix: pq-ml-dsa solo"
+        run: |
+          set -euo pipefail
+          cargo check --no-default-features --features "pq-ml-dsa wallet-ml-dsa"
+          cargo clippy --no-default-features --features "pq-ml-dsa wallet-ml-dsa" --all-targets -- -D warnings
+          # `check` and `clippy` prove it compiles. They do not run a single
+          # signature. `pq-ml-dsa` is a consensus choice - `PQ_SCHEME_ID` is
+          # written into genesis and `validate_pq_scheme` refuses to start on a
+          # mismatch, so an operator can select it for mainnet, and until now
+          # no test had ever generated a key or verified a signature under it.
+          # The crypto module's own tests are the minimum bar for a signature
+          # scheme that gates validator registration.
+          cargo test --no-default-features --features "pq-ml-dsa wallet-ml-dsa" --lib crypto:: 2>&1 | tee /tmp/mldsa-tests.log
+          # Guard against the filter silently matching nothing: a `cargo test`
+          # that runs zero tests exits 0 and looks identical to a pass.
+          if grep -qE 'running 0 tests' /tmp/mldsa-tests.log; then
+            echo "HATA: pq-ml-dsa altinda 0 test kostu -> filtre eslesmedi (vacuous)"
+            exit 1
+          fi
+          # And that the ones that matter are among them. `crypto::` also
+          # matches PKCS#11 parsing and policy tests, which would pass without
+          # a single signature being produced.
+          for t in test_keypair_generation test_sign_and_verify test_deterministic_signature; do
+            grep -qE "primitives::tests::$t \.\.\. ok" /tmp/mldsa-tests.log \
+              || { echo "HATA: $t pq-ml-dsa altinda kosmadi/gecmedi"; exit 1; }
+          done
+          grep -E 'test result:' /tmp/mldsa-tests.log
+      - name: Feature canary - --all-features REDDEDILMELI
+        run: |
+          set -euo pipefail
+          if cargo check --all-features 2>/dev/null; then
+            echo "HATA: --all-features derlendi -> compile_error guard yok (vacuous gate!)"
+            exit 1
+          fi
+          echo "Kanarya OK: --all-features beklendigi gibi compile_error ile rededildi (PQ backend'ler mutually exclusive)."
+      - name: Test
+        # Pipefail zorunlu: tee tek başına exit 0 döner; aksi halde test fail
+        # Core job'ı sahte-yeşil yapar (kanıt: d815561 Test=success, 1 fail gizli;
+        # Coverage nextest aynı fail ile kırmızı - 2026-07-19).
+        run: |
+          set -euo pipefail
+          cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: cargo doc (Madde 6 - public API dokümantasyon)
+        run: |
+          set -euo pipefail
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features pq-ml-dsa 2>&1 | tee /tmp/doc.log
+          echo "cargo doc: warnings as errors - passed"
+      - name: Rozet kanaryasi (log'dan bagimsiz)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- badges-are-current --self-test
+      - name: Rozet guncel mi (README = olculen test sayisi)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- badges-are-current /tmp/libtests.log
+      - name: Odenmis icerik kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- paid-content-cannot-be-read-for-free --self-test
+      - name: Odenmis icerik bedava okunamaz
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- paid-content-cannot-be-read-for-free
+      - name: Uretilebilir icerik kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable --self-test
+      - name: Uretilebilir icerik dogrulanabilir
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- generated-content-is-verifiable
+      # Tarif edilen bir nesnede tarif TEK kopyadir. Jeneratoru degistiren bir
+      # duzenleme yanlis resim uretmez, artik hic uretilemeyen bir nesne uretir:
+      # id dogrulamayi birakir ve geri donulecek bayt diskte yoktur. Kendisiyle
+      # tutarlilik bunu yakalamaz, cunku karsilastirmanin iki tarafi birlikte
+      # kayar. Nitekim gradyan jeneratoru bastan beri bozuktu: fixed_to_int
+      # zaten olcegi birakmis bir degere uygulaniyordu, iki uc rengi de atiyor
+      # ve duz siyah cizyordu, tutarli bicimde hash'leyerek.
+      - name: Sifir-depolama vektor kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-storage-bytes-are-frozen --self-test
+      - name: Uretilen baytlar dondurulmus vektore bagli
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-storage-bytes-are-frozen
+      - name: Ulasilamayan kapi kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable --self-test
+      - name: Ulasilamayan kapi sayisi artmadi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable
+      - name: Kendi kaynagini okuyan test kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- source-reading-tests-are-narrowed --self-test
+      - name: Kendi kaynagini okuyan testler daraltilmis
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- source-reading-tests-are-narrowed
+      - name: Cakisma isareti kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers --self-test
+      - name: Cakisma isareti agacta yok
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-conflict-markers
+      - name: Onarim tetikleyicisi kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss --self-test
+      - name: Onarim kayipta atesliyor
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- repair-fires-on-loss
+      - name: Lubot algi kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate --self-test
+      - name: Lubot okur, uretmez
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate
+      - name: Turetilmis icerik kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test
+      - name: Turetilmis icerik bayt-kesin
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact
+      # Turetilmis bir nesne kendi baytini tutmaz: okumak master'i getirip
+      # yeniden hesaplamak demek. Master gidince depolama kucumez, turev yok
+      # olur, ve sessizce olur: turev manifesti hala duruyor, hala gecerli
+      # gorunuyor. Ilk isaret, karsilanamayan bir okuma. dictionary.rs ayni
+      # sekli referans sayaci ve zarif pencereyle cozuyordu; turevlerde ayni
+      # bagimlilik vardi ve bunlarin hicbiri yoktu.
+      # Bir depolama karari iki orani boler; yalniz oranlari onemli, yani ortak
+      # olcek sadelesir. Tehlike tam burada: olcegi bir orana uygulayip digerine
+      # uygulamamak her esigi o carpan kadar kaydirir ve hicbir sey yanlis
+      # gorunmez. Nitekim ilk yazimda islemci orani 1e9, disk orani 1e6 olcekteydi;
+      # tarif edilen icerik esigi olculen 418 yerine 0,4 okudu ve butun testler
+      # gecti, cunku testler esikleri birbiriyle karsilastiriyordu ve iki taraf da
+      # birlikte kaymisti. Rust disinda yeniden hesaplayarak yakalandi.
+      - name: Esik oranlari tek olcek kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale --self-test
+      - name: Esik oranlari tek olcekte
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- threshold-rates-share-one-scale
+      - name: Turev kaliciligi kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master --self-test
+      - name: Bir turev master'indan uzun yasayamaz
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- a-derivation-cannot-outlive-its-master
+      - name: Iddia birimi kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units --self-test
+      - name: Iddia iki birimi de soyluyor
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- reduction-claims-state-both-units
+
+
+  budzero:
+    name: BudZero / BudZKVM
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: budzero
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        # NOT: master 2026-07-16+ `toolchain` input'unu ZORUNLU kiliyor
+        # (CI kanit: job 87741629986 - "'toolchain' is a required input").
+        with:
+          toolchain: "1.97.0"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budzero
+          workspaces: budzero
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --workspace --all-targets
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  bud-e2e-invariants:
+    # 9 modül-bağımsızlık invariant'ı isimlendirilmiş ZORUNLU
+    # Job. İsim kanaryası: bir invariant silinir/yeniden adlandırılırsa kapı
+    # `cargo test` yeşil kalsa bile FAIL olur (vacuous-gate koruması, kanaryalı).
+    name: B.U.D. E2E Invariants (9/9 isim-kilitli)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Kapı kanaryası (vacuous değil kanıtı)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e --self-test
+      - name: bud_e2e - 9 invariant + 3 e2e (isim kanaryalı)
+        run: |
+          cargo test --lib bud_e2e 2>&1 | tee /tmp/bud-e2e.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e /tmp/bud-e2e.txt
+
+  economy-invariants:
+    # : EIP-1559 + reward-pool + committed-supply denominator locks.
+    # Name canary prevents a vacuous green if tests are renamed/deleted.
+    name: Economy Invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Economy invariant gate canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants --self-test
+      - name:  named invariant tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/economy-invariants.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants /tmp/economy-invariants.txt
+
+  fork-choice-gate:
+    # : per-domain fork-choice/lifecycle named tests.
+    # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
+    name: Fork-Choice Invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Fork-choice gate canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice --self-test
+      - name:  fork-choice tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/fork-choice-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice /tmp/fork-choice-gate.txt
+
+  storage-provider-gate:
+    # : StorageProvider trait + mock implementation named tests.
+    name: StorageProvider Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: StorageProvider gate canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider --self-test
+      # The proof-boundary script existed in ops/scripts/ but no job ran it, so it
+      # proved nothing about any commit. Wired here rather than into a new job
+      # because it is source-only and needs no build.
+      - name: Storage proof boundary canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-proof-production-boundary --self-test
+      - name: Storage proof production boundary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-proof-production-boundary
+      - name:  StorageProvider tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/storage-provider-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider /tmp/storage-provider-gate.txt
+
+  node-classification-gate:
+    # : full/archive node classification + pruning policy named tests.
+    # Name canary prevents a vacuous green if classification tests are renamed/deleted.
+    name: Node Classification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Node classification gate canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- node-classification --self-test
+      - name:  node classification tests
+        run: |
+          set -euo pipefail
+          cargo test --lib node 2>&1 | tee /tmp/node-classification-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- node-classification /tmp/node-classification-gate.txt
+
+  network-hardening-gate:
+    # : network hardening named tests.
+    # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
+    name: Network Hardening
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Network hardening gate canary
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- network-hardening --self-test
+      - name:  network hardening tests
+        run: |
+          set -euo pipefail
+          cargo test --lib 2>&1 | tee /tmp/network-hardening-gate.txt
+          cargo test --lib peer_rate_limit_security_profile 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          cargo test --lib h5_ 2>&1 | tee -a /tmp/network-hardening-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- network-hardening /tmp/network-hardening-gate.txt
+
+
+
+
+  domain-tag-gate:
+    # The cryptographic domain-separation inventory must match the source tree.
+    name: Domain Tag Inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Gate self-test (canary)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- domain-tags --self-test
+      - name: Inventory matches code
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- domain-tags
+
+  poa-compliance-gate:
+    # : MASAK/AML hooks are isolated to PoA domains only.
+    name: PoA Compliance Isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PoA compliance gate self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- poa-compliance --self-test
+      - name:  PoA compliance tests
+        run: |
+          set -euo pipefail
+          cargo test --lib poa_compliance 2>&1 | tee /tmp/poa-compliance-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- poa-compliance /tmp/poa-compliance-gate.txt
+
+  governance-invariants:
+    # : minimal on-chain governance parameter whitelist + activation timelock.
+    name: Governance Invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Governance invariant gate self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- governance-invariants --self-test
+      - name:  governance invariant tests
+        run: |
+          set -euo pipefail
+          cargo test --lib governance 2>&1 | tee /tmp/governance-invariants-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- governance-invariants /tmp/governance-invariants-gate.txt
+
+  wallet-core-gate:
+    # : wallet-core multisig/social recovery primitives.
+    name: Wallet Core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: wallet-core
+          workspaces: wallet-core
+      - name: Wallet Core gate self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-core-gate --self-test
+      - name: wallet-core tests
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path crates/wallet-core/Cargo.toml 2>&1 | tee /tmp/wallet-core-gate.txt
+          cargo test --manifest-path crates/wallet-core/Cargo.toml --features uniffi --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo test --manifest-path crates/wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-core-gate /tmp/wallet-core-gate.txt
+
+  # ============================ Budscan (web3 tarayici cekirdegi) ============================
+  budscan:
+    # Budscan `budlum-core`'a baglanmiyor ve iki tanimi kopyaliyor: ad kurali
+    # ve ContentId. Kopyalar sessizce ayrisabilir ve ayrismalari sessiz
+    # sonuclar uretir (tarayici bir adi kabul eder zincir etmez; ya da
+    # tarayici bir baytin dogrulandigini soyler zincir baska kimlik hesaplar).
+    # `budscan-name-rule-parity` o iki sessizligi gurultuye ceviriyor.
+    name: Budscan (tarayici cekirdegi + yama katmani)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budscan
+          workspaces: budscan
+      - name: Format
+        run: cargo fmt --manifest-path crates/budscan/Cargo.toml --all -- --check
+      - name: Clippy (pedantic, -D warnings)
+        run: cargo clippy --manifest-path crates/budscan/Cargo.toml --all-targets -- -D warnings
+      - name: budscan testleri
+        run: cargo test --manifest-path crates/budscan/Cargo.toml
+      - name: budscan kendi kanaryalari
+        # Ikili kendi ic kanaryalarini kosar: sema hicbir zaman ad olmaz, bos
+        # kanit `dogrulandi` demez, bosta kalan bir yama kontrolu gecmez.
+        run: cargo run --manifest-path crates/budscan/Cargo.toml --bin budscan -- kendini-sina
+      - name: Kapi kanaryasi (vacuous degil kaniti)
+        run: |
+          set -euo pipefail
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset --self-test
+      - name: Ad kurali ve ContentId parity
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-name-rule-parity
+      - name: Yama katmani (liste=disk, yabanci marka yok)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
+
+  # ============================  / Bolum 4 (BNS gate) ============================
+  bns-gate:
+    #  Bolum 4 modul-ayrimi: BNS'in kendi CI gate'i (B.U.D. kapi deseni).
+    # Isim kanaryasi: bir test silinir/yeniden adlandirilirsa kapi FAIL olur.
+    name: BNS Name Registry (8/8 isim-kilitli)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Kapi kanaryasi (vacuous degil kaniti)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bns-gate --self-test
+      - name: bns - 8 test (isim kanaryali)
+        run: |
+          cargo test --lib bns 2>&1 | tee /tmp/bns-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bns-gate /tmp/bns-gate.txt
+
+  # ============================  /  (P0) ============================
+  # Strict mod: aşağıdaki tüm job'lar ilk günden FAIL kapısıdır (ruhu).
+  # Kapıların "boş" (vacuous) olmadığı kanarya testleriyle her koşuda kanıtlanır.
+
+  poa-isolation:
+    # CI Genişletme Madde 9: PoA/Permissionless izolasyon test seti.
+    # 5 farklı sızma senaryosu + 2 ek invariant testi.
+    name: PoA Isolation (7/7 sızma-kilitli) (CI Madde 9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PoA izolasyon testleri (7 test, 5 sızma senaryosu)
+        run: |
+          cargo test --lib poa_isolation 2>&1 | tee /tmp/poa-isolation.txt
+          N=$(grep -c "^test.*ok$" /tmp/poa-isolation.txt || true)
+          echo "PoA izolasyon test sayısı: $N"
+          if [ "$N" -lt 7 ]; then
+            echo "FAIL: PoA izolasyon test sayısı 7'den az ($N)"
+            exit 1
+          fi
+
+  dependency-audit:
+    # : cargo audit + SBOM üretimi + SBOM artifact.
+    name: Dependency Audit + SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: cargo audit (CVE = fail)
+        run: bash ./ops/scripts/audit-deps.sh
+      - name: SBOM üret (CycloneDX)
+        run: bash ./ops/scripts/generate-sbom.sh
+      - name: SBOM artifact yükle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90
+
+  cargo-deny:
+    # : root ve budzero grafikleri ayrı matrix adımlarında denetlenir.
+    name: Cargo Deny (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The root policy moved to .quality/deny.toml, so it has to be named
+          # explicitly; budzero keeps its own deny.toml next to its manifest,
+          # which cargo-deny discovers on its own.
+          - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo deny check (advisories, bans, licenses, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          arguments: --all-features ${{ matrix.config }}
+          command: check
+
+  license-compliance:
+    # Dependency licence compatibility, kept as its own job on purpose.
+    #
+    # `cargo-deny check` (the job above) already covers licences as one of its
+    # four sections, but a failure there surfaces as one red "Cargo Deny" check
+    # and the reason has to be dug out of the log. Licence compatibility is a
+    # legal-exposure question rather than a hygiene one, so it gets a check
+    # that says in its own name what broke.
+    #
+    # This does not replace or weaken the combined run: both stay required.
+    name: License Compliance (dependency licences)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny (pinned)
+        run: cargo install --locked --version 0.20.2 cargo-deny
+
+      # Canary: prove the licence gate can reject something before trusting a
+      # green result. A tree checked against an empty allow-list must fail; if
+      # it passes, the gate is not evaluating licences at all.
+      - name: Gate canary (an empty allow-list must fail)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lic-canary
+          printf '[licenses]\nallow = []\nconfidence-threshold = 0.8\n' > /tmp/lic-canary/deny.toml
+          if cargo deny --manifest-path "${{ matrix.manifest }}" \
+               --config /tmp/lic-canary/deny.toml check licenses >/dev/null 2>&1; then
+            echo "FAIL: an empty allow-list was accepted - the licence gate is vacuous." >&2
+            exit 1
+          fi
+          echo "Canary rejected as expected; the gate evaluates licences."
+
+      - name: cargo deny check licenses
+        run: |
+          set -euo pipefail
+          cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
+            ${{ matrix.config }} check licenses
+
+      # Inventory for the audit trail: what each dependency is licensed under,
+      # not merely whether the run passed.
+      - name: Licence inventory (summary)
+        if: always()
+        run: |
+          {
+            echo "### Dependency licences - ${{ matrix.name }}"
+            echo ""
+            echo '```'
+            cargo deny --all-features --manifest-path "${{ matrix.manifest }}" \
+              ${{ matrix.config }} list 2>/dev/null | cut -c1-200 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  fuzz-quick:
+    #  + : mevcut target'lar + 3 yeni (consensus/relayer/zk).
+    # Uzun koşular fuzz-nightly.yml (schedule, 4h/target, corpus cache) işler.
+    # Quick: 60s/target (10 target × 60s ≈ 10dk + build; timeout-minutes 60).
+    name: Fuzz Quick (60s × 9 target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly - cargo-fuzz gereksinimi)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: nightly
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - name: Install cargo-fuzz
+        run: cargo +nightly install --locked cargo-fuzz
+      # Corpus, koşular arasında taşınır. Without this every run starts from
+      # an empty corpus, so the same 60 seconds re-explores the same shallow
+      # surface each time and the gate never gets deeper. `fuzz-nightly.yml`
+      # already caches per target; this is the same pattern for the quick set,
+      # in one entry because the quick job runs all nine in a single job.
+      #
+      # `restore-keys` is the part that matters: the exact key contains the
+      # run id and will never hit, so the prefix match is what pulls the most
+      # recent corpus forward.
+      - name: Corpus cache (yuvarlanan, dokuz target birlikte)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fuzz/corpus
+          key: fuzz-quick-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-quick-corpus-
+      - name: Her target 60 saniye fuzz
+        # Cargo-fuzz, fuzz/Cargo.toml'u MEVCUT crate köküne göre çözer;
+        # Repo kökünden çalıştırılmalı (fuzz/ altından çağrı = fuzz/fuzz hatası).
+        run: |
+          set -euo pipefail
+          targets=(
+            block_deserialize
+            consensus_validate
+            fuzz_blockchain_serialize
+            snapshot_deserialize
+            transaction_deserialize
+            consensus_state_transition
+            reputation
+            relayer_escrow
+            zk_verifier
+            budl_compile
+            vm_execute
+          )
+          # evm_rlp_decode and evm_mpt_verify run in fuzz-nightly.yml. This
+          # comment used to say "nightly/manual" while the nightly matrix did
+          # not list them either, so for as long as it stood the two targets
+          # compiled and never ran. `every-fuzz-target-is-run` now measures
+          # that instead of trusting the sentence.
+          #
+          # `vm_execute` runs here rather than only nightly: it caps the
+          # program at 4096 instructions and the gas at fifty thousand, so a
+          # loop terminates in milliseconds and the target keeps up with a
+          # sixty second budget.
+          #
+          # `budl_compile` runs here because the front end is cheap to drive:
+          # it parses and type checks and returns. `budl_compile_then_run`
+          # executes what it emitted and is left to fuzz-nightly, since an
+          # accepted program can spend the whole gas limit before halting and
+          # one slow input would eat the 60 second budget for the target.
+          for t in "${targets[@]}"; do
+            echo "=== fuzz-quick: $t (60s) ==="
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
+          done
+          echo "Tüm fuzz target'ları temiz."
+      - name: Crash artifact (varsa)
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-quick-crashes-${{ github.sha }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  secret-scan:
+    # : TAM git geçmişinde secret taraması (fetch-depth: 0).
+    # Gitleaks OSS binary'yi kullanıyoruz: resmi GitHub Action, organizasyon
+    # Repolarında GITLEAKS_LICENSE (dış kayıt) ister; binary aynı motoru
+    # Lisanssız çalıştırır. Sürüm + sha256 pinlidir. Resmi action'a geçiş,
+    # Lisans anahtarı temin edildiğinde değerlendirilebilir (güvenlik çıktısı
+    # Birebir aynıdır).
+    name: Secret Scan (gitleaks, tam geçmiş)
+    runs-on: ubuntu-latest
+    # Security-events: write, gitleaks bulgularinin Security sekmesine SARIF
+    # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
+    # Yukseltme yalniz bu job'a verilir.
+    permissions:
+      contents: read
+      security-events: write
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: gitleaks v8.30.1 kur (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Kanarya - gitleaks alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          # DİKKAT: Sahte token asla tek parça olarak bu dosyaya yazılmaz;
+          # Parçalar çalışma zamanında birleştirilir. Aksi halde repo'nun
+          # Kendi geçmiş taraması bu kalıbı sızıntı sanıp FAIL eder.
+          PFX="gh""p_"
+          S1="xK9mQ2vR7pL4nT8w"
+          S2="Y3zB6cF1hJ5sD0gE42uI"
+          mkdir -p /tmp/gitleaks-canary
+          cd /tmp/gitleaks-canary
+          git init -q .
+          printf 'example_key = "%s%s%s"\n' "$PFX" "$S1" "$S2" > canary.txt
+          git add .
+          git -c user.email=ci@budlum.xyz -c user.name=ci commit -qm canary
+          if gitleaks detect --source . --redact --no-banner; then
+            echo "HATA: gitleaks kanaryayı yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → gitleaks alarmı çalışıyor."
+      # Iki adimli: once SARIF uret (--exit-code 0 -> bulgu olsa da adim
+      # Dusmez), sonra Security sekmesine yukle, en son kapiyi calistir.
+      # Tek adimda hem rapor hem fail istenirse bulgu bulundugunda adim orada
+      # Olur ve upload hic calismaz; yani gorulmesi en kritik olan bulgular
+      # Security sekmesine hic dusmez.
+      - name: Tam geçmiş taraması - SARIF üret (raporlama, kapı değil)
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml --redact \
+            --report-format sarif --report-path gitleaks.sarif --exit-code 0
+      - name: gitleaks SARIF yükle (Security sekmesi)
+        if: always()
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+      - name: Tam geçmiş taraması (bulgu = fail)
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
+
+  timing-safe:
+    # : RPC/crypto'da ham-eşitlik statik taraması + dudect-tarzı
+    # Istatistiksel zamanlama regresyon testi (cargo bench).
+    name: Timing-Safe Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Statik tarama + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- timing-safe
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- timing-safe --self-test
+      - name: Dudect-tarzı istatistiksel zamanlama testi
+        run: cargo bench --bench timing_safe
+
+  docker-security:
+    # : Dockerfile statik lint (hadolint) + repo fs trivy taramasi.
+    # Hadolint binary surum+sha256 pinli (gitleaks deseni). DL3008 (apt surum
+    # Pinleme) warning seviyesinde birakilir: bookworm apt churn'une karsi
+    # Bilincli kalibrasyon, failure-threshold: error ile yalniz error+ FAIL.
+    name: Docker Security (trivy + hadolint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Security-events: write, Trivy bulgularinin Security sekmesine SARIF
+    # Olarak yuklenmesi icin gerekli. Workflow geneli `contents: read`;
+    # Yukseltme yalniz bu job'a verilir.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: hadolint v2.14.0 kur (surum + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-Linux-x86_64
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  /tmp/hadolint" | sha256sum -c -
+          sudo install -m 0755 /tmp/hadolint /usr/local/bin/hadolint
+          hadolint --version
+      - name: Dockerfile lint (failure-threshold=error)
+        run: hadolint --failure-threshold error ops/Dockerfile
+      # Iki adimli: once SARIF uret (exit-code 0 -> adim job'i kirmaz), sonra
+      # Security sekmesine yukle, en son kapiyi calistir. Tek adimda hem SARIF
+      # Hem exit-code 1 verilirse bulgu bulundugunda adim orada olur ve upload
+      # Hic calismaz; bulgular Security sekmesine dusmez. Bu sirayla bulgu
+      # Gorunur olur VE job yine kirmiziya doner.
+      - name: Trivy fs taramasi - SARIF uret (raporlama, kapi degil)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: "0"
+          ignore-unfixed: true
+      - name: Trivy SARIF yukle (Security sekmesi)
+        if: always()
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Trivy fs kapisi (secret + misconfig; CRITICAL/HIGH = fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  coverage:
+    # : nextest + llvm-cov, ratchet kapisi (Q-7b1(a)).
+    # Basline kaniti 2026-07-17: lines 64.15% (14493/22594), 531/531 PASS.
+    # Araclar surum+sha256 pinli (nextest resmi .sha256 asset ile birebir dogrulanmis).
+    name: Coverage (nextest + llvm-cov, ratchet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+          components: llvm-tools-preview
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: cargo-llvm-cov v0.8.7 + nextest 0.9.140 kur (sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/clcov.tar.gz \
+            https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.8.7/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz
+          echo "9a75fe29538d3800b3da57f6f6efb64cba5c720a257bf0cb8b51f39d495a9168  /tmp/clcov.tar.gz" | sha256sum -c -
+          # Hash BURADA sabit. Onceden yanindaki `.sha256` dosyasi da ayni
+          # release'ten indirilip ona karsi dogrulaniyordu: artefakti degistiren
+          # biri yanindaki hash dosyasini da degistirir, yani kontrol kendini
+          # dogruluyordu. Adim adi "sha256 pinli" diyordu ve pin degildi.
+          # Bu deger bagimsiz olarak indirilip hesaplandi (2026-07-31).
+          curl -sSfL -o /tmp/nextest.tar.gz \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-gnu.tar.gz
+          echo "4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3  /tmp/nextest.tar.gz" | sha256sum -c -
+          mkdir -p ~/.cargo/bin
+          tar -xzf /tmp/clcov.tar.gz -C ~/.cargo/bin/
+          tar -xzf /tmp/nextest.tar.gz -C ~/.cargo/bin/
+          cargo llvm-cov --version && cargo nextest --version
+      - name: Kapi kanaryasi (vacuous-gate korumasi)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage --self-test
+      - name: Olcum + ratchet kapisi
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov nextest --lib --json --output-path coverage/cov.json
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- coverage coverage/cov.json
+      - name: Modül analizi kanaryası (vacuous değil)
+        run: python3 ./ops/scripts/check_module_coverage.py --self-test
+      - name: Modül coverage raporu - budlum (baselines 2. adımda, vacuous-gate YOK)
+        run: python3 ./ops/scripts/check_module_coverage.py coverage/cov.json
+      - name: BudZero coverage ölçümü (llvm-cov nextest, budzero workspace)
+        # `cd` cikis kodu kontrol edilmeden kullaniliyordu. Dizin bulunamazsa
+        # kabuk kokte kaliyor, sonraki komut ANA workspace'i olcuyor ve
+        # ciktiyi `budzero-cov.json` adiyla yaziyor: bir sonraki adim onu
+        # budzero'nun kapsami sanip raporluyor. Yanlis bir sayi degil, baska
+        # bir agacin sayisi, dogru dosya adiyla.
+        run: |
+          set -euo pipefail
+          cd budzero
+          cargo llvm-cov nextest --workspace --json --output-path ../coverage/budzero-cov.json
+      - name: Modül coverage raporu - budzero (rapor modu)
+        run: python3 ./ops/scripts/check_module_coverage.py coverage/budzero-cov.json
+      - name: Coverage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/   # cov.json + budzero-cov.json (modul tabanlari bu artifact'ten)
+          retention-days: 30
+
+  repo-lint:
+    # : actionlint + buf + genesis schema (tek birlesik statik kapi).
+    # Araclar surum+sha256 pinli. buf breaking, main'de buf.yaml bulundugunda
+    # Aktiflesir (baseline bu dalgayla kuruluyor - ilk kosuda SKIP dürüst marker).
+    # zizmor workflow güvenlik lint'i de bu job'da (kanaryalı, 0-bulgu politikası).
+    name: Repo Lint (actionlint + buf + genesis + zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: actionlint v1.7.12 kur (sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+      - name: actionlint kapisi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- actionlint
+      - name: zizmor kapisi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zizmor --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zizmor
+      # Gate scripts that no workflow invokes prove nothing but still get
+      # counted as gates. Four had accumulated that way before this check.
+      - name: kapi kablolamasi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- gates-are-wired --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- gates-are-wired
+      # Kapilar Rust'a tasiniyor. Bir kapi ana dala neyin girecegine karar
+      # verdigi icin guven sinirinin icinde, ve kabuk orasi icin kotu bir dil:
+      # yanlis yazilmis bir degisken hata degil bos dizgidir, yani bir kontrol
+      # hicbir seyi inceleyip OK diyebilir. Bu dalda iki kapi tam da yazilma
+      # sebebi olan kusuru kacirirken gecti. Rust surumu derlenmezse durur.
+      - name: Rust kapilari kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
+      - name: Rust kapilari
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
+      - name: Rust kapilari clippy (pedantic, allow yok)
+        run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets
+      - name: Rust kapilari rustfmt
+        run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
+      # A typographic dash in a workflow `name:` silently unlists the job from
+      # branch protection: it runs, it passes, and it stops counting. Three
+      # required checks were carrying one. A hand count already missed them
+      # once, so the count is now a gate.
+      - name: tipografik tire kapisi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
+      # Bir fuzz hedefi ancak uc dosya ayni fikirdeyse fuzz'lar: harness,
+      # fuzz/Cargo.toml'daki [[bin]], ve onu kosturan bir workflow. Uclusunden
+      # biri eksikse hedef listede gorunur ve hicbir sey yapmaz.
+      - name: fuzz hedefi kablolamasi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- fuzz-targets-are-wired --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- fuzz-targets-are-wired
+      # COL_REG_SAME gated register continuity while being a free column
+      # itself: no booleanity, no constraint on the 1-r_same side, and absent
+      # from the LogUp argument. Writing zero before a read deleted the rule
+      # that a read returns what was written, and register values are the
+      # inputs to every arithmetic constraint. The memory table has the same
+      # shape and was never vulnerable, because there 1-m_same gates "first
+      # read of a new address returns zero", so the lie costs something.
+      - name: kisit kapatan bayraklar pinli mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- gating-flags-are-pinned --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- gating-flags-are-pinned
+      # Every per opcode rule in the AIR runs under `builder.when(is_<op>)`.
+      # Booleanity and the exclusivity sum force exactly one selector per row
+      # but never say which one, so 29 of the 35 were free: an honest Assert
+      # row could set is_mul instead and have the multiplication identity
+      # (0 == x * 0, since rd and rs2 are zero there) stand in for the
+      # assertion that was supposed to run. This gate keeps the next selector
+      # from being added unbound.
+      - name: AIR selector-opcode baglanmasi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- air-selectors-are-opcode-bound --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- air-selectors-are-opcode-bound
+      # The memory argument decided whether a CPU row demands a memory entry
+      # with `(is_load + is_store) * rs1_idx`, and rs1_idx is a register
+      # number. `Store r0, r7, r2` asked the bus for seven copies of a row the
+      # memory table supplies once, so every correct program whose pointer was
+      # not in r1 had no valid proof, and the multiplier feeding the argument
+      # was a prover-supplied field element rather than a flag. Every test in
+      # the tree happened to use r1.
+      - name: LogUp carpanlari boolean mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- logup-multipliers-are-boolean --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- logup-multipliers-are-boolean
+      # The AIR packs the CPU, register and memory tables into one matrix and
+      # nothing keeps them the same length. A constraint reading a side table
+      # must fire on the last row, not on the last CPU row. The register image
+      # accumulator learned this the hard way: three register events per step
+      # made that table outrun the CPU table, the fold was still running when
+      # the CPU side halted, and four honest proofs stopped verifying. The
+      # memory image had the identical shape and survived only because no
+      # opcode currently emits two memory events in one step.
+      - name: tablolar arasi kontroller son satirda mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- cross-table-checks-use-last-row --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- cross-table-checks-use-last-row
+      # The Fiat-Shamir transcript carried the degrees, the commitments and the
+      # public values, but not the FRI parameters, and those decide what a
+      # proof is worth: measured, log_blowup 3 with 100 queries and 16 grinding
+      # bits is roughly 316 bits, while 1 query with log_blowup 1 and no
+      # grinding is one bit and produces a proof of the same shape. Least
+      # Authority found this exact class in Plonky3. Absorbing them is half the
+      # fix; the other half is that the absorbed numbers must be read out of
+      # the FriParameters value in force rather than written down a second
+      # time, because two sources of truth for one parameter set drift.
+      - name: FRI parametreleri transcript'te ve turetilmis mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived
+      # A transition constrains the difference between consecutive rows and
+      # never says where the sequence starts. COL_EVENT_DIGEST_0 had only a
+      # transition and a last-row comparison, so the whole accumulator could
+      # slide: write D on the first row, every relative step still holds, and
+      # the proof announces an event digest for events that were never
+      # emitted. storage_deal.rs packs its entire replay context into that
+      # field. Every other accumulator in the AIR already pinned its first
+      # row, which is exactly why the missing one was easy to miss.
+      - name: akumulatorlerin ilk satiri sabit mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- accumulators-pin-their-first-row --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- accumulators-pin-their-first-row
+      # Lt/Gt/Lte/Gte and And/Or/Xor answer from 64 bit columns, and the only
+      # thing tying those to the register value was booleanity plus
+      # sum(b_i * 2^i) == val. Goldilocks is 2^64 - 2^32 + 1, so every value
+      # below 2^32 - 1 has a second valid bit string: 5 and 5 + P both
+      # reconstitute to 5, and the second sets the top bit. The comparison
+      # reads the bits, so the prover picked the answer, and a contract
+      # checking balance >= amount through any of these had a check the prover
+      # decided.
+      - name: bit ayristirmasi kanonik mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bit-decompositions-are-canonical --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- bit-decompositions-are-canonical
+      # The VM halts Assert only on a zero condition; the AIR demanded exactly
+      # 1. Those agree on 0 and 1 and nowhere else, and every test fed it a
+      # comparison result, which is 0 or 1. BudL constrain(...) lowers to this
+      # opcode, so constrain(flags & MASK) was a contract the VM ran and no
+      # prover could prove. A field element has no order, so "non-zero" needs
+      # an inverse witness rather than a comparison against a constant.
+      - name: sifir testleri ters tanik kullaniyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-tests-use-an-inverse-witness --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- zero-tests-use-an-inverse-witness
+      # WalletBindingCapabilities reported uniffi_mobile: true and
+      # wasm_browser: true while the tree had no .udl file, no
+      # uniffi::export, and no #[wasm_bindgen] anywhere. Both binding modules
+      # held a single function returning that same struct. It is a capability
+      # descriptor, so something reads it to decide what it can call, and a
+      # flag that is true regardless of the work being done cannot be told
+      # apart from one that means the work is done.
+      - name: baglama iddiasi gercekle ortusuyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- binding-claims-match-reality --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- binding-claims-match-reality
+      # A module can compile, lint, pass its own tests and still never run.
+      # `storage/mobile_self.rs` holds the rule that critical B.U.D. content
+      # needs a paid replica rather than a phone that is only sometimes online.
+      # It is written, it is tested, and no production caller reaches it, so
+      # nothing enforces it. Green tests are the strongest evidence for the
+      # wrong conclusion here: they pass because the function is correct, not
+      # because anything invokes it. Fifteen other modules measured the same.
+      - name: yetenek modulleri bagli mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- capability-wiring --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- capability-wiring
+      # B.U.D. storage cost `epochs * fee_per_epoch`, with no byte count in it,
+      # so a 1 KiB and a 16 MiB shard cost the same for the same duration. The
+      # client picks the size, so this was ordinary use rather than an attack.
+      # The size was never missing: `open_deal` already looks the shard up in
+      # the manifest to check membership, so `ShardRef.size` was in hand where
+      # the price was computed and simply went unread.
+      - name: depolama boyuta gore mi fiyatlaniyor + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size
+      # Two entry points take a manifest an untrusted caller built.
+      # `RegisterStorageManifest` ran `validate_untrusted`; `open_deal` ran
+      # `verify_id` and stopped, and it is the path that also takes the payer's
+      # money. `verify_id` proves the id derives from the fields present, not
+      # that they agree: `manifest_id` covers k and n, so three data shards
+      # with no parity declared (k=1, n=3) hashes consistently and reports a
+      # loss tolerance of two on an object that survives nothing.
+      - name: guvenilmeyen manifest tam denetleniyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- untrusted-manifests-are-fully-validated --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- untrusted-manifests-are-fully-validated
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- evidence-provenance-is-checked --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- evidence-provenance-is-checked
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- every-opcode-has-a-forgery-test --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- every-opcode-has-a-forgery-test
+      # A self-derived id is a commitment to the fields it hashes and to
+      # nothing else. `AiInferenceRequest.effort` was added to the struct and
+      # to `calculate_id` in one change; had it landed in the struct alone,
+      # an operator could take a 5.0x request, rewrite the tier to 0.5x, keep
+      # the id it was handed, and claim the deep fee, with every test still
+      # green because the tests assert a round-trip and not that changing the
+      # tier changes the id.
+      - name: kendinden turetilen id her alani kapsiyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- self-derived-ids-cover-every-field --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- self-derived-ids-cover-every-field
+      # The id gate has a sibling hole. An id binds a field only to whoever
+      # re-derives it; the signature is what every node checks first, and
+      # `Transaction::signing_hash` builds its preimage by hand, so a field
+      # added to a struct, to the protobuf and to the conversions can miss the
+      # one place 700 lines away that commits it. Three had:
+      # `AiModelSpec.execution_weights_digest` and `.execution_dims`, which are
+      # what separate two models sharing an architecture, and
+      # `AiExecutionProof.public_inputs`, which is the claim the STARK is
+      # checked against. A relaying node could rewrite any of them and the
+      # signature still verified.
+      - name: telden gelen her alan imzalaniyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- wire-fields-are-signed --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- wire-fields-are-signed
+      # Four consensus digests appended a validator's key fields with nothing
+      # between them. Concatenation without lengths is not injective: a
+      # 96-byte BLS key plus a 48-byte PoP is byte-identical to a 144-byte BLS
+      # key plus an empty PoP. `Validator` crosses the wire inside a snapshot
+      # with all four fields `#[serde(default)]` and the restore copies them
+      # verbatim, so a peer could reproduce an honest state root while
+      # installing a validator with no PoP, which `is_consensus_ready` then
+      # drops from the active set. Same root, different validator set, no
+      # error naming the cause.
+      - name: hash girdileri uzunluk onekli mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- hash-inputs-length-prefixed --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- hash-inputs-length-prefixed
+      # `settle_agent_payment_immediate` removed the payment from the live map
+      # and then decided whether to accept it. One refusal put it back and the
+      # other did not, so a second settle reported failure and consumed the
+      # entry on its way out. Nothing rolls that back: `apply_block_checked`
+      # propagates with `?`. The same shape cost `reclaim_agent_payment` worse
+      # than that, since its success path then removed a second time and
+      # unwrapped a `None`, and it stranded a storage operator's only chance
+      # to answer a challenge before the deadline took its bond.
+      - name: reddetmeden once mutasyon var mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- refusals-do-not-mutate-first --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- refusals-do-not-mutate-first
+      # `node.rs` recovers from a poisoned PeerManager mutex in 76 places and
+      # in four it did not: the /24 eclipse bound, the outbound-diversity
+      # bound and both peer-count sites read `.lock()..unwrap_or(true)`, and
+      # `true` is the permissive answer. One panic anywhere near the peer
+      # table therefore switched the eclipse bound OFF, letting a single
+      # operator fill the table from one subnet and surround the node.
+      - name: kilit hatasi bir siniri acmasin + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- lock-failures-do-not-open-a-bound --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- lock-failures-do-not-open-a-bound
+      # `validate_transaction` required only `fee >= base_fee`, and `tx.amount`
+      # reached pricing nowhere: it appeared in the overflow guard and the
+      # balance check and nowhere else. Moving one base unit and moving a
+      # quadrillion cost the same. This is the transfer twin of the storage
+      # deal that charged the same for 1 KiB and 16 MiB.
+      - name: deger transferleri degere gore mi fiyatlaniyor + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- value-transfers-are-priced-by-value --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- value-transfers-are-priced-by-value
+      # `cargo test --workspace` says every test that ran passed; it says
+      # nothing about which tests exist. The forgery tests are the only
+      # evidence the AIR constrains anything, and one deleted in a refactor
+      # leaves the suite exactly as green. `rejects_a_jump_past_the_end_of_the
+      # _program` is the reason: nothing in the AIR bounds COL_PC, and what
+      # refuses an out-of-range jump is the Program CTL, in a constraint that
+      # never mentions jumps. SP1 shipped the neighbouring bug, Polygon zkEVM
+      # the severe one.
+      - name: forgery testleri isim-kilitli mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- forgery-tests-are-named --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- forgery-tests-are-named
+      # `src/storage/README.md` listed under maturity warnings that redundancy
+      # was replication and there was no parity shard concept. By then
+      # `ShardKind::Parity` existed, `ErasureScheme` was on the manifest and
+      # `erasure.rs` was a working Reed-Solomon coder with sixteen tests;
+      # BUD_STORAGE_ROADMAP.md recorded the same gap as closed. Two documents,
+      # one tree, opposite answers. A caveat list is only useful while every
+      # entry on it is true.
+      - name: readme kodun sahip oldugunu inkar etmiyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- readme-does-not-deny-shipped-code
+      # Two storage rules with the same failure mode: the data exists, the
+      # tests pass, and nothing on the operator's path reads it. An operator
+      # that misses a challenge sits out six hours, and a mobile operator may
+      # hold a second copy but never the first. `mobile_self.rs` already
+      # showed how this ends: it held the rule that critical content needs a
+      # paid replica, had tests, and was never called by anything.
+      - name: depolama cezalari uygulaniyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-penalties-are-enforced --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-penalties-are-enforced
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- content-encryption-bound --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- content-encryption-bound
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- shard-placement-is-sticky-and-staked --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- shard-placement-is-sticky-and-staked
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- coding-audit-samples-the-relationship --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- coding-audit-samples-the-relationship
+      # The storage challenge verifier named three public inputs the AIR does
+      # not produce for the program it names, so it rejected every proof
+      # including a correct one, and the caller reads a rejection as a wrong
+      # answer and takes the operator's bond. Every test was green because
+      # every one of them passed `test-mock-proof`, which the production path
+      # short-circuits. Designing how the Merkle path reaches the verifier is
+      # a consensus-visible decision; until it is made, the penalty must not
+      # fire on a rejection the chain cannot justify.
+      - name: kanitlanamayan yol ceza kesmesin + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- uncheckable-proof-paths-do-not-slash --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- uncheckable-proof-paths-do-not-slash
+      # B35: the fixed-point slash expression was written out at five call
+      # sites across two workspaces, and the narrowing was not spelled the same
+      # way in all of them. `as u64` truncated where the Kani mirror panicked,
+      # so a ratio one unit above the ceiling took a millionth of the bond
+      # instead of all of it.
+      - name: slash ifadesi tek evde mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- slash-expression-has-one-home --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- slash-expression-has-one-home
+      # A gate that names its required tests by hand is only as good as those
+      # names. Merging the hardening branches moved a `#[test]` attribute onto
+      # the wrong function and silently un-tested
+      # `total_bud_committed_counts_stake_and_unbonding`, which
+      # check-economy-invariants.sh lists as required.
+      - name: zorunlu testler gercekten test mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- required-tests-are-tests --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- required-tests-are-tests
+      # A HashMap folded into a root() hashes its entries in a per-process
+      # random order, so two honest nodes disagree. Thorchain halted on exactly
+      # this; determinism.yml compares digests across three OSes and cannot see
+      # a per-process seed, so this reads the source instead.
+      - name: konsensus map'leri sirali mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- consensus-maps-are-ordered --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- consensus-maps-are-ordered
+      # The Dockerfile said it had been moved to 1.94.0 and was still on
+      # 1.97.1 - tag *and* digest, verified against the registry. Codegen
+      # differs between releases, so the shipped container was outside the
+      # reproducibility claim determinism.yml makes. rust-toolchain.toml was
+      # not copied into the build context either, so nothing corrected it.
+      - name: docker toolchain pini + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- docker-toolchain-matches-pin --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- docker-toolchain-matches-pin
+      # The nextest step was named "(sha256 pinli)" and fetched the .sha256
+      # from the same release as the tarball. Whoever can replace one can
+      # replace the other, so it verified transit and not provenance.
+      - name: indirme pinleri gercekten pin mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pinned-downloads-are-really-pinned --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pinned-downloads-are-really-pinned
+      # Bir git bagimliliginin surum alani, o commit'te manifest ne diyorsa
+      # odur ve kod degisince kimildamaz. Pinli rust-libp2p agacinda ucu ucuna
+      # uc commit de `libp2p-gossipsub 0.50.0` der: 8541b83b'de backoff.rs'te
+      # checked_add yok (iki tasma yolu da acik), a7d59cbf ekleme tarafini,
+      # 5d47d9d5 heartbeat tarafini kapatir. Tek surum dizesi, uc ayri guvenlik
+      # durusu. 0.50.0 crates.io'ya hic yayimlanmadi, dolayisiyla hicbir
+      # advisory araligi da onu kapsamiyor. cargo-vet git bagimliligini
+      # "denetlenemez" sayar ve 23 paketin hicbirini saymaz; Cargo git kaynagi
+      # icin kilide checksum yazmaz. Kalan tek yontem: pinli revizyonda kaynagi
+      # okuyup ne okundugunu yazmak, ve pin kimildadiginda okumayi tekrar
+      # zorlamak.
+      - name: git bagimliliklari commit bazinda denetlendi mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit
+      # A test name is the claim a reader trusts when counting coverage.
+      # `pow_empty_block_rejected_by_validation` asserted is_some();
+      # `pos_double_producer_address_rejected` asserted both blocks succeed;
+      # the four qcblob_quorum tests never called import_qc_blob at all.
+      - name: reddi iddia eden testler reddi assert ediyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rejection-tests-assert-rejection --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rejection-tests-assert-rejection
+      # A .rs file no `mod` declares is never read by rustc: not linted, not
+      # covered, not tested -- while reading like live code in grep and in
+      # review. proto_bridge.rs sat there duplicating proto_conversions.rs,
+      # and bud-proof/src/memory_air.rs had drifted to an older p3-air API
+      # (row_slice vs current_slice) without anything noticing.
+      - name: yetim kaynak dosya var mi + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-orphan-source-files --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-orphan-source-files
+      # Containment-first: a gate that is off by default must stay off, and the
+      # path that reaches it must consult it. bud-vm hard-coded
+      # MainnetActivation::full() while ContractCall passed mainnet=false, so
+      # the staged-rollout flags were dead code and user bytecode never met
+      # them.
+      - name: containment varsayilanlari + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- containment-defaults --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- containment-defaults
+      - name: buf v1.71.0 kur (sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/buf \
+            https://github.com/bufbuild/buf/releases/download/v1.71.0/buf-Linux-x86_64
+          echo "d3de2838c68a5759ca276884254bc70df4e4ad185d6ed5f65f327b6ce6363eab  /tmp/buf" | sha256sum -c -
+          sudo install -m 0755 /tmp/buf /usr/local/bin/buf
+          buf --version
+      - name: buf build + lint
+        run: |
+          set -o pipefail
+          buf build
+          buf lint
+      - name: "buf breaking: baseline varsa aktif"
+        run: |
+          set -euo pipefail
+          # Main'de buf.yaml yoksa against-resolve "file deleted" yanilgisina duser;
+          # Baseline bu push'la kurulur → durust SKIP marker.
+          # Non-main branch'lerde 'branch=main' ref yok → Repo Lint kırmızı.
+          # Doğrusu 'origin/main' (GitHub docs: .git#branch=<remote>/<branch>).
+          if git cat-file -e origin/main:buf.yaml 2>/dev/null; then
+            buf breaking --against '.git#branch=origin/main'
+            echo "buf breaking: main'e karsi temiz."
+          else
+            echo "SKIP (durust marker): main'de buf.yaml henuz yok - baseline bu dalgayla kuruluyor."
+          fi
+      - name: genesis schema kapisi + kanarya
+        run: |
+          python3 ./ops/scripts/check_genesis_schema.py --self-test
+          python3 ./ops/scripts/check_genesis_schema.py config/mainnet-genesis.json

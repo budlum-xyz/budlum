@@ -1,0 +1,41 @@
+[network]
+profile = "testnet"
+chain_id = 42
+genesis_file = "./config/testnet-genesis.json"
+
+[node]
+role = "validator"
+
+[storage]
+data_dir = "./data/testnet/budlum.db"
+snapshot_dir = "./data/testnet/snapshots"
+backup_dir = "./data/testnet/backups"
+backups_enabled = true
+backup_interval_secs = 3600
+backup_retention_count = 24
+
+[p2p]
+identity_file = "./secrets/testnet-node-id.key"
+bootnodes = []
+dns_seeds = []
+max_peers = 75
+banned_peer_db = "./data/testnet/banned-peers.json"
+mdns_enabled = false
+
+[rpc]
+public_listener = "0.0.0.0:18545"
+operator_listener = "127.0.0.1:18546"
+trusted_proxies = []
+enabled = true
+
+[metrics]
+listener = "0.0.0.0:19090"
+
+[validator]
+key_file = "./secrets/testnet-validator.key"
+backend = "softhsm"
+
+[features]
+governance = false
+zkvm_contracts = false
+pruning = false

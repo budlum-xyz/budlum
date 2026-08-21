@@ -1,0 +1,94 @@
+{
+ "provenance": {
+  "source": "api.blockchair.com v2.0.95-ie; 2026-08-14 canli cekim",
+  "cross_checked": "BTC yukseklik mempool.space ile, ETH yukseklik blockcypher ile dogrulandi",
+  "role": "test/denetim fixture'lari; production runtime verisi DEGILDIR",
+  "note": "hex alanlar onsuz saklanir; sayisal alanlar ondalik. Guncelleme icin kaynak: blockchair (v3: 3xpl.com) + kendi dugumlerimiz"
+ },
+ "btc_merkle_blocks": [
+  {
+   "height": 0,
+   "merkle_root": "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b",
+   "txids": [
+    "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+   ]
+  },
+  {
+   "height": 170,
+   "merkle_root": "7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff",
+   "txids": [
+    "b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082",
+    "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
+   ]
+  },
+  {
+   "height": 586,
+   "merkle_root": "197b3d968ce463aa5da7d8eeba8af35eba80ded4e4fe6808e6cc0dd1c069594d",
+   "txids": [
+    "d45724bacd1480b0c94d363ebf59f844fb54e60cdfda0cd38ef67154e9d0bc43",
+    "4d6edbeb62735d45ff1565385a8b0045f066055c9425e21540ea7a8060f08bf2",
+    "6bf363548b08aa8761e278be802a2d84b8e40daefe8150f9af7dd7b65a0de49f"
+   ]
+  }
+ ],
+ "btc_halvings": [
+  {
+   "height": 210000,
+   "generation_sat": 2500000000
+  },
+  {
+   "height": 420000,
+   "generation_sat": 1250000000
+  },
+  {
+   "height": 630000,
+   "generation_sat": 625000000
+  },
+  {
+   "height": 840000,
+   "generation_sat": 312500000
+  }
+ ],
+ "eth_headers": [
+  {
+   "name": "mainnet_genesis_0",
+   "expected_hash": "d4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+   "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "ommers_hash": "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+   "beneficiary": "0000000000000000000000000000000000000000",
+   "state_root": "d7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
+   "transactions_root": "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+   "receipts_root": "56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+   "logs_bloom": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+   "difficulty": 17179869184,
+   "number": 0,
+   "gas_limit": 5000,
+   "gas_used": 0,
+   "timestamp": 0,
+   "extra_data": "11bbe8db4e347b4e8c937c1c8370e4b5ed33adb3db69cbdb7a38e1e50b1b82fa",
+   "mix_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "nonce": "0000000000000042",
+   "base_fee_per_gas": null
+  },
+  {
+   "name": "post_merge_first_15537394",
+   "expected_hash": "56a9bb0302da44b8c0b3df540781424684c3af04d0b7a38d72842b762076a664",
+   "parent_hash": "55b11b918355b1ef9c5db810302ebad0bf2544255b530cdce90674d5887bb286",
+   "ommers_hash": "1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+   "beneficiary": "eee27662c2b8eba3cd936a23f039f3189633e4c8",
+   "state_root": "40c07091e16263270f3579385090fea02dd5f061ba6750228fcc082ff762fda7",
+   "transactions_root": "1ea1746468686159ce730c1cc49a886721244e5d1fa9a06d6d4196b6f013c82c",
+   "receipts_root": "928073fb98ce316265ea35d95ab7e2e1206cecd85242eb841dbbcc4f568fca4b",
+   "logs_bloom": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   "difficulty": 0,
+   "number": 15537394,
+   "gas_limit": 30000000,
+   "gas_used": 29983006,
+   "timestamp": 1663224179,
+   "extra_data": "",
+   "mix_hash": "a86c2e601b6c44eb4848f7d23d9df3113fbcac42041c49cbed5000cb4f118777",
+   "nonce": "0000000000000000",
+   "base_fee_per_gas": 48811794595
+  }
+ ]
+}

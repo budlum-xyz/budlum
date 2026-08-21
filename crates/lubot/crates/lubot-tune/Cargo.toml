@@ -1,0 +1,11 @@
+[package]
+name = "lubot-tune"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Eğitim planı (LoRA BF16/FP16 - FP4 tip sisteminde yok) ve çıktı hash kilidi"
+
+[dependencies]
+lubot-core = { path = "../lubot-core" }
+lubot-data = { path = "../lubot-data" }

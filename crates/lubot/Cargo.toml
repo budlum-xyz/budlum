@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lubot-core",
+    "crates/lubot-data",
+    "crates/lubot-integrations",
+    "crates/lubot-knowledge",
+    "crates/lubot-serve",
+    "crates/lubot-tune",
+    "crates/lubot-ops",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+[profile.release]
+lto = true

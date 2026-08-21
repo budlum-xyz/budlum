@@ -1,0 +1,195 @@
+# ── Budlum Core Multi-Node Devnet ──────────────────────────
+# 4-node devnet with PoS consensus, metrics, and RPC
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f node1
+#
+# RPC authentication is ON here and the public RPC port is NOT published to the
+# host. Reach it from inside the network, or publish it yourself once you have
+# set BUDLUM_RPC_API_KEY.
+#
+# The CI smoke harness needs an unauthenticated listener; those settings are in
+# docker-compose.ci.yml and have to be asked for by name:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#
+# They are kept out of this file because this is the one the README points at,
+# and a default that is only safe while nobody copies it is not a default.
+
+version: "3.9"
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: budlum-core:devnet
+    container_name: budlum-node1
+    ports:
+      # 8545 (public RPC) is deliberately not published. docker-compose.ci.yml
+      # adds it for the smoke harness.
+      - "4001:4001"
+      - "9090:9090"
+    volumes:
+      - node1_data:/home/budlum/data
+      - node1_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+      # Authenticated by default. Set BUDLUM_RPC_API_KEY before exposing this
+      # listener anywhere; leaving auth off with an empty IP allow-list means
+      # an open JSON-RPC endpoint to whoever can route to the host.
+      - BUDLUM_RPC_AUTH_REQUIRED=1
+    command:
+      - "--network=devnet"
+      - "--port=4001"
+      - "--consensus=pow"
+      - "--difficulty=0"
+      - "--validator-address=0202020202020202020202020202020202020202020202020202020202020202"
+      - "--rpc-public-listener=0.0.0.0:8545"
+      - "--rpc-operator-listener=127.0.0.1:8546"
+      - "--metrics-port=9090"
+      # Güvenlik denetimi varsayılan metrics bind'ini loopback yaptı; devnet ağında
+      # prometheus (node1:9090) ve smoke /metrics ucunun erişebilmesi için
+      # bilinçli olarak tüm arayüzlere bağlanır. Üretim yapılandırması
+      # loopback varsayılanını kullanmaya devam eder (auth'suz metrik yüzeyi).
+      - "--metrics-listener=0.0.0.0:9090"
+      - "--db-path=/home/budlum/data/devnet-node1"
+      - "--snapshot-dir=/home/budlum/data/snapshots"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--banned-peer-db=/home/budlum/data/banned-peers.json"
+    # Devnet smoke flakiness fix (2026-07-20): node2/3/4 tek-atış
+    # `--dial` ile node1'e bağlanıyordu; depends_on yalnız container başlangıcını
+    # Beklediği için node1'in P2P listener'ı hazır olmadan dial ediliyordu →
+    # Mesh çoğu zaman kurulamadı → smoke [2/5] flaky-fail. Healthcheck artık
+    # Public RPC yerine container-içi operator RPC'yi kullanır: auth gerektirmez,
+    # Hosta publish edilmez ve node1'in gerçekten ayağa kalktığını daha doğru ölçer.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -sf --max-time 4 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"bud_netListening\",\"params\":[],\"id\":1}' http://127.0.0.1:8546 | grep -q '\"result\":true'"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - budlum-net
+    restart: unless-stopped
+
+  node2:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: budlum-core:devnet
+    container_name: budlum-node2
+    ports:
+      - "4002:4002"
+      - "127.0.0.1:18545:8545"
+    volumes:
+      - node2_data:/home/budlum/data
+      - node2_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4002"
+      - "--consensus=pow"
+      - "--difficulty=0"
+      - "--db-path=/home/budlum/data/devnet-node2"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--metrics-listener=0.0.0.0:9090"
+      - "--dial=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    restart: unless-stopped
+
+  node3:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: budlum-core:devnet
+    container_name: budlum-node3
+    ports:
+      - "4003:4003"
+    volumes:
+      - node3_data:/home/budlum/data
+      - node3_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4003"
+      - "--consensus=pow"
+      - "--difficulty=0"
+      - "--db-path=/home/budlum/data/devnet-node3"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--metrics-listener=0.0.0.0:9090"
+      - "--dial=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    restart: unless-stopped
+
+  node4:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: budlum-core:devnet
+    container_name: budlum-node4
+    ports:
+      - "4004:4004"
+    volumes:
+      - node4_data:/home/budlum/data
+      - node4_secrets:/home/budlum/secrets
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4004"
+      - "--consensus=pow"
+      - "--difficulty=0"
+      - "--db-path=/home/budlum/data/devnet-node4"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--metrics-listener=0.0.0.0:9090"
+      - "--dial=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      node1:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: budlum-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - budlum-net
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+
+volumes:
+  node1_data:
+  node1_secrets:
+  node2_data:
+  node2_secrets:
+  node3_data:
+  node3_secrets:
+  node4_data:
+  node4_secrets:
+  prometheus_data:
+
+networks:
+  budlum-net:
+    driver: bridge
