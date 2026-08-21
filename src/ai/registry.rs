@@ -10,6 +10,7 @@ use crate::ai::types::{
     AiVerifierStakeInfo, BoundedBytes,
 };
 use crate::core::address::Address;
+use crate::lubot::effort::{tier_is_servable, EffortTier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +29,13 @@ pub fn is_equivocation_error(error: &str) -> bool {
 /// Minimum verifier stake to participate in AI inference.
 /// Prevents Sybil attacks - verifiers must have economic skin-in-the-game.
 pub const MIN_VERIFIER_STAKE: u64 = 1_000;
+
+/// Tavan ilan etmemiş bir operatörün varsayılan çaba tavanı.
+///
+/// Baseline (`1.0x`). Varsayılanı `DEEPEST` yapmak, hiçbir şey ilan etmemiş
+/// bir makineyi `10.0x` isteğe uygun saymak olurdu -- kapının engellemek için
+/// var olduğu durumun tam kendisi.
+pub const DEFAULT_OPERATOR_CEILING: EffortTier = EffortTier::BASELINE;
 
 /// Callback events retained per address.
 ///
@@ -69,6 +77,18 @@ pub struct AiRegistry {
     /// This is separate from validator stake - AI verifiers have their own
     /// Economic commitment to the inference layer.
     pub verifier_stakes: BTreeMap<Address, u64>,
+
+    /// Operatörün ilan ettiği çaba tavanı: hizmet verebileceği en derin kademe.
+    ///
+    /// `src/lubot/effort.rs` iki kural tanımlar ve ikincisini -- "declared
+    /// capability gates eligibility" -- uygulanamaz olarak işaretler, çünkü
+    /// operatörün tavanını ilan edecek bir yer yoktu. Burası o yer.
+    ///
+    /// Kayıt yoksa operatör tavan ilan etmemiştir; `DEFAULT_OPERATOR_CEILING`
+    /// (baseline `1.0x`) varsayılır. Sessizce `10.0x` varsaymak, tavanı
+    /// olmayan bir makineyi en derin isteğe uygun saymak olurdu.
+    #[serde(default)]
+    pub verifier_effort_ceilings: BTreeMap<Address, EffortTier>,
     /// Callback event queue.
     /// When an outcome is finalized with a non-empty callback address,
     /// An event is queued here. Indexed by callback address for efficient
@@ -114,6 +134,7 @@ impl AiRegistry {
             equivocation_events: BTreeMap::new(),
             cancelled_requests: BTreeSet::new(),
             verifier_stakes: BTreeMap::new(),
+            verifier_effort_ceilings: BTreeMap::new(),
             callback_queue: BTreeMap::new(),
             execution_proofs: BTreeMap::new(),
             verifier_qos: BTreeMap::new(),
@@ -133,6 +154,7 @@ impl AiRegistry {
             && self.equivocation_events.is_empty()
             && self.cancelled_requests.is_empty()
             && self.verifier_stakes.is_empty()
+            && self.verifier_effort_ceilings.is_empty()
             && self.callback_queue.is_empty()
             && self.execution_proofs.is_empty()
             && self.verifier_qos.is_empty()
@@ -216,6 +238,13 @@ impl AiRegistry {
                 "Request deadline exceeded: current_block={current_block}, deadline_block={}",
                 request.deadline_block
             ));
+        }
+        // effort.rs Kural 2: hiçbir yetkili operatörün tavanına sığmayan bir
+        // istek fail-closed reddedilir. Alternatif -- kabul edip daha ucuz bir
+        // cevaba sessizce indirmek -- requester'ın imzaladığı kademeyi
+        // karşılamadan ücretini almak olurdu.
+        if let Some(reason) = self.unservable_reason(request.effort) {
+            return Err(format!("Request is unservable: {reason}"));
         }
         let id = request.request_id;
         self.requests.insert(id, request);
@@ -869,6 +898,9 @@ impl AiRegistry {
         // Slash verifier stake if present.
         // Return the staked amount that was seized.
         let seized_stake = self.verifier_stakes.remove(verifier).unwrap_or(0);
+        // Tavan stake'e bağlıdır: stake gidince ilan da gider, yoksa artık
+        // yetkili olmayan bir adresin tavanı state_root'ta asılı kalır.
+        self.verifier_effort_ceilings.remove(verifier);
 
         Ok((*verifier, seized_stake))
     }
@@ -886,6 +918,77 @@ impl AiRegistry {
         let new_stake = current.saturating_add(amount);
         self.verifier_stakes.insert(*verifier, new_stake);
         Ok(new_stake)
+    }
+
+    /// Operatörün çaba tavanını ilan et.
+    ///
+    /// Tavan, operatörün sahip olduğu makinenin gerçekten hizmet verebileceği
+    /// en derin kademedir. `effort.rs` Kural 2'nin ihtiyaç duyduğu ilan yeri
+    /// burasıdır.
+    ///
+    /// Yalnızca yetkili (stake eşiğini karşılayan) operatör ilan edebilir:
+    /// aksi halde stake'i olmayan bir adres tavan yazıp `unservable_reason`
+    /// çıktısını kirletebilirdi.
+    pub fn declare_effort_ceiling(
+        &mut self,
+        verifier: &Address,
+        ceiling: EffortTier,
+    ) -> Result<(), String> {
+        if !self.is_verifier_authorized(verifier) {
+            return Err(format!(
+                "Verifier {} is not authorized to declare an effort ceiling",
+                verifier.to_hex()
+            ));
+        }
+        self.verifier_effort_ceilings.insert(*verifier, ceiling);
+        Ok(())
+    }
+
+    /// Operatörün ilan ettiği tavan; ilan yoksa `DEFAULT_OPERATOR_CEILING`.
+    #[must_use]
+    pub fn effort_ceiling(&self, verifier: &Address) -> EffortTier {
+        self.verifier_effort_ceilings
+            .get(verifier)
+            .copied()
+            .unwrap_or(DEFAULT_OPERATOR_CEILING)
+    }
+
+    /// Şu an yetkili olan operatörlerin ilan ettiği tavanlar.
+    fn authorized_ceilings(&self) -> Vec<EffortTier> {
+        self.verifier_stakes
+            .keys()
+            .filter(|v| self.is_verifier_authorized(v))
+            .map(|v| self.effort_ceiling(v))
+            .collect()
+    }
+
+    /// İstek hiçbir yetkili operatörün tavanına sığmıyorsa sebebini döndür.
+    ///
+    /// `effort.rs` Kural 2: "a request above every declared ceiling must fail
+    /// closed rather than be silently downgraded to a cheaper answer."
+    /// `None` = servis edilebilir.
+    #[must_use]
+    pub fn unservable_reason(&self, tier: EffortTier) -> Option<String> {
+        let ceilings = self.authorized_ceilings();
+        // Hiç yetkili operatör yoksa bu bir admission sorunu değil, canlılık
+        // sorunudur: istek finalize olmaz, ama reddetmek de doğru değil --
+        // operatörler istekten sonra da katılabilir. Kural 2'nin koruduğu
+        // durum, operatörlerin VAR olup hiçbirinin yetişememesidir.
+        if ceilings.is_empty() {
+            return None;
+        }
+        if tier_is_servable(tier, ceilings.iter().copied()) {
+            return None;
+        }
+        let best = ceilings
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(DEFAULT_OPERATOR_CEILING);
+        Some(format!(
+            "effort tier {} exceeds every declared operator ceiling (deepest {})",
+            tier, best
+        ))
     }
 
     /// Withdraw verifier stake (only if no pending equivocation).
@@ -922,6 +1025,7 @@ impl AiRegistry {
         let remaining = current.saturating_sub(amount);
         if remaining == 0 {
             self.verifier_stakes.remove(verifier);
+            self.verifier_effort_ceilings.remove(verifier);
         } else {
             self.verifier_stakes.insert(*verifier, remaining);
         }
@@ -1660,6 +1764,17 @@ impl AiRegistry {
         for (verifier, stake) in &self.verifier_stakes {
             hasher.update(verifier.as_bytes());
             hasher.update(stake.to_le_bytes());
+        }
+
+        // Domain: verifier_effort_ceilings
+        //
+        // Tavan zincir durumudur: `submit_request` admission kararını buna
+        // göre veriyor, dolayısıyla state_root'a girmezse iki düğüm aynı
+        // isteği farklı sonuçlandırır.
+        hasher.update(b"BDLM_AI_VERIFIER_CEILINGS");
+        for (verifier, ceiling) in &self.verifier_effort_ceilings {
+            hasher.update(verifier.as_bytes());
+            hasher.update(ceiling.as_bytes());
         }
 
         // Domain: callback_queue
