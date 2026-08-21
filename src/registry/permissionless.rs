@@ -74,7 +74,7 @@ pub enum SlashingCondition {
 /// It is not a panic because the call site computes a state root that every
 /// node computes alike: aborting would drop the whole validator set at once
 /// rather than a single node.
-const REGISTRY_SERIALIZE_FAILED: &[u8] = b"BDLM_PERMISSIONLESS_REGISTRY_SERIALIZE_FAILED";
+const REGISTRY_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/permissionless-registry";
 
 impl SlashingCondition {
     pub fn as_bytes(&self) -> &'static [u8] {
