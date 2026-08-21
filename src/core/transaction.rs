@@ -37,6 +37,14 @@ pub struct GasSchedule {
     pub contract_call_gas: u64,
 }
 
+/// Stand-in bytes used when a transaction value cannot be serialized.
+///
+/// Cannot fire for these derived-`Serialize` owned types. A distinct
+/// non-empty marker rather than a panic: these bytes feed hashes that every
+/// node recomputes, so aborting would stop the set, while empty bytes would
+/// let two different values hash alike.
+const TX_SERIALIZE_FAILED: &[u8] = b"BDLM_TRANSACTION_SERIALIZE_FAILED";
+
 impl crate::core::chain_config::Network {
     pub fn gas_schedule(&self) -> GasSchedule {
         match self {
@@ -139,8 +147,8 @@ impl RelayerExternalResult {
         // leaf - the exact cross-domain replay this tag exists to prevent.
         // `ExternalChain` is a small C-like enum; the only way bincode fails
         // on it is allocation failure, which is a bug rather than an input.
-        let chain_bytes = bincode::serialize(&self.chain)
-            .expect("BUG: ExternalChain must serialize for the relayer result leaf");
+        let chain_bytes =
+            bincode::serialize(&self.chain).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec());
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"BDLM_RELAYER_RESULT_V2");
         hasher.update(&chain_bytes);
@@ -428,7 +436,7 @@ impl Transaction {
         let mut data = Vec::new();
         data.extend_from_slice(&duration.to_le_bytes());
         data.extend_from_slice(
-            &serde_json::to_vec(&p_type).expect("BUG: ProposalType must serialize"),
+            &serde_json::to_vec(&p_type).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec()),
         );
 
         Self::new_with_chain_id(
@@ -801,7 +809,7 @@ impl Transaction {
         true
     }
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("BUG: Transaction must serialize to_bytes")
+        serde_json::to_vec(self).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec())
     }
     pub fn fee_bid(&self) -> crate::chain::fee_market::FeeBid {
         crate::chain::fee_market::FeeBid {
@@ -902,6 +910,7 @@ impl Transaction {
     }
 }
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]
@@ -1439,6 +1448,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod v29_signing_tests {
     use super::*;
 

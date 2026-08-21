@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod zkvm_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;

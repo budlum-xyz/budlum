@@ -95,7 +95,13 @@ async fn main() {
                 }
                 "--chain-id" | "-c" => {
                     if i + 1 < args.len() {
-                        chain_id = args[i + 1].parse().expect("Invalid chain-id");
+                        chain_id = match args[i + 1].parse() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                eprintln!("Invalid --chain-id: {}", args[i + 1]);
+                                std::process::exit(1);
+                            }
+                        };
                         i += 2;
                     } else {
                         eprintln!("Error: Missing value for --chain-id");
@@ -125,10 +131,23 @@ async fn main() {
                         for item in allocs_str.split(',') {
                             let parts: Vec<&str> = item.split(':').collect();
                             if parts.len() == 2 {
-                                let addr = Address::from_hex(parts[0].trim())
-                                    .expect("Invalid allocation address");
-                                let amount: u64 =
-                                    parts[1].trim().parse().expect("Invalid allocation amount");
+                                let addr = match Address::from_hex(parts[0].trim()) {
+                                    Ok(a) => a,
+                                    Err(_) => {
+                                        eprintln!(
+                                            "Invalid allocation address: {}",
+                                            parts[0].trim()
+                                        );
+                                        std::process::exit(1);
+                                    }
+                                };
+                                let amount: u64 = match parts[1].trim().parse() {
+                                    Ok(v) => v,
+                                    Err(_) => {
+                                        eprintln!("Invalid allocation amount: {}", parts[1].trim());
+                                        std::process::exit(1);
+                                    }
+                                };
                                 allocations.push((addr, amount));
                             } else {
                                 eprintln!("Error: Invalid allocation format '{item}' (expected address:amount)");
@@ -143,7 +162,13 @@ async fn main() {
                 }
                 "--block-reward" => {
                     if i + 1 < args.len() {
-                        block_reward = args[i + 1].parse().expect("Invalid block-reward");
+                        block_reward = match args[i + 1].parse() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                eprintln!("Invalid --block-reward: {}", args[i + 1]);
+                                std::process::exit(1);
+                            }
+                        };
                         i += 2;
                     } else {
                         eprintln!("Error: Missing value for --block-reward");
@@ -152,7 +177,13 @@ async fn main() {
                 }
                 "--base-fee" => {
                     if i + 1 < args.len() {
-                        base_fee = args[i + 1].parse().expect("Invalid base-fee");
+                        base_fee = match args[i + 1].parse() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                eprintln!("Invalid --base-fee: {}", args[i + 1]);
+                                std::process::exit(1);
+                            }
+                        };
                         i += 2;
                     } else {
                         eprintln!("Error: Missing value for --base-fee");
@@ -193,11 +224,18 @@ async fn main() {
                 );
                 std::process::exit(1);
             });
-            let dev_key = KeyPair::generate().unwrap();
+            let dev_key = match KeyPair::generate() {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("Error: dev key generation failed: {e}");
+                    std::process::exit(1);
+                }
+            };
             let dev_addr = Address::from(dev_key.public_key_bytes());
-            dev_key
-                .save(&key_output)
-                .expect("Failed to save generated dev key");
+            if let Err(e) = dev_key.save(&key_output) {
+                eprintln!("Error: could not save generated dev key: {e}");
+                std::process::exit(1);
+            }
             allocations.push((dev_addr, 1_000_000_000));
             validators.push(dev_addr);
             println!("No allocations/validators provided. Generated default devnet keypair:");
@@ -243,9 +281,17 @@ async fn main() {
             bootstrap_domains: network_defaults.bootstrap_domains.clone(),
         };
 
-        let data = serde_json::to_string_pretty(&genesis_config)
-            .expect("Failed to serialize genesis config");
-        std::fs::write(&output_path, data).expect("Failed to write genesis file");
+        let data = match serde_json::to_string_pretty(&genesis_config) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Error: could not serialize genesis config: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = std::fs::write(&output_path, data) {
+            eprintln!("Error: could not write genesis file {output_path}: {e}");
+            std::process::exit(1);
+        }
         println!("Genesis configuration file built and saved to: {output_path}");
         return;
     }
@@ -300,7 +346,13 @@ async fn main() {
             );
             std::process::exit(1);
         }
-        let keypair = KeyPair::generate().expect("keypair generation failed");
+        let keypair = match KeyPair::generate() {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("Error: keypair generation failed: {e}");
+                std::process::exit(1);
+            }
+        };
         keypair.save(&output).unwrap_or_else(|e| {
             eprintln!("Error: cannot write secret key to {output}: {e:?}");
             std::process::exit(1);
@@ -328,7 +380,10 @@ async fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!("Error: could not install the tracing subscriber: {e}");
+        std::process::exit(1);
+    }
 
     if let Some(ref backup_path) = config.restore_backup {
         Storage::restore_snapshot(backup_path, &config.db_path).unwrap_or_else(|error| {
@@ -394,7 +449,10 @@ async fn main() {
     if let Some(ref path) = config.gen_key {
         match budlum_core::crypto::primitives::ValidatorKeys::generate() {
             Ok(keys) => {
-                keys.save(path).expect("Failed to save key");
+                if let Err(e) = keys.save(path) {
+                    eprintln!("Error: could not save validator key to {path}: {e}");
+                    std::process::exit(1);
+                }
                 println!("Validator key generated and saved to: {path}");
                 println!(
                     "Address: {}",
@@ -407,7 +465,16 @@ async fn main() {
     }
 
     if config.check_db {
-        let storage = Storage::new(&config.db_path).expect("Failed to open DB");
+        let storage = match Storage::new(&config.db_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "Error: could not open the database at {}: {e}",
+                    config.db_path
+                );
+                std::process::exit(1);
+            }
+        };
         println!("Starting Database Integrity Audit on: {}", config.db_path);
         match storage.check_integrity() {
             Ok(errors) => {
@@ -438,7 +505,16 @@ async fn main() {
     }
 
     if config.repair_db {
-        let storage = Storage::new(&config.db_path).expect("Failed to open DB");
+        let storage = match Storage::new(&config.db_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "Error: could not open the database at {}: {e}",
+                    config.db_path
+                );
+                std::process::exit(1);
+            }
+        };
         println!("Starting manual Database Repair on: {}", config.db_path);
         if let Err(e) = storage.repair_index() {
             eprintln!("Repair failed: {e}");
@@ -764,7 +840,19 @@ async fn main() {
         )
     });
 
-    let metrics = Arc::new(budlum_core::core::metrics::Metrics::new());
+    // `Metrics::new` can only fail on a metric name we wrote wrong, which is a
+    // build-time mistake rather than anything a peer can trigger. It used to
+    // panic inside the constructor; the release profile aborts on panic, so
+    // that turned a naming typo into a dead validator. Startup exits with a
+    // readable message instead, matching how the other fatal startup errors
+    // in this function are reported.
+    let metrics = match budlum_core::core::metrics::Metrics::new() {
+        Ok(m) => Arc::new(m),
+        Err(e) => {
+            eprintln!("CRITICAL: metrics registry could not be built: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Sharding is a consensus parameter (Whitepaper v1.3): the shards
     // commitment is part of block validity. Sourcing it from per-node CLI
@@ -1029,7 +1117,10 @@ async fn main() {
         storage_node,
         sharding_config,
     )
-    .unwrap()
+    .unwrap_or_else(|e| {
+        eprintln!("Error: could not build the P2P node: {e}");
+        std::process::exit(1);
+    })
     .with_identity(config.p2p_identity_file.clone())
     .with_dns_seeds(config.dns_seeds.clone(), network.default_port())
     .with_banned_peer_db(config.banned_peer_db.clone())
@@ -1062,9 +1153,15 @@ async fn main() {
         }
     }
 
-    node.listen(port).unwrap();
+    if let Err(e) = node.listen(port) {
+        eprintln!("Error: could not listen on port {port}: {e}");
+        std::process::exit(1);
+    }
     if let Some(ref addr) = config.dial {
-        node.dial(addr).expect("Failed to dial");
+        if let Err(e) = node.dial(addr) {
+            eprintln!("Error: could not dial {addr}: {e}");
+            std::process::exit(1);
+        }
     }
     let client = node.get_client();
     let peer_id = node.peer_id.to_string();
@@ -1432,8 +1529,9 @@ async fn main() {
                     let cmd = line.trim();
                     match cmd {
                         "tx" => {
-                            let alice = Address::from_hex(&"01".repeat(32)).unwrap();
-                            let bob = Address::from_hex(&"02".repeat(32)).unwrap();
+                            // Fixed literals for the interactive devnet `tx` command.
+                            let alice = Address::from([0x01u8; 32]);
+                            let bob = Address::from([0x02u8; 32]);
                             let tx = Transaction::new(
                                 alice,
                                 bob,

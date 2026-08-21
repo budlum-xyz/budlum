@@ -308,8 +308,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenRegisterDataAsset as i32,
                 Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(
                     pb::ProtoPollenDataAsset {
-                        data: bincode::serialize(asset)
-                            .expect("BUG: DataAsset proto payload must serialize"),
+                        data: bincode::serialize(asset).unwrap_or_default(),
                     },
                 )),
             ),
@@ -317,8 +316,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenAuthorizeSale as i32,
                 Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(
                     pb::ProtoPollenSaleAuthorization {
-                        data: bincode::serialize(authorization)
-                            .expect("BUG: SaleAuthorization proto payload must serialize"),
+                        data: bincode::serialize(authorization).unwrap_or_default(),
                     },
                 )),
             ),
@@ -326,8 +324,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenGrantAccess as i32,
                 Some(pb::proto_transaction::TypePayload::PollenGrantAccess(
                     pb::ProtoPollenAccessGrant {
-                        data: bincode::serialize(grant)
-                            .expect("BUG: AccessGrant proto payload must serialize"),
+                        data: bincode::serialize(grant).unwrap_or_default(),
                     },
                 )),
             ),
@@ -1983,6 +1980,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::crypto::primitives::KeyPair;

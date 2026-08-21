@@ -1409,7 +1409,10 @@ impl AiRegistry {
             }
         }
         // Remove live entry and archive settlement (audit trail).
-        let payment = self.agent_payments.remove(payment_id).unwrap();
+        let payment = self
+            .agent_payments
+            .remove(payment_id)
+            .ok_or_else(|| String::from("Agent payment: entry vanished before release"))?;
         let to = payment.to_agent;
         self.archive_settled_payment(payment, current_block, AiPaymentEscrowStatus::Released);
         Ok(to)
@@ -1623,8 +1626,7 @@ impl AiRegistry {
     pub fn get_or_create_reputation(&mut self, agent: Address) -> &mut AiAgentReputation {
         self.agent_reputations
             .entry(agent)
-            .or_insert_with(|| AiAgentReputation::new(agent));
-        self.agent_reputations.get_mut(&agent).unwrap()
+            .or_insert_with(|| AiAgentReputation::new(agent))
     }
 
     /// Record a completed payment for an agent (as payer).

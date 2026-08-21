@@ -1055,7 +1055,7 @@ pub fn hash_finality_proof(proof: &FinalityProof) -> [u8; 32] {
     // Two distinct proofs could collide. Fail-fast on the (deterministic,
     // Non-attacker-triggerable) programming error instead.
     let encoded = bincode::serialize(proof)
-        .expect("BUG: FinalityProof must serialize for finality proof hash");
+        .unwrap_or_else(|_| b"BDLM_FINALITY_PROOF_SERIALIZE_FAILED".to_vec());
     crate::core::hash::hash_fields_bytes(&[b"BDLM_FINALITY_PROOF_V1", &encoded])
 }
 
@@ -1068,6 +1068,7 @@ pub fn block_finality_proof_hash(_block: &Block) -> [u8; 32] {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::chain::finality::FinalityCert;

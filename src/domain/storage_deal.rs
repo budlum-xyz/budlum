@@ -130,6 +130,16 @@ pub enum OperatorClass {
     Mobile,
 }
 
+/// Stand-in bytes hashed when a registry entry cannot be serialized.
+///
+/// These types are plain owned data with derived `Serialize`, so `bincode`
+/// has no failing case here; the previous `expect` guarded a condition that
+/// cannot arise. It still must not be a panic: this runs while computing a
+/// state root, and every node computes the same root, so aborting on it would
+/// take down the whole validator set at once rather than a single node.
+/// Hashing a fixed marker keeps the root deterministic across nodes.
+const SERIALIZE_FAILED: &[u8] = b"BDLM_STORAGE_REGISTRY_SERIALIZE_FAILED";
+
 impl OperatorClass {
     /// Whether this class may hold `replica_index = 0`.
     ///
@@ -917,10 +927,7 @@ impl StorageRegistry {
             }]);
         }
         for deal in self.deals.values() {
-            hasher.update(
-                bincode::serialize(deal)
-                    .expect("StorageDeal must serialize for storage registry root"),
-            );
+            hasher.update(bincode::serialize(deal).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
         }
         for ((manifest_id, shard_id), deal_ids) in &self.deals_by_shard {
             hasher.update(manifest_id.0);
@@ -931,27 +938,18 @@ impl StorageRegistry {
         }
         for challenge in self.challenges.values() {
             hasher.update(
-                bincode::serialize(challenge)
-                    .expect("RetrievalChallenge must serialize for storage registry root"),
+                bincode::serialize(challenge).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()),
             );
         }
         for result in self.results.values() {
-            hasher.update(
-                bincode::serialize(result)
-                    .expect("ChallengeResult must serialize for storage registry root"),
-            );
+            hasher.update(bincode::serialize(result).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
         }
         for ticket in self.reallocations.values() {
-            hasher.update(
-                bincode::serialize(ticket)
-                    .expect("StorageReallocationTicket must serialize for storage registry root"),
-            );
+            hasher.update(bincode::serialize(ticket).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
         }
         for manifest in self.manifests.values() {
-            hasher.update(
-                bincode::serialize(manifest)
-                    .expect("ContentManifest must serialize for storage registry root"),
-            );
+            hasher
+                .update(bincode::serialize(manifest).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
         }
         hasher.finalize().into()
     }
@@ -1423,19 +1421,16 @@ impl StorageRegistry {
             &manifest.erasure.k.to_le_bytes(),
             &manifest.erasure.n.to_le_bytes(),
         ]);
-        let parity_index = u32::try_from(
-            u64::from_le_bytes(
-                digest[..8]
-                    .try_into()
-                    .expect("32-byte digest has an 8-byte prefix"),
-            ) % u64::from(parity_count),
-        )
-        .expect("a value reduced modulo a u32 fits in u32");
-        let column = u64::from_le_bytes(
-            digest[8..16]
-                .try_into()
-                .expect("32-byte digest has a second 8-byte word"),
-        ) % columns;
+        // `digest` is a 32-byte array, so both windows are in range and the
+        // modulo keeps the result inside `u32`. Written as fixed-size array
+        // reads rather than fallible slice conversions so there is no panic
+        // left to reason about.
+        let mut lo = [0u8; 8];
+        lo.copy_from_slice(&digest[..8]);
+        let mut hi = [0u8; 8];
+        hi.copy_from_slice(&digest[8..16]);
+        let parity_index = (u64::from_le_bytes(lo) % u64::from(parity_count)) as u32;
+        let column = u64::from_le_bytes(hi) % columns;
         Ok(CodingAudit {
             manifest_id: manifest.manifest_id,
             parity_index,
@@ -1541,11 +1536,9 @@ impl StorageRegistry {
             &input.requested_len.to_le_bytes(),
             &input.challenge_id.to_le_bytes(),
         ]);
-        let offset = u64::from_le_bytes(
-            digest[..8]
-                .try_into()
-                .expect("32-byte challenge digest has an 8-byte prefix"),
-        ) % range_count;
+        let mut lo = [0u8; 8];
+        lo.copy_from_slice(&digest[..8]);
+        let offset = u64::from_le_bytes(lo) % range_count;
         Ok((offset, offset + range_len))
     }
 
@@ -2612,6 +2605,7 @@ pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::address::Address;

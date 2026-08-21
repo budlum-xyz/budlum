@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod integration_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::chain::finality::{
@@ -1657,7 +1658,7 @@ mod integration_tests {
         use std::sync::Arc;
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let metrics = Arc::new(Metrics::new());
+        let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
         let bc =
             Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
@@ -1674,7 +1675,7 @@ mod integration_tests {
         use std::sync::Arc;
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let metrics = Arc::new(Metrics::new());
+        let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
         let bc =
             Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
@@ -1693,7 +1694,7 @@ mod integration_tests {
         use std::sync::Arc;
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let metrics = Arc::new(Metrics::new());
+        let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
         let bc =
             Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
@@ -1710,7 +1711,7 @@ mod integration_tests {
         use std::sync::Arc;
 
         let consensus = Arc::new(PoWEngine::new(0));
-        let metrics = Arc::new(Metrics::new());
+        let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
         let bc =
             Blockchain::new(consensus.clone(), None, 45262, None).with_metrics(metrics.clone());
 
@@ -1726,7 +1727,7 @@ mod integration_tests {
     fn test_metrics_default_encodes_help_text() {
         use crate::core::metrics::Metrics;
 
-        let metrics = Metrics::new();
+        let metrics = Metrics::new().expect("metric names are literals");
         metrics.chain_height.set(42);
         let encoded = metrics.encode();
 

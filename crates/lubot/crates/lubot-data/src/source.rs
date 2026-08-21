@@ -13,7 +13,10 @@ pub enum DataError {
     /// Kapalı-devre dışı kaynak türü (bilinmeyen bayt değeri).
     NotClosedLoop { found: u8 },
     /// Kaynak kapalı-devre ama beklenen tür değil.
-    UnexpectedSource { expected: SourceKind, got: SourceKind },
+    UnexpectedSource {
+        expected: SourceKind,
+        got: SourceKind,
+    },
     /// SHA-256 doğrulaması başarısız - veri akmaz.
     HashMismatch { detail: String },
 }
@@ -75,8 +78,14 @@ mod tests {
     #[test]
     fn unknown_raw_source_is_rejected() {
         assert_eq!(reject_unknown_source(0), Ok(SourceKind::PollenGrant));
-        assert_eq!(reject_unknown_source(3), Err(DataError::NotClosedLoop { found: 3 }));
-        assert_eq!(reject_unknown_source(255), Err(DataError::NotClosedLoop { found: 255 }));
+        assert_eq!(
+            reject_unknown_source(3),
+            Err(DataError::NotClosedLoop { found: 3 })
+        );
+        assert_eq!(
+            reject_unknown_source(255),
+            Err(DataError::NotClosedLoop { found: 255 })
+        );
     }
 
     #[test]

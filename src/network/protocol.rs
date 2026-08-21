@@ -248,6 +248,7 @@ pub fn is_canonical_hash(hash: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

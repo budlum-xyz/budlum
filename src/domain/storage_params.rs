@@ -113,6 +113,7 @@ pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

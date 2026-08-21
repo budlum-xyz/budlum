@@ -18,7 +18,7 @@
 //! (`stark_verification_helpers_have_no_production_callers`) bir çağrı
 //! eklenirse testi kırar. Güncel tablo: `docs/AI_VERIFICATION_STATUS.md`.
 //!
-//! **İki yol birbirinin yerine geçmez** — bağlamadan önce bilinmesi gerekenler:
+//! **İki yol birbirinin yerine geçmez**; bağlamadan önce bilinmesi gerekenler:
 //!
 //! - **Serileştirme farkı:** burada `ProofEnvelope` `bincode` ile açılır,
 //!   üretim yolu `postcard` kullanır. Aynı bayt dizisi ikisinde birden
@@ -89,6 +89,7 @@ pub fn generate_and_verify_proof(vm: &mut Vm, program: &[u64]) -> Result<ProofEn
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use bud_proof::ExecutionPublicInputs;

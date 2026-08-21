@@ -68,6 +68,14 @@ pub enum SlashingCondition {
     MaliciousBehaviour,
 }
 
+/// Stand-in bytes hashed when a registry entry cannot be serialized.
+///
+/// Derived `Serialize` on owned data has no failing case, so this never fires.
+/// It is not a panic because the call site computes a state root that every
+/// node computes alike: aborting would drop the whole validator set at once
+/// rather than a single node.
+const REGISTRY_SERIALIZE_FAILED: &[u8] = b"BDLM_PERMISSIONLESS_REGISTRY_SERIALIZE_FAILED";
+
 impl SlashingCondition {
     pub fn as_bytes(&self) -> &'static [u8] {
         match self {
@@ -532,10 +540,13 @@ impl PermissionlessRegistry {
             }
             _ => return Err(RegistryError::NotActive { account, role }),
         }
+        // The `match` above already read this entry, so the key is present.
+        // Returning an error instead of panicking keeps a future edit to that
+        // match from turning a missing key into a downed node.
         let reg = self
             .registrations
             .remove(&(role, account))
-            .expect("checked");
+            .ok_or(RegistryError::NotActive { account, role })?;
         Ok(reg.stake)
     }
 
@@ -861,19 +872,17 @@ impl PermissionlessRegistry {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_PERMISSIONLESS_REGISTRY_V1");
         hasher.update(
-            bincode::serialize(&self.params)
-                .expect("RegistryParams must serialize for registry root"),
+            bincode::serialize(&self.params).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
         );
         for registration in self.registrations.values() {
             hasher.update(
                 bincode::serialize(registration)
-                    .expect("Registration must serialize for registry root"),
+                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
         for record in &self.slashing_history {
             hasher.update(
-                bincode::serialize(record)
-                    .expect("SlashingRecord must serialize for registry root"),
+                bincode::serialize(record).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
         hasher.finalize().into()
@@ -885,6 +894,7 @@ impl PermissionlessRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::chain_config::FIXED_POINT_SCALE;

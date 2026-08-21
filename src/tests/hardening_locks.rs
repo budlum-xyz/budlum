@@ -2,6 +2,7 @@
 //! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::ai::types::{AiAgentPayment, AiPaymentEscrowStatus, AiRequestId};
     use crate::ai::AiRegistry;

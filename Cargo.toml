@@ -224,6 +224,17 @@ non_ascii_idents = "deny"
 unused_qualifications = "allow"
 deprecated_in_future = "allow"
 
+# Panic kapisi. `unwrap`/`expect` uretim kodunda dugumu indirir: release
+# profili `panic = "abort"` kullaniyor, yani agdan gelen tek bozuk mesaj
+# butun dugumu durdurabilir. Olcum: 150 ihlal vardi, hepsi duzeltildi
+# (metrics 70, main 19, finality 7, storage_deal 9, render 7, ...), sonra
+# kapi acildi. Testler muaf: orada panik dogru davranistir, ve bu lintler
+# `--all-targets` altinda test hedeflerine de deger, bu yuzden test
+# modullerinde ve `tests/` altinda `allow` ile geri aciliyor.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 [profile.release]
 # Release hardening (arastirma #196): panic=abort + overflow-checks + LTO +
 # codegen-units=1 + strip. Panic=abort unwind'i yasaklar (savunmasizlik

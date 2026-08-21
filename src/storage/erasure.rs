@@ -88,9 +88,8 @@ fn tables() -> &'static GfTables {
         // Repeat the multiplicative cycle so `exp[log_a + log_b]` needs no
         // modulo: both logs are at most 254, so the largest index reached is
         // 508, and every index from 255 up mirrors one 255 earlier.
-        let cycle: [u8; 255] = exp[..255]
-            .try_into()
-            .expect("the first 255 entries were just written");
+        let mut cycle = [0u8; 255];
+        cycle.copy_from_slice(&exp[..255]);
         for (dst, src) in exp[255..].iter_mut().zip(cycle.iter().cycle()) {
             *dst = *src;
         }
@@ -708,6 +707,7 @@ pub fn reconstruct_object(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -173,6 +173,7 @@ pub fn tier_is_servable<I: IntoIterator<Item = EffortTier>>(tier: EffortTier, ce
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

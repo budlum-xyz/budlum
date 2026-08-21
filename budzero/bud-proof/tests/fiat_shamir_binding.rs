@@ -238,13 +238,13 @@ fn verifier_never_unwraps_attacker_supplied_values() {
     );
 }
 
-/// The shape-validated optionals must be re-checked where they are read.
+/// The shape-validated optionals must carry a local check where they are read.
 ///
 /// Pins the fix rather than the absence of a symbol: each of these fields is
 /// unwrapped from an `Option` whose `Some`-ness was established elsewhere, and
 /// the point of the change is that the rejection is now local.
 #[test]
-fn optional_openings_are_rejected_locally_not_assumed() {
+fn optional_openings_carry_a_local_shape_check() {
     for field in [
         "aux_trace_local",
         "aux_trace_next",

@@ -128,6 +128,7 @@ pub fn update_consensus_keys_sha2(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     // One `Digest` import covers both hashers. `sha2` 0.11 and `sha3` 0.12

@@ -608,7 +608,7 @@ impl Node {
                 let mut kad_config =
                     KademliaConfig::new(libp2p::StreamProtocol::new("/budlum/kad/1.0.0"));
                 if mobile_mode {
-                    kad_config.set_parallelism(std::num::NonZeroUsize::new(1).unwrap());
+                    kad_config.set_parallelism(std::num::NonZeroUsize::MIN);
                     kad_config.set_publication_interval(Some(Duration::from_secs(24 * 3600)));
                 }
 
@@ -2772,6 +2772,7 @@ impl Node {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod vote_history_wiring_tests {
     use crate::core::chain_config::Network;
 
@@ -2835,6 +2836,7 @@ mod vote_history_wiring_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod mobile_profile_wiring_tests {
     use super::MAX_PEERS;
     use crate::core::address::Address;

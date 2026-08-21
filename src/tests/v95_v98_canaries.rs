@@ -1,6 +1,7 @@
 //! Regression canary tests - CI runner'da çalışır (sandbox OOM kaçınımı).
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::consensus::pos::{PoSConfig, PoSEngine};
     use crate::domain::registry::ConsensusDomainRegistry;

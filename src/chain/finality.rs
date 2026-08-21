@@ -237,11 +237,13 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     let pk_bytes: [u8; 96] = pk
         .try_into()
         .map_err(|_| "Invalid BLS public key length".to_string())?;
-    let pk_affine = G2Affine::from_compressed(&pk_bytes);
-    if pk_affine.is_none().into() {
-        return Err("Invalid BLS public key encoding".to_string());
-    }
-    let pk_affine = pk_affine.unwrap();
+    // `CtOption::unwrap` panics on `None`, and these bytes arrive from the
+    // network. The `is_none` check above made that unreachable, but the
+    // guarantee sat one statement away; `into_option` fuses the check and the
+    // read so a malformed key can only ever become an `Err`.
+    let pk_affine = G2Affine::from_compressed(&pk_bytes)
+        .into_option()
+        .ok_or_else(|| "Invalid BLS public key encoding".to_string())?;
 
     // (security audit §5) enforce that the public key is
     // Actually in the correct prime-order subgroup. Without this
@@ -258,11 +260,9 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     let sig_bytes: [u8; 48] = sig
         .try_into()
         .map_err(|_| "Invalid BLS signature length".to_string())?;
-    let sig_affine = G1Affine::from_compressed(&sig_bytes);
-    if sig_affine.is_none().into() {
-        return Err("Invalid BLS signature encoding".to_string());
-    }
-    let sig_affine = sig_affine.unwrap();
+    let sig_affine = G1Affine::from_compressed(&sig_bytes)
+        .into_option()
+        .ok_or_else(|| "Invalid BLS signature encoding".to_string())?;
 
     // Same subgroup check on the signature: a small-subgroup
     // Signature would also make the pairing produce values in a
@@ -297,11 +297,9 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let pk_affine = G2Affine::from_compressed(&pk_bytes);
-    if pk_affine.is_none().into() {
+    let Some(pk_affine) = G2Affine::from_compressed(&pk_bytes).into_option() else {
         return false;
-    }
-    let pk_affine = pk_affine.unwrap();
+    };
     // (security audit §5) subgroup check on the PoP
     // Public key (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = pk_affine.is_torsion_free().into();
@@ -314,11 +312,9 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let sig_affine = G1Affine::from_compressed(&sig_bytes);
-    if sig_affine.is_none().into() {
+    let Some(sig_affine) = G1Affine::from_compressed(&sig_bytes).into_option() else {
         return false;
-    }
-    let sig_affine = sig_affine.unwrap();
+    };
     // (security audit §5) subgroup check on the PoP
     // Signature (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = sig_affine.is_torsion_free().into();
@@ -644,9 +640,8 @@ impl FinalityAggregator {
                     .try_into()
                     .map_err(|_| "Invalid precommit signature length".to_string())
                     .ok()?;
-                let sig_affine = G1Affine::from_compressed(&sig_bytes);
-                if sig_affine.is_some().into() {
-                    agg_sig += G1Projective::from(sig_affine.unwrap());
+                if let Some(sig_affine) = G1Affine::from_compressed(&sig_bytes).into_option() {
+                    agg_sig += G1Projective::from(sig_affine);
                 }
             }
         }
@@ -712,14 +707,11 @@ impl FinalityCert {
                         .map_err(|_| {
                             format!("Invalid BLS public key length for {}", validator.address)
                         })?;
-                let pk = G2Affine::from_compressed(&pk_bytes);
-                if pk.is_none().into() {
-                    return Err(format!(
-                        "Invalid BLS public key encoding for {}",
-                        validator.address
-                    ));
-                }
-                let pk = pk.unwrap();
+                let pk = G2Affine::from_compressed(&pk_bytes)
+                    .into_option()
+                    .ok_or_else(|| {
+                        format!("Invalid BLS public key encoding for {}", validator.address)
+                    })?;
                 // (security audit §5) subgroup check on
                 // Every bitmap-claimed signer (see `verify_bls_sig`
                 // For the full rationale). Without this, a
@@ -778,11 +770,9 @@ impl FinalityCert {
             .as_slice()
             .try_into()
             .map_err(|_| "Invalid aggregated BLS signature length".to_string())?;
-        let sig_affine = G1Affine::from_compressed(&sig_bytes);
-        if sig_affine.is_none().into() {
-            return Err("Invalid aggregated BLS signature encoding".into());
-        }
-        let sig_affine = sig_affine.unwrap();
+        let sig_affine = G1Affine::from_compressed(&sig_bytes)
+            .into_option()
+            .ok_or_else(|| "Invalid aggregated BLS signature encoding".to_string())?;
         if bool::from(sig_affine.is_identity()) {
             return Err("Aggregated BLS signature is identity".into());
         }
@@ -838,6 +828,7 @@ impl FinalityCert {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

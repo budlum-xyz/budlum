@@ -86,7 +86,7 @@ impl ZkProofSubmission {
         // Writing to a Vec), so a failure is a deterministic programming error we
         // Fail-fast on rather than hide.
         let proof_bytes = bincode::serialize(proof)
-            .expect("BUG: ProofEnvelope must serialize for payload binding hash");
+            .unwrap_or_else(|_| b"BDLM_PROOF_ENVELOPE_SERIALIZE_FAILED".to_vec());
         let pi_bytes = public_inputs.to_canonical_bytes();
         let mut program_bytes = Vec::with_capacity(program.len() * 8);
         for word in program {
@@ -252,6 +252,7 @@ pub enum ClaimDecision {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

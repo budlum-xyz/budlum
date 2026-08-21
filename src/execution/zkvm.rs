@@ -276,6 +276,7 @@ fn decode_program(bytecode: &[u8]) -> Result<Vec<u64>, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use bud_isa::{Instruction, Opcode};

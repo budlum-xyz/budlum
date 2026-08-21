@@ -113,7 +113,15 @@ impl Mempool {
         let existing_hash = self.find_tx_by_sender_nonce(&tx.from, tx.nonce);
 
         if let Some(existing_hash) = existing_hash.as_ref() {
-            let existing = self.transactions.get(existing_hash).unwrap();
+            // `find_tx_by_sender_nonce` returned this hash from the same map,
+            // so the lookup succeeds. Handled rather than unwrapped because
+            // this is the transaction-admission path: a panic here is a node
+            // that any peer can stop by sending a transaction.
+            let Some(existing) = self.transactions.get(existing_hash) else {
+                return Err(MempoolError::InvalidTransaction(
+                    "replacement target vanished from the pool".to_string(),
+                ));
+            };
             // RBF bump her zaman POZİTİF olmalı. Tamsayı bölmesiyle
             // Küçük fee'lerde bump 0'a yuvarlanıyordu (fee=1, %10 → bump 0)
             // → aynı fee ile limitsiz replace-churn (ucuz DoS vektörü).
@@ -315,6 +323,7 @@ impl Default for Mempool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

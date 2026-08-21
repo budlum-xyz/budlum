@@ -18,6 +18,7 @@
 //! lists grow the old entries back.
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     /// All three lockfiles. They are separate workspaces that resolve
     /// independently, and Dependabot reports each one separately, three

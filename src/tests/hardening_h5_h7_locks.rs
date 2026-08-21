@@ -2,6 +2,7 @@
 //! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::chain::snapshot::{
         SnapshotAuthError, SnapshotTrustPolicy, StateSnapshotV2, StateSnapshotV2Params,

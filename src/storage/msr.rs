@@ -124,6 +124,7 @@ pub fn msr_speedup_over_lrc_scaled(layout: &LrcLayout, k: u64, d: u64) -> Result
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

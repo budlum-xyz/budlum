@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hardening_tests {
     use crate::cli::commands::NodeConfig;
     use crate::core::account::AccountState;
@@ -47,7 +48,7 @@ mod hardening_tests {
 
     #[test]
     fn test_metrics_encoding_format() {
-        let metrics = Metrics::new();
+        let metrics = Metrics::new().expect("metric names are literals");
         metrics.chain_height.set(1234);
         metrics.peer_count.set(5);
 

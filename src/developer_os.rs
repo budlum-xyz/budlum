@@ -316,6 +316,7 @@ fn validate_label(field: &'static str, value: &str) -> Result<(), DeveloperOsErr
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

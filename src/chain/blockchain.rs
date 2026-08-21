@@ -807,8 +807,19 @@ impl Blockchain {
         u64::try_from(self.last_block().timestamp / 1_000).unwrap_or(u64::MAX)
     }
 
+    /// The chain tip.
+    ///
+    /// # Panics
+    /// If the chain is empty, which cannot happen: construction always seeds
+    /// genesis and nothing removes it. The signature returns `&Block`, so
+    /// there is no owned value to fall back to; the alternative would be
+    /// changing the return type and every one of the call sites. The panic
+    /// is allowed here deliberately rather than by the workspace default.
+    #[allow(clippy::expect_used)]
     pub fn last_block(&self) -> &Block {
-        self.chain.last().expect("Chain should never be empty")
+        self.chain
+            .last()
+            .expect("chain is seeded with genesis at construction")
     }
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
@@ -5301,11 +5312,9 @@ impl Blockchain {
                     &current_epoch.to_le_bytes(),
                     &tip.vrf_output,
                 ]);
-                let byte_start = u64::from_le_bytes(
-                    entropy[..8]
-                        .try_into()
-                        .expect("32-byte challenge entropy has an 8-byte prefix"),
-                ) % range_count;
+                let mut entropy_head = [0u8; 8];
+                entropy_head.copy_from_slice(&entropy[..8]);
+                let byte_start = u64::from_le_bytes(entropy_head) % range_count;
                 let byte_end = byte_start + range_len;
                 let opener = crate::core::address::Address::from([0u8; 32]);
                 if let Ok(_challenge_id) = self.state.storage_registry.open_challenge(
@@ -5712,6 +5721,7 @@ impl Clone for Blockchain {
     }
 }
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
@@ -6643,6 +6653,7 @@ mod tests {
 /// Hardcoded 50% / 10% literal in `apply_qc_fault_verdict` or
 /// `apply_system_effects`, this test will fail.
 #[test]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     use crate::consensus::pos::{PoSConfig, SlashingEvidence};
     use crate::consensus::PoSEngine;
@@ -6738,6 +6749,7 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod bond_and_reorg_tests {
     //! `#[cfg(test)]` was attached to a single item here, not to a block, so
     //! everything after the first test compiled into the production library.

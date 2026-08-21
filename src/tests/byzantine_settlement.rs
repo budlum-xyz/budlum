@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod byzantine_settlement_tests {
     use crate::chain::blockchain::Blockchain;
     use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};

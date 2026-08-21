@@ -426,6 +426,7 @@ impl std::fmt::Display for EncryptionPolicyError {
 impl std::error::Error for EncryptionPolicyError {}
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

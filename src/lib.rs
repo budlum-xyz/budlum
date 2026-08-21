@@ -32,7 +32,12 @@ pub mod socialfi;
 pub mod storage;
 pub mod tokenomics;
 
+// The workspace denies `unwrap`/`expect` because a panic in production code
+// aborts the node. Inside tests the opposite holds: a failed unwrap is how a
+// test reports a broken invariant, and rewriting 2769 of them into `?` would
+// make the suite harder to read while proving nothing.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 pub mod tests;
 
 pub use crate::chain::blockchain::Blockchain;
