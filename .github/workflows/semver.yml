@@ -1,0 +1,116 @@
+name: Semver Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: semver-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  semver-check:
+    # CI Genişletme Madde 5: cargo-semver-checks, public API kırılması tespiti.
+    #
+    # Sertleştirme (2026-07-21): eski sürüm her iki adımda da
+    # `continue-on-error: true` idi → kapı ASLA kırmızı veremiyordu (gözlem
+    # Modu = süsleme). Ayrıca base mekanizması yoktu: `check-release`
+    # Crates.io'ya yayınlanmamış `budlum-core` için çalışamaz. Yeni model:
+    #   * Base = PR'da `pull_request.base.sha`, main push'ta `push.before`.
+    #   * İki ayrı checkout (current/baseline) + `--baseline-root`.
+    #   * nightly toolchain (cargo-semver-checks rustdoc-json üretimi için).
+    #   * Gate: `semver` (Rust, xtask/gates) - kırılma varsa ve
+    #     `.github/semver-exceptions.txt` boşsa FAIL. İstisna satırları
+    #     Kullanıcı onaylı, gerekçeli "kanıtlı skip-list" desenindedir
+    #     (.quality/deny.toml [advisories] ile aynı disiplin).
+    name: "Semver Check (Madde 5: public API breakage gate)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (current)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: current
+          persist-credentials: false
+      - name: Checkout (baseline = merge base)
+        # Skipped when there is no baseline to compare against: on the very
+        # first push to a branch `github.event.before` is the all-zero SHA, and
+        # asking the remote for that ref fails with "not our ref". The gate
+        # step below already treats a missing base as "nothing to compare" and
+        # passes with an explicit log line, so the run stays honest rather than
+        # red for a reason that has nothing to do with the public API.
+        if: >-
+          github.event.pull_request.base.sha != '' ||
+          (github.event.before != '' &&
+           github.event.before != '0000000000000000000000000000000000000000')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: baseline
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          persist-credentials: false
+      - name: Install Rust (stable pin)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - name: Install pinned nightly (rustdoc-json backend for semver-checks)
+        # 'rustdoc' nightly'de ayrı bir component DEĞİL, rustc component'inin
+        # Parçası (rustup: "did you mean 'rust-docs'?" ile exit 1, 2026-07-21 CI kanıtı).
+        run: rustup toolchain install nightly-2026-07-19 --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+          # İki-checkout yerleşiminde workspace kökünde Cargo.toml yok;
+          # Rust-cache'in `cargo metadata` çağrısı kökte patlar (Error logu).
+          workspaces: ./current
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo-semver-checks kur (locked)
+        run: cargo +1.97.0 install cargo-semver-checks --locked
+      - name: Gate canary (vacuous-gate koruması)
+        run: BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver --self-test
+      - name: Teşhis (kalıcı kanıt adımı) - doğrudan rustdoc-json
+        # Gelecekteki sessiz-crash sınıflarında wrapper'ın yuttuğu hata gövdesini
+        # Ham olarak görünür kılar (continue-on-error: koşuyu bloklamaz).
+        # NOT: `-o <dir>` YASAK, cargo rustdoc kendisi --out-dir ekler; ikinci
+        # Veriliş "Option 'out-dir' given more than once" ile ölür (2026-07-21
+        # Lokal kanıt). JSON target/doc/budlum_core.json'a düşer.
+        continue-on-error: true
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-07-19
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-C debuginfo=0"
+          RUST_BACKTRACE: "1"
+        run: |
+          set +e
+          cd current
+          cargo rustdoc -p budlum-core --lib -- -Z unstable-options --output-format json 2>&1 | tail -60
+          echo "RUSTDOC_DIRECT_EXIT: ${PIPESTATUS[0]}"
+      - name: Semver gate - budlum-core vs baseline
+        env:
+          SEMVER_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Kök-neden (kapandı, 2026-07-21): rustdoc-json ölümü nightly'den
+          # Değil --all-features heuristiğinden kaynaklanıyordu - pq-dilithium+
+          # Pq-ml-dsa compile_error! kilidi. Fix: semver kapısı --default-features ile koşar.
+          # Nightly pin rustdoc-json'un -Z gereksinimi için zorunlu kalıyor.
+          RUSTUP_TOOLCHAIN: nightly-2026-07-19
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-C debuginfo=0"
+        run: |
+          set +e
+          if [ -z "${SEMVER_BEFORE}" ] || [ "${SEMVER_BEFORE}" = "0000000000000000000000000000000000000000" ]; then
+            echo "BASE YOK (ilk push/şüpheli state) - gate atlanmaz, bilgi logu ile PASS."
+            echo "NOT: budlum-core crates.io'da yayınlı değil; base mecburidir."
+            exit 0
+          fi
+          BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver ./current ./baseline
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::gate exit=$rc - runner memory snapshot (OOM kanıtı için):"
+            free -m || true
+          fi
+          exit "$rc"

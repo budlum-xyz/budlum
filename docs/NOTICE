@@ -1,0 +1,41 @@
+Budlum
+Copyright 2026 Lubo's Ruler
+
+This product includes software developed as part of the Budlum project,
+licensed under the PolyForm Shield License 1.0.0 (see LICENSE.md).
+
+Required Notice: Copyright budlum-xyz (https://github.com/budlum-xyz)
+
+Licensor Line of Business: Budlum - permissionless multi-consensus L1
+blockchain and its storage layer (https://github.com/budlum-xyz/budlum)
+
+--------------------------------------------------------------------------------
+Third-party code included in this repository
+--------------------------------------------------------------------------------
+
+Plonky3
+    https://github.com/Plonky3/Plonky3
+    Copyright the Plonky3 contributors
+    Licensed under MIT OR Apache-2.0
+
+    budzero/bud-proof/src/bud_stark/ is derived from the `p3-uni-stark` crate.
+    It is a fork with local modifications, not an independent implementation:
+    the module layout matches upstream and roughly two thirds of the prover and
+    verifier lines are shared with p3-uni-stark 0.6.2. Local changes are
+    concentrated in constraint folding for the Budlum VM AIR and in the proof
+    and config types.
+
+    Plonky3 is also used unmodified as a set of dependencies (p3-air, p3-field,
+    p3-fri, p3-goldilocks, p3-merkle-tree, p3-poseidon2 and others), which carry
+    their own licence terms through Cargo.
+
+--------------------------------------------------------------------------------
+
+Dependencies obtained through Cargo are not vendored into this repository and
+are governed by their own licences. The permitted set is enforced in CI by the
+"License Compliance" job against the allow-list in .quality/deny.toml; a full
+per-dependency inventory is written to that job's summary on every run.
+
+Provenance observations for non-trivial in-tree algorithms, including the
+cases where an origin could not be established, are recorded in
+PROVENANCE_NOTES.md. That file is a map for reviewers, not a clearance.

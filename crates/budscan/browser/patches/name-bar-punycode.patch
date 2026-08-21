@@ -1,0 +1,137 @@
+Adres cubugunda punycode gosterimi.
+
+Ad kuralindan gecmeyen bir ad **acilmaz**, ama gosterilmesi gerekebilir:
+gecmiste duran, bir baglantinin ustunde beliren, bir hata satirinda yazilan
+ad. O anda ASCII disi baytlari oldugu gibi cizmek, homograf saldirisinin
+yasadigi bosluktur.
+
+Kural: bir ad tek bir yazi sistemi kullanmali. Yasaklamak degil, gostermek.
+Latin olmayan alfabelerdeki isimleri yasaklamak bir tarayicinin alacagi karar
+degil; `аyaz.bud` (bir Kiril harf, dordu Latin) `xn--yaz-5cd.bud` gorunur, ki
+bu tam olarak oldugu sey. Tamamen Kiril bir isim tamamen Kiril gorunur.
+
+Not: bu deger olculdu. `budscan::punycode` RFC 3492'yi uyguluyor ve
+`xn--yaz-5cd` uretiyor; Python'un `str.encode("idna")` referansi ayni sonucu
+veriyor. Mimari belgesinde yazan `xn--yaz-hlc` yanlisti ve duzeltildi.
+
+--- a/browser/components/urlbar/UrlbarInput.sys.mjs
++++ b/browser/components/urlbar/UrlbarInput.sys.mjs
+@@ -1892,6 +1892,20 @@ export class UrlbarInput {
+       return uri.spec;
+     }
+ 
++    // bud:// and .eth names go through the budscan name rule before they are
++    // drawn. A name the rule refuses is shown as punycode rather than as the
++    // characters it contains: what is displayed and what would be resolved
++    // have to be the same string, and the gap between them is exactly where
++    // a homograph attack lives.
++    //
++    // This runs before every other formatting step. A later step that
++    // prettifies the string would undo the point of this one.
++    if (uri.scheme == "bud" || uri.host?.endsWith(".eth")) {
++      let displayed = lazy.BudScan.displayForm(uri.spec);
++      if (displayed != uri.spec) {
++        return displayed;
++      }
++    }
++
+     let url = uri.spec;
+ 
+     // Try to decode as UTF-8 if there's no encoding sequence that we would
+--- a/browser/components/urlbar/UrlbarUtils.sys.mjs
++++ b/browser/components/urlbar/UrlbarUtils.sys.mjs
+@@ -34,6 +34,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
+   UrlbarProviderOpenTabs: "resource:///modules/UrlbarProviderOpenTabs.sys.mjs",
+   UrlbarProvidersManager: "resource:///modules/UrlbarProvidersManager.sys.mjs",
+   UrlbarTokenizer: "resource:///modules/UrlbarTokenizer.sys.mjs",
++  BudScan: "resource:///modules/BudScan.sys.mjs",
+ });
+ 
+ export var UrlbarUtils = {
+--- /dev/null
++++ b/browser/components/urlbar/BudScan.sys.mjs
+@@ -0,0 +1,96 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * The JS surface of the budscan core.
++ *
++ * Nothing here decides anything. Every function forwards to Rust and returns
++ * what came back. The reason is the same one that keeps the name rule out of
++ * the C++ protocol handler: two places deciding what a name may contain,
++ * disagreeing, is worse than one place deciding badly.
++ *
++ * In particular this file does not:
++ *   - lowercase a name (that would map UPPER.bud and upper.bud onto one
++ *     record and make ownership a race);
++ *   - strip whitespace beyond the trim the core already does;
++ *   - guess a scheme for a bare domain;
++ *   - decode punycode back to Unicode for display.
++ */
++
++const lazy = {};
++
++ChromeUtils.defineLazyGetter(lazy, "core", () => {
++  return ChromeUtils.importESModule("resource://gre/modules/BudScanCore.sys.mjs");
++});
++
++export var BudScan = {
++  /**
++   * How a name should be drawn in the address bar.
++   *
++   * A name that passes the rule is returned unchanged. One that does not is
++   * returned with every non-ASCII label punycoded.
++   */
++  displayForm(spec) {
++    return lazy.core.displayForm(spec);
++  },
++
++  /**
++   * Does this name pass the rule?
++   *
++   * Returns null when it passes, or a reason string naming the property that
++   * failed. A caller that only needs a boolean should still surface the
++   * reason: "it did not open" is not something a user can act on.
++   */
++  checkName(name) {
++    return lazy.core.checkName(name);
++  },
++
++  /**
++   * Classify what was typed without resolving it.
++   *
++   * Returns one of: "name", "bud-address", "evm-address", "content-id",
++   * "cid", "nft-id", "block-height", "tx-hash", "https-url", "free-text",
++   * "ambiguous", "refused-scheme", "refused-name".
++   *
++   * "ambiguous" is a real answer and not a failure. Thirty-two bytes of hex
++   * is a wallet address, a content id and a transaction hash at the same
++   * time, and picking one would send the user somewhere they did not ask to
++   * go.
++   */
++  classify(input) {
++    return lazy.core.classify(input);
++  },
++};
+--- a/browser/components/urlbar/UrlbarTokenizer.sys.mjs
++++ b/browser/components/urlbar/UrlbarTokenizer.sys.mjs
+@@ -318,6 +318,17 @@ export var UrlbarTokenizer = {
+   },
+ 
+   _getTokenType(token) {
++    // A refused scheme is never re-read as something else. javascript: is a
++    // registrable BNS name today, and whether the bar treats it as a name or
++    // as a scheme depends on which check runs first. This one runs first.
++    let classified = lazy.BudScan.classify(token.value);
++    if (classified == "refused-scheme" || classified == "refused-name") {
++      return this.TYPE.TEXT;
++    }
++    if (classified == "name") {
++      return this.TYPE.POSSIBLE_ORIGIN;
++    }
++
+     // The order of the following checks is important, to avoid misdetections.
+     if (token.value == this.RESTRICT.HISTORY) {
+       return this.TYPE.RESTRICT_HISTORY;

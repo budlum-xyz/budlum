@@ -1,0 +1,41 @@
+# .grype.yaml, Grype (Anchore) zafiyet tarayıcısı yapılandırması
+#
+# NEDEN OSV-Scanner'IN YANINDA: Grype farklı bir veritabanı setinden besleniyor
+# (NVD + GHSA + distro feed'leri) ve her bulguya EPSS skoru ekliyor. EPSS,
+# "bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir cevabıdır ve ne
+# RustSec'te ne OSV.dev'de var. Bir L1 için önceliklendirme farkı yaratır:
+# CVSS 8.7 ama EPSS %0.5 olan bir bulgu ile CVSS 7.0 / EPSS %40 olan bir bulgu
+# aynı aciliyette değildir.
+#
+# Ayrıca Grype SARIF üretir; bulgular Security sekmesine düşer. Repodaki
+# Trivy fs taraması bunu yapmıyor (yalnız exit-code ile job'ı kırıyor), yani
+# bulguları tek bir yerden izlemek şu an mümkün değil.
+#
+# POLİTİKA: istisna listesi osv-scanner.toml ile birebir aynı olmalıdır. İki
+# tarayıcının aynı bulgu için çelişmesi kapının güvenilirliğini aşındırır;
+# biri güncellenirse diğeri de güncellenmelidir. Listede olmayan her bulgu
+# FAIL'dir. Şu an liste boş, taşınan hiçbir zafiyet yok.
+
+# Yalnız düzeltmesi olan bulgular değil, hepsi raporlansın.
+ignore-wontfix: ''
+
+# Eşik: high ve üzeri job'ı kırar. Aşağısı raporlanır ama bloke etmez -
+# Grype'ın distro/NVD kaynakları düşük şiddetli gürültü üretebiliyor ve bu
+# kapının amacı OSV/cargo-deny'nin üstüne EK sinyal koymak, onları
+# tekrarlamak değil.
+fail-on-severity: high
+
+ignore:
+  # Bu liste ŞU AN BOŞ ve öyle kalmalı.
+  #
+  # 2026-07-28'e kadar burada üç kayıt vardı (yamux GHSA-vxx9-2994-q338,
+  # hickory GHSA-3v94-mw7p-v465 ve GHSA-q2qq-hmj6-3wpp). Hepsi "erişilemez"
+  # gerekçesiyle taşınıyordu çünkü libp2p 0.56 yamalı sürümlere geçmemişti.
+  # Artık geçti: kök Cargo.toml libp2p'yi 0.57.0 ağacına sabitliyor, bu da
+  # yamux 0.14.0 ve hickory 0.26.1 getiriyor. Üç bulgu da YAMALANDI, yani
+  # istisnaya gerek kalmadı.
+  #
+  # Yeni bir istisna eklemeden önce: bağımlılığı yükseltmeyi dene. Erişilebilir
+  # bir bulgu ignore edilmez. Erişilemezlik iddiası ediliyorsa kanıtı
+  # src/tests/advisory_reachability.rs içinde bir testle kilitlenmelidir.
+  []

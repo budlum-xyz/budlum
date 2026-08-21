@@ -1,0 +1,26 @@
+[package]
+name = "budlum-gates"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Repository gates, written in Rust rather than shell."
+publish = false
+
+# Round 5: the substring+brace-walk gates could not model nested closures,
+# helpers and conditionals; Strix found a new variant every round. This PR
+# adds `syn` (a real Rust parser) for AST-based gates that model the actual
+# control flow. The trade-off against the old zero-dependency principle is
+# deliberate and documented: correctness of the gate matters more than the
+# width of its dependency set, and syn is the de-facto standard, pure-Rust,
+# widely-audited parser.
+[dependencies]
+syn = { version = "2", features = ["full", "visit", "printing", "derive", "parsing"] }
+quote = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

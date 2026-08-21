@@ -1,0 +1,10 @@
+[package]
+name = "lubot-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Serving köprüsü: a resident-batch engine/a resident-graph engine yapılandırması, atıf politikası denetimi, sağlık sayaçları"
+
+[dependencies]
+lubot-core = { path = "../lubot-core" }

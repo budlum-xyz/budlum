@@ -1,0 +1,39 @@
+name: Dependency Review (PR güvenlik kapısı)
+
+# Bu kapı, her pull_request'te PR diff'inde yeni tanıtılan bağımlılıkların
+# Bilinen zaafiyet/lisans sorunları için GitHub Advisory veritabanına göre
+# Denetlenmesini sağlar. cargo-audit / cargo-deny TÜM bağımlılık ağacını
+# Tararken, bu kapı yalnızca PR'ın getirdiği DELTAYA odaklanır, yani bir PR
+# Bilinen zaafiyetli bir sürüm eklemeye çalışırsa (dependabot dahil) main'e
+# Merge olmadan RED edilir. Tamamlayıcı, tekrarlamaz.
+
+on:
+  pull_request:
+    branches: [main]
+
+# Salt-okur.
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review (GH Advisory, PR diff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # PR diff'inde tanıtılan moderate+ zaafiyetli bağımlılık → fail.
+          # (low = yalnızca uyarı; high/critical çok geç kalır; moderate denge.)
+          fail-on-severity: moderate
+          # Lisans reddi listesi .quality/deny.toml [licenses] içinde yönetilir; burada
+          # Yalnızca advisory odaklı. comment-summary-in-pr opsiyonel.
+          comment-summary-in-pr: always

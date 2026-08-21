@@ -1,0 +1,28 @@
+[workspace]
+members = [
+  "bud-compiler",
+  "bud-vm",
+  "bud-isa",
+  "bud-state",
+  "bud-proof",
+  "bud-node",
+  "bud-cli",
+  "verifier-registry",
+]
+resolver = "2"
+
+[workspace.package]
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+# budzero is a separate workspace, so it does not inherit the root manifest's
+# profile and would otherwise wrap arithmetic silently in release builds.
+# bud-vm evaluates Goldilocks field arithmetic and bud-proof derives trace
+# indices and degree_bits from it, a silent wrap there produces a wrong proof
+# rather than a crash. Mirrors the root Cargo.toml.
+[profile.release]
+overflow-checks = true
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+

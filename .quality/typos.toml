@@ -1,0 +1,121 @@
+# typos-cli konfigürasyonu, Budlum Core
+#
+# Bu repo iki dillidir: kod ve API yüzeyi İngilizce, mimari/denetim
+# dokümantasyonu ve kod içi yorumların büyük bölümü Türkçedir. typos'un
+# varsayılan sözlüğü yalnız İngilizce olduğundan, kalibre edilmeden
+# çalıştırıldığında 1000+ bulgunun neredeyse tamamı Türkçe kelimelerin
+# İngilizce "düzeltmesi" olur ("blok"→"block", "adres"→"address",
+# "sistem"→"system"). Bu gürültü kapıyı kullanılamaz hale getirir.
+#
+# Çözüm gevşetme DEĞİL, doğru kalibrasyondur: aşağıdaki Türkçe kelime listesi
+# tanımlanır, geri kalan her şey FAIL kapısıdır. Yeni bir Türkçe kelime
+# yanlış pozitif verirse buraya eklenir (gerekçe commit mesajında);
+# gerçek bir İngilizce yazım hatası asla ignore edilmez, düzeltilir.
+
+[files]
+extend-exclude = [
+  "target/",
+  "budzero/target/",
+  "Cargo.lock",
+  "*.lock",
+  "supply-chain/",   # cargo-vet üretimi, elle düzenlenmez
+  "proto/",          # wire şeması - kelime değişimi protokolü bozar
+  "fuzz/corpus/",    # fuzzer üretimi binary seed'ler, metin değil
+  "fuzz/artifacts/",
+]
+
+[default]
+# Kimlik/hash benzeri uzun alfanümerik dizileri (SHA, PeerID, adres) tarama.
+extend-ignore-re = [
+  "\\b[0-9a-fA-F]{7,}\\b",              # git SHA / hex hash / hex adres
+  "\\b12D3Koo[A-Za-z0-9]+\\b",          # libp2p PeerID
+  "sha256:[0-9a-f]+",                   # docker digest
+  "(?i)\\bbud1[a-z0-9]+\\b",            # bech32-tarzı Budlum adresleri
+]
+
+[default.extend-words]
+# ── Türkçe kelimeler (yanlış pozitifler) ───────────────────────────────
+# Her biri kendisine eşlenir = "bu doğru yazım, düzeltme önerme".
+blok = "blok"
+Blok = "Blok"
+BLOK = "BLOK"
+adres = "adres"
+Adres = "Adres"
+sistem = "sistem"
+Sistem = "Sistem"
+SISTEM = "SISTEM"
+lokal = "lokal"
+Lokal = "Lokal"
+paralel = "paralel"
+Paralel = "Paralel"
+PARALEL = "PARALEL"
+parametre = "parametre"
+Parametre = "Parametre"
+standart = "standart"
+Standart = "Standart"
+paket = "paket"
+Paket = "Paket"
+grup = "grup"
+Grup = "Grup"
+matris = "matris"
+metod = "metod"
+modul = "modul"
+modulu = "modulu"
+stabilite = "stabilite"
+performans = "performans"
+Performans = "Performans"
+implemente = "implemente"
+aktive = "aktive"
+servise = "servise"
+platforma = "platforma"
+maks = "maks"
+testin = "testin"
+commitin = "commitin"
+committe = "committe"
+sizin = "sizin"
+sade = "sade"
+hava = "hava"
+Hava = "Hava"
+sart = "sart"
+laf = "laf"
+tak = "tak"
+gir = "gir"
+oyu = "oyu"
+daa = "daa"
+certi = "certi"
+nin = "nin"
+ine = "ine"
+iz = "iz"
+siz = "siz"
+ba = "ba"
+makro = "makro"
+versin = "versin"
+tipe = "tipe"
+serie = "serie"
+probleme = "probleme"
+Sur = "Sur"
+lik = "lik"
+foto = "foto"
+# ── budscan turunda eklenenler ────────────────────────────────
+# Üçü de Türkçe kelime; typos'un İngilizce sözlüğü bunları sırasıyla
+# "admin", "offset" ve "vector" sanıyor. Mutasyonla doğrulandı: bu satırlar
+# kaldırılınca kapı 7 bulguyla kırmızıya döner, yani kalibrasyon boş değil.
+#   adin   : "ad" isminin ilgi hâli (bir adın çözümü), "admin" değil
+#   ofset  : Arweave `note` alanının 32 baytlık big-endian kaydırması
+#   vektor : content-id eşitlik testinin paylaşılan test vektörü
+adin = "adin"
+Adin = "Adin"
+ofset = "ofset"
+Ofset = "Ofset"
+vektor = "vektor"
+vektoru = "vektoru"
+Vektor = "Vektor"
+
+# ── Özel adlar / teknik terimler ────────────────────────────────────────
+Canva = "Canva"     # ürün adı (Canvas değil)
+Groth = "Groth"     # Groth16 zk-SNARK şeması (Jens Groth)
+# ── Kasıtlı test fixture'ı ──────────────────────────────────────────────
+# budzero/bud-compiler: "bildirilmemiş struct tipi" hatasını doğrulayan
+# negatif test, kaynakta bilerek yanlış yazılmış bir tip adı kullanır.
+# Düzeltmek testin ölçtüğü şeyi ortadan kaldırır.
+Ponit = "Ponit"

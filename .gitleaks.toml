@@ -1,0 +1,20 @@
+# .gitleaks.toml: Budlum secret-scan yapılandırması
+#
+# CI `gitleaks detect` ile TAM git geçmişini tarar (fetch-depth: 0).
+# Varsayılan kural seti korunur; hiçbir global pattern/path/commit muafiyeti
+# YOKTUR, herhangi bir sızıntı job'u FAIL eder.
+#
+# Geçmiş doğrulaması (baseline GEREKMEDİĞİ için kanıt):
+#   Araç: gitleaks v8.30.1, tam tarih taraması, 2026-07-16
+#   - `git log --all -S'ghp_'` ile çıkan aday commit ağaçları tek tek
+#     `git grep -E 'ghp_[0-9a-zA-Z]{20,}'` ile kontrol edildi: hepsi
+#     `ghp_6aXY...` biçiminde REDAKTE edilmiş işaretçiler; gerçek token yok.
+#   - gitleaks v8.30.1 varsayılan kurallarıyla tam tarama: 0 bulgu.
+#   - Kapının boş (vacuous) olmadığı CI'da her koşuda kanıtlanır: workflow
+#     önce sahte-PAT kanaryası üzerinde gitleaks'in ALARM verdiğini doğrular;
+#     kanarya yakalanamazsa asıl tarama güvenilmez sayılıp job FAIL eder.
+title = "Budlum gitleaks config"
+
+[extend]
+useDefault = true
+

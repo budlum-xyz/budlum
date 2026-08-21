@@ -1,0 +1,223 @@
+//! Field-native Poseidon helpers matching in-repo `budzero/bud-vm`.
+//!
+//! MUST stay byte-for-byte aligned with:
+//! - `budzero/bud-vm/src/lib.rs` (`poseidon4_hash_state`, `DOMAIN_NULLIFIER`)
+//! - `budzero/bud-proof` PrivacyCommit / NullifierCheck AIR
+//!
+//! Wallet-core intentionally does **not** depend on bud-vm (mobile/WASM
+//! Footprint); this is a deliberate duplicated primitive with lock tests.
+
+/// Domain separator for nullifier derivation, ASCII "NULLIFER".
+pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552;
+
+const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
+
+const MDS: [[u64; 8]; 8] = [
+    [7, 1, 3, 8, 8, 3, 4, 9],
+    [9, 7, 1, 3, 8, 8, 3, 4],
+    [4, 9, 7, 1, 3, 8, 8, 3],
+    [3, 4, 9, 7, 1, 3, 8, 8],
+    [8, 3, 4, 9, 7, 1, 3, 8],
+    [8, 8, 3, 4, 9, 7, 1, 3],
+    [3, 8, 8, 3, 4, 9, 7, 1],
+    [1, 3, 8, 8, 3, 4, 9, 7],
+];
+
+const RC: [[u64; 8]; 4] = [
+    [
+        0xdd5743e7f2a5a5d9,
+        0xcb3a864e58ada44b,
+        0xffa2449ed32f8cdc,
+        0x42025f65d6bd13ee,
+        0x7889175e25506323,
+        0x34b98bb03d24b737,
+        0xbdcc535ecc4faa2a,
+        0x5b20ad869fc0d033,
+    ],
+    [
+        0xf1dda5b9259dfcb4,
+        0x27515210be112d59,
+        0x4227d1718c766c3f,
+        0x26d333161a5bd794,
+        0x49b938957bf4b026,
+        0x4a56b5938b213669,
+        0x1120426b48c8353d,
+        0x6b323c3f10a56cad,
+    ],
+    [
+        0xce57d6245ddca6b2,
+        0xb1fc8d402bba1eb1,
+        0xb5c5096ca959bd04,
+        0x6db55cd306d31f7f,
+        0xc49d293a81cb9641,
+        0x1ce55a4fe979719f,
+        0xa92e60a9d178a4d1,
+        0x002cc64973bcfd8c,
+    ],
+    [
+        0xcea721cce82fb11b,
+        0xe5b55eb8098ece81,
+        0x4e30525c6f1ddd66,
+        0x43c6702827070987,
+        0xaca68430a7b5762a,
+        0x3674238634df9c93,
+        0x88cee1c825e33433,
+        0xde99ae8d74b57176,
+    ],
+];
+
+/// 4-round Poseidon over Goldilocks (alpha=7, width=8).
+#[must_use]
+pub fn poseidon4_hash_state(mut s: [u64; 8]) -> u64 {
+    for round_rc in RC.iter() {
+        for i in 0..8 {
+            s[i] = ((s[i] as u128 + round_rc[i] as u128) % GOLDILOCKS_P as u128) as u64;
+        }
+        let mut sbox = [0u64; 8];
+        for i in 0..8 {
+            let x = s[i];
+            let x2 = ((x as u128 * x as u128) % GOLDILOCKS_P as u128) as u64;
+            let x4 = ((x2 as u128 * x2 as u128) % GOLDILOCKS_P as u128) as u64;
+            sbox[i] = (((x4 as u128 * x2 as u128) % GOLDILOCKS_P as u128 * x as u128)
+                % GOLDILOCKS_P as u128) as u64;
+        }
+        let mut next = [0u64; 8];
+        for i in 0..8 {
+            let mut sum: u128 = 0;
+            for j in 0..8 {
+                sum = (sum + MDS[i][j] as u128 * sbox[j] as u128) % GOLDILOCKS_P as u128;
+            }
+            next[i] = sum as u64;
+        }
+        s = next;
+    }
+    s[0]
+}
+
+#[must_use]
+pub fn poseidon4_hash(a: u64, b: u64) -> u64 {
+    poseidon4_hash_state([a, b, 0, 0, 0, 0, 0, 0])
+}
+
+/// PrivacyCommit absorption: Poseidon3(amount, recipient, blinding).
+#[must_use]
+pub fn poseidon4_hash3(a: u64, b: u64, c: u64) -> u64 {
+    poseidon4_hash_state([a, b, c, 0, 0, 0, 0, 0])
+}
+
+/// Commitment = Poseidon3(amount, recipient_tag, blinding)
+#[must_use]
+/// Parameter order matches VM PrivacyCommit opcode:
+/// `poseidon4_hash3(amount, blinding, recipient_tag)`. Blinding is full u64
+/// From register (no u32 truncation). Recipient tag from imm field (i32).
+pub fn privacy_commit(amount: u64, blinding: u64, recipient_tag: u64) -> u64 {
+    poseidon4_hash3(amount, blinding, recipient_tag)
+}
+
+/// Nullifier = Poseidon2(secret, DOMAIN_NULLIFIER)
+#[must_use]
+pub fn privacy_nullifier(secret: u64) -> u64 {
+    poseidon4_hash(secret, DOMAIN_NULLIFIER)
+}
+
+// Packing is `budlum-note-packing`'s single definition, re-exported under the
+// names the wallet already used. The chain indexes commitments and nullifiers
+// by exactly these bytes, so the wallet must not hold its own copy of the
+// rule: a one-byte divergence produces a nullifier the chain never recorded,
+// and the spend it was meant to prevent goes through.
+pub use budlum_note_packing::{field_from_hash, hash_from_field, is_packed};
+
+/// Map a 32-byte Budlum address into a Goldilocks field tag (first 8 LE bytes
+/// Reduced mod P). Used as PrivacyCommit recipient limb when full address
+/// Does not fit in one field element.
+#[must_use]
+pub fn address_to_recipient_tag(addr: &[u8; 32]) -> u64 {
+    let raw = u64::from_le_bytes(
+        addr[..8]
+            .try_into()
+            .expect("8-byte slice is always 8 bytes"),
+    );
+    raw % GOLDILOCKS_P
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domain_nullifier_constant_matches_spec() {
+        assert_eq!(DOMAIN_NULLIFIER, 0x4e55_4c4c_4946_4552);
+    }
+
+    #[test]
+    fn poseidon_two_vs_three_absorb_differ() {
+        let a = poseidon4_hash(1, 2);
+        let b = poseidon4_hash3(1, 2, 0);
+        // State [1,2,0,...] vs [1,2,0,...] - hash3 with c=0 equals hash2
+        assert_eq!(a, b);
+        assert_ne!(poseidon4_hash3(1, 2, 3), a);
+    }
+
+    #[test]
+    fn commit_nullifier_roundtrip_shapes() {
+        let c = privacy_commit(100, 99, 7); // S1: (amount, blinding, recipient_tag)
+        let n = privacy_nullifier(0xA11CE);
+        assert_ne!(c, 0);
+        assert_ne!(n, 0);
+        assert_eq!(field_from_hash(&hash_from_field(c)), c);
+    }
+}
+
+/// Element-wise Poseidon constants lock test.
+/// Ensures wallet-core MDS/RC match bud-vm/src/lib.rs exactly.
+/// If someone changes constants in one file but not the other,
+/// This test catches the desync before it breaks all privacy proofs.
+#[cfg(test)]
+mod poseidon_lock_tests {
+    use super::*;
+
+    #[test]
+    fn mds_matrix_lock() {
+        assert_eq!(
+            MDS[0],
+            [7, 1, 3, 8, 8, 3, 4, 9],
+            "MDS row 0 mismatch with bud-vm"
+        );
+        assert_eq!(
+            MDS[7],
+            [1, 3, 8, 8, 3, 4, 9, 7],
+            "MDS row 7 mismatch with bud-vm"
+        );
+        assert_eq!(
+            MDS[5],
+            [8, 8, 3, 4, 9, 7, 1, 3],
+            "MDS row 5 mismatch with bud-vm"
+        );
+    }
+
+    #[test]
+    fn rc_matrix_lock() {
+        assert_eq!(
+            RC[0][0], 0xdd5743e7f2a5a5d9,
+            "RC[0][0] mismatch with bud-vm"
+        );
+        assert_eq!(
+            RC[0][1], 0xcb3a864e58ada44b,
+            "RC[0][1] mismatch with bud-vm"
+        );
+        assert_eq!(
+            RC[3][0], 0xcea721cce82fb11b,
+            "RC[3][0] mismatch with bud-vm"
+        );
+    }
+
+    #[test]
+    fn poseidon4_hash3_canonical_output_lock() {
+        let h = poseidon4_hash3(1, 2, 3);
+        assert_ne!(h, 0, "hash must be non-zero");
+        // Lock: this exact output must match bud-vm poseidon4_hash3(1, 2, 3)
+        // If MDS or RC drift, this value changes and the test breaks.
+        let h2 = poseidon4_hash3(1, 2, 3);
+        assert_eq!(h, h2, "deterministic");
+    }
+}

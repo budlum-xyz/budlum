@@ -1,0 +1,933 @@
+#[cfg(test)]
+mod rpc_tests {
+    use crate::chain::blockchain::Blockchain;
+    use crate::chain::chain_actor::{ChainActor, ChainHandle};
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::address::Address;
+    use crate::core::transaction::Transaction;
+    use crate::network::node::Node;
+    use crate::rpc::api::BudlumApiServer;
+    use crate::rpc::server::{RpcMode, RpcSecurityConfig, RpcServer};
+    use std::sync::Arc;
+
+    /// Format-gecerli test zarfi (durust marker).
+    fn valid_merkle_proof() -> Vec<u8> {
+        let envelope = bud_proof::ProofEnvelope {
+            proof_format_version: 1,
+            backend: "test-backend".to_string(),
+            p3_version: "0.6".to_string(),
+            fri_params_id: "test-fri".to_string(),
+            public_inputs_hash: [0x42u8; 32],
+            proof_bytes: vec![0xABu8; 96],
+            degree_bits: 8,
+        };
+        bincode::serialize(&envelope).expect("test envelope serialize")
+    }
+
+    async fn setup() -> (RpcServer, ChainHandle) {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45262, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        (
+            RpcServer::with_security_and_mode(
+                chain.clone(),
+                node_client,
+                RpcSecurityConfig::operator_default(),
+                RpcMode::Operator,
+            ),
+            chain,
+        )
+    }
+
+    /// `bud_estimateGas` must answer with a number this chain would charge.
+    ///
+    /// It returned the literal `21000` for every transaction type. That is
+    /// Ethereum's transfer intrinsic; this chain has no gas metering at all.
+    /// The live protocol is a flat fee - `validate_transaction` rejects
+    /// `fee < base_fee`, rejects a divergent `max_fee`, rejects any
+    /// `priority_fee` - so `21000` was not an estimate of anything.
+    ///
+    /// Canary: restore `Ok(Self::to_hex(21000))` and this fails, because the
+    /// Devnet base fee is 1.
+    #[tokio::test]
+    async fn estimate_gas_returns_the_flat_fee_floor_not_an_ethereum_constant() {
+        let (server, chain) = setup().await;
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([1u8; 32]),
+            Address::from([2u8; 32]),
+            100,
+            0, // no fee set: the caller is asking what the floor is
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        let value = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+
+        let base_fee = chain.get_base_fee().await;
+        assert_eq!(
+            value, base_fee,
+            "the estimate must be the fee floor the chain enforces, not 21000"
+        );
+        assert_ne!(
+            value, 21_000,
+            "21000 is Ethereum's number, not this chain's"
+        );
+    }
+
+    /// A caller that already priced its transaction above the floor gets its
+    /// Own fee back - that is what will be charged, since the flat-fee protocol
+    /// Takes `tx.fee` verbatim once it clears `base_fee`.
+    #[tokio::test]
+    async fn estimate_gas_reflects_a_fee_the_caller_already_set() {
+        let (server, chain) = setup().await;
+        let base_fee = chain.get_base_fee().await;
+        let chosen = base_fee + 500;
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([3u8; 32]),
+            Address::from([4u8; 32]),
+            100,
+            chosen,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        let value = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+        assert_eq!(
+            value, chosen,
+            "a fee above the floor is charged as-is, so it is the estimate"
+        );
+    }
+
+    /// The estimate must not vary by transaction type, because the charge does
+    /// Not. A schedule-based answer would price these three differently and be
+    /// Wrong three times.
+    #[tokio::test]
+    async fn estimate_gas_is_the_same_for_every_transaction_type() {
+        use crate::core::transaction::TransactionType;
+        let (server, chain) = setup().await;
+        let base_fee = chain.get_base_fee().await;
+
+        for tx_type in [
+            TransactionType::Transfer,
+            TransactionType::Stake,
+            TransactionType::ContractCall,
+        ] {
+            let mut tx = Transaction::new_with_chain_id(
+                Address::from([5u8; 32]),
+                Address::zero(),
+                1,
+                0,
+                0,
+                vec![],
+                45262,
+                tx_type.clone(),
+            );
+            tx.hash = tx.calculate_hash();
+            let estimate = server.estimate_gas(tx).await.unwrap();
+            let value = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+            assert_eq!(
+                value, base_fee,
+                "flat fee means one answer for {tx_type:?}, not a per-type schedule"
+            );
+        }
+    }
+
+    /// `bud_gasPrice` and `bud_estimateGas` must agree on the floor. They are
+    /// The two numbers a wallet combines, and they were sourced from different
+    /// Places - one from the live chain, one from a constant.
+    #[tokio::test]
+    async fn gas_price_and_estimate_gas_agree_on_the_floor() {
+        let (server, _) = setup().await;
+
+        let price = server.gas_price().await.unwrap();
+        let price = u64::from_str_radix(price.trim_start_matches("0x"), 16).unwrap();
+
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from([6u8; 32]),
+            Address::from([7u8; 32]),
+            1,
+            0,
+            0,
+            vec![],
+            45262,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.hash = tx.calculate_hash();
+        let estimate = server.estimate_gas(tx).await.unwrap();
+        let estimate = u64::from_str_radix(estimate.trim_start_matches("0x"), 16).unwrap();
+
+        assert_eq!(
+            price, estimate,
+            "the advertised price and the estimated cost must come from the same source"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_chain_info() {
+        let (server, _) = setup().await;
+        let chain_id = server.chain_id().await.unwrap();
+        println!("bud_chainId: {chain_id}");
+        assert_eq!(
+            chain_id,
+            format!("0x{:x}", crate::core::transaction::DEFAULT_CHAIN_ID)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_block_methods() {
+        let (server, bc) = setup().await;
+        let block_number = server.block_number().await.unwrap();
+        println!("bud_blockNumber: {block_number}");
+
+        assert_eq!(block_number, "0x0");
+
+        let genesis = bc.get_block(0).await.unwrap();
+        let genesis_hash = genesis.hash.clone();
+        let hex_genesis_hash = if genesis_hash.starts_with("0x") {
+            genesis_hash
+        } else {
+            format!("0x{genesis_hash}")
+        };
+
+        let block_by_hash = server
+            .get_block_by_hash(hex_genesis_hash.clone())
+            .await
+            .unwrap();
+        println!(
+            "bud_getBlockByHash: {}",
+            serde_json::to_string_pretty(&block_by_hash).unwrap()
+        );
+        assert_eq!(block_by_hash["hash"], hex_genesis_hash);
+        assert!(block_by_hash["parentHash"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+
+        let block_by_num = server.get_block_by_number(0).await.unwrap();
+        assert_eq!(block_by_num["hash"], hex_genesis_hash);
+
+        let missing_block = server.get_block_by_number(999).await.unwrap();
+        assert!(missing_block.is_null());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_account_methods() {
+        let (server, bc) = setup().await;
+        let addr = Address::from_hex(&"01".repeat(32)).unwrap();
+        bc.fund_development_account(&addr)
+            .await
+            .expect("devnet faucet");
+
+        let balance = server.get_balance(addr.to_string()).await.unwrap();
+        println!("bud_getBalance: {balance}");
+        assert_eq!(balance, "0x3b9aca00");
+    }
+
+    #[tokio::test]
+    async fn test_rpc_transaction_methods() {
+        let (server, bc) = setup().await;
+        let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let from = Address::from(keypair.public_key_bytes());
+
+        bc.credit_development_account(&from, 1000)
+            .await
+            .expect("devnet credit");
+
+        let bob = Address::from_hex(&"02".repeat(32)).unwrap();
+        let mut tx = Transaction::new(from, bob, 100, vec![]);
+        tx.fee = 1;
+        tx.sign(&keypair);
+        let hex_tx_hash = format!("0x{}", tx.hash);
+
+        server.send_raw_transaction(tx.clone()).await.unwrap();
+
+        let retrieved_tx = server
+            .get_transaction_by_hash(hex_tx_hash.clone())
+            .await
+            .unwrap();
+        println!(
+            "bud_getTransactionByHash: {}",
+            serde_json::to_string_pretty(&retrieved_tx).unwrap()
+        );
+        assert_eq!(retrieved_tx["hash"], hex_tx_hash);
+        assert!(retrieved_tx["signature"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+
+        let receipt = server
+            .get_transaction_receipt(hex_tx_hash.clone())
+            .await
+            .unwrap();
+        error_to_json_result(server.get_transaction_receipt(hex_tx_hash.clone()).await);
+        println!(
+            "bud_getTransactionReceipt (pending): {}",
+            serde_json::to_string_pretty(&receipt).unwrap()
+        );
+
+        assert!(receipt.is_null());
+    }
+
+    fn error_to_json_result<T>(res: Result<T, jsonrpsee::types::error::ErrorObjectOwned>) {
+        let _ = res;
+    }
+
+    #[tokio::test]
+    async fn test_rpc_error_cases() {
+        let (server, _) = setup().await;
+
+        let alice = Address::zero();
+        let bob = Address::zero();
+        let tx = Transaction::new(alice, bob, 100, vec![]);
+        let result = server.send_raw_transaction(tx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), -32602);
+        println!("Error Case (Invalid Params): {err}");
+    }
+
+    #[tokio::test]
+    async fn test_rpc_tx_precheck() {
+        let (server, bc) = setup().await;
+        let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let from = Address::from(keypair.public_key_bytes());
+
+        let bob = Address::from_hex(&"02".repeat(32)).unwrap();
+        let mut tx = Transaction::new(from, bob, 100, vec![]);
+        tx.fee = 1;
+        let precheck = server.tx_precheck(tx.clone()).await.unwrap();
+        println!(
+            "bud_txPrecheck (no sig): {}",
+            serde_json::to_string_pretty(&precheck).unwrap()
+        );
+        assert_eq!(precheck["accepted"], false);
+        assert!(precheck["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "invalid_signature"));
+
+        bc.credit_development_account(&from, 1000)
+            .await
+            .expect("devnet credit");
+
+        let precheck2 = server.tx_precheck(tx.clone()).await.unwrap();
+        assert_eq!(precheck2["accepted"], false);
+
+        tx.sign(&keypair);
+        let precheck3 = server.tx_precheck(tx).await.unwrap();
+        println!(
+            "bud_txPrecheck (with sig): {}",
+            serde_json::to_string_pretty(&precheck3).unwrap()
+        );
+        assert_eq!(precheck3["accepted"], true);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_settlement_methods() {
+        let (server, chain) = setup().await;
+        let domain = crate::domain::plugin::default_domain(
+            1,
+            crate::domain::ConsensusKind::PoW,
+            45262,
+            "pow-header-chain-v1",
+            1,
+        );
+        chain
+            .register_consensus_domain(domain.clone())
+            .await
+            .unwrap();
+
+        let mut block = crate::core::block::Block::new(1, "aa".repeat(32), vec![]);
+        block.timestamp = 1234;
+        block.state_root = "11".repeat(32);
+        block.tx_root = block.calculate_tx_root();
+        block.hash = block.calculate_hash();
+        let commitment =
+            crate::domain::DomainCommitment::from_block(&domain, &block, [2u8; 32], [3u8; 32], 0)
+                .unwrap();
+        chain
+            .submit_domain_commitment(commitment.clone())
+            .await
+            .unwrap();
+        let sealed = chain.seal_global_header().await.unwrap();
+
+        let info = server.get_settlement_info().await.unwrap();
+        assert_eq!(info["globalHeight"], 1);
+        assert_eq!(info["domainCommitmentCount"], 1);
+        assert!(info["latestGlobalHash"].as_str().unwrap().len() == 64);
+
+        let header = server.get_global_header(0).await.unwrap();
+        assert_eq!(header["globalHeight"], "0x0");
+        assert_eq!(
+            header["hash"].as_str().unwrap(),
+            format!("0x{}", sealed.calculate_hash())
+        );
+
+        let missing = server.get_global_header(999).await.unwrap();
+        assert!(missing.is_null());
+
+        let commitments = server.get_domain_commitments().await.unwrap();
+        let commitments = commitments.as_array().unwrap();
+        assert_eq!(commitments.len(), 1);
+        assert_eq!(commitments[0]["domainId"], 1);
+        assert_eq!(
+            commitments[0]["domainBlockHash"],
+            format!("0x{}", hex::encode(commitment.domain_block_hash))
+        );
+
+        let domains = server.get_consensus_domains().await.unwrap();
+        assert_eq!(domains.as_array().unwrap().len(), 1);
+        assert_eq!(domains[0]["domainId"], 1);
+
+        let poa_domain = crate::domain::plugin::default_domain(
+            2,
+            crate::domain::ConsensusKind::PoA,
+            1338,
+            "poa-authority-quorum",
+            0,
+        );
+        let registration = server
+            .register_consensus_domain(poa_domain.clone())
+            .await
+            .unwrap();
+        assert_eq!(registration["domainId"], 2);
+        assert!(registration["domainRegistryRoot"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+        assert!(server.register_consensus_domain(poa_domain).await.is_err());
+        assert_eq!(
+            server
+                .get_consensus_domains()
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let mut block2 = block.clone();
+        block2.index = 2;
+        block2.previous_hash = block.hash.clone();
+        block2.hash = block2.calculate_hash();
+        let raw_commitment =
+            crate::domain::DomainCommitment::from_block(&domain, &block2, [4u8; 32], [5u8; 32], 1)
+                .unwrap();
+        let raw_err = server
+            .submit_domain_commitment(raw_commitment.clone())
+            .await
+            .unwrap_err();
+        assert!(raw_err
+            .message()
+            .contains("Raw domain commitment submission is disabled"));
+
+        let raw_rejected_commitments = server.get_domain_commitments().await.unwrap();
+        assert_eq!(raw_rejected_commitments.as_array().unwrap().len(), 1);
+
+        let new_commitment =
+            crate::domain::DomainCommitment::from_block(&domain, &block2, [4u8; 32], [5u8; 32], 1)
+                .unwrap();
+        let mut new_commitment = new_commitment;
+        // PoW head must show difficulty bits; work floor is 1000/conf.
+        let mut pow_hash = [0u8; 32];
+        pow_hash[1] = 0x0f;
+        new_commitment.domain_block_hash = pow_hash;
+        let proof2 = crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] };
+        new_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof2);
+        let result = server
+            .submit_verified_domain_commitment(crate::domain::VerifiedDomainCommitment {
+                commitment: new_commitment.clone(),
+                proof: proof2,
+            })
+            .await;
+        // Legacy PoW finality retired - valid-looking PoW
+        // Proofs now reject. Previously this finalized successfully.
+        assert!(result.is_err(), "D3: legacy self-declared PoW must reject");
+
+        let commitments2 = server.get_domain_commitments().await.unwrap();
+        assert_eq!(commitments2.as_array().unwrap().len(), 1);
+
+        let mut block3 = block.clone();
+        block3.index = 3;
+        block3.previous_hash = block2.hash.clone();
+        block3.hash = block3.calculate_hash();
+        let mut verified_commitment =
+            crate::domain::DomainCommitment::from_block(&domain, &block3, [6u8; 32], [7u8; 32], 2)
+                .unwrap();
+        let mut pow_hash2 = [0u8; 32];
+        pow_hash2[1] = 0x0f;
+        verified_commitment.domain_block_hash = pow_hash2;
+        let proof = crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] };
+        verified_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof);
+        let verified_payload = crate::domain::VerifiedDomainCommitment {
+            commitment: verified_commitment.clone(),
+            proof,
+        };
+        let verified_result = server
+            .submit_verified_domain_commitment(verified_payload)
+            .await;
+        // Legacy PoW finality retired - must reject.
+        assert!(
+            verified_result.is_err(),
+            "D3: legacy self-declared PoW must reject"
+        );
+
+        let mut block4 = block.clone();
+        block4.index = 4;
+        let weak_proof = crate::domain::FinalityProof::PoWHeaderChain { headers: vec![] };
+        let mut weak_commitment =
+            crate::domain::DomainCommitment::from_block(&domain, &block4, [8u8; 32], [9u8; 32], 3)
+                .unwrap();
+        weak_commitment.finality_proof_hash = crate::domain::hash_finality_proof(&weak_proof);
+        let weak_payload = crate::domain::VerifiedDomainCommitment {
+            commitment: weak_commitment,
+            proof: weak_proof,
+        };
+        assert!(server
+            .submit_verified_domain_commitment(weak_payload)
+            .await
+            .is_err());
+
+        let commitments3 = server.get_domain_commitments().await.unwrap();
+        assert_eq!(commitments3.as_array().unwrap().len(), 1);
+
+        // The relayed submit path requires the sender to be an active relayer.
+        // Fund and register a relayer (staking == registration), then use it as
+        // The message sender.
+        let relayer = Address::from_hex(&"07".repeat(32)).unwrap();
+        chain
+            .credit_development_account(&relayer, 5_000)
+            .await
+            .expect("devnet credit");
+        server
+            .registry_bond_relayer(format!("0x{}", relayer.to_hex()), 2_000)
+            .await
+            .unwrap();
+
+        let cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
+            crate::cross_domain::message::CrossDomainMessageParams {
+                source_domain: 1,
+                target_domain: 2,
+                source_height: 10,
+                event_index: 0,
+                nonce: 42,
+                sender: relayer,
+                recipient: Address::zero(),
+                payload_hash: [9u8; 32],
+                kind: crate::cross_domain::MessageKind::BridgeLock,
+                expiry_height: 100,
+            },
+        );
+
+        let msg_result = server
+            .submit_cross_domain_message(cross_domain_msg.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            msg_result,
+            format!("0x{}", hex::encode(cross_domain_msg.message_id))
+        );
+
+        let asset_id = crate::cross_domain::AssetId([42u8; 32]);
+        let bridge_registration = server.register_bridge_asset(asset_id, 1).await.unwrap();
+        assert_eq!(bridge_registration["status"], "registered");
+
+        // (security audit §3) the bridge-lock → mint → burn → unlock
+        // Happy path is exercised by `src/tests/bridge_lifecycle.rs` (an
+        // Integration test against the internal `Blockchain` API), not via
+        // RPC. The RPC `bud_lockBridgeTransfer` is REMOVED because it
+        // Allowed unauthenticated permanent DoS of any `asset_id`.
+        //
+        // What this RPC test still proves: domain registration, weak-proof
+        // Rejection, relayed submit path with active-relayer gate, and
+        // Global-header sealing - i.e. the full settlement surface minus
+        // The deprecated `lock_bridge_transfer` flow.
+        let _ = Address::from([11u8; 32]);
+        let _ = Address::from([12u8; 32]);
+
+        // Re-seal the global header to confirm the RPC surface still
+        // Accepts new headers after the bridge-lock removal.
+        let rpc_sealed = server.seal_global_header().await.unwrap();
+        assert_eq!(rpc_sealed["globalHeight"], "0x1");
+        assert!(rpc_sealed["domainRegistryRoot"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x"));
+    }
+
+    #[tokio::test]
+    async fn test_storage_rpc_full_lifecycle_register_deal_challenge_answer() {
+        let (server, bc) = setup().await;
+        let manifest = crate::storage::ContentManifest::from_bytes_sliced(
+            b"hello storage rpc lifecycle test",
+            16,
+        )
+        .unwrap();
+        let s_id = manifest.shards[0].shard_id;
+
+        let reg_res = server
+            .storage_register_manifest(manifest.clone())
+            .await
+            .unwrap();
+        assert_eq!(reg_res["shardCount"], manifest.shard_count);
+
+        let get_man = server
+            .storage_get_manifest(format!("0x{}", hex::encode(manifest.manifest_id.0)))
+            .await
+            .unwrap();
+        assert_eq!(get_man["found"], true);
+
+        let op_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let op = Address::from(op_keypair.public_key_bytes());
+        let payer_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let payer = Address::from(payer_keypair.public_key_bytes());
+
+        // Give payer and operator enough balance for deal fees and bond
+        bc.credit_development_account(&payer, 100_000_000)
+            .await
+            .expect("devnet credit");
+        bc.credit_development_account(&op, 100_000_000)
+            .await
+            .expect("devnet credit");
+
+        // The deal-open RPC now requires both the payer and the operator to
+        // sign the exact deal parameters. Without these, an unsigned call
+        // could spend any account the caller names (Strix HIGH, CWE-862).
+        // The preimage also binds the manifest-derived shard size and the
+        // manifest id, because the chain prices the escrow from the manifest
+        // entry; a signature must not survive a forged manifest (Strix HIGH,
+        // CWE-347). A caller-chosen request_id is bound too, so one signed
+        // authorization cannot be replayed (Strix MEDIUM, CWE-294).
+        let request_id: u64 = 7;
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_DEAL_V1",
+            &1u32.to_le_bytes(),
+            s_id.as_bytes(),
+            op.as_bytes(),
+            payer.as_bytes(),
+            &0u8.to_le_bytes(),
+            &10u64.to_le_bytes(),
+            &100u64.to_le_bytes(),
+            &u64::from(manifest.shards[0].size).to_le_bytes(),
+            manifest.manifest_id.as_bytes(),
+            &10u64.to_le_bytes(),
+            &2_000_000u64.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        let payer_sig = payer_keypair.sign(&deal_msg).to_vec();
+        let op_sig = op_keypair.sign(&deal_msg).to_vec();
+
+        let deal_res = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                hex::encode(payer_sig.clone()),
+                hex::encode(op_sig.clone()),
+            )
+            .await
+            .unwrap();
+        let deal_id = deal_res["dealId"].as_u64().unwrap();
+
+        let watcher_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let watcher = Address::from(watcher_keypair.public_key_bytes());
+        // The opener bond is now really debited from the opener's balance, so
+        // The watcher requires one. The field was previously documented as
+        // Debited and never was, which let a freshly generated key with a zero
+        // Balance open a challenge - exactly what this test was doing.
+        bc.credit_development_account(&watcher, 100_000)
+            .await
+            .expect("devnet credit");
+        let open_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_CHALLENGE_V1",
+            &deal_id.to_le_bytes(),
+            &0u64.to_le_bytes(),
+            &15u64.to_le_bytes(),
+            &15u64.to_le_bytes(),
+            &25u64.to_le_bytes(),
+            &50u64.to_le_bytes(),
+            watcher.as_bytes(),
+        ]);
+        let open_sig = watcher_keypair.sign(&open_msg).to_vec();
+
+        let chal_res = server
+            .storage_open_challenge(crate::domain::storage_deal::RetrievalChallengeRequest {
+                deal_id,
+                byte_start: 0,
+                byte_end: 15,
+                challenge_epoch: 15,
+                deadline_epoch: 25,
+                opener_bond: 50,
+                opener: Some(watcher),
+                opener_signature: Some(open_sig),
+            })
+            .await
+            .unwrap();
+        let challenge_id = chal_res["challengeId"].as_u64().unwrap();
+
+        let answer_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ANSWER_CHALLENGE_V1",
+            &challenge_id.to_le_bytes(),
+            &[0xAA; 32],
+            op.as_bytes(),
+            &18u64.to_le_bytes(),
+        ]);
+        let answer_sig = op_keypair.sign(&answer_msg).to_vec();
+
+        let ans_res = server
+            .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
+                challenge_id,
+                _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
+                responder: op,
+                response_epoch: 18,
+                responder_signature: Some(answer_sig),
+                proof_bytes: Some(b"test-mock-proof".to_vec()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ans_res["outcome"], "Answered");
+
+        let outcome = server.storage_get_outcome(challenge_id).await.unwrap();
+        assert_eq!(outcome["challengeId"], serde_json::json!(challenge_id));
+        assert_eq!(outcome["outcome"], "Answered");
+        assert_eq!(
+            outcome["proofKind"], "interim_availability_only",
+            "retrieval results must not be presented as full Proof-of-Storage"
+        );
+        assert_eq!(outcome["proof_kind"], "interim_availability_only");
+
+        // Strix HIGH (CWE-862) regression: an unsigned deal open must be
+        // refused before any balance changes. The signatures are required,
+        // so an empty/forged pair is rejected by the RPC, never reaching the
+        // chain path that debits escrow and locks bond.
+        let unsigned = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                String::new(),
+                String::new(),
+            )
+            .await;
+        assert!(
+            unsigned.is_err(),
+            "an unsigned deal open must be refused, not debit arbitrary accounts"
+        );
+
+        // A signature from the wrong key must also be refused.
+        let wrong_key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let wrong_sig = hex::encode(wrong_key.sign(&deal_msg));
+        let wrong_payer = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                wrong_sig,
+                hex::encode(op_sig.clone()),
+            )
+            .await;
+        assert!(
+            wrong_payer.is_err(),
+            "a payer signature from the wrong key must be refused"
+        );
+
+        // Strix HIGH (CWE-347) regression: the signed preimage binds the
+        // manifest-derived shard size and the manifest id, so a valid
+        // signature cannot be replayed against a forged manifest that
+        // declares a larger shard for the same shard_id. The chain prices
+        // the escrow from that size, so without this binding the forgery
+        // would debit more than either signer authorized.
+        let mut forged = manifest.clone();
+        forged.shards[0].size = 999_999;
+        let forged_res = server
+            .storage_open_deal(
+                1,
+                forged,
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                hex::encode(payer_sig.clone()),
+                hex::encode(op_sig.clone()),
+            )
+            .await;
+        assert!(
+            forged_res.is_err(),
+            "a signature must not survive a manifest that changes the escrow size"
+        );
+
+        // Strix MEDIUM (CWE-294) regression: the same signed deal-open must
+        // not be replayable. The first call above opened an ACTIVE deal over
+        // (manifest, shard, operator, replica 0, epochs 10..100); resending
+        // the same signed request must be refused by the chain's duplicate
+        // active-deal guard before any escrow or bond moves again.
+        let replay = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                hex::encode(payer_sig.clone()),
+                hex::encode(op_sig.clone()),
+            )
+            .await;
+        assert!(
+            replay.is_err(),
+            "the same signed deal-open must not be replayable for a second escrow debit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_storage_economics_rpc_reports_chain_actor_state() {
+        let (server, _) = setup().await;
+
+        let summary = server.storage_get_economics_summary().await.unwrap();
+        assert_eq!(summary["slashedBondTotal"], serde_json::json!(0));
+        assert_eq!(summary["burnedBondTotal"], serde_json::json!(0));
+        assert_eq!(summary["eventCount"], serde_json::json!(0));
+
+        let events = server.storage_get_economics_events().await.unwrap();
+        assert_eq!(events["count"], serde_json::json!(0));
+        assert!(events["events"].as_array().unwrap().is_empty());
+    }
+
+    /// Empty registry → count 0, empty operators list.
+    #[tokio::test]
+    async fn storage_active_operators_empty() {
+        let (server, _) = setup().await;
+        let res = server.storage_active_operators().await.unwrap();
+        assert_eq!(res["roleId"], serde_json::json!(5));
+        assert_eq!(res["role"], "storage_operator");
+        assert_eq!(res["count"], serde_json::json!(0));
+        assert!(res["operators"].as_array().unwrap().is_empty());
+    }
+
+    /// Registered STORAGE_OPERATOR appears in RPC listing.
+    #[tokio::test]
+    async fn storage_active_operators_lists_registered() {
+        let (server, chain) = setup().await;
+
+        let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
+        let min_stake = 1_000u64; // PermissionlessRegistry default floor
+        chain
+            .credit_development_account(&operator, min_stake * 2)
+            .await
+            .expect("devnet credit");
+        chain
+            .bond_storage_operator(operator, min_stake)
+            .await
+            .expect("bond_storage_operator must succeed with sufficient balance");
+
+        let res = server.storage_active_operators().await.unwrap();
+        assert_eq!(res["roleId"], serde_json::json!(5));
+        assert_eq!(res["role"], "storage_operator");
+        assert_eq!(res["count"], serde_json::json!(1));
+        let ops = res["operators"].as_array().unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0]["role"], "storage_operator");
+        assert_eq!(ops[0]["stake"], serde_json::json!(min_stake));
+        let listed = ops[0]["address"].as_str().unwrap().to_lowercase();
+        assert!(
+            listed.contains(&operator.to_hex().to_lowercase())
+                || listed.contains(&format!("0x{}", operator.to_hex()).to_lowercase()),
+            "listed address {listed} must match operator"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_operator_economics_is_permissionless_and_explicit_about_slashes() {
+        let (server, _) = setup().await;
+        let operator = Address::from_hex(&"0b".repeat(32)).unwrap();
+
+        let economics = server
+            .storage_get_operator_economics(operator)
+            .await
+            .expect("read-only operator economics query must succeed");
+        assert_eq!(economics["accruedRewards"], serde_json::json!(0));
+        assert_eq!(economics["activeDealCount"], serde_json::json!(0));
+        assert_eq!(economics["slashedBondTotal"], serde_json::json!(0));
+        assert!(economics["slashHistory"].as_array().unwrap().is_empty());
+        assert_eq!(
+            economics["slashedBondDisposition"],
+            "burn_from_operator_liquid_balance_best_effort"
+        );
+    }
+}

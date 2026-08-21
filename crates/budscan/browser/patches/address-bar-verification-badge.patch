@@ -1,0 +1,205 @@
+Adres cubugu dogrulama rozeti.
+
+Rozet **en zayif halkayi** gosterir. Bir sayfanin baytlari hash'iyle tutuyor
+olabilir ve rozet yine de `yalniz beyan` diyebilir: adin cozumu kanitsizsa
+gosterilen sayfa istenen isme ait olmayabilir. Bayt dogrulamasi bu soruya
+cevap vermez ve rozetin o farki gizlememesi gerekir.
+
+Kilit simgesi kullanilmiyor. Kilit "tasima korunuyor" demek ve bu tarayicinin
+soyledigi sey o degil; ayni simgeyi farkli bir anlamda kullanmak, kullanicinin
+yillar icinde ogrendigi anlami bozar.
+
+--- a/browser/base/content/browser.js
++++ b/browser/base/content/browser.js
+@@ -1188,6 +1188,7 @@ var gBrowserInit = {
+     gIdentityHandler.init();
+     gPermissionPanel.init();
+     gProtectionsHandler.init();
++    gBudVerificationBadge.init();
+     HomePage.init();
+ 
+     let isPrivate = PrivateBrowsingUtils.isWindowPrivate(window);
+@@ -1402,6 +1403,7 @@ var gBrowserInit = {
+     gIdentityHandler.uninit();
+     gPermissionPanel.uninit();
+     gProtectionsHandler.uninit();
++    gBudVerificationBadge.uninit();
+     BrowserSearch.uninit();
+     SidebarController.uninit();
+ 
+--- a/browser/base/content/browser.xhtml
++++ b/browser/base/content/browser.xhtml
+@@ -76,6 +76,7 @@
+   <script src="chrome://browser/content/browser-siteProtections.js"/>
+   <script src="chrome://browser/content/browser-sitePermissionPanel.js"/>
+   <script src="chrome://browser/content/browser-fullZoom.js"/>
++  <script src="chrome://browser/content/browser-budVerification.js"/>
+   <script src="chrome://browser/content/browser-gestureSupport.js"/>
+ </head>
+ 
+--- a/browser/base/jar.mn
++++ b/browser/base/jar.mn
+@@ -42,6 +42,7 @@ browser.jar:
+     content/browser/browser-siteIdentity.js       (content/browser-siteIdentity.js)
+     content/browser/browser-sitePermissionPanel.js (content/browser-sitePermissionPanel.js)
+     content/browser/browser-siteProtections.js    (content/browser-siteProtections.js)
++    content/browser/browser-budVerification.js    (content/browser-budVerification.js)
+     content/browser/browser-sync.js               (content/browser-sync.js)
+     content/browser/browser-tabsintitlebar.js     (content/browser-tabsintitlebar.js)
+ 
+--- /dev/null
++++ b/browser/base/content/browser-budVerification.js
+@@ -0,0 +1,163 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/**
++ * The verification badge.
++ *
++ * Four states, matching budscan::evidence::Strength exactly. The mapping is
++ * one-to-one on purpose: a fifth UI state would be a claim the core never
++ * made, and merging two would hide a distinction the core measured.
++ *
++ * Ordering is weak-to-strong and the badge shows the weakest claim. A page
++ * whose bytes hash correctly but whose name resolution carried no proof is
++ * "yalniz beyan", not "dogrulandi": the bytes are what they say they are, and
++ * nobody proved they are the bytes this name points at.
++ */
++var gBudVerificationBadge = {
++  _element: null,
++
++  /**
++   * Strength -> [l10n id, css class].
++   *
++   * No lock icon anywhere. A lock means "the transport is protected", which
++   * is a different claim from "these bytes are the requested bytes", and
++   * reusing the icon would overwrite a meaning users spent years learning.
++   */
++  STATES: {
++    0: ["budscan-badge-refused", "bud-badge-refused"],
++    1: ["budscan-badge-claim-only", "bud-badge-claim"],
++    2: ["budscan-badge-transport-only", "bud-badge-transport"],
++    3: ["budscan-badge-verified", "bud-badge-verified"],
++  },
++
++  init() {
++    this._element = document.getElementById("bud-verification-badge");
++    gBrowser.addProgressListener(this);
++  },
++
++  uninit() {
++    gBrowser.removeProgressListener(this);
++    this._element = null;
++  },
++
++  onLocationChange(aWebProgress, aRequest, aLocation) {
++    this.update(aRequest, aLocation);
++  },
++
++  /**
++   * Refresh the badge for the current load.
++   *
++   * The default is Refused, not "nothing". A page whose strength could not be
++   * read is a page nobody measured, and an unmeasured page is not a verified
++   * one. Failing towards the strong end here would mean a bug in the channel
++   * silently produces a "dogrulandi" badge.
++   */
++  update(aRequest, aLocation) {
++    if (!this._element) {
++      return;
++    }
++
++    if (!aLocation || aLocation.scheme !== "bud") {
++      // Ordinary web. The badge is hidden rather than set to a low value:
++      // showing "yalniz tasima" on every https page would train users to
++      // ignore it, and an ignored badge measures nothing.
++      this._element.hidden = true;
++      return;
++    }
++
++    let strength = 0;
++    let badge = "";
++    try {
++      let channel = aRequest.QueryInterface(Ci.nsIBudChannel);
++      strength = channel.strength;
++      badge = channel.badgeText;
++    } catch (e) {
++      // Deliberately swallowed and deliberately left at Refused: the failure
++      // to read a strength is itself the answer.
++      strength = 0;
++      badge = "";
++    }
++
++    let [l10nId, cssClass] = this.STATES[strength] || this.STATES[0];
++    this._element.hidden = false;
++    this._element.className = cssClass;
++    document.l10n.setAttributes(this._element, l10nId);
++
++    // The full reason goes in the tooltip, from the core, untranslated: it
++    // names the layer and what it measured ("bud-getirici: baytlarin
++    // ContentId'si manifest_id'ye esit"). Rewriting it here would put a
++    // second author between the measurement and the user.
++    this._element.setAttribute("tooltiptext", badge);
++  },
++
++  QueryInterface: ChromeUtils.generateQI([
++    "nsIWebProgressListener",
++    "nsISupportsWeakReference",
++  ]),
++};
+--- a/browser/base/content/navigator-toolbox.inc.xhtml
++++ b/browser/base/content/navigator-toolbox.inc.xhtml
+@@ -212,6 +212,12 @@
+                              role="button"
+                              data-l10n-id="urlbar-permissions-granted"/>
+                     </box>
++                    <hbox id="bud-verification-badge"
++                          hidden="true"
++                          role="status"
++                          aria-live="polite">
++                      <label id="bud-verification-badge-label"/>
++                    </hbox>
+                     <box id="notification-popup-box"
+                          hidden="true"
+                          role="button">
+--- a/browser/themes/shared/urlbar-searchbar.css
++++ b/browser/themes/shared/urlbar-searchbar.css
+@@ -404,3 +404,38 @@
+ #urlbar[breakout-extend] > #urlbar-input-container > #urlbar-go-button {
+   display: none;
+ }
++
++/* Verification badge.
++ *
++ * Four states get four colours and four shapes. Colour alone would fail for
++ * anyone who cannot distinguish them, and this is a security signal rather
++ * than decoration, so the label text carries the state as well.
++ */
++#bud-verification-badge {
++  align-items: center;
++  margin-inline: 4px;
++  padding-inline: 6px;
++  border-radius: 4px;
++  font-size: 0.85em;
++}
++
++#bud-verification-badge.bud-badge-verified {
++  background-color: color-mix(in srgb, #0b8043 18%, transparent);
++  color: #0b8043;
++}
++
++#bud-verification-badge.bud-badge-transport {
++  background-color: color-mix(in srgb, #5f6368 18%, transparent);
++  color: #5f6368;
++}
++
++#bud-verification-badge.bud-badge-claim {
++  background-color: color-mix(in srgb, #b06000 18%, transparent);
++  color: #b06000;
++}
++
++#bud-verification-badge.bud-badge-refused {
++  background-color: color-mix(in srgb, #c5221f 18%, transparent);
++  color: #c5221f;
++}

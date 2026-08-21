@@ -1,0 +1,130 @@
+# deny.toml: Budlum Core supply-chain kapısı
+#
+# Bu dosya `cargo deny check` ile CI'da zorunlu kapıdır (strict mod:
+# ilk günden fail kapısı; gevşetme YOK). BudZero tarafındaki karşılığı
+# budzero/deny.toml'dur; iki graf ayrı matrix adımında denetlenir.
+#
+# Şema: cargo-deny 0.20+ (eski anahtarlar kaldırıldı).
+# Modern semantikte `allow` listesinde OLMAYAN her lisans otomatik FAIL'dir
+# (eski `unlicensed = "deny"` + copyleft yasağı davranışı böylece korunur;
+# GPL/AGPL ailesi allow'da olmadığından reddedilir).
+#
+# Lisans eklemeleri KANITSIZ yapılmaz: CI kırmızı verirse yalnızca permissive
+# lisanslı (OSI/FSF-free) crate'ler için, gerekçesi commit mesajında yazılarak
+# allow listesi genişletilir (ratchet ruhu).
+
+[graph]
+targets = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "OpenSSL",
+    "Zlib",
+    # Gerekçeli ekleme ( ilk koşu, kanıtlı): icu_* crate ailesi
+    # (idna_adapter ← url ← libp2p zinciri) Unicode-3.0 lisanslı.
+    # Unicode-3.0 OSI-onaylı permissive lisanstır (kopyalayaz DEĞİL);
+    # SPDX: Unicode-3.0. Yerel cargo-deny 0.20.2 koşusunda 19 reddin
+    # tamamının tek sebebi bu lisanstı (başka lisans ihlali yok).
+    "Unicode-3.0",
+    # D1 relayer için reqwest → webpki-roots 1.0.9 CDLA-Permissive-2.0 lisanslı.
+    # CDLA-Permissive-2.0 OSI-onaylı değil ama permissive, data license; reqwest zinciri için gerekli.
+    # Gerekçe: webpki-roots Mozilla CA bundle data'sı için CDLA-Permissive-2.0 kullanır, permissive.
+    "CDLA-Permissive-2.0",
+    # PolyForm Shield 1.0.0: bu deponun KENDİ lisansı (LicenseRef,
+    # SPDX dışı). cargo-deny workspace üyelerinin lisansını da denetlediği
+    # için allow listesine girer.
+    "LicenseRef-PolyForm-Shield-1.0.0",
+]
+
+# On copyleft (GPL / AGPL / LGPL / SSPL): there is deliberately no `deny`
+# list here. cargo-deny removed `[licenses] deny` in 0.20 because
+# the allow-list above is already closed, anything absent from it is
+# refused, so a separate deny list would be a second spelling of the same
+# rule and, worse, a place where someone could later "fix" a failure by
+# quietly editing one list while the other still passed.
+#
+# Verified rather than assumed (cargo-deny 0.20.2, 2026-07-27): a crate
+# declaring `GPL-3.0` against this exact config fails with
+#   error[rejected]: license is not explicitly allowed
+#   licenses FAILED   (exit 4)
+# The CI job carries a canary that re-proves the gate can reject, so a green
+# result cannot come from the check silently doing nothing.
+#
+# A dual-licensed crate is a different case and is accepted through its
+# permissive arm: r-efi is `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and
+# cargo-deny evaluates the SPDX expression, not the individual identifiers.
+# It is also only reachable on `target_os = "uefi"`, which Budlum never
+# builds for.
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Exactly one git source is allowed: the rust-libp2p tree, pinned by revision
+# in every workspace manifest that depends on it.
+#
+# libp2p 0.57.0 is tagged upstream but unpublished, and it is the only build
+# that closes GHSA-vxx9-2994-q338 (yamux 0.12/0.13) plus GHSA-3v94-mw7p-v465
+# and GHSA-q2qq-hmj6-3wpp (hickory-proto 0.25.2). The alternative was to keep
+# ignoring three advisories, which this policy forbids.
+#
+# `unknown-git = "deny"` still holds: any other git dependency fails the gate,
+# and the pin is by full revision hash, so the source cannot move under us.
+# Delete this entry together with the [patch.crates-io] blocks once 0.57.0 is
+# on crates.io.
+allow-git = ["https://github.com/libp2p/rust-libp2p"]
+
+[advisories]
+# unmaintained = "none": eski davranışla aynı ("warn, fail yok").
+#
+# Bu kararın tek gerekçesi uyarıların başka bir yerde görünür kalmasıdır. Bu
+# satır 2026-07-31'e kadar "CI dependency-audit job'ındaki cargo audit her
+# koşuda unmaintained uyarılarını raporlar" diyordu ve bu DOĞRU DEĞİLDİ:
+# `scripts/audit-deps.sh` bulguları `--json` ile geçici bir dosyaya, ham çıktıyı
+# da `target/audit/DEPENDENCY_AUDIT.md`'ye yazıyordu; o raporu hiçbir workflow
+# artefakt olarak yüklemiyordu. İş yeşil dönüyor, log'da tek bir danışma adı
+# geçmiyordu.
+#
+# Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
+# tarafından ikame edildi) mainnet varsayılan PQ imza yolunda duruyor. Karar
+# verilmiş ve `.quality/osv-scanner.toml`'da gerekçesiyle kayıtlı; buna karşın
+# cargo audit tarafında hiçbir koşuda görünmedi. Aynı ağacı tarayan iki
+# araçtan yalnız birinin sonucu okunabiliyordu - "warn, fail yok" kararının
+# dayandığı görünürlük tek bacaklıydı.
+#
+# `audit-deps.sh` artık iki lockfile'ın ham çıktısını log'a basıyor ve görülen
+# RUSTSEC kimliklerini tek listede özetliyor. Bu satırın gerekçesi ancak o
+# çıktı orada durduğu sürece geçerlidir, kaldırılırsa bu karar da yeniden
+# değerlendirilmelidir.
+unmaintained = "none"
+# unsound: doğrudan bağımlılıklarımızda unsound danışması = FAIL (sıkı).
+unsound = "workspace"
+ignore = [
+    # Deliberately empty.
+    #
+    # Until 2026-07-28 this carried RUSTSEC-2026-0118 and RUSTSEC-2026-0119
+    # (hickory-proto), argued as unreachable because DNSSEC was not compiled
+    # in. The argument was true but it was a workaround: libp2p 0.56 pinned
+    # hickory ^0.25.2 and the resolver rejected 0.26.1.
+    #
+    # They are patched now. The root Cargo.toml pins libp2p to the 0.57.0 tree,
+    # which moves libp2p-dns to hickory 0.26 and libp2p-yamux to yamux 0.14, so
+    # the advisories are fixed rather than carried.
+    #
+    # Before adding an entry here: upgrade the dependency. An exception needs a
+    # reachability proof locked by a test in src/tests/advisory_reachability.rs,
+    # not a note.
+]

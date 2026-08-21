@@ -1,0 +1,75 @@
+# BUDSCAN YAPIM YAPILANDIRMASI
+#
+# Bu dosya Mozilla kaynagi indirilip yamalar uygulandiktan sonra derleyiciye
+# verilir. Buradaki her satir bir karar; sebebi yaninda yazili degilse satir
+# buraya girmemeli.
+#
+# README'nin dizin duzeni tablosu bu dosyayi ilan ediyor. Ilan edilen bir
+# dosyanin agacta bulunmamasi, okuyanin var sandigi bir seyin olmamasi
+# demektir; bu, eksik dosyadan daha kotudur.
+
+ac_add_options --enable-application=browser
+
+# ── OLMAYAN OZELLIKLER ────────────────────────────────────────────────
+#
+# Bunlar kapali cunku her biri, tarayicinin disari veri gonderdigi bir yol.
+# Bir dogrulama tarayicisinin kendi kacindigi seyi yapmasi olurdu.
+
+ac_add_options --disable-crashreporter
+ac_add_options --disable-default-browser-agent
+ac_add_options --disable-debug
+ac_add_options --disable-tests
+
+mk_add_options MOZ_CRASHREPORTER=0
+mk_add_options MOZ_DATA_REPORTING=0
+mk_add_options MOZ_SERVICES_HEALTHREPORT=0
+mk_add_options MOZ_TELEMETRY_REPORTING=0
+
+# ── SERTLESTIRME ──────────────────────────────────────────────────────
+
+ac_add_options --enable-hardening
+ac_add_options --enable-stl-hardening
+
+# Ilklenmemis degisken okumasi sifir okur. Bir bilgi sizintisini kullanilabilir
+# olmaktan cikarir; okunan deger artik onceki tahsisin kalintisi degil.
+export CFLAGS="-ftrivial-auto-var-init=zero -fwrapv $CFLAGS"
+export CXXFLAGS="-ftrivial-auto-var-init=zero -fwrapv $CXXFLAGS"
+
+# ── DERLEME ───────────────────────────────────────────────────────────
+
+ac_add_options --enable-optimize
+ac_add_options --enable-release
+ac_add_options --enable-rust-simd
+ac_add_options --disable-cargo-incremental
+ac_add_options --enable-bootstrap
+
+ac_add_options --enable-replace-malloc
+ac_add_options --enable-jemalloc
+
+# ── MARKA ─────────────────────────────────────────────────────────────
+#
+# Uygulama adi ve marka dizini budscan. Bu agacta baska bir tarayicinin
+# marka adi gecmez; `budscan-patchset` kapisi bunu CI'da olcuyor.
+
+ac_add_options --with-app-name=budscan
+ac_add_options --with-app-basename=Budscan
+ac_add_options --with-branding=browser/branding/budscan
+
+ac_add_options --with-l10n-base=$PWD/budscan/browser/l10n
+
+# ── GUNCELLEME ────────────────────────────────────────────────────────
+#
+# Guncelleme kanali imzali. `MOZ_REQUIRE_SIGNING` bos birakilmiyor: imzasiz
+# eklenti yuklenebilmesi, dogrulama iddiasi olan bir tarayicida dogrulanmamis
+# kodun ayricalikli baglamda calismasi demek.
+
+ac_add_options --enable-updater
+ac_add_options --enable-update-channel=release
+ac_add_options --disable-maintenance-service
+ac_add_options --enable-nss-mar
+
+export MAR_CHANNEL_ID=budscan-release
+export ACCEPTED_MAR_CHANNEL_IDS=budscan-release
+
+export MOZ_REQUIRE_SIGNING=1
+export MOZILLA_OFFICIAL=1

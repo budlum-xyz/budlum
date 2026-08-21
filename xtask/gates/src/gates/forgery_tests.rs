@@ -1,0 +1,227 @@
+//! Required forgery tests must exist and be real `#[test]`s that assert a
+//! refusal.
+//!
+//! Ported from `scripts/check-forgery-tests-are-named.sh`. Each required name
+//! must appear as a `#[test] fn`, and its body (following helper calls) must
+//! assert a refusal.
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+const REQUIRED: &[&str] = &[
+    "rejects_a_forged_difference",
+    "rejects_a_forged_product",
+    "rejects_a_forged_quotient_when_dividing_by_zero",
+    "rejects_a_comparison_read_from_a_wrapped_bit_string",
+    "rejects_a_load_that_denies_touching_memory",
+    "rejects_a_pop_that_invents_a_value",
+    "rejects_a_return_to_an_address_never_pushed",
+    "rejects_a_jump_past_the_end_of_the_program",
+    "rejects_a_row_relabelled_as_a_different_opcode",
+    "rejects_a_swapped_source_register",
+    "rejects_a_write_to_the_zero_register",
+    "rejects_a_register_that_changes_value_without_a_write",
+    "rejects_an_assert_that_claims_zero_is_non_zero",
+    "rejects_an_invented_starting_register",
+    "rejects_an_opcode_column_that_disagrees_with_the_program",
+    "rejects_a_redirected_storage_slot",
+    "rejects_a_shifted_event_digest",
+    "rejects_tampered_bitwise_and_result",
+    "rejects_tampered_comparison_result",
+    "rejects_tampered_event_digest",
+    "rejects_tampered_poseidon_sbox",
+    "rejects_tampered_storage_write_result",
+    "rejects_a_proof_claiming_an_impossible_degree",
+];
+
+fn collect_sources(root: &Path) -> String {
+    let mut blob = String::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![root.join("budzero")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.filter_map(Result::ok) {
+            let Ok(path_kind) = e.file_type() else {
+                continue;
+            };
+            let path = e.path();
+            if path_kind.is_dir() {
+                let n = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if !matches!(n.as_str(), ".git" | "target") {
+                    stack.push(path);
+                }
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    blob.push_str(&text);
+                    blob.push('\n');
+                }
+            }
+        }
+    }
+    blob
+}
+
+/// Brace-matched body of `fn <name>`.
+fn body_of(blob: &str, name: &str) -> Option<String> {
+    let needle = format!("fn {name}(");
+    let start = blob.find(&needle)?;
+    let rest = &blob[start + needle.len()..];
+    let open = rest.find('{')? + start + needle.len();
+    let mut depth = 1i32;
+    let mut i = open;
+    let b = blob.as_bytes();
+    while i < b.len() {
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(blob[open..i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn strip_strings(text: &str) -> String {
+    let mut out = String::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' || b[i] == b'\'' {
+            let q = b[i];
+            out.push(if q == b'"' { '"' } else { '\'' });
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' && i + 1 < b.len() {
+                    i += 2;
+                    continue;
+                }
+                if b[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// # Errors
+///
+/// Returns the list of violated claims.
+pub fn run(root: &Path) -> Result<String, String> {
+    let blob = collect_sources(root);
+    if blob.is_empty() {
+        return Err(format!("no .rs sources under {}/budzero", root.display()));
+    }
+    let mut problems: Vec<String> = Vec::new();
+
+    for name in REQUIRED {
+        // `#[test] fn <name>(`
+        let is_test = blob.contains("#[test]") && blob.contains(&format!("fn {name}("));
+        // check attribute precedes the fn
+        let test_before_fn = blob
+            .find(&format!("fn {name}("))
+            .is_some_and(|fn_pos| blob[..fn_pos].rfind("#[test]").is_some());
+        if is_test && test_before_fn {
+            continue;
+        }
+        if blob.contains(&format!("fn {name}(")) {
+            problems.push(format!(
+                "`{name}` exists but is not a `#[test]`-annotated function."
+            ));
+        } else {
+            problems.push(format!("`{name}` is missing."));
+        }
+    }
+
+    // Each required test's body must assert a refusal (directly or via the
+    // shared helper).
+    let helper = "prove_fails_after_tamper";
+    for name in REQUIRED {
+        let Some(body) = body_of(&blob, name) else {
+            continue;
+        };
+        let body = strip_strings(&body);
+        let delegates = body.contains(helper);
+        let asserts_failure = body.contains("is_err()")
+            || body.contains("expect_err")
+            || body.contains("unwrap_err")
+            || body.contains("Err(VerifyError::");
+        let rejects_at_vm =
+            body.contains("assert_eq!(vm.registers") || body.contains("assert!(!receipt.success");
+        if !delegates && !asserts_failure && !rejects_at_vm {
+            problems.push(format!(
+                "`{name}` builds a forgery and never asserts the proof is \
+                 refused. A test that tampers and then expects success is \
+                 coverage on paper."
+            ));
+        }
+    }
+
+    if !problems.is_empty() {
+        let mut msg = String::new();
+        for p in &problems {
+            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
+        }
+        return Err(msg);
+    }
+    Ok(format!(
+        "forgery-names gate OK: {} required forgery tests are real and assert a refusal",
+        REQUIRED.len()
+    ))
+}
+
+/// # Errors
+///
+/// Returns a finding when a defect fixture passes.
+pub fn self_test() -> Result<String, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .subsec_nanos();
+    let dir = std::env::temp_dir().join(format!("budlum-gates-ft-{}-{nanos}", std::process::id()));
+    let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
+
+    let mut good = String::new();
+    for n in REQUIRED {
+        writeln!(
+            good,
+            "#[test]\nfn {n}() {{\n    assert!(prove_fails_after_tamper());\n}}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    good.push_str("fn prove_fails_after_tamper() -> bool { true }\n");
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), &good).map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: dogru testler reddedildi"));
+    }
+    // Remove #[test] from one.
+    let bad = good.replace(
+        "#[test]\nfn rejects_a_forged_difference()",
+        "fn rejects_a_forged_difference()",
+    );
+    std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), bad).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: #[test] tasimayan isim gecti"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(String::from(
+        "forgery-tests kanaryasi OK (test PASS, testsiz FAIL).",
+    ))
+}

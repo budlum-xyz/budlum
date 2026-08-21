@@ -1,0 +1,32 @@
+# CI-only overrides for the devnet compose stack.
+#
+# `docker-compose.yml` is the file people copy. It therefore keeps RPC
+# authentication ON and does not publish the public RPC port, because the
+# README points at it from a "quick start" section and someone will eventually
+# run it on a machine with a public address. A default that is only safe as
+# long as nobody takes it seriously is not a safe default.
+#
+# The smoke harness needs the opposite: an unauthenticated listener it can
+# probe with plain curl and no headers. Those settings live here, applied
+# explicitly:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#
+# Anyone running that command has stated what they want. Anyone running plain
+# `docker compose up` gets the authenticated stack.
+
+services:
+  node1:
+    # Publish the public RPC to the host so the smoke script can reach it at
+    # 127.0.0.1:8545. Only ever bound on a CI runner.
+    ports:
+      - "4001:4001"
+      - "8545:8545"
+      - "9090:9090"
+    environment:
+      - RUST_LOG=info
+      # Disabled so the smoke probes can call JSON-RPC without credentials.
+      # This is the line that must never reach a real deployment, which is why
+      # it lives in a file that has to be named on the command line.
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=

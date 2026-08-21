@@ -1,0 +1,37 @@
+[package]
+name = "bud-core"
+version = "0.1.0"
+edition = "2021"
+description = "B.U.D. 1.0/2.0/3.0 (Broad Universal Database) - Rust iskelet, no unsafe, 128KB block 27tx, ML-DSA-87 final"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+authors = ["Lubo's Ruler <ayazkussann@gmail.com>"]
+
+[lib]
+name = "bud_core"
+path = "src/lib.rs"
+
+[features]
+# B.U.D. Edition: surum 1.0/2.0/3.0 arasinda secim yapilabilir.
+#   bud1 = BYO (kendi sunucu/cihaz, kuralsiz) - edition.rs runtime secimi
+#   bud2 = .bud konteyner depolama (DEFAULT)
+#   bud3 = tarif-tek-nesne (3.0 modulleri; bud2 uzerine insa edilir)
+default = ["bud2"]
+bud1 = []
+bud2 = []
+bud3 = ["bud2"]
+
+[dependencies]
+sha3 = "0.10"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+ml-dsa = { version = "0.1", features = ["getrandom"] }
+zstd = "0.13"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"

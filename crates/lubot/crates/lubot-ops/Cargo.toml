@@ -1,0 +1,17 @@
+[package]
+name = "lubot-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Lubot operatör CLI iskeleti (register/bond/serve/tune/status)"
+
+[[bin]]
+name = "lubot-ops"
+path = "src/main.rs"
+
+[dependencies]
+lubot-core = { path = "../lubot-core" }
+lubot-serve = { path = "../lubot-serve" }
+lubot-tune = { path = "../lubot-tune" }
+serde = { version = "1", features = ["derive"] }

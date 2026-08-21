@@ -1,0 +1,133 @@
+# OSV-Scanner, RustSec dışı zafiyet kaynaklarını kapatan tarama
+#
+# NEDEN cargo-audit/cargo-deny YETMİYOR: her ikisi de yalnız RustSec advisory
+# Veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
+# RustSec'te karşılığı olmayan kayıtları da görür.
+#
+# Bu somut olarak kanıtlandı: bu workflow eklenirken yapılan ilk tarama
+# CVE-2026-32314 / GHSA-vxx9-2994-q338'i yakaladı - yamux'ta kimlik doğrulaması
+# GEREKTİRMEYEN, uzaktan tetiklenebilir panic (DoS), CVSS 8.7. Aynı ağaçta
+# `cargo audit` "0 vulnerabilities found" diyordu, çünkü bu kaydın RustSec
+# Karşılığı yok (rustsec/advisory-db/crates/yamux → 404). Bir L1 node'un P2P
+# Multiplexer'ında bu, cargo-audit'in yapısal olarak göremeyeceği bir sınıf.
+#
+# Kapı politikası: bulgu = FAIL (`continue-on-error` YOK). İstisnalar
+# .quality/osv-scanner.toml ve budzero/osv-scanner.toml içinde, her biri kodda neden
+# ERİŞİLEMEZ olduğunun kanıtıyla (VEX mantığı) yazılır. Erişilebilir bir bulgu
+# Ignore edilmez, bağımlılık yükseltilir.
+#
+# Araç sürüm + sha256 pinlidir (gitleaks/hadolint/actionlint/typos deseni).
+
+name: OSV Scanner
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Haftalık: yeni advisory kod değişmeden de yayınlanabilir.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osv-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  osv-scan:
+    name: OSV Scanner (OSV.dev = RustSec + GHSA + NVD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: osv-scanner v2.4.0 kur (sürüm + sha256 pinli)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/osv-scanner \
+            https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64
+          echo "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0  /tmp/osv-scanner" | sha256sum -c -
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      # Vacuous-gate koruması: "No issues found" hem temiz bir ağacı hem de hiç
+      # Çalışmamış/ağa ulaşamamış bir taramayı gösterebilir. Kanarya, bilinen
+      # Savunmasız bir sürümü içeren sentetik bir lockfile üretip tarayıcının
+      # Onu YAKALADIĞINI kanıtlar; yakalayamazsa kapı güvenilmezdir.
+      - name: Kanarya - OSV alarmının çalıştığının kanıtı
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/osv-canary
+          cat > /tmp/osv-canary/Cargo.lock <<'CANARY'
+          version = 3
+
+          [[package]]
+          name = "canary-app"
+          version = "0.1.0"
+          dependencies = ["yamux"]
+
+          [[package]]
+          name = "yamux"
+          version = "0.12.1"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          CANARY
+          if osv-scanner scan source --lockfile=/tmp/osv-canary/Cargo.lock; then
+            echo "HATA: OSV kanaryayı (yamux 0.12.1 / GHSA-vxx9-2994-q338) yakalayamadı → tarama güvenilmez (vacuous gate)!"
+            exit 1
+          fi
+          echo "Kanarya yakalandı → OSV alarmı çalışıyor."
+
+      # fuzz/Cargo.lock ve crates/wallet-core/Cargo.lock buraya sonradan eklendi.
+      # Depoda dort kilit dosyasi var, tarama ikisini okuyordu. fuzz kilidi
+      # kok kilitle ayni 23 git paketini ve ayrica kendi libfuzzer zincirini
+      # tasiyor; wallet-core BIP39 ve SLIP-0010 anahtar turetmesini tasiyor,
+      # yani taranmayan iki agactan biri dogrudan anahtar ureten agacti.
+      # Fuzz kosucusu CI makinesinde ve gelistirici makinesinde calisir,
+      # cuzdan kodu ise kullanicinin tohumunu gorur; ikisi de "sadece test"
+      # degildir.
+      #
+      # crates/budscan/Cargo.lock ayni sebeple eklendi ve asagidaki "her lockfile
+      # tarandi mi" adimi tam olarak bunu yakaladi: budscan kendi
+      # workspace'i oldugu icin kok kilide girmiyor, listeye elle
+      # eklenmeden once kapsam disindaydi. Kapi calisti.
+      - name: Tarama - depodaki her lockfile (bulgu = fail)
+        run: |
+          set -euo pipefail
+          osv-scanner scan source \
+            --config=.quality/osv-scanner.toml \
+            --lockfile=Cargo.lock \
+            --lockfile=budzero/Cargo.lock \
+            --lockfile=fuzz/Cargo.lock \
+            --lockfile=crates/wallet-core/Cargo.lock \
+            --lockfile=crates/note-packing/Cargo.lock \
+            --lockfile=xtask/gates/Cargo.lock \
+            --lockfile=xtask/tools/Cargo.lock \
+            --lockfile=crates/lubot/Cargo.lock \
+            --lockfile=crates/budscan/Cargo.lock \
+            --lockfile=bud/Cargo.lock
+
+      # Yukaridaki listenin eksilmemesi icin: depodaki her Cargo.lock taranmali.
+      # Yeni bir alt-crate eklendiginde kilidi sessizce kapsam disinda kalirsa
+      # bu adim kirmizi doner.
+      - name: Her lockfile tarandi mi
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r lock; do
+            rel="${lock#./}"
+            if ! grep -q -- "--lockfile=${rel}" .github/workflows/osv-scanner.yml; then
+              echo "TARANMIYOR: ${rel}"
+              missing=1
+            fi
+          done < <(find . -name Cargo.lock -not -path './target/*' -not -path '*/target/*')
+          if [ "$missing" -ne 0 ]; then
+            echo "Yukaridaki kilit dosyalari OSV taramasinin disinda."
+            exit 1
+          fi
+          echo "Depodaki her Cargo.lock OSV taramasinda."

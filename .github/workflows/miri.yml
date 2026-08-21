@@ -1,0 +1,170 @@
+name: Miri UB Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Haftalık gece koşusu, sürekli UB denetimi
+  schedule:
+    - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  miri-crypto:
+    # CI Genişletme Madde 4: Miri undefined behavior denetimi.
+    # Crypto ve budzero modüllerinde UB arar.
+    #
+    # Sertleştirme (2026-07-21): nightly artık TARİH-PİNLİ
+    # (nightly-2026-07-19). Öncesi "nightly" kayan etiket → Miri revizyon
+    # Değişince aynı commit'in CI sonucu değişebiliyordu (dışsal kırmızı
+    # Riski + reprodüksiyon zafiyeti). Pin kaldırımı/güncellenmesi yalnızca
+    # Commit mesajında gerekçeyle yapılır (MSRV pin disipliniyle aynı ruh).
+    # Not: src/ ve budzero'da `#![forbid(unsafe_code)]` + 0 unsafe temiz
+    # Tabanı var; bu kapı bağımlılık zinciri üzerinden yüzeyleşen UB ve
+    # MIR-düzeyi hatalar için erken uyarıdır.
+    name: Miri UB Denetimi (crypto + budzero, nightly-2026-07-19) (Madde 4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly Rust with Miri
+        run: |
+          rustup toolchain install nightly-2026-07-19 --component miri
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+          cache-on-failure: true
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Miri - crypto crate
+        run: |
+          echo "Running Miri on crypto module..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- crypto 2>&1 | tee /tmp/miri-crypto.txt
+          echo "Miri crypto: $(grep -c 'test result: ok' /tmp/miri-crypto.txt || echo '0') suites passed"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+      - name: Miri - budzero bud-vm
+        run: |
+          echo "Running Miri on bud-vm module..."
+          cargo +nightly-2026-07-19 miri test -p bud-vm --lib 2>&1 | tee /tmp/miri-budvm.txt
+          echo "Miri bud-vm: $(grep -c 'test result: ok' /tmp/miri-budvm.txt || echo '0') suites passed"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+      - name: Miri - storage module
+        run: |
+          echo "Running Miri on storage module..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage 2>&1 | tee /tmp/miri-storage.txt
+          echo "Miri storage: $(grep -c 'test result: ok' /tmp/miri-storage.txt || echo '0') suites passed"
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+        continue-on-error: true  # storage sled bağımlılığı Miri ile uyumsuz olabilir
+
+  asan:
+    # cargo-careful'in alternatifi. Arac 0.4.7 pinli nightly ile sysroot
+    # kuramiyor (std `panic_unwind`'i `dep:` arkasina aldi, arac hala implicit
+    # ozellik olarak istiyor). Nightly'yi araca gore oynatmak, nightly'nin
+    # pinli olma sebebini tersine cevirirdi.
+    #
+    # Bu yuzden arac degil, aracin yaptigi is alindi. cargo-careful iki sey
+    # yapiyor: std'yi debug_assertions ile derliyor ve ek calisma-ani
+    # kontrolleri koyduruyor. Ikisi de dogrudan bayraklarla elde edilebilir:
+    #
+    #   -Zbuild-std                std'yi kaynaktan derle
+    #   -Zsanitizer=address        bellek hatalarini calisma aninda yakala
+    #   -Cdebug-assertions=on      std'nin performans icin kapattigi
+    #                              iddialari geri ac
+    #
+    # Kapsam farki durust olsun: cargo-careful ekstra olarak bazi rustc
+    # kontrollerini aciyor, ASan ise onun gormedigi bellek hatalarini
+    # goruyor. Ikisi tamamen ayni degil, ama bosluk aracin yoklugunda
+    # kapsanmadan kalan seyin buyuk kismini kapsiyor: Miri'nin
+    # calistiramadigi FFI ve sistem cagrisi iceren yollar.
+    #
+    # BLOKLAR. Kanaryasi var.
+    name: AddressSanitizer + debug std (careful yerine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly, tarih-pinli)
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: nightly-2026-07-19
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: asan
+      - name: protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      # Kanarya: bilerek serbest birakilmis bellege erisen bir program yazilir
+      # ve ASan'in onu yakalamasi beklenir. Yakalamazsa arac calismiyor
+      # demektir ve temiz kosu bir sey ifade etmez. TSan isinde ayni sey
+      # yillarca eksikti: "hata yok" ile "ikili hic calismadi" ayirt
+      # edilemiyordu.
+      - name: ASan kanaryasi (arac gercekten yakaliyor mu)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/asan-canary/src
+          cat > /tmp/asan-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "asan-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          cat > /tmp/asan-canary/src/main.rs <<'EOF'
+          // Serbest birakilmis bellege erisim. ASan bunu gormezse tarama
+          // guvenilmez.
+          fn main() {
+              let p = {
+                  let v = vec![1u8, 2, 3, 4];
+                  v.as_ptr()
+              };
+              let x = unsafe { *p };
+              println!("{x}");
+          }
+          EOF
+          cd /tmp/asan-canary
+          export RUSTFLAGS="-Zsanitizer=address"
+          # Ciktiyi ONCE dosyaya al, SONRA ara.
+          #
+          # Ilk yazim `cargo run ... | tee log | grep -q ...` seklindeydi ve
+          # `set -euo pipefail` altinda calismadi: program ASan raporuyla
+          # sifirdan farkli cikinca pipefail boru hattini orada oldurdu, grep
+          # hic kosmadi, ve kanarya "yakalayamadi" dedi. ASan aslinda
+          # yakalamisti; logdaki shadow byte dokumu oradaydi. Yani kanarya
+          # araci degil kendi kabuk mantigini olcuyordu.
+          #
+          # `|| true` bilerek: bu komutun BASARISIZ olmasi bekleniyor, cunku
+          # kasitli bir bellek hatasi calistiriyor. Karar asagidaki grep'te
+          # veriliyor ve o blokluyor.
+          cargo +nightly-2026-07-19 run -Zbuild-std \
+            --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1 || true
+          if grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope" \
+               /tmp/asan-canary.log; then
+            echo "kanarya OK: ASan bilerek yazilmis bellek hatasini yakaladi."
+          else
+            echo "KANARYA DUSTU: ASan bir bellek hatasini yakalayamadi, yani bu is" >&2
+            echo "temiz kossa da bir sey kanitlamaz." >&2
+            tail -25 /tmp/asan-canary.log >&2
+            exit 1
+          fi
+
+      - name: ASan + debug std (lib testleri)
+        run: |
+          set -euo pipefail
+          export RUSTFLAGS="-Zsanitizer=address -Cdebug-assertions=on"
+          export ASAN_OPTIONS="detect_leaks=0"
+          cargo +nightly-2026-07-19 test --lib -Zbuild-std \
+            --target x86_64-unknown-linux-gnu -- --test-threads=1

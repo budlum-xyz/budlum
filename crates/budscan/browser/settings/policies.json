@@ -1,0 +1,56 @@
+{
+  "//": "BUDSCAN DAGITIM POLITIKASI. budscan.cfg kilitli tercihleri belirler; bu dosya kurumsal politika katmanidir ve tercihlerden once uygulanir. Ikisi ayni seyi soylemek zorunda: bir ayarin iki katmanda farkli olmasi, hangisinin kazandigini okunamaz yapar.",
+
+  "policies": {
+    "//_telemetri": "Tarayicinin ne gorduğunu bildirmesi, kacindigi seyi yapmasidir. Politika katmaninda da kapali; budscan.cfg'deki lockPref ile ayni yonde.",
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisablePocket": true,
+    "DisableFeedbackCommands": true,
+    "DisableFirefoxAccounts": true,
+    "DisableProfileImport": true,
+    "DisableFormHistory": true,
+
+    "//_kaza": "Kaza raporu bir bellek dokumudur; dogrulanmis icerigin baytlarini disari tasiyabilir.",
+    "DisableFirefoxScreenshots": true,
+
+    "//_guncelleme": "Guncelleme acik kalir. Guncellenmeyen bir tarayici, dogrulama iddiasini surduremez.",
+    "AppAutoUpdate": true,
+    "DisableAppUpdate": false,
+
+    "//_imza": "Imzasiz eklenti yuklenemez. Ayricalikli baglamda dogrulanmamis kod calismasi, rozetin olctugu her seyi anlamsiz kilar.",
+    "ExtensionUpdate": true,
+    "InstallAddonsPermission": {
+      "Default": false
+    },
+
+    "//_ilkcalistirma": "Ilk calistirmada disari hicbir istek gitmez.",
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DontCheckDefaultBrowser": true,
+    "NoDefaultBookmarks": true,
+
+    "//_arama": "Arama onerileri her tus vurusunu bir sunucuya gonderir.",
+    "SearchSuggestEnabled": false,
+
+    "//_dns": "DNS-over-HTTPS kapali birakiliyor: bud:// adlarinin cozumu budscan cekirdegine ait ve bir DoH saglayicisina devredilmesi, cozumun kanitini ucuncu tarafa tasir.",
+    "DNSOverHTTPS": {
+      "Enabled": false,
+      "Locked": true
+    },
+
+    "//_sifreler": "Yerlesik parola yoneticisi kapali; dogrulama tarayicisinin kimlik deposu olmasi ayri bir saldiri yuzeyi.",
+    "OfferToSaveLogins": false,
+
+    "//_izleme": "Sikı izleyici korumasi, kullanicinin degistirebilecegi bir varsayilan olarak degil politika olarak.",
+    "EnableTrackingProtection": {
+      "Value": true,
+      "Locked": false,
+      "Cryptomining": true,
+      "Fingerprinting": true
+    },
+
+    "//_temizlik": "Kapanista oturum verisi silinmez: kullanicinin kendi tercihi, dogrulama iddiasini bozmuyor. Serbest birakilmasi bilincli.",
+    "SanitizeOnShutdown": false
+  }
+}

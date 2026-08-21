@@ -1,0 +1,46 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    # CI Genişletme Madde 10: Performans regresyon takibi.
+    # Criterion benchmark'ları çalıştırır, sonuçları artifact olarak saklar.
+    name: Benchmark Regresyon (Madde 10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-07-16
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Criterion benchmark'ları çalıştır
+        run: |
+          cargo bench --bench micro -- --output-format bencher 2>&1 | tee /tmp/bench-micro.txt
+          cargo bench --bench single_node -- --output-format bencher 2>&1 | tee /tmp/bench-single.txt
+          echo "Benchmark runs completed."
+      - name: Sonuçları artifact olarak sakla
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-results
+          path: /tmp/bench-*.txt
+          retention-days: 30

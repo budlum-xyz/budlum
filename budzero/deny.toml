@@ -1,0 +1,64 @@
+# budzero/deny.toml: BudZero/BudZKVM supply-chain kapısı
+#
+# Kökteli deny.toml ile aynı politika; BudZero grafiği kendi matrix adımında
+# denetlenir. Şema cargo-deny 0.20+'a güncellendi (eski anahtarlar kaldırıldı;
+# davranış birebir korundu: allow dışı lisans = FAIL, bilinmeyen kaynak = FAIL).
+
+[graph]
+targets = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "OpenSSL",
+    "Zlib",
+    # Kökle aynı gerekçe: bud-node → libp2p → idna_adapter zinciri icu_*
+    # crate'lerini getirir; Unicode-3.0 OSI-onaylı permissive lisanstır.
+    "Unicode-3.0",
+    # PolyForm Shield 1.0.0: kök repoyla aynı - workspace üyesi lisansı.
+    "LicenseRef-PolyForm-Shield-1.0.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Exactly one git source, mirroring ../.quality/deny.toml.
+#
+# bud-node depends on libp2p, which comes from the rust-libp2p tree pinned by
+# revision: 0.57.0 is tagged upstream but not on crates.io, and it is the only
+# build that closes GHSA-vxx9-2994-q338 (yamux) plus GHSA-3v94-mw7p-v465 and
+# GHSA-q2qq-hmj6-3wpp (hickory-proto). Every in-registry route was measured and
+# rejected: libp2p-yamux 0.47 binds yamux 0.12.1 *and* 0.13.3 under separate
+# package aliases, so `cargo update yamux@0.12.1 --precise 0.13.10` fails with
+# "candidate versions found which didn't match", and a [patch] entry aimed at
+# crates.io is refused ("patches must point to different sources").
+# libp2p-dns 0.44 requires hickory-resolver ^0.25.2, which 0.26.1 cannot
+# satisfy, and RUSTSEC-2026-0118 has `patched = []` for the whole 0.25 line.
+#
+# `unknown-git = "deny"` still holds: any other git dependency fails the gate.
+# Remove this together with the pin once 0.57.0 is published.
+allow-git = ["https://github.com/libp2p/rust-libp2p"]
+
+[advisories]
+# Kökle aynı politika (gerekçeler ../../deny.toml'da ayrıntılı):
+# unmaintained → fail değil (cargo audit uyarılarıyla görünür kalır),
+# unsound → doğrudan bağımlılıkta FAIL (sıkı).
+unmaintained = "none"
+unsound = "workspace"
+ignore = [
+    { id = "RUSTSEC-2026-0118", reason = "HTTP/DNSSEC yolu kodda kullanılmaz (grep: DnssecDnsHandle|dnssec = 0 eşleşme); libp2p-mdns DNSSEC doğrulamaz → ulaşılamaz. Yükseltme libp2p 0.55 hattında imkânsız (libp2p-mdns ^0.25.0-alpha.4 pini). Ayrıntı: ../../deny.toml" },
+    { id = "RUSTSEC-2026-0119", reason = "Tetikleme saldırganın aynı L2 multicast domain'inde olmasını gerektirir; mainnet/testnet config'inde mdns_enabled=false. Etki LAN-komşuluğu DoS. libp2p yükseltmesiyle kapanacak. Ayrıntı: ../../deny.toml" },
+]
