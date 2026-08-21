@@ -633,14 +633,23 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
     }
 }
 
-/// Production loop - BudToEth direction
+/// BudToEth direction.
+///
+/// NOT PRODUCTION: this loop does not relay. It polls on a timer, increments a
+/// local counter and logs; it never reads a burn event, builds a proof or
+/// submits an Ethereum transaction. The steps it would need are listed inline
+/// below. The opposite direction refuses instead of pretending
+/// (`build_deposit_proof` returns an error rather than submitting a
+/// placeholder proof); this direction only logs, so an operator running
+/// `--direction bud-to-eth` sees healthy-looking ticks while nothing is
+/// relayed. Wiring it up is RFC F10.5b (Solidity bridge contract).
 async fn run_bud_to_eth_loop(config: RelayerConfig) {
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
     let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
 
     let _active = check_relayer_active(&budlum_client, &config).await;
 
-    eprintln!("BudToEth: watching Budlum burn events → Ethereum claim");
+    eprintln!("BudToEth: NOT RELAYING - this direction is not implemented (RFC F10.5b); ticks below are a timer, not bridge activity");
     eprintln!("BudToEth: (Production needs Budlum light-client proof + Ethereum bridge tx - Solidity bridge contract separate RFC F10.5b)");
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
