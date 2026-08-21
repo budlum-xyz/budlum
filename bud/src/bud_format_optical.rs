@@ -18,7 +18,7 @@ impl OpticalPrompt {
     }
 
     pub fn ratio(&self) -> f64 {
-        if self.prompt.len()==0 { return 1.0; }
+        if self.prompt.is_empty() { return 1.0; }
         self.original_size as f64 / self.prompt.len() as f64
     }
 

@@ -89,8 +89,7 @@ impl BudProductionRecord {
     }
 
     /// K19 kapısı: iddia, ölçüm tablosundaki değerin `max_multiple` katını aşamaz.
-    /// Ölçümsüz abartı (uydurma oran) → RED.
-
+    /// Ölçümsüz abartı (uydurma oran) → RED.    ///
     /// Deterministik blob (zincir/segment kaydı için).
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();

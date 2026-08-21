@@ -65,7 +65,7 @@ impl GateSuite {
     pub fn kl(usage_percent: f64) -> GateResult {
         // Yasayan esik: kullanim arttikca gereken ucret duser, n degisir
         // u=90 -> n=3, u=50 -> n=10, u=10 -> n=66 - model
-        let ok = usage_percent>=0.0 && usage_percent<=100.0;
+        let ok = (0.0..=100.0).contains(&usage_percent);
         GateResult { name: "KL", passed: ok, detail: format!("usage {}% -> living threshold checked", usage_percent) }
     }
 

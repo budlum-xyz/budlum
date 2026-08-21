@@ -41,7 +41,13 @@ impl CompactTable {
         self.rows.push(escaped);
     }
 
-    pub fn to_string(&self) -> String {
+    /// Tabloyu metne çevirir.
+    ///
+    /// `Display` üzerinden gelir: envanter metodu `to_string` adıyla inherent
+    /// tanımlıysa (clippy::inherent_to_string) `ToString`'in ürettiğini
+    /// gölgeler ve tür `{}` ile biçimlendirilemez. `Display` yazmak ikisini
+    /// aynı gövdede birleştirir; `.to_string()` çağrıları aynen çalışır.
+    fn fmt_rows(&self) -> String {
         let mut lines = Vec::new();
         lines.push(self.headers.join(" | "));
         for row in &self.rows {
@@ -73,6 +79,12 @@ pub struct Evidence {
     pub start_line: u32,
     pub end_line: u32,
     pub confidence: String, // high/medium/low
+}
+
+impl core::fmt::Display for CompactTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.fmt_rows())
+    }
 }
 
 impl Evidence {

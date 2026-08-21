@@ -207,6 +207,12 @@ pub struct GlobalDedup {
     pub total_saved_bytes: u64,
 }
 
+impl Default for GlobalDedup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalDedup {
     pub fn new() -> Self { Self { chunk_hashes: HashSet::new(), total_saved_bytes: 0 } }
 
@@ -230,6 +236,12 @@ impl GlobalDedup {
 pub struct MerkleTrie {
     pub root: [u8; 32],
     pub entries: HashMap<[u8; 32], Vec<u8>>,
+}
+
+impl Default for MerkleTrie {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MerkleTrie {

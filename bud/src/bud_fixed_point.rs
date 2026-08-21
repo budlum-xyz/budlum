@@ -29,7 +29,7 @@ pub const fn fixed_to_int(v: i64) -> i32 {
 /// Sabit nokta çarpma (32.16 × 32.16 → 32.16). Doyuran.
 #[must_use]
 pub const fn fixed_mul(a: i64, b: i64) -> i64 {
-    let r = (a as i128) * (b as i128) >> FIXED_FRAC_BITS;
+    let r = ((a as i128) * (b as i128)) >> FIXED_FRAC_BITS;
     if r > i64::MAX as i128 {
         i64::MAX
     } else if r < i64::MIN as i128 {

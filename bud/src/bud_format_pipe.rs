@@ -235,7 +235,7 @@ mod tests {
                 (self.next() % n as u64) as usize
             }
         }
-        let mut rng = Rng(0x50_1F_2026_0816_0001);
+        let mut rng = Rng(0x501F_2026_0816_0001);
         for round in 0..150u32 {
             let mut data = Vec::new();
             let n = rng.below(4000);

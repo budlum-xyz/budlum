@@ -7,7 +7,7 @@
 //! - AVIF/JPEG görsel kayıpsız: crf ≤ 32 (ölçülen 3.2x kazancın eşiği; F134)
 //! - ZFP/SZ error-bounded: bağıl hata ≤ 1e-3 (bilimsel sınıf, 100-web bulgusu 6-23x)
 //! - Çözünürlük HER ZAMAN korunur (KF2)
-//! Varsayılanlar ürün kararına açıktır (yorum satırları - kullanıcı onayı ister).
+//!   Varsayılanlar ürün kararına açıktır (yorum satırları - kullanıcı onayı ister).
 
 #![forbid(unsafe_code)]
 

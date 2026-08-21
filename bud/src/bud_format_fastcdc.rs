@@ -206,8 +206,8 @@ impl FastCdcSplit {
     /// Ortalama parça boyuna göre maske (avg ≈ 2^avg_bits).
     fn mask_for_avg(avg: usize) -> u64 {
         let bits = avg.ilog2().max(1);
-        let m = if bits >= 63 { u64::MAX } else { (1u64 << bits) - 1 };
-        m
+        
+        if bits >= 63 { u64::MAX } else { (1u64 << bits) - 1 }
     }
 
     /// Birleştir → orijinal (kayıpsızlık kanıtı).

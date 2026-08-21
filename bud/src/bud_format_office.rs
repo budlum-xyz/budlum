@@ -163,7 +163,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&central);
     let cd_len = out.len() as u32 - cd_start;
     out.extend_from_slice(&ZIP_EOCD.to_le_bytes());
-    out.extend_from_slice(&[0u16.to_le_bytes(), 0u16.to_le_bytes()].concat().as_slice());
+    out.extend_from_slice([0u16.to_le_bytes(), 0u16.to_le_bytes()].concat().as_slice());
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     out.extend_from_slice(&cd_len.to_le_bytes());

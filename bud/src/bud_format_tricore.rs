@@ -77,6 +77,16 @@ pub fn energy_record_hash(n: u32, expected_w: f64) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Y6 BENCHMARK PİNİ: cekirdek-saniye birimi (üretim kohortunda kalibre edilir).
+/// `bench_core_sec`: referans makinede 1 cekirdek-saniyenin jul karşılığı (W·s).
+/// Donanım heterojenliği effort.rs tier'larıyla modellenir (0.5x-10x).
+pub const BENCH_CORE_SEC_J: f64 = 2.0; // varsayılan pin (kalibrasyon bekler)
+
+/// Y6: donanım düzeltmeli beklenen güç - cekirdek-saniye → watt.
+pub fn power_from_core_sec(core_sec: f64, hw_tier: f64) -> f64 {
+    core_sec * BENCH_CORE_SEC_J * hw_tier.max(0.1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,14 +139,4 @@ mod tests {
         let w = TriCoreWeights { a: 0.0, b: 0.0, c: 0.0 };
         assert_eq!(tricore_price(1000, 1.0, 10.0, &w), 0.0);
     }
-}
-
-/// Y6 BENCHMARK PİNİ: cekirdek-saniye birimi (üretim kohortunda kalibre edilir).
-/// `bench_core_sec`: referans makinede 1 cekirdek-saniyenin jul karşılığı (W·s).
-/// Donanım heterojenliği effort.rs tier'larıyla modellenir (0.5x-10x).
-pub const BENCH_CORE_SEC_J: f64 = 2.0; // varsayılan pin (kalibrasyon bekler)
-
-/// Y6: donanım düzeltmeli beklenen güç - cekirdek-saniye → watt.
-pub fn power_from_core_sec(core_sec: f64, hw_tier: f64) -> f64 {
-    core_sec * BENCH_CORE_SEC_J * hw_tier.max(0.1)
 }

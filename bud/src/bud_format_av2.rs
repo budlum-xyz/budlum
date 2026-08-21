@@ -80,8 +80,16 @@ mod tests {
 
     #[test]
     fn av2_durum_dogru() {
-        assert!(AV2_CURRENT.spec_released, "AV2 v1.0.0 2026-05-28 çıktı");
-        assert!(!AV2_CURRENT.hardware_supported, "donanım 2027-2028");
+        // `assert!(SABIT.alan, ...)` clippy::assertions_on_constants tetikler:
+        // koşul derleme zamanında bilinir. Niyet "bu alanlar şu değerde
+        // KİLİTLİ" olduğundan `assert_eq!` doğru ifade — beklenen değeri
+        // açıkça yazar ve alan değişirse hata mesajı ne olduğunu gösterir.
+        let durum = AV2_CURRENT;
+        assert!(durum.spec_released, "AV2 v1.0.0 2026-05-28 çıktı");
+        assert!(
+            !durum.hardware_supported,
+            "donanım desteği 2027-2028 bekleniyor"
+        );
     }
 
     #[test]

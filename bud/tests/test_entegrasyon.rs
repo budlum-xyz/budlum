@@ -152,9 +152,9 @@ fn coklu_konteyner_capraz_dedup() {
     let mut b = Vec::new();
     for i in 0..200 {
         let line_a = format!("2026-08-16T10:{:02}:00Z INFO req={} /api/aaa s=200 b={} reg=tr\n", i % 60, i, i);
-        a.extend_from_slice(&line_a.as_bytes());
+        a.extend_from_slice(line_a.as_bytes());
         let line_b = format!("2026-08-16T10:{:02}:00Z INFO req={} /api/bbb s=200 b={} reg=de\n", i % 60, i + 1000, i + 1000);
-        b.extend_from_slice(&line_b.as_bytes());
+        b.extend_from_slice(line_b.as_bytes());
     }
     a.extend_from_slice(prefix);
     b.extend_from_slice(prefix);

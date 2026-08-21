@@ -346,7 +346,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         let t = col_types[columns.len()];
         let mut col = Vec::with_capacity(n);
         for _ in 0..n {
-            let v = parse_value(&bytes, &mut pos, t)?;
+            let v = parse_value(bytes, &mut pos, t)?;
             col.push(v);
         }
         columns.push(col);
@@ -521,7 +521,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0xC0_10_20_26_08_16_00_02);
-        let mut buf = vec![0u8; 128];
+        let mut buf = [0u8; 128];
         for _ in 0..2000 {
             let len = (rng.next() % 128) as usize;
             for b in &mut buf[..len] {

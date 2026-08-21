@@ -518,7 +518,7 @@ fn run(cli: Cli) -> Result<String, String> {
                 root,
                 [0u8; 32], // genesis (tek kayıt)
             );
-            if !Checkpoint::verify_chain(&[cp.clone()]) {
+            if !Checkpoint::verify_chain(std::slice::from_ref(&cp)) {
                 return Err("checkpoint zinciri doğrulanamadı".into());
             }
             Ok(format!(

@@ -131,8 +131,7 @@ impl PactRecord {
     /// CONSENSUS-GÜVENLİ SERİLEŞTİRME (kalan iş #5 - doğrulama testi aşağıda):
     /// `to_blob`/`from_blob` aşağıda (PACT_MAGIC + alanlar + record_hash digest)
     /// zaten vardır ve CANONICAL'dir: aynı mantıksal kayıt → AYNI baytlar → state
-    /// kökü etkisi yok (fikirler2.0 §10.3). Test: `consensus_guvenli_serilestirme_roundtrip`.
-
+    /// kökü etkisi yok (fikirler2.0 §10.3). Test: `consensus_guvenli_serilestirme_roundtrip`.    ///
     /// Üretim doğrulaması (İ2 generate_and_verify): üretilen bayt commitment'ı karşılar mı?
     /// Kayıpsız sınıfta (ResidualOnly) commitment = content_id(original) - K3 ile eşleşmeli.
     pub fn verify_production(&self, produced: &[u8]) -> bool {
@@ -347,7 +346,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0x5041_4354_2026_0816);
-        let mut buf = vec![0u8; 200];
+        let mut buf = [0u8; 200];
         for _ in 0..2000 {
             let len = (rng.next() % 200) as usize;
             for b in &mut buf[..len] {

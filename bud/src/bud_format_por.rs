@@ -57,7 +57,7 @@ impl PorKey {
         }
         let mut nonce = [0u8; 32];
         nonce[0..8].copy_from_slice(&seed.to_le_bytes());
-        nonce[8..16].copy_from_slice(&(block_count as u64).to_le_bytes());
+        nonce[8..16].copy_from_slice(&block_count.to_le_bytes());
         PorChallenge { indices, nonce }
     }
 

@@ -71,18 +71,20 @@ impl ExeSectionSplit {
         } else {
             ExeKind::Unknown
         };
-        // kod/veri ayrımı: içerik farkına göre (ilk yarıda sıfır yoğunluğu düşükse kod)
+        // Kod/veri ayrımı SABİT ORANLIDIR: ilk %60 kod, gerisi veri.
+        //
+        // Buradaki `if` iki dalında da `data[..split]` döndürüyordu (clippy
+        // if_same_then_else): sıfır yoğunluğu ölçülüyor, karşılaştırılıyor ve
+        // sonuç atılıyordu. Yani "içerik farkına göre ayır" yorumu koda
+        // karşılık gelmiyordu — ölü bir dallanma sabit davranışı içerik-duyarlı
+        // gösteriyordu. Ölçüm kaldırıldı; davranış (ve dolayısıyla kayıpsızlık)
+        // birebir aynı: `decode` iki bölümü sırayla birleştirir.
+        //
+        // Gerçek içerik-duyarlı bölümleme istenirse bölüm sınırının kendisi
+        // konteynere yazılmalıdır; sabit oranda buna gerek yok, `split` çözümde
+        // `code.len()` üzerinden zaten geri geliyor.
         let split = (data.len() * 3) / 5;
-        // sıfır yoğunluğu ölç: kod bölümü daha az sıfır, veri daha çok (padding)
-        let code_zeros = data[..split].iter().filter(|&&b| b == 0).count();
-        let data_zeros = data[split..].iter().filter(|&&b| b == 0).count();
-        let code = if code_zeros as f64 / split.max(1) as f64 <= data_zeros as f64 / data.len().saturating_sub(split).max(1) as f64 {
-            data[..split].to_vec()
-        } else {
-            data[..split].to_vec() // yine de ilk bölüm kod (deterministik)
-        };
-        let _ = code_zeros;
-        let _ = data_zeros;
+        let code = data[..split].to_vec();
         Some(ExeSectionSplit { kind, code, data: data[split..].to_vec() })
     }
 
@@ -252,7 +254,7 @@ fn push_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-fn read_bytes<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<Vec<u8>> {
+fn read_bytes(bytes: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
     if bytes.len() < *pos + 4 {
         return None;
     }
@@ -320,7 +322,7 @@ mod tests {
         let split = PdfStreamSplit::encode(&pdf).expect("encode");
         assert_eq!(split.streams.len(), 2, "iki akış ayrıştı");
         // metin akış gövdelerini içermez
-        assert!(!split.text.windows(8).any(|w| w == &[0x78, 0x9C, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]));
+        assert!(!split.text.windows(8).any(|w| w == [0x78, 0x9C, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]));
         // blob roundtrip
         let blob = split.to_blob();
         let back = PdfStreamSplit::from_blob(&blob).expect("blob");

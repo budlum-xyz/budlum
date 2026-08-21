@@ -161,6 +161,12 @@ impl DualWallet {
 pub struct FiatShamirTranscript {
     pub observed: Vec<String>,
 }
+impl Default for FiatShamirTranscript {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FiatShamirTranscript {
     pub fn new() -> Self { Self { observed: vec![] } }
     pub fn observe(&mut self, label: &str) { self.observed.push(label.to_string()); }

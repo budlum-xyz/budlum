@@ -137,7 +137,13 @@ impl LogFieldColumnar {
         // ilk satırdan şablon çıkar (sabit parçalar)
         let first = parse_nginx_line(&lines[0])?;
         let fixed_template = first.0.concat();
-        let mut columns: Vec<Vec<Vec<u8>>> = vec![Vec::with_capacity(lines.len()); 7];
+        // `vec![Vec::with_capacity(n); 7]` yalnız İLK vektörü n kapasiteli
+        // kurar; kalan altısı onun klonudur ve klon kapasiteyi taşımaz (boş
+        // Vec klonu kapasitesiz doğar). Yani ayırma amacı 7 sütunun 6'sında
+        // sessizce kayboluyordu. Her sütunu tek tek kurmak amacı gerçekten
+        // uygular (clippy::repeat_vec_with_capacity).
+        let mut columns: Vec<Vec<Vec<u8>>> =
+            (0..7).map(|_| Vec::with_capacity(lines.len())).collect();
         for line in &lines {
             let (_, values) = parse_nginx_line(line)?;
             for (ci, v) in values.iter().enumerate() {
@@ -268,7 +274,7 @@ fn push_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-fn read_bytes<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<Vec<u8>> {
+fn read_bytes(bytes: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
     if bytes.len() < *pos + 4 {
         return None;
     }
@@ -385,7 +391,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0x4C47_4644_2026_0816);
-        let mut buf = vec![0u8; 128];
+        let mut buf = [0u8; 128];
         for _ in 0..2000 {
             let len = (rng.next() % 128) as usize;
             for b in &mut buf[..len] {

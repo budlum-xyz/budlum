@@ -153,6 +153,24 @@ jobs:
         run: |
           cargo clippy --manifest-path crates/lubot/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path crates/lubot/Cargo.toml
+      # B.U.D. cekirdegi (bud/) ayni sessiz cukurdaydi: 103 modullu bud-core
+      # -- B.U.D. 1.0/2.0/3.0'in TAMAMI -- hicbir CI isinde derlenmiyordu,
+      # cunku ana workspace'in uyesi degil ve hicbir adim manifestine
+      # bakmiyordu. Olcum: `clippy --features bud3 --all-targets -D warnings`
+      # -> 91 ihlal, aralarinda ic ice gecmis gercek hatalar (ayni dalli if,
+      # kaybolan Vec kapasitesi, yanlis yerlestirilmis cfg kapisi).
+      #
+      # Uc yapilandirma da kosuluyor cunku surumler feature ile ayriliyor:
+      # default (bud2) ile bud3 farkli modul kumesi derler, no-default ise
+      # ikisinin de disinda kalani. Bir yapilandirmayi atlamak, tam da bu
+      # turda bulunan "3.0 modulu 2.0 derlemesine sizmis" hatasini gorunmez
+      # birakirdi.
+      - name: B.U.D. cekirdegi derlenir ve testleri geçer
+        run: |
+          cargo clippy --manifest-path bud/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path bud/Cargo.toml --features bud3 --all-targets -- -D warnings
+          cargo clippy --manifest-path bud/Cargo.toml --no-default-features --all-targets -- -D warnings
+          cargo test --manifest-path bud/Cargo.toml --features bud3
       - name: Turetilmis icerik kanaryasi
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test
       - name: Turetilmis icerik bayt-kesin

@@ -245,7 +245,7 @@ mod tests {
             pkt.extend_from_slice(b"\x00\x11\x22\x33\x44\x55"); // dst mac
             pkt.extend_from_slice(&[0x08, 0x00]); // ethertype IPv4
             pkt.extend_from_slice(&[0x45, 0x00, 0x00, 0x20]); // IP hdr
-            pkt.extend_from_slice(&format!("dns-query-{}", i % 50).as_bytes());
+            pkt.extend_from_slice(format!("dns-query-{}", i % 50).as_bytes());
             pkt.resize(60, 0);
             let incl = pkt.len();
             d.extend_from_slice(&(ts as u32).to_le_bytes());

@@ -2,7 +2,7 @@
 //!
 //! Kalan iş #11b: fountain codes. LT kod: k veri bloğu → n sembol (degree dağılımı
 //! + XOR). Alıcı herhangi ≈k sembolle TAM veriyi geri kurar (Gaussian eleme - küçük
-//! k için belirleyici). Deterministik tohum; kayıpsız.
+//!   k için belirleyici). Deterministik tohum; kayıpsız.
 
 #![forbid(unsafe_code)]
 
@@ -21,7 +21,7 @@ pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>
     for _ in 0..n {
         // soliton-benzeri derece: 1 ağırlıklı (1/3), gerisi 2-8 - küçük derece
         // çözülebilirliği artırır (LT'nin kalbi: degree-1 semboller zincir başlatır).
-        let degree = if rng.next() % 3 == 0 {
+        let degree = if rng.next().is_multiple_of(3) {
             1
         } else {
             2 + (rng.next() % 7) as usize

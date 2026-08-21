@@ -46,7 +46,29 @@ impl BudFlags {
 
     pub fn new(b:bool,r:bool,l:bool,d:bool,pq:bool,enc:bool)->Self{
         let mut f=0u16;
-        if b{f|=Self::BYTE_IDENTICAL;} if r{f|=Self::RESOLUTION_PRESERVED;} if l{f|=Self::LOSSY_ALLOWED;} if d{f|=Self::DEVICE_ONLY;} if pq{f|=Self::PQ_SIGNED;} if enc{f|=Self::ENCRYPTED;}
+        // Altı bağımsız bayrak. Tek satıra dizilmiş `if ... } if ... {` dizisi
+        // clippy::possible_missing_else tetikliyordu: `}` ve `if` aynı satırda
+        // olduğu için okuyan (ve lint) bunu `else if` sanabiliyor. Anlam
+        // bağımsız kurulum olduğundan her biri kendi satırına alındı; davranış
+        // aynı.
+        if b {
+            f |= Self::BYTE_IDENTICAL;
+        }
+        if r {
+            f |= Self::RESOLUTION_PRESERVED;
+        }
+        if l {
+            f |= Self::LOSSY_ALLOWED;
+        }
+        if d {
+            f |= Self::DEVICE_ONLY;
+        }
+        if pq {
+            f |= Self::PQ_SIGNED;
+        }
+        if enc {
+            f |= Self::ENCRYPTED;
+        }
         Self(f)
     }
     pub fn is_byte_identical(&self)->bool{ self.0 & Self::BYTE_IDENTICAL !=0 }
@@ -389,7 +411,7 @@ impl MultiRatioConsensus {
 pub struct BudGates;
 
 impl BudGates {
-    pub fn k_bud(f: &BudFile) -> Result<(), &'static str> { f.decode().map(|_|()).map_err(|e| e) }
+    pub fn k_bud(f: &BudFile) -> Result<(), &'static str> { f.decode().map(|_| ()) }
     /// K25: >100:1 oran => zip bomb şüphesi RED.
     pub fn k_bud_ratio(f: &BudFile, original_len: usize) -> Result<(), &'static str> {
         if f.ratio(original_len) > BudFile::MAX_RATIO {
