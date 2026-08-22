@@ -26,7 +26,7 @@ pub mod threshold_mldsa;
 
 pub use private_transfer_auth::{PrivateTransferAuth, PrivateTransferError, PrivateTransferGates};
 pub use quantum_account::{
-    BftGuardianFinality, GuardianVote, PactBinding, QuantumAccount, RecoveryProposal,
+    BftGuardianFinality, GuardianVote, Pact, PactRegistry, QuantumAccount, RecoveryProposal,
 };
 pub use tee_attestation::{
     TeeAttestation, TeeBackendKind, TeeError, TeeGates, TeeRuntime, TeeRuntimeStatus,
