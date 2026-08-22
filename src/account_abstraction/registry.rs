@@ -21,6 +21,7 @@
 //! değil, işlem şemasına ait.
 
 use super::quantum_account::QuantumAccount;
+use crate::storage::pact_binding::PactRegistry;
 use std::collections::BTreeMap;
 
 /// Kayıt defteri hataları.
@@ -37,6 +38,14 @@ pub enum QuantumAccountRegistryError {
         declared: [u8; 32],
         derived: [u8; 32],
     },
+    /// Hesabın `pact_root`'u sunulan pact kümesinin köküyle eşleşmiyor.
+    PactRootDoesNotMatchRegistry {
+        declared: [u8; 32],
+        computed: [u8; 32],
+    },
+    /// Sunulan pact kaydının kendi kökü bayat: içindeki pact'lerden yeniden
+    /// hesaplanan kök, kaydın taşıdığı kökle aynı değil.
+    PactRegistryRootIsStale { reason: &'static str },
 }
 
 impl std::fmt::Display for QuantumAccountRegistryError {
@@ -67,6 +76,15 @@ impl std::fmt::Display for QuantumAccountRegistryError {
                 hex::encode(declared),
                 hex::encode(derived)
             ),
+            Self::PactRootDoesNotMatchRegistry { declared, computed } => write!(
+                f,
+                "declared pact root {} does not match the presented pact set root {}",
+                hex::encode(declared),
+                hex::encode(computed)
+            ),
+            Self::PactRegistryRootIsStale { reason } => {
+                write!(f, "presented pact registry is inconsistent: {reason}")
+            }
         }
     }
 }
@@ -117,6 +135,42 @@ impl QuantumAccountRegistry {
         }
         self.accounts.insert(account.address, account);
         Ok(())
+    }
+
+    /// Hesabı, `pact_root`'unun adlandırdığı pact kümesiyle birlikte kaydet.
+    ///
+    /// `register` bir hesabın **şeklini** doğrular ve `pact_root`'u olduğu
+    /// gibi kabul eder. Bu yeterli değildi: alan bir kök taşıyordu ama o
+    /// kökün gerçek bir pact kümesini adlandırdığını hiçbir şey
+    /// denetlemiyordu, dolayısıyla `pact_root` bir iddiaydı, bir bağlama
+    /// değil. Aynı sınıf `ProofFixture::bind_verified`'da da vardı: bir
+    /// alanın sıfırdan farklı olması, arkasında bir şey olduğu anlamına
+    /// gelmez.
+    ///
+    /// İki kapı vardır. Sunulan kayıt defterinin kendi kökü içindeki
+    /// pact'lerden yeniden hesaplanabilmeli, **ve** hesabın `pact_root`'u o
+    /// köke eşit olmalı.
+    ///
+    /// # Errors
+    ///
+    /// [`register`](Self::register)'ın döndürdüğü her hata, ayrıca pact
+    /// kaydının kökü bayatsa ya da hesabın kökü onunla eşleşmiyorsa hata
+    /// döner.
+    pub fn register_with_pacts(
+        &mut self,
+        account: QuantumAccount,
+        pacts: &PactRegistry,
+    ) -> Result<(), QuantumAccountRegistryError> {
+        pacts
+            .verify_root()
+            .map_err(|reason| QuantumAccountRegistryError::PactRegistryRootIsStale { reason })?;
+        if account.pact_root != pacts.root {
+            return Err(QuantumAccountRegistryError::PactRootDoesNotMatchRegistry {
+                declared: account.pact_root,
+                computed: pacts.root,
+            });
+        }
+        self.register(account)
     }
 
     #[must_use]
@@ -280,6 +334,82 @@ mod tests {
             Some(2),
             "reddedilen degisiklik kaydi bozmamali"
         );
+    }
+
+    /// Gerçek bir pact kümesi taşıyan hesap kaydedilebilmeli.
+    #[test]
+    fn an_account_bound_to_its_pact_set_registers() {
+        use crate::storage::pact_binding::Pact;
+        use sha3::{Digest, Sha3_256};
+
+        let payload = b"tarif";
+        let mut h = Sha3_256::new();
+        h.update(payload);
+        let commitment: [u8; 32] = h.finalize().into();
+
+        let mut pacts = PactRegistry::new();
+        pacts.add_pact(
+            Pact::new(
+                [1u8; 32], [0u8; 32], [0u8; 32], commitment, [0u8; 32], 10, 0,
+            )
+            .expect("gecerli pact"),
+        );
+
+        let mut account = account_with(2, 3);
+        account.storage_root = [9u8; 32];
+        account.pact_root = pacts.root;
+        let address = account.address;
+
+        let mut registry = QuantumAccountRegistry::new();
+        registry
+            .register_with_pacts(account, &pacts)
+            .expect("kok eslesiyor");
+        assert!(registry.is_registered(&address));
+    }
+
+    /// Uydurma bir `pact_root` reddedilmeli: alanın sıfırdan farklı olması
+    /// arkasında bir pact kümesi olduğu anlamına gelmez.
+    #[test]
+    fn a_pact_root_naming_no_pact_set_is_refused() {
+        let mut account = account_with(2, 3);
+        account.storage_root = [9u8; 32];
+        account.pact_root = [7u8; 32];
+
+        let mut registry = QuantumAccountRegistry::new();
+        let err = registry
+            .register_with_pacts(account, &PactRegistry::new())
+            .expect_err("uydurma kok reddedilmeli");
+        assert!(matches!(
+            err,
+            QuantumAccountRegistryError::PactRootDoesNotMatchRegistry { .. }
+        ));
+        assert!(registry.is_empty(), "reddedilen hesap kayda girmemeli");
+    }
+
+    /// Bayat köklü bir pact kaydı kabul edilmemeli.
+    #[test]
+    fn a_pact_registry_with_a_stale_root_is_refused() {
+        use crate::storage::pact_binding::Pact;
+
+        let mut pacts = PactRegistry::new();
+        pacts.add_pact(
+            Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
+                .expect("gecerli pact"),
+        );
+        // Kok elle bozulur: icindeki pact'lerden yeniden hesaplanamaz.
+        pacts.root = [0u8; 32];
+
+        let mut account = account_with(2, 3);
+        account.storage_root = [9u8; 32];
+        account.pact_root = [0u8; 32];
+
+        let mut registry = QuantumAccountRegistry::new();
+        assert!(matches!(
+            registry
+                .register_with_pacts(account, &pacts)
+                .expect_err("bayat kok reddedilmeli"),
+            QuantumAccountRegistryError::PactRegistryRootIsStale { .. }
+        ));
     }
 
     /// Bilinmeyen bir adres güncellenemez.
