@@ -9,7 +9,7 @@
 //! chain, and a proof carrying `chain_id = 1` matches the expected inputs
 //! here regardless of where it came from.
 //!
-//! This is the "public input mis-binding" class from the threat model. The
+//! This is the wrongly bound public input class from the threat model. The
 //! same class in Aleo/snarkVM produced full transaction forgery, and it is
 //! in scope on every zkVM bounty programme surveyed (wrong state root, wrong
 //! chain id, transcript reuse).
@@ -180,7 +180,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         msg.push_str(
             "\nchain_id is the public input that binds a proof to its chain. Pinned to a\n\
              literal, the proof belongs to no real chain and a proof carrying that same\n\
-             literal matches wherever it came from - the public-input mis-binding class.\n\
+             literal matches wherever it came from - a wrongly bound public input.\n\
              Take it from a constant, a parameter or config instead.",
         );
         return Err(msg);
