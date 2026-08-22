@@ -182,6 +182,35 @@ impl AiRegistry {
                 "require_execution_proof requires execution_program_hash and execution_dims".into(),
             );
         }
+        // Iki alanin VARLIGI yetmez, birbirini tutmasi gerekir.
+        //
+        // `execution_program_hash` ile `execution_dims` ayri ayri veriliyor ve
+        // buraya kadar hicbir sey ikisinin ayni programi tarif ettigini
+        // denetlemiyordu. Oysa dogrulama zamaninda program **dims'ten yeniden
+        // kuruluyor** (`guest_program_for_model`) ve kanit, kaydedilen hash'e
+        // Karsi olculuyor. Ikisi ayrisirsa hicbir gecerli kanit o modeli
+        // Gecemez: model, kaydi kabul edilmis ama sonsuza kadar dogrulanamaz
+        // Bir durumda kalir.
+        //
+        // Bu bir sahtecilik acigi degil - AI yolu programi gonderenden degil
+        // Kayittan aldigi icin fail-closed. Ama sessiz bir tuzak: hata,
+        // Kaydi yapanin yanlisini kaydin kendisinde degil, aylar sonra
+        // Dogrulamada gosterir. Tutarsizligi kaynaginda reddediyoruz.
+        if let (Some(registered_hash), Some(_)) =
+            (spec.execution_program_hash, spec.execution_dims.as_ref())
+        {
+            let rebuilt = crate::ai::execution::guest_program_for_model(&spec).map_err(|e| {
+                format!("execution_dims do not describe a buildable guest program: {e}")
+            })?;
+            let expected = crate::ai::execution::stark_program_hash_from_words(&rebuilt);
+            if registered_hash != expected {
+                return Err(format!(
+                    "execution_program_hash {} does not match the program execution_dims build ({})",
+                    hex::encode(registered_hash),
+                    hex::encode(expected)
+                ));
+            }
+        }
         if self.models.contains_key(&spec.model_id) {
             return Err(format!(
                 "Model ID {} is already registered",
