@@ -80,6 +80,18 @@ pub trait BudlumApi {
         domain: crate::domain::ConsensusDomain,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    #[method(name = "bud_registerSovereignTemplate")]
+    async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_validateSovereignAuditExport")]
+    async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_submitDomainCommitment")]
     async fn submit_domain_commitment(
         &self,

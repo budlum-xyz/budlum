@@ -111,6 +111,14 @@ pub struct Blockchain {
     /// This bounds entries, not only distinct checkpoint-height buckets.
     pub max_pending_certs: usize,
     pub domain_registry: ConsensusDomainRegistry,
+    /// Egemen alan sablonlari (CBDC, kamu, kurumsal PoA, konsorsiyum).
+    ///
+    /// `domain_registry`'den ayri durur cunku ayri seyi anlatir: orasi bir
+    /// alanin uzlasma kurallarini, burasi o alanin uyum/denetim belgesini
+    /// tutar. Bagi `register_sovereign_template` kurar - bir sablon ancak
+    /// adlandirdigi alan kayitliysa ve ayni turu/operatoru gosteriyorsa
+    /// kabul edilir.
+    pub sovereign_registry: crate::domain::SovereignDomainRegistry,
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
@@ -715,6 +723,7 @@ impl Blockchain {
             pending_finality_certs: BTreeMap::new(),
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
+            sovereign_registry: crate::domain::SovereignDomainRegistry::new(),
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
@@ -820,6 +829,49 @@ impl Blockchain {
         self.chain
             .last()
             .expect("chain is seeded with genesis at construction")
+    }
+
+    /// Egemen alan sablonunu, adlandirdigi uzlasma alanina baglayarak kaydet.
+    ///
+    /// Sablon tek basina degerlendirilmez. `register_template_for_domain`
+    /// once alanin kayitli oldugunu, sonra sablonun bildirdigi uzlasma
+    /// turunun ve operatorun alanin gercek degerleriyle ayni oldugunu
+    /// dogrular. Bu kapi olmadan bir sablon, PoS olarak calisan bir alani
+    /// denetime "izinli ve KYC'li" diye gosterebilirdi: iki kayit da kendi
+    /// icinde gecerli, birlikte yanlis.
+    ///
+    /// # Errors
+    ///
+    /// Alan kayitli degilse, tur ya da operator uyusmuyorsa, veya sablonun
+    /// kendi dogrulamasi basarisizsa hata doner.
+    pub fn register_sovereign_template(
+        &mut self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<(), String> {
+        self.sovereign_registry
+            .register_template_for_domain(template, &self.domain_registry)
+    }
+
+    /// Kayitli egemen sablonlarin koku.
+    #[must_use]
+    pub fn sovereign_template_root(&self) -> crate::domain::Hash32 {
+        self.sovereign_registry.root()
+    }
+
+    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    ///
+    /// Paketin tasidigi `template_id` once kayit defterinde aranir. Paketin
+    /// kendi icinde tutarli olmasi yetmez: kimlik paketin icinden geliyorsa,
+    /// uydurma bir kimlikle uretilmis paket de tutarli gorunur.
+    ///
+    /// # Errors
+    ///
+    /// Sablon kayitli degilse ya da paket sablonla uyusmuyorsa hata doner.
+    pub fn validate_sovereign_audit_export(
+        &self,
+        bundle: &crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        self.sovereign_registry.validate_audit_export(bundle)
     }
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
@@ -5706,6 +5758,7 @@ impl Clone for Blockchain {
             pending_finality_certs: self.pending_finality_certs.clone(),
             max_pending_certs: self.max_pending_certs,
             domain_registry: self.domain_registry.clone(),
+            sovereign_registry: self.sovereign_registry.clone(),
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),

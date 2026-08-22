@@ -1070,6 +1070,42 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerSovereignTemplate")?;
+        let domain_id = template.domain_id;
+        self.chain
+            .register_sovereign_template(template)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign template: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "domainId": domain_id }))
+    }
+
+    async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain
+            .validate_sovereign_audit_export(bundle)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign audit export: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "valid": true }))
+    }
+
     async fn submit_domain_commitment(
         &self,
         commitment: crate::domain::DomainCommitment,
