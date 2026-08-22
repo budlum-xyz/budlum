@@ -33,6 +33,10 @@
 //! Arka uc yoksa imzalama basarisiz olur; sessizce imzasiz veya duz metin
 //! bir sonuc dondurulmez. Bir cagiran `Err`'i yok sayarsa taniklik hic
 //! olusmaz, bos bir taniklik olusmaz.
+//!
+//! WIRING: unwired - attestation verification is real, but nothing in the
+//! production path presents an attestation yet. Reached only by tests until
+//! account abstraction is wired into transaction verification.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,

@@ -7,15 +7,15 @@
 //! bakıyordu. Ölçüldü, tahmin edilmedi: dizin bildirildiğinde ortaya çıkan
 //! şey, isimlerinin vaat ettiği işi yapmayan üç dosyaydı.
 //!
-//! * `contracts.rs` — `compile()` bir derleyici değildi. Kaynağın boş olup
+//! * `contracts.rs` - `compile()` bir derleyici değildi. Kaynağın boş olup
 //!   olmadığına bakıp `bytecode_hash` alanına kaynağın hash'ini koyuyordu;
 //!   kendi yorumu "şimdilik stub" diyordu. `CompiledContract` adlı tipin
 //!   içinde bytecode yoktu.
-//! * `devnet.rs` — `start_domain()` düğüm başlatmıyordu. Bir dizin oluşturup
+//! * `devnet.rs` - `start_domain()` düğüm başlatmıyordu. Bir dizin oluşturup
 //!   bir alanı `Running` yapıyor ve "RPC at 127.0.0.1:port" logluyordu; o
 //!   portu dinleyen hiçbir şey yoktu, `rpc_endpoints()` bağlanılamayacak
 //!   adresler döndürüyordu.
-//! * `runner.rs` — `test()` test koşturmuyordu. Her sözleşme için iki sonuç
+//! * `runner.rs` - `test()` test koşturmuyordu. Her sözleşme için iki sonuç
 //!   uyduruyordu ve `all_passed()` daima `true` dönüyordu: sözleşmesi bozuk
 //!   bir geliştiriciye yeşil gösterirdi.
 //!
@@ -32,6 +32,10 @@
 //!
 //! Bir dosya biçimi şeması. İddiası yok: bir TOML dosyasını okur, yazar ve
 //! varsayılanını üretir. Yaptığı iş kadar söylüyor.
+//!
+//! WIRING: unwired - this is a file-format schema for a project file that
+//! lives outside the node. Nothing in the node reads `budlum.toml`, and
+//! nothing should: it describes a developer's project, not chain state.
 
 /// `budlum.toml` proje yapılandırma dosyası şeması.
 ///

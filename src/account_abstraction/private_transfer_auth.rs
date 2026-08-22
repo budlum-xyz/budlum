@@ -31,6 +31,10 @@
 //! gorulmedi ve bu tam yetkilendirme, bu anahtar tarafindan imzalandi".
 //! Gizlilik iddiasi burada yapilmaz; yapilan sey cifte harcamayi ve
 //! yetkisiz harcamayi ayirmaktir.
+//!
+//! WIRING: unwired - the authorization check is real, but no production path
+//! builds a private transfer yet. Reached only by tests until account
+//! abstraction is wired into transaction verification.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,

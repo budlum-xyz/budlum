@@ -36,6 +36,10 @@
 //! * `t == 0`. Sifir esik "kimse imzalamasin yeter" demektir.
 //! * `t > n`. Karsilanmasi imkansiz bir esik, sessizce her zaman reddeden bir
 //!   hesap uretir; bu bir kilitlenmedir, hata olarak soylenir.
+//!
+//! WIRING: unwired - threshold verification is real ML-DSA-87 now, but no
+//! production path selects a threshold account yet. Reached only by tests
+//! until account abstraction is wired into transaction verification.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
