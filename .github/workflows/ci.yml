@@ -190,6 +190,14 @@ jobs:
       # ikisinin de disinda kalani. Bir yapilandirmayi atlamak, tam da bu
       # turda bulunan "3.0 modulu 2.0 derlemesine sizmis" hatasini gorunmez
       # birakirdi.
+      # `cargo fmt --all` ana workspace'i tarar; `bud/` onun uyesi olmadigi
+      # icin bu agacta hicbir bicimlendirme denetimi yoktu. Olcum: 119
+      # dosyanin 103'u rustfmt ciktisindan sapmisti. Bicimlendirme davranis
+      # degistirmez, ama denetlenmeyen bir agac zamanla okunmaz hale gelir ve
+      # gercek degisikligi gurultuden ayirt etmek zorlasir. Agac bir kez
+      # duzeltildi (`2c95cfe2`), bu adim geri kaymasini engeller.
+      - name: B.U.D. cekirdegi biçimlendirilmiş
+        run: cargo fmt --manifest-path bud/Cargo.toml --all -- --check
       - name: B.U.D. cekirdegi derlenir ve testleri geçer
         run: |
           cargo clippy --manifest-path bud/Cargo.toml --all-targets -- -D warnings
