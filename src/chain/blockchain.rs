@@ -2009,6 +2009,32 @@ impl Blockchain {
             ));
         }
 
+        // 1c. Program izin listesi: bu programin bu alani ilerletme hakki var mi?
+        //
+        // Bir onceki denetim kanitin BU zincire ait oldugunu soyluyor, ama
+        // hangi *kodun* kanitlandigini soylemiyor. Dogrulayici programin
+        // hash'ini `public_inputs.program_hash` ile karsilastirir; gonderen
+        // ikisini de kendisi verdigi icin bu denetim her zaman gecer. Yani
+        // saldirgan kendi yazdigi bir programi kusursuz bir kanitla sunabilir:
+        // kanit gecerlidir, yalan soyleyen programdir.
+        //
+        // Alanin ilan ettigi izin listesi bu boslugu kapatir. Liste bos ise
+        // kapi kapalidir - fail-closed.
+        let claimed_domain = submission.domain();
+        let domain = self
+            .domain_registry
+            .get(claimed_domain)
+            .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
+        let program_hash = crate::prover::zk_program_hash(&submission.program);
+        if !domain.zk_program_allowlist.contains(&program_hash) {
+            return Err(format!(
+                "program {} is not on the zk allowlist of domain {} ({} entries)",
+                hex::encode(program_hash),
+                claimed_domain,
+                domain.zk_program_allowlist.len()
+            ));
+        }
+
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
         let fee = self.state.registry.params().proof_submission_fee;
         let mut charged_fee = false;
