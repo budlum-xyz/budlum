@@ -135,6 +135,38 @@ mod tests {
         }
     }
 
+    /// Eski onekli iki liste de ayni disipline tabi: sirali, tekil, bicimli;
+    /// ve iki liste birbiriyle kesismez (etiket olan alan-disi sayilamaz).
+    #[test]
+    fn legacy_prefix_lists_are_sorted_unique_and_well_formed() {
+        use crate::crypto::{BUDLUM_PREFIXED_DOMAIN_TAGS, BUDLUM_PREFIXED_NON_DOMAIN_LITERALS};
+        for list in [
+            BUDLUM_PREFIXED_DOMAIN_TAGS,
+            BUDLUM_PREFIXED_NON_DOMAIN_LITERALS,
+        ] {
+            let unique: BTreeSet<&str> = list.iter().copied().collect();
+            assert_eq!(unique.len(), list.len(), "tekrar eden giris: {list:?}");
+            let sorted: Vec<&str> = unique.into_iter().collect();
+            assert_eq!(sorted, list, "liste sirali kalmali: fark okunabilirlik");
+            for tag in list {
+                let body = tag
+                    .strip_prefix("BUDLUM_")
+                    .unwrap_or_else(|| panic!("tag must carry the BUDLUM_ prefix: {tag}"));
+                assert!(!body.is_empty(), "tag has no body: {tag}");
+                assert!(
+                    body.chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                    "tag must be upper snake case: {tag}"
+                );
+            }
+        }
+        let overlap: Vec<&&str> = BUDLUM_PREFIXED_DOMAIN_TAGS
+            .iter()
+            .filter(|t| BUDLUM_PREFIXED_NON_DOMAIN_LITERALS.contains(t))
+            .collect();
+        assert!(overlap.is_empty(), "iki liste kesismemeli: {overlap:?}");
+    }
+
     /// The consensus- and custody-critical tags are still in the inventory.
     ///
     /// Named individually so dropping one fails with the tag in the message,
