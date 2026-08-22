@@ -1626,3 +1626,57 @@ icerdigi uyum kanitinin gercekten dogru oldugunu garanti etmez. Uyum kokleri
 zincir disinda uretilir ve zincir onlari yalnizca tasir. Bunu iddia
 etmiyoruz: kokler hash olarak saklanir, icerikleri hicbir zaman zincire
 girmez.
+
+## 55. Kanit gecerliligi bir yetkilendirme karari degildir
+
+Bir STARK dogrulayicisi tek bir sey soyler: "bu genel girdilerle bu program
+boyle kostu." Soylemedigi sey, o genel girdilerin **dogru olanlar** oldugudur.
+Girdilerin hangi zincire, hangi alana, hangi yukseklige ait oldugu kanit
+sisteminin kisitladigi bir sey degil; dogrulayicinin kendi kodunda denetlemesi
+gereken bir sey.
+
+Bu ayrimin atlandigi her yerde ayni sinif kusur cikiyor. Budlum'da uc tane
+bulundu ve ucu de ayni bicimdeydi: **kanit gecerliydi, iddia yalandi.**
+
+**1. Zincir baglamasi.** `submit_zk_proof` gonderenin verdigi
+`public_inputs.chain_id`'yi hicbir seyle karsilastirmiyordu. Baska bir zincir
+icin uretilmis, kendi zincirinde tamamen gecerli bir kanit burada da dogrulanir
+ve bir alani ilerletirdi. Denetim ucret tahsilatindan once kondu: reddedilen
+kanit ucret yakmaz, cunku yakilacak bir is yapilmadi.
+
+**2. Ayni kusur, ikinci yer.** AI calistirma yolunda `program_hash` kayitla
+karsilastiriliyordu ama `chain_id` karsilastirilmiyordu. `tx.chain_id` ile
+baglandi; o alan islemin imza on-goruntusunde oldugu icin gonderen serbestce
+secemez. Bir kusuru bulunca ayni bicimin baska nerede oldugunu aramak, kusurun
+kendisini duzeltmek kadar onemli.
+
+**3. Iddia yeniden oynatma.** En ciddisi buydu. Tasima mesajini kanita baglayan
+hash `(kanit, genel girdiler, program)` uzerindeydi. Kabul edilen iddianin
+anahtari ise `(hedef alan, yukseklik)`. Yani kanitin **hangi iddiaya** sunuldugu
+on-goruntunun disindaydi ve gecerli tek bir kanit, henuz iddia edilmemis her
+(alan, yukseklik) ciftine sunulabiliyordu. Saldirgan kanita dokunmuyor,
+yalnizca mesaji yeniden kuruyor. "Ilk gecerli kazanir" politikasi bunu
+yakalamaz, cunku her yeni cift onun gozunde yeni bir iddiadir.
+
+Hedef alan ve yukseklik on-goruntuye alindi, alan ayirici `V2`'ye cikti; eski
+hash'ler kasten gecersiz.
+
+```mermaid
+flowchart TD
+  Sub["Kanit sunumu: kanit + genel girdiler + program"] --> B{"Baglama hash'i tutuyor mu?"}
+  B -->|"hayir"| Rej["Reddedilir"]
+  B -->|"evet"| C{"chain_id bu zincir mi?"}
+  C -->|"baska zincir"| Rej
+  C -->|"evet"| Fee["Ucret tahsil edilir"]
+  Fee --> V{"STARK dogrulamasi"}
+  V -->|"gecersiz"| Burn["Ucret yanar"]
+  V -->|"gecerli"| Claim{"Iddia politikasi: ilk gecerli kazanir"}
+  Claim --> Acc["Kabul"]
+  Note["Hedef alan + yukseklik baglama hash'inde"] --> B
+```
+
+**Sinir.** Bu uc kapi kanitin **dogru iddiaya** ait oldugunu garanti eder;
+iddianin icerdigi durum gecisinin zincirin gercek durumuyla ortustugunu
+garanti etmez. `final_state_root` kaydediliyor ve cakisma tespitinde
+kullaniliyor, ama alanin gercek koku ile karsilastirilmiyor. Bunu iddia
+etmiyoruz.
