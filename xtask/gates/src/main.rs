@@ -83,6 +83,7 @@ mod gates {
     pub mod governance_invariants;
     pub mod guards_reachable;
     pub mod hash_inputs_are_length_prefixed;
+    pub mod indexing_is_not_new;
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
@@ -319,6 +320,14 @@ const GATES: &[Gate] = &[
         run: gates::chain_id_is_not_hardcoded::run,
         run_args: None,
         self_test: gates::chain_id_is_not_hardcoded::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "indexing-is-not-new",
+        replaces: None,
+        run: gates::indexing_is_not_new::run,
+        run_args: None,
+        self_test: gates::indexing_is_not_new::self_test,
         run_log: None,
     },
     Gate {
