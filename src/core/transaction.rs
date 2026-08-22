@@ -859,6 +859,17 @@ impl Transaction {
     /// baskasinin adresine iliskilendirebilirdi. Ikincisi **yetki**:
     /// imzalar `MultisigPolicy` uzerinden tek tek dogrulanir, ayni sahibin
     /// tekrari sayilmaz ve esigin altinda kalan islem reddedilir.
+    /// `wallet-ml-dsa` olmadan ML-DSA-87 dogrulayicisi derlenmez.
+    ///
+    /// O yapilandirmada V6 **kapali duser**: dogrulanamayan bir imza kabul
+    /// edilemez. Bir surumun sessizce gecmesi, imzasiz harcama demektir.
+    #[cfg(not(feature = "wallet-ml-dsa"))]
+    fn verify_v6(&self) -> bool {
+        debug!("V6 requires the wallet-ml-dsa backend; refusing fail-closed");
+        false
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
     fn verify_v6(&self) -> bool {
         use crate::account_abstraction::threshold_mldsa::{
             MultisigPolicy, OwnerSignature, MAX_THRESHOLD_OWNERS,
