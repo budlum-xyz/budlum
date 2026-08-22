@@ -1565,3 +1565,64 @@ flowchart TD
 **yetkisini** dogrular. Ikisi ayri karardir ve ayri yerlerde yasar. Bir
 hesabin kayitli olmasi onun her islemi yetkilendirdigi anlamina gelmez, bir
 imza kumesinin esigi karsilamasi da hesabin kayitli oldugu anlamina gelmez.
+
+## 54. Egemen alanlar: sablonun adlandirdigi seyle ayni olmasi
+
+Egemen Alan Kiti bir alani denetime nasil anlattigimizi tanimlar: sinifi
+(CBDC, kamu, kurumsal PoA, konsorsiyum), uzlasma turu, operatoru, KYC
+gereksinimi ve uyum kanitinin kokleri. Kit yazildiginda dogru yazilmisti -
+PoA bir sablon KYC istemeden gecemiyordu, kimlik alanlardan yeniden
+hesaplaniyordu, yasam dongusu gecisleri denetleniyordu. Eksik olan sey
+bunlarin hicbiri degildi.
+
+**Eksik olan, sablonun neyi anlattiginin denetimiydi.** Bir sablon
+`domain_id = 7` icin "PoA, KYC zorunlu" diyebiliyordu. 7 numarali alanin
+gercekte `PoS` olarak kayitli olup olmadigina bakan bir kod yoktu. Iki kayit
+da kendi icinde gecerliydi; birlikte yalan soyluyorlardi. Denetime sunulan
+belge "bu alan izinli ve KYC'li" derken zincir izinsiz calismaya devam
+ederdi, ve hicbir log bunu soylemezdi.
+
+Ayni kusur operatorde de vardi: sablonun isaret ettigi operator, alanin
+gercek operatoru olmak zorunda degildi, dolayisiyla baskasinin alani adina
+denetim belgesi yazilabilirdi.
+
+`register_template_for_domain` bu bagi kurar. Uc kapi sirayla: alan kayitli
+olmali, uzlasma turu eslesmeli, operator eslesmeli. Sablonun kendi
+dogrulamasi bundan **sonra** kosar - once adlandirdigi seyin var oldugunu ve
+o sey oldugunu bilmek gerekir.
+
+Ayni sinif bir kusur denetim paketinde de vardi. `AuditExportBundle` bir
+`template_id` tasir ve kendini o kimlige karsi dogrular; ama kimlik paketin
+kendi icinden gelir. Uydurma bir `template_id` ile uretilmis bir paket kendi
+tutarlilik denetiminden gecerdi. `validate_audit_export` kimligi once kayit
+defterinde arar: kayitli bir sablona karsilik gelmiyorsa paket reddedilir.
+Bir seyin kendi kendini dogrulamasi, dogrulama degildir.
+
+Iki giris de dugumun disina acilir (`bud_registerSovereignTemplate`,
+`bud_validateSovereignAuditExport`). Sablon kaydi operator yetkisi ister;
+denetim dogrulamasi istemez, cunku bir belgenin gecerli olup olmadigini
+sormak yetki gerektiren bir islem degildir.
+
+```mermaid
+flowchart TD
+  Tmpl["Egemen sablon: id, tur, operator, KYC"] --> G1{"Alan kayitli mi?"}
+  Reg["ConsensusDomainRegistry"] --> G1
+  G1 -->|"hayir"| Rej["Reddedilir"]
+  G1 -->|"evet"| G2{"Uzlasma turu esit mi?"}
+  G2 -->|"PoA iddia, PoS kayit"| Rej
+  G2 -->|"evet"| G3{"Operator esit mi?"}
+  G3 -->|"hayir"| Rej
+  G3 -->|"evet"| G4{"Sablonun kendi dogrulamasi"}
+  G4 -->|"PoA ama KYC yok"| Rej
+  G4 -->|"gecti"| Acc["Kaydedilir, kok degisir"]
+  Bundle["Denetim paketi: template_id"] --> L{"Kimlik kayitta var mi?"}
+  Acc --> L
+  L -->|"hayir"| Rej
+  L -->|"evet"| B2["Paket sablona karsi dogrulanir"]
+```
+
+**Sinir.** Bu bag sablonun **dogru alani anlattigini** garanti eder; sablonun
+icerdigi uyum kanitinin gercekten dogru oldugunu garanti etmez. Uyum kokleri
+zincir disinda uretilir ve zincir onlari yalnizca tasir. Bunu iddia
+etmiyoruz: kokler hash olarak saklanir, icerikleri hicbir zaman zincire
+girmez.
