@@ -1489,3 +1489,79 @@ flowchart TD
   Gate --> Root
   Gate --> Proof["Yeni ihlal CI'da kirmizi"]
 ```
+
+## 53. Hesap soyutlama: kayit defteri ve V6 coklu imza yetkilendirmesi
+
+Hesap soyutlama katmani uzun sure iki parcali bir eksiklik tasidi. Kod
+yazilmisti, gercek ML-DSA-87'ye baglaniyordu ve testleri geciyordu; ama
+uretimden hicbir yol ona ulasamiyordu. Iki ayri sebep vardi ve ikisi de
+olculdu, tahmin edilmedi.
+
+**Birincisi durum katmaniydi.** `QuantumAccount::validate_all` "esik gardiyan
+sayisini asamaz", "sifir esik olmaz" gibi kurallari denetliyordu. Ama uretim
+kodunda `QuantumAccount` aramasi sifir sonuc veriyordu: hesap hicbir yerde
+saklanmiyordu. Bir hesap turu, onu tutan bir kayit olmadan yalnizca bir
+tiptir; korumasi da yalnizca bir niyettir.
+
+`QuantumAccountRegistry` bu bosluga bir kapi olarak yazildi. Kayit iki sartla
+gerceklesir: bildirilen adres, hesabin acik anahtarindan turetilen adresle
+esit olmali, **ve** `validate_all` gecmeli. Ikincisi olmadan kurallar
+uygulanmaz; birincisi olmadan bir hesap baskasinin anahtarini tasiyan bir
+adresle kaydedilebilirdi. Guncelleme klonla-dogrula-yaz desenini kullanir:
+kaydi gecersiz kilan bir degisiklik uygulanmaz ve kayit eski halinde kalir.
+Bir kaydin gecerliligi, ona yazan her yolun ayri ayri dikkatli olmasina
+birakilmamali.
+
+**Ikincisi yetkilendirme katmaniydi.** `MultisigPolicy` gercek bir `t-of-n`
+denetimi yapiyordu: her imza tek tek dogrulaniyor, ayni sahibin tekrari
+sayilmiyor, esigin altinda kalan reddediliyordu. Ama islem semasi tek imza
+tasiyordu, dolayisiyla hicbir islem ona bir yetkilendirme getiremiyordu.
+Kural kodda vardi, uygulanacagi yol yoktu.
+
+`SIGNATURE_VERSION_V6` o yolu acar. Bir V6 isleminde tek imza alani bos kalir
+ve yerine `authorization` gelir: sahip kumesi, esik ve `(sahip, imza)`
+ciftleri. Iki tasarim karari bunu tasiyor.
+
+**Adres kumeden turetilir.** `from`, sahip kumesinin ve esigin hash'idir
+(`BDLM_TX_V6_MULTISIG_ADDRESS`). Bu olmadan gecerli imzalar toplayan bir
+saldirgan kendi kumesini baskasinin adresine iliskilendirebilirdi: imzalar
+dogrulanir, adres denetlenmez, hesap harcanir. Esigin de turetmeye girmesi
+gerekiyor, cunku ayni uc sahibin `2-of-3` ve `3-of-3` politikalari farkli iki
+guvenlik ifadesidir; ayni adresi paylasirlarsa dusuk esikli olan yuksek
+esikli olanin fonunu harcar.
+
+**Kume imzanin kapsamindadir, imzalar degildir.** Sahip kumesi ve esik
+preimage'e girer; imzalarin kendisi girmez. Kume disarida kalsaydi bir
+aracinin kumeyi degistirip imzalari oldugu gibi tasimasi mumkun olurdu.
+Imzalar iceride olsaydi imza kendi kendini imzalardi.
+
+Surumler birbirine karismaz: bir V4/V5 islemi `authorization` tasiyorsa
+reddedilir, bir V6 islemi tek imza tasiyorsa reddedilir. Iki yetki kaynagi
+yan yana durursa hangisinin bagladigi okuyana kalir, ve bu tam olarak sessiz
+sapmanin bicimidir.
+
+Dogrulama durumsuzdur: kume islemle birlikte geldigi icin `verify()` hesap
+durumunu okumak zorunda degildir. Bu bir tasarim tercihidir - kume zincirde
+saklanabilirdi, ama o zaman bir imzanin gecerliligi bir durum okumasina
+bagimli olurdu.
+
+```mermaid
+flowchart TD
+  Owners["Sahip kumesi + esik"] --> Addr["from = H(kume, esik)"]
+  Owners --> Preimage["Imza preimage'i"]
+  Tx["Islem alanlari"] --> Preimage
+  Preimage --> Sigs["t adet ML-DSA-87 imzasi"]
+  Sigs --> V["verify_v6"]
+  Addr --> Bind{"from kumeden turemis mi?"}
+  V --> Bind
+  Bind -->|"hayir"| Reject["Reddedilir: baglama kopuk"]
+  Bind -->|"evet"| Policy{"MultisigPolicy: esik karsilandi mi?"}
+  Policy -->|"tekrar / yabanci / eksik"| Reject
+  Policy -->|"evet"| Accept["Kabul"]
+  Registry["QuantumAccountRegistry"] -->|"validate_all kapisi"| Shape["Hesap sekli gecerli"]
+```
+
+**Sinir.** Kayit defteri hesabin **seklini** dogrular; V6 bir harcamanin
+**yetkisini** dogrular. Ikisi ayri karardir ve ayri yerlerde yasar. Bir
+hesabin kayitli olmasi onun her islemi yetkilendirdigi anlamina gelmez, bir
+imza kumesinin esigi karsilamasi da hesabin kayitli oldugu anlamina gelmez.
