@@ -37,9 +37,16 @@
 //! * `t > n`. Karsilanmasi imkansiz bir esik, sessizce her zaman reddeden bir
 //!   hesap uretir; bu bir kilitlenmedir, hata olarak soylenir.
 //!
-//! WIRING: unwired - threshold verification is real ML-DSA-87 now, but no
-//! production path selects a threshold account yet. Reached only by tests
-//! until account abstraction is wired into transaction verification.
+//! # Nereden cagriliyor
+//!
+//! `Transaction::verify` V6 islemlerini buraya getirir
+//! (`src/core/transaction.rs`, `verify_v6`). Uzun sure oyle degildi: buradaki
+//! `t-of-n` denetimi gercek ML-DSA-87 ile calisiyordu ama islem semasi tek
+//! imza tasidigi icin hicbir islem ona bir yetkilendirme getiremiyordu. Kural
+//! kodda vardi, uygulanacagi yol yoktu.
+//!
+//! V6 o yolu acar: islem sahip kumesini ve imzalari tasir, `from` adresi
+//! kumeden turetilir, ve esigi karsilamayan islem reddedilir.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
