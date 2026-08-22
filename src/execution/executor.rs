@@ -1907,6 +1907,19 @@ impl Executor {
                             "execution proof attests to a failed run",
                         ));
                     }
+                    // Genel girdiler kanitlayicinin iddiasidir; `program_hash`
+                    // gibi `chain_id` de baglanmali. Baglanmazsa baska bir
+                    // zincir icin uretilmis, orada tamamen gecerli bir kanit
+                    // burada da dogrulanir: AIR `chain_id`'yi trace'e baglar
+                    // ama hangi zincirin dogru oldugunu bilemez, o karar
+                    // dogrulayiciya aittir. `tx.chain_id` islemin imzasina
+                    // dahil oldugu icin gonderen bunu serbestce secemez.
+                    if claimed_inputs.chain_id != tx.chain_id {
+                        return Err(BudlumError::validation(
+                            "ai_exec_chain_id",
+                            "public inputs bind the proof to a different chain",
+                        ));
+                    }
                     let expected_inputs = claimed_inputs.to_execution_inputs();
                     let program = crate::ai::execution::guest_program_for_model(spec)
                         .map_err(|e| BudlumError::validation("ai_exec_program_rebuild", e))?;
