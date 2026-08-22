@@ -76,7 +76,7 @@ fn submission(
     pi: &ExecutionPublicInputs,
     program: &[u64],
 ) -> ZkProofSubmission {
-    let payload_hash = ZkProofSubmission::payload_binding_hash(proof, pi, program);
+    let payload_hash = ZkProofSubmission::payload_binding_hash(proof, pi, program, domain, height);
     let message = CrossDomainMessage::new(CrossDomainMessageParams {
         source_domain: domain,
         target_domain: domain,
@@ -365,4 +365,47 @@ fn a_proof_bound_to_another_chain_is_refused() {
     // Kontrol: dogru chain_id ile ayni kanit kabul edilir.
     bc.submit_zk_proof(submission(sender, 1, 11, &proof, &pi, &program))
         .expect("dogru zincire bagli kanit kabul edilmeli");
+}
+
+/// Bir yukseklik icin uretilmis kanit, baska bir yukseklige sunulamamali.
+///
+/// Kabul edilen iddianin anahtari `(alan, yukseklik)`. Baglama hash'i bu
+/// ikisini kapsamazsa, gecerli tek bir kanit henuz iddia edilmemis her
+/// cifte sunulabilir: saldirgan yalnizca tasima mesajini yeniden kurar,
+/// kanita hic dokunmaz. Kanit "bir program boyle kostu" der; "bu, su
+/// yukseklikteki gecistir" demez.
+#[test]
+fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    let sender = addr(0x0a);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+
+    // 20. yukseklik icin gecerli bir iddia.
+    bc.submit_zk_proof(submission(sender, 1, 20, &proof, &pi, &program))
+        .expect("ilk iddia kabul edilmeli");
+
+    // Ayni kanit, 21. yukseklige sunuluyor: mesaj yeniden kuruluyor ama
+    // baglama hash'i artik yuksekligi de kapsadigi icin tutmuyor.
+    let mut replayed = submission(sender, 1, 20, &proof, &pi, &program);
+    replayed.message.source_height = 21;
+    let err = bc
+        .submit_zk_proof(replayed)
+        .expect_err("yuksekligi degistirilen kanit reddedilmeli");
+    assert!(
+        err.contains("payload hash"),
+        "hata baglamayi anlatmali: {err}"
+    );
+
+    // Alan degistirmek de ayni sekilde tutmamali.
+    let mut cross_domain = submission(sender, 1, 20, &proof, &pi, &program);
+    cross_domain.message.target_domain = 2;
+    let err = bc
+        .submit_zk_proof(cross_domain)
+        .expect_err("alani degistirilen kanit reddedilmeli");
+    assert!(
+        err.contains("payload hash"),
+        "hata baglamayi anlatmali: {err}"
+    );
 }

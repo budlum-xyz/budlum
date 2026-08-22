@@ -73,10 +73,28 @@ impl ZkProofSubmission {
     /// Canonical hash binding the transport message to the proof payload. The
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
     /// With a different proof (or vice-versa).
+    ///
+    /// # Hedef alan ve yukseklik neden on-goruntude
+    ///
+    /// Bu hash once yalnizca (kanit, genel girdiler, program) uzerindeydi.
+    /// Kanitin **hangi iddiaya** sunuldugu - `target_domain` ve
+    /// `source_height` - disaridaydi, oysa kabul edilen iddianin anahtari
+    /// tam olarak o ikisi (`ProofClaimKey`).
+    ///
+    /// Sonuc: gecerli tek bir kanit, henuz iddia edilmemis **her** (alan,
+    /// yukseklik) ciftine sunulabiliyordu. Mesaji yeniden kurmak yetiyordu;
+    /// baglama hash'i degismedigi icin hicbir kapi bunu fark etmiyordu.
+    /// Kanit "bir program boyle kostu" der, "bu, 12. yukseklikteki alan 3'un
+    /// gecisidir" demez - o bagi kuran sey bu on-goruntudur.
+    ///
+    /// Alan ayirici bu yuzden `V2`: on-goruntu degisti, eski hash'ler
+    /// kasten gecersiz.
     pub fn payload_binding_hash(
         proof: &ProofEnvelope,
         public_inputs: &ExecutionPublicInputs,
         program: &[u64],
+        target_domain: DomainId,
+        source_height: u64,
     ) -> Hash32 {
         // SECURITY: serialize into a hash MUST NOT silently fall back
         // To empty bytes - two different proofs whose serialization failed would
@@ -93,17 +111,25 @@ impl ZkProofSubmission {
             program_bytes.extend_from_slice(&word.to_le_bytes());
         }
         hash_fields_bytes(&[
-            b"BDLM_ZK_PROOF_PAYLOAD_V1",
+            b"BDLM_ZK_PROOF_PAYLOAD_V2",
             &proof_bytes,
             &pi_bytes,
             &program_bytes,
+            &target_domain.to_le_bytes(),
+            &source_height.to_le_bytes(),
         ])
     }
 
     /// Recompute and return the expected payload binding hash for this
     /// Submission.
     pub fn expected_payload_hash(&self) -> Hash32 {
-        Self::payload_binding_hash(&self.proof, &self.public_inputs, &self.program)
+        Self::payload_binding_hash(
+            &self.proof,
+            &self.public_inputs,
+            &self.program,
+            self.message.target_domain,
+            self.message.source_height,
+        )
     }
 
     /// The domain this proof advances.

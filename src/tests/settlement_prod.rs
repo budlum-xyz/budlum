@@ -2055,7 +2055,8 @@ mod zk_finality_real_proof {
         pi: &ExecutionPublicInputs,
         program: &[u64],
     ) -> ZkProofSubmission {
-        let payload_hash = ZkProofSubmission::payload_binding_hash(proof, pi, program);
+        let payload_hash =
+            ZkProofSubmission::payload_binding_hash(proof, pi, program, DOMAIN_ID, HEIGHT);
         let message = CrossDomainMessage::new(CrossDomainMessageParams {
             source_domain: DOMAIN_ID,
             target_domain: DOMAIN_ID,
