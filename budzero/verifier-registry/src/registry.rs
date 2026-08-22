@@ -23,9 +23,9 @@
 //! geri gelmemesi icin kural: kesme/unbonding semantigindeki her degisiklik
 //! IKISINE birden uygulanir ve ayna testler iki tarafta da kosar.
 //!
-//! Bilincli birakilan iki fark (2026-08-22, semantik karar kullanicida):
-//! - Sifir cezali kesme burada kayda girer; cekirdekte `Ok(None)` doner ve
-//!   kayda girmez. (Denetim izi butunlugu vs sessiz-noop okumasi.)
+//! Bilincli birakilan fark (2026-08-22: ikiydi, G0 karariyla biri kapatildi):
+//! - Sifir cezali kesme artik iki tarafta da kayda girer (cekirdek
+//!   hizalandi; denetim izi butunlugu kanonik - olay oldu, kayda girdi).
 //! - Cekirdek taraf reddedilen kesmeyi `tracing::warn` ile loglar; bu crate
 //!   loglama bagimliligi tasimaz, `Ok(None)` donusunu izlemek cagiranin
 //!   sorumlulugundadir.
