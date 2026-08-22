@@ -14,7 +14,7 @@ on:
       - 'src/**'
       - '.github/workflows/docker-smoke.yml'  # Bu workflow degisince smoke+trivy tetiklensin
   pull_request:
-    branches: [ main ]
+    branches: [ main, fix/architecture-tip-adlari ]
   workflow_dispatch:
 
 # Minimal permissions - bu workflow yalniz okur (build+scan+smoke).
