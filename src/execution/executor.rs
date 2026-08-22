@@ -1769,14 +1769,38 @@ impl Executor {
                         "public_digest does not match nullifiers/outputs",
                     ));
                 }
-                // Authorization: signature must verify under tx.from over public_digest
-                if crate::crypto::primitives::verify_signature(
-                    &sub.public_digest,
-                    &sub.authorization_sig,
-                    tx.from.as_bytes(),
-                )
-                .is_err()
-                {
+                // Yetkilendirme: imza `public_digest` uzerinde, islemi
+                // gonderen hesabin anahtariyla dogrulanmali.
+                //
+                // Dogrulayici, islemin imza surumune gore secilir. Eskiden
+                // kosulsuz Ed25519 kullaniliyor ve acik anahtar olarak
+                // `tx.from` veriliyordu; bu yalnizca V4'te dogrudur, cunku
+                // orada 32 baytlik adres anahtarin **kendisidir**. V5'te
+                // adres anahtarin hash'idir, dolayisiyla ayni cagri hicbir
+                // gecerli imzayi kabul edemezdi: ML-DSA-87 cuzdanli bir
+                // hesap gizli transfer yapamiyordu.
+                //
+                // V5 yolunda anahtar islemin `signer_public_key` alanindan
+                // gelir; `Transaction::verify` o anahtarin `from` adresini
+                // turettigini zaten dogrulamistir, yani buradaki imza da
+                // gonderen hesaba baglidir.
+                let authorized = match tx.signature_version {
+                    crate::core::transaction::SIGNATURE_VERSION_V5 => {
+                        crate::crypto::primitives::verify_ml_dsa_87_signature(
+                            &sub.public_digest,
+                            &sub.authorization_sig,
+                            &tx.signer_public_key,
+                        )
+                        .is_ok()
+                    }
+                    _ => crate::crypto::primitives::verify_signature(
+                        &sub.public_digest,
+                        &sub.authorization_sig,
+                        tx.from.as_bytes(),
+                    )
+                    .is_ok(),
+                };
+                if !authorized {
                     return Err(BudlumError::validation(
                         "private_transfer_auth",
                         "authorization_sig invalid for tx.from",
