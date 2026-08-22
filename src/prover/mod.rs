@@ -60,6 +60,28 @@ pub struct ZkProofSubmission {
     /// `message.target_domain` is the domain being advanced, `message.source_height`
     /// Is the proven target height, and `message.sender` is the submitter (the
     /// Account charged the fee and, if registered, rewarded).
+    ///
+    /// # `source_height` ile `public_inputs.block_height` ayni sey degil
+    ///
+    /// Olculdu, cunku ikisini esitleyen bir kapi koymak cazipti ve yanlis
+    /// olurdu. `public_inputs.block_height`, **programin syscall 6 ile
+    /// okudugu** yukseklik; AIR onu trace'e baglar (`plonky3_air.rs`,
+    /// syscall6 kisiti) ve hicbir sey okumayan bir program icin `0` kalir -
+    /// `prove_bytecode` tam olarak bunu uretir. `source_height` ise kanitin
+    /// **hangi alan yuksekligini ilerlettigi**, yani bir uzlasma iddiasi.
+    ///
+    /// Bir program zincir yuksekligini hic okumadan bir gecisi kanitlayabilir;
+    /// o durumda `block_height = 0` dogru degerdir ve iddia yuksekligi 20
+    /// olabilir. Duz bir esitlik denetimi bu dogru kanitlari reddederdi.
+    ///
+    /// Iddia tarafi ayri korunuyor: `source_height` baglama hash'inin
+    /// on-goruntusunde (bkz. [`Self::payload_binding_hash`]), dolayisiyla bir
+    /// kanit baska bir yukseklige tasinamiyor. `block_height` icin anlamli
+    /// kapi, program zincir yuksekligini *okuduysa* onun gercek yukseklikle
+    /// tutarli olmasidir; bunu soyleyebilmek icin trace'in syscall 6
+    /// kullanip kullanmadigini disaridan bilmek gerekir ve bu bilgi su an
+    /// genel girdilerde tasinmiyor. Kapi, o bilgi tasinana kadar
+    /// kurulmuyor - yanlis kapi, kapi olmamasindan kotudur.
     pub message: CrossDomainMessage,
     /// The STARK proof.
     pub proof: ProofEnvelope,
