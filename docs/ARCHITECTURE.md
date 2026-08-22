@@ -63,6 +63,7 @@
 - [53. Hesap soyutlama: kayit defteri ve V6 coklu imza yetkilendirmesi](#53-hesap-soyutlama-kayit-defteri-ve-v6-coklu-imza-yetkilendirmesi)
 - [54. Egemen alanlar: sablonun adlandirdigi seyle ayni olmasi](#54-egemen-alanlar-sablonun-adlandirdigi-seyle-ayni-olmasi)
 - [55. Kanit gecerliligi bir yetkilendirme karari degildir](#55-kanit-gecerliligi-bir-yetkilendirme-karari-degildir)
+- [56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi](#56-yalnizca-bizim-koydugumuz-kod-calisir-zk-program-izin-listesi)
 
 ## 1. Genel sistem mimarisi
 
@@ -1727,7 +1728,9 @@ flowchart TD
   B -->|"hayir"| Rej["Reddedilir"]
   B -->|"evet"| C{"chain_id bu zincir mi?"}
   C -->|"baska zincir"| Rej
-  C -->|"evet"| Fee["Ucret tahsil edilir"]
+  C -->|"evet"| P{"Program alanin izin listesinde mi?"}
+  P -->|"hayir / liste bos"| Rej
+  P -->|"evet"| Fee["Ucret tahsil edilir"]
   Fee --> V{"STARK dogrulamasi"}
   V -->|"gecersiz"| Burn["Ucret yanar"]
   V -->|"gecerli"| Claim{"Iddia politikasi: ilk gecerli kazanir"}
@@ -1740,3 +1743,77 @@ iddianin icerdigi durum gecisinin zincirin gercek durumuyla ortustugunu
 garanti etmez. `final_state_root` kaydediliyor ve cakisma tespitinde
 kullaniliyor, ama alanin gercek koku ile karsilastirilmiyor. Bunu iddia
 etmiyoruz.
+
+## 56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi
+
+Onceki bolum kanitin **dogru iddiaya** ait oldugunu garanti eden uc kapiyi
+anlatiyor. Hepsi gecildikten sonra bile acik kalan bir soru vardi: kanitlanan
+**kod** neydi?
+
+### Bosluk
+
+`Plonky3Adapter::verify` programin Keccak-256 hash'ini hesaplar ve
+`public_inputs.program_hash` ile karsilastirir. Bu denetim gercek, ama
+soyledigi sey sanildigindan dar: gonderen hem programi hem beklenen hash'i
+kendisi verdigi icin, ikisi birbirini dogrular ve **her zaman uyusur**. Denetim
+"gonderdigin program, gonderdigin hash'e uyuyor" der. "Bu programin bu alani
+ilerletmeye hakki var" demez.
+
+Sonucu su: saldirgan kendi yazdigi bir programi - ornegin durum kokunu istedigi
+degere goturen uc satirlik bir programi - alir, onu **durustce** calistirir ve
+gercek bir STARK uretir. Kanit kusursuzdur. Hicbir kriptografik denetim onu
+yakalayamaz, cunku yalan kanitta degildir. Kanit sistemi "bu program boyle
+kostu" demek uzere tasarlanmistir; "bu program calistirilmali miydi" sorusu
+onun sorusu degildir.
+
+Bu, kanit sisteminin **kisitlamadigi** alani dogrulayicinin kendi kodunda
+denetlemesi gereken sinifin en genis ornegidir. Uc onceki kapi kanitin
+kimligini baglar; bu kapi kanitin **yetkisini** baglar.
+
+### Kapi
+
+`ConsensusDomain` artik bir `zk_program_allowlist` tasiyor: o alani
+ilerletmesine izin verilen programlarin hash'leri. `submit_zk_proof`
+gonderilen programin hash'ini hesaplar ve listede arar; yoksa reddeder.
+
+Izin listesi kimligi, dogrulayicinin AIR'e karsi bagladigi degerin **ayni**si
+(etiketsiz Keccak-256, kelimeler little-endian). Kasten ayni: ayri bir etiketli
+hash kullanmak, "listedeki program" ile "kanitlanan program" arasinda ayrisma
+imkani birakirdi.
+
+Kapi **ucretten once** duruyor. Yetkisiz bir program parasal bir yan etki
+uretmeden reddedilir; reddin bedeli saldirgana degil, ona ait olmayan bir
+hesaba yazilmaz.
+
+### Bos liste = kapali kapi
+
+Varsayilanin yonu bu tasarimin en onemli parcasi. Liste bos dogar ve bos liste
+**hicbir** kaniti kabul etmez. Bir alan, operatoru acikca bir program listesi
+verene kadar zk ile ilerletilemez.
+
+Ters varsayilan - "liste bos ise herkese acik" - kullanisli gorunur ve
+felakettir: yeni kurulan her alan ve bincode ile goc eden her eski kayit
+sussuz dogardi. Depolama goc yolu (`LegacyConsensusDomainV1` -> 
+`ConsensusDomain`) bu yuzden acikca `Vec::new()` yaziyor: eski kayitta boyle
+bir alan yoktu, dolayisiyla hangi programlara izin verdigi **bilinmiyor**, ve
+bilinmeyen izin izin degildir.
+
+```mermaid
+flowchart TD
+  A["Saldirgan kendi programini yazar"] --> B["Programi durustce calistirir"]
+  B --> C["Gercek, gecerli bir STARK uretir"]
+  C --> D{"program_hash denetimi"}
+  D -->|"gecer: ikisini de o verdi"| E{"Alanin izin listesi"}
+  E -->|"program listede yok"| F["Reddedilir - ucret alinmadan"]
+  E -->|"liste bos"| F
+  E -->|"program listede"| G["STARK dogrulanir"]
+  G --> H["Iddia degerlendirilir"]
+```
+
+### Bu kapinin engellemedigi sey
+
+Izin listesindeki bir programin **kendisi** kusurluysa bu kapi yardim etmez;
+yetkiyi baglar, dogrulugu degil. Listeye ne konuldugu bir yonetisim sorusudur
+ve bilerek kod disinda birakilmistir: alan kendi kumesini kendi ilan eder.
+Ayrica AIR'in kendi saglamligi (under-constrained kusurlar) bu kapinin
+kapsaminda degildir - o, dis denetime birakilan ayri bir yuzeydir.

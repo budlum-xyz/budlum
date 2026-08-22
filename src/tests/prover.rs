@@ -32,6 +32,25 @@ fn fresh_chain() -> Blockchain {
     Blockchain::new(consensus, None, 45262, None)
 }
 
+/// Alani kaydeder ve verilen programi zk izin listesine yazar.
+///
+/// Bu yardimci var, cunku artik bir kanit yalnizca gecerli olmakla kabul
+/// edilmiyor: alanin o programa acikca izin vermis olmasi gerekiyor. Izin
+/// listesi bos dogar, yani kayit tek basina yetmez.
+fn register_domain_allowing(bc: &mut Blockchain, id: u32, program: &[u64]) {
+    let mut domain = crate::domain::plugin::default_domain(
+        id,
+        crate::domain::ConsensusKind::Zk,
+        45262 + id as u64,
+        "zk-proof-verification",
+        0,
+    );
+    domain
+        .zk_program_allowlist
+        .push(crate::prover::zk_program_hash(program));
+    bc.domain_registry.register(domain).expect("register");
+}
+
 /// A tiny valid program: Load imm 7 -> reg1, Log reg1, Halt.
 fn sample_bytecode() -> Vec<u8> {
     let program = vec![
@@ -101,6 +120,7 @@ fn submission(
 fn unregistered_account_valid_proof_accepted_but_not_rewarded() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let sender = addr(0x01);
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&sender, fee); // enough only for the (refunded) fee
@@ -125,6 +145,7 @@ fn unregistered_account_valid_proof_accepted_but_not_rewarded() {
 fn registered_prover_valid_proof_is_fee_only_without_mint() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let prover = addr(0x02);
     // Fund + register as prover.
     bc.state.add_balance(&prover, 5_000);
@@ -175,6 +196,7 @@ fn invalid_proof_burns_fee_and_leaves_state_unchanged() {
 fn insufficient_fee_rejected_without_verification() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let sender = addr(0x04); // no balance
     let err = bc
         .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
@@ -187,6 +209,7 @@ fn insufficient_fee_rejected_without_verification() {
 fn payload_hash_mismatch_rejected() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let sender = addr(0x05);
     bc.state.add_balance(&sender, 1_000);
     let mut sub = submission(sender, 1, 10, &proof, &pi, &program);
@@ -202,6 +225,7 @@ fn payload_hash_mismatch_rejected() {
 fn wrong_message_kind_rejected() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let sender = addr(0x06);
     bc.state.add_balance(&sender, 1_000);
     let mut sub = submission(sender, 1, 10, &proof, &pi, &program);
@@ -225,6 +249,7 @@ fn wrong_message_kind_rejected() {
 fn idempotent_resubmission_same_claim() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let prover = addr(0x07);
     bc.state.add_balance(&prover, 5_000);
     bc.state.bond_prover(&prover, 2_000).unwrap();
@@ -258,6 +283,7 @@ fn conflicting_claim_same_domain_height_rejected() {
     use crate::prover::AcceptedProofClaim;
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
 
     // Pre-seed an accepted claim for (domain=1, height=10) with a DIFFERENT
     // Final state root than the proof we are about to submit. (Seeding directly
@@ -307,6 +333,7 @@ fn proof_claim_registry_persists_across_restart() {
         None,
     );
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let prover = addr(0x0A);
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&prover, fee);
@@ -340,6 +367,7 @@ fn proof_claim_registry_persists_across_restart() {
 fn a_proof_bound_to_another_chain_is_refused() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let sender = addr(0x09);
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&sender, fee);
@@ -378,6 +406,7 @@ fn a_proof_bound_to_another_chain_is_refused() {
 fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     let sender = addr(0x0a);
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&sender, fee * 4);
@@ -408,4 +437,101 @@ fn a_proof_claimed_at_one_height_cannot_be_replayed_at_another() {
         err.contains("payload hash"),
         "hata baglamayi anlatmali: {err}"
     );
+}
+
+/// Kanit kusursuz, program yetkisiz: reddedilmeli.
+///
+/// Saldirinin bicimi sudur: saldirgan kendi programini yazar, onu durustce
+/// calistirir ve gercek bir STARK uretir. Kanit gecerlidir - hicbir kriptografik
+/// denetim onu yakalayamaz, cunku yalan kanitta degil, calistirilan kodun
+/// kendisindedir. `program_hash` denetimi de yardim etmez: gonderen hem programi
+/// hem hash'i verdigi icin o denetim her zaman gecer.
+///
+/// Reddi saglayan tek sey alanin onceden ilan ettigi izin listesidir.
+#[test]
+fn a_valid_proof_over_an_unauthorized_program_is_refused() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+
+    // Alan kayitli ve zk kabul ediyor, ama BASKA bir programa izin veriyor.
+    let mut other_program = program.clone();
+    other_program.push(0);
+    register_domain_allowing(&mut bc, 1, &other_program);
+
+    let sender = addr(0x21);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+    let before = bc.state.get_balance(&sender);
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
+        .unwrap_err();
+    assert!(
+        err.contains("not on the zk allowlist"),
+        "izinsiz program izin listesi gerekcesiyle reddedilmeli, gelen: {err}"
+    );
+
+    // Kapi ucretten once: reddedilen gonderim para yakmamali.
+    assert_eq!(
+        bc.state.get_balance(&sender),
+        before,
+        "izin listesi reddi ucretten once olmali"
+    );
+
+    // Ve hicbir iddia kaydedilmemeli.
+    assert!(bc
+        .proof_claims
+        .get(&ProofClaimKey {
+            domain_id: 1,
+            target_height: 10,
+        })
+        .is_none());
+}
+
+/// Bos izin listesi = kapali kapi.
+///
+/// Varsayilanin yonu onemli: yeni ya da goc etmis bir alan, kimse ona program
+/// vermeden zk ile ilerletilememeli. Fail-open bir varsayilan bu alani sussuz
+/// birakirdi.
+#[test]
+fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+
+    let domain = crate::domain::plugin::default_domain(
+        2,
+        crate::domain::ConsensusKind::Zk,
+        45264,
+        "zk-proof-verification",
+        0,
+    );
+    assert!(
+        domain.zk_program_allowlist.is_empty(),
+        "alan zk kanitina kapali dogmali"
+    );
+    bc.domain_registry.register(domain).expect("register");
+
+    let sender = addr(0x22);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 2, 10, &proof, &pi, &program))
+        .unwrap_err();
+    assert!(err.contains("not on the zk allowlist"), "gelen: {err}");
+}
+
+/// Kayitsiz alan: kanit degerlendirilmeden reddedilir.
+#[test]
+fn a_proof_for_an_unknown_domain_is_refused() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    let sender = addr(0x23);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 77, 10, &proof, &pi, &program))
+        .unwrap_err();
+    assert!(err.contains("unknown domain 77"), "gelen: {err}");
 }
