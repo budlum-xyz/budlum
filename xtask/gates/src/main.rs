@@ -104,6 +104,7 @@ mod gates {
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
     pub mod rejection_tests;
+    pub mod rejenerasyon;
     pub mod repair_fires;
     pub mod required_tests;
     pub mod rust_literals;
@@ -461,6 +462,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::domain_tags::self_test,
+    },
+    Gate {
+        name: "rejenerasyon",
+        replaces: None,
+        run: gates::rejenerasyon::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::rejenerasyon::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",
