@@ -148,6 +148,17 @@ pub enum RegistryError {
     RelayerNotActive {
         account: Address,
     },
+    /// The account is already slashed for this role.
+    ///
+    /// A repeated slash used to return `Ok` with `penalty: 0`, which reads at
+    /// the call site as "the slash was applied and cost nothing" rather than
+    /// "this was a replay". The budzero registry rejected the same call, so
+    /// the two registries disagreed on the same input; this variant is the
+    /// core side of that agreement.
+    AlreadySlashed {
+        account: Address,
+        role: RoleId,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -177,6 +188,9 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "{account} is not an active relayer (register with stake first)"
             ),
+            RegistryError::AlreadySlashed { account, role } => {
+                write!(f, "{account} is already slashed as {role}")
+            }
         }
     }
 }
@@ -572,14 +586,12 @@ impl PermissionlessRegistry {
         condition: SlashingCondition,
         slash_ratio_fixed: u64,
     ) -> Result<SlashOutcome, RegistryError> {
-        let already_slashed = self
-            .registrations
-            .get(&(role, account))
-            .is_some_and(|registration| matches!(registration.status, MemberStatus::Slashed));
+        // `slash_role_only` now refuses a replay, so reaching the next line
+        // means this is the first slash for the role and the cross-role sweep
+        // is owed. The previous `already_slashed` precheck existed only to
+        // suppress that sweep after a zero-penalty `Ok`.
         let outcome = self.slash_role_only(account, role, condition, slash_ratio_fixed)?;
-        if !already_slashed {
-            self.slash_cross_role(account, role, condition, slash_ratio_fixed);
-        }
+        self.slash_cross_role(account, role, condition, slash_ratio_fixed);
         Ok(outcome)
     }
 
@@ -599,12 +611,14 @@ impl PermissionlessRegistry {
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
 
+        // A replayed slash is refused rather than answered with a zero-penalty
+        // `Ok`. Both readings leave the stake untouched, but only one of them
+        // tells the caller that nothing happened: an `Ok` here is
+        // indistinguishable from a slash that legitimately cost nothing, so a
+        // caller that logs `penalty` or counts successful slashes records a
+        // second punishment that never occurred.
         if matches!(reg.status, MemberStatus::Slashed) {
-            return Ok(SlashOutcome {
-                condition,
-                penalty: 0,
-                remaining_stake: reg.stake,
-            });
+            return Err(RegistryError::AlreadySlashed { account, role });
         }
 
         let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
@@ -927,6 +941,79 @@ mod tests {
             .unwrap();
         assert!(reg
             .register_verifier(addr(3), MIN_REGISTRATION_STAKE, 0)
+            .is_err());
+    }
+
+    /// A replayed slash must be refused, not answered with a zero penalty.
+    ///
+    /// The two registries disagreed on exactly this input: budzero returned
+    /// `Err(AlreadySlashed)`, core returned `Ok(penalty: 0)`. Nothing covered
+    /// the second call, which is why the divergence survived. An `Ok` here is
+    /// indistinguishable from a slash that legitimately cost nothing.
+    #[test]
+    fn slashing_the_same_role_twice_is_refused() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(9), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+
+        let first = reg
+            .slash(
+                addr(9),
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                FIXED_POINT_SCALE,
+            )
+            .expect("the first slash applies");
+        assert!(first.penalty > 0, "the first slash must cost stake");
+        let after_first = first.remaining_stake;
+
+        let err = reg
+            .slash(
+                addr(9),
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                FIXED_POINT_SCALE,
+            )
+            .expect_err("the replay must be refused");
+        assert_eq!(
+            err,
+            RegistryError::AlreadySlashed {
+                account: addr(9),
+                role: roles::VALIDATOR
+            }
+        );
+
+        // The refusal must not have moved any stake either.
+        assert_eq!(
+            reg.get(&addr(9), roles::VALIDATOR)
+                .map(|r| r.stake)
+                .unwrap_or_default(),
+            after_first,
+            "a refused replay must leave the stake untouched"
+        );
+    }
+
+    /// `slash_role_only` is the path the executor uses for Lubot equivocation;
+    /// it must refuse a replay for the same reason.
+    #[test]
+    fn slashing_a_role_only_twice_is_refused() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(10), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        reg.slash_role_only(
+            addr(10),
+            roles::VALIDATOR,
+            SlashingCondition::MaliciousBehaviour,
+            FIXED_POINT_SCALE,
+        )
+        .expect("the first slash applies");
+        assert!(reg
+            .slash_role_only(
+                addr(10),
+                roles::VALIDATOR,
+                SlashingCondition::MaliciousBehaviour,
+                FIXED_POINT_SCALE,
+            )
             .is_err());
     }
 

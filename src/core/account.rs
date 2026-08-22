@@ -1328,6 +1328,13 @@ impl AccountState {
         // The registry - otherwise the same offence would be paid-for twice.
         // Apply_slashing feeds double-sign evidence, label
         // The registry mirror as DoubleSign, not LivenessFault (audit trail).
+        //
+        // The result is discarded on purpose. The account layer already
+        // returned early if this validator was slashed, so the only errors
+        // reachable here are `NotRegistered` (a validator with no registry
+        // bond) and `AlreadySlashed` (the registry was slashed through
+        // another path first). Both mean the registry is already in the state
+        // this mirror wants, so neither should abort the account-level slash.
         let _ = self.registry.slash(
             *address,
             crate::registry::role::roles::VALIDATOR,
