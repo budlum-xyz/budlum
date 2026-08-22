@@ -42,10 +42,17 @@
 
 use std::fmt::Write as _;
 
-use crate::storage::content_id::ContentId;
+use crate::core::hash::hash_fields_bytes;
 use crate::storage::generated::{
     generate_content, GenerateError, GeneratedSpec, MAX_GENERATED_BYTES,
 };
+
+/// Domain separation for a rendered object's id.
+///
+/// Distinct from `BDLM_CONTENT_V1`: that tag names raw stored bytes, while
+/// this one names a recipe rendered into a format. Sharing a tag would let
+/// an id computed over a chunk collide with an id computed over a render.
+const RENDER_ID_TAG: &[u8] = b"BDLM_RENDER_ID_V1";
 
 /// The format a reader asked for.
 ///
@@ -67,6 +74,10 @@ pub enum RenderFormat {
 
 impl RenderFormat {
     /// A stable tag for the format, for use inside a commitment.
+    ///
+    /// The variant name only. The parameters that distinguish two requests
+    /// of the same variant are carried by [`Self::commitment_bytes`], which
+    /// is what a commitment must fold in.
     #[must_use]
     pub const fn format_tag(&self) -> &'static [u8] {
         match self {
@@ -74,6 +85,25 @@ impl RenderFormat {
             Self::Png { .. } => b"png",
             Self::VideoFrame { .. } => b"frame",
         }
+    }
+
+    /// The format, encoded injectively, for folding into a content id.
+    ///
+    /// The tag alone is not enough. `Png { size: 64 }` and `Png { size: 32 }`
+    /// share the tag `png` and are different objects, so the parameter is
+    /// appended in a fixed width. Two formats produce the same bytes here
+    /// only when they are the same format with the same parameters, which is
+    /// the property [`render_id`] needs to stay injective.
+    #[must_use]
+    pub fn commitment_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8);
+        out.extend_from_slice(self.format_tag());
+        match self {
+            Self::Svg => {}
+            Self::Png { size } => out.extend_from_slice(&size.to_be_bytes()),
+            Self::VideoFrame { frame } => out.extend_from_slice(&frame.to_be_bytes()),
+        }
+        out
     }
 }
 
@@ -84,6 +114,13 @@ pub enum RenderError {
     Generate(GenerateError),
     /// The format requested needs a spec the recipe did not carry.
     MissingParam(&'static str),
+    /// The rendered bytes did not match the committed id.
+    ///
+    /// Separate from [`Self::MissingParam`] because a caller acts on the two
+    /// differently: a missing parameter is a malformed request, while an id
+    /// mismatch means the bytes on hand are not the object that was asked
+    /// for, which is a refusal a validator records.
+    IdMismatch,
 }
 
 impl From<GenerateError> for RenderError {
@@ -99,6 +136,7 @@ impl core::fmt::Display for RenderError {
             Self::MissingParam(p) => {
                 write!(f, "render needs a param the recipe did not carry: {p}")
             }
+            Self::IdMismatch => write!(f, "rendered bytes do not match the committed id"),
         }
     }
 }
@@ -341,27 +379,43 @@ fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<
     Ok(out)
 }
 
+/// The id a rendered object commits to: the format and the bytes together.
+///
+/// The module doc says the format string is part of the commitment, because
+/// "a recipe rendered as PNG is a different object from the same recipe
+/// rendered as SVG". Hashing the rendered bytes alone does not say that. It
+/// says only what the bytes were, and it leaves the format as something the
+/// caller is trusted to have checked separately.
+///
+/// The two are folded here instead, length-prefixed by `hash_fields_bytes`,
+/// so an id names one object: this recipe, in this format, with these
+/// parameters. A reader who asked for a 64-pixel PNG cannot be handed a
+/// 32-pixel one that verifies.
+#[must_use]
+pub fn render_id(format: &RenderFormat, bytes: &[u8]) -> [u8; 32] {
+    hash_fields_bytes(&[RENDER_ID_TAG, &format.commitment_bytes(), bytes])
+}
+
 /// Render and verify against a committed id.
 ///
-/// `expected` must be the id of the *rendered* bytes: the recipe id commits
-/// to the format too, so `format_tag()` is folded into the expected id by
-/// the caller. This is the check a validator runs: produce the bytes, hash
-/// them, compare.
+/// `expected` is a [`render_id`]: the format is bound into it, so a request
+/// for one format cannot be satisfied by bytes produced for another. This is
+/// the check a validator runs: produce the bytes, hash them with the format,
+/// compare.
 ///
 /// # Errors
 ///
 /// [`RenderError::Generate`] and [`RenderError::MissingParam`] from
-/// [`render`], plus [`RenderError::MissingParam`] when the produced bytes
-/// do not match `expected`.
+/// [`render`], plus [`RenderError::IdMismatch`] when the produced bytes do
+/// not match `expected`.
 pub fn render_and_verify(
     spec: &GeneratedSpec,
     format: &RenderFormat,
     expected: &[u8; 32],
 ) -> Result<Vec<u8>, RenderError> {
     let bytes = render(spec, format)?;
-    let produced = ContentId::of(&bytes);
-    if produced.as_bytes() != expected {
-        return Err(RenderError::MissingParam("id mismatch"));
+    if &render_id(format, &bytes) != expected {
+        return Err(RenderError::IdMismatch);
     }
     Ok(bytes)
 }
@@ -369,7 +423,6 @@ pub fn render_and_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::content_id::ContentId;
     use crate::storage::generated::GeneratorId;
 
     fn avatar_spec() -> GeneratedSpec {
@@ -425,9 +478,79 @@ mod tests {
     fn render_and_verify_rejects_wrong_id() {
         let spec = avatar_spec();
         let bytes = render(&spec, &RenderFormat::Svg).unwrap();
-        let good = ContentId::of(&bytes);
-        assert!(render_and_verify(&spec, &RenderFormat::Svg, good.as_bytes()).is_ok());
+        let good = render_id(&RenderFormat::Svg, &bytes);
+        assert!(render_and_verify(&spec, &RenderFormat::Svg, &good).is_ok());
         assert!(render_and_verify(&spec, &RenderFormat::Svg, &[0u8; 32]).is_err());
+    }
+
+    /// An id must name the format, not only the bytes.
+    ///
+    /// The module doc says a recipe rendered as PNG is a different object
+    /// from the same recipe rendered as SVG. Before the format was folded in,
+    /// the id was a plain hash of the rendered bytes, so nothing in the id
+    /// said which format produced them; the two formats stayed apart only
+    /// because their bytes differ, which is a property of the renderers and
+    /// not something the commitment enforced.
+    #[test]
+    fn an_id_for_one_format_is_refused_for_another() {
+        let spec = avatar_spec();
+        let svg = render(&spec, &RenderFormat::Svg).unwrap();
+        let svg_id = render_id(&RenderFormat::Svg, &svg);
+        // The same bytes, labelled as a different format, is a different id.
+        assert_ne!(
+            svg_id,
+            render_id(&RenderFormat::VideoFrame { frame: 0 }, &svg),
+            "the format must change the id even when the bytes do not"
+        );
+        // And an id minted for SVG does not verify a frame render.
+        assert_eq!(
+            render_and_verify(&spec, &RenderFormat::VideoFrame { frame: 0 }, &svg_id),
+            Err(RenderError::IdMismatch)
+        );
+    }
+
+    /// Two requests of the same variant that differ only in a parameter must
+    /// not share an id. `format_tag` alone returns `png` for both, so the
+    /// parameter has to reach the commitment too.
+    #[test]
+    fn a_png_id_is_refused_for_a_png_of_another_size() {
+        let spec = avatar_spec();
+        let small = RenderFormat::Png { size: 32 };
+        let large = RenderFormat::Png { size: 64 };
+        assert_eq!(small.format_tag(), large.format_tag(), "same variant tag");
+        assert_ne!(
+            small.commitment_bytes(),
+            large.commitment_bytes(),
+            "the size must survive into the commitment"
+        );
+        let small_bytes = render(&spec, &small).unwrap();
+        let small_id = render_id(&small, &small_bytes);
+        assert!(render_and_verify(&spec, &small, &small_id).is_ok());
+        assert_eq!(
+            render_and_verify(&spec, &large, &small_id),
+            Err(RenderError::IdMismatch)
+        );
+    }
+
+    /// The format encoding must be injective: a format's bytes cannot be
+    /// produced by any other format. Checked across every variant this
+    /// module renders, so a new variant that collides fails here.
+    #[test]
+    fn no_two_formats_share_commitment_bytes() {
+        let mut formats = vec![RenderFormat::Svg];
+        for n in [0u16, 1, 32, 64, 255, 256, u16::MAX] {
+            formats.push(RenderFormat::Png { size: n });
+            formats.push(RenderFormat::VideoFrame { frame: n });
+        }
+        for (i, a) in formats.iter().enumerate() {
+            for b in formats.iter().skip(i + 1) {
+                assert_ne!(
+                    a.commitment_bytes(),
+                    b.commitment_bytes(),
+                    "{a:?} and {b:?} encode to the same commitment bytes"
+                );
+            }
+        }
     }
 
     /// The pixels the generator drew must come back from the PNG
