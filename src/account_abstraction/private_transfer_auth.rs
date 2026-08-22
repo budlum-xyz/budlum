@@ -32,9 +32,28 @@
 //! Gizlilik iddiasi burada yapilmaz; yapilan sey cifte harcamayi ve
 //! yetkisiz harcamayi ayirmaktir.
 //!
-//! WIRING: unwired - the authorization check is real, but no production path
-//! builds a private transfer yet. Reached only by tests until account
-//! abstraction is wired into transaction verification.
+//! WIRING: unwired - olculdu, ve isaretin eski gerekcesi yanlisti. Uretimde
+//! bir gizli transfer yolu **var**: `TransactionType::PrivateTransferSubmit`
+//! -> `Executor` (`src/execution/executor.rs`). O yol bu modulu cagirmiyor,
+//! ayni isi ikinci kez yaziyor. Bu modul su an yalnizca testlerden ulasilir.
+//!
+//! # Iki uygulama ayni sey degil
+//!
+//! Fark olculdu, tahmin edilmedi. Uretimin imzaladigi on-goruntu
+//! (`compute_public_digest`) nullifier'lari ve cikis baglantilarini
+//! kapsar; **tutari kapsamaz**, cunku tutar gizli transferde acikta
+//! tasinmaz. Bu modulun on-goruntusu (`authorization_payload`) tutari da
+//! baglar, cunku burada tutar biliniyor varsayilir.
+//!
+//! Ikisi ayni soruya iki farkli cevap uretir, dolayisiyla biri digerinin
+//! yerine gecirilemez: bir tarafin urettigi imza otekinde dogrulanmaz.
+//! Birlestirme, hangi modelin dogru oldugu kararini gerektirir - tutar
+//! zincirde acikta mi, degil mi. Bu bir uzlasma yuzeyi karari oldugu icin
+//! kendi commit'inde yapilir; iki uygulamayi "benziyorlar" diye birlestirmek
+//! sessizce yeni bir imza semasi yaratirdi.
+//!
+//! Kayit `PLAN.md` Borc K deseninin ayni sinifi: ayni isin iki yerde ayri
+//! yazilmasi, once **olculur**, sonra tek kaynaga indirilir.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
