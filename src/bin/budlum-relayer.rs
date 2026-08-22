@@ -664,8 +664,11 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
 /// that was really found, not a counter that was never connected to anything.
 async fn run_bud_to_eth_loop(config: RelayerConfig) {
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
-    let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
 
+    // Bu yon icin `EthClient` kurulmuyor. Kuruluyordu ve dongunun sonunda
+    // `let _ = &eth_client;` ile canli tutuluyordu; hicbir cagri yapmadigi
+    // icin bu yalnizca "Ethereum tarafi bagli" gorunumu veriyordu. Gonderim
+    // yolu yokken bir istemci tutmak, olmayan bir yetenegi ima eder.
     let _active = check_relayer_active(&budlum_client, &config).await;
 
     eprintln!(
@@ -713,8 +716,6 @@ async fn run_bud_to_eth_loop(config: RelayerConfig) {
             }
         }
         last_scanned = Some(head);
-
-        let _ = &eth_client;
     }
 }
 
