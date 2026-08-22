@@ -17,7 +17,6 @@
 //! Transport types).
 
 pub mod assignment;
-pub mod bud2_final;
 pub mod content_id;
 pub mod db;
 pub mod derived;
