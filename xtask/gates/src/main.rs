@@ -54,6 +54,7 @@ mod gates {
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
+    pub mod chain_id_is_not_hardcoded;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
@@ -82,6 +83,7 @@ mod gates {
     pub mod governance_invariants;
     pub mod guards_reachable;
     pub mod hash_inputs_are_length_prefixed;
+    pub mod indexing_is_not_new;
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
@@ -101,6 +103,7 @@ mod gates {
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
+    pub mod regeneration;
     pub mod rejection_tests;
     pub mod repair_fires;
     pub mod required_tests;
@@ -313,6 +316,22 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "chain-id-is-not-hardcoded",
+        replaces: None,
+        run: gates::chain_id_is_not_hardcoded::run,
+        run_args: None,
+        self_test: gates::chain_id_is_not_hardcoded::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "indexing-is-not-new",
+        replaces: None,
+        run: gates::indexing_is_not_new::run,
+        run_args: None,
+        self_test: gates::indexing_is_not_new::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "no-orphan-source-files",
         replaces: Some("check-no-orphan-source-files.sh"),
         run: gates::no_orphan_source_files::run,
@@ -443,6 +462,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::domain_tags::self_test,
+    },
+    Gate {
+        name: "regeneration",
+        replaces: None,
+        run: gates::regeneration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::regeneration::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",

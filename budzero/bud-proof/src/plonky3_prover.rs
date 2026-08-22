@@ -278,9 +278,10 @@ pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
         .collect()
 }
 
-fn trace_matrix(
+#[doc(hidden)]
+pub fn trace_matrix(
     trace: &[Step],
-    _program: &[u64],
+    program: &[u64],
     public_inputs: &ExecutionPublicInputs,
 ) -> (RowMajorMatrix<Goldilocks>, usize) {
     let events = register_events(trace);
@@ -291,6 +292,34 @@ fn trace_matrix(
     let num_rows = (3 * n_cpu + 1).next_power_of_two().max(16);
 
     let mut values = vec![Goldilocks::new(0); num_rows * TRACE_WIDTH];
+
+    // Program CTL cokluk taniki. Satir `i`, pc=`i`'nin kac kez calistirildigini
+    // tasir; ROM tarafinin LogUp agirligi budur.
+    //
+    // VerifyMerkle genisletme satirlari orijinal adimla ayni (pc, raw_inst)
+    // demetini yeniden kullanir ve CTL onlari `is_expand` ile disarida birakir,
+    // dolayisiyla burada da sayilmazlar.
+    {
+        let prog_len = program.len();
+        let mut mult = vec![0u64; prog_len];
+        for step in trace {
+            // Genisletme satirlari orijinal adimla ayni (pc, raw_inst) demetini
+            // yeniden kullanir; CTL onlari `is_expand` ile disladigi icin
+            // cokluga da katilmazlar. Katilsalardi tek bir VerifyMerkle adimi
+            // 65 kez sayilirdi.
+            if step.merkle_is_expand || step.inference_is_expand {
+                continue;
+            }
+            if step.pc < prog_len {
+                mult[step.pc] += 1;
+            }
+        }
+        for (pc, count) in mult.iter().enumerate() {
+            if pc < num_rows {
+                values[pc * TRACE_WIDTH + COL_PROG_MULT] = Goldilocks::new(*count);
+            }
+        }
+    }
 
     let mut running_gas = 0u64;
 
@@ -316,11 +345,9 @@ fn trace_matrix(
         // It on the last row as well).
         if i == 0 {
             for j in 0..8 {
-                let limb = u32::from_le_bytes(
-                    public_inputs.initial_state_root[j * 4..j * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&public_inputs.initial_state_root[j * 4..j * 4 + 4]);
+                let limb = u32::from_le_bytes(word);
                 values[row_start + COL_INIT_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
             // Gas_limit: bound to public_inputs[32,33] on the first
@@ -794,11 +821,9 @@ fn trace_matrix(
         values[row_start + COL_TRACE_LEN_CTR] = Goldilocks::new((i + 1) as u64);
         if i == n_cpu.saturating_sub(1) {
             for j in 0..8 {
-                let limb = u32::from_le_bytes(
-                    public_inputs.final_state_root[j * 4..j * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&public_inputs.final_state_root[j * 4..j * 4 + 4]);
+                let limb = u32::from_le_bytes(word);
                 values[row_start + COL_FINAL_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
             // Exit_code: 0 = success (real Halt), 1 = error (
@@ -822,16 +847,19 @@ fn trace_matrix(
         // Share the same `i` index here.
         if step.merkle_is_expand {
             // Expansion row.
-            let key = step.merkle_key.expect("expansion row must have merkle_key");
-            let cur = step
-                .merkle_current
-                .expect("expansion row must have merkle_current");
-            let sibling = step
-                .merkle_sibling
-                .expect("expansion row must have merkle_sibling");
-            let round = step
-                .merkle_round
-                .expect("expansion row must have merkle_round");
+            // `Vm::step` fills these four together with `merkle_is_expand`,
+            // so on an expansion row they are all present. Read as a group
+            // rather than unwrapped one by one: the guarantee lives in
+            // another crate, and a drift there must leave the row unwritten
+            // instead of aborting the prover mid-trace.
+            let (Some(key), Some(cur), Some(sibling), Some(round)) = (
+                step.merkle_key,
+                step.merkle_current,
+                step.merkle_sibling,
+                step.merkle_round,
+            ) else {
+                continue;
+            };
             let bit = (key >> round) & 1;
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
@@ -889,10 +917,9 @@ fn trace_matrix(
                 values[row_start + COL_MERKLE_POSEIDON_X2_0 + i] = Goldilocks::new(0);
                 values[row_start + COL_MERKLE_POSEIDON_X4_0 + i] = Goldilocks::new(0);
             }
-        } else if step.merkle_key.is_some() {
+        } else if let Some(key) = step.merkle_key {
             // Original VerifyMerkle step. The VM patched this row
             // With merkle_key immediately after push.
-            let key = step.merkle_key.unwrap();
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
             // Merkle_current on the original step is the
@@ -903,9 +930,10 @@ fn trace_matrix(
             // Step carries the 64th-round output, allowing
             // The AIR to apply the final root check on the
             // Original step's row, bridging to rd_val_new).
-            let final_merkle = step
-                .merkle_current
-                .expect("original VerifyMerkle step must have merkle_current (the VM sets this)");
+            // The VM sets this on the original step; read it instead of
+            // asserting, so a change there leaves the column at zero rather
+            // than aborting the prover mid-trace.
+            let final_merkle = step.merkle_current.unwrap_or(0);
             values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(final_merkle);
             // Merkle_round=0 on the original step so the AIR can
             // Extract the right bit (key & 1) for the first
@@ -1443,8 +1471,15 @@ fn aux_trace_generator(
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
+            // ROM tarafi agirligi cokluk sutunudur, sabit 1 degil. Dallanmali
+            // programda bir pc hic calistirilmaz (atlanan dal) veya birden cok
+            // kez calistirilir (dongu govdesi); sabit 1 bu iki durumda da
+            // dengeyi bozar ve durust prover `InvalidProof` alir.
             if i < program.len() {
-                s_prog -= diff_pre_prog.inverse();
+                let mult = row[COL_PROG_MULT];
+                if mult != Goldilocks::ZERO {
+                    s_prog -= diff_pre_prog.inverse() * MyExtensionField::from(mult);
+                }
             }
 
             aux_values[(i + 1) * 3] = s_reg;
@@ -1456,24 +1491,25 @@ fn aux_trace_generator(
     })
 }
 
-fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
+#[doc(hidden)]
+pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     let mut vals = Vec::new();
 
     vals.push(Goldilocks::from_u64(pi.chain_id & 0xFFFF_FFFF));
     vals.push(Goldilocks::from_u64(pi.chain_id >> 32));
 
     for chunk in pi.program_hash.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
     for chunk in pi.initial_state_root.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
     for chunk in pi.final_state_root.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
@@ -1505,12 +1541,14 @@ fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // four bytes truncated it, so the comparison held only while every logged
     // value stayed below 2^32 - which every test did, and which a Poseidon
     // output never does.
-    vals.push(Goldilocks::from_u64(u64::from_le_bytes(
-        pi.event_digest[0..8].try_into().unwrap(),
-    )));
+    // `chunks_exact(4)` and this fixed window always yield the right width;
+    // written without a fallible conversion so no panic remains.
+    let mut event_head = [0u8; 8];
+    event_head.copy_from_slice(&pi.event_digest[0..8]);
+    vals.push(Goldilocks::from_u64(u64::from_le_bytes(event_head)));
     // Limbs 1..8 are reserved; they are packed as u32 and asserted zero.
     for chunk in pi.event_digest[8..32].chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
     // One more slot so event_digest stays at 8 public values ([40..48]).
@@ -1518,7 +1556,7 @@ fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // state_writes_digest: 8 u32 limbs -> public_inputs[48..56] (Strix HIGH
     // CWE-345, 2026-08-17).
     for chunk in pi.state_writes_digest.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 

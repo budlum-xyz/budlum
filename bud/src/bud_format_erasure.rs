@@ -20,7 +20,7 @@ use sha3::{Digest, Sha3_256};
 
 pub const ERASURE_MAGIC: [u8; 8] = *b"\xB5ERAS\0\0\0";
 pub const ERASURE_VERSION: u8 = 1;
-pub const MAX_SHARDS: usize = 256;   // GF(2^8) sınırı
+pub const MAX_SHARDS: usize = 256; // GF(2^8) sınırı
 pub const MAX_SHARD_BYTES: usize = 64 * 1024 * 1024; // 64MB tek shard
 
 /// GF(2^8) mod 0x11D - log/exp tabloları (bir kez kurulur, deterministik).
@@ -79,7 +79,11 @@ impl CauchyMds {
         if k == 0 || p == 0 || k + p >= MAX_SHARDS {
             return None;
         }
-        Some(CauchyMds { k, p, gf: Gf8::new() })
+        Some(CauchyMds {
+            k,
+            p,
+            gf: Gf8::new(),
+        })
     }
 
     /// Cauchy matrisi elemanı: C[i][j] = 1 / (x_i + y_j), x/y kümeleri ayrık.
@@ -135,7 +139,11 @@ impl CauchyMds {
             }
         }
         // k hayatta kalan seç (ilk k - MDS herhangi k alt-kümeyle çalışır)
-        let chosen: Vec<(usize, &Vec<u8>)> = survivors.iter().take(self.k).map(|(i, s)| (*i, s)).collect();
+        let chosen: Vec<(usize, &Vec<u8>)> = survivors
+            .iter()
+            .take(self.k)
+            .map(|(i, s)| (*i, s))
+            .collect();
         // k x k katsayı matrisini kur: satır = hayatta kalan shard'ın veri shard'larına
         // katkısı. Veri shard'ı j için: shard i veri ise (i==j → 1), parity ise C[i-k][j].
         // A_ij = (i < k) ? (i == j) : C[i-k][j]
@@ -143,7 +151,11 @@ impl CauchyMds {
         for (r, &(si, _)) in chosen.iter().enumerate() {
             for c in 0..self.k {
                 a[r][c] = if si < self.k {
-                    if si == c { 1 } else { 0 }
+                    if si == c {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
                     self.cauchy(si - self.k, c).unwrap_or(0)
                 };
@@ -250,7 +262,9 @@ mod tests {
         }
         // herhangi 4 hayatta kalan → kurtar
         for drop in 0..6 {
-            let survivors: Vec<(usize, Vec<u8>)> = encoded.iter().enumerate()
+            let survivors: Vec<(usize, Vec<u8>)> = encoded
+                .iter()
+                .enumerate()
                 .filter(|(i, _)| *i != drop)
                 .map(|(i, s)| (i, s.clone()))
                 .collect();
@@ -258,13 +272,17 @@ mod tests {
             assert_eq!(recovered, data, "shard {drop} kaybı kurtarıldı");
         }
         // 2 kayıp → 4 hayatta → kurtar
-        let survivors: Vec<(usize, Vec<u8>)> = encoded.iter().enumerate()
+        let survivors: Vec<(usize, Vec<u8>)> = encoded
+            .iter()
+            .enumerate()
             .filter(|(i, _)| *i != 1 && *i != 5)
             .map(|(i, s)| (i, s.clone()))
             .collect();
         assert_eq!(mds.decode(&survivors).unwrap(), data);
         // 3 kayıp (3 hayatta < 4) → None
-        let too_few: Vec<(usize, Vec<u8>)> = encoded.iter().enumerate()
+        let too_few: Vec<(usize, Vec<u8>)> = encoded
+            .iter()
+            .enumerate()
             .filter(|(i, _)| *i < 3)
             .map(|(i, s)| (i, s.clone()))
             .collect();
@@ -290,6 +308,10 @@ mod tests {
         assert!((CauchyMds::new(20, 2).unwrap().multiplier() - 1.1).abs() < 0.001);
         assert!(mds.multiplier() > 1.0);
         assert!(mds.record_hash() != [0u8; 32]);
-        assert_eq!(mds.record_hash(), CauchyMds::new(4, 2).unwrap().record_hash(), "deterministik");
+        assert_eq!(
+            mds.record_hash(),
+            CauchyMds::new(4, 2).unwrap().record_hash(),
+            "deterministik"
+        );
     }
 }

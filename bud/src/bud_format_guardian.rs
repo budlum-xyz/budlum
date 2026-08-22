@@ -3,11 +3,11 @@
 //! fikirler3.0 tezi: "disk uyur, CPU uyanır, bekçi gezer, tarife uyanıklığa bağlanır."
 //! Bu modül Y-fikirlerinin bud iskeletindeki kod karşılığıdır:
 //! - Y1  Gezici Bekçi: her epoch bekçi N içerikten birini seçer, PACT'i yeniden
-//!      üretir ve commitment'a karşı doğrular (üretim sınavı - PoR yerine).
+//!   üretir ve commitment'a karşı doğrular (üretim sınavı - PoR yerine).
 //! - Y12 Bekçi seçimi: commit-reveal + deterministik PRF (aynı geçmiş → aynı seçim).
 //! - Y14 Bekçi alt-rolü: opt-in bayrağı (yeni RoleId açmadan).
 //! - Y9  Rejeneratif cihaz ağı: mini-bekçi kaydı (shard denetimi + kusur sayacı).
-//! Sayılar program çıktısıdır; elle yazılmaz (2.0 kuralı). N=26 tablosu DV'den.
+//!   Sayılar program çıktısıdır; elle yazılmaz (2.0 kuralı). N=26 tablosu DV'den.
 
 #![forbid(unsafe_code)]
 
@@ -22,9 +22,9 @@ pub const DV_CATCH_RATE_24H: f64 = 0.996;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardianRole {
-    None,        // bekçi değil
-    Operator,    // STORAGE_OPERATOR altında opt-in bekçi (Y14)
-    MiniDevice,  // cihaz ağı mini-bekçisi (Y9)
+    None,       // bekçi değil
+    Operator,   // STORAGE_OPERATOR altında opt-in bekçi (Y14)
+    MiniDevice, // cihaz ağı mini-bekçisi (Y9)
 }
 
 /// Bekçi kaydı (Y14: opt-in bayrağı; Y9: mini-cihaz).
@@ -32,15 +32,21 @@ pub enum GuardianRole {
 pub struct Guardian {
     pub id: [u8; 32],
     pub role: GuardianRole,
-    pub opt_in: bool,          // Y14: seçime yalnız opt-in girer
-    pub fault_count: u64,      // Y9/Y12: kusur sayacı (itibar)
-    pub bond_sep: bool,        // depolama stake'inden AYRI bekçi bond'u
+    pub opt_in: bool,     // Y14: seçime yalnız opt-in girer
+    pub fault_count: u64, // Y9/Y12: kusur sayacı (itibar)
+    pub bond_sep: bool,   // depolama stake'inden AYRI bekçi bond'u
 }
 
 impl Guardian {
     pub fn new(id: [u8; 32], role: GuardianRole) -> Self {
         let opt_in = role != GuardianRole::None;
-        Self { id, role, opt_in, fault_count: 0, bond_sep: true }
+        Self {
+            id,
+            role,
+            opt_in,
+            fault_count: 0,
+            bond_sep: true,
+        }
     }
 
     pub fn record_fault(&mut self) {
@@ -65,7 +71,9 @@ pub fn select_guardian(seeds: &[[u8; 32]], epoch: u64, pact_id: &[u8; 32]) -> Op
         h.update(s);
     }
     let d: [u8; 32] = h.finalize().into();
-    let v = u64::from_le_bytes(d[..8].try_into().unwrap());
+    let mut w8 = [0u8; 8];
+    w8.copy_from_slice(&d[..8]);
+    let v = u64::from_le_bytes(w8);
     let idx = (v % seeds.len() as u64) as usize;
     // tur sayısı: N büyüdükçe uyanıklık payı düşer → tur sıklığı 1/N (DV)
     let tour = DV_N.max(1);
@@ -95,7 +103,9 @@ pub fn tour_plan(pact_ids: &[[u8; 32]], epoch: u64) -> Option<usize> {
     }
     h.update(&all);
     let d: [u8; 32] = h.finalize().into();
-    let v = u64::from_le_bytes(d[..8].try_into().unwrap());
+    let mut w8 = [0u8; 8];
+    w8.copy_from_slice(&d[..8]);
+    let v = u64::from_le_bytes(w8);
     Some((v % pact_ids.len() as u64) as usize)
 }
 
@@ -134,6 +144,21 @@ pub fn guardian_digest(g: &Guardian) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Y1 ÖLÇÜM: üretim sınavı maliyeti vs PoR sınavı maliyeti (program çıktısı).
+/// `produce_sec`: PACT'i yeniden üretme süresi · `por_sec`: karşılık gelen PoR.
+/// Kriter (fikirler2.0 İ2): üretim maliyeti PoR'un %1'inden az olmalı.
+pub fn production_vs_por_ratio(produce_sec: f64, por_sec: f64) -> f64 {
+    if por_sec <= 0.0 {
+        return f64::INFINITY;
+    }
+    produce_sec / por_sec
+}
+
+/// Y1 kabul: oran < 0.01 (%1) mı?
+pub fn production_cheaper_than_por(produce_sec: f64, por_sec: f64) -> bool {
+    production_vs_por_ratio(produce_sec, por_sec) < 0.01
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,7 +188,10 @@ mod tests {
         let data = b"yeniden uretilebilir icerik ";
         let cid = crate::bud_format_container::content_id(data);
         assert!(verify_regeneration(data, &cid), "doğru üretim → kabul");
-        assert!(!verify_regeneration(b"yanlis tarif ciktisi", &cid), "yanlış → RED");
+        assert!(
+            !verify_regeneration(b"yanlis tarif ciktisi", &cid),
+            "yanlış → RED"
+        );
     }
 
     #[test]
@@ -187,9 +215,25 @@ mod tests {
     #[test]
     fn y9_mini_bekci_kusur_sayar() {
         let mut dev = Guardian::new([9u8; 32], GuardianRole::MiniDevice);
-        assert!(audit_mini(&mut dev, &MiniGuardianAudit { device_id: [9u8; 32], pact_id: [1u8; 32], shard_ok: true, signed: true }));
+        assert!(audit_mini(
+            &mut dev,
+            &MiniGuardianAudit {
+                device_id: [9u8; 32],
+                pact_id: [1u8; 32],
+                shard_ok: true,
+                signed: true
+            }
+        ));
         assert_eq!(dev.fault_count, 0);
-        assert!(!audit_mini(&mut dev, &MiniGuardianAudit { device_id: [9u8; 32], pact_id: [1u8; 32], shard_ok: true, signed: false }));
+        assert!(!audit_mini(
+            &mut dev,
+            &MiniGuardianAudit {
+                device_id: [9u8; 32],
+                pact_id: [1u8; 32],
+                shard_ok: true,
+                signed: false
+            }
+        ));
         assert_eq!(dev.fault_count, 1, "yalan kanıt → kusur");
     }
 
@@ -209,19 +253,4 @@ mod tests {
         let g = Guardian::new([5u8; 32], GuardianRole::Operator);
         assert_eq!(guardian_digest(&g), guardian_digest(&g));
     }
-}
-
-/// Y1 ÖLÇÜM: üretim sınavı maliyeti vs PoR sınavı maliyeti (program çıktısı).
-/// `produce_sec`: PACT'i yeniden üretme süresi · `por_sec`: karşılık gelen PoR.
-/// Kriter (fikirler2.0 İ2): üretim maliyeti PoR'un %1'inden az olmalı.
-pub fn production_vs_por_ratio(produce_sec: f64, por_sec: f64) -> f64 {
-    if por_sec <= 0.0 {
-        return f64::INFINITY;
-    }
-    produce_sec / por_sec
-}
-
-/// Y1 kabul: oran < 0.01 (%1) mı?
-pub fn production_cheaper_than_por(produce_sec: f64, por_sec: f64) -> bool {
-    production_vs_por_ratio(produce_sec, por_sec) < 0.01
 }

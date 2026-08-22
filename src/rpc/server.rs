@@ -773,7 +773,9 @@ fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
         .status(status)
         .header("content-type", HeaderValue::from_static("text/plain"))
         .body(HttpBody::from(body))
-        .expect("static RPC security response is valid")
+        // Every argument is a literal, so the builder cannot reject this.
+        // An RPC error response must never be what kills a node.
+        .unwrap_or_else(|_| HttpResponse::new(HttpBody::from(body)))
 }
 
 fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorObjectOwned> {
@@ -1066,6 +1068,42 @@ impl BudlumApiServer for RpcServer {
             "domainId": domain_id,
             "domainRegistryRoot": registry_root,
         }))
+    }
+
+    async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerSovereignTemplate")?;
+        let domain_id = template.domain_id;
+        self.chain
+            .register_sovereign_template(template)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign template: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "domainId": domain_id }))
+    }
+
+    async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain
+            .validate_sovereign_audit_export(bundle)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign audit export: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "valid": true }))
     }
 
     async fn submit_domain_commitment(
@@ -2234,6 +2272,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegister,
@@ -2278,6 +2317,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
@@ -2336,6 +2376,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
@@ -2447,6 +2488,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftMint,
@@ -2489,6 +2531,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBurn,
@@ -2528,6 +2571,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
@@ -2582,6 +2626,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiOfferData {
@@ -2627,6 +2672,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
@@ -2900,6 +2946,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BudlumxyzRegisterApp {
@@ -2957,6 +3004,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
@@ -3213,6 +3261,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
@@ -3409,6 +3458,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
@@ -3508,6 +3558,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
@@ -3741,6 +3792,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiDisputeSlash {

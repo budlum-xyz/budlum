@@ -17,6 +17,7 @@
 use budlum_core::core::address::Address;
 use budlum_core::core::transaction::{Transaction, TransactionType};
 use budlum_core::crypto::primitives::KeyPair;
+use budlum_core::developer_os::{DeveloperOsManifest, ProofFixtureStatus};
 use clap::{Parser, Subcommand};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -57,6 +58,39 @@ enum Command {
         /// `config/mainnet.toml` gibi yapılandırma dosyası (doğrula + özetle).
         #[arg(short, long)]
         config: Option<String>,
+    },
+    /// Yerel geliştirme projesi manifesti (doğrula + proje kimliği).
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectAction {
+    /// Yerel standart manifesti doğrula ve proje kimliğini yazdır.
+    Id {
+        /// Proje adı.
+        #[arg(long, required = true)]
+        name: String,
+        /// BudL kaynak ağacının 32 baytlık hash'i (hex, 0x öneki opsiyonel).
+        #[arg(long, required = true)]
+        source_hash: String,
+    },
+    /// Bir kanıt kaydını, doğrulanmış bir kanıt zarfının hash'ine bağla.
+    BindProof {
+        /// Proje adı.
+        #[arg(long, required = true)]
+        name: String,
+        /// BudL kaynak ağacının 32 baytlık hash'i (hex).
+        #[arg(long, required = true)]
+        source_hash: String,
+        /// Manifestteki kanıt kaydının adı.
+        #[arg(long, required = true)]
+        fixture: String,
+        /// Doğrulaması geçmiş kanıt zarfının 32 baytlık hash'i (hex).
+        #[arg(long, required = true)]
+        proof_hash: String,
     },
 }
 
@@ -327,6 +361,75 @@ fn run_validator(config: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// 32 baytlık hex bir digest'i ayrıştır.
+fn parse_digest(field: &str, hex_str: &str) -> Result<[u8; 32], String> {
+    let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(clean).map_err(|e| format!("{field} geçersiz hex: {e}"))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{field} 32 byte olmalı, {} byte verildi", bytes.len()))
+}
+
+/// Yerel standart manifesti kur ve doğrula.
+///
+/// Manifest bir kayıt katmanıdır ve doğrulaması bir kapıdır: `validate`
+/// geçmeyen bir manifest için proje kimliği hesaplanmaz. Aksi hâlde uydurma
+/// bir derleyici profili ya da sıfır kaynak hash'i taşıyan bir manifest de
+/// pürüzsüz bir kimlik üretir ve gerçeğinden ayırt edilemez.
+fn build_manifest(name: &str, source_hash: &str) -> Result<DeveloperOsManifest, String> {
+    let digest = parse_digest("--source-hash", source_hash)?;
+    let manifest = DeveloperOsManifest::local_standard(name, digest);
+    manifest
+        .validate()
+        .map_err(|e| format!("manifest reddedildi: {e:?}"))?;
+    Ok(manifest)
+}
+
+fn run_project_id(name: &str, source_hash: &str) -> Result<(), String> {
+    let manifest = build_manifest(name, source_hash)?;
+    println!("proje: {name}");
+    println!("chain_id: {}", manifest.chain_id);
+    println!("proje kimliği: 0x{}", hex::encode(manifest.project_id()));
+    Ok(())
+}
+
+/// Bir kanıt kaydının `Verified` demeye hakkı olduğunu, doğrulanan zarfın
+/// hash'ine bağlayarak denetle.
+///
+/// Kaydın kendini doğrulanmış ilan etmesi yetmez: taşıdığı hash, doğrulaması
+/// geçmiş zarfınkiyle aynı olmalı. Farklıysa kayıt başka bir kanıttan söz
+/// ediyordur ve bu, doğru görünen yanlış bir kayıttır.
+fn run_project_bind_proof(
+    name: &str,
+    source_hash: &str,
+    fixture: &str,
+    proof_hash: &str,
+) -> Result<(), String> {
+    let mut manifest = build_manifest(name, source_hash)?;
+    let verified = parse_digest("--proof-hash", proof_hash)?;
+
+    let record = manifest
+        .proof_fixtures
+        .iter_mut()
+        .find(|f| f.name == fixture)
+        .ok_or_else(|| format!("manifestte '{fixture}' adlı kanıt kaydı yok"))?;
+
+    // Kayıt yerel şablondan `Pending` gelir; bağlama, doğrulayıcının çalıştığı
+    // Iddiasını taşıyan bir kayıt üzerinde anlamlıdır.
+    record.status = ProofFixtureStatus::Verified;
+    record.proof_hash = verified;
+    let bound = record.clone();
+
+    bound
+        .bind_verified(verified)
+        .map_err(|e| format!("kanıt bağlama reddedildi: {e:?}"))?;
+    println!("kanıt kaydı '{fixture}' doğrulanan zarfa bağlandı");
+    println!("kanıt hash: 0x{}", hex::encode(verified));
+    println!("proje kimliği: 0x{}", hex::encode(manifest.project_id()));
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = match &cli.command {
@@ -345,6 +448,15 @@ fn main() {
             QueryAction::Status => run_query_status(&cli.rpc_url),
         },
         Command::Validator { config } => run_validator(config.as_deref()),
+        Command::Project { action } => match action {
+            ProjectAction::Id { name, source_hash } => run_project_id(name, source_hash),
+            ProjectAction::BindProof {
+                name,
+                source_hash,
+                fixture,
+                proof_hash,
+            } => run_project_bind_proof(name, source_hash, fixture, proof_hash),
+        },
     };
     if let Err(e) = result {
         eprintln!("hata: {e}");
@@ -373,5 +485,45 @@ mod tests {
         let (host, port) = parse_rpc_url("http://127.0.0.1").unwrap();
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 8545);
+    }
+
+    const SOURCE_HASH: &str = "0909090909090909090909090909090909090909090909090909090909090909";
+
+    /// Manifest doğrulaması bir kapı: geçen bir manifest kimlik üretir.
+    #[test]
+    fn a_valid_project_yields_an_id() {
+        let manifest = build_manifest("demo-app", SOURCE_HASH).unwrap();
+        assert_eq!(manifest.project_id(), manifest.project_id());
+    }
+
+    /// Sıfır kaynak hash'i bir projeyi adlandırmaz; kimlik hesaplanmamalı.
+    #[test]
+    fn a_zero_source_hash_is_refused() {
+        let zero = "0".repeat(64);
+        let err = build_manifest("demo-app", &zero).expect_err("sifir kaynak hash reddedilmeli");
+        assert!(err.contains("manifest reddedildi"), "{err}");
+    }
+
+    /// Kısa bir digest sessizce doldurulmamalı.
+    #[test]
+    fn a_short_digest_is_refused() {
+        let err = parse_digest("--source-hash", "0x0909").expect_err("kisa digest reddedilmeli");
+        assert!(err.contains("32 byte olmalı"), "{err}");
+    }
+
+    /// Bağlama, doğrulanan zarfın hash'ini taşıyan kayıt için geçer.
+    #[test]
+    fn binding_a_proof_to_its_own_hash_passes() {
+        let proof = "01".repeat(32);
+        run_project_bind_proof("demo-app", SOURCE_HASH, "zkvm-smoke", &proof).unwrap();
+    }
+
+    /// Manifestte olmayan bir kayıt bağlanamaz.
+    #[test]
+    fn binding_an_unknown_fixture_is_refused() {
+        let proof = "01".repeat(32);
+        let err = run_project_bind_proof("demo-app", SOURCE_HASH, "yok-boyle-kayit", &proof)
+            .expect_err("bilinmeyen kayit reddedilmeli");
+        assert!(err.contains("kanıt kaydı yok"), "{err}");
     }
 }

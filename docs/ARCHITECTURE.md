@@ -4,6 +4,68 @@
 > `feature-gated`, `planlı` ve `mainnet blocker` etiketleri tamamlanmış üretim
 > özelliği iddiası değildir.
 
+## Icindekiler
+
+> 55 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+
+- [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
+- [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
+- [3. Transaction admission and V4 signing](#3-transaction-admission-and-v4-signing)
+- [4. Cross-domain bridge lifecycle](#4-cross-domain-bridge-lifecycle)
+- [5. EVM receipt verification path](#5-evm-receipt-verification-path)
+- [6. Snapshot trust and schema migration](#6-snapshot-trust-and-schema-migration)
+- [7. Critical durability boundary](#7-critical-durability-boundary)
+- [8. BudZero execution and proof boundary](#8-budzero-execution-and-proof-boundary)
+- [9. AI inference lifecycle](#9-ai-inference-lifecycle)
+- [10. B.U.D. storage lifecycle](#10-bud-storage-lifecycle)
+- [11. Mainnet launch gates](#11-mainnet-launch-gates)
+- [12. CI and security gates](#12-ci-and-security-gates)
+- [13. Executor: tam state transition pipeline](#13-executor-tam-state-transition-pipeline)
+- [14. Privacy layer: Poseidon circuit + note registry state machine](#14-privacy-layer-poseidon-circuit--note-registry-state-machine)
+- [15. Bridge: full cross-domain message verification pipeline](#15-bridge-full-cross-domain-message-verification-pipeline)
+- [16. AI inference + execution proof: full lifecycle with STARK](#16-ai-inference--execution-proof-full-lifecycle-with-stark)
+- [17. Consensus finality: all 5 domain adapters](#17-consensus-finality-all-5-domain-adapters)
+- [18. Registry: complete stake + slash + unbond state machine](#18-registry-complete-stake--slash--unbond-state-machine)
+- [19. Wallet: complete signing + privacy + TEE pipeline](#19-wallet-complete-signing--privacy--tee-pipeline)
+- [20. BudZero STARK: bytecode to verified proof pipeline](#20-budzero-stark-bytecode-to-verified-proof-pipeline)
+- [21. Governance: proposal to execution pipeline](#21-governance-proposal-to-execution-pipeline)
+- [22. Tokenomics: burn + vesting + reward state machine](#22-tokenomics-burn--vesting--reward-state-machine)
+- [23. P2P protocol stack: libp2p to application](#23-p2p-protocol-stack-libp2p-to-application)
+- [24. Pollen data marketplace: full grant + encryption + AI gate](#24-pollen-data-marketplace-full-grant--encryption--ai-gate)
+- [25. Cross-domain message verification: EVM MPT deep dive](#25-cross-domain-message-verification-evm-mpt-deep-dive)
+- [26. Privacy layer: note lifecycle (D2)](#26-privacy-layer-note-lifecycle-d2)
+- [27. Wallet-core architecture](#27-wallet-core-architecture)
+- [28. Governance lifecycle](#28-governance-lifecycle)
+- [29. Tokenomics flow](#29-tokenomics-flow)
+- [30. P2P network topology](#30-p2p-network-topology)
+- [31. Permissionless registry architecture](#31-permissionless-registry-architecture)
+- [32. PoA domain lifecycle](#32-poa-domain-lifecycle)
+- [33. Validator lifecycle: multi-role architecture](#33-validator-lifecycle-multi-role-architecture)
+- [34. Pollen data rights lifecycle](#34-pollen-data-rights-lifecycle)
+- [35. Relayer policy layer](#35-relayer-policy-layer)
+- [36. Fee market (EIP-1559)](#36-fee-market-eip-1559)
+- [37. AI execution proof pipeline](#37-ai-execution-proof-pipeline)
+- [38. DeEd content manifest architecture](#38-deed-content-manifest-architecture)
+- [39. BNS (Budlum Name Service) lifecycle](#39-bns-budlum-name-service-lifecycle)
+- [40. SocialFi NFT lifecycle](#40-socialfi-nft-lifecycle)
+- [41. budlumxyz app registry](#41-budlumxyz-app-registry)
+- [42. Mempool internals](#42-mempool-internals)
+- [43. Developer OS / SDK architecture](#43-developer-os--sdk-architecture)
+- [44. Gateway: Atlas + Passport evidence](#44-gateway-atlas--passport-evidence)
+- [45. Settlement commitment tree](#45-settlement-commitment-tree)
+- [46. Prover market: proof verification](#46-prover-market-proof-verification)
+- [47. Sovereign domain kit](#47-sovereign-domain-kit)
+- [48. Constitution engine](#48-constitution-engine)
+- [49. Mobile self-hosting profile](#49-mobile-self-hosting-profile)
+- [50. Encryption DAO policy lifecycle](#50-encryption-dao-policy-lifecycle)
+- [51. Security audit: attack graph](#51-security-audit-attack-graph)
+- [52. Panik sinirlari: dogrulayici ve dugum canliligi](#52-panik-sinirlari-dogrulayici-ve-dugum-canliligi)
+- [53. Hesap soyutlama: kayit defteri ve V6 coklu imza yetkilendirmesi](#53-hesap-soyutlama-kayit-defteri-ve-v6-coklu-imza-yetkilendirmesi)
+- [54. Egemen alanlar: sablonun adlandirdigi seyle ayni olmasi](#54-egemen-alanlar-sablonun-adlandirdigi-seyle-ayni-olmasi)
+- [55. Kanit gecerliligi bir yetkilendirme karari degildir](#55-kanit-gecerliligi-bir-yetkilendirme-karari-degildir)
+- [56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi](#56-yalnizca-bizim-koydugumuz-kod-calisir-zk-program-izin-listesi)
+- [57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi](#57-regeneration-izinsiz-kodu-reddeden-kanonik-kodu-geri-ureten-kapi)
+
 ## 1. Genel sistem mimarisi
 
 ```mermaid
@@ -452,7 +514,7 @@ flowchart TD
     PosCommit["DomainCommitment: validators_root + epoch"]
     PosProof["FinalityProof::PoS: BLS certificate"]
     PosVerify[verify: cert.verify BLS aggregate signature]
-    PosVerify --> SignerCheck[signers ⊆ validator_set]
+    PosVerify --> SignerCheck["signers subset of validator_set"]
     SignerCheck --> Threshold["2/3+ stake threshold"]
     PosVRF[VRF: calculate_seed -> validator selection]
     PosVRF --> SeedRisk[C2: poison fallback -> predictable seed]
@@ -653,7 +715,7 @@ flowchart TD
     Postcard --> Deserialize[postcard deserialize ProofEnvelope]
     Deserialize --> PUBHash[public_inputs_hash match]
     Deserialize --> DegreeCheck["degree_bits <= MAX_DEGREE_BITS"]
-    Deserialize --> BackendCheck[backend ∈ Plonky3 test]
+    Deserialize --> BackendCheck["backend in Plonky3 test"]
     Deserialize --> FRIVerify[FRI verification]
     FRIVerify --> Result{valid?}
     Result -->|yes| Accept[ACCEPT: proof verified]
@@ -1045,7 +1107,7 @@ flowchart TB
   Peers --> MaxPeers[MAX_PEERS = 50]
   Peers --> Subnet[max_peers_per_subnet /24 = 4]
   Peers --> Score[Reputation scoring]
-  Score --> Ban[Ban threshold <= -100]
+  Score --> Ban["Ban threshold <= -100"]
   Node --> Snap[Snapshot sync]
   Snap --> Chunks[MAX_SNAPSHOT_CHUNKS = 4096]
   Snap --> Concurrent[MAX_CONCURRENT_SNAPSHOTS = 10]
@@ -1122,7 +1184,7 @@ flowchart TD
     StorageSlash --> Jailed
     Jailed --> Release[Jail release]
     Release --> Active
-    Liveness[Missed epochs > threshold] --> LivenessSlash[Liveness report -> slash all roles]
+    Liveness["Missed epochs > threshold"] --> LivenessSlash[Liveness report -> slash all roles]
     CrossRole[Slash one role -> jail ALL roles]
   end
 
@@ -1208,7 +1270,7 @@ flowchart LR
   Content --> Shards[Off-chain sharding]
   Shards --> ShardRef["ShardRef: shard_id + size"]
   Hash --> Manifest["ContentManifest: shards + metadata + owner"]
-  Manifest --> ManifestId[ManifestId = deterministic hash]
+  Manifest --> ManifestId["Manifest::id() = deterministic hash"]
   ManifestId --> Chain[On-chain registration]
   Chain --> Deal[Storage deal per shard]
   Deal --> Operator[Storage operator bonds]
@@ -1252,8 +1314,8 @@ flowchart LR
 ```mermaid
 flowchart LR
   Developer[Developer address] --> Register[register_app auto-increment ID]
-  Register --> Manifest["AppManifest: URL + metadata"]
-  Manifest --> Update[update_app URL/manifest]
+  Register --> Record["AppRecord: website_url + manifest_id"]
+  Record --> Update[update_app URL/manifest]
   Register --> SelfVerify[verify_app developer self-verify]
   SelfVerify --> Attested[developer_attested = true]
   Attested --> Verified[verified = true DAO override reserved]
@@ -1350,7 +1412,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Template[SovereignDomainTemplate] --> Class[SovereignClass enum]
+  Template[SovereignDomainTemplate] --> Class[SovereignDomainClass enum]
   Class --> PoA[EnterprisePoa -> requires PoA consensus]
   Class --> Custom[Custom class label validated]
   Template --> Compliance[ComplianceEvidence hash/root only]
@@ -1432,3 +1494,509 @@ flowchart TD
   PoseidonDesync[Poseidon constants desync] --> AllProofsFail[All proofs rejected]
   SeedMemory[Seed in memory] --> TotalLoss[Total fund loss]
 ```
+
+## 52. Panik sinirlari: dogrulayici ve dugum canliligi
+
+Release profili `panic = "abort"` kullanir. Bunun sonucu tek cumleyle: uretim
+kodundaki her `unwrap`/`expect`, tetiklenebilirse, bir canlilik acigidir. Bir
+es tek bozuk mesaj gonderip dugumu durdurabiliyorsa saldirgan hicbir kripto
+varsayimi kirmadan agi yavaslatir.
+
+Bu yuzden `unwrap_used` ve `expect_used` calisma alani genelinde `deny`
+(kok `Cargo.toml`, `[lints.clippy]`). Kapi acilmadan once olculdu: uretim
+yolunda 150 ihlal vardi, hepsi kapatildi. Kapinin kendisi de sinandi -
+uretim koduna gecici bir `unwrap` eklendiginde `clippy --lib -D warnings`
+101 ile duser, kaldirildiginda 0 doner.
+
+Muafiyetler dar ve gerekcelidir:
+
+| Yer | Neden muaf |
+|---|---|
+| `#[cfg(test)]` moduller, `#[test]` fonksiyonlar | Testte panik dogru davranistir: bozulan degismezi bildirme yolu odur. |
+| `build.rs` | Derleme zamani calisir, kosan dugum degil; protobuf uretimi basarisizsa derleme sesli durmalidir. |
+| `benches/` | Olcum kosucusu; kurulum adimi duserse olcum durmalidir. |
+| `Blockchain::last_block` | `&Block` dondurur, geri donulecek sahipli deger yok; zincir insada genesis ile tohumlanir. Tek tek isaretlenmistir. |
+
+Ihlallerin nasil kapatildigi, uc desende toplanir:
+
+1. **Saldirgan girdisi ayristirma.** Koruma varsa ama *uzaktaysa*, yerellestir.
+   `verify_bls_sig` icinde `is_none()` denetimi ile `unwrap()` arasinda bir
+   ifade mesafesi vardi; `CtOption::into_option()` ikisini tek adimda birlestirir,
+   boylece bozuk anahtar yalnizca `Err` olabilir. Ayni sey STARK dogrulayicisi
+   icin gecerlidir: sekil denetimi `valid_shape` icinde yapiliyordu, okuma ise
+   yuzlerce satir otede; okuma noktasi artik kendi denetimini tasir.
+2. **Durum koku hesaplari.** Bunlar her dugumde ayni sekilde kosar. Panik burada
+   tek dugumu degil butun kumeyi ayni anda dusurur. Serilestirme hatasi (turetilmis
+   `Serialize` icin gerceklesemez) artik sabit bir isaretci baytina duser:
+   `BDLM_*_SERIALIZE_FAILED`. Bos bayt kullanilmaz - iki farkli durumun ayni
+   hash'e dusmesi, hicbir yerde hata gorunmeden catallanma demektir.
+3. **Sabit sinirli aritmetik.** `digest[..8].try_into().expect(...)` gibi
+   ifadeler, dilim uzunlugu zaten sabit oldugu icin, sabit boyutlu dizi
+   okumasina cevrildi (`copy_from_slice`). Boyle bir yerde akil yurutulecek
+   panik hic kalmaz.
+
+Islem kabul yolu ozellikle onemlidir: `Mempool` icinde bir degistirme (RBF)
+adayinin hedefi ayni haritadan okunuyordu, yani `unwrap` guvenliydi - ama
+herhangi bir es islem gondererek bu yolu tetikleyebilir. Artik reddedilen bir
+islem olarak raporlanir.
+
+```mermaid
+flowchart TD
+  Peer["Es: bayt dizisi"] --> Parse["Ayristirma"]
+  Parse -->|"eskiden: unwrap"| Abort["panic = abort: dugum olur"]
+  Parse -->|"simdi: into_option / ok_or"| Reject["Err: mesaj reddedilir, dugum yasar"]
+  Root["Durum koku hesabi"] -->|"eskiden: expect"| AllDown["Tum kume ayni anda duser"]
+  Root -->|"simdi: sabit isaretci"| Deterministic["Kok belirlenimli kalir"]
+  Gate["clippy: unwrap_used / expect_used = deny"] --> Parse
+  Gate --> Root
+  Gate --> Proof["Yeni ihlal CI'da kirmizi"]
+```
+
+## 53. Hesap soyutlama: kayit defteri ve V6 coklu imza yetkilendirmesi
+
+Hesap soyutlama katmani uzun sure iki parcali bir eksiklik tasidi. Kod
+yazilmisti, gercek ML-DSA-87'ye baglaniyordu ve testleri geciyordu; ama
+uretimden hicbir yol ona ulasamiyordu. Iki ayri sebep vardi ve ikisi de
+olculdu, tahmin edilmedi.
+
+**Birincisi durum katmaniydi.** `QuantumAccount::validate_all` "esik gardiyan
+sayisini asamaz", "sifir esik olmaz" gibi kurallari denetliyordu. Ama uretim
+kodunda `QuantumAccount` aramasi sifir sonuc veriyordu: hesap hicbir yerde
+saklanmiyordu. Bir hesap turu, onu tutan bir kayit olmadan yalnizca bir
+tiptir; korumasi da yalnizca bir niyettir.
+
+`QuantumAccountRegistry` bu bosluga bir kapi olarak yazildi. Kayit iki sartla
+gerceklesir: bildirilen adres, hesabin acik anahtarindan turetilen adresle
+esit olmali, **ve** `validate_all` gecmeli. Ikincisi olmadan kurallar
+uygulanmaz; birincisi olmadan bir hesap baskasinin anahtarini tasiyan bir
+adresle kaydedilebilirdi. Guncelleme klonla-dogrula-yaz desenini kullanir:
+kaydi gecersiz kilan bir degisiklik uygulanmaz ve kayit eski halinde kalir.
+Bir kaydin gecerliligi, ona yazan her yolun ayri ayri dikkatli olmasina
+birakilmamali.
+
+**Ikincisi yetkilendirme katmaniydi.** `MultisigPolicy` gercek bir `t-of-n`
+denetimi yapiyordu: her imza tek tek dogrulaniyor, ayni sahibin tekrari
+sayilmiyor, esigin altinda kalan reddediliyordu. Ama islem semasi tek imza
+tasiyordu, dolayisiyla hicbir islem ona bir yetkilendirme getiremiyordu.
+Kural kodda vardi, uygulanacagi yol yoktu.
+
+`SIGNATURE_VERSION_V6` o yolu acar. Bir V6 isleminde tek imza alani bos kalir
+ve yerine `authorization` gelir: sahip kumesi, esik ve `(sahip, imza)`
+ciftleri. Iki tasarim karari bunu tasiyor.
+
+**Adres kumeden turetilir.** `from`, sahip kumesinin ve esigin hash'idir
+(`BDLM_TX_V6_MULTISIG_ADDRESS`). Bu olmadan gecerli imzalar toplayan bir
+saldirgan kendi kumesini baskasinin adresine iliskilendirebilirdi: imzalar
+dogrulanir, adres denetlenmez, hesap harcanir. Esigin de turetmeye girmesi
+gerekiyor, cunku ayni uc sahibin `2-of-3` ve `3-of-3` politikalari farkli iki
+guvenlik ifadesidir; ayni adresi paylasirlarsa dusuk esikli olan yuksek
+esikli olanin fonunu harcar.
+
+**Kume imzanin kapsamindadir, imzalar degildir.** Sahip kumesi ve esik
+preimage'e girer; imzalarin kendisi girmez. Kume disarida kalsaydi bir
+aracinin kumeyi degistirip imzalari oldugu gibi tasimasi mumkun olurdu.
+Imzalar iceride olsaydi imza kendi kendini imzalardi.
+
+Surumler birbirine karismaz: bir V4/V5 islemi `authorization` tasiyorsa
+reddedilir, bir V6 islemi tek imza tasiyorsa reddedilir. Iki yetki kaynagi
+yan yana durursa hangisinin bagladigi okuyana kalir, ve bu tam olarak sessiz
+sapmanin bicimidir.
+
+Dogrulama durumsuzdur: kume islemle birlikte geldigi icin `verify()` hesap
+durumunu okumak zorunda degildir. Bu bir tasarim tercihidir - kume zincirde
+saklanabilirdi, ama o zaman bir imzanin gecerliligi bir durum okumasina
+bagimli olurdu.
+
+```mermaid
+flowchart TD
+  Owners["Sahip kumesi + esik"] --> Addr["from = H(kume, esik)"]
+  Owners --> Preimage["Imza preimage'i"]
+  Tx["Islem alanlari"] --> Preimage
+  Preimage --> Sigs["t adet ML-DSA-87 imzasi"]
+  Sigs --> V["verify_v6"]
+  Addr --> Bind{"from kumeden turemis mi?"}
+  V --> Bind
+  Bind -->|"hayir"| Reject["Reddedilir: baglama kopuk"]
+  Bind -->|"evet"| Policy{"MultisigPolicy: esik karsilandi mi?"}
+  Policy -->|"tekrar / yabanci / eksik"| Reject
+  Policy -->|"evet"| Accept["Kabul"]
+  Registry["QuantumAccountRegistry"] -->|"validate_all kapisi"| Shape["Hesap sekli gecerli"]
+```
+
+**Sinir.** Kayit defteri hesabin **seklini** dogrular; V6 bir harcamanin
+**yetkisini** dogrular. Ikisi ayri karardir ve ayri yerlerde yasar. Bir
+hesabin kayitli olmasi onun her islemi yetkilendirdigi anlamina gelmez, bir
+imza kumesinin esigi karsilamasi da hesabin kayitli oldugu anlamina gelmez.
+
+## 54. Egemen alanlar: sablonun adlandirdigi seyle ayni olmasi
+
+Egemen Alan Kiti bir alani denetime nasil anlattigimizi tanimlar: sinifi
+(CBDC, kamu, kurumsal PoA, konsorsiyum), uzlasma turu, operatoru, KYC
+gereksinimi ve uyum kanitinin kokleri. Kit yazildiginda dogru yazilmisti -
+PoA bir sablon KYC istemeden gecemiyordu, kimlik alanlardan yeniden
+hesaplaniyordu, yasam dongusu gecisleri denetleniyordu. Eksik olan sey
+bunlarin hicbiri degildi.
+
+**Eksik olan, sablonun neyi anlattiginin denetimiydi.** Bir sablon
+`domain_id = 7` icin "PoA, KYC zorunlu" diyebiliyordu. 7 numarali alanin
+gercekte `PoS` olarak kayitli olup olmadigina bakan bir kod yoktu. Iki kayit
+da kendi icinde gecerliydi; birlikte yalan soyluyorlardi. Denetime sunulan
+belge "bu alan izinli ve KYC'li" derken zincir izinsiz calismaya devam
+ederdi, ve hicbir log bunu soylemezdi.
+
+Ayni kusur operatorde de vardi: sablonun isaret ettigi operator, alanin
+gercek operatoru olmak zorunda degildi, dolayisiyla baskasinin alani adina
+denetim belgesi yazilabilirdi.
+
+`register_template_for_domain` bu bagi kurar. Uc kapi sirayla: alan kayitli
+olmali, uzlasma turu eslesmeli, operator eslesmeli. Sablonun kendi
+dogrulamasi bundan **sonra** kosar - once adlandirdigi seyin var oldugunu ve
+o sey oldugunu bilmek gerekir.
+
+Ayni sinif bir kusur denetim paketinde de vardi. `AuditExportBundle` bir
+`template_id` tasir ve kendini o kimlige karsi dogrular; ama kimlik paketin
+kendi icinden gelir. Uydurma bir `template_id` ile uretilmis bir paket kendi
+tutarlilik denetiminden gecerdi. `validate_audit_export` kimligi once kayit
+defterinde arar: kayitli bir sablona karsilik gelmiyorsa paket reddedilir.
+Bir seyin kendi kendini dogrulamasi, dogrulama degildir.
+
+Iki giris de dugumun disina acilir (`bud_registerSovereignTemplate`,
+`bud_validateSovereignAuditExport`). Sablon kaydi operator yetkisi ister;
+denetim dogrulamasi istemez, cunku bir belgenin gecerli olup olmadigini
+sormak yetki gerektiren bir islem degildir.
+
+```mermaid
+flowchart TD
+  Tmpl["Egemen sablon: id, tur, operator, KYC"] --> G1{"Alan kayitli mi?"}
+  Reg["ConsensusDomainRegistry"] --> G1
+  G1 -->|"hayir"| Rej["Reddedilir"]
+  G1 -->|"evet"| G2{"Uzlasma turu esit mi?"}
+  G2 -->|"PoA iddia, PoS kayit"| Rej
+  G2 -->|"evet"| G3{"Operator esit mi?"}
+  G3 -->|"hayir"| Rej
+  G3 -->|"evet"| G4{"Sablonun kendi dogrulamasi"}
+  G4 -->|"PoA ama KYC yok"| Rej
+  G4 -->|"gecti"| Acc["Kaydedilir, kok degisir"]
+  Bundle["Denetim paketi: template_id"] --> L{"Kimlik kayitta var mi?"}
+  Acc --> L
+  L -->|"hayir"| Rej
+  L -->|"evet"| B2["Paket sablona karsi dogrulanir"]
+```
+
+**Sinir.** Bu bag sablonun **dogru alani anlattigini** garanti eder; sablonun
+icerdigi uyum kanitinin gercekten dogru oldugunu garanti etmez. Uyum kokleri
+zincir disinda uretilir ve zincir onlari yalnizca tasir. Bunu iddia
+etmiyoruz: kokler hash olarak saklanir, icerikleri hicbir zaman zincire
+girmez.
+
+## 55. Kanit gecerliligi bir yetkilendirme karari degildir
+
+Bir STARK dogrulayicisi tek bir sey soyler: "bu genel girdilerle bu program
+boyle kostu." Soylemedigi sey, o genel girdilerin **dogru olanlar** oldugudur.
+Girdilerin hangi zincire, hangi alana, hangi yukseklige ait oldugu kanit
+sisteminin kisitladigi bir sey degil; dogrulayicinin kendi kodunda denetlemesi
+gereken bir sey.
+
+Bu ayrimin atlandigi her yerde ayni sinif kusur cikiyor. Budlum'da uc tane
+bulundu ve ucu de ayni bicimdeydi: **kanit gecerliydi, iddia yalandi.**
+
+**1. Zincir baglamasi.** `submit_zk_proof` gonderenin verdigi
+`public_inputs.chain_id`'yi hicbir seyle karsilastirmiyordu. Baska bir zincir
+icin uretilmis, kendi zincirinde tamamen gecerli bir kanit burada da dogrulanir
+ve bir alani ilerletirdi. Denetim ucret tahsilatindan once kondu: reddedilen
+kanit ucret yakmaz, cunku yakilacak bir is yapilmadi.
+
+**2. Ayni kusur, ikinci yer.** AI calistirma yolunda `program_hash` kayitla
+karsilastiriliyordu ama `chain_id` karsilastirilmiyordu. `tx.chain_id` ile
+baglandi; o alan islemin imza on-goruntusunde oldugu icin gonderen serbestce
+secemez. Bir kusuru bulunca ayni bicimin baska nerede oldugunu aramak, kusurun
+kendisini duzeltmek kadar onemli.
+
+**3. Iddia yeniden oynatma.** En ciddisi buydu. Tasima mesajini kanita baglayan
+hash `(kanit, genel girdiler, program)` uzerindeydi. Kabul edilen iddianin
+anahtari ise `(hedef alan, yukseklik)`. Yani kanitin **hangi iddiaya** sunuldugu
+on-goruntunun disindaydi ve gecerli tek bir kanit, henuz iddia edilmemis her
+(alan, yukseklik) ciftine sunulabiliyordu. Saldirgan kanita dokunmuyor,
+yalnizca mesaji yeniden kuruyor. "Ilk gecerli kazanir" politikasi bunu
+yakalamaz, cunku her yeni cift onun gozunde yeni bir iddiadir.
+
+Hedef alan ve yukseklik on-goruntuye alindi, alan ayirici `V2`'ye cikti; eski
+hash'ler kasten gecersiz.
+
+```mermaid
+flowchart TD
+  Sub["Kanit sunumu: kanit + genel girdiler + program"] --> B{"Baglama hash'i tutuyor mu?"}
+  B -->|"hayir"| Rej["Reddedilir"]
+  B -->|"evet"| C{"chain_id bu zincir mi?"}
+  C -->|"baska zincir"| Rej
+  C -->|"evet"| P{"Program alanin izin listesinde mi?"}
+  P -->|"hayir / liste bos"| Rej
+  P -->|"evet"| Fee["Ucret tahsil edilir"]
+  Fee --> V{"STARK dogrulamasi"}
+  V -->|"gecersiz"| Burn["Ucret yanar"]
+  V -->|"gecerli"| Claim{"Iddia politikasi: ilk gecerli kazanir"}
+  Claim --> Acc["Kabul"]
+  Note["Hedef alan + yukseklik baglama hash'inde"] --> B
+```
+
+**Sinir.** Bu uc kapi kanitin **dogru iddiaya** ait oldugunu garanti eder;
+iddianin icerdigi durum gecisinin zincirin gercek durumuyla ortustugunu
+garanti etmez. `final_state_root` kaydediliyor ve cakisma tespitinde
+kullaniliyor, ama alanin gercek koku ile karsilastirilmiyor. Bunu iddia
+etmiyoruz.
+
+## 56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi
+
+Onceki bolum kanitin **dogru iddiaya** ait oldugunu garanti eden uc kapiyi
+anlatiyor. Hepsi gecildikten sonra bile acik kalan bir soru vardi: kanitlanan
+**kod** neydi?
+
+### Bosluk
+
+`Plonky3Adapter::verify` programin Keccak-256 hash'ini hesaplar ve
+`public_inputs.program_hash` ile karsilastirir. Bu denetim gercek, ama
+soyledigi sey sanildigindan dar: gonderen hem programi hem beklenen hash'i
+kendisi verdigi icin, ikisi birbirini dogrular ve **her zaman uyusur**. Denetim
+"gonderdigin program, gonderdigin hash'e uyuyor" der. "Bu programin bu alani
+ilerletmeye hakki var" demez.
+
+Sonucu su: saldirgan kendi yazdigi bir programi - ornegin durum kokunu istedigi
+degere goturen uc satirlik bir programi - alir, onu **durustce** calistirir ve
+gercek bir STARK uretir. Kanit kusursuzdur. Hicbir kriptografik denetim onu
+yakalayamaz, cunku yalan kanitta degildir. Kanit sistemi "bu program boyle
+kostu" demek uzere tasarlanmistir; "bu program calistirilmali miydi" sorusu
+onun sorusu degildir.
+
+Bu, kanit sisteminin **kisitlamadigi** alani dogrulayicinin kendi kodunda
+denetlemesi gereken sinifin en genis ornegidir. Uc onceki kapi kanitin
+kimligini baglar; bu kapi kanitin **yetkisini** baglar.
+
+### Kapi
+
+`ConsensusDomain` artik bir `zk_program_allowlist` tasiyor: o alani
+ilerletmesine izin verilen programlarin hash'leri. `submit_zk_proof`
+gonderilen programin hash'ini hesaplar ve listede arar; yoksa reddeder.
+
+Izin listesi kimligi, dogrulayicinin AIR'e karsi bagladigi degerin **ayni**si
+(etiketsiz Keccak-256, kelimeler little-endian). Kasten ayni: ayri bir etiketli
+hash kullanmak, "listedeki program" ile "kanitlanan program" arasinda ayrisma
+imkani birakirdi.
+
+Kapi **ucretten once** duruyor. Yetkisiz bir program parasal bir yan etki
+uretmeden reddedilir; reddin bedeli saldirgana degil, ona ait olmayan bir
+hesaba yazilmaz.
+
+### Bos liste = kapali kapi
+
+Varsayilanin yonu bu tasarimin en onemli parcasi. Liste bos dogar ve bos liste
+**hicbir** kaniti kabul etmez. Bir alan, operatoru acikca bir program listesi
+verene kadar zk ile ilerletilemez.
+
+Ters varsayilan - "liste bos ise herkese acik" - kullanisli gorunur ve
+felakettir: yeni kurulan her alan ve bincode ile goc eden her eski kayit
+sussuz dogardi. Depolama goc yolu (`LegacyConsensusDomainV1` -> 
+`ConsensusDomain`) bu yuzden acikca `Vec::new()` yaziyor: eski kayitta boyle
+bir alan yoktu, dolayisiyla hangi programlara izin verdigi **bilinmiyor**, ve
+bilinmeyen izin izin degildir.
+
+```mermaid
+flowchart TD
+  A["Saldirgan kendi programini yazar"] --> B["Programi durustce calistirir"]
+  B --> C["Gercek, gecerli bir STARK uretir"]
+  C --> D{"program_hash denetimi"}
+  D -->|"gecer: ikisini de o verdi"| E{"Alanin izin listesi"}
+  E -->|"program listede yok"| F["Reddedilir - ucret alinmadan"]
+  E -->|"liste bos"| F
+  E -->|"program listede"| G["STARK dogrulanir"]
+  G --> H["Iddia degerlendirilir"]
+```
+
+### AI yolu: ayni sinif, farkli bicim
+
+AI cikarim yolu ilk bakista ayni acigi tasiyor gorunur, ama **tasimiyor** ve
+farkin nerede oldugu ogreticidir.
+
+`submit_zk_proof` programi **gonderenden** aliyordu. AI yolu ise programi
+gonderenden almiyor: `guest_program_for_model` onu modelin **kayitli
+boyutlarindan yeniden kuruyor** ve kanit o program ile dogrulaniyor.
+Yani yetki zaten kayittan geliyor, gonderenden degil. Ayni sinifin ikinci
+ornegi burada **kapaliydi**.
+
+Ama kaydin kendisinde ayri bir kusur vardi. `execution_program_hash` ve
+`execution_dims` ayri ayri veriliyordu ve hicbir sey ikisinin **ayni programi**
+tarif ettigini denetlemiyordu. Ayrisirlarsa hicbir gecerli kanit o modeli
+gecemez: model, kaydi kabul edilmis ama sonsuza kadar dogrulanamaz bir durumda
+kalir.
+
+Bu bir sahtecilik acigi degil - fail-closed. Sessiz bir tuzak: hatayi kaydin
+kendisinde degil, cok sonra dogrulama zamaninda gosterir. Kayit artik programi
+boyutlardan yeniden kurup hash'i karsilastiriyor; tutarsizlik kaynaginda
+reddediliyor.
+
+**Iki yuzeyin ayrimi tek cumlede:** yetki gonderenden geliyorsa izin listesi
+gerekir; kayittan geliyorsa kaydin kendi ic tutarliligi gerekir.
+
+### Bu kapinin engellemedigi sey
+
+Izin listesindeki bir programin **kendisi** kusurluysa bu kapi yardim etmez;
+yetkiyi baglar, dogrulugu degil. Listeye ne konuldugu bir yonetisim sorusudur
+ve bilerek kod disinda birakilmistir: alan kendi kumesini kendi ilan eder.
+Ayrica AIR'in kendi saglamligi (under-constrained kusurlar) bu kapinin
+kapsaminda degildir - o, dis denetime birakilan ayri bir yuzeydir.
+
+## 57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi
+
+Onceki iki bolum kanitin **kimligini** ve **yetkisini** bagliyor. Ikisi de tek
+bir degere dayaniyor: programin kanonik hash'i. Bu bolum o degerin kendisini
+koruyan mekanizmayi anlatir.
+
+### Problem: ayni degerin dort kaynagi
+
+Bir zk kanitinin hangi program icin uretildigi tek bir degerle soylenir. O
+deger su an agacta **dort ayri yerde**, **uc ayri crate**'te ve **iki ayri
+hash kutuphanesi**yle hesaplaniyor:
+
+| Yer | Ne icin | Kutuphane |
+|---|---|---|
+| `src/prover/mod.rs` | alan izin listesi kimligi | `sha3` |
+| `src/ai/execution/guest.rs` | AI model kaydi | `sha3` |
+| `src/domain/storage_deal.rs` | depolama meydan okumasi | `sha3` |
+| `budzero/bud-proof/src/plonky3_prover.rs` | **dogrulayici**, AIR'e baglanan | `tiny_keccak` |
+
+Dordunun ayni sonucu vermesi bir **varsayimdir**, ve varsayimlar bayatlar.
+Ayrisirlarsa olan sey sessizdir: izin listesine yazilan hash ile
+dogrulayicinin kanittan hesapladigi hash farkli olur. O anda ya her durust
+kanit reddedilir (alan kilitlenir), ya da - siralama ters giderse - listede
+olmayan bir program listede sayilir.
+
+Derleyici bunu goremez: dort fonksiyon da tek basina dogrudur, yanlis olan
+aralarindaki **iliskidir**. Bir tur denetimi iliskiyi ifade etmez.
+
+### Cozum: degeri yeniden uret, koda inanma
+
+`xtask/gates/src/gates/regeneration.rs` Keccak-256'yi **kendi icinde**,
+agactaki hicbir hash kutuphanesini kullanmadan uygular. Sonra:
+
+1. Kendi uygulamasini bilinen vektorlerle dogrular (bos girdi, `"abc"`).
+   Kapinin kendisi yanlissa soyledigi hicbir sey degerli degildir.
+2. Kanonik degeri **yeniden uretir**.
+3. Agactaki her uygulamanin kanonik beslemeyi (kelimeler little-endian,
+   etiket yok) kullandigini kaynaktan dogrular.
+
+Kapi, kodun soyledigine inanmaz; degeri kendi hesaplar. Bagimsiz ikinci bir
+yolla uretip karsilastirma fikri, derleyici guveni literaturunden alinmadir:
+tek kaynaga guvenmek yerine iki bagimsiz uretimi karsilastirmak.
+
+```mermaid
+flowchart TD
+  G["regeneration kapisi"] --> S{"Kendi Keccak'i dogru mu?"}
+  S -->|"vektorler tutmuyor"| X["FAIL: kapi guvenilmez"]
+  S -->|"evet"| R["Kanonik degeri yeniden uret"]
+  R --> C{"Her uygulama kanonik besleme mi?"}
+  C -->|"etiket eklenmis"| F["FAIL: ayrisma"]
+  C -->|"besleme degismis"| F
+  C -->|"yuzey kaybolmus"| F
+  C -->|"hepsi ayni"| P["PASS"]
+```
+
+### Neden calisma zamaninda degil
+
+"Saldiri algilandiginda kod kendini yenilesin" fikri cazip ve **yanlis
+yerde** dogru. Bir dugum calisma zamaninda kendi kodunu degistirirse artik
+digerleriyle ayni programi calistirmiyordur - bu bir savunma degil, **uzlasma
+bolunmesidir**. Saldirganin en ucuz zaferi savunmayi tetikleyip agi ikiye
+ayirmak olurdu.
+
+Regeneration bu yuzden **yayin oncesi** bir kapidir: kayma uretime hic
+ulasmaz. Yenileme calisma zamaninda degil, yapi zamaninda olur; belirlenimlilik
+korunur.
+
+### Yakinsama: bolen degil, birlestiren
+
+Bu kapinin cekirdek ozelligi ve adinin hakkini verdigi yer burasi. Bir
+"yenilenme" mekanizmasi yanlis kurulursa agi boler. Dogru kurulmasinin sarti
+**yakinsamadir**: farkli bir baslangictan yola cikan her dugum ayni kanonik
+sonuca varmali.
+
+Kapi bunu iddia etmiyor, olcuyor:
+
+* **Idempotence** - ikinci uretim birincisiyle ayni. Olmasaydi iki dugum ayni
+  kaynaktan farkli yerlere varirdi; tam olarak kacindigimiz bolunme.
+* **Onarim** - bozulmus bir girdi kanonik hale **geri getiriliyor**, yalnizca
+  reddedilip birakilmiyor. "Geri uretilsin" tam olarak bu.
+
+Ikisi birlikte sunu verir: izinsiz bir kod girisi karsisinda cevap "her dugum
+kendi cozumunu bulsun" degil, "herkes ayni kanonik hale donsun" olur. Ag
+korunur, bolunmez.
+
+### Kapinin kendi zayif yeri: elle tutulan liste
+
+Ilk surum uc uretim noktasini **elle sayiyordu**. Bu, icadin kendi icindeki
+kol kesme noktasiydi: yarin dorduncu bir yerde ayni hash uretilse liste sessiz
+kalirdi - ve tam olarak o sessizlik, kapinin engellemesi gereken seydi.
+
+Olcum bunu dogruladi. Agacta elle sayilan uctan **fazlasi** vardi:
+
+| Bulunan yeni nokta | Ne yapiyor |
+|---|---|
+| `src/execution/zkvm.rs` | `hash_u64_words`, zkVM'in kendi program hash'i |
+| `src/lubot/verify.rs` | Lubot STARK yolunun `build_public_inputs`'i |
+| `src/domain/storage_deal.rs` | depolama meydan okumasi program hash'i |
+
+Ucu de uretim kodu, ucu de kapinin gormedigi yerdeydi.
+
+Kapi artik **"bildiklerimi denetle" demiyor, "ne varsa bul ve denetle" diyor**.
+Kaynak agacini gezip bir Keccak/SHA3 hasher'ini program kelimeleriyle besleyen
+her noktayi kesfediyor; su an **7 nokta** buluyor.
+
+Kesif uc sekilde saglamlastirildi:
+
+* **Alt esik.** Kanonik uretim noktasi sayisi esigin altina duserse kapi
+  kirmizi yanar. Yani taramanin kendisi korlesirse bu da bir bulgudur -
+  sessizce "hepsi temiz" demez.
+* **Etiket istisna listesi.** Alan etiketi kullanan tek gerekcelendirilmis yer
+  `program_hash_from_words` (bir *kayit kimligi*, kanitin bagladigi deger
+  degil). Baska bir yerde etiket cikarsa bulgudur.
+* **Dogrulayici zorunlulugu.** `plonky3_prover.rs`'deki uretim kaybolursa
+  kanonik bicimin otoritesi gitmis demektir; kapi bunu ayrica arar.
+
+### Kanonik kod ISA'dan yeniden kuruluyor
+
+Karsilastirma ancak iki taraf **bagimsizsa** bir sey kanitlar. Kapi bu yuzden
+depolama meydan okumasi programini `bud_isa`'ya bagimli olmadan, kodlama
+kuralini kendi icinde yeniden yazarak uretir. Boylece ISA tarafinda sessiz bir
+kayma olursa kapi bunu gorebilir.
+
+Bagimsiz kodlamanin gercek `bud_isa` ile birebir ayni ciktiyi verdigi
+olculdu; program baytlari `[2148286750, 0]`.
+
+### Kanaryasi
+
+Kapi kendi kanaryasini tasir (`--self-test`) ve **bes** kaymayi yakaladigini
+kanitlar: gerekcelendirilmemis etiketli uretim, dogrulayici yuzeyinin
+kaybolmasi, **taramanin korlesmesi**, kanonik programin degistirilmesi, ve
+**sonradan sessizce eklenen yeni bir uretim noktasi**. Kanaryasiz
+bir kapi, yesil yandigi icin guvenilen ama hicbir sey olcmeyen bir kapidir.
+
+Ayrica gercek agaca **uc kez** kayma enjekte edilerek dogrulandi. Ucuncusu
+en onemlisi: agaca yeni bir dosya (`src/attacksim/mod.rs`) eklenip icine
+etiketli bir golge program-hash uretimi konuldu. Kapi onu **hicbir listede
+olmamasina ragmen** yakaladi:
+
+```
+FAIL [regeneration]: src/attacksim/mod.rs:4: program-hash uretiminde alan
+etiketi var ve bu dosya gerekcelendirilmis istisnalar arasinda degil
+```
+
+Ilk iki enjeksiyon:
+`zk_program_hash` govdesine bir alan etiketi eklendiginde ve depolama
+programinin `imm` alani 256'dan 512'ye cekildiginde kapi kirmizi yandi ve her
+ikisinde de gerekceyi isimlendirdi; geri alininca yesile dondu, `git diff`
+temiz kaldi.
+
+### Engellemedigi sey
+
+Kapi **beslemenin bicimini** ve degerin yeniden uretilebilirligini korur;
+kanonik bicimin kendisinin dogru secildigini iddia etmez. Dogrulayici bicimi
+degistirirse kapi digerlerinin ona uymadigini soyler - hangisinin hakli
+oldugunu soylemez. O bir tasarim karari olarak kalir.

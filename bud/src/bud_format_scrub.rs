@@ -12,10 +12,10 @@ pub const SCRUB_MAGIC: [u8; 8] = *b"\xB5SCRS\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubTier {
-    Hot,    // sık erişilen - nadir tarama (okuma zaten doğrular)
-    Warm,   // arada - aylık
-    Cold,   // nadir - haftalık
-    Archive,// uzun - günlük dilim
+    Hot,     // sık erişilen - nadir tarama (okuma zaten doğrular)
+    Warm,    // arada - aylık
+    Cold,    // nadir - haftalık
+    Archive, // uzun - günlük dilim
 }
 
 /// Tarama aralığı (saniye) - tier'e göre.

@@ -111,6 +111,14 @@ pub struct Blockchain {
     /// This bounds entries, not only distinct checkpoint-height buckets.
     pub max_pending_certs: usize,
     pub domain_registry: ConsensusDomainRegistry,
+    /// Egemen alan sablonlari (CBDC, kamu, kurumsal PoA, konsorsiyum).
+    ///
+    /// `domain_registry`'den ayri durur cunku ayri seyi anlatir: orasi bir
+    /// alanin uzlasma kurallarini, burasi o alanin uyum/denetim belgesini
+    /// tutar. Bagi `register_sovereign_template` kurar - bir sablon ancak
+    /// adlandirdigi alan kayitliysa ve ayni turu/operatoru gosteriyorsa
+    /// kabul edilir.
+    pub sovereign_registry: crate::domain::SovereignDomainRegistry,
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
@@ -715,6 +723,7 @@ impl Blockchain {
             pending_finality_certs: BTreeMap::new(),
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
+            sovereign_registry: crate::domain::SovereignDomainRegistry::new(),
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
@@ -807,8 +816,62 @@ impl Blockchain {
         u64::try_from(self.last_block().timestamp / 1_000).unwrap_or(u64::MAX)
     }
 
+    /// The chain tip.
+    ///
+    /// # Panics
+    /// If the chain is empty, which cannot happen: construction always seeds
+    /// genesis and nothing removes it. The signature returns `&Block`, so
+    /// there is no owned value to fall back to; the alternative would be
+    /// changing the return type and every one of the call sites. The panic
+    /// is allowed here deliberately rather than by the workspace default.
+    #[allow(clippy::expect_used)]
     pub fn last_block(&self) -> &Block {
-        self.chain.last().expect("Chain should never be empty")
+        self.chain
+            .last()
+            .expect("chain is seeded with genesis at construction")
+    }
+
+    /// Egemen alan sablonunu, adlandirdigi uzlasma alanina baglayarak kaydet.
+    ///
+    /// Sablon tek basina degerlendirilmez. `register_template_for_domain`
+    /// once alanin kayitli oldugunu, sonra sablonun bildirdigi uzlasma
+    /// turunun ve operatorun alanin gercek degerleriyle ayni oldugunu
+    /// dogrular. Bu kapi olmadan bir sablon, PoS olarak calisan bir alani
+    /// denetime "izinli ve KYC'li" diye gosterebilirdi: iki kayit da kendi
+    /// icinde gecerli, birlikte yanlis.
+    ///
+    /// # Errors
+    ///
+    /// Alan kayitli degilse, tur ya da operator uyusmuyorsa, veya sablonun
+    /// kendi dogrulamasi basarisizsa hata doner.
+    pub fn register_sovereign_template(
+        &mut self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<(), String> {
+        self.sovereign_registry
+            .register_template_for_domain(template, &self.domain_registry)
+    }
+
+    /// Kayitli egemen sablonlarin koku.
+    #[must_use]
+    pub fn sovereign_template_root(&self) -> crate::domain::Hash32 {
+        self.sovereign_registry.root()
+    }
+
+    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    ///
+    /// Paketin tasidigi `template_id` once kayit defterinde aranir. Paketin
+    /// kendi icinde tutarli olmasi yetmez: kimlik paketin icinden geliyorsa,
+    /// uydurma bir kimlikle uretilmis paket de tutarli gorunur.
+    ///
+    /// # Errors
+    ///
+    /// Sablon kayitli degilse ya da paket sablonla uyusmuyorsa hata doner.
+    pub fn validate_sovereign_audit_export(
+        &self,
+        bundle: &crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        self.sovereign_registry.validate_audit_export(bundle)
     }
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
@@ -1898,7 +1961,8 @@ impl Blockchain {
 
     /// Real ZK-proof submission with fee + reward + claim policy.
     ///
-    /// 1. Validate the message kind and binding hash.
+    /// 1. Validate the message kind and binding hash, and refuse public
+    ///    Inputs bound to a different `chain_id` than this chain.
     /// 2. Charge the submission fee; invalid, valid, and duplicate work all
     ///    Consume resources, while protocol-conflicting claims are refunded.
     /// 3. Verify the STARK proof.
@@ -1924,6 +1988,51 @@ impl Blockchain {
         let expected = submission.expected_payload_hash();
         if submission.message.payload_hash != expected {
             return Err("payload hash does not bind to the supplied proof".into());
+        }
+
+        // 1b. Genel girdi baglamasi: kanit BU zincire ait olmali.
+        //
+        // `public_inputs.chain_id` gonderenden gelir ve kanit sistemi onu
+        // yalnizca *kendi icinde* tutarli tutar: STARK, "bu genel girdilerle
+        // bu program boyle kostu" der, girdilerin dogru zincire ait oldugunu
+        // soylemez. Denetim burada yapilmazsa baska bir zincir (ya da test
+        // agi) icin uretilmis, kendi zincirinde tamamen gecerli bir kanit
+        // burada da dogrulanir ve bir alani ilerletirdi.
+        //
+        // Bu, dogrulayicinin kanit sisteminin kisitlamadigi alani kendi
+        // kodunda denetlemesi gereken siniftir; kanit gecerliligi tek basina
+        // bir yetkilendirme karari degildir.
+        if submission.public_inputs.chain_id != self.chain_id {
+            return Err(format!(
+                "proof public inputs bind to chain {} but this chain is {}",
+                submission.public_inputs.chain_id, self.chain_id
+            ));
+        }
+
+        // 1c. Program izin listesi: bu programin bu alani ilerletme hakki var mi?
+        //
+        // Bir onceki denetim kanitin BU zincire ait oldugunu soyluyor, ama
+        // hangi *kodun* kanitlandigini soylemiyor. Dogrulayici programin
+        // hash'ini `public_inputs.program_hash` ile karsilastirir; gonderen
+        // ikisini de kendisi verdigi icin bu denetim her zaman gecer. Yani
+        // saldirgan kendi yazdigi bir programi kusursuz bir kanitla sunabilir:
+        // kanit gecerlidir, yalan soyleyen programdir.
+        //
+        // Alanin ilan ettigi izin listesi bu boslugu kapatir. Liste bos ise
+        // kapi kapalidir - fail-closed.
+        let claimed_domain = submission.domain();
+        let domain = self
+            .domain_registry
+            .get(claimed_domain)
+            .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
+        let program_hash = crate::prover::zk_program_hash(&submission.program);
+        if !domain.zk_program_allowlist.contains(&program_hash) {
+            return Err(format!(
+                "program {} is not on the zk allowlist of domain {} ({} entries)",
+                hex::encode(program_hash),
+                claimed_domain,
+                domain.zk_program_allowlist.len()
+            ));
         }
 
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
@@ -3586,6 +3695,7 @@ impl Blockchain {
 
         self.mempool.set_min_fee(self.state.base_fee);
         self.emit_chain_metrics();
+        self.emit_tx_processed(block.transactions.len() as u64);
         Some((block, nft_burn_cids.iter().map(|(cid, _)| cid.0).collect()))
     }
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
@@ -3860,6 +3970,8 @@ impl Blockchain {
         // Deterministic replay contract. Doing it here, after the commit,
         // Made the producer's `liveness` root unreproducible by replay.
 
+        // Sayac blok tasinmadan once okunuyor: `push` blogu tuketiyor.
+        let applied_tx_count = block.transactions.len() as u64;
         self.chain.push(block);
 
         if let Some(last_block) = self.chain.last() {
@@ -3937,6 +4049,7 @@ impl Blockchain {
         }
 
         self.emit_chain_metrics();
+        self.emit_tx_processed(applied_tx_count);
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
     }
 
@@ -5167,7 +5280,7 @@ impl Blockchain {
         }
         let mut unfrozen = 0;
         for req in pending {
-            let domain_id = req.domain_id as crate::domain::DomainId;
+            let domain_id = req.domain_id;
             let Some(domain) = self.domain_registry.get(domain_id) else {
                 tracing::warn!("UnfreezeGovernance: domain {domain_id} not found");
                 continue;
@@ -5301,11 +5414,9 @@ impl Blockchain {
                     &current_epoch.to_le_bytes(),
                     &tip.vrf_output,
                 ]);
-                let byte_start = u64::from_le_bytes(
-                    entropy[..8]
-                        .try_into()
-                        .expect("32-byte challenge entropy has an 8-byte prefix"),
-                ) % range_count;
+                let mut entropy_head = [0u8; 8];
+                entropy_head.copy_from_slice(&entropy[..8]);
+                let byte_start = u64::from_le_bytes(entropy_head) % range_count;
                 let byte_end = byte_start + range_len;
                 let opener = crate::core::address::Address::from([0u8; 32]);
                 if let Ok(_challenge_id) = self.state.storage_registry.open_challenge(
@@ -5693,6 +5804,7 @@ impl Clone for Blockchain {
             pending_finality_certs: self.pending_finality_certs.clone(),
             max_pending_certs: self.max_pending_certs,
             domain_registry: self.domain_registry.clone(),
+            sovereign_registry: self.sovereign_registry.clone(),
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),

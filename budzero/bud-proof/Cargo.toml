@@ -5,6 +5,9 @@ edition = "2021"
 # : cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 bud-vm = { path = "../bud-vm", features = ["experimental"] }
 bud-isa = { path = "../bud-isa", features = ["experimental"] }
@@ -30,3 +33,10 @@ tiny-keccak = { version = "2.0", features = ["keccak"] }
 [[bench]]
 name = "proof_baseline"
 harness = false
+
+[dev-dependencies]
+# Derlenmis dallanma testi (tests/derlenmis_dallanma.rs) icin: kanit boru
+# hattini elle kurulmus komut dizisiyle degil, derleyicinin gercek ciktisiyla
+# besler. Mevcut 106 prover testinin tamami elle kurulmus dizi kullaniyordu.
+bud-compiler = { path = "../bud-compiler" }
+tiny-keccak = { version = "2.0", features = ["keccak"] }

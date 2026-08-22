@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 //! # lubot-knowledge - kapalı-devre bilgi katmanı
 //!
 //! Lubot'un kapalı-devre ilkesini koruyarak kaynak kod ve dokümanlardan

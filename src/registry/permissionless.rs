@@ -68,6 +68,14 @@ pub enum SlashingCondition {
     MaliciousBehaviour,
 }
 
+/// Stand-in bytes hashed when a registry entry cannot be serialized.
+///
+/// Derived `Serialize` on owned data has no failing case, so this never fires.
+/// It is not a panic because the call site computes a state root that every
+/// node computes alike: aborting would drop the whole validator set at once
+/// rather than a single node.
+const REGISTRY_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/permissionless-registry";
+
 impl SlashingCondition {
     pub fn as_bytes(&self) -> &'static [u8] {
         match self {
@@ -107,6 +115,28 @@ impl Registration {
     pub fn is_active(&self) -> bool {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
+
+    /// Hala kesilebilir bir bonda sahip mi: `Active` **veya** `Unbonding`.
+    ///
+    /// # Neden iki ayri soru var
+    ///
+    /// Bu iki soru ayni degil ve karistirilmalari sessiz bir sapma
+    /// uretiyordu. `is_active_relayer` gibi rol yardimcilari `Unbonding`'i
+    /// kabul ediyordu, `is_active` etmiyordu; ayni isim iki farkli cevap
+    /// veriyordu ve fark hicbir yerde yaziyordu degildi.
+    ///
+    /// Dogru ayrim niyettedir. **Yeni bir gorev vermek** icin uye `Active`
+    /// olmali: cikmakta olan birine is atamak, is bitmeden bondunun cozulmesi
+    /// demektir. **Yaptigi bir isten sorumlu tutmak** icinse `Unbonding` de
+    /// yeter, cunku bond hala kilitli ve kesilebilir. Aksi halde bir rolayci
+    /// islemini gonderip hemen `begin_unbonding` cagirarak sorumluluktan
+    /// cikardi.
+    pub fn is_slashable(&self) -> bool {
+        matches!(
+            self.status,
+            MemberStatus::Active | MemberStatus::Unbonding { .. }
+        ) && self.stake > 0
+    }
 }
 
 /// Errors surfaced by the permissionless registry.
@@ -140,6 +170,17 @@ pub enum RegistryError {
     RelayerNotActive {
         account: Address,
     },
+    /// The account is already slashed for this role.
+    ///
+    /// A repeated slash used to return `Ok` with `penalty: 0`, which reads at
+    /// the call site as "the slash was applied and cost nothing" rather than
+    /// "this was a replay". The budzero registry rejected the same call, so
+    /// the two registries disagreed on the same input; this variant is the
+    /// core side of that agreement.
+    AlreadySlashed {
+        account: Address,
+        role: RoleId,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -169,6 +210,9 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "{account} is not an active relayer (register with stake first)"
             ),
+            RegistryError::AlreadySlashed { account, role } => {
+                write!(f, "{account} is already slashed as {role}")
+            }
         }
     }
 }
@@ -532,10 +576,13 @@ impl PermissionlessRegistry {
             }
             _ => return Err(RegistryError::NotActive { account, role }),
         }
+        // The `match` above already read this entry, so the key is present.
+        // Returning an error instead of panicking keeps a future edit to that
+        // match from turning a missing key into a downed node.
         let reg = self
             .registrations
             .remove(&(role, account))
-            .expect("checked");
+            .ok_or(RegistryError::NotActive { account, role })?;
         Ok(reg.stake)
     }
 
@@ -561,14 +608,12 @@ impl PermissionlessRegistry {
         condition: SlashingCondition,
         slash_ratio_fixed: u64,
     ) -> Result<SlashOutcome, RegistryError> {
-        let already_slashed = self
-            .registrations
-            .get(&(role, account))
-            .is_some_and(|registration| matches!(registration.status, MemberStatus::Slashed));
+        // `slash_role_only` now refuses a replay, so reaching the next line
+        // means this is the first slash for the role and the cross-role sweep
+        // is owed. The previous `already_slashed` precheck existed only to
+        // suppress that sweep after a zero-penalty `Ok`.
         let outcome = self.slash_role_only(account, role, condition, slash_ratio_fixed)?;
-        if !already_slashed {
-            self.slash_cross_role(account, role, condition, slash_ratio_fixed);
-        }
+        self.slash_cross_role(account, role, condition, slash_ratio_fixed);
         Ok(outcome)
     }
 
@@ -588,12 +633,14 @@ impl PermissionlessRegistry {
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
 
+        // A replayed slash is refused rather than answered with a zero-penalty
+        // `Ok`. Both readings leave the stake untouched, but only one of them
+        // tells the caller that nothing happened: an `Ok` here is
+        // indistinguishable from a slash that legitimately cost nothing, so a
+        // caller that logs `penalty` or counts successful slashes records a
+        // second punishment that never occurred.
         if matches!(reg.status, MemberStatus::Slashed) {
-            return Ok(SlashOutcome {
-                condition,
-                penalty: 0,
-                remaining_stake: reg.stake,
-            });
+            return Err(RegistryError::AlreadySlashed { account, role });
         }
 
         let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
@@ -727,15 +774,8 @@ impl PermissionlessRegistry {
     // Active checks for all well-known roles (unified)
 
     pub fn is_active_relayer(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::RELAYER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::RELAYER)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn ensure_active_relayer(&self, account: &Address) -> Result<(), RegistryError> {
@@ -747,15 +787,8 @@ impl PermissionlessRegistry {
     }
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::ATTESTER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::ATTESTER)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn ensure_active_attester(&self, account: &Address) -> Result<(), RegistryError> {
@@ -774,27 +807,13 @@ impl PermissionlessRegistry {
     }
 
     pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::LUBOT_OPERATOR) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::LUBOT_OPERATOR)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_ai_verifier(&self, account: &Address) -> bool {
@@ -861,19 +880,17 @@ impl PermissionlessRegistry {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_PERMISSIONLESS_REGISTRY_V1");
         hasher.update(
-            bincode::serialize(&self.params)
-                .expect("RegistryParams must serialize for registry root"),
+            bincode::serialize(&self.params).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
         );
         for registration in self.registrations.values() {
             hasher.update(
                 bincode::serialize(registration)
-                    .expect("Registration must serialize for registry root"),
+                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
         for record in &self.slashing_history {
             hasher.update(
-                bincode::serialize(record)
-                    .expect("SlashingRecord must serialize for registry root"),
+                bincode::serialize(record).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
         hasher.finalize().into()
@@ -918,6 +935,79 @@ mod tests {
             .unwrap();
         assert!(reg
             .register_verifier(addr(3), MIN_REGISTRATION_STAKE, 0)
+            .is_err());
+    }
+
+    /// A replayed slash must be refused, not answered with a zero penalty.
+    ///
+    /// The two registries disagreed on exactly this input: budzero returned
+    /// `Err(AlreadySlashed)`, core returned `Ok(penalty: 0)`. Nothing covered
+    /// the second call, which is why the divergence survived. An `Ok` here is
+    /// indistinguishable from a slash that legitimately cost nothing.
+    #[test]
+    fn slashing_the_same_role_twice_is_refused() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(9), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+
+        let first = reg
+            .slash(
+                addr(9),
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                FIXED_POINT_SCALE,
+            )
+            .expect("the first slash applies");
+        assert!(first.penalty > 0, "the first slash must cost stake");
+        let after_first = first.remaining_stake;
+
+        let err = reg
+            .slash(
+                addr(9),
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                FIXED_POINT_SCALE,
+            )
+            .expect_err("the replay must be refused");
+        assert_eq!(
+            err,
+            RegistryError::AlreadySlashed {
+                account: addr(9),
+                role: roles::VALIDATOR
+            }
+        );
+
+        // The refusal must not have moved any stake either.
+        assert_eq!(
+            reg.get(&addr(9), roles::VALIDATOR)
+                .map(|r| r.stake)
+                .unwrap_or_default(),
+            after_first,
+            "a refused replay must leave the stake untouched"
+        );
+    }
+
+    /// `slash_role_only` is the path the executor uses for Lubot equivocation;
+    /// it must refuse a replay for the same reason.
+    #[test]
+    fn slashing_a_role_only_twice_is_refused() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(10), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        reg.slash_role_only(
+            addr(10),
+            roles::VALIDATOR,
+            SlashingCondition::MaliciousBehaviour,
+            FIXED_POINT_SCALE,
+        )
+        .expect("the first slash applies");
+        assert!(reg
+            .slash_role_only(
+                addr(10),
+                roles::VALIDATOR,
+                SlashingCondition::MaliciousBehaviour,
+                FIXED_POINT_SCALE,
+            )
             .is_err());
     }
 
@@ -1006,6 +1096,57 @@ mod tests {
             .unwrap();
         assert!(reg.is_active_master_verifier(&addr(10)));
         assert!(reg.is_active(&addr(10), roles::VERIFIER)); // alias
+    }
+
+    /// Çıkmakta olan bir üye yeni görev alamaz ama sorumluluktan çıkamaz.
+    ///
+    /// İki soru ayrı ayrı yanıtlanmalı: `is_active` görev atamayı, rol
+    /// yardımcıları (`is_slashable`) kesilebilirliği sorar. Aynı statü için
+    /// ikisinin de aynı cevabı vermesi, `begin_unbonding` çağırmayı
+    /// sorumluluktan kaçmanın yolu yapardı.
+    #[test]
+    fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
+        let mut reg = PermissionlessRegistry::new();
+        let a = addr(21);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+
+        assert!(reg.is_active(&a, roles::RELAYER), "aktifken gorev alir");
+        assert!(reg.is_active_relayer(&a), "aktifken kesilebilir");
+
+        reg.begin_unbonding(a, roles::RELAYER, 1)
+            .expect("unbonding");
+
+        assert!(
+            !reg.is_active(&a, roles::RELAYER),
+            "cikmakta olana yeni gorev verilmez"
+        );
+        assert!(
+            reg.is_active_relayer(&a),
+            "bond hala kilitli: sorumluluk surer"
+        );
+    }
+
+    /// Kesilmiş bir üye hiçbir soruya `true` dönmemeli.
+    #[test]
+    fn a_slashed_member_is_neither_active_nor_slashable_again() {
+        let mut reg = PermissionlessRegistry::new();
+        let a = addr(22);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+        reg.slash(
+            a,
+            roles::RELAYER,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE,
+        )
+        .expect("ilk kesme");
+
+        assert!(!reg.is_active(&a, roles::RELAYER));
+        assert!(
+            !reg.is_active_relayer(&a),
+            "kesilmis bond ikinci kez kesilemez"
+        );
     }
 
     #[test]

@@ -1055,7 +1055,7 @@ pub fn hash_finality_proof(proof: &FinalityProof) -> [u8; 32] {
     // Two distinct proofs could collide. Fail-fast on the (deterministic,
     // Non-attacker-triggerable) programming error instead.
     let encoded = bincode::serialize(proof)
-        .expect("BUG: FinalityProof must serialize for finality proof hash");
+        .unwrap_or_else(|_| b"budlum/serialize-failed/finality-proof".to_vec());
     crate::core::hash::hash_fields_bytes(&[b"BDLM_FINALITY_PROOF_V1", &encoded])
 }
 

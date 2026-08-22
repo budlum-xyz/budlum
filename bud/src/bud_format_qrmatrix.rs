@@ -19,9 +19,9 @@ pub const QRM_VERSION: u8 = 1;
 #[derive(Debug, Clone)]
 pub struct QrMatrix {
     pub version: u32,
-    pub dim: usize,              // 17 + 4·version
-    pub modules: Vec<u8>,        // dim×dim satır-major
-    pub data_bytes: Vec<u8>,     // yerleştirilen byte-mode veri
+    pub dim: usize,          // 17 + 4·version
+    pub modules: Vec<u8>,    // dim×dim satır-major
+    pub data_bytes: Vec<u8>, // yerleştirilen byte-mode veri
 }
 
 impl QrMatrix {
@@ -65,7 +65,7 @@ impl QrMatrix {
             for dy in 0..7usize {
                 for dx in 0..7usize {
                     let ring = dx == 0 || dx == 6 || dy == 0 || dy == 6;
-                    let core = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+                    let core = (2..=4).contains(&dx) && (2..=4).contains(&dy);
                     let val = if ring || core { 0 } else { 1 };
                     let x = cx + dx - 3;
                     let y = cy + dy - 3;
@@ -114,10 +114,14 @@ impl QrMatrix {
                     bit_idx += 1;
                 }
                 if upward {
-                    if row == 0 { break; }
+                    if row == 0 {
+                        break;
+                    }
                     row -= 1;
                 } else {
-                    if row == d - 1 { break; }
+                    if row == d - 1 {
+                        break;
+                    }
                     row += 1;
                 }
             }
@@ -172,7 +176,7 @@ mod tests {
     #[test]
     fn versiyon_secim_kapasiteye_uyar() {
         // 100 bayt → v4 (78) yetmez, v5 (106) yeter
-        let data = vec![0u8; 100];
+        let data = [0u8; 100];
         let v = QrMatrix::version_for(data.len());
         assert!(crate::bud_format_ux::qr_capacity_bytes(v) >= 100);
         assert!(v > 4, "100B → v5+: {v}");

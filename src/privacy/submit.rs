@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 /// Max inputs/outputs per private transfer (DoS bound).
 pub const MAX_PRIVATE_IO: usize = 16;
 
+/// Eski Ed25519 yetkilendirme imzasinin uzunlugu.
+pub const ED25519_AUTH_SIG_LEN: usize = 64;
+
+/// ML-DSA-87 yetkilendirme imzasinin uzunlugu.
+pub const ML_DSA_87_AUTH_SIG_LEN: usize = crate::crypto::primitives::ML_DSA_87_SIGNATURE_LEN;
+
 /// Chain-submitted private transfer (from wallet intent).
 ///
 /// `spent_commitments` are required in v1 so the note set can be updated
@@ -41,8 +47,25 @@ impl PrivateTransferSubmit {
                 "private transfer: exceeds MAX_PRIVATE_IO ({MAX_PRIVATE_IO})"
             ));
         }
-        if self.authorization_sig.len() != 64 {
-            return Err("private transfer: authorization_sig must be 64 bytes".into());
+        // Yetkilendirme imzasi iki bicimden biri olabilir: eski Ed25519 (64
+        // bayt) ya da ML-DSA-87 (4627 bayt). Uzunluk yalnizca **bicim**
+        // denetimidir; hangisinin gecerli oldugu, islemin imza surumune gore
+        // `Executor` tarafinda karara baglanir.
+        //
+        // Onceden yalnizca 64 kabul ediliyordu. Bu, ML-DSA-87 anahtarli (V5)
+        // bir hesabin gizli transfer yetkilendirmesini **imkansiz**
+        // kiliyordu: dogru imzayi uretse bile islem "must be 64 bytes"
+        // diyerek bicim kapisinda dusuyordu. Zincirin varsayilan cuzdani
+        // ML-DSA-87 oldugu icin bu, ozelligin varsayilan yapilandirmada hic
+        // calismamasi demekti.
+        if self.authorization_sig.len() != ED25519_AUTH_SIG_LEN
+            && self.authorization_sig.len() != ML_DSA_87_AUTH_SIG_LEN
+        {
+            return Err(format!(
+                "private transfer: authorization_sig must be {ED25519_AUTH_SIG_LEN} bytes \
+                 (Ed25519) or {ML_DSA_87_AUTH_SIG_LEN} bytes (ML-DSA-87), got {}",
+                self.authorization_sig.len()
+            ));
         }
         Ok(())
     }
@@ -66,5 +89,53 @@ impl PrivateTransferSubmit {
     pub fn verify_digest_matches(&self) -> bool {
         self.public_digest
             == Self::compute_public_digest(&self.nullifiers, &self.output_commitments)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn submit_with_sig(len: usize) -> PrivateTransferSubmit {
+        let nullifiers = vec![[1u8; 32]];
+        let outputs = vec![[2u8; 32]];
+        PrivateTransferSubmit {
+            spent_commitments: vec![[3u8; 32]],
+            nullifiers: nullifiers.clone(),
+            output_commitments: outputs.clone(),
+            authorization_sig: vec![0u8; len],
+            public_digest: PrivateTransferSubmit::compute_public_digest(&nullifiers, &outputs),
+        }
+    }
+
+    /// Eski Ed25519 yetkilendirmesi kabul edilmeye devam etmeli.
+    #[test]
+    fn an_ed25519_authorization_keeps_its_shape() {
+        assert!(submit_with_sig(ED25519_AUTH_SIG_LEN)
+            .validate_shape()
+            .is_ok());
+    }
+
+    /// ML-DSA-87 yetkilendirmesi de kabul edilmeli.
+    ///
+    /// Zincirin varsayilan cuzdani ML-DSA-87. Bicim kapisi yalnizca 64 bayta
+    /// izin verdigi surece, V5 hesabi dogru imzayi uretse bile gizli transfer
+    /// yapamiyordu.
+    #[test]
+    fn an_ml_dsa_87_authorization_is_accepted() {
+        assert!(submit_with_sig(ML_DSA_87_AUTH_SIG_LEN)
+            .validate_shape()
+            .is_ok());
+    }
+
+    /// Iki bicimden hicbirine uymayan uzunluk reddedilmeli.
+    #[test]
+    fn an_authorization_of_any_other_length_is_refused() {
+        for len in [0usize, 1, 63, 65, 4626, 4628] {
+            let err = submit_with_sig(len)
+                .validate_shape()
+                .expect_err("gecersiz uzunluk reddedilmeli");
+            assert!(err.contains("authorization_sig"), "{err}");
+        }
     }
 }

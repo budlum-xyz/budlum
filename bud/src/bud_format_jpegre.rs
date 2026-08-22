@@ -107,9 +107,21 @@ impl JpegAnalysis {
         let header_bytes = scan_start as u64;
         let scan_data_bytes = data.len().saturating_sub(scan_start) as u64;
         let total = data.len() as u64;
-        let header_ratio = if total > 0 { header_bytes as f64 / total as f64 } else { 0.0 };
+        let header_ratio = if total > 0 {
+            header_bytes as f64 / total as f64
+        } else {
+            0.0
+        };
         let recompress_savings_pct = 15.0 + header_ratio * 20.0;
-        Some(JpegAnalysis { width, height, progressive, quant_tables, scan_data_bytes, header_bytes, recompress_savings_pct })
+        Some(JpegAnalysis {
+            width,
+            height,
+            progressive,
+            quant_tables,
+            scan_data_bytes,
+            header_bytes,
+            recompress_savings_pct,
+        })
     }
 
     pub fn recommends_jxl(&self) -> bool {
@@ -156,7 +168,15 @@ impl JpegAnalysis {
         if bytes.len() != HDR + 32 {
             return None;
         }
-        Some(JpegAnalysis { width, height, progressive, quant_tables, scan_data_bytes, header_bytes, recompress_savings_pct })
+        Some(JpegAnalysis {
+            width,
+            height,
+            progressive,
+            quant_tables,
+            scan_data_bytes,
+            header_bytes,
+            recompress_savings_pct,
+        })
     }
 }
 
@@ -167,8 +187,23 @@ mod tests {
     fn synthetic_jpeg() -> Vec<u8> {
         let mut j = vec![0xFF, 0xD8];
         j.extend_from_slice(&[0xFF, MARKER_DQT, 0x00, 0x04, 0x00, 0x01]); // DQT: len=4 (2 len + 2 data)
-        j.extend_from_slice(&[0xFF, MARKER_SOF0, 0x00, 0x0A, 0x08, 0x00, 0x10, 0x00, 0x20, 0x01, 0x01, 0x00]); // SOF0: len=11 (9 payload)
-        j.extend_from_slice(&[0xFF, MARKER_SOS, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]); // SOS: len=8 (6 payload)
+        j.extend_from_slice(&[
+            0xFF,
+            MARKER_SOF0,
+            0x00,
+            0x0A,
+            0x08,
+            0x00,
+            0x10,
+            0x00,
+            0x20,
+            0x01,
+            0x01,
+            0x00,
+        ]); // SOF0: len=11 (9 payload)
+        j.extend_from_slice(&[
+            0xFF, MARKER_SOS, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+        ]); // SOS: len=8 (6 payload)
         for _ in 0..1000 {
             j.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
         }
@@ -208,8 +243,23 @@ mod tests {
     #[test]
     fn progressive_detected() {
         let mut j = vec![0xFF, 0xD8];
-        j.extend_from_slice(&[0xFF, MARKER_SOF2, 0x00, 0x0A, 0x08, 0x00, 0x10, 0x00, 0x20, 0x01, 0x01, 0x00]);
-        j.extend_from_slice(&[0xFF, MARKER_SOS, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+        j.extend_from_slice(&[
+            0xFF,
+            MARKER_SOF2,
+            0x00,
+            0x0A,
+            0x08,
+            0x00,
+            0x10,
+            0x00,
+            0x20,
+            0x01,
+            0x01,
+            0x00,
+        ]);
+        j.extend_from_slice(&[
+            0xFF, MARKER_SOS, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+        ]);
         j.extend_from_slice(&[0x01, 0x02]);
         j.extend_from_slice(&[0xFF, MARKER_EOI]);
         let a = JpegAnalysis::analyze(&j).expect("analiz");

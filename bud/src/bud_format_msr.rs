@@ -8,8 +8,8 @@
 //! - MDS: herhangi 2 düğüm → 4 sembolün tamamı (kayıpsız decode)
 //! - EXACT REPAIR: ölü düğüm, 3 sağlam düğümden β=1 paket (TOPLAM 3 paket)
 //!   indirerek BİREBİR onarılır - düz erasure onarımı k·α=4 paket ister → %25 az
-//! Onarım katsayıları koda gömülü DEĞİL; her onarım λ·D = hedef çözülerek
-//! üretilir (generic) ve test her denemede doğrular.
+//!   Onarım katsayıları koda gömülü DEĞİL; her onarım λ·D = hedef çözülerek
+//!   üretilir (generic) ve test her denemede doğrular.
 
 #![forbid(unsafe_code)]
 
@@ -23,12 +23,7 @@ pub const ALPHA: usize = 2; // düğüm başına paket
 pub const BETA: usize = 1; // onarımda helper başına indirilen paket
 
 // Ψ (4×3) - MDS + onarım için doğrulanmış sabit
-const PSI: [[u8; 3]; N] = [
-    [1, 0, 0],
-    [0, 1, 0],
-    [1, 1, 1],
-    [1, 2, 3],
-];
+const PSI: [[u8; 3]; N] = [[1, 0, 0], [0, 1, 0], [1, 1, 1], [1, 2, 3]];
 
 // GF(2^8) mod 0x11D - log/exp tabloları (deterministik, once_cell yok)
 fn gf_tables() -> ([u8; 512], [u8; 256]) {
@@ -76,8 +71,14 @@ fn build_m(s: &[u8; 4]) -> [[u8; 2]; 3] {
 
 /// Düğüm i'nin 2 paketi (C = Ψ·M satırı).
 fn node_data(psi: &[u8; 3], m: &[[u8; 2]; 3]) -> [u8; 2] {
-    let p0 = gf_add(gf_add(gf_mul(psi[0], m[0][0]), gf_mul(psi[1], m[1][0])), gf_mul(psi[2], m[2][0]));
-    let p1 = gf_add(gf_add(gf_mul(psi[0], m[0][1]), gf_mul(psi[1], m[1][1])), gf_mul(psi[2], m[2][1]));
+    let p0 = gf_add(
+        gf_add(gf_mul(psi[0], m[0][0]), gf_mul(psi[1], m[1][0])),
+        gf_mul(psi[2], m[2][0]),
+    );
+    let p1 = gf_add(
+        gf_add(gf_mul(psi[0], m[0][1]), gf_mul(psi[1], m[1][1])),
+        gf_mul(psi[2], m[2][1]),
+    );
     [p0, p1]
 }
 
@@ -164,9 +165,15 @@ fn solve_lambda(d: &[[u8; 4]; 3], target: &[u8; 4]) -> Option<[u8; 3]> {
         // Gauss-Jordan 3×3
         let mut ok = true;
         for c in 0..3 {
-            let Some(piv) = (c..3).find(|&r| m[r][c] != 0) else { ok = false; break };
+            let Some(piv) = (c..3).find(|&r| m[r][c] != 0) else {
+                ok = false;
+                break;
+            };
             m.swap(c, piv);
-            let Some(pinv) = gf_inv(m[c][c]) else { ok = false; break };
+            let Some(pinv) = gf_inv(m[c][c]) else {
+                ok = false;
+                break;
+            };
             for col in 0..4 {
                 m[c][col] = gf_mul(m[c][col], pinv);
             }
@@ -185,7 +192,10 @@ fn solve_lambda(d: &[[u8; 4]; 3], target: &[u8; 4]) -> Option<[u8; 3]> {
         let lam = [m[0][3], m[1][3], m[2][3]];
         // kalan sütunla doğrula
         let check = gf_add(
-            gf_add(gf_mul(lam[0], d[0][check_col]), gf_mul(lam[1], d[1][check_col])),
+            gf_add(
+                gf_mul(lam[0], d[0][check_col]),
+                gf_mul(lam[1], d[1][check_col]),
+            ),
             gf_mul(lam[2], d[2][check_col]),
         );
         if check == target[check_col] {
@@ -228,8 +238,14 @@ pub fn msr_repair(f: usize, all_nodes: &[[u8; 2]; N]) -> Option<[u8; 2]> {
     let (cx, cy) = packet_coeffs(&PSI[f]);
     let lx = solve_lambda(&d, &cx)?;
     let ly = solve_lambda(&d, &cy)?;
-    let x = gf_add(gf_add(gf_mul(lx[0], dl[0]), gf_mul(lx[1], dl[1])), gf_mul(lx[2], dl[2]));
-    let y = gf_add(gf_add(gf_mul(ly[0], dl[0]), gf_mul(ly[1], dl[1])), gf_mul(ly[2], dl[2]));
+    let x = gf_add(
+        gf_add(gf_mul(lx[0], dl[0]), gf_mul(lx[1], dl[1])),
+        gf_mul(lx[2], dl[2]),
+    );
+    let y = gf_add(
+        gf_add(gf_mul(ly[0], dl[0]), gf_mul(ly[1], dl[1])),
+        gf_mul(ly[2], dl[2]),
+    );
     Some([x, y])
 }
 
@@ -242,7 +258,7 @@ pub fn msr_digest(nodes: &[[u8; 2]; N]) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(MSR_MAGIC);
     for n in nodes {
-        h.update(&n);
+        h.update(n);
     }
     h.finalize().into()
 }
@@ -250,14 +266,19 @@ pub fn msr_digest(nodes: &[[u8; 2]; N]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::{RngCore, SeedableRng};
+    use rand_core::RngCore;
 
     #[test]
     fn msr_mds_decode_her_iki_dugum() {
         // herhangi 2 düğüm → 4 sembolün tamamı (tüm 6 çift)
         let mut rng = rand_core::OsRng;
         for _ in 0..20 {
-            let s = [rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8];
+            let s = [
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+            ];
             let nodes = msr_encode(&s);
             for i in 0..4 {
                 for j in (i + 1)..4 {
@@ -273,7 +294,12 @@ mod tests {
         // ölü düğüm 3 helper'dan β=1 (3 paket) ile BİREBİR onarılır
         let mut rng = rand_core::OsRng;
         for _ in 0..20 {
-            let s = [rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8, rng.next_u32() as u8];
+            let s = [
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+                rng.next_u32() as u8,
+            ];
             let nodes = msr_encode(&s);
             for f in 0..4 {
                 let repaired = msr_repair(f, &nodes).expect("repair");

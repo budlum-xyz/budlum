@@ -134,11 +134,9 @@ fn rendezvous_score(shard_id: &ContentId, entropy: &Hash32, candidate: &ShardCan
         entropy,
         candidate.address.as_bytes(),
     ]);
-    let raw = u64::from_le_bytes(
-        digest[..8]
-            .try_into()
-            .expect("a 32-byte digest has an 8-byte prefix"),
-    );
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&digest[..8]);
+    let raw = u64::from_le_bytes(head);
     // `u` in [0, 1) scaled by 2^64. Zero would divide by the whole scale and
     // score every stake identically, so it is nudged to the smallest
     // non-zero value rather than special-cased into a different branch.
