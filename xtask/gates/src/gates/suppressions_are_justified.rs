@@ -57,6 +57,12 @@ const BUDGETS: &[Budget] = &[
         reason: "`last_block` returns `&Block` and the genesis block is written by the constructor, so there is no owned value to fall back to and no caller that could act on an `Option`; the invariant is enforced at construction rather than re-checked on every read",
     },
     Budget {
+        file: "src/account_abstraction/quantum_account.rs",
+        lint: "clippy::cast_precision_loss",
+        count: 1,
+        reason: "a storage cost in dollars per TB-month is an estimate, and the byte count it divides is far below the 2^53 where an f64 stops counting integers exactly; the alternative is fixed-point arithmetic for a number that is displayed, not settled on",
+    },
+    Budget {
         file: "build.rs",
         lint: "clippy::expect_used",
         count: 1,
