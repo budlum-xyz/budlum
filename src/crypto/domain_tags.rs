@@ -1,7 +1,7 @@
 //! Cryptographic domain-separation tag inventory.
 //!
-//! Every `BDLM_*` string literal that reaches a hash or signature in this
-//! Workspace is listed here. The list exists so a reviewer can check the whole
+//! Every `BDLM_*` and `BUDLUM_*` string literal that reaches a hash or
+//! signature in this workspace is listed here. The list exists so a reviewer can check the whole
 //! Separation surface in one place, and so a tag can never be added, renamed or
 //! Silently reused without appearing in this file.
 //!
@@ -158,6 +158,31 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_VALIDATOR_SET_COMMITMENT_V1",
     "BDLM_VERIFIER_REGISTRY_V1",
     "BDLM_ZK_PROOF_PAYLOAD_V2",
+    // --- BUDLUM_* domains. Written with the longer prefix before the gate
+    //     matched it; now inventoried so the separation surface is whole.
+    //     Wallet-core custody domains (view-key, note) are included too.
+    "BUDLUM_ADDRESS_V2",
+    "BUDLUM_BLS_SCALAR_SHA3_V0",
+    "BUDLUM_BLS_SIG_DST_HI",
+    "BUDLUM_BLS_SIG_DST_LO",
+    "BUDLUM_MLDSA87_SEED_V1",
+    "BUDLUM_NOTE_BLINDING_V1",
+    "BUDLUM_NOTE_SPEND_SECRET_V1",
+    "BUDLUM_PACT_REGISTRY_V1",
+    "BUDLUM_POA_COMMIT_V1",
+    "BUDLUM_POA_LEADER_V2",
+    "BUDLUM_PQ_QC",
+    "BUDLUM_PRECOMMIT",
+    "BUDLUM_PREVOTE",
+    "BUDLUM_PRIVATE_TRANSFER_AUTH_V1",
+    "BUDLUM_PRIVATE_TRANSFER_COMMITMENT_V1",
+    "BUDLUM_PRIVATE_TRANSFER_V1",
+    "BUDLUM_STORAGE_PACT_V1",
+    "BUDLUM_TEE_ATTESTATION_V1",
+    "BUDLUM_VIEW_KEY_V1",
+    "BUDLUM_VIEW_KEY_V1_ROT",
+    "BUDLUM_VRF",
+    "BUDLUM_WALLET_RECOVERY_PROPOSAL_V1",
 ];
 
 /// Tags whose misuse would let an attacker move a signature or hash from one
