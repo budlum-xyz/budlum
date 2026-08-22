@@ -375,6 +375,23 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
+        // DAO politikasi burada uygulanir. `encryption_policies` bugune kadar
+        // yalnizca yazilip okunan bir kayitti: `set_encryption_policy` onu
+        // dogrulayip sakliyor, `active_encryption_policies` listeliyordu, ama
+        // hicbir grant ona carpmiyordu. Bir tavan, yalnizca birinin ona
+        // carpmasiyla tavandir.
+        //
+        // En kisitlayici aktif politika secilir. Birden fazla politika aktif
+        // oldugunda en genisini secmek, DAO'nun daralttigi bir tavani yeni
+        // surum ekleyerek atlatilabilir yapardi.
+        if let Some(policy) = self
+            .encryption_policies
+            .values()
+            .filter(|p| p.active)
+            .min_by_key(|p| p.max_grant_duration_blocks)
+        {
+            policy.check_grant_duration(grant.issued_at_block, grant.expires_at_block)?;
+        }
         let id = grant.grant_id;
         self.access_grants.insert(id, grant);
         Ok(id)
