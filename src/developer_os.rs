@@ -61,6 +61,7 @@ impl BudlPackageFixture {
     pub fn validate(&self) -> Result<(), DeveloperOsError> {
         validate_label("package_name", &self.package_name)?;
         validate_label("compiler_profile", &self.compiler_profile)?;
+        validate_compiler_profile(&self.compiler_profile)?;
         validate_label("entrypoint", &self.entrypoint)?;
         if self.source_hash == [0u8; 32] {
             return Err(DeveloperOsError::ZeroBudlSourceHash);
@@ -280,7 +281,10 @@ impl DeveloperOsManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeveloperOsError {
-    InvalidLabel { field: &'static str, value: String },
+    InvalidLabel {
+        field: &'static str,
+        value: String,
+    },
     ZeroChainId,
     ZeroBudlSourceHash,
     ZeroProofInputCommitment,
@@ -292,6 +296,32 @@ pub enum DeveloperOsError {
     ZeroRelayerPolicyHash,
     ExternalNetworkAccessNotAllowed,
     NoSdkFeatures,
+    /// Derleyici profili gerçek ISA profil kümesinde değil.
+    UnknownCompilerProfile {
+        value: String,
+    },
+}
+
+/// Derleyici profili gerçekten var olan bir profili adlandırmalı.
+///
+/// `validate_label` yalnızca karakter kümesine bakar: boş değil, 64 baytı
+/// aşmıyor, `..` içermiyor. Bu, bir yazım hatasını ya da uydurma bir adı
+/// geçirirdi. Manifest bu alanı `project_id`'ye karıştırdığı için, aynı
+/// paketin "production" ve "prodcution" yazan iki kaydı farklı iki proje
+/// kimliği üretir; ikisi de geçerli görünür ve hangisinin gerçek profille
+/// derlendiği kayıttan anlaşılamaz.
+///
+/// Küme `bud_isa::IsaProfile`'in kendisinden geliyor; oraya yeni bir profil
+/// eklendiğinde burada da karşılığı olmalı.
+fn validate_compiler_profile(value: &str) -> Result<(), DeveloperOsError> {
+    const KNOWN: [&str; 3] = ["production", "experimental", "testing"];
+    if KNOWN.contains(&value) {
+        Ok(())
+    } else {
+        Err(DeveloperOsError::UnknownCompilerProfile {
+            value: value.into(),
+        })
+    }
 }
 
 fn update_str(hasher: &mut Sha256, value: &str) {
@@ -369,5 +399,47 @@ mod tests {
             manifest.validate().unwrap_err(),
             DeveloperOsError::InvalidLabel { .. }
         ));
+    }
+
+    /// Uydurma bir derleyici profili reddedilmeli.
+    ///
+    /// `validate_label` yalnızca karakter kümesine bakıyordu, bu yüzden
+    /// "prodcution" gibi bir yazım hatası geçiyordu. Profil `project_id`
+    /// karışımına giriyor: iki farklı yazım, aynı paket için iki farklı
+    /// proje kimliği üretir ve ikisi de geçerli görünür.
+    #[test]
+    fn a_compiler_profile_outside_the_isa_set_is_refused() {
+        let mut manifest = DeveloperOsManifest::local_standard("proje", [7u8; 32]);
+        manifest.budl_package.compiler_profile = "prodcution".into();
+        assert!(matches!(
+            manifest.validate().unwrap_err(),
+            DeveloperOsError::UnknownCompilerProfile { .. }
+        ));
+
+        for good in ["production", "experimental", "testing"] {
+            let mut ok = DeveloperOsManifest::local_standard("proje", [7u8; 32]);
+            ok.budl_package.compiler_profile = good.into();
+            ok.validate()
+                .unwrap_or_else(|e| panic!("{good} gecerli bir profil olmali: {e:?}"));
+        }
+    }
+
+    /// Kabul edilen profil kümesi gerçek ISA kümesiyle aynı olmalı.
+    ///
+    /// Liste elle yazıldığı için `IsaProfile`'a yeni bir varyant eklendiğinde
+    /// burası sessizce eskir. Bu test o anda düşer.
+    #[test]
+    fn the_accepted_profiles_match_the_isa_profiles() {
+        for profile in [
+            bud_isa::IsaProfile::Production,
+            bud_isa::IsaProfile::Experimental,
+            bud_isa::IsaProfile::Testing,
+        ] {
+            let name = format!("{profile:?}").to_lowercase();
+            assert!(
+                validate_compiler_profile(&name).is_ok(),
+                "ISA profili '{name}' manifest tarafindan taninmiyor"
+            );
+        }
     }
 }
