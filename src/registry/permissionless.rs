@@ -773,9 +773,16 @@ impl PermissionlessRegistry {
 
     // Active checks for all well-known roles (unified)
 
+    // Rol yardımcıları tek bir soruyu sorar: bu üyeye SIMDI yeni gorev
+    // verilebilir mi? Cevap yalniz `MemberStatus::Active` icin evet.
+    // (2026-08-22 kararı, G0: onceki hâl `is_slashable` soruyordu ve
+    // Unbonding'deki üyeye yeni attester imzası / relay mesajı sunma yetkisi
+    // veriyordu - kendi "yeni görev için Active şart" belgesiyle çelişiyordu.
+    // Sorumluluk sorusu ayrıdır ve `Registration::is_slashable`'da yaşar:
+    // çıkmakta olan üyenin kilidi süresince kesilebilirliği sürer.)
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::RELAYER)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn ensure_active_relayer(&self, account: &Address) -> Result<(), RegistryError> {
@@ -788,7 +795,7 @@ impl PermissionlessRegistry {
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::ATTESTER)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn ensure_active_attester(&self, account: &Address) -> Result<(), RegistryError> {
@@ -808,36 +815,22 @@ impl PermissionlessRegistry {
 
     pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::LUBOT_OPERATOR)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_ai_verifier(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::AI_VERIFIER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::AI_VERIFIER)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_prover(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::PROVER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::PROVER)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn total_stake(&self, role: RoleId) -> u64 {
@@ -1100,10 +1093,12 @@ mod tests {
 
     /// Çıkmakta olan bir üye yeni görev alamaz ama sorumluluktan çıkamaz.
     ///
-    /// İki soru ayrı ayrı yanıtlanmalı: `is_active` görev atamayı, rol
-    /// yardımcıları (`is_slashable`) kesilebilirliği sorar. Aynı statü için
-    /// ikisinin de aynı cevabı vermesi, `begin_unbonding` çağırmayı
-    /// sorumluluktan kaçmanın yolu yapardı.
+    /// İki soru ayrı ayrı yanıtlanmalı: `is_active` (ve onu soran tüm rol
+    /// yardımcıları) görev atamayı, `Registration::is_slashable` kesilebilirliği
+    /// sorar. Aynı statü için ikisinin de aynı cevabı vermesi, `begin_unbonding`
+    /// çağırmayı sorumluluktan kaçmanın yolu yapardı. (2026-08-22, G0 kararı:
+    /// yardımcılar `is_active`'e çekildi - önceki `is_slashable` okuması
+    /// Unbonding'deki üyeye yeni görev yetkisi veriyordu.)
     #[test]
     fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
         let mut reg = PermissionlessRegistry::new();
@@ -1122,7 +1117,12 @@ mod tests {
             "cikmakta olana yeni gorev verilmez"
         );
         assert!(
-            reg.is_active_relayer(&a),
+            !reg.is_active_relayer(&a),
+            "rol yardimcisi da yeni gorev vermez: yetki yalniz Active"
+        );
+        assert!(
+            reg.get(&a, roles::RELAYER)
+                .is_some_and(|r| r.is_slashable()),
             "bond hala kilitli: sorumluluk surer"
         );
     }

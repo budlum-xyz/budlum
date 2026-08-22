@@ -595,21 +595,21 @@ impl VerifierRegistry {
             .collect()
     }
 
-    // Rol-spesifik yardimcilar iki ayri sorunun ikincisini sorar:
-    // sorumluluk. `is_active` yeni gorev atamasi icin katidir (yalniz
-    // Active); bu yardimcilar ise bondu hala kilitli oldugu icin cikmakta
-    // olan (Unbonding) uyeyi de kapsar - ispatlanmis bir isin cezasi,
-    // cikis istegiyle birlikte dusmez. (Onceki MEDIUM bulgusu bu katmanin
-    // Unbonding'i Active gibi saymasiydi; ayrim `Registration::is_slashable`
-    // ile isimlendirildi ve ayna testler iki kayit defterinde de kosar.)
+    // Rol yardımcıları tek bir soruyu sorar: bu üyeye SIMDI yeni gorev
+    // verilebilir mi? Cevap yalniz `MemberStatus::Active` icin evet
+    // (2026-08-22 kararı, G0; cekirdek `src/registry/permissionless.rs`
+    // ile ayni gun ayni kararla hizalandi - iki defter ayni soruya ayni
+    // cevabi vermek zorunda). Sorumluluk ayri sorudur ve
+    // `Registration::is_slashable`'da yasar: cikmakta olan uyenin kilidi
+    // suresince kesilebiliriligi surer, ama yeni is almaz.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::RELAYER)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::ATTESTER)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_master_verifier(&self, account: &Address) -> bool {
@@ -618,12 +618,12 @@ impl VerifierRegistry {
 
     pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::LUBOT_OPERATOR)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::CONTENT_VALIDATOR)
-            .is_some_and(Registration::is_slashable)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn total_stake(&self, role: RoleId) -> u64 {
@@ -817,7 +817,9 @@ mod tests {
     /// anlatiyor; ayni girdiye farkli cevap vermeleri, hangisinin okundugunu
     /// bilmeyen bir cagirani sessizce yaniltir. Fark bir kez olctuldu ve
     /// kapatildi: burada `Unbonding` reddediliyordu, cekirdekte kabul
-    /// ediliyordu.
+    /// ediliyordu. 2026-08-22 G0 karari: yardimcilar iki tarafta da
+    /// `is_active`'e cekildi - cikmakta olan uye yeni gorev alamaz,
+    /// kesilebiliriligi `is_slashable` ayri sorusunda surer.
     #[test]
     fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
         let mut reg = VerifierRegistry::new();
@@ -836,7 +838,12 @@ mod tests {
             "cikmakta olana yeni gorev verilmez"
         );
         assert!(
-            reg.is_active_relayer(&a),
+            !reg.is_active_relayer(&a),
+            "rol yardimcisi da yeni gorev vermez: yetki yalniz Active"
+        );
+        assert!(
+            reg.get(&a, roles::RELAYER)
+                .is_some_and(|r| r.is_slashable()),
             "bond hala kilitli: sorumluluk surer"
         );
     }
