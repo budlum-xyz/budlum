@@ -178,45 +178,19 @@ impl RecoveryProposal {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PactBinding {
-    pub tarif_hash: [u8; 32],
-    pub tohum: [u8; 32],
-    pub commitment: [u8; 32],
-    pub reziduel_commitment: [u8; 32],
-    pub bayt_butcesi: u64,
-}
-
-impl PactBinding {
-    pub fn new(
-        tarif_hash: [u8; 32],
-        tohum: [u8; 32],
-        commitment: [u8; 32],
-        reziduel: [u8; 32],
-        butce: u64,
-    ) -> Result<Self, &'static str> {
-        if butce > 128 {
-            return Err("KQ-STORAGE-PACT: bayt_butcesi >128");
-        }
-        Ok(Self {
-            tarif_hash,
-            tohum,
-            commitment,
-            reziduel_commitment: reziduel,
-            bayt_butcesi: butce,
-        })
-    }
-
-    pub fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
-        let mut h = Sha3_256::new();
-        h.update(payload);
-        let calc: [u8; 32] = h.finalize().into();
-        if calc != self.commitment {
-            return Err("KQ-STORAGE-PACT: commitment mismatch");
-        }
-        Ok(())
-    }
-}
+/// PACT bağlama tipi `src/storage/pact_binding.rs`'te yaşar.
+///
+/// Burada ikinci bir `PactBinding` tanımı vardı: aynı beş alan, aynı 128
+/// baytlık bütçe kontrolü, aynı `verify_commitment`. `storage::Pact` bunun
+/// üst kümesi — `id` ve `mod_flag` da taşıyor, `PactRegistry` ile bir köke
+/// bağlanıyor.
+///
+/// Aynı kavramın iki tanımı, birinin değişmesi hâlinde sessizce ayrılır.
+/// Buradaki kopya `mod_flag`'i hiç bilmiyordu: `is_pure_production` ile
+/// `is_residual_only` ayrımı bu tarafta yoktu, dolayısıyla "saf üretim" ile
+/// "rezidüel-yalnız" bir PACT'i ayırt edemezdi. Kopya kaldırıldı; tek tanım
+/// dışarıdan kullanılır.
+pub use crate::storage::pact_binding::{Pact, PactRegistry};
 
 // BFT finality for guardian votes (ratio of guardians)
 #[derive(Debug, Clone)]
@@ -344,11 +318,19 @@ mod tests {
         let mut h = Sha3_256::new();
         h.update(payload);
         let comm: [u8; 32] = h.finalize().into();
-        let pact = PactBinding::new([0u8; 32], [0u8; 32], comm, [0u8; 32], 10)
+        let pact = Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 0)
             .expect("budget of 10 is under the 128 byte limit");
         assert!(pact.verify_commitment(payload).is_ok());
         assert!(pact.verify_commitment(b"other").is_err());
-        assert!(PactBinding::new([0u8; 32], [0u8; 32], comm, [0u8; 32], 129).is_err());
+        assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 129, 0).is_err());
+        // Tek tanımın taşıdığı ayrım: kopya `mod_flag`'i hiç bilmiyordu.
+        assert!(pact.is_pure_production());
+        assert!(
+            Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [1u8; 32], 10, 2)
+                .expect("residual-only pact")
+                .is_residual_only()
+        );
+        assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 3).is_err());
     }
 
     #[test]
