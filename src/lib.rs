@@ -1,6 +1,10 @@
 // Unsafe kilidi - src/ şu an 0 unsafe temiz taban;
 // Bir `unsafe` blok girdiği an derleme FAIL eder (regresyon kapısı).
 #![forbid(unsafe_code)]
+/// Kuantum-guvenli hesap soyutlama. Imza dogrulamasi ML-DSA-87'ye bagli
+/// oldugu icin `wallet-ml-dsa` ozelligini gerektirir.
+#[cfg(feature = "wallet-ml-dsa")]
+pub mod account_abstraction;
 pub mod ai;
 pub mod bns;
 pub mod budlumxyz;
