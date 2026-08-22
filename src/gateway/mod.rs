@@ -2,8 +2,10 @@ pub mod atlas;
 pub mod passport;
 pub mod service;
 pub use atlas::{
-    build_wallet_context, AtlasEvidenceCard, AtlasEvidenceStatus, AtlasWalletContext,
-    PollenAtlasSummary,
+    build_wallet_context, AtlasEvidenceCard, AtlasEvidenceStatus, AtlasQueryEngine,
+    AtlasWalletContext, CrossDomainTrace, DomainSummary, EvidenceRecord, MessageTraceStatus,
+    PollenAtlasSummary, WalletContextEdge, WalletContextGraph, WalletContextNode, WalletEdgeType,
+    WalletNodeType,
 };
 pub use passport::{
     build_passport_profile, build_passport_proof_bundle, try_build_passport_proof_bundle,
