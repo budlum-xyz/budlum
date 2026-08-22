@@ -64,6 +64,7 @@
 - [54. Egemen alanlar: sablonun adlandirdigi seyle ayni olmasi](#54-egemen-alanlar-sablonun-adlandirdigi-seyle-ayni-olmasi)
 - [55. Kanit gecerliligi bir yetkilendirme karari degildir](#55-kanit-gecerliligi-bir-yetkilendirme-karari-degildir)
 - [56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi](#56-yalnizca-bizim-koydugumuz-kod-calisir-zk-program-izin-listesi)
+- [57. Rejenerasyon: kanonik degeri yeniden ureten kapi](#57-rejenerasyon-kanonik-degeri-yeniden-ureten-kapi)
 
 ## 1. Genel sistem mimarisi
 
@@ -1842,3 +1843,87 @@ yetkiyi baglar, dogrulugu degil. Listeye ne konuldugu bir yonetisim sorusudur
 ve bilerek kod disinda birakilmistir: alan kendi kumesini kendi ilan eder.
 Ayrica AIR'in kendi saglamligi (under-constrained kusurlar) bu kapinin
 kapsaminda degildir - o, dis denetime birakilan ayri bir yuzeydir.
+
+## 57. Rejenerasyon: kanonik degeri yeniden ureten kapi
+
+Onceki iki bolum kanitin **kimligini** ve **yetkisini** bagliyor. Ikisi de tek
+bir degere dayaniyor: programin kanonik hash'i. Bu bolum o degerin kendisini
+koruyan mekanizmayi anlatir.
+
+### Problem: ayni degerin dort kaynagi
+
+Bir zk kanitinin hangi program icin uretildigi tek bir degerle soylenir. O
+deger su an agacta **dort ayri yerde**, **uc ayri crate**'te ve **iki ayri
+hash kutuphanesi**yle hesaplaniyor:
+
+| Yer | Ne icin | Kutuphane |
+|---|---|---|
+| `src/prover/mod.rs` | alan izin listesi kimligi | `sha3` |
+| `src/ai/execution/guest.rs` | AI model kaydi | `sha3` |
+| `src/domain/storage_deal.rs` | depolama meydan okumasi | `sha3` |
+| `budzero/bud-proof/src/plonky3_prover.rs` | **dogrulayici**, AIR'e baglanan | `tiny_keccak` |
+
+Dordunun ayni sonucu vermesi bir **varsayimdir**, ve varsayimlar bayatlar.
+Ayrisirlarsa olan sey sessizdir: izin listesine yazilan hash ile
+dogrulayicinin kanittan hesapladigi hash farkli olur. O anda ya her durust
+kanit reddedilir (alan kilitlenir), ya da - siralama ters giderse - listede
+olmayan bir program listede sayilir.
+
+Derleyici bunu goremez: dort fonksiyon da tek basina dogrudur, yanlis olan
+aralarindaki **iliskidir**. Bir tur denetimi iliskiyi ifade etmez.
+
+### Cozum: degeri yeniden uret, koda inanma
+
+`xtask/gates/src/gates/rejenerasyon.rs` Keccak-256'yi **kendi icinde**,
+agactaki hicbir hash kutuphanesini kullanmadan uygular. Sonra:
+
+1. Kendi uygulamasini bilinen vektorlerle dogrular (bos girdi, `"abc"`).
+   Kapinin kendisi yanlissa soyledigi hicbir sey degerli degildir.
+2. Kanonik degeri **yeniden uretir**.
+3. Agactaki her uygulamanin kanonik beslemeyi (kelimeler little-endian,
+   etiket yok) kullandigini kaynaktan dogrular.
+
+Kapi, kodun soyledigine inanmaz; degeri kendi hesaplar. Bagimsiz ikinci bir
+yolla uretip karsilastirma fikri, derleyici guveni literaturunden alinmadir:
+tek kaynaga guvenmek yerine iki bagimsiz uretimi karsilastirmak.
+
+```mermaid
+flowchart TD
+  G["Rejenerasyon kapisi"] --> S{"Kendi Keccak'i dogru mu?"}
+  S -->|"vektorler tutmuyor"| X["FAIL: kapi guvenilmez"]
+  S -->|"evet"| R["Kanonik degeri yeniden uret"]
+  R --> C{"Her uygulama kanonik besleme mi?"}
+  C -->|"etiket eklenmis"| F["FAIL: ayrisma"]
+  C -->|"besleme degismis"| F
+  C -->|"yuzey kaybolmus"| F
+  C -->|"hepsi ayni"| P["PASS"]
+```
+
+### Neden calisma zamaninda degil
+
+"Saldiri algilandiginda kod kendini yenilesin" fikri cazip ve **yanlis
+yerde** dogru. Bir dugum calisma zamaninda kendi kodunu degistirirse artik
+digerleriyle ayni programi calistirmiyordur - bu bir savunma degil, **uzlasma
+bolunmesidir**. Saldirganin en ucuz zaferi savunmayi tetikleyip agi ikiye
+ayirmak olurdu.
+
+Rejenerasyon bu yuzden **yayin oncesi** bir kapidir: kayma uretime hic
+ulasmaz. Yenileme calisma zamaninda degil, yapi zamaninda olur; belirlenimlilik
+korunur.
+
+### Kanaryasi
+
+Kapi kendi kanaryasini tasir (`--self-test`) ve uc kaymayi yakaladigini
+kanitlar: besleme degisimi, etiket eklenmesi, yuzeyin kaybolmasi. Kanaryasiz
+bir kapi, yesil yandigi icin guvenilen ama hicbir sey olcmeyen bir kapidir.
+
+Ayrica gercek agaca kayma enjekte edilerek dogrulandi: `zk_program_hash`
+govdesine bir alan etiketi eklendiginde kapi kirmizi yandi ve gerekceyi
+isimlendirdi; etiket geri alininca yesile dondu.
+
+### Engellemedigi sey
+
+Kapi **beslemenin bicimini** ve degerin yeniden uretilebilirligini korur;
+kanonik bicimin kendisinin dogru secildigini iddia etmez. Dogrulayici bicimi
+degistirirse kapi digerlerinin ona uymadigini soyler - hangisinin hakli
+oldugunu soylemez. O bir tasarim karari olarak kalir.
