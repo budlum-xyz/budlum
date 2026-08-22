@@ -633,53 +633,140 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
     }
 }
 
-/// BudToEth direction.
+/// BudToEth direction: scan finalized Budlum blocks for burn events.
 ///
-/// NOT PRODUCTION: this loop does not relay. It polls on a timer, increments a
-/// local counter and logs; it never reads a burn event, builds a proof or
-/// submits an Ethereum transaction. The steps it would need are listed inline
-/// below. The opposite direction refuses instead of pretending
-/// (`build_deposit_proof` returns an error rather than submitting a
-/// placeholder proof); this direction only logs, so an operator running
-/// `--direction bud-to-eth` sees healthy-looking ticks while nothing is
-/// relayed. Wiring it up is RFC F10.5b (Solidity bridge contract).
+/// # What this used to be
+///
+/// A timer. It polled at an interval, incremented a local counter and printed
+/// "poll tick"; it never read a burn event, never built a proof and never
+/// submitted anything. An operator running `--direction bud-to-eth` saw
+/// healthy-looking ticks while nothing was relayed. The opposite direction
+/// already refused rather than pretending, so the two halves of the same
+/// binary disagreed about what an unimplemented path should do.
+///
+/// # What it does now
+///
+/// Scans blocks over Budlum RPC and finds real burn transactions
+/// (`BurnBridgeTransferWithEvent`). There is no `bud_getBridgeBurnEvents`
+/// method, so the scan walks `bud_getBlockByNumber` and filters on the
+/// transaction type the node already exposes.
+///
+/// # What it deliberately does not do
+///
+/// It does not submit to Ethereum. The claim needs a Budlum finality proof
+/// (BLS aggregate / QC) and an Ethereum bridge contract to verify it; the
+/// Solidity side does not exist yet (RFC F10.5b). So a discovered burn is
+/// reported and counted, and the submit step **refuses loudly** instead of
+/// sending a placeholder. That is the same contract the EthToBud direction
+/// keeps: refuse, do not pretend.
+///
+/// The difference from before is that the refusal is now about a real burn
+/// that was really found, not a counter that was never connected to anything.
 async fn run_bud_to_eth_loop(config: RelayerConfig) {
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
     let eth_client = EthClient::new(config.eth_rpc_url.clone(), config.bridge_address.clone());
 
     let _active = check_relayer_active(&budlum_client, &config).await;
 
-    eprintln!("BudToEth: NOT RELAYING - this direction is not implemented (RFC F10.5b); ticks below are a timer, not bridge activity");
-    eprintln!("BudToEth: (Production needs Budlum light-client proof + Ethereum bridge tx - Solidity bridge contract separate RFC F10.5b)");
+    eprintln!(
+        "BudToEth: scanning for burn events. Submission to Ethereum is NOT available \
+         (no bridge contract, RFC F10.5b) - discovered burns are reported, never \
+         submitted with a placeholder proof."
+    );
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
-    let mut last_burn_height: u64 = 0;
+    let mut last_scanned: Option<u64> = None;
+    let mut total_burns: u64 = 0;
 
     loop {
         interval.tick().await;
 
-        // TODO: Real impl would:
-        // 1. Call Budlum RPC bud_getBridgeBurnEvents or scan blocks for TransactionType::BurnBridgeTransferWithEvent
-        // 2. For each burn, construct BudToEthClaim (bud_to_eth.rs: build_bud_to_eth_claim) - check Burned status
-        // 3. Build Budlum finality proof (BLS aggregate / QC)
-        // 4. Submit to Ethereum bridge via eth_sendRawTransaction claimUnlock
-        // Placeholder poll:
-        eprintln!("BudToEth: poll tick at height {last_burn_height} (RPC integration pending - would fetch burn events)");
+        let head = match budlum_head_height(&budlum_client).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("BudToEth: cannot read head height: {e}");
+                continue;
+            }
+        };
 
-        // Example placeholder burn event simulation (devnet):
-        // Simulate no events
-        last_burn_height += 1;
+        // First pass starts at the head: replaying the whole chain on every
+        // restart would hammer the node and re-report burns already seen.
+        let from = match last_scanned {
+            Some(prev) if head > prev => prev + 1,
+            Some(_) => continue, // no new block
+            None => head,
+        };
 
-        // Challenge window logic (RFC F10 §4-5):
-        // If we see a bad relay (e.g., invalid burn proof), submit slashing report.
-        // Open relayer set is permissionless - anyone can challenge.
-        if last_burn_height.is_multiple_of(100) {
-            eprintln!("BudToEth: challenge window check - no bad relays detected (open relayer set, permissionless)");
+        for height in from..=head {
+            match burn_events_in_block(&budlum_client, height).await {
+                Ok(burns) => {
+                    for tx_hash in burns {
+                        total_burns += 1;
+                        eprintln!(
+                            "BudToEth: burn found at height {height} (tx {tx_hash}) - \
+                             NOT submitted: finality proof + Ethereum bridge contract \
+                             missing (RFC F10.5b). Total seen: {total_burns}"
+                        );
+                    }
+                }
+                Err(e) => eprintln!("BudToEth: block {height} scan failed: {e}"),
+            }
         }
+        last_scanned = Some(head);
 
-        // Prevent unused warning for eth_client (would be used for eth_sendRawTransaction)
         let _ = &eth_client;
     }
+}
+
+/// Current Budlum head height over RPC.
+async fn budlum_head_height(client: &BudlumClient) -> Result<u64, String> {
+    let val = client
+        .rpc_call("bud_blockNumber", serde_json::json!([]))
+        .await?;
+    parse_hex_height(&val)
+}
+
+/// Hashes of burn transactions in one block.
+///
+/// The node renders the transaction type with `{:?}`, so the wire value is the
+/// variant name. Matching on a prefix keeps a variant that carries fields
+/// (`BurnBridgeTransferWithEvent { .. }`) from being missed.
+async fn burn_events_in_block(client: &BudlumClient, height: u64) -> Result<Vec<String>, String> {
+    let params = serde_json::json!([format!("0x{height:x}"), true]);
+    let block = client.rpc_call("bud_getBlockByNumber", params).await?;
+    Ok(burn_hashes_from_block(&block))
+}
+
+/// Burn transaction hashes in a block payload.
+///
+/// Split from the RPC call so the filter can be tested without a node: the
+/// part that can be wrong here is the matching, not the HTTP.
+fn burn_hashes_from_block(block: &serde_json::Value) -> Vec<String> {
+    let Some(txs) = block.get("transactions").and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    txs.iter()
+        .filter(|tx| {
+            tx.get("type")
+                .and_then(|t| t.as_str())
+                .is_some_and(|ty| ty.starts_with("BurnBridgeTransferWithEvent"))
+        })
+        .map(|tx| {
+            tx.get("hash")
+                .and_then(|h| h.as_str())
+                .unwrap_or("<no hash>")
+                .to_string()
+        })
+        .collect()
+}
+
+/// Parse a hex block height as returned by `bud_blockNumber`.
+fn parse_hex_height(val: &serde_json::Value) -> Result<u64, String> {
+    let hex = val
+        .as_str()
+        .ok_or_else(|| "bud_blockNumber did not return a string".to_string())?;
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+        .map_err(|e| format!("bud_blockNumber is not hex: {e}"))
 }
 
 fn main() -> ExitCode {
@@ -724,6 +811,56 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use super::{burn_hashes_from_block, parse_hex_height};
+
+    fn block_with(types: &[&str]) -> serde_json::Value {
+        let txs: Vec<serde_json::Value> = types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| serde_json::json!({ "hash": format!("0x{i:02x}"), "type": t }))
+            .collect();
+        serde_json::json!({ "transactions": txs })
+    }
+
+    /// The loop used to report nothing because it read nothing. A block that
+    /// really carries a burn must yield that burn.
+    #[test]
+    fn a_burn_transaction_is_found() {
+        let b = block_with(&["Transfer", "BurnBridgeTransferWithEvent", "Transfer"]);
+        assert_eq!(burn_hashes_from_block(&b), vec!["0x01".to_string()]);
+    }
+
+    /// A variant rendered with its fields still has to match: `{:?}` prints
+    /// `BurnBridgeTransferWithEvent { .. }`, and an equality test would miss it.
+    #[test]
+    fn a_burn_rendered_with_fields_is_found() {
+        let b = block_with(&["BurnBridgeTransferWithEvent { amount: 5 }"]);
+        assert_eq!(burn_hashes_from_block(&b).len(), 1);
+    }
+
+    /// A near-miss name must not count. Matching too loosely would report
+    /// ordinary bridge traffic as burns.
+    #[test]
+    fn other_bridge_transactions_are_not_burns() {
+        let b = block_with(&["BurnBridgeTransfer", "MintBridgeTransfer", "Transfer"]);
+        assert!(burn_hashes_from_block(&b).is_empty());
+    }
+
+    #[test]
+    fn a_block_without_transactions_yields_nothing() {
+        assert!(burn_hashes_from_block(&serde_json::json!({})).is_empty());
+        assert!(burn_hashes_from_block(&serde_json::Value::Null).is_empty());
+        assert!(burn_hashes_from_block(&block_with(&[])).is_empty());
+    }
+
+    #[test]
+    fn the_head_height_is_parsed_as_hex() {
+        assert_eq!(parse_hex_height(&serde_json::json!("0x10")).unwrap(), 16);
+        assert_eq!(parse_hex_height(&serde_json::json!("0x0")).unwrap(), 0);
+        assert!(parse_hex_height(&serde_json::json!(16)).is_err());
+        assert!(parse_hex_height(&serde_json::json!("zzz")).is_err());
+    }
+
     use super::*;
 
     #[test]
