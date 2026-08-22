@@ -1689,8 +1689,7 @@ mod integration_tests {
 
         let consensus = Arc::new(PoWEngine::new(0));
         let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
-        let mut bc =
-            Blockchain::new(consensus, None, 45262, None).with_metrics(metrics.clone());
+        let mut bc = Blockchain::new(consensus, None, 45262, None).with_metrics(metrics.clone());
 
         let sender_key = KeyPair::generate().expect("keypair");
         let sender = Address::from(sender_key.public_key_bytes());
@@ -1707,7 +1706,8 @@ mod integration_tests {
             TransactionType::Transfer,
         );
         tx.sign(&sender_key);
-        bc.add_transaction(tx).expect("mempool accepts the transfer");
+        bc.add_transaction(tx)
+            .expect("mempool accepts the transfer");
 
         assert_eq!(
             metrics.transactions_processed.get(),
