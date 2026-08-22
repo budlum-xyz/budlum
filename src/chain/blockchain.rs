@@ -3597,6 +3597,7 @@ impl Blockchain {
 
         self.mempool.set_min_fee(self.state.base_fee);
         self.emit_chain_metrics();
+        self.emit_tx_processed(block.transactions.len() as u64);
         Some((block, nft_burn_cids.iter().map(|(cid, _)| cid.0).collect()))
     }
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
@@ -3871,6 +3872,8 @@ impl Blockchain {
         // Deterministic replay contract. Doing it here, after the commit,
         // Made the producer's `liveness` root unreproducible by replay.
 
+        // Sayac blok tasinmadan once okunuyor: `push` blogu tuketiyor.
+        let applied_tx_count = block.transactions.len() as u64;
         self.chain.push(block);
 
         if let Some(last_block) = self.chain.last() {
@@ -3948,6 +3951,7 @@ impl Blockchain {
         }
 
         self.emit_chain_metrics();
+        self.emit_tx_processed(applied_tx_count);
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
     }
 

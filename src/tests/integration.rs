@@ -1666,6 +1666,70 @@ mod integration_tests {
         assert_eq!(metrics.blocks_produced.get(), 1);
     }
 
+    /// Sayac gercek uretim yolunda artmali, yalnizca elle cagrildiginda degil.
+    ///
+    /// BULGU: `emit_tx_processed` agacta yalnizca bu dosyadaki testten
+    /// cagriliyordu; `produce_block` ve `validate_and_add_block` onu hic
+    /// cagirmiyordu, yani `budlum_transactions_processed` calisan bir dugumde
+    /// her zaman 0 kaliyordu. Yanindaki `emit_chain_metrics` iki gercek
+    /// noktadan cagrildigi icin bu fark gozden kacmisti.
+    ///
+    /// Asagidaki test yayimciyi elle cagirmaz: bir islem gonderir, blok
+    /// urettirir ve sayaci okur. Metrigi olcen tek test bu; digeri yayimcinin
+    /// kendisini olcuyor ve o gecerken bu dusuyordu.
+    #[test]
+    fn transactions_processed_counts_a_block_produced_through_the_normal_path() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use crate::core::address::Address;
+        use crate::core::metrics::Metrics;
+        use crate::core::transaction::{Transaction, TransactionType};
+        use crate::crypto::primitives::KeyPair;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let metrics = Arc::new(Metrics::new().expect("metric names are literals"));
+        let mut bc =
+            Blockchain::new(consensus, None, 45262, None).with_metrics(metrics.clone());
+
+        let sender_key = KeyPair::generate().expect("keypair");
+        let sender = Address::from(sender_key.public_key_bytes());
+        bc.state.add_balance(&sender, 1_000);
+
+        let mut tx = Transaction::new_with_chain_id(
+            sender,
+            Address::from([0x66; 32]),
+            1,
+            100,
+            0,
+            Vec::new(),
+            45262,
+            TransactionType::Transfer,
+        );
+        tx.sign(&sender_key);
+        bc.add_transaction(tx).expect("mempool accepts the transfer");
+
+        assert_eq!(
+            metrics.transactions_processed.get(),
+            0,
+            "nothing is applied until a block is produced"
+        );
+
+        let (block, _) = bc
+            .produce_block(Address::from([0x77; 32]))
+            .expect("a block is produced");
+
+        assert_eq!(
+            metrics.transactions_processed.get(),
+            block.transactions.len() as u64,
+            "the counter must equal the transactions the block actually applied"
+        );
+        assert!(
+            metrics.transactions_processed.get() > 0,
+            "a block carrying a transfer must move the counter off zero"
+        );
+    }
+
     #[test]
     fn test_blockchain_emit_tx_processed_increments_counter() {
         use crate::chain::blockchain::Blockchain;
