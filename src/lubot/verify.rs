@@ -27,10 +27,23 @@
 //!   (etiketsiz Keccak-256) kullanır; `program_hash_from_words` (SHA3-256 +
 //!   `BDLM_AI_GUEST_PROGRAM_V1` etiketi) ise yalnız kayıt kimliğidir. İkisi
 //!   karıştırıldığında doğrulama her seferinde düşer.
-//! - **`build_public_inputs` uzlaşma için güvenli değildir:** `chain_id`'yi
-//!   sabit `1`, durum köklerini ve digest'leri sıfır yazar. Yalnız bu
-//!   dosyanın testleri için geçerlidir; işlem yolu girdileri kanıttan alıp
-//!   kayda karşı bağlar.
+//! - **`build_public_inputs` uzlaşma için güvenli değildir:** durum köklerini
+//!   ve digest'leri sıfır yazar. Yalnız bu dosyanın testleri için geçerlidir;
+//!   işlem yolu girdileri kanıttan alıp kayda karşı bağlar.
+//!
+//! # `chain_id` neden artık parametre
+//!
+//! Bu fonksiyon `chain_id`'yi sabit `1` yazıyordu. Zincirin gerçek kimliği
+//! `DEFAULT_CHAIN_ID` = 45262. `chain_id` bir genel girdidir (public input):
+//! kanıtı üretildiği zincire bağlayan alan odur. Sabitlendiğinde iki şey olur:
+//! üretilen kanıt hiçbir gerçek zincire ait olmaz, ve `chain_id = 1` taşıyan
+//! bir kanıt burada beklenen girdiyle eşleşir. Tehdit modelindeki
+//! "public input mis-binding" sınıfı tam olarak budur; Aleo/snarkVM'de aynı
+//! sınıf tam işlem sahteciliğine çıkmıştı.
+//!
+//! Yardımcı yolun bugün üretim çağrısı yok, ama sabit bir alan bağlandığı gün
+//! sessizce yanlış olur. Alan artık çağıranın vermesi gereken bir parametre;
+//! `no-hardcoded-chain-id` kapısı geri gelmesini engelliyor.
 
 use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_vm::Vm;
@@ -49,13 +62,15 @@ pub fn verify_inference_stark(
 }
 
 /// ExecutionPublicInputs'i Vm + program'dan inşa et (Keccak256 program_hash).
-fn build_public_inputs(vm: &Vm, program: &[u64]) -> ExecutionPublicInputs {
+///
+/// `chain_id` çağırandan gelir: kanıtı bir zincire bağlayan alan sabitlenemez.
+fn build_public_inputs(vm: &Vm, program: &[u64], chain_id: u64) -> ExecutionPublicInputs {
     let program_bytes: Vec<u8> = program.iter().flat_map(|&i| i.to_le_bytes()).collect();
     let mut hasher = Keccak256::new();
     hasher.update(&program_bytes);
     let program_hash: [u8; 32] = hasher.finalize().into();
     ExecutionPublicInputs {
-        chain_id: 1,
+        chain_id,
         program_hash,
         initial_state_root: [0u8; 32],
         final_state_root: [0u8; 32],
@@ -75,12 +90,16 @@ fn build_public_inputs(vm: &Vm, program: &[u64]) -> ExecutionPublicInputs {
 ///
 /// `vm` üzerinde `program`'ı çalıştırır, trace'den STARK proof üretir,
 /// Sonra proof'u doğrular. ProofEnvelope döner.
-pub fn generate_and_verify_proof(vm: &mut Vm, program: &[u64]) -> Result<ProofEnvelope, String> {
+pub fn generate_and_verify_proof(
+    vm: &mut Vm,
+    program: &[u64],
+    chain_id: u64,
+) -> Result<ProofEnvelope, String> {
     let receipt = vm.run_receipt(program);
     if !receipt.success {
         return Err("Lubot STARK: program execution failed".into());
     }
-    let pi = build_public_inputs(vm, program);
+    let pi = build_public_inputs(vm, program, chain_id);
     let envelope = DefaultAdapter::prove(&vm.trace, &pi, program)
         .map_err(|e| format!("Lubot STARK: prove failed: {e:?}"))?;
     DefaultAdapter::verify(&envelope, &pi, program)
@@ -91,6 +110,7 @@ pub fn generate_and_verify_proof(vm: &mut Vm, program: &[u64]) -> Result<ProofEn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::transaction::DEFAULT_CHAIN_ID;
     use bud_proof::ExecutionPublicInputs;
 
     fn inputs() -> ExecutionPublicInputs {
@@ -140,10 +160,29 @@ mod tests {
     fn lubot_stark_prove_and_verify_roundtrip() {
         let mut vm = Vm::new(64);
         // Halt = opcode 0x00 → minimal program, tek instruction.
-        let envelope = generate_and_verify_proof(&mut vm, &[0u64]).expect("prove+verify");
+        let envelope =
+            generate_and_verify_proof(&mut vm, &[0u64], DEFAULT_CHAIN_ID).expect("prove+verify");
         assert!(
             !envelope.proof_bytes.is_empty(),
             "proof bytes must be non-empty after real STARK prove"
+        );
+    }
+
+    /// `chain_id` genel girdiye gerçekten giriyor mu.
+    ///
+    /// Sabit yazıldığında bu test yazılamazdı: iki farklı zincir aynı girdiyi
+    /// üretirdi ve bir zincirin kanıtı diğerinde beklenen girdiyle eşleşirdi.
+    #[test]
+    fn the_chain_id_reaches_the_public_inputs() {
+        let vm = Vm::new(64);
+        let a = build_public_inputs(&vm, &[0u64], DEFAULT_CHAIN_ID);
+        let b = build_public_inputs(&vm, &[0u64], 1);
+        assert_eq!(a.chain_id, DEFAULT_CHAIN_ID);
+        assert_eq!(b.chain_id, 1);
+        assert_ne!(
+            a.hash(),
+            b.hash(),
+            "two chains must not produce the same public-input hash"
         );
     }
 }

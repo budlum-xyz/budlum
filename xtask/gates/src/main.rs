@@ -54,6 +54,7 @@ mod gates {
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
+    pub mod chain_id_is_not_hardcoded;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
@@ -310,6 +311,14 @@ const GATES: &[Gate] = &[
         run: gates::no_new_shell_gates::run,
         run_args: None,
         self_test: gates::no_new_shell_gates::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "chain-id-is-not-hardcoded",
+        replaces: None,
+        run: gates::chain_id_is_not_hardcoded::run,
+        run_args: None,
+        self_test: gates::chain_id_is_not_hardcoded::self_test,
         run_log: None,
     },
     Gate {
