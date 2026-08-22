@@ -694,9 +694,12 @@ impl PermissionlessRegistry {
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
-                if outcome.penalty == 0 {
-                    return Ok(None);
-                }
+                // 0 cezali kesme de kayda girer (2026-08-22, G0 karari;
+                // budzero ile hizalandi). Onceki erken donus, cezasi sifir
+                // olan kesmeyi kayittan tamamen siliyordu: rapor actionable'di,
+                // olay gerceklesti, ama denetim izinde hic gorunmuyordu.
+                // Kayit butunlugu sifir cezanin kendisinden degerli - iki
+                // defterin ayni soruya ayni cevabi vermesi zorunlu.
                 self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
@@ -1124,6 +1127,48 @@ mod tests {
             reg.get(&a, roles::RELAYER)
                 .is_some_and(|r| r.is_slashable()),
             "bond hala kilitli: sorumluluk surer"
+        );
+    }
+
+    /// 0 cezali kesme de kayda girmeli (budzero `verifier-registry` ile ayna).
+    ///
+    /// Orani sifir olan bir kosul (liveness) kesmeyi "bedava" yapar: stake
+    /// degismez. Onceki kod bu olayi history'den tamamen siliyordu; iki
+    /// defterin ayni girdiye farkli cevap vermesi, hangisinin okundugunu
+    /// bilmeyen cagirani sessizce yaniltiyordu (2026-08-22, G0 karari:
+    /// kayit butunlugu kanonik - olay oldu, kayda girdi, cezasi sifir).
+    #[test]
+    fn a_zero_penalty_slash_is_still_recorded() {
+        let mut params = RegistryParams::default();
+        params.liveness_slash_ratio_fixed = 0;
+        let mut reg = PermissionlessRegistry::with_params(params);
+        let a = addr(23);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+
+        let report = crate::registry::evidence::SlashingReport::consensus_liveness(
+            a,
+            roles::RELAYER,
+            0,
+            10,
+            5,
+            10,
+            None,
+        );
+        let outcome = reg
+            .slash_from_report(&report)
+            .expect("rapor actionable")
+            .expect("kesme uygulandi");
+        assert_eq!(outcome.penalty, 0, "oran sifir: ceza sifir olmali");
+        assert_eq!(
+            reg.slashing_history().len(),
+            1,
+            "olay kayda girmeli: cezasi sifir olan suc da suc"
+        );
+        assert_eq!(reg.slashing_history()[0].penalty, 0);
+        assert!(
+            !reg.is_active_relayer(&a),
+            "uye yine de Slashed durumuna gecer"
         );
     }
 
