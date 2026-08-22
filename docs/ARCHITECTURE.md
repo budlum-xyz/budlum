@@ -1810,6 +1810,31 @@ flowchart TD
   G --> H["Iddia degerlendirilir"]
 ```
 
+### AI yolu: ayni sinif, farkli bicim
+
+AI cikarim yolu ilk bakista ayni acigi tasiyor gorunur, ama **tasimiyor** ve
+farkin nerede oldugu ogreticidir.
+
+`submit_zk_proof` programi **gonderenden** aliyordu. AI yolu ise programi
+gonderenden almiyor: `guest_program_for_model` onu modelin **kayitli
+boyutlarindan yeniden kuruyor** ve kanit o program ile dogrulaniyor.
+Yani yetki zaten kayittan geliyor, gonderenden degil. Ayni sinifin ikinci
+ornegi burada **kapaliydi**.
+
+Ama kaydin kendisinde ayri bir kusur vardi. `execution_program_hash` ve
+`execution_dims` ayri ayri veriliyordu ve hicbir sey ikisinin **ayni programi**
+tarif ettigini denetlemiyordu. Ayrisirlarsa hicbir gecerli kanit o modeli
+gecemez: model, kaydi kabul edilmis ama sonsuza kadar dogrulanamaz bir durumda
+kalir.
+
+Bu bir sahtecilik acigi degil - fail-closed. Sessiz bir tuzak: hatayi kaydin
+kendisinde degil, cok sonra dogrulama zamaninda gosterir. Kayit artik programi
+boyutlardan yeniden kurup hash'i karsilastiriyor; tutarsizlik kaynaginda
+reddediliyor.
+
+**Iki yuzeyin ayrimi tek cumlede:** yetki gonderenden geliyorsa izin listesi
+gerekir; kayittan geliyorsa kaydin kendi ic tutarliligi gerekir.
+
 ### Bu kapinin engellemedigi sey
 
 Izin listesindeki bir programin **kendisi** kusurluysa bu kapi yardim etmez;
