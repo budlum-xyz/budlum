@@ -1433,7 +1433,7 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit
-      # Rejenerasyon: bir zk kanitinin hangi program icin uretildigini soyleyen
+      # regeneration: bir zk kanitinin hangi program icin uretildigini soyleyen
       # kanonik hash agacta dort yerde, uc crate'te, iki hash kutuphanesiyle
       # hesaplaniyor. Dordunun ayni sonucu vermesi bir varsayimdi ve
       # varsayimlar bayatlar. Ayrisirlarsa izin listesine yazilan deger ile
@@ -1441,10 +1441,10 @@ jobs:
       # kanit reddedilir, ya da listede olmayan bir program listede sayilir.
       # Kapi degeri bagimsiz bir Keccak-256 ile YENIDEN URETIR; kodun
       # soyledigine inanmaz.
-      - name: rejenerasyon (kanonik program-hash yeniden uretimi) + kanarya
+      - name: regeneration (kanonik kodun yeniden uretimi, yakinsamali) + kanarya
         run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rejenerasyon --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- rejenerasyon
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;

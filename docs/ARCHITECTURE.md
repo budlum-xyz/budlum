@@ -64,7 +64,7 @@
 - [54. Egemen alanlar: sablonun adlandirdigi seyle ayni olmasi](#54-egemen-alanlar-sablonun-adlandirdigi-seyle-ayni-olmasi)
 - [55. Kanit gecerliligi bir yetkilendirme karari degildir](#55-kanit-gecerliligi-bir-yetkilendirme-karari-degildir)
 - [56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi](#56-yalnizca-bizim-koydugumuz-kod-calisir-zk-program-izin-listesi)
-- [57. Rejenerasyon: kanonik degeri yeniden ureten kapi](#57-rejenerasyon-kanonik-degeri-yeniden-ureten-kapi)
+- [57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi](#57-regeneration-izinsiz-kodu-reddeden-kanonik-kodu-geri-ureten-kapi)
 
 ## 1. Genel sistem mimarisi
 
@@ -1844,7 +1844,7 @@ ve bilerek kod disinda birakilmistir: alan kendi kumesini kendi ilan eder.
 Ayrica AIR'in kendi saglamligi (under-constrained kusurlar) bu kapinin
 kapsaminda degildir - o, dis denetime birakilan ayri bir yuzeydir.
 
-## 57. Rejenerasyon: kanonik degeri yeniden ureten kapi
+## 57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi
 
 Onceki iki bolum kanitin **kimligini** ve **yetkisini** bagliyor. Ikisi de tek
 bir degere dayaniyor: programin kanonik hash'i. Bu bolum o degerin kendisini
@@ -1874,7 +1874,7 @@ aralarindaki **iliskidir**. Bir tur denetimi iliskiyi ifade etmez.
 
 ### Cozum: degeri yeniden uret, koda inanma
 
-`xtask/gates/src/gates/rejenerasyon.rs` Keccak-256'yi **kendi icinde**,
+`xtask/gates/src/gates/regeneration.rs` Keccak-256'yi **kendi icinde**,
 agactaki hicbir hash kutuphanesini kullanmadan uygular. Sonra:
 
 1. Kendi uygulamasini bilinen vektorlerle dogrular (bos girdi, `"abc"`).
@@ -1889,7 +1889,7 @@ tek kaynaga guvenmek yerine iki bagimsiz uretimi karsilastirmak.
 
 ```mermaid
 flowchart TD
-  G["Rejenerasyon kapisi"] --> S{"Kendi Keccak'i dogru mu?"}
+  G["regeneration kapisi"] --> S{"Kendi Keccak'i dogru mu?"}
   S -->|"vektorler tutmuyor"| X["FAIL: kapi guvenilmez"]
   S -->|"evet"| R["Kanonik degeri yeniden uret"]
   R --> C{"Her uygulama kanonik besleme mi?"}
@@ -1907,19 +1907,50 @@ digerleriyle ayni programi calistirmiyordur - bu bir savunma degil, **uzlasma
 bolunmesidir**. Saldirganin en ucuz zaferi savunmayi tetikleyip agi ikiye
 ayirmak olurdu.
 
-Rejenerasyon bu yuzden **yayin oncesi** bir kapidir: kayma uretime hic
+Regeneration bu yuzden **yayin oncesi** bir kapidir: kayma uretime hic
 ulasmaz. Yenileme calisma zamaninda degil, yapi zamaninda olur; belirlenimlilik
 korunur.
 
+### Yakinsama: bolen degil, birlestiren
+
+Bu kapinin cekirdek ozelligi ve adinin hakkini verdigi yer burasi. Bir
+"yenilenme" mekanizmasi yanlis kurulursa agi boler. Dogru kurulmasinin sarti
+**yakinsamadir**: farkli bir baslangictan yola cikan her dugum ayni kanonik
+sonuca varmali.
+
+Kapi bunu iddia etmiyor, olcuyor:
+
+* **Idempotence** - ikinci uretim birincisiyle ayni. Olmasaydi iki dugum ayni
+  kaynaktan farkli yerlere varirdi; tam olarak kacindigimiz bolunme.
+* **Onarim** - bozulmus bir girdi kanonik hale **geri getiriliyor**, yalnizca
+  reddedilip birakilmiyor. "Geri uretilsin" tam olarak bu.
+
+Ikisi birlikte sunu verir: izinsiz bir kod girisi karsisinda cevap "her dugum
+kendi cozumunu bulsun" degil, "herkes ayni kanonik hale donsun" olur. Ag
+korunur, bolunmez.
+
+### Kanonik kod ISA'dan yeniden kuruluyor
+
+Karsilastirma ancak iki taraf **bagimsizsa** bir sey kanitlar. Kapi bu yuzden
+depolama meydan okumasi programini `bud_isa`'ya bagimli olmadan, kodlama
+kuralini kendi icinde yeniden yazarak uretir. Boylece ISA tarafinda sessiz bir
+kayma olursa kapi bunu gorebilir.
+
+Bagimsiz kodlamanin gercek `bud_isa` ile birebir ayni ciktiyi verdigi
+olculdu; program baytlari `[2148286750, 0]`.
+
 ### Kanaryasi
 
-Kapi kendi kanaryasini tasir (`--self-test`) ve uc kaymayi yakaladigini
-kanitlar: besleme degisimi, etiket eklenmesi, yuzeyin kaybolmasi. Kanaryasiz
+Kapi kendi kanaryasini tasir (`--self-test`) ve **bes** kaymayi yakaladigini
+kanitlar: besleme degisimi, izin listesi tarafinda etiket, AI tarafinda etiket,
+dogrulayici yuzeyinin kaybolmasi, ve kanonik programin degistirilmesi. Kanaryasiz
 bir kapi, yesil yandigi icin guvenilen ama hicbir sey olcmeyen bir kapidir.
 
-Ayrica gercek agaca kayma enjekte edilerek dogrulandi: `zk_program_hash`
-govdesine bir alan etiketi eklendiginde kapi kirmizi yandi ve gerekceyi
-isimlendirdi; etiket geri alininca yesile dondu.
+Ayrica gercek agaca **iki kez** kayma enjekte edilerek dogrulandi:
+`zk_program_hash` govdesine bir alan etiketi eklendiginde ve depolama
+programinin `imm` alani 256'dan 512'ye cekildiginde kapi kirmizi yandi ve her
+ikisinde de gerekceyi isimlendirdi; geri alininca yesile dondu, `git diff`
+temiz kaldi.
 
 ### Engellemedigi sey
 
