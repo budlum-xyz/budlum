@@ -1929,6 +1929,37 @@ Ikisi birlikte sunu verir: izinsiz bir kod girisi karsisinda cevap "her dugum
 kendi cozumunu bulsun" degil, "herkes ayni kanonik hale donsun" olur. Ag
 korunur, bolunmez.
 
+### Kapinin kendi zayif yeri: elle tutulan liste
+
+Ilk surum uc uretim noktasini **elle sayiyordu**. Bu, icadin kendi icindeki
+kol kesme noktasiydi: yarin dorduncu bir yerde ayni hash uretilse liste sessiz
+kalirdi - ve tam olarak o sessizlik, kapinin engellemesi gereken seydi.
+
+Olcum bunu dogruladi. Agacta elle sayilan uctan **fazlasi** vardi:
+
+| Bulunan yeni nokta | Ne yapiyor |
+|---|---|
+| `src/execution/zkvm.rs` | `hash_u64_words`, zkVM'in kendi program hash'i |
+| `src/lubot/verify.rs` | Lubot STARK yolunun `build_public_inputs`'i |
+| `src/domain/storage_deal.rs` | depolama meydan okumasi program hash'i |
+
+Ucu de uretim kodu, ucu de kapinin gormedigi yerdeydi.
+
+Kapi artik **"bildiklerimi denetle" demiyor, "ne varsa bul ve denetle" diyor**.
+Kaynak agacini gezip bir Keccak/SHA3 hasher'ini program kelimeleriyle besleyen
+her noktayi kesfediyor; su an **7 nokta** buluyor.
+
+Kesif uc sekilde saglamlastirildi:
+
+* **Alt esik.** Kanonik uretim noktasi sayisi esigin altina duserse kapi
+  kirmizi yanar. Yani taramanin kendisi korlesirse bu da bir bulgudur -
+  sessizce "hepsi temiz" demez.
+* **Etiket istisna listesi.** Alan etiketi kullanan tek gerekcelendirilmis yer
+  `program_hash_from_words` (bir *kayit kimligi*, kanitin bagladigi deger
+  degil). Baska bir yerde etiket cikarsa bulgudur.
+* **Dogrulayici zorunlulugu.** `plonky3_prover.rs`'deki uretim kaybolursa
+  kanonik bicimin otoritesi gitmis demektir; kapi bunu ayrica arar.
+
 ### Kanonik kod ISA'dan yeniden kuruluyor
 
 Karsilastirma ancak iki taraf **bagimsizsa** bir sey kanitlar. Kapi bu yuzden
@@ -1942,11 +1973,22 @@ olculdu; program baytlari `[2148286750, 0]`.
 ### Kanaryasi
 
 Kapi kendi kanaryasini tasir (`--self-test`) ve **bes** kaymayi yakaladigini
-kanitlar: besleme degisimi, izin listesi tarafinda etiket, AI tarafinda etiket,
-dogrulayici yuzeyinin kaybolmasi, ve kanonik programin degistirilmesi. Kanaryasiz
+kanitlar: gerekcelendirilmemis etiketli uretim, dogrulayici yuzeyinin
+kaybolmasi, **taramanin korlesmesi**, kanonik programin degistirilmesi, ve
+**sonradan sessizce eklenen yeni bir uretim noktasi**. Kanaryasiz
 bir kapi, yesil yandigi icin guvenilen ama hicbir sey olcmeyen bir kapidir.
 
-Ayrica gercek agaca **iki kez** kayma enjekte edilerek dogrulandi:
+Ayrica gercek agaca **uc kez** kayma enjekte edilerek dogrulandi. Ucuncusu
+en onemlisi: agaca yeni bir dosya (`src/attacksim/mod.rs`) eklenip icine
+etiketli bir golge program-hash uretimi konuldu. Kapi onu **hicbir listede
+olmamasina ragmen** yakaladi:
+
+```
+FAIL [regeneration]: src/attacksim/mod.rs:4: program-hash uretiminde alan
+etiketi var ve bu dosya gerekcelendirilmis istisnalar arasinda degil
+```
+
+Ilk iki enjeksiyon:
 `zk_program_hash` govdesine bir alan etiketi eklendiginde ve depolama
 programinin `imm` alani 256'dan 512'ye cekildiginde kapi kirmizi yandi ve her
 ikisinde de gerekceyi isimlendirdi; geri alininca yesile dondu, `git diff`
