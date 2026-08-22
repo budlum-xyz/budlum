@@ -80,6 +80,31 @@ jobs:
               || { echo "HATA: $t pq-ml-dsa altinda kosmadi/gecmedi"; exit 1; }
           done
           grep -E 'test result:' /tmp/mldsa-tests.log
+          # `account_abstraction` is compiled only under `wallet-ml-dsa`, so
+          # this is the one job that sees it. The directory sat unreachable
+          # from lib.rs and never compiled at all: invalid Rust was written
+          # into it and `cargo check --lib` still passed. Inside it three
+          # functions named like security checks could not reject anything.
+          # The filter above stops at `crypto::`, so without this step the
+          # tests that lock those checks would still never run.
+          cargo test --no-default-features --features "pq-ml-dsa wallet-ml-dsa" \
+            --lib account_abstraction:: 2>&1 | tee /tmp/aa-tests.log
+          if grep -qE 'running 0 tests' /tmp/aa-tests.log; then
+            echo "HATA: account_abstraction altinda 0 test kostu -> modul yine baglanmamis olabilir"
+            exit 1
+          fi
+          # Name the signature-verification locks explicitly. A threshold that
+          # counts the same owner twice, or an attestation that accepts a
+          # digest in place of a signature, must both stay rejected.
+          for t in \
+            threshold_mldsa::tests::the_same_owner_signing_twice_does_not_meet_a_threshold_of_two \
+            threshold_mldsa::tests::a_signature_over_another_message_is_refused \
+            tee_attestation::tests::a_digest_in_place_of_a_signature_is_refused \
+            private_transfer_auth::tests::raising_the_amount_after_signing_is_refused; do
+            grep -qE "account_abstraction::$t \.\.\. ok" /tmp/aa-tests.log \
+              || { echo "HATA: $t kosmadi/gecmedi"; exit 1; }
+          done
+          grep -E 'test result:' /tmp/aa-tests.log
       - name: Feature canary - --all-features REDDEDILMELI
         run: |
           set -euo pipefail
