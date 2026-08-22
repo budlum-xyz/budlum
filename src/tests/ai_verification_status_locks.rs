@@ -48,6 +48,10 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
         "ai_exec_no_public_inputs",
         "ai_exec_no_program_hash",
         "ai_exec_program_hash",
+        // Genel girdiler kanitlayicinin iddiasi: `program_hash` gibi
+        // `chain_id` de baglanmali, yoksa baska bir zincirin gecerli kaniti
+        // burada da gecer.
+        "ai_exec_chain_id",
         "ai_exec_stark",
     ] {
         assert!(
