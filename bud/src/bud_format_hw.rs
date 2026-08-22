@@ -50,7 +50,9 @@ pub fn cheapest_tier(usd_ceiling: f64, allow_write_once: bool) -> Option<&'stati
     MEDIA_TIERS
         .iter()
         .filter(|t| t.usd_per_tb_month <= usd_ceiling && (allow_write_once || !t.write_once))
-        .min_by(|a, b| a.usd_per_tb_month.partial_cmp(&b.usd_per_tb_month).unwrap())
+        // `partial_cmp().unwrap()` NaN bir fiyatta panikler. `total_cmp` NaN'i
+        // sirali kabul eder ve panik yerine belirlenimli bir siralama verir.
+        .min_by(|a, b| a.usd_per_tb_month.total_cmp(&b.usd_per_tb_month))
 }
 
 /// 0.016 tek-fiyat hedefi: hangi medya doğrudan tutar?

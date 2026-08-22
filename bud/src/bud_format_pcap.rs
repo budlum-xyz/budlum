@@ -55,11 +55,15 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     let mut ts_secs = Vec::new();
     while pos + 16 <= data.len() {
         let rd = |o: usize| -> u32 {
-            let b = &data[pos + o..pos + o + 4];
+            // Sabit genislikte okuma: dilim uzunlugu burada her zaman 4, ama
+            // `try_into().unwrap()` bunu derleyiciye degil calisma zamanina
+            // birakiyordu. `copy_from_slice` ayni seyi paniksiz yapar.
+            let mut w = [0u8; 4];
+            w.copy_from_slice(&data[pos + o..pos + o + 4]);
             if le {
-                u32::from_le_bytes(b.try_into().unwrap())
+                u32::from_le_bytes(w)
             } else {
-                u32::from_be_bytes(b.try_into().unwrap())
+                u32::from_be_bytes(w)
             }
         };
         let ts_sec = rd(0) as i64;

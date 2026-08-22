@@ -102,10 +102,18 @@ pub fn witness_to_field_trace(steps: &[WitnessStep]) -> Vec<[u64; 10]> {
         row[0] = s.op as u64;
         row[1] = mod_p(s.arg);
         for (k, w) in s.input_digest.chunks_exact(8).enumerate() {
-            row[2 + k] = mod_p(u64::from_le_bytes(w.try_into().unwrap()));
+            {
+                let mut w8 = [0u8; 8];
+                w8.copy_from_slice(w);
+                row[2 + k] = mod_p(u64::from_le_bytes(w8));
+            }
         }
         for (k, w) in s.output_digest.chunks_exact(8).enumerate() {
-            row[6 + k] = mod_p(u64::from_le_bytes(w.try_into().unwrap()));
+            {
+                let mut w8 = [0u8; 8];
+                w8.copy_from_slice(w);
+                row[6 + k] = mod_p(u64::from_le_bytes(w8));
+            }
         }
         rows.push(row);
     }

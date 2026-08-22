@@ -46,7 +46,9 @@ impl BloomDedupIndex {
         for i in 0..self.k {
             d.update([i as u8]);
             let hi = d.clone().finalize();
-            let v = u64::from_le_bytes(hi[..8].try_into().unwrap()) as usize;
+            let mut w = [0u8; 8];
+            w.copy_from_slice(&hi[..8]);
+            let v = u64::from_le_bytes(w) as usize;
             out.push(v % self.num_bits);
         }
         out
