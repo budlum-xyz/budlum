@@ -21,6 +21,7 @@
 
 pub mod private_transfer_auth;
 pub mod quantum_account;
+pub mod registry;
 pub mod tee_attestation;
 pub mod threshold_mldsa;
 
@@ -28,6 +29,7 @@ pub use private_transfer_auth::{PrivateTransferAuth, PrivateTransferError, Priva
 pub use quantum_account::{
     BftGuardianFinality, GuardianVote, Pact, PactRegistry, QuantumAccount, RecoveryProposal,
 };
+pub use registry::{QuantumAccountRegistry, QuantumAccountRegistryError};
 pub use tee_attestation::{
     TeeAttestation, TeeBackendKind, TeeError, TeeGates, TeeRuntime, TeeRuntimeStatus,
 };

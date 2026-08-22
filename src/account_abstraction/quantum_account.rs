@@ -14,10 +14,11 @@
 //! iken teste `vec![1u8; 4627]` yaziliydi). Derlenmeyen kod, hicbir kapinin
 //! gormedigi koddur.
 //!
-//! WIRING: unwired - the quantum account type and its `validate_all` guard are
-//! not yet consulted by transaction verification. Wiring account abstraction
-//! into that path is the next step; until it happens this guard runs only in
-//! tests, and saying so here is more honest than letting it look reachable.
+//! `validate_all` artik `registry::QuantumAccountRegistry` tarafindan
+//! cagriliyor: bir hesap ancak bu denetimden gecerse kayda girer, ve kaydi
+//! degistiren her yol ayni denetimden yeniden gecer. Daha once bu koruma
+//! yazilmisti ama onu cagiran hicbir uretim yolu yoktu, cunku hesabi tutan
+//! bir kayit da yoktu.
 
 use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
 use sha3::{Digest, Sha3_256};
