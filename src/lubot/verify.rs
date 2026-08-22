@@ -38,8 +38,8 @@
 //! kanıtı üretildiği zincire bağlayan alan odur. Sabitlendiğinde iki şey olur:
 //! üretilen kanıt hiçbir gerçek zincire ait olmaz, ve `chain_id = 1` taşıyan
 //! bir kanıt burada beklenen girdiyle eşleşir. Tehdit modelindeki
-//! "public input mis-binding" sınıfı tam olarak budur; Aleo/snarkVM'de aynı
-//! sınıf tam işlem sahteciliğine çıkmıştı.
+//! "genel girdinin yanlış bağlanması" sınıfı tam olarak budur;
+//! Aleo/snarkVM'de aynı sınıf tam işlem sahteciliğine çıkmıştı.
 //!
 //! Yardımcı yolun bugün üretim çağrısı yok, ama sabit bir alan bağlandığı gün
 //! sessizce yanlış olur. Alan artık çağıranın vermesi gereken bir parametre;
