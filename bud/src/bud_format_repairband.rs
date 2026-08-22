@@ -45,11 +45,16 @@ pub fn repair_band(n: usize, k: usize, model: RepairModel) -> Option<f64> {
 
 /// Hangi model en az bandı verir (karar).
 pub fn best_repair_model(n: usize, k: usize) -> Option<(RepairModel, f64)> {
-    [RepairModel::PlainErasure, RepairModel::Lrc, RepairModel::Msr, RepairModel::Mbr]
-        .iter()
-        .filter_map(|&m| repair_band(n, k, m).map(|b| (m, b)))
-        // NaN bir band degeri paniklemek yerine siralanir (bkz. hw modulu).
-        .min_by(|a, b| a.1.total_cmp(&b.1))
+    [
+        RepairModel::PlainErasure,
+        RepairModel::Lrc,
+        RepairModel::Msr,
+        RepairModel::Mbr,
+    ]
+    .iter()
+    .filter_map(|&m| repair_band(n, k, m).map(|b| (m, b)))
+    // NaN bir band degeri paniklemek yerine siralanir (bkz. hw modulu).
+    .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 pub fn band_digest(n: usize, k: usize, m: RepairModel) -> [u8; 32] {

@@ -23,22 +23,70 @@ pub struct MediaTier {
 }
 
 pub const MEDIA_TIERS: &[MediaTier] = &[
-    MediaTier { name: "HDD-CMR", usd_per_tb_month: 0.23342, durability_years: 5, idle_w_per_tb: 7.0, write_once: false,
-                note: "price.rs zemini (sıcak/ılık)" },
-    MediaTier { name: "HDD-SMR", usd_per_tb_month: 0.175, durability_years: 5, idle_w_per_tb: 6.0, write_once: false,
-                note: "F303: $30-45/TB; zoned+append-only soğuk katman" },
-    MediaTier { name: "HAMR", usd_per_tb_month: 0.145, durability_years: 6, idle_w_per_tb: 6.0, write_once: false,
-                note: "F305: 36-44TB, 2029 $4/TB; yoğunluk" },
-    MediaTier { name: "QLC-SSD", usd_per_tb_month: 0.62, durability_years: 4, idle_w_per_tb: 2.0, write_once: false,
-                note: "F311: sıcak tier; DWPD 0.1-0.3 soğuk okuma" },
-    MediaTier { name: "LTO-tape", usd_per_tb_month: 0.00025, durability_years: 30, idle_w_per_tb: 0.0, write_once: true,
-                note: "F3/F307: derin soğuk, 0W idle (tape sınıfı kodlu)" },
-    MediaTier { name: "M-Disc", usd_per_tb_month: 0.012, durability_years: 1000, idle_w_per_tb: 0.0, write_once: true,
-                note: "optik arşiv; yaz-oku cihazı gerekli" },
-    MediaTier { name: "Silica-glass", usd_per_tb_month: 0.01, durability_years: 10_000, idle_w_per_tb: 0.0, write_once: true,
-                note: "F256: 7TB/plaka, Azure AI okuma - gelecek ultra-arşiv" },
-    MediaTier { name: "DNA", usd_per_tb_month: 800.0, durability_years: 1000, idle_w_per_tb: 0.0, write_once: true,
-                note: "F168: $800M/TB - REDDEDİLDİ (ekonomik değil)" },
+    MediaTier {
+        name: "HDD-CMR",
+        usd_per_tb_month: 0.23342,
+        durability_years: 5,
+        idle_w_per_tb: 7.0,
+        write_once: false,
+        note: "price.rs zemini (sıcak/ılık)",
+    },
+    MediaTier {
+        name: "HDD-SMR",
+        usd_per_tb_month: 0.175,
+        durability_years: 5,
+        idle_w_per_tb: 6.0,
+        write_once: false,
+        note: "F303: $30-45/TB; zoned+append-only soğuk katman",
+    },
+    MediaTier {
+        name: "HAMR",
+        usd_per_tb_month: 0.145,
+        durability_years: 6,
+        idle_w_per_tb: 6.0,
+        write_once: false,
+        note: "F305: 36-44TB, 2029 $4/TB; yoğunluk",
+    },
+    MediaTier {
+        name: "QLC-SSD",
+        usd_per_tb_month: 0.62,
+        durability_years: 4,
+        idle_w_per_tb: 2.0,
+        write_once: false,
+        note: "F311: sıcak tier; DWPD 0.1-0.3 soğuk okuma",
+    },
+    MediaTier {
+        name: "LTO-tape",
+        usd_per_tb_month: 0.00025,
+        durability_years: 30,
+        idle_w_per_tb: 0.0,
+        write_once: true,
+        note: "F3/F307: derin soğuk, 0W idle (tape sınıfı kodlu)",
+    },
+    MediaTier {
+        name: "M-Disc",
+        usd_per_tb_month: 0.012,
+        durability_years: 1000,
+        idle_w_per_tb: 0.0,
+        write_once: true,
+        note: "optik arşiv; yaz-oku cihazı gerekli",
+    },
+    MediaTier {
+        name: "Silica-glass",
+        usd_per_tb_month: 0.01,
+        durability_years: 10_000,
+        idle_w_per_tb: 0.0,
+        write_once: true,
+        note: "F256: 7TB/plaka, Azure AI okuma - gelecek ultra-arşiv",
+    },
+    MediaTier {
+        name: "DNA",
+        usd_per_tb_month: 800.0,
+        durability_years: 1000,
+        idle_w_per_tb: 0.0,
+        write_once: true,
+        note: "F168: $800M/TB - REDDEDİLDİ (ekonomik değil)",
+    },
 ];
 
 pub fn tier_get(name: &str) -> Option<&'static MediaTier> {
@@ -76,15 +124,24 @@ mod tests {
 
     #[test]
     fn tape_0_016_tavaninda() {
-        assert!(media_holds_ceiling(tier_get("LTO-tape").unwrap().usd_per_tb_month, 0.016));
-        assert!(!media_holds_ceiling(tier_get("HDD-CMR").unwrap().usd_per_tb_month, 0.016));
+        assert!(media_holds_ceiling(
+            tier_get("LTO-tape").unwrap().usd_per_tb_month,
+            0.016
+        ));
+        assert!(!media_holds_ceiling(
+            tier_get("HDD-CMR").unwrap().usd_per_tb_month,
+            0.016
+        ));
     }
 
     #[test]
     fn ucuz_katman_secimi_dogru() {
         // 0.016 bütçe, write-once serbest → tape; yasak → yok
         assert_eq!(cheapest_tier(0.016, true).unwrap().name, "LTO-tape");
-        assert!(cheapest_tier(0.016, false).is_none() || cheapest_tier(0.016, false).unwrap().usd_per_tb_month > 0.016);
+        assert!(
+            cheapest_tier(0.016, false).is_none()
+                || cheapest_tier(0.016, false).unwrap().usd_per_tb_month > 0.016
+        );
     }
 
     #[test]

@@ -23,9 +23,9 @@ const FORBIDDEN_OPS: &[&str] = &["fdiv", "fadd", "fmul", "fsqrt", "fpow", "float
 #[derive(Debug, Clone)]
 pub struct RecipeCandidate {
     pub miner: [u8; 32],
-    pub pact_id: [u8; 32],     // hedef PACT (commitment)
-    pub recipe: Vec<u8>,       // tarif (opcode listesi - integer-only)
-    pub seed: [u8; 32],        // üretim tohumu
+    pub pact_id: [u8; 32], // hedef PACT (commitment)
+    pub recipe: Vec<u8>,   // tarif (opcode listesi - integer-only)
+    pub seed: [u8; 32],    // üretim tohumu
 }
 
 impl RecipeCandidate {
@@ -78,9 +78,19 @@ mod tests {
 
     #[test]
     fn y15_integer_only_sinir() {
-        let ok = RecipeCandidate { miner: [1u8; 32], pact_id: [2u8; 32], recipe: b"load add store loop".to_vec(), seed: [3u8; 32] };
+        let ok = RecipeCandidate {
+            miner: [1u8; 32],
+            pact_id: [2u8; 32],
+            recipe: b"load add store loop".to_vec(),
+            seed: [3u8; 32],
+        };
         assert!(ok.integer_only());
-        let bad = RecipeCandidate { miner: [1u8; 32], pact_id: [2u8; 32], recipe: b"fdiv load".to_vec(), seed: [3u8; 32] };
+        let bad = RecipeCandidate {
+            miner: [1u8; 32],
+            pact_id: [2u8; 32],
+            recipe: b"fdiv load".to_vec(),
+            seed: [3u8; 32],
+        };
         assert!(!bad.integer_only(), "aralık-makinesi opcode → RED");
     }
 
@@ -88,11 +98,21 @@ mod tests {
     fn y2_aday_dogrulama() {
         let data = b"organik nesne icerigi ";
         let cid = crate::bud_format_container::content_id(data);
-        let c = RecipeCandidate { miner: [1u8; 32], pact_id: cid, recipe: b"load store".to_vec(), seed: [0u8; 32] };
+        let c = RecipeCandidate {
+            miner: [1u8; 32],
+            pact_id: cid,
+            recipe: b"load store".to_vec(),
+            seed: [0u8; 32],
+        };
         assert!(c.verify(data, &cid), "doğru üretim → kabul");
         assert!(!c.verify(b"yanlis", &cid), "yanlış → RED");
         // Y15: float tarif her zaman RED (üretim doğru olsa bile)
-        let bad = RecipeCandidate { miner: [1u8; 32], pact_id: cid, recipe: b"fmul".to_vec(), seed: [0u8; 32] };
+        let bad = RecipeCandidate {
+            miner: [1u8; 32],
+            pact_id: cid,
+            recipe: b"fmul".to_vec(),
+            seed: [0u8; 32],
+        };
         assert!(!bad.verify(data, &cid));
     }
 
@@ -102,19 +122,30 @@ mod tests {
         assert_eq!(bounty(0, 1000, 100).unwrap(), 200);
         // doğrulama tasarrufu yerse → None
         assert!(bounty(0, 50, 100).is_none());
-        assert!(bounty(500, 400, 0).is_none() || bounty(500, 400, 0) == Some(0)); // tasarruf yok
+        assert!(bounty(500, 400, 0).is_none() || bounty(500, 400, 0) == Some(0));
+        // tasarruf yok
     }
 
     #[test]
     fn digest_deterministik() {
-        let c = RecipeCandidate { miner: [1u8; 32], pact_id: [2u8; 32], recipe: b"load".to_vec(), seed: [3u8; 32] };
+        let c = RecipeCandidate {
+            miner: [1u8; 32],
+            pact_id: [2u8; 32],
+            recipe: b"load".to_vec(),
+            seed: [3u8; 32],
+        };
         assert_eq!(recipe_digest(&c), recipe_digest(&c));
     }
 
     #[test]
     fn y15_yasak_opcodelar_kapsar() {
         for op in FORBIDDEN_OPS {
-            let c = RecipeCandidate { miner: [0u8; 32], pact_id: [0u8; 32], recipe: op.as_bytes().to_vec(), seed: [0u8; 32] };
+            let c = RecipeCandidate {
+                miner: [0u8; 32],
+                pact_id: [0u8; 32],
+                recipe: op.as_bytes().to_vec(),
+                seed: [0u8; 32],
+            };
             assert!(!c.integer_only(), "{op} yasak olmalı");
         }
     }

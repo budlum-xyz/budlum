@@ -23,15 +23,19 @@ pub struct TriCoreWeights {
 
 impl Default for TriCoreWeights {
     fn default() -> Self {
-        Self { a: 1.0, b: 0.5, c: 0.2 }
+        Self {
+            a: 1.0,
+            b: 0.5,
+            c: 0.2,
+        }
     }
 }
 
 /// Y11: üç-çekirdek fiyat. Tüm terimler ≥ 0; deterministik.
 pub fn tricore_price(
     residual_bytes: u64,
-    wakefulness: f64,       // 1/N (0..1)
-    production_cpu: f64,    // cekirdek-saniye
+    wakefulness: f64,    // 1/N (0..1)
+    production_cpu: f64, // cekirdek-saniye
     w: &TriCoreWeights,
 ) -> f64 {
     let r = residual_bytes as f64 * w.a;
@@ -94,7 +98,10 @@ mod tests {
     #[test]
     fn y3_uyaniklik_payi_1n() {
         assert!((wakefulness_pay(26) - 1.0 / 26.0).abs() < 1e-12);
-        assert!(wakefulness_pay(100) < wakefulness_pay(10), "N artarsa pay düşer");
+        assert!(
+            wakefulness_pay(100) < wakefulness_pay(10),
+            "N artarsa pay düşer"
+        );
         assert_eq!(wakefulness_pay(0), 0.0);
     }
 
@@ -108,7 +115,10 @@ mod tests {
         assert!(p1 > p0);
         assert!(p0 > 0.0);
         // deterministik
-        assert_eq!(tricore_price(10, 0.5, 2.0, &w), tricore_price(10, 0.5, 2.0, &w));
+        assert_eq!(
+            tricore_price(10, 0.5, 2.0, &w),
+            tricore_price(10, 0.5, 2.0, &w)
+        );
     }
 
     #[test]
@@ -136,7 +146,11 @@ mod tests {
 
     #[test]
     fn agirlik_sifir_terimler() {
-        let w = TriCoreWeights { a: 0.0, b: 0.0, c: 0.0 };
+        let w = TriCoreWeights {
+            a: 0.0,
+            b: 0.0,
+            c: 0.0,
+        };
         assert_eq!(tricore_price(1000, 1.0, 10.0, &w), 0.0);
     }
 }

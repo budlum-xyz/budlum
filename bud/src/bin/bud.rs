@@ -19,23 +19,30 @@ use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass, BudGates, MultiRat
 use bud_core::bud_format_bft::{BftRatioConsensus, RatioVote};
 use bud_core::bud_format_checkpoint::Checkpoint;
 use bud_core::bud_format_container::BudV2File;
-use bud_core::bud_format_production::BudProductionRecord;
 use bud_core::bud_format_pact::PactRecord;
+use bud_core::bud_format_production::BudProductionRecord;
 
-use bud_core::bud_format_segment::SegmentLedger;
+use bud_core::bud_format_engine::{engine_restore_container, engine_store, TransformKind};
 use bud_core::bud_format_multifile::TenantMultifileStore;
-use bud_core::bud_format_engine::{engine_store, engine_restore_container, TransformKind};
+use bud_core::bud_format_segment::SegmentLedger;
 use bud_core::bud_format_videopipe::run_video_pipeline;
 
 use bud_core::bud_format_block::{PactChallengeInBlock, RegenerationBlock};
-use bud_core::bud_format_regeneration::RegenerationOutcome;
 use bud_core::bud_format_catalog::CATALOG;
-use sha3::Digest as _;
-use bud_core::bud_format_pipe::{chunk_count, detect, restore, store, store_compressed, store_compressed_with_min, store_with_min, store_zstd, store_zstd_with_min};
+use bud_core::bud_format_pipe::{
+    chunk_count, detect, restore, store, store_compressed, store_compressed_with_min,
+    store_with_min, store_zstd, store_zstd_with_min,
+};
+use bud_core::bud_format_regeneration::RegenerationOutcome;
 use bud_core::cli::BudCli;
+use sha3::Digest as _;
 
 #[derive(Parser)]
-#[command(name = "bud", version = "4.1", about = "B.U.D. 2.0 .bud format CLI - v1 + v2 konteyner")]
+#[command(
+    name = "bud",
+    version = "4.1",
+    about = "B.U.D. 2.0 .bud format CLI - v1 + v2 konteyner"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -45,115 +52,176 @@ struct Cli {
 enum Commands {
     /// v1 .bud encode (V8 format, ratio konsensüsü ile)
     Encode {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] output: PathBuf,
-        #[arg(long, default_value = "json")] class: String,
-        #[arg(long, default_value_t = 16.68)] required_ratio: f64,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long, default_value = "json")]
+        class: String,
+        #[arg(long, default_value_t = 16.68)]
+        required_ratio: f64,
     },
     /// v1 .bud decode (bütünlük doğrulamalı)
     Decode {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] output: PathBuf,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
     },
     /// v2 konteyner yaz: format algıla + yapısal parçala + .bud dosyası (K38)
     /// --compress = Huffman; --zstd = gerçek zstd (en iyi oran)
     Store {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] output: PathBuf,
-        #[arg(long, default_value_t = 0)] min_chunk: usize,
-        #[arg(long, default_value_t = false)] compress: bool,
-        #[arg(long, default_value_t = false)] zstd: bool,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        min_chunk: usize,
+        #[arg(long, default_value_t = false)]
+        compress: bool,
+        #[arg(long, default_value_t = false)]
+        zstd: bool,
     },
     /// v2 konteyner oku: sıkı doğrula + birleştir → orijinal (K38)
     Restore {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] output: PathBuf,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
     },
     /// encode/decode hızı + maliyet ölçümü
     Bench {
-        #[arg(short, long)] file: PathBuf,
+        #[arg(short, long)]
+        file: PathBuf,
     },
     /// BFT finality: n validator aynı pipe_id/ratio için 2n/3 çoğunluk
     BftVote {
-        #[arg(long)] pipe_id: u16,
-        #[arg(long)] ratio: f64,
-        #[arg(long, default_value = "validator")] validator: String,
-        #[arg(long, default_value_t = 7)] n: usize,
+        #[arg(long)]
+        pipe_id: u16,
+        #[arg(long)]
+        ratio: f64,
+        #[arg(long, default_value = "validator")]
+        validator: String,
+        #[arg(long, default_value_t = 7)]
+        n: usize,
     },
     /// bütünlük + kapı denetimi (v1 ya da v2 otomatik algıla)
     Check {
-        #[arg(short, long)] input: PathBuf,
+        #[arg(short, long)]
+        input: PathBuf,
     },
     /// Üretim oranı kanıtı: .bud'dan ölçülen oran + boru hattı + kök çapalı kayıt üret
     ProduceProof {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(long, default_value = "structural+zstd19")] pipe: String,
-        #[arg(long, default_value_t = 0)] ts: u64,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(long, default_value = "structural+zstd19")]
+        pipe: String,
+        #[arg(long, default_value_t = 0)]
+        ts: u64,
     },
     /// PACT üretim sözleşmesi: .bud'dan commitment + üretici + tohum kaydı (İ1)
     Pact {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] output: Option<PathBuf>,
-        #[arg(long, default_value = "producer")] producer: String,
-        #[arg(long, default_value_t = 0)] ts: u64,
-        #[arg(long, default_value_t = false)] residual: bool,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "producer")]
+        producer: String,
+        #[arg(long, default_value_t = 0)]
+        ts: u64,
+        #[arg(long, default_value_t = false)]
+        residual: bool,
     },
     /// Rejenerasyon mutabakatı: PACT üreticii doğrula (İ2)
     Regenerate {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(long, default_value = "producer")] producer: String,
-        #[arg(long, default_value = "seed")] seed: String,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(long, default_value = "producer")]
+        producer: String,
+        #[arg(long, default_value = "seed")]
+        seed: String,
     },
     /// Çoklu dosya tenant depo: dosyaları parçala + dedup + delta (V7 66x senaryosu)
     Multifile {
-        #[arg(short, long)] input: Vec<PathBuf>,
-        #[arg(short, long)] out: PathBuf,
-        #[arg(long, default_value_t = 16384)] chunk: usize,
+        #[arg(short, long)]
+        input: Vec<PathBuf>,
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 16384)]
+        chunk: usize,
     },
     /// Segment defteri: kayıtları zincir-uyumlu bloğa topla (K89)
     Ledger {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] out: PathBuf,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
     },
     /// Birleşik engine: herhangi bir dosya → .bud + ölçülen oran + adım kanıtı
     Engine {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] out: PathBuf,
-        #[arg(long, default_value_t = false)] erasure: bool,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = false)]
+        erasure: bool,
     },
     /// Video pipeline: YUV örneği + codec çıktısı → .bud + kanıt (K84 sınıfı)
     VideoPipe {
-        #[arg(long)] yuv: PathBuf,
-        #[arg(long)] width: usize,
-        #[arg(long)] height: usize,
-        #[arg(long, default_value_t = 5)] frames: usize,
-        #[arg(long)] video: PathBuf,
-        #[arg(short, long)] out: PathBuf,
-        #[arg(long)] orig_len: u64,
+        #[arg(long)]
+        yuv: PathBuf,
+        #[arg(long)]
+        width: usize,
+        #[arg(long)]
+        height: usize,
+        #[arg(long, default_value_t = 5)]
+        frames: usize,
+        #[arg(long)]
+        video: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(long)]
+        orig_len: u64,
     },
     /// Engine restore: .bud (engine çıktısı) → orijinal dosya
     EngineRestore {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(short, long)] out: PathBuf,
-        #[arg(long, default_value_t = 0)] transform: u8,
-        #[arg(long, default_value_t = false)] erasure: bool,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        transform: u8,
+        #[arg(long, default_value_t = false)]
+        erasure: bool,
     },
     /// Format kataloğu: tüm formatlar + boru hattı + dürüst oran (30+)
     Catalog,
     /// Rejenerasyon bloğu üret: epoch + PACT sınavı + bütçe → blok hash (İ2+İ8)
     Block {
-        #[arg(short, long, default_value = "bud_block.bud")] output: PathBuf,
-        #[arg(long, default_value_t = 0)] epoch: u64,
-        #[arg(long, default_value_t = 0)] budget: u64,
-        #[arg(long, default_value = "0000000000000000000000000000000000000000000000000000000000000000")] prev: String,
+        #[arg(short, long, default_value = "bud_block.bud")]
+        output: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        epoch: u64,
+        #[arg(long, default_value_t = 0)]
+        budget: u64,
+        #[arg(
+            long,
+            default_value = "0000000000000000000000000000000000000000000000000000000000000000"
+        )]
+        prev: String,
     },
     /// v2 konteynerin content_root'una çapalı checkpoint üret (yön 2)
     Checkpoint {
-        #[arg(short, long)] input: PathBuf,
-        #[arg(long, default_value_t = 0)] epoch: u64,
-        #[arg(long, default_value = "expert")] expert: String,
-        #[arg(long, default_value = "structural+zstd19")] pipe: String,
-        #[arg(long, default_value_t = 6.17)] ratio: f64,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        epoch: u64,
+        #[arg(long, default_value = "expert")]
+        expert: String,
+        #[arg(long, default_value = "structural+zstd19")]
+        pipe: String,
+        #[arg(long, default_value_t = 6.17)]
+        ratio: f64,
     },
 }
 
@@ -195,7 +263,12 @@ fn write_file(p: &PathBuf, d: &[u8]) -> Result<(), String> {
 
 fn run(cli: Cli) -> Result<String, String> {
     match cli.command {
-        Commands::Encode { input, output, class, required_ratio } => {
+        Commands::Encode {
+            input,
+            output,
+            class,
+            required_ratio,
+        } => {
             let data = read_file(&input)?;
             let class = parse_class(&class);
             let mime = match class {
@@ -237,9 +310,19 @@ fn run(cli: Cli) -> Result<String, String> {
             let file = BudFile::from_bytes(&bytes).map_err(|e| format!("v1 ayrıştırma: {e}"))?;
             let out = file.decode().map_err(|e| format!("v1 bütünlük: {e}"))?;
             write_file(&output, &out)?;
-            Ok(format!("v1 decode: {} bayt -> {} bayt", bytes.len(), out.len()))
+            Ok(format!(
+                "v1 decode: {} bayt -> {} bayt",
+                bytes.len(),
+                out.len()
+            ))
         }
-        Commands::Store { input, output, min_chunk, compress, zstd } => {
+        Commands::Store {
+            input,
+            output,
+            min_chunk,
+            compress,
+            zstd,
+        } => {
             let data = read_file(&input)?;
             let enc = if zstd {
                 if min_chunk > 0 {
@@ -258,7 +341,9 @@ fn run(cli: Cli) -> Result<String, String> {
             } else {
                 store(&data)
             }
-            .ok_or("v2 store başarısız (boyut/kapasite sınırı - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)")?;
+            .ok_or(
+                "v2 store başarısız (boyut/kapasite sınırı - MAX_CHUNK_COUNT/MAX_TOTAL_BYTES)",
+            )?;
             write_file(&output, &enc)?;
             let cc = chunk_count(&enc).unwrap_or(0);
             Ok(format!(
@@ -267,7 +352,13 @@ fn run(cli: Cli) -> Result<String, String> {
                 data.len(),
                 enc.len(),
                 cc,
-                if zstd { "ZSTD sıkıştırmalı," } else if compress { "HUFFMAN sıkıştırmalı," } else { "" }
+                if zstd {
+                    "ZSTD sıkıştırmalı,"
+                } else if compress {
+                    "HUFFMAN sıkıştırmalı,"
+                } else {
+                    ""
+                }
             ))
         }
         Commands::Restore { input, output } => {
@@ -286,13 +377,22 @@ fn run(cli: Cli) -> Result<String, String> {
             let (enc, dec, cost) = BudCli::bench(&data);
             // K19 dürüstlük: tavan $0.016/TB/ay - model eşiği geçiyor mu, raporla
             let ceiling = 0.016;
-            let gate = if cost <= ceiling { "GEÇTİ" } else { "GEÇMEDİ" };
+            let gate = if cost <= ceiling {
+                "GEÇTİ"
+            } else {
+                "GEÇMEDİ"
+            };
             Ok(format!(
                 "bench: {} bayt, encode {enc:.2} MB/s, decode {dec:.2} MB/s, taban maliyet ${cost:.5}/TB/ay (tavan $0.016: {gate}) - ölçümsüz üst sınır iddiası değil, runner ölçümü ayrı",
                 data.len()
             ))
         }
-        Commands::BftVote { pipe_id, ratio, validator, n } => {
+        Commands::BftVote {
+            pipe_id,
+            ratio,
+            validator,
+            n,
+        } => {
             if n < 1 {
                 return Err("BFT: n >= 1 olmalı".into());
             }
@@ -321,7 +421,13 @@ fn run(cli: Cli) -> Result<String, String> {
                 "BFT: n={n} konsensüs pipe_id={pipe_id} oran {ratio} - sertifika doğrulandı (2n/3 çoğunluk)"
             ))
         }
-        Commands::Pact { input, output, producer, ts, residual } => {
+        Commands::Pact {
+            input,
+            output,
+            producer,
+            ts,
+            residual,
+        } => {
             let bytes = read_file(&input)?;
             let file = BudV2File::decode(&bytes).ok_or("PACT yalnız v2 konteynerler için")?;
             let original = file.restore_original().ok_or("konteyner açılamadı")?;
@@ -347,13 +453,21 @@ fn run(cli: Cli) -> Result<String, String> {
             }
             Ok(format!(
                 "pact: mod={:?} commitment={} boyut={}B hash={} (PACT kaydı zincire yazılabilir)",
-                pact.mode, hex8(&pact.commitment), blob.len(), hex8(&pact.record_hash())
+                pact.mode,
+                hex8(&pact.commitment),
+                blob.len(),
+                hex8(&pact.record_hash())
             ))
         }
-        Commands::Regenerate { input, producer, seed } => {
+        Commands::Regenerate {
+            input,
+            producer,
+            seed,
+        } => {
             let bytes = read_file(&input)?;
             // PACT blob'undan kaydı oku (girdi = pact to_blob çıktısı)
-            let pact = PactRecord::from_blob(&bytes).ok_or("girdi PACT blob'u değil (bud pact çıktısı kullan)")?;
+            let pact = PactRecord::from_blob(&bytes)
+                .ok_or("girdi PACT blob'u değil (bud pact çıktısı kullan)")?;
             // üretici = producer + seed ile üretilecek bayt (burada girdinin orijinali yok;
             // doğrulama: verilen producer ile commitment uyumlu mu - üretici hash'ini yeniden hesapla)
             let mut rh = sha3::Sha3_256::new();
@@ -397,16 +511,24 @@ fn run(cli: Cli) -> Result<String, String> {
             write_file(&out, &blob)?;
             Ok(format!(
                 "ledger: {} kayıt, {} bayt segment bloğu (root={}) - zincir başlığına yazılabilir",
-                seg.entries.len(), blob.len(), hex8(&seg.root())
+                seg.entries.len(),
+                blob.len(),
+                hex8(&seg.root())
             ))
         }
         Commands::ProduceProof { input, pipe, ts } => {
             let bytes = read_file(&input)?;
-            let file = BudV2File::decode(&bytes)
-                .ok_or("üretim kanıtı yalnız v2 konteynerler için")?;
+            let file =
+                BudV2File::decode(&bytes).ok_or("üretim kanıtı yalnız v2 konteynerler için")?;
             let original = file.restore_original().ok_or("konteyner açılamadı")?;
             let ts = if ts == 0 { 1_768_000_000u64 } else { ts }; // deterministik test
-            let rec = BudProductionRecord::new(file.header.codec, Box::leak(pipe.clone().into_boxed_str()), &original, bytes.len() as u64, ts);
+            let rec = BudProductionRecord::new(
+                file.header.codec,
+                Box::leak(pipe.clone().into_boxed_str()),
+                &original,
+                bytes.len() as u64,
+                ts,
+            );
             if !rec.verify() {
                 return Err("üretim kaydı tutarsız".into());
             }
@@ -416,10 +538,15 @@ fn run(cli: Cli) -> Result<String, String> {
                 hex8(&rec.payload_root), hex8(&rec.record_hash())
             ))
         }
-        Commands::Engine { input, out, erasure } => {
+        Commands::Engine {
+            input,
+            out,
+            erasure,
+        } => {
             let data = read_file(&input)?;
             let ts = 1_768_000_000u64;
-            let res = engine_store(&data, erasure, ts).ok_or("engine: giriş geçersiz (boş veya >512MB)")?;
+            let res = engine_store(&data, erasure, ts)
+                .ok_or("engine: giriş geçersiz (boş veya >512MB)")?;
             write_file(&out, &res.container)?;
             let steps_str: Vec<String> = res.steps.iter().map(|s| format!("{s:?}")).collect();
             Ok(format!(
@@ -429,7 +556,12 @@ fn run(cli: Cli) -> Result<String, String> {
             ))
         }
 
-        Commands::EngineRestore { input, out, transform, erasure } => {
+        Commands::EngineRestore {
+            input,
+            out,
+            transform,
+            erasure,
+        } => {
             let blob = read_file(&input)?;
             // engine çıktısı container'dır (blob değil) - container-düzeyi restore
             let original = engine_restore_container(&blob, transform, erasure)
@@ -438,55 +570,98 @@ fn run(cli: Cli) -> Result<String, String> {
             Ok(format!(
                 "engine-restore: {} bayt orijinal geri alindi (transform={} erasure={})",
                 original.len(),
-                TransformKind::from_u8(transform).map(|t| format!("{t:?}")).unwrap_or("?".into()),
+                TransformKind::from_u8(transform)
+                    .map(|t| format!("{t:?}"))
+                    .unwrap_or("?".into()),
                 erasure
             ))
         }
-        Commands::VideoPipe { yuv, width, height, frames, video, out, orig_len } => {
+        Commands::VideoPipe {
+            yuv,
+            width,
+            height,
+            frames,
+            video,
+            out,
+            orig_len,
+        } => {
             let yuv_data = read_file(&yuv)?;
             let video_data = read_file(&video)?;
             let ts = 1_768_000_000u64;
-            let res = run_video_pipeline(&yuv_data, width, height, frames, &video_data, orig_len, ts)
-                .ok_or("video-pipe: sınıf tespiti başarısız (yetersiz kare/bozuk girdi)")?;
+            let res =
+                run_video_pipeline(&yuv_data, width, height, frames, &video_data, orig_len, ts)
+                    .ok_or("video-pipe: sınıf tespiti başarısız (yetersiz kare/bozuk girdi)")?;
             write_file(&out, &res.container)?;
             Ok(format!(
                 "video-pipe: sınıf={:?} codec={:?} gop={} oran={:.2}x konteyner={}B kanıt_hash={}",
-                res.class, res.suggestion.codec, res.suggestion.gop_frames,
-                res.video_record.claimed_ratio, res.container.len(),
+                res.class,
+                res.suggestion.codec,
+                res.suggestion.gop_frames,
+                res.video_record.claimed_ratio,
+                res.container.len(),
                 hex8(&res.production_record.record_hash())
             ))
         }
         Commands::Catalog => {
             let mut lines = Vec::new();
-            lines.push(format!("B.U.D. 2.0 format kataloğu ({} format):", CATALOG.len()));
+            lines.push(format!(
+                "B.U.D. 2.0 format kataloğu ({} format):",
+                CATALOG.len()
+            ));
             for e in CATALOG {
-                let lossless = if e.lossless { "kayıpsız" } else { "kayıplı" };
+                let lossless = if e.lossless {
+                    "kayıpsız"
+                } else {
+                    "kayıplı"
+                };
                 lines.push(format!(
                     "  {:<12} imza={:<8} boru hattı={:<20} oran {:.2}-{:.2}x ({lossless})",
-                    e.name, format!("{:?}", e.signature), e.pipe, e.ratio_min, e.ratio_max
+                    e.name,
+                    format!("{:?}", e.signature),
+                    e.pipe,
+                    e.ratio_min,
+                    e.ratio_max
                 ));
             }
             Ok(lines.join("\n"))
         }
-        Commands::Block { output, epoch, budget, prev } => {
+        Commands::Block {
+            output,
+            epoch,
+            budget,
+            prev,
+        } => {
             // prev hex → [u8;32]
             if prev.len() != 64 {
                 return Err("prev_hash 64 hex karakter olmalı".into());
             }
             let mut prev_hash = [0u8; 32];
             for i in 0..32 {
-                prev_hash[i] = u8::from_str_radix(&prev[i*2..i*2+2], 16).map_err(|_| "prev hex bozuk")?;
+                prev_hash[i] = u8::from_str_radix(&prev[i * 2..i * 2 + 2], 16)
+                    .map_err(|_| "prev hex bozuk")?;
             }
             // örnek PACT sınavı: üretilen bayt commitment ile eşleşiyor (VERIFIED)
             let produced = b"deterministik icerik 1234567890";
-            let pact = bud_core::bud_format_pact::PactRecord::pure([1u8; 32], [7u8; 32], produced, epoch + 1_768_000_000);
+            let pact = bud_core::bud_format_pact::PactRecord::pure(
+                [1u8; 32],
+                [7u8; 32],
+                produced,
+                epoch + 1_768_000_000,
+            );
             let challenge = PactChallengeInBlock {
                 pact_hash: pact.record_hash(),
                 outcome: RegenerationOutcome::Verified,
                 cost_units: 10,
             };
-            let block = RegenerationBlock::new(epoch, prev_hash, vec![challenge], [9u8; 32], budget, epoch + 1_768_000_000)
-                .ok_or("blok üretilemedi (parametre sınırı)")?;
+            let block = RegenerationBlock::new(
+                epoch,
+                prev_hash,
+                vec![challenge],
+                [9u8; 32],
+                budget,
+                epoch + 1_768_000_000,
+            )
+            .ok_or("blok üretilemedi (parametre sınırı)")?;
             if !block.verify() {
                 return Err("blok doğrulanamadı".into());
             }
@@ -495,7 +670,11 @@ fn run(cli: Cli) -> Result<String, String> {
             // yerel saldirganin onceden symlink koyup hedef dosyayi truncate
             // etmesine izin verirdi. Cikti artik kullanici secimli; mevcut
             // dosya symlink ise yazim reddedilir (yeni dosya acilir).
-            if output.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            if output
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
                 return Err(format!("çıktı yolu symlink olamaz: {}", output.display()));
             }
             write_file(&output, &blob)?;
@@ -504,7 +683,13 @@ fn run(cli: Cli) -> Result<String, String> {
                 hex8(&block.hash)
             ))
         }
-        Commands::Checkpoint { input, epoch, expert, pipe, ratio } => {
+        Commands::Checkpoint {
+            input,
+            epoch,
+            expert,
+            pipe,
+            ratio,
+        } => {
             let bytes = read_file(&input)?;
             let file = BudV2File::decode(&bytes)
                 .ok_or("checkpoint yalnız v2 konteynerler için (önce store ile üret)")?;
@@ -537,7 +722,8 @@ fn run(cli: Cli) -> Result<String, String> {
                     out.len()
                 ))
             } else {
-                let file = BudFile::from_bytes(&bytes).map_err(|e| format!("v1 ayrıştırma: {e}"))?;
+                let file =
+                    BudFile::from_bytes(&bytes).map_err(|e| format!("v1 ayrıştırma: {e}"))?;
                 let out = file.decode().map_err(|e| format!("v1 bütünlük: {e}"))?;
                 BudGates::k_bud_ratio(&file, out.len())
                     .map_err(|e| format!("K-BUD-RATIO kapısı: {e}"))?;

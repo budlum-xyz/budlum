@@ -83,7 +83,12 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
             j = i + 1; // tek nokta
             max_err = 0;
         }
-        segs.push(LinSeg { key_start: keys[i], a, b, err: max_err });
+        segs.push(LinSeg {
+            key_start: keys[i],
+            a,
+            b,
+            err: max_err,
+        });
         i = j;
     }
     if segs.is_empty() {
@@ -138,7 +143,10 @@ mod tests {
         for k in &keys {
             let (lo, hi) = search_range(&segs, *k).unwrap();
             let actual = offsets[*k as usize];
-            assert!(lo <= actual && actual <= hi, "key {k}: {lo}..{hi} içinde {actual} olmalı");
+            assert!(
+                lo <= actual && actual <= hi,
+                "key {k}: {lo}..{hi} içinde {actual} olmalı"
+            );
         }
         // RAM: model küçük (2000 nokta → birkaç parça)
         assert!(segs.len() * 24 < 2000 * 8, "model << ham indeks");

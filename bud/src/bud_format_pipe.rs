@@ -19,8 +19,10 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format_container::{BudV2File, FormatCodec, structural_split_compact};
-use crate::bud_format_columnar::{ColumnarMode, columnar_decode, columnar_encode, columnar_to_blob};
+use crate::bud_format_columnar::{
+    columnar_decode, columnar_encode, columnar_to_blob, ColumnarMode,
+};
+use crate::bud_format_container::{structural_split_compact, BudV2File, FormatCodec};
 
 /// Varsayılan compaction eşiği (K35): 64 KiB altı bitişik parçalar birleştirilir.
 pub const DEFAULT_MIN_CHUNK: usize = 64 * 1024;
@@ -274,10 +276,20 @@ mod tests {
         }
         let raw = store(&log).unwrap();
         let comp = store_compressed(&log).unwrap();
-        assert!(comp.len() < raw.len(), "sıkıştırılmış .bud küçülmeli: {} vs {}", raw.len(), comp.len());
+        assert!(
+            comp.len() < raw.len(),
+            "sıkıştırılmış .bud küçülmeli: {} vs {}",
+            raw.len(),
+            comp.len()
+        );
         assert_eq!(restore(&comp).unwrap(), log);
         let z = store_zstd(&log).unwrap();
-        assert!(z.len() < comp.len(), "zstd Huffman'dan küçük: {} vs {}", z.len(), comp.len());
+        assert!(
+            z.len() < comp.len(),
+            "zstd Huffman'dan küçük: {} vs {}",
+            z.len(),
+            comp.len()
+        );
         assert_eq!(restore(&z).unwrap(), log);
     }
 

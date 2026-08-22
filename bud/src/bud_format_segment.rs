@@ -18,7 +18,7 @@ use sha3::{Digest, Sha3_256};
 pub const SEGMENT_MAGIC: [u8; 8] = *b"\xB5SEGL\0\0\0";
 pub const SEGMENT_VERSION: u8 = 1;
 pub const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024; // 64 MB (blockchain-core)
-pub const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024;   // tek kayıt tavanı (16 MB)
+pub const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024; // tek kayıt tavanı (16 MB)
 
 /// Segment defteri: append-only kayıtlar (len-prefix + SHA3 digest).
 #[derive(Debug, Clone)]
@@ -37,7 +37,10 @@ impl SegmentLedger {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_SEGMENT_V1";
 
     pub fn new() -> Self {
-        SegmentLedger { entries: Vec::new(), total_bytes: 0 }
+        SegmentLedger {
+            entries: Vec::new(),
+            total_bytes: 0,
+        }
     }
 
     /// Kayıt ekle (append-only). Boyut tavanları + digest hesaplanır.
@@ -139,7 +142,10 @@ impl SegmentLedger {
         if pos != payload_len || total > MAX_SEGMENT_BYTES {
             return None;
         }
-        Some(SegmentLedger { entries, total_bytes: total })
+        Some(SegmentLedger {
+            entries,
+            total_bytes: total,
+        })
     }
 
     /// Segment kökü (zincir başlığına yazılabilir - İ8 bayt-bütçe ile uyumlu).
@@ -213,7 +219,10 @@ mod tests {
         let mut bad = blob.clone();
         let mid = bad.len() / 2;
         bad[mid] ^= 0xFF;
-        assert!(SegmentLedger::from_blob(&bad).is_none(), "kayıt kurcalama red");
+        assert!(
+            SegmentLedger::from_blob(&bad).is_none(),
+            "kayıt kurcalama red"
+        );
         // artık bayt red
         let mut extra = blob.clone();
         extra.push(0x00);
@@ -229,7 +238,10 @@ mod tests {
         let mut bad = blob.clone();
         // ilk kayıt verisini değiştir (HDR = 13, sonra 4 len + 32 digest, veri başı 49)
         bad[49] = b'X';
-        assert!(SegmentLedger::from_blob(&bad).is_none(), "değiştirilmiş kayıt RED");
+        assert!(
+            SegmentLedger::from_blob(&bad).is_none(),
+            "değiştirilmiş kayıt RED"
+        );
     }
 
     #[test]
@@ -259,7 +271,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

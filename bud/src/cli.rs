@@ -3,8 +3,10 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format::{BudFormatClass, BudFlags, BudFile, MultiRatioConsensus};
-use crate::bud_format_container::{BudV2File, FormatCodec, StructuralKind, structural_split_compact, structural_join};
+use crate::bud_format::{BudFile, BudFlags, BudFormatClass, MultiRatioConsensus};
+use crate::bud_format_container::{
+    structural_join, structural_split_compact, BudV2File, FormatCodec, StructuralKind,
+};
 use crate::bud_format_economics::BudEconomics;
 
 pub struct BudCli;
@@ -23,7 +25,16 @@ impl BudCli {
         );
         match cand {
             Some(c) => BudFile::encode(data, class, mime, 0, 0, c.pipe_id, c.flags, c.payload),
-            None => BudFile::encode(data, class, mime, 0, 0, 0, BudFlags::new(true, true, false, false, false, false), data.to_vec()),
+            None => BudFile::encode(
+                data,
+                class,
+                mime,
+                0,
+                0,
+                0,
+                BudFlags::new(true, true, false, false, false, false),
+                data.to_vec(),
+            ),
         }
     }
 
@@ -57,12 +68,17 @@ impl BudCli {
         let start = std::time::Instant::now();
         let f = Self::encode("test.json", data, BudFormatClass::Json);
         let enc_elapsed = start.elapsed().as_secs_f64();
-        let enc_speed = (data.len() as f64 / (1024.0*1024.0)) / enc_elapsed.max(0.001);
+        let enc_speed = (data.len() as f64 / (1024.0 * 1024.0)) / enc_elapsed.max(0.001);
         let start2 = std::time::Instant::now();
         let _ = Self::decode(&f);
         let dec_elapsed = start2.elapsed().as_secs_f64();
-        let dec_speed = (data.len() as f64 / (1024.0*1024.0)) / dec_elapsed.max(0.001);
-        let econ = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: 17.19, device_only: false };
+        let dec_speed = (data.len() as f64 / (1024.0 * 1024.0)) / dec_elapsed.max(0.001);
+        let econ = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: 17.19,
+            device_only: false,
+        };
         let cost = econ.cost_per_tb_month();
         (enc_speed, dec_speed, cost)
     }
@@ -80,7 +96,7 @@ mod tests {
     }
     #[test]
     fn cli_bench() {
-        let data = vec![b'a'; 1024*1024];
+        let data = vec![b'a'; 1024 * 1024];
         let (enc, dec, cost) = BudCli::bench(&data);
         assert!(enc > 0.0);
         assert!(dec > 0.0);
@@ -102,21 +118,18 @@ mod tests {
             (&bin[..], StructuralKind::Binary, FormatCodec::Unknown),
         ] {
             for min in [1usize, 64, 4096, 65536] {
-                let enc = BudCli::encode_container(kind, codec, data, min)
-                    .expect("konteyner kodlanmalı");
+                let enc =
+                    BudCli::encode_container(kind, codec, data, min).expect("konteyner kodlanmalı");
                 let dec = BudCli::decode_container(&enc).expect("konteyner okunmalı");
-                assert_eq!(
-                    &dec[..],
-                    data,
-                    "kind={kind:?} min={min} kayıpsız roundtrip"
-                );
+                assert_eq!(&dec[..], data, "kind={kind:?} min={min} kayıpsız roundtrip");
             }
         }
     }
     #[test]
     fn cli_container_rejects_tamper() {
         let json = br#"[{"a":1},{"a":2}]"#;
-        let enc = BudCli::encode_container(StructuralKind::Json, FormatCodec::Json, json, 64).unwrap();
+        let enc =
+            BudCli::encode_container(StructuralKind::Json, FormatCodec::Json, json, 64).unwrap();
         let mut bad = enc.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(BudCli::decode_container(&bad).is_none(), "kurcalama red");

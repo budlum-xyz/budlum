@@ -28,13 +28,13 @@ pub const MD_VERSION: u8 = 2;
 /// Markdown bölüm türü.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdSection {
-    Heading(u8),   // # seviyesi 1-6
+    Heading(u8), // # seviyesi 1-6
     Paragraph,
-    List,          // - / * / 1.
-    CodeBlock,     // ``` ...
-    Link,          // [text](url)
-    Table,         // | a | b |
-    Blank,         // bos satir: ayirici, atilirsa belge geri gelmez
+    List,      // - / * / 1.
+    CodeBlock, // ``` ...
+    Link,      // [text](url)
+    Table,     // | a | b |
+    Blank,     // bos satir: ayirici, atilirsa belge geri gelmez
     Other,
 }
 
@@ -78,8 +78,10 @@ impl MarkdownSplit {
                 } else {
                     MdSection::Other
                 }
-            } else if line.trim_start().starts_with('-') || line.trim_start().starts_with('*')
-                || line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+            } else if line.trim_start().starts_with('-')
+                || line.trim_start().starts_with('*')
+                || line.trim_start().starts_with(|c: char| c.is_ascii_digit())
+            {
                 MdSection::List
             } else if line.contains("](") {
                 MdSection::Link
@@ -101,7 +103,12 @@ impl MarkdownSplit {
             return None;
         }
         let trailing_newline = md.ends_with('\n');
-        Some(MarkdownSplit { sections, contents, heading_tree, trailing_newline })
+        Some(MarkdownSplit {
+            sections,
+            contents,
+            heading_tree,
+            trailing_newline,
+        })
     }
 
     /// Bolumleri birlestir. `encode`'un girdisini bayt-birebir geri verir.
@@ -219,7 +226,12 @@ impl MarkdownSplit {
         if pos != payload_len {
             return None;
         }
-        Some(MarkdownSplit { sections, contents, heading_tree, trailing_newline })
+        Some(MarkdownSplit {
+            sections,
+            contents,
+            heading_tree,
+            trailing_newline,
+        })
     }
 }
 
@@ -264,7 +276,9 @@ fn read_str(bytes: &[u8], pos: &mut usize) -> Option<String> {
     if bytes.len() < *pos + len {
         return None;
     }
-    let s = std::str::from_utf8(&bytes[*pos..*pos + len]).ok()?.to_string();
+    let s = std::str::from_utf8(&bytes[*pos..*pos + len])
+        .ok()?
+        .to_string();
     *pos += len;
     Some(s)
 }
@@ -305,7 +319,10 @@ mod tests {
         let geri = MarkdownSplit::from_blob(&blob).expect("gecerli blob kabul edilmeli");
         assert_eq!(geri.sections, split.sections, "bolum turleri birebir");
         assert_eq!(geri.contents, split.contents, "bolum icerikleri birebir");
-        assert_eq!(geri.heading_tree, split.heading_tree, "baslik agaci birebir");
+        assert_eq!(
+            geri.heading_tree, split.heading_tree,
+            "baslik agaci birebir"
+        );
     }
 
     /// Kayipsizlik: `encode` -> `decode` girdiyi bayt-birebir geri verir.
@@ -379,9 +396,16 @@ mod tests {
         assert!(split.sections.contains(&MdSection::CodeBlock), "kod");
         assert!(split.sections.contains(&MdSection::Link), "bağlantı");
         assert!(split.sections.contains(&MdSection::Table), "tablo");
-        assert!(!split.heading_tree.is_empty(), "başlık ağacı (LLM görünümü)");
+        assert!(
+            !split.heading_tree.is_empty(),
+            "başlık ağacı (LLM görünümü)"
+        );
         // context_ratio: başlık ağacı orijinalden çok küçük
-        assert!(split.context_ratio() > 3.0, "LLM bağlamı kompakt: {:.1}x", split.context_ratio());
+        assert!(
+            split.context_ratio() > 3.0,
+            "LLM bağlamı kompakt: {:.1}x",
+            split.context_ratio()
+        );
     }
 
     #[test]

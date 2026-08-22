@@ -23,7 +23,7 @@ impl Default for PriceModel {
         PriceModel {
             disk_usd_per_tb: 12.5,
             amort_months: 60.0,
-            power_w_per_tb: 5.5/20.0,
+            power_w_per_tb: 5.5 / 20.0,
             pue: 1.15,
             hours_per_month: 730.0,
             elec_usd_per_kwh: 0.10,
@@ -40,7 +40,9 @@ impl PriceModel {
         disk + elec + self.other_usd
     }
     pub fn cost_sold(&self, e: f64, r: f64) -> Result<f64, PriceError> {
-        if r <= 0.0 { return Err(PriceError::InvalidRatio) }
+        if r <= 0.0 {
+            return Err(PriceError::InvalidRatio);
+        }
         Ok(self.physical_usd_per_tb_month() * e / r)
     }
     pub fn required_ratio(&self, e: f64, target: f64) -> f64 {
@@ -59,7 +61,13 @@ pub struct Expansion {
 
 impl Expansion {
     pub fn new(k: usize, p: usize) -> Self {
-        Expansion { k, p, e: (k+p) as f64 / k as f64, f: p, repair_disks: k }
+        Expansion {
+            k,
+            p,
+            e: (k + p) as f64 / k as f64,
+            f: p,
+            repair_disks: k,
+        }
     }
 }
 
@@ -132,8 +140,14 @@ mod tests {
 
         // Erasure ve oran ne olursa olsun 0 x e / r = 0 -> tavanın altında.
         let maliyet = cihaz.cost_sold(1.5, 2.0).expect("geçerli oran");
-        assert_eq!(maliyet, 0.0, "sıfır fiziksel maliyet sıfır satılan maliyet verir");
-        assert!(maliyet <= CEILING, "cihaz-içi maliyet 0.016 tavanının altında");
+        assert_eq!(
+            maliyet, 0.0,
+            "sıfır fiziksel maliyet sıfır satılan maliyet verir"
+        );
+        assert!(
+            maliyet <= CEILING,
+            "cihaz-içi maliyet 0.016 tavanının altında"
+        );
 
         // Kanarya: aynı çağrı GERÇEK bir donanım modelinde sıfır DEĞİLDİR.
         // Bu satır olmasa test, modeli her zaman 0 döndüren bir regresyonu da

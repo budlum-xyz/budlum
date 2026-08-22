@@ -64,7 +64,10 @@ mod tests {
 
     #[test]
     fn hiz_asimi_yavaslatir() {
-        assert!(matches!(decide_qos(0, 10, 100, 11, 10), QosVerdict::Throttled(_)));
+        assert!(matches!(
+            decide_qos(0, 10, 100, 11, 10),
+            QosVerdict::Throttled(_)
+        ));
     }
 
     #[test]

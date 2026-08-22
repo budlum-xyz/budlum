@@ -2,176 +2,223 @@
 
 #![forbid(unsafe_code)]
 
-pub mod fidelity;
-pub mod ratio;
-pub mod price;
-pub mod quantum;
-pub mod churn;
-pub mod provider;
-pub mod gates;
-pub mod quantum_chain;
-pub mod bud_format;
-pub mod bud_format_bft;
-pub mod bud_format_registry;
-pub mod bud_format_economics;
-pub mod cli;
-pub mod bud_format_integration;
-pub mod bud_format_real;
-pub mod bud_format_revolutionary;
-pub mod bud_format_optical;
-pub mod bud_format_transpile;
-pub mod bud_format_secure_db;
-pub mod bud_format_ultra;
-pub mod bud_format_container;
-pub mod bud_format_pipe;
-pub mod bud_format_huffman;
-pub mod bud_format_columnar;
-pub mod bud_format_production;
-pub mod bud_format_video;
-pub mod bud_format_view;
-pub mod bud_format_pact;
-pub mod bud_format_dictionary;
-pub mod bud_format_logfield;
-pub mod bud_format_timeseries;
-pub mod bud_format_model;
-pub mod bud_format_regeneration;
-pub mod bud_format_segment;
-pub mod bud_format_block;
-pub mod bud_format_exepdf;
-pub mod bud_format_lrc;
-pub mod bud_format_crop;
-pub mod bud_format_ratioconsensus;
-pub mod bud_format_erasure;
-pub mod bud_format_catalog;
-pub mod bud_format_multifile;
 pub mod bud_fixed_point;
-pub mod bud_format_das;
-pub mod bud_format_videopipe;
-pub mod bud_format_jpegre;
-pub mod bud_format_shamir;
-pub mod bud_format_engine;
-pub mod bud_format_culling;
-pub mod bud_format_markdown;
-pub mod bud_format_fastcdc;
-pub mod bud_format_media;
-pub mod bud_format_matrix;
-pub mod bud_format_telemetry;
-pub mod bud_format_prodcost;
-pub mod bud_format_pcap;
-pub mod bud_format_office;
-pub mod bud_format_bloom;
-pub mod bud_format_lazyrepair;
-pub mod bud_format_hw;
-pub mod bud_format_serviceclass;
-pub mod bud_format_fidelitygate;
-pub mod bud_format_zkbridge;
-pub mod bud_format_lowrank;
-pub mod bud_format_realcorpus;
-pub mod bud_format_fountain;
-pub mod bud_format_wal;
-pub mod bud_format_repairband;
-pub mod bud_format_scrub;
-pub mod bud_format_edge;
-pub mod bud_format_dbdelta;
+pub mod bud_format;
 pub mod bud_format_autozstd;
-pub mod bud_format_qos;
-pub mod bud_format_msr;
-pub mod bud_format_pgm;
-pub mod bud_format_genomic;
-pub mod bud_format_pointcloud;
-pub mod bud_format_securededup;
-pub mod bud_format_guardian;
-pub mod bud_format_recipe;
-pub mod bud_format_tricore;
-pub mod bud_format_tiny;
-pub mod bud_format_social2;
-pub mod bud_format_governance;
-pub mod bud_format_encpact;
-pub mod bud_format_nvc;
 pub mod bud_format_av2;
+pub mod bud_format_bft;
+pub mod bud_format_block;
+pub mod bud_format_bloom;
+pub mod bud_format_catalog;
 pub mod bud_format_checkpoint;
-pub mod bud_format_por;
-pub mod bud_format_social;
+pub mod bud_format_columnar;
+pub mod bud_format_container;
+pub mod bud_format_crop;
+pub mod bud_format_culling;
+pub mod bud_format_das;
+pub mod bud_format_dbdelta;
 pub mod bud_format_dedup;
+pub mod bud_format_dictionary;
+pub mod bud_format_economics;
+pub mod bud_format_edge;
+pub mod bud_format_encpact;
+pub mod bud_format_engine;
+pub mod bud_format_erasure;
+pub mod bud_format_exepdf;
+pub mod bud_format_fastcdc;
+pub mod bud_format_fidelitygate;
+pub mod bud_format_fountain;
+pub mod bud_format_genomic;
+pub mod bud_format_governance;
+pub mod bud_format_guardian;
+pub mod bud_format_huffman;
+pub mod bud_format_hw;
+pub mod bud_format_integration;
+pub mod bud_format_jpegre;
+pub mod bud_format_lazyrepair;
+pub mod bud_format_logfield;
+pub mod bud_format_lowrank;
+pub mod bud_format_lrc;
+pub mod bud_format_markdown;
+pub mod bud_format_matrix;
+pub mod bud_format_media;
+pub mod bud_format_model;
+pub mod bud_format_msr;
+pub mod bud_format_multifile;
+pub mod bud_format_nvc;
+pub mod bud_format_office;
+pub mod bud_format_optical;
+pub mod bud_format_pact;
+pub mod bud_format_pcap;
+pub mod bud_format_pgm;
+pub mod bud_format_pipe;
+pub mod bud_format_pointcloud;
+pub mod bud_format_por;
+pub mod bud_format_prodcost;
+pub mod bud_format_production;
+pub mod bud_format_qos;
+pub mod bud_format_ratioconsensus;
+pub mod bud_format_real;
+pub mod bud_format_realcorpus;
+pub mod bud_format_recipe;
+pub mod bud_format_regeneration;
+pub mod bud_format_registry;
+pub mod bud_format_repairband;
+pub mod bud_format_revolutionary;
+pub mod bud_format_scrub;
+pub mod bud_format_secure_db;
+pub mod bud_format_securededup;
+pub mod bud_format_segment;
+pub mod bud_format_serviceclass;
+pub mod bud_format_shamir;
+pub mod bud_format_social;
+pub mod bud_format_social2;
+pub mod bud_format_telemetry;
+pub mod bud_format_timeseries;
+pub mod bud_format_tiny;
+pub mod bud_format_transpile;
+pub mod bud_format_tricore;
+pub mod bud_format_ultra;
+pub mod bud_format_video;
+pub mod bud_format_videopipe;
+pub mod bud_format_view;
+pub mod bud_format_wal;
+pub mod bud_format_zkbridge;
+pub mod churn;
+pub mod cli;
+pub mod fidelity;
+pub mod gates;
+pub mod price;
+pub mod provider;
+pub mod quantum;
+pub mod quantum_chain;
+pub mod ratio;
 
-pub use fidelity::{ContentId, FidelityError, RenderFormat, FidelityCore};
-pub use ratio::{FormatClass, Pipe, RatioResult};
-pub use price::{PriceModel, PriceError, Expansion};
-pub use quantum::{QuantumSuite, QuantumError};
-pub use churn::{ChurnFixture, ChurnResult, QuadRing};
-pub use provider::{Provider, ProviderError, ProviderClass};
-pub use gates::{GateResult, GateSuite};
-pub use quantum_chain::{Sha3Hasher, PqVrf, HybridTx, HybridFinalityVote, DualWallet, FiatShamirTranscript, MobileSelfProvider, QuantumChainGates, MAX_BLOCK_BYTES, PQ_SCHEME_ID_FINAL};
-pub use bud_format::{BudFormatClass, BudFlags, BudFile, MultiRatioConsensus, BudGates, BUD_MAGIC, BUD_VERSION};
-pub use bud_format_bft::{RatioVote, RatioFinalityCert, BftRatioConsensus};
-pub use bud_format_registry::{MimeRegistry, RatioProof, SecondPreimageResistantMerkle, DictLoopDetector, RegistryGates};
-pub use bud_format_economics::{BudEconomics, GlobalDedup, MerkleTrie, EconomicsGates, EgressZone, egress_cost, holds_egress, residual_price, residual_holds_price, TAPE_USD_PER_TB_MONTH, tape_cost_per_tb_month, tape_holds_ceiling, ArchiveTier, flat_price, flat_holds_ceiling};
-pub use cli::BudCli;
-pub use bud_format_integration::{BudStorageAssignment, BudLivingThreshold, BudErasure, IntegrationGates};
-pub use bud_format_real::{RealCompressor, RealBench, zstd_compress, zstd_decompress_safe, ZSTD_MAX_DECOMPRESSED};
-pub use bud_format_huffman::{HuffmanCoder, BUD_HFM_MAGIC};
-pub use bud_format_columnar::{JsonColumnar, ColumnarMode, columnar_encode, columnar_decode, columnar_to_blob, columnar_from_blob, COLUMNAR_MAGIC};
-pub use bud_format_production::{BudProductionRecord, ProductionGates};
-pub use bud_format_video::{VideoContentClass, VideoCodec, VideoSuggestion, BudVideoRecord, VideoGates, classify_content};
-pub use bud_format_view::{CompiledView, KeySchema, VIEW_MAGIC};
-pub use bud_format_pact::{PactRecord, PactMode, PACT_MAGIC};
-pub use bud_format_dictionary::{TenantDictionary, DICT_MAGIC};
-pub use bud_format_logfield::{LogFieldColumnar, NginxField, NGINX_FIELDS, parse_nginx_line, LOGFIELD_MAGIC};
-pub use bud_format_timeseries::{TimeSeriesColumnar, TS_MAGIC};
-pub use bud_format_model::{ModelFloatSplit, FloatKind, MODEL_MAGIC};
-pub use bud_format_regeneration::{RegenerationOutcome, RegenerationChallenge, RegenerationRecord, REGEN_MAGIC};
-pub use bud_format_segment::{SegmentLedger, SEGMENT_MAGIC};
-pub use bud_format_block::{RegenerationBlock, PactChallengeInBlock, BLOCK_MAGIC};
-pub use bud_format_exepdf::{ExeSectionSplit, ExeKind, PdfStreamSplit, EXE_SPLIT_MAGIC, PDF_SPLIT_MAGIC};
-pub use bud_format_lrc::{LrcScheme, LrcRecord, LRC_MAGIC};
-pub use bud_format_crop::{CropDerivation, MCU_SIZE, CROP_MAGIC};
-pub use bud_format_ratioconsensus::{RatioConsensus, RatioCandidateAgent, ContentClass, class_of, RATIO_CONS_MAGIC};
-pub use bud_format_erasure::{CauchyMds, ERASURE_MAGIC};
-pub use bud_format_catalog::{FormatCatalogEntry, CATALOG, catalog_detect, by_name, catalog_size};
-pub use bud_format_multifile::{TenantMultifileStore, MultifileChunk, MULTI_MAGIC, DEFAULT_CHUNK};
-pub use bud_fixed_point::{FIXED_FRAC_BITS, FIXED_ONE, fixed_from_int, fixed_to_int, fixed_mul, fixed_div, fixed_sqrt, fixed_fraction};
-pub use bud_format_das::{das_root, DasProof, DasSampler, DasOwnership, DAS_MAGIC};
-pub use bud_format_videopipe::{VideoPipelineResult, run_video_pipeline, VIDEO_PIPE_MAGIC};
-pub use bud_format_jpegre::{JpegAnalysis, JPEG_RE_MAGIC};
-pub use bud_format_shamir::{ShamirShare, SHAMIR_MAGIC};
-pub use bud_format_engine::{EngineResult, PipeStep, TransformKind, engine_store, engine_restore_raw, engine_restore_full, engine_restore_container, ENGINE_MAGIC};
-pub use bud_format_culling::{CullingPlan, ClusterTier, CULL_MAGIC};
-pub use bud_format_markdown::{MarkdownSplit, MdSection, MD_MAGIC};
-pub use bud_format_fastcdc::{FastCdcSplit, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK, FASTCDC_MAGIC};
-pub use bud_format_revolutionary::{CompactTable, Evidence, Fact, SqliteChunk, SecretRedactor, ColumnarTransform, HybridSearch, RevolutionaryGates};
-pub use bud_format_optical::{OpticalPrompt, LogTemplate, LogTemplateMiner, OpticalGates};
-pub use bud_format_transpile::{BashTranspile, AstTransform, TranspileGates};
-pub use bud_format_secure_db::{SecureEmbeddedDb, SecureDbGates};
-pub use bud_format_ultra::{DiffusionPrompt, CodeTarif, Log4Layer, UltraGates};
-pub use bud_format_container::{structural_split, structural_join, structural_split_compact, structural_chunks, expert_candidates, select_best_lossless, BudV2Header, BudV2File, ChunkCodec, MultiHash, FormatCodec, StructuralKind, content_id};
-pub use bud_format_pipe::{detect, store, store_with_min, store_compressed, store_compressed_with_min, store_zstd, store_zstd_with_min, store_json_columnar, restore_json_columnar, restore, chunk_count, DEFAULT_MIN_CHUNK};
+pub use bud_fixed_point::{
+    fixed_div, fixed_fraction, fixed_from_int, fixed_mul, fixed_sqrt, fixed_to_int,
+    FIXED_FRAC_BITS, FIXED_ONE,
+};
+pub use bud_format::{
+    BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus, BUD_MAGIC, BUD_VERSION,
+};
+pub use bud_format_bft::{BftRatioConsensus, RatioFinalityCert, RatioVote};
+pub use bud_format_block::{PactChallengeInBlock, RegenerationBlock, BLOCK_MAGIC};
+pub use bud_format_catalog::{by_name, catalog_detect, catalog_size, FormatCatalogEntry, CATALOG};
 pub use bud_format_checkpoint::Checkpoint;
-pub use bud_format_por::{PorKey, PorTag, PorChallenge, PorResponse};
+pub use bud_format_columnar::{
+    columnar_decode, columnar_encode, columnar_from_blob, columnar_to_blob, ColumnarMode,
+    JsonColumnar, COLUMNAR_MAGIC,
+};
+pub use bud_format_container::{
+    content_id, expert_candidates, select_best_lossless, structural_chunks, structural_join,
+    structural_split, structural_split_compact, BudV2File, BudV2Header, ChunkCodec, FormatCodec,
+    MultiHash, StructuralKind,
+};
+pub use bud_format_crop::{CropDerivation, CROP_MAGIC, MCU_SIZE};
+pub use bud_format_culling::{ClusterTier, CullingPlan, CULL_MAGIC};
+pub use bud_format_das::{das_root, DasOwnership, DasProof, DasSampler, DAS_MAGIC};
+pub use bud_format_dedup::{DedupOutcome, PowChallenge, TenantDedup};
+pub use bud_format_dictionary::{TenantDictionary, DICT_MAGIC};
+pub use bud_format_economics::{
+    egress_cost, flat_holds_ceiling, flat_price, holds_egress, residual_holds_price,
+    residual_price, tape_cost_per_tb_month, tape_holds_ceiling, ArchiveTier, BudEconomics,
+    EconomicsGates, EgressZone, GlobalDedup, MerkleTrie, TAPE_USD_PER_TB_MONTH,
+};
+pub use bud_format_engine::{
+    engine_restore_container, engine_restore_full, engine_restore_raw, engine_store, EngineResult,
+    PipeStep, TransformKind, ENGINE_MAGIC,
+};
+pub use bud_format_erasure::{CauchyMds, ERASURE_MAGIC};
+pub use bud_format_exepdf::{
+    ExeKind, ExeSectionSplit, PdfStreamSplit, EXE_SPLIT_MAGIC, PDF_SPLIT_MAGIC,
+};
+pub use bud_format_fastcdc::{
+    FastCdcSplit, FASTCDC_MAGIC, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK, FCDC_MIN_CHUNK,
+};
+pub use bud_format_huffman::{HuffmanCoder, BUD_HFM_MAGIC};
+pub use bud_format_integration::{
+    BudErasure, BudLivingThreshold, BudStorageAssignment, IntegrationGates,
+};
+pub use bud_format_jpegre::{JpegAnalysis, JPEG_RE_MAGIC};
+pub use bud_format_logfield::{
+    parse_nginx_line, LogFieldColumnar, NginxField, LOGFIELD_MAGIC, NGINX_FIELDS,
+};
+pub use bud_format_lrc::{LrcRecord, LrcScheme, LRC_MAGIC};
+pub use bud_format_markdown::{MarkdownSplit, MdSection, MD_MAGIC};
+pub use bud_format_model::{FloatKind, ModelFloatSplit, MODEL_MAGIC};
+pub use bud_format_multifile::{MultifileChunk, TenantMultifileStore, DEFAULT_CHUNK, MULTI_MAGIC};
+pub use bud_format_optical::{LogTemplate, LogTemplateMiner, OpticalGates, OpticalPrompt};
+pub use bud_format_pact::{PactMode, PactRecord, PACT_MAGIC};
+pub use bud_format_pipe::{
+    chunk_count, detect, restore, restore_json_columnar, store, store_compressed,
+    store_compressed_with_min, store_json_columnar, store_with_min, store_zstd,
+    store_zstd_with_min, DEFAULT_MIN_CHUNK,
+};
+pub use bud_format_por::{PorChallenge, PorKey, PorResponse, PorTag};
+pub use bud_format_production::{BudProductionRecord, ProductionGates};
+pub use bud_format_ratioconsensus::{
+    class_of, ContentClass, RatioCandidateAgent, RatioConsensus, RATIO_CONS_MAGIC,
+};
+pub use bud_format_real::{
+    zstd_compress, zstd_decompress_safe, RealBench, RealCompressor, ZSTD_MAX_DECOMPRESSED,
+};
+pub use bud_format_regeneration::{
+    RegenerationChallenge, RegenerationOutcome, RegenerationRecord, REGEN_MAGIC,
+};
+pub use bud_format_registry::{
+    DictLoopDetector, MimeRegistry, RatioProof, RegistryGates, SecondPreimageResistantMerkle,
+};
+pub use bud_format_revolutionary::{
+    ColumnarTransform, CompactTable, Evidence, Fact, HybridSearch, RevolutionaryGates,
+    SecretRedactor, SqliteChunk,
+};
+pub use bud_format_secure_db::{SecureDbGates, SecureEmbeddedDb};
+pub use bud_format_segment::{SegmentLedger, SEGMENT_MAGIC};
+pub use bud_format_shamir::{ShamirShare, SHAMIR_MAGIC};
 pub use bud_format_social::{SocialBridgeRecord, SocialPlatform};
-pub use bud_format_dedup::{TenantDedup, DedupOutcome, PowChallenge};
-pub mod bud_format_wire;
+pub use bud_format_timeseries::{TimeSeriesColumnar, TS_MAGIC};
+pub use bud_format_transpile::{AstTransform, BashTranspile, TranspileGates};
+pub use bud_format_ultra::{CodeTarif, DiffusionPrompt, Log4Layer, UltraGates};
+pub use bud_format_video::{
+    classify_content, BudVideoRecord, VideoCodec, VideoContentClass, VideoGates, VideoSuggestion,
+};
+pub use bud_format_videopipe::{run_video_pipeline, VideoPipelineResult, VIDEO_PIPE_MAGIC};
+pub use bud_format_view::{CompiledView, KeySchema, VIEW_MAGIC};
+pub use churn::{ChurnFixture, ChurnResult, QuadRing};
+pub use cli::BudCli;
+pub use fidelity::{ContentId, FidelityCore, FidelityError, RenderFormat};
+pub use gates::{GateResult, GateSuite};
+pub use price::{Expansion, PriceError, PriceModel};
+pub use provider::{Provider, ProviderClass, ProviderError};
+pub use quantum::{QuantumError, QuantumSuite};
+pub use quantum_chain::{
+    DualWallet, FiatShamirTranscript, HybridFinalityVote, HybridTx, MobileSelfProvider, PqVrf,
+    QuantumChainGates, Sha3Hasher, MAX_BLOCK_BYTES, PQ_SCHEME_ID_FINAL,
+};
+pub use ratio::{FormatClass, Pipe, RatioResult};
 #[cfg(feature = "bud3")]
 pub mod bud_format_optical_transfer;
-#[cfg(feature = "bud3")]
-pub mod bud_format_tarif;
 #[cfg(feature = "bud3")]
 pub mod bud_format_qrmatrix;
 #[cfg(feature = "bud3")]
 pub mod bud_format_sartname;
+#[cfg(feature = "bud3")]
+pub mod bud_format_tarif;
+pub mod bud_format_wire;
 // `bud_format_sertlesme` ve `bud_format_qrvideo` 3.0 modülleridir ama
 // kapısızdı: yukarıda iki `#[cfg(feature = "bud3")]` üst üste yazılmıştı
 // (öznitelik tekrarı derleyici için tek kapıya eşdeğerdir, fazladan olanı
 // sessizce yutulur) ve bu ikisi kapının DIŞINDA kalmıştı. Sonuç: default
 // (bud2) derlemede QR-video yüzeyi de geliyordu, yani 3.0 kapalıyken 3.0 kodu
 // derleniyordu. Tekrarlar kaldırıldı, iki modül ait olduğu kapıya alındı.
-#[cfg(feature = "bud3")]
-pub mod bud_format_sertlesme;
+#[cfg(all(test, feature = "bud3"))]
+pub mod bud3_live_test;
+pub mod bud_format_edition;
 #[cfg(feature = "bud3")]
 pub mod bud_format_qrvideo;
 #[cfg(feature = "bud3")]
-pub mod bud_format_ux;
-pub mod bud_format_edition;
-#[cfg(feature = "bud3")]
 pub mod bud_format_r3fix;
-#[cfg(all(test, feature = "bud3"))]
-pub mod bud3_live_test;
+#[cfg(feature = "bud3")]
+pub mod bud_format_sertlesme;
+#[cfg(feature = "bud3")]
+pub mod bud_format_ux;

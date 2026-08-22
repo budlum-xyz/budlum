@@ -5,8 +5,8 @@
 
 #![forbid(unsafe_code)]
 
-use sha3::{Digest, Sha3_256};
 use ed25519_dalek::Signer as Ed25519Signer;
+use sha3::{Digest, Sha3_256};
 
 pub const MAX_BLOCK_BYTES: usize = 128 * 1024;
 pub const MAX_TX_PER_BLOCK_ML_DSA_87: usize = 27; // 4627B sig
@@ -56,23 +56,40 @@ impl PqVrf {
         let sig = sk.sign(&m);
         (PqVrfOutput(out), PqVrfProof(sig.to_bytes().to_vec()))
     }
-    pub fn verify(pk: &[u8], slot: u64, prev: &[u8; 32], output: &PqVrfOutput, proof: &PqVrfProof) -> bool {
+    pub fn verify(
+        pk: &[u8],
+        slot: u64,
+        prev: &[u8; 32],
+        output: &PqVrfOutput,
+        proof: &PqVrfProof,
+    ) -> bool {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        let pk32: [u8; 32] = match pk.try_into() { Ok(v) => v, Err(_) => return false };
-        let vk = match VerifyingKey::from_bytes(&pk32) { Ok(v) => v, Err(_) => return false };
+        let pk32: [u8; 32] = match pk.try_into() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let vk = match VerifyingKey::from_bytes(&pk32) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
         // output yeniden hesaplanmali
         let mut h = Sha3_256::new();
         h.update(vk.as_bytes());
         h.update(slot.to_le_bytes());
         h.update(prev);
         let recomputed: [u8; 32] = h.finalize().into();
-        if recomputed != output.0 { return false; }
+        if recomputed != output.0 {
+            return false;
+        }
         // imza dogrulanmali
         let mut m = Vec::with_capacity(8 + 32 + 32);
         m.extend_from_slice(&slot.to_le_bytes());
         m.extend_from_slice(prev);
         m.extend_from_slice(&output.0);
-        let sig = match Signature::from_slice(&proof.0) { Ok(s) => s, Err(_) => return false };
+        let sig = match Signature::from_slice(&proof.0) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
         vk.verify(&m, &sig).is_ok()
     }
     pub fn is_below_threshold(output: &PqVrfOutput, threshold: u64) -> bool {
@@ -98,10 +115,21 @@ impl HybridTx {
     pub fn verify(&self, msg: &[u8], ed_pk: &[u8], pq_pk: &[u8]) -> bool {
         use ed25519_dalek::{Signature as EdSig, Verifier as EdVerifier, VerifyingKey as EdVk};
         // 1) Ed25519 imzasini dogrula
-        let pk32: [u8; 32] = match ed_pk.try_into() { Ok(v) => v, Err(_) => return false };
-        let vk = match EdVk::from_bytes(&pk32) { Ok(v) => v, Err(_) => return false };
-        let ed_sig = match EdSig::from_slice(&self.ed_sig) { Ok(s) => s, Err(_) => return false };
-        if vk.verify(msg, &ed_sig).is_err() { return false; }
+        let pk32: [u8; 32] = match ed_pk.try_into() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let vk = match EdVk::from_bytes(&pk32) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let ed_sig = match EdSig::from_slice(&self.ed_sig) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if vk.verify(msg, &ed_sig).is_err() {
+            return false;
+        }
         // 2) ML-DSA-87 imzasini dogrula (FIPS 204)
         let enc_vk = match ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pq_pk) {
             Ok(e) => e,
@@ -115,7 +143,9 @@ impl HybridTx {
         use ml_dsa::signature::Verifier as PqVerifier;
         vk87.verify(msg, &sig87).is_ok()
     }
-    pub fn size_bytes(&self) -> usize { 64 + self.pq_sig.len() + 32 }
+    pub fn size_bytes(&self) -> usize {
+        64 + self.pq_sig.len() + 32
+    }
 }
 
 /// Hybrid Finality Vote - same_set quorum
@@ -126,7 +156,7 @@ pub struct HybridFinalityVote {
 }
 impl HybridFinalityVote {
     pub fn verify_quorum(bls_ok: bool, pq_ok: bool, count: usize, n: usize) -> bool {
-        let quorum = (n*2).div_ceil(3);
+        let quorum = (n * 2).div_ceil(3);
         bls_ok && pq_ok && count >= quorum
     }
 }
@@ -145,7 +175,10 @@ impl DualWallet {
         h.update(b"BUD_PQ_V1");
         h.update(seed);
         let pq: [u8; 32] = h.finalize().into();
-        Self { ed_seed: ed, pq_seed: pq }
+        Self {
+            ed_seed: ed,
+            pq_seed: pq,
+        }
     }
     pub fn address(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
@@ -153,7 +186,9 @@ impl DualWallet {
         h.update(self.pq_seed);
         h.finalize().into()
     }
-    pub fn has_dual(&self) -> bool { true }
+    pub fn has_dual(&self) -> bool {
+        true
+    }
 }
 
 /// Fiat-Shamir absorption - ci_gate
@@ -168,11 +203,22 @@ impl Default for FiatShamirTranscript {
 }
 
 impl FiatShamirTranscript {
-    pub fn new() -> Self { Self { observed: vec![] } }
-    pub fn observe(&mut self, label: &str) { self.observed.push(label.to_string()); }
+    pub fn new() -> Self {
+        Self { observed: vec![] }
+    }
+    pub fn observe(&mut self, label: &str) {
+        self.observed.push(label.to_string());
+    }
     pub fn is_complete(&self) -> bool {
-        let required = ["public_inputs", "fri_config", "polynomial_degree", "proof_data"];
-        required.iter().all(|r| self.observed.iter().any(|o| o==r))
+        let required = [
+            "public_inputs",
+            "fri_config",
+            "polynomial_degree",
+            "proof_data",
+        ];
+        required
+            .iter()
+            .all(|r| self.observed.iter().any(|o| o == r))
     }
 }
 
@@ -183,38 +229,66 @@ pub struct MobileSelfProvider {
     pub last_seen_secs: u64,
 }
 impl MobileSelfProvider {
-    pub fn is_online(&self, now: u64) -> bool { now.saturating_sub(self.last_seen_secs) < 600 }
-    pub fn should_displace(&self, now: u64) -> bool { !self.is_online(now) }
+    pub fn is_online(&self, now: u64) -> bool {
+        now.saturating_sub(self.last_seen_secs) < 600
+    }
+    pub fn should_displace(&self, now: u64) -> bool {
+        !self.is_online(now)
+    }
 }
 
 /// Snow hybrid X25519 + ML-KEM-768 - P2P
 pub struct SnowHybrid;
 impl SnowHybrid {
-    pub fn handshake_ml_kem_ok() -> bool { true }
-    pub fn is_quantum_resistant() -> bool { true }
+    pub fn handshake_ml_kem_ok() -> bool {
+        true
+    }
+    pub fn is_quantum_resistant() -> bool {
+        true
+    }
 }
 
 /// SHA3 sponge - Poseidon2 → SHA3
 pub struct Sha3Sponge;
 impl Sha3Sponge {
-    pub fn hash(data: &[u8]) -> [u8; 32] { Sha3Hasher::hash_bytes(data) }
+    pub fn hash(data: &[u8]) -> [u8; 32] {
+        Sha3Hasher::hash_bytes(data)
+    }
 }
 
 /// Gates KQ-*
 pub struct QuantumChainGates;
 impl QuantumChainGates {
-    pub fn kq_hash(is_sha3: bool) -> bool { is_sha3 }
-    pub fn kq_tx(ed_ok: bool, pq_ok: bool) -> bool { ed_ok && pq_ok }
-    pub fn kq_vrf(output_ok: bool, proof_ok: bool) -> bool { output_ok && proof_ok }
+    pub fn kq_hash(is_sha3: bool) -> bool {
+        is_sha3
+    }
+    pub fn kq_tx(ed_ok: bool, pq_ok: bool) -> bool {
+        ed_ok && pq_ok
+    }
+    pub fn kq_vrf(output_ok: bool, proof_ok: bool) -> bool {
+        output_ok && proof_ok
+    }
     pub fn kq_final(bls_ok: bool, pq_ok: bool, count: usize, n: usize) -> bool {
         HybridFinalityVote::verify_quorum(bls_ok, pq_ok, count, n)
     }
-    pub fn kq_wallet(has_dual: bool) -> bool { has_dual }
-    pub fn kq_p2p(ml_kem_ok: bool) -> bool { ml_kem_ok }
-    pub fn kq_stark(transcript_ok: bool) -> bool { transcript_ok }
-    pub fn kq_feat(scheme: &str) -> bool { scheme==PQ_SCHEME_ID_FINAL }
-    pub fn kq_block(size: usize) -> bool { size <= MAX_BLOCK_BYTES }
-    pub fn kq_media_device_only(cost_zero: bool) -> bool { cost_zero }
+    pub fn kq_wallet(has_dual: bool) -> bool {
+        has_dual
+    }
+    pub fn kq_p2p(ml_kem_ok: bool) -> bool {
+        ml_kem_ok
+    }
+    pub fn kq_stark(transcript_ok: bool) -> bool {
+        transcript_ok
+    }
+    pub fn kq_feat(scheme: &str) -> bool {
+        scheme == PQ_SCHEME_ID_FINAL
+    }
+    pub fn kq_block(size: usize) -> bool {
+        size <= MAX_BLOCK_BYTES
+    }
+    pub fn kq_media_device_only(cost_zero: bool) -> bool {
+        cost_zero
+    }
 }
 
 #[cfg(test)]
@@ -231,7 +305,9 @@ mod tests {
         let sk = [1u8; 32];
         let prev = [2u8; 32];
         let (out, proof) = PqVrf::prove(&sk, 10, &prev);
-        let pk = ed25519_dalek::SigningKey::from_bytes(&sk).verifying_key().to_bytes();
+        let pk = ed25519_dalek::SigningKey::from_bytes(&sk)
+            .verifying_key()
+            .to_bytes();
         // dogru girdi ile dogrulanir
         assert!(PqVrf::verify(&pk, 10, &prev, &out, &proof));
         assert!(PqVrf::is_below_threshold(&out, u64::MAX));
@@ -251,8 +327,8 @@ mod tests {
     fn hybrid_tx_128kb() {
         use ml_dsa::signature::Signer as PqSigner;
         use ml_dsa::Generate as PqGenerate;
-        use rand_core::OsRng;          // ed25519-dalek: rand_core 0.6
-        // gercek anahtarlar + gercek imzalar (ed25519 + ML-DSA-87)
+        use rand_core::OsRng; // ed25519-dalek: rand_core 0.6
+                              // gercek anahtarlar + gercek imzalar (ed25519 + ML-DSA-87)
         let ed_sk = ed25519_dalek::SigningKey::generate(&mut OsRng);
         let ed_pk = ed_sk.verifying_key();
         let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate(); // getrandom ic (FIPS 204)
@@ -261,7 +337,11 @@ mod tests {
         let ed_sig: [u8; 64] = ed_sk.sign(msg).to_bytes();
         let pq_sig: Vec<u8> = pq_sk.sign(msg).encode().into_iter().collect();
         let pq_pk_bytes: Vec<u8> = pq_pk.encode().into_iter().collect();
-        let tx = HybridTx { ed_sig, pq_sig: pq_sig.clone(), pq_pub_hash: [0u8; 32] };
+        let tx = HybridTx {
+            ed_sig,
+            pq_sig: pq_sig.clone(),
+            pq_pub_hash: [0u8; 32],
+        };
         // dogru girdi -> GECER
         assert!(tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes));
         // degistirilmis mesaj -> RED (imza gercekten kontrol ediliyor)
@@ -274,16 +354,30 @@ mod tests {
         let mut bad_pq = pq_sig.clone();
         let mid = bad_pq.len() / 2;
         bad_pq[mid] ^= 0x40;
-        let bad_tx = HybridTx { ed_sig, pq_sig: bad_pq, pq_pub_hash: [0u8; 32] };
-        assert!(!bad_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes), "kurcalanmış PQ imzası RED");
+        let bad_tx = HybridTx {
+            ed_sig,
+            pq_sig: bad_pq,
+            pq_pub_hash: [0u8; 32],
+        };
+        assert!(
+            !bad_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
+            "kurcalanmış PQ imzası RED"
+        );
         // kurcalanmış ed_sig baytı → RED
         let mut bad_ed = ed_sig;
         bad_ed[0] ^= 0x01;
-        let bad_ed_tx = HybridTx { ed_sig: bad_ed, pq_sig: pq_sig.clone(), pq_pub_hash: [0u8; 32] };
-        assert!(!bad_ed_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes), "kurcalanmış Ed imzası RED");
+        let bad_ed_tx = HybridTx {
+            ed_sig: bad_ed,
+            pq_sig: pq_sig.clone(),
+            pq_pub_hash: [0u8; 32],
+        };
+        assert!(
+            !bad_ed_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
+            "kurcalanmış Ed imzası RED"
+        );
         // boyut: 64 + 4627 + 32 = 4723; 27 tx = 127,521 B <= 128 KiB
         assert!(tx.size_bytes() < MAX_BLOCK_BYTES);
-        let block_ok = QuantumChainGates::kq_block(tx.size_bytes()*27);
+        let block_ok = QuantumChainGates::kq_block(tx.size_bytes() * 27);
         assert!(block_ok);
     }
     #[test]
@@ -301,10 +395,16 @@ mod tests {
     }
     #[test]
     fn device_10dk() {
-        let p = MobileSelfProvider { device_id: "d1".into(), last_seen_secs: 0 };
+        let p = MobileSelfProvider {
+            device_id: "d1".into(),
+            last_seen_secs: 0,
+        };
         assert!(!p.is_online(601));
         assert!(p.should_displace(601));
-        let p2 = MobileSelfProvider { device_id: "d1".into(), last_seen_secs: 1000 };
+        let p2 = MobileSelfProvider {
+            device_id: "d1".into(),
+            last_seen_secs: 1000,
+        };
         assert!(p2.is_online(1100));
     }
     #[test]
@@ -323,8 +423,8 @@ mod tests {
         assert!(QuantumChainGates::kq_tx(true, true));
         assert!(QuantumChainGates::kq_feat("ml-dsa-87"));
         assert!(!QuantumChainGates::kq_feat("dilithium5"));
-        assert!(QuantumChainGates::kq_block(128*1024));
-        assert!(!QuantumChainGates::kq_block(128*1024+1));
+        assert!(QuantumChainGates::kq_block(128 * 1024));
+        assert!(!QuantumChainGates::kq_block(128 * 1024 + 1));
     }
     #[test]
     fn media_device_only_holds() {

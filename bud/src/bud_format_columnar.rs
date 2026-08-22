@@ -82,7 +82,7 @@ impl ColType {
 #[derive(Debug, Clone)]
 pub struct JsonColumnar {
     pub mode: ColumnarMode,
-    pub keys: Vec<String>,      // anahtar sırası (Exact: orijinal; OrderFree: sözlük)
+    pub keys: Vec<String>, // anahtar sırası (Exact: orijinal; OrderFree: sözlük)
     pub col_types: Vec<ColType>, // her sütunun tipi
     pub columns: Vec<Vec<Value>>, // her anahtar için değerler (kayıt sırasında, tipli)
 }
@@ -184,7 +184,12 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             columns[ci].push(v.clone());
         }
     }
-    Some(JsonColumnar { mode, keys, col_types, columns })
+    Some(JsonColumnar {
+        mode,
+        keys,
+        col_types,
+        columns,
+    })
 }
 
 /// Sayısal-önce deterministik değer karşılaştırması (OrderFree sıralaması için).
@@ -376,7 +381,12 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
     if computed != bytes[pos..pos + 32] {
         return None;
     }
-    Some(JsonColumnar { mode, keys, col_types, columns })
+    Some(JsonColumnar {
+        mode,
+        keys,
+        col_types,
+        columns,
+    })
 }
 
 /// Tipli değer parse (panik'siz; bomba tavanlı).
@@ -423,7 +433,9 @@ fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
             if sl as u64 > MAX_VALUE_BYTES || bytes.len() < *pos + sl {
                 return None;
             }
-            let s = std::str::from_utf8(&bytes[*pos..*pos + sl]).ok()?.to_string();
+            let s = std::str::from_utf8(&bytes[*pos..*pos + sl])
+                .ok()?
+                .to_string();
             *pos += sl;
             Some(Value::String(s))
         }
@@ -511,9 +523,16 @@ mod tests {
         let d = br#"[{"v":1},{"v":-2}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
         // ilk değer u64 (1) → U64; ama ikinci -2 i64 → kolon Str'e düşer
-        assert_eq!(col.col_types[0], ColType::Str, "karışık sayı tipi Str'e düşer");
+        assert_eq!(
+            col.col_types[0],
+            ColType::Str,
+            "karışık sayı tipi Str'e düşer"
+        );
         let back = columnar_decode(&col).unwrap();
-        assert_eq!(back, d, "kayıpsız (stringleştirilmiş değer JSON'a geri döner)");
+        assert_eq!(
+            back, d,
+            "kayıpsız (stringleştirilmiş değer JSON'a geri döner)"
+        );
     }
 
     #[test]

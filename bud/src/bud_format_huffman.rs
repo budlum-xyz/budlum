@@ -351,10 +351,15 @@ mod tests {
             let n = (rng.next() % 5000) as usize;
             let mut data = vec![0u8; n];
             for b in &mut data {
-                *b = if round % 3 == 0 { rng.byte() % 8 } else { rng.byte() };
+                *b = if round % 3 == 0 {
+                    rng.byte() % 8
+                } else {
+                    rng.byte()
+                };
             }
             let c = HuffmanCoder::compress(&data);
-            let d = HuffmanCoder::decompress(&c).unwrap_or_else(|| panic!("round {round} decompress"));
+            let d =
+                HuffmanCoder::decompress(&c).unwrap_or_else(|| panic!("round {round} decompress"));
             assert_eq!(d, data, "round {round} kayıpsız");
         }
     }
@@ -392,7 +397,11 @@ mod tests {
         for _ in 0..100 {
             assert!(HuffmanCoder::decompress(&bomb).is_none());
         }
-        assert!(start.elapsed().as_secs() < 5, "alloc-bomb yok: {:?}", start.elapsed());
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "alloc-bomb yok: {:?}",
+            start.elapsed()
+        );
         // geçersiz tablo (Kraft bozuk): 256 sembol, hepsi uzunluk 32
         let mut b2 = BUD_HFM_MAGIC.to_vec();
         b2.push(BUD_HFM_VERSION);
@@ -402,14 +411,20 @@ mod tests {
             b2.push(s as u8);
             b2.push(32);
         }
-        assert!(HuffmanCoder::decompress(&b2).is_none(), "Kraft bozuk tablo red");
+        assert!(
+            HuffmanCoder::decompress(&b2).is_none(),
+            "Kraft bozuk tablo red"
+        );
         // yinelenen sembol → bozuk tablo red
         let mut b3 = BUD_HFM_MAGIC.to_vec();
         b3.push(BUD_HFM_VERSION);
         b3.extend_from_slice(&8u64.to_le_bytes());
         b3.extend_from_slice(&2u16.to_le_bytes());
         b3.extend_from_slice(&[65, 3, 65, 3]); // aynı sembol iki kez
-        assert!(HuffmanCoder::decompress(&b3).is_none(), "yinelenen sembol red");
+        assert!(
+            HuffmanCoder::decompress(&b3).is_none(),
+            "yinelenen sembol red"
+        );
         // çöp gövde (panik yok)
         let mut b4 = BUD_HFM_MAGIC.to_vec();
         b4.push(BUD_HFM_VERSION);

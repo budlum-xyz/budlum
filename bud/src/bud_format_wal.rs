@@ -138,7 +138,9 @@ mod tests {
 
     #[test]
     fn wal_kayipsiz_roundtrip() {
-        let recs: Vec<Vec<u8>> = (0..100u32).map(|i| format!("kayıt-{i}: ağırlık {} bayt", i * 7).into_bytes()).collect();
+        let recs: Vec<Vec<u8>> = (0..100u32)
+            .map(|i| format!("kayıt-{i}: ağırlık {} bayt", i * 7).into_bytes())
+            .collect();
         let refs: Vec<&[u8]> = recs.iter().map(|r| r.as_slice()).collect();
         let t = wal_transform(&refs).unwrap();
         let back = wal_restore(&t).unwrap();

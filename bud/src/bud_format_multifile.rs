@@ -37,7 +37,7 @@ pub struct MultifileChunk {
 /// Tenant çoklu dosya deposu: parça havuzu + dosya → parça indeksi + delta desteği.
 #[derive(Debug, Clone, Default)]
 pub struct TenantMultifileStore {
-    pub chunks: Vec<MultifileChunk>,     // benzersiz parçalar (content-addressed)
+    pub chunks: Vec<MultifileChunk>, // benzersiz parçalar (content-addressed)
     pub file_chunks: Vec<Vec<[u8; 32]>>, // her dosyanın parça cid listesi
     pub saved_bytes: u64,
 }
@@ -61,7 +61,10 @@ impl TenantMultifileStore {
             if let Some(existing) = self.chunks.iter().find(|ch| ch.content_id == cid) {
                 saved += existing.data.len() as u64;
             } else {
-                self.chunks.push(MultifileChunk { content_id: cid, data: c.to_vec() });
+                self.chunks.push(MultifileChunk {
+                    content_id: cid,
+                    data: c.to_vec(),
+                });
                 new_chunks += 1;
             }
             cids.push(cid);
@@ -192,7 +195,10 @@ impl TenantMultifileStore {
             }
             let data = bytes[pos..pos + len].to_vec();
             pos += len;
-            chunks.push(MultifileChunk { content_id: content_id(&data), data });
+            chunks.push(MultifileChunk {
+                content_id: content_id(&data),
+                data,
+            });
         }
         if bytes.len() < pos + 4 {
             return None;
@@ -224,7 +230,11 @@ impl TenantMultifileStore {
         if pos != payload_len {
             return None;
         }
-        Some(TenantMultifileStore { chunks, file_chunks, saved_bytes: 0 })
+        Some(TenantMultifileStore {
+            chunks,
+            file_chunks,
+            saved_bytes: 0,
+        })
     }
 }
 
@@ -267,10 +277,21 @@ mod tests {
         let delta = store.add_delta(&base, &next, DEFAULT_CHUNK);
         // delta = 1 bayt işaret/blok + değişen bloklar
         let blocks = base.len().div_ceil(DEFAULT_CHUNK);
-        assert!(delta.len() < base.len() / 50, "delta çok küçük: {} vs base {}", delta.len(), base.len());
-        assert_eq!(delta.len(), blocks + 5 * DEFAULT_CHUNK, "5 değişen blok tam");
+        assert!(
+            delta.len() < base.len() / 50,
+            "delta çok küçük: {} vs base {}",
+            delta.len(),
+            base.len()
+        );
+        assert_eq!(
+            delta.len(),
+            blocks + 5 * DEFAULT_CHUNK,
+            "5 değişen blok tam"
+        );
         // apply: base + delta = next (kayıpsız)
-        let restored = store.apply_delta(&base, &delta, DEFAULT_CHUNK).expect("apply");
+        let restored = store
+            .apply_delta(&base, &delta, DEFAULT_CHUNK)
+            .expect("apply");
         assert_eq!(restored, next, "delta kayıpsız");
     }
 
@@ -282,13 +303,19 @@ mod tests {
         let blob = store.to_blob();
         let back = TenantMultifileStore::from_blob(&blob).expect("blob");
         assert_eq!(back.restore(0).unwrap(), b"dosya 1 icerigi ".repeat(10));
-        assert_eq!(back.restore(1).unwrap(), b"dosya 2 icerigi farkli".repeat(10));
+        assert_eq!(
+            back.restore(1).unwrap(),
+            b"dosya 2 icerigi farkli".repeat(10)
+        );
         // kurcalama red
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(TenantMultifileStore::from_blob(&bad).is_none());
         // bozuk delta
-        assert!(store.apply_delta(b"abc", &[0x99], 4).is_none(), "bozuk bayrak RED");
+        assert!(
+            store.apply_delta(b"abc", &[0x99], 4).is_none(),
+            "bozuk bayrak RED"
+        );
     }
 
     #[test]
@@ -300,13 +327,12 @@ mod tests {
     }
 }
 
-    #[test]
-    fn strix_oom_chunk_count_reddedilir() {
-        // kullanici kontrollu devasa chunk_count → None (OOM yok)
-        let mut bytes = vec![0u8; 64];
-        bytes[0..8].copy_from_slice(b"\xB5MFLE\0\0\0");
-        bytes[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
-        let _ = crate::bud_format_multifile::TenantMultifileStore::from_blob(&bytes);
-        // panik yok, None ya da Err döner
-    }
-
+#[test]
+fn strix_oom_chunk_count_reddedilir() {
+    // kullanici kontrollu devasa chunk_count → None (OOM yok)
+    let mut bytes = vec![0u8; 64];
+    bytes[0..8].copy_from_slice(b"\xB5MFLE\0\0\0");
+    bytes[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+    let _ = crate::bud_format_multifile::TenantMultifileStore::from_blob(&bytes);
+    // panik yok, None ya da Err döner
+}

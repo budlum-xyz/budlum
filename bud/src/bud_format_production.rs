@@ -21,12 +21,12 @@ use sha3::{Digest, Sha3_256};
 #[derive(Debug, Clone)]
 pub struct BudProductionRecord {
     pub format_codec: FormatCodec,
-    pub pipe: &'static str,     // "structural+zstd19", "json-columnar-exact", ...
+    pub pipe: &'static str, // "structural+zstd19", "json-columnar-exact", ...
     pub original_len: u64,
     pub stored_len: u64,
     pub payload_root: [u8; 32], // content_id(original) - K3 çapası
     pub ts_unix: u64,
-    pub claimed_ratio: f64,     // üretim sırasında ÖLÇÜLEN oran (uydurma değil)
+    pub claimed_ratio: f64, // üretim sırasında ÖLÇÜLEN oran (uydurma değil)
 }
 
 impl BudProductionRecord {
@@ -110,14 +110,18 @@ impl BudProductionRecord {
             return None;
         }
         let mut pos = 0usize;
-        let format_codec = crate::bud_format_container::FormatCodec::from_u16(u16::from_le_bytes(bytes[0..2].try_into().ok()?));
+        let format_codec = crate::bud_format_container::FormatCodec::from_u16(u16::from_le_bytes(
+            bytes[0..2].try_into().ok()?,
+        ));
         pos += 2;
         let pipe_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
         if bytes.len() < pos + pipe_len {
             return None;
         }
-        let pipe = std::str::from_utf8(&bytes[pos..pos + pipe_len]).ok()?.to_string();
+        let pipe = std::str::from_utf8(&bytes[pos..pos + pipe_len])
+            .ok()?
+            .to_string();
         pos += pipe_len;
         if bytes.len() < pos + 8 + 8 + 32 + 8 + 8 + 32 {
             return None;
@@ -136,14 +140,22 @@ impl BudProductionRecord {
         if bytes.len() != pos + 32 {
             return None;
         }
-        let rec = BudProductionRecord { format_codec, pipe: Box::leak(pipe.into_boxed_str()), original_len, stored_len, payload_root, ts_unix, claimed_ratio };
+        let rec = BudProductionRecord {
+            format_codec,
+            pipe: Box::leak(pipe.into_boxed_str()),
+            original_len,
+            stored_len,
+            payload_root,
+            ts_unix,
+            claimed_ratio,
+        };
         if bytes[pos..] != rec.record_hash() {
             return None;
         }
         Some(rec)
     }
 
-pub fn plausible_against(&self, measured: f64, max_multiple: f64) -> bool {
+    pub fn plausible_against(&self, measured: f64, max_multiple: f64) -> bool {
         if !measured.is_finite() || measured <= 0.0 {
             return false;
         }
@@ -178,10 +190,12 @@ mod tests {
         assert!((rec.claimed_ratio - data.len() as f64 / 120.0).abs() < 0.01);
         assert_ne!(rec.record_hash(), [0u8; 32], "hash boş değil");
         // aynı alanlar → aynı hash (deterministik)
-        let rec2 = BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 120, 42);
+        let rec2 =
+            BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 120, 42);
         assert_eq!(rec.record_hash(), rec2.record_hash());
         // farklı boyut → farklı hash
-        let rec3 = BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 121, 42);
+        let rec3 =
+            BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 121, 42);
         assert_ne!(rec.record_hash(), rec3.record_hash());
     }
 
@@ -191,10 +205,16 @@ mod tests {
         let data = b"x".repeat(1000);
         let rec = BudProductionRecord::new(FormatCodec::Json, "structural+zstd19", &data, 58, 1);
         // 1000/58 = 17.24x - ölçülen JSON 7.83x'in 1.5 katını aşıyor → RED
-        assert!(ProductionGates::k_bud_production(&rec, 7.83).is_err(), "17x iddiası RED");
+        assert!(
+            ProductionGates::k_bud_production(&rec, 7.83).is_err(),
+            "17x iddiası RED"
+        );
         // ölçülenle uyumlu 8.0x → OK
         let rec2 = BudProductionRecord::new(FormatCodec::Json, "structural+zstd19", &data, 125, 1);
-        assert!(ProductionGates::k_bud_production(&rec2, 7.83).is_ok(), "8.0x iddiası OK");
+        assert!(
+            ProductionGates::k_bud_production(&rec2, 7.83).is_ok(),
+            "8.0x iddiası OK"
+        );
     }
 
     #[test]

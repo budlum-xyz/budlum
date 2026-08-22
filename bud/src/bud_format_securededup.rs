@@ -63,7 +63,6 @@ pub fn secure_dedup_candidate(data: &[u8], pow_bits: u32) -> Option<([u8; 32], b
             found = true;
             break;
         }
-
     }
     Some((cid, found))
 }
@@ -74,7 +73,8 @@ pub fn same_content(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    convergent_key(a) == convergent_key(b) && cipher_content_id(a, &convergent_key(a)) == cipher_content_id(b, &convergent_key(b))
+    convergent_key(a) == convergent_key(b)
+        && cipher_content_id(a, &convergent_key(a)) == cipher_content_id(b, &convergent_key(b))
 }
 
 pub fn sd_digest(cid: &[u8; 32]) -> [u8; 32] {

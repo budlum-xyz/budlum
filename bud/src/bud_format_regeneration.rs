@@ -26,8 +26,8 @@ pub const REGEN_VERSION: u8 = 1;
 /// Sınav sonucu (İ2): üretim mutabakatı geçti mi + maliyet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegenerationOutcome {
-    Verified,     // üretim commitment ile eşleşti → mutabakat
-    Mismatch,     // üretim commitment ile eşleşmedi → RED + itibar düşer
+    Verified,      // üretim commitment ile eşleşti → mutabakat
+    Mismatch,      // üretim commitment ile eşleşmedi → RED + itibar düşer
     NotProducible, // üretici üretilemedi (sınıf yalanı/bozuk üretici)
 }
 
@@ -54,7 +54,11 @@ impl RegenerationChallenge {
 
     /// Rezidüel bütünlük: üretilemeyen artık commitment ile eşleşiyor mu (İ6)?
     /// RecipePlusResidual modunda rezidüel de doğrulanmalı - sınıf yalanı yakalanır.
-    pub fn verify_with_residual(pact: &PactRecord, produced: &[u8], residual: &[u8]) -> RegenerationOutcome {
+    pub fn verify_with_residual(
+        pact: &PactRecord,
+        produced: &[u8],
+        residual: &[u8],
+    ) -> RegenerationOutcome {
         match pact.verify() {
             false => RegenerationOutcome::NotProducible,
             true => {
@@ -68,7 +72,12 @@ impl RegenerationChallenge {
     }
 
     /// Sınav kaydı: epoch + pact_hash + sonuç + maliyet (denetim için, zincire yazılabilir).
-    pub fn record_hash(epoch: u64, pact_hash: [u8; 32], outcome: RegenerationOutcome, cost_units: u64) -> [u8; 32] {
+    pub fn record_hash(
+        epoch: u64,
+        pact_hash: [u8; 32],
+        outcome: RegenerationOutcome,
+        cost_units: u64,
+    ) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
         h.update(epoch.to_le_bytes());
@@ -99,12 +108,27 @@ pub struct RegenerationRecord {
 }
 
 impl RegenerationRecord {
-    pub fn new(epoch: u64, pact_hash: [u8; 32], outcome: RegenerationOutcome, cost_units: u64) -> Self {
-        RegenerationRecord { epoch, pact_hash, outcome, cost_units }
+    pub fn new(
+        epoch: u64,
+        pact_hash: [u8; 32],
+        outcome: RegenerationOutcome,
+        cost_units: u64,
+    ) -> Self {
+        RegenerationRecord {
+            epoch,
+            pact_hash,
+            outcome,
+            cost_units,
+        }
     }
 
     pub fn record_hash(&self) -> [u8; 32] {
-        RegenerationChallenge::record_hash(self.epoch, self.pact_hash, self.outcome, self.cost_units)
+        RegenerationChallenge::record_hash(
+            self.epoch,
+            self.pact_hash,
+            self.outcome,
+            self.cost_units,
+        )
     }
 
     /// Deterministik blob (magic + sürüm + alanlar + digest).
@@ -142,7 +166,12 @@ impl RegenerationRecord {
         if bytes.len() != HDR + 32 {
             return None;
         }
-        let rec = RegenerationRecord { epoch, pact_hash, outcome, cost_units };
+        let rec = RegenerationRecord {
+            epoch,
+            pact_hash,
+            outcome,
+            cost_units,
+        };
         if bytes[HDR..] != rec.record_hash() {
             return None;
         }
@@ -188,7 +217,8 @@ mod tests {
         // İ6: üretici + rezidüel - üretim VE rezidüel birlikte doğrulanmalı
         let produced = b"uretilen kisim";
         let residual = b"organik artik 0x1234";
-        let pact = PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
+        let pact =
+            PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
         assert_eq!(
             RegenerationChallenge::verify_with_residual(&pact, produced, residual),
             RegenerationOutcome::Verified
@@ -210,17 +240,35 @@ mod tests {
         // kayıpsız .bud: commitment = content_id → üretim = orijinal baytlar
         let original = b"kayipsiz icerik 12345";
         let pact = PactRecord::residual_only(original, 300);
-        assert_eq!(RegenerationChallenge::verify(&pact, original), RegenerationOutcome::Verified);
-        assert_eq!(RegenerationChallenge::verify(&pact, b"farkli"), RegenerationOutcome::Mismatch);
+        assert_eq!(
+            RegenerationChallenge::verify(&pact, original),
+            RegenerationOutcome::Verified
+        );
+        assert_eq!(
+            RegenerationChallenge::verify(&pact, b"farkli"),
+            RegenerationOutcome::Mismatch
+        );
     }
 
     #[test]
     fn regeneration_beats_proof_economy() {
         // İ2 kabul: üretim maliyeti kanıt maliyetinin %1'inden az (zkVM ispatı pahalı)
-        assert!(RegenerationChallenge::regeneration_beats_proof(1, 1000), "üretim %0.1 kanıt maliyeti");
-        assert!(RegenerationChallenge::regeneration_beats_proof(50, 10_000), "%0.5");
-        assert!(!RegenerationChallenge::regeneration_beats_proof(200, 10_000), "%2 → kabul etmez");
-        assert!(!RegenerationChallenge::regeneration_beats_proof(1, 0), "proof_cost 0 → false");
+        assert!(
+            RegenerationChallenge::regeneration_beats_proof(1, 1000),
+            "üretim %0.1 kanıt maliyeti"
+        );
+        assert!(
+            RegenerationChallenge::regeneration_beats_proof(50, 10_000),
+            "%0.5"
+        );
+        assert!(
+            !RegenerationChallenge::regeneration_beats_proof(200, 10_000),
+            "%2 → kabul etmez"
+        );
+        assert!(
+            !RegenerationChallenge::regeneration_beats_proof(1, 0),
+            "proof_cost 0 → false"
+        );
     }
 
     #[test]
@@ -229,7 +277,10 @@ mod tests {
         let produced = b"x";
         let mut pact = PactRecord::pure([1u8; 32], [2u8; 32], produced, 1);
         pact.residual_len = 5; // PureProduction'da rezidüel 0 olmalı - verify RED
-        assert_eq!(RegenerationChallenge::verify(&pact, produced), RegenerationOutcome::NotProducible);
+        assert_eq!(
+            RegenerationChallenge::verify(&pact, produced),
+            RegenerationOutcome::NotProducible
+        );
     }
 
     #[test]
@@ -238,7 +289,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

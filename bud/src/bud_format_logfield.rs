@@ -27,12 +27,12 @@ pub const MAX_LINES: usize = 10_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NginxField {
     RemoteAddr,
-    TimeLocal,  // "[14/Nov/2025:20:01:23 +0300]"
+    TimeLocal, // "[14/Nov/2025:20:01:23 +0300]"
     Method,
     Path,
     Proto,
-    Status,     // u16 → binary
-    BodyBytes,  // u64 → binary
+    Status,    // u16 → binary
+    BodyBytes, // u64 → binary
 }
 
 pub const NGINX_FIELDS: [NginxField; 7] = [
@@ -93,17 +93,9 @@ pub fn parse_nginx_line(line: &[u8]) -> Option<(Vec<&[u8]>, Vec<Vec<u8>>)> {
     parts.push(status);
     parts.push(size);
     let _ = parts;
-    // sabit şablon parçaları (alanlar arası): 
+    // sabit şablon parçaları (alanlar arası):
     // "" - - "[" "]" "\"" " " "\"" " " "\n"
-    let fixed: Vec<&[u8]> = vec![
-        b" - - [",
-        b"] \"",
-        b" ",
-        b" ",
-        b"\" ",
-        b" ",
-        b"\n",
-    ];
+    let fixed: Vec<&[u8]> = vec![b" - - [", b"] \"", b" ", b" ", b"\" ", b" ", b"\n"];
     let values: Vec<Vec<u8>> = vec![
         remote.as_bytes().to_vec(),
         time.as_bytes().to_vec(),
@@ -120,8 +112,8 @@ pub fn parse_nginx_line(line: &[u8]) -> Option<(Vec<&[u8]>, Vec<Vec<u8>>)> {
 #[derive(Debug, Clone)]
 pub struct LogFieldColumnar {
     pub lines: usize,
-    pub fixed_template: Vec<u8>,      // sabit parçaların birleşimi (ilk satırdan)
-    pub columns: Vec<Vec<Vec<u8>>>,   // 7 sütun; sayısal alanlar binary
+    pub fixed_template: Vec<u8>, // sabit parçaların birleşimi (ilk satırdan)
+    pub columns: Vec<Vec<Vec<u8>>>, // 7 sütun; sayısal alanlar binary
 }
 
 impl LogFieldColumnar {
@@ -164,7 +156,11 @@ impl LogFieldColumnar {
                 *v = n.to_le_bytes().to_vec();
             }
         }
-        Some(LogFieldColumnar { lines: lines.len(), fixed_template, columns: out_cols })
+        Some(LogFieldColumnar {
+            lines: lines.len(),
+            fixed_template,
+            columns: out_cols,
+        })
     }
 
     /// Sütunlardan orijinal satırları yeniden kur (kayıpsızlık kanıtı).
@@ -181,8 +177,10 @@ impl LogFieldColumnar {
             let method = str_of(&self.columns[2][r])?;
             let path = str_of(&self.columns[3][r])?;
             let proto = str_of(&self.columns[4][r])?;
-            let status = u16::from_le_bytes(self.columns[5][r].as_slice().try_into().ok()?).to_string();
-            let size = u64::from_le_bytes(self.columns[6][r].as_slice().try_into().ok()?).to_string();
+            let status =
+                u16::from_le_bytes(self.columns[5][r].as_slice().try_into().ok()?).to_string();
+            let size =
+                u64::from_le_bytes(self.columns[6][r].as_slice().try_into().ok()?).to_string();
             // şablondan yeniden kur: "remote - - [time] \"method path proto\" status size\n"
             out.extend_from_slice(remote.as_bytes());
             out.extend_from_slice(b" - - [");
@@ -265,7 +263,11 @@ impl LogFieldColumnar {
         if pos != payload_len {
             return None;
         }
-        Some(LogFieldColumnar { lines, fixed_template, columns })
+        Some(LogFieldColumnar {
+            lines,
+            fixed_template,
+            columns,
+        })
     }
 }
 
@@ -310,7 +312,8 @@ mod tests {
 
     #[test]
     fn parse_nginx_line_works() {
-        let line = b"127.0.0.1 - - [14/Nov/2025:20:01:23 +0300] \"GET /index.html HTTP/1.1\" 200 1024\n";
+        let line =
+            b"127.0.0.1 - - [14/Nov/2025:20:01:23 +0300] \"GET /index.html HTTP/1.1\" 200 1024\n";
         let (fixed, values) = parse_nginx_line(line).expect("nginx satırı ayrışır");
         assert_eq!(fixed.len(), 7);
         assert_eq!(values[0], b"127.0.0.1");
@@ -357,7 +360,6 @@ mod tests {
         assert!(LogFieldColumnar::encode(b"").is_none());
     }
 
-
     #[test]
     fn field_aware_ratio_beats_plain_zstd() {
         // ÖLÇÜM: genel LOG zstd19 6.17x; alan-tanımlı + binary sütunlar + zstd
@@ -382,7 +384,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

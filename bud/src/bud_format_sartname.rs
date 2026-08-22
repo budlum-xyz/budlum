@@ -107,8 +107,8 @@ pub fn k13_tavan_icinde_kalanlar(tavan: f64) -> Vec<(&'static str, f64, bool)> {
 /// Üç kanal birbirinden AYRIDIR; biri sıfırlanınca öteki devralmaz.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UcSayacK14b {
-    pub depocu_kira_usd: f64,     // kira: depocuya
-    pub validatur_step_usd: f64,  // step ücreti: validatöre
+    pub depocu_kira_usd: f64,           // kira: depocuya
+    pub validatur_step_usd: f64,        // step ücreti: validatöre
     pub konsensus_commitment: [u8; 32], // commitment: konsensüs kaydı
 }
 
@@ -152,7 +152,11 @@ mod tests {
     #[test]
     fn k4_tarif_kaydi_120b_sinirinda() {
         let u = TarifKaydi::uretim(7, [0x42; 32], vec![0xAA; 24]);
-        assert!(tarif_kaydi_120b_k4(&u), "üretim tarifi 120 B altı: {}", u.record_bytes());
+        assert!(
+            tarif_kaydi_120b_k4(&u),
+            "üretim tarifi 120 B altı: {}",
+            u.record_bytes()
+        );
     }
 
     #[test]
@@ -166,7 +170,10 @@ mod tests {
     fn k6_karusel_fazlalik_bir_civarinda() {
         let veri: Vec<u8> = (0u8..=255).cycle().take(2 * 200 + 37).collect();
         let oran = karusel_fazlalik_k6(&veri).expect("karusel üretilebilmeli");
-        assert!((1.0..=1.25).contains(&oran), "sistematik fazlalık ~1.00: {oran}");
+        assert!(
+            (1.0..=1.25).contains(&oran),
+            "sistematik fazlalık ~1.00: {oran}"
+        );
         // üretim (sistematik + repair) 2x + sabit sınırındadır (K-QR-GENISLEME)
         let turev = crate::bud_format_qrvideo::uret_turev(&veri, 0, 1).expect("türev");
         assert!(qr_turev_buyume_siniri(turev.len(), veri.len()));
@@ -175,7 +182,10 @@ mod tests {
     #[test]
     fn k10_roundtrip_bayt_esit() {
         let girdi: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
-        assert!(bayt_esit_k10(&girdi, "image/png"), "K10 bayt-eşit roundtrip");
+        assert!(
+            bayt_esit_k10(&girdi, "image/png"),
+            "K10 bayt-eşit roundtrip"
+        );
         let log = b"2026-08-17 INFO tarif #1 dogrulandi\n".repeat(64);
         assert!(bayt_esit_k10(&log, "text/plain"));
     }

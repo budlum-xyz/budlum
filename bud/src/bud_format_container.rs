@@ -159,7 +159,10 @@ pub struct MultiHash {
 
 impl MultiHash {
     pub fn sha3_256(bytes: &[u8]) -> Self {
-        MultiHash { algo: 0x16, digest: content_id(bytes) }
+        MultiHash {
+            algo: 0x16,
+            digest: content_id(bytes),
+        }
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut v = vec![self.algo, 32];
@@ -172,7 +175,10 @@ impl MultiHash {
         }
         let mut digest = [0u8; 32];
         digest.copy_from_slice(&raw[2..34]);
-        Some(MultiHash { algo: raw[0], digest })
+        Some(MultiHash {
+            algo: raw[0],
+            digest,
+        })
     }
 }
 
@@ -219,10 +225,10 @@ impl FormatCodec {
 /// Rol-uzman boru hattı adayı (ilham-2 E): her format uzmanı kendi oranını üretir.
 #[derive(Debug, Clone)]
 pub struct ExpertCandidate {
-    pub expert: &'static str,   // "json-expert", "log-expert" ...
-    pub pipe: &'static str,     // "structural+zstd19", "columnar+dict" ...
-    pub ratio: f64,             // ölçülmüş oran (elle yazılmaz; ölçümden)
-    pub lossless: bool,         // kayıpsızlık garantisi (KF2)
+    pub expert: &'static str, // "json-expert", "log-expert" ...
+    pub pipe: &'static str,   // "structural+zstd19", "columnar+dict" ...
+    pub ratio: f64,           // ölçülmüş oran (elle yazılmaz; ölçümden)
+    pub lossless: bool,       // kayıpsızlık garantisi (KF2)
     pub payload: Vec<u8>,
 }
 
@@ -268,24 +274,20 @@ pub fn expert_candidates(
                 payload: original.to_vec(),
             },
         ],
-        FormatCodec::Log => vec![
-            ExpertCandidate {
-                expert: "log-expert",
-                pipe: "structural+zstd19",
-                ratio: ratio_base * 6.17, // ölçüm: LOG zstd-19 6.17x (EK13)
-                lossless: true,
-                payload: original.to_vec(),
-            },
-        ],
-        FormatCodec::Csv => vec![
-            ExpertCandidate {
-                expert: "csv-expert",
-                pipe: "structural+zstd19",
-                ratio: ratio_base * 3.55, // ölçüm: CSV zstd-19 3.55x (EK13)
-                lossless: true,
-                payload: original.to_vec(),
-            },
-        ],
+        FormatCodec::Log => vec![ExpertCandidate {
+            expert: "log-expert",
+            pipe: "structural+zstd19",
+            ratio: ratio_base * 6.17, // ölçüm: LOG zstd-19 6.17x (EK13)
+            lossless: true,
+            payload: original.to_vec(),
+        }],
+        FormatCodec::Csv => vec![ExpertCandidate {
+            expert: "csv-expert",
+            pipe: "structural+zstd19",
+            ratio: ratio_base * 3.55, // ölçüm: CSV zstd-19 3.55x (EK13)
+            lossless: true,
+            payload: original.to_vec(),
+        }],
         _ => vec![ExpertCandidate {
             expert: "binary-expert",
             pipe: "structural+zstd19",
@@ -359,7 +361,13 @@ impl BudV2Header {
         let total_len = u64::from_le_bytes([
             raw[48], raw[49], raw[50], raw[51], raw[52], raw[53], raw[54], raw[55],
         ]);
-        Some(BudV2Header { magic, codec, content_id: mh, chunk_count, total_len })
+        Some(BudV2Header {
+            magic,
+            codec,
+            content_id: mh,
+            chunk_count,
+            total_len,
+        })
     }
 
     pub fn verify(&self) -> bool {
@@ -422,7 +430,10 @@ impl BudV2File {
             .into_iter()
             .map(|c| {
                 let data = crate::bud_format_huffman::HuffmanCoder::compress(&c.data);
-                StructuralChunk { content_id: content_id(&data), data }
+                StructuralChunk {
+                    content_id: content_id(&data),
+                    data,
+                }
             })
             .collect();
         Self::new_with_codec(codec, ChunkCodec::Huffman, compressed)
@@ -436,7 +447,10 @@ impl BudV2File {
             .into_iter()
             .map(|c| {
                 let data = crate::bud_format_real::zstd_compress(&c.data, 19)?;
-                Some(StructuralChunk { content_id: content_id(&data), data })
+                Some(StructuralChunk {
+                    content_id: content_id(&data),
+                    data,
+                })
             })
             .collect::<Option<Vec<_>>>()?;
         Self::new_with_codec(codec, ChunkCodec::Zstd, compressed)
@@ -454,11 +468,18 @@ impl BudV2File {
         if total > Self::MAX_TOTAL_BYTES {
             return None;
         }
-        if chunks.iter().any(|c| c.data.len() as u64 > Self::MAX_CHUNK_BYTES) {
+        if chunks
+            .iter()
+            .any(|c| c.data.len() as u64 > Self::MAX_CHUNK_BYTES)
+        {
             return None;
         }
         let header = BudV2Header::new(codec, &chunks);
-        Some(BudV2File { header, chunk_codec, chunks })
+        Some(BudV2File {
+            header,
+            chunk_codec,
+            chunks,
+        })
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -487,8 +508,7 @@ impl BudV2File {
             return None;
         }
         let chunk_codec = ChunkCodec::from_u8(raw[HDR])?;
-        let count =
-            u32::from_le_bytes([raw[HDR + 1], raw[HDR + 2], raw[HDR + 3], raw[HDR + 4]]);
+        let count = u32::from_le_bytes([raw[HDR + 1], raw[HDR + 2], raw[HDR + 3], raw[HDR + 4]]);
         if count > Self::MAX_CHUNK_COUNT {
             return None;
         }
@@ -520,7 +540,10 @@ impl BudV2File {
             if total > Self::MAX_TOTAL_BYTES {
                 return None;
             }
-            chunks.push(StructuralChunk { content_id: cid, data });
+            chunks.push(StructuralChunk {
+                content_id: cid,
+                data,
+            });
             pos = end;
         }
         if pos != raw.len() {
@@ -529,7 +552,11 @@ impl BudV2File {
         if chunks.len() as u32 != header.chunk_count || total != header.total_len {
             return None;
         }
-        let f = BudV2File { header, chunk_codec, chunks };
+        let f = BudV2File {
+            header,
+            chunk_codec,
+            chunks,
+        };
         if !f.verify() {
             return None;
         }
@@ -588,7 +615,11 @@ impl BudV2File {
 /// Küçük-nesne amplifikasyonu (K21/K35, S.61 MinIO/Ceph dersi) çözümü:
 /// çok küçük parçalar dedup/kanıt verimini düşürür; bitişik min-altı parçalar
 /// tek parçada toplanır. `structural_join` ile hâlâ birebir orijinal.
-pub fn structural_split_compact(kind: StructuralKind, data: &[u8], min_chunk: usize) -> Vec<StructuralChunk> {
+pub fn structural_split_compact(
+    kind: StructuralKind,
+    data: &[u8],
+    min_chunk: usize,
+) -> Vec<StructuralChunk> {
     let raw = structural_split(kind, data);
     if raw.is_empty() {
         return raw;
@@ -605,7 +636,10 @@ pub fn structural_split_compact(kind: StructuralKind, data: &[u8], min_chunk: us
             // akümülatörü boşalt, sonra yeni parça başlat
             if !acc.is_empty() {
                 let v = std::mem::take(&mut acc);
-                out.push(StructuralChunk { content_id: content_id(&v), data: v });
+                out.push(StructuralChunk {
+                    content_id: content_id(&v),
+                    data: v,
+                });
             }
             if c.data.len() >= min_chunk {
                 out.push(c);
@@ -615,7 +649,10 @@ pub fn structural_split_compact(kind: StructuralKind, data: &[u8], min_chunk: us
         }
     }
     if !acc.is_empty() {
-        out.push(StructuralChunk { content_id: content_id(&acc), data: acc });
+        out.push(StructuralChunk {
+            content_id: content_id(&acc),
+            data: acc,
+        });
     }
     out
 }
@@ -634,9 +671,17 @@ mod tests {
         // kayıpsız: parçala + birleştir = orijinal
         let json = br#"[{"a":1,"b":2},{"a":3,"b":4},{"a":5,"b":6}]"#;
         let chunks = structural_split(StructuralKind::Json, json);
-        assert!(chunks.len() >= 3, "JSON kayıt sayısı kadar parça: {}", chunks.len());
+        assert!(
+            chunks.len() >= 3,
+            "JSON kayıt sayısı kadar parça: {}",
+            chunks.len()
+        );
         let joined = structural_join(StructuralKind::Json, &chunks);
-        assert_eq!(&joined[..], &json[..], "JSON yapısal parçalama kayıpsız olmalı");
+        assert_eq!(
+            &joined[..],
+            &json[..],
+            "JSON yapısal parçalama kayıpsız olmalı"
+        );
     }
 
     #[test]
@@ -684,7 +729,8 @@ mod tests {
             lossless: true,
             payload: vec![],
         };
-        let best = select_best_lossless(vec![nan_cand, ok_cand]).expect("NaN elenir, OK aday seçilir");
+        let best =
+            select_best_lossless(vec![nan_cand, ok_cand]).expect("NaN elenir, OK aday seçilir");
         assert_eq!(best.ratio, 7.83);
         assert!(select_best_lossless(vec![]).is_none());
     }
@@ -725,7 +771,10 @@ mod tests {
         let csv = b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n10,11,12\n";
         let raw = structural_split(StructuralKind::Csv, csv);
         let comp = structural_split_compact(StructuralKind::Csv, csv, 64);
-        assert!(raw.len() > comp.len(), "compaction parça sayisini dusurmeli");
+        assert!(
+            raw.len() > comp.len(),
+            "compaction parça sayisini dusurmeli"
+        );
         let joined = structural_join(StructuralKind::Csv, &comp);
         assert_eq!(joined, csv, "compaction kayipsiz");
         // her birlesik parcada content_id dogru
@@ -769,8 +818,8 @@ mod tests {
         let n = rng.below(10);
         for _ in 0..n {
             match rng.below(6) {
-                0 => out.push(b'\\'),     // kaçış (string durumu sınar)
-                1 => out.push(b'"'),      // kaçışlı tırnak
+                0 => out.push(b'\\'), // kaçış (string durumu sınar)
+                1 => out.push(b'"'),  // kaçışlı tırnak
                 2 => out.push(b'{'),
                 3 => out.push(b','),
                 _ => {
@@ -836,8 +885,8 @@ mod tests {
                 }
             }
             match rng.below(4) {
-                0 => {}                        // satır sonu yok (son satır)
-                1 => out.push(b'\r'),          // tek \r (satır sonu değil)
+                0 => {}               // satır sonu yok (son satır)
+                1 => out.push(b'\r'), // tek \r (satır sonu değil)
                 _ => out.push(b'\n'),
             }
         }
@@ -900,19 +949,19 @@ mod tests {
             assert!(structural_join(kind, &[]).is_empty());
         }
         let cases: &[&[u8]] = &[
-            b"",                          // boş
-            b"   ",                       // boşluk
-            b"{\"a\":1}",                 // nesne (dizi değil)
-            b"\"merhaba\"",               // ilkel
-            b"1,2,3",                     // üst seviye ilkeller
-            b"[]}",                       // bozuk: fazla kapanış
-            b"[{\"a\":1}",                // bozuk: kapanış eksik
-            b"{\"a\":[1,2],\"b\":[3,4]}", // iç içe diziler
-            b"[[1,2],[3,4]]",             // dizi içinde dizi
+            b"",                                  // boş
+            b"   ",                               // boşluk
+            b"{\"a\":1}",                         // nesne (dizi değil)
+            b"\"merhaba\"",                       // ilkel
+            b"1,2,3",                             // üst seviye ilkeller
+            b"[]}",                               // bozuk: fazla kapanış
+            b"[{\"a\":1}",                        // bozuk: kapanış eksik
+            b"{\"a\":[1,2],\"b\":[3,4]}",         // iç içe diziler
+            b"[[1,2],[3,4]]",                     // dizi içinde dizi
             b"[\n  {\"a\": 1},\n  {\"a\": 2}\n]", // çok satırlı
             &[0xFF, 0xFE, 0x00, 0x41, 0x22],      // geçersiz UTF-8
-            b"a\r\nb\r\nc",               // CRLF
-            b"\"{\"",                     // string içinde ayraç
+            b"a\r\nb\r\nc",                       // CRLF
+            b"\"{\"",                             // string içinde ayraç
         ];
         for (i, data) in cases.iter().enumerate() {
             for kind in [
@@ -1012,7 +1061,10 @@ mod tests {
         let mut bomb = hdr.to_bytes();
         bomb.push(ChunkCodec::Raw.to_u8());
         bomb.extend_from_slice(&2_000_000u32.to_le_bytes());
-        assert!(BudV2File::decode(&bomb).is_none(), "parça sayısı bombası red");
+        assert!(
+            BudV2File::decode(&bomb).is_none(),
+            "parça sayısı bombası red"
+        );
         // (2) parça boyu bombası: 1 parça ama len = 1 GiB iddiası (MAX_CHUNK_BYTES üstü)
         let mut b2 = hdr.to_bytes();
         b2.push(ChunkCodec::Raw.to_u8());
@@ -1036,7 +1088,10 @@ mod tests {
     fn bud_v2_file_new_rejects_oversize() {
         // 65 MiB parça → MAX_CHUNK_BYTES (64 MiB) üstü → None
         let big = vec![0u8; 65 * 1024 * 1024];
-        let chunks = vec![StructuralChunk { content_id: content_id(&big), data: big }];
+        let chunks = vec![StructuralChunk {
+            content_id: content_id(&big),
+            data: big,
+        }];
         assert!(BudV2File::new(FormatCodec::Text, chunks).is_none());
     }
 
@@ -1066,7 +1121,12 @@ mod tests {
         let hfm = BudV2File::new_compressed(FormatCodec::Log, chunks.clone()).unwrap();
         let z = BudV2File::new_zstd(FormatCodec::Log, chunks).unwrap();
         let zh = z.encode();
-        assert!(zh.len() < hfm.encode().len(), "zstd Huffman'dan küçük: {} vs {}", zh.len(), hfm.encode().len());
+        assert!(
+            zh.len() < hfm.encode().len(),
+            "zstd Huffman'dan küçük: {} vs {}",
+            zh.len(),
+            hfm.encode().len()
+        );
         assert_eq!(z.restore_original().unwrap(), data, "zstd kayıpsız");
         // decode + restore + kurcalama red
         let dec = BudV2File::decode(&zh).unwrap();
@@ -1074,7 +1134,10 @@ mod tests {
         assert_eq!(dec.restore_original().unwrap(), data);
         let mut bad = zh.clone();
         *bad.last_mut().unwrap() ^= 0x01;
-        assert!(BudV2File::decode(&bad).is_none(), "zstd konteyner kurcalama red");
+        assert!(
+            BudV2File::decode(&bad).is_none(),
+            "zstd konteyner kurcalama red"
+        );
     }
 
     #[test]
@@ -1121,8 +1184,12 @@ mod tests {
             for codec in [ChunkCodec::Raw, ChunkCodec::Huffman, ChunkCodec::Zstd] {
                 let f = match codec {
                     ChunkCodec::Raw => BudV2File::new(FormatCodec::Log, chunks.clone()).unwrap(),
-                    ChunkCodec::Huffman => BudV2File::new_compressed(FormatCodec::Log, chunks.clone()).unwrap(),
-                    ChunkCodec::Zstd => BudV2File::new_zstd(FormatCodec::Log, chunks.clone()).unwrap(),
+                    ChunkCodec::Huffman => {
+                        BudV2File::new_compressed(FormatCodec::Log, chunks.clone()).unwrap()
+                    }
+                    ChunkCodec::Zstd => {
+                        BudV2File::new_zstd(FormatCodec::Log, chunks.clone()).unwrap()
+                    }
                 };
                 let bytes = f.encode();
                 for i in 0..bytes.len() {
@@ -1148,7 +1215,11 @@ mod tests {
         for _ in 0..1000 {
             assert!(BudV2File::decode(&tiny).is_none());
         }
-        assert!(start.elapsed().as_secs() < 5, "alloc-bomb yok: {:?}", start.elapsed());
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "alloc-bomb yok: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -1178,7 +1249,7 @@ mod tests {
                 *b = rng.byte();
             }
             let slice = &buf[..len];
-            let _ = BudV2File::decode(slice);       // her boyutta (0..256) panik yok
+            let _ = BudV2File::decode(slice); // her boyutta (0..256) panik yok
             let _ = BudV2Header::from_bytes(slice);
             let _ = MultiHash::decode(slice);
             let _ = structural_split(StructuralKind::Json, slice);
