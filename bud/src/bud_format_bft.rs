@@ -36,7 +36,9 @@ impl RatioVote {
         }
         let vk = VerifyingKey::from_bytes(&self.public_key)
             .map_err(|_| "K-BUD-BFT: gecersiz genel anahtar")?;
-        let sig = Signature::from_bytes(self.signature[..64].try_into().unwrap());
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(&self.signature[..64]);
+        let sig = Signature::from_bytes(&sig_bytes);
         let msg = Self::message(self.pipe_id, self.ratio);
         vk.verify_strict(&msg, &sig).map_err(|_| "K-BUD-BFT: imza dogrulanamadi")
     }

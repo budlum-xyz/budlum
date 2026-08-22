@@ -137,15 +137,27 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     }
     // OrderFree: kayıt sıralaması (deterministik - anahtar sırasıyla; sayısal kolonlarda
     // sayısal karşılaştırma, eşitlikte indeks). Sıra kayıpsızlığı etkilemez (KF2).
+    // Yukaridaki dongu her kaydin nesne oldugunu ve ayni anahtar kumesini
+    // tasidigini dogruladi. Bu dokuz `unwrap` "dogruladik, o halde guvenli"
+    // diyordu; dogru bir muhakeme, ama dogrulama ile kullanim arasindaki
+    // mesafeyi koruyan bir sey yok: araya bir `return` ya da bir kosul
+    // eklendiginde panik geri gelir. Nesneleri bir kez, paniksiz toplayip
+    // asagida onlari kullaniyoruz - ayni maliyet, tasinmayan varsayim yok.
+    let objs: Vec<&serde_json::Map<String, Value>> = arr
+        .iter()
+        .map(Value::as_object)
+        .collect::<Option<Vec<_>>>()?;
+
     let mut indices: Vec<usize> = (0..arr.len()).collect();
     if matches!(mode, ColumnarMode::OrderFree) {
         indices.sort_by(|&a, &b| {
-            let oa = arr[a].as_object().unwrap();
-            let ob = arr[b].as_object().unwrap();
             for k in &keys {
-                let va = oa.get(k).unwrap();
-                let vb = ob.get(k).unwrap();
-                let c = cmp_value(va, vb);
+                // Anahtar kumesi dogrulandi; yine de eksik anahtar panik
+                // degil "esit" sayilir, boylece siralama toplam kalir.
+                let c = match (objs[a].get(k), objs[b].get(k)) {
+                    (Some(va), Some(vb)) => cmp_value(va, vb),
+                    _ => std::cmp::Ordering::Equal,
+                };
                 if c != std::cmp::Ordering::Equal {
                     return c;
                 }
@@ -156,14 +168,15 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     // kolon tiplerini ilk değerden tespit et; uyumsuz değer kolonu Str'e düşürür
     let mut col_types: Vec<ColType> = Vec::with_capacity(keys.len());
     let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(arr.len()); keys.len()];
+    let first_idx = *indices.first()?;
     for k in &keys {
-        let first_v = arr[indices[0]].as_object().unwrap().get(k).unwrap();
+        let first_v = objs[first_idx].get(k)?;
         col_types.push(cell_type(first_v));
     }
     for &idx in &indices {
-        let o = arr[idx].as_object().unwrap();
+        let o = objs[idx];
         for (ci, k) in keys.iter().enumerate() {
-            let v = o.get(k).unwrap();
+            let v = o.get(k)?;
             // tip uyumsuzluğu → kolonu Str'e çevir (sonraki değerler stringleştirilir)
             if cell_type(v) != col_types[ci] {
                 col_types[ci] = ColType::Str;

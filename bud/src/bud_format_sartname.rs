@@ -58,8 +58,14 @@ pub fn bayt_esit_k10(girdi: &[u8], mime: &str) -> bool {
         girdi,
         mime,
         |d| {
-            let mut c = zstd::bulk::Compressor::new(19).unwrap();
-            c.compress(d).unwrap_or_else(|_| d.to_vec())
+            // Sikistirici kurulamazsa veriyi oldugu gibi birak: bir sonraki
+            // satir zaten sikistirma hatasinda ayni seyi yapiyordu, ama
+            // kurulum hatasinda panikliyordu. Iki hata da ayni sonucu
+            // dogurmali, cunku bu fonksiyon bir kapi degil bir olcum.
+            match zstd::bulk::Compressor::new(19) {
+                Ok(mut c) => c.compress(d).unwrap_or_else(|_| d.to_vec()),
+                Err(_) => d.to_vec(),
+            }
         },
         b"qr-turev-bayt",
     );

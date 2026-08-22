@@ -41,8 +41,13 @@ impl BitWriter {
         if self.bit_pos == 0 {
             self.buf.push(0);
         }
+        // `last_mut().unwrap()`: yukaridaki push bunu bos birakmaz, ama
+        // "birakmaz" ile "birakamaz" ayni sey degil. `if let` ayni kodu
+        // paniksiz yazar.
         if b {
-            *self.buf.last_mut().unwrap() |= 1 << self.bit_pos;
+            if let Some(byte) = self.buf.last_mut() {
+                *byte |= 1 << self.bit_pos;
+            }
         }
         self.bit_pos = (self.bit_pos + 1) & 7;
     }

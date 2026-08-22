@@ -47,6 +47,20 @@ bud3 = ["bud2"]
 unsafe_code = "forbid"
 
 [lints.clippy]
+# Panik siniri: uretim yolunda `unwrap`/`expect` yasak.
+#
+# Bu workspace ana repodaki kapinin disindaydi. Olcum: 25 uretim ihlali
+# (huffman 8, columnar 9, sabit genislikli okumalar 6, float siralama 2).
+# Hicbiri "kotu kod" degildi - her biri dogru bir muhakemeye dayaniyordu
+# ("bu dilim her zaman 4 bayt", "anahtar kumesini yukarida dogruladik").
+# Muhakeme dogruydu; tasiyicisi yoktu. Araya bir kosul eklendiginde panik
+# geri gelirdi ve bunu soyleyecek bir kapi yoktu.
+#
+# Duzeltme desenleri ARCHITECTURE §52'deki uc kalibi izliyor: sabit
+# genislikte okuma -> `copy_from_slice`, dogrulanmis varsayim -> degeri bir
+# kez paniksiz topla, float siralama -> `total_cmp`.
+unwrap_used = "deny"
+expect_used = "deny"
 # Indeks matematigi yogun kodda (erasure/Shamir/MSR/fountain: GF(2^8),
 # Cauchy matrisi, kare matris eliminasyonu) dizi indeksleri kasitlidir --
 # `i`/`j` ayni anda birden cok dizide gezer, iterator'e cevirmek satiri

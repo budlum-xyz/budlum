@@ -65,7 +65,9 @@ pub fn select_guardian(seeds: &[[u8; 32]], epoch: u64, pact_id: &[u8; 32]) -> Op
         h.update(s);
     }
     let d: [u8; 32] = h.finalize().into();
-    let v = u64::from_le_bytes(d[..8].try_into().unwrap());
+    let mut w8 = [0u8; 8];
+        w8.copy_from_slice(&d[..8]);
+        let v = u64::from_le_bytes(w8);
     let idx = (v % seeds.len() as u64) as usize;
     // tur sayısı: N büyüdükçe uyanıklık payı düşer → tur sıklığı 1/N (DV)
     let tour = DV_N.max(1);
@@ -95,7 +97,9 @@ pub fn tour_plan(pact_ids: &[[u8; 32]], epoch: u64) -> Option<usize> {
     }
     h.update(&all);
     let d: [u8; 32] = h.finalize().into();
-    let v = u64::from_le_bytes(d[..8].try_into().unwrap());
+    let mut w8 = [0u8; 8];
+        w8.copy_from_slice(&d[..8]);
+        let v = u64::from_le_bytes(w8);
     Some((v % pact_ids.len() as u64) as usize)
 }
 

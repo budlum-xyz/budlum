@@ -48,7 +48,8 @@ pub fn best_repair_model(n: usize, k: usize) -> Option<(RepairModel, f64)> {
     [RepairModel::PlainErasure, RepairModel::Lrc, RepairModel::Msr, RepairModel::Mbr]
         .iter()
         .filter_map(|&m| repair_band(n, k, m).map(|b| (m, b)))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        // NaN bir band degeri paniklemek yerine siralanir (bkz. hw modulu).
+        .min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 pub fn band_digest(n: usize, k: usize, m: RepairModel) -> [u8; 32] {
