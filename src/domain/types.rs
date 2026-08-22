@@ -390,7 +390,6 @@ pub fn normalize_hash32(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -414,7 +413,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod validator_set_commitment_locks {
     use super::*;
 

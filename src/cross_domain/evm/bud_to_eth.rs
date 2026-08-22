@@ -129,7 +129,6 @@ pub fn build_bud_to_eth_claim(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::cross_domain::bridge::BridgeState;

@@ -156,7 +156,6 @@ pub fn verify_execution_proof_full(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::ai::types::*;
@@ -626,7 +625,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod stark_path_e2e {
     use super::*;
 

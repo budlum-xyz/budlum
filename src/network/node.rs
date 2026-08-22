@@ -2772,7 +2772,6 @@ impl Node {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod vote_history_wiring_tests {
     use crate::core::chain_config::Network;
 
@@ -2836,7 +2835,6 @@ mod vote_history_wiring_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod mobile_profile_wiring_tests {
     use super::MAX_PEERS;
     use crate::core::address::Address;

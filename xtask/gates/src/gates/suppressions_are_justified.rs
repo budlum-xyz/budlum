@@ -51,6 +51,204 @@ struct Budget {
 /// The measured inventory. Counted, not typed.
 const BUDGETS: &[Budget] = &[
     Budget {
+        file: "src/chain/blockchain.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "`last_block` returns `&Block` and the genesis block is written by the constructor, so there is no owned value to fall back to and no caller that could act on an `Option`; the invariant is enforced at construction rather than re-checked on every read",
+    },
+    Budget {
+        file: "build.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a build script runs before the crate exists; a failure here must stop the build, and a panic is the only channel cargo reads",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/prover.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "`prove` does not return a `Result` in this trait, so a shape violation the prover itself constructed has nowhere to go; the verifier-side counterpart of this check is a returned error, which is where adversary-supplied input arrives",
+    },
+    Budget {
+        file: "budzero/bud-compiler/src/codegen.rs",
+        lint: "dead_code",
+        count: 1,
+        reason: "a field kept for the generated-code layout that nothing reads yet; listed so the difference between not-read-yet and silently-ignored stays visible",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/prover.rs",
+        lint: "clippy::multiple_bound_locations",
+        count: 2,
+        reason: "plonky3 generic bounds split between the signature and a where clause; rewriting them changes nothing at runtime and makes the signature harder to read against the upstream trait",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/prover.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "a proving entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/prover.rs",
+        lint: "clippy::type_complexity",
+        count: 2,
+        reason: "a plonky3 commitment/opening tuple whose shape is fixed by the upstream API; naming it locally would add an alias that has to be kept in step with the dependency",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/prover.rs",
+        lint: "clippy::type_repetition_in_bounds",
+        count: 2,
+        reason: "plonky3 generic bounds split between the signature and a where clause; rewriting them changes nothing at runtime and makes the signature harder to read against the upstream trait",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/verifier.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "a verification entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/bud_stark/verifier.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "a plonky3 commitment/opening tuple whose shape is fixed by the upstream API; naming it locally would add an alias that has to be kept in step with the dependency",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/plonky3_prover.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "a plonky3 commitment/opening tuple whose shape is fixed by the upstream API; naming it locally would add an alias that has to be kept in step with the dependency",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/trace_layout_tests.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "a `#[cfg(test)]` module of shared trace fixtures whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` does not reach them",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/trace_layout_tests.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a `#[cfg(test)]` module of shared trace fixtures whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` does not reach them",
+    },
+    Budget {
+        file: "budzero/bud-cli/tests/toolchain_end_to_end.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-cli/tests/toolchain_end_to_end.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/derlenmis_dallanma.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/derlenmis_dallanma.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/fiat_shamir_binding.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/fiat_shamir_binding.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/soundness_negatives.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-proof/tests/soundness_negatives.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-vm/tests/trace_fixtures.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "budzero/bud-vm/tests/trace_fixtures.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "an integration test or bench whose helpers sit outside a `#[test]` body, so `allow-unwrap-in-tests` in clippy.toml does not reach them; a panic here fails the test run, which is the reporting channel a test is supposed to use",
+    },
+    Budget {
+        file: "benches/domain_throughput.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/domain_throughput.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/micro/sig_verify.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/micro/sig_verify.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/micro/timing_safe.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/micro/timing_safe.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/single_node/internal_pipeline_tps.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "benches/single_node/internal_pipeline_tps.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "budzero/bud-proof/benches/proof_baseline.rs",
+        lint: "clippy::unwrap_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
+        file: "budzero/bud-proof/benches/proof_baseline.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "a benchmark harness where a panic aborts the measurement and nothing else; criterion has no error channel to return into",
+    },
+    Budget {
         file: "src/ai/registry.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
@@ -437,12 +635,28 @@ fn judge(found: &[Found]) -> Vec<String> {
 /// # Errors
 ///
 /// Returns the suppressions that are unlisted, miscounted, or forbidden.
+/// The trees this gate watches.
+///
+/// `src/` alone was the original scope, and it left three places where a
+/// suppression was invisible: `benches/`, the `budzero/` workspace and
+/// `build.rs`. A gate that watches part of the tree reports what it watched,
+/// not what is true, so the scope is named here and the count below is the
+/// count for all of it.
+const SCANNED: &[&str] = &["src", "benches", "budzero", "build.rs"];
+
 pub fn run(root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
-    collect_rs(&root.join("src"), &mut files);
+    for entry in SCANNED {
+        let p = root.join(entry);
+        if p.is_file() {
+            files.push(p);
+        } else {
+            collect_rs(&p, &mut files);
+        }
+    }
     if files.is_empty() {
         return Err(String::from(
-            "no .rs files found under src/; this gate is watching nothing.",
+            "no .rs files found under the scanned trees; this gate is watching nothing.",
         ));
     }
     files.sort();

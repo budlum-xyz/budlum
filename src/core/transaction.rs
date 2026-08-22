@@ -910,7 +910,6 @@ impl Transaction {
     }
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]
@@ -1448,7 +1447,6 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod v29_signing_tests {
     use super::*;
 

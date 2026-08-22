@@ -215,7 +215,6 @@ fn decode_header_or_err(raw: &[u8]) -> Result<EthHeader, VerifyError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;

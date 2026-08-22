@@ -533,7 +533,6 @@ impl Block {
     }
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -668,7 +667,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod merkle_duplicate_leaf_locks {
     use super::*;
     use crate::core::address::Address;

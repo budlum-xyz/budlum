@@ -579,7 +579,6 @@ fn decode_block_hash(hex_hash: &str) -> Result<[u8; 32], EvidenceError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -791,7 +791,6 @@ impl MasterRegistry {
 pub const DERIVED_PREFIX_SPEC_BYTES: u64 = DERIVED_SPEC_BYTES + 1 + 8 + 8;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

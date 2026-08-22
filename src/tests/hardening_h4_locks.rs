@@ -2,7 +2,6 @@
 //! Marker: REGRESSION - do not delete without replacing coverage.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::crypto::mainnet_policy::{
         check_mainnet_validator_key_policy, MainnetKeyPolicyViolation, MainnetValidatorKeyConfig,

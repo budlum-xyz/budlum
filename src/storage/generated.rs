@@ -601,7 +601,6 @@ fn draw_rings(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, G
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

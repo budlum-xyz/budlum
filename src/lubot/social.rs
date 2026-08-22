@@ -51,7 +51,6 @@ pub fn tag_lubot_nft(registry: &mut NftRegistry, nft_id: u64, tag: &str) -> Resu
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::socialfi::NftRegistry;

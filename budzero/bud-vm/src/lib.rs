@@ -1713,7 +1713,6 @@ pub fn poseidon4_hash(a: u64, b: u64) -> u64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -2223,7 +2222,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod poseidon_parameter_tests {
     use super::*;
 

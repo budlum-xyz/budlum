@@ -268,7 +268,6 @@ fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Ite
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::cross_domain::evm::rlp::{decode as rlp_decode, encode as rlp_encode};
@@ -574,7 +573,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod depth_bound_locks {
     use super::*;
     use crate::cross_domain::evm::rlp::encode as rlp_encode;

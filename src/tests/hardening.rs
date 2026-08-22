@@ -1,5 +1,4 @@
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hardening_tests {
     use crate::cli::commands::NodeConfig;
     use crate::core::account::AccountState;

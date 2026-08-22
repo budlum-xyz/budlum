@@ -9,7 +9,6 @@
 //! İzolasyon "mührü" `src/tests/poa_isolation.rs` içindeki 8. teste eklenmiştir.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::core::address::Address;
 

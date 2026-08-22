@@ -207,7 +207,6 @@ impl ContentDiscovery {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use libp2p::identity;
@@ -313,7 +312,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod poisoned_lock_locks {
     use super::*;
 

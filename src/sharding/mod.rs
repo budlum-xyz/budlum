@@ -260,7 +260,6 @@ pub fn apply_cross_shard_transfer(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::transaction::{Transaction, DEFAULT_CHAIN_ID};

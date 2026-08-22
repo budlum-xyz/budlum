@@ -11,7 +11,6 @@
 //!     "we never looked" cannot be confused with "we looked and accepted".
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     const NODE_RS: &str = include_str!("../network/node.rs");
 

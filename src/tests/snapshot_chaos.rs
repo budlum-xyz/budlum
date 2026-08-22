@@ -9,7 +9,6 @@
 //! `_gap` testleri o görevlarda TERS ÇEVRİLİR.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::chain::blockchain::Blockchain;
     use crate::chain::snapshot::PruningManager;

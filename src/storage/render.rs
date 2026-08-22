@@ -367,7 +367,6 @@ pub fn render_and_verify(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::storage::content_id::ContentId;
