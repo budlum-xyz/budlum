@@ -204,6 +204,16 @@ jobs:
           cargo clippy --manifest-path bud/Cargo.toml --features bud3 --all-targets -- -D warnings
           cargo clippy --manifest-path bud/Cargo.toml --no-default-features --all-targets -- -D warnings
           cargo test --manifest-path bud/Cargo.toml --features bud3
+      # `slice[i]` release profilinde (panic = abort) surec durdurur; bu
+      # `unwrap` ile ayni canlilik sinifi. Agacta 66 dosya bu borcu tasiyor ve
+      # cogu indeks-yogun cozumleyicilerde (RLP/MPT/erasure), orada iterator'e
+      # cevirmek korunmak istenen indeks-esitligi hatasini gizler. Bu yuzden
+      # sayi donduruldu: mevcut 66 dosya borcunu tutabilir, listede olmayan
+      # bir dosya yeni indeks EKLEYEMEZ.
+      - name: Indeksleme kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new --self-test
+      - name: Yeni dosya panikleyen indeks eklemez
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new
       - name: Turetilmis icerik kanaryasi
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test
       - name: Turetilmis icerik bayt-kesin
