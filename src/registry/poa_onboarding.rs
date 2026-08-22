@@ -38,8 +38,14 @@
 //! a plain `Vec<Address>` of authorities, filters the permissionless active
 //! validator set against it, and treats an empty vector as "no filter". That
 //! vector is only ever populated through `with_authorities`, which no
-//! production path calls: `main.rs` builds the engine with `PoAEngine::new`
-//! at both sites. So the authority filter is empty in production, the
+//! production path calls: `main.rs` builds the engine at three sites
+//! (`PoAEngine::new` twice and `PoAEngine::with_signer` once) and every one
+//! of the three leaves `authorities` as `Vec::new()`. (Sayim duzeltmesi:
+//! onceki ifade "both sites" diyip iki yer sayiyordu; ucuncusu, HSM imzalayici
+//! bulunan yoldaki `with_signer` cagrisi, atlanmisti. Sonuc degismiyor - o
+//! yol da listeyi bos birakiyor - ama sayilan seyin dogru sayilmasi gerekir,
+//! yoksa "olctum" demek bir sey ifade etmez.) So the authority filter is
+//! empty in production, the
 //! permissionless active set passes through unfiltered, and the KYC horizon,
 //! the revocation path and the audit log written here decide nothing.
 //!
