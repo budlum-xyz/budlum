@@ -23,7 +23,7 @@
 //! Alintinin *icerigi* burada dogrulanmaz: satici sertifika zincirinin
 //! (Intel SGX icin PCK/QE kimligi, AWS Nitro icin ACM kok sertifikasi)
 //! denetimi bu modulun disindadir ve dugum yapilandirmasindaki bir emanet
-//! koku gerektirir. Bu yuzden [`TeeAttestation::verify`] "bu bir gercek
+//! koku gerektirir. Bu yuzden [`TeeAttestation::verify_signed_by`] "bu bir gercek
 //! SGX cihazi" demez, "bu alinti bu anahtarla imzalanmis ve anahtar bekledigim
 //! anahtar" der. Ikisini karistirmamak icin tip adi `TeeAttestation`, metot
 //! adi `verify_signed_by`: dogrulanan seyin ne oldugu cagri yerinde okunuyor.
