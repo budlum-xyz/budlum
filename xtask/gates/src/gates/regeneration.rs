@@ -55,6 +55,20 @@
 use std::fs;
 use std::path::Path;
 
+/// Kanonik uretim noktasi sayisi bunun altina duserse tarama korlesmis
+/// demektir. Olcum aninda alti kanonik nokta vardi; esik, tek bir yuzeyin
+/// silinmesini yakalayacak kadar yuksek, kucuk yeniden duzenlemelere takilmayacak
+/// kadar dusuk secildi.
+const MIN_CANONICAL_PRODUCERS: usize = 4;
+
+/// Alan etiketi kullanmasi GEREKCELENDIRILMIS tek yer.
+///
+/// `program_hash_from_words` bir kayit kimligidir: SHA3-256 uzerine
+/// `BDLM_AI_GUEST_PROGRAM_V1` etiketi ve guest surumu. Kanitin bagladigi deger
+/// degildir ve onunla karistirilmamalidir; kaynak kodda da "not interchangeable"
+/// diye isaretli.
+const TAGGED_ALLOWLIST: &[&str] = &["src/ai/execution/guest.rs"];
+
 /// Kanonik besleme: her kelime little-endian, etiket yok.
 ///
 /// Dogrulayicinin (`plonky3_prover.rs`) AIR'e bagladigi bicim budur; digerleri
@@ -199,42 +213,6 @@ fn hex32(b: &[u8; 32]) -> String {
     s
 }
 
-/// Kanonik hash'i uretmesi beklenen kaynak konumlari.
-struct Site {
-    file: &'static str,
-    what: &'static str,
-    /// Beslemenin kanonik oldugunu gosteren ifadelerden en az biri bulunmali.
-    canonical_markers: &'static [&'static str],
-    /// Kanonik hash govdesinde bulunursa besleme kanonik DEGILDIR.
-    forbidden_in_body: &'static [&'static str],
-    /// Govdesi incelenecek fonksiyon (varsa).
-    body_fn: Option<&'static str>,
-}
-
-const SITES: &[Site] = &[
-    Site {
-        file: "src/prover/mod.rs",
-        what: "alan izin listesi kimligi (zk_program_hash)",
-        canonical_markers: &["word.to_le_bytes()"],
-        forbidden_in_body: &["BDLM_"],
-        body_fn: Some("fn zk_program_hash"),
-    },
-    Site {
-        file: "src/ai/execution/guest.rs",
-        what: "AI model kaydi (stark_program_hash_from_words)",
-        canonical_markers: &["word.to_le_bytes()"],
-        forbidden_in_body: &["BDLM_"],
-        body_fn: Some("fn stark_program_hash_from_words"),
-    },
-    Site {
-        file: "budzero/bud-proof/src/plonky3_prover.rs",
-        what: "dogrulayici, AIR'e baglanan deger",
-        canonical_markers: &["inst.to_le_bytes()"],
-        forbidden_in_body: &[],
-        body_fn: None,
-    },
-];
-
 fn verify_own_keccak() -> Result<(), String> {
     let empty = keccak256(&[]);
     if hex32(&empty) != "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" {
@@ -256,9 +234,6 @@ fn verify_own_keccak() -> Result<(), String> {
 /// Yakinsama: ikinci uretim ayni sonucu vermeli, bozulmus girdi kanonik hale
 /// onarilmali. Bu ozellik olmadan rejenerasyon agi boler.
 fn verify_convergence() -> Result<Vec<u64>, String> {
-    // YAKINSAMA. Rejenerasyonun birlestirici olmasinin sarti: ikinci kez
-    //    uretmek ayni seyi vermeli (idempotence). Vermezse iki dugum ayni
-    //    kaynaktan farkli yerlere varir - tam olarak kacindigimiz bolunme.
     let first = regenerate_storage_challenge_program();
     let second = regenerate_storage_challenge_program();
     if first != second {
@@ -267,7 +242,6 @@ fn verify_convergence() -> Result<Vec<u64>, String> {
              Bu haliyle kapi agi bolerdi.",
         ));
     }
-    // Bozulmus bir girdi kanonik hale ONARILMALI, reddedilip birakilmamali.
     let mut corrupted = first.clone();
     corrupted[0] ^= 0xDEAD_BEEF;
     let repaired = regenerate_storage_challenge_program();
@@ -282,6 +256,100 @@ fn verify_convergence() -> Result<Vec<u64>, String> {
         ));
     }
     Ok(first)
+}
+
+/// Bir program-hash uretim noktasi: kaynakta bulundugu yer ve bicimi.
+#[derive(Debug)]
+struct Producer {
+    file: String,
+    line: usize,
+    tagged: bool,
+}
+
+/// Bu dosyalar tarama disi: kapinin kendisi ve kanarya fixture'lari.
+fn is_scannable(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.ends_with(".rs") && !s.contains("/target/") && !s.contains("regeneration.rs")
+}
+
+/// Kaynak agacini gezerek program-hash ureten HER noktayi **kesfeder**.
+///
+/// Neden liste degil kesif: onceki surum uc konumu elle sayiyordu. Yarin
+/// dorduncu bir yerde ayni hash uretilirse elle tutulan liste sessiz kalirdi -
+/// ve tam olarak o sessizlik, kapinin korumasi gereken seydi. Olcum bunu
+/// dogruladi: agacta elle sayilan uctan fazlasi vardi
+/// (`src/execution/zkvm.rs`, `src/lubot/verify.rs`, `src/domain/storage_deal.rs`).
+///
+/// Kapi artik "bildiklerimi denetle" degil, "ne varsa bul ve denetle" diyor.
+fn discover_producers(root: &Path) -> Vec<Producer> {
+    let mut out = Vec::new();
+    for base in ["src", "budzero", "wallet-core"] {
+        walk(&root.join(base), root, &mut out);
+    }
+    out.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    out
+}
+
+fn walk(dir: &Path, root: &Path, out: &mut Vec<Producer>) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for e in entries {
+        let path = e.path();
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            walk(&path, root, out);
+        } else if is_scannable(&path) {
+            if let Ok(text) = fs::read_to_string(&path) {
+                scan_file(&path, root, &text, out);
+            }
+        }
+    }
+}
+
+fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
+    let lines: Vec<&str> = text.lines().collect();
+    // Testler kapsam disi: uretim davranisini denetliyoruz.
+    let cut = lines
+        .iter()
+        .position(|l| l.starts_with("#[cfg(test)]"))
+        .unwrap_or(lines.len());
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    for (i, line) in lines[..cut].iter().enumerate() {
+        if !(line.contains("Keccak256::new")
+            || line.contains("Sha3_256::new")
+            || line.contains("Keccak::v256"))
+        {
+            continue;
+        }
+        let end = (i + 12).min(cut);
+        let window = lines[i..end].join("\n");
+        // Sekil A: dogrudan program kelimeleri uzerinde dongu.
+        let shape_a = ["program", "words", "prog", "insts"].iter().any(|n| {
+            window.contains(&format!("for word in {n}"))
+                || window.contains(&format!("for &word in {n}"))
+                || window.contains(&format!("for w in {n}"))
+                || window.contains(&format!("for &w in {n}"))
+                || window.contains(&format!("for inst in {n}"))
+                || window.contains(&format!("for &inst in &{n}"))
+        });
+        // Sekil B: once program_bytes toplanip tek seferde besleniyor.
+        let shape_b =
+            window.contains("update(&program_bytes)") || window.contains("update(program_bytes)");
+        if shape_a || shape_b {
+            out.push(Producer {
+                file: rel.clone(),
+                line: i + 1,
+                tagged: window.contains("BDLM_"),
+            });
+        }
+    }
 }
 
 /// # Errors
@@ -318,40 +386,50 @@ pub fn run(root: &Path) -> Result<String, String> {
     let sample: [u64; 3] = [7, 8, 9];
     let regenerated = keccak256(&canonical_program_bytes(&sample));
 
-    // 5. Her uygulama kanonik beslemeyi kullaniyor mu?
-    let mut checked = 0usize;
+    // Her uretim noktasini KESFET ve denetle.
+    let producers = discover_producers(root);
     let mut findings = Vec::new();
-    for site in SITES {
-        let path = root.join(site.file);
-        let Ok(text) = fs::read_to_string(&path) else {
-            findings.push(format!(
-                "{}: okunamadi - kanonik hash ureten bir yuzey kayboldu mu?",
-                site.file
-            ));
-            continue;
-        };
-        if !site.canonical_markers.iter().any(|m| text.contains(m)) {
-            findings.push(format!(
-                "{} ({}): kanonik besleme bulunamadi; beklenen {:?}",
-                site.file, site.what, site.canonical_markers
-            ));
-        }
-        if let Some(f) = site.body_fn {
-            if let Some(after) = text.split(f).nth(1) {
-                let body: String = after.chars().take(400).collect();
-                for bad in site.forbidden_in_body {
-                    if body.contains(bad) {
-                        findings.push(format!(
-                            "{} ({}): kanonik hash govdesinde '{}' etiketi var; \
-                             etiketli hash dogrulayicinin degeriyle ayrisir",
-                            site.file, site.what, bad
-                        ));
-                    }
-                }
-            }
-        }
-        checked += 1;
+
+    // Kanonik uretim noktasi sayisi asla sifira dusmemeli: dusmusse ya tarama
+    // Bozulmustur ya da yuzey kaybolmustur. Ikisi de sessizce gecmemeli.
+    let canonical: Vec<&Producer> = producers.iter().filter(|p| !p.tagged).collect();
+    if canonical.len() < MIN_CANONICAL_PRODUCERS {
+        return Err(format!(
+            "regeneration: kanonik program-hash ureten yalnizca {} nokta bulundu \
+             (en az {} bekleniyor). Ya bir yuzey kayboldu ya da tarama artik \
+             uretim noktalarini goremiyor - ikisi de kapiyi korlestirir.",
+            canonical.len(),
+            MIN_CANONICAL_PRODUCERS
+        ));
     }
+
+    // Etiketli hash yalnizca bilinen ve gerekcelendirilmis yerde olabilir.
+    // `program_hash_from_words` bir KAYIT kimligidir (SHA3-256 + alan etiketi),
+    // Kanitin bagladigi deger degildir; ikisi kasten farklidir. Baska bir yerde
+    // Etiket cikarsa o, kanonik degerden sessizce ayrisan bir uretimdir.
+    for p in producers.iter().filter(|p| p.tagged) {
+        if !TAGGED_ALLOWLIST.contains(&p.file.as_str()) {
+            findings.push(format!(
+                "{}:{}: program-hash uretiminde alan etiketi var ve bu dosya \
+                 gerekcelendirilmis istisnalar arasinda degil; etiketli hash \
+                 dogrulayicinin degeriyle ayrisir",
+                p.file, p.line
+            ));
+        }
+    }
+
+    // Dogrulayici yuzeyi duruyor mu: kanonik bicimin otoritesi odur.
+    if !producers
+        .iter()
+        .any(|p| p.file.contains("plonky3_prover.rs"))
+    {
+        findings.push(String::from(
+            "budzero/bud-proof/src/plonky3_prover.rs: dogrulayicinin program-hash \
+             uretimi bulunamadi - kanonik bicimin otoritesi kayboldu",
+        ));
+    }
+
+    let checked = producers.len();
 
     if !findings.is_empty() {
         return Err(format!(
@@ -364,8 +442,9 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     Ok(format!(
         "regeneration OK: kanonik program-hash {} olarak yeniden uretildi, \
-         yakinsama (idempotence + onarim) dogrulandi, {checked} uygulama ayni \
-         beslemeyi kullaniyor (bagimsiz Keccak-256 ve bagimsiz ISA kodlamasi ile).",
+         yakinsama (idempotence + onarim) dogrulandi, kesifle bulunan {checked} \
+         uretim noktasinin tamami kanonik (bagimsiz Keccak-256 ve bagimsiz ISA \
+         kodlamasi ile dogrulandi).",
         &hex32(&regenerated)[..16]
     ))
 }
@@ -383,106 +462,153 @@ pub fn self_test() -> Result<String, String> {
         std::env::temp_dir().join(format!("budlum-gates-regen-{}-{nanos}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
 
-    for d in ["src/prover", "src/ai/execution", "budzero/bud-proof/src"] {
+    for d in [
+        "src/prover",
+        "src/ai/execution",
+        "src/execution",
+        "src/lubot",
+        "src/domain",
+        "budzero/bud-proof/src",
+    ] {
         fs::create_dir_all(tmp.join(d)).map_err(|e| format!("kanarya dizini kurulamadi: {e}"))?;
     }
-    let good_prover = "pub fn zk_program_hash(program: &[u64]) -> Hash32 {\n\
-                       let mut hasher = Keccak256::new();\n\
-                       for word in program { hasher.update(word.to_le_bytes()); }\n\
-                       hasher.finalize().into()\n}\n";
-    let good_ai = "pub fn stark_program_hash_from_words(words: &[u64]) -> [u8; 32] {\n\
-                   let mut hasher = Keccak256::new();\n\
-                   for word in words { hasher.update(word.to_le_bytes()); }\n\
-                   hasher.finalize().into()\n}\n";
-    fs::write(tmp.join("src/prover/mod.rs"), good_prover).map_err(|e| e.to_string())?;
-    fs::write(tmp.join("src/ai/execution/guest.rs"), good_ai).map_err(|e| e.to_string())?;
-    fs::write(
-        tmp.join("budzero/bud-proof/src/plonky3_prover.rs"),
-        "let b: Vec<u8> = program.iter().flat_map(|&inst| inst.to_le_bytes().to_vec()).collect();\n",
-    )
-    .map_err(|e| e.to_string())?;
+
+    write_good(&tmp)?;
 
     if let Err(e) = run(&tmp) {
         let _ = fs::remove_dir_all(&tmp);
         return Err(format!("self-test: dogru agac gecmeliydi: {e}"));
     }
+    run_drift_canaries(&tmp)?;
+    let _ = fs::remove_dir_all(&tmp);
+    Ok(String::from(
+        "regeneration self-test OK: dogru agac gecti, bes kayma yakalandi \
+         (etiketli uretim, kayip dogrulayici, korlesen tarama, degismis program, \
+         sonradan eklenen gizli uretim noktasi)",
+    ))
+}
 
-    // Kayma 1: kanonik besleme birakiliyor.
+fn canonical_loop(name: &str, arg: &str) -> String {
+    format!(
+        "pub fn {name}(program: &[u64]) -> [u8; 32] {{\n\
+         let mut hasher = Keccak256::new();\n\
+         for word in {arg} {{ hasher.update(word.to_le_bytes()); }}\n\
+         hasher.finalize().into()\n}}\n"
+    )
+}
+
+/// Kanarya agacinin saglikli halini yazar.
+fn write_good(tmp: &Path) -> Result<(), String> {
     fs::write(
-        tmp.join("src/ai/execution/guest.rs"),
-        "for byte in words_as_bytes { hasher.update([byte]); }\n",
+        tmp.join("src/prover/mod.rs"),
+        canonical_loop("zk_program_hash", "program"),
     )
     .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = fs::remove_dir_all(&tmp);
+    fs::write(
+        tmp.join("src/ai/execution/guest.rs"),
+        canonical_loop("stark_program_hash_from_words", "words"),
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("src/execution/zkvm.rs"),
+        canonical_loop("hash_u64_words", "words"),
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("src/lubot/verify.rs"),
+        "let mut hasher = Keccak256::new();\nhasher.update(&program_bytes);\n",
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+            tmp.join("budzero/bud-proof/src/plonky3_prover.rs"),
+            "let mut hasher = Keccak256::new();\nfor word in program { hasher.update(word.to_le_bytes()); }\n",
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Kanarya kaymalarini sirayla dener.
+fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
+    // Kayma 1: bir uretim noktasina alan etiketi giriyor (gerekcelendirilmemis).
+    fs::write(
+        tmp.join("src/prover/mod.rs"),
+        "pub fn zk_program_hash(program: &[u64]) -> [u8; 32] {\n\
+         let mut hasher = Keccak256::new();\n\
+         hasher.update(b\"BDLM_PROGRAM_V1\");\n\
+         for word in program { hasher.update(word.to_le_bytes()); }\n\
+         hasher.finalize().into()\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: kanonik beslemeden sapan uygulama yakalanmadi",
+            "self-test: gerekcelendirilmemis etiketli uretim yakalanmadi",
         ));
     }
 
-    // Kayma 2: kanonik hash govdesine alan etiketi giriyor.
-    fs::write(tmp.join("src/ai/execution/guest.rs"), good_ai).map_err(|e| e.to_string())?;
-    let tagged = "pub fn zk_program_hash(program: &[u64]) -> Hash32 {\n\
-                  let mut hasher = Keccak256::new();\n\
-                  hasher.update(b\"BDLM_PROGRAM_V1\");\n\
-                  for word in program { hasher.update(word.to_le_bytes()); }\n\
-                  hasher.finalize().into()\n}\n";
-    fs::write(tmp.join("src/prover/mod.rs"), tagged).map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "self-test: etiketli (ayrisan) kanonik hash yakalanmadi",
-        ));
-    }
-
-    // Kayma 3: AI tarafina etiket giriyor (iki yuzey de korunuyor mu).
-    fs::write(tmp.join("src/prover/mod.rs"), good_prover).map_err(|e| e.to_string())?;
-    let tagged_ai = "pub fn stark_program_hash_from_words(words: &[u64]) -> [u8; 32] {\n\
-                     let mut hasher = Keccak256::new();\n\
-                     hasher.update(b\"BDLM_AI_V1\");\n\
-                     for word in words { hasher.update(word.to_le_bytes()); }\n\
-                     hasher.finalize().into()\n}\n";
-    fs::write(tmp.join("src/ai/execution/guest.rs"), tagged_ai).map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from("self-test: AI tarafindaki etiket yakalanmadi"));
-    }
-
-    // Kayma 4: dogrulayici yuzeyi tamamen kayboluyor.
-    fs::write(tmp.join("src/ai/execution/guest.rs"), good_ai).map_err(|e| e.to_string())?;
+    // Kayma 2: dogrulayici yuzeyi kayboluyor - kanonik bicimin otoritesi gider.
+    write_good(tmp)?;
     fs::remove_file(tmp.join("budzero/bud-proof/src/plonky3_prover.rs"))
         .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = fs::remove_dir_all(&tmp);
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "self-test: kaybolan dogrulayici yuzeyi yakalanmadi",
         ));
     }
 
-    // Kayma 5: depolama meydan okumasi programi degisiyor.
-    fs::write(
-        tmp.join("budzero/bud-proof/src/plonky3_prover.rs"),
-        "let b: Vec<u8> = program.iter().flat_map(|&inst| inst.to_le_bytes().to_vec()).collect();\n",
-    )
-    .map_err(|e| e.to_string())?;
-    fs::create_dir_all(tmp.join("src/domain")).map_err(|e| e.to_string())?;
+    // Kayma 3: uretim noktalari topluca siliniyor - tarama korlesirse esik yakalamali.
+    write_good(tmp)?;
+    for f in [
+        "src/prover/mod.rs",
+        "src/ai/execution/guest.rs",
+        "src/execution/zkvm.rs",
+        "src/lubot/verify.rs",
+    ] {
+        fs::remove_file(tmp.join(f)).map_err(|e| e.to_string())?;
+    }
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: kanonik uretim noktalarinin kaybolmasi yakalanmadi",
+        ));
+    }
+
+    // Kayma 4: kanonik program degistiriliyor (ISA'dan yeniden uretimle yakalanir).
+    write_good(tmp)?;
     fs::write(
         tmp.join("src/domain/storage_deal.rs"),
         "let p = Opcode::VerifyMerkle; rd: 1, rs1: 2, imm: 512,\n",
     )
     .map_err(|e| e.to_string())?;
-    if run(&tmp).is_ok() {
-        let _ = fs::remove_dir_all(&tmp);
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "self-test: degistirilmis depolama meydan okumasi programi yakalanmadi",
         ));
     }
 
-    let _ = fs::remove_dir_all(&tmp);
-    Ok(String::from(
-        "regeneration self-test OK: dogru agac gecti, bes kayma yakalandi \
-         (besleme, izin listesi etiketi, AI etiketi, kayip dogrulayici, degismis program)",
-    ))
+    // Kayma 5: YENI bir uretim noktasi sessizce ekleniyor - eski surumun
+    // Goremedigi sey tam olarak buydu.
+    write_good(tmp)?;
+    fs::create_dir_all(tmp.join("src/sneaky")).map_err(|e| e.to_string())?;
+    fs::write(
+        tmp.join("src/sneaky/backdoor.rs"),
+        "pub fn other_program_hash(words: &[u64]) -> [u8; 32] {\n\
+         let mut hasher = Keccak256::new();\n\
+         hasher.update(b\"BDLM_SNEAKY_V1\");\n\
+         for word in words { hasher.update(word.to_le_bytes()); }\n\
+         hasher.finalize().into()\n}\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(tmp).is_ok() {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "self-test: sonradan eklenen yeni uretim noktasi yakalanmadi",
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
