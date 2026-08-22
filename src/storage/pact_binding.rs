@@ -1,6 +1,20 @@
-//! WIRING: unwired - PACT baglama henuz ana islem yoluna baglanmadi.
-//! Storage PACT binding - V6 hardening, depolama bağlı durum kökü
-//! PACT registry + .bud header on-chain + economics + device-only cost 0
+//! Depolama PACT baglamasi: tarif + rezidüel taahhüdü ve kayit koku.
+//!
+//! # Nereden cagriliyor
+//!
+//! `QuantumAccountRegistry::register_with_pacts` bir hesabin `pact_root`
+//! alanini buradaki kayit defterinin koküyle karsilastirir
+//! (`src/account_abstraction/registry.rs`). Uzun sure oyle degildi: hesap
+//! bir `pact_root` tasiyordu ama o kokün gercek bir pact kumesini
+//! adlandirdigini hicbir sey denetlemiyordu, dolayisiyla alan bir iddiaydi,
+//! bir baglama degil.
+//!
+//! # Ne dogrulanir
+//!
+//! Bir pact'in taahhüdü kendi yükünün hash'i olmali (`verify_commitment`),
+//! ve kayit defterinin koku icindeki pact'lerden yeniden hesaplanabilmeli
+//! (`verify_root`). Ikincisi olmadan bir kok, hicbir pact icermeyen bir
+//! kumeyle de eslesebilirdi.
 
 use sha3::{Digest, Sha3_256};
 
