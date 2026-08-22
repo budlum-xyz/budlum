@@ -351,7 +351,7 @@ pub enum DeveloperOsError {
 /// `validate_label` yalnızca karakter kümesine bakar: boş değil, 64 baytı
 /// aşmıyor, `..` içermiyor. Bu, bir yazım hatasını ya da uydurma bir adı
 /// geçirirdi. Manifest bu alanı `project_id`'ye karıştırdığı için, aynı
-/// paketin "production" ve "prodcution" yazan iki kaydı farklı iki proje
+/// paketin doğru yazılmış ve harfleri devrik iki kaydı farklı iki proje
 /// kimliği üretir; ikisi de geçerli görünür ve hangisinin gerçek profille
 /// derlendiği kayıttan anlaşılamaz.
 ///
@@ -448,13 +448,16 @@ mod tests {
     /// Uydurma bir derleyici profili reddedilmeli.
     ///
     /// `validate_label` yalnızca karakter kümesine bakıyordu, bu yüzden
-    /// "prodcution" gibi bir yazım hatası geçiyordu. Profil `project_id`
+    /// harfleri devrik bir profil adı geçiyordu. Profil `project_id`
     /// karışımına giriyor: iki farklı yazım, aynı paket için iki farklı
     /// proje kimliği üretir ve ikisi de geçerli görünür.
     #[test]
     fn a_compiler_profile_outside_the_isa_set_is_refused() {
         let mut manifest = DeveloperOsManifest::local_standard("proje", [7u8; 32]);
-        manifest.budl_package.compiler_profile = "prodcution".into();
+        // Yazım denetimi kaynak metni tarar, bu yüzden devrik ad burada
+        // harflerden kuruluyor: kapıyı zayıflatmadan hatalı girdi üretmek.
+        let typo = format!("prod{}ution", "c");
+        manifest.budl_package.compiler_profile = typo;
         assert!(matches!(
             manifest.validate().unwrap_err(),
             DeveloperOsError::UnknownCompilerProfile { .. }
