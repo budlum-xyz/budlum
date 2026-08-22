@@ -247,7 +247,7 @@ fn f05_readiness_does_not_claim_stark_verification() {
     assert!(src.contains("full_execution_proof_verification"));
 }
 
-/// Kaydedilen program hash'i, kaydedilen boyutlarin urettigi programa uymali.
+/// Kaydedilen program hash'i, kaydedilen boyutlarin urettigi program ile ayni olmali.
 ///
 /// `execution_program_hash` ile `execution_dims` ayri ayri veriliyor. Dogrulama
 /// zamaninda program **dims'ten yeniden kuruluyor** ve kanit kaydedilen hash'e
