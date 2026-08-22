@@ -5,6 +5,7 @@
 //! Depend on budlumdevnet; it is a pure data/validation layer that future CLI and
 //! SDK tools can consume.
 
+use crate::core::transaction::DEFAULT_CHAIN_ID;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -191,7 +192,7 @@ impl DeveloperOsManifest {
     pub fn local_standard(project_name: impl Into<String>, budl_source_hash: [u8; 32]) -> Self {
         Self {
             project_name: project_name.into(),
-            chain_id: 45262,
+            chain_id: DEFAULT_CHAIN_ID,
             devnet_topology: DevnetTopology::SingleNode,
             budl_package: BudlPackageFixture {
                 package_name: "budlum-app".into(),
