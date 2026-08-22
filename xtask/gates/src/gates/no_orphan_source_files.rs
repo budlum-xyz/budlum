@@ -34,8 +34,29 @@
 //! * Raw strings (`r"..."`, `br"..."`) and normal strings and chars are
 //!   blanked (preserving line structure) so braces and `mod` keywords inside
 //!   them cannot perturb module scope tracking.
+//!
+//! # The second failure this closes
+//!
+//! Declaration is not reachability. The check above asks "does some file
+//! declare this one", and `mod.rs` is exempt from being asked. So an entire
+//! directory could sit unreachable from any crate root and stay invisible:
+//! its `mod.rs` was exempt by name, and its siblings counted as declared
+//! because that same unreachable `mod.rs` declared them. A ring of files
+//! vouching for each other passes a per-file check.
+//!
+//! `src/account_abstraction/` was exactly this: five files, 493 lines,
+//! declared in no crate root. It never compiled. Measured, not guessed:
+//! invalid Rust was written into `threshold_mldsa.rs` and `cargo check --lib`
+//! still passed. Inside it, three functions named like security checks could
+//! not reject anything -- one compared the length of a fixed-size array
+//! against its own length, a condition false at compile time.
+//!
+//! So the gate now also walks *from* the crate roots (`lib.rs`, `main.rs`,
+//! `build.rs`, and the auto-discovered target directories) through `mod`
+//! declarations, and reports any file the walk never arrives at. A file must
+//! be both declared and reached.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -441,6 +462,63 @@ fn exempt(rel: &str) -> bool {
     false
 }
 
+/// A crate root: the compiler starts here without anyone declaring it.
+///
+/// `mod.rs` is deliberately absent. A `mod.rs` is only a root of its own
+/// directory, and whether that directory is reached is the question being
+/// asked; treating it as a root assumes the answer.
+fn is_crate_root(rel: &str) -> bool {
+    let Some(base) = rel.rsplit('/').next() else {
+        return false;
+    };
+    if matches!(base, "lib.rs" | "main.rs" | "build.rs") {
+        return true;
+    }
+    // Cargo builds these as targets in their own right.
+    let parts: Vec<&str> = rel.split('/').collect();
+    for i in 0..parts.len().saturating_sub(1) {
+        if parts[i] == "bin" && i > 0 && parts[i - 1] == "src" {
+            return true;
+        }
+        if matches!(parts[i], "tests" | "benches" | "examples") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Files reachable from the crate roots by following `mod` declarations.
+///
+/// Breadth-first from every root. `edges` maps a file to the files it
+/// declares; a file absent from the result is one rustc never opens, however
+/// many other files name it.
+fn reachable_from_roots(
+    files: &[(PathBuf, String)],
+    edges: &BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> BTreeSet<PathBuf> {
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut queue: Vec<PathBuf> = Vec::new();
+    for (full, rel) in files {
+        if is_crate_root(rel) {
+            let n = normalize(full);
+            if seen.insert(n.clone()) {
+                queue.push(n);
+            }
+        }
+    }
+    while let Some(cur) = queue.pop() {
+        let Some(children) = edges.get(&cur) else {
+            continue;
+        };
+        for child in children {
+            if seen.insert(child.clone()) {
+                queue.push(child.clone());
+            }
+        }
+    }
+    seen
+}
+
 fn count_lines(p: &Path) -> usize {
     std::fs::read_to_string(p).map_or(0, |s| s.lines().count())
 }
@@ -504,15 +582,20 @@ pub fn run(root: &Path) -> Result<String, String> {
         walk(&base, root, &mut files);
     }
 
+    let mut edges: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+
     for (full, _rel) in &files {
         let text = std::fs::read_to_string(full).unwrap_or_default();
+        let from = normalize(full);
         for p in declared_paths_for(&text, full) {
-            declared.insert(p);
+            declared.insert(p.clone());
+            edges.entry(from.clone()).or_default().push(p);
         }
         for target in path_attr_targets(&text) {
             let target_path =
                 normalize(&full.parent().unwrap_or_else(|| Path::new("")).join(target));
-            path_targets.insert(target_path);
+            path_targets.insert(target_path.clone());
+            edges.entry(from.clone()).or_default().push(target_path);
         }
     }
 
@@ -534,6 +617,44 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
+    // Second check: reachability from the crate roots. A file can be declared
+    // by a sibling and still never be opened by rustc, if the declaring file
+    // is itself unreachable. `mod.rs` is exempt above by name, which is what
+    // let a whole unreachable directory hide behind its own `mod.rs`.
+    let reachable = reachable_from_roots(&files, &edges);
+    let mut unreachable: Vec<String> = Vec::new();
+    for (full, rel) in &files {
+        if exempt(rel) && !rel.ends_with("mod.rs") {
+            continue;
+        }
+        let abs_path = normalize(full);
+        if reachable.contains(&abs_path) {
+            continue;
+        }
+        // Already named as an orphan; do not report the same file twice.
+        if !declared.contains(&abs_path) && !path_targets.contains(&abs_path) && !exempt(rel) {
+            continue;
+        }
+        let lines = count_lines(full);
+        unreachable.push(format!("{rel}  ({lines} lines)"));
+    }
+
+    if !unreachable.is_empty() {
+        let mut msg = String::from(
+            "FAIL: these .rs files are not reachable from any crate root and are not compiled:\n",
+        );
+        for o in &unreachable {
+            let _ = writeln!(msg, "  - {o}");
+        }
+        msg.push_str(
+            "\nA `mod` somewhere declares them, but nothing declares that declarer, so rustc\n\
+             never opens any of them. A ring of files declaring each other is still dead code:\n\
+             not linted, not covered, not tested, while reading as live code in grep and review.\n\
+             Declare the directory from a crate root or delete it.",
+        );
+        return Err(msg);
+    }
+
     if !orphans.is_empty() {
         let mut msg =
             String::from("FAIL: these .rs files are declared by no `mod` and are not compiled:\n");
@@ -549,7 +670,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     Ok(format!(
-        "Orphan-file gate OK: all {} .rs files are reachable from a module declaration.",
+        "Orphan-file gate OK: all {} .rs files are declared by a `mod` and reachable \
+         from a crate root.",
         files.len()
     ))
 }
@@ -698,10 +820,50 @@ pub fn self_test() -> Result<String, String> {
         "a nested comment next to a real module declaration was flagged",
     )?;
 
+    // 11. The blind spot itself: a directory nothing declares, whose `mod.rs`
+    //     declares its own children. Every child is "declared", the `mod.rs`
+    //     is exempt by name, and the whole directory is still dead code.
+    //     This is `src/account_abstraction/` as it stood.
+    check_fixture(
+        &[
+            ("src/lib.rs", "pub mod real;\n"),
+            ("src/real.rs", "pub fn a() {}\n"),
+            ("src/ghost/mod.rs", "pub mod inner;\n"),
+            ("src/ghost/inner.rs", "pub fn ghost() {}\n"),
+        ],
+        false,
+        "an unreachable directory hid behind its own mod.rs",
+    )?;
+
+    // 12. The same directory, declared from the crate root, must pass.
+    check_fixture(
+        &[
+            ("src/lib.rs", "pub mod real;\npub mod ghost;\n"),
+            ("src/real.rs", "pub fn a() {}\n"),
+            ("src/ghost/mod.rs", "pub mod inner;\n"),
+            ("src/ghost/inner.rs", "pub fn a() {}\n"),
+        ],
+        true,
+        "a directory declared from the crate root was flagged",
+    )?;
+
+    // 13. Reachability must survive a chain, not just one hop.
+    check_fixture(
+        &[
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/a/mod.rs", "pub mod b;\n"),
+            ("src/a/b/mod.rs", "pub mod c;\n"),
+            ("src/a/b/c.rs", "pub fn a() {}\n"),
+        ],
+        true,
+        "a three-deep declared chain was flagged",
+    )?;
+
     Ok(String::from(
         "orphan-file gate self-test OK: undeclared file, missing src, \
-         out-of-scope inline nesting and nested-comment scope perturbation \
-         all rejected; declared, nested, #[path], src/bin, inline-nested and \
-         comment-adjacent modules all pass.",
+         out-of-scope inline nesting, nested-comment scope perturbation and \
+         a directory hiding behind its own mod.rs all rejected; declared, \
+         nested, #[path], src/bin, inline-nested, comment-adjacent and \
+         three-deep chained modules all pass.",
     ))
 }
