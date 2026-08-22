@@ -14,8 +14,20 @@
 //! Not: Bu modül sadece veri modeli ve sorgu altyapısı sağlar.
 //! RPC endpoint entegrasyonu ayrı bir adımda yapılacaktır.
 //!
-//! WIRING: unwired - the evidence endpoints are defined but no RPC method is
-//! registered against them.
+//! WIRING: unwired - olculdu, ve isaretin eski ifadesi yaniltiyordu.
+//! "Hicbir RPC metodu kayitli degil" cumlesi bir Atlas RPC metodu olmadigini
+//! ima ediyor; oysa `bud_atlasGetWalletContext` **var** ve calisiyor. O metot
+//! bu modulu kullanmiyor: `crate::gateway::atlas` adli **ayri** bir modulu
+//! (`build_wallet_context`, 138 satir) cagiriyor.
+//!
+//! Yani agacta `atlas` adini tasiyan iki modul var ve yalnizca digeri
+//! bagli. Bu dosyadaki hicbir tip - `AtlasQueryEngine`, `EvidenceRecord`,
+//! `WalletContextGraph`, `DomainSummary`, `CrossDomainTrace` - modul disinda
+//! tek bir yerde bile gecmiyor (olculdu: sifir kullanim, testler dahil).
+//!
+//! Ayni adi tasiyan iki modulden birinin olu olmasi, isimden okunamayacak bir
+//! durumdur; bu yuzden burada yazili. Silme karari kullanicinin: 568 satir ve
+//! 9 test, tek bir commit'te gitmesi gereken bir temizlik.
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, Hash32};
