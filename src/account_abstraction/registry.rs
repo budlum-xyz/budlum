@@ -397,11 +397,12 @@ mod tests {
                 .expect("gecerli pact"),
         );
         // Kok elle bozulur: icindeki pact'lerden yeniden hesaplanamaz.
-        pacts.root = [0u8; 32];
+        // Sifir kullanilmaz - sifir, bos kumenin gecerli koku.
+        pacts.root = [0xAA; 32];
 
         let mut account = account_with(2, 3);
         account.storage_root = [9u8; 32];
-        account.pact_root = [0u8; 32];
+        account.pact_root = [0xAA; 32];
 
         let mut registry = QuantumAccountRegistry::new();
         assert!(matches!(
