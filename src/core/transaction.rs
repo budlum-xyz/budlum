@@ -25,6 +25,44 @@ pub const DEFAULT_CHAIN_ID: u64 = 45262;
 /// path from the post-quantum wallet format.
 pub const SIGNATURE_VERSION_V4: u32 = 4;
 pub const SIGNATURE_VERSION_V5: u32 = 5;
+/// Coklu imzali yetkilendirme tasiyan islem bicimi.
+///
+/// V5 tek bir imza tasir ve `from`, o imzayi ureten anahtarin hash'idir. Bu,
+/// coklu imzali bir hesabin harcamasini ifade edemez: hesap soyutlama
+/// katmanindaki `MultisigPolicy` gercek bir `t-of-n` denetimi yapiyordu ama
+/// hicbir islem ona bir yetkilendirme getiremiyordu, cunku sema tek imza
+/// tasiyordu. Kural kodda vardi, uygulanacagi yol yoktu.
+///
+/// V6 bu yolu acar: imza alani bos kalir, yerine `authorization` gelir ve
+/// `from` tek bir anahtarin degil, **sahip kumesinin** hash'idir. Boylece
+/// hangi kumenin harcadigi adresin kendisine baglanir; bir saldirgan kendi
+/// sahip kumesiyle baskasinin adresini harcayamaz.
+pub const SIGNATURE_VERSION_V6: u32 = 6;
+
+/// Coklu imzali bir hesabin adresi: sahip kumesi + esik.
+///
+/// Adres, kumenin kendisinden turetilir. Turetmeye esigin de girmesi
+/// gerekiyor: ayni uc sahibin `2-of-3` ve `3-of-3` politikalari farkli iki
+/// guvenlik ifadesidir ve ayni adresi paylasirlarsa, dusuk esikli olan
+/// yuksek esikli olanin fonunu harcar.
+#[must_use]
+pub fn multisig_address(
+    owners: &[[u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN]],
+    threshold: usize,
+) -> Address {
+    let mut sorted: Vec<_> = owners.to_vec();
+    sorted.sort_unstable();
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"BDLM_TX_V6_MULTISIG_ADDRESS");
+    hasher.update((sorted.len() as u64).to_le_bytes());
+    for owner in &sorted {
+        hasher.update((owner.len() as u64).to_le_bytes());
+        hasher.update(owner);
+    }
+    hasher.update((threshold as u64).to_le_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    Address::from(digest)
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GasSchedule {
@@ -336,10 +374,37 @@ pub struct Transaction {
     /// rejects a V5 transaction whose key does not hash to `from`.
     #[serde(default)]
     pub signer_public_key: Vec<u8>,
+    /// V6 coklu imzali yetkilendirme: sahip kumesi, esik ve imzalar.
+    ///
+    /// V4/V5 icin `None` olmak zorunda. Bir V5 islemi bu alani tasiyorsa
+    /// reddedilir: tek imzayla dogrulanan bir islemin yaninda denetlenmemis
+    /// bir yetkilendirme durmasi, okuyan her kodun hangisinin bagladigini
+    /// tahmin etmesini gerektirirdi.
+    #[serde(default)]
+    pub authorization: Option<MultisigAuthorizationV6>,
     pub chain_id: u64,
     #[serde(default)]
     pub signature_version: u32,
     pub tx_type: TransactionType,
+}
+
+/// Bir V6 islemini yetkilendiren sahip kumesi ve imzalari.
+///
+/// # Neden sahip kumesi islemin icinde
+///
+/// Kume zincir durumunda saklanabilirdi, ama o zaman bir islemin
+/// dogrulanmasi hesap durumunun okunmasini gerektirirdi ve `verify()`
+/// durumsuz olmaktan cikardi. Bunun yerine kume islemle birlikte gelir ve
+/// `from` adresi kumeden turetildigi icin, yanlis kume getiren islem
+/// baskasinin hesabini gosteremez: adres tutmaz.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultisigAuthorizationV6 {
+    /// Sahip ML-DSA-87 acik anahtarlari.
+    pub owners: Vec<Vec<u8>>,
+    /// Gereken gecerli imza sayisi.
+    pub threshold: u32,
+    /// `(sahip acik anahtari, imza)` ciftleri.
+    pub signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl Transaction {
     pub fn new(from: Address, to: Address, amount: u64, data: Vec<u8>) -> Self {
@@ -509,6 +574,7 @@ impl Transaction {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id,
             signature_version: SIGNATURE_VERSION_V5,
             tx_type,
@@ -549,6 +615,7 @@ impl Transaction {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: DEFAULT_CHAIN_ID,
             signature_version: SIGNATURE_VERSION_V5,
             tx_type: TransactionType::Transfer,
@@ -573,10 +640,25 @@ impl Transaction {
         put_u128(&mut preimage, self.timestamp);
         put_u64(&mut preimage, self.chain_id);
         put_u32(&mut preimage, self.signature_version);
+        // V6: sahip kumesi ve esik imzanin kapsamina girer, imzalarin kendisi
+        // Girmez. Kume disarida kalsaydi bir aracinin kumeyi degistirip
+        // imzalari oldugu gibi tasimasi mumkun olurdu; imzalar iceride
+        // Olsaydi imza kendi kendini imzalardi.
+        if let Some(auth) = &self.authorization {
+            let mut sorted: Vec<&Vec<u8>> = auth.owners.iter().collect();
+            sorted.sort_unstable();
+            put_u64(&mut preimage, sorted.len() as u64);
+            for owner in sorted {
+                put_bytes(&mut preimage, owner);
+            }
+            put_u32(&mut preimage, auth.threshold);
+        }
         encode_transaction_type_payload(&self.tx_type, &mut preimage);
 
         let mut hasher = Sha3_256::new();
-        let domain = if self.signature_version == SIGNATURE_VERSION_V5 {
+        let domain = if self.signature_version == SIGNATURE_VERSION_V6 {
+            b"BDLM_TX_V6".as_slice()
+        } else if self.signature_version == SIGNATURE_VERSION_V5 {
             b"BDLM_TX_V5".as_slice()
         } else {
             b"BDLM_TX_V4".as_slice()
@@ -632,6 +714,48 @@ impl Transaction {
         self.signature_version = SIGNATURE_VERSION_V5;
         self.hash = self.calculate_hash();
     }
+    /// Coklu imzali bir hesap adina imzala.
+    ///
+    /// `from` cagirandan gelmez, kume ve esikten turetilir: bir islemin
+    /// baskasinin adresini gostermesi burada da mumkun olmamali. Imzalar
+    /// yetkilendirme kumesi preimage'e girdikten **sonra** alinir, cunku
+    /// imzalanan sey kumeyi de kapsar.
+    ///
+    /// Cagiran esigi karsilayacak kadar imza saglamazsa islem uretilir ama
+    /// dogrulanmaz; eksigi sessizce doldurmak, esigi anlamsiz kilardi.
+    #[cfg(feature = "wallet-ml-dsa")]
+    pub fn sign_v6(
+        &mut self,
+        owners: &[[u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN]],
+        threshold: usize,
+        signers: &[&crate::crypto::primitives::WalletKeyPair],
+    ) {
+        self.from = multisig_address(owners, threshold);
+        self.signature = None;
+        self.signer_public_key = Vec::new();
+        self.signature_version = SIGNATURE_VERSION_V6;
+        self.authorization = Some(MultisigAuthorizationV6 {
+            owners: owners.iter().map(|o| o.to_vec()).collect(),
+            threshold: u32::try_from(threshold).unwrap_or(u32::MAX),
+            signatures: Vec::new(),
+        });
+        self.hash = self.calculate_hash();
+        let signing_hash = self.signing_hash();
+        let signatures = signers
+            .iter()
+            .map(|kp| {
+                (
+                    kp.public_key_bytes().to_vec(),
+                    kp.sign(&signing_hash).to_vec(),
+                )
+            })
+            .collect();
+        if let Some(auth) = &mut self.authorization {
+            auth.signatures = signatures;
+        }
+        self.hash = self.calculate_hash();
+    }
+
     pub fn verify(&self) -> bool {
         let canonical_genesis = self.from == Address::zero()
             && self.to == Address::zero()
@@ -643,7 +767,8 @@ impl Transaction {
             && self.tx_type == TransactionType::Transfer
             && self.data == b"BUDLUM_GENESIS_TX"
             && self.signature.is_none();
-        if self.signature_version != SIGNATURE_VERSION_V5
+        if self.signature_version != SIGNATURE_VERSION_V6
+            && self.signature_version != SIGNATURE_VERSION_V5
             && self.signature_version != SIGNATURE_VERSION_V4
             && !canonical_genesis
         {
@@ -655,6 +780,16 @@ impl Transaction {
         }
         if canonical_genesis {
             return true;
+        }
+        // Yetkilendirme yalniz V6'ya aittir. Bir V4/V5 islemi bunu tasiyorsa
+        // Reddedilir: iki yetki kaynagi yan yana durursa hangisinin bagladigi
+        // Okuyana kalir, ve bu tam olarak sessiz sapmanin bicimidir.
+        if self.signature_version == SIGNATURE_VERSION_V6 {
+            return self.verify_v6();
+        }
+        if self.authorization.is_some() {
+            debug!("only a V6 transaction may carry a multisig authorization");
+            return false;
         }
         let signature = match &self.signature {
             Some(s) => s,
@@ -715,6 +850,78 @@ impl Transaction {
             }
         }
     }
+
+    /// V6 dogrulamasi: sahip kumesi adresi tutmali ve esik karsilanmali.
+    ///
+    /// Iki ayri kapi vardir ve ikisi de gereklidir. Birincisi **baglama**:
+    /// `from`, getirilen kume ve esikten turetilen adres olmak zorunda. Bu
+    /// olmadan gecerli imzalar toplayan bir saldirgan kendi kumesini bir
+    /// baskasinin adresine iliskilendirebilirdi. Ikincisi **yetki**:
+    /// imzalar `MultisigPolicy` uzerinden tek tek dogrulanir, ayni sahibin
+    /// tekrari sayilmaz ve esigin altinda kalan islem reddedilir.
+    fn verify_v6(&self) -> bool {
+        use crate::account_abstraction::threshold_mldsa::{
+            MultisigPolicy, OwnerSignature, MAX_THRESHOLD_OWNERS,
+        };
+        use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
+
+        let Some(auth) = &self.authorization else {
+            debug!("V6 transaction carries no authorization");
+            return false;
+        };
+        // Tek imza alani V6'da bos kalir: yetki yetkilendirmededir.
+        if self.signature.is_some() || !self.signer_public_key.is_empty() {
+            debug!("V6 transaction must not carry a single-key signature");
+            return false;
+        }
+        if auth.owners.is_empty() || auth.owners.len() > MAX_THRESHOLD_OWNERS {
+            debug!("V6 owner set size is out of range");
+            return false;
+        }
+        let mut owners = Vec::with_capacity(auth.owners.len());
+        for owner in &auth.owners {
+            let Ok(key) = <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(owner.as_slice()) else {
+                debug!("V6 owner key is not an ML-DSA-87 public key");
+                return false;
+            };
+            owners.push(key);
+        }
+        let Ok(threshold) = usize::try_from(auth.threshold) else {
+            debug!("V6 threshold does not fit this platform");
+            return false;
+        };
+        if multisig_address(&owners, threshold) != self.from {
+            debug!("V6 owner set does not derive the from address");
+            return false;
+        }
+        let Ok(policy) = MultisigPolicy::new(owners, threshold) else {
+            debug!("V6 multisig policy is unsatisfiable");
+            return false;
+        };
+        let mut signatures = Vec::with_capacity(auth.signatures.len());
+        for (key, sig) in &auth.signatures {
+            let Ok(public_key) = <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(key.as_slice()) else {
+                debug!("V6 signer key is not an ML-DSA-87 public key");
+                return false;
+            };
+            let Ok(signature) = <[u8; ML_DSA_87_SIGNATURE_LEN]>::try_from(sig.as_slice()) else {
+                debug!("V6 signature is not an ML-DSA-87 signature");
+                return false;
+            };
+            signatures.push(OwnerSignature {
+                public_key,
+                signature,
+            });
+        }
+        match policy.verify(&self.signing_hash(), &signatures) {
+            Ok(()) => true,
+            Err(e) => {
+                debug!("V6 multisig authorization refused: {e}");
+                false
+            }
+        }
+    }
+
     pub fn is_valid(&self) -> bool {
         if !self.verify() {
             return false;
@@ -1737,5 +1944,149 @@ mod v29_signing_tests {
             !tx.verify(),
             "priority_fee is execution-relevant and signed"
         );
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    mod v6 {
+        use super::*;
+        use crate::crypto::primitives::{WalletKeyPair, ML_DSA_87_PUBLIC_KEY_LEN};
+
+        fn owner_set(n: usize) -> (Vec<WalletKeyPair>, Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>) {
+            let keys: Vec<WalletKeyPair> = (0..n).map(|_| WalletKeyPair::generate()).collect();
+            let pubs = keys.iter().map(WalletKeyPair::public_key_bytes).collect();
+            (keys, pubs)
+        }
+
+        fn tx_for(from: Address) -> Transaction {
+            Transaction::new_with_fee(from, test_addr_from_byte(7u8), 5, 1, 0, vec![])
+        }
+
+        /// Esigi karsilayan bir yetkilendirme islemi gecerli kilar.
+        #[test]
+        fn a_threshold_of_owners_authorizes_the_transaction() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            assert!(tx.verify(), "2-of-3 esigi karsilanmali");
+            assert_eq!(tx.signature_version, SIGNATURE_VERSION_V6);
+        }
+
+        /// Esigin altinda kalan islem reddedilir. Kural `MultisigPolicy`'de
+        /// Yaziliydi; bu test onun bir isleme uygulandigini gosterir.
+        #[test]
+        fn one_signature_does_not_meet_a_threshold_of_two() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0]]);
+            assert!(!tx.verify(), "tek imza 2-of-3 esigini karsilamaz");
+        }
+
+        /// Ayni sahibin iki imzasi esigi karsilamaz.
+        #[test]
+        fn the_same_owner_signing_twice_does_not_reach_the_threshold() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[0]]);
+            assert!(!tx.verify(), "tekrar eden imzalayan bir sayilir");
+        }
+
+        /// Kume disindan bir imzalayan kabul edilmez.
+        #[test]
+        fn an_outsider_signature_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let outsider = WalletKeyPair::generate();
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &outsider]);
+            assert!(!tx.verify(), "kume disindaki imzalayan reddedilmeli");
+        }
+
+        /// Adres kumeye baglidir: baska bir hesabin adresi gosterilemez.
+        #[test]
+        fn an_authorization_cannot_point_at_another_address() {
+            let (keys, owners) = owner_set(3);
+            let (_other_keys, other_owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            assert!(tx.verify());
+            // Saldirgan hedef hesabin adresini takar: imzalar hala gecerli
+            // Ama adres kumeden turemedigi icin baglama kopar.
+            tx.from = multisig_address(&other_owners, 2);
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "adres kumeden turemeli");
+        }
+
+        /// Esik adresin bir parcasidir: ayni kumenin dusuk esikli surumu
+        /// Yuksek esikli hesabin adresini gosteremez.
+        #[test]
+        fn lowering_the_threshold_changes_the_address() {
+            let (keys, owners) = owner_set(3);
+            let strict = multisig_address(&owners, 3);
+            let mut tx = tx_for(strict);
+            tx.sign_v6(&owners, 1, &[&keys[0]]);
+            assert_ne!(tx.from, strict, "esik degisince adres de degisir");
+        }
+
+        /// Kume imzanin kapsamindadir: bir araci onu degistiremez.
+        #[test]
+        fn rewriting_the_owner_set_breaks_the_signatures() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            let (_others, other_owners) = owner_set(3);
+            if let Some(auth) = &mut tx.authorization {
+                auth.owners = other_owners.iter().map(|o| o.to_vec()).collect();
+            }
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "kume imzalidir, degistirilemez");
+        }
+
+        /// V5 bir islem yetkilendirme tasiyamaz.
+        #[test]
+        fn a_v5_transaction_carrying_an_authorization_is_refused() {
+            let keypair = WalletKeyPair::generate();
+            let mut tx = tx_for(keypair.address());
+            tx.sign_v5(&keypair);
+            assert!(tx.verify());
+            tx.authorization = Some(MultisigAuthorizationV6 {
+                owners: vec![keypair.public_key_bytes().to_vec()],
+                threshold: 1,
+                signatures: Vec::new(),
+            });
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "V5 yetkilendirme tasiyamaz");
+        }
+
+        /// V6 bir islem tek imza tasiyamaz: iki yetki kaynagi olmaz.
+        #[test]
+        fn a_v6_transaction_carrying_a_single_signature_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            tx.signature = Some(vec![0u8; 8]);
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "V6 tek imza tasiyamaz");
+        }
+
+        /// Yetkilendirmesi olmayan bir V6 islemi reddedilir.
+        #[test]
+        fn a_v6_transaction_without_an_authorization_is_refused() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            tx.authorization = None;
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "V6 yetkilendirmesiz olmaz");
+        }
+
+        /// Imzalanan sey islemin kendisidir: tutar degisirse yetki duser.
+        #[test]
+        fn tampering_with_the_amount_invalidates_the_authorization() {
+            let (keys, owners) = owner_set(3);
+            let mut tx = tx_for(multisig_address(&owners, 2));
+            tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
+            tx.amount = tx.amount.saturating_add(1);
+            tx.hash = tx.calculate_hash();
+            assert!(!tx.verify(), "tutar imzalidir");
+        }
     }
 }
