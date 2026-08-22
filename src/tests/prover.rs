@@ -329,3 +329,40 @@ fn proof_claim_registry_persists_across_restart() {
     assert!(restarted.proof_claims.get(&key).is_some());
     assert_eq!(restarted.proof_claims.len(), 1);
 }
+
+/// Baska bir zincir icin uretilmis kanit, burada kabul edilmemeli.
+///
+/// `public_inputs.chain_id` gonderenden gelir. STARK yalnizca "bu genel
+/// girdilerle bu program boyle kostu" der; girdilerin **hangi zincire** ait
+/// oldugunu kisitlamaz. Denetim dogrulayicida yapilmazsa, kendi zincirinde
+/// tamamen gecerli bir kanit burada da gecer ve bir alani ilerletir.
+#[test]
+fn a_proof_bound_to_another_chain_is_refused() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    let sender = addr(0x09);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee);
+
+    // Ayni kanit, yalnizca chain_id baska bir zincire isaret ediyor.
+    let mut foreign = pi.clone();
+    foreign.chain_id = pi.chain_id + 1;
+
+    let before = bc.state.get_balance(&sender);
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 11, &proof, &foreign, &program))
+        .expect_err("baska zincire bagli kanit reddedilmeli");
+    assert!(
+        err.contains("chain"),
+        "hata zincir baglamasini anlatmali: {err}"
+    );
+    assert_eq!(
+        bc.state.get_balance(&sender),
+        before,
+        "reddedilen kanit ucret yakmamali: denetim ucretten once"
+    );
+
+    // Kontrol: dogru chain_id ile ayni kanit kabul edilir.
+    bc.submit_zk_proof(submission(sender, 1, 11, &proof, &pi, &program))
+        .expect("dogru zincire bagli kanit kabul edilmeli");
+}
