@@ -171,6 +171,7 @@ fn registered_prover_valid_proof_is_fee_only_without_mint() {
 fn invalid_proof_burns_fee_and_leaves_state_unchanged() {
     let mut bc = fresh_chain();
     let (mut proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
     // Corrupt the proof bytes so verification fails.
     if let Some(b) = proof.proof_bytes.first_mut() {
         *b ^= 0xFF;
