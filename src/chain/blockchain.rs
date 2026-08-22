@@ -1961,7 +1961,8 @@ impl Blockchain {
 
     /// Real ZK-proof submission with fee + reward + claim policy.
     ///
-    /// 1. Validate the message kind and binding hash.
+    /// 1. Validate the message kind and binding hash, and refuse public
+    ///    Inputs bound to a different `chain_id` than this chain.
     /// 2. Charge the submission fee; invalid, valid, and duplicate work all
     ///    Consume resources, while protocol-conflicting claims are refunded.
     /// 3. Verify the STARK proof.
@@ -1987,6 +1988,25 @@ impl Blockchain {
         let expected = submission.expected_payload_hash();
         if submission.message.payload_hash != expected {
             return Err("payload hash does not bind to the supplied proof".into());
+        }
+
+        // 1b. Genel girdi baglamasi: kanit BU zincire ait olmali.
+        //
+        // `public_inputs.chain_id` gonderenden gelir ve kanit sistemi onu
+        // yalnizca *kendi icinde* tutarli tutar: STARK, "bu genel girdilerle
+        // bu program boyle kostu" der, girdilerin dogru zincire ait oldugunu
+        // soylemez. Denetim burada yapilmazsa baska bir zincir (ya da test
+        // agi) icin uretilmis, kendi zincirinde tamamen gecerli bir kanit
+        // burada da dogrulanir ve bir alani ilerletirdi.
+        //
+        // Bu, dogrulayicinin kanit sisteminin kisitlamadigi alani kendi
+        // kodunda denetlemesi gereken siniftir; kanit gecerliligi tek basina
+        // bir yetkilendirme karari degildir.
+        if submission.public_inputs.chain_id != self.chain_id {
+            return Err(format!(
+                "proof public inputs bind to chain {} but this chain is {}",
+                submission.public_inputs.chain_id, self.chain_id
+            ));
         }
 
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
