@@ -174,7 +174,7 @@ impl MultisigPolicy {
     }
 
     #[must_use]
-    pub fn threshold(&self) -> usize {
+    pub const fn threshold(&self) -> usize {
         self.threshold
     }
 

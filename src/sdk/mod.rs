@@ -161,12 +161,16 @@ fn default_fixtures_dir() -> String {
     "fixtures/".to_string()
 }
 
-fn default_fixture_seed() -> u64 {
+const fn default_fixture_seed() -> u64 {
     42
 }
 
 impl BudlumToml {
     /// `budlum.toml` dosyasını okur ve parse eder.
+    ///
+    /// # Errors
+    ///
+    /// Dosya okunamazsa `Io`, geçerli TOML değilse `Parse` döner.
     pub fn load(path: &std::path::Path) -> Result<Self, BudlumTomlError> {
         let content = std::fs::read_to_string(path).map_err(|e| BudlumTomlError::Io {
             path: path.to_path_buf(),
@@ -179,6 +183,7 @@ impl BudlumToml {
     }
 
     /// Varsayılan proje yapılandırmasını döndürür (yeni proje iskeleti için).
+    #[must_use]
     pub fn default_template(name: &str) -> Self {
         Self {
             project: ProjectSection {
@@ -193,6 +198,10 @@ impl BudlumToml {
     }
 
     /// Yapılandırmayı TOML olarak dosyaya yazar.
+    ///
+    /// # Errors
+    ///
+    /// Serileştirme başarısız olursa `Serialize`, yazma başarısız olursa `Io`.
     pub fn save(&self, path: &std::path::Path) -> Result<(), BudlumTomlError> {
         let content = toml::to_string_pretty(self).map_err(|e| BudlumTomlError::Serialize {
             path: path.to_path_buf(),
@@ -225,10 +234,10 @@ pub enum BudlumTomlError {
 impl std::fmt::Display for BudlumTomlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BudlumTomlError::Io { path, source } => {
+            Self::Io { path, source } => {
                 write!(f, "budlum.toml I/O error at {}: {}", path.display(), source)
             }
-            BudlumTomlError::Parse { path, source } => {
+            Self::Parse { path, source } => {
                 write!(
                     f,
                     "budlum.toml parse error at {}: {}",
@@ -236,7 +245,7 @@ impl std::fmt::Display for BudlumTomlError {
                     source
                 )
             }
-            BudlumTomlError::Serialize { path, source } => {
+            Self::Serialize { path, source } => {
                 write!(
                     f,
                     "budlum.toml serialize error at {}: {}",
@@ -251,9 +260,9 @@ impl std::fmt::Display for BudlumTomlError {
 impl std::error::Error for BudlumTomlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            BudlumTomlError::Io { source, .. } => Some(source),
-            BudlumTomlError::Parse { source, .. } => Some(source),
-            BudlumTomlError::Serialize { source, .. } => Some(source),
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::Serialize { source, .. } => Some(source),
         }
     }
 }

@@ -46,6 +46,7 @@ pub struct QuantumAccount {
 }
 
 impl QuantumAccount {
+    #[must_use]
     pub fn address_from_public_key(pubkey: &[u8; ML_DSA_87_PUBLIC_KEY_LEN]) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(ADDRESS_DOMAIN_V2);
@@ -53,6 +54,7 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
+    #[must_use]
     pub fn seed_from_entropy(entropy: &[u8]) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(SEED_DOMAIN_V1);
@@ -60,9 +62,10 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
+    #[must_use]
     pub fn guardian_root(guardians: &[[u8; ML_DSA_87_PUBLIC_KEY_LEN]]) -> [u8; 32] {
         let mut sorted = guardians.to_vec();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         let mut h = Sha3_256::new();
         for g in sorted {
@@ -71,9 +74,13 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
+    #[must_use]
     pub fn storage_cost(&self) -> f64 {
         // physical 0.23342 * e / r, device-only 0
         // For simplicity: storage_bytes * 0.23342 / 1_099_511_627_776 (1TB) / 16.68 (Duz ratio)
+        // Bir hesabın bayt sayısı f64'ün tam tamsayı aralığının (2^53)
+        // çok altında; maliyet zaten ondalıklı bir tahmin.
+        #[allow(clippy::cast_precision_loss)]
         let tb = self.storage_bytes as f64 / 1_099_511_627_776.0;
         if self.storage_bytes == 0 {
             0.0
@@ -82,7 +89,10 @@ impl QuantumAccount {
         }
     }
 
-    pub fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
+    /// # Errors
+    ///
+    /// Eşik 1..=16 aralığında değilse veya gardiyan listesi boş/16'dan büyükse hata döner.
+    pub const fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
             return Err("KQ-WALLET-MULTISIG-16: guardians empty");
         }
@@ -95,7 +105,10 @@ impl QuantumAccount {
         Ok(())
     }
 
-    pub fn verify_recovery_policy(&self) -> Result<(), &'static str> {
+    /// # Errors
+    ///
+    /// Kurtarma eşiği 1..=16 aralığında değilse veya gardiyan listesi boş/16'dan büyükse hata döner.
+    pub const fn verify_recovery_policy(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
             return Err("KQ-WALLET-RECOVERY-16: empty");
         }
@@ -108,6 +121,9 @@ impl QuantumAccount {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// `storage_root` sıfırken `pact_root` sıfır değilse hata döner.
     pub fn verify_storage_bound(&self) -> Result<(), &'static str> {
         // storage_root zero but pact_root non-zero -> inconsistent
         if self.storage_root == [0u8; 32] && self.pact_root != [0u8; 32] {
@@ -123,6 +139,9 @@ impl QuantumAccount {
     /// üretim yolundan çağrıldığını göremez; bu fonksiyon üçünü de sırayla
     /// doğrular ve ilk hatada döner. Ana zincire bağlanacak entegrasyonun
     /// çağıracağı tek yüzey budur.
+    /// # Errors
+    ///
+    /// Üç kontrolden herhangi biri reddederse ilk hata döner.
     pub fn validate_all(&self) -> Result<(), &'static str> {
         self.verify_multisig_threshold()?;
         self.verify_recovery_policy()?;
@@ -142,6 +161,9 @@ pub struct RecoveryProposal {
 }
 
 impl RecoveryProposal {
+    /// # Errors
+    ///
+    /// Yeni sahip mevcut sahiple aynıysa veya zaman kilidi taşarsa hata döner.
     pub fn new(
         current_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
         new_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
@@ -166,6 +188,7 @@ impl RecoveryProposal {
         })
     }
 
+    #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(RECOVERY_DOMAIN_V1);
@@ -178,7 +201,8 @@ impl RecoveryProposal {
         h.finalize().into()
     }
 
-    pub fn is_timelock_satisfied(&self, current: u64) -> bool {
+    #[must_use]
+    pub const fn is_timelock_satisfied(&self, current: u64) -> bool {
         current >= self.executable_after
     }
 }
@@ -208,6 +232,9 @@ pub struct GuardianVote {
 pub struct BftGuardianFinality;
 
 impl BftGuardianFinality {
+    /// # Errors
+    ///
+    /// Oy sayısı eşiğin altındaysa veya nicem tutmazsa hata döner.
     pub fn finalize(
         votes: Vec<GuardianVote>,
         n: usize,
