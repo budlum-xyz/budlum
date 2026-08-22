@@ -30,6 +30,8 @@ pub mod prover;
 pub mod registry;
 pub mod relayer;
 pub mod rpc;
+/// Budlum proje dosyası şeması (`budlum.toml`).
+pub mod sdk;
 pub mod settlement;
 pub mod sharding;
 pub mod socialfi;

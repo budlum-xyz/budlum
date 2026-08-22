@@ -1,47 +1,37 @@
-//! P12-12: Developer OS / BudL SDK - Geliştirici deneyim katmanı.
+//! Budlum proje dosyası (`budlum.toml`) şeması.
 //!
-//! Bu modül, Budlum üzerinde geliştirme yapmak isteyen protokol geliştiricilerine
-//! Yönelik araçlar sağlar:
+//! # Bu modülün geçmişi
 //!
-//! - **Devnet Yönetimi:** Lokal 4-domain devnet (PoW, PoS, PoA, Bft) başlatma
-//!   Ve yapılandırma (`devnet` modülü)
-//! - **Sözleşme Desteği:** BudL sözleşmelerinin derleme ve dağıtım altyapısı
-//!   (`contracts` modülü)
-//! - **Fixture Üretimi:** Test ve geliştirme için proof, Pollen asset/grant,
-//!   Relayer intent fixture'ları (`fixture` modülü)
-//! - **Çalıştırıcı:** BudL compile/test runner, SDK entegrasyon testleri (`runner` modülü)
+//! `src/sdk/` beş dosyaydı ve `lib.rs`'ten hiç bildirilmemişti: 1871 satırın
+//! tamamı derlenmiyordu. Derlenmediği için ne clippy, ne kapılar, ne testler
+//! bakıyordu. Ölçüldü, tahmin edilmedi: dizin bildirildiğinde ortaya çıkan
+//! şey, isimlerinin vaat ettiği işi yapmayan üç dosyaydı.
 //!
-//! # Kullanım
+//! * `contracts.rs` — `compile()` bir derleyici değildi. Kaynağın boş olup
+//!   olmadığına bakıp `bytecode_hash` alanına kaynağın hash'ini koyuyordu;
+//!   kendi yorumu "şimdilik stub" diyordu. `CompiledContract` adlı tipin
+//!   içinde bytecode yoktu.
+//! * `devnet.rs` — `start_domain()` düğüm başlatmıyordu. Bir dizin oluşturup
+//!   bir alanı `Running` yapıyor ve "RPC at 127.0.0.1:port" logluyordu; o
+//!   portu dinleyen hiçbir şey yoktu, `rpc_endpoints()` bağlanılamayacak
+//!   adresler döndürüyordu.
+//! * `runner.rs` — `test()` test koşturmuyordu. Her sözleşme için iki sonuç
+//!   uyduruyordu ve `all_passed()` daima `true` dönüyordu: sözleşmesi bozuk
+//!   bir geliştiriciye yeşil gösterirdi.
 //!
-//! ```rust,ignore
-//! Use budlum_core::sdk::devnet::{DevnetConfig, LocalDevnet};
-//! Use budlum_core::sdk::fixture::{ProofFixtureGenerator, PollenFixtureGenerator};
-//! Use budlum_core::sdk::contracts::BudlContract;
-//! Use budlum_core::sdk::runner::BudlRunner;
-//! ```
+//! Üçü de silindi. Sahte bir devnet'in tutulması için bir neden de yoktu:
+//! gerçek 4 düğümlü devnet `ops/docker-compose.yml` ile zaten var, CI'da
+//! `devnet-multinode-smoke` işinde gerçek RPC'ye karşı koşuyor. İkinci ve
+//! sahte bir kopya, gerçeğinin yanında yalnızca yanıltır.
 //!
-//! # Tasarım Kararları
+//! `fixture.rs` de silindi: ürettiği `ProofFixture`, `developer_os.rs`'teki
+//! doğrulanan manifest kaydıyla aynı adı taşıyıp farklı şey ifade ediyordu.
+//! Tek tip `developer_os.rs`'te yaşıyor.
 //!
-//! - SDK modülü `#![forbid(unsafe_code)]` kuralına tabidir (lib.rs seviyesi).
-//! - Tüm yapılandırmalar `budlum.toml` dosyasından deserialize edilir (serde + toml).
-//! - Fixture üreteçleri deterministiktir - aynı seed aynı fixture setini üretir.
-//! - Devnet 4 domain'i ayrı process'lerde simüle eder (PoW, PoS, PoA, Bft).
+//! # Geriye kalan
 //!
-//! WIRING: unwired - developer-facing surface, called by SDK consumers outside
-//! this tree rather than by the node.
-
-pub mod contracts;
-pub mod devnet;
-pub mod fixture;
-pub mod runner;
-
-pub use contracts::{BudlContract, ContractError, ContractLanguage};
-pub use devnet::{DevnetConfig, DevnetDomainProfile, LocalDevnet, LOCAL_DEVNET_DOMAINS};
-pub use fixture::{
-    FixtureGenerator, PollenAssetFixture, PollenFixtureGenerator, PollenGrantFixture, ProofFixture,
-    ProofFixtureGenerator, RelayerIntentFixture, RelayerIntentFixtureGenerator,
-};
-pub use runner::{BudlRunner, RunResult, RunnerError};
+//! Bir dosya biçimi şeması. İddiası yok: bir TOML dosyasını okur, yazar ve
+//! varsayılanını üretir. Yaptığı iş kadar söylüyor.
 
 /// `budlum.toml` proje yapılandırma dosyası şeması.
 ///
