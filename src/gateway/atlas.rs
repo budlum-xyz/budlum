@@ -14,7 +14,7 @@
 //! Bu yuzden silinmedi, **tasindi**: `AtlasQueryEngine` ve dogrulayicilari
 //! (`EvidenceRecord`, `WalletContextGraph`, `DomainSummary`,
 //! `CrossDomainTrace`) testleriyle birlikte buraya alindi. Ayni adi tasiyan
-//! iki moduls yerine tek modul kaldi.
+//! iki ayri modul yerine tek modul kaldi.
 //!
 //! Tasinmayan tek sey `query_evidence_for_address` idi: adrese gore kanit
 //! ariyormus gibi duruyor, govdesi `Vec::new()` donduruyordu. Adres indeksi

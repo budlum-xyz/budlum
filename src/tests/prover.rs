@@ -35,7 +35,7 @@ fn fresh_chain() -> Blockchain {
 /// Alani kaydeder ve verilen programi zk izin listesine yazar.
 ///
 /// Bu yardimci var, cunku artik bir kanit yalnizca gecerli olmakla kabul
-/// edilmiyor: alanin o programa acikca izin vermis olmasi gerekiyor. Izin
+/// edilmiyor: alanin o program icin acikca izin vermis olmasi gerekiyor. Izin
 /// listesi bos dogar, yani kayit tek basina yetmez.
 fn register_domain_allowing(bc: &mut Blockchain, id: u32, program: &[u64]) {
     let mut domain = crate::domain::plugin::default_domain(
@@ -453,7 +453,7 @@ fn a_valid_proof_over_an_unauthorized_program_is_refused() {
     let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
 
-    // Alan kayitli ve zk kabul ediyor, ama BASKA bir programa izin veriyor.
+    // Alan kayitli ve zk kabul ediyor, ama BASKA bir program icin izin veriyor.
     let mut other_program = program.clone();
     other_program.push(0);
     register_domain_allowing(&mut bc, 1, &other_program);
