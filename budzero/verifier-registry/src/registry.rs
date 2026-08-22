@@ -13,6 +13,22 @@
 //!
 //! WIRING: unwired - a separate crate consumed by downstream verifiers; the
 //! node keeps its own registry in src/registry/.
+//!
+//! ## Cekirdekteki ikizle iliski (`src/registry/permissionless.rs`)
+//!
+//! Iki kayit defteri ayni rol yasam dongusunu iki ayrimda anlatir: bu crate
+//! asagi akisa (dogrulayici musterilerine) sunulur, cekirdekteki dugumun
+//! konsensus durumudur. Ayni soruya iki farkli cevap bir kez olculdu ve kapatildi
+//! (tekrar kesme: `Ok(penalty: 0)` vs `Err(AlreadySlashed)`); ayni sinifin
+//! geri gelmemesi icin kural: kesme/unbonding semantigindeki her degisiklik
+//! IKISINE birden uygulanir ve ayna testler iki tarafta da kosar.
+//!
+//! Bilincli birakilan iki fark (2026-08-22, semantik karar kullanicida):
+//! - Sifir cezali kesme burada kayda girer; cekirdekte `Ok(None)` doner ve
+//!   kayda girmez. (Denetim izi butunlugu vs sessiz-noop okumasi.)
+//! - Cekirdek taraf reddedilen kesmeyi `tracing::warn` ile loglar; bu crate
+//!   loglama bagimliligi tasimaz, `Ok(None)` donusunu izlemek cagiranin
+//!   sorumlulugundadir.
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingReport};
@@ -27,6 +43,13 @@ pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
 
 /// Default number of epochs that unbonded stake stays locked.
 pub const UNBONDING_EPOCHS: u64 = 7;
+
+/// Kesme kayitlari icin tavan: canli durumda en yeni kayitlar tutulur,
+/// eskileri arsiv katmanina (blok gecmisi) aittir. Ana agactaki ikiz
+/// (`src/registry/permissionless.rs::MAX_SLASHING_HISTORY`) ile ayni deger;
+/// iki defter farkli tavanlara sahipken ayni rapor dizisine ikisi de farkli
+/// `slashing_history` cevabi verirdi.
+pub const MAX_SLASHING_HISTORY: usize = 4096;
 
 /// Reasons a registered member can be slashed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,7 +539,7 @@ impl VerifierRegistry {
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
-                self.slashing_history.push(SlashingRecord {
+                self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
                     remaining_stake: outcome.remaining_stake,
@@ -525,6 +548,20 @@ impl VerifierRegistry {
             }
             Err(RegistryError::NotRegistered { .. }) => Ok(None),
             Err(_) => Ok(None),
+        }
+    }
+
+    /// Kesme kaydini ekle; tavan asilinca en eskiyi dusur.
+    ///
+    /// `src/registry/permissionless.rs::record_slash` ile ayni davranis:
+    /// en yeni kayitlar canli durumda kalir. Tavansiz buyuyen bir gecmis,
+    /// bu kaydi canli tutan her surecin bellegi ve serilestirmesi icin
+    /// sinirsiz yuk demektir.
+    fn record_slash(&mut self, record: SlashingRecord) {
+        self.slashing_history.push(record);
+        if self.slashing_history.len() > MAX_SLASHING_HISTORY {
+            let excess = self.slashing_history.len() - MAX_SLASHING_HISTORY;
+            self.slashing_history.drain(..excess);
         }
     }
 
@@ -558,11 +595,13 @@ impl VerifierRegistry {
             .collect()
     }
 
-    // Güvenlik denetimi (MEDIUM): rol-spesifik is_active_* helper'lari
-    // Unbonding'i active sayiyordu; begin_unbonding kaydi Active'den cikarir
-    // cikarmaz bu helper'lar hala yetki veriyordu. Yetki yalniz
-    // MemberStatus::Active icindir; cikis sirasinda stake'in slash edilebilir
-    // kalip kalmadigi ayri bir sorudur ve ayri helper'in konusudur.
+    // Rol-spesifik yardimcilar iki ayri sorunun ikincisini sorar:
+    // sorumluluk. `is_active` yeni gorev atamasi icin katidir (yalniz
+    // Active); bu yardimcilar ise bondu hala kilitli oldugu icin cikmakta
+    // olan (Unbonding) uyeyi de kapsar - ispatlanmis bir isin cezasi,
+    // cikis istegiyle birlikte dusmez. (Onceki MEDIUM bulgusu bu katmanin
+    // Unbonding'i Active gibi saymasiydi; ayrim `Registration::is_slashable`
+    // ile isimlendirildi ve ayna testler iki kayit defterinde de kosar.)
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::role::roles::RELAYER)
             .is_some_and(Registration::is_slashable)
@@ -989,6 +1028,60 @@ mod tests {
         let result = reg.slash_from_report(&report).unwrap();
         assert!(result.is_some());
         assert!(!reg.is_active_master_verifier(&addr(11)));
+    }
+
+    /// Kesme gecmisi tavanda durur: en yeniler tutulur, en eskiler dusurulur.
+    ///
+    /// Ana agactaki karsi testin (`the_slashing_history_stops_growing_at_the_cap`)
+    /// aynasidir: iki defter ayni rapor dizisine ayni uzunluk ve ayni sira ile
+    /// cevap vermek zorundadir, yoksa hangisine bakildigini bilmeyen bir
+    /// cagiran sessizce yanitlanir.
+    #[test]
+    fn the_slashing_history_stops_growing_at_the_cap() {
+        use crate::evidence::{ProofProvenance, SlashingProof};
+
+        let mut reg = VerifierRegistry::new();
+        let total = MAX_SLASHING_HISTORY + 3;
+        for i in 0..total {
+            let mut raw = [0u8; 32];
+            raw[0] = (i / 256) as u8 + 1;
+            raw[1] = (i % 256) as u8;
+            let offender = Address::from(raw);
+            reg.register_master_verifier(offender, 10_000, 0).unwrap();
+            let report = SlashingReport::new(
+                offender,
+                roles::MASTER_VERIFIER,
+                SlashingProof::Liveness {
+                    window_start_epoch: 0,
+                    window_end_epoch: 10,
+                    missed: 5,
+                    expected: 10,
+                },
+                ProofProvenance::ConsensusVerified,
+                None,
+            );
+            assert!(reg.slash_from_report(&report).unwrap().is_some());
+        }
+
+        assert_eq!(reg.slashing_history().len(), MAX_SLASHING_HISTORY);
+        // En eski uc kayit dustu: kalan ilk kayit i=3 raporuna ait olmali.
+        let mut expected_first = [0u8; 32];
+        expected_first[0] = 1;
+        expected_first[1] = 3;
+        let first = reg
+            .slashing_history()
+            .first()
+            .map(|record| record.report.offender);
+        assert_eq!(first, Some(Address::from(expected_first)));
+        // En yeni kayit dizinin sonunda duruyor: budama bastan yapildi.
+        let mut expected_last = [0u8; 32];
+        expected_last[0] = ((total - 1) / 256) as u8 + 1;
+        expected_last[1] = ((total - 1) % 256) as u8;
+        let last = reg
+            .slashing_history()
+            .last()
+            .map(|record| record.report.offender);
+        assert_eq!(last, Some(Address::from(expected_last)));
     }
 
     #[test]
