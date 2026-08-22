@@ -13,6 +13,11 @@
 //! testi bile derlenmezdi (`GuardianVote.signature` alani `[u8; ML_DSA_87_SIGNATURE_LEN]`
 //! iken teste `vec![1u8; 4627]` yaziliydi). Derlenmeyen kod, hicbir kapinin
 //! gormedigi koddur.
+//!
+//! WIRING: unwired - the quantum account type and its `validate_all` guard are
+//! not yet consulted by transaction verification. Wiring account abstraction
+//! into that path is the next step; until it happens this guard runs only in
+//! tests, and saying so here is more honest than letting it look reachable.
 
 use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
 use sha3::{Digest, Sha3_256};
@@ -182,7 +187,7 @@ impl RecoveryProposal {
 ///
 /// Burada ikinci bir `PactBinding` tanımı vardı: aynı beş alan, aynı 128
 /// baytlık bütçe kontrolü, aynı `verify_commitment`. `storage::Pact` bunun
-/// üst kümesi — `id` ve `mod_flag` da taşıyor, `PactRegistry` ile bir köke
+/// üst kümesi - `id` ve `mod_flag` da taşıyor, `PactRegistry` ile bir köke
 /// bağlanıyor.
 ///
 /// Aynı kavramın iki tanımı, birinin değişmesi hâlinde sessizce ayrılır.
