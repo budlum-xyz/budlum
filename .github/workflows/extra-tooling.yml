@@ -24,7 +24,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, fix/architecture-tip-adlari]
   schedule:
     - cron: "0 4 * * 1" # haftalık Pazartesi 04:00 UTC
   workflow_dispatch:
