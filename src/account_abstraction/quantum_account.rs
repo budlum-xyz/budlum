@@ -164,12 +164,12 @@ impl RecoveryProposal {
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(RECOVERY_DOMAIN_V1);
-        h.update(&self.current_owner);
-        h.update(&self.current_address);
-        h.update(&self.new_owner);
-        h.update(&self.new_address);
-        h.update(&self.created_block.to_be_bytes());
-        h.update(&self.executable_after.to_be_bytes());
+        h.update(self.current_owner);
+        h.update(self.current_address);
+        h.update(self.new_owner);
+        h.update(self.new_address);
+        h.update(self.created_block.to_be_bytes());
+        h.update(self.executable_after.to_be_bytes());
         h.finalize().into()
     }
 
