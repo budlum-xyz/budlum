@@ -246,3 +246,83 @@ fn f05_readiness_does_not_claim_stark_verification() {
     assert!(src.contains("verification_level"));
     assert!(src.contains("full_execution_proof_verification"));
 }
+
+/// Kaydedilen program hash'i, kaydedilen boyutlarin urettigi program ile ayni olmali.
+///
+/// `execution_program_hash` ile `execution_dims` ayri ayri veriliyor. Dogrulama
+/// zamaninda program **dims'ten yeniden kuruluyor** ve kanit kaydedilen hash'e
+/// karsi olculuyor; ikisi ayrisirsa hicbir gecerli kanit o modeli gecemez.
+///
+/// Bu bir sahtecilik acigi degildir - AI yolu programi gonderenden degil
+/// kayittan alir, dolayisiyla fail-closed. Sessiz bir tuzaktir: hatayi
+/// kaydin kendisinde degil, cok sonra dogrulamada gosterir. Kaynaginda
+/// reddedilmesi gerekir.
+#[test]
+fn a_model_hash_that_contradicts_its_dims_is_refused() {
+    let mut reg = AiRegistry::new();
+    let err = reg
+        .register_model(AiModelSpec {
+            model_id: AiModelId([9u8; 32]),
+            model_hash: [2u8; 32],
+            modalities: crate::lubot::perception::ModalitySet::text_only(),
+            owner: addr(3),
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 64,
+            max_output_ref_bytes: 64,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            // Kanit zorunlu DEGIL: F-04 kapisina takilmadan bu kapiya gelinsin.
+            require_execution_proof: false,
+            // Bu hash, asagidaki boyutlarin urettigi programin hash'i degil.
+            execution_program_hash: Some([4u8; 32]),
+            execution_class: 1,
+            execution_weights_digest: Some([5u8; 32]),
+            execution_dims: Some(vec![2, 1]),
+        })
+        .expect_err("tutarsiz hash/dims cifti reddedilmeli");
+    assert!(
+        err.contains("does not match the program execution_dims build"),
+        "gerekce hash ile dims'in ayristigini soylemeli, gelen: {err}"
+    );
+}
+
+/// Kontrol: tutarli cift kabul edilir.
+///
+/// Kapinin yalnizca yanlisi reddettigini, dogruyu da reddetmedigini gosterir -
+/// yoksa "her seyi reddet" de bir kapi sayilirdi.
+#[test]
+fn a_model_hash_that_matches_its_dims_registers() {
+    let dims = vec![2u16, 1];
+    let spec_for_hash = crate::ai::execution::FixedPointMlpSpec {
+        dims: dims.clone(),
+        weights: vec![0i32; 2],
+        biases: vec![0i32; 1],
+    };
+    let expected = crate::ai::execution::matmul_program_hash(&spec_for_hash)
+        .expect("program hash uretilebilmeli");
+
+    let mut reg = AiRegistry::new();
+    reg.register_model(AiModelSpec {
+        model_id: AiModelId([10u8; 32]),
+        model_hash: [2u8; 32],
+        modalities: crate::lubot::perception::ModalitySet::text_only(),
+        owner: addr(3),
+        min_verifier_count: 1,
+        agreement_threshold: 1,
+        max_input_ref_bytes: 64,
+        max_output_ref_bytes: 64,
+        request_deadline_blocks: 10,
+        result_deadline_blocks: 10,
+        version: 1,
+        active: true,
+        require_execution_proof: false,
+        execution_program_hash: Some(expected),
+        execution_class: 1,
+        execution_weights_digest: Some([5u8; 32]),
+        execution_dims: Some(dims),
+    })
+    .expect("tutarli cift kabul edilmeli");
+}
