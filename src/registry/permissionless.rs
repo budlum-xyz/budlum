@@ -115,6 +115,28 @@ impl Registration {
     pub fn is_active(&self) -> bool {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
+
+    /// Hala kesilebilir bir bonda sahip mi: `Active` **veya** `Unbonding`.
+    ///
+    /// # Neden iki ayri soru var
+    ///
+    /// Bu iki soru ayni degil ve karistirilmalari sessiz bir sapma
+    /// uretiyordu. `is_active_relayer` gibi rol yardimcilari `Unbonding`'i
+    /// kabul ediyordu, `is_active` etmiyordu; ayni isim iki farkli cevap
+    /// veriyordu ve fark hicbir yerde yaziyordu degildi.
+    ///
+    /// Dogru ayrim niyettedir. **Yeni bir gorev vermek** icin uye `Active`
+    /// olmali: cikmakta olan birine is atamak, is bitmeden bondunun cozulmesi
+    /// demektir. **Yaptigi bir isten sorumlu tutmak** icinse `Unbonding` de
+    /// yeter, cunku bond hala kilitli ve kesilebilir. Aksi halde bir rolayci
+    /// islemini gonderip hemen `begin_unbonding` cagirarak sorumluluktan
+    /// cikardi.
+    pub fn is_slashable(&self) -> bool {
+        matches!(
+            self.status,
+            MemberStatus::Active | MemberStatus::Unbonding { .. }
+        ) && self.stake > 0
+    }
 }
 
 /// Errors surfaced by the permissionless registry.
@@ -752,15 +774,8 @@ impl PermissionlessRegistry {
     // Active checks for all well-known roles (unified)
 
     pub fn is_active_relayer(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::RELAYER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::RELAYER)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn ensure_active_relayer(&self, account: &Address) -> Result<(), RegistryError> {
@@ -772,15 +787,8 @@ impl PermissionlessRegistry {
     }
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::ATTESTER) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::ATTESTER)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn ensure_active_attester(&self, account: &Address) -> Result<(), RegistryError> {
@@ -799,27 +807,13 @@ impl PermissionlessRegistry {
     }
 
     pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::LUBOT_OPERATOR) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::LUBOT_OPERATOR)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
-        match self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR) {
-            Some(reg) => {
-                matches!(
-                    reg.status,
-                    MemberStatus::Active | MemberStatus::Unbonding { .. }
-                ) && reg.stake > 0
-            }
-            None => false,
-        }
+        self.get(account, crate::registry::role::roles::CONTENT_VALIDATOR)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_ai_verifier(&self, account: &Address) -> bool {
@@ -1102,6 +1096,57 @@ mod tests {
             .unwrap();
         assert!(reg.is_active_master_verifier(&addr(10)));
         assert!(reg.is_active(&addr(10), roles::VERIFIER)); // alias
+    }
+
+    /// Çıkmakta olan bir üye yeni görev alamaz ama sorumluluktan çıkamaz.
+    ///
+    /// İki soru ayrı ayrı yanıtlanmalı: `is_active` görev atamayı, rol
+    /// yardımcıları (`is_slashable`) kesilebilirliği sorar. Aynı statü için
+    /// ikisinin de aynı cevabı vermesi, `begin_unbonding` çağırmayı
+    /// sorumluluktan kaçmanın yolu yapardı.
+    #[test]
+    fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
+        let mut reg = PermissionlessRegistry::new();
+        let a = addr(21);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+
+        assert!(reg.is_active(&a, roles::RELAYER), "aktifken gorev alir");
+        assert!(reg.is_active_relayer(&a), "aktifken kesilebilir");
+
+        reg.begin_unbonding(a, roles::RELAYER, 1)
+            .expect("unbonding");
+
+        assert!(
+            !reg.is_active(&a, roles::RELAYER),
+            "cikmakta olana yeni gorev verilmez"
+        );
+        assert!(
+            reg.is_active_relayer(&a),
+            "bond hala kilitli: sorumluluk surer"
+        );
+    }
+
+    /// Kesilmiş bir üye hiçbir soruya `true` dönmemeli.
+    #[test]
+    fn a_slashed_member_is_neither_active_nor_slashable_again() {
+        let mut reg = PermissionlessRegistry::new();
+        let a = addr(22);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+        reg.slash(
+            a,
+            roles::RELAYER,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE,
+        )
+        .expect("ilk kesme");
+
+        assert!(!reg.is_active(&a, roles::RELAYER));
+        assert!(
+            !reg.is_active_relayer(&a),
+            "kesilmis bond ikinci kez kesilemez"
+        );
     }
 
     #[test]

@@ -71,6 +71,21 @@ impl Registration {
     pub fn is_active(&self) -> bool {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
+
+    /// Hala kesilebilir bir bonda sahip mi: `Active` **veya** `Unbonding`.
+    ///
+    /// Bu kayit defteri ile `src/registry/permissionless.rs` ayni sorulara
+    /// ayni cevabi vermek zorunda; ikisi de ayni rollerin ayni yasam
+    /// dongusunu anlatiyor. Gorev atama `is_active` sorar, sorumluluk
+    /// `is_slashable` sorar: cikmakta olan bir uyenin bondu hala kilitli
+    /// oldugu icin yaptigi isten sorumlu tutulabilir, ama ona yeni is
+    /// verilemez.
+    pub fn is_slashable(&self) -> bool {
+        matches!(
+            self.status,
+            MemberStatus::Active | MemberStatus::Unbonding { .. }
+        ) && self.stake > 0
+    }
 }
 
 /// Errors surfaced by the registry.
@@ -549,11 +564,13 @@ impl VerifierRegistry {
     // MemberStatus::Active icindir; cikis sirasinda stake'in slash edilebilir
     // kalip kalmadigi ayri bir sorudur ve ayri helper'in konusudur.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::RELAYER)
+        self.get(account, crate::role::roles::RELAYER)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::ATTESTER)
+        self.get(account, crate::role::roles::ATTESTER)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_master_verifier(&self, account: &Address) -> bool {
@@ -561,11 +578,13 @@ impl VerifierRegistry {
     }
 
     pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::LUBOT_OPERATOR)
+        self.get(account, crate::role::roles::LUBOT_OPERATOR)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::CONTENT_VALIDATOR)
+        self.get(account, crate::role::roles::CONTENT_VALIDATOR)
+            .is_some_and(Registration::is_slashable)
     }
 
     pub fn total_stake(&self, role: RoleId) -> u64 {
@@ -750,6 +769,59 @@ mod tests {
                 "role {role:?} stayed active after a cross-role slash"
             );
         }
+    }
+
+    /// Cikmakta olan uye yeni gorev almaz ama kesilebilir kalir.
+    ///
+    /// Bu, `src/registry/permissionless.rs` icindeki ayni adli testin
+    /// aynasidir. Iki kayit defteri ayni rollerin ayni yasam dongusunu
+    /// anlatiyor; ayni girdiye farkli cevap vermeleri, hangisinin okundugunu
+    /// bilmeyen bir cagirani sessizce yaniltir. Fark bir kez olctuldu ve
+    /// kapatildi: burada `Unbonding` reddediliyordu, cekirdekte kabul
+    /// ediliyordu.
+    #[test]
+    fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
+        let mut reg = VerifierRegistry::new();
+        let a = addr(21);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+
+        assert!(reg.is_active(&a, roles::RELAYER));
+        assert!(reg.is_active_relayer(&a));
+
+        reg.begin_unbonding(a, roles::RELAYER, 1)
+            .expect("unbonding");
+
+        assert!(
+            !reg.is_active(&a, roles::RELAYER),
+            "cikmakta olana yeni gorev verilmez"
+        );
+        assert!(
+            reg.is_active_relayer(&a),
+            "bond hala kilitli: sorumluluk surer"
+        );
+    }
+
+    /// Kesilmis uye hicbir soruya `true` donmemeli.
+    #[test]
+    fn a_slashed_member_is_neither_active_nor_slashable_again() {
+        let mut reg = VerifierRegistry::new();
+        let a = addr(22);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+        reg.slash(
+            a,
+            roles::RELAYER,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE,
+        )
+        .expect("ilk kesme");
+
+        assert!(!reg.is_active(&a, roles::RELAYER));
+        assert!(
+            !reg.is_active_relayer(&a),
+            "kesilmis bond ikinci kez kesilemez"
+        );
     }
 
     #[test]
