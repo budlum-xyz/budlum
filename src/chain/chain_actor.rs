@@ -93,6 +93,14 @@ pub enum ChainCommand {
         crate::domain::ConsensusDomain,
         oneshot::Sender<Result<(), String>>,
     ),
+    RegisterSovereignTemplate(
+        Box<crate::domain::SovereignDomainTemplate>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    ValidateSovereignAuditExport(
+        Box<crate::domain::sovereign::AuditExportBundle>,
+        oneshot::Sender<Result<(), String>>,
+    ),
     SubmitDomainCommitment(
         crate::domain::DomainCommitment,
         oneshot::Sender<Result<(), String>>,
@@ -1178,6 +1186,43 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::RegisterConsensusDomain(domain, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Egemen alan sablonunu kaydet.
+    ///
+    /// Sablon, adlandirdigi uzlasma alanina baglanir: alan kayitli olmali ve
+    /// tur/operator eslesmelidir.
+    pub async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterSovereignTemplate(
+                Box::new(template),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    pub async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ValidateSovereignAuditExport(
+                Box::new(bundle),
+                tx,
+            ))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -2760,6 +2805,15 @@ impl ChainActor {
                 }
                 ChainCommand::RegisterConsensusDomain(domain, res_tx) => {
                     let _ = res_tx.send(self.blockchain.register_consensus_domain(domain));
+                }
+                ChainCommand::RegisterSovereignTemplate(template, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.register_sovereign_template(*template));
+                }
+                ChainCommand::ValidateSovereignAuditExport(bundle, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .validate_sovereign_audit_export(bundle.as_ref()),
+                    );
                 }
                 ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
