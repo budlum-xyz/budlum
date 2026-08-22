@@ -157,7 +157,7 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_TX_V6_MULTISIG_ADDRESS",
     "BDLM_VALIDATOR_SET_COMMITMENT_V1",
     "BDLM_VERIFIER_REGISTRY_V1",
-    "BDLM_ZK_PROOF_PAYLOAD_V1",
+    "BDLM_ZK_PROOF_PAYLOAD_V2",
 ];
 
 /// Tags whose misuse would let an attacker move a signature or hash from one
