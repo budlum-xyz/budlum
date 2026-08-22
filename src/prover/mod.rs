@@ -91,6 +91,23 @@ pub struct ZkProofSubmission {
     pub program: Vec<u64>,
 }
 
+/// Bir zk programinin izin listesi kimligi.
+///
+/// Dogrulayicinin (`Plonky3Adapter::verify`) program hash'i icin kullandigi
+/// fonksiyonun **ayni**si: etiketsiz Keccak-256, kelimeler little-endian.
+/// Kasten ayni: izin listesi, kanitin AIR'e karsi baglandigi degerin
+/// tam olarak ayni degeri uzerinden karar vermeli. Ayri bir etiketli hash
+/// kullanmak, listede olan program ile kanitlanan programin farkli olabilecegi
+/// bir aralik acardi.
+pub fn zk_program_hash(program: &[u64]) -> Hash32 {
+    use sha3::{Digest, Keccak256};
+    let mut hasher = Keccak256::new();
+    for word in program {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
 impl ZkProofSubmission {
     /// Canonical hash binding the transport message to the proof payload. The
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
