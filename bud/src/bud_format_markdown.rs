@@ -12,7 +12,9 @@
 //! liste/kod/bağlantı/tablo - her bölüm türüne göre kompakt serileştirilir (başlık derecesi
 //! ayrı bayt, kod blokları ayrı akış). Çıktı: md-token akışı (zstd ile daha iyi sıkışır,
 //! çünkü yapı tekrarı ayrışır) + LLM bağlamı için derlenmiş görünüm (başlık ağacı + özet).
-//! Kayıpsız: token akışı → orijinal md (roundtrip testli).
+//! Kayıpsız: token akışı → orijinal md (roundtrip testli). Boş satırlar da
+//! bölüm olarak taşınır (`MdSection::Blank`) ve sondaki yeni satır ayrı bir
+//! bayrakta durur; ikisi de markdown'da ayırıcıdır, atılırsa belge geri gelmez.
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -21,7 +23,7 @@
 use sha3::{Digest, Sha3_256};
 
 pub const MD_MAGIC: [u8; 8] = *b"\xB5MDCP\0\0\0";
-pub const MD_VERSION: u8 = 1;
+pub const MD_VERSION: u8 = 2;
 
 /// Markdown bölüm türü.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +34,7 @@ pub enum MdSection {
     CodeBlock,     // ``` ...
     Link,          // [text](url)
     Table,         // | a | b |
+    Blank,         // bos satir: ayirici, atilirsa belge geri gelmez
     Other,
 }
 
@@ -41,6 +44,9 @@ pub struct MarkdownSplit {
     pub sections: Vec<MdSection>,
     pub contents: Vec<String>, // her bölümün metni (başlık işareti dahil - birebir)
     pub heading_tree: Vec<String>, // LLM bağlamı: başlık hiyerarşisi (derlenmiş görünüm)
+    /// Girdi yeni satirla bitiyor muydu. `str::lines` bunu yutar; kayipsizlik
+    /// icin ayrica tasinmasi gerekir.
+    pub trailing_newline: bool,
 }
 
 impl MarkdownSplit {
@@ -80,7 +86,11 @@ impl MarkdownSplit {
             } else if line.trim_start().starts_with('|') && line.contains('|') {
                 MdSection::Table
             } else if line.trim().is_empty() {
-                continue // boş satır atlanır (birleştirmede \n yeniden eklenir - dikkat)
+                // Bos satir markdown'da ayiricidir: paragrafi paragraftan,
+                // listeyi listeden o ayirir. Atilirsa `decode` orijinali geri
+                // veremez ve modulun "kayipsiz" iddiasi yanlis olur. Tur olarak
+                // kaydediliyor, icerigi de oldugu gibi (satir ici bosluk dahil).
+                MdSection::Blank
             } else {
                 MdSection::Paragraph
             };
@@ -90,14 +100,22 @@ impl MarkdownSplit {
         if sections.is_empty() {
             return None;
         }
-        Some(MarkdownSplit { sections, contents, heading_tree })
+        let trailing_newline = md.ends_with('\n');
+        Some(MarkdownSplit { sections, contents, heading_tree, trailing_newline })
     }
 
-    /// Bölümleri birleştir → orijinal md (kayıpsızlık kanıtı).
-    /// Not: encode boş satırları atladı - decode \n ile birleştirir; boş satır kaybı var.
-    /// Bu yüzden gerçek kayıpsızlık için boş satırlar da korunmalı: encode satırbaşı korur.
+    /// Bolumleri birlestir. `encode`'un girdisini bayt-birebir geri verir.
+    ///
+    /// `str::lines` sondaki yeni satiri yutar, bu yuzden onun varligi ayrica
+    /// tasinir: aksi halde "a\n" ile "a" ayni bolum listesini uretir ve biri
+    /// otekine donusur.
+    #[must_use]
     pub fn decode(&self) -> String {
-        self.contents.join("\n")
+        let mut out = self.contents.join("\n");
+        if self.trailing_newline {
+            out.push('\n');
+        }
+        out
     }
 
     /// LLM bağlam verimliliği: başlık ağacı boyutu / orijinal boyut (derlenmiş görünüm).
@@ -124,6 +142,9 @@ impl MarkdownSplit {
         for h in &self.heading_tree {
             push_str(&mut out, h);
         }
+        // Sondaki yeni satir: `str::lines` onu yutar, bolum listesinden geri
+        // turetilemez, bu yuzden blob'a ayri bir bayt olarak giriyor.
+        out.push(u8::from(self.trailing_newline));
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
         h.update(&out);
@@ -184,10 +205,21 @@ impl MarkdownSplit {
             let h = read_str(bytes, &mut pos)?;
             heading_tree.push(h);
         }
+        if bytes.len() < pos + 1 {
+            return None;
+        }
+        let trailing_newline = match bytes[pos] {
+            0 => false,
+            1 => true,
+            // Tek bir dogru kodlama: 2 ve ustu bayt reddedilir, yoksa ayni
+            // belge birden cok gecerli bloba sahip olur ve ozet tekil kalmaz.
+            _ => return None,
+        };
+        pos += 1;
         if pos != payload_len {
             return None;
         }
-        Some(MarkdownSplit { sections, contents, heading_tree })
+        Some(MarkdownSplit { sections, contents, heading_tree, trailing_newline })
     }
 }
 
@@ -199,6 +231,7 @@ fn section_code(t: MdSection) -> u8 {
         MdSection::CodeBlock => 12,
         MdSection::Link => 13,
         MdSection::Table => 14,
+        MdSection::Blank => 9,
         MdSection::Other => 15,
     }
 }
@@ -206,6 +239,7 @@ fn section_code(t: MdSection) -> u8 {
 fn section_from_code(v: u8) -> Option<MdSection> {
     match v {
         1..=6 => Some(MdSection::Heading(v)),
+        9 => Some(MdSection::Blank),
         10 => Some(MdSection::Paragraph),
         11 => Some(MdSection::List),
         12 => Some(MdSection::CodeBlock),
@@ -274,39 +308,60 @@ mod tests {
         assert_eq!(geri.heading_tree, split.heading_tree, "baslik agaci birebir");
     }
 
-    /// BULGU (2026-08-21): bu transform KAYIPSIZ DEGILDIR -- `decode` bolumleri
-    /// `join("\n")` ile birlestirir, bos satirlar ve sondaki yeni satir kalici
-    /// olarak kaybolur:
+    /// Kayipsizlik: `encode` -> `decode` girdiyi bayt-birebir geri verir.
     ///
-    ///   girdi : "# Baslik\n\nParagraf.\n"
-    ///   cikti : "# Baslik\nParagraf."
+    /// Onceki surumde `encode` bos satirlari `continue` ile atiyordu ve bir
+    /// test bu kaybi "bilinen sinir" olarak kilitliyordu. Ama modul dokumu uc
+    /// yerde "kayipsiz" diyor ve tur `lib.rs`'ten disa acik: bir cagiran onu
+    /// kayipsiz sanabilir. Sinir kilitlemek yerine sinir kaldirildi.
     ///
-    /// Mevcut `md_blob_roundtrip` bunu goremiyordu: yalnizca bolum SAYISINI
-    /// karsilastiriyor, baytlari karsilastirmiyordu.
-    ///
-    /// ETKI SU AN SINIRLI: transform uretim boru hattina BAGLI DEGIL --
-    /// `bud_format_engine::TransformKind` yalnizca None/Columnar/LogField tanir,
-    /// `engine_store` markdown'i hic cagirmaz. Yani depolanan veri bugun bu
-    /// yoldan kayba ugramaz. Ancak tur `lib.rs`'te disa acik, bir cagiran onu
-    /// kayipsiz sanabilir.
-    ///
-    /// Test davranisi OLDUGU GIBI kilitler: boru hattina baglanmadan once
-    /// `decode`'un ayiricilari koruyacak sekilde duzeltilmesi gerektigi buradan
-    /// gorunur. Yesil kalan bir "kayipsiz" iddiasi birakmaktansa gercegi yaziyoruz.
+    /// Bos satir markdown'da bir ayiricidir - paragrafi paragraftan, listeyi
+    /// listeden o ayirir - yani atilan sey bicim degil anlamdir.
     #[test]
-    fn markdown_transformu_ayiricilari_kaybeder_bilinen_sinir() {
-        let md = "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde\n";
-        let split = MarkdownSplit::encode(md).expect("encode");
-        let geri = split.decode();
+    fn markdown_transformu_bayt_birebir_geri_doner() {
+        let durumlar = [
+            "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde\n",
+            "# Baslik\n\nParagraf metni.\n\n## Alt baslik\n\n- madde",
+            "tek satir",
+            "tek satir\n",
+            "\n\n\nardisik bos satirlar\n\n\n",
+            "# B\n\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\nson\n",
+            "   \nbosluklu bos satir korunur\n",
+        ];
+        for md in durumlar {
+            let split = MarkdownSplit::encode(md).expect("encode");
+            assert_eq!(
+                split.decode(),
+                md,
+                "encode/decode bayt-birebir olmali: {md:?}"
+            );
+            // Blob yolu da ayni belgeyi geri vermeli.
+            let blob = split.to_blob();
+            let geri = MarkdownSplit::from_blob(&blob).expect("gecerli blob");
+            assert_eq!(geri.decode(), md, "blob yolu da kayipsiz olmali: {md:?}");
+        }
+    }
 
-        assert_ne!(
-            geri, md,
-            "bu transform bayt-birebir DEGIL; esitlik beklenirse sinir kalkmis demektir"
-        );
-        assert_eq!(
-            geri, "# Baslik\nParagraf metni.\n## Alt baslik\n- madde",
-            "kayip tam olarak ayiricilarda: bos satirlar ve sondaki yeni satir"
-        );
+    /// Ayiricinin tasindigi kanit: iki farkli belge ayni bolum listesine
+    /// dusmemeli. Bos satir atilsaydi bu ikisi ayirt edilemezdi.
+    #[test]
+    fn bos_satir_iki_belgeyi_ayri_tutar() {
+        let a = MarkdownSplit::encode("bir\n\niki\n").expect("encode");
+        let b = MarkdownSplit::encode("bir\niki\n").expect("encode");
+        assert_ne!(a.contents, b.contents, "bos satir icerikte gorunmeli");
+        assert_ne!(a.to_blob(), b.to_blob(), "iki belge ayni bloba dusmemeli");
+        assert_eq!(a.decode(), "bir\n\niki\n");
+        assert_eq!(b.decode(), "bir\niki\n");
+    }
+
+    /// Sondaki yeni satir tek basina bir belgeyi ayirir.
+    #[test]
+    fn sondaki_yeni_satir_bloba_giriyor() {
+        let a = MarkdownSplit::encode("metin\n").expect("encode");
+        let b = MarkdownSplit::encode("metin").expect("encode");
+        assert_eq!(a.contents, b.contents, "bolum listeleri ayni");
+        assert_ne!(a.to_blob(), b.to_blob(), "ama bloblar farkli olmali");
+        assert!(a.trailing_newline && !b.trailing_newline);
     }
     use super::*;
 
