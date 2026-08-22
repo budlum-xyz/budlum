@@ -32,7 +32,7 @@ pub struct CropDerivation {
     pub y: u32,
     pub w: u32,
     pub h: u32,
-    pub aligned: bool,               // MCU hizalı mı (byte-exact üretilebilir)
+    pub aligned: bool, // MCU hizalı mı (byte-exact üretilebilir)
 }
 
 impl CropDerivation {
@@ -40,14 +40,20 @@ impl CropDerivation {
 
     /// MCU hizalama kontrolü: kırpma kenarları 16'nın katında mı?
     pub fn is_mcu_aligned(x: u32, y: u32, w: u32, h: u32) -> bool {
-        x.is_multiple_of(MCU_SIZE) && y.is_multiple_of(MCU_SIZE) && w.is_multiple_of(MCU_SIZE) && h.is_multiple_of(MCU_SIZE)
+        x.is_multiple_of(MCU_SIZE)
+            && y.is_multiple_of(MCU_SIZE)
+            && w.is_multiple_of(MCU_SIZE)
+            && h.is_multiple_of(MCU_SIZE)
     }
 
     /// Yeni kırpma kaydı (hizalama otomatik hesaplanır).
     pub fn new(master: [u8; 32], x: u32, y: u32, w: u32, h: u32) -> Self {
         CropDerivation {
             master_content_id: master,
-            x, y, w, h,
+            x,
+            y,
+            w,
+            h,
             aligned: Self::is_mcu_aligned(x, y, w, h),
         }
     }
@@ -109,7 +115,14 @@ impl CropDerivation {
         if bytes.len() != HDR + 32 {
             return None;
         }
-        let rec = CropDerivation { master_content_id: master, x, y, w, h, aligned };
+        let rec = CropDerivation {
+            master_content_id: master,
+            x,
+            y,
+            w,
+            h,
+            aligned,
+        };
         if bytes[HDR..] != rec.derivation_hash() {
             return None;
         }
@@ -126,8 +139,14 @@ mod tests {
         // 4:2:0 MCU = 16x16: hizalı kenarlar byte-exact üretilebilir (ana repo kanıtı)
         assert!(CropDerivation::is_mcu_aligned(0, 0, 16, 16));
         assert!(CropDerivation::is_mcu_aligned(16, 32, 64, 48));
-        assert!(!CropDerivation::is_mcu_aligned(1, 0, 16, 16), "x hizalı değil");
-        assert!(!CropDerivation::is_mcu_aligned(0, 0, 15, 16), "w hizalı değil");
+        assert!(
+            !CropDerivation::is_mcu_aligned(1, 0, 16, 16),
+            "x hizalı değil"
+        );
+        assert!(
+            !CropDerivation::is_mcu_aligned(0, 0, 15, 16),
+            "w hizalı değil"
+        );
         assert!(!CropDerivation::is_mcu_aligned(5, 5, 20, 20), "hem x hem y");
     }
 
@@ -138,9 +157,15 @@ mod tests {
         let aligned = CropDerivation::new(master, 0, 0, 16, 16);
         assert!(aligned.is_regenerable(), "hizalı kırpma üretilebilir");
         let misaligned = CropDerivation::new(master, 1, 0, 16, 16);
-        assert!(!misaligned.is_regenerable(), "hizasız kırpma yeni nesne (organik)");
+        assert!(
+            !misaligned.is_regenerable(),
+            "hizasız kırpma yeni nesne (organik)"
+        );
         // deterministik: aynı bölge → aynı hash
-        assert_eq!(aligned.derivation_hash(), CropDerivation::new(master, 0, 0, 16, 16).derivation_hash());
+        assert_eq!(
+            aligned.derivation_hash(),
+            CropDerivation::new(master, 0, 0, 16, 16).derivation_hash()
+        );
         assert_ne!(aligned.derivation_hash(), misaligned.derivation_hash());
     }
 

@@ -22,9 +22,9 @@ pub const GOV_MAGIC: [u8; 8] = *b"\xB5GOV1\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantState {
-    Locked,     // ödeme üretim teklifine kilitli
-    Active,     // üretim doğrulaması geçti → erişim açık
-    Refunded,   // üretim başarısız → bakiye kilidi iadesi
+    Locked,   // ödeme üretim teklifine kilitli
+    Active,   // üretim doğrulaması geçti → erişim açık
+    Refunded, // üretim başarısız → bakiye kilidi iadesi
 }
 
 #[derive(Debug, Clone)]
@@ -37,7 +37,12 @@ pub struct PollenGrant {
 
 /// Y7: ödeme üretim teklifine kilitlenir; grant Locked başlar.
 pub fn lock_payment(buyer: [u8; 32], pact_id: [u8; 32], amount: u64) -> PollenGrant {
-    PollenGrant { buyer, pact_id, state: GrantState::Locked, payment_locked: amount }
+    PollenGrant {
+        buyer,
+        pact_id,
+        state: GrantState::Locked,
+        payment_locked: amount,
+    }
 }
 
 /// Y7: üretim doğrulaması geçerse grant Active olur (okuma açılır).
@@ -159,9 +164,15 @@ mod tests {
 
     #[test]
     fn y0_baglanti_envanteri() {
-        assert_eq!(wiring_inventory("proof_market", 0, false).0, WiringStatus::Unwired);
+        assert_eq!(
+            wiring_inventory("proof_market", 0, false).0,
+            WiringStatus::Unwired
+        );
         assert_eq!(wiring_inventory("provider", 5, true).0, WiringStatus::Wired);
-        assert_eq!(wiring_inventory("assignment", 3, false).0, WiringStatus::Stub);
+        assert_eq!(
+            wiring_inventory("assignment", 3, false).0,
+            WiringStatus::Stub
+        );
         assert!(wiring_inventory("provider", 5, true).1);
     }
 

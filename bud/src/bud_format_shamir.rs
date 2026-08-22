@@ -43,13 +43,19 @@ impl Gf8 {
         Gf8 { log, exp }
     }
     fn mul(&self, a: u8, b: u8) -> u8 {
-        if a == 0 || b == 0 { return 0; }
+        if a == 0 || b == 0 {
+            return 0;
+        }
         let s = self.log[a as usize] as u16 + self.log[b as usize] as u16;
         self.exp[s as usize]
     }
-    fn add(&self, a: u8, b: u8) -> u8 { a ^ b }
+    fn add(&self, a: u8, b: u8) -> u8 {
+        a ^ b
+    }
     fn inv(&self, a: u8) -> Option<u8> {
-        if a == 0 { return None; }
+        if a == 0 {
+            return None;
+        }
         Some(self.exp[(255 - self.log[a as usize] as u16) as usize])
     }
 }
@@ -75,7 +81,9 @@ impl ShamirShare {
             let mut coeffs = [0u8; 32];
             let mut x = 0x5A17_u64.wrapping_mul(byte as u64 + 1).wrapping_add(0xB0D);
             for c in 0..k.saturating_sub(1) {
-                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
                 coeffs[c] = (x & 0xFF) as u8;
             }
             // her x=1..n için polinom değeri: f(x) = s + c1*x + c2*x^2 + ...
@@ -116,7 +124,9 @@ impl ShamirShare {
                 let mut num = 1u8;
                 let mut den = 1u8;
                 for j in 0..k {
-                    if i == j { continue; }
+                    if i == j {
+                        continue;
+                    }
                     let xj = chosen[j].0;
                     num = gf.mul(num, xj);
                     den = gf.mul(den, gf.add(xj, xi)); // xj - xi = xj ^ xi (GF toplama)
@@ -151,7 +161,10 @@ mod tests {
     #[test]
     fn split_combine_roundtrip() {
         // (3,5): 3 parça tohumu kurar
-        let secret = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+        let secret = [
+            0xDEu8, 0xAD, 0xBE, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 1, 2, 3, 4,
+            5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        ];
         let shares = ShamirShare::split(&secret, 3, 5).expect("böl");
         assert_eq!(shares.len(), 5);
         // herhangi 3 parça kurar
@@ -163,10 +176,17 @@ mod tests {
         // k-1 parça bilgi sızdırmaz: 2 parça ile kurulan, 3 parça ile kurulandan
         // genelde farklıdır (polinom belirsiz). Güvenlik: her olası secret eşit olasılıklı.
         // Test: 2 parça + farklı 3. parça → aynı secret'ı üretmemeli (deterministik çelişki)
-        let alt = ShamirShare::combine(&[shares[0].clone(), shares[1].clone(), shares[4].clone()], 3).unwrap();
+        let alt = ShamirShare::combine(
+            &[shares[0].clone(), shares[1].clone(), shares[4].clone()],
+            3,
+        )
+        .unwrap();
         assert_eq!(alt, secret, "farklı 3 parça da kurar (herhangi k)");
         // k-1 parça ile combine → None (k yetersiz - güvenli red, panik yok)
-        assert!(ShamirShare::combine(&shares[..2], 3).is_none(), "k-1 parça kurtaramaz");
+        assert!(
+            ShamirShare::combine(&shares[..2], 3).is_none(),
+            "k-1 parça kurtaramaz"
+        );
         // 5 parça da kurar
         let all = ShamirShare::combine(&shares, 3).expect("tümü");
         assert_eq!(all, secret);

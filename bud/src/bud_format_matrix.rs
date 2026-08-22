@@ -21,88 +21,280 @@ pub const MATRIX_MAGIC: [u8; 8] = *b"\xB5MATX\0\0\0";
 pub const MATRIX_VERSION: u8 = 1;
 
 /// Ölçülmüş tavanlar (bu modüldeki tüm çarpanlar bu sınırlar içinde).
-pub const CORPUS_DEDUP_MEASURED: f64 = 9.67;   // korpus geneli 16KB SHA256
-pub const FLEET_DEDUP_MEASURED: f64 = 25.43;  // 25 özdeş ELF (dosya-içi parçalama)
-pub const CULLING_MULT_MEASURED: f64 = 2.52;  // 1/(1-0.603) erişim deseni ölçümü
-pub const LRC_ERASURE: f64 = 1.031;           // ölçülmüş LRC
+pub const CORPUS_DEDUP_MEASURED: f64 = 9.67; // korpus geneli 16KB SHA256
+pub const FLEET_DEDUP_MEASURED: f64 = 25.43; // 25 özdeş ELF (dosya-içi parçalama)
+pub const CULLING_MULT_MEASURED: f64 = 2.52; // 1/(1-0.603) erişim deseni ölçümü
+pub const LRC_ERASURE: f64 = 1.031; // ölçülmüş LRC
 pub const PHYSICAL_USD_PER_TB_MONTH: f64 = 0.23342;
 pub const CEILING_USD_TB_MONTH: f64 = 0.016;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatrixEntry {
-    pub class: &'static str,      // sınıf adı
-    pub method: &'static str,     // tek-dosya yöntemi (ölçülen)
-    pub single_ratio: f64,        // tek-dosya ölçülen oran
+    pub class: &'static str,           // sınıf adı
+    pub method: &'static str,          // tek-dosya yöntemi (ölçülen)
+    pub single_ratio: f64,             // tek-dosya ölçülen oran
     pub multiplier_kind: &'static str, // "dedup-korpus" | "filo" | "culling" | "kopya" | "none" | "RED"
-    pub multiplier: f64,          // ölçülmüş çarpan
+    pub multiplier: f64,               // ölçülmüş çarpan
     pub note: &'static str,
 }
 
 pub const MATRIX: &[MatrixEntry] = &[
-    MatrixEntry { class: "json_log", method: "bzip2 (NDJSON)", single_ratio: 10.80, multiplier_kind: "dedup-korpus", multiplier: 3.0,
-                  note: "çok kiracılı log; korpus dedup ölçümü 9.67x, temkinli 3x" },
-    MatrixEntry { class: "json_doc", method: "columnar+zstd19", single_ratio: 29.90, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "columnar 29.9x ölçüldü" },
-    MatrixEntry { class: "csv", method: "columnar+zstd19", single_ratio: 8.20, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "columnar 8.2x ölçüldü" },
-    MatrixEntry { class: "tsv", method: "columnar+zstd19", single_ratio: 4.12, multiplier_kind: "dedup-korpus", multiplier: 4.0,
-                  note: "columnar 4.1x ölçüldü (tab)" },
-    MatrixEntry { class: "xml", method: "xz-9e", single_ratio: 12.70, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "xz 12.7x ölçüldü" },
-    MatrixEntry { class: "html", method: "xz-9e", single_ratio: 18.10, multiplier_kind: "dedup-korpus", multiplier: 1.2,
-                  note: "xz 18.1x ölçüldü" },
-    MatrixEntry { class: "markdown", method: "xz-9e", single_ratio: 38.60, multiplier_kind: "none", multiplier: 1.0,
-                  note: "xz 38.6x ölçüldü - tek başına tavan altı" },
-    MatrixEntry { class: "txt", method: "zstd19", single_ratio: 6.63, multiplier_kind: "dedup-korpus", multiplier: 3.0,
-                  note: "gerçekçi düzyazı 6.6x ölçüldü; çok kiracı doküman dedup" },
-    MatrixEntry { class: "kod", method: "zstd19", single_ratio: 20.0, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "korpus 190x (tekrarlı sentetik); gerçekçi 20x alındı" },
-    MatrixEntry { class: "log", method: "logfield+bzip2", single_ratio: 12.70, multiplier_kind: "dedup-korpus", multiplier: 3.0,
-                  note: "logfield+bzip 12.7x ölçüldü; ortak şablon" },
-    MatrixEntry { class: "sql", method: "xz-9e", single_ratio: 8.80, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "xz 8.8x ölçüldü" },
-    MatrixEntry { class: "yaml", method: "bzip2", single_ratio: 8.20, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "bzip 8.2x ölçüldü" },
-    MatrixEntry { class: "ini", method: "zstd19", single_ratio: 7.50, multiplier_kind: "culling", multiplier: 2.52,
-                  note: "zstd 7.5x × culling 2.52x ölçüldü (yapılandırma = soğuk)" },
-    MatrixEntry { class: "geojson", method: "bzip2", single_ratio: 10.40, multiplier_kind: "dedup-korpus", multiplier: 2.0,
-                  note: "bzip 10.4x ölçüldü" },
-    MatrixEntry { class: "srt", method: "xz-9e", single_ratio: 6.60, multiplier_kind: "dedup-korpus", multiplier: 3.0,
-                  note: "xz 6.6x; ortak şablon altyazı" },
-    MatrixEntry { class: "svg", method: "bzip2", single_ratio: 6.80, multiplier_kind: "dedup-korpus", multiplier: 3.0,
-                  note: "bzip 6.8x; vektör kütüphanesi" },
-    MatrixEntry { class: "docx", method: "zstd19", single_ratio: 5.20, multiplier_kind: "dedup-korpus", multiplier: 3.0,
-                  note: "OPC-içi XML yeniden paketleme; şablonlar" },
-    MatrixEntry { class: "pdf", method: "zstd19", single_ratio: 4.0, multiplier_kind: "dedup-korpus", multiplier: 4.0,
-                  note: "korpus 174x (tekrarlı); gerçekçi 4x; text katmanı" },
-    MatrixEntry { class: "bmp", method: "AVIF-lossless", single_ratio: 15.84, multiplier_kind: "kopya", multiplier: 2.0,
-                  note: "AVIF lossless 15.84x ölçüldü - tek başına 0.01519 ≤ 0.016" },
-    MatrixEntry { class: "tiff", method: "AVIF-lossless", single_ratio: 15.84, multiplier_kind: "kopya", multiplier: 2.0,
-                  note: "AVIF lossless 15.84x ölçüldü" },
-    MatrixEntry { class: "png", method: "JXL-lossless", single_ratio: 4.20, multiplier_kind: "kopya", multiplier: 4.0,
-                  note: "JXL lossless 4.2x ölçüldü (fotoğraf); kütüphane kopya" },
-    MatrixEntry { class: "jpeg", method: "AVIF-lossy", single_ratio: 3.20, multiplier_kind: "kopya", multiplier: 5.0,
-                  note: "AVIF lossy 3.2x ölçüldü (görsel kayıpsız; fidelity gate)" },
-    MatrixEntry { class: "gif", method: "AVIF-lossy", single_ratio: 16.75, multiplier_kind: "none", multiplier: 1.0,
-                  note: "animasyon→AVIF 16.75x ölçüldü - tek başına tavan altı" },
-    MatrixEntry { class: "wav", method: "FLAC", single_ratio: 6.26, multiplier_kind: "kopya", multiplier: 3.0,
-                  note: "FLAC 6.26x ölçüldü (temiz ton); ses kütüphanesi" },
-    MatrixEntry { class: "video_yuv", method: "AV1", single_ratio: 904.0, multiplier_kind: "none", multiplier: 1.0,
-                  note: "YUV→AV1 904x ölçüldü" },
-    MatrixEntry { class: "video_codec", method: "RED", single_ratio: 0.67, multiplier_kind: "RED", multiplier: 0.0,
-                  note: "H.264→AV1 ölçümü 0.67x (kazanç yok); CANARY-lossy tier" },
-    MatrixEntry { class: "elf", method: "zstd19", single_ratio: 2.60, multiplier_kind: "filo", multiplier: 25.43,
-                  note: "zstd 2.6x × filo dedup 25.4x ölçüldü (25 özdeş ELF)" },
-    MatrixEntry { class: "sqlite", method: "xz-9e", single_ratio: 2.80, multiplier_kind: "culling", multiplier: 6.3,
-                  note: "xz 2.8x × culling 2.52x ölçüldü × yedek dedup 2.5 (TenantDedup)" },
-    MatrixEntry { class: "font", method: "zstd19", single_ratio: 2.50, multiplier_kind: "filo", multiplier: 25.43,
-                  note: "zstd 2.5x × filo dedup (ortak fontlar)" },
-    MatrixEntry { class: "zip", method: "zstd19", single_ratio: 1.60, multiplier_kind: "filo", multiplier: 25.43,
-                  note: "zstd 1.6x × filo dedup (aynı arşiv dağıtımı)" },
-    MatrixEntry { class: "ikili_blob", method: "xz-9e", single_ratio: 2.70, multiplier_kind: "culling", multiplier: 6.3,
-                  note: "xz 2.7x × culling 2.52x ölçüldü × blok dedup 2.5" },
-    MatrixEntry { class: "rastgele", method: "RED", single_ratio: 1.0, multiplier_kind: "RED", multiplier: 0.0,
-                  note: "CANARY K25: rastgele/şifreli >100:1 RED - depolanmaz" },
+    MatrixEntry {
+        class: "json_log",
+        method: "bzip2 (NDJSON)",
+        single_ratio: 10.80,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 3.0,
+        note: "çok kiracılı log; korpus dedup ölçümü 9.67x, temkinli 3x",
+    },
+    MatrixEntry {
+        class: "json_doc",
+        method: "columnar+zstd19",
+        single_ratio: 29.90,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "columnar 29.9x ölçüldü",
+    },
+    MatrixEntry {
+        class: "csv",
+        method: "columnar+zstd19",
+        single_ratio: 8.20,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "columnar 8.2x ölçüldü",
+    },
+    MatrixEntry {
+        class: "tsv",
+        method: "columnar+zstd19",
+        single_ratio: 4.12,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 4.0,
+        note: "columnar 4.1x ölçüldü (tab)",
+    },
+    MatrixEntry {
+        class: "xml",
+        method: "xz-9e",
+        single_ratio: 12.70,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "xz 12.7x ölçüldü",
+    },
+    MatrixEntry {
+        class: "html",
+        method: "xz-9e",
+        single_ratio: 18.10,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 1.2,
+        note: "xz 18.1x ölçüldü",
+    },
+    MatrixEntry {
+        class: "markdown",
+        method: "xz-9e",
+        single_ratio: 38.60,
+        multiplier_kind: "none",
+        multiplier: 1.0,
+        note: "xz 38.6x ölçüldü - tek başına tavan altı",
+    },
+    MatrixEntry {
+        class: "txt",
+        method: "zstd19",
+        single_ratio: 6.63,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 3.0,
+        note: "gerçekçi düzyazı 6.6x ölçüldü; çok kiracı doküman dedup",
+    },
+    MatrixEntry {
+        class: "kod",
+        method: "zstd19",
+        single_ratio: 20.0,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "korpus 190x (tekrarlı sentetik); gerçekçi 20x alındı",
+    },
+    MatrixEntry {
+        class: "log",
+        method: "logfield+bzip2",
+        single_ratio: 12.70,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 3.0,
+        note: "logfield+bzip 12.7x ölçüldü; ortak şablon",
+    },
+    MatrixEntry {
+        class: "sql",
+        method: "xz-9e",
+        single_ratio: 8.80,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "xz 8.8x ölçüldü",
+    },
+    MatrixEntry {
+        class: "yaml",
+        method: "bzip2",
+        single_ratio: 8.20,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "bzip 8.2x ölçüldü",
+    },
+    MatrixEntry {
+        class: "ini",
+        method: "zstd19",
+        single_ratio: 7.50,
+        multiplier_kind: "culling",
+        multiplier: 2.52,
+        note: "zstd 7.5x × culling 2.52x ölçüldü (yapılandırma = soğuk)",
+    },
+    MatrixEntry {
+        class: "geojson",
+        method: "bzip2",
+        single_ratio: 10.40,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 2.0,
+        note: "bzip 10.4x ölçüldü",
+    },
+    MatrixEntry {
+        class: "srt",
+        method: "xz-9e",
+        single_ratio: 6.60,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 3.0,
+        note: "xz 6.6x; ortak şablon altyazı",
+    },
+    MatrixEntry {
+        class: "svg",
+        method: "bzip2",
+        single_ratio: 6.80,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 3.0,
+        note: "bzip 6.8x; vektör kütüphanesi",
+    },
+    MatrixEntry {
+        class: "docx",
+        method: "zstd19",
+        single_ratio: 5.20,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 3.0,
+        note: "OPC-içi XML yeniden paketleme; şablonlar",
+    },
+    MatrixEntry {
+        class: "pdf",
+        method: "zstd19",
+        single_ratio: 4.0,
+        multiplier_kind: "dedup-korpus",
+        multiplier: 4.0,
+        note: "korpus 174x (tekrarlı); gerçekçi 4x; text katmanı",
+    },
+    MatrixEntry {
+        class: "bmp",
+        method: "AVIF-lossless",
+        single_ratio: 15.84,
+        multiplier_kind: "kopya",
+        multiplier: 2.0,
+        note: "AVIF lossless 15.84x ölçüldü - tek başına 0.01519 ≤ 0.016",
+    },
+    MatrixEntry {
+        class: "tiff",
+        method: "AVIF-lossless",
+        single_ratio: 15.84,
+        multiplier_kind: "kopya",
+        multiplier: 2.0,
+        note: "AVIF lossless 15.84x ölçüldü",
+    },
+    MatrixEntry {
+        class: "png",
+        method: "JXL-lossless",
+        single_ratio: 4.20,
+        multiplier_kind: "kopya",
+        multiplier: 4.0,
+        note: "JXL lossless 4.2x ölçüldü (fotoğraf); kütüphane kopya",
+    },
+    MatrixEntry {
+        class: "jpeg",
+        method: "AVIF-lossy",
+        single_ratio: 3.20,
+        multiplier_kind: "kopya",
+        multiplier: 5.0,
+        note: "AVIF lossy 3.2x ölçüldü (görsel kayıpsız; fidelity gate)",
+    },
+    MatrixEntry {
+        class: "gif",
+        method: "AVIF-lossy",
+        single_ratio: 16.75,
+        multiplier_kind: "none",
+        multiplier: 1.0,
+        note: "animasyon→AVIF 16.75x ölçüldü - tek başına tavan altı",
+    },
+    MatrixEntry {
+        class: "wav",
+        method: "FLAC",
+        single_ratio: 6.26,
+        multiplier_kind: "kopya",
+        multiplier: 3.0,
+        note: "FLAC 6.26x ölçüldü (temiz ton); ses kütüphanesi",
+    },
+    MatrixEntry {
+        class: "video_yuv",
+        method: "AV1",
+        single_ratio: 904.0,
+        multiplier_kind: "none",
+        multiplier: 1.0,
+        note: "YUV→AV1 904x ölçüldü",
+    },
+    MatrixEntry {
+        class: "video_codec",
+        method: "RED",
+        single_ratio: 0.67,
+        multiplier_kind: "RED",
+        multiplier: 0.0,
+        note: "H.264→AV1 ölçümü 0.67x (kazanç yok); CANARY-lossy tier",
+    },
+    MatrixEntry {
+        class: "elf",
+        method: "zstd19",
+        single_ratio: 2.60,
+        multiplier_kind: "filo",
+        multiplier: 25.43,
+        note: "zstd 2.6x × filo dedup 25.4x ölçüldü (25 özdeş ELF)",
+    },
+    MatrixEntry {
+        class: "sqlite",
+        method: "xz-9e",
+        single_ratio: 2.80,
+        multiplier_kind: "culling",
+        multiplier: 6.3,
+        note: "xz 2.8x × culling 2.52x ölçüldü × yedek dedup 2.5 (TenantDedup)",
+    },
+    MatrixEntry {
+        class: "font",
+        method: "zstd19",
+        single_ratio: 2.50,
+        multiplier_kind: "filo",
+        multiplier: 25.43,
+        note: "zstd 2.5x × filo dedup (ortak fontlar)",
+    },
+    MatrixEntry {
+        class: "zip",
+        method: "zstd19",
+        single_ratio: 1.60,
+        multiplier_kind: "filo",
+        multiplier: 25.43,
+        note: "zstd 1.6x × filo dedup (aynı arşiv dağıtımı)",
+    },
+    MatrixEntry {
+        class: "ikili_blob",
+        method: "xz-9e",
+        single_ratio: 2.70,
+        multiplier_kind: "culling",
+        multiplier: 6.3,
+        note: "xz 2.7x × culling 2.52x ölçüldü × blok dedup 2.5",
+    },
+    MatrixEntry {
+        class: "rastgele",
+        method: "RED",
+        single_ratio: 1.0,
+        multiplier_kind: "RED",
+        multiplier: 0.0,
+        note: "CANARY K25: rastgele/şifreli >100:1 RED - depolanmaz",
+    },
 ];
 
 impl MatrixEntry {
@@ -163,7 +355,10 @@ pub fn matrix_honesty_check() -> bool {
 pub fn matrix_summary() -> (usize, usize, usize) {
     let toplam = MATRIX.len();
     let red = MATRIX.iter().filter(|e| e.multiplier_kind == "RED").count();
-    let gecen = MATRIX.iter().filter(|e| e.holds_ceiling(CEILING_USD_TB_MONTH)).count();
+    let gecen = MATRIX
+        .iter()
+        .filter(|e| e.holds_ceiling(CEILING_USD_TB_MONTH))
+        .count();
     (toplam, red, gecen)
 }
 
@@ -209,8 +404,12 @@ mod tests {
 
     #[test]
     fn red_kanaryalari_tavan_iddiasi_tasimaz() {
-        assert!(!matrix_get("rastgele").unwrap().holds_ceiling(CEILING_USD_TB_MONTH));
-        assert!(!matrix_get("video_codec").unwrap().holds_ceiling(CEILING_USD_TB_MONTH));
+        assert!(!matrix_get("rastgele")
+            .unwrap()
+            .holds_ceiling(CEILING_USD_TB_MONTH));
+        assert!(!matrix_get("video_codec")
+            .unwrap()
+            .holds_ceiling(CEILING_USD_TB_MONTH));
     }
 
     #[test]

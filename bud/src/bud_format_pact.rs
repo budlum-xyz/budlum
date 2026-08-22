@@ -51,12 +51,12 @@ impl PactMode {
 #[derive(Debug, Clone)]
 pub struct PactRecord {
     pub mode: PactMode,
-    pub producer_id: [u8; 32],        // deterministik üretici fonksiyonun hash'i
-    pub seed: [u8; 32],               // üreticinin girdisi (tohum)
-    pub commitment: [u8; 32],         // H(üretilen bayt) - üretimle eşleşme kanıtı
+    pub producer_id: [u8; 32], // deterministik üretici fonksiyonun hash'i
+    pub seed: [u8; 32],        // üreticinin girdisi (tohum)
+    pub commitment: [u8; 32],  // H(üretilen bayt) - üretimle eşleşme kanıtı
     pub residual_commitment: [u8; 32], // H(rezidüel) - boş değilse RecipePlusResidual
-    pub residual_len: u64,            // rezidüel boyut (İ6 fiyat fonksiyonu girdisi)
-    pub byte_budget: u64,            // ağa fiziksel yük tavanı (İ8)
+    pub residual_len: u64,     // rezidüel boyut (İ6 fiyat fonksiyonu girdisi)
+    pub byte_budget: u64,      // ağa fiziksel yük tavanı (İ8)
     pub ts_unix: u64,
 }
 
@@ -215,13 +215,20 @@ impl PactRecord {
             ts_unix: 0,
         };
         let mut pos = 10;
-        r.producer_id.copy_from_slice(&bytes[pos..pos + 32]); pos += 32;
-        r.seed.copy_from_slice(&bytes[pos..pos + 32]); pos += 32;
-        r.commitment.copy_from_slice(&bytes[pos..pos + 32]); pos += 32;
-        r.residual_commitment.copy_from_slice(&bytes[pos..pos + 32]); pos += 32;
-        r.residual_len = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?); pos += 8;
-        r.byte_budget = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?); pos += 8;
-        r.ts_unix = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?); pos += 8;
+        r.producer_id.copy_from_slice(&bytes[pos..pos + 32]);
+        pos += 32;
+        r.seed.copy_from_slice(&bytes[pos..pos + 32]);
+        pos += 32;
+        r.commitment.copy_from_slice(&bytes[pos..pos + 32]);
+        pos += 32;
+        r.residual_commitment.copy_from_slice(&bytes[pos..pos + 32]);
+        pos += 32;
+        r.residual_len = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        r.byte_budget = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+        r.ts_unix = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
+        pos += 8;
         if bytes.len() != pos + 32 {
             return None; // artık bayt → sıkı red
         }
@@ -246,7 +253,10 @@ mod tests {
         let producer = [1u8; 32];
         let produced = b"deterministik uretim ciktisi 1234567890";
         let pact = PactRecord::pure(producer, seed, produced, 100);
-        assert!(pact.verify_production(produced), "üretim commitment'ı eşleşir");
+        assert!(
+            pact.verify_production(produced),
+            "üretim commitment'ı eşleşir"
+        );
         assert!(!pact.verify_production(b"baska cikti"), "farklı üretim RED");
         assert!(pact.verify(), "saf üretim tutarlı");
         // blob roundtrip
@@ -270,7 +280,8 @@ mod tests {
         // üretici + rezidüel: üretilemeyen artık ayrı commitment (İ6)
         let produced = b"uretilen kisim";
         let residual = b"organik artik: gurultu 0x1234";
-        let pact = PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
+        let pact =
+            PactRecord::producer_plus_residual([9u8; 32], [5u8; 32], produced, residual, 200);
         assert!(pact.verify_production(produced));
         assert!(pact.verify(), "rezidüel >0 tutarlı");
         assert_eq!(pact.residual_len, residual.len() as u64);
@@ -280,10 +291,16 @@ mod tests {
         assert!(!liar.verify(), "rezidüel gizleme RED");
         // doğru rezidüel → verify_residual OK; farklı rezidüel → RED (İ6)
         assert!(pact.verify_residual(residual), "doğru rezidüel eşleşir");
-        assert!(!pact.verify_residual(b"farkli reziduel"), "farklı rezidüel RED");
+        assert!(
+            !pact.verify_residual(b"farkli reziduel"),
+            "farklı rezidüel RED"
+        );
         let mut liar2 = pact.clone();
         liar2.residual_commitment = [1u8; 32];
-        assert!(!liar2.verify_residual(residual), "kurcalanmış commitment RED");
+        assert!(
+            !liar2.verify_residual(residual),
+            "kurcalanmış commitment RED"
+        );
     }
 
     #[test]
@@ -293,7 +310,10 @@ mod tests {
         let pact = PactRecord::residual_only(original, 300);
         assert!(pact.verify_production(original), "content_id eşleşir");
         assert!(!pact.verify_production(b"farkli"), "farklı içerik RED");
-        assert_eq!(pact.commitment, crate::bud_format_container::content_id(original));
+        assert_eq!(
+            pact.commitment,
+            crate::bud_format_container::content_id(original)
+        );
         assert!(pact.verify());
     }
 
@@ -337,7 +357,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

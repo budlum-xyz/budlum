@@ -20,10 +20,10 @@ pub const OPTX_VERSION: u8 = 1;
 /// Optik segment (ekrana basılan kod başına bir tane).
 #[derive(Debug, Clone)]
 pub struct OptSegment {
-    pub index: u32,          // sıra (0 tabanlı)
-    pub total: u32,          // toplam segment
-    pub data: Vec<u8>,       // ham bayt dilimi (kod gövdesi)
-    pub digest: [u8; 32],    // SHA3-256(domain || index || total || data)
+    pub index: u32,       // sıra (0 tabanlı)
+    pub total: u32,       // toplam segment
+    pub data: Vec<u8>,    // ham bayt dilimi (kod gövdesi)
+    pub digest: [u8; 32], // SHA3-256(domain || index || total || data)
 }
 
 impl OptSegment {
@@ -147,7 +147,11 @@ mod tests {
         let data = b"siradan bagimsiz birlestirme testi".to_vec();
         let mut segs = split_optical(&data, 8).unwrap();
         segs.reverse(); // sırayı boz
-        assert_eq!(join_optical(&segs).unwrap(), data, "sıra bozuk → yine birleşir");
+        assert_eq!(
+            join_optical(&segs).unwrap(),
+            data,
+            "sıra bozuk → yine birleşir"
+        );
     }
 
     #[test]

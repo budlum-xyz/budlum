@@ -266,7 +266,12 @@ mod tests {
     fn pcap_roundtrip_kayipsiz() {
         let p = ornek_pcap();
         let t = pcap_transform(&p).expect("transform");
-        assert!(t.len() < p.len(), "transform küçültmeli: {} → {}", p.len(), t.len());
+        assert!(
+            t.len() < p.len(),
+            "transform küçültmeli: {} → {}",
+            p.len(),
+            t.len()
+        );
         let r = pcap_restore(&t).expect("restore");
         assert_eq!(r, p, "PCAP birebir");
     }

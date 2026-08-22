@@ -19,10 +19,10 @@ pub const AV2_MAGIC: [u8; 8] = *b"\xB5AV2\0\0\0\0";
 /// AV2 kayıt: yayın durumu + iddia + dürüstlük sınırı.
 #[derive(Debug, Clone, Copy)]
 pub struct Av2Status {
-    pub spec_released: bool,       // 2026-05-28
-    pub claimed_gain_vs_av1: f64,  // ~0.30 (yayınlanan iddia)
-    pub hardware_supported: bool,  // 2027-2028 (bugün yok)
-    pub software_decoder: bool,    // AVM ref var, ~5x AV1 ağır
+    pub spec_released: bool,      // 2026-05-28
+    pub claimed_gain_vs_av1: f64, // ~0.30 (yayınlanan iddia)
+    pub hardware_supported: bool, // 2027-2028 (bugün yok)
+    pub software_decoder: bool,   // AVM ref var, ~5x AV1 ağır
 }
 
 pub const AV2_CURRENT: Av2Status = Av2Status {
@@ -75,7 +75,10 @@ mod tests {
         // teorik ~1291 → 1.05 toleransla ~1356 üstü iddia RED
         assert!(av2_holds_honest(1290.0, av1_measured, gain));
         assert!(av2_holds_honest(1355.0, av1_measured, gain));
-        assert!(!av2_holds_honest(2000.0, av1_measured, gain), "ölçüm üstü iddia RED");
+        assert!(
+            !av2_holds_honest(2000.0, av1_measured, gain),
+            "ölçüm üstü iddia RED"
+        );
     }
 
     #[test]

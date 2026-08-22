@@ -14,11 +14,18 @@ pub struct OpticalPrompt {
 
 impl OpticalPrompt {
     pub fn new(prompt: &str, w: u32, h: u32, orig_size: usize) -> Self {
-        Self { prompt: prompt.to_string(), width: w, height: h, original_size: orig_size }
+        Self {
+            prompt: prompt.to_string(),
+            width: w,
+            height: h,
+            original_size: orig_size,
+        }
     }
 
     pub fn ratio(&self) -> f64 {
-        if self.prompt.is_empty() { return 1.0; }
+        if self.prompt.is_empty() {
+            return 1.0;
+        }
         self.original_size as f64 / self.prompt.len() as f64
     }
 
@@ -45,7 +52,7 @@ impl LogTemplateMiner {
             if token.parse::<f64>().is_ok() {
                 vars.push(token.to_string());
                 template = template.replace(token, "<NUM>");
-            } else if token.contains('.') && token.chars().filter(|c| *c=='.').count()==3 {
+            } else if token.contains('.') && token.chars().filter(|c| *c == '.').count() == 3 {
                 vars.push(token.to_string());
                 template = template.replace(token, "<IP>");
             }
@@ -57,11 +64,17 @@ impl LogTemplateMiner {
             let hash: [u8; 32] = h.finalize().into();
             u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]])
         };
-        LogTemplate { template_id: id, template, variables: vars }
+        LogTemplate {
+            template_id: id,
+            template,
+            variables: vars,
+        }
     }
 
     pub fn ratio(original: usize, templated: usize) -> f64 {
-        if templated==0 { return 1.0; }
+        if templated == 0 {
+            return 1.0;
+        }
         original as f64 / templated as f64
     }
 }
@@ -70,13 +83,21 @@ pub struct OpticalGates;
 
 impl OpticalGates {
     pub fn k_bud_optical(prompt: &OpticalPrompt) -> Result<(), &'static str> {
-        if prompt.prompt.is_empty() { return Err("K-BUD-OPTICAL: prompt empty"); }
-        if !prompt.holds_resolution(prompt.width, prompt.height) { return Err("K-BUD-OPTICAL: resolution mismatch"); }
-        if prompt.ratio() < 10.0 { return Err("K-BUD-OPTICAL: ratio <10 not revolutionary"); }
+        if prompt.prompt.is_empty() {
+            return Err("K-BUD-OPTICAL: prompt empty");
+        }
+        if !prompt.holds_resolution(prompt.width, prompt.height) {
+            return Err("K-BUD-OPTICAL: resolution mismatch");
+        }
+        if prompt.ratio() < 10.0 {
+            return Err("K-BUD-OPTICAL: ratio <10 not revolutionary");
+        }
         Ok(())
     }
     pub fn k_bud_log_template(tmpl: &LogTemplate) -> Result<(), &'static str> {
-        if tmpl.template.is_empty() { return Err("K-BUD-LOG-TEMPLATE: empty"); }
+        if tmpl.template.is_empty() {
+            return Err("K-BUD-LOG-TEMPLATE: empty");
+        }
         Ok(())
     }
 }

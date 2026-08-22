@@ -105,9 +105,7 @@ mod tests {
     use super::*;
 
     fn blocks() -> Vec<Vec<u8>> {
-        (0..8u64)
-            .map(|i| vec![i as u8; 16])
-            .collect()
+        (0..8u64).map(|i| vec![i as u8; 16]).collect()
     }
 
     #[test]
@@ -115,7 +113,9 @@ mod tests {
         let key = PorKey::new([7u8; 32]);
         let blk = blocks();
         let ch = PorKey::challenge(8, 3, 42);
-        let resp = key.respond(&blk, &ch).expect("dürüst prover response üretir");
+        let resp = key
+            .respond(&blk, &ch)
+            .expect("dürüst prover response üretir");
         assert!(key.verify(&blk, &ch, &resp), "dürüst prover dogrulanir");
     }
 
@@ -124,7 +124,9 @@ mod tests {
         let key = PorKey::new([7u8; 32]);
         let mut blk = blocks();
         let ch = PorKey::challenge(8, 3, 42);
-        let resp = key.respond(&blk, &ch).expect("dürüst prover response üretir");
+        let resp = key
+            .respond(&blk, &ch)
+            .expect("dürüst prover response üretir");
         // challenge'daki ilk indeksi boz
         let bad_idx = ch.indices[0] as usize;
         blk[bad_idx][0] ^= 0xFF;
@@ -137,7 +139,9 @@ mod tests {
         let k2 = PorKey::new([8u8; 32]);
         let blk = blocks();
         let ch = PorKey::challenge(8, 3, 42);
-        let resp = k1.respond(&blk, &ch).expect("dürüst prover response üretir");
+        let resp = k1
+            .respond(&blk, &ch)
+            .expect("dürüst prover response üretir");
         assert!(!k2.verify(&blk, &ch, &resp), "yanlis anahtar RED");
     }
 
@@ -146,7 +150,9 @@ mod tests {
         let key = PorKey::new([7u8; 32]);
         let blk = blocks();
         let ch = PorKey::challenge(8, 3, 42);
-        let mut resp = key.respond(&blk, &ch).expect("dürüst prover response üretir");
+        let mut resp = key
+            .respond(&blk, &ch)
+            .expect("dürüst prover response üretir");
         resp.tags[0].0[0] ^= 0xFF;
         assert!(!key.verify(&blk, &ch, &resp), "degistirilmis tag RED");
     }
@@ -166,7 +172,19 @@ mod tests {
             indices: vec![999_999],
             nonce: [0u8; 32],
         };
-        assert!(key.respond(&blk, &ch_bad).is_none(), "sınır dışı indeks None dönmeli");
-        assert!(!key.verify(&blk, &ch_bad, &PorResponse { tags: vec![PorTag([0u8; 32])] }), "sınır dışı indeks verify RED");
+        assert!(
+            key.respond(&blk, &ch_bad).is_none(),
+            "sınır dışı indeks None dönmeli"
+        );
+        assert!(
+            !key.verify(
+                &blk,
+                &ch_bad,
+                &PorResponse {
+                    tags: vec![PorTag([0u8; 32])]
+                }
+            ),
+            "sınır dışı indeks verify RED"
+        );
     }
 }

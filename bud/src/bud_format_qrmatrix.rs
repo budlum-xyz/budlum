@@ -19,9 +19,9 @@ pub const QRM_VERSION: u8 = 1;
 #[derive(Debug, Clone)]
 pub struct QrMatrix {
     pub version: u32,
-    pub dim: usize,              // 17 + 4·version
-    pub modules: Vec<u8>,        // dim×dim satır-major
-    pub data_bytes: Vec<u8>,     // yerleştirilen byte-mode veri
+    pub dim: usize,          // 17 + 4·version
+    pub modules: Vec<u8>,    // dim×dim satır-major
+    pub data_bytes: Vec<u8>, // yerleştirilen byte-mode veri
 }
 
 impl QrMatrix {
@@ -114,10 +114,14 @@ impl QrMatrix {
                     bit_idx += 1;
                 }
                 if upward {
-                    if row == 0 { break; }
+                    if row == 0 {
+                        break;
+                    }
                     row -= 1;
                 } else {
-                    if row == d - 1 { break; }
+                    if row == d - 1 {
+                        break;
+                    }
                     row += 1;
                 }
             }

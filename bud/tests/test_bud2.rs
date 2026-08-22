@@ -113,7 +113,11 @@ fn olculen_oran_boyutlardan_tutarlidir() {
     // dayandığı sayı bu.
     let mut satirlar = Vec::new();
     for i in 0..300 {
-        satirlar.push(format!("2026-08-21T00:00:{:02}Z seviye=bilgi kod={}", i % 60, i));
+        satirlar.push(format!(
+            "2026-08-21T00:00:{:02}Z seviye=bilgi kod={}",
+            i % 60,
+            i
+        ));
     }
     let log = satirlar.join("\n").into_bytes();
 

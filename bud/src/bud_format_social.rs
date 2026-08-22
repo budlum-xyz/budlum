@@ -48,7 +48,14 @@ impl SocialBridgeRecord {
         content: Vec<u8>,
         ts_unix: u64,
     ) -> Self {
-        Self::new_with_ownership(platform, source_uri, owner_did, content, ts_unix, OwnershipKind::Owned)
+        Self::new_with_ownership(
+            platform,
+            source_uri,
+            owner_did,
+            content,
+            ts_unix,
+            OwnershipKind::Owned,
+        )
     }
 
     /// K74: B.U.D. kayıtları varsayılan GERÇEK sahiplik taşır (Owned); lisans köprüsü
@@ -139,7 +146,10 @@ mod tests {
             1,
         );
         assert_eq!(owned.ownership, OwnershipKind::Owned);
-        assert!(!owned.is_revocable(), "Owned kayıt revoke edilemez (gerçek sahiplik)");
+        assert!(
+            !owned.is_revocable(),
+            "Owned kayıt revoke edilemez (gerçek sahiplik)"
+        );
         assert!(owned.is_transferable());
         let licensed = SocialBridgeRecord::new_with_ownership(
             SocialPlatform::ActivityPub,
@@ -149,7 +159,10 @@ mod tests {
             1,
             OwnershipKind::Licensed,
         );
-        assert!(licensed.is_revocable(), "Lisans revoke edilebilir (AB 2426 bildirimi)");
+        assert!(
+            licensed.is_revocable(),
+            "Lisans revoke edilebilir (AB 2426 bildirimi)"
+        );
         // record_hash sahiplik türünü kapsar mı? K74: evet - kötü niyetli Owned→Licensed
         // dönüşümü kayıt kimliğini değiştirir (kayıt bozulması yakalanır)
         assert_ne!(owned.record_hash(), licensed.record_hash());
@@ -191,28 +204,42 @@ mod tests {
         let a = SocialBridgeRecord::new(SocialPlatform::AtProto, "uri", "did", b"x".to_vec(), 1);
         let b = SocialBridgeRecord::new(SocialPlatform::AtProto, "uri", "did", b"x".to_vec(), 1);
         assert_eq!(a.record_hash(), b.record_hash());
-        assert_ne!(a.record_hash(), SocialBridgeRecord::new(SocialPlatform::AtProto, "uri2", "did", b"x".to_vec(), 1).record_hash());
+        assert_ne!(
+            a.record_hash(),
+            SocialBridgeRecord::new(SocialPlatform::AtProto, "uri2", "did", b"x".to_vec(), 1)
+                .record_hash()
+        );
     }
 }
 
-    #[test]
-    fn strix_ownership_kimlige_bagli() {
-        // STRIX fix: sahiplik etiketi degisirse kimlik degisir (manipulasyon yakalanir).
-        let mut a = SocialBridgeRecord {
-            source_uri: "x.com/post/1".to_string(),
-            owner_did: "did:bud:alice".to_string(),
-            content_id: [7u8; 32],
-            ts_unix: 100,
-            ownership: OwnershipKind::Owned,
-            platform: SocialPlatform::AtProto,
-            content: b"icerik".to_vec(),
-        };
-        let h_owned = a.record_hash();
-        a.ownership = OwnershipKind::Licensed;
-        let h_licensed = a.record_hash();
-        assert_ne!(h_owned, h_licensed, "sahiplik degisimi kimligi degistirmeli");
-        // ayni sahiplikte deterministik
-        let b = SocialBridgeRecord { source_uri: "x.com/post/1".to_string(), owner_did: "did:bud:alice".to_string(), content_id: [7u8; 32], ts_unix: 100, ownership: OwnershipKind::Owned, platform: SocialPlatform::AtProto, content: b"icerik".to_vec() };
-        assert_eq!(h_owned, b.record_hash());
-    }
-
+#[test]
+fn strix_ownership_kimlige_bagli() {
+    // STRIX fix: sahiplik etiketi degisirse kimlik degisir (manipulasyon yakalanir).
+    let mut a = SocialBridgeRecord {
+        source_uri: "x.com/post/1".to_string(),
+        owner_did: "did:bud:alice".to_string(),
+        content_id: [7u8; 32],
+        ts_unix: 100,
+        ownership: OwnershipKind::Owned,
+        platform: SocialPlatform::AtProto,
+        content: b"icerik".to_vec(),
+    };
+    let h_owned = a.record_hash();
+    a.ownership = OwnershipKind::Licensed;
+    let h_licensed = a.record_hash();
+    assert_ne!(
+        h_owned, h_licensed,
+        "sahiplik degisimi kimligi degistirmeli"
+    );
+    // ayni sahiplikte deterministik
+    let b = SocialBridgeRecord {
+        source_uri: "x.com/post/1".to_string(),
+        owner_did: "did:bud:alice".to_string(),
+        content_id: [7u8; 32],
+        ts_unix: 100,
+        ownership: OwnershipKind::Owned,
+        platform: SocialPlatform::AtProto,
+        content: b"icerik".to_vec(),
+    };
+    assert_eq!(h_owned, b.record_hash());
+}

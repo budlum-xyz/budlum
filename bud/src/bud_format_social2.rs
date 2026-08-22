@@ -51,7 +51,7 @@ pub fn demote_decision(p: &MultiSourcePact) -> bool {
 #[derive(Debug, Clone)]
 pub struct LadderStep {
     pub step_id: u8,
-    pub param: u64,          // ör. çözünürlük/hedef
+    pub param: u64, // ör. çözünürlük/hedef
     pub commitment: [u8; 32],
     pub production_cost: u64, // göreli üretim maliyeti (ör. cekirdek-saniye)
 }
@@ -103,14 +103,29 @@ mod tests {
     }
 
     fn kaynak(u: &str, alive: bool) -> SocialSource {
-        SocialSource { url: u.as_bytes().to_vec(), post_id: b"p1".to_vec(), ts_unix: 100, alive }
+        SocialSource {
+            url: u.as_bytes().to_vec(),
+            post_id: b"p1".to_vec(),
+            ts_unix: 100,
+            alive,
+        }
     }
 
     #[test]
     fn y8_cok_kaynak_zorunluluk_ve_dusurme() {
-        let tek = MultiSourcePact { pact_id: [1u8; 32], sources: vec![kaynak("x.com/a", true)] };
+        let tek = MultiSourcePact {
+            pact_id: [1u8; 32],
+            sources: vec![kaynak("x.com/a", true)],
+        };
         assert!(!has_redundant_sources(&tek), "tek kaynak → yetersiz");
-        let cok = MultiSourcePact { pact_id: [1u8; 32], sources: vec![kaynak("x.com/a", true), kaynak("y.org/b", true), kaynak("arsiv/c", false)] };
+        let cok = MultiSourcePact {
+            pact_id: [1u8; 32],
+            sources: vec![
+                kaynak("x.com/a", true),
+                kaynak("y.org/b", true),
+                kaynak("arsiv/c", false),
+            ],
+        };
         assert!(has_redundant_sources(&cok));
         assert_eq!(alive_count(&cok), 2);
         // biri ölürse devam
@@ -129,8 +144,18 @@ mod tests {
     fn y10_basamak_zinciri_ve_ucuz_secim() {
         let master = hof(b"master-video");
         let steps = vec![
-            LadderStep { step_id: 1, param: 1080, commitment: step_commitment(&master, 1, 1080), production_cost: 10 },
-            LadderStep { step_id: 2, param: 480, commitment: step_commitment(&master, 2, 480), production_cost: 3 },
+            LadderStep {
+                step_id: 1,
+                param: 1080,
+                commitment: step_commitment(&master, 1, 1080),
+                production_cost: 10,
+            },
+            LadderStep {
+                step_id: 2,
+                param: 480,
+                commitment: step_commitment(&master, 2, 480),
+                production_cost: 3,
+            },
         ];
         // 480p basamağını üret → doğrula
         let uretim = b"480p cikti";
@@ -139,13 +164,19 @@ mod tests {
         // en ucuz basamak 480p
         assert_eq!(cheapest_step(&steps).unwrap().step_id, 2);
         // master değişirse basamak commitment'ı değişir (negatif: farklı master → farklı)
-        assert_ne!(step_commitment(&hof(b"baska-master"), 2, 480), steps[1].commitment);
+        assert_ne!(
+            step_commitment(&hof(b"baska-master"), 2, 480),
+            steps[1].commitment
+        );
         let _ = verify_step(&steps[0], &master, uretim); // panik yok
     }
 
     #[test]
     fn sosyal_digest_deterministik() {
-        let p = MultiSourcePact { pact_id: [1u8; 32], sources: vec![kaynak("x.com", true)] };
+        let p = MultiSourcePact {
+            pact_id: [1u8; 32],
+            sources: vec![kaynak("x.com", true)],
+        };
         assert_eq!(social2_digest(&p), social2_digest(&p));
     }
 }

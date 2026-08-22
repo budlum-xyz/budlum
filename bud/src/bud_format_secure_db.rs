@@ -15,12 +15,22 @@ pub struct SecureEmbeddedDb {
 
 impl SecureEmbeddedDb {
     pub fn new(path: &str) -> Self {
-        Self { path: path.to_string(), encrypted: true, fts5_enabled: true, wireguard_enabled: true, radicle_enabled: true }
+        Self {
+            path: path.to_string(),
+            encrypted: true,
+            fts5_enabled: true,
+            wireguard_enabled: true,
+            radicle_enabled: true,
+        }
     }
 
     pub fn verify(&self) -> Result<(), &'static str> {
-        if self.path.is_empty() { return Err("K-BUD-SECURE-DB: path empty"); }
-        if !self.encrypted { return Err("K-BUD-SECURE-DB: not encrypted"); }
+        if self.path.is_empty() {
+            return Err("K-BUD-SECURE-DB: path empty");
+        }
+        if !self.encrypted {
+            return Err("K-BUD-SECURE-DB: not encrypted");
+        }
         Ok(())
     }
 
@@ -40,11 +50,15 @@ impl SecureDbGates {
         db.verify()
     }
     pub fn k_bud_tunnel(enabled: bool) -> Result<(), &'static str> {
-        if !enabled { return Err("K-BUD-TUNNEL: disabled"); }
+        if !enabled {
+            return Err("K-BUD-TUNNEL: disabled");
+        }
         Ok(())
     }
     pub fn k_bud_distributed_source(enabled: bool) -> Result<(), &'static str> {
-        if !enabled { return Err("K-BUD-DISTRIBUTED-SOURCE: disabled"); }
+        if !enabled {
+            return Err("K-BUD-DISTRIBUTED-SOURCE: disabled");
+        }
         Ok(())
     }
 

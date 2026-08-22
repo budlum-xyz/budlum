@@ -35,7 +35,10 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        BitWriter { buf: Vec::new(), bit_pos: 0 }
+        BitWriter {
+            buf: Vec::new(),
+            bit_pos: 0,
+        }
     }
     fn write_bit(&mut self, b: bool) {
         if self.bit_pos == 0 {
@@ -66,7 +69,11 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(buf: &'a [u8]) -> Self {
-        BitReader { buf, pos: 0, bit: 0 }
+        BitReader {
+            buf,
+            pos: 0,
+            bit: 0,
+        }
     }
     fn read_bit(&mut self) -> Option<bool> {
         if self.pos >= self.buf.len() {
@@ -143,7 +150,12 @@ impl TimeSeriesColumnar {
             prev_ts = *ts;
             prev_value = *v;
         }
-        Some(TimeSeriesColumnar { points: points.len(), first_ts, first_value, bits: w.buf })
+        Some(TimeSeriesColumnar {
+            points: points.len(),
+            first_ts,
+            first_value,
+            bits: w.buf,
+        })
     }
 
     /// Bit akışından (ts, f64) çiftlerini yeniden kur (kayıpsızlık kanıtı).
@@ -236,7 +248,12 @@ impl TimeSeriesColumnar {
         if points == 0 || points > MAX_POINTS {
             return None;
         }
-        Some(TimeSeriesColumnar { points, first_ts, first_value, bits })
+        Some(TimeSeriesColumnar {
+            points,
+            first_ts,
+            first_value,
+            bits,
+        })
     }
 }
 
@@ -305,7 +322,9 @@ mod tests {
         let mut series = Vec::new();
         let mut x = 0x1234_5678_9ABC_DEF0u64;
         for i in 0..200 {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             // NaN/Inf üretmeyen mantissa-değişken değerler (1.0..2.0 arası)
             let bits = (x & 0x000F_FFFF_FFFF_FFFF) | 0x3FF0_0000_0000_0000;
             series.push((i as i64 * 5, f64::from_bits(bits)));

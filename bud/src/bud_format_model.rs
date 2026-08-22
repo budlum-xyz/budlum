@@ -43,8 +43,8 @@ impl FloatKind {
 pub struct ModelFloatSplit {
     pub kind: FloatKind,
     pub count: usize,
-    pub exponents: Vec<u8>,     // her değerin üs baytı (BF16/FP32: 8 bit)
-    pub rest_bits: Vec<u8>,     // işaret + mantissa bitleri (bit-paketli, orijinal sırada)
+    pub exponents: Vec<u8>, // her değerin üs baytı (BF16/FP32: 8 bit)
+    pub rest_bits: Vec<u8>, // işaret + mantissa bitleri (bit-paketli, orijinal sırada)
 }
 
 impl ModelFloatSplit {
@@ -99,7 +99,12 @@ impl ModelFloatSplit {
                 write_bit_at(&mut rest_bits, base_bit + 1 + m, b);
             }
         }
-        Some(ModelFloatSplit { kind, count, exponents, rest_bits })
+        Some(ModelFloatSplit {
+            kind,
+            count,
+            exponents,
+            rest_bits,
+        })
     }
 
     /// Üs + geri kalan akışlardan orijinal kayan nokta baytlarını yeniden kur (kayıpsızlık).
@@ -189,7 +194,12 @@ impl ModelFloatSplit {
         if count == 0 || count > MAX_VALUES {
             return None;
         }
-        Some(ModelFloatSplit { kind, count, exponents, rest_bits })
+        Some(ModelFloatSplit {
+            kind,
+            count,
+            exponents,
+            rest_bits,
+        })
     }
 }
 
@@ -221,7 +231,9 @@ mod tests {
         let mut out = Vec::with_capacity(n * 2);
         let mut x = 0xDEAD_BEEF_1234_5678u64;
         for _i in 0..n {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             // üs: dar bant 118-122 (gerçekçi ağırlık dağılımındaki kazanç burada)
             let exp: u8 = 120 + ((x >> 32) % 5) as u8 - 2;
             let sign: u8 = ((x >> 63) & 1) as u8;
@@ -264,9 +276,17 @@ mod tests {
         let raw_exp = split.exponents.len();
         // üsler 30 farklı değer (100-129) → zstd ile belirgin sıkışma beklenir;
         // Bu test, ayrılmış üs akışının tek başına sıkıştığını doğrular.
-        assert!(exp_comp.len() < raw_exp, "üsler sıkışmalı: {} -> {}", raw_exp, exp_comp.len());
+        assert!(
+            exp_comp.len() < raw_exp,
+            "üsler sıkışmalı: {} -> {}",
+            raw_exp,
+            exp_comp.len()
+        );
         // Dar üs bandı bu korpusta >3x sıkışır (ölçüm: 4.34x).
-        assert!(raw_exp as f64 / exp_comp.len() as f64 > 3.0, "üs sıkışma oranı >3x");
+        assert!(
+            raw_exp as f64 / exp_comp.len() as f64 > 3.0,
+            "üs sıkışma oranı >3x"
+        );
         // toplam kazanç: modelin üs kısmı (~yarısı) sıkışır → %25+ model tasarrufu beklenir
         let rest_comp = zstd::bulk::compress(&split.rest_bits, 19).expect("zstd");
         let total_comp = exp_comp.len() + rest_comp.len();
@@ -274,7 +294,8 @@ mod tests {
         assert!(
             total_comp < model_comp.len(),
             "üs-ayırma + Huffman modeli zstd'den iyi: split {} vs zstd {}",
-            total_comp, model_comp.len()
+            total_comp,
+            model_comp.len()
         );
     }
 
@@ -283,7 +304,9 @@ mod tests {
         let mut model = Vec::new();
         let mut x = 0x1234_5678_9ABC_DEF0u64;
         for _i in 0..200 {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             // FP32: üs 100-130, mantissa 23 bit
             let exp: u8 = 100 + ((x >> 40) % 30) as u8;
             let sign: u8 = ((x >> 63) & 1) as u8;
@@ -308,7 +331,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

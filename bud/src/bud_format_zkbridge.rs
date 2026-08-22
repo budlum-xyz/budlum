@@ -20,10 +20,10 @@ pub const ZK_VERSION: u8 = 1;
 /// STARK-dostu adım kaydı (devreye çevrilecek işlem).
 #[derive(Debug, Clone)]
 pub struct WitnessStep {
-    pub op: u8,             // PipeStep::to_u8
+    pub op: u8, // PipeStep::to_u8
     pub input_digest: [u8; 32],
     pub output_digest: [u8; 32],
-    pub arg: u64,           // adım parametresi (ör. zstd seviyesi)
+    pub arg: u64, // adım parametresi (ör. zstd seviyesi)
 }
 
 /// Engine çıktısından witness izi üret (deterministik).
@@ -47,7 +47,12 @@ pub fn engine_to_witness(res: &EngineResult) -> Vec<WitnessStep> {
             PipeStep::Erasure => 4,
             _ => 0,
         };
-        steps.push(WitnessStep { op: s.to_u8(), input_digest: init, output_digest: o, arg });
+        steps.push(WitnessStep {
+            op: s.to_u8(),
+            input_digest: init,
+            output_digest: o,
+            arg,
+        });
         init = o;
     }
     steps
@@ -144,7 +149,11 @@ mod tests {
         let r2 = crate::bud_format_engine::engine_store(&data, false, 42).unwrap();
         let w1 = engine_to_witness(&r1);
         let w2 = engine_to_witness(&r2);
-        assert_eq!(witness_root(&w1), witness_root(&w2), "witness deterministik");
+        assert_eq!(
+            witness_root(&w1),
+            witness_root(&w2),
+            "witness deterministik"
+        );
         assert!(verify_witness(&w1, &witness_root(&w1)));
         assert!(!w1.is_empty());
     }
@@ -168,7 +177,9 @@ mod tests {
             }
         }
         // deterministik + meta
-        let rows2 = witness_to_field_trace(&engine_to_witness(&crate::bud_format_engine::engine_store(&data, false, 3).unwrap()));
+        let rows2 = witness_to_field_trace(&engine_to_witness(
+            &crate::bud_format_engine::engine_store(&data, false, 3).unwrap(),
+        ));
         let (n1, d1) = field_trace_meta(&rows);
         let (n2, d2) = field_trace_meta(&rows2);
         assert_eq!((n1, d1), (n2, d2));
@@ -183,7 +194,10 @@ mod tests {
         let mut bozuk = w.clone();
         if !bozuk.is_empty() {
             bozuk[0].op ^= 1;
-            assert!(!verify_witness(&bozuk, &orijinal_kok), "bozuk iz orijinal kökle eşleşmemeli");
+            assert!(
+                !verify_witness(&bozuk, &orijinal_kok),
+                "bozuk iz orijinal kökle eşleşmemeli"
+            );
         }
     }
 }

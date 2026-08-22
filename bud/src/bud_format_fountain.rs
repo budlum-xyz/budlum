@@ -124,7 +124,10 @@ impl LcRng {
         Self(seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(1))
     }
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0
     }
 }
