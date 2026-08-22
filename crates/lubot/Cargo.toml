@@ -10,6 +10,20 @@ members = [
     "crates/lubot-ops",
 ]
 
+# Panik siniri: uretim yolunda `unwrap`/`expect` yasak.
+#
+# Bu workspace ana repodaki kapinin disinda kalmisti. Olcum: tek ihlal
+# (`lubot-data/src/jsonl.rs` `encode`), ve o ihlalin belgesi "uretimde
+# `Result` donen sarmalayici kullanilir" diyordu - oyle bir sarmalayici
+# yoktu. Kapi olmadan yanlis beyan agacta kalmisti.
+#
+# Release profili `panic = "abort"` degil burada, ama lubot ayni ikilinin
+# icinde kosuyor; bir panik yine sureci dusurur. Testler muaf
+# (`clippy.toml`: allow-unwrap-in-tests).
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
