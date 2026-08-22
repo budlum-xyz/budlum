@@ -2246,7 +2246,6 @@ impl Default for AccountState {
     }
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::crypto::primitives::KeyPair;
@@ -3039,7 +3038,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod c3_validator_readiness_tests {
     use super::*;
 

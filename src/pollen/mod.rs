@@ -194,7 +194,6 @@ impl From<[u8; 64]> for Signature64 {
 pub type GrantId = AssetId;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;

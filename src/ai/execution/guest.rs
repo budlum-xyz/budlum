@@ -375,7 +375,6 @@ pub fn prove_mlp_inference(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -529,7 +528,6 @@ pub fn validate_gas_budget(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod gas_tests {
     use super::*;
 
@@ -1118,7 +1116,6 @@ pub fn run_matmul_guest(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod matmul_tests {
     use super::*;
 

@@ -1001,7 +1001,6 @@ impl ConsensusEngine for PoSEngine {
     }
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
 
     /// C-12 regression: the PoS engine validates `block.epoch == block.index /

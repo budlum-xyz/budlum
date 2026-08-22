@@ -825,7 +825,6 @@ pub fn manifest_id_from_parts(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

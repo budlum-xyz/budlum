@@ -119,7 +119,6 @@ pub fn build_lubot_result(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::super::{operator_bond, operator_eligible, register_operator, MIN_OPERATOR_BOND};
     use super::*;

@@ -5721,7 +5721,6 @@ impl Clone for Blockchain {
     }
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
@@ -6653,7 +6652,6 @@ mod tests {
 /// Hardcoded 50% / 10% literal in `apply_qc_fault_verdict` or
 /// `apply_system_effects`, this test will fail.
 #[test]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn slashing_ratios_come_from_registry_params_not_hardcoded() {
     use crate::consensus::pos::{PoSConfig, SlashingEvidence};
     use crate::consensus::PoSEngine;
@@ -6749,7 +6747,6 @@ fn slashing_ratios_come_from_registry_params_not_hardcoded() {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod bond_and_reorg_tests {
     //! `#[cfg(test)]` was attached to a single item here, not to a block, so
     //! everything after the first test compiled into the production library.

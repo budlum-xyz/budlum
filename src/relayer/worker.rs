@@ -341,7 +341,6 @@ impl RelayerWorker {
 const CONFIRMATION_DEPTH: u32 = crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cursor_persistence {
     use super::*;
 

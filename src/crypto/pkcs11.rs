@@ -494,7 +494,6 @@ impl ConsensusSigner for Pkcs11Signer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -715,7 +714,6 @@ pub fn validate_vendor_mechanism(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod vendor_tests {
     use super::*;
 

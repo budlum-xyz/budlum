@@ -3,7 +3,6 @@
 //! Eski format snapshot'tan yeni formata migration veri bozmadan çalışmalı.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod migration_tests {
     use crate::chain::snapshot::*;
     use crate::core::account::AccountState;

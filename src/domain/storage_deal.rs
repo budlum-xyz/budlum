@@ -2605,7 +2605,6 @@ pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::address::Address;

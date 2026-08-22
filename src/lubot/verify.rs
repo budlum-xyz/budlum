@@ -89,7 +89,6 @@ pub fn generate_and_verify_proof(vm: &mut Vm, program: &[u64]) -> Result<ProofEn
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use bud_proof::ExecutionPublicInputs;

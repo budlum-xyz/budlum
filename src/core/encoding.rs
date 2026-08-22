@@ -113,7 +113,6 @@ pub fn create_version_message() -> Vec<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::address::Address;

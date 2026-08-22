@@ -12,7 +12,6 @@
 //! reviewer's question into something CI answers.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     /// FIXED: the PQ backend is compile-time, but the key it emits is
     /// consensus data, so the chain records which one it was launched with.

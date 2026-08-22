@@ -4,7 +4,6 @@
 //! Adjustment için ayrı edge-case testleri.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;

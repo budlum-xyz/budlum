@@ -19,7 +19,6 @@ pub fn hash_fields_bytes(fields: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]

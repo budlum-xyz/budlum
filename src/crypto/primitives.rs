@@ -947,7 +947,6 @@ pub fn verify_ml_dsa_87_signature(
     ))
 }
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     #[test]
@@ -1011,7 +1010,6 @@ mod tests {
 /// The println. This is the regression guard for the
 /// Security-relevant side-channel removal.
 #[test]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn keypair_generate_does_not_leak_public_key_via_println() {
     // Capture stdout for the duration of `generate`. If
     // Anything is printed that contains the public key hex
@@ -1031,7 +1029,6 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
 }
 
 #[test]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn bls_from_bytes_roundtrip_and_integrity() {
     let kp = BlsKeypair::generate().expect("generate");
     let bytes = kp.to_bytes();
@@ -1048,7 +1045,6 @@ fn bls_from_bytes_roundtrip_and_integrity() {
 }
 
 #[test]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn test_mainnet_disk_keys_forbidden_when_plaintext_bls_pq_present() {
     let keys = ValidatorKeys::generate().expect("generate");
     assert_eq!(
@@ -1061,7 +1057,6 @@ fn test_mainnet_disk_keys_forbidden_when_plaintext_bls_pq_present() {
 /// RFC 9380 PoP generation is bound to the canonical public key, the chain
 /// id and the account address it is registered under (R11).
 #[test]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn test_bls_proof_of_possession() {
     use crate::core::address::Address;
     use crate::core::transaction::DEFAULT_CHAIN_ID;
@@ -1110,7 +1105,6 @@ fn test_bls_proof_of_possession() {
 /// mirror's literal copy of them together, exactly like
 /// `bond_arithmetic_matches_the_kani_mirror` holds `penalty_for` in step.
 #[test]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn pq_signature_classification_matches_the_kani_mirror() {
     use crate::crypto::primitives::{
         classify_pq_signature_len, pq_signature_len_acceptable, PqSignatureClass,

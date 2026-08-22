@@ -96,7 +96,6 @@ pub fn build_wallet_context(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::pollen::{AccessGrant, DataAsset, Signature64};

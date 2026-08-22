@@ -284,7 +284,6 @@ pub fn decode_response(bytes: &[u8]) -> Result<BitswapResponse, CodecError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::store::MemoryContentStore;

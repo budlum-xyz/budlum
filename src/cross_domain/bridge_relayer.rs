@@ -297,7 +297,6 @@ impl BridgeRelayerPipeline {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::hash::hash_fields_bytes;

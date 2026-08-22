@@ -655,7 +655,6 @@ pub enum GovernanceAction {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::core::address::Address;
@@ -1005,7 +1004,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod l4_tests {
     use super::*;
 

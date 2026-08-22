@@ -25,7 +25,6 @@
 // ─── Regresyon #1: ZK finality fail-open ─────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod zk_finality_fail_open_regression {
     use crate::domain::finality_adapter::{
         DomainFinalityAdapter, FinalityProof, FinalityStatus, ZkFinalityAdapter,
@@ -259,7 +258,6 @@ mod zk_finality_fail_open_regression {
 // ─── Regresyon #2: Relayer escrow silent-failure ──────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod relayer_escrow_silent_failure_regression {
     use crate::ai::registry::AiRegistry;
     use crate::ai::types::{

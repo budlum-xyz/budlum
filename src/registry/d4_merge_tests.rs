@@ -19,7 +19,6 @@
 //! Exact primitive the four domains share.
 #![cfg(test)]
 // Test-only module: an unwrap here is how a test reports a broken invariant.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
 use crate::core::address::Address;

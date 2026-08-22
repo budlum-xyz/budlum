@@ -1,5 +1,4 @@
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::bns::BnsError;
     use crate::bns::BnsRegistry;

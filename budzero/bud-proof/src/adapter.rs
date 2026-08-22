@@ -218,7 +218,6 @@ pub trait ProverAdapter {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod event_digest_tests {
     use super::*;
 
