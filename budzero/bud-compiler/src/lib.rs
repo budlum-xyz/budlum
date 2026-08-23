@@ -222,6 +222,95 @@ mod tests {
         );
     }
 
+    /// Ayrilmis tip adlarinin **hepsi** reddedilmeli.
+    ///
+    /// `RESERVED_TYPE_NAMES` on uc ad tasiyor ve hicbirinin testi yoktu.
+    /// Liste sessiz bir tuzak tasiyor: `Type::from_str` taninmayan her adi
+    /// **struct adi** olarak kabul eder. Yani listeden bir ad dusurulurse
+    /// `u128` reddedilmez, "tanimsiz struct" hatasina donusur - ya da o adda
+    /// bir struct tanimliysa sessizce derlenir ve gelistirici 128-bit
+    /// aritmetigi aldigini sanar. VM'de karsiligi yoktur.
+    ///
+    /// Her ad ayri iddia ediliyor: tek bir dongu iddiasi, bir adin listeden
+    /// dusmesini digerlerinin basarisi altinda gizlerdi.
+    #[test]
+    fn ayrilmis_tip_adlari_reddedilir() {
+        // (ad, hata metninde gecmesi gereken parca)
+        let adlar = [
+            ("u8", "Goldilocks"),
+            ("u16", "Goldilocks"),
+            ("u32", "range-check"),
+            ("u128", "multi-limb"),
+            ("i8", "unsigned"),
+            ("i16", "unsigned"),
+            ("i32", "unsigned"),
+            ("i64", "unsigned"),
+            ("usize", "one integer type"),
+            ("isize", "one integer type"),
+            ("String", "no string type"),
+            ("str", "no string type"),
+            ("Vec", "no dynamic collections"),
+        ];
+
+        for (ad, beklenen) in adlar {
+            let source = format!(
+                r#"
+                contract T {{
+                    pub fn f(x: {ad}) -> u64 {{
+                        return 1;
+                    }}
+
+                    pub fn main() {{
+                        emit E(1);
+                    }}
+                }}
+            "#
+            );
+
+            match compile(&source, IsaProfile::Production) {
+                Ok(_) => panic!("`{ad}` bir BudL tipi olarak kabul edildi"),
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(
+                        msg.contains("is not a BudL type"),
+                        "`{ad}` reddedildi ama ayrilmis-ad kapisindan degil: {msg}"
+                    );
+                    assert!(
+                        msg.contains(beklenen),
+                        "`{ad}` icin gerekce kayboldu; `{beklenen}` bekleniyordu: {msg}"
+                    );
+                }
+                Err(other) => panic!("`{ad}`: SemanticError bekleniyordu, gelen: {other:?}"),
+            }
+        }
+    }
+
+    /// Kontrol grubu: bes gecerli tip adi **kabul** edilmeli.
+    ///
+    /// Ayrilmis-ad kapisinin asiri genisleyip gecerli tipleri yutmadigini
+    /// gosterir. Bu olmadan `from_str`'i her adi reddedecek sekilde bozmak
+    /// yukaridaki testi yesil birakirdi.
+    #[test]
+    fn gecerli_tip_adlari_kabul_edilir() {
+        for ad in ["u64", "bool", "field", "Address", "Hash32"] {
+            let source = format!(
+                r#"
+                contract T {{
+                    pub fn f(x: {ad}) -> u64 {{
+                        return 1;
+                    }}
+
+                    pub fn main() {{
+                        emit E(1);
+                    }}
+                }}
+            "#
+            );
+
+            compile(&source, IsaProfile::Production)
+                .unwrap_or_else(|e| panic!("gecerli tip `{ad}` reddedildi: {e:?}"));
+        }
+    }
+
     /// `u64` uzerinde `/` **reddedilmeli**.
     ///
     /// VM `Opcode::Div`'i Goldilocks alan bolmesi olarak yurutuyor
