@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 62 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 63 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -70,6 +70,7 @@
 - [60. Turev temsil: kare kendini tanimlar, hicbir ara urun saklanmaz](#60-turev-temsil-kare-kendini-tanimlar-hicbir-ara-urun-saklanmaz)
 - [61. Kimlik kimi, tasima limiti neyi sinirlar: dinlemeden once iki soru](#61-kimlik-kimi-tasima-limiti-neyi-sinirlar-dinlemeden-once-iki-soru)
 - [62. Iki kok: consensus'un okudugu ve kanit verebilen](#62-iki-kok-consensusun-okudugu-ve-kanit-verebilen)
+- [63. Komsulukla verilen garanti garanti degildir](#63-komsulukla-verilen-garanti-garanti-degildir)
 
 ## 1. Genel sistem mimarisi
 
@@ -2265,3 +2266,41 @@ degildir.
 dogrulayici ya o koku bagimsiz bir kaynaktan almalidir ya da yalnizca demetin
 kendi icinde tutarli oldugunu ogrenmis olur. Kanit, yalnizca ifade ettigi seyi
 garanti eder.
+
+## 63. Komsulukla verilen garanti garanti degildir
+
+`bud_stark` dogrulayicisinda `recompose_quotient_from_chunks`, Lagrange
+katsayilarini **domain listesinden** uretir ama toplami **chunk listesinin**
+indisiyle gezer. Iki listenin uzunlugu esit olmak zorundadir. Esitligi
+denetleyen kod vardi - ama **baska bir fonksiyonda**: `verify_with_preprocessed`
+icindeki `valid_shape`.
+
+Bu bir garanti degil, bir **komsuluk**tur. Uc sorunu var:
+
+1. **Fonksiyon `pub`.** Yarin eklenen ikinci bir cagiri o denetimi miras
+   almaz; hicbir sey ona denetimi hatirlatmaz.
+2. **Chunk sayisi uzak taraftan gelir.** Kanit bir baskasinin urettigi
+   veridir; uzunluk uyusmazligi bir yazilim hatasi degil, **saldirgan
+   girdisidir**.
+3. **Hata modu reddetme degil, panik.** Dogrulayici yolunda panik, uzaktan
+   tetiklenebilen bir dugum durmasidir. Kotu kaniti reddetmek isimizdir;
+   kotu kanit yuzunden **durmak** degildir.
+
+Kodda eski hali soyle savunuluyordu: *"We checked in valid_shape ... hence the
+unwrap will never panic."* Bir yorumun garanti ettigi sey derleyicinin garanti
+ettigi sey degildir. Yorum dogruydu - **bugun** ve **o tek cagiri icin**.
+
+**Yapilan:** on kosul, ihlal edildiginde yanlis olacak kodun **yanina** tasindi.
+Fonksiyon artik `Option<SC::Challenge>` donduruyor ve uzunluklar uyusmuyorsa
+`None` veriyor; cagiri bunu `VerificationError::InvalidProofShape`'e ceviriyor.
+Indeksleme `get(...)` ile yaziliyor: paniki dislayan sey artik yorum degil,
+tipin kendisi.
+
+**Neden `Option`, neden onarim degil:** sekli ornege uymayan bir kanit, duzeltilmesi
+gereken bir kanit degildir - **kanit degildir**. Eksigi sifirla tamamlamak,
+dogrulayiciyi kabul etmemesi gereken bir seyi kabul eder hale getirir.
+
+**Genel kural:** *bir denetimin kime hizmet ettigi belliyse, o denetim onun
+yanindadir.* Uzaktaki bir denetime dayanan kod, o denetim tasindiginda veya
+yeni bir yol acildiginda sessizce savunmasiz kalir; ve bunu kimse fark etmez,
+cunku her sey derlenir ve butun testler gecer.

@@ -162,7 +162,7 @@ fn unguarded_endpoints(src: &str) -> Vec<String> {
                     None => emits = true,
                     Some(called) => {
                         let defined = src.contains(&format!("fn {called}("));
-                        if !defined || shard_helpers.iter().any(|h| *h == called) {
+                        if !defined || shard_helpers.contains(&called) {
                             emits = true;
                         }
                     }

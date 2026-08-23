@@ -289,3 +289,63 @@ fn degree_bits_is_bounded_before_it_is_shifted() {
         bound + 1
     );
 }
+
+/// The verifier's own arithmetic must not depend on a check that lives in
+/// another function.
+///
+/// `recompose_quotient_from_chunks` indexes its Lagrange coefficients by the
+/// chunk position while the coefficient list is built from the domain list.
+/// Both lengths were, until this test, guaranteed only by `valid_shape` inside
+/// `verify_with_preprocessed`. That is a guarantee by neighbourhood, not by
+/// type: a second caller added later inherits none of it, and the chunk count
+/// comes from a proof a remote party supplied, so the failure mode is a panic
+/// on the verification path rather than a rejected proof.
+#[test]
+fn quotient_recomposition_states_its_own_precondition() {
+    let src = code(VERIFIER).join("\n");
+    let start = first(VERIFIER, "pub fn recompose_quotient_from_chunks");
+    let body: String = code(VERIFIER)
+        .iter()
+        .skip(start)
+        .take(60)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        body.contains("quotient_chunks.len() != quotient_chunks_domains.len()"),
+        "recompose_quotient_from_chunks no longer compares the chunk count \
+         against the domain count; the indexing below it can then read past \
+         the coefficient list"
+    );
+    assert!(
+        body.contains("return None"),
+        "the length disagreement must be refused, not repaired: a proof whose \
+         shape does not match the instance is not a proof"
+    );
+    assert!(
+        src.contains("recompose_quotient_from_chunks::<SC>(")
+            && src.contains(".ok_or(VerificationError::InvalidProofShape)?"),
+        "the caller must turn the refusal into a verification error rather \
+         than unwrapping it"
+    );
+}
+
+/// A refusal that a caller can ignore is not a refusal.
+#[test]
+fn the_recomposition_refusal_cannot_be_discarded_by_a_caller() {
+    let sig_at = first(VERIFIER, "pub fn recompose_quotient_from_chunks");
+    let ret: String = code(VERIFIER)
+        .iter()
+        .skip(sig_at)
+        .take(12)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        ret.contains("-> Option<SC::Challenge>"),
+        "the function returns a bare field element again, so a caller that \
+         skips the shape check gets a silently wrong quotient instead of a \
+         refusal"
+    );
+}

@@ -27,14 +27,32 @@ pub use p3_air::symbolic::AirLayout;
 ///
 /// Given quotient chunks and their domains, this computes the Lagrange
 /// Interpolation coefficients (zps) and reconstructs quotient(zeta).
+///
+/// # Refusals
+///
+/// Returns `None` when the chunk count does not match the domain count.
+///
+/// The number of Lagrange coefficients follows the *domains*, while the sum
+/// below is indexed by the *chunks*, and the chunk count comes from a proof a
+/// remote party supplied. [`verify_with_preprocessed`] checks the two agree
+/// before calling here, but this function is `pub`: its safety must not rest
+/// on a check that lives in a different function, because a second caller
+/// added later inherits none of it, and the failure mode is a panic on the
+/// verification path - a remotely triggered node stop, not a rejected proof.
+///
+/// The check is stated here so that the answer to "what if these disagree?"
+/// is in the same place as the code that would be wrong.
 pub fn recompose_quotient_from_chunks<SC>(
     quotient_chunks_domains: &[Domain<SC>],
     quotient_chunks: &[Vec<SC::Challenge>],
     zeta: SC::Challenge,
-) -> SC::Challenge
+) -> Option<SC::Challenge>
 where
     SC: StarkGenericConfig,
 {
+    if quotient_chunks.len() != quotient_chunks_domains.len() {
+        return None;
+    }
     let zps = quotient_chunks_domains
         .iter()
         .enumerate()
@@ -53,14 +71,16 @@ where
         })
         .collect::<Vec<_>>();
 
-    quotient_chunks
+    Some(
+        quotient_chunks
         .iter()
         .enumerate()
         .map(|(ch_i, ch)| {
-            // We checked in valid_shape the length of "ch" is equal to
-            // <SC::Challenge as BasedVectorSpace<Val<SC>>>::DIMENSION. Hence
-            // The unwrap will never panic.
-            zps[ch_i]
+            // Lengths were checked equal above, so `get` always finds a
+            // coefficient; it is written this way so the compiler, not a
+            // comment, is what rules out the panic.
+            let zp = zps.get(ch_i).copied().unwrap_or(SC::Challenge::ZERO);
+            zp
                 * ch.iter()
                     .enumerate()
                     .map(|(e_i, &c)| {
@@ -73,7 +93,8 @@ where
                     })
                     .sum::<SC::Challenge>()
         })
-        .sum::<SC::Challenge>()
+        .sum::<SC::Challenge>(),
+    )
 }
 
 /// Verifies that the folded constraints match the quotient polynomial at zeta.
@@ -540,7 +561,8 @@ where
         &quotient_chunks_domains,
         &opened_values.quotient_chunks,
         zeta,
-    );
+    )
+    .ok_or(VerificationError::InvalidProofShape)?;
 
     let zeros;
     let trace_next_slice = match &opened_values.trace_next {
