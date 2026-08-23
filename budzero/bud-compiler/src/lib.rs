@@ -185,6 +185,99 @@ mod tests {
         assert_eq!(vm.events, vec![14, 20, 16]);
     }
 
+    /// Derleyicinin urettigi bytecode, kapsanmayan dort operator icin de
+    /// **dogru sonucu** vermeli.
+    ///
+    /// Olculdu: `BinOp` on operator tasiyor, ama VM'de kosturulup sonucu
+    /// dogrulanan testlerde yalnizca `+ - * == >=` geciyordu. `Neq`, `Lt`,
+    /// `Gt`, `Lte` icin uretilen kod hic calistirilmamisti - yalnizca
+    /// "derlendi mi" duzeyinde olculuyorlardi. `Lt` yerine `Gt` yayan bir
+    /// kod uretici butun o testleri gecerdi.
+    ///
+    /// (`Div` burada yok: `u64` uzerinde artik reddediliyor, gerekcesi
+    /// `bolme_u64_uzerinde_reddedilir` testinde.)
+    #[test]
+    #[cfg(feature = "experimental")]
+    fn kapsanmayan_operatorler_dogru_sonuc_uretir() {
+        let source = r#"
+            contract OperatorTest {
+                pub fn main() {
+                    let esitsiz = 3 != 4;
+                    let kucuk = 3 < 4;
+                    let buyuk = 3 > 4;
+                    let kucuk_esit = 4 <= 4;
+                    emit Result(esitsiz, kucuk, buyuk, kucuk_esit);
+                }
+            }
+        "#;
+
+        let bytecode = compile(source, IsaProfile::Experimental).expect("derleme");
+        let mut vm = bud_vm::Vm::new(1024);
+        vm.run(&bytecode).expect("calistirma");
+
+        assert_eq!(
+            vm.events,
+            vec![1, 1, 0, 1],
+            "sirasiyla beklenen: 3!=4 dogru, 3<4 dogru, 3>4 yanlis, 4<=4 dogru"
+        );
+    }
+
+    /// `u64` uzerinde `/` **reddedilmeli**.
+    ///
+    /// VM `Opcode::Div`'i Goldilocks alan bolmesi olarak yurutuyor
+    /// (`rs1 * rs2^-1 mod p`) ve AIR kisiti bunu sabitliyor (`rd * rs2 =
+    /// rs1`). ZK devresinde dogru olan secim bu; tam sayi bolmesi ayrica
+    /// range-check ister.
+    ///
+    /// Ama `u64` yazan gelistirici tam sayi bolmesi bekler. Olculdu: kapi
+    /// yokken `7 / 2` **9223372034707292164** veriyordu ve `7 / 0` hata
+    /// vermeden **0** donuyordu. Ikisi de sessizce yanlis dallanan sozlesme
+    /// uretir, bu yuzden derleme zamaninda kesiliyor.
+    #[test]
+    #[cfg(feature = "experimental")]
+    fn bolme_u64_uzerinde_reddedilir() {
+        let source = r#"
+            contract DivU64 {
+                pub fn main() {
+                    let bolme = 7 / 2;
+                    emit Result(bolme);
+                }
+            }
+        "#;
+
+        match compile(source, IsaProfile::Experimental) {
+            Ok(_) => panic!("`7 / 2` u64 uzerinde derlendi; alan bolmesi tam sayi gibi gorunuyor"),
+            Err(CompileError::SemanticError(msg)) => assert!(
+                msg.contains("field division"),
+                "reddedildi ama baska sebeple: {msg}"
+            ),
+            Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
+        }
+    }
+
+    /// Kontrol grubu: `field` uzerinde `/` **serbest** kalmali.
+    ///
+    /// Kapi yalnizca `u64`'u hedefliyor. Bu test olmadan asiri genis bir
+    /// yasak (her tipte Div reddi) fark edilmeden gecerdi.
+    #[test]
+    #[cfg(feature = "experimental")]
+    fn bolme_field_uzerinde_serbest_kalir() {
+        let source = r#"
+            contract DivField {
+                pub fn bol(a: field, b: field) -> field {
+                    return a / b;
+                }
+
+                pub fn main() {
+                    emit Ready(1);
+                }
+            }
+        "#;
+
+        compile(source, IsaProfile::Experimental)
+            .expect("`field` uzerinde bolme reddedildi; kapi asiri genis");
+    }
+
     #[test]
     #[cfg(feature = "experimental")]
     fn test_comments_support() {

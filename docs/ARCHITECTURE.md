@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 79 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 80 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -87,6 +87,7 @@
 - [77. Onbellek bir depolama iddiasi degildir](#77-onbellek-bir-depolama-iddiasi-degildir)
 - [78. Hesaplanan seyin vardigi yer](#78-hesaplanan-seyin-vardigi-yer)
 - [79. Tarif-adresli kimlik: kareyi konumuna baglamak](#79-tarif-adresli-kimlik-kareyi-konumuna-baglamak)
+- [80. Bolme isareti hangi aritmetigi anlatir](#80-bolme-isareti-hangi-aritmetigi-anlatir)
 
 ## 1. Genel sistem mimarisi
 
@@ -3198,3 +3199,33 @@ orada degildir, yalnizca orada duruyordur - ve duran alan okuyana "bu da
 baglanmis" der, yani yanlis bir guvence uretir. Kalan sema uc mutasyonun
 ucunu de yakalar: sifir-kare kapisi, kare ozetinin katlanmasi, karenin
 konum baglamasi.
+
+
+## 80. Bolme isareti hangi aritmetigi anlatir
+
+BudL'de `/`, VM'de `Opcode::Div` olarak yurutulur ve bu **alan bolmesidir**:
+Goldilocks asal cismi uzerinde `rs1 * rs2^-1 mod p`. AIR kisiti da tam olarak
+bunu sabitler - `rd * rs2 = rs1` - ve sifira bolme durumunda `rd`'yi acikca 0'a
+pinler, cunku o denklem `rs2 = 0` icin bos gecerlidir ve pinlenmezse kotu
+niyetli bir prover bolum yerine istedigi degeri koyabilirdi.
+
+Bu secim ZK devresi icin doğrudur. Tam sayi bolmesi devrede bolum ve kalani
+ayri ayri range-check etmeyi gerektirir; alan tersi tek bir carpma kisitiyla
+ifade edilir.
+
+Sorun semantikte degil, **isaretin kime ne soyledigindeydi**. `u64` tipinde
+`let x = 7 / 2;` yazan bir gelistirici 3 bekler. Olculen sonuc
+`9223372034707292164`'tur - 7'nin 2'nin alan tersiyle carpimi. Ayni sekilde
+`7 / 0` hata vermez, 0 doner. Iki davranis da alan aritmetiginde tutarlidir ve
+tam sayi beklentisi altinda sessizce yanlistir: boyle bir deger uzerine kosul
+kuran sozlesme yanlis dala girer ve hicbir yerde hata gorunmez.
+
+Kapi bu yuzden anlam katmanina kondu, yurutme katmanina degil:
+`sema.rs` `BinOp::Div`'i `Type::U64` operandlarda reddeder, `field` uzerinde
+serbest birakir. `field` yazan kisi alan aritmetigini bilerek secmistir; `u64`
+yazan kisi secmemistir. VM ve AIR degismedi - degismesi gereken sey, hangi
+niyetin bu opcode'a ulasabilecegiydi.
+
+Ucu birden olculdu: kapi kaldirilinca reddetme testi kirmizi verir, kapi her
+tipe genisletilince `field` kontrol grubu kirmizi verir. Kontrol grubu olmadan
+asiri genis bir yasak fark edilmeden gecerdi.
