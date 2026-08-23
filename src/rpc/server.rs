@@ -550,6 +550,29 @@ impl RpcServer {
         })
     }
 
+    fn account_proof_to_json(
+        bundle: &crate::storage::merkle_trie::AccountProofBundle,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            // Named `proofRoot`, not `stateRoot`: this commits to the same
+            // accounts as the consensus root but under a different structure,
+            // and a client that conflates them will verify against the wrong
+            // value.
+            "proofRoot": Self::bytes32_to_0x(bundle.root),
+            "present": bundle.present,
+            "balance": Self::to_hex(bundle.balance),
+            "nonce": Self::to_hex(bundle.nonce),
+            "leafHash": Self::bytes32_to_0x(bundle.proof.leaf_hash),
+            "siblings": bundle
+                .proof
+                .siblings
+                .iter()
+                .map(|s| Self::bytes32_to_0x(*s))
+                .collect::<Vec<_>>(),
+            "directions": bundle.proof.directions.clone(),
+        })
+    }
+
     fn consensus_domain_to_json(d: crate::domain::ConsensusDomain) -> serde_json::Value {
         serde_json::json!({
             "domainId": d.id,
@@ -1030,6 +1053,30 @@ impl BudlumApiServer for RpcServer {
         })?;
         let nonce = self.chain.get_nonce(&addr).await;
         Ok(Self::to_hex(nonce))
+    }
+
+    async fn get_account_proof(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let bundle = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
+            ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
+        })?;
+        // A bundle that does not verify against its own root is a node bug,
+        // not a client error, and must never reach the wire: a caller cannot
+        // tell a malformed proof from a forged one.
+        if !bundle.verify_self_consistent() {
+            return Err(ErrorObjectOwned::owned(
+                -32603,
+                "Account proof failed its own verification",
+                None::<()>,
+            ));
+        }
+        Ok(Self::account_proof_to_json(&bundle))
     }
 
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {

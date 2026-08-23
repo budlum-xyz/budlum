@@ -26,6 +26,17 @@ pub trait BudlumApi {
     #[method(name = "bud_getNonce")]
     async fn get_nonce(&self, address: String) -> Result<String, ErrorObjectOwned>;
 
+    /// Inclusion or absence proof for one account.
+    ///
+    /// `bud_getBalance` returns what this node says; this returns what it can
+    /// prove. The bundle carries its own root, which is the proof-bearing
+    /// trie root and *not* the consensus state root.
+    #[method(name = "bud_getAccountProof")]
+    async fn get_account_proof(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_sendRawTransaction")]
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned>;
 
