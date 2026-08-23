@@ -1162,8 +1162,10 @@ mod tests {
     /// kayit butunlugu kanonik - olay oldu, kayda girdi, cezasi sifir).
     #[test]
     fn a_zero_penalty_slash_is_still_recorded() {
-        let mut params = RegistryParams::default();
-        params.liveness_slash_ratio_fixed = 0;
+        let params = RegistryParams {
+            liveness_slash_ratio_fixed: 0,
+            ..RegistryParams::default()
+        };
         let mut reg = PermissionlessRegistry::with_params(params);
         let a = addr(23);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
