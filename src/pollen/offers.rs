@@ -384,17 +384,48 @@ impl MarketplaceRegistry {
         // En kisitlayici aktif politika secilir. Birden fazla politika aktif
         // oldugunda en genisini secmek, DAO'nun daralttigi bir tavani yeni
         // surum ekleyerek atlatilabilir yapardi.
+        self.check_dao_grant_duration_ceiling(grant.issued_at_block, grant.expires_at_block)?;
+        let id = grant.grant_id;
+        self.access_grants.insert(id, grant);
+        Ok(id)
+    }
+
+    /// DAO'nun ilan ettigi grant suresi tavani.
+    ///
+    /// **Neden ayri bir fonksiyon:** tavan `create_access_grant` icinde satir
+    /// ici yaziliydi ve `access_grants` haritasina yazan IKINCI yol
+    /// (`issue_grant_from_sale_authorization`, pazar yeri satin alma akisi)
+    /// politikaya hic bakmiyordu. Satici imzali bir `SaleAuthorization`
+    /// tasiyan siradan bir alici, DAO'nun tavanini asan bir grant
+    /// alabiliyordu; suresini sinirlayan tek sey saticinin kendi belirledigi
+    /// (guvenlikle ilgisi olmayan) yetki penceresiydi.
+    ///
+    /// Kural: **ayni haritaya yazan her yol ayni kapidan gecer.** Denetim iki
+    /// yerde kopyalanmaz - kopyalansaydi ucuncu bir yol eklendiginde yine
+    /// ayrisirdi. Tek tanim burasi; her iki cagiran da burayi cagirir.
+    ///
+    /// En kisitlayici aktif politika secilir: birden fazla politika aktifken
+    /// en genisini secmek, DAO'nun daralttigi bir tavani yeni surum ekleyerek
+    /// atlatilabilir yapardi.
+    ///
+    /// # Errors
+    ///
+    /// Aktif bir politika varsa ve istenen sure tavani asiyorsa hata doner.
+    /// Hic aktif politika yoksa tavan yoktur ve `Ok` doner.
+    fn check_dao_grant_duration_ceiling(
+        &self,
+        issued_at_block: u64,
+        expires_at_block: u64,
+    ) -> Result<(), String> {
         if let Some(policy) = self
             .encryption_policies
             .values()
             .filter(|p| p.active)
             .min_by_key(|p| p.max_grant_duration_blocks)
         {
-            policy.check_grant_duration(grant.issued_at_block, grant.expires_at_block)?;
+            policy.check_grant_duration(issued_at_block, expires_at_block)?;
         }
-        let id = grant.grant_id;
-        self.access_grants.insert(id, grant);
-        Ok(id)
+        Ok(())
     }
 
     pub fn revoke_access_grant(
@@ -565,6 +596,10 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
+        // Saticinin yetki penceresi bir GUVENLIK tavani degildir: onu satici
+        // belirler. DAO'nun tavani her iki yolda da ayni sekilde uygulanir,
+        // yoksa pazar yeri satin almasi tavani atlatan bir yan kapi olurdu.
+        self.check_dao_grant_duration_ceiling(grant.issued_at_block, grant.expires_at_block)?;
 
         let receipt = PollenPurchaseReceipt::new(
             authorization.authorization_id,
@@ -1083,6 +1118,108 @@ mod tests {
             Some(grant_id)
         );
         assert_ne!(root_before, registry.root());
+    }
+
+    /// DAO tavani, `access_grants`'a yazan HER yolda ayni sekilde uygulanir.
+    ///
+    /// Strix bulgusu (CWE-862): tavan yalnizca `create_access_grant` icinde
+    /// uygulaniyordu. Pazar yeri satin alma yolu (`issue_grant_from_sale_-
+    /// authorization`) politikaya hic bakmiyordu; satici imzali bir yetki
+    /// tasiyan siradan bir alici, suresi yalnizca SATICININ penceresiyle
+    /// sinirli bir grant alabiliyordu. Saticinin penceresi bir guvenlik
+    /// tavani degildir - onu satici belirler.
+    #[test]
+    fn dao_duration_ceiling_binds_the_marketplace_purchase_path_too() {
+        let mut registry = MarketplaceRegistry::new();
+        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        registry.register_data_asset(asset.clone()).unwrap();
+        let authorization_id = registry
+            .create_sale_authorization(signed_sale_authorization(&asset))
+            .unwrap();
+
+        // DAO tavani 3 blok. Satici yetkisi 20. bloga kadar acik, yani
+        // saticinin penceresi 10 blokluk bir grant'e izin verirdi.
+        registry
+            .set_encryption_policy(crate::pollen::EncryptionPolicy {
+                version: 1,
+                hpke_suite_id: 0x20,
+                min_public_key_bytes: 32,
+                max_grant_duration_blocks: 3,
+                deprecated_after_block: None,
+                active: true,
+            })
+            .unwrap();
+
+        let buyer = addr(2);
+        let over_ceiling = 10;
+        let buyer_sig = signed_purchase(
+            &registry,
+            authorization_id,
+            buyer,
+            buyer,
+            10,
+            over_ceiling,
+            2,
+            [0x99; 32],
+            2,
+        );
+        let err = registry
+            .issue_grant_from_sale_authorization(
+                authorization_id,
+                buyer,
+                buyer,
+                10,
+                over_ceiling,
+                2,
+                [0x99; 32],
+                buyer_sig,
+            )
+            .expect_err("DAO tavanini asan satin alma reddedilmeli");
+        assert!(
+            err.contains("exceeds EncryptionPolicy"),
+            "gerekce tavani soylemeli: {err}"
+        );
+
+        // Reddedilen satin alma HICBIR iz birakmamali: ne grant, ne makbuz,
+        // ne de yetkinin sayacinda bir artis.
+        assert!(registry.access_grants.is_empty());
+        assert!(registry.purchase_receipts.is_empty());
+        assert_eq!(
+            registry
+                .sale_authorizations
+                .get(&authorization_id)
+                .unwrap()
+                .grants_issued,
+            0
+        );
+
+        // Tavanin altindaki ayni akis gecer: kapi satin almayi degil, yalnizca
+        // tavani asmayi reddediyor.
+        let within = 3;
+        let ok_sig = signed_purchase(
+            &registry,
+            authorization_id,
+            buyer,
+            buyer,
+            10,
+            within,
+            2,
+            [0x99; 32],
+            2,
+        );
+        let (grant_id, _receipt) = registry
+            .issue_grant_from_sale_authorization(
+                authorization_id,
+                buyer,
+                buyer,
+                10,
+                within,
+                2,
+                [0x99; 32],
+                ok_sig,
+            )
+            .expect("tavanin altindaki satin alma gecmeli");
+        assert!(registry.access_grants.contains_key(&grant_id));
     }
 
     #[test]
