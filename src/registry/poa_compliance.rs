@@ -19,8 +19,9 @@
 //!   * `Blockchain::freeze_poa_account` - alanin turu **kaydindan** okunur,
 //!     cagirandan degil; cagiran kendi alanini "PoA" ilan edip dondurma
 //!     yetkisi uretemez.
-//!   * `Blockchain::validate_sovereign_audit_export_for` - dondurulmus bir
-//!     operatorun egemen denetim paketi reddedilir.
+//!   * `Blockchain::validate_sovereign_audit_export` - dondurulmus bir
+//!     operatorun egemen denetim paketi reddedilir. Operator paketten degil
+//!     **kayitli sablondan** okunur.
 //!
 //! Izinsiz (permissionless) alanlarda dondurma **kasten** reddedilir
 //! (`ensure_poa`): egemenlik iddiasi tasiyan bir agda, izinsiz bir alanin

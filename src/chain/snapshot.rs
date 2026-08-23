@@ -1976,7 +1976,7 @@ mod tests {
         );
         assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
         assert_eq!(
-            serde_json::to_value(restored.tokenomics.clone()).unwrap(),
+            serde_json::to_value(restored.tokenomics).unwrap(),
             serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
             "blobda olmayan tokenomics default'a donmeli"
         );

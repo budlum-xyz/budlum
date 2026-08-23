@@ -380,6 +380,67 @@ mod poa_compliance_gate {
         assert!(err.contains("unknown domain"), "{err}");
     }
 
+    /// Dondurma bir KAPI kurar: dondurulmus operatorun denetim paketi reddedilir.
+    ///
+    /// Kaydin sonucu olmasaydi "donduruldu" yalnizca bir not olurdu.
+    #[test]
+    fn a_frozen_operator_cannot_export_a_sovereign_audit_bundle() {
+        use crate::domain::sovereign::{
+            AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
+            SovereignDomainTemplate,
+        };
+
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(11))
+            .expect("alan kaydi");
+        let operator = addr(0x11);
+
+        let compliance = ComplianceEvidence {
+            policy_hash: [3u8; 32],
+            authority_set_hash: [4u8; 32],
+            jurisdiction_hash: [5u8; 32],
+            audit_commitment: [6u8; 32],
+        };
+        let template = SovereignDomainTemplate::new(
+            11,
+            SovereignDomainClass::EnterprisePoa,
+            ConsensusKind::PoA,
+            operator,
+            true,
+            compliance,
+            DomainLifecycleState::Active,
+        );
+        let template_id = template.template_id;
+        let compliance_root = template.compliance.root();
+        bc.register_sovereign_template(template)
+            .expect("sablon kaydi");
+
+        let bundle = AuditExportBundle {
+            template_id,
+            from_height: 0,
+            to_height: 10,
+            global_header_root: [6u8; 32],
+            commitment_root: [7u8; 32],
+            compliance_root,
+        };
+
+        // Dondurmadan once gecer.
+        bc.validate_sovereign_audit_export(&bundle)
+            .expect("dondurma yokken paket gecmeli");
+
+        // Operator dondurulur.
+        bc.freeze_poa_account(11, true, operator, [8u8; 32])
+            .expect("yetkili dondurma");
+
+        let err = bc
+            .validate_sovereign_audit_export(&bundle)
+            .expect_err("dondurulmus operatorun paketi reddedilmeli");
+        assert!(
+            err.contains("frozen"),
+            "gerekce dondurmayi soylemeli: {err}"
+        );
+    }
+
     /// Dondurma calisir ve denetim izine girer.
     #[test]
     fn a_poa_freeze_is_recorded_with_its_evidence() {

@@ -357,6 +357,18 @@ impl SovereignDomainRegistry {
         bundle.validate_against_template(template)
     }
 
+    /// Kayitli sablonun operatoru.
+    ///
+    /// Uyum kapilari kimligi buradan okur: paketin kendi icinden gelen bir
+    /// kimlik, dondurulmus operatorun baskasinin adini yazmasina izin verirdi.
+    #[must_use]
+    pub fn template_operator(&self, template_id: Hash32) -> Option<Address> {
+        self.templates
+            .values()
+            .find(|t| t.template_id == template_id)
+            .map(|t| t.operator)
+    }
+
     pub fn transition_lifecycle(
         &mut self,
         domain_id: DomainId,
