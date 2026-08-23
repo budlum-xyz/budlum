@@ -980,6 +980,17 @@ impl Executor {
                                         )
                                     })?
                                     .clone();
+                                // The check the other unlock path already had.
+                                // Both paths now call the same rule, so the
+                                // answer no longer depends on which entry
+                                // point the message came through.
+                                crate::cross_domain::bridge::check_burn_matches_lock_domain(
+                                    transfer.source_domain,
+                                    msg.target_domain,
+                                )
+                                .map_err(|e| {
+                                    BudlumError::validation("bridge_unlock_failed", e.0)
+                                })?;
                                 state
                                     .bridge_state
                                     .unlock(transfer_id, msg.source_domain)

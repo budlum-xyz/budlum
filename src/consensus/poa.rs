@@ -119,23 +119,54 @@ impl PoAEngine {
     /// it never widens. An operator-local list cannot admit an account the
     /// chain has not admitted.
     ///
-    /// **Fail-closed.** An empty admitted set used to mean "no filter", so a
-    /// chain whose authority list was never populated ran wide open and looked
-    /// healthy doing it. In a permissioned domain the absence of an admission
-    /// decision is not permission: it is the absence of permission, and the
-    /// domain produces no blocks until someone is admitted. A silent halt is
-    /// recoverable; a silent opening is not.
+    /// **Fail-closed, once the domain has said it is permissioned.** An empty
+    /// admitted set used to mean "no filter", so a chain whose authority list
+    /// was never populated ran wide open and looked healthy doing it. In a
+    /// permissioned domain the absence of an admission decision is not
+    /// permission: it is the absence of permission, and the domain produces
+    /// no blocks until someone is admitted. A silent halt is recoverable; a
+    /// silent opening is not.
+    ///
+    /// # Why "has an admin" and not "has records"
+    ///
+    /// The first attempt treated an empty admission registry as "nobody is
+    /// admitted", which is right for a permissioned domain and wrong for
+    /// every other chain: a plain PoA devnet that never opted into admission
+    /// control would have been unable to produce its first block. Two
+    /// different situations - *gated and nobody let in* versus *not gated* -
+    /// had been collapsed into the same silence.
+    ///
+    /// A domain declares itself permissioned by having an admin. That is a
+    /// deliberate act by whoever set the domain up, it is visible in state,
+    /// and it cannot happen by omission. Before that act, admission control
+    /// is not in force; after it, it is in force completely, and it cannot be
+    /// switched back off by removing records - only by removing the admin,
+    /// which is as deliberate as adding one.
     fn active_authorities<'a>(&self, state: &'a AccountState) -> Vec<&'a Validator> {
+        let active = state.get_active_validators();
+        if !state.poa_is_permissioned(self.config.domain) {
+            return self.narrow_to_operator_list(active);
+        }
         let admitted = state.poa_admitted_addresses(self.config.domain);
-        let chain_admitted: Vec<&'a Validator> = state
-            .get_active_validators()
+        let chain_admitted: Vec<&'a Validator> = active
             .into_iter()
             .filter(|validator| admitted.contains(&validator.address))
             .collect();
+        self.narrow_to_operator_list(chain_admitted)
+    }
+
+    /// Apply the engine's own authority list, which narrows and never widens.
+    ///
+    /// An operator-local list cannot admit an account the chain has not
+    /// admitted; it can only decline to use one the chain did admit. Kept as
+    /// its own step so that ordering is not something a future edit can get
+    /// subtly wrong: whatever the chain decided is computed first, and this
+    /// only ever removes from it.
+    fn narrow_to_operator_list<'a>(&self, validators: Vec<&'a Validator>) -> Vec<&'a Validator> {
         if self.authorities.is_empty() {
-            return chain_admitted;
+            return validators;
         }
-        chain_admitted
+        validators
             .into_iter()
             .filter(|validator| self.authorities.contains(&validator.address))
             .collect()
@@ -518,21 +549,40 @@ mod tests {
     /// A state where every listed address is an active validator *and* holds a
     /// live PoA admission record in domain 0.
     fn admitted_state(addrs: &[Address]) -> AccountState {
-        let admin = Address::from([9u8; 32]);
         let mut state = AccountState::new();
-        state.poa_onboarding.registry_mut().add_admin(0, admin);
         for a in addrs {
             state.validators.insert(*a, Validator::new(*a, 1_000));
             if let Some(v) = state.validators.get_mut(a) {
                 v.active = true;
             }
+        }
+        admit_all(&mut state, 0, addrs, 10_000);
+        state
+    }
+
+    /// Make `domain` permissioned and admit every listed address.
+    ///
+    /// Admission is a two-step lifecycle - the candidate applies with a KYC
+    /// commitment, then an admin approves - and this helper walks both steps,
+    /// because a test that skipped the application would exercise a path
+    /// production cannot reach.
+    fn admit_all(state: &mut AccountState, domain: u32, addrs: &[Address], horizon: u64) {
+        let admin = Address::from([9u8; 32]);
+        state.poa_onboarding.registry_mut().add_admin(domain, admin);
+        for (i, a) in addrs.iter().enumerate() {
+            let mut kyc = [0u8; 32];
+            // Any non-zero commitment; an all-zero one is refused.
+            kyc[0] = u8::try_from(i % 250).unwrap_or(0).saturating_add(1);
             state
                 .poa_onboarding
-                .approve(0, admin, *a, 1, 10_000)
+                .submit_application(domain, *a, kyc, 1)
+                .expect("applicant submits a KYC commitment");
+            state
+                .poa_onboarding
+                .approve(domain, admin, *a, 1, horizon)
                 .expect("admin approves into its own domain");
         }
         state.refresh_poa_admissions(1);
-        state
     }
 
     #[test]
@@ -544,15 +594,75 @@ mod tests {
         if let Some(val) = state.validators.get_mut(&addr) {
             val.active = true;
         }
+        // The domain is permissioned - it has an admin - but nobody has been
+        // admitted yet. Before this change an empty admitted set meant "no
+        // filter" and this validator produced blocks in a permissioned domain
+        // nobody had admitted it to.
+        state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(0, Address::from([9u8; 32]));
         state.refresh_poa_admissions(1);
 
-        // An active validator with no admission record. Before this change an
-        // empty admitted set meant "no filter" and this validator produced
-        // blocks in a permissioned domain nobody had admitted it to.
         let engine = PoAEngine::new(PoAConfig::default(), None);
         assert!(
             engine.active_authorities(&state).is_empty(),
             "a validator with no admission record was authorised: fail-open"
+        );
+    }
+
+    #[test]
+    fn a_chain_that_never_opted_into_admission_control_still_produces_blocks() {
+        // The counterpart to the test above, and the distinction the first
+        // version of this gate got wrong. "Gated and nobody let in" and "not
+        // gated at all" are different situations; collapsing them into the
+        // same empty registry stopped every plain PoA chain at genesis.
+        let v = KeyPair::generate().unwrap();
+        let addr = Address::from(v.public_key_bytes());
+        let mut state = AccountState::new();
+        state.validators.insert(addr, Validator::new(addr, 1_000));
+        if let Some(val) = state.validators.get_mut(&addr) {
+            val.active = true;
+        }
+        state.refresh_poa_admissions(1);
+
+        assert!(
+            !state.poa_is_permissioned(0),
+            "a domain with no admin must not count as permissioned"
+        );
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        assert_eq!(
+            engine.active_authorities(&state).len(),
+            1,
+            "a chain that never opted into admission control was halted by it"
+        );
+    }
+
+    #[test]
+    fn appointing_an_admin_turns_the_gate_on_for_everyone_already_there() {
+        // Admission control must not grandfather anyone in. A validator that
+        // was producing blocks before the domain became permissioned has to
+        // be admitted like anyone else, or the gate would be weakest exactly
+        // at the moment it is switched on.
+        let v = KeyPair::generate().unwrap();
+        let addr = Address::from(v.public_key_bytes());
+        let mut state = AccountState::new();
+        state.validators.insert(addr, Validator::new(addr, 1_000));
+        if let Some(val) = state.validators.get_mut(&addr) {
+            val.active = true;
+        }
+        state.refresh_poa_admissions(1);
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        assert_eq!(engine.active_authorities(&state).len(), 1);
+
+        state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(0, Address::from([9u8; 32]));
+        state.refresh_poa_admissions(2);
+        assert!(
+            engine.active_authorities(&state).is_empty(),
+            "an incumbent validator was grandfathered past admission control"
         );
     }
 
@@ -566,11 +676,8 @@ mod tests {
         if let Some(val) = state.validators.get_mut(&addr) {
             val.active = true;
         }
-        state.poa_onboarding.registry_mut().add_admin(0, admin);
-        state
-            .poa_onboarding
-            .approve(0, admin, addr, 1, 100)
-            .expect("approve");
+        let _ = admin;
+        admit_all(&mut state, 0, &[addr], 100);
 
         let engine = PoAEngine::new(PoAConfig::default(), None);
         state.refresh_poa_admissions(50);
@@ -598,14 +705,25 @@ mod tests {
         if let Some(val) = state.validators.get_mut(&addr) {
             val.active = true;
         }
-        // Admin of domain 1 only.
+        // Admin of domain 1 only. Domain 2 is made permissioned by a
+        // different admin, so the question is genuinely about isolation and
+        // not about domain 2 simply being ungated.
         state
             .poa_onboarding
             .registry_mut()
             .add_admin(1, admin_of_one);
+        state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(2, Address::from([2u8; 32]));
         let cross = state
             .poa_onboarding
-            .approve(2, admin_of_one, addr, 1, 10_000);
+            .submit_application(2, addr, [7u8; 32], 1)
+            .and_then(|()| {
+                state
+                    .poa_onboarding
+                    .approve(2, admin_of_one, addr, 1, 10_000)
+            });
         assert!(
             cross.is_err(),
             "an admin of one domain admitted into another: domains are not isolated"

@@ -365,6 +365,16 @@ impl PoAOnboarding {
 
     // ---- enforcement -----------------------------------------------------
 
+    /// Is `domain` a permissioned domain at all?
+    ///
+    /// True once it has an admin. See
+    /// [`PoaMembershipRegistry::has_any_admin`] for why the admin list is the
+    /// declaration rather than a separate flag.
+    #[must_use]
+    pub fn is_permissioned(&self, domain: DomainId) -> bool {
+        self.registry.has_any_admin(domain)
+    }
+
     /// Every domain this registry holds a record for.
     ///
     /// A domain with no records is not listed, which is the point: the caller

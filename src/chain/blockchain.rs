@@ -2478,9 +2478,11 @@ impl Blockchain {
                     .get_transfer(&transfer_id)
                     .ok_or_else(|| "Unknown bridge transfer".to_string())?
                     .source_domain;
-                if lock_source_domain != message.target_domain {
-                    return Err("Relayed burn target domain does not match lock source".into());
-                }
+                crate::cross_domain::bridge::check_burn_matches_lock_domain(
+                    lock_source_domain,
+                    message.target_domain,
+                )
+                .map_err(|e| e.to_string())?;
                 self.state
                     .bridge_state
                     .unlock(transfer_id, message.source_domain)
