@@ -121,6 +121,7 @@ mod gates {
     pub mod storage_provider_gate;
     pub mod suppressions_are_justified;
     pub mod tee_trust_boundary_is_structural;
+    pub mod test_modules_can_see_what_they_test;
     pub mod the_image_builds_what_the_manifest_declares;
     pub mod threshold_rates;
     pub mod timing_safe;
@@ -952,6 +953,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::tee_trust_boundary_is_structural::self_test,
+    },
+    Gate {
+        name: "test-module-imports",
+        replaces: None,
+        run: gates::test_modules_can_see_what_they_test::run,
+        run_args: None,
+        self_test: gates::test_modules_can_see_what_they_test::self_test,
+        run_log: None,
     },
     Gate {
         name: "gov-slash-evidence-validator-only",

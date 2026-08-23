@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 65 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 66 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -73,6 +73,7 @@
 - [63. Komsulukla verilen garanti garanti degildir](#63-komsulukla-verilen-garanti-garanti-degildir)
 - [64. Izinli alanda kabul yoklugu izin degildir](#64-izinli-alanda-kabul-yoklugu-izin-degildir)
 - [65. Bir yolda duran denetim kural degildir](#65-bir-yolda-duran-denetim-kural-degildir)
+- [66. Turetilmis icerik: bagimli bir tarif indirim almaz](#66-turetilmis-icerik-bagimli-bir-tarif-indirim-almaz)
 
 ## 1. Genel sistem mimarisi
 
@@ -2486,3 +2487,64 @@ bir kural, bir ev.
 Silinmedi. Vaat ettigi sey - kopru adimlarini tek yerde siralamak - dogruydu;
 yalnizca **yanlis katmanda** duruyordu. Ortak denetimler `cross_domain/bridge`
 altina tasindikca pipeline'in soyledigi sey kodda karsiligini buluyor.
+
+## 66. Turetilmis icerik: bagimli bir tarif indirim almaz
+
+Kaynak rejimi (§59) uc sey soyleyebiliyordu: baytlar saklanir (`Stored`), bir
+tariften dogar (`Generated`), ya da onek saklanip gerisi uretilir (`Hybrid`).
+Dorduncu bir sinif vardi ve ifade edilemiyordu: **zincirin zaten tuttugu bir
+nesnenin bolgesi olan icerik.**
+
+`storage/derived` bu sinifin matematigini tasiyordu - hangi kirpmanin bayt
+bazinda yeniden hesaplanabildigi, hangisinin hesaplanamadigi, olculerek. Ama
+kaynak rejimine bagli degildi, yani sistemin geri kalani boyle bir seyin
+varligindan habersizdi.
+
+### Neden `Generated` demek yalan olurdu
+
+En yakin varyant `Generated` gorunuyor. Degil, ve fark tam olarak bu bolumun
+konusu:
+
+- **`Generated`'in tarifi kendi kendine yeter.** Tohum zincirdedir, baytlar
+  ondan dogar. Kopya kaybolursa yeniden uretilir. Bu yuzden **tek kopya**
+  yeter (`required_replica_count` -> 1).
+- **Turetmenin tarifi bir master'i isaret eder.** Master giderse turetme
+  uretilemez - tarif elinizde olsa bile.
+
+Yani bir kirpmaya `Generated` demek, **ayakta duramayan bir tarife dayaniklilik
+indirimi vermek** olurdu. Uc kopya yerine bir kopya tutulur, master bir gun
+serbest birakilir, ve icerik geri getirilemez. Indirim, kaybi telafi eden bir
+uretecin varligindan gelir; burada oyle bir uretec yok.
+
+Ayrim sussel degil: *"bunu her zaman yeniden hesaplayabiliriz"* ile *"baska
+bir sey hayatta kaldigi surece yeniden hesaplayabiliriz"* arasindaki farktir.
+
+### Uc kural
+
+1. **Turetme master'ina taahhut eder.** Kaynak taahhudu `3u8` etiketi ve
+   `derivation_commitment_tag` (master kimligi + butun sinirlar) tasir. Ayni
+   kirpmayi baska bir master'a cevirmek **baska bir nesne** uretir; sessizce
+   tasinamaz.
+2. **Replika indirimi yok.** Tam hedef. Master kendi tam hedefini tasir ve
+   `MasterRegistry` turetmeler onu adlandirdigi surece serbest birakilmasini
+   engeller.
+3. **Kendine ait bayt tutmaz.** Bolgesi oldugu baytlar master'in manifest'i
+   altinda tutulur ve orada odenir; ikinci kez saymak bir nesneyi iki nesne
+   olarak faturalamak olurdu.
+
+### Zincir uzerinde kayit hala reddediliyor
+
+`register_manifest_with_source` turetilmis bir manifest'i kabul **etmez** -
+`Hybrid`'i reddettigi gerekceyle: iddiayi dogrulamak master'in baytlarini
+gerektirir ve onlar zincirde degildir.
+
+Bu bir eksiklik degil, ayni ilkenin surdurulmesi: **dogrulanamayan bir iddia,
+iyi bicimlendirilmis oldugu icin kabul edilmez.** Turetme kendi kayit
+yolundan gecer; orada master'in tutuldugu dogrulanir ve referans alinir.
+
+### Kapi yine bayat isareti buldu
+
+Modul baglandiginda `WIRING: unwired` isareti gecersizlesti ve
+`capability-wiring` bunu ayni turda yakaladi. Ikinci kez: bir sertlestirme
+isini bitirmek, kodu degistirmekle degil, **kod hakkinda soylenen seyi de
+duzeltmekle** biter.

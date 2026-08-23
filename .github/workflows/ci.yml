@@ -1231,6 +1231,18 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- capability-wiring --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- capability-wiring
+      # A test module that imports specific names from its parent rather than
+      # globbing is good practice and also a trap: tests appended to the file
+      # land in the last module, and a narrow import does not bring the new
+      # function along. `cargo check --lib` does not compile test bodies, so
+      # the library builds clean locally and the failure surfaces only here,
+      # as `cannot find function ... in this scope`. That happened once and
+      # cost a full CI round trip; this gate answers the same question in
+      # three seconds.
+      - name: test modulleri cagirdigini goruyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- test-module-imports --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- test-module-imports
       # B.U.D. storage cost `epochs * fee_per_epoch`, with no byte count in it,
       # so a 1 KiB and a 16 MiB shard cost the same for the same duration. The
       # client picks the size, so this was ordinary use rather than an attack.
