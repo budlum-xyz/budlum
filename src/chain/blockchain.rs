@@ -3407,6 +3407,14 @@ impl Blockchain {
         if block.index > 0 {
             Self::adjust_base_fee(state, block.transactions.len());
         }
+
+        // PoA admission is recomputed here, once, at a point every node
+        // reaches with the same state and the same block index. Doing it
+        // lazily on the consensus path instead would make the audit trail
+        // depend on who asked and when, which is the one thing a compliance
+        // record cannot be. An elapsed KYC horizon is therefore observed the
+        // same number of times on every node.
+        state.refresh_poa_admissions(block.index);
     }
 
     /// Epoch-close liveness observation, as a pure state transition.

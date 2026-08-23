@@ -31,6 +31,14 @@ pub struct PoAConfig {
     pub epoch_length: u64,
     pub quorum_ratio: f64,
     pub validators_file: Option<String>,
+    /// Which permissioned domain this engine gates on.
+    ///
+    /// Configured rather than hardcoded because developers create their own
+    /// permissioned domains, each with its own admin and its own admitted
+    /// set. An engine pointed at the wrong domain would read someone else's
+    /// admission decisions, so the domain is stated where the engine is
+    /// configured and nowhere else.
+    pub domain: crate::domain::types::DomainId,
 }
 impl Default for PoAConfig {
     fn default() -> Self {
@@ -39,6 +47,7 @@ impl Default for PoAConfig {
             epoch_length: 30000,
             quorum_ratio: 0.67,
             validators_file: None,
+            domain: 0,
         }
     }
 }
@@ -97,12 +106,36 @@ impl PoAEngine {
         self
     }
 
+    /// Validators allowed to lead or validate in this PoA domain right now.
+    ///
+    /// Admission is decided by [`crate::registry::poa_onboarding`], recomputed
+    /// at each block close and held in [`AccountState`] so every node agrees.
+    /// Two gates, both required: a validator must be active in the
+    /// permissionless set **and** hold a live admission record. A live record
+    /// means an unexpired KYC horizon, so stale approval stops authorising
+    /// blocks on its own, without anyone acting.
+    ///
+    /// The engine's own `authorities` vector, when non-empty, narrows further;
+    /// it never widens. An operator-local list cannot admit an account the
+    /// chain has not admitted.
+    ///
+    /// **Fail-closed.** An empty admitted set used to mean "no filter", so a
+    /// chain whose authority list was never populated ran wide open and looked
+    /// healthy doing it. In a permissioned domain the absence of an admission
+    /// decision is not permission: it is the absence of permission, and the
+    /// domain produces no blocks until someone is admitted. A silent halt is
+    /// recoverable; a silent opening is not.
     fn active_authorities<'a>(&self, state: &'a AccountState) -> Vec<&'a Validator> {
-        let active_refs = state.get_active_validators();
+        let admitted = state.poa_admitted_addresses(self.config.domain);
+        let chain_admitted: Vec<&'a Validator> = state
+            .get_active_validators()
+            .into_iter()
+            .filter(|validator| admitted.contains(&validator.address))
+            .collect();
         if self.authorities.is_empty() {
-            return active_refs;
+            return chain_admitted;
         }
-        active_refs
+        chain_admitted
             .into_iter()
             .filter(|validator| self.authorities.contains(&validator.address))
             .collect()
@@ -463,21 +496,133 @@ mod tests {
         let authority_addr = Address::from(authority.public_key_bytes());
         let outsider_addr = Address::from(outsider.public_key_bytes());
 
-        let mut state = AccountState::new();
-        state
-            .validators
-            .insert(authority_addr, Validator::new(authority_addr, 1_000));
-        state
-            .validators
-            .insert(outsider_addr, Validator::new(outsider_addr, 1_000));
-        state.validators.get_mut(&authority_addr).unwrap().active = true;
-        state.validators.get_mut(&outsider_addr).unwrap().active = true;
+        let mut state = admitted_state(&[authority_addr, outsider_addr]);
 
         let engine = PoAEngine::with_config(PoAConfig::default(), vec![authority_addr], None);
         assert_eq!(engine.active_validator_count(&state), 1);
         let active_refs = engine.active_authorities(&state);
         assert_eq!(active_refs.len(), 1);
         assert_eq!(active_refs[0].address, authority_addr);
+
+        // The operator list narrows, it never widens: dropping the chain's
+        // admission of `authority_addr` must remove it even though the
+        // operator still names it.
+        state.poa_onboarding = crate::registry::poa_onboarding::PoAOnboarding::new();
+        state.refresh_poa_admissions(1);
+        assert!(
+            engine.active_authorities(&state).is_empty(),
+            "an operator-local list admitted an account the chain did not"
+        );
+    }
+
+    /// A state where every listed address is an active validator *and* holds a
+    /// live PoA admission record in domain 0.
+    fn admitted_state(addrs: &[Address]) -> AccountState {
+        let admin = Address::from([9u8; 32]);
+        let mut state = AccountState::new();
+        state.poa_onboarding.registry_mut().add_admin(0, admin);
+        for a in addrs {
+            state.validators.insert(*a, Validator::new(*a, 1_000));
+            if let Some(v) = state.validators.get_mut(a) {
+                v.active = true;
+            }
+            state
+                .poa_onboarding
+                .approve(0, admin, *a, 1, 10_000)
+                .expect("admin approves into its own domain");
+        }
+        state.refresh_poa_admissions(1);
+        state
+    }
+
+    #[test]
+    fn no_admission_means_no_blocks_not_an_open_door() {
+        let v = KeyPair::generate().unwrap();
+        let addr = Address::from(v.public_key_bytes());
+        let mut state = AccountState::new();
+        state.validators.insert(addr, Validator::new(addr, 1_000));
+        if let Some(val) = state.validators.get_mut(&addr) {
+            val.active = true;
+        }
+        state.refresh_poa_admissions(1);
+
+        // An active validator with no admission record. Before this change an
+        // empty admitted set meant "no filter" and this validator produced
+        // blocks in a permissioned domain nobody had admitted it to.
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        assert!(
+            engine.active_authorities(&state).is_empty(),
+            "a validator with no admission record was authorised: fail-open"
+        );
+    }
+
+    #[test]
+    fn an_expired_kyc_stops_authorising_without_anyone_acting() {
+        let v = KeyPair::generate().unwrap();
+        let addr = Address::from(v.public_key_bytes());
+        let admin = Address::from([9u8; 32]);
+        let mut state = AccountState::new();
+        state.validators.insert(addr, Validator::new(addr, 1_000));
+        if let Some(val) = state.validators.get_mut(&addr) {
+            val.active = true;
+        }
+        state.poa_onboarding.registry_mut().add_admin(0, admin);
+        state
+            .poa_onboarding
+            .approve(0, admin, addr, 1, 100)
+            .expect("approve");
+
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        state.refresh_poa_admissions(50);
+        assert_eq!(
+            engine.active_authorities(&state).len(),
+            1,
+            "a live approval must authorise"
+        );
+
+        // Nobody revokes anything; the horizon simply passes.
+        state.refresh_poa_admissions(500);
+        assert!(
+            engine.active_authorities(&state).is_empty(),
+            "a stale KYC dossier kept producing blocks"
+        );
+    }
+
+    #[test]
+    fn one_domains_admin_cannot_admit_into_another() {
+        let v = KeyPair::generate().unwrap();
+        let addr = Address::from(v.public_key_bytes());
+        let admin_of_one = Address::from([1u8; 32]);
+        let mut state = AccountState::new();
+        state.validators.insert(addr, Validator::new(addr, 1_000));
+        if let Some(val) = state.validators.get_mut(&addr) {
+            val.active = true;
+        }
+        // Admin of domain 1 only.
+        state
+            .poa_onboarding
+            .registry_mut()
+            .add_admin(1, admin_of_one);
+        let cross = state
+            .poa_onboarding
+            .approve(2, admin_of_one, addr, 1, 10_000);
+        assert!(
+            cross.is_err(),
+            "an admin of one domain admitted into another: domains are not isolated"
+        );
+
+        state.refresh_poa_admissions(1);
+        let engine_two = PoAEngine::new(
+            PoAConfig {
+                domain: 2,
+                ..PoAConfig::default()
+            },
+            None,
+        );
+        assert!(
+            engine_two.active_authorities(&state).is_empty(),
+            "domain 2 authorised an account only domain 1's admin touched"
+        );
     }
 
     #[test]
