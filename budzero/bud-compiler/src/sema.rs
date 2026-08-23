@@ -632,6 +632,33 @@ impl SemanticAnalyzer {
                         // value that is not the sum of anything. Equality and
                         // assignment stay allowed, which is what these types
                         // are for.
+                        // `/` alan bolmesidir, tam sayi bolmesi degil.
+                        //
+                        // VM `Opcode::Div`'i Goldilocks carpimsal tersi olarak
+                        // yurutuyor (`bud-vm`: `rs1 * rs2^-1 mod p`) ve AIR
+                        // kisiti da bunu sabitliyor: `rd * rs2 = rs1`. Bu ZK
+                        // devresinde dogru olan secim - tam sayi bolmesi
+                        // bolum ve kalan icin ayri range-check gerektirir.
+                        //
+                        // Ama `u64` yazan gelistirici tam sayi bolmesi bekler.
+                        // Olculdu: `7 / 2` alan icinde 9223372034707292164
+                        // veriyor, 3 degil. Bu tur bir sonuc uzerine kosul
+                        // kuran her sozlesme sessizce yanlis dallanir.
+                        //
+                        // Bu yuzden `/` yalnizca `field` uzerinde serbest:
+                        // orada semantik zaten alan aritmetigidir ve yazan
+                        // kisi bunu bilerek secmistir. `u64` icin reddediliyor.
+                        // Bolme sonucunun sifira bolmede 0 olmasi da ayni
+                        // sebeple yalnizca `field` baglaminda anlamlidir
+                        // (AIR bunu acikca kisitliyor).
+                        if matches!(op, BinOp::Div) && matches!(ty, Type::U64) {
+                            errors.push(CompileError::SemanticError(String::from(
+                                "Operator Div cannot be applied to u64 (`/` is field \
+                                 division, not integer division: it computes \
+                                 rs1 * rs2^-1 mod p, so 7 / 2 is not 3; declare the \
+                                 operands as `field` if that is what you mean)",
+                            )));
+                        }
                         if ty.is_opaque_bytes32() {
                             errors.push(CompileError::SemanticError(format!(
                                 "Operator {:?} cannot be applied to {} ({} is an opaque \
