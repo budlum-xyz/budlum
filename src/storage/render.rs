@@ -421,6 +421,9 @@ fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<
 /// Tasima karesi basliginin uzunlugu.
 const QR_FRAME_HEADER_LEN: usize = 16;
 
+/// Tarif-adresli akis kimligi icin alan etiketi.
+const QR_STREAM_ID_TAG: &[u8] = b"BDLM_QR_STREAM_ID_V1";
+
 /// Tasima karesi ureten yol.
 ///
 /// **Kare kendini tanimlar.** Optik/yayin kanalinda geri kanal yoktur: alici
@@ -492,10 +495,92 @@ fn render_qr_stream_frame(
     // manifest kimligi bu fonksiyona ulasmiyor. Iki farkli tarif iki farkli
     // ozet uretir, ki aranan ayirt etme budur.
     let session = generated_spec_digest(spec);
-    let digest = hash_fields_bytes(&[b"BDLM_QR_FRAME_V2", &session, slice]);
+    // Ozet **konuma** da bagli. Yalnizca dilim baytlari hashlenseydi, ayni
+    // baytlari tasiyan iki kare akisin farkli yerlerinde birebir ayni ozeti
+    // tasirdi - olculdu, tasiyordu: tekduze bir yukun dort karesi ayni dort
+    // bayti veriyordu. O durumda bir kare, ayni akisin baska bir konumundaki
+    // karenin yerine gecebilir. Alici dogru bir ozet gorur, kareyi kabul
+    // eder ve dilimi yanlis konuma yazar; butunluk korunur, sira korunmaz.
+    // Optik kanalda kareler zaten sirasiz gelir ve alici sirayi basliktaki
+    // `seq` alanindan okur - o alan ozetin disinda kaldigi surece
+    // degistirilebilir bir ipucudur, dogrulanmis bir iddia degil.
+    let digest = hash_fields_bytes(&[b"BDLM_QR_FRAME_V2", &session, &seq.to_be_bytes(), slice]);
     out.extend_from_slice(digest.get(..4).ok_or(RenderError::MissingParam("digest"))?);
     out.extend_from_slice(slice);
     Ok(out)
+}
+
+/// Tarif-adresli icerik kimligi: bir akisi baytlariyla degil, karelerinin
+/// ozet dizisiyle adresler.
+///
+/// # Neden
+///
+/// `ContentSource::Generated` ile ag icerigin baytlarini degil **tarifini**
+/// saklar. Ama kimlik katmani bunu soylemiyordu: `ContentId::of` uretilmis
+/// baytlarin ozetidir, yani kimligi ogrenmek icin once uretmek gerekir.
+/// "Sakladigimiz sey tariftir" iddiasi adres katmanina inmemisti.
+///
+/// Burada kimlik dogrudan tariften turer. Her kare zaten kendi ozetini
+/// tasiyor (`render_qr_stream_frame`, `BDLM_QR_FRAME_V2`) ve o ozet tarife
+/// bagli; kareler sirayla katlandiginda ortaya cikan deger, o tarifin o
+/// bicimde urettigi akisin kimligidir. Bayt tutmaya gerek yok: elde tarif
+/// varsa kimlik yeniden hesaplanabilir, elde kimlik varsa uretilen akisin
+/// dogru akis oldugu dogrulanabilir.
+///
+/// # Sira semaya girer
+///
+/// Kareler `seq` ile numaralanir ve ozet dizisi **sirayla** katlanir. Sira
+/// serbest birakilsaydi ayni karelerin baska duzeni ayni kimligi verirdi -
+/// oysa karusel duzeni akisin bir parcasi, cunku alici kareleri o sirayla
+/// birlestiriyor. Sirasi degisen akis baska bir akistir.
+///
+/// # Ne degildir
+///
+/// Bu bir depolama kaniti degildir. Kimligin dogru olmasi, karsi tarafin
+/// baytlari tuttugunu degil, tarifi calistirdiginda ayni akisi uretecegini
+/// soyler - zaten istenen de budur. Organik icerik bu semaya **giremez**:
+/// `Stored` baytlarin bir tarifi yoktur ve olmayan bir tarifi adreslemek
+/// sinif yalani olurdu. Ayrimi `ContentSource` zaten tasiyor.
+///
+/// # Hatalar
+///
+/// `frame_count` sifirsa hata doner: sifir kareli bir akis yoktur ve bos bir
+/// katlama, birbirinden farkli butun bos-olmayan akislarla ayni sabit degeri
+/// verirdi.
+pub fn qr_stream_content_id(
+    spec: &GeneratedSpec,
+    payload: &[u8],
+    payload_len: u16,
+    frame_count: u32,
+) -> Result<[u8; 32], RenderError> {
+    if frame_count == 0 {
+        return Err(RenderError::MissingParam("qr stream frame_count"));
+    }
+    // Sema bilerek dar. Kare ozeti zaten tarifi, konumu ve dilim baytlarini
+    // bagliyor; katlamada bunlari **tekrar** baglamak yeni bir sey soylemez.
+    //
+    // Ilk yazilan surum uc alani daha tasiyordu - tarif ozeti, kare sayisi,
+    // dilim boyu - ve ucu de gereksiz cikti. Mutasyonla olculdu: her biri
+    // semadan tek tek cikarildiginda hicbir test kirilmadi, cunku ucunun de
+    // ayirt ettigi sey kare ozetlerinin icinde zaten vardi. Farkli dilim
+    // boyu farkli kareler uretir; farkli kare sayisi farkli uzunlukta bir
+    // katlama yapar; farkli tarif farkli kare ozeti verir.
+    //
+    // Bir semayi savunan sey, kaldirildiginda bir seyin bozulmasidir.
+    // Bozmuyorsa orada degildir, yalnizca orada duruyordur - ve duran alan
+    // okuyana "bu da baglanmis" der, yani yanlis bir guvence uretir.
+    let mut acc = hash_fields_bytes(&[QR_STREAM_ID_TAG]);
+    for seq in 0..frame_count {
+        let frame = render_qr_stream_frame(spec, payload, seq, payload_len)?;
+        // Karenin kendi ozeti basligin 12..16 araligindadir. Kareyi bastan
+        // hashlemek yerine o deger kullanilir: kimlik, alicinin kare basina
+        // zaten dogruladigi seyin ustune kurulur, ayri bir ozet semasi degil.
+        let frame_digest = frame
+            .get(12..QR_FRAME_HEADER_LEN)
+            .ok_or(RenderError::MissingParam("qr frame digest"))?;
+        acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &acc, frame_digest]);
+    }
+    Ok(acc)
 }
 
 /// The id a rendered object commits to: the format and the bytes together.
@@ -564,6 +649,84 @@ mod tests {
     /// gorur, dogru ayristirir ve iki nesnenin parcalarini tek nesne diye
     /// birlestirir. Butunluk korunur, dogruluk korunmaz.
     ///
+    /// Bir kare, akistaki konumuna baglidir.
+    ///
+    /// Kare ozeti once yalnizca tarif ozetini ve dilim baytlarini
+    /// baglıyordu. Tekduze bir yukte - ki bos alan, dolgu ve duz renk
+    /// bolgeleri bunu siradan yapar - ardisik dilimler ayni baytlari tasir,
+    /// yani dort kare **birebir ayni** ozeti tasiyordu. Olculdu: 4 karenin
+    /// dordu de `[72, 41, 61, 244]`.
+    ///
+    /// O durumda bir kare, ayni akisin baska bir konumundaki karenin yerine
+    /// gecebilir. Alici dogru bir ozet gorur, kareyi kabul eder ve dilimi
+    /// yanlis konuma yazar. Sirayi basliktaki `seq` alanindan okuyor, ve o
+    /// alan ozetin disindayken degistirilebilir bir ipucudur - dogrulanmis
+    /// bir iddia degil. Butunluk korunur, sira korunmaz.
+    #[test]
+    fn a_frame_is_bound_to_its_position_in_the_stream() {
+        let spec = avatar_spec();
+        // Tekduze yuk: her dilim ayni baytlari tasir, yani konum baglamasi
+        // yoksa kareler ayirt edilemez. Carpismanin olcusu tam olarak bu.
+        let payload = [0xABu8; 256];
+
+        let first = super::render_qr_stream_frame(&spec, &payload, 0, 64).expect("ilk kare");
+        let second = super::render_qr_stream_frame(&spec, &payload, 1, 64).expect("ikinci kare");
+
+        let d_first = first.get(12..16).expect("ilk ozet");
+        let d_second = second.get(12..16).expect("ikinci ozet");
+        assert_ne!(
+            d_first, d_second,
+            "ayni baytlari tasiyan iki kare ayni ozeti tasiyor: biri digerinin \
+             yerine gecebilir"
+        );
+
+        // Dilim baytlari gercekten ayni - fark yalnizca konumdan geliyor.
+        assert_eq!(
+            first.get(16..),
+            second.get(16..),
+            "test kurulumu anlamsiz: dilimler zaten farkli"
+        );
+    }
+
+    /// Tarif-adresli kimlik: ayni tarif ayni kimligi, farkli tarif farkli
+    /// kimligi verir - ve kareler bayt tutulmadan adreslenir.
+    ///
+    /// Olculen sey `qr_stream_content_id`'nin bir **adres** olarak
+    /// kullanilabilir olmasi: belirlenimli (ayni girdi ayni cikti), ayirt
+    /// edici (tarif degisince kimlik degisir) ve **siraya duyarli**.
+    #[test]
+    fn a_stream_is_addressed_by_its_recipe_not_its_bytes() {
+        let one = avatar_spec();
+        let mut two = avatar_spec();
+        two.seed = [8u8; 32];
+
+        let payload = [0xABu8; 256];
+
+        // Belirlenimli: iki kez hesaplamak ayni degeri verir. Aksi halde
+        // kimlik bir adres degil, bir olcum artigi olurdu.
+        let id_a = super::qr_stream_content_id(&one, &payload, 64, 4).expect("ilk kimlik");
+        let id_again = super::qr_stream_content_id(&one, &payload, 64, 4).expect("yeniden");
+        assert_eq!(id_a, id_again, "ayni tarif ayni kimligi vermeli");
+
+        // Ayirt edici: tarif degisince kimlik degisir. Bu olmadan iki farkli
+        // akis ayni adresi paylasirdi.
+        let id_b = super::qr_stream_content_id(&two, &payload, 64, 4).expect("ikinci kimlik");
+        assert_ne!(id_a, id_b, "farkli tarif farkli kimlik vermeli");
+
+        // Siraya duyarli: kare sayisi semaya girer, yani akisin uzunlugu
+        // kimligin parcasi. Girmeseydi bir akisin on eki, akisin kendisiyle
+        // ayni adresi tasiyabilirdi.
+        let id_short = super::qr_stream_content_id(&one, &payload, 64, 3).expect("kisa akis");
+        assert_ne!(id_a, id_short, "kare sayisi kimlige girmeli");
+
+        // Sifir kare reddedilir: bos katlama butun akislar icin ayni sabiti
+        // verirdi.
+        assert!(
+            super::qr_stream_content_id(&one, &payload, 64, 0).is_err(),
+            "sifir kareli akis kimligi olmamali"
+        );
+    }
+
     /// Oturum baglamasi bunu keser: ayni baytlar, farkli tarif, farkli ozet.
     #[test]
     fn a_frame_is_bound_to_the_stream_it_belongs_to() {
