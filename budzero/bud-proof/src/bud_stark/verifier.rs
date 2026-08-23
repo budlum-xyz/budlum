@@ -73,15 +73,15 @@ where
 
     Some(
         quotient_chunks
-        .iter()
-        .enumerate()
-        .map(|(ch_i, ch)| {
-            // Lengths were checked equal above, so `get` always finds a
-            // coefficient; it is written this way so the compiler, not a
-            // comment, is what rules out the panic.
-            let zp = zps.get(ch_i).copied().unwrap_or(SC::Challenge::ZERO);
-            zp
-                * ch.iter()
+            .iter()
+            .enumerate()
+            .map(|(ch_i, ch)| {
+                // Lengths were checked equal above, so `get` always finds a
+                // coefficient; it is written this way so the compiler, not a
+                // comment, is what rules out the panic.
+                let zp = zps.get(ch_i).copied().unwrap_or(SC::Challenge::ZERO);
+                zp * ch
+                    .iter()
                     .enumerate()
                     .map(|(e_i, &c)| {
                         // `e_i` indexes the extension basis, whose length is
@@ -92,8 +92,8 @@ where
                         SC::Challenge::ith_basis_element(e_i).map_or(SC::Challenge::ZERO, |b| b * c)
                     })
                     .sum::<SC::Challenge>()
-        })
-        .sum::<SC::Challenge>(),
+            })
+            .sum::<SC::Challenge>(),
     )
 }
 
