@@ -1718,6 +1718,13 @@ mod tests {
     use bud_vm::Vm;
     use p3_field::PrimeField64;
 
+    /// Kanit uzerinde tek alani bozan mutasyon.
+    ///
+    /// `Vec<(&str, Box<dyn Fn(&mut Proof<MyConfig>)>)>` dogrudan yazildiginda
+    /// clippy `type_complexity` veriyor - hakli, cunku okuyan kisi once tipi
+    /// cozup sonra ne yaptigini anlamak zorunda kaliyor.
+    type ProofMutation = Box<dyn Fn(&mut crate::bud_stark::Proof<MyConfig>)>;
+
     fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
         Instruction {
             opcode,
@@ -3909,7 +3916,7 @@ mod tests {
 
         // Her biri tek alani bozar. Hepsi `valid_shape` uzerinden
         // `InvalidProofShape`e dusmeli.
-        let mutations: Vec<(&str, Box<dyn Fn(&mut crate::bud_stark::Proof<MyConfig>)>)> = vec![
+        let mutations: Vec<(&str, ProofMutation)> = vec![
             (
                 "trace_local kisaltildi",
                 Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
