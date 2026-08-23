@@ -15,7 +15,7 @@ pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 /// parasini geri alir, yani yeterli sermayeli biri icin bir domain acmanin
 /// net maliyeti yalnizca paranin o sure boyunca bagli kalmasidir.
 ///
-/// Kayitli her domain zincirin **blok basina** isine ekleniyor: [`Self::root`]
+/// Kayitli her domain zincirin **blok basina** isine ekleniyor: [`ConsensusDomainRegistry::root`]
 /// her domain icin bir yaprak hash'i hesaplar ve bu kok her blokta yeniden
 /// uretilir. Yani kayit sayisi dogrudan her dogrulayicinin her blokta yaptigi
 /// isi belirler, ve o is domain sahibi tarafindan degil **ag tarafindan**
@@ -340,7 +340,7 @@ mod tests {
     /// Kayit defteri tavanini asamaz.
     ///
     /// Kayitli her domain her blokta yeniden hesaplanan kayit kokune bir
-    /// yaprak ekler; o isi ag oder, domain sahibi degil. Operator bagi geri
+    /// yaprak ekler; o isi agin tamami karsiliyor, domain sahibi degil. Operator bagi geri
     /// alinabildigi icin bag bu buyumeyi sinirlamaz - tek sinir tavan.
     #[test]
     fn the_registry_does_not_grow_past_its_ceiling() {
