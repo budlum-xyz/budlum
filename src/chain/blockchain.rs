@@ -2113,9 +2113,22 @@ impl Blockchain {
         //
         // Kademe 2 on kosulu (2026-08-22, G0 onayi). Kanit gecerli olsa bile
         // cok eski bir yukseklige baglanmis olmasi ayri bir kusurdur: ayni
-        // kanit, ne kadar zaman gecerse gecsin "taze" gorunur. `0` bilincli
-        // tolerans: prove_bytecode henuz yuksekligi yazmiyor (0 = iddia yok);
-        // bu gecis, uretici yuksekligi yazana kadar belgelenmis bosluktur.
+        // kanit, ne kadar zaman gecerse gecsin "taze" gorunur.
+        //
+        // `0` **kalici** bir tolerans, gecici bir bosluk degil. Bu yorumun
+        // onceki hali "prove_bytecode henuz yuksekligi yazmiyor" diyordu ve
+        // bayatti: uretici `vm.context.block_height` degerini yaziyor
+        // (`execution/zkvm.rs`). Deger `0` oldugunda anlami "uretici eksik"
+        // degil, **program zincir yuksekligini hic okumadi**: `block_height`
+        // programin syscall 6 ile okudugu yuksekliktir ve okumayan bir
+        // program icin `0` dogru cevaptir.
+        //
+        // Bir program zincir yuksekligini hic okumadan bir gecisi
+        // kanitlayabilir; o kanitlarin hepsini reddetmek dogru olani
+        // reddetmek olurdu. Iddia tarafi ayrica korunuyor: `source_height`
+        // baglama hash'inin on-goruntusunde, yani kanit baska bir yukseklige
+        // tasinamiyor. Ayrimin tam gerekcesi `prover/mod.rs`,
+        // `ZkProofSubmission::message` dokumantasyonunda.
         let chain_height = self.chain.len() as u64;
         let claimed_height = submission.public_inputs.block_height;
         if claimed_height != 0
