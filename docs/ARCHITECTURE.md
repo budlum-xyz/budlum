@@ -67,6 +67,7 @@
 - [57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi](#57-regeneration-izinsiz-kodu-reddeden-kanonik-kodu-geri-ureten-kapi)
 - [58. Tarayici sinirinda izin: CORS bir reddetme degil, bir teslim kararidir](#58-tarayici-sinirinda-izin-cors-bir-reddetme-degil-bir-teslim-kararidir)
 - [59. Dayanikliligi kopya degil tarif saglar: kaynak rejimi ve replikasyon hedefi](#59-dayanikliligi-kopya-degil-tarif-saglar-kaynak-rejimi-ve-replikasyon-hedefi)
+- [60. Turev temsil: kare kendini tanimlar, hicbir ara urun saklanmaz](#60-turev-temsil-kare-kendini-tanimlar-hicbir-ara-urun-saklanmaz)
 
 ## 1. Genel sistem mimarisi
 
@@ -2131,3 +2132,54 @@ eski kimlikleri degistirmemeli.
 - **Uretecin belirlenimliligini kanitlamaz.** `GeneratorId` kapali bir
   kumedir ve her girdinin belirlenimliligi kendi kaynagindan savunulur; keyfi
   bytecode bu garantiyi tasimaz.
+
+## 60. Turev temsil: kare kendini tanimlar, hicbir ara urun saklanmaz
+
+Bir icerik, kanaldan gecebilmek icin bicim degistirir: kareler halinde
+paketlenir, kanalin tasiyabilecegi bir temsile donusur. Sorulmasi gereken
+soru sudur: **bu donusum depolamaya ne ekler?**
+
+Cevap: hicbir sey. `RenderFormat::QrStream` bir depolama bicimi degil, bir
+**tasima temsilidir**. Kare talep aninda uretilir, hicbir ara urun
+saklanmaz. Icerigin kalici hali yine manifest'in soyledigi seydir - tarifli
+icerikte tarif (§59), organik icerikte baytlar. Turev temsil hicbir rejimde
+depolama EKLEMEZ; testi bu ozelligi dogrudan olcer.
+
+### Neden kare kendini tanimlamak zorunda
+
+Optik ya da yayin kanalinda **geri kanal yoktur**. Alici kayip bir kareyi
+yeniden isteyemez, el sikisma yapamaz, akisa ortasindan katilir. Baglam
+tasiyan bir kare, o baglami kaciran alici icin coptur. Bu yuzden her kare tek
+basina ayristirilabilir olmak zorundadir.
+
+Baslik alanlari ve her birinin **hangi hatayi onledigi**:
+
+| alan | onledigi hata |
+|---|---|
+| iki sihirli bayt | "bu bizim mi" sorusu, herhangi bir surum adlandirilmadan once cevaplanmali. Tek bayta bakan alici, bu protokolu hic konusmamis bir kaynagi "surumun eski" diye suclar - kameradaki her kod bu yoldan gecer |
+| surum | ayristirmayi butunuyle kapiya baglar; bilinmeyen surum sessizce yanlis ayristirilmaz, **adlandirilir** |
+| bayraklar | `0x0F` anlasilmasi zorunlu, `0xF0` yok sayilabilir yari |
+| `seq` | kacinci kare; ayni `seq` her zaman ayni baytlar |
+| `total_len` | alici ne kadarini topladigini bilir |
+| yuk ozeti | kare bozuksa yuk kullanilmaz |
+
+**Bayrak bolmesi bastan gelir, cunku sonradan eklenemez.** "Her bilinmeyen
+bit olumcul" denmis bir aliciyi ancak yeni bir format kirilmasi duzeltir.
+Yok sayilabilir yariyi bugun ilan etmek, hicbir bit onu kullanmasa bile
+tasarimin kendisidir.
+
+**Sessiz basarisizlik yuksek sesli olandan kotudur.** Cozemedigi bir kareyle
+karsilasan alici hangi durumda oldugunu soylemeli; ama bize ait OLMAYAN bir
+kare icin **susmali** - kamera goruntusundeki her kodu anlatmak gurultudur ve
+yanlis tahmin ekranda kalir.
+
+### Ne yapmaz
+
+- **Kanal kodlayici degildir.** Silinti kodu, gercek modul matrisi ve video
+  konteyneri ayri, surumlenmis adimlardir. Burasi yalnizca kanalin tasiyacagi
+  kendini-tanimlayan kareyi kurar.
+- **Kanalin belirlenimliligini garanti etmez.** Kare uretimi belirlenimlidir;
+  kanalin kendisi degildir. Kayipli bir yeniden kodlama altinda round-trip,
+  hedef kanalda olculmeden varsayilamaz.
+- **Organik icerikte depolamayi sifirlamaz.** Temsil degistirmek bilgi
+  kuramini degistirmez (§59).
