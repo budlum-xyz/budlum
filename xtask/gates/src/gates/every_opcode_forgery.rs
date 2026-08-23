@@ -35,7 +35,15 @@ fn check_test_refusals(
             || body.contains("Err(VerifyError::");
         let rejects_at_vm =
             body.contains("assert_eq!(vm.registers") || body.contains("assert!(!receipt.success");
-        if !delegates && !asserts_failure && !rejects_at_vm {
+        // A test may also pin the *reason* for the refusal rather than just
+        // its existence: build the error string and compare it. That is a
+        // stronger assertion than `is_err()` - it fails both when the forgery
+        // is accepted and when it is rejected by the wrong layer - so it must
+        // count. The marker is a comparison against the sentinel this suite
+        // uses for "the verifier returned Ok", since a test that never
+        // constructs that string is not measuring a refusal.
+        let pins_refusal_reason = body.contains("\"kabul edildi\"");
+        if !delegates && !asserts_failure && !rejects_at_vm && !pins_refusal_reason {
             problems.push(format!(
                 "`{name}` builds a forgery and never asserts the proof is \
                  refused. A test that tampers and then expects success is \
