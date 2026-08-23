@@ -100,6 +100,7 @@ mod gates {
     pub mod paid_content;
     pub mod pinned_downloads;
     pub mod poa_compliance_gate;
+    pub mod proof_deps_are_exactly_pinned;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
@@ -125,6 +126,7 @@ mod gates {
     pub mod the_image_builds_what_the_manifest_declares;
     pub mod threshold_rates;
     pub mod timing_safe;
+    pub mod transcript_mirrors;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
@@ -164,6 +166,22 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "proof-deps-are-exactly-pinned",
+        replaces: None,
+        run: gates::proof_deps_are_exactly_pinned::run,
+        run_args: None,
+        self_test: gates::proof_deps_are_exactly_pinned::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "transcript-mirrors",
+        replaces: None,
+        run: gates::transcript_mirrors::run,
+        run_args: None,
+        self_test: gates::transcript_mirrors::self_test,
+        run_log: None,
+    },
     Gate {
         name: "capability-wiring",
         replaces: Some("check-capability-modules-are-wired.sh"),
