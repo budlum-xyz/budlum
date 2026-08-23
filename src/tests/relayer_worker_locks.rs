@@ -901,11 +901,20 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
          unsupported: got {err:?}"
     );
 
-    // And the reason has to be the leaf binding, which is the check standing
-    // between a stub and a signed claim.
+    // And the reason has to name what is missing.
+    //
+    // It used to name the leaf binding: the stub produced a placeholder proof
+    // whose leaf did not match `hash(tag || tx_hash || bridge_address)`. That
+    // refusal was real but incidental, and the same stub sailed through the
+    // Merkle check because a tree with no siblings verifies `leaf == root`
+    // (ARCHITECTURE.md section 69). The assembler now refuses outright, so
+    // the message names the actual gap: this adapter does not read Ethereum.
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("Merkle") || msg.contains("leaf") || msg.contains("forgery"),
-        "the refusal must name the binding that failed, got: {msg}"
+        msg.contains("does not read Ethereum")
+            || msg.contains("Merkle")
+            || msg.contains("leaf")
+            || msg.contains("forgery"),
+        "the refusal must name what is missing, got: {msg}"
     );
 }

@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 70 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 71 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -78,6 +78,7 @@
 - [68. Bir dogrulayici kanitladigi seyi dondurur](#68-bir-dogrulayici-kanitladigi-seyi-dondurur)
 - [69. Tek yaprakli agac: kendi kendini onaylayan kanit](#69-tek-yaprakli-agac-kendi-kendini-onaylayan-kanit)
 - [70. Gecit tarifi okur: saklanmayan baytlar](#70-gecit-tarifi-okur-saklanmayan-baytlar)
+- [71. Yerlesim tavsiyesi: kural degil olcum](#71-yerlesim-tavsiyesi-kural-degil-olcum)
 
 ## 1. Genel sistem mimarisi
 
@@ -2730,3 +2731,48 @@ ardindan baska bir kaynaktan gelen baytlari ayni isim altinda sunmak olurdu:
 tam da bolum 68'deki hata, bir degerin kanitlanmis gorunmesi.
 
 `Ok(Some(bytes))` yalnizca kimligi tutan baytlar icin doner.
+## 71. Yerlesim tavsiyesi: kural degil olcum
+
+`storage/assignment.rs` rendezvous hashing ile bir shard'i kimin tutmasi
+gerektigini deterministik olarak secer: ayni shard, ayni entropi ve ayni aday
+kumesi her dugumde ayni cevabi verir, stake'i sifir olan aday elenir.
+Aritmetigi test edilmisti ve hicbir uretim yolu cagirmiyordu.
+
+Onarim bileti bugun **acik pazarda** calisir: bir shard'in kopyasi
+dustugunde bilet acilir ve ilk kabul eden operator alir. Yerlesim hesabini
+kabulun onune kosul olarak koymak bu pazari kapatirdi. Bu ayri bir politika
+karari ve bir modulun kendi basina verecegi bir karar degil.
+
+Bu yuzden yerlesim **tavsiye olarak** baglandi. Bakim taramasi her epoch
+bekleyen biletlere `expected_holder` yazar; kabul kurallari degismedi,
+bileti kim alirsa alir.
+
+### Neden yazmaya deger
+
+Bugun bir bileti kimin aldigi ile yerlesimin kimi sectigi arasinda hicbir
+karsilastirma yok. Bu, iki farkli arizayi disaridan ayirt edilemez kiliyor:
+yerlesim hesabinin gercek kapasiteyi yansitmamasi, ve atanan operatorlerin
+yukumlulugunu atlamasi. Ikisi de bilinmeye deger.
+
+`placements_that_diverged` bu farki raporlar: `(bilet, tavsiye edilen,
+gercekte kabul eden)`. Bos bir sonuc, hesabin gerceklesen kabullerle
+ortustugu anlamina gelir.
+
+### Tavsiye bir kez yazilir
+
+Yalniz `Pending` biletlere ve yalniz `expected_holder` bossa. Kabul edilmis
+bir bilete sonradan tavsiye yazmak, tavsiyeyi sonucun ardindan uydurmak
+olurdu ve olcum diye bir sey kalmazdi. Entropi son blogun hash'inden
+turetilir: her dugum ayni cevabi bulur ve secim bir epoch oncesinden tahmin
+edilemez.
+
+Aday kumesi bossa hicbir sey yazilmaz. **Bos bir tavsiye, yanlis bir
+tavsiyeden iyidir.**
+
+### Hala baglanmayan: `displaced_shards`
+
+Bir ayrilmayi onarima cevirmek, nesne yazildiginda kaydedilmis yerlesimi
+gerektirir. `ContentManifest` bir tutucu listesi tasimiyor. Kimsenin
+saklamadigi bir yerlesimle karsilastirma yapmak, bugunun cevabini yine
+bugunun cevabiyla karsilastirmak olurdu; bolum 62'deki bayat agacin
+tersinden ayni hatasi.
