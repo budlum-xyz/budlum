@@ -205,6 +205,72 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
+    /// Bir zk programini alanin izin listesine ekler.
+    ///
+    /// # Neden bu yol var
+    ///
+    /// `zk_program_allowlist` `submit_zk_proof`'ta okunuyor ve bos liste
+    /// fail-closed anlamina geliyor - dogru varsayilan. Ama listeye **ekleme
+    /// yolu yoktu**: alan olusturulurken `Vec::new()` yaziliyor ve baska
+    /// hicbir kod dokunmuyordu. Yani kapinin arkasinda hicbir zaman bir sey
+    /// olamazdi; okunan ama hicbir zaman doldurulamayan bir liste, kodu
+    /// okuyana "programlar yonetiliyor" izlenimi verir ve yonetilmez.
+    ///
+    /// # Errors
+    ///
+    /// Alan yoksa, ya da program zaten listedeyse. Ikinci durum sessizce
+    /// gecilebilirdi, ama "zaten oradaydi" ile "simdi eklendi" ayni cevabi
+    /// verirse, bir yonetim islemi kendi etkisini dogrulayamaz.
+    pub fn allow_zk_program(&mut self, id: DomainId, program: Hash32) -> Result<(), String> {
+        let domain = self
+            .domains
+            .get_mut(&id)
+            .ok_or_else(|| format!("Unknown domain {id}"))?;
+        if domain.zk_program_allowlist.contains(&program) {
+            return Err(format!(
+                "Program {} is already on the allowlist of domain {id}",
+                hex::encode(program)
+            ));
+        }
+        domain.zk_program_allowlist.push(program);
+        Ok(())
+    }
+
+    /// Bir zk programini izin listesinden cikarir.
+    ///
+    /// # Neden geri cekme sart
+    ///
+    /// Kabul edilmis bir program, alanin durumunu ilerletme hakkina sahiptir.
+    /// O programda sonradan bir hata bulunursa - kanit sisteminin
+    /// kisitlamadigi bir alan, yanlis bir gecis kurali - tek savunma onu
+    /// listeden cikarmaktir. Ekleme yolu olup cikarma yolu olmayan bir izin
+    /// listesi, tek yonlu bir kapidir: iceri alinan bir daha disari
+    /// cikarilamaz, ve o programin yanlis oldugu anlasildiginda yapilabilecek
+    /// tek sey tum alani dondurmak olur.
+    ///
+    /// Cikarma **geriye donuk degildir**: cikarilmadan once uretilmis ve
+    /// kabul edilmis kanitlar gecerli kalir. Zincirin gecmisi yeniden
+    /// yazilmaz; degisen sey bundan sonra ne kabul edilecegi.
+    ///
+    /// # Errors
+    ///
+    /// Alan yoksa, ya da program listede degilse.
+    pub fn revoke_zk_program(&mut self, id: DomainId, program: &Hash32) -> Result<(), String> {
+        let domain = self
+            .domains
+            .get_mut(&id)
+            .ok_or_else(|| format!("Unknown domain {id}"))?;
+        let before = domain.zk_program_allowlist.len();
+        domain.zk_program_allowlist.retain(|p| p != program);
+        if domain.zk_program_allowlist.len() == before {
+            return Err(format!(
+                "Program {} is not on the allowlist of domain {id}, so there is nothing to revoke",
+                hex::encode(program)
+            ));
+        }
+        Ok(())
+    }
+
     pub fn active_domains(&self) -> impl Iterator<Item = &ConsensusDomain> {
         self.domains
             .values()
@@ -384,6 +450,54 @@ mod tests {
             dup.contains("already registered"),
             "yinelenme, tavandan once denetlenmeli: {dup}"
         );
+    }
+
+    /// Bir program listeye alinabilir ve geri cekilebilir.
+    ///
+    /// Kapidan once liste yalnizca okunuyordu: `submit_zk_proof` ona bakiyor
+    /// ama hicbir kod ona yazmiyordu. Okunan ama doldurulamayan bir izin
+    /// listesi, yonetiliyormus gibi gorunen ve yonetilmeyen bir kapidir.
+    #[test]
+    fn a_zk_program_can_be_admitted_and_withdrawn() {
+        let mut registry = ConsensusDomainRegistry::new();
+        registry
+            .register(default_domain(5, ConsensusKind::PoS, 1338, "pos", 0))
+            .expect("kayit");
+
+        let program = [9u8; 32];
+        let other = [8u8; 32];
+
+        // Baslangicta liste bos: fail-closed varsayilan korunuyor.
+        let domain = registry.get(5).expect("alan");
+        assert!(domain.zk_program_allowlist.is_empty());
+
+        registry.allow_zk_program(5, program).expect("ekleme");
+        assert_eq!(
+            registry.get(5).expect("alan").zk_program_allowlist,
+            vec![program]
+        );
+
+        // Ayni programi iki kez eklemek sessizce gecmez: bir yonetim islemi
+        // kendi etkisini dogrulayabilmeli.
+        assert!(registry.allow_zk_program(5, program).is_err());
+
+        // Geri cekme calisir ve yalnizca hedefi kaldirir.
+        registry.allow_zk_program(5, other).expect("ikinci ekleme");
+        registry.revoke_zk_program(5, &program).expect("geri cekme");
+        assert_eq!(
+            registry.get(5).expect("alan").zk_program_allowlist,
+            vec![other],
+            "yalnizca hedeflenen program cikmali"
+        );
+
+        // Listede olmayani geri cekmek hata: basarisiz bir geri cekme,
+        // basarili gibi okunursa program hala kabul edilirken kaldirildigi
+        // sanilir.
+        assert!(registry.revoke_zk_program(5, &program).is_err());
+
+        // Bilinmeyen alan her iki yolda da reddedilir.
+        assert!(registry.allow_zk_program(404, program).is_err());
+        assert!(registry.revoke_zk_program(404, &program).is_err());
     }
 
     #[test]
