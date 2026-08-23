@@ -56,7 +56,7 @@ use std::fmt::Write as _;
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::generated::{
-    generate_content, GenerateError, GeneratedSpec, MAX_GENERATED_BYTES,
+    generate_content, generated_spec_digest, GenerateError, GeneratedSpec, MAX_GENERATED_BYTES,
 };
 
 /// Domain separation for a rendered object's id.
@@ -300,7 +300,7 @@ pub fn render(spec: &GeneratedSpec, format: &RenderFormat) -> Result<Vec<u8>, Re
         RenderFormat::Png { size } => render_png(spec, &pixels, *size),
         RenderFormat::VideoFrame { frame } => render_frame(spec, &pixels, *frame),
         RenderFormat::QrStream { seq, payload_len } => {
-            render_qr_stream_frame(&pixels, *seq, *payload_len)
+            render_qr_stream_frame(spec, &pixels, *seq, *payload_len)
         }
     }
 }
@@ -451,6 +451,7 @@ const QR_FRAME_HEADER_LEN: usize = 16;
 /// Burasi yalnizca **kanalin tasiyacagi kendini-tanimlayan kareyi** kurar.
 /// Kare uretimi belirlenimlidir; kanalin kendisi degildir.
 fn render_qr_stream_frame(
+    spec: &GeneratedSpec,
     payload: &[u8],
     seq: u32,
     payload_len: u16,
@@ -478,7 +479,20 @@ fn render_qr_stream_frame(
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     // Yuk ozetinin ilk 4 bayti: kare butunlugu icin yeterli, baslik kucuk
     // kalir. Icerik kimligi bu degildir - onu manifest tasir.
-    let digest = hash_fields_bytes(&[b"BDLM_QR_FRAME_V1", slice]);
+    //
+    // Ozet **oturuma bagli**: on-goruntu, kareyi ureten tarifin ozetini de
+    // iceriyor. Bagli olmasaydi bir karenin butunlugu yalnizca kendi
+    // baytlarindan dogrulanirdi, ve ayni `seq` degerini tasiyan **baska bir
+    // icerigin** karesi bu akisin karesi yerine gecebilirdi: alici dogru bir
+    // ozet gorur, dogru ayristirir ve iki farkli nesnenin parcalarini tek
+    // nesne diye birlestirir. Optik kanalda bu ucuz bir saldiri - kameranin
+    // gordugu her kod aday.
+    //
+    // Cape tarif ozeti, cunku bu katmanda bilinen ve kareyi ureten sey odur;
+    // manifest kimligi bu fonksiyona ulasmiyor. Iki farkli tarif iki farkli
+    // ozet uretir, ki aranan ayirt etme budur.
+    let session = generated_spec_digest(spec);
+    let digest = hash_fields_bytes(&[b"BDLM_QR_FRAME_V2", &session, slice]);
     out.extend_from_slice(digest.get(..4).ok_or(RenderError::MissingParam("digest"))?);
     out.extend_from_slice(slice);
     Ok(out)
@@ -535,8 +549,72 @@ mod tests {
             generator: GeneratorId::Avatar,
             seed: [7u8; 32],
             output_len: 32 * 32,
-            step_budget: 1_000_000,
+            step_budget: 8_000,
         }
+    }
+
+    /// Kare, ait oldugu akisa baglidir.
+    ///
+    /// Kare basligi kendini tanimlar ama **hangi akisa** ait oldugunu
+    /// soylemiyordu: ozet yalnizca kendi yukunden hesaplaniyordu. Iki farkli
+    /// icerik ayni bayt dilimini uretebilir - ozellikle duz renkli bolgeler
+    /// farkli tariflerde ayni baytlari verir - ve o durumda iki akisin ayni
+    /// sirali kareleri **bit bit ayni** olur. Alici, kameranin gordugu her
+    /// kodu aday sayar; iki akis ayni anda goruntudeyse dogru bir ozet
+    /// gorur, dogru ayristirir ve iki nesnenin parcalarini tek nesne diye
+    /// birlestirir. Butunluk korunur, dogruluk korunmaz.
+    ///
+    /// Oturum baglamasi bunu keser: ayni baytlar, farkli tarif, farkli ozet.
+    #[test]
+    fn a_frame_is_bound_to_the_stream_it_belongs_to() {
+        // Ayni yuk dilimini iki farkli tarif altinda kareye koy. Baytlar
+        // ayni oldugu icin, oturum baglamasi olmadan iki kare ayirt
+        // edilemezdi - carpismanin tam olarak olcusu bu.
+        let one = avatar_spec();
+        let mut two = avatar_spec();
+        two.seed = [8u8; 32];
+
+        let payload = [0xABu8; 128];
+        let a = super::render_qr_stream_frame(&one, &payload, 0, 64).expect("ilk akis");
+        let b = super::render_qr_stream_frame(&two, &payload, 0, 64).expect("ikinci akis");
+
+        // Yuk ayni: iki karenin govdesi bit bit ayni.
+        assert_eq!(
+            a.get(16..),
+            b.get(16..),
+            "kurulum gecerli degil - yukler ayni olmaliydi"
+        );
+        // Sabit baslik alanlari da ayni: ayni protokol, surum, seq, uzunluk.
+        assert_eq!(
+            a.get(..12),
+            b.get(..12),
+            "sabit baslik alanlari ayni olmali"
+        );
+
+        // Ayirt eden tek sey ozet olmali. Oturum baglamasi olmasaydi bu
+        // iddia dusetdi, cunku ozet yalnizca ayni olan yukten hesaplanirdi.
+        assert_ne!(
+            a.get(12..16),
+            b.get(12..16),
+            "ayni yuku tasiyan iki akisin karesi ayni ozeti tasimamali"
+        );
+
+        // Baglanma yukun kendisini de kapsamaya devam ediyor: ayni akista
+        // farkli yuk farkli ozet.
+        let mut other_payload = payload;
+        other_payload[0] = 0x00;
+        let c = super::render_qr_stream_frame(&one, &other_payload, 0, 64).expect("farkli yuk");
+        assert_ne!(
+            a.get(12..16),
+            c.get(12..16),
+            "yuk ozete girmeye devam etmeli"
+        );
+
+        // Belirlenimlilik korunuyor: ayni akis, ayni yuk, ayni kare.
+        assert_eq!(
+            a,
+            super::render_qr_stream_frame(&one, &payload, 0, 64).expect("yeniden uretim")
+        );
     }
 
     /// Tasima karesi kendini tanimlar ve belirlenimlidir.
