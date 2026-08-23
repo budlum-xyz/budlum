@@ -1783,6 +1783,48 @@ impl AccountState {
         Ok(())
     }
 
+    /// Yeni arz yaratan bir yol icin bakiye ekler; sabit tavani asmaz.
+    ///
+    /// # Neden ayri bir yol
+    ///
+    /// [`Self::try_add_balance`] iki farkli isi ayni imzayla yapiyordu:
+    /// **var olan** parayi tasimak (bir kilidin cozulmesi, bir bagin iadesi,
+    /// bir ucretin odenmesi) ve **yeni** para yaratmak (kopruden gelen bir
+    /// varligin karsiligini basmak). Ikisi ayni tasimda birlestiginde arz
+    /// tavani denetlenemez hale gelir: iade edilen bir bagi tavana karsi
+    /// saymak yanlistir, basilan bir tokeni saymamak da.
+    ///
+    /// [`Self::supply_capacity_remaining`] yazilmisti ve 100M'lik tavani
+    /// dogru hesapliyordu, ama **hicbir uretim yolu onu cagirmiyordu** -
+    /// yalnizca testler. Hesaplayan ama kimsenin sormadigi bir sinir,
+    /// sinir degildir; okuyan kisiye sinir varmis gibi gorunmesi yuzunden
+    /// hic olmamasindan daha kotudur.
+    ///
+    /// # Neden tavanin tamamina bakiliyor
+    ///
+    /// Denetlenen sey bu cagrinin miktari degil, cagri sonrasi **toplam**
+    /// taahhut. Tek tek kucuk mint'ler ayri ayri makul gorunur; tavani asan
+    /// sey toplamdir. Payda [`Self::total_bud_committed`]: likit bakiyeler,
+    /// stake, unbonding kuyrugu ve rol baglari. Bunlarin biri disarida
+    /// birakilirsa bir bag, bir arz yakimi gibi okunur ve olmayan bir
+    /// bassliga yer acar.
+    ///
+    /// # Errors
+    ///
+    /// Miktar kalan tavan bosuluğunu asarsa, ya da bakiye `u64` tasarsa.
+    pub fn try_mint_balance(&mut self, public_key: &Address, amount: u64) -> Result<(), String> {
+        let headroom = self.supply_capacity_remaining();
+        if amount > headroom {
+            return Err(format!(
+                "supply cap: minting {amount} would put total committed supply above \
+                 BUD_TOTAL_SUPPLY; only {headroom} remains. Committed supply counts liquid \
+                 balances, validator stake, unbonding entries and role bonds, so the cap is \
+                 a property of the chain and not of any one account."
+            ));
+        }
+        self.try_add_balance(public_key, amount)
+    }
+
     /// Amount of `address`'s balance that is currently spendable, taking team
     /// Vesting into account. For a non-vesting account this is the full balance.
     /// For the configured team account, the balance may not be spent below the
@@ -2674,6 +2716,60 @@ mod tests {
             state.supply_capacity_remaining(),
             0,
             "staked BUD must consume supply headroom"
+        );
+    }
+
+    /// Arz yaratan yol tavani asamaz.
+    ///
+    /// Tavan zaten hesaplaniyordu; eksik olan sey onu **soran** bir uretim
+    /// yoluydu. Bu test hem sinirin tuttugunu hem de sinirin dogru paydayi
+    /// kullandigini olcer: stake ve rol baglari da taahhut edilmis arzdir,
+    /// disarida birakilirlarsa olmayan bir bassliga yer acilir.
+    #[test]
+    fn a_minting_path_cannot_cross_the_supply_cap() {
+        let recipient = test_addr_from_byte(31u8);
+        let mut state = AccountState::new();
+
+        // Tavanin 10 birim altina kadar dolduruluyor.
+        let cap = crate::tokenomics::BUD_TOTAL_SUPPLY;
+        state.add_balance(&recipient, cap - 10);
+        assert_eq!(state.supply_capacity_remaining(), 10);
+
+        // Bosluk kadar basim gecer - kapi mesru basimi engellememeli.
+        state
+            .try_mint_balance(&recipient, 10)
+            .expect("bosluk kadar basim kabul edilmeli");
+        assert_eq!(state.supply_capacity_remaining(), 0);
+
+        // Tavanin ustundeki tek birim reddedilir.
+        let err = state
+            .try_mint_balance(&recipient, 1)
+            .expect_err("tavan dolduktan sonra basim reddedilmeli");
+        assert!(
+            err.contains("supply cap"),
+            "ret gerekcesi tavani soylemeli: {err}"
+        );
+
+        // Ret gercekten uygulanmis olmali: reddedip yine de eklemek
+        // tavani suslemeye cevirirdi.
+        assert_eq!(
+            state.get_balance(&recipient),
+            cap,
+            "reddedilen basim bakiyeye girmemeli"
+        );
+
+        // Stake de taahhut edilmis arzdir: tavan yalnizca likit bakiyelere
+        // baksaydi, stake'lenmis her birim yeni basim icin sahte bosluk
+        // acardi.
+        let mut staked = AccountState::new();
+        let holder = test_addr_from_byte(32u8);
+        let validator = test_addr_from_byte(33u8);
+        staked.add_balance(&holder, cap - 100);
+        staked.add_validator(validator, 100);
+        assert_eq!(staked.supply_capacity_remaining(), 0);
+        assert!(
+            staked.try_mint_balance(&holder, 1).is_err(),
+            "stake edilmis arz tavana sayilmali"
         );
     }
 
