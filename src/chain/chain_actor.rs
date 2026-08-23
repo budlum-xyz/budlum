@@ -2528,6 +2528,54 @@ impl ChainActor {
             );
         }
 
+        // Yerlesim tavsiyesi. Bekleyen her onarim biletine, rendezvous
+        // yerlesiminin o shard icin sectigi tutucu yazilir. Bileti kim kabul
+        // ederse yine o alir; yazilan sey bir kural degil bir olcumdur, ve
+        // sapmayi `placements_that_diverged` gorunur kilar.
+        //
+        // Entropi son blogun hash'inden: her dugum ayni cevabi bulur, ve
+        // secim bir epoch oncesinden tahmin edilemez.
+        let placement_candidates: Vec<crate::storage::assignment::ShardCandidate> = self
+            .blockchain
+            .state
+            .get_active_validators()
+            .into_iter()
+            .map(|validator| crate::storage::assignment::ShardCandidate {
+                address: validator.address,
+                stake: validator.stake,
+            })
+            .collect();
+        if !placement_candidates.is_empty() {
+            let entropy = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_MAINTENANCE_PLACEMENT_V1",
+                &self.blockchain.chain_id.to_le_bytes(),
+                self.blockchain.last_block().hash.as_bytes(),
+                &current_epoch.to_le_bytes(),
+            ]);
+            let annotated = self
+                .blockchain
+                .state
+                .storage_registry
+                .annotate_expected_holders(&entropy, &placement_candidates);
+            if annotated > 0 {
+                tracing::info!(
+                    "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
+                );
+            }
+        }
+        for (ticket_id, expected, actual) in self
+            .blockchain
+            .state
+            .storage_registry
+            .placements_that_diverged()
+        {
+            tracing::info!(
+                "B.U.D. repair ticket {ticket_id} was taken by {} while placement chose {}",
+                hex::encode(actual.0),
+                hex::encode(expected.0)
+            );
+        }
+
         // Talep bandi. Rejim indirimi almis bir nesne cok okunmaya baslarsa
         // hedefi geri yukselir; asagidaki tarama bunu her epoch yeniden
         // olcer. `under_replicated_shards` artik epoch aliyor, yani indirim

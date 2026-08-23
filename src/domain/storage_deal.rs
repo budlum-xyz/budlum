@@ -534,6 +534,23 @@ pub struct StorageReallocationTicket {
     pub opened_epoch: u64,
     pub deadline_epoch: u64,
     pub status: ReallocationStatus,
+    /// Yerlesim algoritmasinin bu shard icin hesapladigi tutucu.
+    ///
+    /// **Tavsiye, kural degil.** Bileti kim kabul ederse alir; bu alan
+    /// yalnizca "rendezvous yerlesimi kimi secerdi" sorusunun cevabini
+    /// kayda gecirir. Kabulu buna baglamak acik pazari kapatirdi ve ayri bir
+    /// politika kararidir.
+    ///
+    /// Kaydedilmesinin sebebi olculebilirlik: sapmanin gorunur olmasi.
+    /// Biletleri surekli baska operatorlerin aliyor olmasi, ya yerlesim
+    /// hesabinin gercek kapasiteyi yansitmadigini ya da atanan operatorlerin
+    /// yukumlulugunu yerine getirmedigini soyler. Ikisi de bilinmeye deger
+    /// ve ikisi de bugun gorunmuyor.
+    ///
+    /// `None`: aday kumesi yerlesim uretemedi (stake'li dogrulayici yok).
+    /// Bos bir tavsiye, yanlis bir tavsiyeden iyidir.
+    #[serde(default)]
+    pub expected_holder: Option<Address>,
 }
 
 /// On-chain, in-memory registry of all `StorageDeal`s, `RetrievalChallenge`s,
@@ -2240,6 +2257,9 @@ impl StorageRegistry {
                     opened_epoch: now_epoch,
                     deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
                     status: ReallocationStatus::Pending,
+                    // Aday kumesi kayit defterinde yok; tavsiye acildiktan
+                    // sonra `annotate_expected_holders` ile yazilir.
+                    expected_holder: None,
                 }
             });
             (slash_amount, ticket)
@@ -2427,9 +2447,69 @@ impl StorageRegistry {
             opened_epoch: now_epoch,
             deadline_epoch: now_epoch.saturating_add(REALLOCATION_ACCEPTANCE_EPOCHS),
             status: ReallocationStatus::Pending,
+            expected_holder: None,
         };
         self.reallocations.insert(ticket_id, ticket);
         Some(ticket_id)
+    }
+
+    /// Bekleyen biletlere yerlesim tavsiyesini yaz.
+    ///
+    /// `assign_shard` rendezvous hashing ile shard basina deterministik bir
+    /// tutucu secer: ayni shard, ayni entropi ve ayni aday kumesi her
+    /// dugumde ayni cevabi verir. Buradaki cevap **tavsiyedir**, bileti kim
+    /// kabul ederse alir (`accept_reallocation_ticket` degismedi).
+    ///
+    /// Yazilmasinin sebebi sapmayi gorunur kilmak. Bugun bir bileti kimin
+    /// aldigi ile yerlesim hesabinin kimi sectigi arasinda hicbir
+    /// karsilastirma yok, dolayisiyla ne hesabin gercek kapasiteyi
+    /// yansitmadigi ne de atanan operatorlerin yukumlulugunu atladigi
+    /// gorulebiliyor.
+    ///
+    /// Yalniz `Pending` biletler ve yalniz bir kez: kabul edilmis bir bilete
+    /// sonradan tavsiye yazmak, tavsiyeyi sonucun ardindan uydurmak olurdu.
+    /// Doner deger yazilan tavsiye sayisidir.
+    pub fn annotate_expected_holders(
+        &mut self,
+        entropy: &crate::domain::Hash32,
+        candidates: &[crate::storage::assignment::ShardCandidate],
+    ) -> usize {
+        let mut written = 0;
+        for ticket in self.reallocations.values_mut() {
+            if ticket.status != ReallocationStatus::Pending || ticket.expected_holder.is_some() {
+                continue;
+            }
+            // Tek kopya: bilet tek bir slotu doldurur, kumeyi degil.
+            let Ok(placed) =
+                crate::storage::assignment::assign_shard(&ticket.shard_id, entropy, candidates, 1)
+            else {
+                // Aday yoksa tavsiye de yok. Bos bir tavsiye, yanlis bir
+                // tavsiyeden iyidir.
+                continue;
+            };
+            ticket.expected_holder = placed.first().copied();
+            if ticket.expected_holder.is_some() {
+                written += 1;
+            }
+        }
+        written
+    }
+
+    /// Tavsiyeden sapan, kabul edilmis biletler.
+    ///
+    /// Doner: `(ticket_id, tavsiye edilen, gercekte kabul eden)`. Bos bir
+    /// sonuc yerlesim hesabinin gerceklesen kabullerle ortustugunu soyler.
+    #[must_use]
+    pub fn placements_that_diverged(&self) -> Vec<(u64, Address, Address)> {
+        self.reallocations
+            .values()
+            .filter_map(|ticket| {
+                let expected = ticket.expected_holder?;
+                let replacement = ticket.replacement_deal_id?;
+                let actual = self.deals.get(&replacement)?.operator;
+                (actual != expected).then_some((ticket.ticket_id, expected, actual))
+            })
+            .collect()
     }
 
     pub fn mark_overdue_reallocations_under_replicated(&mut self, now_epoch: u64) -> usize {
@@ -3418,6 +3498,113 @@ mod tests {
             )
             .unwrap();
         (id, shard_id)
+    }
+
+    // === Yerlesim tavsiyesi ==============================================
+
+    fn placement_candidates(n: u8) -> Vec<crate::storage::assignment::ShardCandidate> {
+        (1..=n)
+            .map(|i| crate::storage::assignment::ShardCandidate {
+                address: Address::from([i; 32]),
+                stake: 1_000,
+            })
+            .collect()
+    }
+
+    /// Bir bilet acan en kisa yol: anlasma ac, meydan okumayi kacir.
+    fn registry_with_pending_ticket() -> StorageRegistry {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let cid = reg
+            .open_challenge(deal_id, 0, 4, 110, 120, opener(), 50)
+            .expect("meydan okuma acilmali");
+        reg.finalize_missed_challenge(cid, 150)
+            .expect("kacirilan meydan okuma bilet acmali");
+        reg
+    }
+
+    /// Bekleyen bir bilete tavsiye yazilir ve deterministiktir.
+    #[test]
+    fn a_pending_ticket_gets_a_deterministic_advisory() {
+        let mut reg = registry_with_pending_ticket();
+        let cands = placement_candidates(5);
+        assert_eq!(reg.annotate_expected_holders(&[7u8; 32], &cands), 1);
+        let first = reg
+            .all_reallocation_tickets()
+            .first()
+            .and_then(|t| t.expected_holder)
+            .expect("tavsiye yazilmali");
+
+        // Ayni shard, ayni entropi, ayni aday kumesi: ayni cevap.
+        let mut again = registry_with_pending_ticket();
+        again.annotate_expected_holders(&[7u8; 32], &cands);
+        let second = again
+            .all_reallocation_tickets()
+            .first()
+            .and_then(|t| t.expected_holder)
+            .expect("tavsiye yazilmali");
+        assert_eq!(first, second, "yerlesim her dugumde ayni cevabi vermeli");
+    }
+
+    /// Tavsiye bir kez yazilir; ikinci gecis uzerine yazmaz.
+    ///
+    /// Yoksa entropi degistikce tavsiye de degisirdi ve sapma olcumu
+    /// anlamsizlasirdi: kabulun ardindan uydurulan bir tavsiye hicbir seyi
+    /// olcmez.
+    #[test]
+    fn an_advisory_is_written_once() {
+        let mut reg = registry_with_pending_ticket();
+        let cands = placement_candidates(5);
+        assert_eq!(reg.annotate_expected_holders(&[7u8; 32], &cands), 1);
+        let first = reg
+            .all_reallocation_tickets()
+            .first()
+            .and_then(|t| t.expected_holder);
+        // Baska bir entropi ile ikinci gecis: hicbir sey degismemeli.
+        assert_eq!(reg.annotate_expected_holders(&[9u8; 32], &cands), 0);
+        let after = reg
+            .all_reallocation_tickets()
+            .first()
+            .and_then(|t| t.expected_holder);
+        assert_eq!(first, after, "tavsiye sonradan degistirilemez");
+    }
+
+    /// Aday yoksa tavsiye de yok: bos bir tavsiye yanlis bir tavsiyeden iyi.
+    #[test]
+    fn no_candidates_means_no_advisory() {
+        let mut reg = registry_with_pending_ticket();
+        assert_eq!(reg.annotate_expected_holders(&[7u8; 32], &[]), 0);
+        assert!(reg
+            .all_reallocation_tickets()
+            .first()
+            .and_then(|t| t.expected_holder)
+            .is_none());
+    }
+
+    /// Stake'i sifir olan aday secilmez: kaybedecek seyi olmayan bir
+    /// operator baytlari birakmaktan zarar gormez.
+    #[test]
+    fn a_zero_stake_candidate_is_never_advised() {
+        let mut reg = registry_with_pending_ticket();
+        let zero = vec![crate::storage::assignment::ShardCandidate {
+            address: Address::from([3u8; 32]),
+            stake: 0,
+        }];
+        assert_eq!(reg.annotate_expected_holders(&[7u8; 32], &zero), 0);
+    }
+
+    /// Kabul edilmemis bir bilette sapma raporlanmaz.
+    ///
+    /// Sapma ancak gerceklesen bir kabul ile tavsiye arasinda olculebilir.
+    #[test]
+    fn divergence_needs_an_actual_acceptance() {
+        let mut reg = registry_with_pending_ticket();
+        reg.annotate_expected_holders(&[7u8; 32], &placement_candidates(5));
+        assert!(
+            reg.placements_that_diverged().is_empty(),
+            "kabul edilmemis bilet sapma uretemez"
+        );
     }
 
     #[test]

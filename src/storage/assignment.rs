@@ -53,13 +53,26 @@
 //! not there. What is enforceable here is that one address never holds two
 //! shards of the same object, which is checkable from state.
 //!
-//! WIRING: unwired - measured: no production path calls `assign_shard`,
-//! `assign_object` or `displaced_shards` yet. Placement is the piece the
-//! repair trigger and the coding audit both need, and neither is wired
-//! either, so wiring this alone would connect one end of a chain whose
-//! other end is still open. Recorded rather than left for a reader to
-//! discover: the arithmetic is real, the tests are real, and nothing in
-//! production reaches it.
+//! WIRING: wired - `assign_shard` is called once per epoch by the storage
+//! maintenance sweep, through `StorageRegistry::annotate_expected_holders`.
+//! Each pending repair ticket is annotated with the holder rendezvous
+//! placement would choose.
+//!
+//! The annotation is **advisory**. Whoever accepts a ticket still gets it;
+//! `accept_reallocation_ticket` did not change. Binding acceptance to the
+//! placement would close the open market for repairs, which is a separate
+//! policy decision and not one this module can make on its own.
+//!
+//! What the advisory buys is measurement. Until now there was no comparison
+//! at all between who takes a repair and who the placement would pick, so
+//! neither failure mode was visible: a placement that does not reflect real
+//! capacity, and assigned operators that skip their obligations look the
+//! same from outside. `placements_that_diverged` reports the gap.
+//!
+//! `displaced_shards` remains uncalled and that is honest. Turning a
+//! departure into a repair needs the placement recorded when the object was
+//! written, and `ContentManifest` carries no holder list. Comparing against
+//! a placement nobody stored would compare the current answer with itself.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
