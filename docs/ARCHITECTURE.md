@@ -2267,42 +2267,53 @@ dogrulayici ya o koku bagimsiz bir kaynaktan almalidir ya da yalnizca demetin
 kendi icinde tutarli oldugunu ogrenmis olur. Kanit, yalnizca ifade ettigi seyi
 garanti eder.
 
-### 62.1 Maliyet olculdu, ve olcum bir sinir dogurdu
+### 62.1 Maliyet olculdu, ve olcum tasarimi degistirdi
 
-Iki kokun yan yana durmasi bedava degil. Olcum (referans makine, release):
+Olcum (referans makine, release):
 
-| Hesap sayisi | Kok kurma | Kanit uretimi | Dogrulama | Kanit boyu |
-|---|---|---|---|---|
-| 100 | 4,6 ms | 4,6 ms | 32 us | 8288 B |
-| 1000 | 45 ms | 45 ms | 32 us | 8288 B |
-| 5000 | 222 ms | 224 ms | 32 us | 8288 B |
+| Hesap | Kok kurma | 1 kanit | 10 kanit | Dogrulama | Kanit boyu |
+|---|---|---|---|---|---|
+| 100 | 4,6 ms | 4,6 ms | - | 32 us | 8288 B |
+| 1000 | 44,7 ms | 45,4 ms | 459 ms | 32 us | 8288 B |
+| 5000 | 221 ms | 229 ms | **2,23 s** | 32 us | 8288 B |
 
 Uc sey okunuyor:
 
-1. **Dogrulama sabit** (32 us) ve **kanit boyu sabit** (8288 B) - hesap sayisi
-   ne olursa olsun. Bu zaten trie'yi isteme sebebimizdi ve olcum onu dogruluyor.
-2. **Uretim dogrusal**, cunku her istek trie'yi sifirdan kurar ve 256 seviye
-   boyunca butun yapraklari ozetler. Onbellek yok.
-3. Uretim maliyeti kok kurma maliyetiyle **ayni** - yani pahali olan tarama
-   degil, **ozetleme**. Kardes altagaci `BTreeMap::range` ile secmek (adres
-   bitleri MSB-first, `BTreeMap` da anahtarlarini ayni sirada tutar, bu yuzden
-   bir bit onekini paylasan adresler bitisik bir aralikta durur) taramayi
-   O(256 n)'den kaldirdi ama toplam degismedi: darbogaz ozetlemeydi.
+1. **Dogrulama sabit** (32 us) ve **kanit boyu sabit** (8288 B), hesap sayisi
+   ne olursa olsun. Trie'yi isteme sebebimiz buydu; olcum onu dogruluyor.
+2. **Kanit uretimi kok kurmayla ayni maliyette.** Yani pahali olan gezinme
+   degil, **agacin kendisini kurmak**.
+3. Ve iste asil bulgu: **10 kanit, 1 kanitin 10 kati.** Onuncu cagiri,
+   birincinin zaten kurdugu agaci yeniden kurmak icin oduyordu.
 
-Ucuncu madde bir guvenlik sorusu doguruyor: `bud_getAccountProof` **uzaktan
-tetiklenen** bir uctur. Onbelleksiz ve sinirsiz birakilirsa cagiriya bir **is
-carpani** verir - ucuz bir istek, yuz milisaniyelerce dugum CPU'su,
-tekrarlanabilir. Bu yuzden `MAX_PROOF_ACCOUNTS = 4096` kondu ve asildiginda
-istek **reddedilir**.
+Ucuncu madde bir tasarim hatasidir, bir performans notu degil.
+`bud_getAccountProof` uzaktan tetiklenir; her istegin agaci sifirdan kurmasi
+cagiriya bir **is carpani** verir.
 
-Reddin bicimi onemli: bos sonuc degil, hata. Bos sonuc donseydi cagiri
-"cevaplamayiz"i "hesap yok" diye okuyabilirdi - ve yokluk bu tasarimda
-**olumlu bir iddia**. Bir reddi bir cevaba cevirmek, kanit sisteminin
-soyleyebilecegi en tehlikeli yalandir.
+**Ilk cozum yanlisti.** Once bir tavan konmustu (`MAX_PROOF_ACCOUNTS`):
+hesap sayisi asilirsa istek reddedilsin. Ama bu, maliyeti cozmek yerine
+**ozelligi kapatiyordu** - buyuyen bir agda kanit hizmeti bir gun sessizce
+kesilecekti ve sebep bir tasarim tercihi degil, unutulmus bir sabit olacakti.
+Tavan bir sinir gibi gorunuyordu; aslinda bir teslim olustu.
 
-**Sinir bir performans ayari degildir**, bu dugumun ne sorulmasina razi
-oldugunun siniridir. Yukseltmek o maliyeti odeme kararidir ve karar dugumun
-butcesini belirleyenin, istegi gonderenin degil.
+**Dogru cozum agaci saklamaktir.** `ProofTrieCache` trie'yi **yukseklik
+basina en fazla bir kez** kurar:
+
+- **Tembel:** kanit istenmezse agac hic kurulmaz. Kimsenin kullanmadigi bir
+  ozelligin bedelini dugumu calistirmak odemez.
+- **Yukseklikle anahtarlanmis:** durum yalnizca blokla degisir, bu yuzden
+  kuruldugu yuksekligi tasiyan bir agac ya gunceldir ya atilir. Bayrak ya da
+  zaman damgasi degil, **yukseklik** - cunku bayrak set edilmeyi unutulabilir,
+  yukseklik unutulamaz.
+- Sonuc: bir yukseklikteki ilk istek agaci kurar, sonraki her istek bir agac
+  gezintisidir (32 us dogrulama tarafinda, uretim tarafinda 256 seviye).
+
+**Bayat agac neden tehlikeli:** kuruldugu andaki duruma ait kanit, **kendi
+kokune karsi dogrulanir**. Yani bayat bir kanit bozuk gorunmez - dogru
+gorunur, yanlis soruyu cevaplar. Iki test bunu tutuyor: `prove_from_trie` ile
+`prove_account` her adres icin **ayni** demeti uretmeli (onbellek farkli bir
+cevap veremez), ve durum degisince kok **degismeli** (yoksa bayatlik
+saptanamazdi).
 
 ### 62.2 Neden simdi, ag kullanilmiyorken
 
@@ -2311,8 +2322,10 @@ catallanma sorusu yok; ama zincir canliyken ikinci bir kok eklemek, hakkinda
 uzlasilmasi gereken yeni bir alan eklemek demektir. Su an eklemenin bedeli
 yalnizca CPU; sonra eklemenin bedeli bir surum gecisi olurdu.
 
-Ayrica olcumun kendisi bir kusur buldu (`MAX_PROOF_ACCOUNTS` yoklugu). Bu kusur
-ancak kod var olunca olculebilirdi: **once kod, sonra olcum, sonra sinir.**
+Ayrica olcumun kendisi tasarimi degistirdi: onbellek gereksinimi belgeden
+degil, **rakamdan** dogdu. Bu ancak kod var olunca olculebilirdi. Sira sudur:
+**once kod, sonra olcum, sonra tasarim** - tersi, tahmine gore optimize
+etmektir.
 
 ## 63. Komsulukla verilen garanti garanti degildir
 

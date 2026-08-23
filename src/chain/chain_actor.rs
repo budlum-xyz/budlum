@@ -2269,15 +2269,79 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 }
+/// The proof-bearing trie, built at most once per chain height.
+///
+/// Building it costs O(depth * accounts): measured at 5000 accounts, 222 ms.
+/// Rebuilding per request turned `bud_getAccountProof` into a work
+/// multiplier - ten proofs cost 2.23 s, all of it spent rebuilding the same
+/// tree. That is a remote caller choosing how much node CPU to spend.
+///
+/// Built lazily rather than at the end of every block, because a node nobody
+/// asks for proofs should not pay for them at all: the cost belongs to the
+/// feature being used, not to running a node. The first request after a new
+/// block pays; every later request at that height is a tree walk.
+///
+/// `height` is what makes the cache honest. State only changes with a block,
+/// so a trie tagged with the height it was built at is either current or
+/// discarded - it can never serve a proof for state that has moved on.
+struct ProofTrieCache {
+    height: u64,
+    trie: crate::storage::merkle_trie::MerkleTrie,
+}
+
 pub struct ChainActor {
     blockchain: Blockchain,
     rx: mpsc::Receiver<ChainCommand>,
+    proof_trie: Option<ProofTrieCache>,
 }
 
 impl ChainActor {
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
         let (tx, rx) = mpsc::channel(1000);
-        (Self { blockchain, rx }, ChainHandle { tx })
+        (
+            Self {
+                blockchain,
+                rx,
+                proof_trie: None,
+            },
+            ChainHandle { tx },
+        )
+    }
+
+    /// Proof for one account, reusing the trie built for this height.
+    ///
+    /// The cache is keyed by height and rebuilt when it does not match, so a
+    /// proof is always drawn against the state the chain is at. A stale trie
+    /// would produce a proof that verifies against its own root and describes
+    /// state that no longer exists - worse than no proof, because it is a
+    /// correct-looking answer to the wrong question.
+    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
+        let height = self.blockchain.chain.len() as u64;
+        let stale = self
+            .proof_trie
+            .as_ref()
+            .is_none_or(|cached| cached.height != height);
+        if stale {
+            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+            for (a, acct) in &self.blockchain.state.accounts {
+                trie.insert(&a.0, acct.balance, acct.nonce);
+            }
+            self.proof_trie = Some(ProofTrieCache { height, trie });
+        }
+        match self.proof_trie.as_ref() {
+            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
+            // Unreachable: the branch above assigns it. Written as a fallback
+            // rather than an unwrap so a future edit that breaks the
+            // invariant costs one rebuild instead of stopping the node.
+            None => crate::storage::merkle_trie::prove_account(
+                self.blockchain
+                    .state
+                    .accounts
+                    .iter()
+                    .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
+                &addr.0,
+            ),
+        }
     }
 
     fn storage_economics_disabled_on_mainnet(&self) -> bool {
@@ -2536,18 +2600,8 @@ impl ChainActor {
                     let _ = tx.send(nonce);
                 }
                 ChainCommand::GetAccountProof(addr, tx) => {
-                    // `None` here is the trie refusing an oversized account
-                    // set, and it travels outward as `None`: a refusal to
-                    // answer must not be readable as an answer.
-                    let bundle = crate::storage::merkle_trie::prove_account(
-                        self.blockchain
-                            .state
-                            .accounts
-                            .iter()
-                            .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
-                        &addr.0,
-                    );
-                    let _ = tx.send(bundle);
+                    let bundle = self.account_proof(&addr);
+                    let _ = tx.send(Some(bundle));
                 }
                 ChainCommand::AddTransaction(tx_obj, res_tx) => {
                     let _ = res_tx.send(

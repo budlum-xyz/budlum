@@ -1063,16 +1063,12 @@ impl BudlumApiServer for RpcServer {
         let addr = Address::from_hex(clean_addr).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
         })?;
-        // The node declined to build a proof (today: the account set exceeds
-        // `merkle_trie::MAX_PROOF_ACCOUNTS`). Reported as an error rather than
-        // an empty result, because a caller must not be able to read "we would
-        // not answer" as "the account is absent".
+        // `None` means the node could not answer at all (the chain actor is
+        // gone). Reported as an error rather than an empty result: a caller
+        // must never be able to read "we did not answer" as "the account is
+        // absent", because absence here is a positive claim carrying a proof.
         let bundle = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
-            ErrorObjectOwned::owned(
-                -32603,
-                "Account proof unavailable: the account set exceeds the proof limit",
-                None::<()>,
-            )
+            ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
         })?;
         // A bundle that does not verify against its own root is a node bug,
         // not a client error, and must never reach the wire: a caller cannot
