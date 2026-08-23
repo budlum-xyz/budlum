@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 75 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 76 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -83,6 +83,7 @@
 - [73. Iki bagimsiz derleyici: kaynagin ikiliye ulastigini kim soyluyor](#73-iki-bagimsiz-derleyici-kaynagin-ikiliye-ulastigini-kim-soyluyor)
 - [74. Sozluk kimligin parcasi](#74-sozluk-kimligin-parcasi)
 - [75. Ilan edilen butce: liste hangi kod, kapi ne kadar](#75-ilan-edilen-butce-liste-hangi-kod-kapi-ne-kadar)
+- [76. Sinirlayicinin kendisi sinirli mi](#76-sinirlayicinin-kendisi-sinirli-mi)
 
 ## 1. Genel sistem mimarisi
 
@@ -2961,3 +2962,110 @@ Reddedilen bir kanit gonderenin bakiyesine dokunmaz.
 Tam tavanda harcama kabul edilir. `>=` yazmak, ilan ettigi kadarini harcayan
 durust bir programi reddederdi; ilan edilen sinir bir tavandir, ulasilmasi
 yasak bir esik degil.
+
+## 76. Sinirlayicinin kendisi sinirli mi
+
+Bu bolum tek bir soruyu izliyor ve o soru bu turda dokuz ayri yerde ayni
+cevabi verdi: **bir siniri yazmak, o sinirin baglayici oldugu anlamina
+gelmiyor.**
+
+### Sinifin kendisi
+
+Bir kod tabaninda sinir gorunumlu uc sey vardir ve ucu de okuyucuya ayni
+seyi hissettirir:
+
+1. **Hesaplanan ama sorulmayan sinir.** `supply_capacity_remaining` 100
+   milyonluk arz tavanini dogru hesapliyordu. Uretimde hicbir yol onu
+   cagirmiyordu - yalnizca testler. Tavan bir belgeydi; koprüden gelen her
+   varlik `try_add_balance` ile dogrudan basiliyordu.
+2. **Olcen ama kendisi olculmeyen sinir.** `step_budget` bir uretim
+   tarifinin kac adim harcayabilecegini bagliyordu. Butcenin kendisi
+   `u32` genisliginde serbestti: dort milyara yakin adim ilan eden bir
+   tarif, onu kaydeden **her dogrulayicida** o isi yaptirabilirdi.
+3. **Tek adimda reddedilen, iki adimda serbest olan sinir.** Eklenti kayit
+   defteri yeniden kaydi reddediyordu. Yaninda `remove` duruyordu ve
+   `remove` + `register` tam olarak reddedilen seyi yapiyordu - izsiz.
+
+Ucunun ortak yani: kodu okuyan biri sinir gorur. Uctide de sinir yoktur.
+Ve bu, sinirin hic olmamasindan daha kotudur, cunku olmayan bir sinir
+yazilmayi bekler; varmis gibi duran bir sinir yazilmis sayilir.
+
+### Neden testler bunu yakalamamisti
+
+Yakalamalari beklenmezdi. Her uc durumda da testler **var olan davranisi**
+doğruluyordu ve var olan davranis kendi icinde tutarliydi. `remove`
+gercekten kaldiriyordu, `step_budget` gercekten olcuyordu,
+`supply_capacity_remaining` gercekten dogru hesapliyordu. Eksik olan sey
+bir hata degil, bir **baglanti**ydi: hesaplananin sorulmasi, olcenin
+olculmesi, reddedilenin her yoldan reddedilmesi.
+
+Bu yüzden bu turda yazilan her test once **kirmizi** gorduruldu ve
+kirmizinin sekli onemliydi: kapiyi kaldirinca degil, kapiyi
+**zayiflatinca** da dusmeliydi. Arz tavani testi, paydadan stake
+cikarilinca duser. Kare baglama testi, oturum capasi kalkinca duser -
+ama ancak iki akis **ayni baytlari** tasidiginda, cunku carpismanin olcusu
+odur.
+
+### Kaynak okuyan kapilar: neyi yakalar, neyi yakalamaz
+
+Uc yeni kapi kaynak metnini okuyor. Bu bilincli bir takas:
+
+- `transcript-mirrors` kanitlayici ve dogrulayicinin emilim dizisini sira
+  ve tur olarak karsilastirir. Calisma zamaninda olcmek icin tam bir kanit
+  uretip dogrulamak gerekirdi; buradaki soru daha dar ve kaynakta
+  cevaplanabilir. **Yakalamaz:** iki tarafin ayni sirada ayni yanlis seyi
+  emmesi.
+- `proof-deps-are-exactly-pinned` `p3-*` bagimliliklarinin `=x.y.z` ile
+  yazildigini arar. Bu kapinin ilk kosusu somut bir ayrisma buldu: kok
+  `Cargo.lock` 0.6.2 tutuyordu, `budzero/Cargo.lock` 0.6.3 - ayni caret
+  manifest, iki farkli surum, ayni depoda.
+- `minting-paths-are-counted` bakiye ekleyen her uretim satirini sayar ve
+  sayiyi gerekcelendirilmis bir listeyle karsilastirir. Kapi hangi
+  cagrinin tasima hangisinin basim oldugunu **cikaramaz** - bu bir muhasebe
+  sorusu. O yuzden her cagri yerinin gerekcesi kapinin icinde yazili ve yeni
+  bir cagri eklemek kapiyi kirmizi yakar. Zahmetli olmasi kasitli: arz
+  yaratan bir yolun sessizce eklenmesi bu zincirin verebilecegi en pahali
+  hatadir, kapinin maliyeti bir satir gerekce.
+
+### Iade edilebilir bag bir sinir degildir
+
+Domain kaydi izinli degil; yeterli bagi yatiran herkes domain acabilir. Bag
+bir maliyet gibi okunur ama **harcanan** bir ucret degil, **geri alinabilen**
+bir mevduattir. Kayitli her domain kayit kokune bir yaprak ekler ve o kok
+her blokta yeniden uretilir - yani maliyeti agin tamami karsilar, domain sahibi bir sure
+sonra parasini geri alir.
+
+`MAX_REGISTERED_DOMAINS` bu bilesimi kirar. Tavan dolunca yeni kayit
+reddedilir ve bu bir yonetim karari zorunlu kilar: tavani yukseltmek ya da
+kullanilmayanlari emekliye ayirmak. Sessizce buyuyen bir maliyetten,
+konusulan bir karara.
+
+### Entropi: olculebilen ve olculemeyen
+
+`seed_from_entropy` her uzunluktaki girdiyi kabul ediyordu ve **her zaman**
+32 bayt donduruyordu. Cikti her zaman yuksek entropili gorunur; SHA3-256'nin
+ciktisi tek baytlik bir girdiden de rastgele bir bit dizisi gibi okunur. Bir
+tohumu kiran sey ciktinin bicimi degil girdinin arama uzayidir.
+
+Alt sinir uzunluk uzerinden konuldu, Shannon entropisi uzerinden degil.
+Bunun nedeni durustluktur: 32 sifir bayt ile bir CSPRNG'nin urettigi 32
+bayt bu katmandan **ayirt edilemez**. Uzunluk, dogru tarafta olan ve
+olculebilen kisimdir; kaynagin kalitesi cagiranin sorumlulugudur ve hata
+metni bunu soyler.
+
+### Geri cekilebilirlik
+
+Iki yerde ayni ilke: bir seyi kabul etmenin yolu varsa, geri cekmenin de
+yolu olmali.
+
+`zk_program_allowlist` okunuyordu (`submit_zk_proof`, fail-closed) ama
+**doldurulamiyordu**: alan kurulurken `Vec::new()` yaziliyor ve baska hicbir
+kod dokunmuyordu. Kapinin arkasinda hicbir zaman bir sey olamazdi. Simdi
+`allow_zk_program` ve `revoke_zk_program` var. Geri cekme geriye donuk
+degil: cekilmeden once kabul edilmis kanitlar gecerli kalir, zincirin
+gecmisi yeniden yazilmaz.
+
+Eklentiler icin ayni ilke tersinden: degisim **engellenmedi**, cunku hatali
+bir eklentinin degistirilebilmesi gerekir. Engellenen sey degisimin
+gorunmeden olmasi. `replace` eski ve yeni adapter adini bir ize yazar ve iz
+birikir - silinen bir iz izin kendisini anlamsiz kilar.
