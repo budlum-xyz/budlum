@@ -145,7 +145,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 ///
 /// Kapi test kodunu uretimden ayirt edemezse.
 pub fn self_test() -> Result<String, String> {
-    let sample = r#"
+    let sample = r"
         fn production() {
             self.state.try_add_balance(&a, 1)?;
             self.state.try_mint_balance(&b, 2)?;
@@ -157,7 +157,7 @@ mod tests {
         state.try_add_balance(&d, 4);
     }
 }
-    "#;
+    ";
     let lines = production_lines(sample);
     let moves = lines
         .iter()
