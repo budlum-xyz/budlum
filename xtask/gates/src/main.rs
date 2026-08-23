@@ -90,6 +90,7 @@ mod gates {
     pub mod lubot_reads;
     pub mod master_derivation;
     pub mod mermaid;
+    pub mod minting_paths_are_counted;
     pub mod named_tests;
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
@@ -166,6 +167,14 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "minting-paths-are-counted",
+        replaces: None,
+        run: gates::minting_paths_are_counted::run,
+        run_args: None,
+        self_test: gates::minting_paths_are_counted::self_test,
+        run_log: None,
+    },
     Gate {
         name: "proof-deps-are-exactly-pinned",
         replaces: None,
