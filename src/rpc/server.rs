@@ -33,6 +33,21 @@ const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
 /// Cannot mistake a successful retrieval outcome for a full storage proof.
 const RETRIEVAL_OUTCOME_PROOF_KIND: &str = "interim_availability_only";
 
+/// Upper bound accepted for `max_request_body_size`. A limit large enough to
+/// Exhaust node memory is not a limit; anything above this is treated as a
+/// Misconfiguration rather than silently honoured.
+const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
+
+/// Upper bound accepted for `max_connections`, for the same reason.
+const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
+
+/// Transport limits applied when a caller builds a config from process
+/// Configuration without stating its own. These match
+/// [`RpcSecurityConfig::default`] so that every constructor in this file
+/// Produces a bounded listener.
+const RPC_DEFAULT_BODY_LIMIT: u32 = 16 * 1024 * 1024;
+const RPC_DEFAULT_CONNECTION_LIMIT: u32 = 500;
+
 // (security audit §5) `auth_required` defaults to `true` (secure
 // By default). Operators that explicitly want an unauthenticated RPC
 // Must call [`RpcSecurityConfig::operator_default`], which logs a
@@ -123,8 +138,13 @@ impl RpcSecurityConfig {
             cors_origins,
             rate_limit_per_minute,
             trusted_proxies: Vec::new(),
-            max_request_body_size: None,
-            max_connections: None,
+            // Leaving these `None` handed the listener over to whatever the
+            // Transport crate happened to default to, and the value differed
+            // From every other constructor here. A config built from process
+            // Configuration is bounded like the rest; a caller that wants
+            // Other values overwrites these fields after construction.
+            max_request_body_size: Some(RPC_DEFAULT_BODY_LIMIT),
+            max_connections: Some(RPC_DEFAULT_CONNECTION_LIMIT),
         })
     }
 }
@@ -565,6 +585,40 @@ fn validate_rpc_security_config(
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "RPC auth_required=true but no API key configured",
+        )
+        .into());
+    }
+    // Authentication decides *who* may call; the transport limits decide how
+    // Much an accepted caller may cost. A listener that starts without both is
+    // Reachable by an authorised client and still trivially exhaustible, so the
+    // Absent limit is refused here rather than deferred to the transport crate.
+    let body_limit = security.max_request_body_size.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC max_request_body_size is unset; refusing to serve an unbounded request body",
+        )
+    })?;
+    if body_limit == 0 || body_limit > RPC_BODY_LIMIT_CEILING {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "RPC max_request_body_size must be between 1 and {RPC_BODY_LIMIT_CEILING} bytes, got {body_limit}"
+            ),
+        )
+        .into());
+    }
+    let connection_limit = security.max_connections.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC max_connections is unset; refusing to serve an unbounded connection count",
+        )
+    })?;
+    if connection_limit == 0 || connection_limit > RPC_CONNECTION_LIMIT_CEILING {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "RPC max_connections must be between 1 and {RPC_CONNECTION_LIMIT_CEILING}, got {connection_limit}"
+            ),
         )
         .into());
     }
@@ -4383,6 +4437,68 @@ mod tests {
         };
         assert!(validate_rpc_security_config(&configured).is_ok());
         assert!(validate_rpc_security_config(&RpcSecurityConfig::operator_default()).is_ok());
+    }
+
+    #[test]
+    fn a_config_built_from_process_configuration_carries_transport_limits() {
+        let cfg = RpcSecurityConfig::from_env(false, None, Vec::new(), Vec::new(), None)
+            .expect("from_env without auth must succeed");
+        assert!(
+            cfg.max_request_body_size.unwrap_or(0) > 0,
+            "from_env left the body size to the transport crate"
+        );
+        assert!(
+            cfg.max_connections.unwrap_or(0) > 0,
+            "from_env left the connection count to the transport crate"
+        );
+        assert!(validate_rpc_security_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn an_unbounded_listener_is_refused_before_listen() {
+        let no_body = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            max_request_body_size: None,
+            ..Default::default()
+        };
+        assert!(
+            validate_rpc_security_config(&no_body).is_err(),
+            "a config with no body limit reached the listener"
+        );
+
+        let no_conns = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            max_connections: None,
+            ..Default::default()
+        };
+        assert!(
+            validate_rpc_security_config(&no_conns).is_err(),
+            "a config with no connection limit reached the listener"
+        );
+    }
+
+    #[test]
+    fn a_limit_that_does_not_limit_is_refused_before_listen() {
+        for (body, conns) in [
+            (Some(0u32), Some(10u32)),
+            (Some(16 * 1024 * 1024), Some(0)),
+            (Some(RPC_BODY_LIMIT_CEILING + 1), Some(10)),
+            (
+                Some(16 * 1024 * 1024),
+                Some(RPC_CONNECTION_LIMIT_CEILING + 1),
+            ),
+        ] {
+            let cfg = RpcSecurityConfig {
+                api_key: Some("secret".into()),
+                max_request_body_size: body,
+                max_connections: conns,
+                ..Default::default()
+            };
+            assert!(
+                validate_rpc_security_config(&cfg).is_err(),
+                "body={body:?} conns={conns:?} was accepted as a limit"
+            );
+        }
     }
 
     fn cors_config(origins: &[&str]) -> RpcSecurityConfig {
