@@ -27,9 +27,9 @@ pub const LRC_VERSION: u8 = 1;
 /// LRC şeması parametreleri (k, L, G) + türetilmiş çarpan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LrcScheme {
-    pub k: usize,  // toplam veri shard'ı
-    pub l: usize,  // yerel grup sayısı (yerel parity = L)
-    pub g: usize,  // global parity sayısı
+    pub k: usize, // toplam veri shard'ı
+    pub l: usize, // yerel grup sayısı (yerel parity = L)
+    pub g: usize, // global parity sayısı
 }
 
 impl LrcScheme {
@@ -84,7 +84,11 @@ impl LrcRecord {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_LRC_V1";
 
     pub fn new(scheme: LrcScheme, object_count: u64, ts_unix: u64) -> Self {
-        LrcRecord { scheme, object_count, ts_unix }
+        LrcRecord {
+            scheme,
+            object_count,
+            ts_unix,
+        }
     }
 
     pub fn record_hash(&self) -> [u8; 32] {
@@ -124,7 +128,11 @@ impl LrcRecord {
         if bytes.len() != HDR + 32 {
             return None;
         }
-        let rec = LrcRecord { scheme: LrcScheme::new(k, l, g)?, object_count, ts_unix };
+        let rec = LrcRecord {
+            scheme: LrcScheme::new(k, l, g)?,
+            object_count,
+            ts_unix,
+        };
         if bytes[HDR..] != rec.record_hash() {
             return None;
         }
@@ -140,11 +148,19 @@ mod tests {
     fn lrc_multiplier_beats_rs() {
         // Ana repo ölçümü: RS(10,16)=1.6x, LRC k=2000 L=50 G=12 → 1.031x
         let lrc = LrcScheme::new(2000, 50, 12).expect("geçerli");
-        assert!((lrc.multiplier() - 1.031).abs() < 0.001, "1.031x: {}", lrc.multiplier());
+        assert!(
+            (lrc.multiplier() - 1.031).abs() < 0.001,
+            "1.031x: {}",
+            lrc.multiplier()
+        );
         assert!(lrc.beats_rs_overhead());
         // küçük şema: k=500 L=25 G=10 → 1.070x
         let lrc2 = LrcScheme::new(500, 25, 10).expect("geçerli");
-        assert!((lrc2.multiplier() - 1.070).abs() < 0.001, "1.070x: {}", lrc2.multiplier());
+        assert!(
+            (lrc2.multiplier() - 1.070).abs() < 0.001,
+            "1.070x: {}",
+            lrc2.multiplier()
+        );
         // RS(10,16) karşılaştırması: 1.6x vs 1.03x → %95 overhead kesintisi
         let rs_overhead = 0.600;
         let lrc_overhead = lrc.multiplier() - 1.0;

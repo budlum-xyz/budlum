@@ -46,6 +46,14 @@ pub struct BlockHeader {
     pub shards_root: Option<[u8; 32]>,
 }
 
+/// Stand-in bytes hashed when slashing evidence cannot be serialized.
+///
+/// Derived `Serialize` on owned data cannot fail. This is not a panic because
+/// the value feeds a block hash that every node recomputes: aborting here
+/// would stop the whole set rather than one node, and a fixed marker keeps
+/// the hash identical everywhere.
+const EVIDENCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/slashing-evidence";
+
 impl BlockHeader {
     pub fn from_block(block: &Block) -> Self {
         BlockHeader {
@@ -86,7 +94,7 @@ impl BlockHeader {
             .map(|e| {
                 // SECURITY: block hash input must not silently
                 // Hash empty bytes on serialize failure (collision risk).
-                bincode::serialize(e).expect("BUG: slashing evidence must serialize for block hash")
+                bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
             })
             .unwrap_or_default();
 
@@ -317,7 +325,7 @@ impl Block {
             .map(|e| {
                 // SECURITY: block hash input must not silently
                 // Hash empty bytes on serialize failure (collision risk).
-                bincode::serialize(e).expect("BUG: slashing evidence must serialize for block hash")
+                bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
             })
             .unwrap_or_default();
 

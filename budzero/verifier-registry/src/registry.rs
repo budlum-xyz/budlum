@@ -11,8 +11,40 @@
 //! - Evidence-gated slashing: only consensus-verified reports are acted on.
 //! - Deterministic `state_root` for snapshot/consensus commitment.
 //!
-//! WIRING: unwired - a separate crate consumed by downstream verifiers; the
-//! node keeps its own registry in src/registry/.
+//! WIRING: unwired - olculdu, ve gerekce eskisinden dar.
+//!
+//! Onceki gerekce "asagi akistaki dogrulayicilar tarafindan tuketilen ayri
+//! bir crate" diyordu. Bunun karsiligi yok: `budzero` calisma alaninda hicbir
+//! crate buna bagimli degil ve paket yayimlanmiyor. Bugun bu kodu calistiran
+//! tek sey kendi testleri.
+//!
+//! Silinmiyor, cunku islevsiz degil: cekirdekteki ikizin
+//! (`src/registry/permissionless.rs`) **bagimsiz ikinci ifadesidir**. Ayni
+//! rol yasam dongusu iki kez, iki ayri kod tabaninda yazilmis durumda ve
+//! `slash_expression` kapisi ikisinin kesme aritmetiginin ayrismasini
+//! engelliyor; ayna testler iki tarafta da kosuyor. Bir hesabin iki bagimsiz
+//! yazimi, tek yazimin sessizce yanlis olmasini zorlastirir - Wheeler'in
+//! ikili derleme fikrinin kucuk olcekli hali.
+//!
+//! Yani bu crate bir tuketici bekleyen kutuphane degil, cekirdegin
+//! carpraz denetimi. Iddia buydu diye yaziliyor: bir gun gercek bir tuketici
+//! cikarsa gerekce degisir, cikmazsa da kod yalan soylemiyor olur.
+//!
+//! ## Cekirdekteki ikizle iliski (`src/registry/permissionless.rs`)
+//!
+//! Iki kayit defteri ayni rol yasam dongusunu iki ayrimda anlatir: bu crate
+//! asagi akisa (dogrulayici musterilerine) sunulur, cekirdekteki dugumun
+//! konsensus durumudur. Ayni soruya iki farkli cevap bir kez olculdu ve kapatildi
+//! (tekrar kesme: `Ok(penalty: 0)` vs `Err(AlreadySlashed)`); ayni sinifin
+//! geri gelmemesi icin kural: kesme/unbonding semantigindeki her degisiklik
+//! IKISINE birden uygulanir ve ayna testler iki tarafta da kosar.
+//!
+//! Bilincli birakilan fark (2026-08-22: ikiydi, G0 karariyla biri kapatildi):
+//! - Sifir cezali kesme artik iki tarafta da kayda girer (cekirdek
+//!   hizalandi; denetim izi butunlugu kanonik - olay oldu, kayda girdi).
+//! - Cekirdek taraf reddedilen kesmeyi `tracing::warn` ile loglar; bu crate
+//!   loglama bagimliligi tasimaz, `Ok(None)` donusunu izlemek cagiranin
+//!   sorumlulugundadir.
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingReport};
@@ -27,6 +59,13 @@ pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
 
 /// Default number of epochs that unbonded stake stays locked.
 pub const UNBONDING_EPOCHS: u64 = 7;
+
+/// Kesme kayitlari icin tavan: canli durumda en yeni kayitlar tutulur,
+/// eskileri arsiv katmanina (blok gecmisi) aittir. Ana agactaki ikiz
+/// (`src/registry/permissionless.rs::MAX_SLASHING_HISTORY`) ile ayni deger;
+/// iki defter farkli tavanlara sahipken ayni rapor dizisine ikisi de farkli
+/// `slashing_history` cevabi verirdi.
+pub const MAX_SLASHING_HISTORY: usize = 4096;
 
 /// Reasons a registered member can be slashed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +109,21 @@ pub struct Registration {
 impl Registration {
     pub fn is_active(&self) -> bool {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
+    }
+
+    /// Hala kesilebilir bir bonda sahip mi: `Active` **veya** `Unbonding`.
+    ///
+    /// Bu kayit defteri ile `src/registry/permissionless.rs` ayni sorulara
+    /// ayni cevabi vermek zorunda; ikisi de ayni rollerin ayni yasam
+    /// dongusunu anlatiyor. Gorev atama `is_active` sorar, sorumluluk
+    /// `is_slashable` sorar: cikmakta olan bir uyenin bondu hala kilitli
+    /// oldugu icin yaptigi isten sorumlu tutulabilir, ama ona yeni is
+    /// verilemez.
+    pub fn is_slashable(&self) -> bool {
+        matches!(
+            self.status,
+            MemberStatus::Active | MemberStatus::Unbonding { .. }
+        ) && self.stake > 0
     }
 }
 
@@ -423,10 +477,14 @@ impl VerifierRegistry {
             }
             _ => return Err(RegistryError::NotActive { account, role }),
         }
+        // The `match` above already read this entry, so the key is present.
+        // Handled rather than unwrapped: this crate is consumed by verifiers
+        // whose release profile aborts on panic, and a future edit to that
+        // match must not be able to turn a missing key into a downed process.
         let reg = self
             .registrations
             .remove(&(role, account))
-            .expect("checked");
+            .ok_or(RegistryError::NotActive { account, role })?;
         Ok(reg.stake)
     }
 
@@ -497,7 +555,7 @@ impl VerifierRegistry {
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
-                self.slashing_history.push(SlashingRecord {
+                self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
                     remaining_stake: outcome.remaining_stake,
@@ -506,6 +564,20 @@ impl VerifierRegistry {
             }
             Err(RegistryError::NotRegistered { .. }) => Ok(None),
             Err(_) => Ok(None),
+        }
+    }
+
+    /// Kesme kaydini ekle; tavan asilinca en eskiyi dusur.
+    ///
+    /// `src/registry/permissionless.rs::record_slash` ile ayni davranis:
+    /// en yeni kayitlar canli durumda kalir. Tavansiz buyuyen bir gecmis,
+    /// bu kaydi canli tutan her surecin bellegi ve serilestirmesi icin
+    /// sinirsiz yuk demektir.
+    fn record_slash(&mut self, record: SlashingRecord) {
+        self.slashing_history.push(record);
+        if self.slashing_history.len() > MAX_SLASHING_HISTORY {
+            let excess = self.slashing_history.len() - MAX_SLASHING_HISTORY;
+            self.slashing_history.drain(..excess);
         }
     }
 
@@ -539,17 +611,21 @@ impl VerifierRegistry {
             .collect()
     }
 
-    // Güvenlik denetimi (MEDIUM): rol-spesifik is_active_* helper'lari
-    // Unbonding'i active sayiyordu; begin_unbonding kaydi Active'den cikarir
-    // cikarmaz bu helper'lar hala yetki veriyordu. Yetki yalniz
-    // MemberStatus::Active icindir; cikis sirasinda stake'in slash edilebilir
-    // kalip kalmadigi ayri bir sorudur ve ayri helper'in konusudur.
+    // Rol yardımcıları tek bir soruyu sorar: bu üyeye SIMDI yeni gorev
+    // verilebilir mi? Cevap yalniz `MemberStatus::Active` icin evet
+    // (2026-08-22 kararı, G0; cekirdek `src/registry/permissionless.rs`
+    // ile ayni gun ayni kararla hizalandi - iki defter ayni soruya ayni
+    // cevabi vermek zorunda). Sorumluluk ayri sorudur ve
+    // `Registration::is_slashable`'da yasar: cikmakta olan uyenin kilidi
+    // suresince kesilebiliriligi surer, ama yeni is almaz.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::RELAYER)
+        self.get(account, crate::role::roles::RELAYER)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_attester(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::ATTESTER)
+        self.get(account, crate::role::roles::ATTESTER)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_master_verifier(&self, account: &Address) -> bool {
@@ -557,11 +633,13 @@ impl VerifierRegistry {
     }
 
     pub fn is_active_lubot_operator(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::LUBOT_OPERATOR)
+        self.get(account, crate::role::roles::LUBOT_OPERATOR)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn is_active_content_validator(&self, account: &Address) -> bool {
-        self.is_active(account, crate::role::roles::CONTENT_VALIDATOR)
+        self.get(account, crate::role::roles::CONTENT_VALIDATOR)
+            .is_some_and(Registration::is_active)
     }
 
     pub fn total_stake(&self, role: RoleId) -> u64 {
@@ -620,6 +698,192 @@ mod tests {
 
     fn addr(b: u8) -> Address {
         Address::from([b; 32])
+    }
+
+    /// Withdrawing must never panic, whatever order the caller uses.
+    ///
+    /// The removal below used to be an `expect("checked")` that leaned on the
+    /// status match a few lines above. That was true, but the guarantee lived
+    /// away from the read. This walks every reachable status so the refusal is
+    /// asserted rather than assumed.
+    #[test]
+    fn withdraw_refuses_every_non_withdrawable_status_without_panicking() {
+        let account = addr(9);
+
+        // Never registered.
+        let mut reg = VerifierRegistry::new();
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, 100),
+            Err(RegistryError::NotRegistered { .. })
+        ));
+
+        // Registered and active: not unbonding yet.
+        reg.register_validator(account, 5_000, 0)
+            .expect("stake is above the minimum");
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, 100),
+            Err(RegistryError::NotActive { .. })
+        ));
+
+        // Unbonding but still locked.
+        let release = reg
+            .begin_unbonding(account, roles::VALIDATOR, 10)
+            .expect("an active registration can begin unbonding");
+        assert!(
+            release > 10,
+            "unbonding must lock the stake for some epochs"
+        );
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, release - 1),
+            Err(RegistryError::StillUnbonding { .. })
+        ));
+
+        // Released: the one path that pays out, and it pays the full stake.
+        assert_eq!(
+            reg.withdraw(account, roles::VALIDATOR, release),
+            Ok(5_000),
+            "a released registration returns the whole stake"
+        );
+
+        // Withdrawing twice must refuse, not double-pay.
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, release),
+            Err(RegistryError::NotRegistered { .. })
+        ));
+    }
+
+    /// Slashing the same registration twice must not burn the stake twice.
+    ///
+    /// This is the replay case: the same evidence arriving again must leave
+    /// the remaining stake untouched.
+    #[test]
+    fn slashing_twice_does_not_burn_the_remainder_again() {
+        let account = addr(11);
+        let mut reg = VerifierRegistry::new();
+        reg.register_validator(account, 10_000, 0)
+            .expect("stake is above the minimum");
+
+        let half = FIXED_POINT_SCALE / 2;
+        let first = reg
+            .slash(
+                account,
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                half,
+            )
+            .expect("an active registration can be slashed");
+        assert_eq!(first.penalty, 5_000);
+        assert_eq!(first.remaining_stake, 5_000);
+
+        let replay = reg.slash(
+            account,
+            roles::VALIDATOR,
+            SlashingCondition::DoubleSign,
+            half,
+        );
+        assert!(
+            matches!(replay, Err(RegistryError::AlreadySlashed { .. })),
+            "a replayed slash must be refused, got {replay:?}"
+        );
+
+        let after = reg
+            .get(&account, roles::VALIDATOR)
+            .expect("the registration still exists after being slashed");
+        assert_eq!(
+            after.stake, 5_000,
+            "the remaining stake must survive the replay untouched"
+        );
+    }
+
+    /// One address, several roles: slashing one jails all of them.
+    ///
+    /// The module header promises this, so it is asserted rather than trusted.
+    #[test]
+    fn slashing_one_role_jails_every_other_role_the_address_holds() {
+        let account = addr(12);
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(account, 5_000, 0)
+            .expect("stake is above the minimum");
+        reg.register_relayer(account, 3_000, 0)
+            .expect("stake is above the minimum");
+        reg.register_attester(account, 2_000, 0)
+            .expect("stake is above the minimum");
+
+        let half = FIXED_POINT_SCALE / 2;
+        reg.slash(
+            account,
+            roles::MASTER_VERIFIER,
+            SlashingCondition::DoubleSign,
+            half,
+        )
+        .expect("an active registration can be slashed");
+
+        for role in [roles::MASTER_VERIFIER, roles::RELAYER, roles::ATTESTER] {
+            assert!(
+                !reg.is_active(&account, role),
+                "role {role:?} stayed active after a cross-role slash"
+            );
+        }
+    }
+
+    /// Cikmakta olan uye yeni gorev almaz ama kesilebilir kalir.
+    ///
+    /// Bu, `src/registry/permissionless.rs` icindeki ayni adli testin
+    /// aynasidir. Iki kayit defteri ayni rollerin ayni yasam dongusunu
+    /// anlatiyor; ayni girdiye farkli cevap vermeleri, hangisinin okundugunu
+    /// bilmeyen bir cagirani sessizce yaniltir. Fark bir kez olctuldu ve
+    /// kapatildi: burada `Unbonding` reddediliyordu, cekirdekte kabul
+    /// ediliyordu. 2026-08-22 G0 karari: yardimcilar iki tarafta da
+    /// `is_active`'e cekildi - cikmakta olan uye yeni gorev alamaz,
+    /// kesilebiliriligi `is_slashable` ayri sorusunda surer.
+    #[test]
+    fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
+        let mut reg = VerifierRegistry::new();
+        let a = addr(21);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+
+        assert!(reg.is_active(&a, roles::RELAYER));
+        assert!(reg.is_active_relayer(&a));
+
+        reg.begin_unbonding(a, roles::RELAYER, 1)
+            .expect("unbonding");
+
+        assert!(
+            !reg.is_active(&a, roles::RELAYER),
+            "cikmakta olana yeni gorev verilmez"
+        );
+        assert!(
+            !reg.is_active_relayer(&a),
+            "rol yardimcisi da yeni gorev vermez: yetki yalniz Active"
+        );
+        assert!(
+            reg.get(&a, roles::RELAYER)
+                .is_some_and(|r| r.is_slashable()),
+            "bond hala kilitli: sorumluluk surer"
+        );
+    }
+
+    /// Kesilmis uye hicbir soruya `true` donmemeli.
+    #[test]
+    fn a_slashed_member_is_neither_active_nor_slashable_again() {
+        let mut reg = VerifierRegistry::new();
+        let a = addr(22);
+        reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
+            .expect("kayit");
+        reg.slash(
+            a,
+            roles::RELAYER,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE,
+        )
+        .expect("ilk kesme");
+
+        assert!(!reg.is_active(&a, roles::RELAYER));
+        assert!(
+            !reg.is_active_relayer(&a),
+            "kesilmis bond ikinci kez kesilemez"
+        );
     }
 
     #[test]
@@ -787,6 +1051,60 @@ mod tests {
         let result = reg.slash_from_report(&report).unwrap();
         assert!(result.is_some());
         assert!(!reg.is_active_master_verifier(&addr(11)));
+    }
+
+    /// Kesme gecmisi tavanda durur: en yeniler tutulur, en eskiler dusurulur.
+    ///
+    /// Ana agactaki karsi testin (`the_slashing_history_stops_growing_at_the_cap`)
+    /// aynasidir: iki defter ayni rapor dizisine ayni uzunluk ve ayni sira ile
+    /// cevap vermek zorundadir, yoksa hangisine bakildigini bilmeyen bir
+    /// cagiran sessizce yanitlanir.
+    #[test]
+    fn the_slashing_history_stops_growing_at_the_cap() {
+        use crate::evidence::{ProofProvenance, SlashingProof};
+
+        let mut reg = VerifierRegistry::new();
+        let total = MAX_SLASHING_HISTORY + 3;
+        for i in 0..total {
+            let mut raw = [0u8; 32];
+            raw[0] = (i / 256) as u8 + 1;
+            raw[1] = (i % 256) as u8;
+            let offender = Address::from(raw);
+            reg.register_master_verifier(offender, 10_000, 0).unwrap();
+            let report = SlashingReport::new(
+                offender,
+                roles::MASTER_VERIFIER,
+                SlashingProof::Liveness {
+                    window_start_epoch: 0,
+                    window_end_epoch: 10,
+                    missed: 5,
+                    expected: 10,
+                },
+                ProofProvenance::ConsensusVerified,
+                None,
+            );
+            assert!(reg.slash_from_report(&report).unwrap().is_some());
+        }
+
+        assert_eq!(reg.slashing_history().len(), MAX_SLASHING_HISTORY);
+        // En eski uc kayit dustu: kalan ilk kayit i=3 raporuna ait olmali.
+        let mut expected_first = [0u8; 32];
+        expected_first[0] = 1;
+        expected_first[1] = 3;
+        let first = reg
+            .slashing_history()
+            .first()
+            .map(|record| record.report.offender);
+        assert_eq!(first, Some(Address::from(expected_first)));
+        // En yeni kayit dizinin sonunda duruyor: budama bastan yapildi.
+        let mut expected_last = [0u8; 32];
+        expected_last[0] = ((total - 1) / 256) as u8 + 1;
+        expected_last[1] = ((total - 1) % 256) as u8;
+        let last = reg
+            .slashing_history()
+            .last()
+            .map(|record| record.report.offender);
+        assert_eq!(last, Some(Address::from(expected_last)));
     }
 
     #[test]

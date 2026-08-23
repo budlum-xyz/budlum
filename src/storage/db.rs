@@ -81,6 +81,11 @@ impl From<LegacyConsensusDomainV1> for ConsensusDomain {
             last_committed_height: domain.last_committed_height,
             last_committed_hash: domain.last_committed_hash,
             pow_parameters: None,
+            // Goc eden eski kayitta boyle bir alan yoktu, dolayisiyla bu
+            // alanin hangi programlara izin verdigi bilinmiyor. Bilinmeyen
+            // Izin = izin yok: liste bos birakilir ve alan, operatoru acikca
+            // Bir program listesi verene kadar zk ile ilerletilemez.
+            zk_program_allowlist: Vec::new(),
         }
     }
 }

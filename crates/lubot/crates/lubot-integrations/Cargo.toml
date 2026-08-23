@@ -9,3 +9,6 @@ description = "Dış veri adaptör iskeleti: WebSocket/REST bağlantı deseni, t
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[lints]
+workspace = true

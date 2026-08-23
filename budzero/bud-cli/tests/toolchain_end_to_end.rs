@@ -1,3 +1,7 @@
+// Integration test: an unwrap here is how the test reports a broken
+// invariant, so the workspace-wide panic gate does not apply.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! End-to-end coverage for the BudL toolchain: every checked-in `.bud` program
 //! must compile, execute, prove and verify.
 //!
@@ -13,15 +17,18 @@ use bud_proof::{event_digest_from_events, ExecutionPublicInputs, ProverAdapter};
 use bud_vm::Vm;
 use tiny_keccak::{Hasher, Keccak};
 
-/// Straight-line programs: these must survive the whole pipeline.
-const PROVABLE_PROGRAMS: &[&str] = &["example.bud", "example2.bud", "test_prover.bud"];
-
-/// Programs whose control flow skips an instruction.
+/// Programs that must survive the whole pipeline.
 ///
-/// The Program CTL LogUp in `plonky3_air` pairs every CPU row with exactly one
-/// preprocessed program row, so an instruction that is never executed leaves an
-/// unmatched row and verification fails. They must still compile and execute.
-const BRANCHING_PROGRAMS: &[&str] = &["example_loop.bud", "control_flow.bud"];
+/// Dallanmali programlar da buraya aittir: Program CTL artik bir *lookup*,
+/// permutasyon degil. `COL_PROG_MULT` her ROM satirinin kac kez calistirildigini
+/// tasidigi icin atlanan komut (0 kez) ve dongu govdesi (N kez) dengeyi bozmaz.
+const PROVABLE_PROGRAMS: &[&str] = &[
+    "example.bud",
+    "example2.bud",
+    "test_prover.bud",
+    "example_loop.bud",
+    "control_flow.bud",
+];
 
 fn workspace_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -39,6 +46,20 @@ fn keccak256(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn public_inputs_for(vm: &Vm, bytecode: &[u64], events: &[u64]) -> ExecutionPublicInputs {
+    public_inputs_with_writes(vm, bytecode, events, [0u8; 32])
+}
+
+/// Depolama yazan bir program icin kamu girdileri.
+///
+/// `state_writes_digest` AIR tarafindan gercek SWrite zincirine baglanir;
+/// sabit sifir vermek, depolamaya dokunan her programin dogrulamasini
+/// dusurur.
+fn public_inputs_with_writes(
+    vm: &Vm,
+    bytecode: &[u64],
+    events: &[u64],
+    state_writes_digest: [u8; 32],
+) -> ExecutionPublicInputs {
     let bytecode_bytes: Vec<u8> = bytecode
         .iter()
         .flat_map(|&word| word.to_le_bytes().to_vec())
@@ -66,7 +87,7 @@ fn public_inputs_for(vm: &Vm, bytecode: &[u64], events: &[u64]) -> ExecutionPubl
         exit_code: 0,
         trace_len: vm.trace.len() as u64,
         event_digest: event_digest_from_events(events),
-        state_writes_digest: [0u8; 32],
+        state_writes_digest,
     }
 }
 
@@ -132,45 +153,6 @@ fn hashing_the_event_list_breaks_verification_of_an_emitting_program() {
         bud_proof::Plonky3Adapter::verify(&bad, &pi, &bytecode).is_err(),
         "a hashed event digest must not satisfy the AIR binding"
     );
-}
-
-/// Branching programs must still compile and execute; only proving is blocked.
-#[test]
-fn branching_programs_execute_but_cannot_be_proved_yet() {
-    let root = workspace_root();
-    for name in BRANCHING_PROGRAMS {
-        let source = std::fs::read_to_string(root.join(name))
-            .unwrap_or_else(|e| panic!("{name}: cannot read: {e}"));
-        let bytecode = bud_compiler::compile(&source, IsaProfile::Production)
-            .unwrap_or_else(|e| panic!("{name}: compile failed: {e:?}"));
-
-        let mut vm = Vm::new(1024);
-        let receipt = vm.run_receipt(&bytecode);
-        assert!(
-            receipt.success,
-            "{name}: execution must still succeed: {:?}",
-            receipt.error
-        );
-
-        let visited: std::collections::HashSet<usize> =
-            vm.trace.iter().map(|step| step.pc).collect();
-        assert!(
-            visited.len() < bytecode.len(),
-            "{name}: this list is for programs that leave an instruction unexecuted \
-             ({} of {} program counters visited)",
-            visited.len(),
-            bytecode.len()
-        );
-
-        let pi = public_inputs_for(&vm, &bytecode, &receipt.events);
-        let envelope = bud_proof::Plonky3Adapter::prove(&vm.trace, &pi, &bytecode)
-            .unwrap_or_else(|e| panic!("{name}: prove failed: {e:?}"));
-        assert!(
-            bud_proof::Plonky3Adapter::verify(&envelope, &pi, &bytecode).is_err(),
-            "{name}: verified unexpectedly - the Program CTL branch gap looks fixed, \
-             update BudL_SPEC.md and move this program to PROVABLE_PROGRAMS"
-        );
-    }
 }
 
 /// The checked-in `state.json` is the default state file for `bud-cli`, so it
@@ -263,4 +245,107 @@ fn a_vm_smaller_than_the_heap_base_still_faults_on_structs() {
         "a 1024-byte VM is below HEAP_BASE and must fault; if this now succeeds \
          the heap layout changed and MIN_VM_MEMORY_BYTES needs revisiting"
     );
+}
+
+/// Depolama alani bildirmek onu kullanilabilir yapmali.
+///
+/// `storage { count: u64, }` ayristiriliyor ve `codegen` her alan icin bir
+/// slot ayirip `SWrite` uretebiliyordu, ama sema fonksiyon govdesine bos bir
+/// ortamla giriyordu: bildirilen alani okumak da yazmak da "Undefined
+/// variable" ile reddediliyordu. Dilin kalici durum ozelligi bastan sona
+/// yazilmisti ve hicbir program ona erisemiyordu.
+#[test]
+fn a_declared_storage_field_can_be_read_and_written() {
+    let source = "contract Counter {\n\
+                      storage {\n\
+                          count: u64,\n\
+                      }\n\
+                      pub fn main() {\n\
+                          storage::count = storage::count + 7;\n\
+                      }\n\
+                  }\n";
+    let bytecode = bud_compiler::compile(source, IsaProfile::Production)
+        .expect("bildirilen bir storage alani derlenebilmeli");
+
+    let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+    let receipt = vm.run_receipt(&bytecode);
+    assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
+    assert_ne!(
+        receipt.state_writes_digest, [0u8; 32],
+        "depolamaya yazan bir kosum bos olmayan bir yazma ozeti uretmeli"
+    );
+}
+
+/// Depolamaya yazan bir program kanitlanabilmeli.
+///
+/// AIR `state_writes_digest`'i gercek SWrite zincirine baglar (Strix HIGH
+/// CWE-345). Cagiran taraf oraya sabit sifir koydugunda kanit uretiliyor ama
+/// **kendi dogrulayicisinda** dusuyordu. Depolamaya dokunmayan programlarda
+/// sifir dogru cevap oldugu icin kusur gorunmuyordu.
+#[test]
+fn a_storage_writing_program_proves_and_verifies() {
+    let source = "contract W {\n\
+                      storage {\n\
+                          count: u64,\n\
+                      }\n\
+                      pub fn main() {\n\
+                          storage::count = 5;\n\
+                      }\n\
+                  }\n";
+    let bytecode = bud_compiler::compile(source, IsaProfile::Production).expect("compile");
+
+    let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+    let receipt = vm.run_receipt(&bytecode);
+    assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
+
+    let pi =
+        public_inputs_with_writes(&vm, &bytecode, &receipt.events, receipt.state_writes_digest);
+    let envelope =
+        bud_proof::Plonky3Adapter::prove(&vm.trace, &pi, &bytecode).expect("kanit uretilmeli");
+    bud_proof::Plonky3Adapter::verify(&envelope, &pi, &bytecode)
+        .expect("uretilen kanit dogrulanmali");
+
+    // Kirmizi taraf: eski davranis (sabit sifir) reddedilmeli.
+    let zeroed = public_inputs_with_writes(&vm, &bytecode, &receipt.events, [0u8; 32]);
+    assert!(
+        bud_proof::Plonky3Adapter::verify(&envelope, &zeroed, &bytecode).is_err(),
+        "sifir yazma ozeti tasiyan kamu girdisi kabul edilmemeli - bu tam olarak \
+         duzeltilen kusurdur"
+    );
+}
+
+/// Storage alaninin tipi gercekten var olmali.
+///
+/// `Type::from_str` primitif olmayan her adi `Type::Struct(ad)` yapar, bu
+/// yuzden `count: Uint644` gibi bir yazim hatasi hayali bir struct tipine
+/// donusuyor ve sessizce kabul ediliyordu. Ayni acik struct alan tiplerinde
+/// kapatilmisti; storage alanlari o gecisin disinda kalmisti.
+#[test]
+fn a_storage_field_with_an_unknown_type_is_refused() {
+    let source = "contract T {\n\
+                      storage {\n\
+                          count: Uint644,\n\
+                      }\n\
+                      pub fn main() {\n\
+                          storage::count = 1;\n\
+                      }\n\
+                  }\n";
+    let err = bud_compiler::compile(source, IsaProfile::Production)
+        .expect_err("bilinmeyen bir storage tipi reddedilmeli");
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("Uint644") && text.contains("storage field"),
+        "hata alani ve tipi adlandirmali: {text}"
+    );
+
+    // Yesil taraf: gercek tip gecmeli.
+    let ok = "contract T {\n\
+                  storage {\n\
+                      count: u64,\n\
+                  }\n\
+                  pub fn main() {\n\
+                      storage::count = 1;\n\
+                  }\n\
+              }\n";
+    bud_compiler::compile(ok, IsaProfile::Production).expect("u64 gecerli bir storage tipi");
 }

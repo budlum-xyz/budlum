@@ -1,0 +1,15 @@
+# Panik sinirlari: `unwrap_used` ve `expect_used` uretim yolunda `deny`.
+# Test kodu bu kapinin disinda kalir, ama bu istisna tek bir yerde yazilir.
+#
+# Alternatif, her test modulune `#[allow(clippy::unwrap_used)]` serpistirmekti.
+# O yol iki nedenle reddedildi: iki yuz otuzdan fazla suskunluk uretiyordu ve
+# her biri `suppressions-are-justified` kapisinin saydigi bir muafiyet olarak
+# agacta kaliyordu. Bir istisnanin denetlenebilir olmasi, gorunur ve tek
+# noktada olmasina baglidir; iki yuz kopya bunun tersidir.
+#
+# Kapsam uyarisi: bu iki anahtar yalnizca `#[test]` govdelerini ve
+# `#[cfg(test)]` modullerini kapsar. Entegrasyon testlerindeki serbest yardimci
+# fonksiyonlar ve `benches/` kapsam disindadir; onlar dosya basinda tek tek
+# ilan edilir ve `suppressions-are-justified` tablosunda gerekcesiyle durur.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

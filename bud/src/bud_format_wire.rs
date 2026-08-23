@@ -36,13 +36,41 @@ pub struct WireField {
 
 /// Wire format sürüm sözleşmesi: hangi alan hangi sürümden itibaren var.
 pub const WIRE_CONTRACT: &[WireField] = &[
-    WireField { id: 0x01, policy: FieldPolicy::MustUnderstand, since_version: 1 }, // content_id (K3)
-    WireField { id: 0x02, policy: FieldPolicy::MustUnderstand, since_version: 1 }, // chunk_codec
-    WireField { id: 0x03, policy: FieldPolicy::MustUnderstand, since_version: 1 }, // erasure_param
-    WireField { id: 0x04, policy: FieldPolicy::Ignorable, since_version: 1 },      // mime (kayıpsızlık dışı)
-    WireField { id: 0x05, policy: FieldPolicy::Ignorable, since_version: 1 },      // width/height (KF2 meta)
-    WireField { id: 0x06, policy: FieldPolicy::Ignorable, since_version: 2 },      // future: culling_plan
-    WireField { id: 0x07, policy: FieldPolicy::MustUnderstand, since_version: 3 }, // future: pq_signature (güvenlik)
+    WireField {
+        id: 0x01,
+        policy: FieldPolicy::MustUnderstand,
+        since_version: 1,
+    }, // content_id (K3)
+    WireField {
+        id: 0x02,
+        policy: FieldPolicy::MustUnderstand,
+        since_version: 1,
+    }, // chunk_codec
+    WireField {
+        id: 0x03,
+        policy: FieldPolicy::MustUnderstand,
+        since_version: 1,
+    }, // erasure_param
+    WireField {
+        id: 0x04,
+        policy: FieldPolicy::Ignorable,
+        since_version: 1,
+    }, // mime (kayıpsızlık dışı)
+    WireField {
+        id: 0x05,
+        policy: FieldPolicy::Ignorable,
+        since_version: 1,
+    }, // width/height (KF2 meta)
+    WireField {
+        id: 0x06,
+        policy: FieldPolicy::Ignorable,
+        since_version: 2,
+    }, // future: culling_plan
+    WireField {
+        id: 0x07,
+        policy: FieldPolicy::MustUnderstand,
+        since_version: 3,
+    }, // future: pq_signature (güvenlik)
 ];
 
 /// Okuyucu sürümü verilen bir alanı anlayabilir mi?
@@ -78,24 +106,27 @@ pub const GOLDEN_VECTORS: &[GoldenVector] = &[
         name: "empty-content-v1",
         input: b"",
         expected_digest: [
-            0x7a, 0x20, 0x33, 0x86, 0x70, 0xab, 0x69, 0x5d, 0xa0, 0xaa, 0x6e, 0xdc, 0xd5, 0x63, 0xd7, 0x74,
-            0x12, 0xe0, 0x97, 0x32, 0x9a, 0x1a, 0xd2, 0x0b, 0xec, 0xf6, 0xc3, 0x4f, 0xaa, 0x60, 0x9f, 0x00,
+            0x7a, 0x20, 0x33, 0x86, 0x70, 0xab, 0x69, 0x5d, 0xa0, 0xaa, 0x6e, 0xdc, 0xd5, 0x63,
+            0xd7, 0x74, 0x12, 0xe0, 0x97, 0x32, 0x9a, 0x1a, 0xd2, 0x0b, 0xec, 0xf6, 0xc3, 0x4f,
+            0xaa, 0x60, 0x9f, 0x00,
         ],
     },
     GoldenVector {
         name: "hello-v1",
         input: b"hello budlum",
         expected_digest: [
-            0x2d, 0xfb, 0x6e, 0x9f, 0xad, 0x00, 0xc6, 0x26, 0x6f, 0x1d, 0x88, 0x67, 0x1e, 0xbf, 0xe7, 0xb0,
-            0x53, 0x89, 0x14, 0x18, 0xe1, 0x85, 0xd1, 0x72, 0x27, 0x78, 0xd5, 0x40, 0x8c, 0x42, 0xab, 0x73,
+            0x2d, 0xfb, 0x6e, 0x9f, 0xad, 0x00, 0xc6, 0x26, 0x6f, 0x1d, 0x88, 0x67, 0x1e, 0xbf,
+            0xe7, 0xb0, 0x53, 0x89, 0x14, 0x18, 0xe1, 0x85, 0xd1, 0x72, 0x27, 0x78, 0xd5, 0x40,
+            0x8c, 0x42, 0xab, 0x73,
         ],
     },
     GoldenVector {
         name: "wire-contract-v1",
         input: b"wire-contract-v1",
         expected_digest: [
-            0x5d, 0xd8, 0xce, 0x41, 0x92, 0x96, 0x40, 0x04, 0x9f, 0xb8, 0x8a, 0x0f, 0xf7, 0x21, 0x60, 0x77,
-            0xda, 0x38, 0x88, 0xda, 0x8a, 0x0e, 0xe3, 0xd6, 0x67, 0xe4, 0x43, 0xa8, 0xdd, 0x99, 0x22, 0x2a,
+            0x5d, 0xd8, 0xce, 0x41, 0x92, 0x96, 0x40, 0x04, 0x9f, 0xb8, 0x8a, 0x0f, 0xf7, 0x21,
+            0x60, 0x77, 0xda, 0x38, 0x88, 0xda, 0x8a, 0x0e, 0xe3, 0xd6, 0x67, 0xe4, 0x43, 0xa8,
+            0xdd, 0x99, 0x22, 0x2a,
         ],
     },
 ];
@@ -146,7 +177,10 @@ mod tests {
     fn must_understand_yeni_alan_reddedilir() {
         // okuyucu v1, alan v3 (pq_signature, MustUnderstand) → RED
         let pq = WIRE_CONTRACT.iter().find(|f| f.id == 0x07).unwrap();
-        assert!(field_verdict(pq, 1).is_err(), "v1 okuyucu pq alanını anlamaz → RED");
+        assert!(
+            field_verdict(pq, 1).is_err(),
+            "v1 okuyucu pq alanını anlamaz → RED"
+        );
         // okuyucu v3 → anlar (Ok döner)
         assert!(field_verdict(pq, 3).is_ok());
     }
@@ -168,13 +202,19 @@ mod tests {
     #[test]
     fn sürüm_uyumluluğu() {
         assert!(version_compatible(1, 3));
-        assert!(!version_compatible(4, 3), "container sürümü codec'ten büyük → RED");
+        assert!(
+            !version_compatible(4, 3),
+            "container sürümü codec'ten büyük → RED"
+        );
         assert!(version_compatible(3, 3));
     }
 
     #[test]
     fn golden_vectors_deterministik() {
-        assert!(conformance_pass(), "golden vector kırıldı - sürüm değişimi bilinçli olmalı");
+        assert!(
+            conformance_pass(),
+            "golden vector kırıldı - sürüm değişimi bilinçli olmalı"
+        );
         // aynı girdi → aynı özet
         assert_eq!(golden(b"hello budlum"), golden(b"hello budlum"));
         assert_ne!(golden(b"hello budlum"), golden(b"hello budlumX"));
@@ -184,11 +224,23 @@ mod tests {
     fn contract_benzersiz_id() {
         assert!(contract_ok(WIRE_CONTRACT));
         let bozuk = vec![
-            WireField { id: 1, policy: FieldPolicy::MustUnderstand, since_version: 1 },
-            WireField { id: 1, policy: FieldPolicy::Ignorable, since_version: 2 }, // çift id
+            WireField {
+                id: 1,
+                policy: FieldPolicy::MustUnderstand,
+                since_version: 1,
+            },
+            WireField {
+                id: 1,
+                policy: FieldPolicy::Ignorable,
+                since_version: 2,
+            }, // çift id
         ];
         assert!(!contract_ok(&bozuk));
-        let sifir = vec![WireField { id: 2, policy: FieldPolicy::Ignorable, since_version: 0 }];
+        let sifir = vec![WireField {
+            id: 2,
+            policy: FieldPolicy::Ignorable,
+            since_version: 0,
+        }];
         assert!(!contract_ok(&sifir), "since_version >= 1 olmalı");
     }
 

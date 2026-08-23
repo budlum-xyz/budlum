@@ -15,9 +15,9 @@ use crate::bud_format_container::content_id;
 
 pub const FASTCDC_MAGIC: [u8; 8] = *b"\xB5FCDC\0\0\0";
 pub const FASTCDC_VERSION: u8 = 1;
-pub const FCDC_MIN_CHUNK: usize = 4 * 1024;    // 4KB
-pub const FCDC_AVG_CHUNK: usize = 16 * 1024;   // 16KB (V7)
-pub const FCDC_MAX_CHUNK: usize = 64 * 1024;   // 64KB
+pub const FCDC_MIN_CHUNK: usize = 4 * 1024; // 4KB
+pub const FCDC_AVG_CHUNK: usize = 16 * 1024; // 16KB (V7)
+pub const FCDC_MAX_CHUNK: usize = 64 * 1024; // 64KB
 
 /// Gear hash sabitleri (deterministik - aynı girdi aynı sınırlar).
 const GEAR_TABLE: [u64; 128] = [
@@ -164,8 +164,13 @@ pub struct FastCdcSplit {
 impl FastCdcSplit {
     /// Gear hash ile parçala (deterministik sınırlar).
     pub fn split(data: &[u8], min_c: usize, avg_c: usize, max_c: usize) -> Option<Self> {
-        if data.is_empty() || min_c == 0 || avg_c == 0 || max_c == 0
-            || min_c > avg_c || avg_c > max_c {
+        if data.is_empty()
+            || min_c == 0
+            || avg_c == 0
+            || max_c == 0
+            || min_c > avg_c
+            || avg_c > max_c
+        {
             return None;
         }
         let mask = Self::mask_for_avg(avg_c);
@@ -179,10 +184,18 @@ impl FastCdcSplit {
             let c = data.to_vec();
             chunks.push(c.clone());
             chunk_ids.push(content_id(&c));
-            return Some(FastCdcSplit { chunks, chunk_ids, min_chunk: min_c, avg_chunk: avg_c, max_chunk: max_c });
+            return Some(FastCdcSplit {
+                chunks,
+                chunk_ids,
+                min_chunk: min_c,
+                avg_chunk: avg_c,
+                max_chunk: max_c,
+            });
         }
         while i < data.len() {
-            hash = (hash.rotate_left(1)).wrapping_mul(GEAR_TABLE[(data[i] & 0x7F) as usize]).wrapping_add(data[i] as u64);
+            hash = (hash.rotate_left(1))
+                .wrapping_mul(GEAR_TABLE[(data[i] & 0x7F) as usize])
+                .wrapping_add(data[i] as u64);
             let len = i - start;
             let cut = (hash & mask) == 0;
             if (cut && len >= min_c) || len >= max_c {
@@ -200,14 +213,24 @@ impl FastCdcSplit {
             chunks.push(c.clone());
             chunk_ids.push(content_id(&c));
         }
-        Some(FastCdcSplit { chunks, chunk_ids, min_chunk: min_c, avg_chunk: avg_c, max_chunk: max_c })
+        Some(FastCdcSplit {
+            chunks,
+            chunk_ids,
+            min_chunk: min_c,
+            avg_chunk: avg_c,
+            max_chunk: max_c,
+        })
     }
 
     /// Ortalama parça boyuna göre maske (avg ≈ 2^avg_bits).
     fn mask_for_avg(avg: usize) -> u64 {
         let bits = avg.ilog2().max(1);
-        let m = if bits >= 63 { u64::MAX } else { (1u64 << bits) - 1 };
-        m
+
+        if bits >= 63 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
     }
 
     /// Birleştir → orijinal (kayıpsızlık kanıtı).
@@ -223,7 +246,11 @@ impl FastCdcSplit {
     /// Parça sayısı + ortalama boyut (tanı).
     pub fn stats(&self) -> (usize, f64) {
         let n = self.chunks.len();
-        let avg = if n > 0 { self.chunks.iter().map(|c| c.len()).sum::<usize>() as f64 / n as f64 } else { 0.0 };
+        let avg = if n > 0 {
+            self.chunks.iter().map(|c| c.len()).sum::<usize>() as f64 / n as f64
+        } else {
+            0.0
+        };
         (n, avg)
     }
 }
@@ -275,7 +302,10 @@ mod tests {
         let ids_a: std::collections::HashSet<_> = sa.chunk_ids.iter().cloned().collect();
         let ids_b: std::collections::HashSet<_> = sb.chunk_ids.iter().cloned().collect();
         let shared = ids_a.intersection(&ids_b).count();
-        assert!(shared >= 2, "içerik-tanımlı parçalama edit'e dirençli: {shared} ortak");
+        assert!(
+            shared >= 2,
+            "içerik-tanımlı parçalama edit'e dirençli: {shared} ortak"
+        );
     }
 
     #[test]

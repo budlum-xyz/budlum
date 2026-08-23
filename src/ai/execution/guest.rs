@@ -220,8 +220,14 @@ pub fn build_fixed_point_mlp_guest(
     spec.validate()?;
     let wdig = weights_digest(spec);
     // Pack first 8 bytes of each digest as u64 LE field elements for Poseidon.
-    let w_limb = u64::from_le_bytes(wdig[0..8].try_into().unwrap());
-    let i_limb = u64::from_le_bytes(input_commit[0..8].try_into().unwrap());
+    // Both digests are 32-byte arrays, so the first eight bytes always exist;
+    // read them as fixed-size arrays so there is no fallible conversion.
+    let mut w_head = [0u8; 8];
+    w_head.copy_from_slice(&wdig[0..8]);
+    let mut i_head = [0u8; 8];
+    i_head.copy_from_slice(&input_commit[0..8]);
+    let w_limb = u64::from_le_bytes(w_head);
+    let i_limb = u64::from_le_bytes(i_head);
 
     let mut prog = Vec::with_capacity(16);
     // r10 = 2^32, the shift used to rebuild a 64-bit limb from two halves.

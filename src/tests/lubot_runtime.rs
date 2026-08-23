@@ -710,3 +710,142 @@ fn ai_model_register_below_fee_is_rejected_atomically() {
         "atomic: hiçbir kesinti olmamalı"
     );
 }
+
+// ── effort.rs Kural 2: ilan edilen kapasite uygunluğu kapılar ────────────
+//
+// `tier_is_servable` yazılmıştı ama hiçbir yerden çağrılmıyordu, çünkü
+// operatörün tavanını ilan edecek bir yer yoktu. `verifier_effort_ceilings`
+// o yer; aşağıdaki testler kapının hem çalıştığını hem de boş (vacuous)
+// olmadığını sabitler.
+
+#[test]
+fn tavan_ilan_edilmeden_varsayilan_baseline() {
+    use crate::ai::registry::{AiRegistry, DEFAULT_OPERATOR_CEILING};
+    use crate::lubot::effort::EffortTier;
+
+    let reg = AiRegistry::new();
+    let operator = Address::from([0x11; 32]);
+    assert_eq!(reg.effort_ceiling(&operator), DEFAULT_OPERATOR_CEILING);
+    assert_eq!(reg.effort_ceiling(&operator), EffortTier::BASELINE);
+}
+
+#[test]
+fn stakesiz_operator_tavan_ilan_edemez() {
+    use crate::ai::registry::AiRegistry;
+    use crate::lubot::effort::EffortTier;
+
+    let mut reg = AiRegistry::new();
+    let operator = Address::from([0x12; 32]);
+    // Stake yok -> yetkisiz -> ilan reddedilmeli.
+    assert!(reg
+        .declare_effort_ceiling(&operator, EffortTier::DEEPEST)
+        .is_err());
+    assert_eq!(reg.effort_ceiling(&operator), EffortTier::BASELINE);
+}
+
+#[test]
+fn tavan_ustundeki_istek_fail_closed_reddedilir() {
+    use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
+    use crate::lubot::effort::EffortTier;
+
+    let mut reg = AiRegistry::new();
+    let operator = Address::from([0x13; 32]);
+    reg.lock_verifier_stake(&operator, MIN_VERIFIER_STAKE)
+        .unwrap();
+    // Operatör 2.0x'e kadar hizmet verebildiğini ilan ediyor.
+    let ceiling = EffortTier::from_tenths(20).unwrap();
+    reg.declare_effort_ceiling(&operator, ceiling).unwrap();
+
+    // Tavanın altı ve tam tavan servis edilebilir.
+    assert!(reg.unservable_reason(EffortTier::BASELINE).is_none());
+    assert!(reg.unservable_reason(ceiling).is_none());
+
+    // Tavanın üstü fail-closed: sessizce ucuzlatılmaz.
+    let reason = reg
+        .unservable_reason(EffortTier::DEEPEST)
+        .expect("10.0x, 2.0x tavanının üstünde: reddedilmeliydi");
+    assert!(
+        reason.contains("exceeds every declared operator ceiling"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn tavan_ustundeki_istek_submit_request_tarafindan_reddedilir() {
+    use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
+    use crate::lubot::effort::EffortTier;
+
+    let requester = Address::from([0x14; 32]);
+    let (spec, mut request) = model_and_request(requester);
+
+    let mut reg = AiRegistry::new();
+    reg.register_model(spec).unwrap();
+
+    let operator = Address::from([0x15; 32]);
+    reg.lock_verifier_stake(&operator, MIN_VERIFIER_STAKE)
+        .unwrap();
+    reg.declare_effort_ceiling(&operator, EffortTier::BASELINE)
+        .unwrap();
+
+    // Baseline istek kabul edilir (kapı boş değil: bu taraf geçmeli).
+    assert!(reg.submit_request(request.clone(), 0).is_ok());
+
+    // 10.0x istek reddedilir.
+    request.effort = EffortTier::DEEPEST;
+    request.request_id = request.calculate_id();
+    let err = reg
+        .submit_request(request, 0)
+        .expect_err("tavan üstü istek admission'da reddedilmeliydi");
+    assert!(err.contains("unservable"), "{err}");
+}
+
+#[test]
+fn operator_yokken_istek_reddedilmez() {
+    use crate::ai::registry::AiRegistry;
+    use crate::lubot::effort::EffortTier;
+
+    // Operatör yokluğu bir canlılık sorunudur, admission sorunu değil:
+    // operatörler istekten sonra da katılabilir.
+    let reg = AiRegistry::new();
+    assert!(reg.unservable_reason(EffortTier::DEEPEST).is_none());
+}
+
+#[test]
+fn tavan_state_root_a_girer() {
+    use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
+    use crate::lubot::effort::EffortTier;
+
+    let operator = Address::from([0x16; 32]);
+    let mut a = AiRegistry::new();
+    a.lock_verifier_stake(&operator, MIN_VERIFIER_STAKE)
+        .unwrap();
+    let mut b = a.clone();
+
+    a.declare_effort_ceiling(&operator, EffortTier::BASELINE)
+        .unwrap();
+    b.declare_effort_ceiling(&operator, EffortTier::DEEPEST)
+        .unwrap();
+
+    // Tavan admission kararını değiştiriyor; state_root'a girmezse iki düğüm
+    // aynı isteği farklı sonuçlandırır ve bunu fark etmez.
+    assert_ne!(a.state_root(), b.state_root());
+}
+
+#[test]
+fn slash_tavani_da_kaldirir() {
+    use crate::ai::registry::{AiRegistry, MIN_VERIFIER_STAKE};
+    use crate::lubot::effort::EffortTier;
+
+    let operator = Address::from([0x17; 32]);
+    let mut reg = AiRegistry::new();
+    reg.lock_verifier_stake(&operator, MIN_VERIFIER_STAKE)
+        .unwrap();
+    reg.declare_effort_ceiling(&operator, EffortTier::DEEPEST)
+        .unwrap();
+    assert_eq!(reg.effort_ceiling(&operator), EffortTier::DEEPEST);
+
+    // Stake tamamen çekilince ilan da düşer.
+    reg.withdraw_verifier_stake(&operator, MIN_VERIFIER_STAKE, 0)
+        .unwrap();
+    assert_eq!(reg.effort_ceiling(&operator), EffortTier::BASELINE);
+}

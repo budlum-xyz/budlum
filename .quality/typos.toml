@@ -111,6 +111,21 @@ vektor = "vektor"
 vektoru = "vektoru"
 Vektor = "Vektor"
 
+# ── §67 kanitlanmis talep turunda eklenenler ──────────────────────────
+# Ikisi de Türkçe kelime; typos'un İngilizce sözlüğü bunları "again" ve
+# "popular" sanıyor.
+#   agin     : "ag" (network) isminin ilgi hâli (agin uzerinde anlasmasi)
+#   populer  : Türkçe yazımıyla popüler; "popular" değil
+agin = "agin"
+Agin = "Agin"
+populer = "populer"
+Populer = "Populer"
+populerlik = "populerlik"
+populerlikle = "populerlikle"
+# formatin : "format" isminin ilgi hâli (formatin butun fikri); "formation" değil
+formatin = "formatin"
+Formatin = "Formatin"
+
 # ── Özel adlar / teknik terimler ────────────────────────────────────────
 Canva = "Canva"     # ürün adı (Canvas değil)
 Groth = "Groth"     # Groth16 zk-SNARK şeması (Jens Groth)

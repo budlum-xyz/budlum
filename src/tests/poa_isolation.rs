@@ -285,3 +285,186 @@ mod poa_isolation_tests {
         );
     }
 }
+
+/// PoA uyum defteri artik bir KAPI: dondurma kaydinin sonucu var.
+///
+/// Modul uzun sure yalniz kayit tutuyordu - dondurma cagrilabiliyordu ama
+/// dondurulmus olmanin hicbir etkisi yoktu. Bu testler baglamayi kilitler.
+#[cfg(test)]
+mod poa_compliance_gate {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::PoWEngine;
+    use crate::core::address::Address;
+    use crate::domain::plugin::default_domain;
+    use crate::domain::{ConsensusDomain, ConsensusKind};
+    use crate::registry::ComplianceDomainKind;
+    use std::sync::Arc;
+
+    fn addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    fn chain() -> Blockchain {
+        Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None)
+    }
+
+    fn poa_domain(id: u32) -> ConsensusDomain {
+        default_domain(
+            id,
+            ConsensusKind::PoA,
+            u64::from(id) + 900,
+            "poa-authority-quorum",
+            0,
+        )
+    }
+
+    /// Izinsiz alanda dondurma REDDEDILIR.
+    ///
+    /// Egemenlik iddiasi tasiyan bir agda, izinsiz bir alanin hesabini
+    /// merkezi bir yonetici donduramamali. Alanin turu **kaydindan** okunur;
+    /// cagiran kendi alanini "PoA" ilan edip bu yetkiyi uretemez.
+    #[test]
+    fn a_permissionless_domain_account_cannot_be_frozen() {
+        let mut bc = chain();
+        // PoA olmayan herhangi bir alan: uyum defteri yalniz PoA'ya bakar.
+        let d = default_domain(7, ConsensusKind::PoW, 907, "pow-header-chain-v1", 0);
+        bc.register_consensus_domain(d).expect("alan kaydi");
+
+        let err = bc
+            .freeze_poa_account(7, true, addr(0x42), [9u8; 32])
+            .expect_err("izinsiz alanda dondurma reddedilmeli");
+        assert!(
+            err.contains("Poa") || err.contains("PoA") || err.contains("Permissionless"),
+            "gerekce alanin izinsiz oldugunu soylemeli, gelen: {err}"
+        );
+        assert!(!bc
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &addr(0x42)));
+    }
+
+    /// Yetkisiz cagiran donduramaz.
+    #[test]
+    fn an_unauthorized_admin_cannot_freeze() {
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(8))
+            .expect("alan kaydi");
+
+        bc.freeze_poa_account(8, false, addr(0x43), [9u8; 32])
+            .expect_err("yetkisiz dondurma reddedilmeli");
+        assert!(!bc
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &addr(0x43)));
+    }
+
+    /// Gerekce ozeti sifir olamaz: kanitsiz dondurma denetlenemez.
+    #[test]
+    fn a_freeze_without_evidence_is_refused() {
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(9))
+            .expect("alan kaydi");
+
+        bc.freeze_poa_account(9, true, addr(0x44), [0u8; 32])
+            .expect_err("sifir gerekce ozeti reddedilmeli");
+        assert!(!bc
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &addr(0x44)));
+    }
+
+    /// Bilinmeyen alan icin dondurma yok.
+    #[test]
+    fn an_unknown_domain_cannot_be_frozen() {
+        let mut bc = chain();
+        let err = bc
+            .freeze_poa_account(4242, true, addr(0x45), [9u8; 32])
+            .expect_err("bilinmeyen alan reddedilmeli");
+        assert!(err.contains("unknown domain"), "{err}");
+    }
+
+    /// Dondurma bir KAPI kurar: dondurulmus operatorun denetim paketi reddedilir.
+    ///
+    /// Kaydin sonucu olmasaydi "donduruldu" yalnizca bir not olurdu.
+    #[test]
+    fn a_frozen_operator_cannot_export_a_sovereign_audit_bundle() {
+        use crate::domain::sovereign::{
+            AuditExportBundle, ComplianceEvidence, DomainLifecycleState, SovereignDomainClass,
+            SovereignDomainTemplate,
+        };
+
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(11))
+            .expect("alan kaydi");
+        // Operator alanin KAYDINDAN okunur. Testin kendi adresini uydurmasi,
+        // kaydin sablonla tutarliligini dogrulayan kapiyi atlatirdi; kayit
+        // zaten "sablonun operatoru alanin operatoruyle ayni olmali" diyor.
+        let operator = bc
+            .domain_registry
+            .get(11)
+            .and_then(|d| d.operator)
+            .expect("kayitli alanin operatoru");
+
+        let compliance = ComplianceEvidence {
+            policy_hash: [3u8; 32],
+            authority_set_hash: [4u8; 32],
+            jurisdiction_hash: [5u8; 32],
+            audit_commitment: [6u8; 32],
+        };
+        let template = SovereignDomainTemplate::new(
+            11,
+            SovereignDomainClass::EnterprisePoa,
+            ConsensusKind::PoA,
+            operator,
+            true,
+            compliance,
+            DomainLifecycleState::Active,
+        );
+        let template_id = template.template_id;
+        let compliance_root = template.compliance.root();
+        bc.register_sovereign_template(template)
+            .expect("sablon kaydi");
+
+        let bundle = AuditExportBundle {
+            template_id,
+            from_height: 0,
+            to_height: 10,
+            global_header_root: [6u8; 32],
+            commitment_root: [7u8; 32],
+            compliance_root,
+        };
+
+        // Dondurmadan once gecer.
+        bc.validate_sovereign_audit_export(&bundle)
+            .expect("dondurma yokken paket gecmeli");
+
+        // Operator dondurulur.
+        bc.freeze_poa_account(11, true, operator, [8u8; 32])
+            .expect("yetkili dondurma");
+
+        let err = bc
+            .validate_sovereign_audit_export(&bundle)
+            .expect_err("dondurulmus operatorun paketi reddedilmeli");
+        assert!(
+            err.contains("frozen"),
+            "gerekce dondurmayi soylemeli: {err}"
+        );
+    }
+
+    /// Dondurma calisir ve denetim izine girer.
+    #[test]
+    fn a_poa_freeze_is_recorded_with_its_evidence() {
+        let mut bc = chain();
+        bc.register_consensus_domain(poa_domain(10))
+            .expect("alan kaydi");
+        let target = addr(0x46);
+
+        bc.freeze_poa_account(10, true, target, [7u8; 32])
+            .expect("yetkili dondurma gecmeli");
+
+        assert!(bc
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &target));
+        assert!(
+            !bc.poa_compliance.audit_events().is_empty(),
+            "dondurma denetim izine girmeli"
+        );
+    }
+}

@@ -191,6 +191,35 @@ pub struct ConsensusDomain {
     /// By the storage loader and remain bridge-gated.
     #[serde(default)]
     pub pow_parameters: Option<PoWDomainParameters>,
+    /// Bu alani ilerletmesine izin verilen zk programlarinin hash'leri.
+    ///
+    /// # Neden bir izin listesi gerekiyor
+    ///
+    /// Kanit dogrulayicisi (`Plonky3Adapter::verify`) programin hash'ini
+    /// hesaplayip `public_inputs.program_hash` ile karsilastirir. Bu **ic
+    /// tutarlilik** denetimidir: gonderen hem programi hem beklenen hash'i
+    /// kendisi verdigi icin, ikisi birbirini dogrular ve her zaman uyusur.
+    /// Denetim "gonderdigin program, gonderdigin hash'e uyuyor" der;
+    /// "bu programin bu alani ilerletmeye hakki var" demez.
+    ///
+    /// Sonuc: saldirgan kendi yazdigi bir programi - ornegin durum kokunu
+    /// istedigi degere goturen bir program - kusursuz bir kanitla sunabilirdi.
+    /// Kanit gercekten gecerlidir; yalan soyleyen kanit degil, programin
+    /// kendisidir. Kanit sistemi bunu yakalayamaz, cunku isi "bu program boyle
+    /// kostu" demektir, "bu program calistirilmali miydi" demek degil.
+    ///
+    /// Bu liste o bosluu kapatir: alan, kendisini ilerletebilecek program
+    /// kumesini onceden ilan eder. Disaridan gelen kod, ancak bizim
+    /// eklememizle ice girer.
+    ///
+    /// # Bos liste = kapali kapi
+    ///
+    /// Bos birakilirsa alan **hicbir** zk kanitini kabul etmez. Varsayilan
+    /// kasten bu yonde: yeni ya da eski (goc etmis) bir kayit, kimse ona bir
+    /// program listesi vermeden zk ile ilerletilemez. Fail-open bir varsayilan
+    /// (bos liste = herkese acik) bu alani tamamen sussuz birakirdi.
+    #[serde(default)]
+    pub zk_program_allowlist: Vec<Hash32>,
 }
 
 impl ConsensusDomain {

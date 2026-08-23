@@ -14,10 +14,10 @@ pub const SVC_MAGIC: [u8; 8] = *b"\xB5SVC1\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServiceClass {
-    Hot = 0,    // erişim sık → HDD-CMR/QLC, çok kopya/erasure yüksek
-    Warm = 1,   // arada → HDD-CMR, erasure standart
-    Cold = 2,   // nadir → SMR/tape-hibrit, erasure düşük
-    Archive = 3, // yasal/uzun → tape/M-Disc, write-once
+    Hot = 0,         // erişim sık → HDD-CMR/QLC, çok kopya/erasure yüksek
+    Warm = 1,        // arada → HDD-CMR, erasure standart
+    Cold = 2,        // nadir → SMR/tape-hibrit, erasure düşük
+    Archive = 3,     // yasal/uzun → tape/M-Disc, write-once
     Regenerable = 4, // üretilebilir → sözleşme + commitment (bayt tutmaz, İ2)
 }
 
@@ -70,7 +70,13 @@ mod tests {
 
     #[test]
     fn her_sinif_ic_yerlesimi_var() {
-        for c in [ServiceClass::Hot, ServiceClass::Warm, ServiceClass::Cold, ServiceClass::Archive, ServiceClass::Regenerable] {
+        for c in [
+            ServiceClass::Hot,
+            ServiceClass::Warm,
+            ServiceClass::Cold,
+            ServiceClass::Archive,
+            ServiceClass::Regenerable,
+        ] {
             assert!(!placement_media(c).is_empty());
         }
     }
