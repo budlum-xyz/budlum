@@ -393,7 +393,14 @@ mod poa_compliance_gate {
         let mut bc = chain();
         bc.register_consensus_domain(poa_domain(11))
             .expect("alan kaydi");
-        let operator = addr(0x11);
+        // Operator alanin KAYDINDAN okunur. Testin kendi adresini uydurmasi,
+        // kaydin sablonla tutarliligini dogrulayan kapiyi atlatirdi; kayit
+        // zaten "sablonun operatoru alanin operatoruyle ayni olmali" diyor.
+        let operator = bc
+            .domain_registry
+            .get(11)
+            .and_then(|d| d.operator)
+            .expect("kayitli alanin operatoru");
 
         let compliance = ComplianceEvidence {
             policy_hash: [3u8; 32],
