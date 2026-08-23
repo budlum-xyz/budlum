@@ -1096,6 +1096,86 @@ impl StorageRegistry {
             .or_insert_with(|| manifest.clone());
     }
 
+    /// Kaynak rejimi beyan eden bir manifest'i kaydet.
+    ///
+    /// **"Uretiliyor" bir indirim talebidir, bu yuzden kanitlanmadan kabul
+    /// edilmez.** `Generated` diyen bir manifest yalnizca bir kopya tutmayi
+    /// hak eder (`required_replica_count`); bu iddia dogrulanmasaydi, siradan
+    /// organik icerigi "uretiliyor" diye etiketleyen biri ucte bir kopyayla
+    /// tam dayaniklilik odemesi alir ve icerik gercekten kaybolurdu.
+    ///
+    /// Dogrulama ucuz ve kesindir: tarifi KOSAR, cikan baytlarin icerik
+    /// kimligini hesaplar ve manifest'in tek shard'iyla karsilastirir.
+    /// Uyduramazsin - tarif uzayi icerik uzayindan kucuktur (guvercin
+    /// yuvasi); tarif ancak icerik gercekten o tariften dogduysa tutar.
+    ///
+    /// `Hybrid` bu yolda kabul edilmez: onek baytlari zincirde degildir, bu
+    /// yuzden dogrulanamaz. Dogrulanamayan bir iddia indirim de almaz.
+    ///
+    /// # Errors
+    ///
+    /// Tarif kosulamazsa, urettigi baytlar manifest'in kimligiyle
+    /// eslesmezse, manifest tek shard'li degilse ya da rejim `Hybrid` ise
+    /// hata doner.
+    pub fn register_manifest_with_source(
+        &mut self,
+        manifest: &ContentManifest,
+    ) -> Result<(), StorageError> {
+        match &manifest.source {
+            crate::storage::generated::ContentSource::Stored => {}
+            crate::storage::generated::ContentSource::Generated(spec) => {
+                // Uretilen icerik tek parcadir: tarif butun nesneyi uretir.
+                // Cok shard'li bir "uretiliyor" iddiasi hangi shard'in hangi
+                // parcaya denk geldigini soylemez, yani dogrulanamaz.
+                if manifest.shards.len() != 1 {
+                    return Err(StorageError::InvalidManifest {
+                        reason: "Generated manifest must have exactly one shard".into(),
+                    });
+                }
+                let shard =
+                    manifest
+                        .shards
+                        .first()
+                        .ok_or_else(|| StorageError::InvalidManifest {
+                            reason: "Generated manifest has no shard".into(),
+                        })?;
+                // Tarifi KOS. Iddia burada ya tutar ya dusr.
+                crate::storage::generated::generate_and_verify(spec, shard.shard_id).map_err(
+                    |e| StorageError::InvalidManifest {
+                        reason: format!(
+                            "Generated manifest recipe does not reproduce its content: {e:?}"
+                        ),
+                    },
+                )?;
+            }
+            crate::storage::generated::ContentSource::Hybrid { .. } => {
+                return Err(StorageError::InvalidManifest {
+                    reason:
+                        "Hybrid source cannot be verified on-chain; its prefix is not recoverable"
+                            .into(),
+                });
+            }
+        }
+        self.register_manifest(manifest);
+        Ok(())
+    }
+
+    /// Bu manifest icin kac kopya gerektigi.
+    ///
+    /// Kayitli manifest'in beyan ettigi rejime bakar. Kayitli degilse tam
+    /// hedef doner: bilmedigimiz bir seye indirim verilmez (fail-closed).
+    #[must_use]
+    pub fn required_replicas_for(&self, manifest_id: &ContentId) -> u8 {
+        self.manifests
+            .get(manifest_id)
+            .map_or(STORAGE_REPLICATION_TARGET, |manifest| {
+                crate::storage::generated::required_replica_count(
+                    &manifest.source,
+                    STORAGE_REPLICATION_TARGET,
+                )
+            })
+    }
+
     pub fn get_manifest(&self, manifest_id: &ContentId) -> Option<&ContentManifest> {
         self.manifests.get(manifest_id)
     }
@@ -2439,16 +2519,19 @@ impl StorageRegistry {
             .count()
     }
 
+    /// Hedefin altinda kalan shard'lar.
+    ///
+    /// Hedef artik sabit degil, **icerigin kaynagina** baglidir: tariften
+    /// dogan icerik icin bir kopya yeterlidir (`required_replicas_for`).
+    /// Sabit 3 ile olcmek, tarifli icerigi surekli "eksik kopyali" gosterip
+    /// hicbir dayaniklilik eklemeyen onarim biletleri actiriyordu.
     pub fn under_replicated_shards(&self) -> Vec<(ContentId, ContentId, usize)> {
         self.deals_by_shard
             .keys()
             .filter_map(|(manifest_id, shard_id)| {
                 let active = self.active_replica_count(manifest_id, shard_id);
-                (active < usize::from(STORAGE_REPLICATION_TARGET)).then_some((
-                    *manifest_id,
-                    *shard_id,
-                    active,
-                ))
+                let target = usize::from(self.required_replicas_for(manifest_id));
+                (active < target).then_some((*manifest_id, *shard_id, active))
             })
             .collect()
     }
@@ -2632,6 +2715,169 @@ mod tests {
         ContentManifest::from_bytes_sliced(b"some test content for the deal", 8).unwrap()
     }
 
+    // === B.U.D. 3.0: tarif dayanikliligi kopyanin yerine gecer ===========
+
+    /// Tarifi gercekten kosan, dolayisiyla kaydi kabul edilen bir manifest.
+    fn generated_manifest() -> (ContentManifest, crate::storage::generated::GeneratedSpec) {
+        use crate::storage::generated::{generate_content, GeneratedSpec, GeneratorId};
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [7u8; 32],
+            output_len: 32 * 32,
+            step_budget: 1_000_000,
+        };
+        // Manifest, tarifin GERCEK ciktisindan kurulur: iddia dogru olsun.
+        let bytes = generate_content(&spec).expect("tarif kosmali");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("manifest")
+            .with_source(crate::storage::generated::ContentSource::Generated(
+                spec.clone(),
+            ));
+        (manifest, spec)
+    }
+
+    /// Tariften dogan icerik TEK kopya ister; uc kopya dayaniklilik eklemez.
+    ///
+    /// Ayni deterministik ureteci uc kez saklamak, ucuncu bir yedek degil
+    /// ayni cevabin uc kopyasidir. Icerigi ayakta tutan sey zincirdeki
+    /// tariftir.
+    #[test]
+    fn a_recipe_backed_object_needs_one_copy_not_three() {
+        use crate::storage::generated::{required_replica_count, ContentSource};
+        let (manifest, spec) = generated_manifest();
+
+        assert_eq!(
+            required_replica_count(
+                &ContentSource::Generated(spec.clone()),
+                STORAGE_REPLICATION_TARGET
+            ),
+            1,
+            "tarifli icerik tek kopya ister"
+        );
+        // Tutulan icerik tam hedefi ister: baytlarin baska kaynagi yok.
+        assert_eq!(
+            required_replica_count(&ContentSource::Stored, STORAGE_REPLICATION_TARGET),
+            STORAGE_REPLICATION_TARGET
+        );
+        // Hybrid indirim ALMAZ: onek yeniden uretilemeyen gercek bayttir.
+        assert_eq!(
+            required_replica_count(
+                &ContentSource::Hybrid {
+                    prefix_bytes: 16,
+                    spec,
+                },
+                STORAGE_REPLICATION_TARGET
+            ),
+            STORAGE_REPLICATION_TARGET,
+            "onek yeniden uretilemez, indirim alamaz"
+        );
+
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&manifest)
+            .expect("dogru tarif kabul edilmeli");
+        assert_eq!(reg.required_replicas_for(&manifest.manifest_id), 1);
+    }
+
+    /// "Uretiliyor" bir INDIRIM TALEBIDIR; kanitlanmadan kabul edilmez.
+    ///
+    /// Kanit olmasaydi, siradan organik icerigi "uretiliyor" diye
+    /// etiketleyen biri ucte bir kopyayla tam dayaniklilik odemesi alir ve
+    /// icerik gercekten kaybolurdu.
+    #[test]
+    fn a_false_generated_claim_is_refused_at_registration() {
+        use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [7u8; 32],
+            output_len: 32 * 32,
+            step_budget: 1_000_000,
+        };
+        // Organik baytlar, "bu tariften dogdu" diye etiketleniyor. Yalan.
+        let organic = b"bu baytlar hicbir tariften dogmadi".to_vec();
+        let manifest = ContentManifest::from_bytes_sliced(&organic, organic.len() as u32)
+            .expect("manifest")
+            .with_source(ContentSource::Generated(spec));
+
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .register_manifest_with_source(&manifest)
+            .expect_err("yalan uretim iddiasi reddedilmeli");
+        assert!(
+            format!("{err:?}").contains("does not reproduce"),
+            "gerekce tarifin icerigi uretmedigini soylemeli: {err:?}"
+        );
+        // Reddedilen manifest HIC kaydedilmemeli: yoksa indirimi yine alir.
+        assert!(reg.get_manifest(&manifest.manifest_id).is_none());
+        // Kayitli olmayan icerik tam hedefe duser (fail-closed).
+        assert_eq!(
+            reg.required_replicas_for(&manifest.manifest_id),
+            STORAGE_REPLICATION_TARGET
+        );
+    }
+
+    /// Dogrulanamayan iddia indirim de almaz: `Hybrid` zincirde kanitlanamaz.
+    #[test]
+    fn a_hybrid_source_is_refused_because_its_prefix_cannot_be_proven() {
+        use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [7u8; 32],
+            output_len: 32 * 32,
+            step_budget: 1_000_000,
+        };
+        let manifest = ContentManifest::from_bytes_sliced(b"onekli icerik", 13)
+            .expect("manifest")
+            .with_source(ContentSource::Hybrid {
+                prefix_bytes: 4,
+                spec,
+            });
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .register_manifest_with_source(&manifest)
+            .expect_err("dogrulanamayan hybrid iddiasi reddedilmeli");
+        assert!(format!("{err:?}").contains("Hybrid"), "{err:?}");
+        assert!(reg.get_manifest(&manifest.manifest_id).is_none());
+    }
+
+    /// Kaynak rejimi KIMLIGE girer.
+    ///
+    /// Girmeseydi ayni baytlar icin biri "tutuluyor" digeri "uretiliyor"
+    /// diyen iki manifest ayni id'yi paylasirdi; `register_manifest`
+    /// ilk-yazan-kazanir oldugu icin biri digerinin dayaniklilik
+    /// gereksinimini sessizce degistirebilirdi.
+    #[test]
+    fn the_source_regime_changes_the_manifest_id() {
+        let (generated, _spec) = generated_manifest();
+        let stored = ContentManifest::from_bytes_sliced(
+            &crate::storage::generated::generate_content(&match &generated.source {
+                crate::storage::generated::ContentSource::Generated(s) => s.clone(),
+                _ => unreachable!("test manifest is Generated"),
+            })
+            .expect("tarif"),
+            32 * 32,
+        )
+        .expect("manifest");
+
+        // Ayni baytlar, farkli iddia -> farkli kimlik.
+        assert_ne!(
+            generated.manifest_id, stored.manifest_id,
+            "kaynak rejimi kimlige girmeli"
+        );
+        // Eski manifest'lerin kimligi degismemeli: `Stored` hicbir bayt
+        // eklemez, bu yuzden bu alan eklenmeden onceki id ile ayni kalir.
+        assert_eq!(
+            stored.manifest_id,
+            crate::storage::manifest::manifest_id_from_parts_stored(
+                &stored.shards,
+                &stored.erasure,
+                &stored.encryption,
+                stored.content_size(),
+                stored.total_size,
+            ),
+            "Stored kimligi degismemeli"
+        );
+    }
+
     fn good_econ() -> StorageEconomicsParams {
         StorageEconomicsParams {
             operator_bond: 5_000_000,
@@ -2763,7 +3009,7 @@ mod tests {
             k: 1,
             n: liar.shard_count,
         };
-        liar.manifest_id = crate::storage::manifest_id_from_parts(
+        liar.manifest_id = crate::storage::manifest_id_from_parts_stored(
             &liar.shards,
             &liar.erasure,
             &liar.encryption,

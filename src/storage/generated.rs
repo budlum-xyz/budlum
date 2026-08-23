@@ -130,6 +130,61 @@ pub enum ContentSource {
     },
 }
 
+/// Kaynak rejiminin taahhut baytlari.
+///
+/// `Stored` **bos** dizi verir. Bu kasitli: kaynak alani manifest kimligine
+/// sonradan eklendi ve `Stored` bu alandan onceki her manifest'in anlamiydi.
+/// Bos dizi, o manifest'lerin id'sinin birebir ayni kalmasini saglar - bir
+/// alan eklemek eski kimlikleri degistirmemeli.
+///
+/// Diger rejimler enjektif kodlanir: etiket + ayirt edici parametreler.
+/// Iki rejim ancak ayni rejim ve ayni parametrelerse ayni baytlari uretir.
+#[must_use]
+pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
+    match source {
+        ContentSource::Stored => Vec::new(),
+        ContentSource::Generated(spec) => {
+            let mut out = Vec::with_capacity(1 + 32);
+            out.push(1u8);
+            out.extend_from_slice(&generated_spec_digest(spec));
+            out
+        }
+        ContentSource::Hybrid { prefix_bytes, spec } => {
+            let mut out = Vec::with_capacity(1 + 4 + 32);
+            out.push(2u8);
+            out.extend_from_slice(&prefix_bytes.to_le_bytes());
+            out.extend_from_slice(&generated_spec_digest(spec));
+            out
+        }
+    }
+}
+
+/// Bu kaynak icin kac bagimsiz kopya tutulmasi gerektigi.
+///
+/// **B.U.D. 3.0'in cekirdek kurali.** Replikasyon hedefi bugune kadar sabit
+/// bir sayiydi (`STORAGE_REPLICATION_TARGET` = 3) ve ne tuttugunu
+/// sormuyordu. Tariften dogan bir icerik icin uc kopya tutmak ayni
+/// deterministik ureteci uc kez saklamaktir: kopyalar **dayaniklilik
+/// eklemez**, cunku icerik zaten zincirdeki tariften yeniden uretilebilir.
+/// Bir kopya, tarifin cikti verdigini gosteren canli ornektir; dayanikliligi
+/// saglayan sey tarifin kendisidir.
+///
+/// - `Generated` -> **1**. Tarif zincirde; kaybolan kopya yeniden uretilir.
+/// - `Hybrid` -> tam hedef. Onek gercek, yeniden uretilemeyen bayttir; onu
+///   kaybetmek icerigi kaybetmektir.
+/// - `Stored` -> tam hedef. Baytlarin baska kaynagi yok.
+///
+/// Neden `Hybrid` indirim ALMAZ: indirim, kaybi telafi eden bir uretecin
+/// varligindan gelir. Onek boyle bir uretecten dogmaz. Kismi indirim
+/// vermek, korunmayan bayta korunuyormus muamelesi yapardi.
+#[must_use]
+pub fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
+    match source {
+        ContentSource::Generated(_) => 1,
+        ContentSource::Stored | ContentSource::Hybrid { .. } => full_target,
+    }
+}
+
 /// How many bytes an operator actually holds for a source.
 ///
 /// The number the storage decision divides. `Stored` holds all of them,

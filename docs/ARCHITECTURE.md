@@ -66,6 +66,7 @@
 - [56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi](#56-yalnizca-bizim-koydugumuz-kod-calisir-zk-program-izin-listesi)
 - [57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi](#57-regeneration-izinsiz-kodu-reddeden-kanonik-kodu-geri-ureten-kapi)
 - [58. Tarayici sinirinda izin: CORS bir reddetme degil, bir teslim kararidir](#58-tarayici-sinirinda-izin-cors-bir-reddetme-degil-bir-teslim-kararidir)
+- [59. Dayanikliligi kopya degil tarif saglar: kaynak rejimi ve replikasyon hedefi](#59-dayanikliligi-kopya-degil-tarif-saglar-kaynak-rejimi-ve-replikasyon-hedefi)
 
 ## 1. Genel sistem mimarisi
 
@@ -2056,3 +2057,77 @@ degildir. Tarayici disindaki bir istemci `Origin` basligini diledigi gibi
 yazar. Yetkiyi veren sey kimlik dogrulamasi, IP izin listesi ve hiz
 sinirlamasidir; bu bolum yalnizca tarayicinin dogru olani yapabilmesini
 saglar.
+
+## 59. Dayanikliligi kopya degil tarif saglar: kaynak rejimi ve replikasyon hedefi
+
+Depolama katmani her icerik icin `STORAGE_REPLICATION_TARGET` = 3 kopya
+istiyordu. Bu sayi sabitti ve **ne tuttugunu sormuyordu**. Tariften dogan bir
+icerik icin uc kopya tutmak, ayni deterministik ureteci uc kez saklamaktir:
+kopyalar dayaniklilik EKLEMEZ, cunku icerik zaten zincirdeki tariften yeniden
+uretilebilir.
+
+Sorulmasi gereken soru "kac kopya var" degil, **"bu baytlarin baska bir
+kaynagi var mi"**. Varsa kopya bir yedek degil, ayni cevabin tekraridir.
+
+### Kaynak rejimi manifest'in beyanidir
+
+`ContentManifest.source` uc rejimden birini soyler:
+
+| rejim | kalici olan | gereken kopya |
+|---|---|---|
+| `Stored` | baytlarin kendisi | tam hedef (3) |
+| `Generated(spec)` | yalnizca tarif | **1** |
+| `Hybrid { prefix, spec }` | onek + tarif | tam hedef (3) |
+
+`Generated` icin bir kopya yeterlidir: o kopya tarifin cikti verdigini
+gosteren canli ornektir, dayanikliligi saglayan sey tarifin kendisidir.
+Kaybolan kopya zincirdeki tariften yeniden uretilir.
+
+**`Hybrid` neden indirim ALMAZ:** indirim, kaybi telafi eden bir uretecin
+varligindan gelir. Onek boyle bir uretecten dogmaz - gercek, yeniden
+uretilemeyen bayttir. Kismi indirim vermek, korunmayan bayta korunuyormus
+muamelesi yapmak olurdu.
+
+### "Uretiliyor" bir indirim talebidir, bu yuzden kanitlanir
+
+Bir manifest "bu icerik tariften doguyor" diyerek ucte bir kopyayla tam
+dayaniklilik odemesi talep eder. Bu iddia dogrulanmasaydi, siradan organik
+icerigi `Generated` diye etiketleyen biri indirimi alir ve icerik **gercekten
+kaybolurdu**.
+
+`StorageRegistry::register_manifest_with_source` iddiayi kabul etmeden once
+**tarifi kosar**, cikan baytlarin icerik kimligini hesaplar ve manifest'in
+shard'iyla karsilastirir. Tutmuyorsa kayit reddedilir; reddedilen manifest
+kaydedilmez, dolayisiyla indirimi de alamaz. Kayitli olmayan icerik tam
+hedefe duser (fail-closed).
+
+Uyduramazsin: tarif uzayi icerik uzayindan kucuktur. Tarif ancak icerik
+gercekten o tariften dogduysa tutar - "her organik dosyaya tarif buluruz"
+diyen bir tasarim guvercin yuvasi ilkesine carpar.
+
+`Hybrid` bu yolda kabul edilmez: onek baytlari zincirde degildir, bu yuzden
+dogrulanamaz. **Dogrulanamayan iddia indirim de almaz.**
+
+### Rejim kimlige girer
+
+`source` `manifest_id`'ye dahildir. Olmasaydi ayni baytlar icin biri
+"tutuluyor" digeri "uretiliyor" diyen iki manifest ayni id'yi paylasirdi ve
+`register_manifest` ilk-yazan-kazanir oldugu icin biri digerinin dayaniklilik
+gereksinimini sessizce degistirebilirdi.
+
+`Stored` taahhude **hicbir bayt eklemez**. Bu kasitli: alan sonradan eklendi
+ve `Stored` bu alandan onceki her manifest'in anlamiydi. Bir alan eklemek
+eski kimlikleri degistirmemeli.
+
+### Ne saglamaz
+
+- **Organik icerik icin depolamayi sifirlamaz.** Tariften dogmamis bir
+  icerikte birinin baytlari tutmasi bilgi kuramince sarttir. Bu bolum yalnizca
+  tarifli sinifta kopya sayisini durustlestirir; "her icerik icin depolama 0"
+  diyen bir tasarim yalan soyler.
+- **Erisim surekliligini garanti etmez.** Tek kopyali tarifli icerikte o kopya
+  duserse veri kaybi olmaz (tarif zincirdedir) ama yeniden uretilene kadar
+  servis durur. Dayaniklilik ile erisilebilirlik ayri eksenlerdir.
+- **Uretecin belirlenimliligini kanitlamaz.** `GeneratorId` kapali bir
+  kumedir ve her girdinin belirlenimliligi kendi kaynagindan savunulur; keyfi
+  bytecode bu garantiyi tasimaz.
