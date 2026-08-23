@@ -181,21 +181,50 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 1. Coverage: each opcode must appear in some test body.
+    //
+    // Mentioning the opcode is necessary but not sufficient, and the gate
+    // used to stop here. That made the headline claim ("every opcode
+    // attacked") wider than what was measured: an opcode named only in a
+    // test's *setup* - the honest program a different opcode's forgery is
+    // built on - counted as attacked. `Opcode::Add` is the live example; it
+    // appears in five tests and none of them is named for it.
+    //
+    // A test that never modifies execution data cannot be forging anything:
+    // it runs an honest program and checks the honest answer. So a test
+    // counts as an attack only if it also *writes* into what is proved. The
+    // suite does that two ways, and both are accepted:
+    //
+    //   * directly rewriting a trace column (`COL_*`), or
+    //   * going through `prove_fails_after_tamper`, whose `tamper` closure
+    //     edits the `Vec<Step>` the trace is built from.
+    //
+    // Requiring `COL_*` alone was measured and is too narrow: 15 opcodes
+    // (Inv, And, Not, Eq, Neq, Gt, Lte, Gte, Jmp, Jnz, SRead, Syscall,
+    // PrivacyCommit, NullifierCheck, SumConservation) attack only through
+    // the helper. With both forms accepted all 33 opcodes stay covered, so
+    // this pins today's behaviour rather than describing an aspiration.
     checked += 1;
+    let attacking_tests: Vec<(&String, &String)> = tests
+        .iter()
+        .filter(|(_, body)| body.contains("COL_") || body.contains("prove_fails_after_tamper"))
+        .collect();
     let uncovered: Vec<&String> = opcodes
         .iter()
         .filter(|op| {
             let a = format!("Opcode::{op},");
             let b = format!("Opcode::{op})");
-            !tests
-                .values()
-                .any(|body| body.contains(&a) || body.contains(&b))
+            !attacking_tests
+                .iter()
+                .any(|(_, body)| body.contains(&a) || body.contains(&b))
         })
         .collect();
     if !uncovered.is_empty() {
         problems.push(format!(
-            "{} opcode(s) have no forgery test: {}. A constraint nobody has \
-             watched fail is a constraint nobody has tested.",
+            "{} opcode(s) have no forgery test that modifies what is proved \
+             (a `COL_*` column or the steps passed to \
+             `prove_fails_after_tamper`): {}. Naming an opcode in a test's \
+             setup is not attacking it - a constraint nobody has watched \
+             fail is a constraint nobody has tested.",
             uncovered.len(),
             uncovered
                 .iter()
