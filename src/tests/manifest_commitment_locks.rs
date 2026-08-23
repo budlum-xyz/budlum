@@ -1172,7 +1172,7 @@ mod repair_band {
         // pointless deals here.
         let (reg, manifest_id, _) = registry_with_object(4, 6);
         assert_eq!(
-            reg.under_replicated_shards().len(),
+            reg.under_replicated_shards(0).len(),
             6,
             "the shard view flags every singly-held shard"
         );

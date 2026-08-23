@@ -472,6 +472,15 @@ pub struct ChallengeResult {
 /// Off-chain team-operated scheduler. Mainnet storage remains fail-closed until
 /// This policy is externally audited and economically approved.
 pub const STORAGE_REPLICATION_TARGET: u8 = 3;
+
+/// Kanitlanmis okuma hizinin, indirimli bir nesneye bir kopya daha ekleyen
+/// adimi. `ACCESS_SCALE` ile olceklenmis, yari-omur basina okuma cinsinden.
+///
+/// Bir yari-omurde (720 epoch) 8 kanitlanmis okuma. Dusuk, cunku burada
+/// sayilan sey ham okuma degil *kanitlanmis* okuma: her cevaplanan geri
+/// getirme meydan okumasi bir tanedir, ve zincir bunlari nesne basina seyrek
+/// acar. Esik ham trafige gore ayarlansaydi hicbir nesne asamazdi.
+pub const DEMAND_REPLICA_STEP_SCALED: u64 = 8 * crate::storage::living_threshold::ACCESS_SCALE;
 pub const REALLOCATION_ACCEPTANCE_EPOCHS: u64 = 4;
 
 /// How long before a deal matures its operator may renew it unopposed.
@@ -558,6 +567,22 @@ pub struct StorageRegistry {
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
+    /// Finalized read evidence per object, newest last.
+    ///
+    /// The demand signal `storage::living_threshold` needs. It is a log of
+    /// finalized events rather than a mutable per-object counter, and that is
+    /// the whole design: a counter would have to be agreed on by the network
+    /// and written on every read, which is the cost the storage levers exist
+    /// to avoid. From the same events at the same epoch every node derives
+    /// the same estimate, because the decay is integer halving.
+    ///
+    /// Only answered retrieval challenges are recorded. A challenge that was
+    /// answered correctly is a read the chain **proved** happened; a missed
+    /// or mismatched one proves the opposite. Using unproven reads would let
+    /// an operator inflate demand for its own content and keep replicas the
+    /// network is paying for.
+    #[serde(default)]
+    access_events: BTreeMap<ContentId, Vec<crate::storage::living_threshold::AccessEvent>>,
     /// What each owner declared about content they intend to self-host.
     ///
     /// `MobileSelfContentPolicy` lets an owner mark content critical and name
@@ -1216,6 +1241,32 @@ impl StorageRegistry {
             })
     }
 
+    /// Kanitlanmis talebi hesaba katarak kac kopya gerektigi.
+    ///
+    /// Rejim indirimi tabani belirler; talep yalnizca yukari iter. Cok okunan
+    /// bir nesne icin bir kopya, o kopyayi tutan tek operator dustugunde
+    /// herkesin okuyamadigi bir nesne demektir; indirim dayaniklilik icin
+    /// verilmisti, populerlik onu geri alir.
+    ///
+    /// Talep asagi indirmez. Az okunan bir nesnenin kopyalarini kismak,
+    /// olculen talebin *yoklugunu* dayaniklilik kararina cevirmek olurdu:
+    /// hic okunmamis bir yedek tam da kaybedilmemesi gereken seydir.
+    ///
+    /// Esik [`DEMAND_REPLICA_STEP_SCALED`]'in kati basina bir kopya, tam
+    /// hedefe kadar. Sabit bir merdiven, cunku burada donen sayi zincirin
+    /// uzerinde anlasmasi gereken bir sayidir; operatorun kendi donanim
+    /// oranlarina bagli bir esik iki dugume iki cevap verirdi.
+    #[must_use]
+    pub fn required_replicas_with_demand(&self, manifest_id: &ContentId, epoch: u64) -> u8 {
+        let floor = self.required_replicas_for(manifest_id);
+        if floor >= STORAGE_REPLICATION_TARGET {
+            return floor;
+        }
+        let rate = self.access_estimate(manifest_id, epoch).rate_scaled(epoch);
+        let steps = u8::try_from(rate / DEMAND_REPLICA_STEP_SCALED).unwrap_or(u8::MAX);
+        floor.saturating_add(steps).min(STORAGE_REPLICATION_TARGET)
+    }
+
     pub fn get_manifest(&self, manifest_id: &ContentId) -> Option<&ContentManifest> {
         self.manifests.get(manifest_id)
     }
@@ -1836,6 +1887,9 @@ impl StorageRegistry {
             .deals
             .get(&challenge.deal_id)
             .ok_or(StorageError::UnknownDeal(challenge.deal_id))?;
+        // Copied before the mutable borrows below; the object a proven read
+        // belongs to is the deal's manifest, not the shard.
+        let challenge_manifest_id = deal.manifest_id;
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal.deal_id));
         }
@@ -1936,8 +1990,52 @@ impl StorageRegistry {
                 }
             }
         };
+        if result.outcome == ChallengeOutcome::Answered {
+            self.record_proven_read(challenge_manifest_id, response_epoch);
+        }
         self.results.insert(challenge_id, result.clone());
         Ok(result)
+    }
+
+    /// Record one proven read of `manifest_id` at `epoch`.
+    ///
+    /// Reads in the same epoch collapse into one event's count, so the log
+    /// grows with epochs an object was read in rather than with reads. An
+    /// object read a thousand times in one epoch costs one entry.
+    fn record_proven_read(&mut self, manifest_id: ContentId, epoch: u64) {
+        let events = self.access_events.entry(manifest_id).or_default();
+        match events.last_mut() {
+            Some(last) if last.epoch == epoch => {
+                last.count = last.count.saturating_add(1);
+            }
+            // Out-of-order epochs would make the derived estimate depend on
+            // arrival order, so a late event is folded into the newest one
+            // rather than appended behind it. `from_events` refuses
+            // out-of-order input; this makes sure it never sees any.
+            Some(last) if last.epoch > epoch => {
+                last.count = last.count.saturating_add(1);
+            }
+            _ => events.push(crate::storage::living_threshold::AccessEvent { epoch, count: 1 }),
+        }
+    }
+
+    /// The demand estimate for `manifest_id` as of `epoch`.
+    ///
+    /// Derived from the finalized event log, so two nodes with the same
+    /// blocks compute the same number. An object with no proven reads yields
+    /// a zero estimate, which is a real answer: nothing has demonstrated
+    /// demand for it.
+    #[must_use]
+    pub fn access_estimate(
+        &self,
+        manifest_id: &ContentId,
+        epoch: u64,
+    ) -> crate::storage::living_threshold::AccessEstimate {
+        let events = self
+            .access_events
+            .get(manifest_id)
+            .map_or(&[][..], |v| &v[..]);
+        crate::storage::living_threshold::AccessEstimate::from_events(events, epoch)
     }
 
     /// Context-free verification is intentionally disabled. A Merkle proof that
@@ -2559,18 +2657,23 @@ impl StorageRegistry {
             .count()
     }
 
-    /// Hedefin altinda kalan shard'lar.
+    /// Hedefin altinda kalan shard'lar, `epoch` itibariyla.
     ///
-    /// Hedef artik sabit degil, **icerigin kaynagina** baglidir: tariften
-    /// dogan icerik icin bir kopya yeterlidir (`required_replicas_for`).
-    /// Sabit 3 ile olcmek, tarifli icerigi surekli "eksik kopyali" gosterip
-    /// hicbir dayaniklilik eklemeyen onarim biletleri actiriyordu.
-    pub fn under_replicated_shards(&self) -> Vec<(ContentId, ContentId, usize)> {
+    /// Hedef sabit degil. **Icerigin kaynagina** baglidir (tariften dogan
+    /// icerik icin bir kopya yeterlidir) ve **kanitlanmis talebe** baglidir
+    /// (cok okunan bir nesne indirimini geri verir). Sabit 3 ile olcmek,
+    /// tarifli icerigi surekli "eksik kopyali" gosterip hicbir dayaniklilik
+    /// eklemeyen onarim biletleri actiriyordu; indirimi talepten bagimsiz
+    /// vermek ise cok okunan bir nesneyi tek operatorun arkasinda birakiyordu.
+    ///
+    /// `epoch` parametreli tek bir surum var. Talebi goren ve gormeyen iki
+    /// surum birakmak, hangi hedefin uygulandigini cagirana sectirirdi.
+    pub fn under_replicated_shards(&self, epoch: u64) -> Vec<(ContentId, ContentId, usize)> {
         self.deals_by_shard
             .keys()
             .filter_map(|(manifest_id, shard_id)| {
                 let active = self.active_replica_count(manifest_id, shard_id);
-                let target = usize::from(self.required_replicas_for(manifest_id));
+                let target = usize::from(self.required_replicas_with_demand(manifest_id, epoch));
                 (active < target).then_some((*manifest_id, *shard_id, active))
             })
             .collect()
@@ -4542,5 +4645,196 @@ mod tests {
             reg.open_challenge(deal_id, 0, 4096, 100, 110, Address::from([9u8; 32]), 0),
             Err(StorageError::ZeroOpenerBond)
         ));
+    }
+}
+
+#[cfg(test)]
+mod demand_driven_replication_tests {
+    use super::*;
+    use crate::storage::generated::{ContentSource, GeneratedSpec, GeneratorId};
+
+    /// Tariften dogan, hic okunmamis bir nesne indirimini korur.
+    ///
+    /// Talebin YOKLUGU bir dayaniklilik karari degildir; taban rejimden
+    /// gelir ve talep yalnizca yukari iter.
+    #[test]
+    fn an_unread_generated_object_keeps_its_discount() {
+        let (reg, manifest_id) = generated_registry();
+        assert_eq!(reg.required_replicas_for(&manifest_id), 1);
+        assert_eq!(reg.required_replicas_with_demand(&manifest_id, 0), 1);
+        // Cok sonraki bir epoch'ta da ayni: sifir okuma sifir taleptir.
+        assert_eq!(reg.required_replicas_with_demand(&manifest_id, 10_000), 1);
+    }
+
+    /// Kanitlanmis okuma indirimi geri alir.
+    ///
+    /// Tek kopya, o kopyayi tutan operator dustugunde nesnenin okunamamasi
+    /// demektir. Indirim dayaniklilik icin verilmisti; populerlik onu geri
+    /// alir.
+    #[test]
+    fn proven_reads_claw_the_discount_back() {
+        let (mut reg, manifest_id) = generated_registry();
+        // Bir adimin altinda kalan okuma hedefi degistirmez.
+        for _ in 0..7 {
+            reg.record_proven_read(manifest_id, 5);
+        }
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 5),
+            1,
+            "esigin altindaki talep indirimi bozmaz"
+        );
+        // Bir adimi asinca bir kopya daha.
+        reg.record_proven_read(manifest_id, 5);
+        assert_eq!(reg.required_replicas_with_demand(&manifest_id, 5), 2);
+        // Iki adim: tam hedef.
+        for _ in 0..8 {
+            reg.record_proven_read(manifest_id, 5);
+        }
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 5),
+            STORAGE_REPLICATION_TARGET
+        );
+        // Tavani asamaz.
+        for _ in 0..500 {
+            reg.record_proven_read(manifest_id, 5);
+        }
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 5),
+            STORAGE_REPLICATION_TARGET,
+            "talep hedefi tavanin uzerine cikaramaz"
+        );
+    }
+
+    /// Talep unutulur. Bir zamanlar populer olan nesne sonsuza dek uc kopya
+    /// tutmaz; okunmayi birakinca tahmin yari-omurle soner.
+    #[test]
+    fn demand_decays_when_reading_stops() {
+        let (mut reg, manifest_id) = generated_registry();
+        for _ in 0..16 {
+            reg.record_proven_read(manifest_id, 5);
+        }
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 5),
+            STORAGE_REPLICATION_TARGET
+        );
+        let half_life = crate::storage::living_threshold::ACCESS_HALF_LIFE_EPOCHS;
+        // Bir yari-omur sonra 16 -> 8: hala bir adim uzerinde.
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 5 + half_life),
+            2
+        );
+        // Uc yari-omur sonra 16 -> 2: adimin altinda, indirim geri geldi.
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 5 + 3 * half_life),
+            1
+        );
+    }
+
+    /// Ayni epoch'taki okumalar tek kayitta toplanir.
+    ///
+    /// Yoksa cok okunan bir nesnenin defteri okuma sayisiyla buyurdu; oysa
+    /// bu defter zincir durumunda yasiyor.
+    #[test]
+    fn reads_in_one_epoch_collapse_into_one_entry() {
+        let (mut reg, manifest_id) = generated_registry();
+        for _ in 0..1000 {
+            reg.record_proven_read(manifest_id, 7);
+        }
+        let events = reg
+            .access_events
+            .get(&manifest_id)
+            .expect("okuma kaydi olmali");
+        assert_eq!(events.len(), 1, "bin okuma tek kayit");
+        assert_eq!(events[0].count, 1000);
+    }
+
+    /// Tam hedefte olan icerik zaten tavanda: talep bir sey degistirmez ve
+    /// bosuna hesaplanmaz.
+    #[test]
+    fn stored_content_is_already_at_the_ceiling() {
+        let mut reg = StorageRegistry::new();
+        let bytes = b"siradan tutulan icerik".to_vec();
+        let manifest =
+            ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32).expect("manifest");
+        reg.register_manifest(&manifest);
+        for _ in 0..100 {
+            reg.record_proven_read(manifest.manifest_id, 1);
+        }
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest.manifest_id, 1),
+            STORAGE_REPLICATION_TARGET
+        );
+    }
+
+    /// Kayitli olmayan icerik fail-closed: bilmedigimiz seye indirim yok.
+    #[test]
+    fn an_unknown_object_gets_the_full_target() {
+        let reg = StorageRegistry::new();
+        let unknown = ContentId([42u8; 32]);
+        assert_eq!(
+            reg.required_replicas_with_demand(&unknown, 99),
+            STORAGE_REPLICATION_TARGET
+        );
+    }
+
+    /// Gec gelen bir olay defteri sirasiz birakmaz.
+    ///
+    /// `AccessEstimate::from_events` sirasiz girdiyi reddediyor; bu test
+    /// reddedilecek girdinin hic olusmadigini gosterir.
+    #[test]
+    fn a_late_event_never_breaks_the_ordering() {
+        let (mut reg, manifest_id) = generated_registry();
+        reg.record_proven_read(manifest_id, 100);
+        reg.record_proven_read(manifest_id, 50);
+        let events = reg
+            .access_events
+            .get(&manifest_id)
+            .expect("okuma kaydi olmali");
+        assert!(
+            events.windows(2).all(|w| w[0].epoch <= w[1].epoch),
+            "defter her zaman epoch'a gore sirali"
+        );
+        assert_eq!(events.len(), 1, "gec olay en yeniye katlanir");
+        assert_eq!(events[0].count, 2, "gec olay kaybolmaz, sayilir");
+    }
+
+    /// Bir shard'in eksik kopyali sayilmasi talebe gore degisir.
+    #[test]
+    fn the_shard_view_follows_demand() {
+        let (mut reg, manifest_id) = generated_registry();
+        let manifest = reg.get_manifest(&manifest_id).expect("manifest").clone();
+        let shard_id = manifest.shards.first().expect("shard").shard_id;
+        reg.deals_by_shard
+            .entry((manifest_id, shard_id))
+            .or_default();
+        // Bir kopya bile yok ama hedef 1: bu shard eksik sayilir.
+        assert_eq!(reg.under_replicated_shards(0).len(), 1);
+        // Hedef talep ile 3'e cikinca hala eksik, ama hedef gercekten degisti.
+        for _ in 0..16 {
+            reg.record_proven_read(manifest_id, 0);
+        }
+        assert_eq!(
+            reg.required_replicas_with_demand(&manifest_id, 0),
+            STORAGE_REPLICATION_TARGET
+        );
+        assert_eq!(reg.under_replicated_shards(0).len(), 1);
+    }
+
+    fn generated_registry() -> (StorageRegistry, ContentId) {
+        let spec = GeneratedSpec {
+            generator: GeneratorId::Avatar,
+            seed: [3u8; 32],
+            output_len: 32 * 32,
+            step_budget: 1_000_000,
+        };
+        let bytes = crate::storage::generated::generate_content(&spec).expect("uretim");
+        let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
+            .expect("manifest")
+            .with_source(ContentSource::Generated(spec));
+        let mut reg = StorageRegistry::new();
+        reg.register_manifest_with_source(&manifest)
+            .expect("dogru tarif kabul edilmeli");
+        let id = manifest.manifest_id;
+        (reg, id)
     }
 }
