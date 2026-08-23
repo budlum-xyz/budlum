@@ -1721,8 +1721,14 @@ mod settlement_prod_tests {
         );
     }
 
+    /// Eklenti degisimi kayitsiz yapilamaz.
+    ///
+    /// Test eskiden `remove` sonrasi `get(1).is_none()` bekliyordu, yani
+    /// eklentinin izsiz kaldirilabilmesini **dogruluyordu**. Eklenti bir
+    /// Custom alanin finality kararini yazan koddur; onu degistirmek
+    /// konsensus degisikligidir ve konsensus degisikligi gorunur olmalidir.
     #[test]
-    fn plugin_registry_prevents_duplicate_and_allows_removal() {
+    fn plugin_registry_prevents_duplicate_and_records_replacement() {
         use crate::domain::{DomainPluginRegistry, PoWDomainPlugin};
 
         let mut reg = DomainPluginRegistry::new();
@@ -1730,10 +1736,14 @@ mod settlement_prod_tests {
         let p1 = Arc::new(PoWDomainPlugin::new(engine.clone()));
         let p2 = Arc::new(PoWDomainPlugin::new(engine));
         reg.register(1, p1).unwrap();
-        assert!(reg.register(1, p2).is_err());
+        assert!(reg.register(1, p2.clone()).is_err());
         assert!(reg.get(1).is_some());
-        reg.remove(1);
-        assert!(reg.get(1).is_none());
+
+        // Degisim mumkun ama iz birakiyor.
+        let record = reg.replace(1, p2).expect("degisim kabul edilmeli");
+        assert_eq!(record.domain_id, 1);
+        assert_eq!(reg.replacements().len(), 1);
+        assert!(reg.get(1).is_some(), "degisimden sonra eklenti duruyor");
     }
 
     #[test]
