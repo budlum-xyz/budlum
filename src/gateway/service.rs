@@ -95,7 +95,7 @@ pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 ///
 /// Onbelleksiz her istek tarifi bastan kosuyordu. Sicak bir icerik icin bu,
 /// istek sayisiyla dogru orantili CPU demektir ve maliyeti isteyen degil
-/// **gecidi isleten** oder. Uretim belirlenimli oldugu icin ayni tarif her
+/// **gecidi isleten** karsilar. Uretim belirlenimli oldugu icin ayni tarif her
 /// zaman ayni baytlari verir; ayni hesabi tekrar yapmanin bir karsiligi yok.
 ///
 /// # Neden sinirli
