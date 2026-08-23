@@ -65,6 +65,7 @@
 - [55. Kanit gecerliligi bir yetkilendirme karari degildir](#55-kanit-gecerliligi-bir-yetkilendirme-karari-degildir)
 - [56. Yalnizca bizim koydugumuz kod calisir: zk program izin listesi](#56-yalnizca-bizim-koydugumuz-kod-calisir-zk-program-izin-listesi)
 - [57. Regeneration: izinsiz kodu reddeden, kanonik kodu geri ureten kapi](#57-regeneration-izinsiz-kodu-reddeden-kanonik-kodu-geri-ureten-kapi)
+- [58. Tarayici sinirinda izin: CORS bir reddetme degil, bir teslim kararidir](#58-tarayici-sinirinda-izin-cors-bir-reddetme-degil-bir-teslim-kararidir)
 
 ## 1. Genel sistem mimarisi
 
@@ -2000,3 +2001,58 @@ Kapi **beslemenin bicimini** ve degerin yeniden uretilebilirligini korur;
 kanonik bicimin kendisinin dogru secildigini iddia etmez. Dogrulayici bicimi
 degistirirse kapi digerlerinin ona uymadigini soyler - hangisinin hakli
 oldugunu soylemez. O bir tasarim karari olarak kalir.
+
+## 58. Tarayici sinirinda izin: CORS bir reddetme degil, bir teslim kararidir
+
+Budscan gibi tarayici icinde calisan bir istemci icin dugumun RPC yuzeyi,
+sunucunun ne dondurdugu kadar tarayicinin o yaniti JavaScript'e teslim edip
+etmedigiyle de belirlenir. Bu iki karar ayridir ve kodda ayri ayri
+karsiliklari olmak zorundadir.
+
+`RpcSecurityConfig.cors_origins` alani adiyla ikinciyi vaat ediyordu, ama
+yalnizca birincisini yapiyordu: gelen istegin `Origin` basligini listeye
+bakip reddediyor, izin verdigi durumda yanita hicbir `Access-Control-*`
+basligi eklemiyordu. Sonuc, adin vaadinin tersiydi:
+
+- **Izin verilen koken de engelleniyordu.** Sunucu 200 ve dogru govdeyi
+  donduruyor, tarayici `Access-Control-Allow-Origin` bulunmadigi icin yaniti
+  cagirana vermiyordu. Yapilandirmada kokeni listelemek hicbir sey
+  degistirmiyordu.
+- **Preflight kimlik dogrulamasinda oluyordu.** Tarayici, ozel baslikli bir
+  `POST` oncesi `OPTIONS` preflight gonderir ve bu istege `x-api-key`
+  koymaz. `auth_required=true` iken preflight 401 aliyor, asil istek hic
+  gonderilmiyordu. Yani kimlik dogrulamasi aciksa tarayici istemcisi
+  yapisal olarak imkansizdi.
+
+Kural olarak yazilisi: **bir izin karari ancak yanitta gorunurse izindir.**
+Yalnizca reddetme tarafini uygulayan bir yapilandirma alani, adinin
+tasidigi yetkiyi tasimaz.
+
+Kodda karsiligi (`src/rpc/server.rs`):
+
+- `cors_outcome` tek karar noktasidir ve uc sonuctan birini uretir:
+  `NotApplicable` (CORS yapilandirilmamis ya da istek tarayicidan gelmiyor),
+  `Allow(origin)`, `Deny`. Onceki `is_origin_allowed` silindi; iki ayri
+  koken karari birbirinden ayrisabilirdi.
+- **Varsayilan kapali:** `cors_origins` bos ise hicbir baslik yayilmaz.
+  Tarayici erisimi acik bir yapilandirma gerektirir.
+- Izin verilen kokende yanita `Access-Control-Allow-Origin` (yansitilmis
+  koken), `Vary: Origin`, izinli yontemler ve izinli basliklar eklenir.
+  `Vary` sart: yanit kokene gore degisiyor, aradaki bir onbellek bir kokene
+  uretilmis yaniti baskasina servis etmemeli.
+- Basliklar yalnizca basarili yanitlara degil, **401 ve 429 yanitlarina da**
+  eklenir. Aksi halde istemci gercek hatayi goremez, her seyi ayirt
+  edilemez bir ag hatasi olarak gorur.
+- Preflight kimlik dogrulamasindan **once** yanitlanir. Guvenli olmasinin
+  sebebi preflight'in durum degistirmemesidir: yalnizca "bu koken
+  deneyebilir mi" sorusuna cevap verir, IP izin listesi ve koken denetimi
+  ondan once kosar.
+- `Access-Control-Allow-Credentials` **hicbir zaman** gonderilmez. Kimlik
+  `x-api-key` / `Authorization` basligiyla tasinir, cerezle degil; boylece
+  `*` yapilandirmasi bir oturum calma yoluna donusemez.
+
+Engellemedigi sey: CORS bir tarayici sozlesmesidir, erisim denetimi
+degildir. Tarayici disindaki bir istemci `Origin` basligini diledigi gibi
+yazar. Yetkiyi veren sey kimlik dogrulamasi, IP izin listesi ve hiz
+sinirlamasidir; bu bolum yalnizca tarayicinin dogru olani yapabilmesini
+saglar.

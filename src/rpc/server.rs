@@ -193,12 +193,30 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
-        if !is_origin_allowed(&self.config, &req) {
+        let cors = cors_outcome(&self.config, &req);
+        if cors == CorsOutcome::Deny {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
+        // Preflight kimlik doğrulamasından önce yanıtlanır: tarayıcı bu isteğe
+        // `x-api-key` koyamaz, 401 dönersek asıl istek hiç gönderilmez. Durum
+        // değiştiren bir yol değildir; IP ve köken denetimi zaten geçilmiştir.
+        if let CorsOutcome::Allow(ref origin) = cors {
+            if is_cors_preflight(&req) {
+                let origin = origin.clone();
+                return Box::pin(async move { Ok(preflight_response(&origin)) });
+            }
+        }
+
         if !is_authorized(&self.config, &req) {
-            return Box::pin(async { Ok(text_response(StatusCode::UNAUTHORIZED, "Unauthorized")) });
+            let cors = cors;
+            return Box::pin(async move {
+                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
+            });
         }
 
         let client_ip = extract_client_ip(&self.config, &req);
@@ -206,11 +224,14 @@ where
             if let Some(ref m) = self.metrics {
                 m.rpc_rate_limited_total.inc();
             }
-            return Box::pin(async {
-                Ok(text_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "Too many requests",
-                ))
+            let cors = cors;
+            return Box::pin(async move {
+                let mut response =
+                    text_response(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
             });
         }
         if let Some(ref m) = self.metrics {
@@ -221,7 +242,12 @@ where
         let metrics = self.metrics.clone();
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            let result = inner.call(req).await;
+            let mut result = inner.call(req).await;
+            // Başarılı yanıt da başlık almazsa tarayıcı gövdeyi JavaScript'e
+            // teslim etmez; izin kararı ancak yanıtta görünürse işe yarar.
+            if let (Ok(ref mut response), CorsOutcome::Allow(ref origin)) = (&mut result, &cors) {
+                apply_cors_headers(response, origin);
+            }
             if let Some(ref m) = metrics {
                 m.rpc_request_duration_seconds
                     .observe(start.elapsed().as_secs_f64());
@@ -686,23 +712,83 @@ fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
         .any(|allowed| allowed == "*" || allowed == &ip_str)
 }
 
-fn is_origin_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
-    if config.cors_origins.is_empty() {
-        return true;
-    }
+/// CORS onçözümü: `cors_origins` yalnızca istek reddetmeye yarıyordu, yanıta
+/// hiçbir `Access-Control-*` başlığı eklenmiyordu. Bir tarayıcı için bu, izin
+/// verilen kökenin de engellenmesi demekti: yanıt 200 dönse bile tarayıcı
+/// başlık yokluğunda JavaScript'e teslim etmez. Ayrıca tarayıcı preflight
+/// (`OPTIONS`) isteğine özel başlık koymaz; `auth_required=true` iken preflight
+/// 401 alıyor ve asıl istek hiç gönderilmiyordu. Yani "cors_origins" adının
+/// vaat ettiği şey kodda yoktu.
+///
+/// Karar: CORS **açık izinle** çalışır. `cors_origins` boşsa hiçbir CORS başlığı
+/// yayılmaz (tarayıcı erişimi kapalı); doluysa yalnızca eşleşen köken yansıtılır.
+/// `Access-Control-Allow-Credentials` hiçbir zaman gönderilmez: kimlik
+/// `x-api-key` / `Authorization` başlığıyla taşınır, çerezle değil, böylece
+/// `*` yapılandırması oturum çalmaya dönüşemez.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CorsOutcome {
+    /// CORS kapalı ya da istek tarayıcıdan gelmiyor; başlık eklenmez.
+    NotApplicable,
+    /// Köken izinli; yanıta başlıklar eklenir.
+    Allow(String),
+    /// Köken izinli değil; istek reddedilir.
+    Deny,
+}
 
+/// Preflight, asıl isteğin taşıyacağı kimlik başlıklarını taşıyamaz; bu yüzden
+/// kimlik doğrulamasından önce yanıtlanır. Güvenli olmasının sebebi
+/// preflight'ın durum değiştirmemesi: yalnızca "bu köken deneyebilir mi"
+/// sorusuna cevap verir, IP izin listesi ve köken denetimi önce koşar.
+fn is_cors_preflight<B>(req: &HttpRequest<B>) -> bool {
+    req.method() == hyper::Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method")
+}
+
+pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> CorsOutcome {
+    if config.cors_origins.is_empty() {
+        return CorsOutcome::NotApplicable;
+    }
     let Some(origin) = req
         .headers()
         .get("origin")
         .and_then(|value| value.to_str().ok())
     else {
-        return true;
+        return CorsOutcome::NotApplicable;
     };
-
-    config
+    if config
         .cors_origins
         .iter()
         .any(|allowed| allowed == "*" || allowed == origin)
+    {
+        CorsOutcome::Allow(origin.to_string())
+    } else {
+        CorsOutcome::Deny
+    }
+}
+
+/// `Vary: Origin` şart: yanıt kökene göre değişiyor, aradaki bir önbellek
+/// bir kökene üretilmiş yanıtı başkasına servis etmemeli.
+fn apply_cors_headers(response: &mut HttpResponse, origin: &str) {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(origin) {
+        headers.insert("access-control-allow-origin", value);
+    }
+    headers.insert("vary", HeaderValue::from_static("Origin"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("content-type, x-api-key, authorization"),
+    );
+    headers.insert("access-control-max-age", HeaderValue::from_static("600"));
+}
+
+fn preflight_response(origin: &str) -> HttpResponse {
+    let mut response = text_response(StatusCode::NO_CONTENT, "");
+    apply_cors_headers(&mut response, origin);
+    response
 }
 
 fn is_per_ip_rate_limited(
@@ -4299,6 +4385,118 @@ mod tests {
         };
         assert!(validate_rpc_security_config(&configured).is_ok());
         assert!(validate_rpc_security_config(&RpcSecurityConfig::operator_default()).is_ok());
+    }
+
+    fn cors_config(origins: &[&str]) -> RpcSecurityConfig {
+        RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some("secret".into()),
+            allowed_ips: Vec::new(),
+            cors_origins: origins.iter().map(|o| (*o).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn request_from_origin(origin: &str) -> HttpRequest<()> {
+        HttpRequest::builder()
+            .uri("/")
+            .header("origin", origin)
+            .body(())
+            .unwrap()
+    }
+
+    /// Izin verilen koken yanitta gorunmeli: taryici, basligi olmayan bir
+    /// yanitin govdesini JavaScript'e teslim etmez.
+    #[test]
+    fn allowed_origin_is_reflected_into_the_response() {
+        let config = cors_config(&["https://budscan.example"]);
+        let req = request_from_origin("https://budscan.example");
+        let outcome = cors_outcome(&config, &req);
+        assert_eq!(
+            outcome,
+            CorsOutcome::Allow("https://budscan.example".into())
+        );
+
+        let mut response = text_response(StatusCode::OK, "ok");
+        apply_cors_headers(&mut response, "https://budscan.example");
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://budscan.example")
+        );
+        // Onbellek bir kokene uretilmis yaniti baskasina servis etmemeli.
+        assert_eq!(
+            response.headers().get("vary").and_then(|v| v.to_str().ok()),
+            Some("Origin")
+        );
+        // Kimlik baslikla tasinir, cerezle degil: kimlik bilgisi izni
+        // hicbir zaman verilmez, boylece `*` oturum calmaya donusemez.
+        assert!(response
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none());
+    }
+
+    #[test]
+    fn unlisted_origin_is_denied_and_gets_no_headers() {
+        let config = cors_config(&["https://budscan.example"]);
+        let req = request_from_origin("https://saldirgan.example");
+        let outcome = cors_outcome(&config, &req);
+        assert_eq!(outcome, CorsOutcome::Deny);
+        assert!(!matches!(outcome, CorsOutcome::Allow(_)));
+
+        // Reddedilen kokene hicbir baslik sizmamali: 403 govdesi bile
+        // baslikla dondurulurse taryici yaniti okuyabilir hale gelir.
+        let response = text_response(StatusCode::FORBIDDEN, "Forbidden");
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+
+    /// CORS yapilandirilmamissa hicbir baslik yayilmaz - varsayilan kapali.
+    #[test]
+    fn empty_cors_list_emits_no_headers() {
+        let config = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
+        let req = request_from_origin("https://budscan.example");
+        assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
+    }
+
+    /// Preflight kimlik basligi tasiyamaz. 401 dondurursek asil istek hic
+    /// gonderilmez; bu yuzden preflight auth'tan once yanitlanir.
+    #[test]
+    fn preflight_is_recognised_and_answered_without_credentials() {
+        let mut req = HttpRequest::builder()
+            .method(hyper::Method::OPTIONS)
+            .uri("/")
+            .header("origin", "https://budscan.example")
+            .header("access-control-request-method", "POST")
+            .body(())
+            .unwrap();
+        assert!(is_cors_preflight(&req));
+
+        // Kimlik basligi yok; yine de izin karari uretilebilmeli.
+        let config = cors_config(&["https://budscan.example"]);
+        assert!(!is_authorized(&config, &req));
+
+        let response = preflight_response("https://budscan.example");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .and_then(|v| v.to_str().ok()),
+            Some("content-type, x-api-key, authorization")
+        );
+
+        // Sade bir OPTIONS preflight degildir.
+        *req.method_mut() = hyper::Method::POST;
+        assert!(!is_cors_preflight(&req));
     }
 
     #[test]
