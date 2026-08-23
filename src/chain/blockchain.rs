@@ -1670,12 +1670,16 @@ impl Blockchain {
 
         // Credit the recipient and the relayer
         // Using try_add_balance to prevent silent u64 overflow capping.
+        // Arz yaratan yol: kopruden gelen varligin zincir uzerindeki
+        // karsiligi burada basiliyor, yani bu iki cagri toplam arzi
+        // buyutuyor. `try_mint_balance` sabit tavani denetler; ucret de
+        // ayni basimdan geliyor ve ayni tavana tabidir.
         self.state
-            .try_add_balance(&transfer.recipient, final_amount as u64)
-            .map_err(|e| format!("Bridge mint overflow (recipient): {e}"))?;
+            .try_mint_balance(&transfer.recipient, final_amount as u64)
+            .map_err(|e| format!("Bridge mint (recipient): {e}"))?;
         self.state
-            .try_add_balance(&relayer, fee as u64)
-            .map_err(|e| format!("Bridge mint fee overflow (relayer): {e}"))?;
+            .try_mint_balance(&relayer, fee as u64)
+            .map_err(|e| format!("Bridge mint fee (relayer): {e}"))?;
 
         if let Some(store) = &self.storage {
             store
@@ -2477,12 +2481,15 @@ impl Blockchain {
                 }
 
                 // Try_add_balance for relay bridge mint
+                // Ayni arz yaratimi, relayer boru hattindan gelen ikinci
+                // giris. Iki girisi de ayni kapiya baglamak sart: biri
+                // baglanip oteki unutulursa tavan yalnizca yarim tutar.
                 self.state
-                    .try_add_balance(&transfer.recipient, final_amount as u64)
-                    .map_err(|e| format!("Bridge relay mint overflow (recipient): {e}"))?;
+                    .try_mint_balance(&transfer.recipient, final_amount as u64)
+                    .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
                 self.state
-                    .try_add_balance(&relayer, fee as u64)
-                    .map_err(|e| format!("Bridge relay mint fee overflow (relayer): {e}"))?;
+                    .try_mint_balance(&relayer, fee as u64)
+                    .map_err(|e| format!("Bridge relay mint fee (relayer): {e}"))?;
             }
             MessageKind::BridgeBurn => {
                 // The burn message is a fresh id CORRELATED to the original
