@@ -17,7 +17,13 @@ pub struct BudStorageAssignment {
 
 impl BudStorageAssignment {
     pub fn assign(content_id: [u8; 32], validators: Vec<String>, k: u8, p: u8, tier: u8) -> Self {
-        Self { content_id, assigned_validators: validators, erasure_k: k, erasure_p: p, tier }
+        Self {
+            content_id,
+            assigned_validators: validators,
+            erasure_k: k,
+            erasure_p: p,
+            tier,
+        }
     }
 
     pub fn displaced_shards(&self, removed_validator: &str) -> Vec<usize> {
@@ -45,7 +51,13 @@ pub struct BudLivingThreshold {
 
 impl BudLivingThreshold {
     pub fn tier(&self) -> u8 {
-        if self.access_count_last_epoch > 100 { 0 } else if self.access_count_last_epoch > 10 { 1 } else { 2 }
+        if self.access_count_last_epoch > 100 {
+            0
+        } else if self.access_count_last_epoch > 10 {
+            1
+        } else {
+            2
+        }
     }
     pub fn required_replicas(&self) -> usize {
         match self.tier() {
@@ -56,9 +68,13 @@ impl BudLivingThreshold {
     }
     pub fn decide(&self) -> &'static str {
         // From living_threshold.rs decide()
-        if self.access_count_last_epoch > 100 { "hot 3 replica" }
-        else if self.access_count_last_epoch > 10 { "cold EVENODD 7+2" }
-        else { "ice device+1" }
+        if self.access_count_last_epoch > 100 {
+            "hot 3 replica"
+        } else if self.access_count_last_epoch > 10 {
+            "cold EVENODD 7+2"
+        } else {
+            "ice device+1"
+        }
     }
 }
 
@@ -69,15 +85,19 @@ pub struct BudErasure {
 }
 
 impl BudErasure {
-    pub fn new(k: usize, p: usize) -> Self { Self { k, p } }
-    pub fn expansion(&self) -> f64 { (self.k + self.p) as f64 / self.k as f64 }
+    pub fn new(k: usize, p: usize) -> Self {
+        Self { k, p }
+    }
+    pub fn expansion(&self) -> f64 {
+        (self.k + self.p) as f64 / self.k as f64
+    }
     pub fn encode(&self, data_shards: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
         // Cauchy MDS stub: parity = XOR of data shards with different patterns
         let mut parity = Vec::new();
         for i in 0..self.p {
             let mut p = vec![0u8; data_shards[0].len()];
             for (j, shard) in data_shards.iter().enumerate() {
-                let pattern = ((i+j) % 256) as u8;
+                let pattern = ((i + j) % 256) as u8;
                 for (o, s) in p.iter_mut().zip(shard.iter()) {
                     *o ^= s ^ pattern;
                 }
@@ -92,14 +112,22 @@ pub struct IntegrationGates;
 
 impl IntegrationGates {
     pub fn k_bud_assignment(assign: &BudStorageAssignment) -> Result<(), &'static str> {
-        if assign.assigned_validators.is_empty() { return Err("K-BUD-ASSIGN: no validators"); }
-        if assign.erasure_k < 3 { return Err("K-BUD-ASSIGN: k<3"); }
-        if assign.assigned_shards_count() == 0 { return Err("K-BUD-ASSIGN: zero shards"); }
+        if assign.assigned_validators.is_empty() {
+            return Err("K-BUD-ASSIGN: no validators");
+        }
+        if assign.erasure_k < 3 {
+            return Err("K-BUD-ASSIGN: k<3");
+        }
+        if assign.assigned_shards_count() == 0 {
+            return Err("K-BUD-ASSIGN: zero shards");
+        }
         Ok(())
     }
     pub fn k_bud_living_threshold(lt: &BudLivingThreshold) -> Result<(), &'static str> {
         let tier = lt.tier();
-        if tier > 2 { return Err("K-BUD-LIVING: invalid tier"); }
+        if tier > 2 {
+            return Err("K-BUD-LIVING: invalid tier");
+        }
         Ok(())
     }
     pub fn k_bud_integration(file: &BudFile, econ: &BudEconomics) -> Result<(), &'static str> {
@@ -109,7 +137,9 @@ impl IntegrationGates {
         Ok(())
     }
     pub fn k_bud_erasure(erasure: &BudErasure, data_shards: usize) -> Result<(), &'static str> {
-        if data_shards < erasure.k { return Err("K-BUD-ERASURE-REAL: not enough data shards"); }
+        if data_shards < erasure.k {
+            return Err("K-BUD-ERASURE-REAL: not enough data shards");
+        }
         Ok(())
     }
 }
@@ -120,14 +150,18 @@ mod tests {
     #[test]
     fn assignment_real() {
         let cid = [1u8; 32];
-        let assign = BudStorageAssignment::assign(cid, vec!["v1".into(), "v2".into(), "v3".into()], 7, 2, 1);
+        let assign =
+            BudStorageAssignment::assign(cid, vec!["v1".into(), "v2".into(), "v3".into()], 7, 2, 1);
         assert!(IntegrationGates::k_bud_assignment(&assign).is_ok());
         assert_eq!(assign.displaced_shards("v1"), vec![0]);
         assert_eq!(assign.assigned_shards_count(), 21);
     }
     #[test]
     fn living_threshold_real() {
-        let lt = BudLivingThreshold { access_count_last_epoch: 150, size_bytes: 1024 };
+        let lt = BudLivingThreshold {
+            access_count_last_epoch: 150,
+            size_bytes: 1024,
+        };
         assert_eq!(lt.tier(), 0);
         assert_eq!(lt.decide(), "hot 3 replica");
         assert_eq!(lt.required_replicas(), 3);

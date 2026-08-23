@@ -21,7 +21,8 @@ pub enum RpcError {
 /// fazında eklenir; imzalar değişmez.
 pub trait ChainClient {
     /// Pollen grant'i bu tüketici için şu an aktif mi?
-    fn pollen_grant_active(&self, content_id: &Hash32, consumer: &Hash32) -> Result<bool, RpcError>;
+    fn pollen_grant_active(&self, content_id: &Hash32, consumer: &Hash32)
+        -> Result<bool, RpcError>;
     /// Model zincir üstünde kayıtlı mı?
     fn model_registered(&self, model_id: &Hash32) -> Result<bool, RpcError>;
     /// Operator compute-bond miktarı.
@@ -57,7 +58,10 @@ mod tests {
             chain.pollen_grant_active(&[1; 32], &[2; 32]),
             Err(RpcError::NotConnected)
         );
-        assert_eq!(chain.model_registered(&[1; 32]), Err(RpcError::NotConnected));
+        assert_eq!(
+            chain.model_registered(&[1; 32]),
+            Err(RpcError::NotConnected)
+        );
         assert_eq!(chain.operator_bond(&[1; 32]), Err(RpcError::NotConnected));
     }
 }

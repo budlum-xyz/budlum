@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 pub mod ast;
 pub mod codegen;
 pub mod lexer;
@@ -97,6 +100,57 @@ mod tests {
         vm.run(&bytecode).unwrap();
 
         assert_eq!(vm.events, vec![10]);
+    }
+
+    /// Ayni kapi `Hash32` icin de gecerli.
+    ///
+    /// Ayri test, cunku `is_opaque_bytes32` iki tipi birden kapsiyor
+    /// (`Type::Address | Type::Hash32`) ve birinin listeden dusmesi
+    /// digerinin testiyle gorunmez kalirdi - olculdu: `Hash32` kaldirilinca
+    /// yalnizca bu test kirmizi verir.
+    #[test]
+    fn rejects_arithmetic_on_hash32() {
+        let source = r"
+            contract C {
+                fn combine(a: Hash32, b: Hash32) -> u64 {
+                    let c = a + b;
+                    return 1;
+                }
+
+                pub fn main() {
+                    emit E(1);
+                }
+            }
+        ";
+        match compile(source, IsaProfile::Production) {
+            Ok(_) => panic!("Hash32 uzerinde toplama derlendi; tip bir etiketten ibaret"),
+            Err(CompileError::SemanticError(msg)) => {
+                assert!(msg.contains("Hash32"), "yanlis sebeple reddedildi: {msg}")
+            }
+            Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
+        }
+    }
+
+    /// Esitlik karsilastirmasi **serbest** kalmali.
+    ///
+    /// Kapinin kendisinin sinirli oldugunu olcer. Yasak aritmetige ve
+    /// siralamaya; `==` ve `!=` bu tiplerin varlik sebebi. Kapi onlari da
+    /// kesseydi tip kullanilamaz hale gelirdi ve bu test, asiri genis bir
+    /// yasagi yakalayan taraf.
+    #[test]
+    fn equality_on_opaque_identities_stays_allowed() {
+        for op in ["==", "!="] {
+            let source = format!(
+                "contract T {{ pub fn f(a: Address, b: Address) {{ \
+                 let c = a {op} b; }} pub fn main() {{ }} }}"
+            );
+            let res = compile(&source, IsaProfile::Production);
+            assert!(
+                res.is_ok(),
+                "`{op}` Address uzerinde reddedildi: kapi kendi amacini asti - \
+                 bu tipler tam da karsilastirilmak icin var. {res:?}"
+            );
+        }
     }
 
     #[test]
@@ -1171,7 +1225,10 @@ mod tests {
     /// answer that a type is supposed to prevent.
     #[test]
     fn arithmetic_on_an_opaque_32_byte_type_is_refused() {
-        for op in ["+", "-", "*", "/", "<", ">"] {
+        // `<=` ve `>=` listede yoktu. Kapi (`sema.rs`, `is_opaque_bytes32`)
+        // ikisini de kapsiyor, ama kapsadigi olculmemisti: listeden dusen bir
+        // operator, kapinin o operator icin kaldirilmasini gorunmez kilardi.
+        for op in ["+", "-", "*", "/", "<", ">", "<=", ">="] {
             let source = format!(
                 r#"
                 contract C {{

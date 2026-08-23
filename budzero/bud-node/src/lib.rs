@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 //! B.U.D. (Broad Universal Database) - P2P Storage Node
 //!
 //! This crate implements the P2P storage backend for the B.U.D. network,

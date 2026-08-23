@@ -15,26 +15,86 @@ pub const PRODCOST_MAGIC: [u8; 8] = *b"\xB5COST\0\0\0";
 #[derive(Debug, Clone, Copy)]
 pub struct StepCost {
     pub step: &'static str,
-    pub mb_per_s: f64,      // işleme hızı (ölçülmüş/yayınlanmış)
+    pub mb_per_s: f64,       // işleme hızı (ölçülmüş/yayınlanmış)
     pub cpu_sec_per_tb: f64, // hesaplanmış: 1_048_576 MB / mb_per_s
 }
 
 pub const STEPS: &[StepCost] = &[
-    StepCost { step: "detect", mb_per_s: 12_000.0, cpu_sec_per_tb: 87.4 },
-    StepCost { step: "columnar-json", mb_per_s: 420.0, cpu_sec_per_tb: 2496.6 },
-    StepCost { step: "logfield", mb_per_s: 380.0, cpu_sec_per_tb: 2759.4 },
-    StepCost { step: "structural-split", mb_per_s: 2_400.0, cpu_sec_per_tb: 436.9 },
-    StepCost { step: "fastcdc", mb_per_s: 3_500.0, cpu_sec_per_tb: 299.6 },
-    StepCost { step: "zstd-3", mb_per_s: 640.0, cpu_sec_per_tb: 1638.4 },
-    StepCost { step: "zstd-19", mb_per_s: 90.0, cpu_sec_per_tb: 11650.8 },
-    StepCost { step: "xz-9e", mb_per_s: 22.0, cpu_sec_per_tb: 47662.5 },
-    StepCost { step: "cauchy-erasure-enc", mb_per_s: 120.0, cpu_sec_per_tb: 8738.1 },
-    StepCost { step: "cauchy-erasure-dec", mb_per_s: 260.0, cpu_sec_per_tb: 4032.9 },
-    StepCost { step: "sha3-256", mb_per_s: 1_100.0, cpu_sec_per_tb: 953.3 },
-    StepCost { step: "avif-lossy (media)", mb_per_s: 45.0, cpu_sec_per_tb: 23301.7 },
-    StepCost { step: "jxl-lossless (media)", mb_per_s: 30.0, cpu_sec_per_tb: 34952.6 },
-    StepCost { step: "flac (audio)", mb_per_s: 250.0, cpu_sec_per_tb: 4194.3 },
-    StepCost { step: "av1 (video)", mb_per_s: 60.0, cpu_sec_per_tb: 17476.3 },
+    StepCost {
+        step: "detect",
+        mb_per_s: 12_000.0,
+        cpu_sec_per_tb: 87.4,
+    },
+    StepCost {
+        step: "columnar-json",
+        mb_per_s: 420.0,
+        cpu_sec_per_tb: 2496.6,
+    },
+    StepCost {
+        step: "logfield",
+        mb_per_s: 380.0,
+        cpu_sec_per_tb: 2759.4,
+    },
+    StepCost {
+        step: "structural-split",
+        mb_per_s: 2_400.0,
+        cpu_sec_per_tb: 436.9,
+    },
+    StepCost {
+        step: "fastcdc",
+        mb_per_s: 3_500.0,
+        cpu_sec_per_tb: 299.6,
+    },
+    StepCost {
+        step: "zstd-3",
+        mb_per_s: 640.0,
+        cpu_sec_per_tb: 1638.4,
+    },
+    StepCost {
+        step: "zstd-19",
+        mb_per_s: 90.0,
+        cpu_sec_per_tb: 11650.8,
+    },
+    StepCost {
+        step: "xz-9e",
+        mb_per_s: 22.0,
+        cpu_sec_per_tb: 47662.5,
+    },
+    StepCost {
+        step: "cauchy-erasure-enc",
+        mb_per_s: 120.0,
+        cpu_sec_per_tb: 8738.1,
+    },
+    StepCost {
+        step: "cauchy-erasure-dec",
+        mb_per_s: 260.0,
+        cpu_sec_per_tb: 4032.9,
+    },
+    StepCost {
+        step: "sha3-256",
+        mb_per_s: 1_100.0,
+        cpu_sec_per_tb: 953.3,
+    },
+    StepCost {
+        step: "avif-lossy (media)",
+        mb_per_s: 45.0,
+        cpu_sec_per_tb: 23301.7,
+    },
+    StepCost {
+        step: "jxl-lossless (media)",
+        mb_per_s: 30.0,
+        cpu_sec_per_tb: 34952.6,
+    },
+    StepCost {
+        step: "flac (audio)",
+        mb_per_s: 250.0,
+        cpu_sec_per_tb: 4194.3,
+    },
+    StepCost {
+        step: "av1 (video)",
+        mb_per_s: 60.0,
+        cpu_sec_per_tb: 17476.3,
+    },
 ];
 
 /// Adım maliyetini adıyla bul.
@@ -44,7 +104,11 @@ pub fn step_cost(name: &str) -> Option<&'static StepCost> {
 
 /// Boru hattının toplam CPU süresi (saniye/TB) - fiyat fonksiyonu girdisi.
 pub fn pipeline_cpu_sec_per_tb(steps: &[&str]) -> f64 {
-    steps.iter().filter_map(|s| step_cost(s)).map(|s| s.cpu_sec_per_tb).sum()
+    steps
+        .iter()
+        .filter_map(|s| step_cost(s))
+        .map(|s| s.cpu_sec_per_tb)
+        .sum()
 }
 
 /// CPU saniyesinin $ karşılığı (validatör donanım amortismanı ~$0.00002/CPU-sn).
@@ -77,14 +141,24 @@ mod tests {
             assert!(s.cpu_sec_per_tb > 0.0);
             // 1 TB = 1_048_576 MB → cpu_sec = MB/mb_per_s
             let beklenen = 1_048_576.0 / s.mb_per_s;
-            assert!((s.cpu_sec_per_tb - beklenen).abs() < 1.0, "{} tutarsız", s.step);
+            assert!(
+                (s.cpu_sec_per_tb - beklenen).abs() < 1.0,
+                "{} tutarsız",
+                s.step
+            );
         }
     }
 
     #[test]
     fn kolay_pipeline_ucuz_agir_pipeline_pahali() {
         let hafif = pipeline_production_usd_per_tb(&["detect", "structural-split", "zstd-3"]);
-        let agir = pipeline_production_usd_per_tb(&["detect", "columnar-json", "zstd-19", "cauchy-erasure-enc", "sha3-256"]);
+        let agir = pipeline_production_usd_per_tb(&[
+            "detect",
+            "columnar-json",
+            "zstd-19",
+            "cauchy-erasure-enc",
+            "sha3-256",
+        ]);
         assert!(agir > hafif);
         assert!(hafif > 0.0);
     }

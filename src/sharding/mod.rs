@@ -242,17 +242,20 @@ pub fn apply_cross_shard_transfer(
         .ok_or_else(|| "receiver balance overflow on cross-shard transfer".to_string())?;
 
     // Both mutations below are infallible after the checks above.
+    // The checks above establish both, but this is a transaction-execution
+    // path: a panic here is a halted chain, so an arithmetic surprise is
+    // reported as a rejected transaction instead.
     let sender = state.get_or_create(&tx.from);
     sender.balance = sender
         .balance
         .checked_sub(total_cost)
-        .expect("balance checked");
+        .ok_or("shard transfer: sender balance underflow")?;
     sender.nonce = sender.nonce.saturating_add(1);
     let receiver = state.get_or_create(&tx.to);
     receiver.balance = receiver
         .balance
         .checked_add(tx.amount)
-        .expect("overflow checked");
+        .ok_or("shard transfer: receiver balance overflow")?;
     Ok(())
 }
 

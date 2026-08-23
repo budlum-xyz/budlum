@@ -126,15 +126,30 @@
 //! master cannot run at registration, which is the only moment refusing is
 //! cheap.
 //!
-//! WIRING: unwired - measured: no production path registers a derived
-//! manifest yet. The spec, its bounds and its refusals are here and tested;
-//! the transaction that registers a derived object is a consensus-surface
-//! change and lands with the V4 manifest tag.
+//! WIRING: wired - the source regime carries a derived variant, so a
+//! derivation's master and every bound it declares are inside the manifest
+//! id, and the replica rule reads the variant rather than assuming.
 //!
-//! (The variant this module will hang off is named in `generated.rs`, not
-//! here. Naming it in this sentence would make the wiring gate read the
-//! mention as a call and declare that module wired, which is the exact
-//! failure this comment is describing about its own module.)
+//! # What being wired changed, and what it did not
+//!
+//! Three things now hold that did not before:
+//!
+//! * A derivation commits to its master. Re-pointing the same crop at a
+//!   different object produces a different manifest id, so a derivation
+//!   cannot be quietly moved onto another master.
+//! * A derivation earns **no replica discount**. The single-replica rule
+//!   exists because a generated object's recipe stands on its own; a
+//!   derivation's recipe names a master, and losing the master loses the
+//!   derivation. Treating the two the same would have discounted durability
+//!   that is not there.
+//! * A derivation holds no bytes of its own. The bytes it is a region of are
+//!   held under the master's manifest and paid for there, so counting them
+//!   again would bill one object twice.
+//!
+//! What did not change: the on-chain registration path still refuses a
+//! derived manifest, for the same reason it refuses a hybrid one - verifying
+//! the claim needs the master's bytes, and those are not on chain. An
+//! unverifiable claim is not accepted merely because it is well formed.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;

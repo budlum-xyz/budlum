@@ -60,7 +60,10 @@ impl RatioResult {
                 let passes = *ratio >= 16.68; // Düz 7+1 (price.rs ile tutarli; KF eşiği)
                 return Some(RatioResult {
                     format,
-                    pipe: Pipe { name: pipe_name, steps: &[] },
+                    pipe: Pipe {
+                        name: pipe_name,
+                        steps: &[],
+                    },
                     ratio: *ratio,
                     passes_kf: passes,
                 });

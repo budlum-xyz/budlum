@@ -1,5 +1,5 @@
 use p3_air::{AirBuilder, ExtensionBuilder, RowWindow, WindowAccess};
-use p3_field::{Algebra, BasedVectorSpace};
+use p3_field::{Algebra, BasedVectorSpace, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrixView;
 use p3_matrix::stack::ViewPair;
 
@@ -47,7 +47,7 @@ fn recompose_aux_opening_row<SC: StarkGenericConfig>(row: &[SC::Challenge]) -> V
                 .iter()
                 .enumerate()
                 .map(|(i, &coeff)| {
-                    SC::Challenge::ith_basis_element(i).expect("basis index in range") * coeff
+                    SC::Challenge::ith_basis_element(i).map_or(SC::Challenge::ZERO, |b| b * coeff)
                 })
                 .sum()
         })
@@ -233,7 +233,7 @@ impl<SC: StarkGenericConfig> ExtensionBuilder for ProverConstraintFolder<'_, SC>
     }
 }
 
-impl<'a, SC: StarkGenericConfig> p3_air::PermutationAirBuilder for ProverConstraintFolder<'a, SC> {
+impl<SC: StarkGenericConfig> p3_air::PermutationAirBuilder for ProverConstraintFolder<'_, SC> {
     type MP = AuxWindow<PackedChallenge<SC>>;
     type RandomVar = SC::Challenge;
     type PermutationVar = PackedChallenge<SC>;
@@ -313,9 +313,7 @@ impl<SC: StarkGenericConfig> ExtensionBuilder for VerifierConstraintFolder<'_, S
     }
 }
 
-impl<'a, SC: StarkGenericConfig> p3_air::PermutationAirBuilder
-    for VerifierConstraintFolder<'a, SC>
-{
+impl<SC: StarkGenericConfig> p3_air::PermutationAirBuilder for VerifierConstraintFolder<'_, SC> {
     type MP = AuxWindow<SC::Challenge>;
     type RandomVar = SC::Challenge;
     type PermutationVar = SC::Challenge;

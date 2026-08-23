@@ -1,6 +1,10 @@
 // Unsafe kilidi - src/ şu an 0 unsafe temiz taban;
 // Bir `unsafe` blok girdiği an derleme FAIL eder (regresyon kapısı).
 #![forbid(unsafe_code)]
+/// Kuantum-guvenli hesap soyutlama. Imza dogrulamasi ML-DSA-87'ye bagli
+/// oldugu icin `wallet-ml-dsa` ozelligini gerektirir.
+#[cfg(feature = "wallet-ml-dsa")]
+pub mod account_abstraction;
 pub mod ai;
 pub mod bns;
 pub mod budlumxyz;
@@ -26,12 +30,18 @@ pub mod prover;
 pub mod registry;
 pub mod relayer;
 pub mod rpc;
+/// Budlum proje dosyası şeması (`budlum.toml`).
+pub mod sdk;
 pub mod settlement;
 pub mod sharding;
 pub mod socialfi;
 pub mod storage;
 pub mod tokenomics;
 
+// The workspace denies `unwrap`/`expect` because a panic in production code
+// aborts the node. Inside tests the opposite holds: a failed unwrap is how a
+// test reports a broken invariant, and rewriting 2769 of them into `?` would
+// make the suite harder to read while proving nothing.
 #[cfg(test)]
 pub mod tests;
 

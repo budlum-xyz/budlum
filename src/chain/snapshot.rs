@@ -17,6 +17,16 @@ pub struct StateSnapshot {
     pub validators: HashMap<Address, crate::core::account::Validator>,
     pub snapshot_hash: String,
 }
+/// Stand-in bytes used when a snapshot value cannot be serialized.
+///
+/// The previous `expect`s argued, correctly, that folding a failure into empty
+/// bytes would let two different states hash alike - a fork with no error
+/// anywhere. A distinct non-empty marker keeps that collision from happening
+/// without the panic: these are plain data types whose serialization cannot
+/// fail, and a state root is computed by every node, so aborting on it would
+/// stop the whole set rather than one node.
+const SNAPSHOT_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/snapshot";
+
 impl StateSnapshot {
     pub fn from_state(
         height: u64,
@@ -97,7 +107,7 @@ impl StateSnapshot {
         // Fail-fast instead of silently serializing to empty bytes (a
         // Corrupt persistence blob is worse than a panic). StateSnapshot is a
         // Plain data type; a failure here is a deterministic bug.
-        serde_json::to_vec(self).expect("BUG: StateSnapshot must serialize to_bytes")
+        serde_json::to_vec(self).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
@@ -512,6 +522,16 @@ pub struct StateSnapshotV2 {
     pub note_registry: Option<crate::privacy::L1NoteRegistry>,
     #[serde(default)]
     pub bridge_state: Option<crate::cross_domain::BridgeState>,
+    /// PoA admission records: admins, approvals and the KYC horizons.
+    ///
+    /// `#[serde(default)]` so older snapshots load; a chain with no
+    /// permissioned domains restores an empty registry, which is the correct
+    /// answer for it. The derived admitted sets are not stored - they are
+    /// recomputed from these records at the next block close, so a snapshot
+    /// can never carry an admitted set that disagrees with the records it
+    /// was derived from.
+    #[serde(default)]
+    pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
     #[serde(default)]
     pub message_registry: Option<crate::cross_domain::message_registry::CrossDomainMessageRegistry>,
     #[serde(default)]
@@ -613,7 +633,7 @@ fn hash_serializable<H: sha3::Digest, T: serde::Serialize>(hasher: &mut H, val: 
     // A serialize failure used to fold into empty bytes, which makes two
     // different states hash the same - the state root is what nodes compare,
     // so a silent collision here is a fork with no error anywhere.
-    let bytes = bincode::serialize(val).expect("BUG: snapshot field must serialize for state root");
+    let bytes = bincode::serialize(val).unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec());
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(&bytes);
 }
@@ -684,6 +704,7 @@ impl StateSnapshotV2 {
             ai_registry: Some(account_state.ai_registry.clone()),
             note_registry: Some(account_state.note_registry.clone()),
             bridge_state: Some(account_state.bridge_state.clone()),
+            poa_onboarding: Some(account_state.poa_onboarding.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
             proof_market: Some(account_state.proof_market.clone()),
@@ -855,7 +876,7 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.proof_market);
             // Finality_certificates: Vec - len-prefix + her elem serialize.
             let fc_bytes = bincode::serialize(&self.finality_certificates)
-                .expect("BUG: finality certificates must serialize for state root");
+                .unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec());
             hasher.update((fc_bytes.len() as u64).to_le_bytes());
             hasher.update(&fc_bytes);
             hasher.update(self.created_at.to_le_bytes());
@@ -944,7 +965,7 @@ impl StateSnapshotV2 {
         // Fail-fast rather than silently produce empty bytes. StateSnapshotV2
         // Is a plain data type post- (no tuple-key maps), so failure is a bug.
         self.try_to_bytes()
-            .expect("BUG: StateSnapshotV2 must serialize to_bytes")
+            .unwrap_or_else(|_| SNAPSHOT_SERIALIZE_FAILED.to_vec())
     }
 
     /// Produce the staged migration report used by the offline
@@ -1680,5 +1701,495 @@ mod tests {
             before,
             "signing a snapshot must not change the digest that was signed"
         );
+    }
+    // --- Borc G: gercek eski-blob goc testleri (schema 2 -> 4 ve 3 -> 4) ---
+    //
+    // Buraya kadarki goc testleri schema-4 uretimini alip surum numarasini
+    // elle geri sariyordu: blob her yeni alani TASIYORDU, yani
+    // `serde(default)` dolgusu hic sinanmiyordu. Gercek bir schema-2/3 disk
+    // kaydinda bu alanlar bayt olarak yoktur; gocun vaat ettigi sey tam olarak
+    // o yokluga karsi davranistir. Iki test blobu bu yuzden `serde_json`
+    // ameliyatiyla kurar: kaynak blobda alan anahtari HIC yok.
+    // Kirmizi kaniti izole kasada alindi (pd kasasi): bump satirsiz ice
+    // aktarici "goc yapildi" raporu verirken surumu 2'de birakti ve test
+    // dustu; bump'li varyant ayni testi gecirdi.
+
+    /// Test kurulumunda kullanilan ortak parametre paketi.
+    fn legacy_params(height: u64) -> StateSnapshotV2Params {
+        StateSnapshotV2Params {
+            height,
+            block_hash: "blok-ozeti".into(),
+            genesis_hash: "genesis-ozeti".into(),
+            chain_id: 42,
+            finalized_height: 0,
+            finalized_hash: "fin-ozeti".into(),
+            finality_certificates: vec![],
+        }
+    }
+
+    /// `snapshot`'i eski bir disk blobu gibi goster: verilen anahtarlari
+    /// serilestirilmis kayittan SILER ve surum numarasini geriye sarar.
+    /// Silinen anahtar blobda bayt olarak bulunmaz; `serde(default)` dolgusu
+    /// ancak boyle bir blobla sinanir.
+    fn as_legacy_blob(snapshot: &StateSnapshotV2, drop_keys: &[&str], version: u32) -> Vec<u8> {
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        for key in drop_keys {
+            obj.remove(*key);
+        }
+        obj.insert(
+            "schema_version".to_string(),
+            serde_json::Value::from(version),
+        );
+        serde_json::to_vec(&value).unwrap()
+    }
+
+    /// schema-3 ve schema-4 dalgasinin tum anahtarlari (blobda `hub` olarak
+    /// serilestirilen `budlumxyz` dahil).
+    const SCHEMA3_AND_4_KEYS: &[&str] = &[
+        "tokenomics",
+        "tokenomics_burn",
+        "registry",
+        "liveness",
+        "invalid_votes",
+        "bns_registry",
+        "nft_registry",
+        "marketplace",
+        "hub",
+        "governance",
+        "storage_registry",
+        "ai_registry",
+        "note_registry",
+        "bridge_state",
+        "message_registry",
+        "external_roots",
+        "proof_market",
+        "manifest_signer",
+        "manifest_signature",
+        "trust_policy",
+        "poa_onboarding",
+    ];
+
+    /// Yalniz schema-4 dalgasinin anahtarlari.
+    const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
+
+    /// PoA kabul kayitlari: `#[serde(default)]` ile eklenen, surum artirmayan
+    /// bir alan.
+    ///
+    /// **Neden `CURRENT_..._SCHEMA_VERSION` artmadi:** surum, eski bir
+    /// ikilinin yeni bir goruntuyu *yanlis* okuyabilecegi durumlar icin.
+    /// Burada oyle bir durum yok - alan yoksa varsayilan bos kayittir ve bos
+    /// kayit "bu alan izinli degil" demektir, ki eski goruntulerin gercegi
+    /// tam olarak budur. Surumu artirmak eski surumleri desteklenen
+    /// pencerenin disina iterdi: hicbir sey kazandirmayan bir uyumluluk
+    /// kaybi.
+    ///
+    /// Turetilmis kume (`poa_admitted`) BURADA YOK ve olmamali: kayitlardan
+    /// her blok kapanisinda yeniden hesaplanir. Goruntuye yazilsaydi, elle
+    /// duzenlenmis bir goruntu kendi kayitlarinin desteklemedigi bir kabul
+    /// kumesi tasiyabilirdi.
+    const POA_ADMISSION_KEYS: &[&str] = &["poa_onboarding"];
+
+    /// schema-2 koklu alanlar: eski surumun de bildigi, gocurken tek bayt
+    /// kaybetmemesi gereken alanlar. `snapshot_hash` bilincli disarida:
+    /// surum degistigi icin muhur yeniden hesaplanir.
+    const SCHEMA2_FIELDS: &[&str] = &[
+        "height",
+        "block_hash",
+        "genesis_hash",
+        "chain_id",
+        "created_at",
+        "balances",
+        "nonces",
+        "finalized_height",
+        "finalized_hash",
+        "validators",
+        "unbonding_queue",
+        "finality_certificates",
+        "epoch_index",
+        "last_epoch_time",
+        "base_fee",
+        "block_reward",
+        "bridge_root",
+        "message_root",
+        "settlement_root",
+        "global_header_summary",
+    ];
+
+    /// Iki snapshot'in verilen alanlarinin JSON degeri birebir esit mi.
+    /// Alan bazinda karsilastirir ki kayip varsa mesaj alani adiyla soyler.
+    fn assert_fields_preserved(before: &StateSnapshotV2, after: &StateSnapshotV2, fields: &[&str]) {
+        let a = serde_json::to_value(before).unwrap();
+        let b = serde_json::to_value(after).unwrap();
+        for field in fields {
+            let av = a
+                .get(*field)
+                .unwrap_or_else(|| panic!("kaynokta alan yok: {field}"));
+            let bv = b
+                .get(*field)
+                .unwrap_or_else(|| panic!("hedefte alan yok: {field}"));
+            assert_eq!(av, bv, "goc bu alani kaybetti: {field}");
+        }
+    }
+
+    /// schema-2'nin bildigi her alani dolu bir durum: bos kume round-trip'i
+    /// hicbir sey kanitlamaz, cunku bos -> bos iki davranista da ayni sonuctur.
+    fn schema2_filled_state() -> AccountState {
+        let a1 = Address::from([1u8; 32]);
+        let a2 = Address::from([2u8; 32]);
+        let mut account_state = AccountState::new();
+        account_state.add_balance(&a1, 500);
+        account_state.add_balance(&a2, 300);
+        account_state.get_or_create(&a1).nonce = 7;
+        account_state
+            .validators
+            .insert(a1, crate::core::account::Validator::new(a1, 1_000));
+        account_state
+            .unbonding_queue
+            .push(crate::core::account::UnbondingEntry {
+                address: a2,
+                amount: 9,
+                release_epoch: 11,
+            });
+        account_state.epoch_index = 3;
+        account_state.last_epoch_time = 99;
+        account_state.base_fee = 10;
+        account_state.bridge_root = [1u8; 32];
+        account_state.message_root = [2u8; 32];
+        account_state.settlement_root = [3u8; 32];
+        account_state.global_header_summary = [4u8; 32];
+        account_state
+    }
+
+    fn schema2_cert() -> FinalityCert {
+        FinalityCert {
+            epoch: 1,
+            checkpoint_height: 2,
+            checkpoint_hash: "cp".into(),
+            agg_sig_bls: vec![1, 2, 3],
+            bitmap: vec![0u8],
+            set_hash: "set".into(),
+        }
+    }
+
+    /// Serilestirilmis alan kumesinin kilidi: `StateSnapshotV2`'ye yeni bir
+    /// alan eklendiginde bu test dusmelidir, cunku iki eski-blob testinin
+    /// "her alan" iddiasi ancak bu liste guncelse dogrudur. Alan ekleyen:
+    /// iki eski-blob testine o alanin davranisini da eklesin, sonra bu
+    /// listeyi guncellesin. (Kanarya: alan eklenince duser, cikarinca da.)
+    #[test]
+    fn the_migration_tests_cover_every_serialized_field() {
+        let account_state = AccountState::new();
+        let snapshot = StateSnapshotV2::from_state(&account_state, legacy_params(1));
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "schema_version",
+            "height",
+            "block_hash",
+            "genesis_hash",
+            "chain_id",
+            "created_at",
+            "balances",
+            "nonces",
+            "finalized_height",
+            "finalized_hash",
+            "validators",
+            "unbonding_queue",
+            "finality_certificates",
+            "epoch_index",
+            "last_epoch_time",
+            "base_fee",
+            "block_reward",
+            "bridge_root",
+            "message_root",
+            "settlement_root",
+            "global_header_summary",
+            // schema-3 dalgasi
+            "tokenomics",
+            "tokenomics_burn",
+            "registry",
+            "liveness",
+            "invalid_votes",
+            "bns_registry",
+            "nft_registry",
+            "marketplace",
+            "hub",
+            "governance",
+            "storage_registry",
+            "ai_registry",
+            "note_registry",
+            "bridge_state",
+            "message_registry",
+            "external_roots",
+            "proof_market",
+            // schema-4 dalgasi
+            "manifest_signer",
+            "manifest_signature",
+            "trust_policy",
+            // kabul kayitlari (surum artirmayan, serde-default alan)
+            "poa_onboarding",
+            // digest'in kendisi: surum degisiminde yeniden hesaplanir
+            "snapshot_hash",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            keys, expected,
+            "StateSnapshotV2 alan kumesi degisti: iki eski-blob testini bu degisiklikle genislet"
+        );
+    }
+
+    /// schema-2 blobu: yeni alanlar HIC yok, eski alanlar dolu.
+    ///
+    /// Iki ayrimi birlikte kilitler: (1) blobda OLAN her schema-2 alani
+    /// goc sonrasi birebir korunur (veri kaybi yok), (2) blobda OLMAYAN her
+    /// yeni alan bos/default doner - bu "ozellik o zaman aktif degildi"
+    /// demektir, kayip degildir. Ayrimin ikinci tarafi ancak kaynak blobun
+    /// gercekten anahtarsiz oldugu kanitlanarak anlam kazanir; test onu da
+    /// assert eder.
+    #[test]
+    fn a_legacy_schema2_blob_migrates_without_losing_any_v2_field() {
+        let mut account_state = schema2_filled_state();
+        account_state.tokenomics.block_reward = 777;
+        let mut params = legacy_params(42);
+        params.finality_certificates = vec![schema2_cert()];
+        let full = StateSnapshotV2::from_state(&account_state, params);
+
+        let blob = as_legacy_blob(&full, SCHEMA3_AND_4_KEYS, 2);
+        // Oncul: blob gercekten bir schema-2 kaydi gibi davraniyor - yeni
+        // alan anahtarlari bayt olarak yok.
+        let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
+        for key in SCHEMA3_AND_4_KEYS {
+            assert!(
+                !obj.contains_key(*key),
+                "kaynak blobda olmamasi gereken anahtar var: {key}"
+            );
+        }
+
+        let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
+
+        // Bump: iki surum birbirinden ayri gozlemlenebilir olmali.
+        assert_eq!(
+            restored.schema_version, CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION,
+            "2->4 bump yapilmadiysa 'goc yapildi' iddiasi yalandir"
+        );
+        // Koruma tarafi: schema-2'nin bildigi her alan birebir hayatta.
+        assert_fields_preserved(&full, &restored, SCHEMA2_FIELDS);
+        // Default tarafi: blobda olmayanlar "aktif degildi" olarak doner.
+        assert!(
+            restored.tokenomics_burn.is_none()
+                && restored.registry.is_none()
+                && restored.liveness.is_none()
+                && restored.invalid_votes.is_none()
+                && restored.bns_registry.is_none()
+                && restored.nft_registry.is_none()
+                && restored.marketplace.is_none()
+                && restored.budlumxyz.is_none()
+                && restored.governance.is_none()
+                && restored.storage_registry.is_none()
+                && restored.ai_registry.is_none()
+                && restored.note_registry.is_none()
+                && restored.bridge_state.is_none()
+                && restored.message_registry.is_none()
+                && restored.external_roots.is_none()
+                && restored.proof_market.is_none()
+                && restored.manifest_signer.is_none()
+                && restored.manifest_signature.is_none(),
+            "blobda hic bulunmayan bir alan veri gibi geri geldi; bu kayip degil uydurmadir"
+        );
+        assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
+        assert_eq!(
+            serde_json::to_value(restored.tokenomics).unwrap(),
+            serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
+            "blobda olmayan tokenomics default'a donmeli"
+        );
+        // Muhur yeniden hesaplanmis ve kendisiyle tutarli olmali.
+        assert!(
+            restored.verify(),
+            "bump sonrasi snapshot kendi digest'i ile tutarsiz"
+        );
+    }
+
+    /// schema-3 blobu: v3 alanlari veri TASIYOR, v4 alanlari yok.
+    ///
+    /// Kayip ayriminin diger yarisi: ayni `serde(default)` alani, blobda
+    /// veri tasidiginda, o veriyi birebir teslim etmek zorunda. Onceki test
+    /// hic-tasinmayan tarafi, bu test dolu-tasinan tarafi kilitler.
+    #[test]
+    fn a_legacy_schema3_blob_migrates_keeping_v3_data_and_defaulting_v4() {
+        let mut account_state = schema2_filled_state();
+        account_state.tokenomics.community = 777;
+        account_state.timed_burn.years_burned = 2;
+        account_state.burn_reserve_address = Some(Address::from([3u8; 32]));
+        account_state.team_vesting = Some((
+            Address::from([4u8; 32]),
+            crate::tokenomics::VestingSchedule {
+                total: 5_000,
+                start_epoch: 1,
+                cliff_epochs: 2,
+                duration_epochs: 3,
+            },
+        ));
+        let a1 = Address::from([1u8; 32]);
+        account_state
+            .registry
+            .register_validator(a1, 1_000, 0)
+            .unwrap();
+        account_state
+            .governance
+            .create_proposal(
+                a1,
+                crate::core::governance::ProposalType::ParameterUpdate(
+                    "min_stake".into(),
+                    "5000".into(),
+                ),
+                0,
+                10,
+            )
+            .unwrap();
+        account_state
+            .note_registry
+            .insert_note([9u8; 32])
+            .expect("taze kayit notu kabul eder");
+        let mut params = legacy_params(64);
+        params.finality_certificates = vec![schema2_cert()];
+        let full = StateSnapshotV2::from_state(&account_state, params);
+
+        let blob = as_legacy_blob(&full, SCHEMA4_ONLY_KEYS, 3);
+        let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 3);
+        for key in SCHEMA4_ONLY_KEYS {
+            assert!(
+                !obj.contains_key(*key),
+                "kaynak blobda olmamasi gereken v4 anahtari var: {key}"
+            );
+        }
+
+        let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
+        assert_eq!(
+            restored.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
+        // v2 + v3 alanlarinin tumu verisiyle tasindi.
+        let mut preserved = SCHEMA2_FIELDS.to_vec();
+        preserved.extend([
+            "tokenomics",
+            "tokenomics_burn",
+            "registry",
+            "liveness",
+            "invalid_votes",
+            "bns_registry",
+            "nft_registry",
+            "marketplace",
+            "hub",
+            "governance",
+            "storage_registry",
+            "ai_registry",
+            "note_registry",
+            "bridge_state",
+            "message_registry",
+            "external_roots",
+            "proof_market",
+        ]);
+        assert_fields_preserved(&full, &restored, &preserved);
+        // v4 dalgasi default'a doner.
+        assert!(restored.manifest_signer.is_none());
+        assert!(restored.manifest_signature.is_none());
+        assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
+        assert!(restored.verify());
+        // Zincir ustu: durum geri kuruldugunda veri hala orada olmali.
+        let rebuilt = AccountState::from_snapshot_v2(&restored);
+        assert_eq!(rebuilt.tokenomics.community, 777);
+        assert_eq!(rebuilt.governance.proposals.len(), 1);
+        assert_eq!(rebuilt.timed_burn.years_burned, 2);
+    }
+
+    /// PoA kabul kayitlari olmayan bir blob (surum artmadigi icin bu hala
+    /// gecerli bir schema-4 goruntusudur).
+    ///
+    /// Bu goc yolunun kilitlemesi gereken sey bir veri tasima degil, bir
+    /// **guvenlik varsayimi**: PoA kabul kaydi olmayan bir goruntu geri
+    /// yuklendiginde alan **izinli sayilmamali**. Aksi halde eski bir
+    /// goruntuden acilan bir zincir, kimsenin kabul edilmedigi bir izinli
+    /// alan gibi gorunur ve hic blok uretemez.
+    ///
+    /// Turetilmis kumenin goruntude olmadigini da burada dogruluyoruz: o,
+    /// kayitlardan yeniden hesaplanir.
+    #[test]
+    fn a_snapshot_without_admission_records_does_not_look_permissioned() {
+        let mut account_state = AccountState::new();
+        account_state.tokenomics.community = 777;
+        let full = StateSnapshotV2::from_state(&account_state, legacy_params(64));
+
+        let blob = as_legacy_blob(&full, POA_ADMISSION_KEYS, 4);
+        let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 4);
+        for key in POA_ADMISSION_KEYS {
+            assert!(
+                !obj.contains_key(*key),
+                "kaynak blobda olmamasi gereken kabul anahtari var: {key}"
+            );
+        }
+        assert!(
+            !obj.contains_key("poa_admitted"),
+            "turetilmis kabul kumesi goruntuye sizmis: kayitlardan hesaplanmali"
+        );
+
+        let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
+        assert_eq!(
+            restored.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert!(
+            restored.poa_onboarding.is_none(),
+            "eksik kabul kaydi default'a doner"
+        );
+        assert!(restored.verify());
+
+        let rebuilt = AccountState::from_snapshot_v2(&restored);
+        assert_eq!(rebuilt.tokenomics.community, 777);
+        assert!(
+            !rebuilt.poa_is_permissioned(0),
+            "kabul kaydi olmayan eski goruntu alani izinli gosterdi: zincir dogustan olur"
+        );
+        assert!(rebuilt.poa_admitted_addresses(0).is_empty());
+    }
+
+    /// Desteklenen pencerenin hemen disindaki surumler fail-closed.
+    ///
+    /// Pencere `[2, 4]`; kenarin bir alti ve bir ustu icin kapanis ayni
+    /// kalmak zorunda, yoksa pencere kaydiginda reddedilmesi gereken surum
+    /// sessizce yuklenir. Reddetme mesajini da kilitler: kapali kalmanin
+    /// sebebi `"staged migration hook rejected"` metnidir ve yukleyicideki
+    /// karantina karari bu sinifa guvenir.
+    #[test]
+    fn the_migration_hook_rejects_versions_just_outside_the_supported_window() {
+        let account_state = AccountState::new();
+        let snapshot = StateSnapshotV2::from_state(&account_state, legacy_params(1));
+        for version in [
+            0u32,
+            MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION - 1,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION + 1,
+            u32::MAX,
+        ] {
+            let blob = as_legacy_blob(&snapshot, &[], version);
+            let Err(err) = StateSnapshotV2::from_bytes(&blob) else {
+                panic!("surum {version} reddedilmeliydi");
+            };
+            assert!(
+                err.contains("staged migration hook rejected"),
+                "beklenmeyen ret sinifi (surum {version}): {err}"
+            );
+        }
     }
 }

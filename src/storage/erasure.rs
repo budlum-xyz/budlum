@@ -88,9 +88,8 @@ fn tables() -> &'static GfTables {
         // Repeat the multiplicative cycle so `exp[log_a + log_b]` needs no
         // modulo: both logs are at most 254, so the largest index reached is
         // 508, and every index from 255 up mirrors one 255 earlier.
-        let cycle: [u8; 255] = exp[..255]
-            .try_into()
-            .expect("the first 255 entries were just written");
+        let mut cycle = [0u8; 255];
+        cycle.copy_from_slice(&exp[..255]);
         for (dst, src) in exp[255..].iter_mut().zip(cycle.iter().cycle()) {
             *dst = *src;
         }
@@ -834,6 +833,47 @@ mod tests {
             let out = reconstruct_object(&manifest, &present)
                 .unwrap_or_else(|e| panic!("losing {lost:?} broke recovery: {e}"));
             assert_eq!(out, data, "wrong bytes after losing {lost:?}");
+        }
+    }
+
+    proptest::proptest! {
+        // The MDS promise as a property, not a fixture. The existing
+        // `any_k_of_n_reconstructs_the_object` pins one scheme (k=4, n=6) and
+        // one byte pattern; a Cauchy-matrix mistake that only shows up at a
+        // different k/n or on different data would survive it. Here the scheme
+        // and the payload are both generated, and every loss pattern up to the
+        // parity count is still exercised exhaustively.
+        //
+        // Silent wrong-bytes is the failure mode that matters: erasure decode
+        // does not checksum its own output, so a bad matrix returns success
+        // with corrupt data rather than erroring.
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn any_k_of_n_reconstructs_over_generated_schemes_and_payloads(
+            k in 1usize..=5,
+            parity in 0usize..=3,
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..600),
+        ) {
+            let n = k + parity;
+            let scheme = ErasureScheme { k: k as u32, n: n as u32 };
+            let enc = encode_object(&data, scheme).expect("generated scheme is valid");
+            let manifest = enc.to_manifest().expect("manifest");
+
+            // Losing any `parity` shards must still round-trip exactly.
+            for lost in combinations(n, parity) {
+                let mut present: Vec<Option<Vec<u8>>> =
+                    enc.shards.iter().cloned().map(Some).collect();
+                for &i in &lost {
+                    present[i] = None;
+                }
+                let out = reconstruct_object(&manifest, &present)
+                    .unwrap_or_else(|e| panic!("k={k} n={n} losing {lost:?} broke recovery: {e}"));
+                proptest::prop_assert_eq!(
+                    out, data.clone(),
+                    "k={} n={} wrong bytes after losing {:?}", k, n, lost
+                );
+            }
         }
     }
 

@@ -55,7 +55,10 @@ fn r3_roundtrip(orijinal: &[u8], mime: &str) -> bool {
 fn gorsel_png_kayipsiz_tam_cozunurluk() {
     // 128x128 gercek PNG (PIL ile uretildi, tests/fixtures/gorsel.png)
     let png = fixture("gorsel.png");
-    assert!(r3_roundtrip(&png, "image/png"), "PNG kayıpsız + tam çözünürlük");
+    assert!(
+        r3_roundtrip(&png, "image/png"),
+        "PNG kayıpsız + tam çözünürlük"
+    );
     // çözünürlük: PNG header 0x10..0x14 (width), 0x14..0x18 (height)
     let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
     let h = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
@@ -70,7 +73,10 @@ fn video_yuv_kayipsiz_tam_cozunurluk() {
     // kare boyutu: 64*48*1.5 = 4608 B/kare → 60 kare
     let kare_bayt = 4608usize;
     assert_eq!(yuv.len() % kare_bayt, 0, "kare hizası tam");
-    assert!(yuv.len() / kare_bayt >= 60, "kare sayısı korunur (en az 60)");
+    assert!(
+        yuv.len() / kare_bayt >= 60,
+        "kare sayısı korunur (en az 60)"
+    );
 }
 
 #[test]
@@ -81,7 +87,7 @@ fn metin_log_kayipsiz() {
 
 #[test]
 fn edition_her_ucu_kodda_var() {
-    use crate::bud_format_edition::{Edition, Bud1Custody, Bud1Nft};
+    use crate::bud_format_edition::{Bud1Custody, Bud1Nft, Edition};
     // 1.0: BYO - kendi sunucu + cihaz
     let _ext = Bud1Nft::new_external([1u8; 32], "sunucum.example".into(), "uri".into());
     let _dev = Bud1Nft::new_device([2u8; 32], "uri".into(), true);

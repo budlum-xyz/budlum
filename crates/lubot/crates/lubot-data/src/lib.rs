@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 //! # lubot-data - kapalı-devre veri katmanı
 //!
 //! Lubot yalnızca Pollen grant'li, B.U.D. StorageDeal etiketli veya

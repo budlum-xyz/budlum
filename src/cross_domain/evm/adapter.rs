@@ -34,10 +34,10 @@ use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
 use crate::cross_domain::chain_adapter::{AdapterError, ChainAdapter};
 use crate::cross_domain::event_tree::MerkleProof;
-use crate::cross_domain::evm::header::{verify_chain, EthHeader, DEFAULT_CONFIRMATIONS};
-use crate::cross_domain::evm::mpt;
-use crate::cross_domain::evm::receipt::{decode_receipt, EthReceipt};
-use crate::cross_domain::evm::verify::{verify_evm_receipt, EvmDepositProof, VerifyError};
+use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
+use crate::cross_domain::evm::verify::{
+    verify_evm_receipt, EvmDepositProof, VerifiedDeposit, VerifyError,
+};
 use crate::domain::types::Hash32;
 
 /// Ethereum bridge kontrat deposit event imzas (topic0).
@@ -136,16 +136,20 @@ impl ChainAdapter for EvmChainAdapter {
         &self,
         tx_hash: &str,
     ) -> Result<(MerkleProof, Hash32, String), AdapterError> {
-        // Offline-test: dummy proof (F10.1 verify ile tutarsız → RED test).
-        let leaf = crate::core::hash::hash_fields_bytes(&[b"BDLM_EVM_STUB", tx_hash.as_bytes()]);
-        Ok((
-            MerkleProof {
-                leaf,
-                index: 0,
-                siblings: Vec::new(),
-            },
-            leaf,
-            tx_hash.to_string(),
+        // Bu adaptor Ethereum'u okumuyor, dolayisiyla bir receipt kaniti
+        // uretemez. Eskiden tek yaprakli bir agac donuyordu: yaprak ve kok
+        // ayni deger, yani `verify_receipt_proof` icindeki Merkle denetimi
+        // hicbir sey olcmeden geciyordu. Bir stub'in en tehlikeli hali,
+        // gecerli gorunen bir cikti uretenidir.
+        //
+        // Reddetmek dogru davranis. Relayer bu hatayi gorur ve hicbir sey
+        // imzalamaz; sessiz kalan bir relayer bir transferi geciktirir, ama
+        // dogrulanmamis bir basariyi imzalayan relayer yalani gercek yapar.
+        let _ = tx_hash;
+        Err(AdapterError::ProofVerificationFailed(
+            "EVM adapter cannot assemble a receipt proof: it does not read Ethereum. \
+             Wire an RPC-backed proof assembler before relaying value"
+                .into(),
         ))
     }
 
@@ -182,6 +186,24 @@ impl ChainAdapter for EvmChainAdapter {
         external_state_root: &Hash32,
         expected_tx_hash: &str,
     ) -> Result<(), AdapterError> {
+        // Bir yaprak kendi kokune karsi dogrulanmaz.
+        //
+        // `MerkleProof::verify` bos bir `siblings` listesiyle cagrildiginda
+        // hicbir hash adimi atmaz ve `leaf == expected_root` karsilastirmasina
+        // duser. Yani proof'u ureten taraf ayni degeri hem yaprak hem kok
+        // olarak verirse denetim gecer. Bu, adaptorun kendi uydurdugu bir
+        // agaci kendi kendine onaylatmasidir; `generate_receipt_proof`'un
+        // offline stub'i tam olarak bunu uretiyor.
+        //
+        // Denetim burada, `verify`den once. Sonra konsaydi cagri zaten
+        // gecmis olurdu.
+        if proof.siblings.is_empty() {
+            return Err(AdapterError::ProofVerificationFailed(
+                "EVM receipt proof has no sibling path: a single-leaf tree proves only that \
+                 the prover can repeat itself, because leaf and root are then the same value"
+                    .into(),
+            ));
+        }
         // Merkle proof self-consistency (kısmi fix).
         if !proof.verify(*external_state_root) {
             return Err(AdapterError::ProofVerificationFailed(
@@ -235,33 +257,29 @@ impl ChainAdapter for EvmChainAdapter {
 }
 
 impl EvmChainAdapter {
-    /// Tam on-chain EVM receipt verify (F10.2 verify.rs orchestrator).
-    /// Bu, ChainAdapter::verify_receipt_proof'un zenginleştirilmiş hali -
-    /// Relayer tam proof paketi (header chain + MPT nodes + receipt) sağlar.
-    pub fn verify_deposit(&self, proof: &EvmDepositProof<'_>) -> Result<EthReceipt, VerifyError> {
-        // Verify_evm_receipt: header N-conf → MPT → receipt → status → deposit log.
-        let _verified = verify_evm_receipt(proof)?;
-        // Receipt decode (verify_evm_receipt içinde zaten var, burada accessor için).
-        // Verify_evm_receipt VerifiedDeposit döner; caller'a EthReceipt gerekirse
-        // Ayrı decode. Minimal: header chain teyit.
-        let target = decode_header_or_err(proof.target_header)?;
-        let confs: Vec<EthHeader> = proof
-            .confirmation_headers
-            .iter()
-            .map(|h| decode_header_or_err(h))
-            .collect::<Result<_, _>>()?;
-        verify_chain(&target, &confs, proof.required_confirmations)
-            .map_err(|e| VerifyError::Header(e.to_string()))?;
-        // MPT + receipt decode (verify_evm_receipt içinde çağrılır).
-        let receipt_bytes =
-            mpt::verify(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
-        decode_receipt(&receipt_bytes).map_err(VerifyError::from)
+    /// Tam on-chain EVM deposit verify (F10.2 `verify.rs` orchestrator).
+    ///
+    /// Bu, `ChainAdapter::verify_receipt_proof`'un zenginleştirilmiş hali:
+    /// relayer tam proof paketi (header zinciri + MPT node'ları + receipt)
+    /// sağlar, buradan dönen şey ise **kanıtlanmış deposit**tir.
+    ///
+    /// Eskiden bu fonksiyon `verify_evm_receipt`'in sonucunu `_verified` diye
+    /// atıp header zincirini ve MPT'yi ikinci kez çözüyor, çağırana ham bir
+    /// `EthReceipt` veriyordu. Iki kusuru vardı. Ilki: aynı denetim iki yerde
+    /// yazılmış oluyordu, ve bir denetimin iki kopyası varsa hangisinin
+    /// uygulandığını saldırgan seçer (bkz. `docs/ARCHITECTURE.md` §65).
+    /// Ikincisi ve daha kötüsü: `EthReceipt`, `verify_evm_receipt`'in
+    /// *yaptığı* iki denetimi (`status` doğru mu, deposit log'u gerçekten
+    /// var mı) taşımayan bir tiptir. Çağıran, adı "verify" olan bir
+    /// fonksiyondan status'u kontrol edilmemiş görünen bir receipt alıyordu.
+    ///
+    /// Artık tek bir doğrulama var ve dönen tip onun kanıtladığı şey.
+    pub fn verify_deposit(
+        &self,
+        proof: &EvmDepositProof<'_>,
+    ) -> Result<VerifiedDeposit, VerifyError> {
+        verify_evm_receipt(proof)
     }
-}
-
-fn decode_header_or_err(raw: &[u8]) -> Result<EthHeader, VerifyError> {
-    crate::cross_domain::evm::header::decode_header(raw)
-        .map_err(|e| VerifyError::Header(e.to_string()))
 }
 
 /// Receipt proof leaf'ini `tx_hash + bridge_address`'ten türetir.
@@ -294,12 +312,45 @@ mod tests {
         assert_eq!(adapter.required_confirmations, DEFAULT_CONFIRMATIONS);
     }
 
+    /// Okumadigi bir zincir icin kanit uretmeyi reddeder.
+    ///
+    /// Eskiden tek yaprakli bir agac donuyordu ve testi `proof.leaf == root`
+    /// esitligini **sabitliyordu**. O esitlik tam da kusurun kendisiydi:
+    /// `MerkleProof::verify` bos bir kardes listesiyle hicbir hash adimi
+    /// atmaz, `leaf == root` karsilastirmasina duser ve gecer. Yani
+    /// adaptorun urettigi kanit, adaptorun kendi denetiminden her zaman
+    /// geciyordu.
     #[tokio::test]
-    async fn offline_stub_generate_proof() {
+    async fn the_offline_adapter_refuses_to_invent_a_proof() {
         let adapter = EvmChainAdapter::test_default();
-        let (proof, root, hash) = adapter.generate_receipt_proof("0xabc").await.unwrap();
-        assert_eq!(hash, "0xabc");
-        assert_eq!(proof.leaf, root);
+        let err = adapter
+            .generate_receipt_proof("0xabc")
+            .await
+            .expect_err("Ethereum okunmadan receipt kaniti uretilemez");
+        assert!(
+            format!("{err:?}").contains("does not read Ethereum"),
+            "gerekce neyin eksik oldugunu soylemeli: {err:?}"
+        );
+    }
+
+    /// Ve tek yaprakli bir agac, elle kurulsa bile kabul edilmez.
+    #[test]
+    fn a_single_leaf_tree_is_refused() {
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
+        let proof = MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        };
+        // Yaprak ve kok ayni: `verify` hicbir adim atmadan gecerdi.
+        let err = adapter
+            .verify_receipt_proof(&proof, &leaf, "0xabc")
+            .expect_err("kardessiz bir yol hicbir sey kanitlamaz");
+        assert!(
+            format!("{err:?}").contains("no sibling path"),
+            "gerekce kardes yolunun eksikligini soylemeli: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -315,12 +366,17 @@ mod tests {
         assert!(hash.starts_with("0x"));
     }
 
+    /// Onay bekleme de reddeder, cunku kanit uretemez.
+    ///
+    /// Eskiden `success: true` donuyordu. Relayer bunu imzalayabilecegi bir
+    /// sonuc olarak okurdu, oysa altinda hicbir Ethereum okumasi yok.
     #[tokio::test]
-    async fn offline_stub_wait_confirmation() {
+    async fn waiting_for_confirmation_refuses_without_a_proof() {
         let adapter = EvmChainAdapter::test_default();
-        let result = adapter.wait_for_confirmation("0xabc", 1).await.unwrap();
-        assert_eq!(result.chain, ExternalChain::Ethereum);
-        assert!(result.success);
+        assert!(
+            adapter.wait_for_confirmation("0xabc", 1).await.is_err(),
+            "kanit uretemeyen adaptor basarili bir sonuc bildiremez"
+        );
     }
 
     #[test]
@@ -370,18 +426,35 @@ mod tests {
             .expect("a configured adapter must register");
     }
 
+    /// Gercek bir kardes yolu olan kanit kurar.
+    ///
+    /// Asagidaki testlerin olctugu sey yaprak bagidir, agac degil. Ama tek
+    /// yaprakli bir agac artik reddediliyor (ARCHITECTURE.md §69): kardessiz
+    /// bir yolda `verify` hicbir hash adimi atmaz ve `leaf == root`
+    /// karsilastirmasina duser, yani kanitlayan kendi ciktisini kendisi
+    /// onaylar. Bu yardimci tek bir kardes ekleyip koku o kardesle hesaplar,
+    /// boylece testler olcmek istedikleri seyi olcmeye devam eder.
+    fn proof_with_sibling(leaf: Hash32) -> (MerkleProof, Hash32) {
+        let sibling = [0x5au8; 32];
+        let root = crate::core::hash::hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", &leaf, &sibling]);
+        (
+            MerkleProof {
+                leaf,
+                index: 0,
+                siblings: vec![sibling],
+            },
+            root,
+        )
+    }
+
     #[test]
     fn verify_receipt_proof_minimal_ok() {
         // Tam fix: leaf = hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address).
         let adapter = EvmChainAdapter::test_default();
         let tx_hash = "0xabc";
         let leaf = derive_receipt_leaf(tx_hash, &adapter.bridge_address);
-        let proof = MerkleProof {
-            leaf,
-            index: 0,
-            siblings: vec![],
-        };
-        assert!(adapter.verify_receipt_proof(&proof, &leaf, tx_hash).is_ok());
+        let (proof, root) = proof_with_sibling(leaf);
+        assert!(adapter.verify_receipt_proof(&proof, &root, tx_hash).is_ok());
         // Forged root must fail.
         assert!(adapter
             .verify_receipt_proof(&proof, &[0u8; 32], tx_hash)
@@ -396,16 +469,12 @@ mod tests {
         let real_tx = "0xabc";
         let forged_tx = "0xdeadbeef";
         let leaf = derive_receipt_leaf(real_tx, &adapter.bridge_address);
-        let proof = MerkleProof {
-            leaf,
-            index: 0,
-            siblings: vec![],
-        };
+        let (proof, root) = proof_with_sibling(leaf);
         // Real tx ile geçer.
-        assert!(adapter.verify_receipt_proof(&proof, &leaf, real_tx).is_ok());
+        assert!(adapter.verify_receipt_proof(&proof, &root, real_tx).is_ok());
         // Forged tx ile RED.
         let err = adapter
-            .verify_receipt_proof(&proof, &leaf, forged_tx)
+            .verify_receipt_proof(&proof, &root, forged_tx)
             .expect_err("forged tx_hash must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("forgery"), "msg: {msg}");
@@ -416,13 +485,9 @@ mod tests {
         // Empty tx_hash kabul edilmez (binding anlamsız olur).
         let adapter = EvmChainAdapter::test_default();
         let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
-        let proof = MerkleProof {
-            leaf,
-            index: 0,
-            siblings: vec![],
-        };
+        let (proof, root) = proof_with_sibling(leaf);
         let err = adapter
-            .verify_receipt_proof(&proof, &leaf, "")
+            .verify_receipt_proof(&proof, &root, "")
             .expect_err("empty tx_hash must be rejected");
         let msg = format!("{err}");
         assert!(
@@ -442,19 +507,15 @@ mod tests {
         let leaf_b = derive_receipt_leaf(tx_hash, &bridge_b);
         assert_ne!(leaf_a, leaf_b);
         let adapter_a = EvmChainAdapter::new(bridge_a.clone(), DEFAULT_DEPOSIT_TOPIC0);
-        let proof = MerkleProof {
-            leaf: leaf_a,
-            index: 0,
-            siblings: vec![],
-        };
+        let (proof, root) = proof_with_sibling(leaf_a);
         // Bridge A → leaf_a bağlamı doğru; adapter_a ile geçer.
         assert!(adapter_a
-            .verify_receipt_proof(&proof, &leaf_a, tx_hash)
+            .verify_receipt_proof(&proof, &root, tx_hash)
             .is_ok());
         // Bridge A'nın proof'unu Bridge B'nin adapter'ı ile kullanırsak RED.
         let adapter_b = EvmChainAdapter::new(bridge_b, DEFAULT_DEPOSIT_TOPIC0);
         let err = adapter_b
-            .verify_receipt_proof(&proof, &leaf_a, tx_hash)
+            .verify_receipt_proof(&proof, &root, tx_hash)
             .expect_err("cross-bridge proof must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("forgery"), "msg: {msg}");
@@ -544,10 +605,25 @@ mod tests {
             "verify_deposit was removed or renamed; update this pin"
         );
         assert!(
-            adapter_prod.contains("verify_evm_receipt(proof)?"),
+            adapter_prod.contains("verify_evm_receipt(proof)"),
             "verify_deposit no longer runs the full verify_evm_receipt \
              orchestrator - the 'real safe path' claim in this file's header \
              needs rewriting"
+        );
+        // And it returns what that orchestrator proved. Returning a bare
+        // `EthReceipt` would hand the caller a value that does not carry the
+        // status check or the deposit-log match `verify_evm_receipt` made,
+        // from a function named `verify`. See ARCHITECTURE.md section 68.
+        assert!(
+            adapter_prod.contains("Result<VerifiedDeposit, VerifyError>"),
+            "verify_deposit must return the proven deposit, not a raw receipt"
+        );
+        // One verification, not two. A second header/MPT decode in this file
+        // would be a second copy of the same check, and an attacker picks
+        // which copy applies (section 65).
+        assert!(
+            !adapter_prod.contains("mpt::verify("),
+            "verify_deposit is decoding the MPT again instead of delegating"
         );
 
         // The relayer reaches the adapter through the trait method only.

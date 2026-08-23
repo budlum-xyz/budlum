@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone)]
 pub struct BudEconomics {
     pub physical_usd: f64, // 0.23342
-    pub expansion: f64, // 1.286
+    pub expansion: f64,    // 1.286
     pub ratio: f64,
     pub device_only: bool,
 }
@@ -32,7 +32,7 @@ impl BudEconomics {
         let base = 0.0001;
         let per_byte = 0.000000001; // $ per byte per month
         let sig_cost = if self.ratio > 10.0 { 0.00002 } else { 0.00005 }; // PQ sig
-        base + (size_bytes as f64)*per_byte + sig_cost
+        base + (size_bytes as f64) * per_byte + sig_cost
     }
 
     pub fn holds_price(&self, ceiling: f64) -> bool {
@@ -78,10 +78,14 @@ pub fn residual_price(
     coldness: f64,
     physical_usd_per_tb_month: f64,
 ) -> f64 {
-    if !residual_tb.is_finite() || residual_tb < 0.0
-        || !erasure_multiplier.is_finite() || erasure_multiplier < 1.0
-        || !coldness.is_finite() || coldness < 0.0
-        || !physical_usd_per_tb_month.is_finite() || physical_usd_per_tb_month < 0.0
+    if !residual_tb.is_finite()
+        || residual_tb < 0.0
+        || !erasure_multiplier.is_finite()
+        || erasure_multiplier < 1.0
+        || !coldness.is_finite()
+        || coldness < 0.0
+        || !physical_usd_per_tb_month.is_finite()
+        || physical_usd_per_tb_month < 0.0
     {
         return f64::INFINITY;
     }
@@ -93,10 +97,15 @@ pub fn residual_price(
 }
 
 /// İ6 kapısı: üretilebilir sınıf (rezidüel 0) taahhüdü her zaman tutar.
-pub fn residual_holds_price(residual_tb: f64, erasure_multiplier: f64, coldness: f64, physical: f64, ceiling: f64) -> bool {
+pub fn residual_holds_price(
+    residual_tb: f64,
+    erasure_multiplier: f64,
+    coldness: f64,
+    physical: f64,
+    ceiling: f64,
+) -> bool {
     residual_price(residual_tb, erasure_multiplier, coldness, physical) <= ceiling + 1e-12
 }
-
 
 /// Ekonomi kararı: TEK FİYAT.
 /// "tek fiyat olacak, CPU gibi masraflar hali hazırda validatör tarafından karşılanıyor."
@@ -104,10 +113,17 @@ pub fn residual_holds_price(residual_tb: f64, erasure_multiplier: f64, coldness:
 /// validatörün yüküdür (fiyata girmez). Pay-as-you-go zaten kaldırıldı; İ6 rezidüel
 /// sınıf ekonomisi de bu kararla SADELEŞTİ: her içerik sınıfı aynı taban fiyattan.
 /// Fiyat = fiziksel taban × erasure çarpanı / ölçülen oran (tek formül, herkes için).
-pub fn flat_price(physical_usd_per_tb_month: f64, erasure_multiplier: f64, measured_ratio: f64) -> f64 {
-    if !physical_usd_per_tb_month.is_finite() || physical_usd_per_tb_month < 0.0
-        || !erasure_multiplier.is_finite() || erasure_multiplier < 1.0
-        || !measured_ratio.is_finite() || measured_ratio <= 0.0
+pub fn flat_price(
+    physical_usd_per_tb_month: f64,
+    erasure_multiplier: f64,
+    measured_ratio: f64,
+) -> f64 {
+    if !physical_usd_per_tb_month.is_finite()
+        || physical_usd_per_tb_month < 0.0
+        || !erasure_multiplier.is_finite()
+        || erasure_multiplier < 1.0
+        || !measured_ratio.is_finite()
+        || measured_ratio <= 0.0
     {
         return f64::INFINITY; // K38: bozuk girdi → dürüst RED
     }
@@ -126,9 +142,9 @@ pub fn flat_holds_ceiling(physical: f64, erasure: f64, ratio: f64, ceiling: f64)
 // ÖLÇÜLMÜŞ tavanların içinde tutulur (bud_format_matrix::matrix_honesty_check).
 
 /// Ölçülmüş çarpan tavanları (matrix canary'sinin dayandığı sabitler).
-pub const CORPUS_DEDUP_MEASURED: f64 = 9.67;    // korpus geneli 16KB SHA256
-pub const FLEET_DEDUP_MEASURED: f64 = 25.43;   // 25 özdeş ELF (dosya-içi parçalama)
-pub const CULLING_MULT_MEASURED: f64 = 2.52;   // 1/(1-0.603) erişim deseni
+pub const CORPUS_DEDUP_MEASURED: f64 = 9.67; // korpus geneli 16KB SHA256
+pub const FLEET_DEDUP_MEASURED: f64 = 25.43; // 25 özdeş ELF (dosya-içi parçalama)
+pub const CULLING_MULT_MEASURED: f64 = 2.52; // 1/(1-0.603) erişim deseni
 
 /// Ölçülmüş medya codec oranları (bud_format_media canary'si).
 pub const AVIF_LOSSLESS_BMP_MEASURED: f64 = 15.84;
@@ -141,7 +157,11 @@ pub const AV1_YUV_MEASURED: f64 = 904.0;
 /// Boru hattı oranı: transform × codec × dedup × culling (her bileşen ölçülü).
 pub fn pipeline_ratio(transform: f64, codec: f64, dedup: f64, culling: f64) -> f64 {
     let p = transform.max(1.0) * codec.max(1.0) * dedup.max(1.0) * culling.max(1.0);
-    if p.is_finite() && p > 0.0 { p } else { f64::INFINITY }
+    if p.is_finite() && p > 0.0 {
+        p
+    } else {
+        f64::INFINITY
+    }
 }
 
 /// Boru hattı $/TB/ay: 0.23342 × erasure / boru_hatti_orani.
@@ -153,13 +173,22 @@ pub fn pipeline_price(
     dedup: f64,
     culling: f64,
 ) -> f64 {
-    flat_price(physical_usd_per_tb_month, erasure_multiplier, pipeline_ratio(transform, codec, dedup, culling))
+    flat_price(
+        physical_usd_per_tb_month,
+        erasure_multiplier,
+        pipeline_ratio(transform, codec, dedup, culling),
+    )
 }
 
 /// Boru hattı tavan kapısı.
 pub fn pipeline_holds_ceiling(
-    physical: f64, erasure: f64, ceiling: f64,
-    transform: f64, codec: f64, dedup: f64, culling: f64,
+    physical: f64,
+    erasure: f64,
+    ceiling: f64,
+    transform: f64,
+    codec: f64,
+    dedup: f64,
+    culling: f64,
 ) -> bool {
     pipeline_price(physical, erasure, transform, codec, dedup, culling) <= ceiling + 1e-12
 }
@@ -184,10 +213,10 @@ pub fn tape_holds_ceiling(tb: f64, ceiling: f64) -> bool {
 /// Medya merdiveni (F1153): sıcak NVMe → QLC → refurb HDD → bant (TCO azalan).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveTier {
-    HotNvme,    // pahalı, düşük gecikme
-    Qlc,        // sıcak-tier
-    RefurbHdd,  // $10/TB
-    Tape,       // $5/TB, 30 yıl
+    HotNvme,   // pahalı, düşük gecikme
+    Qlc,       // sıcak-tier
+    RefurbHdd, // $10/TB
+    Tape,      // $5/TB, 30 yıl
 }
 
 impl ArchiveTier {
@@ -207,8 +236,19 @@ pub struct GlobalDedup {
     pub total_saved_bytes: u64,
 }
 
+impl Default for GlobalDedup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalDedup {
-    pub fn new() -> Self { Self { chunk_hashes: HashSet::new(), total_saved_bytes: 0 } }
+    pub fn new() -> Self {
+        Self {
+            chunk_hashes: HashSet::new(),
+            total_saved_bytes: 0,
+        }
+    }
 
     pub fn insert_chunk(&mut self, hash: [u8; 32], size: usize) -> bool {
         if self.chunk_hashes.contains(&hash) {
@@ -221,7 +261,9 @@ impl GlobalDedup {
     }
 
     pub fn dedup_ratio(&self, original_bytes: u64) -> f64 {
-        if original_bytes==0 { return 1.0; }
+        if original_bytes == 0 {
+            return 1.0;
+        }
         original_bytes as f64 / (original_bytes as f64 - self.total_saved_bytes as f64).max(1.0)
     }
 }
@@ -232,9 +274,18 @@ pub struct MerkleTrie {
     pub entries: HashMap<[u8; 32], Vec<u8>>,
 }
 
+impl Default for MerkleTrie {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MerkleTrie {
     pub fn new() -> Self {
-        Self { root: [0u8; 32], entries: HashMap::new() }
+        Self {
+            root: [0u8; 32],
+            entries: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, key: [u8; 32], value: Vec<u8>) {
@@ -259,13 +310,28 @@ pub struct EconomicsGates;
 
 impl EconomicsGates {
     pub fn k_bud_economics(econ: &BudEconomics, ceiling: f64) -> Result<(), &'static str> {
-        if econ.holds_price(ceiling) { Ok(()) } else { Err("KF: economics cost > ceiling") }
+        if econ.holds_price(ceiling) {
+            Ok(())
+        } else {
+            Err("KF: economics cost > ceiling")
+        }
     }
-    pub fn k_bud_global_dedup(dedup: &GlobalDedup, expected_saved: u64) -> Result<(), &'static str> {
-        if dedup.total_saved_bytes >= expected_saved { Ok(()) } else { Err("K-BUD-DEDUP: saved less than expected") }
+    pub fn k_bud_global_dedup(
+        dedup: &GlobalDedup,
+        expected_saved: u64,
+    ) -> Result<(), &'static str> {
+        if dedup.total_saved_bytes >= expected_saved {
+            Ok(())
+        } else {
+            Err("K-BUD-DEDUP: saved less than expected")
+        }
     }
     pub fn k_bud_trie_root(trie: &MerkleTrie) -> Result<(), &'static str> {
-        if trie.root != [0u8; 32] { Ok(()) } else { Err("K-BUD-TRIE: root zero") }
+        if trie.root != [0u8; 32] {
+            Ok(())
+        } else {
+            Err("K-BUD-TRIE: root zero")
+        }
     }
 }
 
@@ -275,31 +341,59 @@ mod tests {
     #[test]
     fn economics_holds() {
         // JSON 17.19x Düz 7+1 (e=1.143) ile 0.016 tutar: 0.23342*1.143/17.19 = 0.01552 <= 0.016
-        let econ = BudEconomics { physical_usd: 0.23342, expansion: 1.143, ratio: 17.19, device_only: false };
+        let econ = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.143,
+            ratio: 17.19,
+            device_only: false,
+        };
         assert!(econ.holds_price(0.016));
         // EVENODD (e=1.286) ile TUTMAZ: 0.23342*1.286/17.19 = 0.01747 > 0.016 - bu gerçek ölçümdür (kanarya)
-        let econ2 = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: 17.19, device_only: false };
+        let econ2 = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: 17.19,
+            device_only: false,
+        };
         assert!(!econ2.holds_price(0.016));
-        let econ3 = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: 2.53, device_only: false };
+        let econ3 = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: 2.53,
+            device_only: false,
+        };
         assert!(!econ3.holds_price(0.016));
-        let econ4 = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: 2.53, device_only: true };
+        let econ4 = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: 2.53,
+            device_only: true,
+        };
         assert!(econ4.holds_price(0.016));
     }
     #[test]
     fn k60_egress_zero_in_network() {
         // K60: ağ içi erişim egress 0 - 10TB bile bedava
         assert_eq!(egress_cost(EgressZone::InNetwork, 10.0, 0.005), 0.0);
-        assert!(holds_egress(EgressZone::InNetwork, 10.0, 0.005, 0.0), "InNetwork her zaman bütçeyi tutar");
+        assert!(
+            holds_egress(EgressZone::InNetwork, 10.0, 0.005, 0.0),
+            "InNetwork her zaman bütçeyi tutar"
+        );
         // İnternet çıkışı ücretli
         assert!((egress_cost(EgressZone::Internet, 1.0, 0.005) - 0.005).abs() < 1e-12);
-        assert!(!holds_egress(EgressZone::Internet, 1.0, 0.005, 0.001), "1TB internet çıkışı 0.001 bütçeyi tutmaz");
+        assert!(
+            !holds_egress(EgressZone::Internet, 1.0, 0.005, 0.001),
+            "1TB internet çıkışı 0.001 bütçeyi tutmaz"
+        );
         // bozuk oran → +inf (K38)
         assert_eq!(egress_cost(EgressZone::Internet, 1.0, -1.0), f64::INFINITY);
-        assert_eq!(egress_cost(EgressZone::Internet, 1.0, f64::NAN), f64::INFINITY);
+        assert_eq!(
+            egress_cost(EgressZone::Internet, 1.0, f64::NAN),
+            f64::INFINITY
+        );
         // negatif TB → 0 egress (mantıklı sınır)
         assert_eq!(egress_cost(EgressZone::Internet, -5.0, 0.005), 0.0);
     }
-
 
     #[test]
     fn tape_archive_tier_f3() {
@@ -338,14 +432,24 @@ mod tests {
     #[test]
     fn residual_class_economy_i6() {
         // İ6: üretilebilir sınıf (rezidüel 0) → depolama maliyeti 0
-        assert_eq!(residual_price(0.0, 1.143, 0.0, 0.23342), 0.0, "üretilebilir bedava");
-        assert!(residual_holds_price(0.0, 1.143, 0.0, 0.23342, 0.016), "üretilebilir tavanı her zaman tutar");
+        assert_eq!(
+            residual_price(0.0, 1.143, 0.0, 0.23342),
+            0.0,
+            "üretilebilir bedava"
+        );
+        assert!(
+            residual_holds_price(0.0, 1.143, 0.0, 0.23342, 0.016),
+            "üretilebilir tavanı her zaman tutar"
+        );
         // rezidüel sınıf: boyut × erasure × soğukluk
         let p1 = residual_price(1.0, 1.143, 0.0, 0.23342);
         assert!((p1 - 0.2668).abs() < 0.01, "1TB rezidüel ~0.267: {p1}");
         // soğukluk indirimi: coldness 1 → %50 düşük
         let pcold = residual_price(1.0, 1.143, 1.0, 0.23342);
-        assert!((p1 / pcold - 2.0).abs() < 0.05, "soğuk %50 ucuz: {p1} vs {pcold}");
+        assert!(
+            (p1 / pcold - 2.0).abs() < 0.05,
+            "soğuk %50 ucuz: {p1} vs {pcold}"
+        );
         // bozuk girdi → +inf (K38)
         assert_eq!(residual_price(-1.0, 1.143, 0.0, 0.23342), f64::INFINITY);
         assert_eq!(residual_price(1.0, 0.5, 0.0, 0.23342), f64::INFINITY);
@@ -354,15 +458,35 @@ mod tests {
     #[test]
     fn invalid_ratio_is_honest_inf() {
         // K38: oran <=0 / NaN → +inf (tavan asla tutmaz, panik/NaN yok)
-        let zero = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: 0.0, device_only: false };
+        let zero = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: 0.0,
+            device_only: false,
+        };
         assert_eq!(zero.cost_per_tb_month(), f64::INFINITY);
         assert!(!zero.holds_price(0.016));
-        let nan = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: f64::NAN, device_only: false };
+        let nan = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: f64::NAN,
+            device_only: false,
+        };
         assert_eq!(nan.cost_per_tb_month(), f64::INFINITY);
-        let neg = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: -3.0, device_only: false };
+        let neg = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: -3.0,
+            device_only: false,
+        };
         assert_eq!(neg.cost_per_tb_month(), f64::INFINITY);
         // device_only her zaman 0
-        let d = BudEconomics { physical_usd: 0.23342, expansion: 1.286, ratio: 0.0, device_only: true };
+        let d = BudEconomics {
+            physical_usd: 0.23342,
+            expansion: 1.286,
+            ratio: 0.0,
+            device_only: true,
+        };
         assert_eq!(d.cost_per_tb_month(), 0.0);
     }
     #[test]
@@ -377,7 +501,7 @@ mod tests {
     fn merkle_trie() {
         let mut trie = MerkleTrie::new();
         let k = [1u8; 32];
-        trie.insert(k, vec![1,2,3]);
+        trie.insert(k, vec![1, 2, 3]);
         assert!(trie.get(&k).is_some());
         assert!(EconomicsGates::k_bud_trie_root(&trie).is_ok());
     }
