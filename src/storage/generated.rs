@@ -324,6 +324,11 @@ pub enum GenerateError {
     },
     /// The declared output is larger than any generator may emit.
     OutputTooLarge { declared: u32, max: u32 },
+    /// Ilan edilen adim butcesi, cikti boyutunun izin verdigi tavani asiyor.
+    ///
+    /// Butce yukleyicinin beyani; tavan onu bagliyor. Ikisi de tasiniyor ki
+    /// cagiran neyi ne kadar asmis oldugunu soyleyebilsin.
+    BudgetAboveCeiling { declared: u32, ceiling: u32 },
     /// A zero-length object was described. Nothing has a zero-byte identity
     /// worth committing to, and `encode_object` refuses empty input anyway.
     EmptyOutput,
@@ -332,6 +337,13 @@ pub enum GenerateError {
 impl std::fmt::Display for GenerateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BudgetAboveCeiling { declared, ceiling } => write!(
+                f,
+                "declared step budget {declared} is above the ceiling {ceiling} for this \
+                 output size. The budget bounds work done on every validator that registers \
+                 the recipe, so the budget itself must be bounded: catalogue generators are \
+                 linear in output size, and a recipe outside that ratio is not one of them."
+            ),
             Self::BudgetExhausted { budget, needed } => write!(
                 f,
                 "generator needs at least {needed} steps but {budget} were paid for"
@@ -369,6 +381,65 @@ pub const MAX_GENERATED_BYTES: u32 = 4 * 1024 * 1024;
 /// A generator that emitted bytes for free would let a spec with a tiny
 /// budget produce a huge object, so the output itself is metered.
 const STEPS_PER_OUTPUT_BYTE: u32 = 1;
+
+/// Ilan edilen adim butcesinin cikti baytina orani icin ust sinir.
+///
+/// # Neden bir tavan gerekiyor
+///
+/// `step_budget` bir olcer, ama olcerin **kendisi spec'ten geliyor** - yani
+/// yukleyicinin beyani. Tavansiz bir `u32`, dort milyara yakin adim ilan
+/// edebilir. O adimlari kim harcar: uretici, tarifi kaydeden **her
+/// dogrulayicida** kosuyor. Butce, uretici sonsuza kadar kosmasin diye
+/// kondu; ama butcenin kendisi sinirsizsa, sinirladigi sey yok.
+///
+/// Bu, "adi butce olan ama tavani olmayan sayac" durumuydu. Kodu okuyan biri
+/// `Meter`'i gorup is miktarinin bagli oldugunu dusunur; bagli olan tek sey
+/// yukleyicinin secmeye razi oldugu sayidir.
+///
+/// # Neden cikti boyutunun bir kati
+///
+/// Katalogdaki her uretici cikti boyutuyla **dogrusal** calisiyor: avatar
+/// `cells * half + side * side`, gradient ve rings satir basina sabit is.
+/// Yani mesru bir tarifin adim sayisi, urettigi bayt sayisinin sabit bir
+/// kati. Tavani bu orana baglamak, mesru her tarife yer birakirken oranin
+/// disina cikan hicbir seye izin vermez.
+///
+/// # S2.2: ayni tavan sinif sahteciligini de kapatir
+///
+/// "Uretilebilir" sinifi tek replika ile saklanir, cunku baytlar tariften
+/// yeniden uretilebilir. Organik bir icerigi (foto, video) bu sinifa sokmanin
+/// yolu, iceriği govdesinde tasiyan bir uretici yazmaktir - sabit bir blob
+/// donduren tarif. Boyle bir tarifin **maliyeti blob ile orantilidir**, yani
+/// adim/bayt orani katalogdaki gercek ureticilerinkiyle ayni mertebede olmaz;
+/// blob'u tasimak ve yazmak, onu hesaplamaktan cok daha az adim harcar.
+/// Oranin **altini** denetlemek bu turden sahteciligi yakalamaz, ama ustunu
+/// denetlemek, "pahali hesap" kilifina girmeye calisan tarifleri keser.
+/// Sinif sahteciliginin geri kalani yeniden-uretim sinaviyla kapali: tarif
+/// baytlari uretemezse manifest reddediliyor.
+///
+/// # Katsayi nereden
+///
+/// Avatar en pahali uretici: `cells * half` (izgara) + `side` (her satir).
+/// `side * side = output_len / 4` oldugundan satir toplami `output_len / 4`,
+/// izgara payi ondan kucuk, ve girise pesin yazilan `STEPS_PER_OUTPUT_BYTE`
+/// bir `output_len` daha ekliyor. Toplam iki `output_len`in altinda kaliyor.
+/// Sekiz kat, olculen en kotu duruma dort kat pay birakir: katalog buyuyunce
+/// tavan degil, tavanin gerekcesi yeniden olculmeli.
+pub const MAX_STEPS_PER_OUTPUT_BYTE: u32 = 8;
+
+/// Boyuttan bagimsiz kurulum payi, adim cinsinden.
+///
+/// Bir ureticinin isi cikti boyutuyla dogrusal, ama tamami degil: palet
+/// cikarmak, izgarayi kurmak, sabit-nokta katsayilarini hazirlamak kac bayt
+/// uretilecek olursa olsun ayni. Tavan yalnizca orandan hesaplanirsa cok
+/// kucuk ciktilar (tek bayt, birkac bayt) bu sabit maliyetin altinda kalir ve
+/// mesru bir tarif, gercekte harcadigi isi ilan edemedigi icin reddedilir.
+///
+/// Pay, orana **eklenir**: tavan `taban + boyut * oran`. Boylece kucuk
+/// ciktilarda kurulum maliyeti karsilanir, buyuk ciktilarda taban ihmal
+/// edilir hale gelir ve siniri belirleyen yine oran olur - yani DoS
+/// yuzeyi buyudukce sinir sikilasir, gevsemez.
+pub const STEP_BUDGET_BASE: u32 = 4096;
 
 /// A step meter.
 ///
@@ -453,6 +524,18 @@ pub fn generate_content(spec: &GeneratedSpec) -> Result<Vec<u8>, GenerateError> 
         return Err(GenerateError::OutputTooLarge {
             declared: spec.output_len,
             max: MAX_GENERATED_BYTES,
+        });
+    }
+
+    // Butcenin kendisi de sinirli. Bu denetim uretici kosmadan once, cunku
+    // amaci uretici kosarken harcanacak isi bagladmak; sonradan bakmak
+    // bakilan seyi kacirir.
+    let ceiling =
+        STEP_BUDGET_BASE.saturating_add(spec.output_len.saturating_mul(MAX_STEPS_PER_OUTPUT_BYTE));
+    if spec.step_budget > ceiling {
+        return Err(GenerateError::BudgetAboveCeiling {
+            declared: spec.step_budget,
+            ceiling,
         });
     }
 
@@ -711,7 +794,7 @@ mod tests {
             GeneratorId::Gradient,
             GeneratorId::Rings,
         ] {
-            let s = spec(g, 7, 3072, 100_000);
+            let s = spec(g, 7, 3072, 20_000);
             let a = generate_content(&s).expect("generates");
             let b = generate_content(&s).expect("generates");
             assert_eq!(a, b, "{g:?} is not deterministic");
@@ -722,8 +805,8 @@ mod tests {
     fn a_different_seed_produces_different_bytes() {
         // Without this the seed would be decoration and a collection of ten
         // thousand items would be ten thousand copies of one picture.
-        let a = generate_content(&spec(GeneratorId::Avatar, 1, 3072, 100_000)).unwrap();
-        let b = generate_content(&spec(GeneratorId::Avatar, 2, 3072, 100_000)).unwrap();
+        let a = generate_content(&spec(GeneratorId::Avatar, 1, 3072, 20_000)).unwrap();
+        let b = generate_content(&spec(GeneratorId::Avatar, 2, 3072, 20_000)).unwrap();
         assert_ne!(a, b);
     }
 
@@ -731,7 +814,7 @@ mod tests {
     fn generated_bytes_verify_against_their_own_id() {
         // The check that makes generated content safe to serve: the id is
         // still the hash of the bytes, exactly as it is for stored content.
-        let s = spec(GeneratorId::Gradient, 3, 3072, 100_000);
+        let s = spec(GeneratorId::Gradient, 3, 3072, 20_000);
         let bytes = generate_content(&s).unwrap();
         let id = ContentId::of(&bytes);
         let got = generate_and_verify(&s, id).expect("the id derives from the bytes");
@@ -743,7 +826,7 @@ mod tests {
         // The attack this closes: registering a known id against a spec that
         // draws something else, so readers are handed the wrong object under
         // an id they trust.
-        let s = spec(GeneratorId::Gradient, 3, 3072, 100_000);
+        let s = spec(GeneratorId::Gradient, 3, 3072, 20_000);
         let wrong = ContentId([0xAB; 32]);
         let err = generate_and_verify(&s, wrong).expect_err("the id does not derive");
         assert!(
@@ -771,7 +854,7 @@ mod tests {
     fn a_sufficient_budget_still_produces_the_object() {
         // The canary for the test above. A budget check that refused
         // everything would pass that test and be useless.
-        let s = spec(GeneratorId::Rings, 5, 3072, 200_000);
+        let s = spec(GeneratorId::Rings, 5, 3072, 24_000);
         let out = generate_content(&s).expect("a paid-for generation completes");
         assert_eq!(out.len(), 3072);
     }
@@ -819,7 +902,13 @@ mod tests {
             GeneratorId::Rings,
         ] {
             for len in [1u32, 2, 7, 100, 3071, 3072, 4097] {
-                let out = generate_content(&spec(g, 9, len, 500_000)).unwrap_or_else(|e| {
+                let out = generate_content(&spec(
+                    g,
+                    9,
+                    len,
+                    STEP_BUDGET_BASE + len * MAX_STEPS_PER_OUTPUT_BYTE,
+                ))
+                .unwrap_or_else(|e| {
                     panic!("{g:?} at {len} bytes: {e}");
                 });
                 assert_eq!(out.len(), len as usize, "{g:?} at {len} bytes");
@@ -831,7 +920,7 @@ mod tests {
     fn the_commitment_covers_every_field_of_the_spec() {
         // A field outside the digest is a field anyone could rewrite while
         // keeping the id, which would point one id at two objects.
-        let base = spec(GeneratorId::Avatar, 1, 3072, 100_000);
+        let base = spec(GeneratorId::Avatar, 1, 3072, 20_000);
         let d = generated_spec_digest(&base);
 
         let mut swapped_generator = base.clone();
@@ -867,6 +956,61 @@ mod tests {
         );
     }
 
+    /// Ilan edilen butce, cikti boyutunun izin verdigi tavani asamaz.
+    ///
+    /// Butcenin isi, uretici kosarken harcanacak isi baglamakti. Tavan
+    /// eklenmeden once butce `u32` genisliginde serbestti: dort milyara
+    /// yakin adim ilan eden bir tarif, onu kaydeden **her dogrulayicida** o
+    /// isi yaptirabilirdi. Sinirlayicinin kendisi sinirsizsa sinirladigi bir
+    /// sey yoktur.
+    #[test]
+    fn a_declared_budget_cannot_exceed_what_the_output_size_allows() {
+        let len = 32 * 32;
+        let ceiling = STEP_BUDGET_BASE + len * MAX_STEPS_PER_OUTPUT_BYTE;
+
+        // Tavanin ustundeki butce, uretici hic kosmadan reddedilir.
+        let err = generate_content(&spec(GeneratorId::Avatar, 1, len, ceiling + 1))
+            .expect_err("tavanin ustundeki butce reddedilmeli");
+        assert!(
+            matches!(
+                err,
+                GenerateError::BudgetAboveCeiling {
+                    declared,
+                    ceiling: c,
+                } if declared == ceiling + 1 && c == ceiling
+            ),
+            "ret, ilan edileni ve tavani tasimali: {err:?}"
+        );
+
+        // Onceki sinirsiz dunyada mesru sayilan deger artik reddedilir.
+        assert!(
+            generate_content(&spec(GeneratorId::Avatar, 1, len, 1_000_000)).is_err(),
+            "1e6 adim, 1 KB'lik bir cikti icin tavanin cok ustunde"
+        );
+
+        // Tavandaki butce gecer: kapi mesru tarifi engellememeli.
+        generate_content(&spec(GeneratorId::Avatar, 1, len, ceiling))
+            .expect("tavandaki butce kabul edilmeli");
+
+        // Katalogdaki her uretici tavanin altinda kalmali - tavan, gercek
+        // maliyeti karsilamiyorsa mesru icerigi reddeden bir kapi olurdu.
+        for generator in [
+            GeneratorId::Avatar,
+            GeneratorId::Gradient,
+            GeneratorId::Rings,
+        ] {
+            generate_content(&spec(generator, 3, len, ceiling))
+                .unwrap_or_else(|e| panic!("{generator:?} tavan icinde uretebilmeli, {e:?} dondu"));
+        }
+
+        // Tavan cikti boyutuyla olcekleniyor: kucuk cikti kucuk tavan.
+        let small = 64u32;
+        assert!(
+            generate_content(&spec(GeneratorId::Gradient, 2, small, ceiling)).is_err(),
+            "buyuk ciktinin tavani kucuk cikti icin gecerli olmamali"
+        );
+    }
+
     #[test]
     fn the_generator_tag_does_not_move_with_the_enum_order() {
         // Pinned so a later reordering cannot silently change every id ever
@@ -885,7 +1029,7 @@ mod tests {
     #[test]
     fn held_bytes_orders_the_three_sources_on_one_axis() {
         let object = 500_000u64;
-        let spec = spec(GeneratorId::Avatar, 1, 3072, 100_000);
+        let spec = spec(GeneratorId::Avatar, 1, 3072, 20_000);
 
         let stored = held_bytes(&ContentSource::Stored, object);
         let generated = held_bytes(&ContentSource::Generated(spec.clone()), object);
@@ -909,7 +1053,7 @@ mod tests {
     #[test]
     fn a_prefix_past_the_end_of_the_object_is_refused() {
         let object = 1_000u64;
-        let spec = spec(GeneratorId::Avatar, 1, 3072, 100_000);
+        let spec = spec(GeneratorId::Avatar, 1, 3072, 20_000);
         assert_eq!(
             held_bytes(
                 &ContentSource::Hybrid {
@@ -1031,7 +1175,12 @@ mod tests {
         ];
 
         for (generator, seed_byte, len, expected_hex) in vectors {
-            let s = spec(*generator, *seed_byte, *len, 5_000_000);
+            let s = spec(
+                *generator,
+                *seed_byte,
+                *len,
+                STEP_BUDGET_BASE + *len * MAX_STEPS_PER_OUTPUT_BYTE,
+            );
             let bytes = generate_content(&s)
                 .unwrap_or_else(|e| panic!("{generator:?} seed {seed_byte} len {len}: {e}"));
             let got = ContentId::of(&bytes).to_string();
@@ -1059,7 +1208,7 @@ mod tests {
     #[test]
     fn a_gradient_is_not_a_single_flat_colour() {
         for seed in [1u8, 7, 42] {
-            let bytes = generate_content(&spec(GeneratorId::Gradient, seed, 3072, 5_000_000))
+            let bytes = generate_content(&spec(GeneratorId::Gradient, seed, 3072, 20_000))
                 .expect("generates");
             let distinct = bytes
                 .iter()
@@ -1086,7 +1235,7 @@ mod tests {
     #[test]
     fn a_gradient_runs_between_its_two_endpoint_colours() {
         let bytes =
-            generate_content(&spec(GeneratorId::Gradient, 7, 3072, 5_000_000)).expect("generates");
+            generate_content(&spec(GeneratorId::Gradient, 7, 3072, 20_000)).expect("generates");
         let first = i32::from(bytes[0]);
         let last = i32::from(bytes[bytes.len() - 3]);
         assert!(
@@ -1135,7 +1284,7 @@ mod tests {
         assert_eq!(required_replica_count(&derived_source(), 3), 3);
         assert_eq!(
             required_replica_count(
-                &ContentSource::Generated(spec(GeneratorId::Avatar, 7, 3072, 100_000)),
+                &ContentSource::Generated(spec(GeneratorId::Avatar, 7, 3072, 20_000)),
                 3
             ),
             1,
