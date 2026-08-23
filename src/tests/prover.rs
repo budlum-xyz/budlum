@@ -595,3 +595,66 @@ fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
         .unwrap();
     assert_eq!(again, ProofAcceptance::Idempotent);
 }
+
+/// Ilan edilen butcenin asilmasi reddedilir.
+///
+/// `gas_limit` ve `gas_used` genel girdilerin icinde ve baglama hash'inde:
+/// gonderen ikisini de sonradan degistiremez. Ama ikisi **birbirine karsi**
+/// denetlenmezse tutarli sekilde imzalanmis bir asim kabul edilirdi.
+///
+/// Kanit sistemi bu iliskiyi kisitlamaz - STARK "bu program bu girdilerle
+/// boyle kostu" der, ilan edilen tavanin asilmadigini soylemez. Izin listesi
+/// de soylemez: o **hangi kodun** calisabilecegini denetler, bu ise o kodun
+/// ilan ettigi sinir icinde kalip kalmadigini.
+#[test]
+fn gas_used_above_the_declared_limit_is_refused() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x01);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+    let before = bc.state.get_balance(&sender);
+
+    let mut overspent = pi.clone();
+    overspent.gas_limit = 1_000;
+    overspent.gas_used = 1_001;
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &overspent, &program))
+        .expect_err("ilan edilen butcenin asilmasi reddedilmeli");
+    assert!(
+        err.contains("gas"),
+        "ret, asilan seyin butce oldugunu soylemeli: {err}"
+    );
+    // Ret ucretten once: reddedilen bir kanit bakiyeye dokunmaz.
+    assert_eq!(bc.state.get_balance(&sender), before);
+}
+
+/// Tam tavanda harcama kabul edilir: sinir asilmadi.
+///
+/// `>` degil `>=` yazmak, ilan ettigi kadarini harcayan durust bir programi
+/// reddederdi.
+#[test]
+fn spending_exactly_the_declared_limit_is_allowed() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x02);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+
+    let mut exact = pi.clone();
+    exact.gas_limit = 5_000;
+    exact.gas_used = 5_000;
+
+    // Butce denetimi bu kaniti gecirmeli. Kanit dogrulamasi baska sebeplerle
+    // duserse de olur; olculen sey butce kapisinin yanlis reddetmemesi.
+    let outcome = bc.submit_zk_proof(submission(sender, 1, 10, &proof, &exact, &program));
+    if let Err(e) = &outcome {
+        assert!(
+            !e.contains("declared limit"),
+            "tam tavanda harcama butce kapisina takilmamali: {e}"
+        );
+    }
+}

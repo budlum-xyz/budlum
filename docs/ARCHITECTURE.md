@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 74 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 75 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -82,6 +82,7 @@
 - [72. Bicim taahhudun parcasidir](#72-bicim-taahhudun-parcasidir)
 - [73. Iki bagimsiz derleyici: kaynagin ikiliye ulastigini kim soyluyor](#73-iki-bagimsiz-derleyici-kaynagin-ikiliye-ulastigini-kim-soyluyor)
 - [74. Sozluk kimligin parcasi](#74-sozluk-kimligin-parcasi)
+- [75. Ilan edilen butce: liste hangi kod, kapi ne kadar](#75-ilan-edilen-butce-liste-hangi-kod-kapi-ne-kadar)
 
 ## 1. Genel sistem mimarisi
 
@@ -2920,3 +2921,43 @@ Ayni manifest ikinci kez sunuldugunda sayac artmaz. Artsaydi hicbir zaman
 dusmeyecek bir referans kalirdi ve sozluk, son bagimlisi gittikten sonra bile
 silinemez olurdu. Idempotent bir islemin yan etkisi idempotent olmazsa, islem
 de idempotent degildir.
+## 75. Ilan edilen butce: liste hangi kod, kapi ne kadar
+
+Program izin listesi (bolum 2, kademe 2) **hangi kodun** bir alani
+ilerletebilecegini soyler ve liste bosken kapi kapalidir. Bu, kanit
+gecerliligini yetkilendirme karariyla karistirmamanin yoluydu.
+
+Sormadigi soru: listeden gecen o kod **ne kadarini** harcayabilir.
+
+`gas_limit` ve `gas_used` genel girdilerin icinde tasiniyor ve baglama
+hash'ine giriyor, yani gonderen ikisini de sonradan degistiremez. Ama ikisi
+birbirine karsi hic denetlenmiyordu. `gas_used > gas_limit` olan bir kanit,
+degerler tutarli sekilde imzalandigi icin kabul ediliyordu: ilan edilen tavan
+kayitliydi ve hicbir sey onu okumuyordu.
+
+### Kanit sistemi bu iliskiyi kisitlamaz
+
+STARK "bu program bu genel girdilerle boyle kostu" der. Ilan edilen tavanin
+asilmadigini soylemez, cunku tavan onun kisitladigi bir sey degil - genel
+girdilerin icindeki iki sayidan biri.
+
+Bolum 69 ile ayni sinif: **dogrulayici, kanit sisteminin kisitlamadigi alani
+kendi kodunda denetlemek zorundadir.** Orada bos kardes listesiydi, burada
+denetlenmeyen bir tavan.
+
+### Neden izin listesi bunu kapatmiyor
+
+Ikisi farkli sorular. Liste kimin girebilecegini, butce iceride ne
+yapabilecegini belirler. Listeye alinmis bir programin ilan ettiginden
+fazlasini harcamasi, dogrulama isini sinirsiz buyutebilirdi - ve o program
+listede oldugu icin her denetimi gecerdi.
+
+Denetim ucretten **once** kosar, digerleriyle ayni sirada: zincir baglamasi
+(1b), izin listesi (1c), tazelik (1d), sureklilik (1e), butce (1f).
+Reddedilen bir kanit gonderenin bakiyesine dokunmaz.
+
+### `>` ve `>=` arasindaki fark
+
+Tam tavanda harcama kabul edilir. `>=` yazmak, ilan ettigi kadarini harcayan
+durust bir programi reddederdi; ilan edilen sinir bir tavandir, ulasilmasi
+yasak bir esik degil.

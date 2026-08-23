@@ -265,8 +265,15 @@ mod tests {
             .expect("uretilmis icerik bayt dondurmeli");
         assert_eq!(bytes.len(), 32 * 32);
         // Ve uretilen sey istenen sey: kimlik tutar.
+        //
+        // Kaynak geri konur. Manifest kimligi kaynagi taahhut eder (§66), yani
+        // ayni baytlarin kaynaksiz hali **baska bir kimlik** verir. Onu
+        // beklemek, uretim dogru calisirken bile duser - testin ilk hali tam
+        // olarak bunu yapiyordu ve olctugu sey uretim degil kendi kurgusuydu.
         let len = u32::try_from(bytes.len()).expect("boyut");
-        let rebuilt = ContentManifest::from_bytes_sliced(&bytes, len).expect("manifest");
+        let rebuilt = ContentManifest::from_bytes_sliced(&bytes, len)
+            .expect("manifest")
+            .with_source(manifest.source.clone());
         assert_eq!(rebuilt.manifest_id, manifest.manifest_id);
     }
 
