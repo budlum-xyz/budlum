@@ -4344,10 +4344,27 @@ mod tests {
     //       Constraints and `budzero/docs/BudL_SPEC.md` ("VerifyMerkle
     //       Soundness") for the argument.
     //
+    //   (c) **Yolun sonucunun koke baglanmasi.** (a) ve (b) uzun sure
+    //       Yeterli sayildi, degildi. Zincir satir satir dogru
+    //       Hesaplaniyordu ve **ulastigi yer hicbir seye baglanmiyordu**:
+    //       Kok karsilastirmasi orijinal satirin `merkle_current`
+    //       Hucresine bakiyor, o hucreye 64. turun ciktisinin yazildigini
+    //       Zorlayan bir kisit yoktu. Genisleme satirlarina hic dokunmadan
+    //       Orijinal satira iddia edilen kokun kendisini yazan bir prover
+    //       Dogrulanan bir kanit uretiyordu - olculdu, uretti.
+    //       `COL_MERKLE_FINAL_FLAG` artik beklenen degeri genisleme boyunca
+    //       Tasir ve son turda uretilen ciktiyla esitligi denetlenir.
+    //       Test: `rejects_verify_merkle_root_not_produced_by_the_path`.
+    //
     // What this does *not* license: `verify_merkle_enabled` stays `false`
     // In the default ISA config. That flag is gated on external review of
     // The soundness argument, which is a process step, not a missing
     // Constraint. Do not flip it on the strength of this comment.
+    //
+    // (c) bu ayrimin neden korundugunu da gosteriyor: bu yorumun onceki
+    // Surumu (b)'yi "implemented" ilan ediyordu ve ilan dogruydu -
+    // Eksik olan (b) degildi, kimsenin ayri bir madde olarak yazmadigi
+    // (c) idi. Ic degerlendirmenin gozden kacirdigi sey tam olarak budur.
     //
     // Tests: `verify_merkle_opcode_is_deprecated_for_zk_proofs` pins the
     // 0x1E encoding, `rejects_verify_merkle_with_zero_selector` covers (a),
