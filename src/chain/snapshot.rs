@@ -522,6 +522,16 @@ pub struct StateSnapshotV2 {
     pub note_registry: Option<crate::privacy::L1NoteRegistry>,
     #[serde(default)]
     pub bridge_state: Option<crate::cross_domain::BridgeState>,
+    /// PoA admission records: admins, approvals and the KYC horizons.
+    ///
+    /// `#[serde(default)]` so older snapshots load; a chain with no
+    /// permissioned domains restores an empty registry, which is the correct
+    /// answer for it. The derived admitted sets are not stored - they are
+    /// recomputed from these records at the next block close, so a snapshot
+    /// can never carry an admitted set that disagrees with the records it
+    /// was derived from.
+    #[serde(default)]
+    pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
     #[serde(default)]
     pub message_registry: Option<crate::cross_domain::message_registry::CrossDomainMessageRegistry>,
     #[serde(default)]
@@ -694,6 +704,7 @@ impl StateSnapshotV2 {
             ai_registry: Some(account_state.ai_registry.clone()),
             note_registry: Some(account_state.note_registry.clone()),
             bridge_state: Some(account_state.bridge_state.clone()),
+            poa_onboarding: Some(account_state.poa_onboarding.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
             proof_market: Some(account_state.proof_market.clone()),

@@ -253,6 +253,20 @@ pub struct AccountState {
     /// Parallel note subtree (privacy transfers).
     pub note_registry: crate::privacy::L1NoteRegistry,
     pub bridge_state: BridgeState,
+    /// PoA admission: who may act in each permissioned domain, and until when.
+    ///
+    /// Lives in state, not on one node's engine, because a whitelist consensus
+    /// gates on has to be something every node agrees about. Admission is
+    /// per-domain and isolated: a domain's admin admits into that domain only.
+    pub poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding,
+    /// Admitted addresses per domain, recomputed once per block.
+    ///
+    /// `poa_onboarding.whitelist()` needs `&mut` because an elapsed KYC
+    /// horizon is written to the audit trail the first time it is observed.
+    /// Consensus reads state immutably and on a hot path, so the observation
+    /// happens once at block close and the result is cached here. Consensus
+    /// then reads a plain set.
+    pub poa_admitted: BTreeMap<crate::domain::types::DomainId, BTreeSet<Address>>,
     pub message_registry: CrossDomainMessageRegistry,
     pub external_roots: BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
     /// On-chain burn-reserve account the timed burn consumes. `None` when $BUD
@@ -351,6 +365,8 @@ impl AccountState {
             ai_registry: crate::ai::registry::AiRegistry::new(),
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
+            poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding::new(),
+            poa_admitted: BTreeMap::new(),
             message_registry: CrossDomainMessageRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
@@ -391,6 +407,8 @@ impl AccountState {
             ai_registry: crate::ai::registry::AiRegistry::new(),
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
+            poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding::new(),
+            poa_admitted: BTreeMap::new(),
             message_registry: CrossDomainMessageRegistry::new(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
@@ -445,6 +463,8 @@ impl AccountState {
             ai_registry: crate::ai::registry::AiRegistry::new(),
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
+            poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding::new(),
+            poa_admitted: BTreeMap::new(),
             message_registry: CrossDomainMessageRegistry::new(),
             epoch_index: snapshot.height / 100,
             last_epoch_time: 0,
@@ -516,6 +536,11 @@ impl AccountState {
             ai_registry: snapshot.ai_registry.clone().unwrap_or_default(),
             note_registry: snapshot.note_registry.clone().unwrap_or_default(),
             bridge_state: snapshot.bridge_state.clone().unwrap_or_default(),
+            poa_onboarding: snapshot.poa_onboarding.clone().unwrap_or_default(),
+            // Derived, not restored: recomputed from the records above at the
+            // next block close. Restoring it would let a doctored snapshot
+            // ship an admitted set its own records do not support.
+            poa_admitted: BTreeMap::new(),
             message_registry: snapshot.message_registry.clone().unwrap_or_default(),
             team_vesting,
             unbonding_queue: snapshot.unbonding_queue.clone(),
@@ -1984,6 +2009,45 @@ impl AccountState {
     }
     pub fn get_all_nonces(&self) -> HashMap<Address, u64> {
         self.accounts.iter().map(|(k, v)| (*k, v.nonce)).collect()
+    }
+
+    /// Recompute the PoA admitted sets for every domain that has records.
+    ///
+    /// Called once per block from `apply_system_effects`. Two reasons it lives
+    /// at block close rather than on the consensus read path:
+    ///
+    /// * `whitelist()` takes `&mut self` because observing an elapsed KYC
+    ///   horizon writes an audit entry. Consensus reads `&AccountState`.
+    /// * More importantly, *when* that observation happens must not depend on
+    ///   who asked. At block close every node performs it at the same index
+    ///   with the same state, so the compliance record is identical on all of
+    ///   them. A record whose contents depend on query traffic is not a record.
+    pub fn refresh_poa_admissions(&mut self, block_index: u64) {
+        let domains = self.poa_onboarding.domains_with_records();
+        self.poa_admitted.clear();
+        for domain in domains {
+            let admitted = self
+                .poa_onboarding
+                .whitelist(domain, block_index)
+                .members()
+                .into_iter()
+                .copied()
+                .collect::<BTreeSet<Address>>();
+            self.poa_admitted.insert(domain, admitted);
+        }
+    }
+
+    /// Addresses admitted to act in `domain` as of the last block close.
+    ///
+    /// An empty set means nobody is admitted, which in a permissioned domain
+    /// is a real answer and not a missing one. Callers must not read it as
+    /// "no filter configured".
+    #[must_use]
+    pub fn poa_admitted_addresses(
+        &self,
+        domain: crate::domain::types::DomainId,
+    ) -> BTreeSet<Address> {
+        self.poa_admitted.get(&domain).cloned().unwrap_or_default()
     }
 
     pub fn calculate_state_root(&mut self) -> String {

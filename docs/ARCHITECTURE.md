@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 63 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 64 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -71,6 +71,7 @@
 - [61. Kimlik kimi, tasima limiti neyi sinirlar: dinlemeden once iki soru](#61-kimlik-kimi-tasima-limiti-neyi-sinirlar-dinlemeden-once-iki-soru)
 - [62. Iki kok: consensus'un okudugu ve kanit verebilen](#62-iki-kok-consensusun-okudugu-ve-kanit-verebilen)
 - [63. Komsulukla verilen garanti garanti degildir](#63-komsulukla-verilen-garanti-garanti-degildir)
+- [64. Izinli alanda kabul yoklugu izin degildir](#64-izinli-alanda-kabul-yoklugu-izin-degildir)
 
 ## 1. Genel sistem mimarisi
 
@@ -2364,3 +2365,70 @@ dogrulayiciyi kabul etmemesi gereken bir seyi kabul eder hale getirir.
 yanindadir.* Uzaktaki bir denetime dayanan kod, o denetim tasindiginda veya
 yeni bir yol acildiginda sessizce savunmasiz kalir; ve bunu kimse fark etmez,
 cunku her sey derlenir ve butun testler gecer.
+
+## 64. Izinli alanda kabul yoklugu izin degildir
+
+PoA'da iki kabul modeli yan yana duruyordu ve **uyumlu olan kapaliydi**.
+
+`registry/poa_onboarding` tam bir kabul yasam dongusu tasiyor: alan basina
+admin, onay/red/iptal, degistirilemez denetim izi, ve **KYC gecerlilik ufku**.
+Consensus ise bunu hic gormuyordu; baktigi sey `PoAEngine` uzerindeki duz bir
+`Vec<Address>`'ti. O vektor yalnizca `with_authorities` ile dolar ve uretimde
+hicbir yol onu cagirmiyordu. Uc kurulum noktasinin ucu de listeyi bos
+birakiyordu.
+
+Ve bos liste **"filtre yok"** demekti.
+
+Sonucu soyle okumak gerekir: izinli olmasi gereken bir alan, kabul listesi hic
+doldurulmadigi icin **izinsiz calisiyordu** - ve saglikli gorunuyordu. Yazilan
+uyum katmani (KYC ufku, iptal yolu, denetim izi) hicbir seye karar vermiyordu.
+
+### Ne degisti
+
+**1. Kabul kaydi zincir durumunda.** `AccountState.poa_onboarding`. Consensus'un
+uzerinde uzlastigi bir beyaz liste, tek bir dugumun motorundaki bir alan
+olamaz; her dugumun ayni cevabi verdigi bir sey olmak zorundadir. Anlik
+goruntulerde `#[serde(default)]` ile tasinir, boylece eski goruntuler yuklenir.
+
+**2. Turetilmis kume blok kapanisinda hesaplanir.** `refresh_poa_admissions`
+her blok sonunda `AccountState.poa_admitted`'i yeniden kurar.
+
+Neden orada: `whitelist()` `&mut` ister, cunku sona eren bir KYC ufkunu **ilk
+gozlemleyen** denetim izine yazar. Consensus durumu degismez sekilde ve sicak
+yolda okur. Ama asil sebep bu degil - asil sebep **gozlemin ne zaman
+oldugunun soruyu kimin sordugundan bagimsiz olmasi** gerektigidir. Blok
+kapanisinda her dugum ayni indekste, ayni durumla gozlemi yapar; boylece
+uyum kaydi hepsinde aynidir. Icerigi sorgu trafigine bagli olan bir kayit,
+kayit degildir.
+
+Turetilmis kume **anlik goruntuye yazilmaz**, kayitlardan yeniden hesaplanir.
+Yazilsaydi, elle duzenlenmis bir goruntu kendi kayitlarinin desteklemedigi bir
+kabul kumesi tasiyabilirdi.
+
+**3. Filtre fail-closed.** Iki kapi, ikisi de zorunlu: bir dogrulayici hem
+izinsiz kumede aktif olmali **hem de** canli bir kabul kaydi tasimali. Canli
+kayit, suresi dolmamis KYC ufku demektir - yani bayat onay, **kimse bir sey
+yapmadan** blok yetkilendirmeyi birakir.
+
+Bos kabul kumesi artik "kimse yetkili degil" demektir ve alan kimse kabul
+edilene kadar blok uretmez. **Sessiz bir durus geri alinabilir; sessiz bir
+acilma geri alinamaz.**
+
+**4. Operator listesi daraltir, genisletmez.** Motorun kendi `authorities`
+vektoru bos degilse kumeyi daha da kisitlar. Bir operatorun yerel listesi,
+zincirin kabul etmedigi bir hesabi **kabul edemez**.
+
+**5. Alan yapilandirmadan gelir.** `PoAConfig.domain`. Gelistiriciler kendi
+izinli alanlarini kurar; her alanin kendi admini ve kendi kabul kumesi vardir.
+Yanlis alana bakan bir motor **baskasinin kabul kararlarini** okurdu, bu
+yuzden alan motorun yapilandirildigi yerde bir kez soylenir.
+
+**6. Alanlar arasi tam izolasyon.** Kabul kaydinin anahtari `(alan, hesap)`.
+Bir alanin admini yalnizca kendi alanina kabul yapar; baska alana yazma
+denemesi **hata dondurur**. Bir alanin cokmesi digerini etkilemez.
+
+### Sinir
+
+Bu, PoA alaninda **kimin** blok uretebilecegine dair bir karardir. Uretilen
+blogun **dogru** oldugunu soylemez: onu imza dogrulamasi, durum gecisi ve
+sonluluk kurallari soyler. Kabul, yetkilendirmedir; dogruluk ayri bir sorudur.
