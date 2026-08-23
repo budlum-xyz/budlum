@@ -2140,6 +2140,32 @@ impl Blockchain {
             ));
         }
 
+        // 1f. Ilan edilen butce: harcanan, ilan edilenden fazla olamaz.
+        //
+        // `gas_limit` ve `gas_used` genel girdilerin icinde tasiniyor ve
+        // baglama hash'ine giriyor, yani gonderen ikisini de sonradan
+        // degistiremez. Ama ikisi **birbirine karsi** hic denetlenmiyordu:
+        // `gas_used > gas_limit` olan bir kanit, degerler tutarli sekilde
+        // imzalanmis oldugu icin buraya kadar gelip kabul ediliyordu.
+        //
+        // Kanit sistemi bu iliskiyi kisitlamaz. STARK "bu program bu
+        // girdilerle boyle kostu" der; ilan edilen tavanin asilmadigini
+        // soylemez. Bolum 69'un ayni sinifi: dogrulayici, kanit sisteminin
+        // kisitlamadigi alani kendi kodunda denetlemek zorundadir.
+        //
+        // Bu, izin listesinin (1c) cevaplamadigi sorudur. Liste **hangi
+        // kodun** calisabilecegini soyler; bu denetim o kodun **ilan ettigi
+        // sinir icinde** kalip kalmadigini. Listeden gecmis bir program,
+        // ilan ettiginden fazlasini harcayarak dogrulama isini sinirsiz
+        // buyutebilirdi.
+        let declared_limit = submission.public_inputs.gas_limit;
+        let spent = submission.public_inputs.gas_used;
+        if spent > declared_limit {
+            return Err(format!(
+                "proof claims {spent} gas used against a declared limit of {declared_limit}"
+            ));
+        }
+
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
         let fee = self.state.registry.params().proof_submission_fee;
         let mut charged_fee = false;
