@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 66 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 67 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -74,6 +74,7 @@
 - [64. Izinli alanda kabul yoklugu izin degildir](#64-izinli-alanda-kabul-yoklugu-izin-degildir)
 - [65. Bir yolda duran denetim kural degildir](#65-bir-yolda-duran-denetim-kural-degildir)
 - [66. Turetilmis icerik: bagimli bir tarif indirim almaz](#66-turetilmis-icerik-bagimli-bir-tarif-indirim-almaz)
+- [67. Kanitlanmis talep: indirim populerlikle geri alinir](#67-kanitlanmis-talep-indirim-populerlikle-geri-alinir)
 
 ## 1. Genel sistem mimarisi
 
@@ -2548,3 +2549,64 @@ Modul baglandiginda `WIRING: unwired` isareti gecersizlesti ve
 `capability-wiring` bunu ayni turda yakaladi. Ikinci kez: bir sertlestirme
 isini bitirmek, kodu degistirmekle degil, **kod hakkinda soylenen seyi de
 duzeltmekle** biter.
+## 67. Kanitlanmis talep: indirim populerlikle geri alinir
+
+Bolum 66'ya kadar bir nesnenin kac kopya isteyecegi yalnizca **kaynagina**
+bakiyordu: tariften dogan icerik bir kopya, tutulan icerik uc kopya. Bu
+indirimin gerekcesi dayanikliliktir. Tarif zincirde oldugu surece nesne
+her zaman yeniden uretilebilir, dolayisiyla ucuncu bir kopya dayaniklilik
+eklemez.
+
+Gerekce eksikti. Tarif nesneyi *kaybolmaktan* kurtarir ama *okunamamaktan*
+kurtarmaz. Tek kopyayi tutan operator dustugunde nesne kaybolmus olmaz;
+sadece o an kimse okuyamaz, ve birinin yeniden uretmesi gerekir. Ayda bir
+okunan bir nesne icin bu bedeldir. Saniyede okunan bir nesne icin kesintidir.
+Indirim dayaniklilik icin verilmisti; **populerlik onu geri alir**.
+
+### Talep neyle olculur
+
+Bir okuma sayaci akla ilk gelen cozumdur ve yanlis olandir. Sayac, aginin
+uzerinde anlasmasi gereken bir sayiyi her okumada yazmak demektir; oysa
+depolama kollarinin var olma sebebi tam da bu maliyetten kacinmaktir.
+
+Bunun yerine tahmin **sonlanmis olaylardan turetilir**. Defter nesne basina
+bir olay listesidir (`epoch`, `count`), ve tahmin her sorulusunda o listeden
+yeniden hesaplanir. Ayni bloklara sahip iki dugum ayni sayiyi bulur, cunku
+sonumleme kayan noktali bir ussel degil tam sayi yarilamadir: `ACCESS_SCALE`
+ile olceklenmis birikim, yari-omur (720 epoch) basina bir kez sagi kaydirilir.
+
+Deftere yalnizca **cevaplanmis geri getirme meydan okumalari** girer. Bir
+meydan okumanin dogru cevaplanmis olmasi, zincirin o okumanin gerceklestigini
+*kanitlamasi* demektir; kacirilmis ya da yanlis cevaplanmis olan tersini
+kanitlar. Kanitlanmamis okumalar sayilsaydi, bir operator kendi icerigi icin
+talebi sisirip agin odedigi kopyalari elinde tutardi.
+
+Ayni epoch'taki okumalar tek kayitta toplanir. Defter okuma sayisiyla degil,
+nesnenin okundugu epoch sayisiyla buyur: bin okuma bir satir. Gec gelen bir
+olay da en yeni kayda katlanir, arkasina eklenmez; sirasiz bir defter iki
+dugume iki tahmin verirdi.
+
+### Talep hedefi nasil degistirir
+
+Taban rejimden gelir, talep yalnizca **yukari** iter. Yari-omur basina her
+sekiz kanitlanmis okuma bir kopya ekler, tam hedefe kadar; tavani asamaz.
+
+Talep asagi indirmez, ve bu bir eksiklik degil karardir. Az okunan bir
+nesnenin kopyalarini kismak, olculen talebin *yoklugunu* bir dayaniklilik
+kararina cevirmek olurdu. Hic okunmamis bir yedek tam da kaybedilmemesi
+gereken seydir.
+
+Esik sabit bir merdivendir, operatorun donanim oranlarina bagli degildir.
+`storage::living_threshold` icindeki basa-bas hesabi operatorun kendi disk ve
+islemci maliyetlerini kullanir ve dogru sekilde dugum-yereldir: iki operator
+ayni nesne icin durustce farkli cevaplara varabilir, cunku farkli donanim
+satin almislardir. Kopya hedefi ise oyle degil. Zincirin uzerinde anlasmasi
+gereken bir sayidir, dolayisiyla girdisi de zincirin uzerinde anlastigi bir
+sey olmak zorundadir.
+
+### Tek surum
+
+`under_replicated_shards` artik `epoch` alir. Talebi goren ve gormeyen iki
+surum yan yana birakilmadi. Bolum 65'te ayni sekil bir kusur olarak
+gorulmustu: bir denetimin iki kopyasi varsa, hangisinin uygulanacagini
+saldirgan secer.

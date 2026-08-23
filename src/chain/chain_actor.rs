@@ -2528,6 +2528,28 @@ impl ChainActor {
             );
         }
 
+        // Talep bandi. Rejim indirimi almis bir nesne cok okunmaya baslarsa
+        // hedefi geri yukselir; asagidaki tarama bunu her epoch yeniden
+        // olcer. `under_replicated_shards` artik epoch aliyor, yani indirim
+        // sabit degil kanitlanmis okumaya bagli.
+        let demand_gap = self
+            .blockchain
+            .state
+            .storage_registry
+            .under_replicated_shards(current_epoch);
+        for (manifest_id, shard_id, active) in &demand_gap {
+            let target = self
+                .blockchain
+                .state
+                .storage_registry
+                .required_replicas_with_demand(manifest_id, current_epoch);
+            tracing::warn!(
+                "B.U.D. shard {} of {} is below its demand-adjusted target at epoch {current_epoch}: {active} active, target={target}",
+                hex::encode(shard_id.0),
+                hex::encode(manifest_id.0)
+            );
+        }
+
         let under_replicated = self
             .blockchain
             .state
@@ -3697,11 +3719,15 @@ impl ChainActor {
                                 == crate::domain::storage_deal::ReallocationStatus::ActiveReplacement
                         })
                         .count();
+                    let stats_epoch = self.blockchain.last_block().index
+                        / crate::core::chain_config::epoch_len_for_chain_id(
+                            self.blockchain.chain_id,
+                        );
                     let under_replicated_shards = self
                         .blockchain
                         .state
                         .storage_registry
-                        .under_replicated_shards()
+                        .under_replicated_shards(stats_epoch)
                         .len();
                     let _ = res_tx.send(serde_json::json!({
                         "slashedBondTotal": self.blockchain.storage_slashed_bond_total,
