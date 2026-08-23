@@ -9,7 +9,7 @@ name: Dependency Review (PR güvenlik kapısı)
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, fix/architecture-tip-adlari]
 
 # Salt-okur.
 concurrency:
