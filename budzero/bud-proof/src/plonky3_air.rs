@@ -1330,6 +1330,63 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(nxt_is_expand.clone())
             .assert_zero(nxt_merkle_current.clone() - poseidon_output.clone());
 
+        // Son turun ciktisi, kok karsilastirmasinin baktigi degere baglanir.
+        //
+        // # Kapanan bosluk
+        //
+        // Asagidaki kok denetimi, **orijinal** VerifyMerkle satirinin
+        // `merkle_current` degerini `rs1_val` (iddia edilen kok) ile
+        // karsilastiriyor. Prover o hucreye 64. turun ciktisini yaziyor - ama
+        // bunu **zorlayan bir kisit yoktu**. Yani zincir satir satir dogru
+        // hesaplaniyordu ve sonucu hicbir yere baglanmiyordu: kotu niyetli
+        // bir prover orijinal satira dogrudan `rs1_val`'i yazar, esitlik
+        // saglanir, `rd_val_new = 1` doner. Yol dogrulanmis gibi gorunur,
+        // dogrulanan sey yoktur.
+        //
+        // Bu, opcode'un uretimde kapali tutulma gerekcesiydi ("unfinished
+        // path verification"). Eksik olan tek sey su gecis: **son** genisleme
+        // satirindan (`is_expand = 1`, ardil satir genisleme degil) cikan
+        // Poseidon ciktisi, o genislemeyi baslatan orijinal satirin
+        // `merkle_current` degerine esit olmali.
+        //
+        // # Neden geriye dogru degil, ileriye dogru okunuyor
+        //
+        // Orijinal satir genislemelerden **once** gelir, yani AIR'in iki-satir
+        // penceresi son genislemeden orijinale bakamaz. Bunun yerine deger
+        // ileri tasinir: `COL_MERKLE_FINAL_FLAG` sutunu, genisleme boyunca
+        // orijinal satirin bekledigi degeri taşir ve son turda esitlik
+        // denetlenir. Sutun zaten tanimliydi ve hicbir kisit onu okumuyordu -
+        // tanimli ama sorulmayan bir sutun, olmayan bir sutundan daha kotudur,
+        // cunku okuyan kisiye denetleniyormus gibi gorunur.
+        let on_original_row: AB::Expr =
+            is_verify_merkle.clone() * (one.clone() - is_expand.clone());
+        let merkle_final_expected: AB::Expr = cur[COL_MERKLE_FINAL_FLAG].into();
+        let nxt_merkle_final_expected: AB::Expr = nxt[COL_MERKLE_FINAL_FLAG].into();
+
+        // Beklenen deger, orijinal satirdan ilk genislemeye tasinir.
+        builder
+            .when_transition()
+            .when(on_original_row.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(nxt_merkle_final_expected.clone() - merkle_current.clone());
+
+        // Ve genislemeden genislemeye degismeden tasinir. Degisebilseydi
+        // tasima bir sey tasimazdi.
+        builder
+            .when_transition()
+            .when(is_expand.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(nxt_merkle_final_expected.clone() - merkle_final_expected.clone());
+
+        // Son genisleme satirinda (ardil satir genisleme degil) turun ciktisi
+        // tasinan degere esit olmali. Zincir burada kapanir: orijinal satirin
+        // kok ile karsilastirdigi deger, gercekten 64 turun sonucudur.
+        builder
+            .when_transition()
+            .when(is_expand.clone())
+            .when(one.clone() - nxt_is_expand.clone())
+            .assert_zero(merkle_final_expected.clone() - poseidon_output.clone());
+
         // Commit 3, final root check: on the original
         // VerifyMerkle step, the merkle_current (which the
         // Trace_matrix sets to the 64th-round Poseidon output)
@@ -1353,7 +1410,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         //   Eq = 1 - prod (1 when final==root, 0 otherwise)
         //   Diff * eq = 0
         //   Rd_val_new == eq
-        let on_original: AB::Expr = is_verify_merkle.clone() * (one.clone() - is_expand.clone());
+        let on_original: AB::Expr = on_original_row.clone();
         let merkle_diff_inv: AB::Expr = cur[COL_MERKLE_DIFF_INV].into();
         let diff: AB::Expr = merkle_current.clone() - rs1_val.clone();
         let prod: AB::Expr = diff.clone() * merkle_diff_inv.clone();

@@ -867,14 +867,29 @@ pub fn trace_matrix(
             // `rem == 2 * rem' + bit`, which is what ties `bit` to `key`;
             // without it the direction bits were free and a flipped bit
             // produced a different root that the AIR still accepted.
+            // Bu genislemeyi baslatan orijinal satirin bekledigi deger: yol
+            // bittiginde ulasilmasi gereken 64. tur ciktisi. Orijinal satir
+            // genislemelerden hemen once gelir, bu yuzden geriye dogru ilk
+            // genisleme-olmayan Merkle satiri aranir. Bulunamazsa 0 kalir ve
+            // AIR'in son-tur esitligi kirilir - sessiz gecmek yerine.
+            let final_merkle_value = trace[..i]
+                .iter()
+                .rev()
+                .find(|s| !s.merkle_is_expand)
+                .and_then(|s| s.merkle_current)
+                .unwrap_or(0);
             values[row_start + COL_MERKLE_KEY_REM] = Goldilocks::new(key >> round);
             values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(cur);
             values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
             values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
-            //: only the *original* step is the
-            // Final row of the path; expansion rows are intermediates.
-            values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(0);
+            // Bu sutun artik bir bayrak degil, **tasinan bir deger**: orijinal
+            // satirin kok ile karsilastiracagi 64. tur ciktisi, genisleme
+            // boyunca degismeden tasinir ve son turda uretilen ciktiyla
+            // esitligi denetlenir (`plonky3_air.rs`, "Son turun ciktisi ...").
+            // Onceden burada sabit 0 vardi ve AIR sutunu hic okumuyordu; o
+            // yuzden orijinal satirin degeri hicbir seye bagli degildi.
+            values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(final_merkle_value);
 
             // Poseidon witnesses: on every expansion row,
             // Populate the x^2 / x^4 columns with the Goldilocks
@@ -6324,6 +6339,124 @@ mod tests {
             "a flipped Merkle direction bit produced a verifying proof: the \
              path would prove membership at a position the key does not \
              describe. proving_rejected={rejected_at_proving}, \
+             verification_rejected={rejected_at_verification}"
+        );
+    }
+
+    /// Yolun uretmedigi bir kok iddiasi reddedilmeli.
+    ///
+    /// Kok denetimi, **orijinal** VerifyMerkle satirinin `merkle_current`
+    /// hucresini iddia edilen kokle (`rs1_val`) karsilastirir. Prover o
+    /// hucreye 64. turun ciktisini yazar - ama hicbir kisit bunu zorlamiyordu.
+    /// 64 genisleme satiri Poseidon zincirini satir satir dogru hesapliyor,
+    /// ulastigi sonuc ise hicbir yere baglanmiyordu.
+    ///
+    /// Saldirgan izi VM seviyesinde kurgular: **gecerli** bir yolla baslar
+    /// (ayni kurulum `proves_verify_merkle_valid_64_depth` ile), sonra
+    /// iddia edilen koku degistirir ve orijinal adimin `merkle_current`
+    /// alanina o yeni koku yazip "eslesti" der. Genisleme satirlarina
+    /// dokunulmaz - zincir kendi icinde tutarli kalir, yalnizca vardigi yer
+    /// yok sayilir. `trace_matrix` turev sutunlarin hepsini bu izden tutarli
+    /// uretir, yani ortada bayat tanik yoktur.
+    ///
+    /// Kisit kaldirilarak olculdu: bu kanit **dogrulandi** (`verify` Ok).
+    /// Kisitla birlikte reddediliyor. Opcode'un uretimde kapali tutulma
+    /// gerekcesi ("unfinished path verification") tam olarak buydu.
+    #[test]
+    fn rejects_verify_merkle_root_not_produced_by_the_path() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let key: u64 = 7;
+        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
+        let leaf: u64 = 0xBEEF;
+        let mut current = leaf;
+        for (i, &sibling) in siblings.iter().enumerate() {
+            let bit = (key >> i) & 1;
+            current = if bit == 0 {
+                bud_vm::merkle_poseidon_round(current, sibling)
+            } else {
+                bud_vm::merkle_poseidon_round(sibling, current)
+            };
+        }
+        let honest_root = current;
+        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
+        for (i, &sibling) in siblings.iter().enumerate() {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
+        }
+        vm.registers[2] = honest_root;
+        vm.registers[3] = leaf;
+
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.trace.len(), 66);
+
+        // Saldiri: baska bir kok iddia edilir ve orijinal adim, yolun
+        // ulastigi sonuc yerine o koku tasiyip "eslesti" der.
+        let forged_root = honest_root ^ 0xFFFF;
+        let mut trace = vm.trace.clone();
+        trace[0].src1_val = forged_root;
+        trace[0].registers[2] = forged_root;
+        trace[0].merkle_current = Some(forged_root);
+        trace[0].dst_val = 1;
+        for st in trace.iter_mut().skip(1) {
+            st.registers[1] = 1;
+            st.registers[2] = forged_root;
+        }
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&trace),
+                ),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Plonky3Adapter::prove(&trace, &pi, &program)
+        }));
+
+        let rejected_at_proving = match &attempted {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(_)) => false,
+        };
+        let rejected_at_verification = match attempted {
+            Ok(Ok(envelope)) => Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            _ => false,
+        };
+
+        assert!(
+            rejected_at_proving || rejected_at_verification,
+            "yolun uretmedigi bir kok dogrulandi: 64 tur hesaplandi ve sonucu \
+             atlandi. proving_rejected={rejected_at_proving}, \
              verification_rejected={rejected_at_verification}"
         );
     }
