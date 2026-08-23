@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 76 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 78 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -84,6 +84,8 @@
 - [74. Sozluk kimligin parcasi](#74-sozluk-kimligin-parcasi)
 - [75. Ilan edilen butce: liste hangi kod, kapi ne kadar](#75-ilan-edilen-butce-liste-hangi-kod-kapi-ne-kadar)
 - [76. Sinirlayicinin kendisi sinirli mi](#76-sinirlayicinin-kendisi-sinirli-mi)
+- [77. Onbellek bir depolama iddiasi degildir](#77-onbellek-bir-depolama-iddiasi-degildir)
+- [78. Hesaplanan seyin vardigi yer](#78-hesaplanan-seyin-vardigi-yer)
 
 ## 1. Genel sistem mimarisi
 
@@ -3069,3 +3071,77 @@ Eklentiler icin ayni ilke tersinden: degisim **engellenmedi**, cunku hatali
 bir eklentinin degistirilebilmesi gerekir. Engellenen sey degisimin
 gorunmeden olmasi. `replace` eski ve yeni adapter adini bir ize yazar ve iz
 birikir - silinen bir iz izin kendisini anlamsiz kilar.
+
+## 77. Onbellek bir depolama iddiasi degildir
+
+Gecit, adiyla istenen icerigi bir tariften uretir. Ayni ad kisa araliklarla
+cok kez istendiginde ayni uretim bastan yapiliyordu. Araya bir onbellek
+girdi; onbellegin kendisi bir sinir sorusu acti.
+
+**Onbellek, sifir-bayt depolama iddiasina dokunmaz.** Ilan su: ag, icerigin
+kendisini saklamaz, tarifini saklar. Onbellekteki bayt bu ilanin istisnasi
+degil, cunku uc niteligi birden tasiyor: **gecici** (surec yeniden
+baslayinca yok), **tek dugume ait** (paylasilmaz, uzlasmaya girmez, kimse
+ondan sorumlu degil) ve **yeniden kurulabilir** (silinirse tarif ayni
+ciktiyi verir). Bu ucu birden tasimayan bir sey onbellek degil depolamadir
+ve o zaman ilan yanlis olur. Ayrim adlandirma inceligi degil: saklanan seyin
+kaybi bir veri kaybiysa, orasi artik onbellek degildir.
+
+**Sinir girdi sayisidir, bayt degil.** Her girdi zaten gecidin icerik
+tavaniyla (`MAX_GATEWAY_CONTENT_BYTES`) sinirli, yani 64 girdi en kotu
+durumda 64 x tavan bellek demek. Bayt saymak ayni sonucu daha karmasik bir
+muhasebeyle verirdi.
+
+**Sinirsiz onbellek sinirsiz kuyruktur.** Tavani olmayan bir onbellek,
+istemcinin doldurabildigi bir kuyruktan farksizdir: farkli adlar isteyen bir
+saldirgan, dugumun bellegini istedigi kadar buyutur. Tavan bu yuzden
+tercihe bagli bir ayar degil, kapinin kendisi.
+
+**Ayni kimlik onbellekte bir kez durur.** Tahliye FIFO; en eski girdi cikar.
+Yinelenme denetimi olmasaydi onbellek "64 girdi" derken ayni icerigin iki
+kopyasini tutabilirdi - o zaman ilan edilen kapasite anlamsizlasir, cunku
+64 girdilik onbellek 32 farkli icerik tutuyor olabilir. Testin olctugu sey
+budur: kopya sayisi, toplam boyut degil. Ilk yazilan test boyutu olcuyordu
+ve yinelenme denetimini kaldiran mutasyonu yakalamadi - boyut 64'te sabit
+kaliyor, degisen sey kopya sayisi.
+
+Gercek LRU tercih edilmedi: okuma yolunda yazma kilidi ister, yani okuma
+istekleri birbirini bekler. FIFO'nun isabet orani daha dusuk, maliyeti
+ongorulebilir.
+
+## 78. Hesaplanan seyin vardigi yer
+
+BudZero'nun `VerifyMerkle` islemi bir yol dogrulamasi yapar: 64 tur boyunca
+yaprak, her turda bir kardes degerle Poseidon'dan gecirilir ve sonucun
+iddia edilen koke esit olmasi beklenir. Kanit devresi bu turlarin her birini
+satir satir kisitliyordu - kardes degerin gercekten bellekten okundugu,
+yon bitinin anahtara uydugu, Poseidon'un dogru hesaplandigi, tur sayacinin
+atlamadigi. Hepsi yerindeydi.
+
+Eksik olan tek sey, **zincirin vardigi yerin koke baglanmasiydi**.
+
+Kok karsilastirmasi, genisleme satirlarinin degil, islemin **kendi**
+satirinin bir hucresine bakiyordu. Kanit ureten taraf o hucreye 64. turun
+ciktisini yaziyordu - ama bunu zorlayan bir kisit yoktu. Yani kotu niyetli
+bir uretici, 64 genisleme satirina hic dokunmadan (zincir kendi icinde
+kusursuz tutarli kalir), yalnizca o tek hucreye iddia ettigi kokun kendisini
+yazar. Esitlik bedavaya saglanir, islem "dogrulandi" der. 64 tur hesaplanir
+ve sonucu atlanir.
+
+Bu olculdu: kisit eklenmeden once boyle bir kanit uretildi ve **dogrulandi**.
+
+Bosluk, bir sutunun tasinmasiyla kapandi. Islemin satiri genislemelerden
+**once** geldigi icin devrenin iki-satirlik penceresi son genislemeden geriye
+bakamaz; bunun yerine beklenen deger ileri tasinir. Zaten tanimli olan ama
+hicbir kisidin okumadigi bir sutun bu isi ustlendi: islem satirindan ilk
+genislemeye aktarilir, genislemeler boyunca degismeden gider, son turda
+uretilen ciktiyla esitligi denetlenir.
+
+**Tanimli ama sorulmayan bir sutun, olmayan bir sutundan daha kotudur** -
+okuyan kisiye denetleniyormus gibi gorunur.
+
+Islem uretimde hala kapali. Ama gerekcesi degisti: eksik kisit degil, **dis
+denetim**. Ayrim onemli, cunku kodun onceki hali yol dogrulamasini
+"tamamlanmis" ilan ediyordu ve o ilan kendi cercevesinde dogruydu - eksik
+olan sey, kimsenin ayri bir madde olarak yazmadigi bagdi. Bir soundness
+iddiasinin onu yazani ikna etmesi yetmez.
