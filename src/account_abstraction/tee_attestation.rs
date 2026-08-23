@@ -34,9 +34,29 @@
 //! bir sonuc dondurulmez. Bir cagiran `Err`'i yok sayarsa taniklik hic
 //! olusmaz, bos bir taniklik olusmaz.
 //!
-//! WIRING: unwired - attestation verification is real, but nothing in the
-//! production path presents an attestation yet. Reached only by tests until
-//! account abstraction is wired into transaction verification.
+//! WIRING: unwired - olculdu, ve onceki gerekce bayattı.
+//!
+//! Eski gerekce "hesap soyutlamasi islem dogrulamasina baglanana kadar"
+//! diyordu. Hesap soyutlamasi **baglandi**: `Transaction::verify_v6`
+//! `threshold_mldsa`'yi cagiriyor ve V6 islemleri esik imzasiyla
+//! dogrulaniyor. Yani beklenen kosul gerceklesti ve bu modul yine de
+//! cagrilmiyor.
+//!
+//! Gercek sebep baska: bir islem **taniklik tasimiyor**. `verify_v6` sahip
+//! kumesini, esigi ve imzalari okur; taniklik icin bir alan yok.
+//!
+//! Alan eklemek bir taahhut yuzeyi degisikligidir ve tek basina yapilmasi
+//! dogru olmaz. Taniklik, imzalayan anahtarin *nerede* durdugu hakkinda bir
+//! iddiadir; onu islemin icine koymak, dogrulayan tarafin o iddiayi neye
+//! karsi denetleyecegini de gerektirir. Bu modul kendi sinirini zaten
+//! soyluyor: `verify_signed_by` "bu gercek bir SGX cihazi" demez, "bu alinti
+//! bu anahtarla imzalanmis" der. Satici sertifika zincirinin denetimi bir
+//! emanet koku ister ve dugum yapilandirmasinda oyle bir kok yok.
+//!
+//! Yani zincire yazilabilecek tek sey, denetlenemeyen bir iddia olurdu.
+//! `TeeGates` "uretim yolundan cagrilacak tek giris noktasi" olarak duruyor
+//! ve o giris noktasi acildiginda tek satirlik bir baglama olacak; bugun
+//! acilmiyor cunku arkasinda duracak emanet koku yok.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,

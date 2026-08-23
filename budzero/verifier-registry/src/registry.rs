@@ -11,8 +11,24 @@
 //! - Evidence-gated slashing: only consensus-verified reports are acted on.
 //! - Deterministic `state_root` for snapshot/consensus commitment.
 //!
-//! WIRING: unwired - a separate crate consumed by downstream verifiers; the
-//! node keeps its own registry in src/registry/.
+//! WIRING: unwired - olculdu, ve gerekce eskisinden dar.
+//!
+//! Onceki gerekce "asagi akistaki dogrulayicilar tarafindan tuketilen ayri
+//! bir crate" diyordu. Bunun karsiligi yok: `budzero` calisma alaninda hicbir
+//! crate buna bagimli degil ve paket yayimlanmiyor. Bugun bu kodu calistiran
+//! tek sey kendi testleri.
+//!
+//! Silinmiyor, cunku islevsiz degil: cekirdekteki ikizin
+//! (`src/registry/permissionless.rs`) **bagimsiz ikinci ifadesidir**. Ayni
+//! rol yasam dongusu iki kez, iki ayri kod tabaninda yazilmis durumda ve
+//! `slash_expression` kapisi ikisinin kesme aritmetiginin ayrismasini
+//! engelliyor; ayna testler iki tarafta da kosuyor. Bir hesabin iki bagimsiz
+//! yazimi, tek yazimin sessizce yanlis olmasini zorlastirir - Wheeler'in
+//! ikili derleme fikrinin kucuk olcekli hali.
+//!
+//! Yani bu crate bir tuketici bekleyen kutuphane degil, cekirdegin
+//! carpraz denetimi. Iddia buydu diye yaziliyor: bir gun gercek bir tuketici
+//! cikarsa gerekce degisir, cikmazsa da kod yalan soylemiyor olur.
 //!
 //! ## Cekirdekteki ikizle iliski (`src/registry/permissionless.rs`)
 //!
