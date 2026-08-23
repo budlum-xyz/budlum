@@ -119,6 +119,12 @@ pub struct Blockchain {
     /// adlandirdigi alan kayitliysa ve ayni turu/operatoru gosteriyorsa
     /// kabul edilir.
     pub sovereign_registry: crate::domain::SovereignDomainRegistry,
+    /// PoA alanlarinin uyum defteri: dondurma kayitlari ve denetim izi.
+    ///
+    /// Yalniz `ConsensusKind::PoA` alanlari icin anlamlidir; izinsiz alanlarda
+    /// dondurma cagrisi reddedilir (`ensure_poa`). Defter kayit tutmakla
+    /// kalmaz, `ensure_not_frozen` uzerinden gercek bir kapi kurar.
+    pub poa_compliance: crate::registry::PoaComplianceRegistry,
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
@@ -724,6 +730,7 @@ impl Blockchain {
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
             sovereign_registry: crate::domain::SovereignDomainRegistry::new(),
+            poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
@@ -871,6 +878,72 @@ impl Blockchain {
         &self,
         bundle: &crate::domain::sovereign::AuditExportBundle,
     ) -> Result<(), String> {
+        self.sovereign_registry.validate_audit_export(bundle)
+    }
+
+    /// Bir PoA alaninda adresi dondur.
+    ///
+    /// Dondurma yalniz izinli (PoA) alanlarda ve yalniz yetkili yonetici
+    /// tarafindan yapilabilir; ikisi de `PoaComplianceRegistry` icinde
+    /// dogrulanir. Gerekce ozeti sifir olamaz - kanitsiz dondurma, kaydi
+    /// denetlenemez yapar.
+    ///
+    /// # Errors
+    ///
+    /// Alan kayitli degilse, PoA degilse, yonetici yetkisiz ise veya gerekce
+    /// ozeti sifirsa hata doner.
+    pub fn freeze_poa_account(
+        &mut self,
+        domain_id: u32,
+        admin_authorized: bool,
+        address: crate::core::address::Address,
+        reason_hash: [u8; 32],
+    ) -> Result<(), String> {
+        let domain = self
+            .domain_registry
+            .get(domain_id)
+            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
+        // Alanin turu kaydindan okunur, cagirandan degil: cagiran kendi
+        // Alanini "PoA" ilan edip dondurma yetkisi uretemez.
+        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            crate::registry::ComplianceDomainKind::PoA
+        } else {
+            crate::registry::ComplianceDomainKind::Permissionless
+        };
+        self.poa_compliance
+            .freeze_suspicious(
+                kind,
+                admin_authorized,
+                address,
+                reason_hash,
+                self.chain.len() as u64,
+            )
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// Dondurulmus bir hesabin egemen denetim paketi kabul edilmez.
+    ///
+    /// Kapi burada kuruluyor: defter artik yalnizca kayit tutmuyor, kaydin
+    /// bir sonucu var. Dondurma kaydi olan bir operatorun urettigi paket
+    /// reddedilir - aksi halde "donduruldu" yalnizca bir not olurdu.
+    ///
+    /// # Errors
+    ///
+    /// Paketin sahibi dondurulmussa ya da paket sablonla uyusmuyorsa hata doner.
+    pub fn validate_sovereign_audit_export_for(
+        &self,
+        operator: &crate::core::address::Address,
+        bundle: &crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        if self
+            .poa_compliance
+            .is_frozen(crate::registry::ComplianceDomainKind::PoA, operator)
+        {
+            return Err(format!(
+                "operator {} is frozen; audit export refused",
+                operator.to_hex()
+            ));
+        }
         self.sovereign_registry.validate_audit_export(bundle)
     }
 
@@ -5849,6 +5922,7 @@ impl Clone for Blockchain {
             max_pending_certs: self.max_pending_certs,
             domain_registry: self.domain_registry.clone(),
             sovereign_registry: self.sovereign_registry.clone(),
+            poa_compliance: self.poa_compliance.clone(),
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),
