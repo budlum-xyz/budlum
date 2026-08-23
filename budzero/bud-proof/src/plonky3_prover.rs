@@ -3988,6 +3988,255 @@ mod tests {
         }
     }
 
+    /// Sekli dogru ama **icerigi** bozulmus kanit reddedilmeli.
+    ///
+    /// `VerificationError` bes cesit tasiyor ve olculdu: dordunun
+    /// (`OodEvaluationMismatch`, `RandomizationError`, `InvalidOpeningArgument`,
+    /// `NextPointUnavailable`) hicbir testte karsiligi yoktu. Sekil kapisi
+    /// (`InvalidProofShape`) testliydi, ama o kapi bir kaniti yalnizca
+    /// *bicimsel* olarak eler.
+    ///
+    /// Bu test acilan bir degeri, uzunluklara hic dokunmadan degistiriyor -
+    /// yani sekil kapisini gecen, sadece icerigi yanlis bir kanit. Bir
+    /// saldirganin uretecegi sey tam olarak budur.
+    ///
+    /// **Olculen red yolu `InvalidOpeningArgument`** (FRI/PCS katmani), test
+    /// yazilirken beklenen `OodEvaluationMismatch` degil: acilan deger
+    /// degistiginde kanit daha kisit denetimine varmadan PCS acilis
+    /// dogrulamasinda eleniyor. Iddia bu yuzden "sekil disi bir sebeple
+    /// reddedildi" seklinde kuruldu; belirli bir hata cesidini pinlemek,
+    /// olcum yapmadan yazilmis bir beklentiyi kodlamak olurdu.
+    /// `OodEvaluationMismatch` yolu hala testsiz - ona ulasmak icin PCS
+    /// acilisiyla tutarli ama kisiti bozan bir kanit uretmek gerekir.
+    #[test]
+    fn rejects_a_proof_whose_openings_are_altered_without_changing_its_shape() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+
+        // Kontrol grubu: bu gecmezse asagidaki red saldiriya degil kurulum
+        // hatasina borclu olurdu.
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "durust kanit dogrulanmali: kurulum bozuk"
+        );
+
+        let base: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+
+        // Sekli **bozulmamis** mutasyonlar: uzunluklar aynen korunuyor, tek
+        // degisen acilan bir degerin kendisi. Boylece `valid_shape` gecer ve
+        // red, kisit denetiminden gelmek zorunda kalir.
+        let mutations: Vec<(&str, ProofMutation)> = vec![
+            (
+                "iz acilisinin bir degeri degistirildi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.trace_local[0] += MyExtensionField::ONE;
+                }),
+            ),
+            (
+                "bolum parcasinin bir degeri degistirildi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.quotient_chunks[0][0] += MyExtensionField::ONE;
+                }),
+            ),
+        ];
+
+        for (ad, mutate) in mutations {
+            let mut forged_proof = base.clone();
+            mutate(&mut forged_proof);
+
+            let air_p = BudAir {
+                num_steps: vm.trace.len(),
+                program: program.clone(),
+            };
+            let cfg_p = build_config();
+            let pv_p = to_public_values(&pi);
+            let pp_p = setup_preprocessed(&cfg_p, &air_p, forged_proof.degree_bits);
+            let direct = crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &forged_proof,
+                &pv_p,
+                pp_p.as_ref().map(|(_, v)| v),
+            );
+
+            let reason = direct
+                .as_ref()
+                .err()
+                .map(|e| format!("{e}"))
+                .unwrap_or_else(|| "kabul edildi".to_string());
+            assert_ne!(
+                reason, "kabul edildi",
+                "{ad}: icerigi bozulmus kanit dogrulandi"
+            );
+            // Red **sekil** kapisindan gelmemeli: sekil korundu, dolayisiyla
+            // bu reddin kriptografik denetimden gelmesi gerekiyor. Sekil
+            // cevabi burada gorulurse mutasyon istemeden uzunluk bozmustur ve
+            // test soundness'i degil yine sekli olcuyor demektir.
+            assert_ne!(
+                reason, "invalid proof shape",
+                "{ad}: red sekil kapisindan geldi; sekil korundugu icin reddin \
+                 kriptografik denetimden gelmesi gerekiyordu"
+            );
+        }
+    }
+
+    /// ZK bayragi ile kanittaki rastgelelik taahhudu **uyusmali**.
+    ///
+    /// `verifier.rs:363` bunu acikca denetliyor: ZK acikken rastgelelik
+    /// taahhudu bulunmali, kapaliyken bulunmamali. Hicbir testi yoktu.
+    /// Uyusmazlik kabul edilseydi, ZK acikken rastgeleligi olmayan bir kanit
+    /// gizlilik iddiasini sessizce kaybederdi.
+    #[test]
+    fn rejects_a_proof_whose_randomization_does_not_match_the_zk_setting() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+        let base: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+
+        let air_p = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let cfg_p = build_config();
+        let pv_p = to_public_values(&pi);
+        let pp_p = setup_preprocessed(&cfg_p, &air_p, base.degree_bits);
+
+        // Kontrol grubu: dokunulmamis kanit gecmeli.
+        assert!(
+            crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &base,
+                &pv_p,
+                pp_p.as_ref().map(|(_, v)| v),
+            )
+            .is_ok(),
+            "durust kanit dogrulanmali: kurulum bozuk"
+        );
+
+        // Iki yon de ayri ayri olculuyor.
+        //
+        // Yalnizca taahhudu eklemek yeterli degildi: o durumu `verifier.rs`
+        // icinde **ikinci** bir yer de yakaliyor (acilan rastgelelik degeri
+        // yoksa `RandomizationError`), dolayisiyla ilk kapi tamamen
+        // silindiginde bile test yesil kaliyordu - olculdu. `opened_values`
+        // tarafini bozan ikinci vaka o kapiyi tek basina zorluyor.
+        let vakalar: Vec<(&str, ProofMutation)> = vec![
+            (
+                "taahhut var, acilan deger yok",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.commitments.random = Some(p.commitments.quotient_chunks.clone());
+                    p.opened_values.random = None;
+                }),
+            ),
+            (
+                "acilan deger var, taahhut yok",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.commitments.random = None;
+                    p.opened_values.random = Some(p.opened_values.quotient_chunks[0].clone());
+                }),
+            ),
+        ];
+
+        for (ad, boz) in vakalar {
+            let mut forged = base.clone();
+            boz(&mut forged);
+
+            let reason = crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &forged,
+                &pv_p,
+                pp_p.as_ref().map(|(_, v)| v),
+            )
+            .err()
+            .map(|e| format!("{e}"))
+            .unwrap_or_else(|| "kabul edildi".to_string());
+
+            assert_eq!(
+                reason, "randomization error: FRI batch randomization does not match ZK setting",
+                "{ad}: ZK ayariyla celisen rastgelelik dogru sebeple reddedilmedi"
+            );
+        }
+    }
+
     #[test]
     fn rejects_a_proof_claiming_an_impossible_degree() {
         let program = vec![
