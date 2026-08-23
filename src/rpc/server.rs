@@ -3240,6 +3240,46 @@ impl BudlumApiServer for RpcServer {
         Ok(hex::encode(data))
     }
 
+    async fn gateway_render_content(
+        &self,
+        name: String,
+        format: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Ayni Pollen denetimi. Bir bicim istemek, erisim kurallarini
+        // atlamanin yolu olamaz: korumali icerik hangi bicimde istenirse
+        // istensin korumalidir.
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        let manifest_id = resolved.as_ref().and_then(|r| {
+            r.content_id
+                .or(r.storage_root.map(crate::storage::ContentId))
+        });
+        if let Some(cid) = manifest_id {
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
+                return Err(ErrorObjectOwned::owned(
+                    -32603,
+                    "Content is Pollen-protected; an AccessGrant is required",
+                    None::<()>,
+                ));
+            }
+        }
+        let parsed = parse_render_format(&format).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid render format: {e}"), None::<()>)
+        })?;
+        let gateway =
+            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let (bytes, id) = gateway
+            .render_name_content(&name, &parsed)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32000, format!("Render failed: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "bytes": hex::encode(bytes),
+            "renderId": hex::encode(id),
+            "format": format,
+        }))
+    }
+
     async fn passport_get_profile(
         &self,
         name: String,
@@ -4466,6 +4506,39 @@ impl BudlumApiServer for RpcServer {
     }
 }
 
+/// Kablo uzerindeki bicim dizgisini `RenderFormat`'a cevir.
+///
+/// Kabul edilenler: `svg`, `png:<kenar>`, `frame:<indeks>`.
+///
+/// Bilinmeyen bir bicim **reddedilir**, varsayilana dusulmez. Dusmek,
+/// isteyenin sordugundan baska bir nesneyi onun kimligiyle dondurmek olurdu:
+/// bicim taahhudun parcasi, dolayisiyla `png` yazmak isteyip `pngg` yazan
+/// birine SVG vermek yanlis cevaptir.
+///
+/// `QrStream` kasten disarida. O bir tasima temsili, bir okuma bicimi degil;
+/// RPC uzerinden istenmesinin anlami yok.
+///
+/// # Errors
+///
+/// Bicim taninmazsa veya sayisal parametre cozulemezse.
+fn parse_render_format(format: &str) -> Result<crate::storage::render::RenderFormat, String> {
+    use crate::storage::render::RenderFormat;
+    match format.split_once(':') {
+        None if format == "svg" => Ok(RenderFormat::Svg),
+        Some(("png", size)) => size
+            .parse::<u16>()
+            .map(|size| RenderFormat::Png { size })
+            .map_err(|_| format!("png size is not a number: {size}")),
+        Some(("frame", frame)) => frame
+            .parse::<u16>()
+            .map(|frame| RenderFormat::VideoFrame { frame })
+            .map_err(|_| format!("frame index is not a number: {frame}")),
+        _ => Err(format!(
+            "unknown render format '{format}'; expected svg, png:<size> or frame:<index>"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4791,5 +4864,59 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
         );
         assert!(is_ip_allowed(&config, &req));
+    }
+}
+
+#[cfg(test)]
+mod render_format_tests {
+    use super::parse_render_format;
+    use crate::storage::render::RenderFormat;
+
+    /// Uc bicim taninir ve parametreleri tasinir.
+    #[test]
+    fn the_three_read_formats_parse() {
+        assert_eq!(parse_render_format("svg"), Ok(RenderFormat::Svg));
+        assert_eq!(
+            parse_render_format("png:256"),
+            Ok(RenderFormat::Png { size: 256 })
+        );
+        assert_eq!(
+            parse_render_format("frame:17"),
+            Ok(RenderFormat::VideoFrame { frame: 17 })
+        );
+    }
+
+    /// Bilinmeyen bicim reddedilir, varsayilana dusulmez.
+    ///
+    /// Dusmek, isteyenin sordugundan baska bir nesneyi onun kimligiyle
+    /// dondurmek olurdu. Bicim taahhudun parcasi (§72): `png` yazmak isteyip
+    /// `pngg` yazan birine SVG vermek yanlis cevaptir, esnek davranis degil.
+    #[test]
+    fn an_unknown_format_is_refused_not_defaulted() {
+        for bad in ["", "pngg", "webp", "SVG", "svg:1", "png", "frame"] {
+            assert!(
+                parse_render_format(bad).is_err(),
+                "'{bad}' bir bicim degil, reddedilmeli"
+            );
+        }
+    }
+
+    /// Sayisal parametre cozulemezse hata, sifir degil.
+    #[test]
+    fn a_bad_number_is_an_error() {
+        assert!(parse_render_format("png:buyuk").is_err());
+        assert!(parse_render_format("png:-1").is_err());
+        // u16 tasmasi da hata: sessizce kirpmak baska bir nesne uretirdi.
+        assert!(parse_render_format("png:70000").is_err());
+        assert!(parse_render_format("frame:abc").is_err());
+    }
+
+    /// `QrStream` RPC uzerinden istenemez.
+    ///
+    /// O bir tasima temsili, bir okuma bicimi degil.
+    #[test]
+    fn the_transport_frame_is_not_a_read_format() {
+        assert!(parse_render_format("qrstream:0").is_err());
+        assert!(parse_render_format("qr:0:256").is_err());
     }
 }

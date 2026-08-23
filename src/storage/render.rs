@@ -1,9 +1,21 @@
 //! Render a generated object into the format a reader asked for.
 //!
-//! WIRING: unwired - this is the B.U.D. "recipe to bytes" format surface;
-//! nothing in production requests a render yet, so the module is reached by
-//! its own tests and by the re-export in `mod.rs` only. The validator-facing
-//! render/verify path (Layer 3) will be the first caller.
+//! WIRING: wired - `BudGateway::render_name_content` calls `render` and
+//! `render_id`, reached from the `bud_gatewayRenderContent` RPC. A reader
+//! asks for a name and a format; the recipe produces those bytes on demand
+//! and nothing is stored.
+//!
+//! The format is part of the commitment, so the reply carries the render id
+//! rather than the manifest id: the same recipe rendered as PNG is a
+//! different object from the same recipe rendered as SVG, and returning the
+//! manifest id for both would name two different byte strings with one id.
+//!
+//! An unknown format string is refused rather than defaulted. Falling back
+//! would hand the caller an object it did not ask for under an id it cannot
+//! predict.
+//!
+//! `QrStream` is deliberately not reachable from the RPC. It is a transport
+//! representation, not a way to read an object.
 //!
 //! This is the format layer of the "recipe" invention: a generated object is
 //! stored as a `GeneratedSpec` (a generator and a seed), and the bytes a
