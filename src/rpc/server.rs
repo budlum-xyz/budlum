@@ -209,7 +209,6 @@ where
         }
 
         if !is_authorized(&self.config, &req) {
-            let cors = cors;
             return Box::pin(async move {
                 let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
                 if let CorsOutcome::Allow(ref origin) = cors {
@@ -224,7 +223,6 @@ where
             if let Some(ref m) = self.metrics {
                 m.rpc_rate_limited_total.inc();
             }
-            let cors = cors;
             return Box::pin(async move {
                 let mut response =
                     text_response(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
