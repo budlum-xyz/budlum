@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 55 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 61 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -68,6 +68,7 @@
 - [58. Tarayici sinirinda izin: CORS bir reddetme degil, bir teslim kararidir](#58-tarayici-sinirinda-izin-cors-bir-reddetme-degil-bir-teslim-kararidir)
 - [59. Dayanikliligi kopya degil tarif saglar: kaynak rejimi ve replikasyon hedefi](#59-dayanikliligi-kopya-degil-tarif-saglar-kaynak-rejimi-ve-replikasyon-hedefi)
 - [60. Turev temsil: kare kendini tanimlar, hicbir ara urun saklanmaz](#60-turev-temsil-kare-kendini-tanimlar-hicbir-ara-urun-saklanmaz)
+- [61. Kimlik kimi, tasima limiti neyi sinirlar: dinlemeden once iki soru](#61-kimlik-kimi-tasima-limiti-neyi-sinirlar-dinlemeden-once-iki-soru)
 
 ## 1. Genel sistem mimarisi
 
@@ -2183,3 +2184,40 @@ yanlis tahmin ekranda kalir.
   hedef kanalda olculmeden varsayilamaz.
 - **Organik icerikte depolamayi sifirlamaz.** Temsil degistirmek bilgi
   kuramini degistirmez (§59).
+
+## 61. Kimlik kimi, tasima limiti neyi sinirlar: dinlemeden once iki soru
+
+Kimlik dogrulama **kimin** cagirabilecegine karar verir. Tasima limitleri
+kabul edilen cagirinin **ne kadara mal olabilecegine** karar verir. Bunlar
+farkli iki sorudur ve bir tanesinin cevaplanmasi digerini cevaplamaz:
+yetkili bir istemci de tek bir istekle dugumun bellegini tuketebilir.
+
+`validate_rpc_security_config` uzun sure yalnizca birinci soruyu soruyordu:
+`auth_required=true` iken API anahtari bos mu. Ikinci soru hic sorulmadigi
+icin `max_request_body_size` ve `max_connections` alanlari `None` birakilmis
+bir yapilandirma **dogrulamadan gecip dinlemeye baslayabiliyordu**; limit o
+noktada bizim degil, tasima kutuphanesinin varsayilaniydi.
+
+Ayrisma yapinin kendisinden geliyordu: bu iki alan `Option` idi ve dort ayri
+kurucudan uc tanesi (`default`, `operator_default`, dogrudan struct kurulumu)
+bir deger koyarken `from_env` **ikisini de `None` birakiyordu**. Yani surumun
+guvenlik durusu, config'in hangi kurucudan geldigine bagliydi. Uretimde
+`main.rs` alanlari kurucudan sonra elle dolduruyordu; bunu yapmayan her cagri
+yolu sessizce sinirsiz kaliyordu.
+
+**Kod ne yapiyor:**
+
+- `from_env` artik iki alani da dolduruyor (`RPC_DEFAULT_BODY_LIMIT`,
+  `RPC_DEFAULT_CONNECTION_LIMIT`). Kendi degerini isteyen cagiri kurulumdan
+  sonra ustune yazar; hicbir sey soylemeyen cagiri **sinirli** kalir.
+- `validate_rpc_security_config` her iki alanin **var oldugunu** ve
+  **gercekten sinirladigini** denetliyor. Reddedilen dort durum: alan yok;
+  deger `0` (bir limit degil, bir kilit); deger `RPC_BODY_LIMIT_CEILING`
+  ustu; deger `RPC_CONNECTION_LIMIT_CEILING` ustu. Bellegi tuketmeye yetecek
+  kadar buyuk bir sayi limit degildir, yanlis yapilandirmadir.
+- Denetim `run` icinde, dinleyici acilmadan once calisir. Reddedilen yapilandirma
+  bir uyari degil, baslatma hatasidir (fail-closed).
+
+**Sinir:** bu limitler tek bir dugumun kabul kapisidir. Dagitik hiz sinirlama,
+istemci basina kota ve ustteki ters vekilin kendi limitleri ayri katmanlardir;
+buradaki denetim onlarin yerine gecmez.
