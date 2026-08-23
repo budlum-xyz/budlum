@@ -28,6 +28,37 @@ pub const ADDRESS_DOMAIN_V2: &[u8] = b"BUDLUM_ADDRESS_V2";
 pub const SEED_DOMAIN_V1: &[u8] = b"BUDLUM_MLDSA87_SEED_V1";
 pub const RECOVERY_DOMAIN_V1: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1";
 pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
+
+/// Bir imzalama tohumunu turetmek icin gereken en az girdi baytı.
+///
+/// Turetilen tohum 256 bit. Girdi bundan kisaysa tohumun arama uzayi da o
+/// kadar kucuktur ve hash bunu buyutmez - yalnizca gizler. Gerekcenin tamami
+/// [`QuantumAccount::seed_from_entropy`] uzerinde.
+pub const MIN_SEED_ENTROPY_BYTES: usize = 32;
+
+/// Tohum turetiminin reddettigi durum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedError {
+    /// Girdi [`MIN_SEED_ENTROPY_BYTES`] baytindan kisa.
+    InsufficientEntropy { given: usize, required: usize },
+}
+
+impl std::fmt::Display for SeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientEntropy { given, required } => write!(
+                f,
+                "KQ-SEED-ENTROPY: tohum girdisi {given} bayt, en az {required} bayt gerekli. \
+                 Turetilen tohum 256 bit tasidigini iddia eder; daha kisa bir girdiden \
+                 turetilirse iddia yanlistir ve adresler onceden hesaplanabilir. \
+                 Girdi isletim sisteminin rastgelelik kaynagindan gelmelidir - \
+                 uzunluk denetlenir, kalitesi denetlenemez."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SeedError {}
 pub const BUD_MAGIC: [u8; 8] = *b"BUDLUM\x01\x00";
 
 #[derive(Debug, Clone)]
@@ -55,12 +86,56 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
-    #[must_use]
-    pub fn seed_from_entropy(entropy: &[u8]) -> [u8; 32] {
+    /// Bir ML-DSA-87 imzalama anahtarinin tohumunu entropiden turetir.
+    ///
+    /// # Neden bir alt sinir var
+    ///
+    /// Bu fonksiyon her zaman 32 bayt dondurur, girdisi ne olursa olsun.
+    /// Cikti **her zaman yuksek entropili gorunur**: SHA3-256'nin ciktisi tek
+    /// baytlik bir girdiden de rastgele bir bit dizisi gibi okunur. Bu
+    /// gorunum yaniltir, cunku bir tohumu kiran sey ciktinin bicimi degil
+    /// **girdinin arama uzayidir**. Girdi 2 bayttan geliyorsa tohum 65 536
+    /// olasiliktan biridir; saldirgan hepsini deneyip her birinin adresini
+    /// onceden hesaplar, kamuya acilan adresi tabloda arar ve ozel anahtari
+    /// okur. Hash'in gucu burada hicbir sey yapmaz - dogru cevabi zaten
+    /// bulmustur, sadece hangisi oldugunu bilmiyordur.
+    ///
+    /// Bu, "adi entropi olan ama entropiyi hic olcmeyen fonksiyon" durumuydu:
+    /// imza `&[u8]` aliyordu ve bos dilim de gecerliydi. `Result` donmesi
+    /// cagiranin bu karari **atlayamamasini** saglar; `#[must_use]` bir
+    /// degeri gormezden gelmeyi zorlastirir, ama `Err` gormezden gelinemez.
+    ///
+    /// # Neden 32 bayt
+    ///
+    /// Turetilen sey 256 bitlik bir tohum. Girdi bundan kisaysa, cikti
+    /// tasidigi bit sayisi kadar guclu olur ve geri kalani susleme. Alt
+    /// siniri ciktinin genisligiyle esitlemek, tohumun **ilan ettigi**
+    /// guvenlik seviyesini gercekten tasimasini saglar. Daha uzun girdi
+    /// serbesttir: fazlasi zarar vermez.
+    ///
+    /// Olculen sey uzunluk, Shannon entropisi degil. Bir cagiran 32 bayt
+    /// sifir gonderebilir ve kapi susar. Bunun nedeni, bir baytin gercekten
+    /// rastgele olup olmadiginin bu katmandan **olculemez** olmasi: 32 sifir
+    /// bayt ile bir CSPRNG'nin urettigi 32 bayt burada ayirt edilemez.
+    /// Uzunluk, dogru tarafta olan ve olculebilen kisimdir; entropi
+    /// kaynaginin kalitesi cagiranin sorumlulugudur ve `SeedError`'in metni
+    /// bunu soyler.
+    ///
+    /// # Errors
+    ///
+    /// Girdi [`MIN_SEED_ENTROPY_BYTES`] baytindan kisaysa
+    /// [`SeedError::InsufficientEntropy`].
+    pub fn seed_from_entropy(entropy: &[u8]) -> Result<[u8; 32], SeedError> {
+        if entropy.len() < MIN_SEED_ENTROPY_BYTES {
+            return Err(SeedError::InsufficientEntropy {
+                given: entropy.len(),
+                required: MIN_SEED_ENTROPY_BYTES,
+            });
+        }
         let mut h = Sha3_256::new();
         h.update(SEED_DOMAIN_V1);
         h.update(entropy);
-        h.finalize().into()
+        Ok(h.finalize().into())
     }
 
     #[must_use]
@@ -377,5 +452,61 @@ mod tests {
         // Esigi gecer ama 2n/3 kotasini gecmez: 2 oy, n=4 icin kota 3.
         assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2)], 4, 2).is_err());
         assert!(BftGuardianFinality::finalize(vec![vote(1)], 4, 2).is_err());
+    }
+
+    /// Kisa girdiden tohum turetilemez.
+    ///
+    /// Kapinin olctugu sey ciktinin bicimi degil girdinin arama uzayi.
+    /// Kapidan once bu fonksiyon her uzunlugu kabul ediyordu ve bos dilimden
+    /// bile 32 baytlik, rastgele gorunen bir tohum uretiyordu; bu tohumun
+    /// tek bir olasiligi vardi ve tureyen adres herkesce onceden
+    /// hesaplanabilirdi.
+    #[test]
+    fn a_seed_cannot_be_derived_from_thin_entropy() {
+        // Sinirin altindaki her uzunluk reddedilir - bos dilim dahil.
+        for len in [0usize, 1, 2, 16, MIN_SEED_ENTROPY_BYTES - 1] {
+            let err = QuantumAccount::seed_from_entropy(&vec![7u8; len])
+                .expect_err("sinirin altindaki girdi reddedilmeli");
+            assert_eq!(
+                err,
+                SeedError::InsufficientEntropy {
+                    given: len,
+                    required: MIN_SEED_ENTROPY_BYTES,
+                },
+                "{len} bayt icin verilen/gereken degerler bildirilmeli"
+            );
+            // Mesaj cagirana ne yapmasi gerektigini soylemeli: sayilar ve
+            // entropinin nereden gelmesi gerektigi metinde olmali.
+            let text = err.to_string();
+            assert!(
+                text.contains(&len.to_string()),
+                "mesaj verilen uzunlugu yazmali"
+            );
+            assert!(text.contains("32"), "mesaj gereken uzunlugu yazmali");
+        }
+
+        // Sinirdaki ve ustundeki girdi gecer.
+        let at = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES])
+            .expect("sinirdaki girdi kabul edilmeli");
+        let over = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES + 48])
+            .expect("daha uzun girdi kabul edilmeli");
+
+        // Fazla girdi susleme degil: turetime giriyor, yoksa uzunlugu
+        // artirmak guvenligi artirmazdi.
+        assert_ne!(at, over, "girdinin tamami tohuma girmeli");
+
+        // Turetim deterministik: ayni girdi ayni tohum.
+        assert_eq!(
+            at,
+            QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES])
+                .expect("ayni girdi yine kabul edilmeli")
+        );
+
+        // Alan ayirici gercekten ayiriyor: ayni baytlar baska bir baglamda
+        // ayni tohumu vermemeli.
+        let mut raw = sha3::Sha3_256::new();
+        raw.update([7u8; MIN_SEED_ENTROPY_BYTES]);
+        let undomained: [u8; 32] = raw.finalize().into();
+        assert_ne!(at, undomained, "alan ayirici turetime girmeli");
     }
 }
