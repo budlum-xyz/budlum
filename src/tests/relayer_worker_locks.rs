@@ -861,11 +861,14 @@ fn a_bridge_address_of_the_wrong_length_is_refused() {
 /// unreachable too; now an operator can register it, and the stub is what
 /// `build_verified_result` will call.
 ///
-/// It must still refuse. `generate_receipt_proof` returns a placeholder leaf
-/// derived from `BDLM_EVM_STUB`, and `verify_receipt_proof` recomputes the
-/// leaf as `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`. The
-/// two do not agree, so the adapter rejects its own output and the worker
-/// submits nothing.
+/// It must still refuse, and it now refuses one step earlier and for a
+/// better reason. `generate_receipt_proof` used to return a placeholder
+/// single-leaf tree that happened to fail the leaf binding; the refusal was
+/// real but incidental, and the same stub passed the Merkle check itself
+/// because a tree with no siblings verifies `leaf == root` (see
+/// ARCHITECTURE.md section 69). The assembler now returns an error outright:
+/// this adapter does not read Ethereum, so it cannot produce a receipt
+/// proof. The worker submits nothing.
 ///
 /// That is the property worth pinning: turning the bridge on gets a stalled
 /// transfer, never a signed claim about an Ethereum transaction that was
