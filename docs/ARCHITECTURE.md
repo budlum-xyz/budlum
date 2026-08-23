@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 69 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 70 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -77,6 +77,7 @@
 - [67. Kanitlanmis talep: indirim populerlikle geri alinir](#67-kanitlanmis-talep-indirim-populerlikle-geri-alinir)
 - [68. Bir dogrulayici kanitladigi seyi dondurur](#68-bir-dogrulayici-kanitladigi-seyi-dondurur)
 - [69. Tek yaprakli agac: kendi kendini onaylayan kanit](#69-tek-yaprakli-agac-kendi-kendini-onaylayan-kanit)
+- [70. Gecit tarifi okur: saklanmayan baytlar](#70-gecit-tarifi-okur-saklanmayan-baytlar)
 
 ## 1. Genel sistem mimarisi
 
@@ -2686,3 +2687,46 @@ gercek yapar, cunku imza onu sahici kilar.
 Ilke bolum 62 ve 68 ile ayni ailedendir: **her zaman gecen bir denetim,
 olmayan bir denetimden daha kotudur**, cunku okuyan kisi orada bir denetim
 oldugunu sanir.
+## 70. Gecit tarifi okur: saklanmayan baytlar
+
+Bolum 66 ve 67 tariften dogan icerigin **kaydini** ele aliyordu: nasil kabul
+edilir, kac kopya ister, indirimini ne zaman geri verir. Okunmasi eksikti.
+
+`BudGateway::fetch_name_content` bir BNS adini icerige cevirir ve dort yol
+dener: yerel sled deposu, dugumun kendi B.U.D. deposu, uzak esler, sonra
+hata. Dordu de **saklanmis bayt** arar.
+
+`Generated` bir manifest'in baytlari hicbir yerde saklanmaz. Saklanan sey
+tariftir. Bu, formatin butun fikridir: uretilmis nesne bir uretici ve bir
+tohumdur, baytlar okunurken islemciyle dogar. Dolayisiyla gecit, kaydi kabul
+edilmis, ucreti hesaplanmis, kopya hedefi belirlenmis her uretilmis nesne
+icin "bulunamadi" donuyordu. Nesne zincirde vardi ve okunamiyordu.
+
+Gecide bir dal eklendi, ve **once** geliyor: digerlerinin arayacagi bir sey
+yok.
+
+### Uretim dogrulanir
+
+Tarif zincirde. Ama uretici kodun o tarifi dogru okudugunu soyleyen tek sey
+uretilen baytlarin manifest kimligini tutmasidir. Dal `generate_content` ile
+baytlari uretir, `ContentManifest::from_bytes_sliced` ile yeniden hash'ler ve
+kimligi karsilastirir. Tutmuyorsa istek reddedilir.
+
+Bu bir ic tutarlilik denetimi degil, gecidin sundugu seyin **istenen sey**
+oldugunun kanitidir. Budscan'in besinci adimiyla ayni soru: getirilen baytlar
+istenen baytlar mi.
+
+### Uc sonuc, uc anlam
+
+`Ok(None)` "bu manifest bir tarif degil" demektir ve cagirani saklanmis bayt
+yollarina birakir. `Hybrid` ve `Derived` buraya duser: ilki yeniden
+uretilemeyen bir onek tasir, ikincisi master'in baytlarina bagimlidir.
+Ikisini de yalniz tariften uretmeye kalkmak, elde olmayan baytlari varmis
+gibi gostermek olurdu.
+
+`Err` ise tarif var ama uretim guvenilmez demektir, ve bu durumda sonraki
+yollara **dusulmez**. Duserek devam etmek, dogrulanamayan bir uretimin
+ardindan baska bir kaynaktan gelen baytlari ayni isim altinda sunmak olurdu:
+tam da bolum 68'deki hata, bir degerin kanitlanmis gorunmesi.
+
+`Ok(Some(bytes))` yalnizca kimligi tutan baytlar icin doner.

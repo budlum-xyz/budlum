@@ -426,18 +426,35 @@ mod tests {
             .expect("a configured adapter must register");
     }
 
+    /// Gercek bir kardes yolu olan kanit kurar.
+    ///
+    /// Asagidaki testlerin olctugu sey yaprak bagidir, agac degil. Ama tek
+    /// yaprakli bir agac artik reddediliyor (ARCHITECTURE.md §69): kardessiz
+    /// bir yolda `verify` hicbir hash adimi atmaz ve `leaf == root`
+    /// karsilastirmasina duser, yani kanitlayan kendi ciktisini kendisi
+    /// onaylar. Bu yardimci tek bir kardes ekleyip koku o kardesle hesaplar,
+    /// boylece testler olcmek istedikleri seyi olcmeye devam eder.
+    fn proof_with_sibling(leaf: Hash32) -> (MerkleProof, Hash32) {
+        let sibling = [0x5au8; 32];
+        let root = crate::core::hash::hash_fields_bytes(&[b"BDLM_MERKLE_NODE_V1", &leaf, &sibling]);
+        (
+            MerkleProof {
+                leaf,
+                index: 0,
+                siblings: vec![sibling],
+            },
+            root,
+        )
+    }
+
     #[test]
     fn verify_receipt_proof_minimal_ok() {
         // Tam fix: leaf = hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address).
         let adapter = EvmChainAdapter::test_default();
         let tx_hash = "0xabc";
         let leaf = derive_receipt_leaf(tx_hash, &adapter.bridge_address);
-        let proof = MerkleProof {
-            leaf,
-            index: 0,
-            siblings: vec![],
-        };
-        assert!(adapter.verify_receipt_proof(&proof, &leaf, tx_hash).is_ok());
+        let (proof, root) = proof_with_sibling(leaf);
+        assert!(adapter.verify_receipt_proof(&proof, &root, tx_hash).is_ok());
         // Forged root must fail.
         assert!(adapter
             .verify_receipt_proof(&proof, &[0u8; 32], tx_hash)
@@ -452,16 +469,12 @@ mod tests {
         let real_tx = "0xabc";
         let forged_tx = "0xdeadbeef";
         let leaf = derive_receipt_leaf(real_tx, &adapter.bridge_address);
-        let proof = MerkleProof {
-            leaf,
-            index: 0,
-            siblings: vec![],
-        };
+        let (proof, root) = proof_with_sibling(leaf);
         // Real tx ile geçer.
-        assert!(adapter.verify_receipt_proof(&proof, &leaf, real_tx).is_ok());
+        assert!(adapter.verify_receipt_proof(&proof, &root, real_tx).is_ok());
         // Forged tx ile RED.
         let err = adapter
-            .verify_receipt_proof(&proof, &leaf, forged_tx)
+            .verify_receipt_proof(&proof, &root, forged_tx)
             .expect_err("forged tx_hash must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("forgery"), "msg: {msg}");
@@ -472,13 +485,9 @@ mod tests {
         // Empty tx_hash kabul edilmez (binding anlamsız olur).
         let adapter = EvmChainAdapter::test_default();
         let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
-        let proof = MerkleProof {
-            leaf,
-            index: 0,
-            siblings: vec![],
-        };
+        let (proof, root) = proof_with_sibling(leaf);
         let err = adapter
-            .verify_receipt_proof(&proof, &leaf, "")
+            .verify_receipt_proof(&proof, &root, "")
             .expect_err("empty tx_hash must be rejected");
         let msg = format!("{err}");
         assert!(
@@ -498,19 +507,15 @@ mod tests {
         let leaf_b = derive_receipt_leaf(tx_hash, &bridge_b);
         assert_ne!(leaf_a, leaf_b);
         let adapter_a = EvmChainAdapter::new(bridge_a.clone(), DEFAULT_DEPOSIT_TOPIC0);
-        let proof = MerkleProof {
-            leaf: leaf_a,
-            index: 0,
-            siblings: vec![],
-        };
+        let (proof, root) = proof_with_sibling(leaf_a);
         // Bridge A → leaf_a bağlamı doğru; adapter_a ile geçer.
         assert!(adapter_a
-            .verify_receipt_proof(&proof, &leaf_a, tx_hash)
+            .verify_receipt_proof(&proof, &root, tx_hash)
             .is_ok());
         // Bridge A'nın proof'unu Bridge B'nin adapter'ı ile kullanırsak RED.
         let adapter_b = EvmChainAdapter::new(bridge_b, DEFAULT_DEPOSIT_TOPIC0);
         let err = adapter_b
-            .verify_receipt_proof(&proof, &leaf_a, tx_hash)
+            .verify_receipt_proof(&proof, &root, tx_hash)
             .expect_err("cross-bridge proof must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("forgery"), "msg: {msg}");

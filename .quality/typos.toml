@@ -122,6 +122,9 @@ populer = "populer"
 Populer = "Populer"
 populerlik = "populerlik"
 populerlikle = "populerlikle"
+# formatin : "format" isminin ilgi hâli (formatin butun fikri); "formation" değil
+formatin = "formatin"
+Formatin = "Formatin"
 
 # ── Özel adlar / teknik terimler ────────────────────────────────────────
 Canva = "Canva"     # ürün adı (Canvas değil)
