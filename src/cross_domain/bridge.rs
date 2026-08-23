@@ -698,7 +698,7 @@ mod tests {
 
 #[cfg(test)]
 mod bridge_fee_split {
-    use super::split_bridge_fee;
+    use super::{check_burn_matches_lock_domain, split_bridge_fee};
 
     const PPM_1_PCT: u64 = 10_000;
 

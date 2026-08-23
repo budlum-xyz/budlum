@@ -128,6 +128,21 @@ pub enum ContentSource {
         /// How the remainder is produced.
         spec: GeneratedSpec,
     },
+    /// The bytes are a region of another object this chain holds.
+    ///
+    /// The case `Generated` cannot honestly express. A generated object's
+    /// recipe is self-sufficient: the seed is on chain and the bytes follow
+    /// from it. A derived object's recipe is not - it names a master, and if
+    /// that master goes away the derivation cannot be produced at all.
+    ///
+    /// Calling a crop `Generated` would therefore buy a replica discount
+    /// against a recipe that does not stand on its own. The distinction is
+    /// not cosmetic: it is the difference between "we can always recompute
+    /// this" and "we can recompute this as long as something else survives".
+    ///
+    /// See [`crate::storage::derived`] for which transforms are byte-exact
+    /// and why misaligned crops are refused rather than approximated.
+    Derived(crate::storage::derived::DerivedSpec),
 }
 
 /// Kaynak rejiminin taahhut baytlari.
@@ -156,6 +171,15 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
             out.extend_from_slice(&generated_spec_digest(spec));
             out
         }
+        // The derivation tag already covers the master id and every bound, so
+        // the master is inside the manifest id: an object cannot be re-pointed
+        // at a different master without becoming a different object.
+        ContentSource::Derived(spec) => {
+            let mut out = Vec::with_capacity(1 + 32);
+            out.push(3u8);
+            out.extend_from_slice(&spec.derivation_commitment_tag());
+            out
+        }
     }
 }
 
@@ -181,7 +205,14 @@ pub fn source_commitment_bytes(source: &ContentSource) -> Vec<u8> {
 pub fn required_replica_count(source: &ContentSource, full_target: u8) -> u8 {
     match source {
         ContentSource::Generated(_) => 1,
-        ContentSource::Stored | ContentSource::Hybrid { .. } => full_target,
+        // No discount. The recipe depends on a master, so the durability
+        // argument that earns `Generated` its single replica does not apply:
+        // losing the master loses the derivation too. The master carries its
+        // own full target, and `MasterRegistry` is what stops it being
+        // released while derivations name it.
+        ContentSource::Stored | ContentSource::Hybrid { .. } | ContentSource::Derived(_) => {
+            full_target
+        }
     }
 }
 
@@ -207,6 +238,9 @@ pub fn held_bytes(source: &ContentSource, object_bytes: u64) -> Option<u64> {
                 Some(prefix)
             }
         }
+        // Nothing is held for the derivation itself; the bytes it is a region
+        // of are held under the master's own manifest and paid for there.
+        ContentSource::Derived(_) => Some(0),
     }
 }
 
@@ -1059,5 +1093,90 @@ mod tests {
             (first - last).abs() > 32,
             "the ends of a gradient should differ: first channel {first}, last {last}"
         );
+    }
+    /// A crop of a master, as the source regime now expresses it.
+    fn derived_source() -> ContentSource {
+        ContentSource::Derived(crate::storage::derived::DerivedSpec {
+            master_id: crate::storage::content_id::ContentId([7u8; 32]),
+            transform: crate::storage::derived::DerivedTransform::Crop,
+            block_x: 4,
+            block_y: 2,
+            block_w: 8,
+            block_h: 6,
+            master_blocks_w: 20,
+            master_blocks_h: 15,
+            prefix: None,
+        })
+    }
+
+    #[test]
+    fn a_derivation_commits_to_the_master_it_depends_on() {
+        let bytes = source_commitment_bytes(&derived_source());
+        assert_eq!(bytes.first(), Some(&3u8), "derived carries its own tag");
+
+        // Point the same crop at a different master: a different object.
+        let ContentSource::Derived(mut other) = derived_source() else {
+            unreachable!("constructed as Derived")
+        };
+        other.master_id = crate::storage::content_id::ContentId([8u8; 32]);
+        assert_ne!(
+            bytes,
+            source_commitment_bytes(&ContentSource::Derived(other)),
+            "a derivation could be re-pointed at another master without \
+             changing its manifest id"
+        );
+    }
+
+    #[test]
+    fn a_derivation_is_not_replica_discounted_like_a_generated_object() {
+        // The discount `Generated` earns comes from a recipe that stands on
+        // its own. A derivation's recipe names a master, so losing the master
+        // loses the derivation: the durability argument does not transfer.
+        assert_eq!(required_replica_count(&derived_source(), 3), 3);
+        assert_eq!(
+            required_replica_count(
+                &ContentSource::Generated(spec(GeneratorId::Avatar, 7, 3072, 100_000)),
+                3
+            ),
+            1,
+            "the contrast is the point"
+        );
+    }
+
+    #[test]
+    fn a_derivation_holds_no_bytes_of_its_own() {
+        // The bytes it is a region of are held under the master's manifest
+        // and paid for there. Counting them twice would bill one object as
+        // two.
+        assert_eq!(held_bytes(&derived_source(), 10_000), Some(0));
+    }
+    #[test]
+    fn an_inconsistent_derivation_is_refused_without_fetching_the_master() {
+        // The bound checks do not need the master's bytes, only what the spec
+        // says about it. Refusing here costs nothing; refusing later would
+        // mean paying to fetch a multi-megabyte object to learn the box was
+        // outside it all along.
+        let ContentSource::Derived(mut spec) = derived_source() else {
+            unreachable!("constructed as Derived")
+        };
+        spec.block_x = 19; // master is 20 blocks wide, box is 8 wide
+        assert!(
+            spec.check_region().is_err(),
+            "a box that runs off the master was accepted"
+        );
+        spec.block_x = 4;
+        assert!(spec.check_region().is_ok(), "the honest box still passes");
+    }
+
+    #[test]
+    fn a_derivation_of_a_derivation_is_refused() {
+        // Durability that depends on a chain of derivations is durability
+        // nobody can reason about: releasing one master takes out everything
+        // downstream of it.
+        let ContentSource::Derived(spec) = derived_source() else {
+            unreachable!("constructed as Derived")
+        };
+        assert!(spec.check_master_is_stored(true).is_err());
+        assert!(spec.check_master_is_stored(false).is_ok());
     }
 }

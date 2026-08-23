@@ -1155,6 +1155,46 @@ impl StorageRegistry {
                             .into(),
                 });
             }
+            // Bir turetmeyi tam dogrulamak master'in baytlarini gerektirir ve
+            // onlar zincirde degildir - `Hybrid` ile ayni gerekce. Ama
+            // dogrulanamayan kismi reddetmek, dogrulanabilir kismi
+            // denetlememek icin bir mazeret degil: tarifin KENDI ic tutarliligi
+            // burada, master getirilmeden, kesin olarak denetlenebilir.
+            //
+            // `check_region` tam da bunun icin yazilmisti: donusum ile alanlar
+            // uyusuyor mu, bolge bos mu, kutu master'in beyan ettigi sinirlarin
+            // disina tasiyor mu. Bu denetimi atlayip yalnizca "dogrulanamaz"
+            // demek, kendi kendisiyle celisen bir tarifi de ayni cop kutusuna
+            // atmak olurdu - oysa o, master hic getirilmeden reddedilebilir.
+            crate::storage::generated::ContentSource::Derived(spec) => {
+                spec.check_region()
+                    .map_err(|e| StorageError::InvalidManifest {
+                        reason: format!("Derived spec is not internally consistent: {e:?}"),
+                    })?;
+                // Turetmenin turetmesi yasak, ve bu da master getirilmeden
+                // denetlenebilir: master'in manifest'i KAYITLI ise rejimini
+                // buradan okuruz.
+                //
+                // Kayitli degilse bilmiyoruz demektir ve bilmedigimiz seye
+                // izin vermeyiz - `required_replicas_for` ile ayni fail-closed
+                // durus. Zincir, dayanikliligi baska bir turetmeye bagli olan
+                // bir zincirin ilk halkasini kabul etmemeli.
+                let master_is_derived = self.manifests.get(&spec.master_id).is_none_or(|m| {
+                    matches!(
+                        m.source,
+                        crate::storage::generated::ContentSource::Derived(_)
+                    )
+                });
+                spec.check_master_is_stored(master_is_derived)
+                    .map_err(|e| StorageError::InvalidManifest {
+                        reason: format!("Derived master is not a stored object: {e:?}"),
+                    })?;
+                return Err(StorageError::InvalidManifest {
+                    reason: "Derived source cannot be verified here; \
+                             the master's bytes are not on chain"
+                        .into(),
+                });
+            }
         }
         self.register_manifest(manifest);
         Ok(())
