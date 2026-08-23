@@ -535,14 +535,33 @@ mod tests {
         assert_eq!(active_refs.len(), 1);
         assert_eq!(active_refs[0].address, authority_addr);
 
-        // The operator list narrows, it never widens: dropping the chain's
+        // The operator list narrows, it never widens: revoking the chain's
         // admission of `authority_addr` must remove it even though the
         // operator still names it.
-        state.poa_onboarding = crate::registry::poa_onboarding::PoAOnboarding::new();
+        //
+        // Revoked, not wiped. Clearing the whole registry would also remove
+        // the domain's admin, and a domain with no admin is not a
+        // permissioned domain at all: the assertion would then pass for the
+        // wrong reason, proving nothing about operator lists.
+        let admin = Address::from([9u8; 32]);
+        state
+            .poa_onboarding
+            .revoke(0, admin, authority_addr, 1, "test")
+            .expect("admin revokes its own admission");
         state.refresh_poa_admissions(1);
+        assert!(
+            state.poa_is_permissioned(0),
+            "the domain must still be permissioned, or this proves nothing"
+        );
         assert!(
             engine.active_authorities(&state).is_empty(),
             "an operator-local list admitted an account the chain did not"
+        );
+        // And the outsider the chain still admits stays out, because the
+        // operator list does not name it.
+        assert!(
+            state.poa_admitted_addresses(0).contains(&outsider_addr),
+            "the chain still admits the outsider"
         );
     }
 
