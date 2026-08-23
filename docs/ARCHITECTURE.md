@@ -2267,6 +2267,53 @@ dogrulayici ya o koku bagimsiz bir kaynaktan almalidir ya da yalnizca demetin
 kendi icinde tutarli oldugunu ogrenmis olur. Kanit, yalnizca ifade ettigi seyi
 garanti eder.
 
+### 62.1 Maliyet olculdu, ve olcum bir sinir dogurdu
+
+Iki kokun yan yana durmasi bedava degil. Olcum (referans makine, release):
+
+| Hesap sayisi | Kok kurma | Kanit uretimi | Dogrulama | Kanit boyu |
+|---|---|---|---|---|
+| 100 | 4,6 ms | 4,6 ms | 32 us | 8288 B |
+| 1000 | 45 ms | 45 ms | 32 us | 8288 B |
+| 5000 | 222 ms | 224 ms | 32 us | 8288 B |
+
+Uc sey okunuyor:
+
+1. **Dogrulama sabit** (32 us) ve **kanit boyu sabit** (8288 B) - hesap sayisi
+   ne olursa olsun. Bu zaten trie'yi isteme sebebimizdi ve olcum onu dogruluyor.
+2. **Uretim dogrusal**, cunku her istek trie'yi sifirdan kurar ve 256 seviye
+   boyunca butun yapraklari ozetler. Onbellek yok.
+3. Uretim maliyeti kok kurma maliyetiyle **ayni** - yani pahali olan tarama
+   degil, **ozetleme**. Kardes altagaci `BTreeMap::range` ile secmek (adres
+   bitleri MSB-first, `BTreeMap` da anahtarlarini ayni sirada tutar, bu yuzden
+   bir bit onekini paylasan adresler bitisik bir aralikta durur) taramayi
+   O(256 n)'den kaldirdi ama toplam degismedi: darbogaz ozetlemeydi.
+
+Ucuncu madde bir guvenlik sorusu doguruyor: `bud_getAccountProof` **uzaktan
+tetiklenen** bir uctur. Onbelleksiz ve sinirsiz birakilirsa cagiriya bir **is
+carpani** verir - ucuz bir istek, yuz milisaniyelerce dugum CPU'su,
+tekrarlanabilir. Bu yuzden `MAX_PROOF_ACCOUNTS = 4096` kondu ve asildiginda
+istek **reddedilir**.
+
+Reddin bicimi onemli: bos sonuc degil, hata. Bos sonuc donseydi cagiri
+"cevaplamayiz"i "hesap yok" diye okuyabilirdi - ve yokluk bu tasarimda
+**olumlu bir iddia**. Bir reddi bir cevaba cevirmek, kanit sisteminin
+soyleyebilecegi en tehlikeli yalandir.
+
+**Sinir bir performans ayari degildir**, bu dugumun ne sorulmasina razi
+oldugunun siniridir. Yukseltmek o maliyeti odeme kararidir ve karar dugumun
+butcesini belirleyenin, istegi gonderenin degil.
+
+### 62.2 Neden simdi, ag kullanilmiyorken
+
+Bu is bilerek **kullanim baslamadan** yapildi. Iki kok bir arada durdugu surece
+catallanma sorusu yok; ama zincir canliyken ikinci bir kok eklemek, hakkinda
+uzlasilmasi gereken yeni bir alan eklemek demektir. Su an eklemenin bedeli
+yalnizca CPU; sonra eklemenin bedeli bir surum gecisi olurdu.
+
+Ayrica olcumun kendisi bir kusur buldu (`MAX_PROOF_ACCOUNTS` yoklugu). Bu kusur
+ancak kod var olunca olculebilirdi: **once kod, sonra olcum, sonra sinir.**
+
 ## 63. Komsulukla verilen garanti garanti degildir
 
 `bud_stark` dogrulayicisinda `recompose_quotient_from_chunks`, Lagrange
