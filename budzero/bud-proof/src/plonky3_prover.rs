@@ -3840,6 +3840,147 @@ mod tests {
     /// a real proof started landing on this field once the transcript changed
     /// the proof's byte layout. The panic was always reachable; which byte
     /// reaches it is not stable.
+    /// Dogrulayicinin sekil denetimleri gercekten kapi mi.
+    ///
+    /// `verify_with_preprocessed` kanitin acilan degerlerinin beklenen
+    /// genislikte oldugunu denetler (`valid_shape`) ve uymayani
+    /// `InvalidProofShape` ile reddeder. Bu denetimler, kanit sisteminin
+    /// **kisitlamadigi** alanlar: PCS bir vektorun uzunlugunu degil, verilen
+    /// noktalardaki acilislari dogrular. Yani burasi dogrulayicinin kendi
+    /// kodunda tutmasi gereken sinir - literaturde en sik rastlanan zkVM
+    /// zafiyet sinifi tam olarak bu (dogrulayicinin devreye guvenip kendi
+    /// denetimini atlamasi).
+    ///
+    /// 652 satirlik `bud_stark/verifier.rs` uretim yolunda calisiyordu ve tek
+    /// testi yoktu. Bu test o yuzeye ilk kapiyi koyuyor: durust kanit gecer,
+    /// her biri tek alani bozulmus dort kanit reddedilir.
+    #[test]
+    fn verifier_shape_checks_reject_malformed_openings() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+
+        // Kontrol grubu. Bu gecmezse asagidaki redler saldiriya degil
+        // kurulum hatasina borclu olurdu.
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "durust kanit dogrulanmali: kurulum bozuk"
+        );
+
+        let base: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+
+        // Her biri tek alani bozar. Hepsi `valid_shape` uzerinden
+        // `InvalidProofShape`e dusmeli.
+        let mutations: Vec<(&str, Box<dyn Fn(&mut crate::bud_stark::Proof<MyConfig>)>)> = vec![
+            (
+                "trace_local kisaltildi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.trace_local.pop();
+                }),
+            ),
+            (
+                "trace_local uzatildi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    let v = p.opened_values.trace_local[0];
+                    p.opened_values.trace_local.push(v);
+                }),
+            ),
+            (
+                "bolum parcasi dusuruldu",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.quotient_chunks.pop();
+                }),
+            ),
+            (
+                "yardimci iz acilisi silindi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.aux_trace_local = None;
+                }),
+            ),
+        ];
+
+        for (ad, mutate) in mutations {
+            let mut forged_proof = base.clone();
+            mutate(&mut forged_proof);
+            let forged = ProofEnvelope {
+                proof_bytes: postcard::to_allocvec(&forged_proof).unwrap(),
+                ..envelope.clone()
+            };
+            assert!(
+                Plonky3Adapter::verify(&forged, &pi, &program).is_err(),
+                "sekli bozuk kanit dogrulandi ({ad})"
+            );
+
+            // Adapter her hatayi `InvalidProof`e duzlestirir, yani yukaridaki
+            // iddia "reddedildi" der ama **neden** reddedildigini soylemez -
+            // bir kriptografik dogrulama hatasi da ayni cevabi verirdi.
+            // Dogrulayici dogrudan cagrilip reddin gercekten sekil kapisindan
+            // geldigi olculur. Bu ayrim olmadan test, sekil denetimi tamamen
+            // kaldirildiginda bile yesil kaliyordu - olculdu, kaldi.
+            let air_p = BudAir {
+                num_steps: vm.trace.len(),
+                program: program.clone(),
+            };
+            let cfg_p = build_config();
+            let pv_p = to_public_values(&pi);
+            let pp_p = setup_preprocessed(&cfg_p, &air_p, forged_proof.degree_bits);
+            let direct = crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &forged_proof,
+                &pv_p,
+                pp_p.as_ref().map(|(_, v)| v),
+            );
+            let reason = direct
+                .as_ref()
+                .err()
+                .map(|e| format!("{e}"))
+                .unwrap_or_else(|| "kabul edildi".to_string());
+            assert_eq!(
+                reason, "invalid proof shape",
+                "{ad}: red sekil kapisindan gelmedi"
+            );
+        }
+    }
+
     #[test]
     fn rejects_a_proof_claiming_an_impossible_degree() {
         let program = vec![
