@@ -239,7 +239,7 @@ mod tests {
             generator: GeneratorId::Avatar,
             seed: [11u8; 32],
             output_len: 32 * 32,
-            step_budget: 1_000_000,
+            step_budget: 8_000,
         }
     }
 

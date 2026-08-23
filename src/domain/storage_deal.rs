@@ -3087,7 +3087,7 @@ mod tests {
             generator: GeneratorId::Avatar,
             seed: [7u8; 32],
             output_len: 32 * 32,
-            step_budget: 1_000_000,
+            step_budget: 8_000,
         };
         // Manifest, tarifin GERCEK ciktisindan kurulur: iddia dogru olsun.
         let bytes = generate_content(&spec).expect("tarif kosmali");
@@ -3153,7 +3153,7 @@ mod tests {
             generator: GeneratorId::Avatar,
             seed: [7u8; 32],
             output_len: 32 * 32,
-            step_budget: 1_000_000,
+            step_budget: 8_000,
         };
         // Organik baytlar, "bu tariften dogdu" diye etiketleniyor. Yalan.
         let organic = b"bu baytlar hicbir tariften dogmadi".to_vec();
@@ -3186,7 +3186,7 @@ mod tests {
             generator: GeneratorId::Avatar,
             seed: [7u8; 32],
             output_len: 32 * 32,
-            step_budget: 1_000_000,
+            step_budget: 8_000,
         };
         let manifest = ContentManifest::from_bytes_sliced(b"onekli icerik", 13)
             .expect("manifest")
@@ -5152,7 +5152,7 @@ mod demand_driven_replication_tests {
             generator: GeneratorId::Avatar,
             seed: [3u8; 32],
             output_len: 32 * 32,
-            step_budget: 1_000_000,
+            step_budget: 8_000,
         };
         let bytes = crate::storage::generated::generate_content(&spec).expect("uretim");
         let manifest = ContentManifest::from_bytes_sliced(&bytes, bytes.len() as u32)
