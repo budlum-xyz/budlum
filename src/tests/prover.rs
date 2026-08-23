@@ -536,3 +536,62 @@ fn a_proof_for_an_unknown_domain_is_refused() {
         .unwrap_err();
     assert!(err.contains("unknown domain 77"), "gelen: {err}");
 }
+
+/// 1d (tazelik): genel girdi cok eski bir yukseklik iddia ederse kanit,
+/// kanit sisteminin kendisi dogrulamadan once reddedilir.
+#[test]
+fn a_proof_claiming_a_stale_block_height_is_rejected() {
+    let mut bc = fresh_chain();
+    let (proof, mut pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x31);
+    pi.block_height = 100_000;
+
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
+        .unwrap_err();
+    assert!(err.contains("block height"), "hata sebebi soylemeli: {err}");
+}
+
+/// 1e (sureklilik): kabul edilen kanit alanin ilerlemesini kendi final
+/// kokune tasir; bu ilerlemenin gerisine yapilan iddia reddedilir.
+#[test]
+fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
+    let mut bc = fresh_chain();
+    let (proof, pi, program) = real_proof();
+    register_domain_allowing(&mut bc, 1, &program);
+    let sender = addr(0x32);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&sender, fee * 4);
+
+    let out = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
+        .unwrap();
+    assert!(matches!(out, ProofAcceptance::Accepted { .. }));
+
+    let d = bc.domain_registry.get(1).expect("alan kayitli");
+    assert_eq!(
+        d.last_committed_height, 10,
+        "kabul, alanin ilerlemesini tasimali"
+    );
+    assert_eq!(
+        d.last_committed_hash, pi.final_state_root,
+        "final kok alana baglanmali"
+    );
+
+    // Ayni kanit, geride bir yukseklige iddia: ucret yakilmadan kapi 1e'de red.
+    let err = bc
+        .submit_zk_proof(submission(sender, 1, 9, &proof, &pi, &program))
+        .unwrap_err();
+    assert!(
+        err.contains("stale zk claim"),
+        "hata sebebi soylemeli: {err}"
+    );
+
+    // Ilerlemeyi tasiyan ilk kabulden sonra ayni yukseklige yeniden sunum
+    // idempotent kalir (kapi 1e esitlige dokunmaz, calisma iddia katmaninin).
+    let again = bc
+        .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
+        .unwrap();
+    assert_eq!(again, ProofAcceptance::Idempotent);
+}

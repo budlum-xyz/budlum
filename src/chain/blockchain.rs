@@ -2035,6 +2035,41 @@ impl Blockchain {
             ));
         }
 
+        // 1d. Kanit tazeligi: iddia edilen yukseklik zincire yakin olmali.
+        //
+        // Kademe 2 on kosulu (2026-08-22, G0 onayi). Kanit gecerli olsa bile
+        // cok eski bir yukseklige baglanmis olmasi ayri bir kusurdur: ayni
+        // kanit, ne kadar zaman gecerse gecsin "taze" gorunur. `0` bilincli
+        // tolerans: prove_bytecode henuz yuksekligi yazmiyor (0 = iddia yok);
+        // bu gecis, uretici yuksekligi yazana kadar belgelenmis bosluktur.
+        let chain_height = self.chain.len() as u64;
+        let claimed_height = submission.public_inputs.block_height;
+        if claimed_height != 0
+            && claimed_height.abs_diff(chain_height) > crate::prover::MAX_ZK_PROOF_HEIGHT_LAG
+        {
+            return Err(format!(
+                "proof claims block height {claimed_height} but the chain is at {chain_height} (max lag {})",
+                crate::prover::MAX_ZK_PROOF_HEIGHT_LAG
+            ));
+        }
+
+        // 1e. Iddia, alanin ilerlemesinin gerisine dusemez (sureklilik).
+        //
+        // Kabul edilen her kanit alanin `last_committed_height/_hash` alanini
+        // o iddianin yuksekligine ve `final_state_root`'una tasir (asagida,
+        // `ClaimDecision::New` kolunda). Boylece alanin kaydi en son kabul
+        // edilen kanitin final kokunu tasir - `final_state_root` artik yalniz
+        // kanitin icinde yasayan bir deger degil, alanin gercek kokuyle
+        // karsilastirilabilir bir taahhuttur. Geriye yapilan iddia, ucret
+        // yakilmadan burada reddedilir.
+        let claim_height = submission.target_height();
+        if claim_height < domain.last_committed_height {
+            return Err(format!(
+                "stale zk claim: domain {claimed_domain} already committed at height {} but the claim targets {claim_height}",
+                domain.last_committed_height
+            ));
+        }
+
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
         let fee = self.state.registry.params().proof_submission_fee;
         let mut charged_fee = false;
@@ -2081,6 +2116,15 @@ impl Blockchain {
                     prover: submitter,
                     rewarded,
                 });
+                // 1e'nin kayit yarisi: alanin ilerlemesini bu kanitin final
+                // kokune bagla. Sonraki kanit bu ilerlemenin gerisine iddia
+                // atamaz (yukaridaki kapi) ve baska yuzler (kopru dogrulama)
+                // alanin kokunu okudugunda en son kabul edilen kanitin
+                // final kokunu gorur.
+                if let Some(d) = self.domain_registry.get_mut(claimed_domain) {
+                    d.last_committed_height = key.target_height;
+                    d.last_committed_hash = final_state_root;
+                }
                 if let Some(store) = &self.storage {
                     store
                         .save_proof_claim_registry(&self.proof_claims)

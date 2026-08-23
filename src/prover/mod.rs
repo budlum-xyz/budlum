@@ -108,6 +108,16 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
     hasher.finalize().into()
 }
 
+/// Bir zk kanitinin genel girdisindeki `block_height` icin kabul penceresi.
+///
+/// STARK kaniti "bu girdilerle boyle kostu" der; girdinin cok eski bir
+/// yuksekligi iddia etmesi ayri bir sorundur - gecerli bir eski kanit,
+/// sunuldugu her yerde "taze" gorunur. Pencere, kanitin iddia ettigi
+/// yuksekligi zincirin gercek yuksekligine baglar. `0` bilincli olarak
+/// kabul edilir: `prove_bytecode` henuz yuksekligi yazmiyor; 0 = "iddia
+/// yok". Uretici yuksekligi yazmaya basladiginda pencere tamamiyla isler.
+pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
+
 impl ZkProofSubmission {
     /// Canonical hash binding the transport message to the proof payload. The
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
