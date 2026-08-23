@@ -49,7 +49,7 @@
 //!
 //! # Where the derived set lives
 //!
-//! [`Self::whitelist`] takes `&mut self`: observing an elapsed KYC horizon
+//! [`PoAOnboarding::whitelist`] takes `&mut self`: observing an elapsed KYC horizon
 //! writes an audit entry. Consensus reads `&AccountState` on a hot path, so
 //! the observation happens once per block, at block close, and the result is
 //! cached in `AccountState::poa_admitted`. That placement is not a

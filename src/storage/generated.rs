@@ -393,7 +393,7 @@ const STEPS_PER_OUTPUT_BYTE: u32 = 1;
 /// kondu; ama butcenin kendisi sinirsizsa, sinirladigi sey yok.
 ///
 /// Bu, "adi butce olan ama tavani olmayan sayac" durumuydu. Kodu okuyan biri
-/// `Meter`'i gorup is miktarinin bagli oldugunu dusunur; bagli olan tek sey
+/// `Meter`'i gordugunde is miktarinin bagli oldugunu dusunur; bagli olan tek sey
 /// yukleyicinin secmeye razi oldugu sayidir.
 ///
 /// # Neden cikti boyutunun bir kati
