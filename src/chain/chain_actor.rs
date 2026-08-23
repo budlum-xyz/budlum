@@ -2536,6 +2536,9 @@ impl ChainActor {
                     let _ = tx.send(nonce);
                 }
                 ChainCommand::GetAccountProof(addr, tx) => {
+                    // `None` here is the trie refusing an oversized account
+                    // set, and it travels outward as `None`: a refusal to
+                    // answer must not be readable as an answer.
                     let bundle = crate::storage::merkle_trie::prove_account(
                         self.blockchain
                             .state
@@ -2544,7 +2547,7 @@ impl ChainActor {
                             .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
                         &addr.0,
                     );
-                    let _ = tx.send(Some(bundle));
+                    let _ = tx.send(bundle);
                 }
                 ChainCommand::AddTransaction(tx_obj, res_tx) => {
                     let _ = res_tx.send(
