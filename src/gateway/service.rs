@@ -74,10 +74,74 @@ fn render_from_recipe(
     Ok(Some(bytes))
 }
 
+/// Uretim onbelleginde tutulacak en fazla nesne.
+///
+/// Sayi, bayt degil: her girdi zaten [`MAX_GATEWAY_CONTENT_BYTES`] ile
+/// sinirli, ve iki sinirin carpimi en kotu durumdaki bellegi verir. Sayiyi
+/// baglamak, bayt saymaktan daha az kod ve ayni garantidir.
+pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
+
+/// Tarifi tekrar tekrar kosmamak icin sinirli bir onbellek.
+///
+/// # Ne degistirir, ne degistirmez
+///
+/// Uretilebilir icerikte baytlar hicbir yerde **saklanmaz**; zincirde olan
+/// tariftir ve dogrulayici disk yuku bu sinifta sifirdir. Bu onbellek o
+/// iddiaya dokunmaz: gecici, tek dugume ait, yeniden kurulabilir bir
+/// performans katmanidir. Silinse sistem dogru calismaya devam eder, yalnizca
+/// yavaslar - depolamanin tanimi bu degildir.
+///
+/// # Neden gerekli
+///
+/// Onbelleksiz her istek tarifi bastan kosuyordu. Sicak bir icerik icin bu,
+/// istek sayisiyla dogru orantili CPU demektir ve maliyeti isteyen degil
+/// **gecidi isleten** oder. Uretim belirlenimli oldugu icin ayni tarif her
+/// zaman ayni baytlari verir; ayni hesabi tekrar yapmanin bir karsiligi yok.
+///
+/// # Neden sinirli
+///
+/// Sinirsiz bir onbellek, sinirsiz bir kuyruktur: farkli isimler isteyen bir
+/// saldirgan gecidi bellekten dusurur. Tahliye politikasi **en eski girdi**
+/// (FIFO): gercek bir LRU erisim sirasini guncellemek icin okuma yolunda da
+/// yazma kilidi ister; buradaki amac sicak icerigi tutmak degil, ayni
+/// icerigin arka arkaya gelen isteklerini ucuzlatmak, ve FIFO bunu ayni
+/// maliyetle yapar.
+#[derive(Default)]
+struct GenerationCache {
+    /// Ekleme sirasinda tutulan girdiler.
+    entries: std::collections::VecDeque<(ContentId, Vec<u8>)>,
+}
+
+impl GenerationCache {
+    fn get(&self, id: &ContentId) -> Option<Vec<u8>> {
+        self.entries
+            .iter()
+            .find(|(key, _)| key == id)
+            .map(|(_, bytes)| bytes.clone())
+    }
+
+    fn insert(&mut self, id: ContentId, bytes: Vec<u8>) {
+        if self.entries.iter().any(|(key, _)| key == &id) {
+            return;
+        }
+        while self.entries.len() >= MAX_GENERATION_CACHE_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((id, bytes));
+    }
+}
+
 pub struct BudGateway {
     chain: ChainHandle,
     network: Option<NodeClient>,
     storage: Option<Storage>,
+    /// Uretilmis icerigin gecici onbellegi.
+    ///
+    /// `Mutex` cunku gecit paylasilan bir referans uzerinden okunuyor ve
+    /// onbellege yazmak okuma yolunda oluyor. Kilit yalnizca arama ve ekleme
+    /// suresince tutulur; uretim kilidin **disinda** yapilir, yoksa yavas bir
+    /// tarif tum gecidi bekletirdi.
+    generation_cache: std::sync::Mutex<GenerationCache>,
 }
 
 impl BudGateway {
@@ -86,6 +150,7 @@ impl BudGateway {
             chain,
             network,
             storage,
+            generation_cache: std::sync::Mutex::new(GenerationCache::default()),
         }
     }
 
@@ -125,8 +190,20 @@ impl BudGateway {
         // manifest kimligine karsi dogrulanir. Yani gecit urettigi seyi
         // dogrular: yanlis bir tarif yanlis bayt uretirse kimlik tutmaz ve
         // istek reddedilir.
+        // Onbellek once: ayni tarifi ayni baytlar icin tekrar kosmanin
+        // karsiligi yok. Kilit yalnizca arama suresince tutuluyor.
+        if let Ok(cache) = self.generation_cache.lock() {
+            if let Some(bytes) = cache.get(&cid) {
+                return checked_gateway_content("generation cache", bytes);
+            }
+        }
+
         if let Some(manifest) = self.chain.get_storage_manifest(cid).await {
+            // Uretim kilidin disinda: yavas bir tarif tum gecidi bekletmemeli.
             if let Some(bytes) = render_from_recipe(&manifest)? {
+                if let Ok(mut cache) = self.generation_cache.lock() {
+                    cache.insert(cid, bytes.clone());
+                }
                 return checked_gateway_content("on-demand generation", bytes);
             }
         }
@@ -332,5 +409,63 @@ mod tests {
                 .is_none(),
             "hybrid yalniz tariften uretilemez"
         );
+    }
+
+    /// Uretim onbellegi sinirini asmaz ve dogru baytlari verir.
+    ///
+    /// Sinirsiz bir onbellek sinirsiz bir kuyruktur: farkli isimler isteyen
+    /// bir saldirgan gecidi bellekten dusurur. Sinirin isi bunu engellemek,
+    /// ve engellenirken dogru cevabin bozulmamasi.
+    #[test]
+    fn the_generation_cache_stays_within_its_bound() {
+        let mut cache = GenerationCache::default();
+
+        // Sinira kadar her girdi tutulur.
+        for i in 0..MAX_GENERATION_CACHE_ENTRIES {
+            let id = ContentId([u8::try_from(i % 256).expect("mod 256"); 32]);
+            cache.insert(id, vec![u8::try_from(i % 256).expect("mod 256")]);
+        }
+        assert_eq!(cache.entries.len(), MAX_GENERATION_CACHE_ENTRIES);
+
+        // Ilk giren hala orada - tahliye henuz gerekmedi.
+        let first = ContentId([0u8; 32]);
+        assert_eq!(cache.get(&first), Some(vec![0u8]));
+
+        // Sinirin ustundeki girdi eskisini disari atar, boyut sabit kalir.
+        let fresh = ContentId([200u8; 32]);
+        cache.insert(fresh, vec![9u8]);
+        assert_eq!(
+            cache.entries.len(),
+            MAX_GENERATION_CACHE_ENTRIES,
+            "onbellek sinirin ustune cikmamali"
+        );
+        assert_eq!(cache.get(&fresh), Some(vec![9u8]), "yeni girdi tutulmali");
+        assert_eq!(
+            cache.get(&first),
+            None,
+            "en eski girdi tahliye edilmis olmali"
+        );
+
+        // Ayni kimlik onbellekte **bir kez** durur. Yinelenme denetimi
+        // olmasaydi ayni nesne her istekte bir slot daha yerdi: onbellegin
+        // ilan ettigi kapasite 64 nesne, ama gercekte tuttugu farkli nesne
+        // sayisi bir tek sicak icerigin tekrarlariyla bire kadar duserdi.
+        // Sinir tutmaya devam ederdi - ise yaramayan bir sinir olarak.
+        cache.insert(fresh, vec![9u8]);
+        let copies = cache
+            .entries
+            .iter()
+            .filter(|(key, _)| key == &fresh)
+            .count();
+        assert_eq!(copies, 1, "ayni kimlik onbellekte bir kez durmali");
+        assert_eq!(
+            cache.get(&fresh),
+            Some(vec![9u8]),
+            "yinelenen girdi bozulmamali"
+        );
+
+        // Onbellekte olmayan bir kimlik icin cevap yok - eski bir girdiyi
+        // yanlis kimlikle dondurmek, gecidin sundugu her seyi supheli yapardi.
+        assert_eq!(cache.get(&ContentId([255u8; 32])), None);
     }
 }
