@@ -2219,6 +2219,64 @@ mod tests {
         assert_eq!(POSEIDON_RC[0][0], 0xdd5743e7f2a5a5d9, "RC[0][0] mismatch");
         assert_eq!(POSEIDON_RC[0][1], 0xcb3a864e58ada44b, "RC[0][1] mismatch");
     }
+
+    /// Butun tablo tek sabite baglanir.
+    ///
+    /// Yukaridaki kilit 240 yuvarlak sabitin **ikisini** tutuyordu. Kalan 238'i
+    /// sessizce degistirilebilirdi: bir sabiti degistirmek permutasyonu
+    /// degistirir, permutasyonu degistirmek taahhutlerin ne sakladigini ve neye
+    /// bagladigini degistirir - ve hicbir test bunu gormezdi.
+    ///
+    /// Ornek kontrol tam da bu sinifi kaciran denetimdir: her zaman gecen
+    /// (cunku ornek disi her yeri serbest birakan) bir kilit, olmayan kilitten
+    /// daha kotudur, cunku kilit varmis gibi okunur.
+    ///
+    /// Parmak izi FNV-1a 64 ile hesaplanir. Kriptografik bir ozet degil ve
+    /// olmasi da gerekmiyor: burada savunulan sey gizlilik degil
+    /// **degisiklige duyarlilik**. Bir sabitin tek biti degisirse deger kayar.
+    /// Hash kutuphanesi eklemek, kilitledigi tabloyla ayni agacta yasayan yeni
+    /// bir bagimlilik demek olurdu.
+    ///
+    /// Deger degistiginde yapilacak sey guncellemek degil, **once neyin
+    /// degistigini bulmaktir**.
+    #[test]
+    fn the_whole_constant_table_is_locked() {
+        const fn fnv1a64(vals: &[[u64; 8]]) -> u64 {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut r = 0;
+            while r < vals.len() {
+                let mut c = 0;
+                while c < 8 {
+                    let bytes = vals[r][c].to_le_bytes();
+                    let mut b = 0;
+                    while b < 8 {
+                        h ^= bytes[b] as u64;
+                        h = h.wrapping_mul(0x100_0000_01b3);
+                        b += 1;
+                    }
+                    c += 1;
+                }
+                r += 1;
+            }
+            h
+        }
+
+        assert_eq!(
+            fnv1a64(&POSEIDON_RC_FULL),
+            0x5abc_6908_02c0_0f4a,
+            "the 30-round constant table changed; 238 of these 240 values were \
+             previously unchecked. Find what moved before touching this number"
+        );
+        assert_eq!(
+            fnv1a64(&POSEIDON_MDS),
+            0x7fb2_9bd1_52c1_ff25,
+            "the MDS matrix changed; row 0 and row 7 alone did not cover it"
+        );
+        // Ucdan tutan iki kenar: parmak izi ile birlikte, tablonun hem
+        // uzunlugunu hem siniri tutar.
+        assert_eq!(POSEIDON_RC_FULL[0][0], 0xdd57_43e7_f2a5_a5d9);
+        assert_eq!(POSEIDON_RC_FULL[29][7], 0x323d_9533_2b14_5fd6);
+    }
 }
 
 #[cfg(test)]
