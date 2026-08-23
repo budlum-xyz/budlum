@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 68 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 69 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -76,6 +76,7 @@
 - [66. Turetilmis icerik: bagimli bir tarif indirim almaz](#66-turetilmis-icerik-bagimli-bir-tarif-indirim-almaz)
 - [67. Kanitlanmis talep: indirim populerlikle geri alinir](#67-kanitlanmis-talep-indirim-populerlikle-geri-alinir)
 - [68. Bir dogrulayici kanitladigi seyi dondurur](#68-bir-dogrulayici-kanitladigi-seyi-dondurur)
+- [69. Tek yaprakli agac: kendi kendini onaylayan kanit](#69-tek-yaprakli-agac-kendi-kendini-onaylayan-kanit)
 
 ## 1. Genel sistem mimarisi
 
@@ -2644,3 +2645,44 @@ kullanimsiz kaldi ve kaldirildi - dogrulama tekrarinin olculebilir kaniti.
 
 Ilke, bolum 62'deki bayat agac ile ayni: **yanlis soruyu dogru cevaplayan
 bir deger, yanlis cevaptan daha tehlikelidir**, cunku dogru gorunur.
+## 69. Tek yaprakli agac: kendi kendini onaylayan kanit
+
+Relayer, bir adaptorun urettigi receipt kanitini imzalamadan once
+`verify_receipt_proof` ile denetler. Dosyanin kendi basligi bu adimi soyle
+gerekcelendiriyordu: *"bir adaptorun dogru oldugu degil, yalnizca kaynak
+oldugu varsayilir; kendi dogrulayicisi kendi ciktisina karsi calisir."*
+
+Denetim vardi ve **hicbir sey olcmuyordu.**
+
+`MerkleProof::verify` yaprakla baslar, `siblings` listesindeki her kardes icin
+bir hash adimi atar ve sonucu beklenen kokle karsilastirir. Liste bossa hic
+adim atilmaz ve karsilastirma `leaf == expected_root` haline gelir.
+
+`EvmChainAdapter::generate_receipt_proof` tam olarak bunu uretiyordu: bos bir
+kardes listesi, ve `leaf` ile `root` olarak **ayni deger**. Yani adaptorun
+urettigi her kanit, adaptorun kendi denetiminden gecmek zorundaydi. Testi de
+bu esitligi sabitliyordu (`assert_eq!(proof.leaf, root)`), yani kusur
+korunuyordu.
+
+Bir yaprak kendi kokune karsi dogrulanmaz. Boyle bir kanit yalnizca
+kanitlayanin kendini tekrarlayabildigini gosterir.
+
+Iki degisiklik yapildi.
+
+`verify_receipt_proof` artik bos bir kardes listesini **`verify` cagrilmadan
+once** reddediyor. Sonra reddetmek anlamsiz olurdu; cagri zaten gecmis
+olurdu.
+
+`generate_receipt_proof` ise gecerli gorunen bir cikti uretmeyi birakti ve
+hata donuyor: bu adaptor Ethereum'u okumuyor, dolayisiyla bir receipt kaniti
+uretemez. Bir stub'in en tehlikeli hali, gecerli gorunen bir cikti
+uretenidir; reddeden bir stub eksik oldugunu soyler, gecerli gorunen bir stub
+eksikligi gizler.
+
+Relayer bunu goren tarafta hicbir sey imzalamaz. Sessiz kalan bir relayer bir
+transferi geciktirir; dogrulanmamis bir basariyi imzalayan relayer yalani
+gercek yapar, cunku imza onu sahici kilar.
+
+Ilke bolum 62 ve 68 ile ayni ailedendir: **her zaman gecen bir denetim,
+olmayan bir denetimden daha kotudur**, cunku okuyan kisi orada bir denetim
+oldugunu sanir.

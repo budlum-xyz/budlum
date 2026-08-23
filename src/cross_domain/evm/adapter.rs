@@ -136,16 +136,20 @@ impl ChainAdapter for EvmChainAdapter {
         &self,
         tx_hash: &str,
     ) -> Result<(MerkleProof, Hash32, String), AdapterError> {
-        // Offline-test: dummy proof (F10.1 verify ile tutarsız → RED test).
-        let leaf = crate::core::hash::hash_fields_bytes(&[b"BDLM_EVM_STUB", tx_hash.as_bytes()]);
-        Ok((
-            MerkleProof {
-                leaf,
-                index: 0,
-                siblings: Vec::new(),
-            },
-            leaf,
-            tx_hash.to_string(),
+        // Bu adaptor Ethereum'u okumuyor, dolayisiyla bir receipt kaniti
+        // uretemez. Eskiden tek yaprakli bir agac donuyordu: yaprak ve kok
+        // ayni deger, yani `verify_receipt_proof` icindeki Merkle denetimi
+        // hicbir sey olcmeden geciyordu. Bir stub'in en tehlikeli hali,
+        // gecerli gorunen bir cikti uretenidir.
+        //
+        // Reddetmek dogru davranis. Relayer bu hatayi gorur ve hicbir sey
+        // imzalamaz; sessiz kalan bir relayer bir transferi geciktirir, ama
+        // dogrulanmamis bir basariyi imzalayan relayer yalani gercek yapar.
+        let _ = tx_hash;
+        Err(AdapterError::ProofVerificationFailed(
+            "EVM adapter cannot assemble a receipt proof: it does not read Ethereum. \
+             Wire an RPC-backed proof assembler before relaying value"
+                .into(),
         ))
     }
 
@@ -182,6 +186,24 @@ impl ChainAdapter for EvmChainAdapter {
         external_state_root: &Hash32,
         expected_tx_hash: &str,
     ) -> Result<(), AdapterError> {
+        // Bir yaprak kendi kokune karsi dogrulanmaz.
+        //
+        // `MerkleProof::verify` bos bir `siblings` listesiyle cagrildiginda
+        // hicbir hash adimi atmaz ve `leaf == expected_root` karsilastirmasina
+        // duser. Yani proof'u ureten taraf ayni degeri hem yaprak hem kok
+        // olarak verirse denetim gecer. Bu, adaptorun kendi uydurdugu bir
+        // agaci kendi kendine onaylatmasidir; `generate_receipt_proof`'un
+        // offline stub'i tam olarak bunu uretiyor.
+        //
+        // Denetim burada, `verify`den once. Sonra konsaydi cagri zaten
+        // gecmis olurdu.
+        if proof.siblings.is_empty() {
+            return Err(AdapterError::ProofVerificationFailed(
+                "EVM receipt proof has no sibling path: a single-leaf tree proves only that \
+                 the prover can repeat itself, because leaf and root are then the same value"
+                    .into(),
+            ));
+        }
         // Merkle proof self-consistency (kısmi fix).
         if !proof.verify(*external_state_root) {
             return Err(AdapterError::ProofVerificationFailed(
@@ -290,12 +312,45 @@ mod tests {
         assert_eq!(adapter.required_confirmations, DEFAULT_CONFIRMATIONS);
     }
 
+    /// Okumadigi bir zincir icin kanit uretmeyi reddeder.
+    ///
+    /// Eskiden tek yaprakli bir agac donuyordu ve testi `proof.leaf == root`
+    /// esitligini **sabitliyordu**. O esitlik tam da kusurun kendisiydi:
+    /// `MerkleProof::verify` bos bir kardes listesiyle hicbir hash adimi
+    /// atmaz, `leaf == root` karsilastirmasina duser ve gecer. Yani
+    /// adaptorun urettigi kanit, adaptorun kendi denetiminden her zaman
+    /// geciyordu.
     #[tokio::test]
-    async fn offline_stub_generate_proof() {
+    async fn the_offline_adapter_refuses_to_invent_a_proof() {
         let adapter = EvmChainAdapter::test_default();
-        let (proof, root, hash) = adapter.generate_receipt_proof("0xabc").await.unwrap();
-        assert_eq!(hash, "0xabc");
-        assert_eq!(proof.leaf, root);
+        let err = adapter
+            .generate_receipt_proof("0xabc")
+            .await
+            .expect_err("Ethereum okunmadan receipt kaniti uretilemez");
+        assert!(
+            format!("{err:?}").contains("does not read Ethereum"),
+            "gerekce neyin eksik oldugunu soylemeli: {err:?}"
+        );
+    }
+
+    /// Ve tek yaprakli bir agac, elle kurulsa bile kabul edilmez.
+    #[test]
+    fn a_single_leaf_tree_is_refused() {
+        let adapter = EvmChainAdapter::new(vec![7u8; 20], DEFAULT_DEPOSIT_TOPIC0);
+        let leaf = derive_receipt_leaf("0xabc", &adapter.bridge_address);
+        let proof = MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        };
+        // Yaprak ve kok ayni: `verify` hicbir adim atmadan gecerdi.
+        let err = adapter
+            .verify_receipt_proof(&proof, &leaf, "0xabc")
+            .expect_err("kardessiz bir yol hicbir sey kanitlamaz");
+        assert!(
+            format!("{err:?}").contains("no sibling path"),
+            "gerekce kardes yolunun eksikligini soylemeli: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -311,12 +366,17 @@ mod tests {
         assert!(hash.starts_with("0x"));
     }
 
+    /// Onay bekleme de reddeder, cunku kanit uretemez.
+    ///
+    /// Eskiden `success: true` donuyordu. Relayer bunu imzalayabilecegi bir
+    /// sonuc olarak okurdu, oysa altinda hicbir Ethereum okumasi yok.
     #[tokio::test]
-    async fn offline_stub_wait_confirmation() {
+    async fn waiting_for_confirmation_refuses_without_a_proof() {
         let adapter = EvmChainAdapter::test_default();
-        let result = adapter.wait_for_confirmation("0xabc", 1).await.unwrap();
-        assert_eq!(result.chain, ExternalChain::Ethereum);
-        assert!(result.success);
+        assert!(
+            adapter.wait_for_confirmation("0xabc", 1).await.is_err(),
+            "kanit uretemeyen adaptor basarili bir sonuc bildiremez"
+        );
     }
 
     #[test]
