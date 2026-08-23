@@ -878,7 +878,30 @@ impl Blockchain {
         &self,
         bundle: &crate::domain::sovereign::AuditExportBundle,
     ) -> Result<(), String> {
-        self.sovereign_registry.validate_audit_export(bundle)
+        self.sovereign_registry.validate_audit_export(bundle)?;
+        // Dondurma kaydinin bir SONUCU olmali. Defter uzun sure yalniz kayit
+        // Tutuyordu: dondurma cagrilabiliyordu ama dondurulmus olmak hicbir
+        // Seyi degistirmiyordu - "donduruldu" bir not, bir karar degildi.
+        //
+        // Operator paketten degil, KAYITLI SABLONDAN okunur. Paketin icinden
+        // Gelen bir kimlik, dondurulmus operatorun baskasinin adini yazip
+        // Kapiyi asmasina izin verirdi.
+        let operator = self
+            .sovereign_registry
+            .template_operator(bundle.template_id)
+            .ok_or_else(|| {
+                "AuditExportBundle names a template that is not registered".to_string()
+            })?;
+        if self
+            .poa_compliance
+            .is_frozen(crate::registry::ComplianceDomainKind::PoA, &operator)
+        {
+            return Err(format!(
+                "operator {} is frozen; audit export refused",
+                operator.to_hex()
+            ));
+        }
+        Ok(())
     }
 
     /// Bir PoA alaninda adresi dondur.
@@ -919,32 +942,6 @@ impl Blockchain {
                 self.chain.len() as u64,
             )
             .map_err(|e| format!("{e:?}"))
-    }
-
-    /// Dondurulmus bir hesabin egemen denetim paketi kabul edilmez.
-    ///
-    /// Kapi burada kuruluyor: defter artik yalnizca kayit tutmuyor, kaydin
-    /// bir sonucu var. Dondurma kaydi olan bir operatorun urettigi paket
-    /// reddedilir - aksi halde "donduruldu" yalnizca bir not olurdu.
-    ///
-    /// # Errors
-    ///
-    /// Paketin sahibi dondurulmussa ya da paket sablonla uyusmuyorsa hata doner.
-    pub fn validate_sovereign_audit_export_for(
-        &self,
-        operator: &crate::core::address::Address,
-        bundle: &crate::domain::sovereign::AuditExportBundle,
-    ) -> Result<(), String> {
-        if self
-            .poa_compliance
-            .is_frozen(crate::registry::ComplianceDomainKind::PoA, operator)
-        {
-            return Err(format!(
-                "operator {} is frozen; audit export refused",
-                operator.to_hex()
-            ));
-        }
-        self.sovereign_registry.validate_audit_export(bundle)
     }
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
