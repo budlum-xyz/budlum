@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 72 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 73 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -80,6 +80,7 @@
 - [70. Gecit tarifi okur: saklanmayan baytlar](#70-gecit-tarifi-okur-saklanmayan-baytlar)
 - [71. Yerlesim tavsiyesi: kural degil olcum](#71-yerlesim-tavsiyesi-kural-degil-olcum)
 - [72. Bicim taahhudun parcasidir](#72-bicim-taahhudun-parcasidir)
+- [73. Iki bagimsiz derleyici: kaynagin ikiliye ulastigini kim soyluyor](#73-iki-bagimsiz-derleyici-kaynagin-ikiliye-ulastigini-kim-soyluyor)
 
 ## 1. Genel sistem mimarisi
 
@@ -2820,3 +2821,56 @@ Pollen korumali icerik, hangi bicimde istenirse istensin korumalidir. Yeni
 uc `bud_gatewayFetchContent` ile ayni denetimi kosar. Bir bicim istemek,
 erisim kurallarini atlamanin yolu olamaz; olsaydi denetim degil gecikme
 olurdu.
+## 73. Iki bagimsiz derleyici: kaynagin ikiliye ulastigini kim soyluyor
+
+Bu belgedeki her denetim bir varsayima dayanir: calisan ikili, okudugumuz
+kaynaktan dogdu. Kaynagi okumak, testleri kosturmak, kapilari kurmak - hepsi
+o varsayim dogruysa bir sey soyler.
+
+Varsayimi kanitlayan sey derleyicidir, ve derleyici de bir programdir.
+Kaynakta olmayan bir sey ekleyen bir derleyici, kendi kaynaginda da bunun
+izini birakmayacak sekilde yazilabilir: yeni derleyiciyi derlerken ayni
+eklemeyi yeniden uretir. Kaynagi okuyan hicbir denetim bunu goremez, cunku
+sorun kaynakta degil.
+
+### Belirlenimlilik yetmez
+
+`determinism.yml` ayni kaynagi iki kez derleyip ayni genesis hash'ini
+aldigini dogrular ve bu degerlidir: derleme surece bagimli bir sey
+kacirmiyor. Ama **ayni** derleyici iki kez kosuyor. Bir arka kapi varsa iki
+kosu da ayni fazlaligi uretir ve karsilastirma gecer. Her zaman gecen bir
+denetim, olmayan bir denetimden daha kotudur (bkz. bolum 69).
+
+### Cozum guven degil, ikinci bir tanik
+
+Ayni kaynak **iki farkli derleyiciyle** derlenir. Ikisi de ayni sonucu
+uretiyorsa, ikisinin ayni fazlaligi bagimsiz olarak eklemis olmasi gerekir.
+Iki farkli surum, iki farkli ikili, iki farkli derleme gecmisi - ayni sekilde
+ele gecirilmis olmalari, tek bir derleyiciye guvenmekten cok daha zayif bir
+varsayimdir.
+
+Bu, bir derleyiciyi "temiz" ilan etmez. Yaptigi sey, bir arka kapinin
+gorunmeden kalabilmesi icin gereken sarti agirlastirmaktir.
+
+### Ne karsilastiriliyor ve neden ikili degil
+
+Rust ikilileri bugun bit-bit yeniden uretilebilir degil: yol on ekleri,
+artimli derleme meta verisi, panik mesajlarindaki mutlak yollar iki kosuda
+farkli baytlar birakir. Bu farklar davranisi degistirmez. Ikilileri
+karsilastirmak, is her kostugunda kirmizi verirdi ve kirmizi kalan bir kapi
+kapatilir, yani sonunda hicbir sey olculmez.
+
+Karsilastirilan sey **davranisin kanonik ozeti**: genesis hash'i ve kanonik
+program hash'i. Ikisi de zincirin uzerinde anlastigi degerler, ve bir arka
+kapinin gizlenmesi gereken yer tam olarak burasi. Uretilen kodu degistiren
+bir derleyici bu degerleri kaydirmadan is goremez.
+
+Bir deger uretilemezse is **kirmizi doner**, atlanmaz. Olculemeyen bir sey
+yesil sayilamaz; bos bir karsilastirma, gecmis bir karsilastirma gibi
+gorunur.
+
+### Neden haftada bir
+
+Iki tam release derlemesi pahalidir ve bu denetimin yakaladigi sinif her
+commit'te degismez. Kaynak degisikliklerini yakalayan denetimler her
+push'ta kosar; bu, altlarindaki zemini denetler.
