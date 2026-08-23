@@ -34,10 +34,10 @@ use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
 use crate::cross_domain::chain_adapter::{AdapterError, ChainAdapter};
 use crate::cross_domain::event_tree::MerkleProof;
-use crate::cross_domain::evm::header::{verify_chain, EthHeader, DEFAULT_CONFIRMATIONS};
-use crate::cross_domain::evm::mpt;
-use crate::cross_domain::evm::receipt::{decode_receipt, EthReceipt};
-use crate::cross_domain::evm::verify::{verify_evm_receipt, EvmDepositProof, VerifyError};
+use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
+use crate::cross_domain::evm::verify::{
+    verify_evm_receipt, EvmDepositProof, VerifiedDeposit, VerifyError,
+};
 use crate::domain::types::Hash32;
 
 /// Ethereum bridge kontrat deposit event imzas (topic0).
@@ -235,33 +235,29 @@ impl ChainAdapter for EvmChainAdapter {
 }
 
 impl EvmChainAdapter {
-    /// Tam on-chain EVM receipt verify (F10.2 verify.rs orchestrator).
-    /// Bu, ChainAdapter::verify_receipt_proof'un zenginleştirilmiş hali -
-    /// Relayer tam proof paketi (header chain + MPT nodes + receipt) sağlar.
-    pub fn verify_deposit(&self, proof: &EvmDepositProof<'_>) -> Result<EthReceipt, VerifyError> {
-        // Verify_evm_receipt: header N-conf → MPT → receipt → status → deposit log.
-        let _verified = verify_evm_receipt(proof)?;
-        // Receipt decode (verify_evm_receipt içinde zaten var, burada accessor için).
-        // Verify_evm_receipt VerifiedDeposit döner; caller'a EthReceipt gerekirse
-        // Ayrı decode. Minimal: header chain teyit.
-        let target = decode_header_or_err(proof.target_header)?;
-        let confs: Vec<EthHeader> = proof
-            .confirmation_headers
-            .iter()
-            .map(|h| decode_header_or_err(h))
-            .collect::<Result<_, _>>()?;
-        verify_chain(&target, &confs, proof.required_confirmations)
-            .map_err(|e| VerifyError::Header(e.to_string()))?;
-        // MPT + receipt decode (verify_evm_receipt içinde çağrılır).
-        let receipt_bytes =
-            mpt::verify(proof.proof_nodes, &target.receipts_root, proof.receipt_key)?;
-        decode_receipt(&receipt_bytes).map_err(VerifyError::from)
+    /// Tam on-chain EVM deposit verify (F10.2 `verify.rs` orchestrator).
+    ///
+    /// Bu, `ChainAdapter::verify_receipt_proof`'un zenginleştirilmiş hali:
+    /// relayer tam proof paketi (header zinciri + MPT node'ları + receipt)
+    /// sağlar, buradan dönen şey ise **kanıtlanmış deposit**tir.
+    ///
+    /// Eskiden bu fonksiyon `verify_evm_receipt`'in sonucunu `_verified` diye
+    /// atıp header zincirini ve MPT'yi ikinci kez çözüyor, çağırana ham bir
+    /// `EthReceipt` veriyordu. Iki kusuru vardı. Ilki: aynı denetim iki yerde
+    /// yazılmış oluyordu, ve bir denetimin iki kopyası varsa hangisinin
+    /// uygulandığını saldırgan seçer (bkz. `docs/ARCHITECTURE.md` §65).
+    /// Ikincisi ve daha kötüsü: `EthReceipt`, `verify_evm_receipt`'in
+    /// *yaptığı* iki denetimi (`status` doğru mu, deposit log'u gerçekten
+    /// var mı) taşımayan bir tiptir. Çağıran, adı "verify" olan bir
+    /// fonksiyondan status'u kontrol edilmemiş görünen bir receipt alıyordu.
+    ///
+    /// Artık tek bir doğrulama var ve dönen tip onun kanıtladığı şey.
+    pub fn verify_deposit(
+        &self,
+        proof: &EvmDepositProof<'_>,
+    ) -> Result<VerifiedDeposit, VerifyError> {
+        verify_evm_receipt(proof)
     }
-}
-
-fn decode_header_or_err(raw: &[u8]) -> Result<EthHeader, VerifyError> {
-    crate::cross_domain::evm::header::decode_header(raw)
-        .map_err(|e| VerifyError::Header(e.to_string()))
 }
 
 /// Receipt proof leaf'ini `tx_hash + bridge_address`'ten türetir.
@@ -544,10 +540,25 @@ mod tests {
             "verify_deposit was removed or renamed; update this pin"
         );
         assert!(
-            adapter_prod.contains("verify_evm_receipt(proof)?"),
+            adapter_prod.contains("verify_evm_receipt(proof)"),
             "verify_deposit no longer runs the full verify_evm_receipt \
              orchestrator - the 'real safe path' claim in this file's header \
              needs rewriting"
+        );
+        // And it returns what that orchestrator proved. Returning a bare
+        // `EthReceipt` would hand the caller a value that does not carry the
+        // status check or the deposit-log match `verify_evm_receipt` made,
+        // from a function named `verify`. See ARCHITECTURE.md section 68.
+        assert!(
+            adapter_prod.contains("Result<VerifiedDeposit, VerifyError>"),
+            "verify_deposit must return the proven deposit, not a raw receipt"
+        );
+        // One verification, not two. A second header/MPT decode in this file
+        // would be a second copy of the same check, and an attacker picks
+        // which copy applies (section 65).
+        assert!(
+            !adapter_prod.contains("mpt::verify("),
+            "verify_deposit is decoding the MPT again instead of delegating"
         );
 
         // The relayer reaches the adapter through the trait method only.

@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 67 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 68 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -75,6 +75,7 @@
 - [65. Bir yolda duran denetim kural degildir](#65-bir-yolda-duran-denetim-kural-degildir)
 - [66. Turetilmis icerik: bagimli bir tarif indirim almaz](#66-turetilmis-icerik-bagimli-bir-tarif-indirim-almaz)
 - [67. Kanitlanmis talep: indirim populerlikle geri alinir](#67-kanitlanmis-talep-indirim-populerlikle-geri-alinir)
+- [68. Bir dogrulayici kanitladigi seyi dondurur](#68-bir-dogrulayici-kanitladigi-seyi-dondurur)
 
 ## 1. Genel sistem mimarisi
 
@@ -2610,3 +2611,36 @@ sey olmak zorundadir.
 surum yan yana birakilmadi. Bolum 65'te ayni sekil bir kusur olarak
 gorulmustu: bir denetimin iki kopyasi varsa, hangisinin uygulanacagini
 saldirgan secer.
+## 68. Bir dogrulayici kanitladigi seyi dondurur
+
+`EvmChainAdapter::verify_deposit` bir Ethereum deposit kanitini dogruluyordu
+ve iki sey yanlisti.
+
+Ilki: dogrulamayi iki kez yapiyordu. `verify_evm_receipt` cagriliyor, sonucu
+`_verified` diye atiliyor, ardindan header zinciri ve MPT ayni fonksiyonun
+govdesinde yeniden cozuluyordu. Bolum 65'teki sekil: bir denetimin iki
+kopyasi varsa, biri duzeltilip oteki unutuldugunda hangisinin uygulandigini
+saldirgan secer.
+
+Ikincisi ve daha onemlisi: **dondugu tip kanitladigi seyi tasimiyordu.**
+`verify_evm_receipt` bes sey dogrular - header zinciri onaylanmis mi, MPT
+receipt'i receiptsRoot'a bagliyor mu, receipt cozulebiliyor mu, `status`
+basarili mi, ve koprü kontratindan beklenen deposit log'u gercekten var mi.
+Bu bes denetimin sonucu `VerifiedDeposit`'tir: tx hash, deposit yuku, blok
+numarasi.
+
+Fonksiyon bunun yerine `EthReceipt` donduruyordu. `EthReceipt` ham bir
+receipt'tir; `status`'un denetlendigini de, log'un bulundugunu da tasimaz.
+Yani adi `verify_deposit` olan bir fonksiyon, cagirana **dogrulanmamis
+gorunen** bir deger veriyordu. Cagiran ya denetimleri gereksiz yere
+tekrarlar, ya da tekrarlamaz ve fonksiyonun yaptigini varsayar. Ikinci
+durumda kod dogru calisir ama nedenini kimse okuyamaz; ilkinde ise ucuncu
+bir denetim kopyasi dogar.
+
+Duzeltme fonksiyonu bir satira indirdi: `verify_evm_receipt(proof)`. Tip
+imzasi artik ne kanitlandigini soyluyor. Kopya kodun silinmesiyle
+`verify_chain`, `mpt`, `decode_receipt` ve yerel `decode_header_or_err`
+kullanimsiz kaldi ve kaldirildi - dogrulama tekrarinin olculebilir kaniti.
+
+Ilke, bolum 62'deki bayat agac ile ayni: **yanlis soruyu dogru cevaplayan
+bir deger, yanlis cevaptan daha tehlikelidir**, cunku dogru gorunur.
