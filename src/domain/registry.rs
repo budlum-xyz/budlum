@@ -5,6 +5,40 @@ use std::collections::BTreeMap;
 
 pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 
+/// Kayitli tutulabilecek en fazla domain sayisi.
+///
+/// # Neden bir tavan gerekiyor
+///
+/// Kayit izinli degil: yeterli bagi yatiran herkes domain acabilir. Bagin
+/// kendisi bir maliyettir ama **sinir degildir** - geri alinabilir bir
+/// mevduattir, harcanan bir ucret degil. Unbond suresi dolunca operator
+/// parasini geri alir, yani yeterli sermayeli biri icin bir domain acmanin
+/// net maliyeti yalnizca paranin o sure boyunca bagli kalmasidir.
+///
+/// Kayitli her domain zincirin **blok basina** isine ekleniyor: [`Self::root`]
+/// her domain icin bir yaprak hash'i hesaplar ve bu kok her blokta yeniden
+/// uretilir. Yani kayit sayisi dogrudan her dogrulayicinin her blokta yaptigi
+/// isi belirler, ve o is domain sahibi tarafindan degil **ag tarafindan**
+/// odenir. Bag geri alinabildigi icin, sermayesi olan bir saldirgan bu isi
+/// kalici olarak yukseltip parasini geri alabilir.
+///
+/// Tavan bu bilesimi kirar: bagin geri alinabilirligi degismez, ama toplam
+/// yuk artik sabit bir ustten sinirli. `u16` genisliginde bir sayi secildi
+/// (65 536 degil 4096): 4096 yaprakli bir Merkle agaci 12 seviyedir ve her
+/// blokta yeniden hesaplanmasi olculebilir bir maliyettir; bunun ustu, hicbir
+/// mesru ihtiyacin karsiligi olmadan dogrulayici maliyetini buyutur.
+///
+/// # Tavan dolunca ne olur
+///
+/// Yeni kayit reddedilir. Bu bir yonetim kararini zorunlu kilar - tavani
+/// yukseltmek ya da kullanilmayan domainleri emekliye ayirmak - ve o karar
+/// gorunur olur. Sessizce buyuyen bir maliyetten, konusulan bir karara.
+///
+/// Emekli (`Retired`) domainler de sayilir: yaprak agacta durdugu surece kok
+/// hesabina girer. Sayimin disinda tutulmalari icin kayittan **silinmeleri**
+/// gerekir, ki o ayri bir karar ve ayri bir yol.
+pub const MAX_REGISTERED_DOMAINS: usize = 4096;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConsensusDomainRegistry {
     domains: BTreeMap<DomainId, ConsensusDomain>,
@@ -20,6 +54,18 @@ impl ConsensusDomainRegistry {
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         if self.domains.contains_key(&domain.id) {
             return Err(format!("Domain {} is already registered", domain.id));
+        }
+        // Sayim, kimlik denetiminden sonra: zaten kayitli bir id ile gelen
+        // istek tavani mesgul etmemeli, cunku yeni bir yaprak eklemiyor.
+        if self.domains.len() >= MAX_REGISTERED_DOMAINS {
+            return Err(format!(
+                "Domain {} rejected: registry is at its ceiling of {MAX_REGISTERED_DOMAINS} \
+                 domains. Every registered domain costs every validator work in every block \
+                 (the registry root is rebuilt per block), and the operator bond is refundable, \
+                 so nothing else bounds that cost. Retire an unused domain or raise the ceiling \
+                 through governance.",
+                domain.id
+            ));
         }
         if !domain.has_operator_bond(MIN_DOMAIN_OPERATOR_BOND) {
             return Err(format!(
@@ -289,6 +335,55 @@ mod tests {
         second.register(domain_b).unwrap();
 
         assert_eq!(first.root(), second.root());
+    }
+
+    /// Kayit defteri tavanini asamaz.
+    ///
+    /// Kayitli her domain her blokta yeniden hesaplanan kayit kokune bir
+    /// yaprak ekler; o isi ag oder, domain sahibi degil. Operator bagi geri
+    /// alinabildigi icin bag bu buyumeyi sinirlamaz - tek sinir tavan.
+    #[test]
+    fn the_registry_does_not_grow_past_its_ceiling() {
+        let mut registry = ConsensusDomainRegistry::new();
+
+        // Tavana kadar dolduruluyor. Her kayit basarili olmali: tavan
+        // dolmadan reddeden bir kapi mesru kullanimi engellerdi.
+        for id in 0..MAX_REGISTERED_DOMAINS {
+            let id = u32::try_from(id).expect("tavan u32'ye sigar");
+            registry
+                .register(default_domain(id, ConsensusKind::PoS, 1338, "pos", 0))
+                .expect("tavana kadar her kayit kabul edilmeli");
+        }
+        assert_eq!(registry.domains().len(), MAX_REGISTERED_DOMAINS);
+
+        // Tavanin ustundeki ilk kayit reddedilir.
+        let overflow = u32::try_from(MAX_REGISTERED_DOMAINS).expect("tavan+0 u32'ye sigar");
+        let err = registry
+            .register(default_domain(overflow, ConsensusKind::PoS, 1338, "pos", 0))
+            .expect_err("tavanin ustundeki kayit reddedilmeli");
+        assert!(
+            err.contains("ceiling"),
+            "ret gerekcesi tavani soylemeli: {err}"
+        );
+
+        // Ret gercekten kayda girmemis olmali - mesaj verip yine de eklemek
+        // tavani sussuz birakirdi.
+        assert_eq!(
+            registry.domains().len(),
+            MAX_REGISTERED_DOMAINS,
+            "reddedilen kayit deftere girmemeli"
+        );
+
+        // Zaten kayitli bir id ile gelen istek tavan gerekcesiyle degil
+        // yinelenme gerekcesiyle reddedilir: yeni yaprak eklemedigi icin
+        // tavanla ilgisi yok.
+        let dup = registry
+            .register(default_domain(0, ConsensusKind::PoS, 1338, "pos", 0))
+            .expect_err("yinelenen kayit reddedilmeli");
+        assert!(
+            dup.contains("already registered"),
+            "yinelenme, tavandan once denetlenmeli: {dup}"
+        );
     }
 
     #[test]
