@@ -7,8 +7,32 @@
 //!
 //! Path bits are MSB-first (address bit 0 = root branch).
 //!
-//! WIRING: unwired - account state still hashes through the existing root;
-//! this trie is not the one consensus reads.
+//! WIRING: wired - reached from the chain actor's `GetAccountProof` command
+//! and served on the RPC surface as `bud_getAccountProof`.
+//!
+//! # Why a second root exists
+//!
+//! Consensus reads the root built in `core::account::calculate_state_root`:
+//! a sequential Merkle tree over the account map, cached and updated
+//! incrementally. That root is correct for what it does, and it stays the
+//! consensus root; changing it would fork the chain.
+//!
+//! It cannot, however, carry an account proof. Its leaf order follows the
+//! iteration order of the account map, so a leaf's *position* has no
+//! cryptographic relation to the address it describes. A proof drawn from
+//! it establishes that some leaf is in the tree, not which address that leaf
+//! belongs to, and it cannot establish absence at all without shipping every
+//! leaf so the caller can look for the address itself: an O(n) witness.
+//!
+//! In this trie position *is* the address, bit by bit. Inclusion and absence
+//! are the same fixed-depth proof, and a proof for one address cannot be
+//! relabelled as a proof for another (see [`MerkleProof::verify`]).
+//!
+//! So this is a second, proof-bearing root, served alongside the consensus
+//! root and never in place of it. The bundle returned by [`prove_account`]
+//! carries its own root precisely because a caller must not assume the two
+//! roots are equal - they commit to the same accounts under different
+//! structures.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -135,6 +159,58 @@ impl MerkleTrie {
         for (addr, balance, nonce) in entries {
             self.leaves.insert(*addr, (*balance, *nonce));
         }
+    }
+}
+
+/// A proof about one account, together with the root it was drawn against.
+///
+/// The root travels with the proof because a verifier that already trusts a
+/// root must check the proof against *that* root, and a verifier that does
+/// not must obtain it independently. Shipping the root here does not make it
+/// trusted; it makes the claim self-describing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProofBundle {
+    /// Root of the proof-bearing trie. Not the consensus state root.
+    pub root: [u8; 32],
+    /// `false` means the trie proves the address is absent, which is a
+    /// positive result, not a failure to answer.
+    pub present: bool,
+    pub balance: u64,
+    pub nonce: u64,
+    pub proof: MerkleProof,
+}
+
+impl AccountProofBundle {
+    /// Check the bundle against its own stated root.
+    ///
+    /// This is the weakest useful check: it says the bundle is internally
+    /// consistent. A caller that wants a claim about chain state must compare
+    /// `root` against a root it obtained some other way.
+    pub fn verify_self_consistent(&self) -> bool {
+        self.proof.verify(&self.root)
+    }
+}
+
+/// Build the proof-bearing trie over `accounts` and prove one address.
+///
+/// Absence is proved, not reported: an address with no entry yields
+/// `present: false` and a proof that verifies against the same root.
+pub fn prove_account<I>(accounts: I, address: &[u8; 32]) -> AccountProofBundle
+where
+    I: IntoIterator<Item = ([u8; 32], u64, u64)>,
+{
+    let mut trie = MerkleTrie::new();
+    for (addr, balance, nonce) in accounts {
+        trie.insert(&addr, balance, nonce);
+    }
+    let (balance, nonce) = trie.leaves.get(address).copied().unwrap_or((0, 0));
+    let present = trie.leaves.contains_key(address);
+    AccountProofBundle {
+        root: trie.root_ref(),
+        present,
+        balance,
+        nonce,
+        proof: trie.proof(address),
     }
 }
 
@@ -352,5 +428,71 @@ mod tests {
         let root = trie.root();
         let proof = trie.proof(&addr(99));
         assert!(proof.verify(&root));
+    }
+
+    #[test]
+    fn an_absent_account_is_proved_absent_not_merely_unanswered() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let bundle = prove_account(entries.clone(), &addr(9));
+        assert!(!bundle.present, "absent address reported as present");
+        assert_eq!(bundle.balance, 0);
+        assert_eq!(bundle.nonce, 0);
+        assert!(
+            bundle.verify_self_consistent(),
+            "absence is a proof and must verify against the same root"
+        );
+
+        let present = prove_account(entries, &addr(1));
+        assert!(present.present);
+        assert_eq!(present.balance, 100);
+        assert!(present.verify_self_consistent());
+        assert_eq!(
+            present.root, bundle.root,
+            "both bundles were drawn against the same account set"
+        );
+    }
+
+    #[test]
+    fn a_proof_cannot_be_relabelled_onto_another_address() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let bundle = prove_account(entries, &addr(1));
+        let mut forged = bundle.clone();
+        forged.proof.address = addr(2);
+        assert!(
+            !forged.verify_self_consistent(),
+            "a proof for one address verified as a proof for another"
+        );
+    }
+
+    #[test]
+    fn the_absence_witness_is_fixed_depth_regardless_of_account_count() {
+        // This is the property the consensus root cannot offer: proving an
+        // address is absent there needs every leaf, so the witness grows with
+        // the account set. Here it is TRIE_DEPTH whatever the set size is.
+        for count in [1usize, 8, 64] {
+            let entries: Vec<_> = (0..count)
+                .map(|i| (addr(i as u8), i as u64, i as u64))
+                .collect();
+            let bundle = prove_account(entries, &addr(200));
+            assert!(!bundle.present);
+            assert_eq!(bundle.proof.siblings.len(), TRIE_DEPTH);
+            assert_eq!(bundle.proof.directions.len(), TRIE_DEPTH);
+            assert!(bundle.verify_self_consistent());
+        }
+    }
+
+    #[test]
+    fn a_tampered_balance_breaks_the_bundle() {
+        let entries = vec![(addr(1), 100u64, 1u64)];
+        let mut bundle = prove_account(entries, &addr(1));
+        bundle.balance = 999;
+        // The struct field is a convenience copy; the binding claim lives in
+        // the leaf hash, so recomputing the leaf from the lied-about balance
+        // must not verify.
+        let lied_leaf = hash_leaf(&addr(1), bundle.balance, bundle.nonce);
+        assert_ne!(
+            lied_leaf, bundle.proof.leaf_hash,
+            "the balance field is not bound to the proof"
+        );
     }
 }

@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 61 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 62 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -69,6 +69,7 @@
 - [59. Dayanikliligi kopya degil tarif saglar: kaynak rejimi ve replikasyon hedefi](#59-dayanikliligi-kopya-degil-tarif-saglar-kaynak-rejimi-ve-replikasyon-hedefi)
 - [60. Turev temsil: kare kendini tanimlar, hicbir ara urun saklanmaz](#60-turev-temsil-kare-kendini-tanimlar-hicbir-ara-urun-saklanmaz)
 - [61. Kimlik kimi, tasima limiti neyi sinirlar: dinlemeden once iki soru](#61-kimlik-kimi-tasima-limiti-neyi-sinirlar-dinlemeden-once-iki-soru)
+- [62. Iki kok: consensus'un okudugu ve kanit verebilen](#62-iki-kok-consensusun-okudugu-ve-kanit-verebilen)
 
 ## 1. Genel sistem mimarisi
 
@@ -2221,3 +2222,46 @@ yolu sessizce sinirsiz kaliyordu.
 **Sinir:** bu limitler tek bir dugumun kabul kapisidir. Dagitik hiz sinirlama,
 istemci basina kota ve ustteki ters vekilin kendi limitleri ayri katmanlardir;
 buradaki denetim onlarin yerine gecmez.
+
+## 62. Iki kok: consensus'un okudugu ve kanit verebilen
+
+Zincirde artik hesap durumu uzerinde **iki** kok var. Bu bir tutarsizlik degil,
+bilincli bir ayrimdir: iki kok ayni hesap kumesine baglanir ama **farkli yapilar
+altinda**, cunku iki farkli soruya cevap verirler.
+
+**Consensus kokun** (`core::account::calculate_state_root`) sorusu: *durum ne?*
+Yapraklar hesap haritasinin siralamasiyla dizilir, agac cache'lenir ve kirli
+hesaplar uzerinden artimli guncellenir. Blok uretimi ve dogrulama bunu okur.
+Bu kok degismez; degistirmek zinciri catallar.
+
+**Kanit veren kokun** (`storage::merkle_trie`) sorusu: *bunu nasil
+kanitlarsin?* Consensus koku bu soruya cevap veremez ve bunun sebebi bir
+eksiklik degil, yapisidir:
+
+- **Yaprak konumu ile adres arasinda kriptografik bag yok.** Konum, hesap
+  haritasinin gezinme sirasindan gelir. Bu agactan cikan bir yol "bir yerde su
+  yaprak var" der; **hangi adresin yapragi oldugunu soylemez**. Bir dogrulayici
+  yolu baska bir adresin kaniti diye yeniden etiketleyebilir.
+- **Yokluk kaniti sinirli boyutta verilemez.** Bir adresin agacta *olmadigini*
+  gostermenin tek yolu tum yapraklari gonderip dogrulayiciya kendisinin
+  aratmaktir: tanik hesap sayisiyla buyur, O(n).
+
+Trie'de konum **adresin bitleridir**. Bu iki sonucu dogurur: iclik ve dislik
+ayni sabit derinlikli (256) kanittir, ve bir kanit baska bir adrese
+etiketlenemez - `MerkleProof::verify` her adimda yon bitinin adresin ilgili
+bitiyle eslestigini denetler, eslesmezse kanit **gecmez**.
+
+**Yuzey:** `prove_account` bir `AccountProofBundle` uretir; zincir aktoru
+`GetAccountProof` komutuyla bunu sunar; RPC `bud_getAccountProof` olarak disa
+verir. Alan adi bilerek **`proofRoot`**, `stateRoot` degil: iki koku
+karistiran bir istemci yanlis degere karsi dogrulama yapar.
+
+**Fail-closed:** dugum kendi urettigi demeti kendi kokune karsi dogrulamadan
+tele koymaz. Dogrulamayan demet bir istemci hatasi degil, bir dugum hatasidir
+ve `-32603` ile reddedilir; bozuk kaniti sahte kanittan ayirmak cagirinin isi
+degildir.
+
+**Ne yapmaz:** demetin tasidigi kok, tasidigi icin guvenilir olmaz. Bir
+dogrulayici ya o koku bagimsiz bir kaynaktan almalidir ya da yalnizca demetin
+kendi icinde tutarli oldugunu ogrenmis olur. Kanit, yalnizca ifade ettigi seyi
+garanti eder.

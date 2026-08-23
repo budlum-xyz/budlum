@@ -4,6 +4,7 @@ use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
+use crate::storage::merkle_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -21,6 +22,14 @@ pub enum ChainCommand {
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
+    /// Account inclusion/absence proof against the proof-bearing state root.
+    ///
+    /// Distinct from [`Self::GetBalance`]: that answers what the node says a
+    /// balance is, this answers what the node can *prove* about it.
+    GetAccountProof(
+        Address,
+        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
+    ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     ProduceBlock(Address, oneshot::Sender<Option<(Block, Vec<[u8; 32]>)>>),
     ValidateAndAddBlock(Block, oneshot::Sender<Result<Vec<[u8; 32]>, String>>),
@@ -527,6 +536,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetNonce(*addr, tx)).await;
         rx.await.unwrap_or(0)
+    }
+
+    /// Ask the chain for a proof about one account.
+    ///
+    /// `None` means the node could not answer, which is not the same as the
+    /// account being absent: absence is itself a proof and comes back as
+    /// `Some` with `present: false`.
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofBundle> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
+        rx.await.unwrap_or(None)
     }
 
     pub async fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
@@ -2514,6 +2534,17 @@ impl ChainActor {
                 ChainCommand::GetNonce(addr, tx) => {
                     let nonce = self.blockchain.state.get_nonce(&addr);
                     let _ = tx.send(nonce);
+                }
+                ChainCommand::GetAccountProof(addr, tx) => {
+                    let bundle = crate::storage::merkle_trie::prove_account(
+                        self.blockchain
+                            .state
+                            .accounts
+                            .iter()
+                            .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
+                        &addr.0,
+                    );
+                    let _ = tx.send(Some(bundle));
                 }
                 ChainCommand::AddTransaction(tx_obj, res_tx) => {
                     let _ = res_tx.send(
