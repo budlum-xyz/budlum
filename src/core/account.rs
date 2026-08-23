@@ -46,6 +46,13 @@ pub struct Account {
     pub balance: u64,
     pub nonce: u64,
 }
+/// Stand-in bytes hashed when a state-root input cannot be serialized.
+///
+/// Derived `Serialize` on owned data cannot fail. Not a panic because every
+/// node recomputes this root: an abort would stop the whole validator set at
+/// once, and a fixed marker keeps the root identical across nodes.
+const STATE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/account-state";
+
 impl Account {
     pub fn new(public_key: Address) -> Self {
         Account {
@@ -246,6 +253,20 @@ pub struct AccountState {
     /// Parallel note subtree (privacy transfers).
     pub note_registry: crate::privacy::L1NoteRegistry,
     pub bridge_state: BridgeState,
+    /// PoA admission: who may act in each permissioned domain, and until when.
+    ///
+    /// Lives in state, not on one node's engine, because a whitelist consensus
+    /// gates on has to be something every node agrees about. Admission is
+    /// per-domain and isolated: a domain's admin admits into that domain only.
+    pub poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding,
+    /// Admitted addresses per domain, recomputed once per block.
+    ///
+    /// `poa_onboarding.whitelist()` needs `&mut` because an elapsed KYC
+    /// horizon is written to the audit trail the first time it is observed.
+    /// Consensus reads state immutably and on a hot path, so the observation
+    /// happens once at block close and the result is cached here. Consensus
+    /// then reads a plain set.
+    pub poa_admitted: BTreeMap<crate::domain::types::DomainId, BTreeSet<Address>>,
     pub message_registry: CrossDomainMessageRegistry,
     pub external_roots: BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
     /// On-chain burn-reserve account the timed burn consumes. `None` when $BUD
@@ -344,6 +365,8 @@ impl AccountState {
             ai_registry: crate::ai::registry::AiRegistry::new(),
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
+            poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding::new(),
+            poa_admitted: BTreeMap::new(),
             message_registry: CrossDomainMessageRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
@@ -384,6 +407,8 @@ impl AccountState {
             ai_registry: crate::ai::registry::AiRegistry::new(),
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
+            poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding::new(),
+            poa_admitted: BTreeMap::new(),
             message_registry: CrossDomainMessageRegistry::new(),
             bns_registry: crate::bns::BnsRegistry::new(),
             nft_registry: crate::socialfi::NftRegistry::new(),
@@ -438,6 +463,8 @@ impl AccountState {
             ai_registry: crate::ai::registry::AiRegistry::new(),
             note_registry: crate::privacy::L1NoteRegistry::new(),
             bridge_state: BridgeState::new(),
+            poa_onboarding: crate::registry::poa_onboarding::PoAOnboarding::new(),
+            poa_admitted: BTreeMap::new(),
             message_registry: CrossDomainMessageRegistry::new(),
             epoch_index: snapshot.height / 100,
             last_epoch_time: 0,
@@ -509,6 +536,11 @@ impl AccountState {
             ai_registry: snapshot.ai_registry.clone().unwrap_or_default(),
             note_registry: snapshot.note_registry.clone().unwrap_or_default(),
             bridge_state: snapshot.bridge_state.clone().unwrap_or_default(),
+            poa_onboarding: snapshot.poa_onboarding.clone().unwrap_or_default(),
+            // Derived, not restored: recomputed from the records above at the
+            // next block close. Restoring it would let a doctored snapshot
+            // ship an admitted set its own records do not support.
+            poa_admitted: BTreeMap::new(),
             message_registry: snapshot.message_registry.clone().unwrap_or_default(),
             team_vesting,
             unbonding_queue: snapshot.unbonding_queue.clone(),
@@ -961,7 +993,11 @@ impl AccountState {
             self.keys_dirty = true;
         }
         self.mark_dirty(public_key);
-        self.accounts.get_mut(public_key).unwrap()
+        // `entry` returns the reference without a second fallible lookup, so
+        // the insert above and the read here cannot drift apart.
+        self.accounts
+            .entry(*public_key)
+            .or_insert_with(|| Account::new(*public_key))
     }
     pub fn mark_dirty(&mut self, public_key: &Address) {
         self.dirty_accounts.insert(*public_key);
@@ -1317,6 +1353,13 @@ impl AccountState {
         // The registry - otherwise the same offence would be paid-for twice.
         // Apply_slashing feeds double-sign evidence, label
         // The registry mirror as DoubleSign, not LivenessFault (audit trail).
+        //
+        // The result is discarded on purpose. The account layer already
+        // returned early if this validator was slashed, so the only errors
+        // reachable here are `NotRegistered` (a validator with no registry
+        // bond) and `AlreadySlashed` (the registry was slashed through
+        // another path first). Both mean the registry is already in the state
+        // this mirror wants, so neither should abort the account-level slash.
         let _ = self.registry.slash(
             *address,
             crate::registry::role::roles::VALIDATOR,
@@ -1547,7 +1590,7 @@ impl AccountState {
                                 return false;
                             }
                             let bytes = bincode::serialize(&record.report)
-                                .expect("SlashingReport must serialize");
+                                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec());
                             sha2::Sha256::digest(&bytes).as_slice() == evidence_hash
                         });
                 if !evidence_matches {
@@ -1738,6 +1781,48 @@ impl AccountState {
         })?;
         self.dirty_accounts.insert(*public_key);
         Ok(())
+    }
+
+    /// Yeni arz yaratan bir yol icin bakiye ekler; sabit tavani asmaz.
+    ///
+    /// # Neden ayri bir yol
+    ///
+    /// [`Self::try_add_balance`] iki farkli isi ayni imzayla yapiyordu:
+    /// **var olan** parayi tasimak (bir kilidin cozulmesi, bir bagin iadesi,
+    /// bir ucretin odenmesi) ve **yeni** para yaratmak (kopruden gelen bir
+    /// varligin karsiligini basmak). Ikisi ayni tasimda birlestiginde arz
+    /// tavani denetlenemez hale gelir: iade edilen bir bagi tavana karsi
+    /// saymak yanlistir, basilan bir tokeni saymamak da.
+    ///
+    /// [`Self::supply_capacity_remaining`] yazilmisti ve 100M'lik tavani
+    /// dogru hesapliyordu, ama **hicbir uretim yolu onu cagirmiyordu** -
+    /// yalnizca testler. Hesaplayan ama kimsenin sormadigi bir sinir,
+    /// sinir degildir; okuyan kisiye sinir varmis gibi gorunmesi yuzunden
+    /// hic olmamasindan daha kotudur.
+    ///
+    /// # Neden tavanin tamamina bakiliyor
+    ///
+    /// Denetlenen sey bu cagrinin miktari degil, cagri sonrasi **toplam**
+    /// taahhut. Tek tek kucuk mint'ler ayri ayri makul gorunur; tavani asan
+    /// sey toplamdir. Payda [`Self::total_bud_committed`]: likit bakiyeler,
+    /// stake, unbonding kuyrugu ve rol baglari. Bunlarin biri disarida
+    /// birakilirsa bir bag, bir arz yakimi gibi okunur ve olmayan bir
+    /// bassliga yer acar.
+    ///
+    /// # Errors
+    ///
+    /// Miktar kalan tavan bosuluğunu asarsa, ya da bakiye `u64` tasarsa.
+    pub fn try_mint_balance(&mut self, public_key: &Address, amount: u64) -> Result<(), String> {
+        let headroom = self.supply_capacity_remaining();
+        if amount > headroom {
+            return Err(format!(
+                "supply cap: minting {amount} would put total committed supply above \
+                 BUD_TOTAL_SUPPLY; only {headroom} remains. Committed supply counts liquid \
+                 balances, validator stake, unbonding entries and role bonds, so the cap is \
+                 a property of the chain and not of any one account."
+            ));
+        }
+        self.try_add_balance(public_key, amount)
     }
 
     /// Amount of `address`'s balance that is currently spendable, taking team
@@ -1968,6 +2053,55 @@ impl AccountState {
         self.accounts.iter().map(|(k, v)| (*k, v.nonce)).collect()
     }
 
+    /// Recompute the PoA admitted sets for every domain that has records.
+    ///
+    /// Called once per block from `apply_system_effects`. Two reasons it lives
+    /// at block close rather than on the consensus read path:
+    ///
+    /// * `whitelist()` takes `&mut self` because observing an elapsed KYC
+    ///   horizon writes an audit entry. Consensus reads `&AccountState`.
+    /// * More importantly, *when* that observation happens must not depend on
+    ///   who asked. At block close every node performs it at the same index
+    ///   with the same state, so the compliance record is identical on all of
+    ///   them. A record whose contents depend on query traffic is not a record.
+    pub fn refresh_poa_admissions(&mut self, block_index: u64) {
+        let domains = self.poa_onboarding.domains_with_records();
+        self.poa_admitted.clear();
+        for domain in domains {
+            let admitted = self
+                .poa_onboarding
+                .whitelist(domain, block_index)
+                .members()
+                .into_iter()
+                .copied()
+                .collect::<BTreeSet<Address>>();
+            self.poa_admitted.insert(domain, admitted);
+        }
+    }
+
+    /// Is `domain` running admission control?
+    ///
+    /// A domain becomes permissioned by having an admin, which is a
+    /// deliberate act recorded in state. Chains that never opted in are not
+    /// gated, so an empty admission registry does not silently stop them.
+    #[must_use]
+    pub fn poa_is_permissioned(&self, domain: crate::domain::types::DomainId) -> bool {
+        self.poa_onboarding.is_permissioned(domain)
+    }
+
+    /// Addresses admitted to act in `domain` as of the last block close.
+    ///
+    /// An empty set means nobody is admitted, which in a permissioned domain
+    /// is a real answer and not a missing one. Callers must not read it as
+    /// "no filter configured".
+    #[must_use]
+    pub fn poa_admitted_addresses(
+        &self,
+        domain: crate::domain::types::DomainId,
+    ) -> BTreeSet<Address> {
+        self.poa_admitted.get(&domain).cloned().unwrap_or_default()
+    }
+
     pub fn calculate_state_root(&mut self) -> String {
         use sha2::{Digest, Sha256};
 
@@ -2068,7 +2202,7 @@ impl AccountState {
         let accounts_root_bytes = if self.cached_tree.is_empty() {
             [0u8; 32]
         } else {
-            self.cached_tree.last().unwrap()[0]
+            self.cached_tree.last().map_or([0u8; 32], |row| row[0])
         };
 
         // ConsensusStateV2 Root Hashing
@@ -2143,21 +2277,23 @@ impl AccountState {
         final_hasher.update(self.tokenomics.block_reward.to_le_bytes());
         final_hasher.update(b"tokenomics_v1");
         final_hasher.update(
-            bincode::serialize(&self.tokenomics).expect("tokenomics must serialize for state root"),
+            bincode::serialize(&self.tokenomics)
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(b"timed_burn_v1");
         final_hasher.update(
-            bincode::serialize(&self.timed_burn).expect("timed_burn must serialize for state root"),
+            bincode::serialize(&self.timed_burn)
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(b"burn_reserve_v1");
         final_hasher.update(
             bincode::serialize(&self.burn_reserve_address)
-                .expect("burn_reserve_address must serialize for state root"),
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(b"team_vesting_v1");
         final_hasher.update(
             bincode::serialize(&self.team_vesting)
-                .expect("team_vesting must serialize for state root"),
+                .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
         final_hasher.update(self.bridge_root);
         final_hasher.update(self.message_root);
@@ -2210,7 +2346,7 @@ impl AccountState {
             final_hasher.update(b"external_roots_v1");
             final_hasher.update(
                 bincode::serialize(&self.external_roots)
-                    .expect("external_roots must serialize for state root"),
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
         if self.governance.has_non_default_state() {
@@ -2580,6 +2716,60 @@ mod tests {
             state.supply_capacity_remaining(),
             0,
             "staked BUD must consume supply headroom"
+        );
+    }
+
+    /// Arz yaratan yol tavani asamaz.
+    ///
+    /// Tavan zaten hesaplaniyordu; eksik olan sey onu **soran** bir uretim
+    /// yoluydu. Bu test hem sinirin tuttugunu hem de sinirin dogru paydayi
+    /// kullandigini olcer: stake ve rol baglari da taahhut edilmis arzdir,
+    /// disarida birakilirlarsa olmayan bir bassliga yer acilir.
+    #[test]
+    fn a_minting_path_cannot_cross_the_supply_cap() {
+        let recipient = test_addr_from_byte(31u8);
+        let mut state = AccountState::new();
+
+        // Tavanin 10 birim altina kadar dolduruluyor.
+        let cap = crate::tokenomics::BUD_TOTAL_SUPPLY;
+        state.add_balance(&recipient, cap - 10);
+        assert_eq!(state.supply_capacity_remaining(), 10);
+
+        // Bosluk kadar basim gecer - kapi mesru basimi engellememeli.
+        state
+            .try_mint_balance(&recipient, 10)
+            .expect("bosluk kadar basim kabul edilmeli");
+        assert_eq!(state.supply_capacity_remaining(), 0);
+
+        // Tavanin ustundeki tek birim reddedilir.
+        let err = state
+            .try_mint_balance(&recipient, 1)
+            .expect_err("tavan dolduktan sonra basim reddedilmeli");
+        assert!(
+            err.contains("supply cap"),
+            "ret gerekcesi tavani soylemeli: {err}"
+        );
+
+        // Ret gercekten uygulanmis olmali: reddedip yine de eklemek
+        // tavani suslemeye cevirirdi.
+        assert_eq!(
+            state.get_balance(&recipient),
+            cap,
+            "reddedilen basim bakiyeye girmemeli"
+        );
+
+        // Stake de taahhut edilmis arzdir: tavan yalnizca likit bakiyelere
+        // baksaydi, stake'lenmis her birim yeni basim icin sahte bosluk
+        // acardi.
+        let mut staked = AccountState::new();
+        let holder = test_addr_from_byte(32u8);
+        let validator = test_addr_from_byte(33u8);
+        staked.add_balance(&holder, cap - 100);
+        staked.add_validator(validator, 100);
+        assert_eq!(staked.supply_capacity_remaining(), 0);
+        assert!(
+            staked.try_mint_balance(&holder, 1).is_err(),
+            "stake edilmis arz tavana sayilmali"
         );
     }
 

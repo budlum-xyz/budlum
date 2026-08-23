@@ -52,6 +52,49 @@ impl EncryptionPolicy {
         Ok(())
     }
 
+    /// Bir grant suresinin bu politikaya uyup uymadigi.
+    ///
+    /// `max_grant_duration_blocks` bugune kadar yalnizca saklanan bir sayiydi:
+    /// politika kaydediliyor, dogrulaniyor, Merkle yaprağina giriyordu, ama
+    /// hicbir grant ona karsi olculmuyordu. DAO'nun "en fazla N blok" karari
+    /// bu yuzden bir temenniydi - istenen sureyi asan bir grant kabul
+    /// ediliyordu.
+    ///
+    /// # Errors
+    ///
+    /// Politika pasifse, bu blokta artik gecerli degilse
+    /// (`deprecated_after_block`), ya da istenen sure tavani asiyorsa reddeder.
+    pub fn check_grant_duration(
+        &self,
+        issued_at_block: u64,
+        expires_at_block: u64,
+    ) -> Result<(), String> {
+        if !self.active {
+            return Err(format!(
+                "EncryptionPolicy v{} is not active; a grant cannot cite it",
+                self.version
+            ));
+        }
+        if let Some(deprecated) = self.deprecated_after_block {
+            if issued_at_block >= deprecated {
+                return Err(format!(
+                    "EncryptionPolicy v{} was deprecated after block {deprecated}; grant issued at {issued_at_block}",
+                    self.version
+                ));
+            }
+        }
+        // Ters araligi burada reddetmiyoruz: `validate_shape` zaten
+        // `expires > issued` diyor. Buranin sordugu tek soru tavanin asilip
+        // asilmadigi, ve tasma durumunda cevap "asildi".
+        let requested = expires_at_block.saturating_sub(issued_at_block);
+        if requested > self.max_grant_duration_blocks {
+            return Err(format!(
+                "AccessGrant duration {requested} exceeds EncryptionPolicy v{} maximum {}",
+                self.version, self.max_grant_duration_blocks
+            ));
+        }
+        Ok(())
+    }
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"BDLM_POLLEN_ENCRYPTION_POLICY_V1");
@@ -639,6 +682,50 @@ mod tests {
         assert!(!json.contains("decrypt"));
         assert!(!json.contains("private"));
         assert!(!json.contains("override"));
+    }
+
+    fn policy_with_max(max: u64) -> EncryptionPolicy {
+        EncryptionPolicy {
+            version: 1,
+            hpke_suite_id: 0x20,
+            min_public_key_bytes: 32,
+            max_grant_duration_blocks: max,
+            deprecated_after_block: None,
+            active: true,
+        }
+    }
+
+    /// Tavan yalnizca birinin ona carpmasiyla tavandir. Politika 100 blok
+    /// diyorsa 101 bloklu bir grant reddedilmeli.
+    #[test]
+    fn a_grant_longer_than_the_policy_maximum_is_refused() {
+        let policy = policy_with_max(100);
+        assert!(
+            policy.check_grant_duration(10, 110).is_ok(),
+            "tam tavan gecmeli"
+        );
+        let err = policy
+            .check_grant_duration(10, 111)
+            .expect_err("tavani asan sure reddedilmeli");
+        assert!(err.contains("exceeds EncryptionPolicy"), "{err}");
+    }
+
+    /// Pasif bir politika bir grant'a dayanak olamaz.
+    #[test]
+    fn an_inactive_policy_cannot_back_a_grant() {
+        let mut policy = policy_with_max(100);
+        policy.active = false;
+        assert!(policy.check_grant_duration(10, 20).is_err());
+    }
+
+    /// Kullanimdan kaldirilma bloguna ulasildiginda politika artik gecmez.
+    #[test]
+    fn a_deprecated_policy_stops_backing_grants_at_its_block() {
+        let mut policy = policy_with_max(100);
+        policy.deprecated_after_block = Some(50);
+        assert!(policy.check_grant_duration(49, 60).is_ok());
+        assert!(policy.check_grant_duration(50, 60).is_err());
+        assert!(policy.check_grant_duration(51, 60).is_err());
     }
 
     #[test]

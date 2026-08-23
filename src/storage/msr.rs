@@ -3,7 +3,10 @@
 //! WIRING: unwired - this module measures the repair-traffic floor for the
 //! storage research; the consensus surface that will price repair from it
 //! (validator-facing accounting, Layer 3) is not built yet, so the module is
-//! reached by its own tests and by `lrc.rs` only.
+//! reached by its own tests only. (Yon duzeltmesi: bu modul `lrc.rs`'i
+//! **okur** - `lrc_repair_traffic_scaled` icin `LrcLayout` alir - tersi
+//! degil. Onceki ifade "by `lrc.rs`" diyerek bagimliligi ters gosteriyordu,
+//! yani bu modulun bir cagirani varmis gibi okunuyordu; yok.)
 //!
 //! A repair that must read every surviving data shard costs `k` shards of
 //! traffic no matter how the parity is laid out. Regenerating codes lower

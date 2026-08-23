@@ -214,4 +214,71 @@ mod tests {
             "consecutive block timestamps must be non-decreasing"
         );
     }
+
+    // ─── Egemen alan sablonu: uzlasma alanina baglama ───
+
+    /// Zincir uzerinden kaydedilen sablon, gercek alanla ayni turu gostermeli.
+    ///
+    /// `Blockchain::register_sovereign_template` iki kaydi birbirine baglar.
+    /// Bag olmadan sablon kendi basina gecerli olurdu ve PoS calisan bir alan
+    /// denetime "izinli ve KYC'li" diye sunulabilirdi.
+    #[test]
+    fn a_sovereign_template_must_match_the_registered_domain() {
+        use crate::domain::sovereign::{
+            ComplianceEvidence, DomainLifecycleState, SovereignDomainClass, SovereignDomainTemplate,
+        };
+        use crate::domain::ConsensusKind;
+
+        let mut bc = setup_chain();
+        let domain = crate::domain::plugin::default_domain(
+            77,
+            ConsensusKind::PoA,
+            4077,
+            "poa-authority-quorum",
+            0,
+        );
+        let operator = domain.operator.expect("varsayilan alan operator tasir");
+        bc.register_consensus_domain(domain).expect("alan kaydi");
+
+        let evidence = ComplianceEvidence {
+            policy_hash: [1u8; 32],
+            authority_set_hash: [2u8; 32],
+            jurisdiction_hash: [3u8; 32],
+            audit_commitment: [4u8; 32],
+        };
+
+        // Yanlis tur: alan PoA, sablon PoS diyor.
+        let mismatched = SovereignDomainTemplate::new(
+            77,
+            SovereignDomainClass::Cbdc,
+            ConsensusKind::PoS,
+            operator,
+            false,
+            evidence.clone(),
+            DomainLifecycleState::Draft,
+        );
+        assert!(
+            bc.register_sovereign_template(mismatched).is_err(),
+            "tur uyusmazligi reddedilmeli"
+        );
+
+        // Dogru tur ve operator: kabul.
+        let matching = SovereignDomainTemplate::new(
+            77,
+            SovereignDomainClass::Cbdc,
+            ConsensusKind::PoA,
+            operator,
+            true,
+            evidence,
+            DomainLifecycleState::Draft,
+        );
+        let root_before = bc.sovereign_template_root();
+        bc.register_sovereign_template(matching)
+            .expect("eslesen sablon kabul edilmeli");
+        assert_ne!(
+            bc.sovereign_template_root(),
+            root_before,
+            "kabul edilen sablon koku degistirmeli"
+        );
+    }
 }

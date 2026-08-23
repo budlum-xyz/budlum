@@ -29,7 +29,7 @@ pub const fn fixed_to_int(v: i64) -> i32 {
 /// Sabit nokta çarpma (32.16 × 32.16 → 32.16). Doyuran.
 #[must_use]
 pub const fn fixed_mul(a: i64, b: i64) -> i64 {
-    let r = (a as i128) * (b as i128) >> FIXED_FRAC_BITS;
+    let r = ((a as i128) * (b as i128)) >> FIXED_FRAC_BITS;
     if r > i64::MAX as i128 {
         i64::MAX
     } else if r < i64::MIN as i128 {
@@ -131,7 +131,11 @@ mod tests {
     fn sqrt_approximation() {
         // sqrt(4) ≈ 2
         let s = fixed_sqrt(fixed_from_int(4));
-        assert!((fixed_to_int(s) - 2).abs() <= 1, "sqrt(4)≈2: {}", fixed_to_int(s));
+        assert!(
+            (fixed_to_int(s) - 2).abs() <= 1,
+            "sqrt(4)≈2: {}",
+            fixed_to_int(s)
+        );
         // sqrt(0) = 0
         assert_eq!(fixed_sqrt(0), 0);
         // sqrt(1) ≈ 1
@@ -148,7 +152,10 @@ mod tests {
         assert!(third > 0 && third < FIXED_ONE);
         // determinizm: aynı girdi aynı çıktı
         assert_eq!(fixed_fraction(1, 3), fixed_fraction(1, 3));
-        assert_eq!(fixed_mul(fixed_from_int(7), fixed_from_int(9)), fixed_mul(fixed_from_int(9), fixed_from_int(7)));
+        assert_eq!(
+            fixed_mul(fixed_from_int(7), fixed_from_int(9)),
+            fixed_mul(fixed_from_int(9), fixed_from_int(7))
+        );
         // denom 0 → 0
         assert_eq!(fixed_fraction(5, 0), 0);
     }

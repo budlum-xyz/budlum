@@ -1,3 +1,7 @@
+// Integration test: an unwrap here is how the test reports a broken
+// invariant, so the workspace-wide panic gate does not apply.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Fiat-Shamir binding order in the in-tree STARK.
 //!
 //! Six zkVMs were found in March 2026 to share one root cause: a
@@ -200,5 +204,198 @@ fn alpha_and_zeta_follow_their_commitments() {
             zeta + 1,
             quotient + 1
         );
+
+        // alpha, iz taahhutlerinden **sonra** gelmeli.
+        //
+        // Bu testin adi "alpha_and_zeta" idi ve govdesi yalnizca zeta'yi
+        // olcuyordu - alpha hic aranmiyordu. Belgelenmis ama denetlenmemis
+        // bir degismez, denetlenmeyen bir degismezdir; adi gecen kisim
+        // okuyana kapsandigi izlenimi verdigi icin daha da kotusudur.
+        //
+        // Kisitlari tek polinomda katlayan carpan alpha'dir. Iz taahhudu
+        // sabitlenmeden ornekleniirse, prover alpha'yi ogrendikten sonra izi
+        // secebilir ve katlanmis kisitin sifira gitmesini saglayacak bir iz
+        // arayabilir. Katlama ancak katladigi seyler sabitse anlamlidir.
+        let trace_observe = code(body)
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.contains("challenger.observe")
+                    && (l.contains("trace_commit") || l.contains("commitments.trace"))
+            })
+            .map(|(i, _)| i)
+            .next()
+            .unwrap_or_else(|| {
+                panic!("{name}: the trace commitment is no longer absorbed into the transcript")
+            });
+        let alpha = code(body)
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("alpha") && l.contains("sample_algebra_element()"))
+            .map(|(i, _)| i)
+            .next()
+            .unwrap_or_else(|| panic!("{name}: alpha is no longer sampled"));
+        assert!(
+            trace_observe < alpha,
+            "{name}: alpha is sampled at line {} before the trace commitment \
+             is absorbed at line {}. A prover that learns the folding factor \
+             first can search for a trace whose folded constraint vanishes",
+            alpha + 1,
+            trace_observe + 1
+        );
+
+        // Ve alpha, zeta'dan once gelmeli: zeta, alpha ile katlanmis kisitin
+        // degerlendirildigi noktadir. Ters sirada nokta, katlamadan bagimsiz
+        // secilmis olurdu.
+        assert!(
+            alpha < zeta,
+            "{name}: zeta (line {}) is sampled before alpha (line {}); the \
+             evaluation point must depend on the folding it evaluates",
+            zeta + 1,
+            alpha + 1
+        );
     }
+}
+
+// ── Verifier panic surface (2026-08-21) ──────────────────────────────────
+// A proof is attacker-supplied data. Anything the verifier reads out of it is
+// reachable by anyone who can submit one, so a panic there is not a crash in
+// one request: `panic = "abort"` in the release profile takes the whole node
+// down, and a node that aborts on a malformed proof is a liveness hole that
+// costs the attacker one message.
+//
+// The values below were guarded only indirectly - `valid_shape` and
+// `process_preprocessed_trace` rejected the mismatching cases a hundred lines
+// earlier, so the `unwrap`s were unreachable *at the time they were written*.
+// That is the fragile kind of correct: the guarantee lives in a different
+// function, and an edit there silently converts a rejected proof into a
+// panicking node. They now return `InvalidProofShape` at the point of use.
+
+/// No `unwrap`/`expect` may read proof-supplied data in the verifier.
+///
+/// Scoped to the verifier because that is the side that consumes untrusted
+/// input; the prover runs on data we produced ourselves.
+#[test]
+fn verifier_never_unwraps_attacker_supplied_values() {
+    let offenders: Vec<(usize, &str)> = code(VERIFIER)
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(".unwrap()") || l.contains(".expect("))
+        .map(|(i, l)| (i + 1, l.trim()))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "the verifier panics on malformed proof data at {offenders:?}. A proof \
+         is attacker-supplied; return `VerificationError::InvalidProofShape` \
+         instead so a bad proof is rejected rather than taking the node down"
+    );
+}
+
+/// The shape-validated optionals must carry a local check where they are read.
+///
+/// Pins the fix rather than the absence of a symbol: each of these fields is
+/// unwrapped from an `Option` whose `Some`-ness was established elsewhere, and
+/// the point of the change is that the rejection is now local.
+#[test]
+fn optional_openings_carry_a_local_shape_check() {
+    for field in [
+        "aux_trace_local",
+        "aux_trace_next",
+        "preprocessed_local",
+        "preprocessed_next",
+        "trace_next",
+    ] {
+        let read = code(VERIFIER)
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(field))
+            .any(|(i, _)| {
+                // The `ok_or` sits within a few lines of the field read, since
+                // the read is a multi-line method chain.
+                code(VERIFIER)[i..(i + 4).min(code(VERIFIER).len())]
+                    .iter()
+                    .any(|l| l.contains("ok_or(VerificationError::InvalidProofShape)"))
+            });
+        assert!(
+            read,
+            "`{field}` is read out of the proof without a local \
+             `ok_or(VerificationError::InvalidProofShape)`; it would panic if \
+             the distant shape check ever stops covering it"
+        );
+    }
+}
+
+/// `degree_bits` comes out of the proof bytes and is used as a shift amount.
+#[test]
+fn degree_bits_is_bounded_before_it_is_shifted() {
+    let bound = first(VERIFIER, "> MAX_VERIFIER_DEGREE_BITS");
+    let shift = first(VERIFIER, "let degree = 1 << degree_bits");
+    assert!(
+        bound < shift,
+        "`degree_bits` is shifted at line {} before being bounded at line {}; \
+         a corrupt proof would overflow the shift and abort the node",
+        shift + 1,
+        bound + 1
+    );
+}
+
+/// The verifier's own arithmetic must not depend on a check that lives in
+/// another function.
+///
+/// `recompose_quotient_from_chunks` indexes its Lagrange coefficients by the
+/// chunk position while the coefficient list is built from the domain list.
+/// Both lengths were, until this test, guaranteed only by `valid_shape` inside
+/// `verify_with_preprocessed`. That is a guarantee by neighbourhood, not by
+/// type: a second caller added later inherits none of it, and the chunk count
+/// comes from a proof a remote party supplied, so the failure mode is a panic
+/// on the verification path rather than a rejected proof.
+#[test]
+fn quotient_recomposition_states_its_own_precondition() {
+    let src = code(VERIFIER).join("\n");
+    let start = first(VERIFIER, "pub fn recompose_quotient_from_chunks");
+    let body: String = code(VERIFIER)
+        .iter()
+        .skip(start)
+        .take(60)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        body.contains("quotient_chunks.len() != quotient_chunks_domains.len()"),
+        "recompose_quotient_from_chunks no longer compares the chunk count \
+         against the domain count; the indexing below it can then read past \
+         the coefficient list"
+    );
+    assert!(
+        body.contains("return None"),
+        "the length disagreement must be refused, not repaired: a proof whose \
+         shape does not match the instance is not a proof"
+    );
+    assert!(
+        src.contains("recompose_quotient_from_chunks::<SC>(")
+            && src.contains(".ok_or(VerificationError::InvalidProofShape)?"),
+        "the caller must turn the refusal into a verification error rather \
+         than unwrapping it"
+    );
+}
+
+/// A refusal that a caller can ignore is not a refusal.
+#[test]
+fn the_recomposition_refusal_cannot_be_discarded_by_a_caller() {
+    let sig_at = first(VERIFIER, "pub fn recompose_quotient_from_chunks");
+    let ret: String = code(VERIFIER)
+        .iter()
+        .skip(sig_at)
+        .take(12)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        ret.contains("-> Option<SC::Challenge>"),
+        "the function returns a bare field element again, so a caller that \
+         skips the shape check gets a silently wrong quotient instead of a \
+         refusal"
+    );
 }

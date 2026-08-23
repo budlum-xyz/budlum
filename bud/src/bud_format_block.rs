@@ -23,9 +23,9 @@ pub const MAX_PACTS_PER_BLOCK: usize = 10_000;
 /// Bloktaki tek PACT sınav kaydı: commitment + sınav sonucu (bayt YOK - İ2).
 #[derive(Debug, Clone)]
 pub struct PactChallengeInBlock {
-    pub pact_hash: [u8; 32],   // PACT kaydının hash'i
+    pub pact_hash: [u8; 32], // PACT kaydının hash'i
     pub outcome: RegenerationOutcome,
-    pub cost_units: u64,       // üretim maliyeti (İ2 ekonomi)
+    pub cost_units: u64, // üretim maliyeti (İ2 ekonomi)
 }
 
 /// Rejenerasyon bloğu (zincir halkası).
@@ -34,10 +34,10 @@ pub struct RegenerationBlock {
     pub epoch: u64,
     pub prev_hash: [u8; 32],
     pub pact_challenges: Vec<PactChallengeInBlock>,
-    pub segment_root: [u8; 32],   // defter kökü (K89)
-    pub byte_budget: u64,         // İ8: ağın toplam fiziksel yük tavanı
+    pub segment_root: [u8; 32], // defter kökü (K89)
+    pub byte_budget: u64,       // İ8: ağın toplam fiziksel yük tavanı
     pub ts_unix: u64,
-    pub hash: [u8; 32],           // zincir çapası (deterministik)
+    pub hash: [u8; 32], // zincir çapası (deterministik)
 }
 
 impl RegenerationBlock {
@@ -55,8 +55,13 @@ impl RegenerationBlock {
             return None;
         }
         let mut b = RegenerationBlock {
-            epoch, prev_hash, pact_challenges: challenges, segment_root,
-            byte_budget, ts_unix, hash: [0u8; 32],
+            epoch,
+            prev_hash,
+            pact_challenges: challenges,
+            segment_root,
+            byte_budget,
+            ts_unix,
+            hash: [0u8; 32],
         };
         b.hash = b.compute_hash();
         Some(b)
@@ -86,7 +91,10 @@ impl RegenerationBlock {
     /// Blok doğrulama: hash zinciri + tüm sınavlar VERIFIED mi (İ2: üretim mutabakatı).
     pub fn verify(&self) -> bool {
         self.hash == self.compute_hash()
-            && self.pact_challenges.iter().all(|c| c.outcome == RegenerationOutcome::Verified)
+            && self
+                .pact_challenges
+                .iter()
+                .all(|c| c.outcome == RegenerationOutcome::Verified)
     }
 
     /// Rejenerasyon sınavını bloğa eklemeden önce DOĞRULA (İ2 çekirdeği).
@@ -97,7 +105,11 @@ impl RegenerationBlock {
         cost_units: u64,
     ) -> Option<PactChallengeInBlock> {
         let outcome = RegenerationChallenge::verify(pact, produced);
-        Some(PactChallengeInBlock { pact_hash: pact.record_hash(), outcome, cost_units })
+        Some(PactChallengeInBlock {
+            pact_hash: pact.record_hash(),
+            outcome,
+            cost_units,
+        })
     }
 
     /// Rejenerasyon ekonomisi (İ2 kabul): bloktaki toplam üretim maliyeti,
@@ -133,7 +145,9 @@ impl RegenerationBlock {
     pub fn from_blob(bytes: &[u8]) -> Option<Self> {
         const HDR: usize = 8 + 1 + 8 + 32 + 4;
         if bytes.len() < HDR + 32 + 32 + 8 + 8 + 32
-            || bytes[0..8] != BLOCK_MAGIC || bytes[8] != BLOCK_VERSION {
+            || bytes[0..8] != BLOCK_MAGIC
+            || bytes[8] != BLOCK_VERSION
+        {
             return None;
         }
         let epoch = u64::from_le_bytes(bytes[9..17].try_into().ok()?);
@@ -161,7 +175,11 @@ impl RegenerationBlock {
             pos += 1;
             let cost_units = u64::from_le_bytes(bytes[pos..pos + 8].try_into().ok()?);
             pos += 8;
-            challenges.push(PactChallengeInBlock { pact_hash, outcome, cost_units });
+            challenges.push(PactChallengeInBlock {
+                pact_hash,
+                outcome,
+                cost_units,
+            });
         }
         if bytes.len() < pos + 32 + 8 + 8 + 32 {
             return None;
@@ -179,7 +197,15 @@ impl RegenerationBlock {
         if pos != bytes.len() {
             return None;
         }
-        let b = RegenerationBlock { epoch, prev_hash, pact_challenges: challenges, segment_root, byte_budget, ts_unix, hash };
+        let b = RegenerationBlock {
+            epoch,
+            prev_hash,
+            pact_challenges: challenges,
+            segment_root,
+            byte_budget,
+            ts_unix,
+            hash,
+        };
         if b.hash != b.compute_hash() {
             return None; // kurcalama
         }
@@ -202,8 +228,9 @@ mod tests {
         let (pact, produced) = sample_pact();
         let ch = RegenerationBlock::add_challenge(&pact, &produced, 50).expect("challenge");
         assert_eq!(ch.outcome, RegenerationOutcome::Verified);
-        let block = RegenerationBlock::new(1, [0u8; 32], vec![ch], [9u8; 32], 1_000_000, 1_768_000_000)
-            .expect("blok");
+        let block =
+            RegenerationBlock::new(1, [0u8; 32], vec![ch], [9u8; 32], 1_000_000, 1_768_000_000)
+                .expect("blok");
         assert!(block.verify(), "blok geçerli (tüm sınavlar VERIFIED)");
         // blob roundtrip
         let blob = block.to_blob();
@@ -226,8 +253,8 @@ mod tests {
         let (pact, _) = sample_pact();
         let ch = RegenerationBlock::add_challenge(&pact, b"yanlis uretim", 50).expect("challenge");
         assert_eq!(ch.outcome, RegenerationOutcome::Mismatch);
-        let block = RegenerationBlock::new(2, [1u8; 32], vec![ch], [0u8; 32], 100, 10)
-            .expect("blok");
+        let block =
+            RegenerationBlock::new(2, [1u8; 32], vec![ch], [0u8; 32], 100, 10).expect("blok");
         assert!(!block.verify(), "Mismatch sınav bloğu RED eder (İ2)");
     }
 
@@ -257,7 +284,14 @@ mod tests {
         let empty = RegenerationBlock::new(4, block.hash, vec![], [0u8; 32], 0, 4).unwrap();
         assert!(empty.verify());
         // MAX_PACTS aşımı → None
-        let too_many = vec![PactChallengeInBlock { pact_hash: [0u8; 32], outcome: RegenerationOutcome::Verified, cost_units: 1 }; MAX_PACTS_PER_BLOCK + 1];
+        let too_many = vec![
+            PactChallengeInBlock {
+                pact_hash: [0u8; 32],
+                outcome: RegenerationOutcome::Verified,
+                cost_units: 1
+            };
+            MAX_PACTS_PER_BLOCK + 1
+        ];
         assert!(RegenerationBlock::new(5, [0u8; 32], too_many, [0u8; 32], 0, 5).is_none());
     }
 
@@ -267,7 +301,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

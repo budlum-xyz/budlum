@@ -93,8 +93,16 @@ mod tests {
         assert!(!is_tiny(5000, TINY_OBJECT_THRESHOLD));
         assert!(!is_tiny(100, 0), "eşik 0 → sınıf yok");
         let nesneler = vec![
-            TinyInline { content_id: hof(b"a"), data: vec![0u8; 100], encrypted: false },
-            TinyInline { content_id: hof(b"b"), data: vec![0u8; 200], encrypted: true },
+            TinyInline {
+                content_id: hof(b"a"),
+                data: vec![0u8; 100],
+                encrypted: false,
+            },
+            TinyInline {
+                content_id: hof(b"b"),
+                data: vec![0u8; 200],
+                encrypted: true,
+            },
         ];
         assert!(fits_in_block(&nesneler, 1024));
         assert!(!fits_in_block(&nesneler, 200));
@@ -116,7 +124,11 @@ mod tests {
 
     #[test]
     fn tiny_deterministik() {
-        let t = TinyInline { content_id: [1u8; 32], data: b"veri".to_vec(), encrypted: false };
+        let t = TinyInline {
+            content_id: [1u8; 32],
+            data: b"veri".to_vec(),
+            encrypted: false,
+        };
         assert_eq!(tiny_digest(&t), tiny_digest(&t));
     }
 }

@@ -197,6 +197,44 @@ pub fn split_bridge_fee(
     Ok((recipient, fee))
 }
 
+/// Refuse a relayed burn whose lock was opened in a different domain.
+///
+/// A burn message says "the tokens were destroyed on the target chain, release
+/// the lock here". Two domains have to agree for that to be true: the domain
+/// the lock was opened *from*, and the domain the burn message names as its
+/// target. If they differ, the message is talking about a different transfer
+/// than the one about to be unlocked.
+///
+/// # Why this is a function and not two comparisons
+///
+/// It was two comparisons - one of them missing. Two production paths unlock a
+/// bridge transfer: `Blockchain::submit_relay_proof` and the executor's
+/// external-result handler. They perform the same six steps (unlock, fetch
+/// transfer, split the fee, two overflow refusals, credit), the second was
+/// written by copying the first, and its own comment says so. But this check
+/// was in the first and not the second, so which check applied depended on
+/// which entry point the message arrived through - and an attacker picks the
+/// entry point.
+///
+/// A check that lives in one caller is not a rule, it is a habit. Callers may
+/// be added; a rule with one home cannot be forgotten by the next one.
+///
+/// # Errors
+///
+/// Returns `Err` when the transfer's source domain is not the burn message's
+/// target domain.
+pub fn check_burn_matches_lock_domain(
+    lock_source_domain: DomainId,
+    burn_target_domain: DomainId,
+) -> Result<(), BridgeError> {
+    if lock_source_domain != burn_target_domain {
+        return Err(BridgeError(format!(
+            "relayed burn targets domain {burn_target_domain} but the lock was opened from domain {lock_source_domain}"
+        )));
+    }
+    Ok(())
+}
+
 impl BridgeState {
     pub fn new() -> Self {
         Self {
@@ -660,7 +698,7 @@ mod tests {
 
 #[cfg(test)]
 mod bridge_fee_split {
-    use super::split_bridge_fee;
+    use super::{check_burn_matches_lock_domain, split_bridge_fee};
 
     const PPM_1_PCT: u64 = 10_000;
 
@@ -744,5 +782,35 @@ mod bridge_fee_split {
             assert_eq!(recipient + fee, amount);
             assert!(recipient > 0, "amount {amount} left the recipient nothing");
         }
+    }
+    #[test]
+    fn a_relayed_burn_from_the_wrong_domain_is_refused() {
+        // The lock was opened from domain 1; the burn message claims to
+        // target domain 9. It is describing some other transfer.
+        assert!(check_burn_matches_lock_domain(1, 9).is_err());
+        assert!(check_burn_matches_lock_domain(1, 1).is_ok());
+    }
+
+    #[test]
+    fn both_unlock_paths_call_the_same_domain_rule() {
+        // The rule used to live in `submit_relay_proof` and not in the
+        // executor's external-result handler, so which check applied depended
+        // on which entry point a message arrived through - and an attacker
+        // picks the entry point. This test reads the two call sites rather
+        // than the behaviour, because the defect was structural: the logic
+        // was correct wherever it existed, and absent where it did not.
+        let chain = include_str!("../chain/blockchain.rs");
+        let executor = include_str!("../execution/executor.rs");
+        for (name, src) in [("blockchain.rs", chain), ("executor.rs", executor)] {
+            assert!(
+                src.contains("check_burn_matches_lock_domain"),
+                "{name} unlocks a bridge transfer without calling the shared domain rule"
+            );
+        }
+        // And nobody has re-inlined the old comparison.
+        assert!(
+            !chain.contains("Relayed burn target domain does not match lock source"),
+            "the inline check came back; one rule, one home"
+        );
     }
 }

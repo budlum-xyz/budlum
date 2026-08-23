@@ -196,29 +196,43 @@ impl HuffmanCoder {
         }
         if fs.len() == 1 {
             let mut lens = [0u8; 256];
-            lens[fs[0].3.unwrap()] = 1;
+            // Tek yapraga sahip agac: yaprak her zaman bir sembol tasir, ama
+            // bunu `unwrap` ile degil desen eslemesiyle soyluyoruz.
+            if let Some(sym) = fs[0].3 {
+                lens[sym] = 1;
+            }
             return lens;
         }
         let mut internal = fs.len();
         while internal > 1 {
             let mut best1: Option<usize> = None;
             let mut best2: Option<usize> = None;
+            // Ayni karsilastirma, `unwrap` yerine desen eslemesiyle. Siralama
+            // olcutu degismedi: once frekans, esitlikte kucuk indeks - Huffman
+            // agacinin belirlenimli kalmasi buna bagli.
+            let better = |cand: usize, cur: Option<usize>| -> bool {
+                match cur {
+                    None => true,
+                    Some(c) => fs[cand].0 < fs[c].0 || (fs[cand].0 == fs[c].0 && cand < c),
+                }
+            };
             for i in 0..fs.len() {
                 if used[i] {
                     continue;
                 }
-                if best1.is_none() || fs[i].0 < fs[best1.unwrap()].0
-                    || (fs[i].0 == fs[best1.unwrap()].0 && i < best1.unwrap())
-                {
+                if better(i, best1) {
                     best2 = best1;
                     best1 = Some(i);
-                } else if best2.is_none() || fs[i].0 < fs[best2.unwrap()].0
-                    || (fs[i].0 == fs[best2.unwrap()].0 && i < best2.unwrap())
-                {
+                } else if better(i, best2) {
                     best2 = Some(i);
                 }
             }
-            let (i1, i2) = (best1.unwrap(), best2.unwrap());
+            // Dongu kosulu (`internal > 1`) kullanilmamis en az iki dugum
+            // birakir; yine de eksiklikte panik yerine agaci oldugu gibi
+            // birakip cikiyoruz.
+            let (Some(i1), Some(i2)) = (best1, best2) else {
+                break;
+            };
             let f = fs[i1].0 + fs[i2].0;
             fs.push((f, Some(i1), Some(i2), None));
             used.push(false);
@@ -226,9 +240,10 @@ impl HuffmanCoder {
             used[i2] = true;
             internal -= 1;
         }
-        let root_idx = (0..fs.len()).find(|&i| !used[i]).unwrap();
         let mut lens = [0u8; 256];
-        Self::dfs_lengths(&fs, root_idx, 0, &mut lens);
+        if let Some(root_idx) = (0..fs.len()).find(|&i| !used[i]) {
+            Self::dfs_lengths(&fs, root_idx, 0, &mut lens);
+        }
         lens
     }
 
@@ -336,10 +351,15 @@ mod tests {
             let n = (rng.next() % 5000) as usize;
             let mut data = vec![0u8; n];
             for b in &mut data {
-                *b = if round % 3 == 0 { rng.byte() % 8 } else { rng.byte() };
+                *b = if round % 3 == 0 {
+                    rng.byte() % 8
+                } else {
+                    rng.byte()
+                };
             }
             let c = HuffmanCoder::compress(&data);
-            let d = HuffmanCoder::decompress(&c).unwrap_or_else(|| panic!("round {round} decompress"));
+            let d =
+                HuffmanCoder::decompress(&c).unwrap_or_else(|| panic!("round {round} decompress"));
             assert_eq!(d, data, "round {round} kayıpsız");
         }
     }
@@ -377,7 +397,11 @@ mod tests {
         for _ in 0..100 {
             assert!(HuffmanCoder::decompress(&bomb).is_none());
         }
-        assert!(start.elapsed().as_secs() < 5, "alloc-bomb yok: {:?}", start.elapsed());
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "alloc-bomb yok: {:?}",
+            start.elapsed()
+        );
         // geçersiz tablo (Kraft bozuk): 256 sembol, hepsi uzunluk 32
         let mut b2 = BUD_HFM_MAGIC.to_vec();
         b2.push(BUD_HFM_VERSION);
@@ -387,14 +411,20 @@ mod tests {
             b2.push(s as u8);
             b2.push(32);
         }
-        assert!(HuffmanCoder::decompress(&b2).is_none(), "Kraft bozuk tablo red");
+        assert!(
+            HuffmanCoder::decompress(&b2).is_none(),
+            "Kraft bozuk tablo red"
+        );
         // yinelenen sembol → bozuk tablo red
         let mut b3 = BUD_HFM_MAGIC.to_vec();
         b3.push(BUD_HFM_VERSION);
         b3.extend_from_slice(&8u64.to_le_bytes());
         b3.extend_from_slice(&2u16.to_le_bytes());
         b3.extend_from_slice(&[65, 3, 65, 3]); // aynı sembol iki kez
-        assert!(HuffmanCoder::decompress(&b3).is_none(), "yinelenen sembol red");
+        assert!(
+            HuffmanCoder::decompress(&b3).is_none(),
+            "yinelenen sembol red"
+        );
         // çöp gövde (panik yok)
         let mut b4 = BUD_HFM_MAGIC.to_vec();
         b4.push(BUD_HFM_VERSION);

@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 //! Budlum Wallet Core - BIP39 mnemonic + FIPS 204 ML-DSA-87 post-quantum key derivation + signing.
 //!
 //! The signing scheme is ML-DSA-87 (NIST FIPS 204, Category 5, formerly

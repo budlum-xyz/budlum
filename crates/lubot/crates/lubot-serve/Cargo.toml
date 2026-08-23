@@ -8,3 +8,6 @@ description = "Serving köprüsü: vLLM/SGLang yapılandırması, atıf politika
 
 [dependencies]
 lubot-core = { path = "../lubot-core" }
+
+[lints]
+workspace = true

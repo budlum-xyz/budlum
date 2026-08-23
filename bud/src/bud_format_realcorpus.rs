@@ -23,14 +23,16 @@ fn gercek_dosya(candidates: &[&str]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bud_format_engine::{engine_store, engine_restore_full};
+    use crate::bud_format_engine::{engine_restore_full, engine_store};
 
     #[test]
     fn gercek_elf_engine_kayipsiz() {
-        if let Some(elf) = gercek_dosya(&["/bin/bash", "/usr/bin/bash", "/bin/ls", "/usr/bin/env"]) {
+        if let Some(elf) = gercek_dosya(&["/bin/bash", "/usr/bin/bash", "/bin/ls", "/usr/bin/env"])
+        {
             let res = engine_store(&elf, false, 1).expect("engine");
             let blob = res.to_blob();
-            let back = engine_restore_full(&blob, res.transform_kind.to_u8(), false).expect("restore");
+            let back =
+                engine_restore_full(&blob, res.transform_kind.to_u8(), false).expect("restore");
             assert_eq!(back, elf, "GERÇEK ELF birebir");
             assert!(res.measured_ratio > 1.0 || elf.len() < 4096);
         } else {
@@ -40,7 +42,7 @@ mod tests {
 
     #[test]
     fn gercek_font_engine_kayipsiz() {
-        let mut adaylar = vec![
+        let adaylar = vec![
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
@@ -56,7 +58,8 @@ mod tests {
         }
         if let Some(font) = gercek_dosya(&adaylar) {
             let res = engine_store(&font, false, 2).expect("engine");
-            let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false).expect("restore");
+            let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false)
+                .expect("restore");
             assert_eq!(back, font, "GERÇEK font birebir");
         } else {
             eprintln!("SKIP: font bulunamadı");
@@ -65,10 +68,16 @@ mod tests {
 
     #[test]
     fn gercek_metin_engine_kayipsiz() {
-        let adaylar = ["/etc/os-release", "/etc/hostname", "/etc/hosts", "/usr/share/doc"];
+        let adaylar = [
+            "/etc/os-release",
+            "/etc/hostname",
+            "/etc/hosts",
+            "/usr/share/doc",
+        ];
         if let Some(txt) = gercek_dosya(&adaylar) {
             let res = engine_store(&txt, false, 3).expect("engine");
-            let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false).expect("restore");
+            let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false)
+                .expect("restore");
             assert_eq!(back, txt, "GERÇEK metin birebir");
         } else {
             eprintln!("SKIP: metin bulunamadı");
@@ -82,7 +91,11 @@ mod tests {
         if let Some(elf) = gercek_dosya(&["/bin/bash", "/usr/bin/env"]) {
             let res = engine_store(&elf, false, 1).unwrap();
             // ELF tek dosya: transform yok, zstd sınırı ~2-3x makul
-            assert!(res.measured_ratio < 50.0, "ELF için 50x üstü iddia RED: {}", res.measured_ratio);
+            assert!(
+                res.measured_ratio < 50.0,
+                "ELF için 50x üstü iddia RED: {}",
+                res.measured_ratio
+            );
         }
     }
 }

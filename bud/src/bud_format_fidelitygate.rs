@@ -7,7 +7,7 @@
 //! - AVIF/JPEG görsel kayıpsız: crf ≤ 32 (ölçülen 3.2x kazancın eşiği; F134)
 //! - ZFP/SZ error-bounded: bağıl hata ≤ 1e-3 (bilimsel sınıf, 100-web bulgusu 6-23x)
 //! - Çözünürlük HER ZAMAN korunur (KF2)
-//! Varsayılanlar ürün kararına açıktır (yorum satırları - kullanıcı onayı ister).
+//!   Varsayılanlar ürün kararına açıktır (yorum satırları - kullanıcı onayı ister).
 
 #![forbid(unsafe_code)]
 
@@ -15,8 +15,8 @@ use sha3::{Digest, Sha3_256};
 
 pub const FID_MAGIC: [u8; 8] = *b"\xB5FID1\0\0\0";
 
-pub const AVIF_CRF_VISUALLY_LOSSLESS: u32 = 32;   // ≤ bu → görsel kayıpsız sayılır (ölçülen)
-pub const ZFP_REL_ERROR_BOUND: f64 = 1e-3;       // ≤ bu → error-bounded
+pub const AVIF_CRF_VISUALLY_LOSSLESS: u32 = 32; // ≤ bu → görsel kayıpsız sayılır (ölçülen)
+pub const ZFP_REL_ERROR_BOUND: f64 = 1e-3; // ≤ bu → error-bounded
 pub const SZ_REL_ERROR_BOUND: f64 = 1e-3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,10 @@ pub fn classify_lossy(kind: &str, crf: Option<u32>, rel_error: Option<f64>) -> L
 /// Gate: kabul edilen kayıplılık sınıflarının listesi.
 pub fn gate_allows(l: LossyKind) -> bool {
     // Kayıpsız (None) her zaman geçer; sınırlı kayıplı sınıflar kabul; sınırsız RED.
-    matches!(l, LossyKind::None | LossyKind::VisuallyLossless | LossyKind::ErrorBounded)
+    matches!(
+        l,
+        LossyKind::None | LossyKind::VisuallyLossless | LossyKind::ErrorBounded
+    )
 }
 
 pub fn fidelity_digest(kind: &str, crf: Option<u32>, rel_error: Option<f64>) -> [u8; 32] {

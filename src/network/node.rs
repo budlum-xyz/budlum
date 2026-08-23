@@ -608,7 +608,7 @@ impl Node {
                 let mut kad_config =
                     KademliaConfig::new(libp2p::StreamProtocol::new("/budlum/kad/1.0.0"));
                 if mobile_mode {
-                    kad_config.set_parallelism(std::num::NonZeroUsize::new(1).unwrap());
+                    kad_config.set_parallelism(std::num::NonZeroUsize::MIN);
                     kad_config.set_publication_interval(Some(Duration::from_secs(24 * 3600)));
                 }
 
