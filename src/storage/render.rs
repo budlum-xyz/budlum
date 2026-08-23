@@ -70,6 +70,25 @@ pub enum RenderFormat {
     /// reader can ask for frame 17 of a loop and get the same bytes every
     /// time. The container (MP4/WebM) is a separate encoder step.
     VideoFrame { frame: u16 },
+    /// Bir tasima karesi: icerigin optik kanal icin paketlenmis hali.
+    ///
+    /// **Bu bir depolama bicimi degil, bir TASIMA temsilidir.** Kare talep
+    /// aninda uretilir, hicbir ara urun saklanmaz - dolayisiyla bu format
+    /// hicbir rejimde depolama EKLEMEZ (§59). Icerigin kalici hali yine
+    /// manifest'in soyledigi seydir: tarifli icerikte tarif, organik
+    /// icerikte baytlar.
+    ///
+    /// Kanal geri kanalsizdir: alici kayip kareyi yeniden isteyemez. Bu
+    /// yuzden kareler **bagimsiz** olmak zorundadir - her kare kendi
+    /// basligini tasir ve tek basina dogrulanir. `seq` kacinci kare
+    /// oldugunu soyler; ayni `seq` her zaman ayni baytlari verir, cunku
+    /// uretim tariften belirlenimlidir.
+    QrStream {
+        /// Kacinci tasima karesi.
+        seq: u32,
+        /// Kare basina tasinan yuk (bayt).
+        payload_len: u16,
+    },
 }
 
 impl RenderFormat {
@@ -84,6 +103,7 @@ impl RenderFormat {
             Self::Svg => b"svg",
             Self::Png { .. } => b"png",
             Self::VideoFrame { .. } => b"frame",
+            Self::QrStream { .. } => b"qrstream",
         }
     }
 
@@ -102,6 +122,10 @@ impl RenderFormat {
             Self::Svg => {}
             Self::Png { size } => out.extend_from_slice(&size.to_be_bytes()),
             Self::VideoFrame { frame } => out.extend_from_slice(&frame.to_be_bytes()),
+            Self::QrStream { seq, payload_len } => {
+                out.extend_from_slice(&seq.to_be_bytes());
+                out.extend_from_slice(&payload_len.to_be_bytes());
+            }
         }
         out
     }
@@ -263,6 +287,9 @@ pub fn render(spec: &GeneratedSpec, format: &RenderFormat) -> Result<Vec<u8>, Re
         RenderFormat::Svg => render_svg(spec, &pixels),
         RenderFormat::Png { size } => render_png(spec, &pixels, *size),
         RenderFormat::VideoFrame { frame } => render_frame(spec, &pixels, *frame),
+        RenderFormat::QrStream { seq, payload_len } => {
+            render_qr_stream_frame(&pixels, *seq, *payload_len)
+        }
     }
 }
 
@@ -379,6 +406,72 @@ fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<
     Ok(out)
 }
 
+/// Tasima karesi basliginin uzunlugu.
+const QR_FRAME_HEADER_LEN: usize = 16;
+
+/// Tasima karesi ureten yol.
+///
+/// **Kare kendini tanimlar.** Optik/yayin kanalinda geri kanal yoktur: alici
+/// kayip bir kareyi yeniden isteyemez, el sikisma yapamaz, akisa ortasindan
+/// katilir. Bu yuzden her kare tek basina ayristirilabilir olmak zorundadir;
+/// baglam tasiyan bir kare, o baglami kaciran alici icin coptur.
+///
+/// Baslik alanlari ve NEDEN oradalar:
+///
+/// - **Iki sihirli bayt** - "bu bizim mi" sorusu, herhangi bir surum
+///   adlandirilmadan ONCE cevaplanmali. Tek bayta bakan bir alici, hicbir
+///   zaman bu protokolu konusmamis bir kaynagi "surumun eski" diye
+///   suclayabilir; kamera goruntusundeki her kod bu yoldan gecer.
+/// - **Surum** - ayristirmayi butunuyle kapiya baglar. Bilinmeyen surum
+///   sessizce yanlis ayristirilmaz, adlandirilir.
+/// - **Bayraklar** - `0x0F` anlasilmasi ZORUNLU yari, `0xF0` yok sayilabilir
+///   yari. Bolme bastan gelir cunku sonradan eklenemez: "her bilinmeyen bit
+///   olumcul" denmis bir aliciyi ancak yeni bir kirilma duzeltir.
+/// - **`seq`** - kacinci kare. Ayni `seq` her zaman ayni baytlari verir.
+/// - **`total_len`** - icerigin tam uzunlugu; alici ne kadarini topladigini
+///   bilir.
+/// - **`payload_digest`** - yukun ozeti. Kare bozuksa yuk KULLANILMAZ.
+///
+/// # Ne yapmaz
+///
+/// Bu fonksiyon bir kanal kodlayici DEGILDIR: silinti kodu (fountain),
+/// gercek QR modul matrisi ve video konteyneri ayri, surumlenmis adimlardir.
+/// Burasi yalnizca **kanalin tasiyacagi kendini-tanimlayan kareyi** kurar.
+/// Kare uretimi belirlenimlidir; kanalin kendisi degildir.
+fn render_qr_stream_frame(
+    payload: &[u8],
+    seq: u32,
+    payload_len: u16,
+) -> Result<Vec<u8>, RenderError> {
+    let want = usize::from(payload_len);
+    if want == 0 {
+        return Err(RenderError::MissingParam("qr stream payload_len"));
+    }
+    // Kare `seq`'in gosterdigi dilimi tasir. Icerik bittiginde dilim bos
+    // kalir; bos bir kare, olmayan bir seyi varmis gibi gosterirdi.
+    let start = (seq as usize).saturating_mul(want);
+    if start >= payload.len() {
+        return Err(RenderError::MissingParam("qr stream seq past end"));
+    }
+    let end = start.saturating_add(want).min(payload.len());
+    let slice = payload
+        .get(start..end)
+        .ok_or(RenderError::MissingParam("qr stream slice out of range"))?;
+
+    let mut out = Vec::with_capacity(QR_FRAME_HEADER_LEN + slice.len());
+    out.extend_from_slice(&[0xBD, 0x1A]);
+    out.push(1u8);
+    out.push(0u8);
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    // Yuk ozetinin ilk 4 bayti: kare butunlugu icin yeterli, baslik kucuk
+    // kalir. Icerik kimligi bu degildir - onu manifest tasir.
+    let digest = hash_fields_bytes(&[b"BDLM_QR_FRAME_V1", slice]);
+    out.extend_from_slice(digest.get(..4).ok_or(RenderError::MissingParam("digest"))?);
+    out.extend_from_slice(slice);
+    Ok(out)
+}
+
 /// The id a rendered object commits to: the format and the bytes together.
 ///
 /// The module doc says the format string is part of the commitment, because
@@ -432,6 +525,111 @@ mod tests {
             output_len: 32 * 32,
             step_budget: 1_000_000,
         }
+    }
+
+    /// Tasima karesi kendini tanimlar ve belirlenimlidir.
+    ///
+    /// Geri kanalsiz bir kanalda alici akisa ortasindan katilir; baglam
+    /// tasiyan bir kare o baglami kaciran alici icin coptur.
+    #[test]
+    fn a_transport_frame_describes_itself_and_repeats_exactly() {
+        let spec = avatar_spec();
+        let fmt = RenderFormat::QrStream {
+            seq: 2,
+            payload_len: 64,
+        };
+        let a = render(&spec, &fmt).unwrap();
+        let b = render(&spec, &fmt).unwrap();
+        assert_eq!(a, b, "ayni seq her zaman ayni baytlari vermeli");
+
+        // Iki sihirli bayt: "bu bizim mi" sorusu surumden ONCE cevaplanir.
+        assert_eq!(a.first().copied(), Some(0xBD));
+        assert_eq!(a.get(1).copied(), Some(0x1A));
+        // Surum ve bayrak alanlari basligin sabit yerinde.
+        assert_eq!(a.get(2).copied(), Some(1));
+        assert_eq!(a.get(3).copied(), Some(0));
+        // Kare kendi sirasini tasir: baglam gerektirmez.
+        assert_eq!(
+            a.get(4..8),
+            Some(&2u32.to_be_bytes()[..]),
+            "kare kacinci oldugunu kendi soylemeli"
+        );
+
+        // Farkli seq farkli karedir ve kimlige girer.
+        let other = render(
+            &spec,
+            &RenderFormat::QrStream {
+                seq: 3,
+                payload_len: 64,
+            },
+        )
+        .unwrap();
+        assert_ne!(a, other);
+        assert_ne!(
+            render_id(&fmt, &a),
+            render_id(
+                &RenderFormat::QrStream {
+                    seq: 3,
+                    payload_len: 64
+                },
+                &other
+            ),
+            "seq kimlige girmeli"
+        );
+    }
+
+    /// Tasima temsili DEPOLAMA EKLEMEZ.
+    ///
+    /// Bu, tum tasarimin dayandigi ozellik: kare talep aninda uretilir ve
+    /// hicbir ara urun saklanmaz. Kalici olan sey yine tariftir.
+    #[test]
+    fn a_transport_representation_adds_no_stored_bytes() {
+        use crate::storage::generated::{held_bytes, ContentSource};
+        let spec = avatar_spec();
+        let object_len = u64::from(spec.output_len);
+
+        // Kareler uretilebiliyor...
+        let frame = render(
+            &spec,
+            &RenderFormat::QrStream {
+                seq: 0,
+                payload_len: 128,
+            },
+        )
+        .unwrap();
+        assert!(!frame.is_empty());
+
+        // ...ama tutulan bayt hala sifir: temsil kalici degil.
+        assert_eq!(
+            held_bytes(&ContentSource::Generated(spec), object_len),
+            Some(0),
+            "tasima temsili depolama eklememeli"
+        );
+    }
+
+    /// Icerigin sonunu gecen kare uretilmez.
+    ///
+    /// Bos bir kare, olmayan bir seyi varmis gibi gosterirdi.
+    #[test]
+    fn a_frame_past_the_end_is_refused() {
+        let spec = avatar_spec();
+        assert!(render(
+            &spec,
+            &RenderFormat::QrStream {
+                seq: 99_999,
+                payload_len: 64
+            }
+        )
+        .is_err());
+        // Sifir uzunluklu yuk de reddedilir.
+        assert!(render(
+            &spec,
+            &RenderFormat::QrStream {
+                seq: 0,
+                payload_len: 0
+            }
+        )
+        .is_err());
     }
 
     #[test]
