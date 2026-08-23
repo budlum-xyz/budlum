@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 78 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 79 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -86,6 +86,7 @@
 - [76. Sinirlayicinin kendisi sinirli mi](#76-sinirlayicinin-kendisi-sinirli-mi)
 - [77. Onbellek bir depolama iddiasi degildir](#77-onbellek-bir-depolama-iddiasi-degildir)
 - [78. Hesaplanan seyin vardigi yer](#78-hesaplanan-seyin-vardigi-yer)
+- [79. Tarif-adresli kimlik: kareyi konumuna baglamak](#79-tarif-adresli-kimlik-kareyi-konumuna-baglamak)
 
 ## 1. Genel sistem mimarisi
 
@@ -3145,3 +3146,55 @@ denetim**. Ayrim onemli, cunku kodun onceki hali yol dogrulamasini
 "tamamlanmis" ilan ediyordu ve o ilan kendi cercevesinde dogruydu - eksik
 olan sey, kimsenin ayri bir madde olarak yazmadigi bagdi. Bir soundness
 iddiasinin onu yazani ikna etmesi yetmez.
+
+## 79. Tarif-adresli kimlik: kareyi konumuna baglamak
+
+`ContentSource::Generated` ile ag icerigin baytlarini degil tarifini saklar.
+Kimlik katmani bunu soylemiyordu: `ContentId::of` uretilmis baytlarin
+ozetidir, yani kimligi ogrenmek icin once uretmek gerekir. "Sakladigimiz sey
+tariftir" iddiasi adres katmanina inmemisti.
+
+`qr_stream_content_id` kimligi dogrudan tariften turetir: her kare zaten
+kendi ozetini tasiyor ve o ozet tarife bagli; kareler sirayla katlandiginda
+ortaya cikan deger, o tarifin urettigi akisin kimligidir. Elde tarif varsa
+kimlik yeniden hesaplanabilir; elde kimlik varsa uretilen akisin dogru akis
+oldugu dogrulanabilir. Bayt tutmaya gerek yok.
+
+Bu bir depolama kaniti **degildir**. Kimligin dogru olmasi, karsi tarafin
+baytlari tuttugunu degil, tarifi calistirdiginda ayni akisi uretecegini
+soyler - istenen de budur. Organik icerik bu semaya giremez: `Stored`
+baytlarin bir tarifi yoktur ve olmayan bir tarifi adreslemek sinif yalani
+olurdu.
+
+### Kareyi konumuna baglamak
+
+Bu is yazilirken kare ozetinde bir bosluk olculdu. Ozet yalnizca tarif
+ozetini ve dilim baytlarini bagliyordu. Tekduze bir yukte - bos alan, dolgu,
+duz renk bolgeleri bunu siradan yapar - ardisik dilimler ayni baytlari
+tasir, yani kareler **birebir ayni** ozeti tasiyordu: dort karenin dordu de
+`[72, 41, 61, 244]`.
+
+O durumda bir kare, ayni akisin baska bir konumundaki karenin yerine
+gecebilir. Alici dogru bir ozet gorur, kareyi kabul eder ve dilimi yanlis
+konuma yazar. Sirayi basliktaki `seq` alanindan okuyor, ve o alan ozetin
+disindayken degistirilebilir bir ipucudur - dogrulanmis bir iddia degil.
+Butunluk korunur, sira korunmaz. Optik kanalda kareler zaten sirasiz gelir,
+yani bu teorik bir sira degil normal calisma bicimi.
+
+Ozet artik `seq`'i de bagliyor.
+
+### Semayi kucultmek
+
+Kimlik semasinin ilk hali uc alan daha tasiyordu: tarif ozeti, kare sayisi,
+dilim boyu. Ucu de cikarildi.
+
+Gerekce olcumdur. Her alan semadan tek tek cikarildi ve **hicbir test
+kirilmadi** - cunku ucunun de ayirt ettigi sey kare ozetlerinin icinde zaten
+vardi. Farkli dilim boyu farkli kareler uretir; farkli kare sayisi farkli
+uzunlukta bir katlama yapar; farkli tarif farkli kare ozeti verir.
+
+Bir semayi savunan sey, kaldirildiginda bir seyin bozulmasidir. Bozmuyorsa
+orada degildir, yalnizca orada duruyordur - ve duran alan okuyana "bu da
+baglanmis" der, yani yanlis bir guvence uretir. Kalan sema uc mutasyonun
+ucunu de yakalar: sifir-kare kapisi, kare ozetinin katlanmasi, karenin
+konum baglamasi.
