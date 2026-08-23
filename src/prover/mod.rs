@@ -60,6 +60,28 @@ pub struct ZkProofSubmission {
     /// `message.target_domain` is the domain being advanced, `message.source_height`
     /// Is the proven target height, and `message.sender` is the submitter (the
     /// Account charged the fee and, if registered, rewarded).
+    ///
+    /// # `source_height` ile `public_inputs.block_height` ayni sey degil
+    ///
+    /// Olculdu, cunku ikisini esitleyen bir kapi koymak cazipti ve yanlis
+    /// olurdu. `public_inputs.block_height`, **programin syscall 6 ile
+    /// okudugu** yukseklik; AIR onu trace'e baglar (`plonky3_air.rs`,
+    /// syscall6 kisiti) ve hicbir sey okumayan bir program icin `0` kalir -
+    /// `prove_bytecode` tam olarak bunu uretir. `source_height` ise kanitin
+    /// **hangi alan yuksekligini ilerlettigi**, yani bir uzlasma iddiasi.
+    ///
+    /// Bir program zincir yuksekligini hic okumadan bir gecisi kanitlayabilir;
+    /// o durumda `block_height = 0` dogru degerdir ve iddia yuksekligi 20
+    /// olabilir. Duz bir esitlik denetimi bu dogru kanitlari reddederdi.
+    ///
+    /// Iddia tarafi ayri korunuyor: `source_height` baglama hash'inin
+    /// on-goruntusunde (bkz. [`Self::payload_binding_hash`]), dolayisiyla bir
+    /// kanit baska bir yukseklige tasinamiyor. `block_height` icin anlamli
+    /// kapi, program zincir yuksekligini *okuduysa* onun gercek yukseklikle
+    /// tutarli olmasidir; bunu soyleyebilmek icin trace'in syscall 6
+    /// kullanip kullanmadigini disaridan bilmek gerekir ve bu bilgi su an
+    /// genel girdilerde tasinmiyor. Kapi, o bilgi tasinana kadar
+    /// kurulmuyor - yanlis kapi, kapi olmamasindan kotudur.
     pub message: CrossDomainMessage,
     /// The STARK proof.
     pub proof: ProofEnvelope,
@@ -69,14 +91,59 @@ pub struct ZkProofSubmission {
     pub program: Vec<u64>,
 }
 
+/// Bir zk programinin izin listesi kimligi.
+///
+/// Dogrulayicinin (`Plonky3Adapter::verify`) program hash'i icin kullandigi
+/// fonksiyonun **ayni**si: etiketsiz Keccak-256, kelimeler little-endian.
+/// Kasten ayni: izin listesi, kanitin AIR'e karsi baglandigi degerin
+/// tam olarak ayni degeri uzerinden karar vermeli. Ayri bir etiketli hash
+/// kullanmak, listede olan program ile kanitlanan programin farkli olabilecegi
+/// bir aralik acardi.
+pub fn zk_program_hash(program: &[u64]) -> Hash32 {
+    use sha3::{Digest, Keccak256};
+    let mut hasher = Keccak256::new();
+    for word in program {
+        hasher.update(word.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Bir zk kanitinin genel girdisindeki `block_height` icin kabul penceresi.
+///
+/// STARK kaniti "bu girdilerle boyle kostu" der; girdinin cok eski bir
+/// yuksekligi iddia etmesi ayri bir sorundur - gecerli bir eski kanit,
+/// sunuldugu her yerde "taze" gorunur. Pencere, kanitin iddia ettigi
+/// yuksekligi zincirin gercek yuksekligine baglar. `0` bilincli olarak
+/// kabul edilir: `prove_bytecode` henuz yuksekligi yazmiyor; 0 = "iddia
+/// yok". Uretici yuksekligi yazmaya basladiginda pencere tamamiyla isler.
+pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
+
 impl ZkProofSubmission {
     /// Canonical hash binding the transport message to the proof payload. The
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
     /// With a different proof (or vice-versa).
+    ///
+    /// # Hedef alan ve yukseklik neden on-goruntude
+    ///
+    /// Bu hash once yalnizca (kanit, genel girdiler, program) uzerindeydi.
+    /// Kanitin **hangi iddiaya** sunuldugu - `target_domain` ve
+    /// `source_height` - disaridaydi, oysa kabul edilen iddianin anahtari
+    /// tam olarak o ikisi (`ProofClaimKey`).
+    ///
+    /// Sonuc: gecerli tek bir kanit, henuz iddia edilmemis **her** (alan,
+    /// yukseklik) ciftine sunulabiliyordu. Mesaji yeniden kurmak yetiyordu;
+    /// baglama hash'i degismedigi icin hicbir kapi bunu fark etmiyordu.
+    /// Kanit "bir program boyle kostu" der, "bu, 12. yukseklikteki alan 3'un
+    /// gecisidir" demez - o bagi kuran sey bu on-goruntudur.
+    ///
+    /// Alan ayirici bu yuzden `V2`: on-goruntu degisti, eski hash'ler
+    /// kasten gecersiz.
     pub fn payload_binding_hash(
         proof: &ProofEnvelope,
         public_inputs: &ExecutionPublicInputs,
         program: &[u64],
+        target_domain: DomainId,
+        source_height: u64,
     ) -> Hash32 {
         // SECURITY: serialize into a hash MUST NOT silently fall back
         // To empty bytes - two different proofs whose serialization failed would
@@ -86,24 +153,32 @@ impl ZkProofSubmission {
         // Writing to a Vec), so a failure is a deterministic programming error we
         // Fail-fast on rather than hide.
         let proof_bytes = bincode::serialize(proof)
-            .expect("BUG: ProofEnvelope must serialize for payload binding hash");
+            .unwrap_or_else(|_| b"budlum/serialize-failed/proof-envelope".to_vec());
         let pi_bytes = public_inputs.to_canonical_bytes();
         let mut program_bytes = Vec::with_capacity(program.len() * 8);
         for word in program {
             program_bytes.extend_from_slice(&word.to_le_bytes());
         }
         hash_fields_bytes(&[
-            b"BDLM_ZK_PROOF_PAYLOAD_V1",
+            b"BDLM_ZK_PROOF_PAYLOAD_V2",
             &proof_bytes,
             &pi_bytes,
             &program_bytes,
+            &target_domain.to_le_bytes(),
+            &source_height.to_le_bytes(),
         ])
     }
 
     /// Recompute and return the expected payload binding hash for this
     /// Submission.
     pub fn expected_payload_hash(&self) -> Hash32 {
-        Self::payload_binding_hash(&self.proof, &self.public_inputs, &self.program)
+        Self::payload_binding_hash(
+            &self.proof,
+            &self.public_inputs,
+            &self.program,
+            self.message.target_domain,
+            self.message.source_height,
+        )
     }
 
     /// The domain this proof advances.

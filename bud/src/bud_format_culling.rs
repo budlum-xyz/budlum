@@ -29,10 +29,10 @@ pub const MAX_CLUSTERS: usize = 1_000_000;
 /// Cluster sıcaklık sınıfı (erişim sıklığına göre - oyun detay seviyesi karşılığı).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClusterTier {
-    Hot,        // sık erişilen - hızlı depo, tam detay (detay seviyesi0)
-    Warm,       // ara sıra - zstd, orta detay (detay seviyesi1)
-    Cold,       // nadir - arşiv/tape, düşük detay (detay seviyesi2)
-    Culled,     // hiç erişilmemiş - üretilebilir sınıfta saklanmaz
+    Hot,    // sık erişilen - hızlı depo, tam detay (detay seviyesi0)
+    Warm,   // ara sıra - zstd, orta detay (detay seviyesi1)
+    Cold,   // nadir - arşiv/tape, düşük detay (detay seviyesi2)
+    Culled, // hiç erişilmemiş - üretilebilir sınıfta saklanmaz
 }
 
 impl ClusterTier {
@@ -59,10 +59,10 @@ impl ClusterTier {
 #[derive(Debug, Clone)]
 pub struct CullingPlan {
     pub cluster_count: usize,
-    pub tiers: Vec<ClusterTier>,       // her cluster için tier
-    pub access_counts: Vec<u64>,       // erişim sayıları (sıcaklık girdisi)
-    pub hot_threshold: u64,            // ≥ bu erişim → Hot
-    pub cold_threshold: u64,           // < bu erişim → Cold; 0 → Culled
+    pub tiers: Vec<ClusterTier>, // her cluster için tier
+    pub access_counts: Vec<u64>, // erişim sayıları (sıcaklık girdisi)
+    pub hot_threshold: u64,      // ≥ bu erişim → Hot
+    pub cold_threshold: u64,     // < bu erişim → Cold; 0 → Culled
     pub ts_unix: u64,
 }
 
@@ -71,21 +71,29 @@ impl CullingPlan {
 
     /// Erişim sayılarından plan üret (deterministik eşiklerle).
     /// hot_threshold ve cold_threshold çağıranın; varsayılan: hot≥10, cold≥1, 0→Culled.
-    pub fn from_access(access: &[u64], hot_threshold: u64, cold_threshold: u64, ts: u64) -> Option<Self> {
+    pub fn from_access(
+        access: &[u64],
+        hot_threshold: u64,
+        cold_threshold: u64,
+        ts: u64,
+    ) -> Option<Self> {
         if access.is_empty() || access.len() > MAX_CLUSTERS {
             return None;
         }
-        let tiers: Vec<ClusterTier> = access.iter().map(|&a| {
-            if a >= hot_threshold.max(1) {
-                ClusterTier::Hot
-            } else if a >= cold_threshold.max(1) {
-                ClusterTier::Warm
-            } else if a > 0 {
-                ClusterTier::Cold
-            } else {
-                ClusterTier::Culled // hiç erişilmemiş → culling (saklanmaz)
-            }
-        }).collect();
+        let tiers: Vec<ClusterTier> = access
+            .iter()
+            .map(|&a| {
+                if a >= hot_threshold.max(1) {
+                    ClusterTier::Hot
+                } else if a >= cold_threshold.max(1) {
+                    ClusterTier::Warm
+                } else if a > 0 {
+                    ClusterTier::Cold
+                } else {
+                    ClusterTier::Culled // hiç erişilmemiş → culling (saklanmaz)
+                }
+            })
+            .collect();
         Some(CullingPlan {
             cluster_count: access.len(),
             tiers,
@@ -98,7 +106,10 @@ impl CullingPlan {
 
     /// Saklanması gereken cluster sayısı (Culled hariç - culling kazancı).
     pub fn stored_clusters(&self) -> usize {
-        self.tiers.iter().filter(|t| **t != ClusterTier::Culled).count()
+        self.tiers
+            .iter()
+            .filter(|t| **t != ClusterTier::Culled)
+            .count()
     }
 
     /// Culling oranı: saklanmayan / toplam (oyun %70-90 culling karşılığı).
@@ -111,7 +122,10 @@ impl CullingPlan {
 
     /// Tier dağılım özeti (tiering kararı için).
     pub fn tier_summary(&self) -> (usize, usize, usize, usize) {
-        let mut h = 0; let mut w = 0; let mut c = 0; let mut cu = 0;
+        let mut h = 0;
+        let mut w = 0;
+        let mut c = 0;
+        let mut cu = 0;
         for t in &self.tiers {
             match t {
                 ClusterTier::Hot => h += 1,
@@ -191,7 +205,14 @@ impl CullingPlan {
         if bytes.len() != pos + 32 {
             return None;
         }
-        let plan = CullingPlan { cluster_count: count, tiers, access_counts, hot_threshold, cold_threshold, ts_unix };
+        let plan = CullingPlan {
+            cluster_count: count,
+            tiers,
+            access_counts,
+            hot_threshold,
+            cold_threshold,
+            ts_unix,
+        };
         if bytes[pos..] != plan.record_hash() {
             return None;
         }

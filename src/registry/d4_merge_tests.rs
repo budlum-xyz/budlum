@@ -18,6 +18,7 @@
 //! And `verify_domain_commitment_finality` call, so these tests exercise the
 //! Exact primitive the four domains share.
 #![cfg(test)]
+// Test-only module: an unwrap here is how a test reports a broken invariant.
 
 use super::*;
 use crate::core::address::Address;

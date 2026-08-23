@@ -17,7 +17,6 @@
 //! Transport types).
 
 pub mod assignment;
-pub mod bud2_final;
 pub mod content_id;
 pub mod db;
 pub mod derived;
@@ -66,8 +65,9 @@ pub use living_threshold::{
 };
 pub use lrc::{LrcError, LrcLayout, MAX_GROUP_SHARDS};
 pub use manifest::{
-    manifest_id_from_parts, manifest_id_from_shards, ContentCipher, ContentEncryption,
-    ContentManifest, ErasureScheme, ShardKind, ShardRef, MIN_AEAD_CIPHERTEXT_BYTES,
+    manifest_id_from_parts, manifest_id_from_parts_stored, manifest_id_from_shards, ContentCipher,
+    ContentEncryption, ContentManifest, ErasureScheme, ShardKind, ShardRef,
+    MIN_AEAD_CIPHERTEXT_BYTES,
 };
 pub use mobile_self::{
     MobileAvailabilityClass, MobileSelfContentPolicy, MobileSelfProfile, ReplicaRecommendation,

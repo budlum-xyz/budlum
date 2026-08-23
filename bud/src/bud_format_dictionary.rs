@@ -22,9 +22,9 @@ pub const MAX_SAMPLE_BYTES: usize = 1024 * 1024; // tek örnek tavanı
 
 #[derive(Debug, Clone)]
 pub struct TenantDictionary {
-    pub bytes: Vec<u8>,      // zstd sözlük gövdesi (magic BDLM ile sarılı değil - ham)
-    pub digest: [u8; 32],    // SHA3("BDLM_BUD_DICT_V1" || bytes) - determinizm çapası
-    pub dict_id: u32,        // zstd dictID (ilk 4 bayt, little-endian)
+    pub bytes: Vec<u8>,   // zstd sözlük gövdesi (magic BDLM ile sarılı değil - ham)
+    pub digest: [u8; 32], // SHA3("BDLM_BUD_DICT_V1" || bytes) - determinizm çapası
+    pub dict_id: u32,     // zstd dictID (ilk 4 bayt, little-endian)
     pub sample_count: usize,
 }
 
@@ -59,7 +59,12 @@ impl TenantDictionary {
         } else {
             0
         };
-        TenantDictionary { bytes, digest, dict_id, sample_count: 0 }
+        TenantDictionary {
+            bytes,
+            digest,
+            dict_id,
+            sample_count: 0,
+        }
     }
 
     /// Deterministik sözlük kimliği (İ5: ID yerine gövde hash'i kullan).
@@ -119,20 +124,35 @@ mod tests {
         let records = gen_records(2000);
         let raw: usize = records.iter().map(|r| r.len()).sum();
         // sözlüksüz zstd-19
-        let plain: usize = records.iter()
-            .map(|r| zstd::bulk::compress(r, 19).map(|c| c.len()).unwrap_or(r.len()))
+        let plain: usize = records
+            .iter()
+            .map(|r| {
+                zstd::bulk::compress(r, 19)
+                    .map(|c| c.len())
+                    .unwrap_or(r.len())
+            })
             .sum();
         // sözlük eğit + sözlükle sıkıştır
         let train: Vec<Vec<u8>> = records[..1000].to_vec();
         let test: Vec<Vec<u8>> = records[1000..].to_vec();
         let dict = TenantDictionary::train(&train, 4096).expect("sözlük eğitilir");
-        let with_dict: usize = test.iter()
-            .map(|r| dict.compress_with(r, 19, r.len().max(16)).map(|c| c.len()).unwrap_or(r.len()))
+        let with_dict: usize = test
+            .iter()
+            .map(|r| {
+                dict.compress_with(r, 19, r.len().max(16))
+                    .map(|c| c.len())
+                    .unwrap_or(r.len())
+            })
             .sum::<usize>()
             + dict.bytes.len();
         let test_raw: usize = test.iter().map(|r| r.len()).sum();
-        let test_plain: usize = test.iter()
-            .map(|r| zstd::bulk::compress(r, 19).map(|c| c.len()).unwrap_or(r.len()))
+        let test_plain: usize = test
+            .iter()
+            .map(|r| {
+                zstd::bulk::compress(r, 19)
+                    .map(|c| c.len())
+                    .unwrap_or(r.len())
+            })
             .sum();
         assert!(
             test_raw as f64 / with_dict as f64 > test_raw as f64 / test_plain as f64,
@@ -160,7 +180,9 @@ mod tests {
         let dict = TenantDictionary::train(&records, 2048).expect("sözlük");
         // sözlükle sıkıştır → aç = orijinal
         let rec = records[0].clone();
-        let c = dict.compress_with(&rec, 19, rec.len().max(8)).expect("sıkıştır");
+        let c = dict
+            .compress_with(&rec, 19, rec.len().max(8))
+            .expect("sıkıştır");
         let d = dict.decompress_with(&c, rec.len().max(8) * 2).expect("aç");
         assert_eq!(d, rec, "sözlüklü roundtrip kayıpsız");
         // yanlış sözlükle açma → başarısız olabilir (zstd dictID uyuşmazlığı)
@@ -173,7 +195,11 @@ mod tests {
         let mut big_sample = vec![0u8; MAX_SAMPLE_BYTES + 1];
         assert!(TenantDictionary::train(&[big_sample], 100).is_none());
         big_sample = vec![0u8; 10];
-        assert!(TenantDictionary::train(&[big_sample.clone(), big_sample.clone()], MAX_DICT_SIZE + 1).is_none());
+        assert!(TenantDictionary::train(
+            &[big_sample.clone(), big_sample.clone()],
+            MAX_DICT_SIZE + 1
+        )
+        .is_none());
     }
 
     #[test]

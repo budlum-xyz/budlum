@@ -62,16 +62,16 @@ impl Edition {
 /// - Cihazda depolarsa: cihaz aktifken validatör; veri sosyal medyada görünür.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bud1Custody {
-    External { server: String },   // kendi sunucusu / 3. parti
-    Device,                         // kendi cihazı (aktifken validatör)
+    External { server: String }, // kendi sunucusu / 3. parti
+    Device,                      // kendi cihazı (aktifken validatör)
 }
 
 #[derive(Debug, Clone)]
 pub struct Bud1Nft {
     pub id: [u8; 32],
-    pub content_uri: String,        // verinin TUTULDUĞU yer (dışarıda)
+    pub content_uri: String, // verinin TUTULDUĞU yer (dışarıda)
     pub custody: Bud1Custody,
-    pub social_visible: bool,       // veri sosyal medyada görünür mü?
+    pub social_visible: bool, // veri sosyal medyada görünür mü?
 }
 
 impl Bud1Nft {
@@ -158,7 +158,11 @@ mod tests {
 
     #[test]
     fn bud1_kuralsiz_kendi_depolamasi() {
-        let ext = Bud1Nft::new_external([1u8; 32], "kendi-sunucum.example".into(), "https://kendi-sunucum.example/nft-1".into());
+        let ext = Bud1Nft::new_external(
+            [1u8; 32],
+            "kendi-sunucum.example".into(),
+            "https://kendi-sunucum.example/nft-1".into(),
+        );
         assert!(!Edition::Bud1.tarif_zorunlu(), "1.0 kuralsız");
         assert!(ext.liability_user(), "sorumluluk kullanıcıda");
         // cihaz modu: aktifse validatör
@@ -172,13 +176,20 @@ mod tests {
     fn edition_farkli_digest() {
         let e1 = Bud1Nft::new_external([1u8; 32], "s".into(), "u".into());
         let e2 = Bud1Nft::new_device([1u8; 32], "u".into(), true);
-        assert_ne!(bud1_digest(&e1), bud1_digest(&e2), "custody farkı digest'e yansır");
+        assert_ne!(
+            bud1_digest(&e1),
+            bud1_digest(&e2),
+            "custody farkı digest'e yansır"
+        );
         assert_eq!(bud1_digest(&e1), bud1_digest(&e1));
     }
 
     #[test]
     fn secim_kaydi() {
-        let c = EditionChoice { edition: Edition::Bud3, ts_unix: 1_768_000_000 };
+        let c = EditionChoice {
+            edition: Edition::Bud3,
+            ts_unix: 1_768_000_000,
+        };
         assert_eq!(c.digest(), c.digest());
     }
 }

@@ -26,31 +26,35 @@
 //! [`crate::registry::permissionless::PermissionlessRegistry`]. The seal is
 //! Exercised by `tests::poa_isolation`.
 //!
-//! WIRING: unwired - measured, and the gap is wider than this module.
-//! Nothing in production constructs a [`PoAOnboarding`], and nothing
-//! constructs the [`PoaMembershipRegistry`] underneath it either: outside
-//! tests, the only mentions of that type are its own definition and two doc
-//! comments. `AccountState` does not hold either one, so no admission
-//! decision recorded here survives a restart or reaches consensus.
+//! WIRING: wired - [`AccountState`](crate::core::account::AccountState) holds
+//! a [`PoAOnboarding`], `AccountState::refresh_poa_admissions` recomputes the
+//! admitted set at every block close, and
+//! [`PoAEngine`](crate::consensus::poa::PoAEngine) gates leadership on it.
 //!
-//! What consensus actually asks is a different question.
-//! [`PoAEngine`](crate::consensus::poa::PoAEngine) keeps
-//! a plain `Vec<Address>` of authorities, filters the permissionless active
-//! validator set against it, and treats an empty vector as "no filter". That
-//! vector is only ever populated through `with_authorities`, which no
-//! production path calls: `main.rs` builds the engine with `PoAEngine::new`
-//! at both sites. So the authority filter is empty in production, the
-//! permissionless active set passes through unfiltered, and the KYC horizon,
-//! the revocation path and the audit log written here decide nothing.
+//! # What this replaced
 //!
-//! Two admission models therefore exist side by side, and the compliant one
-//! is the one that is switched off. Closing this means choosing which is
-//! authoritative for the PoA domain and giving that one a home in
-//! `AccountState`, since a whitelist consensus consults has to be state that
-//! every node agrees on rather than a field on one node's engine. That is a
-//! consensus-surface decision, not a wiring change, which is why the marker
-//! says unwired rather than the module being deleted: the compliance
-//! lifecycle here is the part that is complete.
+//! Two admission models used to sit side by side, and the compliant one was
+//! the one switched off. Consensus consulted a plain `Vec<Address>` on the
+//! engine, populated only by `with_authorities`, which no production path
+//! called - so the vector was empty, and an empty vector meant "no filter".
+//! A domain that was supposed to be permissioned ran open, and looked healthy
+//! doing it. The KYC horizon, the revocation path and the audit trail written
+//! here decided nothing.
+//!
+//! Closing it meant choosing which model was authoritative and giving that
+//! one a home in `AccountState`, because a whitelist consensus gates on has
+//! to be state every node agrees about rather than a field on one node's
+//! engine. The compliance lifecycle here was already the complete half; what
+//! was missing was the half that made it binding.
+//!
+//! # Where the derived set lives
+//!
+//! [`PoAOnboarding::whitelist`] takes `&mut self`: observing an elapsed KYC horizon
+//! writes an audit entry. Consensus reads `&AccountState` on a hot path, so
+//! the observation happens once per block, at block close, and the result is
+//! cached in `AccountState::poa_admitted`. That placement is not a
+//! convenience - it is what makes the audit trail identical on every node. A
+//! record whose contents depend on who queried and when is not a record.
 
 use crate::core::address::Address;
 use crate::domain::types::DomainId;
@@ -360,6 +364,31 @@ impl PoAOnboarding {
     }
 
     // ---- enforcement -----------------------------------------------------
+
+    /// Is `domain` a permissioned domain at all?
+    ///
+    /// True once it has an admin. See
+    /// [`PoaMembershipRegistry::has_any_admin`] for why the admin list is the
+    /// declaration rather than a separate flag.
+    #[must_use]
+    pub fn is_permissioned(&self, domain: DomainId) -> bool {
+        self.registry.has_any_admin(domain)
+    }
+
+    /// Every domain this registry holds a record for.
+    ///
+    /// A domain with no records is not listed, which is the point: the caller
+    /// recomputing admissions must not have to know in advance which domains
+    /// exist. Developers create their own permissioned domains, so that list
+    /// is data, not a constant.
+    #[must_use]
+    pub fn domains_with_records(&self) -> BTreeSet<DomainId> {
+        self.kyc_expiry
+            .keys()
+            .map(|(domain, _)| *domain)
+            .chain(self.audit.iter().map(|e| e.domain))
+            .collect()
+    }
 
     /// Build the expiry-aware whitelist for a domain at `now_block`. This is
     /// The object consensus should gate on. Members whose KYC horizon has

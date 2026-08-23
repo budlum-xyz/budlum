@@ -1,9 +1,20 @@
 //! Yapılandırılmış log ayrıştırma - operatör loglarının (Nginx erişim,
 //! Syslog) bağımlılıksız satır ayrıştırması.
 //!
+//! WIRING: unwired - `main.rs` bu modülü `mod logparse;` ile bildiriyor ama
+//! hiçbir komut çağırmıyor; `lubot-ops` bir binary crate olduğu için dışarıdan
+//! da çağrılamaz. 238 satır ve 5 testi vardır, testler geçer. Ağaç CI'da hiç
+//! derlenmediği için bu durum görülmemişti. Modül silinmedi: bir `logs`
+//! komutuna bağlanması ayrı bir karardır. Bağlanana kadar `dead_code`
+//! susturulur, aksi halde `-D warnings` altında derleme durur.
+//!
 //! Kapsam: Nginx erişim satırı, Syslog PRI çözümü (facility/severity) ve
 //! yaygın olay anahtar sözcüklerinden severity çıkarımı. Regex ve chrono
 //! bağımlılığı eklenmez; ayrıştırma elle, sınırlı ve deterministiktir.
+
+// Yukarıdaki WIRING notunun gereği: modül bağlanana kadar ölü kod uyarıları
+// derlemeyi durdurmasın. Bağlandığında bu satır kaldırılır.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

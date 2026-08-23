@@ -15,8 +15,8 @@ pub const ENCPACT_MAGIC: [u8; 8] = *b"\xB5EPC1\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionDecl {
-    Plaintext,     // açık - üretilebilir sınıfa aday
-    ClientSide,    // istemci şifreli - otomatik rezidüel (encrypted-residual)
+    Plaintext,  // açık - üretilebilir sınıfa aday
+    ClientSide, // istemci şifreli - otomatik rezidüel (encrypted-residual)
 }
 
 /// Y13: sınıflandırma - ClientSide içerik rezidüel sınıfa girer.
@@ -58,19 +58,34 @@ mod tests {
 
     #[test]
     fn y13_sinif_ve_entropi_reddi() {
-        assert_eq!(class_for_decl(EncryptionDecl::ClientSide), "encrypted-residual");
-        assert_eq!(class_for_decl(EncryptionDecl::Plaintext), "regenerable-or-residual");
+        assert_eq!(
+            class_for_decl(EncryptionDecl::ClientSide),
+            "encrypted-residual"
+        );
+        assert_eq!(
+            class_for_decl(EncryptionDecl::Plaintext),
+            "regenerable-or-residual"
+        );
         assert!(pact_mode_encrypted(EncryptionDecl::ClientSide));
         assert!(!pact_mode_encrypted(EncryptionDecl::Plaintext));
         assert!(regenerable_ok(EncryptionDecl::Plaintext));
-        assert!(!regenerable_ok(EncryptionDecl::ClientSide), "şifreli → üretilebilir değil");
+        assert!(
+            !regenerable_ok(EncryptionDecl::ClientSide),
+            "şifreli → üretilebilir değil"
+        );
     }
 
     #[test]
     fn y13_beyan_idye_bagli() {
         let cid = [7u8; 32];
-        assert_eq!(declaration_bound(&cid, EncryptionDecl::Plaintext), declaration_bound(&cid, EncryptionDecl::Plaintext));
+        assert_eq!(
+            declaration_bound(&cid, EncryptionDecl::Plaintext),
+            declaration_bound(&cid, EncryptionDecl::Plaintext)
+        );
         // aynı kimlik farklı beyan → farklı bağ (değişiklik yeni kimlik üretir)
-        assert_ne!(declaration_bound(&cid, EncryptionDecl::Plaintext), declaration_bound(&cid, EncryptionDecl::ClientSide));
+        assert_ne!(
+            declaration_bound(&cid, EncryptionDecl::Plaintext),
+            declaration_bound(&cid, EncryptionDecl::ClientSide)
+        );
     }
 }

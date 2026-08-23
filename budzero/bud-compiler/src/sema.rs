@@ -113,6 +113,14 @@ impl Type {
 pub struct SemanticAnalyzer {
     pub structs: HashMap<String, HashMap<String, Type>>,
     pub functions: HashMap<String, (Vec<Type>, Type)>,
+    /// Sozlesmenin `storage { ... }` blogunda bildirilen alanlarin tipleri.
+    ///
+    /// Erisim `storage::ad` sozdizimiyle olur ve `Stmt::StorageWrite` /
+    /// `Expr::StorageRead` olarak ayristirilir, bu yuzden alanlar yerel
+    /// degisken ortamina konmaz. Burada tutulmalarinin nedeni tiplerin bir
+    /// kez dogrulanmasi: bir alanin tip adindaki yazim hatasi, struct alan
+    /// tiplerinde oldugu gibi, sessizce hayali bir struct tipine donusmesin.
+    pub storage: HashMap<String, Type>,
     pub current_func_ret: Type,
 }
 
@@ -127,6 +135,7 @@ impl SemanticAnalyzer {
         Self {
             structs: HashMap::new(),
             functions: HashMap::new(),
+            storage: HashMap::new(),
             current_func_ret: Type::Void,
         }
     }
@@ -142,6 +151,35 @@ impl SemanticAnalyzer {
                 fields.insert(f.name.clone(), ty);
             }
             self.structs.insert(s.name.clone(), fields);
+        }
+
+        // 1a. Register storage fields. Their types are validated here once,
+        // the same way struct field types are, so a typo in a storage type
+        // is reported rather than silently becoming a phantom struct.
+        for field in &contract.storage {
+            match Type::from_str(&field.ty) {
+                Ok(ty) => {
+                    self.storage.insert(field.name.clone(), ty);
+                }
+                Err(e) => errors.push(CompileError::SemanticError(e)),
+            }
+        }
+
+        // 1a-bis. Storage alan tiplerinin gercekten var oldugunu dogrula.
+        // `Type::from_str` primitif olmayan HER adi `Type::Struct(ad)`
+        // yapar, dolayisiyla `count: Uint644` gibi bir yazim hatasi hayali
+        // bir struct tipine donusur ve sessizce kabul edilirdi - struct alan
+        // tiplerinde kapatilan acigin ayni sinifi. Struct kayit gecisinden
+        // sonra kosar ki bir alan sonradan bildirilen bir struct'a atifta
+        // bulunabilsin.
+        for field in &contract.storage {
+            if let Ok(ty) = Type::from_str(&field.ty) {
+                self.check_struct_type(
+                    &ty,
+                    &format!("storage field '{}'", field.name),
+                    &mut errors,
+                );
+            }
         }
 
         // 1b. Validate struct *type references* in field declarations.

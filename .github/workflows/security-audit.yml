@@ -24,7 +24,7 @@ name: Security Audit
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, fix/architecture-tip-adlari]
   push:
     branches: [main]
   schedule:
@@ -178,7 +178,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           languages: rust
           queries: security-extended
@@ -196,7 +196,7 @@ jobs:
       - name: Build (CodeQL extraction)
         run: cargo build --lib --locked
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
 
   msrv:
     name: MSRV check (1.94.0)

@@ -9,7 +9,7 @@ on:
   # the same reason: a filtered-out run reports nothing rather than success,
   # which branch protection reads as still-waiting.
   pull_request:
-    branches: [ main ]
+    branches: [ main, fix/architecture-tip-adlari ]
   schedule:
     # Haftalık hijyen taraması (cargo update etkileri + yeni dep'ler)
     - cron: '17 4 * * 1'

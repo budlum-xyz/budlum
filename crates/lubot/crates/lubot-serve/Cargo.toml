@@ -8,3 +8,6 @@ description = "Serving köprüsü: a resident-batch engine/a resident-graph engi
 
 [dependencies]
 lubot-core = { path = "../lubot-core" }
+
+[lints]
+workspace = true

@@ -95,7 +95,7 @@ where
         air.num_constraints()
             .is_none_or(|n| { n == get_symbolic_constraints(air, layout).len() }),
         "num_constraints() = {} but symbolic evaluation found {} constraints",
-        air.num_constraints().unwrap(),
+        air.num_constraints().unwrap_or_default(),
         get_symbolic_constraints(air, layout).len(),
     );
 
@@ -181,8 +181,15 @@ where
 
     // Observe the Merkle root of the trace commitment.
     challenger.observe(trace_commit.clone());
+    // The width gate must stay: the verifier absorbs this commitment under
+    // exactly the same `preprocessed_width > 0` condition, so reading the
+    // option directly here would let the two transcripts diverge whenever a
+    // commitment exists for a zero-width preprocessed trace. Inside the gate
+    // the option is read without unwrapping, matching the verifier.
     if preprocessed_width > 0 {
-        challenger.observe(preprocessed_commit.as_ref().unwrap().clone());
+        if let Some(commit) = preprocessed_commit.as_ref() {
+            challenger.observe(commit.clone());
+        }
     }
 
     // Observe the public input values.
@@ -303,10 +310,13 @@ where
     // This is similar to what is done for the quotient polynomials.
     // TODO: This approach is only statistically zk. To make it perfectly zk, `R` would have to truly be an extension field polynomial.
     let (opt_r_commit, opt_r_data) = if SC::Pcs::ZK {
-        let (r_commit, r_data) = pcs
-            .get_opt_randomization_poly_commitment(core::iter::once(ext_trace_domain))
-            .expect("ZK is enabled, so we should have randomization commitments");
-        (Some(r_commit), Some(r_data))
+        // Read the option instead of asserting that `Pcs::ZK` implies it: the
+        // flag and the commitment come from different impls, so a mismatch
+        // must degrade rather than abort the prover.
+        match pcs.get_opt_randomization_poly_commitment(core::iter::once(ext_trace_domain)) {
+            Some((r_commit, r_data)) => (Some(r_commit), Some(r_data)),
+            None => (None, None),
+        }
     } else {
         (None, None)
     };
@@ -336,9 +346,15 @@ where
     // By zero errors. This doesn't lead to a soundness issue as the verifier will just reject in those
     // Cases but it is a completeness issue and contributes a completeness error of |gK| = 2N/|EF|.
     let zeta: SC::Challenge = challenger.sample_algebra_element();
+    // The prover returns `Proof<SC>` rather than a `Result`, so there is no
+    // refusal to return here: every domain this prover constructs supports
+    // `next_point`, and a domain that does not would produce a proof the
+    // verifier must reject anyway. Marked explicitly rather than left to the
+    // workspace-wide deny.
+    #[allow(clippy::expect_used)]
     let zeta_next = trace_domain
         .next_point(zeta)
-        .expect("domain should support next_point operation");
+        .expect("the trace domain supports next_point");
 
     let is_random = opt_r_data.is_some();
     let main_next = !air.main_next_row_columns().is_empty();

@@ -23,17 +23,20 @@ pub const DAS_VERSION: u8 = 1;
 /// Merkle kökü (parça listesinden - domain-etiketli, K38).
 pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
     // yaprak hash'leri
-    let leaves: Vec<[u8; 32]> = chunks.iter().map(|c| {
-        let mut h = Sha3_256::new();
-        h.update(b"BDLM_BUD_DAS_LEAF_V1");
-        h.update((c.len() as u64).to_le_bytes());
-        h.update(c);
-        h.finalize().into()
-    }).collect();
+    let leaves: Vec<[u8; 32]> = chunks
+        .iter()
+        .map(|c| {
+            let mut h = Sha3_256::new();
+            h.update(b"BDLM_BUD_DAS_LEAF_V1");
+            h.update((c.len() as u64).to_le_bytes());
+            h.update(c);
+            h.finalize().into()
+        })
+        .collect();
     // ikili merkle (tek sayıda → son yaprak çoğaltılır)
     let mut level = leaves;
     while level.len() > 1 {
-        let mut next = Vec::with_capacity((level.len() + 1) / 2);
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let mut h = Sha3_256::new();
             h.update(b"BDLM_BUD_DAS_NODE_V1");
@@ -70,21 +73,32 @@ impl DasProof {
         h.update((chunks[leaf_index].len() as u64).to_le_bytes());
         h.update(&chunks[leaf_index]);
         let leaf: [u8; 32] = h.finalize().into();
-        let mut level: Vec<[u8; 32]> = chunks.iter().map(|c| {
-            let mut h = Sha3_256::new();
-            h.update(b"BDLM_BUD_DAS_LEAF_V1");
-            h.update((c.len() as u64).to_le_bytes());
-            h.update(c);
-            h.finalize().into()
-        }).collect();
+        let mut level: Vec<[u8; 32]> = chunks
+            .iter()
+            .map(|c| {
+                let mut h = Sha3_256::new();
+                h.update(b"BDLM_BUD_DAS_LEAF_V1");
+                h.update((c.len() as u64).to_le_bytes());
+                h.update(c);
+                h.finalize().into()
+            })
+            .collect();
         let mut idx = leaf_index;
         let mut path = Vec::new();
         while level.len() > 1 {
-            let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
-            let sibling = if sibling_idx < level.len() { level[sibling_idx] } else { level[idx] };
+            let sibling_idx = if idx.is_multiple_of(2) {
+                idx + 1
+            } else {
+                idx - 1
+            };
+            let sibling = if sibling_idx < level.len() {
+                level[sibling_idx]
+            } else {
+                level[idx]
+            };
             path.push(sibling);
             // üst seviyeye geç
-            let mut next = Vec::with_capacity((level.len() + 1) / 2);
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
             for pair in level.chunks(2) {
                 let mut h = Sha3_256::new();
                 h.update(b"BDLM_BUD_DAS_NODE_V1");
@@ -114,7 +128,7 @@ impl DasProof {
         for sibling in &self.path {
             let mut nh = Sha3_256::new();
             nh.update(b"BDLM_BUD_DAS_NODE_V1");
-            if idx % 2 == 0 {
+            if idx.is_multiple_of(2) {
                 nh.update(cur);
                 nh.update(*sibling);
             } else {
@@ -141,7 +155,9 @@ impl DasSampler {
         let mut out = Vec::with_capacity(k);
         let mut x = seed;
         while out.len() < k.min(count) {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             let idx = (x % count as u64) as usize;
             if !out.contains(&idx) {
                 out.push(idx);
@@ -257,7 +273,10 @@ mod tests {
         // kurcalanmış parça → örnekleme RED
         let mut bad = chunks.clone();
         bad[50][0] ^= 0xFF;
-        assert!(!DasSampler::verify_sample(&bad, &root, 42, 10), "bozuk parça yakalanır");
+        assert!(
+            !DasSampler::verify_sample(&bad, &root, 42, 10),
+            "bozuk parça yakalanır"
+        );
         // farklı kök → RED
         assert!(!DasSampler::verify_sample(&chunks, &[0u8; 32], 42, 10));
         // indeksler deterministik + çakışmasız

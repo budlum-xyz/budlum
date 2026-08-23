@@ -45,8 +45,8 @@ impl LlmCache {
             items: BTreeMap::new(),
         };
         if enabled && path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("önbellek okunamadı: {e}"))?;
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("önbellek okunamadı: {e}"))?;
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
@@ -151,10 +151,7 @@ mod tests {
     #[test]
     fn disabled_cache_returns_none() {
         let c = LlmCache::open(&tmp_path("b.jsonl"), false).unwrap();
-        assert_eq!(
-            c.get(&LlmCache::key("x", "y", "z", &[0u8; 32])),
-            None
-        );
+        assert_eq!(c.get(&LlmCache::key("x", "y", "z", &[0u8; 32])), None);
     }
 
     #[test]
@@ -178,11 +175,7 @@ mod tests {
         let p = tmp_path("d.jsonl");
         let _ = std::fs::remove_file(&p);
         // Eski sürüm anahtarıyla satır yaz.
-        std::fs::write(
-            &p,
-            r#"{"key":"eski|m|v|t|h","parsed":{"x":1}}"#,
-        )
-        .unwrap();
+        std::fs::write(&p, r#"{"key":"eski|m|v|t|h","parsed":{"x":1}}"#).unwrap();
         let c = LlmCache::open(&p, true).unwrap();
         assert!(c.is_empty());
         let _ = std::fs::remove_file(&p);

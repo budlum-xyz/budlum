@@ -203,11 +203,7 @@ impl BudlumxyzRegistry {
             // (name, website_url) pairs can collide at the hash boundary
             // (Strix HIGH, CWE-347).
             let name_bytes = app.name.as_bytes();
-            hasher.update(
-                u64::try_from(name_bytes.len())
-                    .expect("name fits u64")
-                    .to_le_bytes(),
-            );
+            hasher.update((name_bytes.len() as u64).to_le_bytes());
             hasher.update(name_bytes);
             hasher.update([app.developer_attested as u8, app.verified as u8]);
             let category_tag = match app.category.clone() {
@@ -220,11 +216,7 @@ impl BudlumxyzRegistry {
             };
             hasher.update([category_tag]);
             let url_bytes = app.website_url.as_bytes();
-            hasher.update(
-                u64::try_from(url_bytes.len())
-                    .expect("url fits u64")
-                    .to_le_bytes(),
-            );
+            hasher.update((url_bytes.len() as u64).to_le_bytes());
             hasher.update(url_bytes);
             match app.manifest_id {
                 Some(manifest_id) => {

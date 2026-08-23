@@ -18,24 +18,24 @@ pub const TARIF_VERSION: u8 = 1;
 /// İçerik kaynağı üç rejimi (şartname §17.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentSource {
-    Generated,     // tariften doğar (R1) - tutulan bayt 0
-    Compressible,  // sıkışabilir organik (R2) - zlib tabanı tutulur
-    EntropyCoded,  // foto/video/şifreli (R3) - ham gövde, sıkışmaz
+    Generated,    // tariften doğar (R1) - tutulan bayt 0
+    Compressible, // sıkışabilir organik (R2) - zlib tabanı tutulur
+    EntropyCoded, // foto/video/şifreli (R3) - ham gövde, sıkışmaz
 }
 
 /// Tarif kaydı - B.U.D. 3.0'ın TEK kalıcı nesnesi.
 #[derive(Debug, Clone)]
 pub enum TarifKaydi {
     Uretim {
-        commitment: [u8; 32],     // içerik kimliği (K3)
-        generator: u16,           // üreteç kimliği (deterministik)
+        commitment: [u8; 32], // içerik kimliği (K3)
+        generator: u16,       // üreteç kimliği (deterministik)
         seed: [u8; 32],
-        params: Vec<u8>,          // üreteç parametreleri
+        params: Vec<u8>, // üreteç parametreleri
     },
     Govdeli {
         commitment: [u8; 32],
-        sikistirma: u8,           // 0=yok, 1=zlib-9 (küçültüyorsa)
-        govde: Vec<u8>,           // sıkışmış (R2) veya ham (R3) gövde
+        sikistirma: u8, // 0=yok, 1=zlib-9 (küçültüyorsa)
+        govde: Vec<u8>, // sıkışmış (R2) veya ham (R3) gövde
     },
 }
 
@@ -53,7 +53,11 @@ impl TarifKaydi {
         match self {
             Self::Uretim { .. } => ContentSource::Generated,
             Self::Govdeli { sikistirma, .. } => {
-                if *sikistirma > 0 { ContentSource::Compressible } else { ContentSource::EntropyCoded }
+                if *sikistirma > 0 {
+                    ContentSource::Compressible
+                } else {
+                    ContentSource::EntropyCoded
+                }
             }
         }
     }
@@ -61,9 +65,7 @@ impl TarifKaydi {
     /// Kayıt boyutu (commitment alanı muhasebesi, §19.1).
     pub fn record_bytes(&self) -> u64 {
         match self {
-            Self::Uretim { params, .. } => {
-                32 + 2 + 32 + params.len() as u64
-            }
+            Self::Uretim { params, .. } => 32 + 2 + 32 + params.len() as u64,
             Self::Govdeli { govde, .. } => 32 + 1 + govde.len() as u64,
         }
     }
@@ -85,13 +87,22 @@ impl TarifKaydi {
         h.update(seed);
         h.update(&params);
         let commitment: [u8; 32] = h.finalize().into();
-        Self::Uretim { commitment, generator, seed, params }
+        Self::Uretim {
+            commitment,
+            generator,
+            seed,
+            params,
+        }
     }
 
     /// Govdeli tarif yaz (zlib-9; küçültmüyorsa ham gövde - şartname §1.2).
     pub fn govdeli(govde: Vec<u8>, sikistirma: u8) -> Self {
         let commitment = Self::commit(&govde);
-        Self::Govdeli { commitment, sikistirma, govde }
+        Self::Govdeli {
+            commitment,
+            sikistirma,
+            govde,
+        }
     }
 }
 
@@ -106,7 +117,11 @@ pub fn kira(tarif: &TarifKaydi, erasure: f64, compression_ratio: f64) -> f64 {
     if held == 0 {
         return 0.0; // R1: kira yok, bayt tutulmuyor
     }
-    let oran = if compression_ratio > 1.0 { compression_ratio } else { 1.0 };
+    let oran = if compression_ratio > 1.0 {
+        compression_ratio
+    } else {
+        1.0
+    };
     R3_ZEMIN_USD_TB_AY * erasure.max(1.0) / oran
 }
 
@@ -114,10 +129,10 @@ pub fn kira(tarif: &TarifKaydi, erasure: f64, compression_ratio: f64) -> f64 {
 /// Elektrik alt sınırı (şartname §18.1b): altına inen fiyat validatör zararı = DoS.
 pub fn step_tabani(generator: u16) -> f64 {
     match generator {
-        1 => 0.000085,  // avatar (RLE)
-        2 => 0.00226,   // gradyan (vektör)
-        3 => 0.01028,   // hash-gürültü
-        _ => 0.01028,   // bilinmeyen üreteç → en yüksek taban (güvenli)
+        1 => 0.000085, // avatar (RLE)
+        2 => 0.00226,  // gradyan (vektör)
+        3 => 0.01028,  // hash-gürültü
+        _ => 0.01028,  // bilinmeyen üreteç → en yüksek taban (güvenli)
     }
 }
 
@@ -148,14 +163,23 @@ pub fn tarif_digest(t: &TarifKaydi) -> [u8; 32] {
     h.update(TARIF_MAGIC);
     h.update([TARIF_VERSION]);
     match t {
-        TarifKaydi::Uretim { commitment, generator, seed, params } => {
+        TarifKaydi::Uretim {
+            commitment,
+            generator,
+            seed,
+            params,
+        } => {
             h.update([0]);
             h.update(commitment);
             h.update(generator.to_le_bytes());
             h.update(seed);
             h.update(params);
         }
-        TarifKaydi::Govdeli { commitment, sikistirma, govde } => {
+        TarifKaydi::Govdeli {
+            commitment,
+            sikistirma,
+            govde,
+        } => {
             h.update([1]);
             h.update(commitment);
             h.update([*sikistirma]);
@@ -201,7 +225,10 @@ mod tests {
     #[test]
     fn tarif_uydurulamaz_kanaryasi() {
         let hedef = vec![0xA5; 160]; // organik içerik
-        assert!(tarif_uydurulamaz(&hedef, 200_000), "200k deneme eşleşmemeli");
+        assert!(
+            tarif_uydurulamaz(&hedef, 200_000),
+            "200k deneme eşleşmemeli"
+        );
         let _ = TarifKaydi::commit(&hedef); // commitment hesaplanabilir
     }
 
@@ -209,7 +236,11 @@ mod tests {
     fn record_boyut_rejime_bagli() {
         // R1 ~120 B; R2/R3 = gövde + 33 B
         let u = TarifKaydi::uretim(1, [0u8; 32], vec![]);
-        assert!(u.record_bytes() <= 120, "üretim tarifi ~120 B: {}", u.record_bytes());
+        assert!(
+            u.record_bytes() <= 120,
+            "üretim tarifi ~120 B: {}",
+            u.record_bytes()
+        );
         let g = TarifKaydi::govdeli(vec![0u8; 500], 1);
         assert_eq!(g.record_bytes(), 533);
     }

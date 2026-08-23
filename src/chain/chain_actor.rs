@@ -4,6 +4,7 @@ use crate::consensus::qc::{QcBlob, QcFaultProof};
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
+use crate::storage::merkle_trie::AccountProofBundle;
 use tokio::sync::{mpsc, oneshot};
 
 /// Direction filter for agent payment queries.
@@ -21,6 +22,14 @@ pub enum ChainCommand {
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
+    /// Account inclusion/absence proof against the proof-bearing state root.
+    ///
+    /// Distinct from [`Self::GetBalance`]: that answers what the node says a
+    /// balance is, this answers what the node can *prove* about it.
+    GetAccountProof(
+        Address,
+        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
+    ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
     ProduceBlock(Address, oneshot::Sender<Option<(Block, Vec<[u8; 32]>)>>),
     ValidateAndAddBlock(Block, oneshot::Sender<Result<Vec<[u8; 32]>, String>>),
@@ -91,6 +100,14 @@ pub enum ChainCommand {
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
     RegisterConsensusDomain(
         crate::domain::ConsensusDomain,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    RegisterSovereignTemplate(
+        Box<crate::domain::SovereignDomainTemplate>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    ValidateSovereignAuditExport(
+        Box<crate::domain::sovereign::AuditExportBundle>,
         oneshot::Sender<Result<(), String>>,
     ),
     SubmitDomainCommitment(
@@ -519,6 +536,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetNonce(*addr, tx)).await;
         rx.await.unwrap_or(0)
+    }
+
+    /// Ask the chain for a proof about one account.
+    ///
+    /// `None` means the node could not answer, which is not the same as the
+    /// account being absent: absence is itself a proof and comes back as
+    /// `Some` with `present: false`.
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofBundle> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
+        rx.await.unwrap_or(None)
     }
 
     pub async fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
@@ -1178,6 +1206,43 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::RegisterConsensusDomain(domain, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Egemen alan sablonunu kaydet.
+    ///
+    /// Sablon, adlandirdigi uzlasma alanina baglanir: alan kayitli olmali ve
+    /// tur/operator eslesmelidir.
+    pub async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterSovereignTemplate(
+                Box::new(template),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    pub async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ValidateSovereignAuditExport(
+                Box::new(bundle),
+                tx,
+            ))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -2204,15 +2269,79 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 }
+/// The proof-bearing trie, built at most once per chain height.
+///
+/// Building it costs O(depth * accounts): measured at 5000 accounts, 222 ms.
+/// Rebuilding per request turned `bud_getAccountProof` into a work
+/// multiplier - ten proofs cost 2.23 s, all of it spent rebuilding the same
+/// tree. That is a remote caller choosing how much node CPU to spend.
+///
+/// Built lazily rather than at the end of every block, because a node nobody
+/// asks for proofs should not pay for them at all: the cost belongs to the
+/// feature being used, not to running a node. The first request after a new
+/// block pays; every later request at that height is a tree walk.
+///
+/// `height` is what makes the cache honest. State only changes with a block,
+/// so a trie tagged with the height it was built at is either current or
+/// discarded - it can never serve a proof for state that has moved on.
+struct ProofTrieCache {
+    height: u64,
+    trie: crate::storage::merkle_trie::MerkleTrie,
+}
+
 pub struct ChainActor {
     blockchain: Blockchain,
     rx: mpsc::Receiver<ChainCommand>,
+    proof_trie: Option<ProofTrieCache>,
 }
 
 impl ChainActor {
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
         let (tx, rx) = mpsc::channel(1000);
-        (Self { blockchain, rx }, ChainHandle { tx })
+        (
+            Self {
+                blockchain,
+                rx,
+                proof_trie: None,
+            },
+            ChainHandle { tx },
+        )
+    }
+
+    /// Proof for one account, reusing the trie built for this height.
+    ///
+    /// The cache is keyed by height and rebuilt when it does not match, so a
+    /// proof is always drawn against the state the chain is at. A stale trie
+    /// would produce a proof that verifies against its own root and describes
+    /// state that no longer exists - worse than no proof, because it is a
+    /// correct-looking answer to the wrong question.
+    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
+        let height = self.blockchain.chain.len() as u64;
+        let stale = self
+            .proof_trie
+            .as_ref()
+            .is_none_or(|cached| cached.height != height);
+        if stale {
+            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+            for (a, acct) in &self.blockchain.state.accounts {
+                trie.insert(&a.0, acct.balance, acct.nonce);
+            }
+            self.proof_trie = Some(ProofTrieCache { height, trie });
+        }
+        match self.proof_trie.as_ref() {
+            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
+            // Unreachable: the branch above assigns it. Written as a fallback
+            // rather than an unwrap so a future edit that breaks the
+            // invariant costs one rebuild instead of stopping the node.
+            None => crate::storage::merkle_trie::prove_account(
+                self.blockchain
+                    .state
+                    .accounts
+                    .iter()
+                    .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
+                &addr.0,
+            ),
+        }
     }
 
     fn storage_economics_disabled_on_mainnet(&self) -> bool {
@@ -2399,6 +2528,76 @@ impl ChainActor {
             );
         }
 
+        // Yerlesim tavsiyesi. Bekleyen her onarim biletine, rendezvous
+        // yerlesiminin o shard icin sectigi tutucu yazilir. Bileti kim kabul
+        // ederse yine o alir; yazilan sey bir kural degil bir olcumdur, ve
+        // sapmayi `placements_that_diverged` gorunur kilar.
+        //
+        // Entropi son blogun hash'inden: her dugum ayni cevabi bulur, ve
+        // secim bir epoch oncesinden tahmin edilemez.
+        let placement_candidates: Vec<crate::storage::assignment::ShardCandidate> = self
+            .blockchain
+            .state
+            .get_active_validators()
+            .into_iter()
+            .map(|validator| crate::storage::assignment::ShardCandidate {
+                address: validator.address,
+                stake: validator.stake,
+            })
+            .collect();
+        if !placement_candidates.is_empty() {
+            let entropy = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_MAINTENANCE_PLACEMENT_V1",
+                &self.blockchain.chain_id.to_le_bytes(),
+                self.blockchain.last_block().hash.as_bytes(),
+                &current_epoch.to_le_bytes(),
+            ]);
+            let annotated = self
+                .blockchain
+                .state
+                .storage_registry
+                .annotate_expected_holders(&entropy, &placement_candidates);
+            if annotated > 0 {
+                tracing::info!(
+                    "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
+                );
+            }
+        }
+        for (ticket_id, expected, actual) in self
+            .blockchain
+            .state
+            .storage_registry
+            .placements_that_diverged()
+        {
+            tracing::info!(
+                "B.U.D. repair ticket {ticket_id} was taken by {} while placement chose {}",
+                hex::encode(actual.0),
+                hex::encode(expected.0)
+            );
+        }
+
+        // Talep bandi. Rejim indirimi almis bir nesne cok okunmaya baslarsa
+        // hedefi geri yukselir; asagidaki tarama bunu her epoch yeniden
+        // olcer. `under_replicated_shards` artik epoch aliyor, yani indirim
+        // sabit degil kanitlanmis okumaya bagli.
+        let demand_gap = self
+            .blockchain
+            .state
+            .storage_registry
+            .under_replicated_shards(current_epoch);
+        for (manifest_id, shard_id, active) in &demand_gap {
+            let target = self
+                .blockchain
+                .state
+                .storage_registry
+                .required_replicas_with_demand(manifest_id, current_epoch);
+            tracing::warn!(
+                "B.U.D. shard {} of {} is below its demand-adjusted target at epoch {current_epoch}: {active} active, target={target}",
+                hex::encode(shard_id.0),
+                hex::encode(manifest_id.0)
+            );
+        }
+
         let under_replicated = self
             .blockchain
             .state
@@ -2469,6 +2668,10 @@ impl ChainActor {
                 ChainCommand::GetNonce(addr, tx) => {
                     let nonce = self.blockchain.state.get_nonce(&addr);
                     let _ = tx.send(nonce);
+                }
+                ChainCommand::GetAccountProof(addr, tx) => {
+                    let bundle = self.account_proof(&addr);
+                    let _ = tx.send(Some(bundle));
                 }
                 ChainCommand::AddTransaction(tx_obj, res_tx) => {
                     let _ = res_tx.send(
@@ -2760,6 +2963,15 @@ impl ChainActor {
                 }
                 ChainCommand::RegisterConsensusDomain(domain, res_tx) => {
                     let _ = res_tx.send(self.blockchain.register_consensus_domain(domain));
+                }
+                ChainCommand::RegisterSovereignTemplate(template, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.register_sovereign_template(*template));
+                }
+                ChainCommand::ValidateSovereignAuditExport(bundle, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .validate_sovereign_audit_export(bundle.as_ref()),
+                    );
                 }
                 ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
@@ -3555,11 +3767,15 @@ impl ChainActor {
                                 == crate::domain::storage_deal::ReallocationStatus::ActiveReplacement
                         })
                         .count();
+                    let stats_epoch = self.blockchain.last_block().index
+                        / crate::core::chain_config::epoch_len_for_chain_id(
+                            self.blockchain.chain_id,
+                        );
                     let under_replicated_shards = self
                         .blockchain
                         .state
                         .storage_registry
-                        .under_replicated_shards()
+                        .under_replicated_shards(stats_epoch)
                         .len();
                     let _ = res_tx.send(serde_json::json!({
                         "slashedBondTotal": self.blockchain.storage_slashed_bond_total,

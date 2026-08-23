@@ -1,8 +1,16 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 pub mod adapter;
 pub mod bud_stark;
 pub mod plonky3_air;
 pub mod plonky3_prover;
 
+#[cfg(test)]
+// Test-only module: it holds three `#[test]` functions and a helper they
+// share, and nothing outside it references the module. It was compiled into
+// the production build, which both grew the binary and exempted it from
+// nothing - the panic gate flagged its `expect`s as production code.
 #[cfg(test)]
 pub mod trace_layout_tests;
 

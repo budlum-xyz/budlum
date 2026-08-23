@@ -106,7 +106,10 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
     });
 
     let mut parts: Vec<String> = Vec::new();
-    parts.push(format!("# Proje\n{}", escape_cell(&ctx.project_name, cell_max)));
+    parts.push(format!(
+        "# Proje\n{}",
+        escape_cell(&ctx.project_name, cell_max)
+    ));
 
     if !facts.is_empty() {
         let rows: Vec<Vec<String>> = facts
@@ -123,7 +126,11 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
             .collect();
         parts.push(format!(
             "# Olgular\n{}",
-            table(&["Ozne", "Yuklem", "Nesne", "Kanit", "Guven"], &rows, cell_max)
+            table(
+                &["Ozne", "Yuklem", "Nesne", "Kanit", "Guven"],
+                &rows,
+                cell_max
+            )
         ));
     }
 
@@ -143,7 +150,11 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
             .collect();
         parts.push(format!(
             "# Iliskiler\n{}",
-            table(&["Kaynak", "Iliski", "Hedef", "Kanit", "Guven"], &rows, cell_max)
+            table(
+                &["Kaynak", "Iliski", "Hedef", "Kanit", "Guven"],
+                &rows,
+                cell_max
+            )
         ));
     }
 

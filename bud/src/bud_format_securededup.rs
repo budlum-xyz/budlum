@@ -40,9 +40,12 @@ pub fn secure_dedup_candidate(data: &[u8], pow_bits: u32) -> Option<([u8; 32], b
     let key = convergent_key(data);
     let cid = cipher_content_id(data, &key);
     // PoW: H(cid || nonce) leading_zero_bits >= pow_bits (deterministik arama)
-    let mut nonce: u64 = 0;
+    // Sayaç döngü değişkeninden gelir (clippy::explicit_counter_loop): ayrı
+    // bir `nonce` tutup elle artırmak, değerinin döngü koşulundan bağımsız
+    // kaymasına açık bir desendi. Fonksiyon nonce'u döndürmüyor (yalnız
+    // `found`), bu yüzden döngü dışı bağlamaya gerek yok.
     let mut found = false;
-    for _ in 0..1_000_000 {
+    for nonce in 0..1_000_000u64 {
         let mut h = Sha3_256::new();
         h.update(cid);
         h.update(nonce.to_le_bytes());
@@ -60,7 +63,6 @@ pub fn secure_dedup_candidate(data: &[u8], pow_bits: u32) -> Option<([u8; 32], b
             found = true;
             break;
         }
-        nonce += 1;
     }
     Some((cid, found))
 }
@@ -71,7 +73,8 @@ pub fn same_content(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    convergent_key(a) == convergent_key(b) && cipher_content_id(a, &convergent_key(a)) == cipher_content_id(b, &convergent_key(b))
+    convergent_key(a) == convergent_key(b)
+        && cipher_content_id(a, &convergent_key(a)) == cipher_content_id(b, &convergent_key(b))
 }
 
 pub fn sd_digest(cid: &[u8; 32]) -> [u8; 32] {

@@ -19,7 +19,7 @@ pub struct TenantDedup {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DedupOutcome {
-    Stored,   // yeni chunk, saklandi
+    Stored,       // yeni chunk, saklandi
     Deduplicated, // mevcut, tasarruf
 }
 
@@ -60,7 +60,10 @@ impl PowChallenge {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_POW_V1";
 
     pub fn new(chunk_id: [u8; 32], difficulty: u32) -> Self {
-        PowChallenge { chunk_id, difficulty }
+        PowChallenge {
+            chunk_id,
+            difficulty,
+        }
     }
 
     fn hash_with_nonce(&self, nonce: u64) -> [u8; 32] {

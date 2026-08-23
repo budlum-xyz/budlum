@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 //! # lubot-integrations - dış veri adaptör iskeleti
 //!
 //! Kapalı-devre ilkesiyle dış servislere bağlanmak için yeniden
@@ -47,10 +50,17 @@ pub fn canonical_symbol(symbol: &str, known: &std::collections::BTreeSet<String>
     if known.contains(&s) {
         return s;
     }
-    if s.len() >= 2 {
-        let cut = s[..s.len() - 1].to_string();
-        if known.contains(&cut) {
-            return cut;
+    // Try every prefix, longest first. The previous form dropped exactly one
+    // character, so `BTCUSD` -> `BTCUS` never matched `BTC` and the documented
+    // `BTCUSDT` case could not work either; the suffix is not one character.
+    // Longest-first keeps the match greedy: with both `BTC` and `BTCU` known,
+    // `BTCUSD` resolves to `BTCU`.
+    // `char_indices` keeps the cut on a UTF-8 boundary; `s[..n]` on a byte
+    // index would panic mid-character.
+    let cuts: Vec<usize> = s.char_indices().map(|(i, _)| i).skip(1).collect();
+    for i in cuts.into_iter().rev() {
+        if known.contains(&s[..i]) {
+            return s[..i].to_string();
         }
     }
     s

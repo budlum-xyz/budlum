@@ -5,7 +5,7 @@
 //! 2) "Uzun videoya ne oluyor?" - akışlı segmentleme + kare sayısı/tur.
 //! 3) "0.016'ya düşürdükten sonra QR video + tarif acayip az alan kaplamıyor mu?"
 //!    - ekonomik çelişki denetimi: tarif alanı ~120 B ise validatör yükü ~0;
-//!    o zaman kullanıcı NE için öder? Cevap: NFT oluşturma ücreti (creation fee).
+//!      o zaman kullanıcı NE için öder? Cevap: NFT oluşturma ücreti (creation fee).
 //! 4) "Kullanıcı sadece NFT oluştururken ücret versin" - creation-fee modeli.
 //!
 //! Tüm sayılar program çıktısıdır; elle yazılmaz (şartname kuralı).
@@ -80,10 +80,10 @@ pub fn qr_kare_sayisi(icerik_bayt: usize, damla_basina_bayt: usize, kare_kapasit
 /// Uzun video (ör. 2 saat, 4 GB) → kaç kare, kaç tur, kaç segment.
 /// BLOCK=200 B, QR v40 → 14 damla/kare. 4 GB = 4·2^30 bayt.
 pub struct VideoUx {
-    pub kare: usize,        // toplam kare (sistematik tur)
-    pub tur: usize,         // karusel turu (1 tur = tüm bloklar)
-    pub segment: usize,     // 256 MB segmentler
-    pub kare_per_sn: f64,   // ekran 30 fps → saniye
+    pub kare: usize,      // toplam kare (sistematik tur)
+    pub tur: usize,       // karusel turu (1 tur = tüm bloklar)
+    pub segment: usize,   // 256 MB segmentler
+    pub kare_per_sn: f64, // ekran 30 fps → saniye
     pub dakika: f64,
 }
 
@@ -111,9 +111,9 @@ pub fn video_ux(bayt: usize) -> VideoUx {
 /// Çözüm: NFT oluşturma ücreti (creation fee) - kullanıcı içeriği TARİFLERKEN öder.
 #[derive(Debug, Clone, Copy)]
 pub struct CreationFee {
-    pub usd_per_nft: f64,     // NFT oluşturma ücreti
-    pub nft_per_tb: f64,      // 1 TB tarifli içerik kaç NFT eder (temsili)
-    pub usd_per_tb: f64,      // efektif: $/TB (creation fee modeli)
+    pub usd_per_nft: f64, // NFT oluşturma ücreti
+    pub nft_per_tb: f64,  // 1 TB tarifli içerik kaç NFT eder (temsili)
+    pub usd_per_tb: f64,  // efektif: $/TB (creation fee modeli)
 }
 
 /// NFT creation fee: tarifli içerikte "depolama kirası" yerine oluşturma ücreti.
@@ -182,7 +182,11 @@ mod tests {
         let v = video_ux(4 * 1024 * 1024 * 1024);
         assert_eq!(v.segment, 16, "4GB / 256MB = 16 segment");
         assert!(v.kare > 10_000, "kare sayısı büyük: {}", v.kare);
-        assert!(v.dakika > 1.0, "2 saat video 30fps'te dakikalar sürer: {:.1}", v.dakika);
+        assert!(
+            v.dakika > 1.0,
+            "2 saat video 30fps'te dakikalar sürer: {:.1}",
+            v.dakika
+        );
         // akış: segment-commitment eşleşen segment anında oynatılabilir (şartname §14)
         let _ = v.segment;
     }
@@ -192,7 +196,11 @@ mod tests {
         // 0.016 hedefi sonrası "her şey çok ucuz" boşluğu: NFT creation fee kapatır.
         // NFT başına 0.05 $, NFT = 100 MB içerik → 1 TB = 10240 NFT → 512 $/TB (gelirli)
         let fee = creation_fee_model(0.05, 100 * 1024 * 1024);
-        assert!(fee.usd_per_tb > 0.016, "gelir tavanın çok üstünde olmalı: {}", fee.usd_per_tb);
+        assert!(
+            fee.usd_per_tb > 0.016,
+            "gelir tavanın çok üstünde olmalı: {}",
+            fee.usd_per_tb
+        );
         assert!(creation_fee_ceiling_ok(&fee, 0.016), "gelir boşluğu yok");
         // tarif alanı: 1 TB içerik, tarif 120 B, tarif/100MB → tarif alanı çok az
         let alan = tarif_alan_tb(1.0, 120, 100 * 1024 * 1024);
@@ -205,7 +213,10 @@ mod tests {
         let v = video_ux(2 * 1024 * 1024 * 1024);
         // 1. segmentin ilk blokları önce gelir → oynatma başlayabilir
         let ilk_segment_kare = qr_kare_sayisi(256 * 1024 * 1024, 200, qr_capacity_bytes(40));
-        assert!(ilk_segment_kare < v.kare, "segment akışı: ilk segment daha az kare");
+        assert!(
+            ilk_segment_kare < v.kare,
+            "segment akışı: ilk segment daha az kare"
+        );
     }
 
     #[test]

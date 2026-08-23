@@ -12,8 +12,8 @@ pub const AUTOZ_MAGIC: [u8; 8] = *b"\xB5AZST\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZstdDecision {
-    Level(u8),      // seçilen seviye
-    Skip,           // sıkışmaz - ham sakla
+    Level(u8), // seçilen seviye
+    Skip,      // sıkışmaz - ham sakla
 }
 
 /// Sıkıştırma denemesi sonucuna göre karar.
@@ -58,7 +58,10 @@ mod tests {
 
     #[test]
     fn sikismazsa_gec() {
-        assert!(matches!(decide(1.01, 1.02, 10_000, 1.05), ZstdDecision::Skip));
+        assert!(matches!(
+            decide(1.01, 1.02, 10_000, 1.05),
+            ZstdDecision::Skip
+        ));
     }
 
     #[test]
@@ -68,7 +71,10 @@ mod tests {
 
     #[test]
     fn buyuk_kazanc_yavs_seviye() {
-        assert!(matches!(decide(1.5, 2.2, 10_000, 1.05), ZstdDecision::Level(19)));
+        assert!(matches!(
+            decide(1.5, 2.2, 10_000, 1.05),
+            ZstdDecision::Level(19)
+        ));
     }
 
     #[test]

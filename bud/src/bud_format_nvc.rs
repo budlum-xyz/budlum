@@ -17,8 +17,8 @@ use sha3::{Digest, Sha3_256};
 pub const NVC_MAGIC: [u8; 8] = *b"\xB5NVC1\0\0\0";
 
 // DCVC-RT integerizasyon sabitleri (belgeden).
-pub const K1: i32 = 512;   // f64 → int16: round(v * K1)
-pub const K2: i32 = 8192;  // int16 → f64-ölçekli: LUT girişi ölçeği
+pub const K1: i32 = 512; // f64 → int16: round(v * K1)
+pub const K2: i32 = 8192; // int16 → f64-ölçekli: LUT girişi ölçeği
 
 /// f64 değeri int16'ya ölçekle (deterministik yuvarlama: yarım-yukarı).
 pub fn to_int16(v: f64) -> i16 {

@@ -73,7 +73,10 @@ mod tests {
         let back = page_delta_decode(&d).unwrap();
         assert_eq!(back, pages);
         // delta düşük entropi: zstd daha iyi sıkıştırır (yapısal kazanç)
-        let ham: usize = d.iter().map(|p| p.iter().filter(|&&b| b != 0).count()).sum();
+        let ham: usize = d
+            .iter()
+            .map(|p| p.iter().filter(|&&b| b != 0).count())
+            .sum();
         assert!(ham < 256, "delta seyrek: {ham}");
     }
 

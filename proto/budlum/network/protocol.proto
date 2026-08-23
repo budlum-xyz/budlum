@@ -103,6 +103,25 @@ message ProtoTransaction {
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
     bytes signer_public_key = 49;
+    // V6 multisig authorization. Absent for V4 and V5; a transaction that
+    // carries it on any other version is refused at admission.
+    ProtoMultisigAuthorization authorization = 50;
+}
+
+// A t-of-n owner set and the signatures authorizing one transaction.
+//
+// The owner set travels with the transaction so verification stays
+// stateless, and `from` is derived from the set and threshold, so a wrong
+// set cannot point at somebody else's account: the address will not match.
+message ProtoMultisigAuthorization {
+    repeated bytes owners = 1;
+    uint32 threshold = 2;
+    repeated ProtoOwnerSignature signatures = 3;
+}
+
+message ProtoOwnerSignature {
+    bytes public_key = 1;
+    bytes signature = 2;
 }
 
 // Developer self-attestation over an app record.

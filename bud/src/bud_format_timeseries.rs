@@ -2,8 +2,8 @@
 //!
 //! K92: zaman serisi sıkıştırması 10-12x (ardışık zaman damgası farkı
 //! + XOR kayan nokta değerleri). B.U.D. telemetri/ölçüm verisi için domain transformu:
-//! (ts, value) çiftlerini zaman farkı + XOR bit akışına çevirir - zstd'nin
-//! göremediği yüksek entropili float farklarını görür.
+//!   (ts, value) çiftlerini zaman farkı + XOR bit akışına çevirir - zstd'nin
+//!   göremediği yüksek entropili float farklarını görür.
 //!
 //! Kayıpsız: encode → decode = orijinal (K38). Panik'siz, no unsafe, deterministik.
 //!
@@ -35,14 +35,22 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        BitWriter { buf: Vec::new(), bit_pos: 0 }
+        BitWriter {
+            buf: Vec::new(),
+            bit_pos: 0,
+        }
     }
     fn write_bit(&mut self, b: bool) {
         if self.bit_pos == 0 {
             self.buf.push(0);
         }
+        // `last_mut().unwrap()`: yukaridaki push bunu bos birakmaz, ama
+        // "birakmaz" ile "birakamaz" ayni sey degil. `if let` ayni kodu
+        // paniksiz yazar.
         if b {
-            *self.buf.last_mut().unwrap() |= 1 << self.bit_pos;
+            if let Some(byte) = self.buf.last_mut() {
+                *byte |= 1 << self.bit_pos;
+            }
         }
         self.bit_pos = (self.bit_pos + 1) & 7;
     }
@@ -61,7 +69,11 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(buf: &'a [u8]) -> Self {
-        BitReader { buf, pos: 0, bit: 0 }
+        BitReader {
+            buf,
+            pos: 0,
+            bit: 0,
+        }
     }
     fn read_bit(&mut self) -> Option<bool> {
         if self.pos >= self.buf.len() {
@@ -107,12 +119,12 @@ impl TimeSeriesColumnar {
             } else if (-63..=63).contains(&delta) {
                 w.write_bit(true);
                 w.write_bit(false);
-                w.write_bits((delta as i64 + 63) as u64, 7);
+                w.write_bits((delta + 63) as u64, 7);
             } else if (-255..=255).contains(&delta) {
                 w.write_bit(true);
                 w.write_bit(true);
                 w.write_bit(false);
-                w.write_bits((delta as i64 + 255) as u64, 9);
+                w.write_bits((delta + 255) as u64, 9);
             } else {
                 w.write_bit(true);
                 w.write_bit(true);
@@ -138,7 +150,12 @@ impl TimeSeriesColumnar {
             prev_ts = *ts;
             prev_value = *v;
         }
-        Some(TimeSeriesColumnar { points: points.len(), first_ts, first_value, bits: w.buf })
+        Some(TimeSeriesColumnar {
+            points: points.len(),
+            first_ts,
+            first_value,
+            bits: w.buf,
+        })
     }
 
     /// Bit akışından (ts, f64) çiftlerini yeniden kur (kayıpsızlık kanıtı).
@@ -231,7 +248,12 @@ impl TimeSeriesColumnar {
         if points == 0 || points > MAX_POINTS {
             return None;
         }
-        Some(TimeSeriesColumnar { points, first_ts, first_value, bits })
+        Some(TimeSeriesColumnar {
+            points,
+            first_ts,
+            first_value,
+            bits,
+        })
     }
 }
 
@@ -300,7 +322,9 @@ mod tests {
         let mut series = Vec::new();
         let mut x = 0x1234_5678_9ABC_DEF0u64;
         for i in 0..200 {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             // NaN/Inf üretmeyen mantissa-değişken değerler (1.0..2.0 arası)
             let bits = (x & 0x000F_FFFF_FFFF_FFFF) | 0x3FF0_0000_0000_0000;
             series.push((i as i64 * 5, f64::from_bits(bits)));

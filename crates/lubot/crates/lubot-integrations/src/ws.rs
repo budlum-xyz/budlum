@@ -9,8 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Bağlantı durumu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ConnState {
+    /// Baslangic durumu: `SessionTracker::default()` bunu bekliyordu ama
+    /// `ConnState` `Default` turetmiyordu, bu yuzden derive derlenmiyordu.
+    #[default]
     Disconnected,
     Connecting,
     Connected,

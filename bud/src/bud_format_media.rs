@@ -30,9 +30,9 @@ pub const MEDIA_BENCH_VERSION: u8 = 1;
 /// Ölçülmüş medya codec dönüşümü.
 #[derive(Debug, Clone, Copy)]
 pub struct MediaBench {
-    pub name: &'static str,   // "BMP→AVIF-lossless"
-    pub tool: &'static str,   // ölçüm aracı
-    pub measured_ratio: f64,  // GERÇEK ölçüm (üzerinde iddia yasak)
+    pub name: &'static str,  // "BMP→AVIF-lossless"
+    pub tool: &'static str,  // ölçüm aracı
+    pub measured_ratio: f64, // GERÇEK ölçüm (üzerinde iddia yasak)
     pub lossless: bool,
     pub note: &'static str,
 }
@@ -99,7 +99,10 @@ mod tests {
             assert!(b.measured_ratio.is_finite());
         }
         // H264->AV1 kazançsız (canary): 1.0x iddia bile RED.
-        assert!(!holds_honest("H264->AV1", 1.0, 1.0), "H264->AV1 1.0x iddiası ölçümü aşıyor");
+        assert!(
+            !holds_honest("H264->AV1", 1.0, 1.0),
+            "H264->AV1 1.0x iddiası ölçümü aşıyor"
+        );
         assert!(holds_honest("H264->AV1", 0.67, 1.0));
     }
 

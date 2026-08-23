@@ -1,3 +1,7 @@
+// Benchmark harness, not node code: this binary measures throughput and is
+// never part of a running validator. A failed setup step should stop the
+// measurement loudly rather than be threaded through `Result`.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Domain Throughput & Latency Benchmarks (criterion.rs)
 //!
 //! Her domain için somut throughput/latency ölçümleri:

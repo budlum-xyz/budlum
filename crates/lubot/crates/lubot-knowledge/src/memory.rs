@@ -85,8 +85,8 @@ impl TaskMemory {
             failures: Vec::new(),
         };
         if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("hafıza okunamadı: {e}"))?;
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("hafıza okunamadı: {e}"))?;
             for line in text.lines() {
                 if line.trim().is_empty() {
                     continue;
@@ -166,10 +166,20 @@ impl TaskMemory {
             .map(|r| {
                 let mut score = 0usize;
                 let hay = format!("{} {}", r.request.to_lowercase(), r.summary.to_lowercase());
+                let mut matched = false;
                 for w in &words {
                     if hay.contains(w) {
                         score += 2;
+                        matched = true;
                     }
+                }
+                // Relevance gates the bonuses. They used to be added to every
+                // run, so a run with one decision scored 1 and passed the
+                // `score > 0` filter with no query word matching it at all:
+                // an unrelated query returned the busiest runs rather than
+                // nothing.
+                if !matched {
+                    return (0usize, r);
                 }
                 score += self.decisions_for(&r.task_id).len().min(3);
                 if self

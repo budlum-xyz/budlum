@@ -131,6 +131,7 @@ mod poa_authority_binding {
             last_committed_height: 0,
             last_committed_hash: [0u8; 32],
             pow_parameters: None,
+            zk_program_allowlist: Vec::new(),
         }
     }
 

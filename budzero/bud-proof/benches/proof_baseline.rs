@@ -1,3 +1,7 @@
+// Integration test: an unwrap here is how the test reports a broken
+// invariant, so the workspace-wide panic gate does not apply.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use bud_isa::{Instruction, Opcode};
 use bud_proof::{ExecutionPublicInputs, Plonky3Adapter, ProverAdapter};
 use bud_vm::Vm;

@@ -283,7 +283,6 @@ mod tests {
 
 /// Pollen Data Rights / AccessGrant v2 primitives.
 pub mod data_rights;
-pub mod encryption_policy;
 
 /// The read gate that keeps paid content behind the payment that bought it.
 pub mod content_gate;

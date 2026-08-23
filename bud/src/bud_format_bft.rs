@@ -36,9 +36,12 @@ impl RatioVote {
         }
         let vk = VerifyingKey::from_bytes(&self.public_key)
             .map_err(|_| "K-BUD-BFT: gecersiz genel anahtar")?;
-        let sig = Signature::from_bytes(self.signature[..64].try_into().unwrap());
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(&self.signature[..64]);
+        let sig = Signature::from_bytes(&sig_bytes);
         let msg = Self::message(self.pipe_id, self.ratio);
-        vk.verify_strict(&msg, &sig).map_err(|_| "K-BUD-BFT: imza dogrulanamadi")
+        vk.verify_strict(&msg, &sig)
+            .map_err(|_| "K-BUD-BFT: imza dogrulanamadi")
     }
 
     /// Test/üretim: gizli anahtarla imzala.
@@ -66,7 +69,11 @@ impl RatioFinalityCert {
             return Err("K-BUD-BFT: pipe_id mismatch");
         }
         // ratio aynı mı (tolerans 0.01)
-        if !self.votes.iter().all(|v| (v.ratio - self.ratio).abs() < 0.01) {
+        if !self
+            .votes
+            .iter()
+            .all(|v| (v.ratio - self.ratio).abs() < 0.01)
+        {
             return Err("K-BUD-BFT: ratio mismatch");
         }
         // STRIX: validator benzersizliği - aynı validator 2 oy veremez.
@@ -87,7 +94,10 @@ impl RatioFinalityCert {
 pub struct BftRatioConsensus;
 
 impl BftRatioConsensus {
-    pub fn finalize_ratio(votes: Vec<RatioVote>, n: usize) -> Result<RatioFinalityCert, &'static str> {
+    pub fn finalize_ratio(
+        votes: Vec<RatioVote>,
+        n: usize,
+    ) -> Result<RatioFinalityCert, &'static str> {
         if votes.is_empty() {
             return Err("K-BUD-BFT: no votes");
         }
@@ -97,13 +107,21 @@ impl BftRatioConsensus {
         for v in votes {
             counts.entry(v.pipe_id).or_default().push(v);
         }
-        let (best_pipe, best_votes) = counts.into_iter().max_by_key(|(_, vs)| vs.len()).ok_or("K-BUD-BFT: no best")?;
+        let (best_pipe, best_votes) = counts
+            .into_iter()
+            .max_by_key(|(_, vs)| vs.len())
+            .ok_or("K-BUD-BFT: no best")?;
         let quorum = (n * 2).div_ceil(3);
         if best_votes.len() < quorum {
             return Err("K-BUD-BFT: no quorum");
         }
         let ratio = best_votes[0].ratio;
-        Ok(RatioFinalityCert { pipe_id: best_pipe, ratio, votes: best_votes, quorum })
+        Ok(RatioFinalityCert {
+            pipe_id: best_pipe,
+            ratio,
+            votes: best_votes,
+            quorum,
+        })
     }
 }
 
@@ -130,7 +148,9 @@ mod tests {
     #[test]
     fn bft_imzali_sertifika_gecer() {
         let sks = [sk(1), sk(2), sk(3), sk(4), sk(5)];
-        let votes = (0..4).map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68)).collect();
+        let votes = (0..4)
+            .map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68))
+            .collect();
         let cert = BftRatioConsensus::finalize_ratio(votes, 5).unwrap();
         assert!(cert.verify(5).is_ok(), "imzalı sertifika kabul");
     }
@@ -138,7 +158,9 @@ mod tests {
     #[test]
     fn bft_sahte_imza_reddedilir() {
         let sks = [sk(1), sk(2), sk(3), sk(4), sk(5)];
-        let mut votes: Vec<RatioVote> = (0..4).map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68)).collect();
+        let mut votes: Vec<RatioVote> = (0..4)
+            .map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68))
+            .collect();
         votes[0].signature = RatioVote::sign(&sk(9), 7, 16.68); // başka anahtarla imzala
         let cert = BftRatioConsensus::finalize_ratio(votes, 5).unwrap();
         assert!(cert.verify(5).is_err(), "sahte imza RED");
@@ -165,8 +187,13 @@ mod tests {
     #[test]
     fn bft_quorum_alti_reddedilir() {
         let sks = [sk(1), sk(2), sk(3)];
-        let votes = (0..3).map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68)).collect();
+        let votes = (0..3)
+            .map(|i| vote(&format!("val-{i}"), &sks[i], 7, 16.68))
+            .collect();
         // 3/5 < 2n/3 → finalize zaten RED (quorum kapısı)
-        assert!(BftRatioConsensus::finalize_ratio(votes, 5).is_err(), "3/5 < 2n/3 → RED");
+        assert!(
+            BftRatioConsensus::finalize_ratio(votes, 5).is_err(),
+            "3/5 < 2n/3 → RED"
+        );
     }
 }

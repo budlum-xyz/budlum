@@ -43,10 +43,29 @@
 //! path exists for it. What this module adds is the reference and the rules
 //! that keep the reference honest.
 //!
-//! WIRING: unwired - measured: no production path sets `dictionary_id` on a
-//! manifest yet. Binding it into the commitment changes the manifest preimage
-//! and is being landed with the other V4 fields rather than on its own, so
-//! that registered manifests migrate once instead of three times.
+//! WIRING: wired - `ContentManifest.dictionary_id` names the dictionary and
+//! `StorageRegistry::register_manifest_with_source` takes the reference
+//! through `acquire_dictionary`, which refuses an unknown dictionary, a
+//! retiring one, and a dictionary that itself names a dictionary.
+//!
+//! The earlier note said this was waiting to land with the other V4 fields so
+//! manifests would migrate once. V4 landed - the source commitment is in the
+//! preimage - and this field was not part of it, so the note had outlived its
+//! reason. It is bound now on the same terms section 66 set for the source:
+//! **only a claim that is made is committed to.** `None` contributes no bytes
+//! to the preimage, so every manifest registered before this field keeps its
+//! id and nothing migrates.
+//!
+//! Why the id has to cover it: a dictionary is part of how the object
+//! decodes. Bytes opened with the wrong dictionary are different bytes. Left
+//! out of the id, a manifest could be re-pointed at another dictionary
+//! without disturbing its record, and the same id would then decode to
+//! something else.
+//!
+//! The reference is taken only for a **new** registration. Registration is
+//! first-writer-wins and idempotent, so counting the same manifest twice
+//! would leave a reference that never drops and a dictionary that cannot be
+//! deleted after its last dependent is gone.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;

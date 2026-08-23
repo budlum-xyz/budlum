@@ -14,6 +14,17 @@ resolver = "2"
 [workspace.package]
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 
+# Panik kapisi. Kok manifestteki ile ayni gerekce, ayri workspace oldugu icin
+# ayrica yazilmasi gerekiyor: asagidaki `panic = "abort"` ile birlikte, uretim
+# yolundaki her `unwrap`/`expect` tetiklenebilirse bir canlilik acigidir - bu
+# crate'leri kosan dogrulayici, tek bozuk girdiyle olur. Olcum: kapi
+# acilmadan once 127 ihlal vardi (bud-compiler/parser.rs 81, plonky3_prover 14,
+# bud_stark/prover.rs 4, ...), hepsi kapatildi ya da gerekcesiyle muaf tutuldu.
+# Testler muaf: orada panik dogru davranistir.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 # budzero is a separate workspace, so it does not inherit the root manifest's
 # profile and would otherwise wrap arithmetic silently in release builds.
 # bud-vm evaluates Goldilocks field arithmetic and bud-proof derives trace

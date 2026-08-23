@@ -4,12 +4,15 @@
 //! This module; otherwise CI will fail with an overlap or out-of-bounds
 //! Error.
 
+// An unwrap here is how these layout tests report a broken invariant.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use crate::plonky3_air::{
     COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT,
     COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
-    COL_POSEIDON_X4_BASE, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_SAME_INV,
-    COL_RS1_IDX_INV, COL_STATE_WRITES_0, COL_SYSCALL_IS_1, COL_SYSCALL_IS_2, COL_SYSCALL_IS_3,
-    COL_SYSCALL_IS_6, TRACE_WIDTH,
+    COL_POSEIDON_X4_BASE, COL_PROG_MULT, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT,
+    COL_REG_SAME_INV, COL_RS1_IDX_INV, COL_STATE_WRITES_0, COL_SYSCALL_IS_1, COL_SYSCALL_IS_2,
+    COL_SYSCALL_IS_3, COL_SYSCALL_IS_6, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -290,6 +293,12 @@ fn all_ranges() -> Vec<ColRange> {
             name: "state_writes_digest",
             start: COL_STATE_WRITES_0,
             end: COL_STATE_WRITES_0 + 8,
+        },
+        // Program CTL cokluk taniki: satir i, pc=i'nin calistirilma sayisi.
+        ColRange {
+            name: "prog_mult",
+            start: COL_PROG_MULT,
+            end: COL_PROG_MULT + 1,
         },
     ]
 }

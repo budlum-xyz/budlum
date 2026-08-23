@@ -1,3 +1,6 @@
+// Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
+// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+#![forbid(unsafe_code)]
 //! # lubot-core - çekirdek tipler
 //!
 //! Zincir üstü budlum katmanıyla eşleşen **ayna tipler** (K3 kararı):

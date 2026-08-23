@@ -89,7 +89,62 @@ fn unbind_lines(src: &str) -> Vec<(usize, String)> {
 }
 
 /// Endpoint names whose body emits a shard id without a Pollen check.
+/// Names of `*_to_json` helpers in `src` whose own body emits a shard id.
+///
+/// An endpoint that calls a serialiser publishes whatever that serialiser
+/// publishes, so the indirection has to be followed. Treating *every*
+/// `_to_json(&` call as a shard-id emission was the blunt version of this
+/// check: it flagged endpoints serialising something else entirely (an
+/// account proof, a block header), which teaches a reader that the gate
+/// cries wolf. Following the call keeps the check strict where it matters.
+fn shard_emitting_helpers(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inbody = false;
+    let mut emits = false;
+    let mut name = String::new();
+    for line in src.lines() {
+        if inbody {
+            if line.contains("\"shardId\":") {
+                emits = true;
+            }
+            if line == "    }" {
+                if emits {
+                    out.push(name.clone());
+                }
+                inbody = false;
+            }
+        } else if let Some(rest) = line.trim_start().strip_prefix("fn ") {
+            let candidate = rest.split('(').next().unwrap_or("").trim();
+            if candidate.ends_with("_to_json") {
+                name = candidate.to_string();
+                inbody = true;
+                emits = false;
+            }
+        }
+    }
+    out
+}
+
+/// The name of the `*_to_json` helper called on `line`, if any.
+fn called_serialiser(line: &str) -> Option<String> {
+    let head = line.split("_to_json(&").next()?;
+    let ident: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if ident.is_empty() {
+        None
+    } else {
+        Some(format!("{ident}_to_json"))
+    }
+}
+
 fn unguarded_endpoints(src: &str) -> Vec<String> {
+    let shard_helpers = shard_emitting_helpers(src);
     let mut out = Vec::new();
     let mut inbody = false;
     let mut emits = false;
@@ -97,8 +152,21 @@ fn unguarded_endpoints(src: &str) -> Vec<String> {
     let mut name = String::new();
     for line in src.lines() {
         if inbody {
-            if line.contains("\"shardId\":") || line.contains("_to_json(&") {
+            if line.contains("\"shardId\":") {
                 emits = true;
+            }
+            if line.contains("_to_json(&") {
+                // An unresolvable serialiser is assumed to emit: the gate
+                // must not go quiet because it could not find the callee.
+                match called_serialiser(line) {
+                    None => emits = true,
+                    Some(called) => {
+                        let defined = src.contains(&format!("fn {called}("));
+                        if !defined || shard_helpers.contains(&called) {
+                            emits = true;
+                        }
+                    }
+                }
             }
             if line.contains("pollen_asset_for_content") {
                 guards = true;
@@ -325,6 +393,13 @@ const C8: &str = "    fn helper(x: u64) -> u64 { x + 1 }\n";
 const C9: &str = "    async fn leaky(&self, id: String) -> Result<Value, E> {\n        Ok(json!({ \"shardId\": hex::encode(s.shard_id.0) }))\n    }\n";
 const C10: &str = "    async fn guarded(&self, id: String) -> Result<Value, E> {\n        let protecting_asset = self.chain.pollen_asset_for_content(id).await;\n        let shards = if protecting_asset.is_some() { vec![] } else {\n            vec![json!({ \"shardId\": hex::encode(s.shard_id.0) })]\n        };\n        Ok(json!({ \"shards\": shards }))\n    }\n";
 const C11: &str = "    async fn unrelated(&self) -> Result<Value, E> {\n        Ok(json!({ \"height\": 1 }))\n    }\n";
+/// An endpoint calling a serialiser that itself emits a shard id: the
+/// indirection must not hide the leak.
+const C13: &str = "    fn deal_to_json(d: &Deal) -> Value {\n        json!({ \"shardId\": hex::encode(d.shard_id.0) })\n    }\n\n    async fn indirect_leak(&self, id: String) -> Result<Value, E> {\n        Ok(Self::deal_to_json(&d))\n    }\n";
+/// An endpoint calling a serialiser that emits no shard id: nothing to guard.
+const C14: &str = "    fn header_to_json(h: &Header) -> Value {\n        json!({ \"height\": h.height })\n    }\n\n    async fn innocent(&self, id: String) -> Result<Value, E> {\n        Ok(Self::header_to_json(&h))\n    }\n";
+/// A serialiser the gate cannot find: it assumes the worst, it does not go quiet.
+const C15: &str = "    async fn unknown_helper(&self, id: String) -> Result<Value, E> {\n        Ok(Self::mystery_to_json(&x))\n    }\n";
 const AI_REACH: &str = "    let manifest = chain.get_storage_manifest(id).await;\n";
 const AI_MEDIATED: &str = "    let ok = pollen.authorize_content_read(&id, &who, grant, block)?;\n    let manifest = chain.get_storage_manifest(id).await;\n";
 const AI_CLEAN: &str = "    let out = model.infer(&request.input_ref);\n";
@@ -434,6 +509,27 @@ fn canaries_strings(canaries: &mut usize) -> Result<(), String> {
     expect_bool(
         unguarded_endpoints(C11).is_empty(),
         "an endpoint with no shard id was flagged",
+        canaries,
+    )?;
+
+    // 13. A shard id reached through a serialiser is still a shard id.
+    expect_bool(
+        !unguarded_endpoints(C13).is_empty(),
+        "a shard id published through a *_to_json helper was not detected",
+        canaries,
+    )?;
+
+    // 14. A serialiser emitting no shard id does not make an endpoint guilty.
+    expect_bool(
+        unguarded_endpoints(C14).is_empty(),
+        "an endpoint serialising something other than a shard id was flagged",
+        canaries,
+    )?;
+
+    // 15. An unresolvable serialiser is assumed to emit: the gate stays loud.
+    expect_bool(
+        !unguarded_endpoints(C15).is_empty(),
+        "an unresolvable serialiser silenced the gate",
         canaries,
     )?;
     Ok(())

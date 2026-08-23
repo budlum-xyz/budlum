@@ -83,13 +83,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "lubot-integrations"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lubot-knowledge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "lubot-ops"
 version = "0.1.0"
 dependencies = [
  "lubot-core",
- "lubot-data",
  "lubot-serve",
  "lubot-tune",
+ "serde",
 ]
 
 [[package]]

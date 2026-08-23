@@ -1,0 +1,149 @@
+name: Diverse Double Compiling
+
+# Bir ikilinin kendi kaynagindan dogdugunu, derleyiciye guvenerek
+# soyleyemezsiniz.
+#
+# `determinism.yml` zaten iki kez derleyip ayni genesis hash'ini aldigini
+# dogruluyor. O, **ciktinin belirlenimli** oldugunu soyler ve degerlidir; ama
+# ayni derleyici iki kez kosarsa, o derleyicinin kaynakta olmayan bir sey
+# eklemesi durumunda iki kosu da ayni fazlaligi uretir ve karsilastirma gecer.
+# Kendini yeniden ureten bir derleyici arka kapisi tam olarak boyle gorunmez.
+#
+# Wheeler'in gozlemi sudur: sorun guven degil, **bagimsiz dogrulamanin
+# yoklugu**. Ayni kaynak iki ayri derleyiciyle derlenir; ikisi de ayni
+# baytlari uretiyorsa, ikisinin ayni fazlaligi bagimsiz olarak eklemis olmasi
+# gerekir. Bu is bunu kurar.
+#
+# DELIBERATE-TOOLCHAIN-DIVERGENCE
+#
+# Bu is `rust-toolchain.toml`'daki pin'den bilerek sapar ve `docker-toolchain`
+# kapisi bu isareti gorup bu dosyayi denetlemez. Sapma isin amacidir: ayni
+# kaynagi ikinci bir derleyiciyle derlemek. Pin'e esitlemek, iki kez ayni
+# derleyiciyi kosturmak olurdu ve `determinism.yml` zaten onu yapiyor.
+#
+# Karsilastirilan sey ikili degil, **ikilinin davranisinin kanonik ozeti**.
+# Rust ikilileri bugun bit-bit yeniden uretilebilir degil: yol on ekleri,
+# artimli derleme meta verisi ve panik mesajlarindaki mutlak yollar iki
+# kosuda farkli baytlar uretir. Bu farklar davranisi degistirmez ve
+# karsilastirilirsa is her zaman kirmizi olur, yani hicbir sey olcmez.
+# Bunun yerine zincirin uzerinde anlastigi degerler karsilastirilir: genesis
+# hash'i, kanonik program hash'i ve durum kok ornekleri. Bir arka kapinin
+# gizlenebilecegi yer tam da bunlardir.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Haftada bir: iki tam derleme pahali, ve arka kapi siniflari her
+    # commit'te degismez.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ddc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile-with:
+    name: Stage 1 (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Kanonik derleyici: repo'nun sabitledigi surum.
+          - label: pinned
+            toolchain: "1.97.0"
+          # Bagimsiz derleyici: farkli bir surum, dolayisiyla farkli bir
+          # ikili ve farkli bir derleme gecmisi. Ayni arka kapiyi tasimasi
+          # icin ikisinin ayni sekilde ele gecirilmis olmasi gerekir.
+          - label: independent
+            toolchain: "1.98.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+          rustup default "${{ matrix.toolchain }}"
+          rustc --version
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Build
+        run: cargo build --release 2>&1 | tail -5
+
+      - name: Canonical digests
+        id: digests
+        run: |
+          set -euo pipefail
+          # Genesis: zincirin ilk uzlasma degeri. Kaynakta olmayan bir sey
+          # buraya karisirsa iki derleyici ayrisir.
+          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis.txt
+          GENESIS=$(grep "GENESIS_HASH=" /tmp/genesis.txt | tail -1 | cut -d= -f2)
+          test -n "${GENESIS}"
+
+          # Kanonik program hash'i: zkVM programinin kimligi. Bir derleyici
+          # uretilen kodu degistirirse bu deger kayar.
+          # `|| true` yok. Kapi kosmazsa bu is kirmizi doner: olculemeyen bir
+          # sey yesil sayilamaz, ve sessizce atlanan bir asama karsilastirmayi
+          # bosaltir.
+          (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/proghash.txt 2>&1
+          PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${PROGRAM}"
+
+          {
+            echo "genesis=${GENESIS}"
+            echo "program=${PROGRAM}"
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'genesis=%s\nprogram=%s\n' "${GENESIS}" "${PROGRAM}" > "digests-${{ matrix.label }}.txt"
+          cat "digests-${{ matrix.label }}.txt"
+
+      - name: Upload digests
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ddc-digests-${{ matrix.label }}
+          path: digests-${{ matrix.label }}.txt
+          retention-days: 7
+
+  compare:
+    name: Stage 2 compare (bit-for-bit on canonical values)
+    runs-on: ubuntu-latest
+    needs: compile-with
+    timeout-minutes: 10
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: ddc-digests-*
+          merge-multiple: true
+
+      - name: Compare
+        run: |
+          set -euo pipefail
+          test -f digests-pinned.txt
+          test -f digests-independent.txt
+          echo "--- pinned"
+          cat digests-pinned.txt
+          echo "--- independent"
+          cat digests-independent.txt
+
+          # Kullanilamayan bir deger karsilastirilmaz ve **sessizce
+          # gecilmez**: olculemeyen bir sey yesil sayilamaz.
+          if ! diff -u digests-pinned.txt digests-independent.txt; then
+            echo "FAIL: iki bagimsiz derleyici ayni kaynaktan farkli kanonik"
+            echo "degerler uretti. Ya derleme surece bagimli bir sey kacirdi,"
+            echo "ya biri kaynakta olmayan bir sey ekledi. Ikisi de arastirilir."
+            exit 1
+          fi
+          echo "OK: iki bagimsiz derleyici ayni kanonik degerleri uretti."

@@ -7,8 +7,32 @@
 //!
 //! Path bits are MSB-first (address bit 0 = root branch).
 //!
-//! WIRING: unwired - account state still hashes through the existing root;
-//! this trie is not the one consensus reads.
+//! WIRING: wired - reached from the chain actor's `GetAccountProof` command
+//! and served on the RPC surface as `bud_getAccountProof`.
+//!
+//! # Why a second root exists
+//!
+//! Consensus reads the root built in `core::account::calculate_state_root`:
+//! a sequential Merkle tree over the account map, cached and updated
+//! incrementally. That root is correct for what it does, and it stays the
+//! consensus root; changing it would fork the chain.
+//!
+//! It cannot, however, carry an account proof. Its leaf order follows the
+//! iteration order of the account map, so a leaf's *position* has no
+//! cryptographic relation to the address it describes. A proof drawn from
+//! it establishes that some leaf is in the tree, not which address that leaf
+//! belongs to, and it cannot establish absence at all without shipping every
+//! leaf so the caller can look for the address itself: an O(n) witness.
+//!
+//! In this trie position *is* the address, bit by bit. Inclusion and absence
+//! are the same fixed-depth proof, and a proof for one address cannot be
+//! relabelled as a proof for another (see [`MerkleProof::verify`]).
+//!
+//! So this is a second, proof-bearing root, served alongside the consensus
+//! root and never in place of it. The bundle returned by [`prove_account`]
+//! carries its own root precisely because a caller must not assume the two
+//! roots are equal - they commit to the same accounts under different
+//! structures.
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -102,16 +126,27 @@ impl MerkleTrie {
 
             // Sibling = hash of all leaves that share bits [0, bit_index)
             // With `address` and have the opposite bit at `bit_index`.
-            let mut side: Vec<([u8; 32], u64, u64)> = Vec::new();
-            for (addr, (b, n)) in &self.leaves {
-                if !prefix_eq(addr, address, bit_index) {
-                    continue;
-                }
-                if get_bit(addr, bit_index) == bit {
-                    continue;
-                }
-                side.push((*addr, *b, *n));
-            }
+            //
+            // Those leaves are a *contiguous* range of the map. Path bits are
+            // MSB-first over the address bytes, which is exactly the order
+            // `BTreeMap<[u8; 32], _>` keeps its keys in, so every address
+            // sharing a bit prefix sits between the two addresses that pad
+            // that prefix with all-zeros and all-ones. Scanning the whole map
+            // at each of the 256 levels instead made one proof cost O(256 n);
+            // measured at 5000 accounts that was 224 ms of work per proof, on
+            // an endpoint a remote caller chooses when to invoke.
+            let (lo, hi) = sibling_bounds(address, bit_index);
+            let side: Vec<([u8; 32], u64, u64)> = self
+                .leaves
+                .range(lo..=hi)
+                .map(|(a, (b, n))| (*a, *b, *n))
+                .collect();
+            debug_assert!(
+                side.iter()
+                    .all(|(a, _, _)| prefix_eq(a, address, bit_index)
+                        && get_bit(a, bit_index) != bit),
+                "the range picked up a leaf outside the sibling subtree"
+            );
             siblings.push(hash_leaves(&side, bit_index + 1));
         }
 
@@ -138,7 +173,107 @@ impl MerkleTrie {
     }
 }
 
+/// A proof about one account, together with the root it was drawn against.
+///
+/// The root travels with the proof because a verifier that already trusts a
+/// root must check the proof against *that* root, and a verifier that does
+/// not must obtain it independently. Shipping the root here does not make it
+/// trusted; it makes the claim self-describing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProofBundle {
+    /// Root of the proof-bearing trie. Not the consensus state root.
+    pub root: [u8; 32],
+    /// `false` means the trie proves the address is absent, which is a
+    /// positive result, not a failure to answer.
+    pub present: bool,
+    pub balance: u64,
+    pub nonce: u64,
+    pub proof: MerkleProof,
+}
+
+impl AccountProofBundle {
+    /// Check the bundle against its own stated root.
+    ///
+    /// This is the weakest useful check: it says the bundle is internally
+    /// consistent. A caller that wants a claim about chain state must compare
+    /// `root` against a root it obtained some other way.
+    pub fn verify_self_consistent(&self) -> bool {
+        self.proof.verify(&self.root)
+    }
+}
+
+/// Build the proof-bearing trie over `accounts` and prove one address.
+///
+/// Absence is proved, not reported: an address with no entry yields
+/// `present: false` and a proof that verifies against the same root.
+///
+/// # Cost
+///
+/// This builds the trie from scratch on every call, which is right for a
+/// one-off and wrong for a serving endpoint. Measured at 5000 accounts: one
+/// proof 229 ms, ten proofs 2.23 s - the tenth caller pays to rebuild the
+/// same tree the first caller already built. A caller answering repeated
+/// requests should hold the trie across them and call [`prove_from_trie`].
+pub fn prove_account<I>(accounts: I, address: &[u8; 32]) -> AccountProofBundle
+where
+    I: IntoIterator<Item = ([u8; 32], u64, u64)>,
+{
+    let mut trie = MerkleTrie::new();
+    for (addr, balance, nonce) in accounts {
+        trie.insert(&addr, balance, nonce);
+    }
+    prove_from_trie(&trie, address)
+}
+
+/// Prove one address against an already-built trie.
+///
+/// The proof is identical to [`prove_account`]'s; only who pays for building
+/// the tree differs.
+#[must_use]
+pub fn prove_from_trie(trie: &MerkleTrie, address: &[u8; 32]) -> AccountProofBundle {
+    let (balance, nonce) = trie.leaves.get(address).copied().unwrap_or((0, 0));
+    let present = trie.leaves.contains_key(address);
+    AccountProofBundle {
+        root: trie.root_ref(),
+        present,
+        balance,
+        nonce,
+        proof: trie.proof(address),
+    }
+}
+
 // ─── Hashing ─────────────────────────────────────────────────────────
+
+/// Lowest and highest address in the sibling subtree at `bit_index`.
+///
+/// The subtree holds every address that agrees with `address` on bits
+/// `[0, bit_index)` and disagrees at `bit_index`. Padding the remaining bits
+/// with zeros gives the lowest such address and with ones the highest, so the
+/// subtree is the inclusive range between them.
+fn sibling_bounds(address: &[u8; 32], bit_index: usize) -> ([u8; 32], [u8; 32]) {
+    let mut lo = [0u8; 32];
+    for i in 0..bit_index {
+        if get_bit(address, i) {
+            set_bit(&mut lo, i);
+        }
+    }
+    if !get_bit(address, bit_index) {
+        set_bit(&mut lo, bit_index);
+    }
+    let mut hi = lo;
+    for i in (bit_index + 1)..TRIE_DEPTH {
+        set_bit(&mut hi, i);
+    }
+    (lo, hi)
+}
+
+fn set_bit(address: &mut [u8; 32], level: usize) {
+    let byte_idx = level / 8;
+    let bit_idx = 7 - (level % 8);
+    if let Some(byte) = address.get_mut(byte_idx) {
+        *byte |= 1 << bit_idx;
+    }
+}
 
 fn hash_leaf(address: &[u8; 32], balance: u64, nonce: u64) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -352,5 +487,115 @@ mod tests {
         let root = trie.root();
         let proof = trie.proof(&addr(99));
         assert!(proof.verify(&root));
+    }
+
+    #[test]
+    fn an_absent_account_is_proved_absent_not_merely_unanswered() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let bundle = prove_account(entries.clone(), &addr(9));
+        assert!(!bundle.present, "absent address reported as present");
+        assert_eq!(bundle.balance, 0);
+        assert_eq!(bundle.nonce, 0);
+        assert!(
+            bundle.verify_self_consistent(),
+            "absence is a proof and must verify against the same root"
+        );
+
+        let present = prove_account(entries, &addr(1));
+        assert!(present.present);
+        assert_eq!(present.balance, 100);
+        assert!(present.verify_self_consistent());
+        assert_eq!(
+            present.root, bundle.root,
+            "both bundles were drawn against the same account set"
+        );
+    }
+
+    #[test]
+    fn a_proof_cannot_be_relabelled_onto_another_address() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let bundle = prove_account(entries, &addr(1));
+        let mut forged = bundle.clone();
+        forged.proof.address = addr(2);
+        assert!(
+            !forged.verify_self_consistent(),
+            "a proof for one address verified as a proof for another"
+        );
+    }
+
+    #[test]
+    fn the_absence_witness_is_fixed_depth_regardless_of_account_count() {
+        // This is the property the consensus root cannot offer: proving an
+        // address is absent there needs every leaf, so the witness grows with
+        // the account set. Here it is TRIE_DEPTH whatever the set size is.
+        for count in [1usize, 8, 64] {
+            let entries: Vec<_> = (0..count)
+                .map(|i| (addr(i as u8), i as u64, i as u64))
+                .collect();
+            let bundle = prove_account(entries, &addr(200));
+            assert!(!bundle.present);
+            assert_eq!(bundle.proof.siblings.len(), TRIE_DEPTH);
+            assert_eq!(bundle.proof.directions.len(), TRIE_DEPTH);
+            assert!(bundle.verify_self_consistent());
+        }
+    }
+
+    #[test]
+    fn a_tampered_balance_breaks_the_bundle() {
+        let entries = vec![(addr(1), 100u64, 1u64)];
+        let mut bundle = prove_account(entries, &addr(1));
+        bundle.balance = 999;
+        // The struct field is a convenience copy; the binding claim lives in
+        // the leaf hash, so recomputing the leaf from the lied-about balance
+        // must not verify.
+        let lied_leaf = hash_leaf(&addr(1), bundle.balance, bundle.nonce);
+        assert_ne!(
+            lied_leaf, bundle.proof.leaf_hash,
+            "the balance field is not bound to the proof"
+        );
+    }
+
+    #[test]
+    fn a_reused_trie_gives_the_same_proof_as_a_fresh_one() {
+        // This is what makes caching safe: the tree carries no per-request
+        // state, so a proof drawn from a held trie is byte-identical to one
+        // drawn from a tree built for that single request. If this ever
+        // stopped holding, the cache would be serving a different answer
+        // than the uncached path and nothing else would notice.
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2), (addr(7), 7, 7)];
+        let mut held = MerkleTrie::new();
+        held.bulk_insert(&entries);
+
+        for target in [addr(1), addr(2), addr(7), addr(200)] {
+            let fresh = prove_account(entries.clone(), &target);
+            let cached = prove_from_trie(&held, &target);
+            assert_eq!(fresh, cached, "the held trie answered differently");
+            assert!(cached.verify_self_consistent());
+        }
+    }
+
+    #[test]
+    fn a_trie_held_across_a_state_change_answers_for_the_state_it_holds() {
+        // The cache is keyed by height for exactly this reason. A trie built
+        // before a balance changed still verifies - against its own, now
+        // stale, root. That is why the key must be the height and not, say,
+        // a timestamp or a "dirty" flag someone remembers to set.
+        let before = vec![(addr(1), 100u64, 1u64)];
+        let after = vec![(addr(1), 999u64, 2u64)];
+        let mut held = MerkleTrie::new();
+        held.bulk_insert(&before);
+
+        let stale = prove_from_trie(&held, &addr(1));
+        let current = prove_account(after, &addr(1));
+
+        assert!(
+            stale.verify_self_consistent(),
+            "the stale proof still verifies"
+        );
+        assert_ne!(
+            stale.root, current.root,
+            "a state change must move the root, or staleness would be undetectable"
+        );
+        assert_eq!(stale.balance, 100, "the held trie reports what it holds");
     }
 }

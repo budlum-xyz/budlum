@@ -15,8 +15,8 @@ use crate::domain::storage_deal::{StorageEconomicsParams, StorageError, StorageR
 use crate::domain::storage_params::StorageDomainParams;
 use crate::storage::content_id::ContentId;
 use crate::storage::manifest::{
-    manifest_id_from_parts, ContentCipher, ContentEncryption, ContentManifest, ErasureScheme,
-    ShardKind, ShardRef,
+    manifest_id_from_parts_stored, ContentCipher, ContentEncryption, ContentManifest,
+    ErasureScheme, ShardKind, ShardRef,
 };
 use crate::storage::{encode_object, reconstruct_object};
 
@@ -111,14 +111,14 @@ fn relabelling_a_shard_changes_the_manifest_id() {
     relabelled[0].kind = ShardKind::Parity;
 
     assert_ne!(
-        manifest_id_from_parts(
+        manifest_id_from_parts_stored(
             &m.shards,
             &m.erasure,
             &m.encryption,
             m.content_size(),
             m.total_size
         ),
-        manifest_id_from_parts(
+        manifest_id_from_parts_stored(
             &relabelled,
             &m.erasure,
             &m.encryption,
@@ -139,14 +139,14 @@ fn understating_k_changes_the_manifest_id() {
     let understated = ErasureScheme { k: 1, n: 6 };
 
     assert_ne!(
-        manifest_id_from_parts(
+        manifest_id_from_parts_stored(
             &m.shards,
             &honest,
             &m.encryption,
             m.content_size(),
             m.total_size
         ),
-        manifest_id_from_parts(
+        manifest_id_from_parts_stored(
             &m.shards,
             &understated,
             &m.encryption,
@@ -203,7 +203,7 @@ fn a_content_size_larger_than_the_stored_bytes_is_refused() {
 
     let mut lying = coded_manifest();
     lying.content_size = stored + 1;
-    lying.manifest_id = manifest_id_from_parts(
+    lying.manifest_id = manifest_id_from_parts_stored(
         &lying.shards,
         &lying.erasure,
         &lying.encryption,
@@ -256,7 +256,7 @@ fn duplicate_shard_indices_are_refused() {
     let mut m = coded_manifest();
     m.shards[1].index = m.shards[0].index;
     m.total_size = m.shards.iter().map(|s| s.size as u64).sum();
-    m.manifest_id = manifest_id_from_parts(
+    m.manifest_id = manifest_id_from_parts_stored(
         &m.shards,
         &m.erasure,
         &m.encryption,
@@ -279,7 +279,7 @@ fn the_v2_commitment_differs_from_v1() {
     let scheme = ErasureScheme::replication(2);
     assert_ne!(
         crate::storage::manifest::manifest_id_from_shards(&shards),
-        manifest_id_from_parts(
+        manifest_id_from_parts_stored(
             &shards,
             &scheme,
             &ContentEncryption::Plaintext,
@@ -1172,7 +1172,7 @@ mod repair_band {
         // pointless deals here.
         let (reg, manifest_id, _) = registry_with_object(4, 6);
         assert_eq!(
-            reg.under_replicated_shards().len(),
+            reg.under_replicated_shards(0).len(),
             6,
             "the shard view flags every singly-held shard"
         );

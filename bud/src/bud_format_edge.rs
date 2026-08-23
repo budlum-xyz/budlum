@@ -22,7 +22,12 @@ impl EdgeCache {
         if capacity_bytes == 0 {
             return None;
         }
-        Some(Self { capacity_bytes, used: 0, hits: 0, misses: 0 })
+        Some(Self {
+            capacity_bytes,
+            used: 0,
+            hits: 0,
+            misses: 0,
+        })
     }
 
     /// İstek: boyut verilen nesne önbelleğe sığıyor mu + karşıla bütçe.

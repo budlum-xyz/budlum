@@ -74,6 +74,20 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
         let Ok(text) = std::fs::read_to_string(&p) else {
             continue;
         };
+        // Bir is bilerek baska bir derleyici isteyebilir, ama bunu **yazili
+        // bir gerekce ile** yapmali. Dosyada `DELIBERATE-TOOLCHAIN-DIVERGENCE`
+        // isareti aranir; isaret varsa o dosyadaki surumler pin'e karsi
+        // denetlenmez.
+        //
+        // Tek mesru ornek bugun `diverse-double-compiling.yml`: isin butun
+        // amaci ayni kaynagi ikinci bir derleyiciyle derlemek, dolayisiyla
+        // pin'e esitlemek isi anlamsiz kilardi (bkz. ARCHITECTURE.md §73).
+        //
+        // Isaret bir kapi acmiyor, bir beyan istiyor: sapma dosyanin icinde
+        // gerekcesiyle duruyor ve tesadufen olusamiyor.
+        if text.contains("DELIBERATE-TOOLCHAIN-DIVERGENCE") {
+            continue;
+        }
         for line in text.lines() {
             let t = line.trim_start();
             if let Some(rest) = t.strip_prefix("toolchain:") {

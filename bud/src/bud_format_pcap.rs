@@ -55,11 +55,15 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
     let mut ts_secs = Vec::new();
     while pos + 16 <= data.len() {
         let rd = |o: usize| -> u32 {
-            let b = &data[pos + o..pos + o + 4];
+            // Sabit genislikte okuma: dilim uzunlugu burada her zaman 4, ama
+            // `try_into().unwrap()` bunu derleyiciye degil calisma zamanina
+            // birakiyordu. `copy_from_slice` ayni seyi paniksiz yapar.
+            let mut w = [0u8; 4];
+            w.copy_from_slice(&data[pos + o..pos + o + 4]);
             if le {
-                u32::from_le_bytes(b.try_into().unwrap())
+                u32::from_le_bytes(w)
             } else {
-                u32::from_be_bytes(b.try_into().unwrap())
+                u32::from_be_bytes(w)
             }
         };
         let ts_sec = rd(0) as i64;
@@ -245,7 +249,7 @@ mod tests {
             pkt.extend_from_slice(b"\x00\x11\x22\x33\x44\x55"); // dst mac
             pkt.extend_from_slice(&[0x08, 0x00]); // ethertype IPv4
             pkt.extend_from_slice(&[0x45, 0x00, 0x00, 0x20]); // IP hdr
-            pkt.extend_from_slice(&format!("dns-query-{}", i % 50).as_bytes());
+            pkt.extend_from_slice(format!("dns-query-{}", i % 50).as_bytes());
             pkt.resize(60, 0);
             let incl = pkt.len();
             d.extend_from_slice(&(ts as u32).to_le_bytes());
@@ -262,7 +266,12 @@ mod tests {
     fn pcap_roundtrip_kayipsiz() {
         let p = ornek_pcap();
         let t = pcap_transform(&p).expect("transform");
-        assert!(t.len() < p.len(), "transform küçültmeli: {} → {}", p.len(), t.len());
+        assert!(
+            t.len() < p.len(),
+            "transform küçültmeli: {} → {}",
+            p.len(),
+            t.len()
+        );
         let r = pcap_restore(&t).expect("restore");
         assert_eq!(r, p, "PCAP birebir");
     }

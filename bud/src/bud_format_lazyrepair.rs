@@ -42,11 +42,17 @@ pub fn decide_repair(
         return Some(RepairAction::RepairNow { helpers: 1 });
     }
     // bütçe yoksa ertele; yaş eşiği aşılırsa onar
-    let age_threshold = if budget_per_epoch <= 0.0 { 0 } else { (1.0 / budget_per_epoch.max(0.001)) as u64 };
+    let age_threshold = if budget_per_epoch <= 0.0 {
+        0
+    } else {
+        (1.0 / budget_per_epoch.max(0.001)) as u64
+    };
     if age_epochs >= age_threshold.max(2) {
         Some(RepairAction::RepairNow { helpers: 2 })
     } else {
-        Some(RepairAction::Defer { until_epoch: age_threshold.max(2) })
+        Some(RepairAction::Defer {
+            until_epoch: age_threshold.max(2),
+        })
     }
 }
 
@@ -67,29 +73,47 @@ mod tests {
 
     #[test]
     fn kayip_yoksa_ertelenir() {
-        assert!(matches!(decide_repair(0, 2, 0, false, 0.5), Some(RepairAction::Defer { .. })));
+        assert!(matches!(
+            decide_repair(0, 2, 0, false, 0.5),
+            Some(RepairAction::Defer { .. })
+        ));
     }
 
     #[test]
     fn tolerans_asilirsa_hemen_onar() {
-        assert!(matches!(decide_repair(3, 2, 0, false, 0.5), Some(RepairAction::RepairNow { .. })));
+        assert!(matches!(
+            decide_repair(3, 2, 0, false, 0.5),
+            Some(RepairAction::RepairNow { .. })
+        ));
     }
 
     #[test]
     fn okuma_talebi_hemen_onarir() {
-        assert!(matches!(decide_repair(1, 2, 0, true, 0.5), Some(RepairAction::RepairNow { .. })));
+        assert!(matches!(
+            decide_repair(1, 2, 0, true, 0.5),
+            Some(RepairAction::RepairNow { .. })
+        ));
     }
 
     #[test]
     fn butce_yoksa_ertele_buyuk_yasta_onar() {
         // bütçe 0 → eşik 0.max(2)=2; yaş 1 → ertele, yaş 5 → onar
-        assert!(matches!(decide_repair(1, 2, 1, false, 0.0), Some(RepairAction::Defer { .. })));
-        assert!(matches!(decide_repair(1, 2, 5, false, 0.0), Some(RepairAction::RepairNow { .. })));
+        assert!(matches!(
+            decide_repair(1, 2, 1, false, 0.0),
+            Some(RepairAction::Defer { .. })
+        ));
+        assert!(matches!(
+            decide_repair(1, 2, 5, false, 0.0),
+            Some(RepairAction::RepairNow { .. })
+        ));
     }
 
     #[test]
     fn karar_deterministik() {
-        assert_eq!(repair_digest(1, 2, 3, true, 0.5), repair_digest(1, 2, 3, true, 0.5));
+        assert_eq!(
+            repair_digest(1, 2, 3, true, 0.5),
+            repair_digest(1, 2, 3, true, 0.5)
+        );
     }
 }
 

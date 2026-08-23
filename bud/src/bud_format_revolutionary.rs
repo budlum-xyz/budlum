@@ -4,7 +4,6 @@
 
 #![forbid(unsafe_code)]
 
-
 pub const BUD_MAGIC_V6: [u8; 8] = *b"BUD\x01\x00\x00\x00\x00";
 pub const BUD_VERSION_V6: u16 = 6;
 
@@ -13,35 +12,55 @@ pub struct CompactTable {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub max_cell_chars: usize, // 240
-    pub max_chars: usize, // 120k
+    pub max_chars: usize,      // 120k
 }
 
 impl CompactTable {
     pub fn new(headers: Vec<String>) -> Self {
-        Self { headers, rows: Vec::new(), max_cell_chars: 240, max_chars: 120_000 }
+        Self {
+            headers,
+            rows: Vec::new(),
+            max_cell_chars: 240,
+            max_chars: 120_000,
+        }
     }
 
     pub fn escape_cell(s: &str, max_chars: usize) -> String {
         let mut text = s.replace("|", "\\|").replace("\n", " ");
         text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if max_chars>0 && text.len()>max_chars {
-            text.truncate(max_chars-1);
+        if max_chars > 0 && text.len() > max_chars {
+            text.truncate(max_chars - 1);
             text.push('…');
         }
         text
     }
 
     pub fn format_evidence(path: &str, start: u32, end: u32) -> String {
-        if path.is_empty() { return "".to_string(); }
-        if start>0 && end>0 { format!("{}:L{}-L{}", path, start, end) } else { path.to_string() }
+        if path.is_empty() {
+            return "".to_string();
+        }
+        if start > 0 && end > 0 {
+            format!("{}:L{}-L{}", path, start, end)
+        } else {
+            path.to_string()
+        }
     }
 
     pub fn add_row(&mut self, row: Vec<String>) {
-        let escaped: Vec<String> = row.iter().map(|c| Self::escape_cell(c, self.max_cell_chars)).collect();
+        let escaped: Vec<String> = row
+            .iter()
+            .map(|c| Self::escape_cell(c, self.max_cell_chars))
+            .collect();
         self.rows.push(escaped);
     }
 
-    pub fn to_string(&self) -> String {
+    /// Tabloyu metne çevirir.
+    ///
+    /// `Display` üzerinden gelir: envanter metodu `to_string` adıyla inherent
+    /// tanımlıysa (clippy::inherent_to_string) `ToString`'in ürettiğini
+    /// gölgeler ve tür `{}` ile biçimlendirilemez. `Display` yazmak ikisini
+    /// aynı gövdede birleştirir; `.to_string()` çağrıları aynen çalışır.
+    fn fmt_rows(&self) -> String {
         let mut lines = Vec::new();
         lines.push(self.headers.join(" | "));
         for row in &self.rows {
@@ -62,7 +81,9 @@ impl CompactTable {
 
     pub fn compression_ratio_vs_json(&self, json_len: usize) -> f64 {
         let compact_len = self.to_string().len();
-        if compact_len==0 { return 1.0; }
+        if compact_len == 0 {
+            return 1.0;
+        }
         json_len as f64 / compact_len as f64
     }
 }
@@ -75,9 +96,20 @@ pub struct Evidence {
     pub confidence: String, // high/medium/low
 }
 
+impl core::fmt::Display for CompactTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.fmt_rows())
+    }
+}
+
 impl Evidence {
     pub fn new(path: &str, start: u32, end: u32, confidence: &str) -> Self {
-        Self { path: path.to_string(), start_line: start, end_line: end, confidence: confidence.to_string() }
+        Self {
+            path: path.to_string(),
+            start_line: start,
+            end_line: end,
+            confidence: confidence.to_string(),
+        }
     }
 
     pub fn format(&self) -> String {
@@ -85,7 +117,7 @@ impl Evidence {
     }
 
     pub fn has_evidence(&self) -> bool {
-        !self.path.is_empty() && self.start_line>0
+        !self.path.is_empty() && self.start_line > 0
     }
 }
 
@@ -149,7 +181,9 @@ impl ColumnarTransform {
     pub fn transform_csv(csv: &str) -> (Vec<String>, Vec<Vec<String>>) {
         // CSV to columnar: header + columns
         let lines: Vec<&str> = csv.lines().collect();
-        if lines.is_empty() { return (vec![], vec![]); }
+        if lines.is_empty() {
+            return (vec![], vec![]);
+        }
         let headers: Vec<String> = lines[0].split(',').map(|s| s.to_string()).collect();
         let mut columns: Vec<Vec<String>> = vec![Vec::new(); headers.len()];
         for line in lines.iter().skip(1) {
@@ -164,7 +198,9 @@ impl ColumnarTransform {
     }
 
     pub fn ratio_improvement(original_len: usize, columnar_len: usize) -> f64 {
-        if columnar_len==0 { return 1.0; }
+        if columnar_len == 0 {
+            return 1.0;
+        }
         original_len as f64 / columnar_len as f64
     }
 }
@@ -176,7 +212,7 @@ impl HybridSearch {
     pub fn reciprocal_rank_fusion(ft5_rank: usize, tfidf_rank: usize) -> f64 {
         // RRF: 1/(k+rank)
         let k = 60.0;
-        1.0/(k+ft5_rank as f64) + 1.0/(k+tfidf_rank as f64)
+        1.0 / (k + ft5_rank as f64) + 1.0 / (k + tfidf_rank as f64)
     }
 }
 
@@ -187,15 +223,21 @@ pub struct RevolutionaryGates;
 impl RevolutionaryGates {
     pub fn k_bud_compact_table(table: &CompactTable, json_len: usize) -> Result<(), &'static str> {
         let ratio = table.compression_ratio_vs_json(json_len);
-        if ratio < 2.0 { return Err("K-BUD-COMPACT-TABLE: ratio <2.0 not revolutionary"); }
+        if ratio < 2.0 {
+            return Err("K-BUD-COMPACT-TABLE: ratio <2.0 not revolutionary");
+        }
         Ok(())
     }
     pub fn k_bud_evidence(ev: &Evidence) -> Result<(), &'static str> {
-        if !ev.has_evidence() { return Err("K-BUD-EVIDENCE: no evidence"); }
+        if !ev.has_evidence() {
+            return Err("K-BUD-EVIDENCE: no evidence");
+        }
         Ok(())
     }
     pub fn k_bud_sqlite(chunk: &SqliteChunk) -> Result<(), &'static str> {
-        if chunk.content_hash == [0u8; 32] { return Err("K-BUD-SQLITE: hash zero"); }
+        if chunk.content_hash == [0u8; 32] {
+            return Err("K-BUD-SQLITE: hash zero");
+        }
         Ok(())
     }
     pub fn k_bud_secret_redact(original: &str, redacted: &str) -> Result<(), &'static str> {
@@ -205,12 +247,18 @@ impl RevolutionaryGates {
         Ok(())
     }
     pub fn k_bud_columnar(headers: &[String], columns: &[Vec<String>]) -> Result<(), &'static str> {
-        if headers.is_empty() { return Err("K-BUD-COLUMNAR: no headers"); }
-        if columns.is_empty() { return Err("K-BUD-COLUMNAR: no columns"); }
+        if headers.is_empty() {
+            return Err("K-BUD-COLUMNAR: no headers");
+        }
+        if columns.is_empty() {
+            return Err("K-BUD-COLUMNAR: no columns");
+        }
         Ok(())
     }
     pub fn k_bud_fts5(rrf_score: f64) -> Result<(), &'static str> {
-        if rrf_score <= 0.0 { return Err("K-BUD-FTS5: rrf score zero"); }
+        if rrf_score <= 0.0 {
+            return Err("K-BUD-FTS5: rrf score zero");
+        }
         Ok(())
     }
 }
@@ -220,8 +268,22 @@ mod tests {
     use super::*;
     #[test]
     fn compact_table_ratio() {
-        let mut table = CompactTable::new(vec!["id".into(), "subject".into(), "predicate".into(), "object".into(), "evidence".into(), "confidence".into()]);
-        table.add_row(vec!["abc123".into(), "file".into(), "implements".into(), "feature".into(), "src/main.rs:L10-L20".into(), "high".into()]);
+        let mut table = CompactTable::new(vec![
+            "id".into(),
+            "subject".into(),
+            "predicate".into(),
+            "object".into(),
+            "evidence".into(),
+            "confidence".into(),
+        ]);
+        table.add_row(vec![
+            "abc123".into(),
+            "file".into(),
+            "implements".into(),
+            "feature".into(),
+            "src/main.rs:L10-L20".into(),
+            "high".into(),
+        ]);
         let json_len = 1000;
         let ratio = table.compression_ratio_vs_json(json_len);
         assert!(ratio > 1.0);

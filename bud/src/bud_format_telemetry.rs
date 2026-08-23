@@ -103,7 +103,7 @@ mod tests {
         }
         assert_eq!(t.total_access(), 225);
         let plan = t.plan(10, 1, 2).unwrap();
-        let (h, w, c, cu) = plan.tier_summary();
+        let (h, w, _c, cu) = plan.tier_summary();
         // i=2..9 → ≥10 erişim → Hot; i=1 → 5 → Warm; i=0 → 0 → Culled
         assert_eq!(h, 8);
         assert_eq!(w, 1);

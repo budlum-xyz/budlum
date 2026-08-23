@@ -11,14 +11,68 @@ name = "bud_core"
 path = "src/lib.rs"
 
 [features]
-# B.U.D. Edition: surum 1.0/2.0/3.0 arasinda secim yapilabilir.
-#   bud1 = BYO (kendi sunucu/cihaz, kuralsiz) - edition.rs runtime secimi
-#   bud2 = .bud konteyner depolama (DEFAULT)
-#   bud3 = tarif-tek-nesne (3.0 modulleri; bud2 uzerine insa edilir)
+# B.U.D. Edition -- surum 1.0/2.0/3.0.
+#
+# ONEMLI AYRIM: surum SECIMI DERLEME ZAMANI DEGIL CALISMA ZAMANIDIR.
+# `bud_format_edition::Edition` (Bud1/Bud2/Bud3) enum'u secimi tasir; bir
+# dugum ucunu de ayni ikilide sunar. Dolayisiyla:
+#   bud1 = BYO (kendi sunucu/cihaz). Ayri modul YOK -> feature bos ve
+#          hicbir `cfg` kapisinda kullanilmiyor. Yalnizca niyet belgesi.
+#   bud2 = .bud konteyner depolama (DEFAULT). Cekirdek her zaman derlenir;
+#          bu feature da hicbir `cfg` kapisinda kullanilmiyor.
+#   bud3 = tarif-tek-nesne. GERCEKTEN kapi: `#[cfg(feature = "bud3")]` ile
+#          QR/fountain/tarif modullerini derlemeye alir (bkz. lib.rs).
+# bud1/bud2 bos birakildi cunku kaldirmak alt-akis `--features bud2` cagrilarini
+# kirardi; kapi gibi davrandiklari sanilmasin diye durumlari burada yazili.
 default = ["bud2"]
 bud1 = []
 bud2 = []
 bud3 = ["bud2"]
+
+# --------------------------------------------------------------------------
+# Lint kapisi.
+#
+# Bu crate (B.U.D. 1.0/2.0/3.0'in TAMAMI, 103 modul) CI'da hicbir isle
+# derlenmiyordu: ci.yml'deki hicbir adim `bud/Cargo.toml`'a bakmiyor. Olcum:
+# `cargo clippy --features bud3 --all-targets -- -D warnings` -> 91 ihlal,
+# icinde gercek hatalar vardi (ayrintili gerekce ilgili satirlarda):
+#   - bud_format_exepdf.rs: if'in iki dali ayni -> "icerik-duyarli" bolumleme
+#     iddiasi sahteydi, olcum hesaplanip atiliyordu
+#   - bud_format_logfield.rs: vec![Vec::with_capacity(n); 7] -> kapasite
+#     7 sutunun 6'sinda sessizce kayboluyordu
+#   - lib.rs: cift `#[cfg(feature = "bud3")]` yuzunden iki 3.0 modulu
+#     kapinin disinda kalmisti (bud2 derlemesinde 3.0 kodu geliyordu)
+# Kapi buraya yazildi ki ayni sinif hata sessizce geri gelmesin.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Panik siniri: uretim yolunda `unwrap`/`expect` yasak.
+#
+# Bu workspace ana repodaki kapinin disindaydi. Olcum: 25 uretim ihlali
+# (huffman 8, columnar 9, sabit genislikli okumalar 6, float siralama 2).
+# Hicbiri "kotu kod" degildi - her biri dogru bir muhakemeye dayaniyordu
+# ("bu dilim her zaman 4 bayt", "anahtar kumesini yukarida dogruladik").
+# Muhakeme dogruydu; tasiyicisi yoktu. Araya bir kosul eklendiginde panik
+# geri gelirdi ve bunu soyleyecek bir kapi yoktu.
+#
+# Duzeltme desenleri ARCHITECTURE §52'deki uc kalibi izliyor: sabit
+# genislikte okuma -> `copy_from_slice`, dogrulanmis varsayim -> degeri bir
+# kez paniksiz topla, float siralama -> `total_cmp`.
+unwrap_used = "deny"
+expect_used = "deny"
+# Indeks matematigi yogun kodda (erasure/Shamir/MSR/fountain: GF(2^8),
+# Cauchy matrisi, kare matris eliminasyonu) dizi indeksleri kasitlidir --
+# `i`/`j` ayni anda birden cok dizide gezer, iterator'e cevirmek satiri
+# okunmaz yapar ve indeks-esitligi hatasi riskini artirir. 18 ihlalin hepsi
+# bu sinifta; gerekce ile aciyoruz, gorunmezlestirmiyoruz.
+needless_range_loop = "allow"
+# Cozumleyici/kodlayici imzalari genis (kodek + parametre + kapasite + kapi).
+# 3 ihlal; imzayi bolmek cagri yerlerini kirar, kazanci yok.
+too_many_arguments = "allow"
+# Sutunlu/Huffman yapilari ic ice Vec dondurur; tur takma adi eklemek
+# okunurlugu artirmiyor. 4 ihlal.
+type_complexity = "allow"
 
 [dependencies]
 sha3 = "0.10"

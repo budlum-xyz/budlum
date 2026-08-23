@@ -309,35 +309,39 @@ olduğunu söyler.
 Derlenen bytecode BudZKVM'de çalışır → execution trace → Plonky3 STARK proof.
 
 ---
-## 9. Kanıtlanabilirlik Sınırı: Dallanan Programlar
+## 9. Dallanan Programlar: Program CTL Çokluğu
 
-`bud-proof` içindeki AIR, bir Program CTL (LogUp) ile her CPU satırını tam
-olarak bir ön-işlenmiş program satırıyla eşler (`plonky3_air.rs`,
-`preprocessed_trace()` ve Program CTL bloğu). Bu eşleme **her komutun en az bir
-kez çalıştırılmasını** gerektirir.
+`bud-proof` içindeki AIR, bir Program CTL (LogUp) ile CPU satırlarını
+ön-işlenmiş program satırlarına bağlar (`plonky3_air.rs`,
+`preprocessed_trace()` ve Program CTL bloğu).
 
-Sonuç: yürütülmeyen bir komut bırakan program STARK doğrulamasında
-`OodEvaluationMismatch` ile reddedilir. BudL'de `if`, `while` ve `for`
-alınmayan dalı atlayan `Jmp`/`Jnz` üretir, dolayısıyla **dallanan sözleşmeler
-şu an kanıtlanamaz.**
+Bu eşleme başlangıçta bir **permütasyon** olarak yazılmıştı: ROM tarafı her
+program satırına sabit `1` ağırlık veriyordu, dolayısıyla her komutun tam bir
+kez çalıştırılması gerekiyordu. Dallanma bu varsayımı tanım gereği bozar --
+atlanan dalın komutu hiç çalışmaz, döngü gövdesi ise defalarca çalışır -- ve
+dürüst prover `InvalidProof` alırdı.
+
+Eşleme artık gerçek bir **lookup**'tır. `COL_PROG_MULT` (sütun 753) her ROM
+satırı için o pc'nin trace'te kaç kez çalıştırıldığını taşır; ROM tarafının
+LogUp ağırlığı bu sayıdır. Sıfır çokluk atlanan komuttur, `N` çokluk `N` kez
+dönen döngü gövdesidir, ikisi de dengeyi bozmaz.
+
+Sağlamlık: çokluk taahhüt edilen ana trace'te durur (doğrulayıcı trace'i
+görmediği için ön-işlenmiş tabloya konamaz) ve
+`prog_mult * (1 - pre_active) = 0` kısıtı programda olmayan bir pc'ye ağırlık
+yazılmasını engeller.
 
 | Program şekli | Derleme | Yürütme | Kanıt | Doğrulama |
 |---|---|---|---|---|
 | Düz kod, `emit` dahil | OK | OK | OK | OK |
 | Her komutu çalıştıran sıçrama (`Jmp +1`) | OK | OK | OK | OK |
-| Komut atlayan dal (`if`/`while`/`for`) | OK | OK | OK | FAIL |
+| Komut atlayan dal (`if`/`else`) | OK | OK | OK | OK |
+| Döngü (`while`/`for`) | OK | OK | OK | OK |
 
-Ölçüm: `Jmp +1` (hiçbir komut atlamaz) doğrulanır; `Jmp +2` (bir komut atlar)
-`OodEvaluationMismatch` verir. Sıçramanın kendisi değil, **atlanan komut**
-sorundur.
-
-Sınır `budzero/bud-cli/tests/toolchain_end_to_end.rs` ve
-`plonky3_prover.rs` kanaryalarıyla kilitlidir. Program CTL satır-başına çokluk
-(multiplicity) taşıyacak şekilde genişletildiğinde bu testler kırmızıya döner ve
-bu bölümün güncellenmesini zorlar.
-
-**Üretim etkisi:** BudL sözleşme yürütme katmanı mainnet'te açık değildir; bu
-sınır kapatılmadan dallanan sözleşmeler zincir üzerinde kanıtlanamaz.
+Kilit testler: `bud-proof/tests/derlenmis_dallanma.rs` derleyicinin ürettiği
+`if` ve `while` çıktısını uçtan uca kanıtlar; `bud-cli/tests/toolchain_end_to_end.rs`
+içindeki `PROVABLE_PROGRAMS` listesi `example_loop.bud` ve `control_flow.bud`
+programlarını içerir.
 
 ---
 
@@ -373,11 +377,10 @@ struct sözleşmesi derlenip **çalıştırılır** (doğru sonucu üretir), tab
 ilişkisi (`MIN > HEAP_BASE`) doğrulanır ve `1024` baytlık bir VM'in hâlâ hata
 vermesi kanarya olarak tutulur.
 
-**Not:** bellek düzeltmesi çalıştırmayı mümkün kılar, kanıtlamayı değil. Struct
-kullanan sözleşmeler bir yardımcı fonksiyon + prolog üretir; `Call`/`Ret` şekli
-en az bir komutu yürütülmeden bırakır, dolayısıyla §9'daki Program CTL sınırına
-takılır. Test bunu koşullu doğrular: doğrulama **tam olarak** her komut
-çalıştığında başarılı olmalıdır.
+**Not:** struct kullanan sözleşmeler bir yardımcı fonksiyon + prolog üretir ve
+`Call`/`Ret` şekli en az bir komutu yürütülmeden bırakır. §9'daki Program CTL
+çokluk sütunu bu durumu artık karşıladığı için atlanan komut kanıtlamayı
+engellemez.
 
 ---
 ## 12. AIR Kanıt Kapsamı: Opcode Matrisi

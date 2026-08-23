@@ -33,6 +33,21 @@ const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
 /// Cannot mistake a successful retrieval outcome for a full storage proof.
 const RETRIEVAL_OUTCOME_PROOF_KIND: &str = "interim_availability_only";
 
+/// Upper bound accepted for `max_request_body_size`. A limit large enough to
+/// Exhaust node memory is not a limit; anything above this is treated as a
+/// Misconfiguration rather than silently honoured.
+const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
+
+/// Upper bound accepted for `max_connections`, for the same reason.
+const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
+
+/// Transport limits applied when a caller builds a config from process
+/// Configuration without stating its own. These match
+/// [`RpcSecurityConfig::default`] so that every constructor in this file
+/// Produces a bounded listener.
+const RPC_DEFAULT_BODY_LIMIT: u32 = 16 * 1024 * 1024;
+const RPC_DEFAULT_CONNECTION_LIMIT: u32 = 500;
+
 // (security audit §5) `auth_required` defaults to `true` (secure
 // By default). Operators that explicitly want an unauthenticated RPC
 // Must call [`RpcSecurityConfig::operator_default`], which logs a
@@ -123,8 +138,13 @@ impl RpcSecurityConfig {
             cors_origins,
             rate_limit_per_minute,
             trusted_proxies: Vec::new(),
-            max_request_body_size: None,
-            max_connections: None,
+            // Leaving these `None` handed the listener over to whatever the
+            // Transport crate happened to default to, and the value differed
+            // From every other constructor here. A config built from process
+            // Configuration is bounded like the rest; a caller that wants
+            // Other values overwrites these fields after construction.
+            max_request_body_size: Some(RPC_DEFAULT_BODY_LIMIT),
+            max_connections: Some(RPC_DEFAULT_CONNECTION_LIMIT),
         })
     }
 }
@@ -193,12 +213,29 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
-        if !is_origin_allowed(&self.config, &req) {
+        let cors = cors_outcome(&self.config, &req);
+        if cors == CorsOutcome::Deny {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
+        // Preflight kimlik doğrulamasından önce yanıtlanır: tarayıcı bu isteğe
+        // `x-api-key` koyamaz, 401 dönersek asıl istek hiç gönderilmez. Durum
+        // değiştiren bir yol değildir; IP ve köken denetimi zaten geçilmiştir.
+        if let CorsOutcome::Allow(ref origin) = cors {
+            if is_cors_preflight(&req) {
+                let origin = origin.clone();
+                return Box::pin(async move { Ok(preflight_response(&origin)) });
+            }
+        }
+
         if !is_authorized(&self.config, &req) {
-            return Box::pin(async { Ok(text_response(StatusCode::UNAUTHORIZED, "Unauthorized")) });
+            return Box::pin(async move {
+                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
+            });
         }
 
         let client_ip = extract_client_ip(&self.config, &req);
@@ -206,11 +243,13 @@ where
             if let Some(ref m) = self.metrics {
                 m.rpc_rate_limited_total.inc();
             }
-            return Box::pin(async {
-                Ok(text_response(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "Too many requests",
-                ))
+            return Box::pin(async move {
+                let mut response =
+                    text_response(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
             });
         }
         if let Some(ref m) = self.metrics {
@@ -221,7 +260,12 @@ where
         let metrics = self.metrics.clone();
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            let result = inner.call(req).await;
+            let mut result = inner.call(req).await;
+            // Başarılı yanıt da başlık almazsa tarayıcı gövdeyi JavaScript'e
+            // teslim etmez; izin kararı ancak yanıtta görünürse işe yarar.
+            if let (Ok(ref mut response), CorsOutcome::Allow(ref origin)) = (&mut result, &cors) {
+                apply_cors_headers(response, origin);
+            }
             if let Some(ref m) = metrics {
                 m.rpc_request_duration_seconds
                     .observe(start.elapsed().as_secs_f64());
@@ -506,6 +550,29 @@ impl RpcServer {
         })
     }
 
+    fn account_proof_to_json(
+        bundle: &crate::storage::merkle_trie::AccountProofBundle,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            // Named `proofRoot`, not `stateRoot`: this commits to the same
+            // accounts as the consensus root but under a different structure,
+            // and a client that conflates them will verify against the wrong
+            // value.
+            "proofRoot": Self::bytes32_to_0x(bundle.root),
+            "present": bundle.present,
+            "balance": Self::to_hex(bundle.balance),
+            "nonce": Self::to_hex(bundle.nonce),
+            "leafHash": Self::bytes32_to_0x(bundle.proof.leaf_hash),
+            "siblings": bundle
+                .proof
+                .siblings
+                .iter()
+                .map(|s| Self::bytes32_to_0x(*s))
+                .collect::<Vec<_>>(),
+            "directions": bundle.proof.directions.clone(),
+        })
+    }
+
     fn consensus_domain_to_json(d: crate::domain::ConsensusDomain) -> serde_json::Value {
         serde_json::json!({
             "domainId": d.id,
@@ -541,6 +608,40 @@ fn validate_rpc_security_config(
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "RPC auth_required=true but no API key configured",
+        )
+        .into());
+    }
+    // Authentication decides *who* may call; the transport limits decide how
+    // Much an accepted caller may cost. A listener that starts without both is
+    // Reachable by an authorised client and still trivially exhaustible, so the
+    // Absent limit is refused here rather than deferred to the transport crate.
+    let body_limit = security.max_request_body_size.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC max_request_body_size is unset; refusing to serve an unbounded request body",
+        )
+    })?;
+    if body_limit == 0 || body_limit > RPC_BODY_LIMIT_CEILING {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "RPC max_request_body_size must be between 1 and {RPC_BODY_LIMIT_CEILING} bytes, got {body_limit}"
+            ),
+        )
+        .into());
+    }
+    let connection_limit = security.max_connections.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC max_connections is unset; refusing to serve an unbounded connection count",
+        )
+    })?;
+    if connection_limit == 0 || connection_limit > RPC_CONNECTION_LIMIT_CEILING {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "RPC max_connections must be between 1 and {RPC_CONNECTION_LIMIT_CEILING}, got {connection_limit}"
+            ),
         )
         .into());
     }
@@ -686,23 +787,83 @@ fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
         .any(|allowed| allowed == "*" || allowed == &ip_str)
 }
 
-fn is_origin_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
-    if config.cors_origins.is_empty() {
-        return true;
-    }
+/// CORS onçözümü: `cors_origins` yalnızca istek reddetmeye yarıyordu, yanıta
+/// hiçbir `Access-Control-*` başlığı eklenmiyordu. Bir tarayıcı için bu, izin
+/// verilen kökenin de engellenmesi demekti: yanıt 200 dönse bile tarayıcı
+/// başlık yokluğunda JavaScript'e teslim etmez. Ayrıca tarayıcı preflight
+/// (`OPTIONS`) isteğine özel başlık koymaz; `auth_required=true` iken preflight
+/// 401 alıyor ve asıl istek hiç gönderilmiyordu. Yani "cors_origins" adının
+/// vaat ettiği şey kodda yoktu.
+///
+/// Karar: CORS **açık izinle** çalışır. `cors_origins` boşsa hiçbir CORS başlığı
+/// yayılmaz (tarayıcı erişimi kapalı); doluysa yalnızca eşleşen köken yansıtılır.
+/// `Access-Control-Allow-Credentials` hiçbir zaman gönderilmez: kimlik
+/// `x-api-key` / `Authorization` başlığıyla taşınır, çerezle değil, böylece
+/// `*` yapılandırması oturum çalmaya dönüşemez.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CorsOutcome {
+    /// CORS kapalı ya da istek tarayıcıdan gelmiyor; başlık eklenmez.
+    NotApplicable,
+    /// Köken izinli; yanıta başlıklar eklenir.
+    Allow(String),
+    /// Köken izinli değil; istek reddedilir.
+    Deny,
+}
 
+/// Preflight, asıl isteğin taşıyacağı kimlik başlıklarını taşıyamaz; bu yüzden
+/// kimlik doğrulamasından önce yanıtlanır. Güvenli olmasının sebebi
+/// preflight'ın durum değiştirmemesi: yalnızca "bu köken deneyebilir mi"
+/// sorusuna cevap verir, IP izin listesi ve köken denetimi önce koşar.
+fn is_cors_preflight<B>(req: &HttpRequest<B>) -> bool {
+    req.method() == hyper::Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method")
+}
+
+pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> CorsOutcome {
+    if config.cors_origins.is_empty() {
+        return CorsOutcome::NotApplicable;
+    }
     let Some(origin) = req
         .headers()
         .get("origin")
         .and_then(|value| value.to_str().ok())
     else {
-        return true;
+        return CorsOutcome::NotApplicable;
     };
-
-    config
+    if config
         .cors_origins
         .iter()
         .any(|allowed| allowed == "*" || allowed == origin)
+    {
+        CorsOutcome::Allow(origin.to_string())
+    } else {
+        CorsOutcome::Deny
+    }
+}
+
+/// `Vary: Origin` şart: yanıt kökene göre değişiyor, aradaki bir önbellek
+/// bir kökene üretilmiş yanıtı başkasına servis etmemeli.
+fn apply_cors_headers(response: &mut HttpResponse, origin: &str) {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(origin) {
+        headers.insert("access-control-allow-origin", value);
+    }
+    headers.insert("vary", HeaderValue::from_static("Origin"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("content-type, x-api-key, authorization"),
+    );
+    headers.insert("access-control-max-age", HeaderValue::from_static("600"));
+}
+
+fn preflight_response(origin: &str) -> HttpResponse {
+    let mut response = text_response(StatusCode::NO_CONTENT, "");
+    apply_cors_headers(&mut response, origin);
+    response
 }
 
 fn is_per_ip_rate_limited(
@@ -773,7 +934,9 @@ fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
         .status(status)
         .header("content-type", HeaderValue::from_static("text/plain"))
         .body(HttpBody::from(body))
-        .expect("static RPC security response is valid")
+        // Every argument is a literal, so the builder cannot reject this.
+        // An RPC error response must never be what kills a node.
+        .unwrap_or_else(|_| HttpResponse::new(HttpBody::from(body)))
 }
 
 fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorObjectOwned> {
@@ -890,6 +1053,34 @@ impl BudlumApiServer for RpcServer {
         })?;
         let nonce = self.chain.get_nonce(&addr).await;
         Ok(Self::to_hex(nonce))
+    }
+
+    async fn get_account_proof(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        // `None` means the node could not answer at all (the chain actor is
+        // gone). Reported as an error rather than an empty result: a caller
+        // must never be able to read "we did not answer" as "the account is
+        // absent", because absence here is a positive claim carrying a proof.
+        let bundle = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
+            ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
+        })?;
+        // A bundle that does not verify against its own root is a node bug,
+        // not a client error, and must never reach the wire: a caller cannot
+        // tell a malformed proof from a forged one.
+        if !bundle.verify_self_consistent() {
+            return Err(ErrorObjectOwned::owned(
+                -32603,
+                "Account proof failed its own verification",
+                None::<()>,
+            ));
+        }
+        Ok(Self::account_proof_to_json(&bundle))
     }
 
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {
@@ -1066,6 +1257,42 @@ impl BudlumApiServer for RpcServer {
             "domainId": domain_id,
             "domainRegistryRoot": registry_root,
         }))
+    }
+
+    async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerSovereignTemplate")?;
+        let domain_id = template.domain_id;
+        self.chain
+            .register_sovereign_template(template)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign template: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "domainId": domain_id }))
+    }
+
+    async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain
+            .validate_sovereign_audit_export(bundle)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign audit export: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "valid": true }))
     }
 
     async fn submit_domain_commitment(
@@ -2234,6 +2461,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegister,
@@ -2278,6 +2506,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
@@ -2336,6 +2565,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BnsSetContent,
@@ -2447,6 +2677,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftMint,
@@ -2489,6 +2720,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBurn,
@@ -2528,6 +2760,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
@@ -2582,6 +2815,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiOfferData {
@@ -2627,6 +2861,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
@@ -2900,6 +3135,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::BudlumxyzRegisterApp {
@@ -2957,6 +3193,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
@@ -3001,6 +3238,46 @@ impl BudlumApiServer for RpcServer {
             )
         })?;
         Ok(hex::encode(data))
+    }
+
+    async fn gateway_render_content(
+        &self,
+        name: String,
+        format: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Ayni Pollen denetimi. Bir bicim istemek, erisim kurallarini
+        // atlamanin yolu olamaz: korumali icerik hangi bicimde istenirse
+        // istensin korumalidir.
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        let manifest_id = resolved.as_ref().and_then(|r| {
+            r.content_id
+                .or(r.storage_root.map(crate::storage::ContentId))
+        });
+        if let Some(cid) = manifest_id {
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
+                return Err(ErrorObjectOwned::owned(
+                    -32603,
+                    "Content is Pollen-protected; an AccessGrant is required",
+                    None::<()>,
+                ));
+            }
+        }
+        let parsed = parse_render_format(&format).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid render format: {e}"), None::<()>)
+        })?;
+        let gateway =
+            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let (bytes, id) = gateway
+            .render_name_content(&name, &parsed)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32000, format!("Render failed: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "bytes": hex::encode(bytes),
+            "renderId": hex::encode(id),
+            "format": format,
+        }))
     }
 
     async fn passport_get_profile(
@@ -3213,6 +3490,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
@@ -3409,6 +3687,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
@@ -3508,6 +3787,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
@@ -3741,6 +4021,7 @@ impl BudlumApiServer for RpcServer {
             hash: String::new(),
             signature: None,
             signer_public_key: Vec::new(),
+            authorization: None,
             chain_id: self.chain.get_chain_id().await,
             signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
             tx_type: crate::core::transaction::TransactionType::AiDisputeSlash {
@@ -4225,6 +4506,39 @@ impl BudlumApiServer for RpcServer {
     }
 }
 
+/// Kablo uzerindeki bicim dizgisini `RenderFormat`'a cevir.
+///
+/// Kabul edilenler: `svg`, `png:<kenar>`, `frame:<indeks>`.
+///
+/// Bilinmeyen bir bicim **reddedilir**, varsayilana dusulmez. Dusmek,
+/// isteyenin sordugundan baska bir nesneyi onun kimligiyle dondurmek olurdu:
+/// bicim taahhudun parcasi, dolayisiyla `png` yazmak isteyip `pngg` yazan
+/// birine SVG vermek yanlis cevaptir.
+///
+/// `QrStream` kasten disarida. O bir tasima temsili, bir okuma bicimi degil;
+/// RPC uzerinden istenmesinin anlami yok.
+///
+/// # Errors
+///
+/// Bicim taninmazsa veya sayisal parametre cozulemezse.
+fn parse_render_format(format: &str) -> Result<crate::storage::render::RenderFormat, String> {
+    use crate::storage::render::RenderFormat;
+    match format.split_once(':') {
+        None if format == "svg" => Ok(RenderFormat::Svg),
+        Some(("png", size)) => size
+            .parse::<u16>()
+            .map(|size| RenderFormat::Png { size })
+            .map_err(|_| format!("png size is not a number: {size}")),
+        Some(("frame", frame)) => frame
+            .parse::<u16>()
+            .map(|frame| RenderFormat::VideoFrame { frame })
+            .map_err(|_| format!("frame index is not a number: {frame}")),
+        _ => Err(format!(
+            "unknown render format '{format}'; expected svg, png:<size> or frame:<index>"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4247,6 +4561,180 @@ mod tests {
         };
         assert!(validate_rpc_security_config(&configured).is_ok());
         assert!(validate_rpc_security_config(&RpcSecurityConfig::operator_default()).is_ok());
+    }
+
+    #[test]
+    fn a_config_built_from_process_configuration_carries_transport_limits() {
+        let cfg = RpcSecurityConfig::from_env(false, None, Vec::new(), Vec::new(), None)
+            .expect("from_env without auth must succeed");
+        assert!(
+            cfg.max_request_body_size.unwrap_or(0) > 0,
+            "from_env left the body size to the transport crate"
+        );
+        assert!(
+            cfg.max_connections.unwrap_or(0) > 0,
+            "from_env left the connection count to the transport crate"
+        );
+        assert!(validate_rpc_security_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn an_unbounded_listener_is_refused_before_listen() {
+        let no_body = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            max_request_body_size: None,
+            ..Default::default()
+        };
+        assert!(
+            validate_rpc_security_config(&no_body).is_err(),
+            "a config with no body limit reached the listener"
+        );
+
+        let no_conns = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            max_connections: None,
+            ..Default::default()
+        };
+        assert!(
+            validate_rpc_security_config(&no_conns).is_err(),
+            "a config with no connection limit reached the listener"
+        );
+    }
+
+    #[test]
+    fn a_limit_that_does_not_limit_is_refused_before_listen() {
+        for (body, conns) in [
+            (Some(0u32), Some(10u32)),
+            (Some(16 * 1024 * 1024), Some(0)),
+            (Some(RPC_BODY_LIMIT_CEILING + 1), Some(10)),
+            (
+                Some(16 * 1024 * 1024),
+                Some(RPC_CONNECTION_LIMIT_CEILING + 1),
+            ),
+        ] {
+            let cfg = RpcSecurityConfig {
+                api_key: Some("secret".into()),
+                max_request_body_size: body,
+                max_connections: conns,
+                ..Default::default()
+            };
+            assert!(
+                validate_rpc_security_config(&cfg).is_err(),
+                "body={body:?} conns={conns:?} was accepted as a limit"
+            );
+        }
+    }
+
+    fn cors_config(origins: &[&str]) -> RpcSecurityConfig {
+        RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some("secret".into()),
+            allowed_ips: Vec::new(),
+            cors_origins: origins.iter().map(|o| (*o).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn request_from_origin(origin: &str) -> HttpRequest<()> {
+        HttpRequest::builder()
+            .uri("/")
+            .header("origin", origin)
+            .body(())
+            .unwrap()
+    }
+
+    /// Izin verilen koken yanitta gorunmeli: taryici, basligi olmayan bir
+    /// yanitin govdesini JavaScript'e teslim etmez.
+    #[test]
+    fn allowed_origin_is_reflected_into_the_response() {
+        let config = cors_config(&["https://budscan.example"]);
+        let req = request_from_origin("https://budscan.example");
+        let outcome = cors_outcome(&config, &req);
+        assert_eq!(
+            outcome,
+            CorsOutcome::Allow("https://budscan.example".into())
+        );
+
+        let mut response = text_response(StatusCode::OK, "ok");
+        apply_cors_headers(&mut response, "https://budscan.example");
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://budscan.example")
+        );
+        // Onbellek bir kokene uretilmis yaniti baskasina servis etmemeli.
+        assert_eq!(
+            response.headers().get("vary").and_then(|v| v.to_str().ok()),
+            Some("Origin")
+        );
+        // Kimlik baslikla tasinir, cerezle degil: kimlik bilgisi izni
+        // hicbir zaman verilmez, boylece `*` oturum calmaya donusemez.
+        assert!(response
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none());
+    }
+
+    #[test]
+    fn unlisted_origin_is_denied_and_gets_no_headers() {
+        let config = cors_config(&["https://budscan.example"]);
+        let req = request_from_origin("https://saldirgan.example");
+        let outcome = cors_outcome(&config, &req);
+        assert_eq!(outcome, CorsOutcome::Deny);
+        assert!(!matches!(outcome, CorsOutcome::Allow(_)));
+
+        // Reddedilen kokene hicbir baslik sizmamali: 403 govdesi bile
+        // baslikla dondurulurse taryici yaniti okuyabilir hale gelir.
+        let response = text_response(StatusCode::FORBIDDEN, "Forbidden");
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+
+    /// CORS yapilandirilmamissa hicbir baslik yayilmaz - varsayilan kapali.
+    #[test]
+    fn empty_cors_list_emits_no_headers() {
+        let config = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
+        let req = request_from_origin("https://budscan.example");
+        assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
+    }
+
+    /// Preflight kimlik basligi tasiyamaz. 401 dondurursek asil istek hic
+    /// gonderilmez; bu yuzden preflight auth'tan once yanitlanir.
+    #[test]
+    fn preflight_is_recognised_and_answered_without_credentials() {
+        let mut req = HttpRequest::builder()
+            .method(hyper::Method::OPTIONS)
+            .uri("/")
+            .header("origin", "https://budscan.example")
+            .header("access-control-request-method", "POST")
+            .body(())
+            .unwrap();
+        assert!(is_cors_preflight(&req));
+
+        // Kimlik basligi yok; yine de izin karari uretilebilmeli.
+        let config = cors_config(&["https://budscan.example"]);
+        assert!(!is_authorized(&config, &req));
+
+        let response = preflight_response("https://budscan.example");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .and_then(|v| v.to_str().ok()),
+            Some("content-type, x-api-key, authorization")
+        );
+
+        // Sade bir OPTIONS preflight degildir.
+        *req.method_mut() = hyper::Method::POST;
+        assert!(!is_cors_preflight(&req));
     }
 
     #[test]
@@ -4376,5 +4864,59 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
         );
         assert!(is_ip_allowed(&config, &req));
+    }
+}
+
+#[cfg(test)]
+mod render_format_tests {
+    use super::parse_render_format;
+    use crate::storage::render::RenderFormat;
+
+    /// Uc bicim taninir ve parametreleri tasinir.
+    #[test]
+    fn the_three_read_formats_parse() {
+        assert_eq!(parse_render_format("svg"), Ok(RenderFormat::Svg));
+        assert_eq!(
+            parse_render_format("png:256"),
+            Ok(RenderFormat::Png { size: 256 })
+        );
+        assert_eq!(
+            parse_render_format("frame:17"),
+            Ok(RenderFormat::VideoFrame { frame: 17 })
+        );
+    }
+
+    /// Bilinmeyen bicim reddedilir, varsayilana dusulmez.
+    ///
+    /// Dusmek, isteyenin sordugundan baska bir nesneyi onun kimligiyle
+    /// dondurmek olurdu. Bicim taahhudun parcasi (§72): `png` yazmak isteyip
+    /// `pngg` yazan birine SVG vermek yanlis cevaptir, esnek davranis degil.
+    #[test]
+    fn an_unknown_format_is_refused_not_defaulted() {
+        for bad in ["", "pngg", "webp", "SVG", "svg:1", "png", "frame"] {
+            assert!(
+                parse_render_format(bad).is_err(),
+                "'{bad}' bir bicim degil, reddedilmeli"
+            );
+        }
+    }
+
+    /// Sayisal parametre cozulemezse hata, sifir degil.
+    #[test]
+    fn a_bad_number_is_an_error() {
+        assert!(parse_render_format("png:buyuk").is_err());
+        assert!(parse_render_format("png:-1").is_err());
+        // u16 tasmasi da hata: sessizce kirpmak baska bir nesne uretirdi.
+        assert!(parse_render_format("png:70000").is_err());
+        assert!(parse_render_format("frame:abc").is_err());
+    }
+
+    /// `QrStream` RPC uzerinden istenemez.
+    ///
+    /// O bir tasima temsili, bir okuma bicimi degil.
+    #[test]
+    fn the_transport_frame_is_not_a_read_format() {
+        assert!(parse_render_format("qrstream:0").is_err());
+        assert!(parse_render_format("qr:0:256").is_err());
     }
 }

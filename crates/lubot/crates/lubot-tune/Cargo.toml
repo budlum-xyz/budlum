@@ -9,3 +9,6 @@ description = "Eğitim planı (LoRA BF16/FP16 - FP4 tip sisteminde yok) ve çık
 [dependencies]
 lubot-core = { path = "../lubot-core" }
 lubot-data = { path = "../lubot-data" }
+
+[lints]
+workspace = true

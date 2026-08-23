@@ -35,14 +35,19 @@ impl HttpMethod {
 }
 
 /// Yeniden deneme politikası.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryPolicy {
     /// Azami deneme sayısı (ilk istek dahil).
     pub max_attempts: u32,
     /// Denemeler arası üstel bekleme tabanı (saniye).
     pub base_delay_secs: u64,
     /// Yanıtı başarısız sayan HTTP durumları (örn. 429, 5xx).
-    pub retry_on_status: &'static [u16],
+    ///
+    /// `&'static [u16]` idi ve `Deserialize` bir slice referansini kuramaz
+    /// (veri gecici tampondan gelir, 'static olamaz), bu yuzden derive
+    /// derlenmiyordu. `Vec<u16>` hem serilestirilir hem yapilandirmadan
+    /// okunabilir. `Copy` dustu; tip zaten `Clone`.
+    pub retry_on_status: Vec<u16>,
 }
 
 impl Default for RetryPolicy {
@@ -50,7 +55,7 @@ impl Default for RetryPolicy {
         Self {
             max_attempts: 3,
             base_delay_secs: 1,
-            retry_on_status: &[429, 500, 502, 503, 504],
+            retry_on_status: vec![429, 500, 502, 503, 504],
         }
     }
 }

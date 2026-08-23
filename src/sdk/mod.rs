@@ -1,52 +1,62 @@
-//! P12-12: Developer OS / BudL SDK - Geliştirici deneyim katmanı.
+//! Budlum proje dosyası (`budlum.toml`) şeması.
 //!
-//! Bu modül, Budlum üzerinde geliştirme yapmak isteyen protokol geliştiricilerine
-//! Yönelik araçlar sağlar:
+//! # Bu modülün geçmişi
 //!
-//! - **Devnet Yönetimi:** Lokal 4-domain devnet (PoW, PoS, PoA, Bft) başlatma
-//!   Ve yapılandırma (`devnet` modülü)
-//! - **Sözleşme Desteği:** BudL sözleşmelerinin derleme ve dağıtım altyapısı
-//!   (`contracts` modülü)
-//! - **Fixture Üretimi:** Test ve geliştirme için proof, Pollen asset/grant,
-//!   Relayer intent fixture'ları (`fixture` modülü)
-//! - **Çalıştırıcı:** BudL compile/test runner, SDK entegrasyon testleri (`runner` modülü)
+//! `src/sdk/` beş dosyaydı ve `lib.rs`'ten hiç bildirilmemişti: 1871 satırın
+//! tamamı derlenmiyordu. Derlenmediği için ne clippy, ne kapılar, ne testler
+//! bakıyordu. Ölçüldü, tahmin edilmedi: dizin bildirildiğinde ortaya çıkan
+//! şey, isimlerinin vaat ettiği işi yapmayan üç dosyaydı.
 //!
-//! # Kullanım
+//! * `contracts.rs` - `compile()` bir derleyici değildi. Kaynağın boş olup
+//!   olmadığına bakıp `bytecode_hash` alanına kaynağın hash'ini koyuyordu;
+//!   kendi yorumu "şimdilik stub" diyordu. `CompiledContract` adlı tipin
+//!   içinde bytecode yoktu.
+//! * `devnet.rs` - `start_domain()` düğüm başlatmıyordu. Bir dizin oluşturup
+//!   bir alanı `Running` yapıyor ve "RPC at 127.0.0.1:port" logluyordu; o
+//!   portu dinleyen hiçbir şey yoktu, `rpc_endpoints()` bağlanılamayacak
+//!   adresler döndürüyordu.
+//! * `runner.rs` - `test()` test koşturmuyordu. Her sözleşme için iki sonuç
+//!   uyduruyordu ve `all_passed()` daima `true` dönüyordu: sözleşmesi bozuk
+//!   bir geliştiriciye yeşil gösterirdi.
 //!
-//! ```rust,ignore
-//! Use budlum_core::sdk::devnet::{DevnetConfig, LocalDevnet};
-//! Use budlum_core::sdk::fixture::{ProofFixtureGenerator, PollenFixtureGenerator};
-//! Use budlum_core::sdk::contracts::BudlContract;
-//! Use budlum_core::sdk::runner::BudlRunner;
-//! ```
+//! Üçü de silindi. Sahte bir devnet'in tutulması için bir neden de yoktu:
+//! gerçek 4 düğümlü devnet `ops/docker-compose.yml` ile zaten var, CI'da
+//! `devnet-multinode-smoke` işinde gerçek RPC'ye karşı koşuyor. İkinci ve
+//! sahte bir kopya, gerçeğinin yanında yalnızca yanıltır.
 //!
-//! # Tasarım Kararları
+//! `fixture.rs` de silindi: ürettiği `ProofFixture`, `developer_os.rs`'teki
+//! doğrulanan manifest kaydıyla aynı adı taşıyıp farklı şey ifade ediyordu.
+//! Tek tip `developer_os.rs`'te yaşıyor.
 //!
-//! - SDK modülü `#![forbid(unsafe_code)]` kuralına tabidir (lib.rs seviyesi).
-//! - Tüm yapılandırmalar `budlum.toml` dosyasından deserialize edilir (serde + toml).
-//! - Fixture üreteçleri deterministiktir - aynı seed aynı fixture setini üretir.
-//! - Devnet 4 domain'i ayrı process'lerde simüle eder (PoW, PoS, PoA, Bft).
+//! # Geriye kalan
 //!
-//! WIRING: unwired - developer-facing surface, called by SDK consumers outside
-//! this tree rather than by the node.
-
-pub mod contracts;
-pub mod devnet;
-pub mod fixture;
-pub mod runner;
-
-pub use contracts::{BudlContract, ContractError, ContractLanguage};
-pub use devnet::{DevnetConfig, DevnetDomainProfile, LocalDevnet, LOCAL_DEVNET_DOMAINS};
-pub use fixture::{
-    FixtureGenerator, PollenAssetFixture, PollenFixtureGenerator, PollenGrantFixture, ProofFixture,
-    ProofFixtureGenerator, RelayerIntentFixture, RelayerIntentFixtureGenerator,
-};
-pub use runner::{BudlRunner, RunResult, RunnerError};
+//! Bir dosya biçimi şeması. İddiası yok: bir TOML dosyasını okur, yazar ve
+//! varsayılanını üretir. Yaptığı iş kadar söylüyor.
+//!
+//! # İkinci ölçüm: şema silinen araçları tarif ediyordu
+//!
+//! Yukarıdaki üç dosya silindikten sonra şema oldukları gibi kalmıştı.
+//! `[devnet]` silinen sahte devnet'i, `[contracts]` silinen sahte derleyiciyi,
+//! `[fixtures]` silinen fixture üreticisini yapılandırıyordu. Ağaçta tek bir
+//! `budlum.toml` yok ve bu bölümleri okuyan hiçbir tip kalmamıştı (ölçüldü:
+//! `DevnetSection`, `ContractsSection`, `FixturesSection` için modül dışında
+//! sıfır kullanım).
+//!
+//! Bir yapılandırma alanı, yapılandırdığı şey yokken daha kötüdür: dosyaya
+//! `domains = ["pow", "pos"]` yazan bir geliştirici o alanların başlatılacağını
+//! sanır. Üç bölüm silindi; geriye projenin gerçekten sahip olduğu şey kaldı:
+//! adı ve sürümü.
+//!
+//! WIRING: unwired - this is a file-format schema for a project file that
+//! lives outside the node. Nothing in the node reads `budlum.toml`, and
+//! nothing should: it describes a developer's project, not chain state.
 
 /// `budlum.toml` proje yapılandırma dosyası şeması.
 ///
-/// Bir Budlum projesinin kök dizinindeki `budlum.toml` dosyası, SDK'nın
-/// Projeyi nasıl derleyeceğini, test edeceğini ve devnet'e bağlayacağını tanımlar.
+/// Bir Budlum projesinin kök dizinindeki `budlum.toml` dosyası projeyi
+/// Adlandırır ve sürümler. Derleme, test ve devnet bağlama alanları
+/// Kaldırıldı: o araçlar iddialarını karşılamadıkları için silindi, ve
+/// Yapılandırdığı şey olmayan bir alan, olmayan bir yeteneği vaat eder.
 ///
 /// # Örnek `budlum.toml`
 ///
@@ -55,31 +65,11 @@ pub use runner::{BudlRunner, RunResult, RunnerError};
 /// Name = "my-budlum-dapp"
 /// Version = "0.1.0"
 /// Budlum_version = "0.1.0"
-///
-/// [devnet]
-/// Config = "config/devnet.toml"
-/// Domains = ["pow", "pos", "poa", "bft"]
-///
-/// [contracts]
-/// Directory = "contracts/"
-///
-/// [fixtures]
-/// Directory = "fixtures/"
-/// Seed = 42
 /// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BudlumToml {
     /// Proje meta verileri.
     pub project: ProjectSection,
-    /// Devnet yapılandırması.
-    #[serde(default)]
-    pub devnet: DevnetSection,
-    /// Sözleşme dizini yapılandırması.
-    #[serde(default)]
-    pub contracts: ContractsSection,
-    /// Fixture yapılandırması.
-    #[serde(default)]
-    pub fixtures: FixturesSection,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -93,86 +83,12 @@ pub struct ProjectSection {
     pub budlum_version: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DevnetSection {
-    /// Devnet yapılandırma dosyasının yolu (config/devnet.toml gibi).
-    #[serde(default = "default_devnet_config")]
-    pub config: String,
-    /// Başlatılacak domain'ler.
-    #[serde(default = "default_domains")]
-    pub domains: Vec<String>,
-}
-
-impl Default for DevnetSection {
-    fn default() -> Self {
-        Self {
-            config: default_devnet_config(),
-            domains: default_domains(),
-        }
-    }
-}
-
-fn default_devnet_config() -> String {
-    "config/devnet.toml".to_string()
-}
-
-fn default_domains() -> Vec<String> {
-    vec![
-        "pow".to_string(),
-        "pos".to_string(),
-        "poa".to_string(),
-        "bft".to_string(),
-    ]
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ContractsSection {
-    /// Sözleşme kaynak dizini.
-    #[serde(default = "default_contracts_dir")]
-    pub directory: String,
-}
-
-impl Default for ContractsSection {
-    fn default() -> Self {
-        Self {
-            directory: default_contracts_dir(),
-        }
-    }
-}
-
-fn default_contracts_dir() -> String {
-    "contracts/".to_string()
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FixturesSection {
-    /// Fixture çıktı dizini.
-    #[serde(default = "default_fixtures_dir")]
-    pub directory: String,
-    /// Deterministik fixture üretimi için seed.
-    #[serde(default = "default_fixture_seed")]
-    pub seed: u64,
-}
-
-impl Default for FixturesSection {
-    fn default() -> Self {
-        Self {
-            directory: default_fixtures_dir(),
-            seed: default_fixture_seed(),
-        }
-    }
-}
-
-fn default_fixtures_dir() -> String {
-    "fixtures/".to_string()
-}
-
-fn default_fixture_seed() -> u64 {
-    42
-}
-
 impl BudlumToml {
     /// `budlum.toml` dosyasını okur ve parse eder.
+    ///
+    /// # Errors
+    ///
+    /// Dosya okunamazsa `Io`, geçerli TOML değilse `Parse` döner.
     pub fn load(path: &std::path::Path) -> Result<Self, BudlumTomlError> {
         let content = std::fs::read_to_string(path).map_err(|e| BudlumTomlError::Io {
             path: path.to_path_buf(),
@@ -185,6 +101,7 @@ impl BudlumToml {
     }
 
     /// Varsayılan proje yapılandırmasını döndürür (yeni proje iskeleti için).
+    #[must_use]
     pub fn default_template(name: &str) -> Self {
         Self {
             project: ProjectSection {
@@ -192,13 +109,14 @@ impl BudlumToml {
                 version: "0.1.0".to_string(),
                 budlum_version: Some("0.1.0".to_string()),
             },
-            devnet: DevnetSection::default(),
-            contracts: ContractsSection::default(),
-            fixtures: FixturesSection::default(),
         }
     }
 
     /// Yapılandırmayı TOML olarak dosyaya yazar.
+    ///
+    /// # Errors
+    ///
+    /// Serileştirme başarısız olursa `Serialize`, yazma başarısız olursa `Io`.
     pub fn save(&self, path: &std::path::Path) -> Result<(), BudlumTomlError> {
         let content = toml::to_string_pretty(self).map_err(|e| BudlumTomlError::Serialize {
             path: path.to_path_buf(),
@@ -231,10 +149,10 @@ pub enum BudlumTomlError {
 impl std::fmt::Display for BudlumTomlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BudlumTomlError::Io { path, source } => {
+            Self::Io { path, source } => {
                 write!(f, "budlum.toml I/O error at {}: {}", path.display(), source)
             }
-            BudlumTomlError::Parse { path, source } => {
+            Self::Parse { path, source } => {
                 write!(
                     f,
                     "budlum.toml parse error at {}: {}",
@@ -242,7 +160,7 @@ impl std::fmt::Display for BudlumTomlError {
                     source
                 )
             }
-            BudlumTomlError::Serialize { path, source } => {
+            Self::Serialize { path, source } => {
                 write!(
                     f,
                     "budlum.toml serialize error at {}: {}",
@@ -257,9 +175,9 @@ impl std::fmt::Display for BudlumTomlError {
 impl std::error::Error for BudlumTomlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            BudlumTomlError::Io { source, .. } => Some(source),
-            BudlumTomlError::Parse { source, .. } => Some(source),
-            BudlumTomlError::Serialize { source, .. } => Some(source),
+            Self::Io { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::Serialize { source, .. } => Some(source),
         }
     }
 }
@@ -274,8 +192,7 @@ mod tests {
         let toml_str = toml::to_string_pretty(&tmpl).unwrap();
         let parsed: BudlumToml = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.project.name, "test-project");
-        assert_eq!(parsed.devnet.domains.len(), 4);
-        assert_eq!(parsed.fixtures.seed, 42);
+        assert_eq!(parsed.project.version, "0.1.0");
     }
 
     #[test]

@@ -26,13 +26,16 @@ pub const SERT_VERSION: u8 = 1;
 /// creation-fee (kullanıcı tariflerken öder) + saniye başına tarif kotası.
 #[derive(Debug, Clone, Copy)]
 pub struct TarifKotasi {
-    pub min_creation_fee_usd: f64,   // tarif başına minimum ücret
-    pub max_tarif_per_sec: u64,      // düğüm başına saniyelik tarif kotası
+    pub min_creation_fee_usd: f64, // tarif başına minimum ücret
+    pub max_tarif_per_sec: u64,    // düğüm başına saniyelik tarif kotası
 }
 
 impl Default for TarifKotasi {
     fn default() -> Self {
-        Self { min_creation_fee_usd: 0.001, max_tarif_per_sec: 100 }
+        Self {
+            min_creation_fee_usd: 0.001,
+            max_tarif_per_sec: 100,
+        }
     }
 }
 
@@ -93,10 +96,10 @@ pub fn turev_dogrulama(turev: &[u8], beklenen: &[u8; 32]) -> bool {
 /// üretim CPU + QR render + dağıtım - hepsi sıfıra mı gidiyor?
 #[derive(Debug, Clone, Copy)]
 pub struct MaliyetBilesenleri {
-    pub uretim_cpu_usd_per_tb: f64,  // validatör CPU (step ücreti karşılığı)
-    pub qr_render_usd_per_tb: f64,   // QR kare render
-    pub dagitim_usd_per_tb: f64,     // ağ dağıtımı (0 - talep anında)
-    pub kira_usd_per_tb: f64,        // depolama kirası (R1'de 0)
+    pub uretim_cpu_usd_per_tb: f64, // validatör CPU (step ücreti karşılığı)
+    pub qr_render_usd_per_tb: f64,  // QR kare render
+    pub dagitim_usd_per_tb: f64,    // ağ dağıtımı (0 - talep anında)
+    pub kira_usd_per_tb: f64,       // depolama kirası (R1'de 0)
 }
 
 impl MaliyetBilesenleri {
@@ -165,7 +168,10 @@ mod tests {
     fn tarif_uydurulamaz_kanaryasi_kapisi() {
         // Ad: `tarif_uydurulamaz_kanaryasi` DEGIL - ustteki pub fn ile cakisir (E0061).
         let hedef = vec![0x5A; 64];
-        assert!(tarif_uydurulamaz_kanaryasi(&hedef, 200_000), "200k deneme eşleşmemeli");
+        assert!(
+            tarif_uydurulamaz_kanaryasi(&hedef, 200_000),
+            "200k deneme eşleşmemeli"
+        );
     }
 
     #[test]
@@ -190,7 +196,12 @@ mod tests {
         assert!(!dibe_dustu_mu(&b, 0.016));
         assert!(uretim_cpu_sifir_degil(&b), "üretim CPU'su sıfır sayılamaz");
         // CPU 0 → RED (maliyet yok olmaz)
-        let sifir = MaliyetBilesenleri { uretim_cpu_usd_per_tb: 0.0, qr_render_usd_per_tb: 0.0001, dagitim_usd_per_tb: 0.0, kira_usd_per_tb: 0.0 };
+        let sifir = MaliyetBilesenleri {
+            uretim_cpu_usd_per_tb: 0.0,
+            qr_render_usd_per_tb: 0.0001,
+            dagitim_usd_per_tb: 0.0,
+            kira_usd_per_tb: 0.0,
+        };
         assert!(!uretim_cpu_sifir_degil(&sifir));
     }
 }

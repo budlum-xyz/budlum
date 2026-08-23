@@ -241,6 +241,12 @@ pub struct Proposal {
     pub activation_epoch: Option<u64>,
 }
 
+/// Stand-in bytes hashed when a governance record cannot be serialized.
+///
+/// Cannot fire for these derived-`Serialize` owned types. Kept non-panicking
+/// because the call site computes a governance root shared by every node.
+const GOVERNANCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/governance";
+
 impl Proposal {
     pub fn new(
         id: u64,
@@ -418,12 +424,12 @@ impl GovernanceState {
         hasher.update(self.next_proposal_id.to_le_bytes());
         hasher.update(
             bincode::serialize(&self.proposals)
-                .expect("governance proposals must serialize for governance root"),
+                .unwrap_or_else(|_| GOVERNANCE_SERIALIZE_FAILED.to_vec()),
         );
         hasher.update(self.constitution.root());
         hasher.update(
             bincode::serialize(&self.proposer_epoch_count)
-                .expect("governance proposer_epoch_count must serialize for governance root"),
+                .unwrap_or_else(|_| GOVERNANCE_SERIALIZE_FAILED.to_vec()),
         );
         hasher.finalize().into()
     }

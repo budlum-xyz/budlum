@@ -62,7 +62,10 @@ macro_rules! gen_security_tests {
             fn $name() {
                 let a = addr($idx);
                 let mut tx = Transaction::new(a, addr(0), 0, vec![]);
-                tx.nonce = $idx as u64;
+                // `as u64` here was a `u64 as u64` no-op (the literals are
+                // inferred as u64 from this very assignment) and tripped
+                // `trivial_numeric_casts`. `addr()` takes u8 separately.
+                tx.nonce = $idx;
                 // Proving that even with valid-looking nonces,
                 // Without balance it fails.
                 let state = crate::core::account::AccountState::new();

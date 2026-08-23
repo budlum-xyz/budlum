@@ -15,3 +15,6 @@ lubot-core = { path = "../lubot-core" }
 lubot-serve = { path = "../lubot-serve" }
 lubot-tune = { path = "../lubot-tune" }
 serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

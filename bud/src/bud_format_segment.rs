@@ -18,7 +18,7 @@ use sha3::{Digest, Sha3_256};
 pub const SEGMENT_MAGIC: [u8; 8] = *b"\xB5SEGL\0\0\0";
 pub const SEGMENT_VERSION: u8 = 1;
 pub const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024; // 64 MB (blockchain-core)
-pub const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024;   // tek kayıt tavanı (16 MB)
+pub const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024; // tek kayıt tavanı (16 MB)
 
 /// Segment defteri: append-only kayıtlar (len-prefix + SHA3 digest).
 #[derive(Debug, Clone)]
@@ -27,11 +27,20 @@ pub struct SegmentLedger {
     pub total_bytes: u64,
 }
 
+impl Default for SegmentLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SegmentLedger {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_SEGMENT_V1";
 
     pub fn new() -> Self {
-        SegmentLedger { entries: Vec::new(), total_bytes: 0 }
+        SegmentLedger {
+            entries: Vec::new(),
+            total_bytes: 0,
+        }
     }
 
     /// Kayıt ekle (append-only). Boyut tavanları + digest hesaplanır.
@@ -96,6 +105,18 @@ impl SegmentLedger {
         }
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
+        // `count` saldirgan kontrollu; dogrudan ayirmak 45 baytlik blobla
+        // 103 GB talep uretiyordu (olculdu: "memory allocation of
+        // 103079215080 bytes failed" -> SIGABRT, panic="abort" ile dugum olur).
+        // Ustteki SHA3 kontrolu korumaz: anahtarsiz ozet + public DOMAIN
+        // sabiti, gecerli blob uretmek serbest.
+        //
+        // Her kayit en az 4 bayt uzunluk + 32 bayt ozet = 36 bayt tuketir;
+        // tavan girdinin kendi uzunlugundan turetildigi icin ayirma daima
+        // girdiyle orantili kalir.
+        if count > payload_len.saturating_sub(pos) / 36 {
+            return None;
+        }
         let mut entries = Vec::with_capacity(count);
         let mut total: u64 = 0;
         for _ in 0..count {
@@ -121,7 +142,10 @@ impl SegmentLedger {
         if pos != payload_len || total > MAX_SEGMENT_BYTES {
             return None;
         }
-        Some(SegmentLedger { entries, total_bytes: total })
+        Some(SegmentLedger {
+            entries,
+            total_bytes: total,
+        })
     }
 
     /// Segment kökü (zincir başlığına yazılabilir - İ8 bayt-bütçe ile uyumlu).
@@ -136,6 +160,38 @@ impl SegmentLedger {
 
 #[cfg(test)]
 mod tests {
+
+    /// RAM DENETIMI (2026-08-21): sisirilmis `count`, 45 baytlik girdiyle
+    /// 103.079.215.080 baytlik ayirma talebi uretiyordu -> SIGABRT.
+    /// SHA3 alani korumaz (anahtarsiz ozet + public DOMAIN).
+    #[test]
+    fn sisirilmis_kayit_sayisi_ayirmadan_once_reddedilir() {
+        use sha3::{Digest, Sha3_256};
+        let mut b = Vec::new();
+        b.extend_from_slice(&SEGMENT_MAGIC);
+        b.push(SEGMENT_VERSION);
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        let mut h = Sha3_256::new();
+        h.update(SegmentLedger::DOMAIN);
+        h.update(&b);
+        b.extend_from_slice(&h.finalize());
+
+        assert!(
+            SegmentLedger::from_blob(&b).is_none(),
+            "govdesi olmayan u32::MAX kayit sayisi reddedilmeli"
+        );
+    }
+
+    /// Kanarya: tavan gercek defteri reddetmemeli.
+    #[test]
+    fn gercek_defter_tavandan_etkilenmez() {
+        let mut seg = SegmentLedger::new();
+        seg.append(b"birinci kayit").expect("append");
+        seg.append(b"ikinci kayit").expect("append");
+        let blob = seg.to_blob();
+        let geri = SegmentLedger::from_blob(&blob).expect("gecerli blob kabul edilmeli");
+        assert_eq!(geri.root(), seg.root(), "kok ozet degismez");
+    }
     use super::*;
 
     #[test]
@@ -163,7 +219,10 @@ mod tests {
         let mut bad = blob.clone();
         let mid = bad.len() / 2;
         bad[mid] ^= 0xFF;
-        assert!(SegmentLedger::from_blob(&bad).is_none(), "kayıt kurcalama red");
+        assert!(
+            SegmentLedger::from_blob(&bad).is_none(),
+            "kayıt kurcalama red"
+        );
         // artık bayt red
         let mut extra = blob.clone();
         extra.push(0x00);
@@ -179,7 +238,10 @@ mod tests {
         let mut bad = blob.clone();
         // ilk kayıt verisini değiştir (HDR = 13, sonra 4 len + 32 digest, veri başı 49)
         bad[49] = b'X';
-        assert!(SegmentLedger::from_blob(&bad).is_none(), "değiştirilmiş kayıt RED");
+        assert!(
+            SegmentLedger::from_blob(&bad).is_none(),
+            "değiştirilmiş kayıt RED"
+        );
     }
 
     #[test]
@@ -209,7 +271,9 @@ mod tests {
         impl Rng {
             fn next(&mut self) -> u64 {
                 let mut x = self.0;
-                x ^= x >> 12; x ^= x << 25; x ^= x >> 27;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
                 self.0 = x;
                 x.wrapping_mul(0x2545_F491_4F6C_DD1D)
             }

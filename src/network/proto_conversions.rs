@@ -308,8 +308,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenRegisterDataAsset as i32,
                 Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(
                     pb::ProtoPollenDataAsset {
-                        data: bincode::serialize(asset)
-                            .expect("BUG: DataAsset proto payload must serialize"),
+                        data: bincode::serialize(asset).unwrap_or_default(),
                     },
                 )),
             ),
@@ -317,8 +316,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenAuthorizeSale as i32,
                 Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(
                     pb::ProtoPollenSaleAuthorization {
-                        data: bincode::serialize(authorization)
-                            .expect("BUG: SaleAuthorization proto payload must serialize"),
+                        data: bincode::serialize(authorization).unwrap_or_default(),
                     },
                 )),
             ),
@@ -326,8 +324,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenGrantAccess as i32,
                 Some(pb::proto_transaction::TypePayload::PollenGrantAccess(
                     pb::ProtoPollenAccessGrant {
-                        data: bincode::serialize(grant)
-                            .expect("BUG: AccessGrant proto payload must serialize"),
+                        data: bincode::serialize(grant).unwrap_or_default(),
                     },
                 )),
             ),
@@ -431,6 +428,21 @@ impl From<&Transaction> for pb::ProtoTransaction {
             wire_version: 2,
             type_payload,
             signer_public_key: tx.signer_public_key.clone(),
+            authorization: tx
+                .authorization
+                .as_ref()
+                .map(|auth| pb::ProtoMultisigAuthorization {
+                    owners: auth.owners.clone(),
+                    threshold: auth.threshold,
+                    signatures: auth
+                        .signatures
+                        .iter()
+                        .map(|(public_key, signature)| pb::ProtoOwnerSignature {
+                            public_key: public_key.clone(),
+                            signature: signature.clone(),
+                        })
+                        .collect(),
+                }),
         }
     }
 }
@@ -1400,6 +1412,17 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
             hash: proto.hash,
             signature,
             signer_public_key: proto.signer_public_key,
+            authorization: proto.authorization.map(|auth| {
+                crate::core::transaction::MultisigAuthorizationV6 {
+                    owners: auth.owners,
+                    threshold: auth.threshold,
+                    signatures: auth
+                        .signatures
+                        .into_iter()
+                        .map(|s| (s.public_key, s.signature))
+                        .collect(),
+                }
+            }),
             chain_id: proto.chain_id,
             signature_version: proto.signature_version,
             tx_type,
@@ -2158,6 +2181,7 @@ mod tests {
             wire_version: 2,
             type_payload: None, // Missing payload for NftBoost!
             signer_public_key: Vec::new(),
+            authorization: None,
         };
 
         assert!(Transaction::try_from(proto.clone()).is_err());

@@ -123,6 +123,21 @@ impl PoaMembershipRegistry {
         self.admins.insert((domain, admin), ());
     }
 
+    /// Has anyone been made admin of `domain`?
+    ///
+    /// This is how a domain declares itself permissioned. There is no
+    /// separate "is this domain gated" flag, because a flag and an admin list
+    /// can disagree; an admin is both the declaration and the thing that can
+    /// act on it. A domain nobody administers is not a locked domain, it is
+    /// not a permissioned domain at all.
+    #[must_use]
+    pub fn has_any_admin(&self, domain: DomainId) -> bool {
+        self.admins
+            .range((domain, Address::zero())..)
+            .next()
+            .is_some_and(|((d, _), ())| *d == domain)
+    }
+
     pub fn is_admin(&self, domain: DomainId, account: &Address) -> bool {
         self.admins.contains_key(&(domain, *account))
     }

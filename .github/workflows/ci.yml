@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, fix/architecture-tip-adlari]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -80,6 +80,31 @@ jobs:
               || { echo "HATA: $t pq-ml-dsa altinda kosmadi/gecmedi"; exit 1; }
           done
           grep -E 'test result:' /tmp/mldsa-tests.log
+          # `account_abstraction` is compiled only under `wallet-ml-dsa`, so
+          # this is the one job that sees it. The directory sat unreachable
+          # from lib.rs and never compiled at all: invalid Rust was written
+          # into it and `cargo check --lib` still passed. Inside it three
+          # functions named like security checks could not reject anything.
+          # The filter above stops at `crypto::`, so without this step the
+          # tests that lock those checks would still never run.
+          cargo test --no-default-features --features "pq-ml-dsa wallet-ml-dsa" \
+            --lib account_abstraction:: 2>&1 | tee /tmp/aa-tests.log
+          if grep -qE 'running 0 tests' /tmp/aa-tests.log; then
+            echo "HATA: account_abstraction altinda 0 test kostu -> modul yine baglanmamis olabilir"
+            exit 1
+          fi
+          # Name the signature-verification locks explicitly. A threshold that
+          # counts the same owner twice, or an attestation that accepts a
+          # digest in place of a signature, must both stay rejected.
+          for t in \
+            threshold_mldsa::tests::the_same_owner_signing_twice_does_not_meet_a_threshold_of_two \
+            threshold_mldsa::tests::a_signature_over_another_message_is_refused \
+            tee_attestation::tests::a_digest_in_place_of_a_signature_is_refused \
+            private_transfer_auth::tests::raising_the_amount_after_signing_is_refused; do
+            grep -qE "account_abstraction::$t \.\.\. ok" /tmp/aa-tests.log \
+              || { echo "HATA: $t kosmadi/gecmedi"; exit 1; }
+          done
+          grep -E 'test result:' /tmp/aa-tests.log
       - name: Feature canary - --all-features REDDEDILMELI
         run: |
           set -euo pipefail
@@ -143,6 +168,52 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate --self-test
       - name: Lubot okur, uretmez
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- lubot-reads-but-does-not-generate
+      # crates/lubot ayri bir workspace: ana Cargo.toml uyesi degil, bu yuzden
+      # `cargo clippy --all-targets` ona hic ugramiyordu. Yalniz kaynak metnini
+      # okuyan yukaridaki kapi vardi. Sonuc: agac derlenmez hale geldi ve
+      # kimse gormedi (`&'static [u16]` serde ile turetilemiyordu,
+      # `ConnState: Default` eksikti, bir test `&[]` gonderiyordu). Derleme +
+      # test buraya baglandi ki bir daha sessizce bozulmasin.
+      - name: Lubot derlenir ve testleri geçer
+        run: |
+          cargo clippy --manifest-path crates/lubot/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path crates/lubot/Cargo.toml
+      # B.U.D. cekirdegi (bud/) ayni sessiz cukurdaydi: 103 modullu bud-core
+      # -- B.U.D. 1.0/2.0/3.0'in TAMAMI -- hicbir CI isinde derlenmiyordu,
+      # cunku ana workspace'in uyesi degil ve hicbir adim manifestine
+      # bakmiyordu. Olcum: `clippy --features bud3 --all-targets -D warnings`
+      # -> 91 ihlal, aralarinda ic ice gecmis gercek hatalar (ayni dalli if,
+      # kaybolan Vec kapasitesi, yanlis yerlestirilmis cfg kapisi).
+      #
+      # Uc yapilandirma da kosuluyor cunku surumler feature ile ayriliyor:
+      # default (bud2) ile bud3 farkli modul kumesi derler, no-default ise
+      # ikisinin de disinda kalani. Bir yapilandirmayi atlamak, tam da bu
+      # turda bulunan "3.0 modulu 2.0 derlemesine sizmis" hatasini gorunmez
+      # birakirdi.
+      # `cargo fmt --all` ana workspace'i tarar; `bud/` onun uyesi olmadigi
+      # icin bu agacta hicbir bicimlendirme denetimi yoktu. Olcum: 119
+      # dosyanin 103'u rustfmt ciktisindan sapmisti. Bicimlendirme davranis
+      # degistirmez, ama denetlenmeyen bir agac zamanla okunmaz hale gelir ve
+      # gercek degisikligi gurultuden ayirt etmek zorlasir. Agac bir kez
+      # duzeltildi (`2c95cfe2`), bu adim geri kaymasini engeller.
+      - name: B.U.D. cekirdegi biçimlendirilmiş
+        run: cargo fmt --manifest-path bud/Cargo.toml --all -- --check
+      - name: B.U.D. cekirdegi derlenir ve testleri geçer
+        run: |
+          cargo clippy --manifest-path bud/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path bud/Cargo.toml --features bud3 --all-targets -- -D warnings
+          cargo clippy --manifest-path bud/Cargo.toml --no-default-features --all-targets -- -D warnings
+          cargo test --manifest-path bud/Cargo.toml --features bud3
+      # `slice[i]` release profilinde (panic = abort) surec durdurur; bu
+      # `unwrap` ile ayni canlilik sinifi. Agacta 66 dosya bu borcu tasiyor ve
+      # cogu indeks-yogun cozumleyicilerde (RLP/MPT/erasure), orada iterator'e
+      # cevirmek korunmak istenen indeks-esitligi hatasini gizler. Bu yuzden
+      # sayi donduruldu: mevcut 66 dosya borcunu tutabilir, listede olmayan
+      # bir dosya yeni indeks EKLEYEMEZ.
+      - name: Indeksleme kanaryasi
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new --self-test
+      - name: Yeni dosya panikleyen indeks eklemez
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- indexing-is-not-new
       - name: Turetilmis icerik kanaryasi
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- derived-content-stays-byte-exact --self-test
       - name: Turetilmis icerik bayt-kesin
@@ -821,7 +892,7 @@ jobs:
             --report-format sarif --report-path gitleaks.sarif --exit-code 0
       - name: gitleaks SARIF yükle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -900,7 +971,7 @@ jobs:
           ignore-unfixed: true
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -1160,6 +1231,18 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- capability-wiring --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- capability-wiring
+      # A test module that imports specific names from its parent rather than
+      # globbing is good practice and also a trap: tests appended to the file
+      # land in the last module, and a narrow import does not bring the new
+      # function along. `cargo check --lib` does not compile test bodies, so
+      # the library builds clean locally and the failure surfaces only here,
+      # as `cannot find function ... in this scope`. That happened once and
+      # cost a full CI round trip; this gate answers the same question in
+      # three seconds.
+      - name: test modulleri cagirdigini goruyor mu + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- test-module-imports --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- test-module-imports
       # B.U.D. storage cost `epochs * fee_per_epoch`, with no byte count in it,
       # so a 1 KiB and a 16 MiB shard cost the same for the same duration. The
       # client picks the size, so this was ordinary use rather than an attack.
@@ -1362,6 +1445,18 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- git-deps-are-audited-by-commit
+      # regeneration: bir zk kanitinin hangi program icin uretildigini soyleyen
+      # kanonik hash agacta dort yerde, uc crate'te, iki hash kutuphanesiyle
+      # hesaplaniyor. Dordunun ayni sonucu vermesi bir varsayimdi ve
+      # varsayimlar bayatlar. Ayrisirlarsa izin listesine yazilan deger ile
+      # dogrulayicinin kanittan hesapladigi deger farkli olur: ya her durust
+      # kanit reddedilir, ya da listede olmayan bir program listede sayilir.
+      # Kapi degeri bagimsiz bir Keccak-256 ile YENIDEN URETIR; kodun
+      # soyledigine inanmaz.
+      - name: regeneration (kanonik kodun yeniden uretimi, yakinsamali) + kanarya
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- regeneration
       # A test name is the claim a reader trusts when counting coverage.
       # `pow_empty_block_rejected_by_validation` asserted is_some();
       # `pos_double_producer_address_rejected` asserted both blocks succeed;

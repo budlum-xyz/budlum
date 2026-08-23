@@ -278,9 +278,10 @@ pub fn initial_memory_reads(trace: &[Step]) -> Vec<(u64, u64)> {
         .collect()
 }
 
-fn trace_matrix(
+#[doc(hidden)]
+pub fn trace_matrix(
     trace: &[Step],
-    _program: &[u64],
+    program: &[u64],
     public_inputs: &ExecutionPublicInputs,
 ) -> (RowMajorMatrix<Goldilocks>, usize) {
     let events = register_events(trace);
@@ -291,6 +292,34 @@ fn trace_matrix(
     let num_rows = (3 * n_cpu + 1).next_power_of_two().max(16);
 
     let mut values = vec![Goldilocks::new(0); num_rows * TRACE_WIDTH];
+
+    // Program CTL cokluk taniki. Satir `i`, pc=`i`'nin kac kez calistirildigini
+    // tasir; ROM tarafinin LogUp agirligi budur.
+    //
+    // VerifyMerkle genisletme satirlari orijinal adimla ayni (pc, raw_inst)
+    // demetini yeniden kullanir ve CTL onlari `is_expand` ile disarida birakir,
+    // dolayisiyla burada da sayilmazlar.
+    {
+        let prog_len = program.len();
+        let mut mult = vec![0u64; prog_len];
+        for step in trace {
+            // Genisletme satirlari orijinal adimla ayni (pc, raw_inst) demetini
+            // yeniden kullanir; CTL onlari `is_expand` ile disladigi icin
+            // cokluga da katilmazlar. Katilsalardi tek bir VerifyMerkle adimi
+            // 65 kez sayilirdi.
+            if step.merkle_is_expand || step.inference_is_expand {
+                continue;
+            }
+            if step.pc < prog_len {
+                mult[step.pc] += 1;
+            }
+        }
+        for (pc, count) in mult.iter().enumerate() {
+            if pc < num_rows {
+                values[pc * TRACE_WIDTH + COL_PROG_MULT] = Goldilocks::new(*count);
+            }
+        }
+    }
 
     let mut running_gas = 0u64;
 
@@ -316,11 +345,9 @@ fn trace_matrix(
         // It on the last row as well).
         if i == 0 {
             for j in 0..8 {
-                let limb = u32::from_le_bytes(
-                    public_inputs.initial_state_root[j * 4..j * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&public_inputs.initial_state_root[j * 4..j * 4 + 4]);
+                let limb = u32::from_le_bytes(word);
                 values[row_start + COL_INIT_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
             // Gas_limit: bound to public_inputs[32,33] on the first
@@ -794,11 +821,9 @@ fn trace_matrix(
         values[row_start + COL_TRACE_LEN_CTR] = Goldilocks::new((i + 1) as u64);
         if i == n_cpu.saturating_sub(1) {
             for j in 0..8 {
-                let limb = u32::from_le_bytes(
-                    public_inputs.final_state_root[j * 4..j * 4 + 4]
-                        .try_into()
-                        .unwrap(),
-                );
+                let mut word = [0u8; 4];
+                word.copy_from_slice(&public_inputs.final_state_root[j * 4..j * 4 + 4]);
+                let limb = u32::from_le_bytes(word);
                 values[row_start + COL_FINAL_ROOT_0 + j] = Goldilocks::new(limb as u64);
             }
             // Exit_code: 0 = success (real Halt), 1 = error (
@@ -822,16 +847,19 @@ fn trace_matrix(
         // Share the same `i` index here.
         if step.merkle_is_expand {
             // Expansion row.
-            let key = step.merkle_key.expect("expansion row must have merkle_key");
-            let cur = step
-                .merkle_current
-                .expect("expansion row must have merkle_current");
-            let sibling = step
-                .merkle_sibling
-                .expect("expansion row must have merkle_sibling");
-            let round = step
-                .merkle_round
-                .expect("expansion row must have merkle_round");
+            // `Vm::step` fills these four together with `merkle_is_expand`,
+            // so on an expansion row they are all present. Read as a group
+            // rather than unwrapped one by one: the guarantee lives in
+            // another crate, and a drift there must leave the row unwritten
+            // instead of aborting the prover mid-trace.
+            let (Some(key), Some(cur), Some(sibling), Some(round)) = (
+                step.merkle_key,
+                step.merkle_current,
+                step.merkle_sibling,
+                step.merkle_round,
+            ) else {
+                continue;
+            };
             let bit = (key >> round) & 1;
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
@@ -839,14 +867,29 @@ fn trace_matrix(
             // `rem == 2 * rem' + bit`, which is what ties `bit` to `key`;
             // without it the direction bits were free and a flipped bit
             // produced a different root that the AIR still accepted.
+            // Bu genislemeyi baslatan orijinal satirin bekledigi deger: yol
+            // bittiginde ulasilmasi gereken 64. tur ciktisi. Orijinal satir
+            // genislemelerden hemen once gelir, bu yuzden geriye dogru ilk
+            // genisleme-olmayan Merkle satiri aranir. Bulunamazsa 0 kalir ve
+            // AIR'in son-tur esitligi kirilir - sessiz gecmek yerine.
+            let final_merkle_value = trace[..i]
+                .iter()
+                .rev()
+                .find(|s| !s.merkle_is_expand)
+                .and_then(|s| s.merkle_current)
+                .unwrap_or(0);
             values[row_start + COL_MERKLE_KEY_REM] = Goldilocks::new(key >> round);
             values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(cur);
             values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
             values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
-            //: only the *original* step is the
-            // Final row of the path; expansion rows are intermediates.
-            values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(0);
+            // Bu sutun artik bir bayrak degil, **tasinan bir deger**: orijinal
+            // satirin kok ile karsilastiracagi 64. tur ciktisi, genisleme
+            // boyunca degismeden tasinir ve son turda uretilen ciktiyla
+            // esitligi denetlenir (`plonky3_air.rs`, "Son turun ciktisi ...").
+            // Onceden burada sabit 0 vardi ve AIR sutunu hic okumuyordu; o
+            // yuzden orijinal satirin degeri hicbir seye bagli degildi.
+            values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(final_merkle_value);
 
             // Poseidon witnesses: on every expansion row,
             // Populate the x^2 / x^4 columns with the Goldilocks
@@ -889,10 +932,9 @@ fn trace_matrix(
                 values[row_start + COL_MERKLE_POSEIDON_X2_0 + i] = Goldilocks::new(0);
                 values[row_start + COL_MERKLE_POSEIDON_X4_0 + i] = Goldilocks::new(0);
             }
-        } else if step.merkle_key.is_some() {
+        } else if let Some(key) = step.merkle_key {
             // Original VerifyMerkle step. The VM patched this row
             // With merkle_key immediately after push.
-            let key = step.merkle_key.unwrap();
             values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
             // Merkle_current on the original step is the
@@ -903,9 +945,10 @@ fn trace_matrix(
             // Step carries the 64th-round output, allowing
             // The AIR to apply the final root check on the
             // Original step's row, bridging to rd_val_new).
-            let final_merkle = step
-                .merkle_current
-                .expect("original VerifyMerkle step must have merkle_current (the VM sets this)");
+            // The VM sets this on the original step; read it instead of
+            // asserting, so a change there leaves the column at zero rather
+            // than aborting the prover mid-trace.
+            let final_merkle = step.merkle_current.unwrap_or(0);
             values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(final_merkle);
             // Merkle_round=0 on the original step so the AIR can
             // Extract the right bit (key & 1) for the first
@@ -1443,8 +1486,15 @@ fn aux_trace_generator(
             if i < trace_len && is_expand_row == Goldilocks::ZERO {
                 s_prog += diff_cpu_prog.inverse();
             }
+            // ROM tarafi agirligi cokluk sutunudur, sabit 1 degil. Dallanmali
+            // programda bir pc hic calistirilmaz (atlanan dal) veya birden cok
+            // kez calistirilir (dongu govdesi); sabit 1 bu iki durumda da
+            // dengeyi bozar ve durust prover `InvalidProof` alir.
             if i < program.len() {
-                s_prog -= diff_pre_prog.inverse();
+                let mult = row[COL_PROG_MULT];
+                if mult != Goldilocks::ZERO {
+                    s_prog -= diff_pre_prog.inverse() * MyExtensionField::from(mult);
+                }
             }
 
             aux_values[(i + 1) * 3] = s_reg;
@@ -1456,24 +1506,25 @@ fn aux_trace_generator(
     })
 }
 
-fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
+#[doc(hidden)]
+pub fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     let mut vals = Vec::new();
 
     vals.push(Goldilocks::from_u64(pi.chain_id & 0xFFFF_FFFF));
     vals.push(Goldilocks::from_u64(pi.chain_id >> 32));
 
     for chunk in pi.program_hash.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
     for chunk in pi.initial_state_root.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
     for chunk in pi.final_state_root.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
@@ -1505,12 +1556,14 @@ fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // four bytes truncated it, so the comparison held only while every logged
     // value stayed below 2^32 - which every test did, and which a Poseidon
     // output never does.
-    vals.push(Goldilocks::from_u64(u64::from_le_bytes(
-        pi.event_digest[0..8].try_into().unwrap(),
-    )));
+    // `chunks_exact(4)` and this fixed window always yield the right width;
+    // written without a fallible conversion so no panic remains.
+    let mut event_head = [0u8; 8];
+    event_head.copy_from_slice(&pi.event_digest[0..8]);
+    vals.push(Goldilocks::from_u64(u64::from_le_bytes(event_head)));
     // Limbs 1..8 are reserved; they are packed as u32 and asserted zero.
     for chunk in pi.event_digest[8..32].chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
     // One more slot so event_digest stays at 8 public values ([40..48]).
@@ -1518,7 +1571,7 @@ fn to_public_values(pi: &ExecutionPublicInputs) -> Vec<Goldilocks> {
     // state_writes_digest: 8 u32 limbs -> public_inputs[48..56] (Strix HIGH
     // CWE-345, 2026-08-17).
     for chunk in pi.state_writes_digest.chunks_exact(4) {
-        let val = u32::from_le_bytes(chunk.try_into().unwrap());
+        let val = u32::from_le_bytes(chunk.try_into().unwrap_or([0u8; 4]));
         vals.push(Goldilocks::from_u64(val as u64));
     }
 
@@ -1664,6 +1717,13 @@ mod tests {
     use bud_isa::{Instruction, Opcode};
     use bud_vm::Vm;
     use p3_field::PrimeField64;
+
+    /// Kanit uzerinde tek alani bozan mutasyon.
+    ///
+    /// `Vec<(&str, Box<dyn Fn(&mut Proof<MyConfig>)>)>` dogrudan yazildiginda
+    /// clippy `type_complexity` veriyor - hakli, cunku okuyan kisi once tipi
+    /// cozup sonra ne yaptigini anlamak zorunda kaliyor.
+    type ProofMutation = Box<dyn Fn(&mut crate::bud_stark::Proof<MyConfig>)>;
 
     fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
         Instruction {
@@ -3787,6 +3847,147 @@ mod tests {
     /// a real proof started landing on this field once the transcript changed
     /// the proof's byte layout. The panic was always reachable; which byte
     /// reaches it is not stable.
+    /// Dogrulayicinin sekil denetimleri gercekten kapi mi.
+    ///
+    /// `verify_with_preprocessed` kanitin acilan degerlerinin beklenen
+    /// genislikte oldugunu denetler (`valid_shape`) ve uymayani
+    /// `InvalidProofShape` ile reddeder. Bu denetimler, kanit sisteminin
+    /// **kisitlamadigi** alanlar: PCS bir vektorun uzunlugunu degil, verilen
+    /// noktalardaki acilislari dogrular. Yani burasi dogrulayicinin kendi
+    /// kodunda tutmasi gereken sinir - literaturde en sik rastlanan zkVM
+    /// zafiyet sinifi tam olarak bu (dogrulayicinin devreye guvenip kendi
+    /// denetimini atlamasi).
+    ///
+    /// 652 satirlik `bud_stark/verifier.rs` uretim yolunda calisiyordu ve tek
+    /// testi yoktu. Bu test o yuzeye ilk kapiyi koyuyor: durust kanit gecer,
+    /// her biri tek alani bozulmus dort kanit reddedilir.
+    #[test]
+    fn verifier_shape_checks_reject_malformed_openings() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+
+        // Kontrol grubu. Bu gecmezse asagidaki redler saldiriya degil
+        // kurulum hatasina borclu olurdu.
+        assert!(
+            Plonky3Adapter::verify(&envelope, &pi, &program).is_ok(),
+            "durust kanit dogrulanmali: kurulum bozuk"
+        );
+
+        let base: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+
+        // Her biri tek alani bozar. Hepsi `valid_shape` uzerinden
+        // `InvalidProofShape`e dusmeli.
+        let mutations: Vec<(&str, ProofMutation)> = vec![
+            (
+                "trace_local kisaltildi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.trace_local.pop();
+                }),
+            ),
+            (
+                "trace_local uzatildi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    let v = p.opened_values.trace_local[0];
+                    p.opened_values.trace_local.push(v);
+                }),
+            ),
+            (
+                "bolum parcasi dusuruldu",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.quotient_chunks.pop();
+                }),
+            ),
+            (
+                "yardimci iz acilisi silindi",
+                Box::new(|p: &mut crate::bud_stark::Proof<MyConfig>| {
+                    p.opened_values.aux_trace_local = None;
+                }),
+            ),
+        ];
+
+        for (ad, mutate) in mutations {
+            let mut forged_proof = base.clone();
+            mutate(&mut forged_proof);
+            let forged = ProofEnvelope {
+                proof_bytes: postcard::to_allocvec(&forged_proof).unwrap(),
+                ..envelope.clone()
+            };
+            assert!(
+                Plonky3Adapter::verify(&forged, &pi, &program).is_err(),
+                "sekli bozuk kanit dogrulandi ({ad})"
+            );
+
+            // Adapter her hatayi `InvalidProof`e duzlestirir, yani yukaridaki
+            // iddia "reddedildi" der ama **neden** reddedildigini soylemez -
+            // bir kriptografik dogrulama hatasi da ayni cevabi verirdi.
+            // Dogrulayici dogrudan cagrilip reddin gercekten sekil kapisindan
+            // geldigi olculur. Bu ayrim olmadan test, sekil denetimi tamamen
+            // kaldirildiginda bile yesil kaliyordu - olculdu, kaldi.
+            let air_p = BudAir {
+                num_steps: vm.trace.len(),
+                program: program.clone(),
+            };
+            let cfg_p = build_config();
+            let pv_p = to_public_values(&pi);
+            let pp_p = setup_preprocessed(&cfg_p, &air_p, forged_proof.degree_bits);
+            let direct = crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &forged_proof,
+                &pv_p,
+                pp_p.as_ref().map(|(_, v)| v),
+            );
+            let reason = direct
+                .as_ref()
+                .err()
+                .map(|e| format!("{e}"))
+                .unwrap_or_else(|| "kabul edildi".to_string());
+            assert_eq!(
+                reason, "invalid proof shape",
+                "{ad}: red sekil kapisindan gelmedi"
+            );
+        }
+    }
+
     #[test]
     fn rejects_a_proof_claiming_an_impossible_degree() {
         let program = vec![
@@ -4291,10 +4492,27 @@ mod tests {
     //       Constraints and `budzero/docs/BudL_SPEC.md` ("VerifyMerkle
     //       Soundness") for the argument.
     //
+    //   (c) **Yolun sonucunun koke baglanmasi.** (a) ve (b) uzun sure
+    //       Yeterli sayildi, degildi. Zincir satir satir dogru
+    //       Hesaplaniyordu ve **ulastigi yer hicbir seye baglanmiyordu**:
+    //       Kok karsilastirmasi orijinal satirin `merkle_current`
+    //       Hucresine bakiyor, o hucreye 64. turun ciktisinin yazildigini
+    //       Zorlayan bir kisit yoktu. Genisleme satirlarina hic dokunmadan
+    //       Orijinal satira iddia edilen kokun kendisini yazan bir prover
+    //       Dogrulanan bir kanit uretiyordu - olculdu, uretti.
+    //       `COL_MERKLE_FINAL_FLAG` artik beklenen degeri genisleme boyunca
+    //       Tasir ve son turda uretilen ciktiyla esitligi denetlenir.
+    //       Test: `rejects_verify_merkle_root_not_produced_by_the_path`.
+    //
     // What this does *not* license: `verify_merkle_enabled` stays `false`
     // In the default ISA config. That flag is gated on external review of
     // The soundness argument, which is a process step, not a missing
     // Constraint. Do not flip it on the strength of this comment.
+    //
+    // (c) bu ayrimin neden korundugunu da gosteriyor: bu yorumun onceki
+    // Surumu (b)'yi "implemented" ilan ediyordu ve ilan dogruydu -
+    // Eksik olan (b) degildi, kimsenin ayri bir madde olarak yazmadigi
+    // (c) idi. Ic degerlendirmenin gozden kacirdigi sey tam olarak budur.
     //
     // Tests: `verify_merkle_opcode_is_deprecated_for_zk_proofs` pins the
     // 0x1E encoding, `rejects_verify_merkle_with_zero_selector` covers (a),
@@ -6286,6 +6504,124 @@ mod tests {
             "a flipped Merkle direction bit produced a verifying proof: the \
              path would prove membership at a position the key does not \
              describe. proving_rejected={rejected_at_proving}, \
+             verification_rejected={rejected_at_verification}"
+        );
+    }
+
+    /// Yolun uretmedigi bir kok iddiasi reddedilmeli.
+    ///
+    /// Kok denetimi, **orijinal** VerifyMerkle satirinin `merkle_current`
+    /// hucresini iddia edilen kokle (`rs1_val`) karsilastirir. Prover o
+    /// hucreye 64. turun ciktisini yazar - ama hicbir kisit bunu zorlamiyordu.
+    /// 64 genisleme satiri Poseidon zincirini satir satir dogru hesapliyor,
+    /// ulastigi sonuc ise hicbir yere baglanmiyordu.
+    ///
+    /// Saldirgan izi VM seviyesinde kurgular: **gecerli** bir yolla baslar
+    /// (ayni kurulum `proves_verify_merkle_valid_64_depth` ile), sonra
+    /// iddia edilen koku degistirir ve orijinal adimin `merkle_current`
+    /// alanina o yeni koku yazip "eslesti" der. Genisleme satirlarina
+    /// dokunulmaz - zincir kendi icinde tutarli kalir, yalnizca vardigi yer
+    /// yok sayilir. `trace_matrix` turev sutunlarin hepsini bu izden tutarli
+    /// uretir, yani ortada bayat tanik yoktur.
+    ///
+    /// Kisit kaldirilarak olculdu: bu kanit **dogrulandi** (`verify` Ok).
+    /// Kisitla birlikte reddediliyor. Opcode'un uretimde kapali tutulma
+    /// gerekcesi ("unfinished path verification") tam olarak buydu.
+    #[test]
+    fn rejects_verify_merkle_root_not_produced_by_the_path() {
+        let program = vec![
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let key: u64 = 7;
+        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
+        let leaf: u64 = 0xBEEF;
+        let mut current = leaf;
+        for (i, &sibling) in siblings.iter().enumerate() {
+            let bit = (key >> i) & 1;
+            current = if bit == 0 {
+                bud_vm::merkle_poseidon_round(current, sibling)
+            } else {
+                bud_vm::merkle_poseidon_round(sibling, current)
+            };
+        }
+        let honest_root = current;
+        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
+        for (i, &sibling) in siblings.iter().enumerate() {
+            let off = 264 + i * 8;
+            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
+        }
+        vm.registers[2] = honest_root;
+        vm.registers[3] = leaf;
+
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.trace.len(), 66);
+
+        // Saldiri: baska bir kok iddia edilir ve orijinal adim, yolun
+        // ulastigi sonuc yerine o koku tasiyip "eslesti" der.
+        let forged_root = honest_root ^ 0xFFFF;
+        let mut trace = vm.trace.clone();
+        trace[0].src1_val = forged_root;
+        trace[0].registers[2] = forged_root;
+        trace[0].merkle_current = Some(forged_root);
+        trace[0].dst_val = 1;
+        for st in trace.iter_mut().skip(1) {
+            st.registers[1] = 1;
+            st.registers[2] = forged_root;
+        }
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_memory_reads(&trace),
+                ),
+                crate::adapter::register_image_commitment_of_reads(
+                    &crate::plonky3_prover::initial_register_reads(&trace),
+                ),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Plonky3Adapter::prove(&trace, &pi, &program)
+        }));
+
+        let rejected_at_proving = match &attempted {
+            Err(_) => true,
+            Ok(Err(_)) => true,
+            Ok(Ok(_)) => false,
+        };
+        let rejected_at_verification = match attempted {
+            Ok(Ok(envelope)) => Plonky3Adapter::verify(&envelope, &pi, &program).is_err(),
+            _ => false,
+        };
+
+        assert!(
+            rejected_at_proving || rejected_at_verification,
+            "yolun uretmedigi bir kok dogrulandi: 64 tur hesaplandi ve sonucu \
+             atlandi. proving_rejected={rejected_at_proving}, \
              verification_rejected={rejected_at_verification}"
         );
     }

@@ -35,7 +35,12 @@ fn det_vec(seed: u64, n: usize, j: usize) -> Vec<f64> {
 /// Düşük-rank ayrıştırma (kayıpsız: kalan tam saklanır).
 /// `a` satır-major f64 matris (r x c). `rank` hedef rank (≤ min(r,c)).
 /// Çıktı: (U, V, residual) - A ≈ U·V + residual; residual gerçek fark.
-pub fn low_rank_encode(a: &[f64], r: usize, c: usize, rank: usize) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+pub fn low_rank_encode(
+    a: &[f64],
+    r: usize,
+    c: usize,
+    rank: usize,
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     if r == 0 || c == 0 || a.len() != r * c || rank == 0 || rank > r.min(c) {
         return None;
     }
@@ -117,7 +122,14 @@ pub fn low_rank_encode(a: &[f64], r: usize, c: usize, rank: usize) -> Option<(Ve
 }
 
 /// Kayıpsız geri çevirme: U·V + residual = A.
-pub fn low_rank_decode(u: &[f64], v: &[f64], res: &[f64], r: usize, c: usize, rank: usize) -> Option<Vec<f64>> {
+pub fn low_rank_decode(
+    u: &[f64],
+    v: &[f64],
+    res: &[f64],
+    r: usize,
+    c: usize,
+    rank: usize,
+) -> Option<Vec<f64>> {
     if u.len() != r * rank || v.len() != rank * c || res.len() != r * c {
         return None;
     }
@@ -203,13 +215,19 @@ mod tests {
     #[test]
     fn dusuk_rank_kayipsiz_roundtrip() {
         let a = dusuk_rank_ornek(40, 30, 3);
-        assert!(roundtrip_within(&a, 40, 30, 3, 1e-12), "düşük rank 1e-12 tolerans");
+        assert!(
+            roundtrip_within(&a, 40, 30, 3, 1e-12),
+            "düşük rank 1e-12 tolerans"
+        );
         // rastgele (yüksek rank) veride de deterministik geri çevirme
         let mut rnd = vec![0.0; 100];
         for (i, x) in rnd.iter_mut().enumerate() {
             *x = (i as f64 * 13.7).fract();
         }
-        assert!(roundtrip_within(&rnd, 10, 10, 2, 1e-12), "genel veri 1e-12 tolerans");
+        assert!(
+            roundtrip_within(&rnd, 10, 10, 2, 1e-12),
+            "genel veri 1e-12 tolerans"
+        );
     }
 
     #[test]

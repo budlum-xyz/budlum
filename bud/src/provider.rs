@@ -24,7 +24,9 @@ pub trait Provider {
     fn cls(&self) -> ProviderClass;
     fn fetch(&self, content_id_hex: &str) -> Result<Vec<u8>, ProviderError>;
     fn cost_usd_per_tb_month(&self) -> f64;
-    fn is_own_content(&self) -> bool { false }
+    fn is_own_content(&self) -> bool {
+        false
+    }
 }
 
 pub struct SocialMediaProvider {
@@ -32,11 +34,15 @@ pub struct SocialMediaProvider {
 }
 
 impl Provider for SocialMediaProvider {
-    fn cls(&self) -> ProviderClass { ProviderClass::SocialOpen }
+    fn cls(&self) -> ProviderClass {
+        ProviderClass::SocialOpen
+    }
     fn fetch(&self, _cid: &str) -> Result<Vec<u8>, ProviderError> {
         Err(ProviderError::NotFound) // no_social: iptal
     }
-    fn cost_usd_per_tb_month(&self) -> f64 { 0.0 }
+    fn cost_usd_per_tb_month(&self) -> f64 {
+        0.0
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,10 +54,18 @@ pub struct MobileSelfProvider {
 
 impl MobileSelfProvider {
     pub fn new_owner(device_id: String) -> Self {
-        Self { device_id, is_owner: true, last_seen_secs: 0 }
+        Self {
+            device_id,
+            is_owner: true,
+            last_seen_secs: 0,
+        }
     }
     pub fn new_replica(device_id: String, last_seen: u64) -> Self {
-        Self { device_id, is_owner: false, last_seen_secs: last_seen }
+        Self {
+            device_id,
+            is_owner: false,
+            last_seen_secs: last_seen,
+        }
     }
     pub fn is_online(&self, now_secs: u64) -> bool {
         if self.is_owner {
@@ -66,12 +80,18 @@ impl MobileSelfProvider {
 }
 
 impl Provider for MobileSelfProvider {
-    fn cls(&self) -> ProviderClass { ProviderClass::DeviceClosed }
+    fn cls(&self) -> ProviderClass {
+        ProviderClass::DeviceClosed
+    }
     fn fetch(&self, _cid: &str) -> Result<Vec<u8>, ProviderError> {
         Ok(vec![])
     }
-    fn cost_usd_per_tb_month(&self) -> f64 { 0.0 } // zero_model
-    fn is_own_content(&self) -> bool { self.is_owner }
+    fn cost_usd_per_tb_month(&self) -> f64 {
+        0.0
+    } // zero_model
+    fn is_own_content(&self) -> bool {
+        self.is_owner
+    }
 }
 
 pub struct NetworkFullProvider {
@@ -81,7 +101,7 @@ pub struct NetworkFullProvider {
 impl NetworkFullProvider {
     pub fn expansion(&self) -> f64 {
         // EVENODD p=7 e=1.286 always_evenodd
-        9.0/7.0
+        9.0 / 7.0
     }
     pub fn required_ratio_60m(&self) -> f64 {
         // fiziksel 0.23342 * e / 0.016 = 18.76
@@ -90,7 +110,9 @@ impl NetworkFullProvider {
 }
 
 impl Provider for NetworkFullProvider {
-    fn cls(&self) -> ProviderClass { ProviderClass::NetworkFull }
+    fn cls(&self) -> ProviderClass {
+        ProviderClass::NetworkFull
+    }
     fn fetch(&self, _cid: &str) -> Result<Vec<u8>, ProviderError> {
         Ok(vec![])
     }
@@ -116,7 +138,9 @@ mod tests {
     use super::*;
     #[test]
     fn social_cost_zero_but_disabled() {
-        let p = SocialMediaProvider { url_template: "https://..." };
+        let p = SocialMediaProvider {
+            url_template: "https://...",
+        };
         assert_eq!(p.cost_usd_per_tb_month(), 0.0);
         assert!(p.fetch("abc").is_err()); // disabled
     }

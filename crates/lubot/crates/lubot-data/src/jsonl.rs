@@ -17,13 +17,19 @@ pub struct InstructionRecord {
 
 /// Kaydı tek satırlık JSON'a kodla.
 ///
-/// # Panics
+/// Belge daha önce "üretimde `Result` dönen sarmalayıcı kullanılır" diyordu.
+/// Öyle bir sarmalayıcı yoktu: bu fonksiyon panikleyen tek yoldu ve yalnızca
+/// testlerden çağrılıyordu. İddia kaldırıldı, panik de kaldırıldı.
 ///
-/// Yalnızca serileştirme hatalarında (String alanlar için pratikte imkânsız);
-/// üretimde `Result` dönen sarmalayıcı kullanılır.
-#[must_use]
-pub fn encode(rec: &InstructionRecord) -> String {
-    serde_json::to_string(rec).expect("InstructionRecord serileştirilemeli")
+/// Serileştirme burada pratikte başarısız olmaz (üç `String` alan), ama
+/// "olmaz" ile "olamaz" aynı şey değildir ve release profili
+/// `panic = "abort"` kullanıyor. Hata durumunda çağıran karar verir.
+///
+/// # Errors
+///
+/// `serde_json` kaydı serileştiremezse hata döner.
+pub fn encode(rec: &InstructionRecord) -> Result<String, String> {
+    serde_json::to_string(rec).map_err(|e| format!("JSONL kaydı kodlanamadı: {e}"))
 }
 
 /// JSONL satırından kayıt çöz.
@@ -46,7 +52,7 @@ mod tests {
             user: "Başkent neresi?".to_string(),
             assistant: "Ankara.".to_string(),
         };
-        assert_eq!(decode(&encode(&rec)).unwrap(), rec);
+        assert_eq!(decode(&encode(&rec).unwrap()).unwrap(), rec);
     }
 
     #[test]
@@ -56,7 +62,7 @@ mod tests {
             user: "x|y\nz".to_string(),
             assistant: "ş ğ ü ö ç".to_string(),
         };
-        assert_eq!(decode(&encode(&rec)).unwrap(), rec);
+        assert_eq!(decode(&encode(&rec).unwrap()).unwrap(), rec);
     }
 
     #[test]

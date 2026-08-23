@@ -15,10 +15,10 @@ pub const BLOOM_MAGIC: [u8; 8] = *b"\xB5BLM1\0\0\0";
 
 #[derive(Debug, Clone)]
 pub struct BloomDedupIndex {
-    bits: Vec<u64>,     // bit dizisi
+    bits: Vec<u64>, // bit dizisi
     num_bits: usize,
-    k: usize,           // hash sayısı
-    inserted: usize,    // eklenen chunk sayısı
+    k: usize,             // hash sayısı
+    inserted: usize,      // eklenen chunk sayısı
     exact: Vec<[u8; 32]>, // kesin doğrulama seti (iki-aşamalı)
 }
 
@@ -29,7 +29,9 @@ impl BloomDedupIndex {
             return None;
         }
         let num_bits = expected.saturating_mul(bits_per_entry).max(64);
-        let k = ((num_bits as f64 / expected as f64) * std::f64::consts::LN_2).round().max(1.0) as usize;
+        let k = ((num_bits as f64 / expected as f64) * std::f64::consts::LN_2)
+            .round()
+            .max(1.0) as usize;
         Some(Self {
             bits: vec![0; num_bits.div_ceil(64)],
             num_bits,
@@ -46,7 +48,9 @@ impl BloomDedupIndex {
         for i in 0..self.k {
             d.update([i as u8]);
             let hi = d.clone().finalize();
-            let v = u64::from_le_bytes(hi[..8].try_into().unwrap()) as usize;
+            let mut w = [0u8; 8];
+            w.copy_from_slice(&hi[..8]);
+            let v = u64::from_le_bytes(w) as usize;
             out.push(v % self.num_bits);
         }
         out

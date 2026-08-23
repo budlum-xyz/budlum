@@ -298,7 +298,17 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         exit_code: 0,
         trace_len: vm.trace.len() as u64,
         event_digest,
-        state_writes_digest: [0u8; 32],
+        // Depolama yazma ozeti VM'den gelir, sabit sifirdan degil.
+        //
+        // Burada `[0u8; 32]` yaziliydi. Depolamaya dokunmayan programlarda
+        // bu doğru cevaptı ve hicbir sey bozulmuyordu; tek bir
+        // `storage::x = 5;` iceren program ise kanit uretip **kendi
+        // dogrulayicisinda** dusuyordu, cunku AIR bu alani gercek SWrite
+        // zincirine bagliyor (Strix HIGH CWE-345) ve kamu girdisi sifir
+        // kaliyordu. Kusur gorunmez kalmisti: sema `storage` alanlarini
+        // ortama hic koymadigi icin depolama kullanan bir program zaten
+        // derlenemiyordu.
+        state_writes_digest: receipt.state_writes_digest,
     };
 
     // Prove and Verify

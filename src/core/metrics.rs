@@ -41,256 +41,164 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new() -> Self {
+    /// Build the metric set.
+    ///
+    /// Every name and help string below is a literal in this file, so the
+    /// only way `prometheus` refuses one is a malformed name we wrote
+    /// ourselves - a build-time mistake, not something a peer can trigger.
+    /// It still returns `Result` rather than panicking: this runs inside node
+    /// startup, the release profile aborts on panic, and a metrics registry
+    /// is not a reason to take a validator down. The caller decides.
+    pub fn new() -> Result<Self, prometheus::Error> {
         let registry = Registry::new();
 
-        let chain_height =
-            IntGauge::new("budlum_chain_height", "Current chain height").expect("metric");
-        let peer_count = IntGauge::new("budlum_peer_count", "Connected peers").expect("metric");
-        let mempool_size =
-            IntGauge::new("budlum_mempool_size", "Pending transactions").expect("metric");
-        let blocks_produced =
-            IntCounter::new("budlum_blocks_produced", "Total blocks produced").expect("metric");
+        let chain_height = IntGauge::new("budlum_chain_height", "Current chain height")?;
+        let peer_count = IntGauge::new("budlum_peer_count", "Connected peers")?;
+        let mempool_size = IntGauge::new("budlum_mempool_size", "Pending transactions")?;
+        let blocks_produced = IntCounter::new("budlum_blocks_produced", "Total blocks produced")?;
         let transactions_processed =
-            IntCounter::new("budlum_transactions_processed", "Total transactions").expect("metric");
-        let reorgs_total =
-            IntCounter::new("budlum_reorgs_total", "Total chain reorgs").expect("metric");
-        let finalized_height =
-            IntGauge::new("budlum_finalized_height", "Finalized block height").expect("metric");
+            IntCounter::new("budlum_transactions_processed", "Total transactions")?;
+        let reorgs_total = IntCounter::new("budlum_reorgs_total", "Total chain reorgs")?;
+        let finalized_height = IntGauge::new("budlum_finalized_height", "Finalized block height")?;
         let block_propagation_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_block_propagation_seconds",
             "Observed block propagation time in seconds",
-        ))
-        .expect("metric");
+        ))?;
         let mempool_sender_count =
-            IntGauge::new("budlum_mempool_sender_count", "Distinct senders in mempool")
-                .expect("metric");
+            IntGauge::new("budlum_mempool_sender_count", "Distinct senders in mempool")?;
         let peer_connection_quality = IntGauge::new(
             "budlum_peer_connection_quality",
             "Aggregate peer quality score",
-        )
-        .expect("metric");
+        )?;
         let consensus_round_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_consensus_round_seconds",
             "Consensus round duration in seconds",
-        ))
-        .expect("metric");
+        ))?;
         let finality_lag =
-            IntGauge::new("budlum_finality_lag", "Head height minus finalized height")
-                .expect("metric");
+            IntGauge::new("budlum_finality_lag", "Head height minus finalized height")?;
         let storage_db_size_bytes = IntGauge::new(
             "budlum_storage_db_size_bytes",
             "Approximate storage size in bytes",
-        )
-        .expect("metric");
+        )?;
         let storage_write_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_storage_write_seconds",
             "Storage write latency in seconds",
-        ))
-        .expect("metric");
+        ))?;
         let storage_read_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_storage_read_seconds",
             "Storage read latency in seconds",
-        ))
-        .expect("metric");
+        ))?;
         let settlement_commitments_total = IntCounter::new(
             "budlum_settlement_commitments_total",
             "Total settlement commitments processed",
-        )
-        .expect("metric");
+        )?;
         let settlement_frozen_domains = IntGauge::new(
             "budlum_settlement_frozen_domains",
             "Frozen settlement domains",
-        )
-        .expect("metric");
+        )?;
         let settlement_global_headers_sealed = IntCounter::new(
             "budlum_settlement_global_headers_sealed",
             "Total sealed settlement global headers",
-        )
-        .expect("metric");
+        )?;
         let settlement_equivocations_detected = IntCounter::new(
             "budlum_settlement_equivocations_detected",
             "Total settlement equivocations detected",
-        )
-        .expect("metric");
+        )?;
         let p2p_peers_connected = IntGauge::new(
             "budlum_p2p_peers_connected",
             "Currently connected P2P peers",
-        )
-        .expect("metric");
+        )?;
         let p2p_messages_received = IntCounter::new(
             "budlum_p2p_messages_received",
             "Total P2P messages received",
-        )
-        .expect("metric");
+        )?;
         let p2p_gossip_duplicates = IntCounter::new(
             "budlum_p2p_gossip_duplicates",
             "Duplicate gossip messages observed",
-        )
-        .expect("metric");
+        )?;
         let p2p_sync_requests = IntCounter::new(
             "budlum_p2p_sync_requests",
             "P2P sync requests sent or handled",
-        )
-        .expect("metric");
+        )?;
         let mempool_evictions = IntCounter::new(
             "budlum_mempool_evictions",
             "Transactions evicted from mempool",
-        )
-        .expect("metric");
+        )?;
         let mempool_expired_cleanups = IntCounter::new(
             "budlum_mempool_expired_cleanups",
             "Expired mempool cleanup runs",
-        )
-        .expect("metric");
+        )?;
         let rpc_request_duration_seconds = Histogram::with_opts(HistogramOpts::new(
             "budlum_rpc_request_duration_seconds",
             "RPC request latency in seconds",
-        ))
-        .expect("metric");
+        ))?;
         let rpc_requests_total =
-            IntCounter::new("budlum_rpc_requests_total", "Total RPC requests received")
-                .expect("metric");
+            IntCounter::new("budlum_rpc_requests_total", "Total RPC requests received")?;
         //: Domain metrics.
         let bridge_transfers_total = IntCounter::new(
             "budlum_bridge_transfers_total",
             "Total bridge transfers processed",
-        )
-        .expect("metric");
+        )?;
         let bridge_amount_locked = IntGauge::new(
             "budlum_bridge_amount_locked",
             "Assets currently locked in bridge",
-        )
-        .expect("metric");
+        )?;
         let ai_requests_total = IntCounter::new(
             "budlum_ai_requests_total",
             "Total AI inference requests submitted",
-        )
-        .expect("metric");
+        )?;
         let ai_outcomes_finalized = IntCounter::new(
             "budlum_ai_outcomes_finalized",
             "Total AI outcomes finalized",
-        )
-        .expect("metric");
+        )?;
         let bns_names_registered =
-            IntCounter::new("budlum_bns_names_registered", "Total BNS names registered")
-                .expect("metric");
+            IntCounter::new("budlum_bns_names_registered", "Total BNS names registered")?;
         let slashing_events_total = IntCounter::new(
             "budlum_slashing_events_total",
             "Total slashing events executed",
-        )
-        .expect("metric");
+        )?;
 
         let rpc_rate_limited_total = IntCounter::new(
             "budlum_rpc_rate_limited_total",
             "Total RPC requests rejected due to rate limiting",
-        )
-        .expect("metric");
+        )?;
 
-        registry
-            .register(Box::new(chain_height.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(peer_count.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(mempool_size.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(blocks_produced.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(transactions_processed.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(reorgs_total.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(finalized_height.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(block_propagation_seconds.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(mempool_sender_count.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(peer_connection_quality.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(consensus_round_seconds.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(finality_lag.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(storage_db_size_bytes.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(storage_write_seconds.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(storage_read_seconds.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(settlement_commitments_total.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(settlement_frozen_domains.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(settlement_global_headers_sealed.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(settlement_equivocations_detected.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(p2p_peers_connected.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(p2p_messages_received.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(p2p_gossip_duplicates.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(p2p_sync_requests.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(mempool_evictions.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(mempool_expired_cleanups.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(rpc_request_duration_seconds.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(rpc_requests_total.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(bridge_transfers_total.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(bridge_amount_locked.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(ai_requests_total.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(ai_outcomes_finalized.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(bns_names_registered.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(slashing_events_total.clone()))
-            .expect("metric");
-        registry
-            .register(Box::new(rpc_rate_limited_total.clone()))
-            .expect("metric");
+        registry.register(Box::new(chain_height.clone()))?;
+        registry.register(Box::new(peer_count.clone()))?;
+        registry.register(Box::new(mempool_size.clone()))?;
+        registry.register(Box::new(blocks_produced.clone()))?;
+        registry.register(Box::new(transactions_processed.clone()))?;
+        registry.register(Box::new(reorgs_total.clone()))?;
+        registry.register(Box::new(finalized_height.clone()))?;
+        registry.register(Box::new(block_propagation_seconds.clone()))?;
+        registry.register(Box::new(mempool_sender_count.clone()))?;
+        registry.register(Box::new(peer_connection_quality.clone()))?;
+        registry.register(Box::new(consensus_round_seconds.clone()))?;
+        registry.register(Box::new(finality_lag.clone()))?;
+        registry.register(Box::new(storage_db_size_bytes.clone()))?;
+        registry.register(Box::new(storage_write_seconds.clone()))?;
+        registry.register(Box::new(storage_read_seconds.clone()))?;
+        registry.register(Box::new(settlement_commitments_total.clone()))?;
+        registry.register(Box::new(settlement_frozen_domains.clone()))?;
+        registry.register(Box::new(settlement_global_headers_sealed.clone()))?;
+        registry.register(Box::new(settlement_equivocations_detected.clone()))?;
+        registry.register(Box::new(p2p_peers_connected.clone()))?;
+        registry.register(Box::new(p2p_messages_received.clone()))?;
+        registry.register(Box::new(p2p_gossip_duplicates.clone()))?;
+        registry.register(Box::new(p2p_sync_requests.clone()))?;
+        registry.register(Box::new(mempool_evictions.clone()))?;
+        registry.register(Box::new(mempool_expired_cleanups.clone()))?;
+        registry.register(Box::new(rpc_request_duration_seconds.clone()))?;
+        registry.register(Box::new(rpc_requests_total.clone()))?;
+        registry.register(Box::new(bridge_transfers_total.clone()))?;
+        registry.register(Box::new(bridge_amount_locked.clone()))?;
+        registry.register(Box::new(ai_requests_total.clone()))?;
+        registry.register(Box::new(ai_outcomes_finalized.clone()))?;
+        registry.register(Box::new(bns_names_registered.clone()))?;
+        registry.register(Box::new(slashing_events_total.clone()))?;
+        registry.register(Box::new(rpc_rate_limited_total.clone()))?;
 
-        Metrics {
+        Ok(Metrics {
             registry: Arc::new(registry),
             chain_height,
             peer_count,
@@ -326,23 +234,21 @@ impl Metrics {
             ai_outcomes_finalized,
             bns_names_registered,
             slashing_events_total,
-        }
+        })
     }
 
     pub fn encode(&self) -> String {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
-        encoder
-            .encode(&metric_families, &mut buffer)
-            .expect("metrics encoding should not fail");
-        String::from_utf8(buffer).expect("Prometheus text encoder emitted invalid UTF-8")
-    }
-}
-
-impl Default for Metrics {
-    fn default() -> Self {
-        Self::new()
+        // Serving metrics is an observability concern; failing to render them
+        // must not abort the node. Both failures are impossible for the
+        // encoder we construct here, so an empty body is the honest answer:
+        // the scrape reports nothing rather than the process dying.
+        if encoder.encode(&metric_families, &mut buffer).is_err() {
+            return String::new();
+        }
+        String::from_utf8(buffer).unwrap_or_default()
     }
 }
 
@@ -352,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_metrics_initialization_and_encoding() {
-        let metrics = Metrics::new();
+        let metrics = Metrics::new().expect("metric names are literals in this file");
         metrics.chain_height.set(42);
         metrics.blocks_produced.inc();
         metrics.rpc_request_duration_seconds.observe(0.125);

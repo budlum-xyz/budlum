@@ -72,32 +72,37 @@
 //!
 //! # What is wired and what is not
 //!
-//! The arithmetic, its bounds and its refusals are here, tested, and exported
-//! from [`crate::storage`]. What no production path does yet is *consult* a
-//! strategy for a real object, because that needs an access estimate carried
-//! in the manifest, which is a consensus-surface change and lands separately.
-//! So the decision function is reachable and the decision is not yet taken.
+//! The demand signal is wired: proven reads are recorded, the estimate is
+//! derived from them, and the replica target follows it. The per-operator
+//! economics ([`decide`], [`break_even_rate_scaled`],
+//! [`one_reproduction_picodollars`]) are exported and tested but called by no
+//! production path, on purpose. They answer a question each operator answers
+//! for itself with its own hardware costs, and there is no operator-side
+//! storage daemon in this repository to ask it. Wiring them into consensus
+//! would be the actual mistake: it would put one operator's disk price into a
+//! number every node has to agree on.
 //!
-//! WIRING: unwired - measured. [`AccessEstimate`] appears in exactly two
-//! places outside this file, both of them the re-export in
-//! `crate::storage`; nothing constructs one.
-//! [`ContentManifest`](crate::storage::manifest::ContentManifest) carries no
-//! access counter and no strategy field, so there is nowhere to put the two
-//! values [`decide`] needs as input and nowhere to record the answer it
-//! returns.
+//! WIRING: wired. The demand half of this module is on a production path.
 //!
-//! Both halves of that are the same consensus-surface change and neither can
-//! be done alone. An estimate every node has to agree on cannot live on one
-//! node, because two nodes holding different counts would decide differently
-//! about the same object and the network would stop agreeing on what it
-//! holds. The counter has to be a manifest field updated under the same
-//! rules as the rest of the manifest, which means a new field in a
-//! content-addressed structure, which means deciding whether it is part of
-//! the identity: fold it in and every read changes the content id, leave it
-//! out and it is state the id does not bind.
+//! [`AccessEvent`] is recorded by `StorageRegistry` every time a retrieval
+//! challenge is answered correctly, and [`AccessEstimate::from_events`]
+//! derives the rate from that log. `required_replicas_with_demand` turns the
+//! rate into a replica target, and the maintenance sweep in the chain actor
+//! reads it once per epoch.
 //!
-//! The arithmetic is finished and does not depend on how that is answered,
-//! which is why it is here and correct while nothing calls it.
+//! The consensus problem that kept it unwired was solved by not storing an
+//! estimate at all. A counter as a manifest field would have to be folded
+//! into the content id or left unbound by it, and both answers are wrong. A
+//! log of finalized events has neither problem: every node derives the same
+//! number from the same blocks, because the decay is integer halving.
+//!
+//! [`decide`] and [`break_even_rate_scaled`] remain deliberately node-local
+//! and are not called from consensus code. They take [`OperatorRates`], which
+//! are what one operator's own disk and processor cost; two honest operators
+//! reach different answers for the same object. That is correct for an
+//! operator choosing how to hold its own bytes and wrong for a number the
+//! network must agree on, which is why the replica target uses a fixed
+//! ladder instead.
 
 /// Epochs over which an access estimate halves.
 ///
@@ -317,7 +322,7 @@ impl AccessEstimate {
 /// in a block (a manifest id and a count), and the chain already finalizes
 /// the reference events this signal needs: retrieval challenges, NFT
 /// transfers, and content reads that are themselves transactions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccessEvent {
     /// Epoch the reads happened in.
     pub epoch: u64,

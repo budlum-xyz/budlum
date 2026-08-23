@@ -452,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn kare_paketleme_20B_baslik() {
+    fn kare_paketleme_20_bayt_baslik() {
         let k = Karusel::new(b"ic".repeat(100).as_slice()).unwrap();
         let p = k.pack(5, 0, 0x04, b"veri").unwrap();
         assert_eq!(p.len(), DAMLA_HDR_LEN + 4);

@@ -13,9 +13,13 @@
 
 #![forbid(unsafe_code)]
 
-use crate::bud_format_container::{BudV2File, FormatCodec, StructuralKind, structural_split_compact};
+use crate::bud_format_container::{
+    structural_split_compact, BudV2File, FormatCodec, StructuralKind,
+};
 use crate::bud_format_production::BudProductionRecord;
-use crate::bud_format_video::{BudVideoRecord, VideoContentClass, VideoSuggestion, classify_content};
+use crate::bud_format_video::{
+    classify_content, BudVideoRecord, VideoContentClass, VideoSuggestion,
+};
 
 pub const VIDEO_PIPE_MAGIC: [u8; 8] = *b"\xB5VPIP\0\0\0";
 pub const VIDEO_PIPE_VERSION: u8 = 1;
@@ -23,7 +27,7 @@ pub const VIDEO_PIPE_VERSION: u8 = 1;
 /// Video boru hattı sonucu: konteyner + video kaydı + üretim kanıtı (uçtan uca).
 #[derive(Debug, Clone)]
 pub struct VideoPipelineResult {
-    pub container: Vec<u8>,            // .bud konteyner baytları (zstd)
+    pub container: Vec<u8>, // .bud konteyner baytları (zstd)
     pub class: VideoContentClass,
     pub suggestion: VideoSuggestion,
     pub video_record: BudVideoRecord,
@@ -51,17 +55,32 @@ pub fn run_video_pipeline(
     let container = file.encode();
     // 4) video kaydı + üretim kanıtı (ölçülen oran - K19)
     let video_record = BudVideoRecord::new(
-        suggestion.codec, class, w as u32, h as u32,
-        suggestion.gop_frames, suggestion.lossless,
-        original_len, container.len() as u64,
+        suggestion.codec,
+        class,
+        w as u32,
+        h as u32,
+        suggestion.gop_frames,
+        suggestion.lossless,
+        original_len,
+        container.len() as u64,
     );
     if !video_record.verify() {
         return None;
     }
     let production_record = BudProductionRecord::new(
-        FormatCodec::Mp4, "video-pipeline", &container, original_len, ts_unix,
+        FormatCodec::Mp4,
+        "video-pipeline",
+        &container,
+        original_len,
+        ts_unix,
     );
-    Some(VideoPipelineResult { container, class, suggestion, video_record, production_record })
+    Some(VideoPipelineResult {
+        container,
+        class,
+        suggestion,
+        video_record,
+        production_record,
+    })
 }
 
 /// Boru hattı sonucu → deterministik blob (kayıt zinciri).
@@ -105,11 +124,18 @@ mod tests {
         let res = run_video_pipeline(&yuv, 160, 120, 5, &codec_out, 1_000_000, 1_768_000_000)
             .expect("boru hattı");
         assert_eq!(res.class, VideoContentClass::Static);
-        assert_eq!(res.suggestion.codec, crate::bud_format_video::VideoCodec::Av1);
+        assert_eq!(
+            res.suggestion.codec,
+            crate::bud_format_video::VideoCodec::Av1
+        );
         assert!(res.suggestion.gop_frames >= 240, "statik uzun GOP");
         // konteyner açılabilir + içeriği orijinal
         let file = BudV2File::decode(&res.container).expect("konteyner");
-        assert_eq!(file.restore_original().unwrap(), codec_out, "video bitstream kayıpsız");
+        assert_eq!(
+            file.restore_original().unwrap(),
+            codec_out,
+            "video bitstream kayıpsız"
+        );
         // video kaydı tutarlı + oran ölçüm aralığında
         assert!(res.video_record.verify());
         assert!(res.video_record.claimed_ratio > 1.0);
@@ -127,12 +153,14 @@ mod tests {
         let mut yuv = Vec::new();
         let mut x = 0x1234_5678u64;
         for _ in 0..6 * (160 * 120 * 3 / 2) {
-            x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
             yuv.push((x & 0xff) as u8);
         }
         let codec_out = b"av1 high motion stream ".repeat(500);
-        let res = run_video_pipeline(&yuv, 160, 120, 5, &codec_out, 2_000_000, 100)
-            .expect("boru hattı");
+        let res =
+            run_video_pipeline(&yuv, 160, 120, 5, &codec_out, 2_000_000, 100).expect("boru hattı");
         assert_eq!(res.class, VideoContentClass::HighMotion);
         assert!(res.suggestion.gop_frames <= 120, "hareketli kısa GOP");
         assert!(res.video_record.verify());

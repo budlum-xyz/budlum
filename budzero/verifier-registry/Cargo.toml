@@ -6,6 +6,9 @@ rust-version = "1.97.0"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 description = "Generic RoleId-based staking + slashing registry for Budlum's multi-domain L1. Master Verifier, Relayer, Attester, and any future role share one primitive."
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.11"

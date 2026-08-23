@@ -27,9 +27,9 @@ pub const VIEW_VERSION: u8 = 1;
 pub struct KeySchema {
     pub key: String,
     pub type_name: String, // "string" | "number" | "bool" | "null" | "object" | "array"
-    pub unique_values: u64,      // kardinalite (dedup potansiyeli)
-    pub sample: String,          // ilk değerin kompakt gösterimi
-    pub optional: bool,          // bazı kayıtlarda yok
+    pub unique_values: u64, // kardinalite (dedup potansiyeli)
+    pub sample: String,    // ilk değerin kompakt gösterimi
+    pub optional: bool,    // bazı kayıtlarda yok
 }
 
 /// Derlenmiş görünüm: şema + özet + kompakt tablo.
@@ -103,7 +103,11 @@ impl CompiledView {
             ));
         }
         let summary = summary_parts.join(" | ");
-        Some(CompiledView { record_count: arr.len() as u64, keys: schemas, summary })
+        Some(CompiledView {
+            record_count: arr.len() as u64,
+            keys: schemas,
+            summary,
+        })
     }
 
     /// Deterministik blob (digest'li).
@@ -163,10 +167,20 @@ impl CompiledView {
             let sample = read_str(bytes, &mut pos)?.to_string();
             let optional = bytes[pos] != 0;
             pos += 1;
-            keys.push(KeySchema { key, type_name: type_name.to_string(), unique_values, sample, optional });
+            keys.push(KeySchema {
+                key,
+                type_name: type_name.to_string(),
+                unique_values,
+                sample,
+                optional,
+            });
         }
         let summary = read_str(bytes, &mut pos)?.to_string();
-        Some(CompiledView { record_count, keys, summary })
+        Some(CompiledView {
+            record_count,
+            keys,
+            summary,
+        })
     }
 
     /// Görünüm boyutu, orijinale göre (token-verimlilik oranı).
@@ -229,8 +243,14 @@ mod tests {
         let d = sample_json();
         let view = CompiledView::compile(&d).expect("derleme");
         assert_eq!(view.record_count, 3);
-        assert!(view.keys.iter().any(|k| k.key == "u" && k.type_name == "string"));
-        assert!(view.keys.iter().any(|k| k.key == "v" && k.type_name == "number"));
+        assert!(view
+            .keys
+            .iter()
+            .any(|k| k.key == "u" && k.type_name == "string"));
+        assert!(view
+            .keys
+            .iter()
+            .any(|k| k.key == "v" && k.type_name == "number"));
         // u kardinalitesi 2 (u1,u2), s kardinalitesi 2 (200,404)
         let u = view.keys.iter().find(|k| k.key == "u").unwrap();
         assert_eq!(u.unique_values, 2);
@@ -266,17 +286,32 @@ mod tests {
         // amortize olmaz - görünüm yalnız büyük JSON/LOG koleksiyonları için anlamlı)
         let mut rows = Vec::new();
         for i in 0..2000 {
-            rows.push(format!(r#"{{"u":"u{}","ts":"2026-08-{:02}","a":"{}","v":{},"s":{}}}"#,
-                i % 50, (i % 16) + 1, ["l","r","w","d"][i % 4], i, [200,200,404,500][i % 4]));
+            rows.push(format!(
+                r#"{{"u":"u{}","ts":"2026-08-{:02}","a":"{}","v":{},"s":{}}}"#,
+                i % 50,
+                (i % 16) + 1,
+                ["l", "r", "w", "d"][i % 4],
+                i,
+                [200, 200, 404, 500][i % 4]
+            ));
         }
         let d = format!("[{}]", rows.join(",")).into_bytes();
         let view = CompiledView::compile(&d).expect("derleme");
         let eff = view.token_efficiency(d.len());
-        assert!(eff >= 5.0, "2000 kayıtlık görünüm en az 5x kompakt: {eff:.1}x");
-        assert!(view.summary.len() < 250, "summary kompakt: {}", view.summary.len());
+        assert!(
+            eff >= 5.0,
+            "2000 kayıtlık görünüm en az 5x kompakt: {eff:.1}x"
+        );
+        assert!(
+            view.summary.len() < 250,
+            "summary kompakt: {}",
+            view.summary.len()
+        );
         // küçük örnekte dürüst not: overhead amortize olmaz (0.4x) - görünümü atla
         let small = sample_json();
-        assert!(view.token_efficiency(small.len()) < 2.0 || view.token_efficiency(small.len()) > 0.3);
+        assert!(
+            view.token_efficiency(small.len()) < 2.0 || view.token_efficiency(small.len()) > 0.3
+        );
     }
 
     #[test]

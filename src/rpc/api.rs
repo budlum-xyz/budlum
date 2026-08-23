@@ -26,6 +26,17 @@ pub trait BudlumApi {
     #[method(name = "bud_getNonce")]
     async fn get_nonce(&self, address: String) -> Result<String, ErrorObjectOwned>;
 
+    /// Inclusion or absence proof for one account.
+    ///
+    /// `bud_getBalance` returns what this node says; this returns what it can
+    /// prove. The bundle carries its own root, which is the proof-bearing
+    /// trie root and *not* the consensus state root.
+    #[method(name = "bud_getAccountProof")]
+    async fn get_account_proof(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     #[method(name = "bud_sendRawTransaction")]
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned>;
 
@@ -78,6 +89,18 @@ pub trait BudlumApi {
     async fn register_consensus_domain(
         &self,
         domain: crate::domain::ConsensusDomain,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_registerSovereignTemplate")]
+    async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    #[method(name = "bud_validateSovereignAuditExport")]
+    async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_submitDomainCommitment")]
@@ -493,6 +516,19 @@ pub trait BudlumApi {
     /// B.U.D. Gateway: Fetch raw content by BNS name (D-Web entry).
     #[method(name = "bud_gatewayFetchContent")]
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned>;
+
+    /// B.U.D. Gateway: render recipe-born content into a requested format.
+    ///
+    /// `format` is one of `svg`, `png:<size>`, `frame:<index>`. The reply
+    /// carries the bytes and the render id, which commits to the format:
+    /// the same recipe rendered as PNG is a different object from the same
+    /// recipe rendered as SVG.
+    #[method(name = "bud_gatewayRenderContent")]
+    async fn gateway_render_content(
+        &self,
+        name: String,
+        format: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// D-Web Passport profile bundle for budlum.xyz. Read-only and evidence-labelled.
     #[method(name = "bud_passportGetProfile")]

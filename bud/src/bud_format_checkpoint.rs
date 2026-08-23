@@ -111,9 +111,25 @@ mod tests {
 
     #[test]
     fn chain_verifies_and_restores_latest() {
-        let c1 = Checkpoint::new(1, FormatCodec::Json, "json-expert", "zstd19", 7.83, root(1), [0u8; 32]);
+        let c1 = Checkpoint::new(
+            1,
+            FormatCodec::Json,
+            "json-expert",
+            "zstd19",
+            7.83,
+            root(1),
+            [0u8; 32],
+        );
         let h1 = c1.compute_hash();
-        let c2 = Checkpoint::new(2, FormatCodec::Log, "log-expert", "zstd19", 6.17, root(2), h1);
+        let c2 = Checkpoint::new(
+            2,
+            FormatCodec::Log,
+            "log-expert",
+            "zstd19",
+            6.17,
+            root(2),
+            h1,
+        );
         let chain = vec![c1, c2];
         assert!(Checkpoint::verify_chain(&chain), "gecerli zincir");
         let latest = Checkpoint::latest(&chain).unwrap();
@@ -123,24 +139,73 @@ mod tests {
 
     #[test]
     fn broken_chain_rejected() {
-        let c1 = Checkpoint::new(1, FormatCodec::Json, "json-expert", "zstd19", 7.83, root(1), [0u8; 32]);
-        let c2 = Checkpoint::new(2, FormatCodec::Log, "log-expert", "zstd19", 6.17, root(2), [0xAA; 32]);
-        assert!(!Checkpoint::verify_chain(&[c1, c2]), "prev hash uymayan zincir RED");
+        let c1 = Checkpoint::new(
+            1,
+            FormatCodec::Json,
+            "json-expert",
+            "zstd19",
+            7.83,
+            root(1),
+            [0u8; 32],
+        );
+        let c2 = Checkpoint::new(
+            2,
+            FormatCodec::Log,
+            "log-expert",
+            "zstd19",
+            6.17,
+            root(2),
+            [0xAA; 32],
+        );
+        assert!(
+            !Checkpoint::verify_chain(&[c1, c2]),
+            "prev hash uymayan zincir RED"
+        );
     }
 
     #[test]
     fn genesis_must_be_zero_prev() {
-        let c1 = Checkpoint::new(1, FormatCodec::Json, "json-expert", "zstd19", 7.83, root(1), [0x01; 32]);
-        assert!(!Checkpoint::verify_chain(&[c1]), "genesis prev sifir olmali");
+        let c1 = Checkpoint::new(
+            1,
+            FormatCodec::Json,
+            "json-expert",
+            "zstd19",
+            7.83,
+            root(1),
+            [0x01; 32],
+        );
+        assert!(
+            !Checkpoint::verify_chain(&[c1]),
+            "genesis prev sifir olmali"
+        );
     }
 
     #[test]
     fn tampered_ratio_breaks_chain() {
-        let c1 = Checkpoint::new(1, FormatCodec::Json, "json-expert", "zstd19", 7.83, root(1), [0u8; 32]);
+        let c1 = Checkpoint::new(
+            1,
+            FormatCodec::Json,
+            "json-expert",
+            "zstd19",
+            7.83,
+            root(1),
+            [0u8; 32],
+        );
         let h1 = c1.compute_hash();
-        let mut c2 = Checkpoint::new(2, FormatCodec::Log, "log-expert", "zstd19", 6.17, root(2), h1);
+        let mut c2 = Checkpoint::new(
+            2,
+            FormatCodec::Log,
+            "log-expert",
+            "zstd19",
+            6.17,
+            root(2),
+            h1,
+        );
         assert!(Checkpoint::verify_chain(&[c1.clone(), c2.clone()]));
         c2.ratio = 13750.0; // değiştirildi (kayıt bozuldu)
-        assert!(!Checkpoint::verify_chain(&[c1, c2]), "ratio degisince zincir RED");
+        assert!(
+            !Checkpoint::verify_chain(&[c1, c2]),
+            "ratio degisince zincir RED"
+        );
     }
 }

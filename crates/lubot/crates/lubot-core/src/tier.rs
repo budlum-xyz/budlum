@@ -42,8 +42,14 @@ mod tests {
 
     #[test]
     fn served_names_follow_tier_naming() {
-        assert_eq!(ModelTier::Light.served_model_name("v0.1"), "lubot-light-v0.1");
-        assert_eq!(ModelTier::Normal.served_model_name("v0.1"), "lubot-normal-v0.1");
+        assert_eq!(
+            ModelTier::Light.served_model_name("v0.1"),
+            "lubot-light-v0.1"
+        );
+        assert_eq!(
+            ModelTier::Normal.served_model_name("v0.1"),
+            "lubot-normal-v0.1"
+        );
     }
 
     #[test]

@@ -1,3 +1,8 @@
+// The workspace denies `expect` because a panic in a running node aborts it.
+// A build script is not a running node: it executes at compile time, and a
+// failure to generate the protobuf bindings must stop the build loudly.
+#![allow(clippy::expect_used)]
+
 fn main() {
     println!("cargo:rerun-if-changed=proto/budlum/network/protocol.proto");
 

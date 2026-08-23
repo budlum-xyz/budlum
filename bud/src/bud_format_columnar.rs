@@ -82,7 +82,7 @@ impl ColType {
 #[derive(Debug, Clone)]
 pub struct JsonColumnar {
     pub mode: ColumnarMode,
-    pub keys: Vec<String>,      // anahtar sırası (Exact: orijinal; OrderFree: sözlük)
+    pub keys: Vec<String>, // anahtar sırası (Exact: orijinal; OrderFree: sözlük)
     pub col_types: Vec<ColType>, // her sütunun tipi
     pub columns: Vec<Vec<Value>>, // her anahtar için değerler (kayıt sırasında, tipli)
 }
@@ -137,15 +137,27 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     }
     // OrderFree: kayıt sıralaması (deterministik - anahtar sırasıyla; sayısal kolonlarda
     // sayısal karşılaştırma, eşitlikte indeks). Sıra kayıpsızlığı etkilemez (KF2).
+    // Yukaridaki dongu her kaydin nesne oldugunu ve ayni anahtar kumesini
+    // tasidigini dogruladi. Bu dokuz `unwrap` "dogruladik, o halde guvenli"
+    // diyordu; dogru bir muhakeme, ama dogrulama ile kullanim arasindaki
+    // mesafeyi koruyan bir sey yok: araya bir `return` ya da bir kosul
+    // eklendiginde panik geri gelir. Nesneleri bir kez, paniksiz toplayip
+    // asagida onlari kullaniyoruz - ayni maliyet, tasinmayan varsayim yok.
+    let objs: Vec<&serde_json::Map<String, Value>> = arr
+        .iter()
+        .map(Value::as_object)
+        .collect::<Option<Vec<_>>>()?;
+
     let mut indices: Vec<usize> = (0..arr.len()).collect();
     if matches!(mode, ColumnarMode::OrderFree) {
         indices.sort_by(|&a, &b| {
-            let oa = arr[a].as_object().unwrap();
-            let ob = arr[b].as_object().unwrap();
             for k in &keys {
-                let va = oa.get(k).unwrap();
-                let vb = ob.get(k).unwrap();
-                let c = cmp_value(va, vb);
+                // Anahtar kumesi dogrulandi; yine de eksik anahtar panik
+                // degil "esit" sayilir, boylece siralama toplam kalir.
+                let c = match (objs[a].get(k), objs[b].get(k)) {
+                    (Some(va), Some(vb)) => cmp_value(va, vb),
+                    _ => std::cmp::Ordering::Equal,
+                };
                 if c != std::cmp::Ordering::Equal {
                     return c;
                 }
@@ -156,14 +168,15 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
     // kolon tiplerini ilk değerden tespit et; uyumsuz değer kolonu Str'e düşürür
     let mut col_types: Vec<ColType> = Vec::with_capacity(keys.len());
     let mut columns: Vec<Vec<Value>> = vec![Vec::with_capacity(arr.len()); keys.len()];
+    let first_idx = *indices.first()?;
     for k in &keys {
-        let first_v = arr[indices[0]].as_object().unwrap().get(k).unwrap();
+        let first_v = objs[first_idx].get(k)?;
         col_types.push(cell_type(first_v));
     }
     for &idx in &indices {
-        let o = arr[idx].as_object().unwrap();
+        let o = objs[idx];
         for (ci, k) in keys.iter().enumerate() {
-            let v = o.get(k).unwrap();
+            let v = o.get(k)?;
             // tip uyumsuzluğu → kolonu Str'e çevir (sonraki değerler stringleştirilir)
             if cell_type(v) != col_types[ci] {
                 col_types[ci] = ColType::Str;
@@ -171,7 +184,12 @@ pub fn columnar_encode(data: &[u8], mode: ColumnarMode) -> Option<JsonColumnar> 
             columns[ci].push(v.clone());
         }
     }
-    Some(JsonColumnar { mode, keys, col_types, columns })
+    Some(JsonColumnar {
+        mode,
+        keys,
+        col_types,
+        columns,
+    })
 }
 
 /// Sayısal-önce deterministik değer karşılaştırması (OrderFree sıralaması için).
@@ -346,7 +364,7 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         let t = col_types[columns.len()];
         let mut col = Vec::with_capacity(n);
         for _ in 0..n {
-            let v = parse_value(&bytes, &mut pos, t)?;
+            let v = parse_value(bytes, &mut pos, t)?;
             col.push(v);
         }
         columns.push(col);
@@ -363,7 +381,12 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
     if computed != bytes[pos..pos + 32] {
         return None;
     }
-    Some(JsonColumnar { mode, keys, col_types, columns })
+    Some(JsonColumnar {
+        mode,
+        keys,
+        col_types,
+        columns,
+    })
 }
 
 /// Tipli değer parse (panik'siz; bomba tavanlı).
@@ -410,7 +433,9 @@ fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
             if sl as u64 > MAX_VALUE_BYTES || bytes.len() < *pos + sl {
                 return None;
             }
-            let s = std::str::from_utf8(&bytes[*pos..*pos + sl]).ok()?.to_string();
+            let s = std::str::from_utf8(&bytes[*pos..*pos + sl])
+                .ok()?
+                .to_string();
             *pos += sl;
             Some(Value::String(s))
         }
@@ -498,9 +523,16 @@ mod tests {
         let d = br#"[{"v":1},{"v":-2}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).expect("encode");
         // ilk değer u64 (1) → U64; ama ikinci -2 i64 → kolon Str'e düşer
-        assert_eq!(col.col_types[0], ColType::Str, "karışık sayı tipi Str'e düşer");
+        assert_eq!(
+            col.col_types[0],
+            ColType::Str,
+            "karışık sayı tipi Str'e düşer"
+        );
         let back = columnar_decode(&col).unwrap();
-        assert_eq!(back, d, "kayıpsız (stringleştirilmiş değer JSON'a geri döner)");
+        assert_eq!(
+            back, d,
+            "kayıpsız (stringleştirilmiş değer JSON'a geri döner)"
+        );
     }
 
     #[test]
@@ -521,7 +553,7 @@ mod tests {
             }
         }
         let mut rng = Rng(0xC0_10_20_26_08_16_00_02);
-        let mut buf = vec![0u8; 128];
+        let mut buf = [0u8; 128];
         for _ in 0..2000 {
             let len = (rng.next() % 128) as usize;
             for b in &mut buf[..len] {

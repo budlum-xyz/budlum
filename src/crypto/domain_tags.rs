@@ -10,7 +10,19 @@
 //!
 //! The `domain_tag_inventory` tests enforce two properties: the inventory is
 //! Free of duplicates and sorted, and it matches the tags actually present in
-//! The source tree (checked by `scripts/check-domain-tags.sh` in CI).
+//! The source tree (checked by the Rust `domain-tags` gate in
+//! `xtask/gates/src/gates/domain_tags.rs`; CI runs it with its canary).
+//!
+//! ## Legacy `BUDLUM_` öneki
+//!
+//! Ağaçta yeniden adlandırma öncesi yazılmış bir `BUDLUM_*` kuşağı yaşıyor.
+//! Kapı uzun süre yalnız `BDLM_` önekini tarıyordu; bu kuşak envanterin kör
+//! noktasındaydı (ölçüm: 23 ayrıştırma etiketi + 14 alan-dışı dizge).
+//! Karar (2026-08-22, kullanıcı): yeniden adlandırma yerine kapsam
+//! genişletildi - kapı iki öneki de tarar, envanter hepsini listeler.
+//! Alan-dışı dizgeler de (env değişkeni, HSM yuvası, test adı) listede
+//! durur: kapı böylece muafiyet listesine gerek duymadan tam kalır ve yeni
+//! bir `BUDLUM_*` literal her koşulda gözden geçirilmek zorunda kalır.
 
 /// Every domain-separation tag used across the workspace, sorted and unique.
 pub const DOMAIN_TAGS: &[&str] = &[
@@ -42,6 +54,7 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_AI_RESULT_LEAF_V1",
     "BDLM_AI_RESULT_SIG_V1",
     "BDLM_AI_SPEC_LEAF_V1",
+    "BDLM_AI_VERIFIER_CEILINGS",
     "BDLM_AI_VERIFIER_QOS",
     "BDLM_AI_VERIFIER_QOS_V1",
     "BDLM_AI_VERIFIER_STAKES",
@@ -73,7 +86,6 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_EMPTY_DOMAIN_EVENT_ROOT_V1",
     "BDLM_EMPTY_MERKLE_ROOT_V1",
     "BDLM_EVM_RECEIPT_LEAF_V1",
-    "BDLM_EVM_STUB",
     "BDLM_FINALITY_PROOF_V1",
     "BDLM_GENERATED_SPEC_V1",
     "BDLM_GENERATED_STREAM_V1",
@@ -87,6 +99,7 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_LRC_LAYOUT_V1",
     "BDLM_LUBOT_PERCEPTION_V1",
     "BDLM_MAINTENANCE_CODING_AUDIT_V1",
+    "BDLM_MAINTENANCE_PLACEMENT_V1",
     "BDLM_MANIFEST_V1",
     "BDLM_MANIFEST_V4",
     "BDLM_MARKETPLACE_REGISTRY_V2",
@@ -123,12 +136,15 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_POS_SLOT_SEED_V3",
     "BDLM_POW_HEADER_V1",
     "BDLM_PROCESSED_MESSAGE_LEAF_V1",
+    "BDLM_QR_FRAME_V2",
+    "BDLM_QR_STREAM_ID_V1",
     "BDLM_RELAYER_POLICY_ENVELOPE_V1",
     "BDLM_RELAYER_POLICY_REGISTRY_V1",
     "BDLM_RELAYER_RESULT_V2",
     "BDLM_RELAYER_USER_INTENT_V1",
     "BDLM_RELAY_PROOF_HASH_V1",
     "BDLM_RELAY_RECORD_V1",
+    "BDLM_RENDER_ID_V1",
     "BDLM_RETRIEVAL_CHALLENGE_RANGE_V1",
     "BDLM_RPC_CODING_AUDIT_ENTROPY_V1",
     "BDLM_RPC_STORAGE_CHALLENGE_ENTROPY_V1",
@@ -151,9 +167,11 @@ pub const DOMAIN_TAGS: &[&str] = &[
     "BDLM_STUB_RECEIPT_V1",
     "BDLM_TX_V4",
     "BDLM_TX_V5",
+    "BDLM_TX_V6",
+    "BDLM_TX_V6_MULTISIG_ADDRESS",
     "BDLM_VALIDATOR_SET_COMMITMENT_V1",
     "BDLM_VERIFIER_REGISTRY_V1",
-    "BDLM_ZK_PROOF_PAYLOAD_V1",
+    "BDLM_ZK_PROOF_PAYLOAD_V2",
 ];
 
 /// Tags whose misuse would let an attacker move a signature or hash from one
@@ -170,5 +188,62 @@ pub const CRITICAL_DOMAIN_TAGS: &[&str] = &[
     "BDLM_POS_CACHE_POISON_V3",
     "BDLM_TX_V4",
     "BDLM_TX_V5",
+    "BDLM_TX_V6",
+    "BDLM_TX_V6_MULTISIG_ADDRESS",
     "BDLM_VALIDATOR_SET_COMMITMENT_V1",
+];
+
+/// Yeniden adlandırma öncesi kuşaktan kalan `BUDLUM_` önekli ayrıştırma
+/// etiketleri. Hepsi bir hash'e ya da imzaya ulaşır; `BDLM_` önekine
+/// taşınmaları yazım tercihi değil, wire/uyumluluk kararıdır - ayrı
+/// tutulmalarının sebebi budur. Sıralı ve tekil; `domain-tags` kapısı
+/// envanter dışı kalanı ve kullanılmayanı kırmızı verir.
+pub const BUDLUM_PREFIXED_DOMAIN_TAGS: &[&str] = &[
+    "BUDLUM_ADDRESS_V2",
+    "BUDLUM_BLS_SCALAR_SHA3_V0",
+    "BUDLUM_BLS_SIG_DST_HI",
+    "BUDLUM_BLS_SIG_DST_LO",
+    "BUDLUM_GENESIS_TX",
+    "BUDLUM_MLDSA87_SEED_V1",
+    "BUDLUM_NOTE_BLINDING_V1",
+    "BUDLUM_NOTE_SPEND_SECRET_V1",
+    "BUDLUM_PACT_REGISTRY_V1",
+    "BUDLUM_POA_COMMIT_V1",
+    "BUDLUM_POA_LEADER_V2",
+    "BUDLUM_PQ_QC",
+    "BUDLUM_PRECOMMIT",
+    "BUDLUM_PREVOTE",
+    "BUDLUM_PRIVATE_TRANSFER_AUTH_V1",
+    "BUDLUM_PRIVATE_TRANSFER_COMMITMENT_V1",
+    "BUDLUM_PRIVATE_TRANSFER_V1",
+    "BUDLUM_STORAGE_PACT_V1",
+    "BUDLUM_TEE_ATTESTATION_V1",
+    "BUDLUM_VIEW_KEY_V1",
+    "BUDLUM_VIEW_KEY_V1_ROT",
+    "BUDLUM_VRF",
+    "BUDLUM_WALLET_RECOVERY_PROPOSAL_V1",
+];
+
+/// `BUDLUM_` önekinden ve karakter kümesinden geçen ama ayrıştırma etiketi
+/// OLMAYAN dizgeler: ortam değişkeni adları, HSM yuva etiketi, kaldırılmış
+/// bir bayrağın adı, test sabiti. Ayrıştırma yüzeyi sayılmazlar; yine de
+/// listede dururlar. Sebep kirlenme değil, kapının basitliğidir: muafiyet
+/// listesi olmayan bir kapı, yeni bir `BUDLUM_*` literali - ister etiket
+/// ister env adı - her zaman bu dosyadan geçmeye zorlar; iki sınıfın ayrımı
+/// kodda değil burada, belgede yaşar.
+pub const BUDLUM_PREFIXED_NON_DOMAIN_LITERALS: &[&str] = &[
+    "BUDLUM_CHAIN_ID",
+    "BUDLUM_DB_PATH",
+    "BUDLUM_MAINNET_VALIDATOR",
+    "BUDLUM_METRICS_API_KEY",
+    "BUDLUM_MOBILE_MODE",
+    "BUDLUM_NETWORK",
+    "BUDLUM_ROLE",
+    "BUDLUM_RPC_ALLOWED_IPS",
+    "BUDLUM_RPC_API_KEY_ENV",
+    "BUDLUM_RPC_AUTH_REQUIRED",
+    "BUDLUM_RPC_RATE_LIMIT_PER_MINUTE",
+    "BUDLUM_TUR6_RPC_TEST_KEY",
+    "BUDLUM_VALIDATOR_KEY",
+    "BUDLUM_VERIFY_MERKLE",
 ];

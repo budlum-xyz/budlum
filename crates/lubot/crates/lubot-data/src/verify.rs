@@ -16,10 +16,9 @@ use crate::source::DataError;
 /// - Hex çözülemezse `HashMismatch` (boş/yanlış biçim).
 /// - Digest uyuşmuyorsa `HashMismatch`.
 pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), DataError> {
-    let expected: Vec<u8> = hex_bytes(expected_hex)
-        .ok_or_else(|| DataError::HashMismatch {
-            detail: format!("beklenen hex çözülemedi: {expected_hex}"),
-        })?;
+    let expected: Vec<u8> = hex_bytes(expected_hex).ok_or_else(|| DataError::HashMismatch {
+        detail: format!("beklenen hex çözülemedi: {expected_hex}"),
+    })?;
     if expected.len() != 32 {
         return Err(DataError::HashMismatch {
             detail: format!("SHA-256 32 bayttır; {expected_hex} farklı uzunlukta"),
@@ -30,7 +29,10 @@ pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), DataError> {
         Ok(())
     } else {
         Err(DataError::HashMismatch {
-            detail: format!("beklenen: {expected_hex}, gerçek: {}", hex_of(actual.as_slice())),
+            detail: format!(
+                "beklenen: {expected_hex}, gerçek: {}",
+                hex_of(actual.as_slice())
+            ),
         })
     }
 }

@@ -122,6 +122,40 @@ impl PoWEngine {
             current_difficulty: RwLock::new(difficulty),
         }
     }
+
+    #[cfg(test)]
+    pub fn adjusted_difficulty_for_test(&self, current: usize, actual_time_sn: u64) -> usize {
+        let expected_time = self
+            .config
+            .target_block_time
+            .saturating_mul(self.config.adjustment_interval);
+        let ratio_scaled = (expected_time as u128 * 100) / (actual_time_sn as u128).max(1);
+        let ratio_capped = ratio_scaled.clamp(25, 400);
+        ((current as u128 * ratio_capped) / 100).clamp(1, 32) as usize
+    }
+    /// Uretici tick araligina kalibre edilmis motor.
+    ///
+    /// `new` her zaman `PoWConfig::default()` degerini (10 sn hedef) alir.
+    /// Uretici ise `slot_ms` ile tick atar: devnet 1 sn, testnet 3 sn,
+    /// mainnet 6 sn. Iki sayi birbirinden habersiz oldugu icin retarget
+    /// zinciri "cok hizli" sayip zorlugu her 100 blokta 4 katina cikarir.
+    ///
+    /// Canli devnet dugumunde olculdu: 100. blokta zorluk 2 -> 8 (32 sifir
+    /// bit), ardindan 364 milyon iterasyonda blok bulunamadi ve zincir
+    /// durdu. Tirmanis 2 -> 8 -> 32 (tavan) diye devam ettigi icin geri
+    /// donusu yoktur.
+    ///
+    /// Bu kurucu hedefi uretim hizina esitler; retarget boylece gercek
+    /// sapmayi olcer, sabit bir kalibrasyon hatasini degil.
+    pub fn calibrated(difficulty: usize, slot_ms: u64) -> Self {
+        let target_block_time = (slot_ms / 1000).max(1);
+        PoWEngine::with_config(PoWConfig {
+            difficulty,
+            target_block_time,
+            ..Default::default()
+        })
+    }
+
     pub fn with_config(config: PoWConfig) -> Self {
         let d = config.difficulty;
         PoWEngine {
@@ -589,5 +623,67 @@ mod tests {
 
         // Invalid hex should return false, not panic
         assert!(!engine.meets_difficulty("not-a-hex-string"));
+    }
+    /// BULGU: uretici tick araligi (`slot_ms`) ile PoW retarget hedefi
+    /// (`target_block_time`) birbirinden habersiz kuruluyor. `PoWEngine::new`
+    /// her zaman `PoWConfig::default()` degerini (10 sn) aliyor, oysa devnet
+    /// slotu 1 sn. Olculdu: canli devnet dugumu 100. blokta zorlugu 2'den 8'e
+    /// (32 sifir bit) sicratti, 285 milyon iterasyonda blok bulamadi ve zincir
+    /// durdu. Retarget her 100 blokta en fazla 4x artabildigi icin tirmanis
+    /// 2 -> 8 -> 32 (tavan) diye devam eder; bu geri donusu olmayan bir kilit.
+    /// Mevcut testler yalnizca [1,32] clamp'ini dogruluyordu, orantiligi degil.
+    #[test]
+    fn retarget_uretici_hizina_gore_kalibre_edilmeli() {
+        // Zincirin gercekten urettigi hiz: 1 sn/blok (devnet slot_ms=1000).
+        let gercek_slot_sn = 1u64;
+        // Hedef bu hiza kalibre edilirse zorluk sabit kalmali.
+        let engine = PoWEngine::with_config(PoWConfig {
+            difficulty: 2,
+            target_block_time: gercek_slot_sn,
+            adjustment_interval: 100,
+        });
+        // 100 blok x 1 sn = 100 sn gecti; beklenen de 100 sn.
+        let d = engine.adjusted_difficulty_for_test(2, 100);
+        assert_eq!(
+            d, 2,
+            "uretici hizi hedefe esitken zorluk degismemeli, {d} bulundu"
+        );
+
+        // Kalibrasyon yoksa (varsayilan 10 sn hedef) ayni zincir zorlugu
+        // 4 katina cikarir - canli dugumde olculen davranis budur.
+        let kalibresiz = PoWEngine::new(2);
+        let d2 = kalibresiz.adjusted_difficulty_for_test(2, 100);
+        assert_eq!(
+            d2, 8,
+            "kalibresiz motor 100 sn'lik 100 blogu 10x hizli sayip zorlugu 8'e cikarir"
+        );
+    }
+
+    /// `calibrated` her ag icin retargeti uretim hizina esitler.
+    #[test]
+    fn calibrated_uretim_hizina_esitler() {
+        // (slot_ms, beklenen hedef sn)
+        for (slot_ms, beklenen) in [(1_000u64, 1u64), (3_000, 3), (6_000, 6)] {
+            let e = PoWEngine::calibrated(2, slot_ms);
+            assert_eq!(
+                e.config.target_block_time, beklenen,
+                "slot {slot_ms}ms icin hedef {beklenen} sn olmali"
+            );
+            // Zincir tam bu hizda uretirken zorluk sabit kalmali.
+            let gecen = beklenen.saturating_mul(e.config.adjustment_interval);
+            assert_eq!(
+                e.adjusted_difficulty_for_test(2, gecen),
+                2,
+                "uretim hedefe esitken zorluk degismemeli (slot {slot_ms}ms)"
+            );
+        }
+    }
+
+    /// Kalibrasyon sifira bolunmeye yol acmamali: 1 sn altindaki slotlar
+    /// tabana oturur.
+    #[test]
+    fn calibrated_alt_sinirda_sifirlanmaz() {
+        let e = PoWEngine::calibrated(2, 200);
+        assert_eq!(e.config.target_block_time, 1, "hedef en az 1 sn olmali");
     }
 }

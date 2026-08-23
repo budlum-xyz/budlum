@@ -45,8 +45,13 @@ audit-as-crates-io = true
 [policy."libp2p-allow-block-list"]
 audit-as-crates-io = true
 
+# libp2p-connection-limits: git checkout'u 0.7.0 diyor, crates.io'da yayimlanmis
+# en yuksek surum 0.6.0. Yani bu paketin crates.io'da bir esi YOK; "aynisi say"
+# demek dogru degildi ve cargo vet taramayi hic calistirmiyordu. `false`, paketi
+# birinci taraf sayar: crates.io denetimi aranmaz, kaynagi Cargo.lock'taki commit
+# pini ile sabit kalir. Yayimlanmis 0.7.0 cikarsa `true`ya donulebilir.
 [policy."libp2p-connection-limits"]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [policy."libp2p-core"]
 audit-as-crates-io = true

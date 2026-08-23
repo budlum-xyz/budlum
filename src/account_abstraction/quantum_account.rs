@@ -1,21 +1,64 @@
+//! Kuantum-guvenli hesap soyutlama V2: adres turetme, koruyucu politikasi,
+//! depolama bagi.
+//!
+//! # Boyut sabitleri
+//!
+//! Bu dosya once ML-DSA-87 uzunluklarini kendi `pub const`'lari olarak
+//! yeniden tanimliyordu ve her yerde `[u8; ML_DSA_87_PUBLIC_KEY_LEN]` / `[u8; ML_DSA_87_SIGNATURE_LEN]` cipliak
+//! sayilarini kullaniyordu. Ayni sayinin iki tanimi, birinin degismesi
+//! halinde sessizce ayrilir. Uzunluklar artik
+//! `crate::crypto::primitives`'ten geliyor; tek tanim var.
+//!
+//! Dizin `lib.rs`'ten hic ulasilmadigi icin bu dosya derlenmiyordu; kendi
+//! testi bile derlenmezdi (`GuardianVote.signature` alani `[u8; ML_DSA_87_SIGNATURE_LEN]`
+//! iken teste `vec![1u8; 4627]` yaziliydi). Derlenmeyen kod, hicbir kapinin
+//! gormedigi koddur.
+//!
+//! `validate_all` artik `registry::QuantumAccountRegistry` tarafindan
+//! cagriliyor: bir hesap ancak bu denetimden gecerse kayda girer, ve kaydi
+//! degistiren her yol ayni denetimden yeniden gecer. Daha once bu koruma
+//! yazilmisti ama onu cagiran hicbir uretim yolu yoktu, cunku hesabi tutan
+//! bir kayit da yoktu.
 
-//! WIRING: unwired - kuantum hesap soyutlama V2 (KQ-* kapilari) henuz ana
-//! islem yoluna baglanmadi; `QuantumAccount` bu dalda yalnizca kendi
-//! modulu ve testleri icinde yasiyor. Kapilarin tamami `validate_all`
-//! altinda tek giris noktasindan cagrilir; ana zincire baglanma ayri bir
-//! entegrasyon PR'i gerektirir (hesap modeli degisikligi).
-//! Quantum-safe deterministic account abstraction V2 - storage-bound + BFT guardian finality
-//! Kapılar + kaos + economics + threshold research
-
+use crate::crypto::primitives::{ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN};
 use sha3::{Digest, Sha3_256};
 
-pub const ML_DSA_87_PUBLIC_KEY_LEN: usize = 2592;
-pub const ML_DSA_87_SIGNATURE_LEN: usize = 4627;
 pub const MAX_MULTISIG_OWNERS: usize = 16;
 pub const ADDRESS_DOMAIN_V2: &[u8] = b"BUDLUM_ADDRESS_V2";
 pub const SEED_DOMAIN_V1: &[u8] = b"BUDLUM_MLDSA87_SEED_V1";
 pub const RECOVERY_DOMAIN_V1: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1";
 pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
+
+/// Bir imzalama tohumunu turetmek icin gereken en az girdi baytı.
+///
+/// Turetilen tohum 256 bit. Girdi bundan kisaysa tohumun arama uzayi da o
+/// kadar kucuktur ve hash bunu buyutmez - yalnizca gizler. Gerekcenin tamami
+/// [`QuantumAccount::seed_from_entropy`] uzerinde.
+pub const MIN_SEED_ENTROPY_BYTES: usize = 32;
+
+/// Tohum turetiminin reddettigi durum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedError {
+    /// Girdi [`MIN_SEED_ENTROPY_BYTES`] baytindan kisa.
+    InsufficientEntropy { given: usize, required: usize },
+}
+
+impl std::fmt::Display for SeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientEntropy { given, required } => write!(
+                f,
+                "KQ-SEED-ENTROPY: tohum girdisi {given} bayt, en az {required} bayt gerekli. \
+                 Turetilen tohum 256 bit tasidigini iddia eder; daha kisa bir girdiden \
+                 turetilirse iddia yanlistir ve adresler onceden hesaplanabilir. \
+                 Girdi isletim sisteminin rastgelelik kaynagindan gelmelidir - \
+                 uzunluk denetlenir, kalitesi denetlenemez."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SeedError {}
 pub const BUD_MAGIC: [u8; 8] = *b"BUDLUM\x01\x00";
 
 #[derive(Debug, Clone)]
@@ -35,23 +78,70 @@ pub struct QuantumAccount {
 }
 
 impl QuantumAccount {
-    pub fn address_from_public_key(pubkey: &[u8; 2592]) -> [u8; 32] {
+    #[must_use]
+    pub fn address_from_public_key(pubkey: &[u8; ML_DSA_87_PUBLIC_KEY_LEN]) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(ADDRESS_DOMAIN_V2);
         h.update(pubkey);
         h.finalize().into()
     }
 
-    pub fn seed_from_entropy(entropy: &[u8]) -> [u8; 32] {
+    /// Bir ML-DSA-87 imzalama anahtarinin tohumunu entropiden turetir.
+    ///
+    /// # Neden bir alt sinir var
+    ///
+    /// Bu fonksiyon her zaman 32 bayt dondurur, girdisi ne olursa olsun.
+    /// Cikti **her zaman yuksek entropili gorunur**: SHA3-256'nin ciktisi tek
+    /// baytlik bir girdiden de rastgele bir bit dizisi gibi okunur. Bu
+    /// gorunum yaniltir, cunku bir tohumu kiran sey ciktinin bicimi degil
+    /// **girdinin arama uzayidir**. Girdi 2 bayttan geliyorsa tohum 65 536
+    /// olasiliktan biridir; saldirgan hepsini deneyip her birinin adresini
+    /// onceden hesaplar, kamuya acilan adresi tabloda arar ve ozel anahtari
+    /// okur. Hash'in gucu burada hicbir sey yapmaz - dogru cevabi zaten
+    /// bulmustur, sadece hangisi oldugunu bilmiyordur.
+    ///
+    /// Bu, "adi entropi olan ama entropiyi hic olcmeyen fonksiyon" durumuydu:
+    /// imza `&[u8]` aliyordu ve bos dilim de gecerliydi. `Result` donmesi
+    /// cagiranin bu karari **atlayamamasini** saglar; `#[must_use]` bir
+    /// degeri gormezden gelmeyi zorlastirir, ama `Err` gormezden gelinemez.
+    ///
+    /// # Neden 32 bayt
+    ///
+    /// Turetilen sey 256 bitlik bir tohum. Girdi bundan kisaysa, cikti
+    /// tasidigi bit sayisi kadar guclu olur ve geri kalani susleme. Alt
+    /// siniri ciktinin genisligiyle esitlemek, tohumun **ilan ettigi**
+    /// guvenlik seviyesini gercekten tasimasini saglar. Daha uzun girdi
+    /// serbesttir: fazlasi zarar vermez.
+    ///
+    /// Olculen sey uzunluk, Shannon entropisi degil. Bir cagiran 32 bayt
+    /// sifir gonderebilir ve kapi susar. Bunun nedeni, bir baytin gercekten
+    /// rastgele olup olmadiginin bu katmandan **olculemez** olmasi: 32 sifir
+    /// bayt ile bir CSPRNG'nin urettigi 32 bayt burada ayirt edilemez.
+    /// Uzunluk, dogru tarafta olan ve olculebilen kisimdir; entropi
+    /// kaynaginin kalitesi cagiranin sorumlulugudur ve `SeedError`'in metni
+    /// bunu soyler.
+    ///
+    /// # Errors
+    ///
+    /// Girdi [`MIN_SEED_ENTROPY_BYTES`] baytindan kisaysa
+    /// [`SeedError::InsufficientEntropy`].
+    pub fn seed_from_entropy(entropy: &[u8]) -> Result<[u8; 32], SeedError> {
+        if entropy.len() < MIN_SEED_ENTROPY_BYTES {
+            return Err(SeedError::InsufficientEntropy {
+                given: entropy.len(),
+                required: MIN_SEED_ENTROPY_BYTES,
+            });
+        }
         let mut h = Sha3_256::new();
         h.update(SEED_DOMAIN_V1);
         h.update(entropy);
-        h.finalize().into()
+        Ok(h.finalize().into())
     }
 
-    pub fn guardian_root(guardians: &[[u8; 2592]]) -> [u8; 32] {
+    #[must_use]
+    pub fn guardian_root(guardians: &[[u8; ML_DSA_87_PUBLIC_KEY_LEN]]) -> [u8; 32] {
         let mut sorted = guardians.to_vec();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         let mut h = Sha3_256::new();
         for g in sorted {
@@ -60,30 +150,59 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
+    #[must_use]
     pub fn storage_cost(&self) -> f64 {
         // physical 0.23342 * e / r, device-only 0
         // For simplicity: storage_bytes * 0.23342 / 1_099_511_627_776 (1TB) / 16.68 (Duz ratio)
+        // Bir hesabın bayt sayısı f64'ün tam tamsayı aralığının (2^53)
+        // çok altında; maliyet zaten ondalıklı bir tahmin.
+        #[allow(clippy::cast_precision_loss)]
         let tb = self.storage_bytes as f64 / 1_099_511_627_776.0;
-        if self.storage_bytes == 0 { 0.0 } else { tb * 0.23342 / 16.68 }
+        if self.storage_bytes == 0 {
+            0.0
+        } else {
+            tb * 0.23342 / 16.68
+        }
     }
 
-    pub fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
-        if self.guardians.is_empty() { return Err("KQ-WALLET-MULTISIG-16: guardians empty"); }
-        if self.guardians.len() > MAX_MULTISIG_OWNERS { return Err("KQ-WALLET-MULTISIG-16: exceeds 16"); }
-        if self.multisig_threshold==0 || self.multisig_threshold>self.guardians.len() { return Err("KQ-WALLET-MULTISIG-16: threshold outside"); }
+    /// # Errors
+    ///
+    /// Eşik 1..=16 aralığında değilse veya gardiyan listesi boş/16'dan büyükse hata döner.
+    pub const fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
+        if self.guardians.is_empty() {
+            return Err("KQ-WALLET-MULTISIG-16: guardians empty");
+        }
+        if self.guardians.len() > MAX_MULTISIG_OWNERS {
+            return Err("KQ-WALLET-MULTISIG-16: exceeds 16");
+        }
+        if self.multisig_threshold == 0 || self.multisig_threshold > self.guardians.len() {
+            return Err("KQ-WALLET-MULTISIG-16: threshold outside");
+        }
         Ok(())
     }
 
-    pub fn verify_recovery_policy(&self) -> Result<(), &'static str> {
-        if self.guardians.is_empty() { return Err("KQ-WALLET-RECOVERY-16: empty"); }
-        if self.guardians.len() > MAX_MULTISIG_OWNERS { return Err("KQ-WALLET-RECOVERY-16: exceeds 16"); }
-        if self.recovery_threshold==0 || self.recovery_threshold>self.guardians.len() { return Err("KQ-WALLET-RECOVERY-16: threshold outside"); }
+    /// # Errors
+    ///
+    /// Kurtarma eşiği 1..=16 aralığında değilse veya gardiyan listesi boş/16'dan büyükse hata döner.
+    pub const fn verify_recovery_policy(&self) -> Result<(), &'static str> {
+        if self.guardians.is_empty() {
+            return Err("KQ-WALLET-RECOVERY-16: empty");
+        }
+        if self.guardians.len() > MAX_MULTISIG_OWNERS {
+            return Err("KQ-WALLET-RECOVERY-16: exceeds 16");
+        }
+        if self.recovery_threshold == 0 || self.recovery_threshold > self.guardians.len() {
+            return Err("KQ-WALLET-RECOVERY-16: threshold outside");
+        }
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// `storage_root` sıfırken `pact_root` sıfır değilse hata döner.
     pub fn verify_storage_bound(&self) -> Result<(), &'static str> {
         // storage_root zero but pact_root non-zero -> inconsistent
-        if self.storage_root == [0u8;32] && self.pact_root != [0u8;32] {
+        if self.storage_root == [0u8; 32] && self.pact_root != [0u8; 32] {
             return Err("KQ-STORAGE-BOUND: storage_root zero but pact_root non-zero");
         }
         Ok(())
@@ -96,6 +215,9 @@ impl QuantumAccount {
     /// üretim yolundan çağrıldığını göremez; bu fonksiyon üçünü de sırayla
     /// doğrular ve ilk hatada döner. Ana zincire bağlanacak entegrasyonun
     /// çağıracağı tek yüzey budur.
+    /// # Errors
+    ///
+    /// Üç kontrolden herhangi biri reddederse ilk hata döner.
     pub fn validate_all(&self) -> Result<(), &'static str> {
         self.verify_multisig_threshold()?;
         self.verify_recovery_policy()?;
@@ -106,77 +228,101 @@ impl QuantumAccount {
 
 #[derive(Debug, Clone)]
 pub struct RecoveryProposal {
-    pub current_owner: [u8; 2592],
+    pub current_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
     pub current_address: [u8; 32],
-    pub new_owner: [u8; 2592],
+    pub new_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
     pub new_address: [u8; 32],
     pub created_block: u64,
     pub executable_after: u64,
 }
 
 impl RecoveryProposal {
-    pub fn new(current_owner: [u8; 2592], new_owner: [u8; 2592], timelock: u64, created: u64) -> Result<Self, &'static str> {
-        if current_owner==new_owner { return Err("KQ-WALLET-RECOVERY-16: new==current"); }
-        let executable_after = created.checked_add(timelock).ok_or("KQ-WALLET-RECOVERY-16: timelock overflow")?;
+    /// # Errors
+    ///
+    /// Yeni sahip mevcut sahiple aynıysa veya zaman kilidi taşarsa hata döner.
+    pub fn new(
+        current_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
+        new_owner: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
+        timelock: u64,
+        created: u64,
+    ) -> Result<Self, &'static str> {
+        if current_owner == new_owner {
+            return Err("KQ-WALLET-RECOVERY-16: new==current");
+        }
+        let executable_after = created
+            .checked_add(timelock)
+            .ok_or("KQ-WALLET-RECOVERY-16: timelock overflow")?;
         let current_address = QuantumAccount::address_from_public_key(&current_owner);
         let new_address = QuantumAccount::address_from_public_key(&new_owner);
-        Ok(Self{current_owner, current_address, new_owner, new_address, created_block: created, executable_after})
+        Ok(Self {
+            current_owner,
+            current_address,
+            new_owner,
+            new_address,
+            created_block: created,
+            executable_after,
+        })
     }
 
+    #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(RECOVERY_DOMAIN_V1);
-        h.update(&self.current_owner);
-        h.update(&self.current_address);
-        h.update(&self.new_owner);
-        h.update(&self.new_address);
-        h.update(&self.created_block.to_be_bytes());
-        h.update(&self.executable_after.to_be_bytes());
+        h.update(self.current_owner);
+        h.update(self.current_address);
+        h.update(self.new_owner);
+        h.update(self.new_address);
+        h.update(self.created_block.to_be_bytes());
+        h.update(self.executable_after.to_be_bytes());
         h.finalize().into()
     }
 
-    pub fn is_timelock_satisfied(&self, current: u64) -> bool { current >= self.executable_after }
-}
-
-#[derive(Debug, Clone)]
-pub struct PactBinding {
-    pub tarif_hash: [u8; 32],
-    pub tohum: [u8; 32],
-    pub commitment: [u8; 32],
-    pub reziduel_commitment: [u8; 32],
-    pub bayt_butcesi: u64,
-}
-
-impl PactBinding {
-    pub fn new(tarif_hash: [u8;32], tohum: [u8;32], commitment: [u8;32], reziduel: [u8;32], butce: u64) -> Result<Self, &'static str> {
-        if butce>128 { return Err("KQ-STORAGE-PACT: bayt_butcesi >128"); }
-        Ok(Self{tarif_hash, tohum, commitment, reziduel_commitment: reziduel, bayt_butcesi: butce})
-    }
-
-    pub fn verify_commitment(&self, payload: &[u8]) -> Result<(), &'static str> {
-        let mut h = Sha3_256::new();
-        h.update(payload);
-        let calc: [u8;32] = h.finalize().into();
-        if calc != self.commitment { return Err("KQ-STORAGE-PACT: commitment mismatch"); }
-        Ok(())
+    #[must_use]
+    pub const fn is_timelock_satisfied(&self, current: u64) -> bool {
+        current >= self.executable_after
     }
 }
+
+/// PACT bağlama tipi `src/storage/pact_binding.rs`'te yaşar.
+///
+/// Burada ikinci bir `PactBinding` tanımı vardı: aynı beş alan, aynı 128
+/// baytlık bütçe kontrolü, aynı `verify_commitment`. `storage::Pact` bunun
+/// üst kümesi - `id` ve `mod_flag` da taşıyor, `PactRegistry` ile bir köke
+/// bağlanıyor.
+///
+/// Aynı kavramın iki tanımı, birinin değişmesi hâlinde sessizce ayrılır.
+/// Buradaki kopya `mod_flag`'i hiç bilmiyordu: `is_pure_production` ile
+/// `is_residual_only` ayrımı bu tarafta yoktu, dolayısıyla "saf üretim" ile
+/// "rezidüel-yalnız" bir PACT'i ayırt edemezdi. Kopya kaldırıldı; tek tanım
+/// dışarıdan kullanılır.
+pub use crate::storage::pact_binding::{Pact, PactRegistry};
 
 // BFT finality for guardian votes (ratio of guardians)
 #[derive(Debug, Clone)]
 pub struct GuardianVote {
-    pub guardian_id: [u8; 2592],
+    pub guardian_id: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
     pub proposal_digest: [u8; 32],
-    pub signature: [u8; 4627],
+    pub signature: [u8; ML_DSA_87_SIGNATURE_LEN],
 }
 
 pub struct BftGuardianFinality;
 
 impl BftGuardianFinality {
-    pub fn finalize(votes: Vec<GuardianVote>, n: usize, threshold: usize) -> Result<Vec<GuardianVote>, &'static str> {
-        if votes.len() < threshold { return Err("K-BUD-BFT-GUARDIAN: quorum < threshold"); }
-        let quorum = (n*2).div_ceil(3);
-        if votes.len() < quorum { return Err("K-BUD-BFT-GUARDIAN: quorum <2n/3"); }
+    /// # Errors
+    ///
+    /// Oy sayısı eşiğin altındaysa veya nicem tutmazsa hata döner.
+    pub fn finalize(
+        votes: Vec<GuardianVote>,
+        n: usize,
+        threshold: usize,
+    ) -> Result<Vec<GuardianVote>, &'static str> {
+        if votes.len() < threshold {
+            return Err("K-BUD-BFT-GUARDIAN: quorum < threshold");
+        }
+        let quorum = (n * 2).div_ceil(3);
+        if votes.len() < quorum {
+            return Err("K-BUD-BFT-GUARDIAN: quorum <2n/3");
+        }
         Ok(votes)
     }
 }
@@ -184,48 +330,183 @@ impl BftGuardianFinality {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn address_v2() {
-        let pk = [1u8; 2592];
-        let addr = QuantumAccount::address_from_public_key(&pk);
-        assert_eq!(addr.len(), 32);
-    }
-    #[test]
-    fn multisig_16_ok() {
-        let guardians = vec![[1u8;2592]; 16];
-        let acc = QuantumAccount{
-            address: [0u8;32], pq_public_key: [0u8;2592], storage_root: [0u8;32], pact_root: [0u8;32],
+
+    const PK: [u8; ML_DSA_87_PUBLIC_KEY_LEN] = [1u8; ML_DSA_87_PUBLIC_KEY_LEN];
+    const SIG: [u8; ML_DSA_87_SIGNATURE_LEN] = [1u8; ML_DSA_87_SIGNATURE_LEN];
+
+    fn account(
+        guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>,
+        multisig_threshold: usize,
+        recovery_threshold: usize,
+    ) -> QuantumAccount {
+        QuantumAccount {
+            address: [0u8; 32],
+            pq_public_key: [0u8; ML_DSA_87_PUBLIC_KEY_LEN],
+            storage_root: [0u8; 32],
+            pact_root: [0u8; 32],
             guardian_root: QuantumAccount::guardian_root(&guardians),
-            guardians, multisig_threshold: 10, recovery_threshold: 10, timelock_blocks: 100, nonce:0, balance:0, storage_bytes: 0
-        };
-        assert!(acc.verify_multisig_threshold().is_ok());
-        assert!(acc.verify_storage_bound().is_ok());
+            guardians,
+            multisig_threshold,
+            recovery_threshold,
+            timelock_blocks: 100,
+            nonce: 0,
+            balance: 0,
+            storage_bytes: 0,
+        }
     }
+
     #[test]
-    fn storage_bound_fail() {
-        let acc = QuantumAccount{
-            address: [0u8;32], pq_public_key: [0u8;2592], storage_root: [0u8;32], pact_root: [1u8;32],
-            guardian_root: [0u8;32], guardians: vec![[1u8;2592]], multisig_threshold:1, recovery_threshold:1, timelock_blocks:0, nonce:0, balance:0, storage_bytes:0
-        };
+    fn the_address_is_bound_to_the_public_key() {
+        let a = QuantumAccount::address_from_public_key(&PK);
+        let b = QuantumAccount::address_from_public_key(&[2u8; ML_DSA_87_PUBLIC_KEY_LEN]);
+        assert_ne!(a, b);
+        assert_eq!(a, QuantumAccount::address_from_public_key(&PK));
+    }
+
+    #[test]
+    fn a_well_formed_policy_validates() {
+        let mut guardians = Vec::new();
+        for i in 0..16u8 {
+            guardians.push([i; ML_DSA_87_PUBLIC_KEY_LEN]);
+        }
+        let acc = account(guardians, 10, 10);
+        assert!(acc.validate_all().is_ok());
+    }
+
+    /// `validate_all` uc kapinin da gectigini soylemeli; biri duserse
+    /// tamami dusmeli.
+    #[test]
+    fn validate_all_refuses_an_out_of_range_threshold() {
+        let acc = account(vec![PK], 2, 1);
+        assert!(acc.verify_multisig_threshold().is_err());
+        assert!(acc.validate_all().is_err());
+        let zero = account(vec![PK], 0, 1);
+        assert!(zero.validate_all().is_err());
+    }
+
+    #[test]
+    fn a_pact_root_without_a_storage_root_is_refused() {
+        let mut acc = account(vec![PK], 1, 1);
+        acc.pact_root = [1u8; 32];
         assert!(acc.verify_storage_bound().is_err());
+        assert!(acc.validate_all().is_err());
     }
+
+    /// Koruyucu koku sirasiz olmali: ayni kume farkli sirada ayni koku
+    /// vermeli, yoksa ayni politika iki farkli hesap gibi gorunur.
     #[test]
-    fn pact_commitment() {
+    fn the_guardian_root_does_not_depend_on_order() {
+        let a = [1u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        let b = [2u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        assert_eq!(
+            QuantumAccount::guardian_root(&[a, b]),
+            QuantumAccount::guardian_root(&[b, a])
+        );
+        assert_ne!(
+            QuantumAccount::guardian_root(&[a]),
+            QuantumAccount::guardian_root(&[a, b])
+        );
+    }
+
+    #[test]
+    fn a_recovery_proposal_respects_its_timelock() {
+        let current = [1u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        let next = [2u8; ML_DSA_87_PUBLIC_KEY_LEN];
+        let p = RecoveryProposal::new(current, next, 100, 10).expect("distinct owners");
+        assert_eq!(p.executable_after, 110);
+        assert!(!p.is_timelock_satisfied(109));
+        assert!(p.is_timelock_satisfied(110));
+        assert!(RecoveryProposal::new(current, current, 100, 10).is_err());
+        assert!(RecoveryProposal::new(current, next, u64::MAX, 10).is_err());
+    }
+
+    #[test]
+    fn the_pact_commitment_is_checked_against_the_payload() {
         let payload = b"hello";
         let mut h = Sha3_256::new();
         h.update(payload);
-        let comm: [u8;32] = h.finalize().into();
-        let pact = PactBinding::new([0u8;32], [0u8;32], comm, [0u8;32], 10).unwrap();
+        let comm: [u8; 32] = h.finalize().into();
+        let pact = Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 0)
+            .expect("budget of 10 is under the 128 byte limit");
         assert!(pact.verify_commitment(payload).is_ok());
         assert!(pact.verify_commitment(b"other").is_err());
+        assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 129, 0).is_err());
+        // Tek tanımın taşıdığı ayrım: kopya `mod_flag`'i hiç bilmiyordu.
+        assert!(pact.is_pure_production());
+        assert!(
+            Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [1u8; 32], 10, 2)
+                .expect("residual-only pact")
+                .is_residual_only()
+        );
+        assert!(Pact::new([0u8; 32], [0u8; 32], [0u8; 32], comm, [0u8; 32], 10, 3).is_err());
     }
+
     #[test]
-    fn guardian_bft() {
-        let votes = vec![
-            GuardianVote{guardian_id: [1u8;2592], proposal_digest: [0u8;32], signature: vec![1u8;4627]},
-            GuardianVote{guardian_id: [2u8;2592], proposal_digest: [0u8;32], signature: vec![1u8;4627]},
-            GuardianVote{guardian_id: [3u8;2592], proposal_digest: [0u8;32], signature: vec![1u8;4627]},
-        ];
-        assert!(BftGuardianFinality::finalize(votes, 4, 2).is_ok());
+    fn guardian_finality_needs_both_the_threshold_and_two_thirds() {
+        let vote = |id: u8| GuardianVote {
+            guardian_id: [id; ML_DSA_87_PUBLIC_KEY_LEN],
+            proposal_digest: [0u8; 32],
+            signature: SIG,
+        };
+        assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2), vote(3)], 4, 2).is_ok());
+        // Esigi gecer ama 2n/3 kotasini gecmez: 2 oy, n=4 icin kota 3.
+        assert!(BftGuardianFinality::finalize(vec![vote(1), vote(2)], 4, 2).is_err());
+        assert!(BftGuardianFinality::finalize(vec![vote(1)], 4, 2).is_err());
+    }
+
+    /// Kisa girdiden tohum turetilemez.
+    ///
+    /// Kapinin olctugu sey ciktinin bicimi degil girdinin arama uzayi.
+    /// Kapidan once bu fonksiyon her uzunlugu kabul ediyordu ve bos dilimden
+    /// bile 32 baytlik, rastgele gorunen bir tohum uretiyordu; bu tohumun
+    /// tek bir olasiligi vardi ve tureyen adres herkesce onceden
+    /// hesaplanabilirdi.
+    #[test]
+    fn a_seed_cannot_be_derived_from_thin_entropy() {
+        // Sinirin altindaki her uzunluk reddedilir - bos dilim dahil.
+        for len in [0usize, 1, 2, 16, MIN_SEED_ENTROPY_BYTES - 1] {
+            let err = QuantumAccount::seed_from_entropy(&vec![7u8; len])
+                .expect_err("sinirin altindaki girdi reddedilmeli");
+            assert_eq!(
+                err,
+                SeedError::InsufficientEntropy {
+                    given: len,
+                    required: MIN_SEED_ENTROPY_BYTES,
+                },
+                "{len} bayt icin verilen/gereken degerler bildirilmeli"
+            );
+            // Mesaj cagirana ne yapmasi gerektigini soylemeli: sayilar ve
+            // entropinin nereden gelmesi gerektigi metinde olmali.
+            let text = err.to_string();
+            assert!(
+                text.contains(&len.to_string()),
+                "mesaj verilen uzunlugu yazmali"
+            );
+            assert!(text.contains("32"), "mesaj gereken uzunlugu yazmali");
+        }
+
+        // Sinirdaki ve ustundeki girdi gecer.
+        let at = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES])
+            .expect("sinirdaki girdi kabul edilmeli");
+        let over = QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES + 48])
+            .expect("daha uzun girdi kabul edilmeli");
+
+        // Fazla girdi susleme degil: turetime giriyor, yoksa uzunlugu
+        // artirmak guvenligi artirmazdi.
+        assert_ne!(at, over, "girdinin tamami tohuma girmeli");
+
+        // Turetim deterministik: ayni girdi ayni tohum.
+        assert_eq!(
+            at,
+            QuantumAccount::seed_from_entropy(&[7u8; MIN_SEED_ENTROPY_BYTES])
+                .expect("ayni girdi yine kabul edilmeli")
+        );
+
+        // Alan ayirici gercekten ayiriyor: ayni baytlar baska bir baglamda
+        // ayni tohumu vermemeli.
+        let mut raw = sha3::Sha3_256::new();
+        raw.update([7u8; MIN_SEED_ENTROPY_BYTES]);
+        let undomained: [u8; 32] = raw.finalize().into();
+        assert_ne!(at, undomained, "alan ayirici turetime girmeli");
     }
 }
