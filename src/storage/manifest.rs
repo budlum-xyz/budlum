@@ -335,6 +335,23 @@ pub struct ContentManifest {
     /// not this field.
     #[serde(default)]
     pub owner: crate::core::address::Address,
+    /// Bu nesnenin cozulmesi icin gereken paylasilan sozluk.
+    ///
+    /// `None`: nesne kendi basina cozulur. Cogunlukla boyledir ve bu yuzden
+    /// varsayilan bu; alan eklenmeden once yazilmis her manifest de buraya
+    /// duser ve kimligi degismez.
+    ///
+    /// IDENTITY: included when set. Sozluk, nesnenin **cozulebilirliginin
+    /// parcasi**: yanlis sozlukle acilan baytlar baska baytlardir. Kimlige
+    /// katilmasaydi bir manifest, kaydi bozulmadan baska bir sozluge
+    /// yonlendirilebilir ve ayni id altinda baska bir icerik cozulurdu.
+    ///
+    /// Taahhut §66'nin desenini izler: **yalnizca iddia edildiginde taahhut
+    /// edilir.** `None` on-goruntude hicbir bayt uretmez, dolayisiyla bu
+    /// alandan once kaydedilmis manifest'lerin id'si birebir ayni kalir ve
+    /// goc gerekmez.
+    #[serde(default)]
+    pub dictionary_id: Option<ContentId>,
     /// Sum of the stored shard sizes.
     ///
     /// Hashed into the id alongside `content_size`: the object length and
@@ -456,6 +473,7 @@ impl ContentManifest {
         Ok(ContentManifest {
             manifest_id,
             owner,
+            dictionary_id: None,
             total_size: total,
             shard_count,
             erasure,
@@ -483,6 +501,7 @@ impl ContentManifest {
             self.content_size(),
             self.total_size,
             &source,
+            self.dictionary_id.as_ref(),
         );
         self.source = source;
         self
@@ -546,6 +565,7 @@ impl ContentManifest {
             self.content_size(),
             self.total_size,
             &self.source,
+            self.dictionary_id.as_ref(),
         );
         if expected != self.manifest_id {
             return Err(format!(
@@ -844,6 +864,7 @@ pub fn manifest_id_from_parts(
     content_size: u64,
     total_size: u64,
     source: &crate::storage::generated::ContentSource,
+    dictionary_id: Option<&ContentId>,
 ) -> ContentId {
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
@@ -871,6 +892,13 @@ pub fn manifest_id_from_parts(
     // alandan once yazilmis manifest'lerin id'si birebir ayni kalmak
     // zorunda. Yalnizca bir sey iddia edildiginde iddia taahhut edilir.
     buf.extend_from_slice(&crate::storage::generated::source_commitment_bytes(source));
+    // Sozluk taahhudu: kaynak taahhudu ile ayni kural. Sozluk yoksa hicbir
+    // bayt yazilmaz, dolayisiyla bu alandan once kaydedilmis manifest'lerin
+    // on-goruntusu degismez ve id'leri korunur.
+    if let Some(dict) = dictionary_id {
+        buf.push(1u8);
+        buf.extend_from_slice(&dict.0);
+    }
     ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V4", &buf]))
 }
 
@@ -893,6 +921,7 @@ pub fn manifest_id_from_parts_stored(
         content_size,
         total_size,
         &crate::storage::generated::ContentSource::Stored,
+        None,
     )
 }
 

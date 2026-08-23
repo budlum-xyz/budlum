@@ -584,6 +584,14 @@ pub struct StorageRegistry {
     reallocations: BTreeMap<u64, StorageReallocationTicket>,
     #[serde(default)]
     pub manifests: BTreeMap<ContentId, ContentManifest>,
+    /// Paylasilan sozlukler ve onlara kac manifest'in dayandigi.
+    ///
+    /// Burada yasamasinin sebebi referans sayimi: bir sozluk, ona dayanan
+    /// son nesne de gidene kadar silinemez. Sayim manifest kaydiyla ayni
+    /// yerde tutulmazsa ikisi ayrisir ve hala okunan bir sozluk silinebilir
+    /// hale gelir.
+    #[serde(default)]
+    pub dictionaries: crate::storage::dictionary::DictionaryRegistry,
     /// Finalized read evidence per object, newest last.
     ///
     /// The demand signal `storage::living_threshold` needs. It is a log of
@@ -1163,6 +1171,19 @@ impl StorageRegistry {
         &mut self,
         manifest: &ContentManifest,
     ) -> Result<(), StorageError> {
+        // Sozluk referansi once denetlenir: bir nesne, cozulemeyecegi bir
+        // sozluge dayanarak kaydedilemez.
+        //
+        // Uc ret var ve ucu de kayittan once olmali. Bilinmeyen sozluk:
+        // baytlari kimse tutmuyorsa nesne acilamaz. Emekliye ayrilan sozluk:
+        // silinmesi planlanan bir seye yeni bagimli eklemek, silme tarihini
+        // sessizce gecersiz kilardi. Sozlugun sozluge dayanmasi: zincir
+        // olusur ve bir nesneyi acmak icin kac getirme gerektigi
+        // sinirsizlasir.
+        //
+        // Kayittan **sonra** denetlemek gec olurdu: manifest kaydi
+        // birinci-yazan-kazanir ve idempotent, yani reddedilen bir kayit
+        // geri alinamaz.
         match &manifest.source {
             crate::storage::generated::ContentSource::Stored => {}
             crate::storage::generated::ContentSource::Generated(spec) => {
@@ -1236,6 +1257,38 @@ impl StorageRegistry {
                              the master's bytes are not on chain"
                         .into(),
                 });
+            }
+        }
+        // Sozluk referansi burada alinir ve denetim ayni cagriya gomuludur:
+        // `acquire_dictionary` once `check_dictionary_reference`'i kosar.
+        // Ayri bir on denetim yazmak ayni kurali iki yerde tutmak olurdu ve
+        // ikisi ayrisabilirdi (§68).
+        //
+        // Uc ret var. Bilinmeyen sozluk: baytlari kimse tutmuyorsa nesne
+        // acilamaz. Emekliye ayrilan sozluk: silinmesi planlanan bir seye yeni
+        // bagimli eklemek silme tarihini sessizce gecersiz kilardi. Sozlugun
+        // sozluge dayanmasi: zincir olusur ve bir nesneyi acmak icin kac
+        // getirme gerektigi sinirsizlasir.
+        //
+        // Kayittan **once** olmasi sart: manifest kaydi
+        // birinci-yazan-kazanir ve idempotent, yani reddedilen bir kayit geri
+        // alinamaz.
+        //
+        // Referans yalnizca **yeni** bir kayit icin alinir. `register_manifest`
+        // birinci-yazan-kazanir ve idempotent; ayni manifest ikinci kez
+        // sunuldugunda sayaci bir daha artirmak, hicbir zaman dusmeyecek bir
+        // referans birakirdi ve sozluk son bagimlisi gittikten sonra bile
+        // silinemez hale gelirdi.
+        let already_registered = self.manifests.contains_key(&manifest.manifest_id);
+        if let Some(dict_id) = manifest.dictionary_id {
+            if !already_registered {
+                let referrer_is_dictionary =
+                    self.dictionaries.has_dictionary(&manifest.manifest_id);
+                self.dictionaries
+                    .acquire_dictionary(&dict_id, referrer_is_dictionary)
+                    .map_err(|e| StorageError::InvalidManifest {
+                        reason: format!("dictionary reference is not usable: {e:?}"),
+                    })?;
             }
         }
         self.register_manifest(manifest);
@@ -2936,6 +2989,93 @@ mod tests {
 
     fn good_manifest() -> ContentManifest {
         ContentManifest::from_bytes_sliced(b"some test content for the deal", 8).unwrap()
+    }
+
+    // === Sozluk referansi ================================================
+
+    /// Sozluk kimlige girer: iki manifest ayni baytlari, farkli sozluklerle
+    /// beyan ederse ayni nesne olamazlar.
+    ///
+    /// Girmeseydi bir manifest, kaydi bozulmadan baska bir sozluge
+    /// yonlendirilebilir ve ayni id baska bir icerik cozerdi.
+    #[test]
+    fn the_dictionary_is_part_of_the_identity() {
+        let plain = good_manifest();
+        let mut with_dict = plain.clone();
+        with_dict.dictionary_id = Some(ContentId([9u8; 32]));
+        let rebound = with_dict.clone().with_source(with_dict.source.clone());
+        assert_ne!(
+            rebound.manifest_id, plain.manifest_id,
+            "sozluk beyan eden manifest ayni id'yi tasiyamaz"
+        );
+    }
+
+    /// Sozluk beyan etmeyen manifest'in kimligi degismez.
+    ///
+    /// Bu alan eklenmeden once kaydedilmis her manifest buraya duser; goc
+    /// gerekmemesinin sebebi bu.
+    #[test]
+    fn no_dictionary_means_no_change_to_the_preimage() {
+        let m = good_manifest();
+        assert!(m.dictionary_id.is_none());
+        assert_eq!(m.verify_id(), Ok(()), "eski kimlik aynen dogrulanmali");
+    }
+
+    /// Bilinmeyen bir sozluge dayanan nesne kaydedilemez.
+    ///
+    /// Baytlari kimse tutmuyorsa nesne acilamaz; kaydi kabul etmek
+    /// cozulemeyecek bir seye dayaniklilik odemesi yapmak olurdu.
+    #[test]
+    fn an_unknown_dictionary_is_refused() {
+        let mut reg = StorageRegistry::new();
+        let mut m = good_manifest();
+        m.dictionary_id = Some(ContentId([9u8; 32]));
+        let err = reg
+            .register_manifest_with_source(&m)
+            .expect_err("bilinmeyen sozluk reddedilmeli");
+        assert!(matches!(err, StorageError::InvalidManifest { .. }));
+        assert!(
+            !reg.manifests.contains_key(&m.manifest_id),
+            "reddedilen kayit deftere girmemeli"
+        );
+    }
+
+    /// Kayitli bir sozluge dayanan nesne kabul edilir ve referans alinir.
+    #[test]
+    fn a_registered_dictionary_is_acquired() {
+        let mut reg = StorageRegistry::new();
+        let dict = ContentId([9u8; 32]);
+        reg.dictionaries
+            .register_dictionary(dict, 4_096)
+            .expect("sozluk kaydedilmeli");
+        let mut m = good_manifest();
+        m.dictionary_id = Some(dict);
+        reg.register_manifest_with_source(&m)
+            .expect("kayitli sozluge dayanan nesne kabul edilmeli");
+        assert_eq!(reg.dictionaries.reference_count(&dict), Some(1));
+    }
+
+    /// Ayni manifest iki kez sunulursa referans bir kez alinir.
+    ///
+    /// Kayit birinci-yazan-kazanir ve idempotent. Ikinci kez saymak, hicbir
+    /// zaman dusmeyecek bir referans birakir ve sozluk son bagimlisi
+    /// gittikten sonra bile silinemez hale gelirdi.
+    #[test]
+    fn re_registering_does_not_double_count_the_reference() {
+        let mut reg = StorageRegistry::new();
+        let dict = ContentId([9u8; 32]);
+        reg.dictionaries
+            .register_dictionary(dict, 4_096)
+            .expect("sozluk kaydedilmeli");
+        let mut m = good_manifest();
+        m.dictionary_id = Some(dict);
+        reg.register_manifest_with_source(&m).expect("ilk kayit");
+        reg.register_manifest_with_source(&m).expect("ikinci kayit");
+        assert_eq!(
+            reg.dictionaries.reference_count(&dict),
+            Some(1),
+            "idempotent kayit sayaci bir daha artirmamali"
+        );
     }
 
     // === B.U.D. 3.0: tarif dayanikliligi kopyanin yerine gecer ===========

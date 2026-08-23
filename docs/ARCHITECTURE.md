@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 73 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 74 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -81,6 +81,7 @@
 - [71. Yerlesim tavsiyesi: kural degil olcum](#71-yerlesim-tavsiyesi-kural-degil-olcum)
 - [72. Bicim taahhudun parcasidir](#72-bicim-taahhudun-parcasidir)
 - [73. Iki bagimsiz derleyici: kaynagin ikiliye ulastigini kim soyluyor](#73-iki-bagimsiz-derleyici-kaynagin-ikiliye-ulastigini-kim-soyluyor)
+- [74. Sozluk kimligin parcasi](#74-sozluk-kimligin-parcasi)
 
 ## 1. Genel sistem mimarisi
 
@@ -2874,3 +2875,48 @@ gorunur.
 Iki tam release derlemesi pahalidir ve bu denetimin yakaladigi sinif her
 commit'te degismez. Kaynak degisikliklerini yakalayan denetimler her
 push'ta kosar; bu, altlarindaki zemini denetler.
+## 74. Sozluk kimligin parcasi
+
+Paylasilan sozluk, bir kumeyi olusturan nesnelerin ortak yapisini bir kez
+odemenin yoludur: ortak kisim bir kez saklanir, her nesne yalnizca farkini
+tutar ve yine tek basina cozulur. Kod olculmus kazanclariyla birlikte
+duruyordu (200 sosyal gonderide %49, 40 oyun varyantinda %92) ve hicbir
+manifest bir sozluk adlandiramiyordu.
+
+Isaret bunu bir vaatle acikliyordu: alan, diger V4 alanlariyla **birlikte**
+inecekti, boylece kayitli manifest'ler bir kez goc ederdi. V4 indi - kaynak
+taahhudu on-goruntuye girdi - ve bu alan onun parcasi olmadi. Yani gerekce
+kendi kosulunu gecmisti; bekledigi sey olmustu ve kod hala bekliyordu.
+
+### Neden kimlige giriyor
+
+Sozluk, nesnenin **cozulebilirliginin parcasi**. Yanlis sozlukle acilan
+baytlar baska baytlardir. Kimlige katilmasaydi bir manifest, kaydi
+bozulmadan baska bir sozluge yonlendirilebilirdi ve ayni id altinda baska bir
+icerik cozulurdu.
+
+Taahhut bolum 66'nin kuralini izler: **yalnizca iddia edilen taahhut edilir.**
+`None` on-goruntuye hicbir bayt eklemez, dolayisiyla bu alandan once
+kaydedilmis her manifest'in id'si birebir ayni kalir. Goc yok, cunku degisen
+bir sey yok.
+
+### Uc ret, hepsi kayittan once
+
+Referans `acquire_dictionary` ile alinir ve denetim o cagrinin icindedir -
+ayri bir on denetim yazmak ayni kurali iki yerde tutmak olurdu (bolum 68).
+
+Bilinmeyen sozluk: baytlari kimse tutmuyorsa nesne acilamaz, ve kaydi kabul
+etmek cozulemeyecek bir seye dayaniklilik odemesi yapmaktir. Emekliye ayrilan
+sozluk: silinmesi planlanmis bir seye yeni bagimli eklemek, silme tarihini
+sessizce gecersiz kilardi. Sozluge dayanan sozluk: zincir olusur ve bir
+nesneyi acmak icin kac getirme gerektigi sinirsizlasir.
+
+Ucu de kayittan **once** olmak zorunda, cunku kayit birinci-yazan-kazanir ve
+idempotent: reddedilen bir kayit geri alinamaz.
+
+### Referans yalniz yeni kayitta alinir
+
+Ayni manifest ikinci kez sunuldugunda sayac artmaz. Artsaydi hicbir zaman
+dusmeyecek bir referans kalirdi ve sozluk, son bagimlisi gittikten sonra bile
+silinemez olurdu. Idempotent bir islemin yan etkisi idempotent olmazsa, islem
+de idempotent degildir.
