@@ -122,9 +122,27 @@ impl Default for MainnetActivation {
     /// reason for the gate is gone, so the gate is gone.
     ///
     /// `VerifyMerkle` and `VerifyInference` stay closed for reasons that have
-    /// nothing to do with Poseidon: the first has an unfinished path
-    /// verification, the second has no verification circuit behind it at all
-    /// and returns a hard-coded zero. See `docs/AI_VERIFICATION_STATUS.md`.
+    /// nothing to do with Poseidon. `VerifyInference` has no verification
+    /// circuit behind it at all and returns a hard-coded zero; see
+    /// `docs/AI_VERIFICATION_STATUS.md`.
+    ///
+    /// `VerifyMerkle`'in gerekcesi degisti. Uzun sure "unfinished path
+    /// verification" yaziyordu ve dogruydu: 64 genisleme satiri Poseidon
+    /// zincirini satir satir dogru hesapliyor, **ulastigi sonuc hicbir seye
+    /// baglanmiyordu**. Kok karsilastirmasi orijinal satirin
+    /// `merkle_current` hucresine bakiyordu ve o hucreye 64. turun
+    /// ciktisinin yazildigini zorlayan kisit yoktu; genisleme satirlarina
+    /// hic dokunmadan oraya iddia edilen kokun kendisini yazan bir prover
+    /// dogrulanan bir kanit uretiyordu. Olculdu, uretti.
+    ///
+    /// O bosluk kapandi (`plonky3_air.rs`, "Son turun ciktisi ...";
+    /// `rejects_verify_merkle_root_not_produced_by_the_path`). Kapi yine de
+    /// kapali: kalan kosul **dis denetim**, eksik kisit degil. Bir soundness
+    /// iddiasinin onu yazani ikna etmesi yetmez. Bu yorumun onceki surumu
+    /// yol dogrulamasini "implemented" sayiyordu ve eksik olan sey tam da
+    /// kimsenin ayri madde olarak yazmadigi bagdi - ic degerlendirmenin
+    /// neyi kacirdigini gosteren orneklerden biri. Bayragi bu yorumun
+    /// gucune dayanarak acmayin.
     fn default() -> Self {
         Self {
             verify_merkle_enabled: false,
