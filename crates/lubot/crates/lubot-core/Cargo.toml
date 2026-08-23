@@ -7,3 +7,6 @@ license.workspace = true
 description = "Lubot çekirdek tipleri: model kimliği, dataset tipleri, LoRA manifesti"
 
 [dependencies]
+
+[lints]
+workspace = true

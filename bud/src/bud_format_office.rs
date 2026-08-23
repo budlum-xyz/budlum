@@ -41,11 +41,12 @@ pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
             return None;
         }
         let name = String::from_utf8_lossy(&data[pos + 30..pos + 30 + name_len]).to_string();
-        let comp = &data[pos + 30 + name_len + extra_len..pos + 30 + name_len + extra_len + comp_len];
+        let comp =
+            &data[pos + 30 + name_len + extra_len..pos + 30 + name_len + extra_len + comp_len];
         let raw = match method {
-            0 => comp.to_vec(),                       // STORE
-            8 => inflate_raw(comp, uncomp_len)?,      // DEFLATE (zlib-sız ham)
-            _ => return None,                          // desteklenmeyen yöntem
+            0 => comp.to_vec(),                  // STORE
+            8 => inflate_raw(comp, uncomp_len)?, // DEFLATE (zlib-sız ham)
+            _ => return None,                    // desteklenmeyen yöntem
         };
         entries.push(OfficeEntry { name, data: raw });
         pos += 30 + name_len + extra_len + comp_len;
@@ -163,7 +164,7 @@ pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
     out.extend_from_slice(&central);
     let cd_len = out.len() as u32 - cd_start;
     out.extend_from_slice(&ZIP_EOCD.to_le_bytes());
-    out.extend_from_slice(&[0u16.to_le_bytes(), 0u16.to_le_bytes()].concat().as_slice());
+    out.extend_from_slice([0u16.to_le_bytes(), 0u16.to_le_bytes()].concat().as_slice());
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     out.extend_from_slice(&cd_len.to_le_bytes());
@@ -187,9 +188,22 @@ mod tests {
     /// STORE-only ZIP üretici (test korpusu - docx/xlsx benzeri XML girdiler).
     fn ornek_opc() -> Vec<u8> {
         let entries = vec![
-            ("[Content_Types].xml".to_string(), b"<?xml version=\"1.0\"?><Types/>".to_vec()),
-            ("word/document.xml".to_string(), format!("<w:document>{}</w:document>", "<w:p>Paragraf metni.</w:p>".repeat(200)).into_bytes()),
-            ("word/styles.xml".to_string(), b"<w:styles><w:style/></w:styles>".to_vec()),
+            (
+                "[Content_Types].xml".to_string(),
+                b"<?xml version=\"1.0\"?><Types/>".to_vec(),
+            ),
+            (
+                "word/document.xml".to_string(),
+                format!(
+                    "<w:document>{}</w:document>",
+                    "<w:p>Paragraf metni.</w:p>".repeat(200)
+                )
+                .into_bytes(),
+            ),
+            (
+                "word/styles.xml".to_string(),
+                b"<w:styles><w:style/></w:styles>".to_vec(),
+            ),
         ];
         // elle STORE zip (ofis_transform'un restore'u gibi)
         let mut local = Vec::new();
@@ -199,13 +213,13 @@ mod tests {
             let nb = name.as_bytes();
             local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
             local.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // version(2)+flags(2)
-            local.extend_from_slice(&0u16.to_le_bytes());       // method=STORE
-            local.extend_from_slice(&0u32.to_le_bytes());       // time(2)+date(2)
-            local.extend_from_slice(&0u32.to_le_bytes());       // crc
+            local.extend_from_slice(&0u16.to_le_bytes()); // method=STORE
+            local.extend_from_slice(&0u32.to_le_bytes()); // time(2)+date(2)
+            local.extend_from_slice(&0u32.to_le_bytes()); // crc
             local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
             local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
-            local.extend_from_slice(&(nb.len() as u16).to_le_bytes());   // name_len
-            local.extend_from_slice(&0u16.to_le_bytes());       // extra_len
+            local.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+            local.extend_from_slice(&0u16.to_le_bytes()); // extra_len
             local.extend_from_slice(nb);
             central.extend_from_slice(&ZIP_CENTRAL.to_le_bytes());
             central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]);
@@ -252,7 +266,6 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn strix_truncate_panik_yok() {
         // STRIX: kırpılmış/bozuk transform girdisi None dönmeli, PANİK olmamalı.
@@ -272,7 +285,7 @@ mod tests {
         assert!(office_restore(b"bozuk").is_none());
     }
 
-#[test]
+    #[test]
     fn office_digest_deterministik() {
         let z = ornek_opc();
         let t = office_transform(&z).unwrap();

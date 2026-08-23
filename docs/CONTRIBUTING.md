@@ -22,9 +22,8 @@ If you find the project useful, please also consider starring and forking the re
 
 ## Project Constitution
 
-The rules this repository enforces are written down in
-[`.specify/memory/constitution.md`](../.specify/memory/constitution.md): six
-principles, each paired with the CI mechanism that enforces it.
+The rules this repository enforces live in the code that enforces them:
+`src/core/constitution.rs` and its test suite `src/tests/constitution_engine.rs`.
 
 Read it before a first change to consensus, tokenomics or a CI gate. It is
 descriptive, not aspirational, every claim in it names a script, a baseline or

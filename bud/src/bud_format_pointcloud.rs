@@ -20,7 +20,11 @@ pub struct PointCloud {
 /// Grid hücre boyutuna göre kuantize + tekilleştir (deterministik sıra).
 /// `lossy=false` → koordinatlar grid + residual olarak SAKLANIR (kayıpsız geri).
 /// `lossy=true` → yalnız grid merkezleri (error-bounded: hata ≤ grid/2).
-pub fn quantize(pc: &PointCloud, grid: f64, lossy: bool) -> Option<(Vec<(i64, i64, i64)>, Option<Vec<(f64, f64, f64)>>)> {
+pub fn quantize(
+    pc: &PointCloud,
+    grid: f64,
+    lossy: bool,
+) -> Option<(Vec<(i64, i64, i64)>, Option<Vec<(f64, f64, f64)>>)> {
     if pc.coords.is_empty() || grid <= 0.0 || !grid.is_finite() {
         return None;
     }
@@ -32,7 +36,11 @@ pub fn quantize(pc: &PointCloud, grid: f64, lossy: bool) -> Option<(Vec<(i64, i6
         let cz = (z / grid).round() as i64;
         cells.push((cx, cy, cz));
         if !lossy {
-            residual.push((x - cx as f64 * grid, y - cy as f64 * grid, z - cz as f64 * grid));
+            residual.push((
+                x - cx as f64 * grid,
+                y - cy as f64 * grid,
+                z - cz as f64 * grid,
+            ));
         }
     }
     // tekilleştirme (aynı hücre birden çok nokta → 1 temsil + sayı)
@@ -49,7 +57,11 @@ pub fn quantize(pc: &PointCloud, grid: f64, lossy: bool) -> Option<(Vec<(i64, i6
 }
 
 /// Kayıpsız geri çevirme: hücre + residual → birebir koordinat.
-pub fn dequantize_lossless(cells: &[(i64, i64, i64)], residual: &[(f64, f64, f64)], grid: f64) -> Option<Vec<(f64, f64, f64)>> {
+pub fn dequantize_lossless(
+    cells: &[(i64, i64, i64)],
+    residual: &[(f64, f64, f64)],
+    grid: f64,
+) -> Option<Vec<(f64, f64, f64)>> {
     if cells.len() != residual.len() {
         return None;
     }
@@ -96,14 +108,18 @@ mod tests {
 
     #[test]
     fn kayipli_tekillestirme_error_sinirli() {
-        let pc = PointCloud { coords: vec![(0.1, 0.1, 0.1), (0.1001, 0.1001, 0.1001), (5.0, 5.0, 5.0)] };
+        let pc = PointCloud {
+            coords: vec![(0.1, 0.1, 0.1), (0.1001, 0.1001, 0.1001), (5.0, 5.0, 5.0)],
+        };
         let (cells, _) = quantize(&pc, 0.1, true).unwrap();
         // 3 nokta → 2 hücre (ilk ikisi aynı)
         assert_eq!(cells.len(), 2);
         // hata sınırı: grid/2
         for &(cx, cy, cz) in &cells {
             for &(x, y, z) in &pc.coords {
-                let d = ((x - cx as f64 * 0.1).abs()).max((y - cy as f64 * 0.1).abs()).max((z - cz as f64 * 0.1).abs());
+                let d = ((x - cx as f64 * 0.1).abs())
+                    .max((y - cy as f64 * 0.1).abs())
+                    .max((z - cz as f64 * 0.1).abs());
                 if (x / 0.1).round() as i64 == cx {
                     assert!(d <= 0.05 + 1e-9);
                 }
@@ -114,13 +130,22 @@ mod tests {
     #[test]
     fn gecersiz_girdi() {
         assert!(quantize(&PointCloud { coords: vec![] }, 1.0, false).is_none());
-        assert!(quantize(&PointCloud { coords: vec![(0.0, 0.0, 0.0)] }, 0.0, false).is_none());
+        assert!(quantize(
+            &PointCloud {
+                coords: vec![(0.0, 0.0, 0.0)]
+            },
+            0.0,
+            false
+        )
+        .is_none());
         assert!(dequantize_lossless(&[(0, 0, 0)], &[], 1.0).is_none());
     }
 
     #[test]
     fn pc_deterministik() {
-        let pc = PointCloud { coords: vec![(1.5, 2.5, 3.5)] };
+        let pc = PointCloud {
+            coords: vec![(1.5, 2.5, 3.5)],
+        };
         let (c1, _) = quantize(&pc, 1.0, true).unwrap();
         let (c2, _) = quantize(&pc, 1.0, true).unwrap();
         assert_eq!(pc_digest(&c1), pc_digest(&c2));

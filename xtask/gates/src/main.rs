@@ -54,6 +54,7 @@ mod gates {
     pub mod budscan_patchset;
     pub mod capability_modules_are_wired;
     pub mod cargo_vet;
+    pub mod chain_id_is_not_hardcoded;
     pub mod clippy_extra;
     pub mod coding_audit_samples_the_relationship;
     pub mod consensus_maps_ordered;
@@ -82,12 +83,14 @@ mod gates {
     pub mod governance_invariants;
     pub mod guards_reachable;
     pub mod hash_inputs_are_length_prefixed;
+    pub mod indexing_is_not_new;
     pub mod kani;
     pub mod lock_failures;
     pub mod logup_multipliers;
     pub mod lubot_reads;
     pub mod master_derivation;
     pub mod mermaid;
+    pub mod minting_paths_are_counted;
     pub mod named_tests;
     pub mod network_hardening_gate;
     pub mod no_conflict_markers;
@@ -98,9 +101,11 @@ mod gates {
     pub mod paid_content;
     pub mod pinned_downloads;
     pub mod poa_compliance_gate;
+    pub mod proof_deps_are_exactly_pinned;
     pub mod readme_no_deny;
     pub mod reduction_claims;
     pub mod refusals_no_mutate;
+    pub mod regeneration;
     pub mod rejection_tests;
     pub mod repair_fires;
     pub mod required_tests;
@@ -118,9 +123,11 @@ mod gates {
     pub mod storage_provider_gate;
     pub mod suppressions_are_justified;
     pub mod tee_trust_boundary_is_structural;
+    pub mod test_modules_can_see_what_they_test;
     pub mod the_image_builds_what_the_manifest_declares;
     pub mod threshold_rates;
     pub mod timing_safe;
+    pub mod transcript_mirrors;
     pub mod udeps;
     pub mod uncheckable_proof;
     pub mod untrusted_manifests;
@@ -160,6 +167,30 @@ struct Gate {
 }
 
 const GATES: &[Gate] = &[
+    Gate {
+        name: "minting-paths-are-counted",
+        replaces: None,
+        run: gates::minting_paths_are_counted::run,
+        run_args: None,
+        self_test: gates::minting_paths_are_counted::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "proof-deps-are-exactly-pinned",
+        replaces: None,
+        run: gates::proof_deps_are_exactly_pinned::run,
+        run_args: None,
+        self_test: gates::proof_deps_are_exactly_pinned::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "transcript-mirrors",
+        replaces: None,
+        run: gates::transcript_mirrors::run,
+        run_args: None,
+        self_test: gates::transcript_mirrors::self_test,
+        run_log: None,
+    },
     Gate {
         name: "capability-wiring",
         replaces: Some("check-capability-modules-are-wired.sh"),
@@ -313,6 +344,22 @@ const GATES: &[Gate] = &[
         run_log: None,
     },
     Gate {
+        name: "chain-id-is-not-hardcoded",
+        replaces: None,
+        run: gates::chain_id_is_not_hardcoded::run,
+        run_args: None,
+        self_test: gates::chain_id_is_not_hardcoded::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "indexing-is-not-new",
+        replaces: None,
+        run: gates::indexing_is_not_new::run,
+        run_args: None,
+        self_test: gates::indexing_is_not_new::self_test,
+        run_log: None,
+    },
+    Gate {
         name: "no-orphan-source-files",
         replaces: Some("check-no-orphan-source-files.sh"),
         run: gates::no_orphan_source_files::run,
@@ -443,6 +490,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::domain_tags::self_test,
+    },
+    Gate {
+        name: "regeneration",
+        replaces: None,
+        run: gates::regeneration::run,
+        run_log: None,
+        run_args: None,
+        self_test: gates::regeneration::self_test,
     },
     Gate {
         name: "rejection-tests-assert-rejection",
@@ -925,6 +980,14 @@ const GATES: &[Gate] = &[
         run_log: None,
         run_args: None,
         self_test: gates::tee_trust_boundary_is_structural::self_test,
+    },
+    Gate {
+        name: "test-module-imports",
+        replaces: None,
+        run: gates::test_modules_can_see_what_they_test::run,
+        run_args: None,
+        self_test: gates::test_modules_can_see_what_they_test::self_test,
+        run_log: None,
     },
     Gate {
         name: "gov-slash-evidence-validator-only",

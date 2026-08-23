@@ -191,7 +191,7 @@ impl std::fmt::Display for ContentEncryption {
 /// Same `manifest_id`.
 ///
 /// This doc used to say the id derived from `(owner, total_size, shards)`. It
-/// Never did: [`manifest_id_from_parts`] reads the shards and the scheme and
+/// Never did: [`manifest_id_from_parts_stored`] reads the shards and the scheme and
 /// Nothing else. The sentence read as a binding, so anyone counting what the
 /// Id protects counted `owner` among them. What each remaining field is or is
 /// Not inside the commitment is now recorded on the field itself.
@@ -335,6 +335,23 @@ pub struct ContentManifest {
     /// not this field.
     #[serde(default)]
     pub owner: crate::core::address::Address,
+    /// Bu nesnenin cozulmesi icin gereken paylasilan sozluk.
+    ///
+    /// `None`: nesne kendi basina cozulur. Cogunlukla boyledir ve bu yuzden
+    /// varsayilan bu; alan eklenmeden once yazilmis her manifest de buraya
+    /// duser ve kimligi degismez.
+    ///
+    /// IDENTITY: included when set. Sozluk, nesnenin **cozulebilirliginin
+    /// parcasi**: yanlis sozlukle acilan baytlar baska baytlardir. Kimlige
+    /// katilmasaydi bir manifest, kaydi bozulmadan baska bir sozluge
+    /// yonlendirilebilir ve ayni id altinda baska bir icerik cozulurdu.
+    ///
+    /// Taahhut §66'nin desenini izler: **yalnizca iddia edildiginde taahhut
+    /// edilir.** `None` on-goruntude hicbir bayt uretmez, dolayisiyla bu
+    /// alandan once kaydedilmis manifest'lerin id'si birebir ayni kalir ve
+    /// goc gerekmez.
+    #[serde(default)]
+    pub dictionary_id: Option<ContentId>,
     /// Sum of the stored shard sizes.
     ///
     /// Hashed into the id alongside `content_size`: the object length and
@@ -345,7 +362,7 @@ pub struct ContentManifest {
     /// Number of shards.
     ///
     /// IDENTITY: excluded - the length of `shards`, which the id covers, and
-    /// `manifest_id_from_parts` already hashes that length as its first
+    /// `manifest_id_from_parts_stored` already hashes that length as its first
     /// field. `validate_untrusted` refuses a `shard_count` that disagrees
     /// with the list.
     pub shard_count: u32,
@@ -354,6 +371,25 @@ pub struct ContentManifest {
     /// those deserialize to replication and behave exactly as they did.
     #[serde(default)]
     pub erasure: ErasureScheme,
+    /// Bu icerigin baytlarinin nasil var oldugu: tutuluyor mu, yoksa bir
+    /// tariften mi doguyor.
+    ///
+    /// **Neden manifest'te:** replikasyon hedefi (`STORAGE_REPLICATION_TARGET`
+    /// = 3) sabit bir sayiydi ve ne tuttugunu sormuyordu. Tariften dogan bir
+    /// icerik icin uc kopya tutmak, ayni deterministik ureteci uc kez
+    /// saklamaktir: kopyalar dayaniklilik EKLEMEZ, cunku icerik zaten
+    /// zincirdeki tariften yeniden uretilebilir. Manifest kaynak rejimini
+    /// soylemedigi surece anlasma katmani bu ayrimi yapamazdi.
+    ///
+    /// Varsayilan `Stored`: bu alandan once yazilmis her manifest tam olarak
+    /// bunu demek istiyordu, anlamlari degismez.
+    ///
+    /// IDENTITY: included - kimlige girer. Girmeseydi ayni baytlar icin biri
+    /// "tutuluyor" digeri "uretiliyor" diyen iki manifest ayni id'yi
+    /// paylasirdi ve `register_manifest` ilk-yazan-kazanir oldugu icin
+    /// birinin iddiasi digerininkini sessizce degistirirdi.
+    #[serde(default)]
+    pub source: crate::storage::generated::ContentSource,
     /// Length of the *object*, as opposed to `total_size`, which is the sum
     /// of the stored shard sizes.
     ///
@@ -432,17 +468,43 @@ impl ContentManifest {
         // commitment that no one made. Callers that did encrypt say so with
         // `with_encryption`.
         let encryption = ContentEncryption::Plaintext;
-        let manifest_id = manifest_id_from_parts(&shards, &erasure, &encryption, total, total);
+        let manifest_id =
+            manifest_id_from_parts_stored(&shards, &erasure, &encryption, total, total);
         Ok(ContentManifest {
             manifest_id,
             owner,
+            dictionary_id: None,
             total_size: total,
             shard_count,
             erasure,
+            source: crate::storage::generated::ContentSource::Stored,
             content_size: total,
             encryption,
             shards,
         })
+    }
+
+    /// Bu manifest'in kaynak rejimini beyan et.
+    ///
+    /// Rejim kimlige girdigi icin id yeniden hesaplanir: iddiayi degistirmek
+    /// nesneyi degistirir. `Stored` icin hesap birebir eski deger doner.
+    ///
+    /// Beyan bir TALEPTIR, kanit degil. Zincir tarafi kaniti
+    /// `StorageRegistry::register_manifest_with_source` icinde tarifi
+    /// kosarak arar; burada yalnizca iddia kaydedilir.
+    #[must_use]
+    pub fn with_source(mut self, source: crate::storage::generated::ContentSource) -> Self {
+        self.manifest_id = manifest_id_from_parts(
+            &self.shards,
+            &self.erasure,
+            &self.encryption,
+            self.content_size(),
+            self.total_size,
+            &source,
+            self.dictionary_id.as_ref(),
+        );
+        self.source = source;
+        self
     }
 
     /// The object's byte length.
@@ -476,7 +538,7 @@ impl ContentManifest {
             ));
         }
         self.content_size = content_size;
-        self.manifest_id = manifest_id_from_parts(
+        self.manifest_id = manifest_id_from_parts_stored(
             &self.shards,
             &self.erasure,
             &self.encryption,
@@ -502,6 +564,8 @@ impl ContentManifest {
             &self.encryption,
             self.content_size(),
             self.total_size,
+            &self.source,
+            self.dictionary_id.as_ref(),
         );
         if expected != self.manifest_id {
             return Err(format!(
@@ -636,7 +700,7 @@ impl ContentManifest {
             ));
         }
         self.erasure = erasure;
-        self.manifest_id = manifest_id_from_parts(
+        self.manifest_id = manifest_id_from_parts_stored(
             &self.shards,
             &self.erasure,
             &self.encryption,
@@ -691,7 +755,7 @@ impl ContentManifest {
     #[must_use]
     pub fn with_encryption(mut self, encryption: ContentEncryption) -> Self {
         self.encryption = encryption;
-        self.manifest_id = manifest_id_from_parts(
+        self.manifest_id = manifest_id_from_parts_stored(
             &self.shards,
             &self.erasure,
             &self.encryption,
@@ -755,7 +819,7 @@ impl ContentManifest {
 ///
 /// Kept for manifests that predate erasure coding, where every shard was
 /// data and the scheme was replication. New code should call
-/// [`manifest_id_from_parts`], which also binds the redundancy claim.
+/// [`manifest_id_from_parts_stored`], which also binds the redundancy claim.
 pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
     let mut buf = Vec::with_capacity(8 + shards.len() * (4 + 32 + 4));
     buf.extend_from_slice(b"BDLM_MANIFEST_V1");
@@ -792,12 +856,15 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// claim be rewritten under a stable id: register `ClientSide`, then serve a
 /// manifest reading `Plaintext` at the same id, and a reader concludes the
 /// bytes it pulled were never protected.
+#[must_use]
 pub fn manifest_id_from_parts(
     shards: &[ShardRef],
     erasure: &ErasureScheme,
     encryption: &ContentEncryption,
     content_size: u64,
     total_size: u64,
+    source: &crate::storage::generated::ContentSource,
+    dictionary_id: Option<&ContentId>,
 ) -> ContentId {
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
@@ -821,7 +888,41 @@ pub fn manifest_id_from_parts(
     // length, falling back to the shard total for pre-V4 manifests.
     buf.extend_from_slice(&content_size.to_le_bytes());
     buf.extend_from_slice(&total_size.to_le_bytes());
+    // Kaynak rejimi taahhude girer, ama `Stored` HICBIR bayt eklemez: bu
+    // alandan once yazilmis manifest'lerin id'si birebir ayni kalmak
+    // zorunda. Yalnizca bir sey iddia edildiginde iddia taahhut edilir.
+    buf.extend_from_slice(&crate::storage::generated::source_commitment_bytes(source));
+    // Sozluk taahhudu: kaynak taahhudu ile ayni kural. Sozluk yoksa hicbir
+    // bayt yazilmaz, dolayisiyla bu alandan once kaydedilmis manifest'lerin
+    // on-goruntusu degismez ve id'leri korunur.
+    if let Some(dict) = dictionary_id {
+        buf.push(1u8);
+        buf.extend_from_slice(&dict.0);
+    }
     ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V4", &buf]))
+}
+
+/// Kaynak rejimi `Stored` olan icerik icin kimlik.
+///
+/// Bu alan eklenmeden onceki her cagiranin kastettigi sey. `Stored` taahhude
+/// **hicbir bayt eklemez**, bu yuzden burasi eski kimlikle birebir aynidir.
+#[must_use]
+pub fn manifest_id_from_parts_stored(
+    shards: &[ShardRef],
+    erasure: &ErasureScheme,
+    encryption: &ContentEncryption,
+    content_size: u64,
+    total_size: u64,
+) -> ContentId {
+    manifest_id_from_parts(
+        shards,
+        erasure,
+        encryption,
+        content_size,
+        total_size,
+        &crate::storage::generated::ContentSource::Stored,
+        None,
+    )
 }
 
 #[cfg(test)]

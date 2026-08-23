@@ -4,8 +4,28 @@
 //! Module therefore requires every state-changing operation to declare its
 //! Domain kind and fails closed for [`ComplianceDomainKind::Permissionless`].
 //!
-//! WIRING: unwired - no PoA transaction reaches the compliance recorder; the
-//! audit trail it exports is never written to.
+//! PoA alanlari icin uyum defteri: tarama, dondurma ve seyahat kurali
+//! kayitlari ile bunlarin denetim izi.
+//!
+//! # Kapi, defter degil
+//!
+//! Bu modul bir sure yalniz kayit tutuyordu: dondurma cagrilabiliyordu ama
+//! dondurulmus olmanin hicbir sonucu yoktu. "Donduruldu" bir not olarak
+//! kaliyordu, bir karar olarak degil.
+//!
+//! Artik `Blockchain::poa_compliance` uzerinde yasiyor ve iki yerden
+//! baglaniyor:
+//!
+//!   * `Blockchain::freeze_poa_account` - alanin turu **kaydindan** okunur,
+//!     cagirandan degil; cagiran kendi alanini "PoA" ilan edip dondurma
+//!     yetkisi uretemez.
+//!   * `Blockchain::validate_sovereign_audit_export` - dondurulmus bir
+//!     operatorun egemen denetim paketi reddedilir. Operator paketten degil
+//!     **kayitli sablondan** okunur.
+//!
+//! Izinsiz (permissionless) alanlarda dondurma **kasten** reddedilir
+//! (`ensure_poa`): egemenlik iddiasi tasiyan bir agda, izinsiz bir alanin
+//! hesabini merkezi bir yonetici dondurememeli.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};

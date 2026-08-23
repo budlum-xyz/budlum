@@ -111,6 +111,20 @@ pub struct Blockchain {
     /// This bounds entries, not only distinct checkpoint-height buckets.
     pub max_pending_certs: usize,
     pub domain_registry: ConsensusDomainRegistry,
+    /// Egemen alan sablonlari (CBDC, kamu, kurumsal PoA, konsorsiyum).
+    ///
+    /// `domain_registry`'den ayri durur cunku ayri seyi anlatir: orasi bir
+    /// alanin uzlasma kurallarini, burasi o alanin uyum/denetim belgesini
+    /// tutar. Bagi `register_sovereign_template` kurar - bir sablon ancak
+    /// adlandirdigi alan kayitliysa ve ayni turu/operatoru gosteriyorsa
+    /// kabul edilir.
+    pub sovereign_registry: crate::domain::SovereignDomainRegistry,
+    /// PoA alanlarinin uyum defteri: dondurma kayitlari ve denetim izi.
+    ///
+    /// Yalniz `ConsensusKind::PoA` alanlari icin anlamlidir; izinsiz alanlarda
+    /// dondurma cagrisi reddedilir (`ensure_poa`). Defter kayit tutmakla
+    /// kalmaz, `ensure_not_frozen` uzerinden gercek bir kapi kurar.
+    pub poa_compliance: crate::registry::PoaComplianceRegistry,
     pub domain_commitment_registry: DomainCommitmentRegistry,
     pub global_headers: Vec<GlobalBlockHeader>,
     pub plugin_registry: DomainPluginRegistry,
@@ -715,6 +729,8 @@ impl Blockchain {
             pending_finality_certs: BTreeMap::new(),
             max_pending_certs: 100, // Keep last 100 pending cert batches
             domain_registry,
+            sovereign_registry: crate::domain::SovereignDomainRegistry::new(),
+            poa_compliance: crate::registry::PoaComplianceRegistry::new(),
             domain_commitment_registry,
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
@@ -807,8 +823,125 @@ impl Blockchain {
         u64::try_from(self.last_block().timestamp / 1_000).unwrap_or(u64::MAX)
     }
 
+    /// The chain tip.
+    ///
+    /// # Panics
+    /// If the chain is empty, which cannot happen: construction always seeds
+    /// genesis and nothing removes it. The signature returns `&Block`, so
+    /// there is no owned value to fall back to; the alternative would be
+    /// changing the return type and every one of the call sites. The panic
+    /// is allowed here deliberately rather than by the workspace default.
+    #[allow(clippy::expect_used)]
     pub fn last_block(&self) -> &Block {
-        self.chain.last().expect("Chain should never be empty")
+        self.chain
+            .last()
+            .expect("chain is seeded with genesis at construction")
+    }
+
+    /// Egemen alan sablonunu, adlandirdigi uzlasma alanina baglayarak kaydet.
+    ///
+    /// Sablon tek basina degerlendirilmez. `register_template_for_domain`
+    /// once alanin kayitli oldugunu, sonra sablonun bildirdigi uzlasma
+    /// turunun ve operatorun alanin gercek degerleriyle ayni oldugunu
+    /// dogrular. Bu kapi olmadan bir sablon, PoS olarak calisan bir alani
+    /// denetime "izinli ve KYC'li" diye gosterebilirdi: iki kayit da kendi
+    /// icinde gecerli, birlikte yanlis.
+    ///
+    /// # Errors
+    ///
+    /// Alan kayitli degilse, tur ya da operator uyusmuyorsa, veya sablonun
+    /// kendi dogrulamasi basarisizsa hata doner.
+    pub fn register_sovereign_template(
+        &mut self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<(), String> {
+        self.sovereign_registry
+            .register_template_for_domain(template, &self.domain_registry)
+    }
+
+    /// Kayitli egemen sablonlarin koku.
+    #[must_use]
+    pub fn sovereign_template_root(&self) -> crate::domain::Hash32 {
+        self.sovereign_registry.root()
+    }
+
+    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    ///
+    /// Paketin tasidigi `template_id` once kayit defterinde aranir. Paketin
+    /// kendi icinde tutarli olmasi yetmez: kimlik paketin icinden geliyorsa,
+    /// uydurma bir kimlikle uretilmis paket de tutarli gorunur.
+    ///
+    /// # Errors
+    ///
+    /// Sablon kayitli degilse ya da paket sablonla uyusmuyorsa hata doner.
+    pub fn validate_sovereign_audit_export(
+        &self,
+        bundle: &crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        self.sovereign_registry.validate_audit_export(bundle)?;
+        // Dondurma kaydinin bir SONUCU olmali. Defter uzun sure yalniz kayit
+        // Tutuyordu: dondurma cagrilabiliyordu ama dondurulmus olmak hicbir
+        // Seyi degistirmiyordu - "donduruldu" bir not, bir karar degildi.
+        //
+        // Operator paketten degil, KAYITLI SABLONDAN okunur. Paketin icinden
+        // Gelen bir kimlik, dondurulmus operatorun baskasinin adini yazip
+        // Kapiyi asmasina izin verirdi.
+        let operator = self
+            .sovereign_registry
+            .template_operator(bundle.template_id)
+            .ok_or_else(|| {
+                "AuditExportBundle names a template that is not registered".to_string()
+            })?;
+        if self
+            .poa_compliance
+            .is_frozen(crate::registry::ComplianceDomainKind::PoA, &operator)
+        {
+            return Err(format!(
+                "operator {} is frozen; audit export refused",
+                operator.to_hex()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Bir PoA alaninda adresi dondur.
+    ///
+    /// Dondurma yalniz izinli (PoA) alanlarda ve yalniz yetkili yonetici
+    /// tarafindan yapilabilir; ikisi de `PoaComplianceRegistry` icinde
+    /// dogrulanir. Gerekce ozeti sifir olamaz - kanitsiz dondurma, kaydi
+    /// denetlenemez yapar.
+    ///
+    /// # Errors
+    ///
+    /// Alan kayitli degilse, PoA degilse, yonetici yetkisiz ise veya gerekce
+    /// ozeti sifirsa hata doner.
+    pub fn freeze_poa_account(
+        &mut self,
+        domain_id: u32,
+        admin_authorized: bool,
+        address: crate::core::address::Address,
+        reason_hash: [u8; 32],
+    ) -> Result<(), String> {
+        let domain = self
+            .domain_registry
+            .get(domain_id)
+            .ok_or_else(|| format!("unknown domain {domain_id}"))?;
+        // Alanin turu kaydindan okunur, cagirandan degil: cagiran kendi
+        // Alanini "PoA" ilan edip dondurma yetkisi uretemez.
+        let kind = if matches!(domain.kind, crate::domain::ConsensusKind::PoA) {
+            crate::registry::ComplianceDomainKind::PoA
+        } else {
+            crate::registry::ComplianceDomainKind::Permissionless
+        };
+        self.poa_compliance
+            .freeze_suspicious(
+                kind,
+                admin_authorized,
+                address,
+                reason_hash,
+                self.chain.len() as u64,
+            )
+            .map_err(|e| format!("{e:?}"))
     }
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
@@ -1537,12 +1670,16 @@ impl Blockchain {
 
         // Credit the recipient and the relayer
         // Using try_add_balance to prevent silent u64 overflow capping.
+        // Arz yaratan yol: kopruden gelen varligin zincir uzerindeki
+        // karsiligi burada basiliyor, yani bu iki cagri toplam arzi
+        // buyutuyor. `try_mint_balance` sabit tavani denetler; ucret de
+        // ayni basimdan geliyor ve ayni tavana tabidir.
         self.state
-            .try_add_balance(&transfer.recipient, final_amount as u64)
-            .map_err(|e| format!("Bridge mint overflow (recipient): {e}"))?;
+            .try_mint_balance(&transfer.recipient, final_amount as u64)
+            .map_err(|e| format!("Bridge mint (recipient): {e}"))?;
         self.state
-            .try_add_balance(&relayer, fee as u64)
-            .map_err(|e| format!("Bridge mint fee overflow (relayer): {e}"))?;
+            .try_mint_balance(&relayer, fee as u64)
+            .map_err(|e| format!("Bridge mint fee (relayer): {e}"))?;
 
         if let Some(store) = &self.storage {
             store
@@ -1898,7 +2035,8 @@ impl Blockchain {
 
     /// Real ZK-proof submission with fee + reward + claim policy.
     ///
-    /// 1. Validate the message kind and binding hash.
+    /// 1. Validate the message kind and binding hash, and refuse public
+    ///    Inputs bound to a different `chain_id` than this chain.
     /// 2. Charge the submission fee; invalid, valid, and duplicate work all
     ///    Consume resources, while protocol-conflicting claims are refunded.
     /// 3. Verify the STARK proof.
@@ -1924,6 +2062,125 @@ impl Blockchain {
         let expected = submission.expected_payload_hash();
         if submission.message.payload_hash != expected {
             return Err("payload hash does not bind to the supplied proof".into());
+        }
+
+        // 1b. Genel girdi baglamasi: kanit BU zincire ait olmali.
+        //
+        // `public_inputs.chain_id` gonderenden gelir ve kanit sistemi onu
+        // yalnizca *kendi icinde* tutarli tutar: STARK, "bu genel girdilerle
+        // bu program boyle kostu" der, girdilerin dogru zincire ait oldugunu
+        // soylemez. Denetim burada yapilmazsa baska bir zincir (ya da test
+        // agi) icin uretilmis, kendi zincirinde tamamen gecerli bir kanit
+        // burada da dogrulanir ve bir alani ilerletirdi.
+        //
+        // Bu, dogrulayicinin kanit sisteminin kisitlamadigi alani kendi
+        // kodunda denetlemesi gereken siniftir; kanit gecerliligi tek basina
+        // bir yetkilendirme karari degildir.
+        if submission.public_inputs.chain_id != self.chain_id {
+            return Err(format!(
+                "proof public inputs bind to chain {} but this chain is {}",
+                submission.public_inputs.chain_id, self.chain_id
+            ));
+        }
+
+        // 1c. Program izin listesi: bu programin bu alani ilerletme hakki var mi?
+        //
+        // Bir onceki denetim kanitin BU zincire ait oldugunu soyluyor, ama
+        // hangi *kodun* kanitlandigini soylemiyor. Dogrulayici programin
+        // hash'ini `public_inputs.program_hash` ile karsilastirir; gonderen
+        // ikisini de kendisi verdigi icin bu denetim her zaman gecer. Yani
+        // saldirgan kendi yazdigi bir programi kusursuz bir kanitla sunabilir:
+        // kanit gecerlidir, yalan soyleyen programdir.
+        //
+        // Alanin ilan ettigi izin listesi bu boslugu kapatir. Liste bos ise
+        // kapi kapalidir - fail-closed.
+        let claimed_domain = submission.domain();
+        let domain = self
+            .domain_registry
+            .get(claimed_domain)
+            .ok_or_else(|| format!("unknown domain {claimed_domain}"))?;
+        let program_hash = crate::prover::zk_program_hash(&submission.program);
+        if !domain.zk_program_allowlist.contains(&program_hash) {
+            return Err(format!(
+                "program {} is not on the zk allowlist of domain {} ({} entries)",
+                hex::encode(program_hash),
+                claimed_domain,
+                domain.zk_program_allowlist.len()
+            ));
+        }
+
+        // 1d. Kanit tazeligi: iddia edilen yukseklik zincire yakin olmali.
+        //
+        // Kademe 2 on kosulu (2026-08-22, G0 onayi). Kanit gecerli olsa bile
+        // cok eski bir yukseklige baglanmis olmasi ayri bir kusurdur: ayni
+        // kanit, ne kadar zaman gecerse gecsin "taze" gorunur.
+        //
+        // `0` **kalici** bir tolerans, gecici bir bosluk degil. Bu yorumun
+        // onceki hali "prove_bytecode henuz yuksekligi yazmiyor" diyordu ve
+        // bayatti: uretici `vm.context.block_height` degerini yaziyor
+        // (`execution/zkvm.rs`). Deger `0` oldugunda anlami "uretici eksik"
+        // degil, **program zincir yuksekligini hic okumadi**: `block_height`
+        // programin syscall 6 ile okudugu yuksekliktir ve okumayan bir
+        // program icin `0` dogru cevaptir.
+        //
+        // Bir program zincir yuksekligini hic okumadan bir gecisi
+        // kanitlayabilir; o kanitlarin hepsini reddetmek dogru olani
+        // reddetmek olurdu. Iddia tarafi ayrica korunuyor: `source_height`
+        // baglama hash'inin on-goruntusunde, yani kanit baska bir yukseklige
+        // tasinamiyor. Ayrimin tam gerekcesi `prover/mod.rs`,
+        // `ZkProofSubmission::message` dokumantasyonunda.
+        let chain_height = self.chain.len() as u64;
+        let claimed_height = submission.public_inputs.block_height;
+        if claimed_height != 0
+            && claimed_height.abs_diff(chain_height) > crate::prover::MAX_ZK_PROOF_HEIGHT_LAG
+        {
+            return Err(format!(
+                "proof claims block height {claimed_height} but the chain is at {chain_height} (max lag {})",
+                crate::prover::MAX_ZK_PROOF_HEIGHT_LAG
+            ));
+        }
+
+        // 1e. Iddia, alanin ilerlemesinin gerisine dusemez (sureklilik).
+        //
+        // Kabul edilen her kanit alanin `last_committed_height/_hash` alanini
+        // o iddianin yuksekligine ve `final_state_root`'una tasir (asagida,
+        // `ClaimDecision::New` kolunda). Boylece alanin kaydi en son kabul
+        // edilen kanitin final kokunu tasir - `final_state_root` artik yalniz
+        // kanitin icinde yasayan bir deger degil, alanin gercek kokuyle
+        // karsilastirilabilir bir taahhuttur. Geriye yapilan iddia, ucret
+        // yakilmadan burada reddedilir.
+        let claim_height = submission.target_height();
+        if claim_height < domain.last_committed_height {
+            return Err(format!(
+                "stale zk claim: domain {claimed_domain} already committed at height {} but the claim targets {claim_height}",
+                domain.last_committed_height
+            ));
+        }
+
+        // 1f. Ilan edilen butce: harcanan, ilan edilenden fazla olamaz.
+        //
+        // `gas_limit` ve `gas_used` genel girdilerin icinde tasiniyor ve
+        // baglama hash'ine giriyor, yani gonderen ikisini de sonradan
+        // degistiremez. Ama ikisi **birbirine karsi** hic denetlenmiyordu:
+        // `gas_used > gas_limit` olan bir kanit, degerler tutarli sekilde
+        // imzalanmis oldugu icin buraya kadar gelip kabul ediliyordu.
+        //
+        // Kanit sistemi bu iliskiyi kisitlamaz. STARK "bu program bu
+        // girdilerle boyle kostu" der; ilan edilen tavanin asilmadigini
+        // soylemez. Bolum 69'un ayni sinifi: dogrulayici, kanit sisteminin
+        // kisitlamadigi alani kendi kodunda denetlemek zorundadir.
+        //
+        // Bu, izin listesinin (1c) cevaplamadigi sorudur. Liste **hangi
+        // kodun** calisabilecegini soyler; bu denetim o kodun **ilan ettigi
+        // sinir icinde** kalip kalmadigini. Listeden gecmis bir program,
+        // ilan ettiginden fazlasini harcayarak dogrulama isini sinirsiz
+        // buyutebilirdi.
+        let declared_limit = submission.public_inputs.gas_limit;
+        let spent = submission.public_inputs.gas_used;
+        if spent > declared_limit {
+            return Err(format!(
+                "proof claims {spent} gas used against a declared limit of {declared_limit}"
+            ));
         }
 
         // 2. Fee debit (refunded on actionable / conflict outcomes below).
@@ -1972,6 +2229,15 @@ impl Blockchain {
                     prover: submitter,
                     rewarded,
                 });
+                // 1e'nin kayit yarisi: alanin ilerlemesini bu kanitin final
+                // kokune bagla. Sonraki kanit bu ilerlemenin gerisine iddia
+                // atamaz (yukaridaki kapi) ve baska yuzler (kopru dogrulama)
+                // alanin kokunu okudugunda en son kabul edilen kanitin
+                // final kokunu gorur.
+                if let Some(d) = self.domain_registry.get_mut(claimed_domain) {
+                    d.last_committed_height = key.target_height;
+                    d.last_committed_hash = final_state_root;
+                }
                 if let Some(store) = &self.storage {
                     store
                         .save_proof_claim_registry(&self.proof_claims)
@@ -2228,12 +2494,15 @@ impl Blockchain {
                 }
 
                 // Try_add_balance for relay bridge mint
+                // Ayni arz yaratimi, relayer boru hattindan gelen ikinci
+                // giris. Iki girisi de ayni kapiya baglamak sart: biri
+                // baglanip oteki unutulursa tavan yalnizca yarim tutar.
                 self.state
-                    .try_add_balance(&transfer.recipient, final_amount as u64)
-                    .map_err(|e| format!("Bridge relay mint overflow (recipient): {e}"))?;
+                    .try_mint_balance(&transfer.recipient, final_amount as u64)
+                    .map_err(|e| format!("Bridge relay mint (recipient): {e}"))?;
                 self.state
-                    .try_add_balance(&relayer, fee as u64)
-                    .map_err(|e| format!("Bridge relay mint fee overflow (relayer): {e}"))?;
+                    .try_mint_balance(&relayer, fee as u64)
+                    .map_err(|e| format!("Bridge relay mint fee (relayer): {e}"))?;
             }
             MessageKind::BridgeBurn => {
                 // The burn message is a fresh id CORRELATED to the original
@@ -2255,9 +2524,11 @@ impl Blockchain {
                     .get_transfer(&transfer_id)
                     .ok_or_else(|| "Unknown bridge transfer".to_string())?
                     .source_domain;
-                if lock_source_domain != message.target_domain {
-                    return Err("Relayed burn target domain does not match lock source".into());
-                }
+                crate::cross_domain::bridge::check_burn_matches_lock_domain(
+                    lock_source_domain,
+                    message.target_domain,
+                )
+                .map_err(|e| e.to_string())?;
                 self.state
                     .bridge_state
                     .unlock(transfer_id, message.source_domain)
@@ -3184,6 +3455,14 @@ impl Blockchain {
         if block.index > 0 {
             Self::adjust_base_fee(state, block.transactions.len());
         }
+
+        // PoA admission is recomputed here, once, at a point every node
+        // reaches with the same state and the same block index. Doing it
+        // lazily on the consensus path instead would make the audit trail
+        // depend on who asked and when, which is the one thing a compliance
+        // record cannot be. An elapsed KYC horizon is therefore observed the
+        // same number of times on every node.
+        state.refresh_poa_admissions(block.index);
     }
 
     /// Epoch-close liveness observation, as a pure state transition.
@@ -3586,6 +3865,7 @@ impl Blockchain {
 
         self.mempool.set_min_fee(self.state.base_fee);
         self.emit_chain_metrics();
+        self.emit_tx_processed(block.transactions.len() as u64);
         Some((block, nft_burn_cids.iter().map(|(cid, _)| cid.0).collect()))
     }
     pub fn mine_pending_transactions(&mut self, miner_address: Address) {
@@ -3860,6 +4140,8 @@ impl Blockchain {
         // Deterministic replay contract. Doing it here, after the commit,
         // Made the producer's `liveness` root unreproducible by replay.
 
+        // Sayac blok tasinmadan once okunuyor: `push` blogu tuketiyor.
+        let applied_tx_count = block.transactions.len() as u64;
         self.chain.push(block);
 
         if let Some(last_block) = self.chain.last() {
@@ -3937,6 +4219,7 @@ impl Blockchain {
         }
 
         self.emit_chain_metrics();
+        self.emit_tx_processed(applied_tx_count);
         Ok(nft_burn_cids.iter().map(|(cid, _)| cid.0).collect())
     }
 
@@ -5167,7 +5450,7 @@ impl Blockchain {
         }
         let mut unfrozen = 0;
         for req in pending {
-            let domain_id = req.domain_id as crate::domain::DomainId;
+            let domain_id = req.domain_id;
             let Some(domain) = self.domain_registry.get(domain_id) else {
                 tracing::warn!("UnfreezeGovernance: domain {domain_id} not found");
                 continue;
@@ -5301,11 +5584,9 @@ impl Blockchain {
                     &current_epoch.to_le_bytes(),
                     &tip.vrf_output,
                 ]);
-                let byte_start = u64::from_le_bytes(
-                    entropy[..8]
-                        .try_into()
-                        .expect("32-byte challenge entropy has an 8-byte prefix"),
-                ) % range_count;
+                let mut entropy_head = [0u8; 8];
+                entropy_head.copy_from_slice(&entropy[..8]);
+                let byte_start = u64::from_le_bytes(entropy_head) % range_count;
                 let byte_end = byte_start + range_len;
                 let opener = crate::core::address::Address::from([0u8; 32]);
                 if let Ok(_challenge_id) = self.state.storage_registry.open_challenge(
@@ -5693,6 +5974,8 @@ impl Clone for Blockchain {
             pending_finality_certs: self.pending_finality_certs.clone(),
             max_pending_certs: self.max_pending_certs,
             domain_registry: self.domain_registry.clone(),
+            sovereign_registry: self.sovereign_registry.clone(),
+            poa_compliance: self.poa_compliance.clone(),
             domain_commitment_registry: self.domain_commitment_registry.clone(),
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),

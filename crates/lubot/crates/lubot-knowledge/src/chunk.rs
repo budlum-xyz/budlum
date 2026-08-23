@@ -45,7 +45,9 @@ pub fn chunk_document(
     overlap: Option<usize>,
 ) -> Result<Vec<Chunk>, String> {
     let max_lines = max_lines.unwrap_or(DEFAULT_MAX_LINES).max(1);
-    let overlap = overlap.unwrap_or(DEFAULT_OVERLAP_LINES).min(max_lines.saturating_sub(1));
+    let overlap = overlap
+        .unwrap_or(DEFAULT_OVERLAP_LINES)
+        .min(max_lines.saturating_sub(1));
 
     let lines: Vec<&str> = content.lines().collect();
     let total = lines.len();
@@ -99,7 +101,10 @@ mod tests {
     use super::*;
 
     fn doc() -> String {
-        (1..=300).map(|i| format!("satir {i}")).collect::<Vec<_>>().join("\n")
+        (1..=300)
+            .map(|i| format!("satir {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -125,7 +130,9 @@ mod tests {
 
     #[test]
     fn empty_document_yields_no_chunks() {
-        assert!(chunk_document("p", "d", "x", "", None, None).unwrap().is_empty());
+        assert!(chunk_document("p", "d", "x", "", None, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

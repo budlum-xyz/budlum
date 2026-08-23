@@ -10,11 +10,11 @@ pub type EmbeddingVector = Vec<f64>;
 
 /// İngilizce + Türkçe sık geçen sözcükler (gömme gürültüsünü azaltır).
 const STOPWORDS: &[&str] = &[
-    "the", "is", "in", "it", "of", "and", "or", "to", "a", "an", "for", "on", "with", "as",
-    "at", "be", "this", "that", "are", "was", "were", "by", "from", "not", "but", "if", "so",
-    "do", "we", "he", "she", "they", "you", "i", "my", "its", "our", "has", "have", "had",
-    "will", "would", "can", "could", "may", "should", "all", "no", "than", "when", "then",
-    "bir", "bu", "ve", "veya", "icin", "ile", "degil", "ama", "sonra", "gibi", "cok", "daha",
+    "the", "is", "in", "it", "of", "and", "or", "to", "a", "an", "for", "on", "with", "as", "at",
+    "be", "this", "that", "are", "was", "were", "by", "from", "not", "but", "if", "so", "do", "we",
+    "he", "she", "they", "you", "i", "my", "its", "our", "has", "have", "had", "will", "would",
+    "can", "could", "may", "should", "all", "no", "than", "when", "then", "bir", "bu", "ve",
+    "veya", "icin", "ile", "degil", "ama", "sonra", "gibi", "cok", "daha",
 ];
 
 /// Varsayılan gömme boyutu.
@@ -53,7 +53,7 @@ impl TfIdfEmbedder {
         let lower = text.to_lowercase();
         lower
             .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|t| t.len() >= 2 && !STOPWORDS.contains(&t))
+            .filter(|t| t.len() >= 2 && !STOPWORDS.contains(t))
             .map(ToString::to_string)
             .collect()
     }
@@ -74,10 +74,13 @@ impl TfIdfEmbedder {
         // Sıklığa göre sırala, boyut kadar tut.
         let mut ranked: Vec<(String, usize)> = doc_freq.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // `ranked` is still needed below to look up document frequencies, so
+        // borrow here instead of consuming it. `into_iter()` moved the vector
+        // and the later `ranked.iter()` then failed to compile.
         self.vocab = ranked
-            .into_iter()
+            .iter()
             .take(self.dimensions)
-            .map(|(t, _)| t)
+            .map(|(t, _)| t.clone())
             .collect();
         self.vocab_index = self
             .vocab
@@ -89,8 +92,14 @@ impl TfIdfEmbedder {
             .vocab
             .iter()
             .map(|t| {
-                let df = ranked.iter().find(|(term, _)| term == t).map_or(1, |(_, f)| *f);
-                (t.clone(), ((n_docs as f64 + 1.0) / (df as f64 + 1.0)).ln() + 1.0)
+                let df = ranked
+                    .iter()
+                    .find(|(term, _)| term == t)
+                    .map_or(1, |(_, f)| *f);
+                (
+                    t.clone(),
+                    ((n_docs as f64 + 1.0) / (df as f64 + 1.0)).ln() + 1.0,
+                )
             })
             .collect();
         self.fitted = true;
@@ -199,7 +208,10 @@ mod tests {
     #[test]
     fn deterministic_embeddings() {
         let mut e = TfIdfEmbedder::new(32);
-        e.fit(&["budlum depolama katmani".to_string(), "lubot cikarim".to_string()]);
+        e.fit(&[
+            "budlum depolama katmani".to_string(),
+            "lubot cikarim".to_string(),
+        ]);
         assert_eq!(e.embed("budlum depolama"), e.embed("budlum depolama"));
     }
 
@@ -211,7 +223,9 @@ mod tests {
 
     #[test]
     fn cosine_zero_for_zero_vectors() {
-        assert_eq!(TfIdfEmbedder::cosine_similarity(&[], &[]), 0.0);
+        // `&[]` bir `&[_; 0]`; imza `&EmbeddingVector` (= `&Vec<f64>`) istiyor.
+        let empty: EmbeddingVector = Vec::new();
+        assert_eq!(TfIdfEmbedder::cosine_similarity(&empty, &empty), 0.0);
         let zero = vec![0.0; 8];
         assert_eq!(TfIdfEmbedder::cosine_similarity(&zero, &zero), 0.0);
     }
