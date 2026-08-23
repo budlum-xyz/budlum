@@ -638,3 +638,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLI'in kurdugu VM **mainnet kipinde** olmali.
+    ///
+    /// `Vm::new` varsayilani `mainnet_mode: false` birakir ve o kipte
+    /// `decode_instruction` kapili opcode'lari (VerifyMerkle, VerifyInference)
+    /// cozer. CLI mainnet-guvenli varsayilan tasimazsa kapili bir opcode
+    /// yerel calistirmada gecer, zincirde reddedilir - tek bir bytecode iki
+    /// farkli anlam tasir.
+    ///
+    /// Test `run_pipeline`'i **gercekten kosuyor** ve dondurdugu VM'in kipine
+    /// bakiyor. Ilk yazimi bunun yerine `Vm::with_mainnet_mode(.., true)`
+    /// cagirip sonucu olcuyordu; o test `with_mainnet_mode`'un kendisini
+    /// dogruluyordu, CLI'i degil - mutasyonla olculdu: `run_pipeline` icindeki
+    /// cagri `Vm::new`'e dondurulunce test yesil kaliyordu.
+    #[test]
+    fn cli_vm_mainnet_kipinde_kurulur() {
+        let varsayilan = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+        assert!(
+            !varsayilan.mainnet_mode,
+            "Vm::new artik mainnet kipinde geliyor; CLI'in ayrica kip \
+             secmesinin gerekcesi bu testin dayandigi varsayimdi"
+        );
+
+        let yol = std::env::temp_dir().join(format!(
+            "budcli-kip-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let cikti = run_pipeline(ExecutionConfig {
+            bytecode: vec![bud_isa::Instruction {
+                opcode: bud_isa::Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode()],
+            sender: None,
+            nonce: None,
+            block_height: None,
+            args: Vec::new(),
+            chain_id: 1,
+            state_in_file: Some(yol.to_string_lossy().into_owned()),
+            commit_state: false,
+        })
+        .expect("bos Halt programi kosmaliydi");
+
+        assert!(
+            cikti.vm.mainnet_mode,
+            "CLI boru hatti VM'i mainnet kipinde kurmuyor; kapili opcode'lar \
+             yerelde calisip zincirde reddedilir"
+        );
+
+        std::fs::remove_file(&yol).ok();
+    }
+
+    /// State'te bulunmayan bir sender icin islem **reddedilmeli**.
+    ///
+    /// Eksik hesabi ortulu olarak olusturmak, calistiricinin verdigi sender
+    /// degerini ag durumuna yansitir ve sahip olunmayan bir hesaptan islem
+    /// basilmis gibi davranir. Fail-closed olmali.
+    #[test]
+    fn kayitsiz_sender_reddedilir() {
+        // `State::load` var olmayan yolu bos state olarak acar (olculdu,
+        // `bud-state/src/lib.rs:158`), dolayisiyla dosya olusturmak gerekmiyor
+        // - onemli olan hesabin state'te BULUNMAMASI.
+        let yol = std::env::temp_dir().join(format!(
+            "budcli-yok-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        assert!(!yol.exists(), "test dosyasi zaten var: {}", yol.display());
+
+        let config = ExecutionConfig {
+            bytecode: vec![bud_isa::Instruction {
+                opcode: bud_isa::Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode()],
+            // State bos, dolayisiyla bu hesap yok.
+            sender: Some(0xDEAD_BEEF),
+            nonce: None,
+            block_height: None,
+            args: Vec::new(),
+            chain_id: 1,
+            state_in_file: Some(yol.to_string_lossy().into_owned()),
+            commit_state: false,
+        };
+
+        let sonuc = run_pipeline(config);
+        let hata = match sonuc {
+            Ok(_) => panic!("kayitsiz sender kabul edildi; ortulu hesap olusturuluyor"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            hata.contains("does not exist"),
+            "reddedildi ama baska sebeple: {hata}"
+        );
+    }
+}
