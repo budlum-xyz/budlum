@@ -204,6 +204,56 @@ fn alpha_and_zeta_follow_their_commitments() {
             zeta + 1,
             quotient + 1
         );
+
+        // alpha, iz taahhutlerinden **sonra** gelmeli.
+        //
+        // Bu testin adi "alpha_and_zeta" idi ve govdesi yalnizca zeta'yi
+        // olcuyordu - alpha hic aranmiyordu. Belgelenmis ama denetlenmemis
+        // bir degismez, denetlenmeyen bir degismezdir; adi gecen kisim
+        // okuyana kapsandigi izlenimi verdigi icin daha da kotusudur.
+        //
+        // Kisitlari tek polinomda katlayan carpan alpha'dir. Iz taahhudu
+        // sabitlenmeden ornekleniirse, prover alpha'yi ogrendikten sonra izi
+        // secebilir ve katlanmis kisitin sifira gitmesini saglayacak bir iz
+        // arayabilir. Katlama ancak katladigi seyler sabitse anlamlidir.
+        let trace_observe = code(body)
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.contains("challenger.observe")
+                    && (l.contains("trace_commit") || l.contains("commitments.trace"))
+            })
+            .map(|(i, _)| i)
+            .next()
+            .unwrap_or_else(|| {
+                panic!("{name}: the trace commitment is no longer absorbed into the transcript")
+            });
+        let alpha = code(body)
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("alpha") && l.contains("sample_algebra_element()"))
+            .map(|(i, _)| i)
+            .next()
+            .unwrap_or_else(|| panic!("{name}: alpha is no longer sampled"));
+        assert!(
+            trace_observe < alpha,
+            "{name}: alpha is sampled at line {} before the trace commitment \
+             is absorbed at line {}. A prover that learns the folding factor \
+             first can search for a trace whose folded constraint vanishes",
+            alpha + 1,
+            trace_observe + 1
+        );
+
+        // Ve alpha, zeta'dan once gelmeli: zeta, alpha ile katlanmis kisitin
+        // degerlendirildigi noktadir. Ters sirada nokta, katlamadan bagimsiz
+        // secilmis olurdu.
+        assert!(
+            alpha < zeta,
+            "{name}: zeta (line {}) is sampled before alpha (line {}); the \
+             evaluation point must depend on the folding it evaluates",
+            zeta + 1,
+            alpha + 1
+        );
     }
 }
 
