@@ -517,6 +517,19 @@ pub trait BudlumApi {
     #[method(name = "bud_gatewayFetchContent")]
     async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned>;
 
+    /// B.U.D. Gateway: render recipe-born content into a requested format.
+    ///
+    /// `format` is one of `svg`, `png:<size>`, `frame:<index>`. The reply
+    /// carries the bytes and the render id, which commits to the format:
+    /// the same recipe rendered as PNG is a different object from the same
+    /// recipe rendered as SVG.
+    #[method(name = "bud_gatewayRenderContent")]
+    async fn gateway_render_content(
+        &self,
+        name: String,
+        format: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// D-Web Passport profile bundle for budlum.xyz. Read-only and evidence-labelled.
     #[method(name = "bud_passportGetProfile")]
     async fn passport_get_profile(

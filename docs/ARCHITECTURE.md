@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 71 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 72 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -79,6 +79,7 @@
 - [69. Tek yaprakli agac: kendi kendini onaylayan kanit](#69-tek-yaprakli-agac-kendi-kendini-onaylayan-kanit)
 - [70. Gecit tarifi okur: saklanmayan baytlar](#70-gecit-tarifi-okur-saklanmayan-baytlar)
 - [71. Yerlesim tavsiyesi: kural degil olcum](#71-yerlesim-tavsiyesi-kural-degil-olcum)
+- [72. Bicim taahhudun parcasidir](#72-bicim-taahhudun-parcasidir)
 
 ## 1. Genel sistem mimarisi
 
@@ -2776,3 +2777,46 @@ gerektirir. `ContentManifest` bir tutucu listesi tasimiyor. Kimsenin
 saklamadigi bir yerlesimle karsilastirma yapmak, bugunun cevabini yine
 bugunun cevabiyla karsilastirmak olurdu; bolum 62'deki bayat agacin
 tersinden ayni hatasi.
+## 72. Bicim taahhudun parcasidir
+
+Bolum 70 gecidin tarifi okumasini sagladi: uretilmis bir nesne istendiginde
+baytlar tariften dogar. Donen sey ureticinin ham ciktisidir.
+
+Okuyanlar ayni baytlari istemez. Bir tarayici SVG ister, bir cuzdan kucuk bir
+PNG, bir galeri baska bir olcu, bir oynatici tek bir kare. Uretilmis bir
+nesne icin bunlarin hepsi **ayni tariften** dogar ve hicbiri saklanmaz. Bu,
+tarif fikrinin en somut karsiligidir: bir nesnenin kac gorunumu varsa o kadar
+dosya saklamak yerine, bir tarif ve talep aninda islemci.
+
+`storage/render.rs` bu bicimleri belirlenimli olarak uretiyordu ve hicbir
+uretim yolu cagirmiyordu. Artik `bud_gatewayRenderContent` cagiriyor.
+
+### Neden render kimligi, manifest kimligi degil
+
+Bicim, nesnenin kimliginin parcasidir. PNG olarak uretilen bir tarif, ayni
+tarifin SVG'sinden **baska bir nesnedir**: farkli baytlar, farkli uzunluk,
+farkli kullanim. `render_id` bicimi de hash'e katar, dolayisiyla iki gorunum
+iki kimlik alir.
+
+Cevap ikisini birlikte doner. Manifest kimligini dondurmek, iki farkli bayt
+dizisini tek bir adla adlandirmak olurdu; cagiran hangi baytlari aldigini
+kimlikten okuyamazdi.
+
+### Bilinmeyen bicim reddedilir
+
+`svg`, `png:<kenar>`, `frame:<indeks>`. Baska bir sey hata doner ve
+varsayilana **dusulmez**.
+
+Dusmek esneklik gibi gorunur ve degildir: `png` yazmak isteyip `pngg` yazan
+birine SVG vermek, istenmeyen bir nesneyi tahmin edilemeyen bir kimlikle
+teslim etmektir. Sayisal parametre cozulemezse de ayni: `png:70000` bir
+`u16`'ya sigmaz ve sessizce kirpmak baska bir nesne uretirdi.
+
+`QrStream` RPC'den istenemez. O bir tasima temsili, bir okuma bicimi degil.
+
+### Erisim denetimi bicimden bagimsizdir
+
+Pollen korumali icerik, hangi bicimde istenirse istensin korumalidir. Yeni
+uc `bud_gatewayFetchContent` ile ayni denetimi kosar. Bir bicim istemek,
+erisim kurallarini atlamanin yolu olamaz; olsaydi denetim degil gecikme
+olurdu.

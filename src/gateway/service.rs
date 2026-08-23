@@ -167,6 +167,65 @@ impl BudGateway {
                 .unwrap_or_else(|| "none".to_string())
         ))
     }
+
+    /// Ayni tarifi, okuyanin istedigi bicimde uret.
+    ///
+    /// `fetch_name_content` tarifin ham ciktisini doner: uretici ne
+    /// uretiyorsa o. Bir tarayici SVG ister, bir cuzdan kucuk bir PNG, bir
+    /// galeri baska bir olcu. Uretilmis bir nesne icin bunlarin hepsi **ayni
+    /// tariften** dogar; hicbiri saklanmaz.
+    ///
+    /// Bicim taahhudun parcasidir. PNG olarak uretilen bir tarif, ayni
+    /// tarifin SVG'sinden **baska bir nesnedir** ve `render_id` ikisine ayri
+    /// kimlik verir. Bu yuzden burada donen kimlik manifest kimligi degil,
+    /// bicime bagli render kimligidir; cagiran ikisini karistiramaz cunku
+    /// fonksiyon ikisini birlikte doner.
+    ///
+    /// Yalniz tariften dogan icerik icin calisir. Saklanan baytlarin bicimi
+    /// zaten baytlarin kendisidir; onlari yeniden bicimlendirmek bir gecidin
+    /// isi degil.
+    ///
+    /// # Errors
+    ///
+    /// Isim cozulmezse, icerik tarifli degilse, ya da uretim bicimin
+    /// sinirlarini asarsa.
+    pub async fn render_name_content(
+        &self,
+        name: &str,
+        format: &crate::storage::render::RenderFormat,
+    ) -> Result<(Vec<u8>, [u8; 32]), String> {
+        let resolved = self
+            .chain
+            .bns_resolve_full(name.to_string())
+            .await
+            .ok_or_else(|| format!("BNS name '{name}' not found"))?;
+        if resolved.is_expired {
+            return Err(format!("BNS name '{name}' expired"));
+        }
+        let storage_root = resolved
+            .storage_root
+            .ok_or_else(|| format!("BNS name '{name}' has no storage binding"))?;
+        let cid = ContentId(storage_root);
+        let manifest = self
+            .chain
+            .get_storage_manifest(cid)
+            .await
+            .ok_or_else(|| format!("BNS name '{name}' resolves to no known manifest"))?;
+
+        let crate::storage::generated::ContentSource::Generated(ref spec) = manifest.source else {
+            return Err(
+                "only recipe-born content can be rendered into a requested format; \
+                 stored bytes already are their format"
+                    .into(),
+            );
+        };
+
+        let bytes = crate::storage::render::render(spec, format)
+            .map_err(|e| format!("render failed: {e:?}"))?;
+        let bytes = checked_gateway_content("on-demand render", bytes)?;
+        let id = crate::storage::render::render_id(format, &bytes);
+        Ok((bytes, id))
+    }
 }
 
 #[cfg(test)]
