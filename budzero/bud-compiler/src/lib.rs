@@ -102,49 +102,33 @@ mod tests {
         assert_eq!(vm.events, vec![10]);
     }
 
-    /// 32 baytlik kimlikler uzerinde aritmetik reddedilmeli.
-    ///
-    /// `Address` ve `Hash32` 32 bayt; bir VM yazmaci 8. Aritmetige izin
-    /// verilseydi kod, dort limb'in **birine** uygulanan bir isleme derlenir
-    /// ve hicbir seyin toplami olmayan bir deger sessizce uretirdi. Sessiz
-    /// olmasi kritik: derleyici hata vermez, VM panik atmaz, sozlesme
-    /// calisir ve yanlis adresi hesaplar.
-    ///
-    /// Kapi `sema.rs`'te (`is_opaque_bytes32`) ve **tek testi yoktu** -
-    /// 662 satirlik anlamsal denetleyicinin tamami test edilmemisti. Bu
-    /// testler o yuzeye ilk kapiyi koyuyor.
-    ///
-    /// Esitlik ve atama serbest kalir: bu tipler zaten bunun icin var.
-    #[test]
-    fn rejects_arithmetic_on_opaque_32_byte_identities() {
-        // Her biri tek bir operatoru dener. Toplu bir "hepsi hata verir"
-        // iddiasi, bir operatorun kapidan kacmasini gizlerdi.
-        for op in ["+", "-", "*", "/", "<", ">", "<=", ">="] {
-            let source = format!(
-                "contract T {{ pub fn f(a: Address, b: Address) {{ \
-                 let c = a {op} b; }} pub fn main() {{ }} }}"
-            );
-            let res = compile(&source, IsaProfile::Production);
-            assert!(
-                res.is_err(),
-                "`{op}` Address uzerinde kabul edildi: 32 baytin bir limb'i \
-                 sessizce islenirdi"
-            );
-        }
-    }
-
     /// Ayni kapi `Hash32` icin de gecerli.
     ///
-    /// Ayri test, cunku `is_opaque_bytes32` iki tipi birden kapsiyor ve
-    /// birinin listeden dusmesi digerinin testiyle gorunmez.
+    /// Ayri test, cunku `is_opaque_bytes32` iki tipi birden kapsiyor
+    /// (`Type::Address | Type::Hash32`) ve birinin listeden dusmesi
+    /// digerinin testiyle gorunmez kalirdi - olculdu: `Hash32` kaldirilinca
+    /// yalnizca bu test kirmizi verir.
     #[test]
     fn rejects_arithmetic_on_hash32() {
-        let source = "contract T { pub fn f(a: Hash32, b: Hash32) { \
-                      let c = a + b; } pub fn main() { } }";
-        assert!(
-            compile(source, IsaProfile::Production).is_err(),
-            "Hash32 uzerinde toplama kabul edildi"
-        );
+        let source = r"
+            contract C {
+                fn combine(a: Hash32, b: Hash32) -> u64 {
+                    let c = a + b;
+                    return 1;
+                }
+
+                pub fn main() {
+                    emit E(1);
+                }
+            }
+        ";
+        match compile(source, IsaProfile::Production) {
+            Ok(_) => panic!("Hash32 uzerinde toplama derlendi; tip bir etiketten ibaret"),
+            Err(CompileError::SemanticError(msg)) => {
+                assert!(msg.contains("Hash32"), "yanlis sebeple reddedildi: {msg}")
+            }
+            Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
+        }
     }
 
     /// Esitlik karsilastirmasi **serbest** kalmali.
@@ -1241,7 +1225,10 @@ mod tests {
     /// answer that a type is supposed to prevent.
     #[test]
     fn arithmetic_on_an_opaque_32_byte_type_is_refused() {
-        for op in ["+", "-", "*", "/", "<", ">"] {
+        // `<=` ve `>=` listede yoktu. Kapi (`sema.rs`, `is_opaque_bytes32`)
+        // ikisini de kapsiyor, ama kapsadigi olculmemisti: listeden dusen bir
+        // operator, kapinin o operator icin kaldirilmasini gorunmez kilardi.
+        for op in ["+", "-", "*", "/", "<", ">", "<=", ">="] {
             let source = format!(
                 r#"
                 contract C {{
