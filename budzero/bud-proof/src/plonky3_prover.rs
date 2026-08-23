@@ -4119,6 +4119,132 @@ mod tests {
         }
     }
 
+    /// Public input'larin **her biri** kaniti gecersiz kilmali.
+    ///
+    /// Test `OodEvaluationMismatch` yoluna ulasmak icin yazildi (kisit
+    /// denkleminin zeta'da tutmamasi) ve olcum baska bir sey gosterdi:
+    /// **56 public input degerinin her biri degistirildiginde red
+    /// `InvalidPowWitness` uzerinden geliyor**, yani FRI proof-of-work
+    /// denetiminden - kisit denetimine varilmadan once.
+    ///
+    /// Sebep, kanit sistemi acisindan iyi haber: public input'lar Fiat-Shamir
+    /// transcript'ine absorbe ediliyor (`prover.rs` `observe_slice`,
+    /// `verifier.rs` aynasi). Bir tanesi degisince tum challenge zinciri
+    /// degisiyor ve FRI sorgulari tutmuyor. Baglama kisit katmanindan **once**
+    /// transcript katmaninda kuruluyor; "Last Challenge Attack" sinifinin
+    /// engellendigi yer tam burasi.
+    ///
+    /// Iddia bu yuzden belirli bir hata cesidini degil **reddi** pinliyor:
+    /// hangi katmanin yakaladigi bir uygulama detayi, degismemesi gereken sey
+    /// hicbir public input'in serbest kalmamasi. `OodEvaluationMismatch`'e
+    /// ulasmak transcript'i de tutarli tutan bir sahte kanit uretmeyi
+    /// gerektirir - kanit sistemini kirmadan yapilamaz, ki bu zaten istenen
+    /// ozelliktir.
+    ///
+    /// Iki bagimsiz katman oldugu mutasyonla olculdu:
+    ///
+    /// * `observe_slice(public_values)` **kismen** (son deger dusurulerek)
+    ///   bozuldugunda test yesil kaliyor - o degeri AIR kisiti da bagliyor.
+    /// * Absorbe **tamamen** kaldirildiginda `public input 1` serbest kaliyor
+    ///   ve test kirmizi veriyor - yani bazi degerleri yalnizca transcript
+    ///   bagliyor, kisit katmani degil.
+    ///
+    /// Ikisi birlikte tam kapsama veriyor; biri kaldirilirsa acik olusuyor.
+    /// Testin her indisi ayri gezmesinin sebebi de bu: kapsama tek tip
+    /// degil, indise gore farkli katmandan geliyor.
+    ///
+    /// `Plonky3Adapter::verify` bu yolu olcemez: public input'lari kendi
+    /// hash'iyle onceden eler. Dogrulayici bu yuzden dogrudan cagriliyor.
+    #[test]
+    fn rejects_a_proof_for_every_altered_public_input() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let program_bytes: Vec<u8> = program
+            .iter()
+            .flat_map(|&i| i.to_le_bytes().to_vec())
+            .collect();
+        let mut hasher = Keccak::v256();
+        hasher.update(&program_bytes);
+        let mut program_hash = [0u8; 32];
+        hasher.finalize(&mut program_hash);
+
+        let pi = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash,
+            initial_state_root: crate::adapter::initial_state_root_of(
+                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
+                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0u8; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 0,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0u8; 32],
+            state_writes_digest: [0u8; 32],
+        };
+
+        let envelope =
+            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("durust kanit uretilmeli");
+        let proof: crate::bud_stark::Proof<MyConfig> =
+            postcard::from_bytes(&envelope.proof_bytes).expect("gercek kanit cozulmeli");
+
+        let air_p = BudAir {
+            num_steps: vm.trace.len(),
+            program: program.clone(),
+        };
+        let cfg_p = build_config();
+        let pp_p = setup_preprocessed(&cfg_p, &air_p, proof.degree_bits);
+
+        // Kontrol grubu: dogru public input'larla gecmeli.
+        let durust = to_public_values(&pi);
+        assert!(
+            crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &proof,
+                &durust,
+                pp_p.as_ref().map(|(_, v)| v),
+            )
+            .is_ok(),
+            "durust kanit dogrulanmali: kurulum bozuk"
+        );
+
+        // Kanit aynen kaliyor; yalnizca dogrulayiciya sunulan public input
+        // degisiyor. Her indis **ayri** iddia ediliyor: toplu tek bir iddia,
+        // bir indisin hic baglanmamis olmasini digerlerinin basarisi altinda
+        // gizlerdi - SP1'in `committed_value_digest` kisitsizliginin sinifi.
+        for i in 0..durust.len() {
+            let mut bozuk = durust.clone();
+            bozuk[i] += Goldilocks::ONE;
+
+            let sonuc = crate::bud_stark::verify_with_preprocessed(
+                &cfg_p,
+                &air_p,
+                &proof,
+                &bozuk,
+                pp_p.as_ref().map(|(_, v)| v),
+            );
+
+            assert!(
+                sonuc.is_err(),
+                "public input {i} degistirildi ama kanit hala gecerli sayildi; \
+                 bu deger kanita baglanmamis"
+            );
+        }
+    }
+
     /// ZK bayragi ile kanittaki rastgelelik taahhudu **uyusmali**.
     ///
     /// `verifier.rs:363` bunu acikca denetliyor: ZK acikken rastgelelik
