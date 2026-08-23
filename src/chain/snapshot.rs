@@ -1767,10 +1767,28 @@ mod tests {
         "manifest_signer",
         "manifest_signature",
         "trust_policy",
+        "poa_onboarding",
     ];
 
     /// Yalniz schema-4 dalgasinin anahtarlari.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
+
+    /// PoA kabul kayitlari: `#[serde(default)]` ile eklenen, surum artirmayan
+    /// bir alan.
+    ///
+    /// **Neden `CURRENT_..._SCHEMA_VERSION` artmadi:** surum, eski bir
+    /// ikilinin yeni bir goruntuyu *yanlis* okuyabilecegi durumlar icin.
+    /// Burada oyle bir durum yok - alan yoksa varsayilan bos kayittir ve bos
+    /// kayit "bu alan izinli degil" demektir, ki eski goruntulerin gercegi
+    /// tam olarak budur. Surumu artirmak eski surumleri desteklenen
+    /// pencerenin disina iterdi: hicbir sey kazandirmayan bir uyumluluk
+    /// kaybi.
+    ///
+    /// Turetilmis kume (`poa_admitted`) BURADA YOK ve olmamali: kayitlardan
+    /// her blok kapanisinda yeniden hesaplanir. Goruntuye yazilsaydi, elle
+    /// duzenlenmis bir goruntu kendi kayitlarinin desteklemedigi bir kabul
+    /// kumesi tasiyabilirdi.
+    const POA_ADMISSION_KEYS: &[&str] = &["poa_onboarding"];
 
     /// schema-2 koklu alanlar: eski surumun de bildigi, gocurken tek bayt
     /// kaybetmemesi gereken alanlar. `snapshot_hash` bilincli disarida:
@@ -1914,6 +1932,8 @@ mod tests {
             "manifest_signer",
             "manifest_signature",
             "trust_policy",
+            // kabul kayitlari (surum artirmayan, serde-default alan)
+            "poa_onboarding",
             // digest'in kendisi: surum degisiminde yeniden hesaplanir
             "snapshot_hash",
         ]
@@ -2091,6 +2111,58 @@ mod tests {
         assert_eq!(rebuilt.tokenomics.community, 777);
         assert_eq!(rebuilt.governance.proposals.len(), 1);
         assert_eq!(rebuilt.timed_burn.years_burned, 2);
+    }
+
+    /// PoA kabul kayitlari olmayan bir blob (surum artmadigi icin bu hala
+    /// gecerli bir schema-4 goruntusudur).
+    ///
+    /// Bu goc yolunun kilitlemesi gereken sey bir veri tasima degil, bir
+    /// **guvenlik varsayimi**: PoA kabul kaydi olmayan bir goruntu geri
+    /// yuklendiginde alan **izinli sayilmamali**. Aksi halde eski bir
+    /// goruntuden acilan bir zincir, kimsenin kabul edilmedigi bir izinli
+    /// alan gibi gorunur ve hic blok uretemez.
+    ///
+    /// Turetilmis kumenin goruntude olmadigini da burada dogruluyoruz: o,
+    /// kayitlardan yeniden hesaplanir.
+    #[test]
+    fn a_snapshot_without_admission_records_does_not_look_permissioned() {
+        let mut account_state = AccountState::new();
+        account_state.tokenomics.community = 777;
+        let full = StateSnapshotV2::from_state(&account_state, legacy_params(64));
+
+        let blob = as_legacy_blob(&full, POA_ADMISSION_KEYS, 4);
+        let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 4);
+        for key in POA_ADMISSION_KEYS {
+            assert!(
+                !obj.contains_key(*key),
+                "kaynak blobda olmamasi gereken kabul anahtari var: {key}"
+            );
+        }
+        assert!(
+            !obj.contains_key("poa_admitted"),
+            "turetilmis kabul kumesi goruntuye sizmis: kayitlardan hesaplanmali"
+        );
+
+        let restored = StateSnapshotV2::from_bytes(&blob).unwrap();
+        assert_eq!(
+            restored.schema_version,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert!(
+            restored.poa_onboarding.is_none(),
+            "eksik kabul kaydi default'a doner"
+        );
+        assert!(restored.verify());
+
+        let rebuilt = AccountState::from_snapshot_v2(&restored);
+        assert_eq!(rebuilt.tokenomics.community, 777);
+        assert!(
+            !rebuilt.poa_is_permissioned(0),
+            "kabul kaydi olmayan eski goruntu alani izinli gosterdi: zincir dogustan olur"
+        );
+        assert!(rebuilt.poa_admitted_addresses(0).is_empty());
     }
 
     /// Desteklenen pencerenin hemen disindaki surumler fail-closed.

@@ -6,7 +6,7 @@
 
 ## Icindekiler
 
-> 64 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
+> 65 bolum, tek dosya. Bolme karari degismedi; bu liste yalnizca gezinme icin.
 
 - [1. Genel sistem mimarisi](#1-genel-sistem-mimarisi)
 - [2. Consensus-domain izolasyonu](#2-consensus-domain-izolasyonu)
@@ -72,6 +72,7 @@
 - [62. Iki kok: consensus'un okudugu ve kanit verebilen](#62-iki-kok-consensusun-okudugu-ve-kanit-verebilen)
 - [63. Komsulukla verilen garanti garanti degildir](#63-komsulukla-verilen-garanti-garanti-degildir)
 - [64. Izinli alanda kabul yoklugu izin degildir](#64-izinli-alanda-kabul-yoklugu-izin-degildir)
+- [65. Bir yolda duran denetim kural degildir](#65-bir-yolda-duran-denetim-kural-degildir)
 
 ## 1. Genel sistem mimarisi
 
@@ -2432,3 +2433,56 @@ denemesi **hata dondurur**. Bir alanin cokmesi digerini etkilemez.
 Bu, PoA alaninda **kimin** blok uretebilecegine dair bir karardir. Uretilen
 blogun **dogru** oldugunu soylemez: onu imza dogrulamasi, durum gecisi ve
 sonluluk kurallari soyler. Kabul, yetkilendirmedir; dogruluk ayri bir sorudur.
+
+## 65. Bir yolda duran denetim kural degildir
+
+`BridgeRelayerPipeline` uretimde hic kurulmuyordu. "Olu modul" gibi
+gorunuyordu; olcum baska bir sey soyledi.
+
+Yaptigi is **iki uretim yolunda elle sirali olarak zaten yapiliyordu**:
+`Blockchain::submit_relay_proof` ve executor'un dis-sonuc isleyicisi. Ikisi de
+ayni alti adimi yuruyor: kilidi ac, transferi getir, ucreti ayir, iki tasma
+reddi, alicinin ve relayer'in bakiyesini yaz.
+
+Ikincisi birincisi kopyalanarak yazilmis - ve **bunu kendi yorumunda soyluyor**:
+*"Now uses the same logic as submit_relay_proof."*
+
+### Kopyanin eksik tasidigi sey
+
+Bir kilit acilirken iki alanin anlasmasi gerekir: kilidin **acildigi** alan ve
+yakma mesajinin **hedef** gosterdigi alan. Farklilarsa mesaj, acilmak uzere
+olan transferden **baska bir transferden** bahsediyordur.
+
+Bu denetim birinci yolda vardi, ikincisinde yoktu.
+
+Sonuc: hangi denetimin uygulandigi, mesajin **hangi kapidan girdigine**
+bagliydi. Ve kapiyi saldirgan secer.
+
+### Duzeltme
+
+`check_burn_matches_lock_domain` tek tanim, iki cagri. Kural artik bir
+cagirinin icinde degil, cagirilarin **ustunde** duruyor.
+
+Ilkesi soyle: **bir cagirinin icinde yasayan denetim kural degil, aliskanliktir.**
+Cagirilar eklenir; tek evi olan bir kural, bir sonraki cagirinin unutmasina
+kapali olur.
+
+Bu, DAO grant tavaninda (§53) ve iki kokte gorulen sekille aynidir: bir
+denetim bir yolda var, oteki yolda yok. Uc kez ayni sekil cikinca, sekil
+tesadufi degildir.
+
+### Test neyi okur
+
+Ikinci test **davranisi degil cagri yerlerini** okuyor
+(`include_str!` ile iki dosya). Sebebi kusurun **yapisal** olmasi: mantik var
+oldugu her yerde dogruydu, sorun var **olmadigi** yerdi. Davranisi test etmek
+yalnizca test edilen yolu kanitlar - eksik yol zaten test edilmiyordu.
+
+Ayrica eski satir ici karsilastirmanin **geri gelmedigini** de dogruluyor:
+bir kural, bir ev.
+
+### Pipeline ne oldu
+
+Silinmedi. Vaat ettigi sey - kopru adimlarini tek yerde siralamak - dogruydu;
+yalnizca **yanlis katmanda** duruyordu. Ortak denetimler `cross_domain/bridge`
+altina tasindikca pipeline'in soyledigi sey kodda karsiligini buluyor.

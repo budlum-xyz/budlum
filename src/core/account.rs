@@ -2037,6 +2037,16 @@ impl AccountState {
         }
     }
 
+    /// Is `domain` running admission control?
+    ///
+    /// A domain becomes permissioned by having an admin, which is a
+    /// deliberate act recorded in state. Chains that never opted in are not
+    /// gated, so an empty admission registry does not silently stop them.
+    #[must_use]
+    pub fn poa_is_permissioned(&self, domain: crate::domain::types::DomainId) -> bool {
+        self.poa_onboarding.is_permissioned(domain)
+    }
+
     /// Addresses admitted to act in `domain` as of the last block close.
     ///
     /// An empty set means nobody is admitted, which in a permissioned domain
