@@ -134,7 +134,6 @@ crates/budscan/src/fetch.rs	31
 crates/budscan/src/lib.rs	22
 crates/budscan/src/punycode.rs	16
 crates/budscan/src/query.rs	27
-crates/lubot/ARCHITECTURE.md	34
 crates/lubot/Cargo.toml	5
 crates/lubot/NOTICE.md	18
 crates/lubot/README.md	29
@@ -241,7 +240,6 @@ src/prover/mod.rs	25
 src/registry/d4_merge_tests.rs	1
 src/registry/evidence.rs	1
 src/registry/invalid_vote.rs	1
-src/registry/permissionless.rs	34
 src/registry/poa_compliance.rs	11
 src/registry/role.rs	1
 src/rpc/api.rs	17
