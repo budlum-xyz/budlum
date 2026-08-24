@@ -1,46 +1,47 @@
-//! Getirici katmani: dort hedef, dort ayri dogrulama gucu.
+//! The fetcher layer: four targets, four different verification strengths.
 //!
-//! Her getirici **kendi dogrulama gucunu beyan eder** ve adres cubugu o
-//! beyani gosterir:
+//! Each fetcher **declares its own verification strength**, and the address bar
+//! shows exactly that.
 //!
-//! | hedef            | getirme | dogrulama                | cubukta        |
-//! |------------------|---------|--------------------------|----------------|
-//! | Budlum manifest  | B.U.D.  | hash = `manifest_id`     | dogrulandi     |
-//! | IPFS CID         | IPFS    | hash = CID               | dogrulandi     |
-//! | Arweave tx       | Arweave | hash = `data_root`       | dogrulandi     |
-//! | HTTPS URL        | HTTP    | yalniz TLS               | yalniz tasima  |
+//! | target           | fetched over | verification             | in the bar      |
+//! |------------------|--------------|--------------------------|-----------------|
+//! | Budlum manifest  | B.U.D.       | hash equals `manifest_id`| verified        |
+//! | IPFS CID         | IPFS         | hash equals the CID      | verified        |
+//! | Arweave tx       | Arweave      | hash equals `data_root`  | verified        |
+//! | HTTPS URL        | HTTP         | TLS only                 | transport only  |
 //!
-//! # Tasima bu modulde degil
+//! # Transport is not in this module
 //!
-//! [`Transport`] bir trait ve bu crate'te ag kodu yok. Sebep tek bir cumleye
-//! siger: dogrulama mantigi, sokete dokunan bir seye baglanirsa test edilemez
-//! olur, ve dogrulanmayan bir dogrulayici bir dogrulayici degildir. Uretimde
-//! tasima `budlum-core`'un `NodeClient`'i ya da bir HTTP istemcisi olur;
-//! testte bellekteki bir tablo.
+//! The [`Transport`] trait is the seam, and the seam is deliberate:
+//! verification logic that is bound to something touching a socket becomes
+//! untestable, and a verifier that is not verified is not a verifier. In
+//! production the transport is `budlum-core`'s `NodeClient` or an HTTP client;
+//! in the tests it is a table.
 
 use crate::arweave::{self, ArweaveVerdict};
 use crate::cid::{self, CidVerdict};
 use crate::content_id::{bytes_match, ContentId};
 use crate::evidence::{Claim, Evidence, Strength};
 
-/// Bir hedef: bir adin cozuldugu sey.
+/// A target: the thing a name resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// Budlum B.U.D. manifest kimligi.
+    /// A Budlum B.U.D. manifest id.
     Bud(ContentId),
-    /// IPFS CID (dizgi hali; cozumu getirici yapar).
+    /// An IPFS CID in string form; the fetcher parses it.
     Ipfs(String),
-    /// Arweave `data_root` (ham baytlar).
+    /// An Arweave `data_root`, as raw bytes.
     Arweave(Vec<u8>),
-    /// Siradan HTTPS adresi.
+    /// An ordinary HTTPS address.
     Https(String),
 }
 
 impl Target {
-    /// Bu hedefin **azami** dogrulama gucu, bayt gelmeden once bilinen.
+    /// The **maximum** verification strength of this target, known before any
+    /// byte arrives.
     ///
-    /// Bir HTTPS hedefinin dogrulanmis olma ihtimali yok; bunu getirmeden once
-    /// bilmek, kullaniciya tiklamadan once soylemeyi mumkun kiliyor.
+    /// An HTTPS target has no chance of being verified, and knowing that before
+    /// fetching makes it possible to tell the user before they click.
     #[must_use]
     pub fn ceiling(&self) -> Strength {
         match self {
@@ -60,17 +61,18 @@ impl Target {
     }
 }
 
-/// Baytlari nereden alacagimiz. Ag bu crate'te degil.
+/// Where the bytes come from. The network is not in this crate.
 pub trait Transport {
-    /// Hedefin baytlarini getir.
+    /// Fetch the target's bytes.
     ///
     /// # Errors
     ///
-    /// Ag hatasi, bulunamayan icerik, ya da boyut sinirinin asilmasi.
+    /// A network error, content that is not found, or the size limit being
+    /// exceeded.
     fn fetch(&self, target: &Target) -> Result<Vec<u8>, String>;
 }
 
-/// Bir getirmenin sonucu: baytlar **ve** ne kadar dogrulandiklari.
+/// The result of a fetch: the bytes **and** how strongly they were verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
     pub bytes: Vec<u8>,
@@ -78,35 +80,38 @@ pub struct Fetched {
 }
 
 impl Fetched {
-    /// Baytlar gosterilebilir mi?
+    /// May the bytes be displayed?
     #[must_use]
     pub fn is_displayable(&self) -> bool {
         self.evidence.is_displayable()
     }
 }
 
-/// Bir sayfanin azami boyutu.
+/// The maximum size of a page.
 ///
-/// `budlum-core`'un `MAX_GATEWAY_CONTENT_BYTES` degeriyle ayni: 10 MiB. Ayni
-/// olmasi tesaduf degil, ikisi de ayni icerigi tasiyor ve iki farkli sinir
-/// birinin digerini kabul ettigi bir bosluk acardi.
+/// It is the same as `budlum-core`'s `MAX_GATEWAY_CONTENT_BYTES`, 10 MiB. That
+/// sameness is not a coincidence: both carry the same content, and two
+/// different limits would open a gap in which one accepts what the other
+/// refuses.
 pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 
-/// Bir hedefi getir ve dogrula.
+/// Fetch a target and verify it.
 ///
-/// Dogrulama **her zaman** yapilir; basarisiz olursa baytlar donmeye devam
-/// eder ama `Evidence` `Refused` olur ve `is_displayable()` false doner.
-/// Baytlari atmak yerine etiketlemek, cagirana neyi reddettigini gosterme
-/// imkani birakiyor (bir hata sayfasi "3 KB geldi, hash tutmadi" diyebilir).
+/// Verification is **always** performed; when it fails, the bytes are still
+/// returned but the `Evidence` becomes `Refused` and `is_displayable()` returns
+/// false. Labelling the bytes rather than discarding them leaves the caller able
+/// to show what was refused, so an error page can say "3 KB arrived, the hash
+/// did not match".
 ///
 /// # Errors
 ///
-/// Tasima hatasi, boyut asimi, ya da cozulemeyen bir hedef tanimlayicisi.
+/// A transport error, a size overrun, or a target identifier that cannot be
+/// parsed.
 pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<Fetched, String> {
     let bytes = transport.fetch(target)?;
     if bytes.len() > MAX_CONTENT_BYTES {
         return Err(format!(
-            "{} icerigi {} bayt; sinir {MAX_CONTENT_BYTES}",
+            "{} content is {} bytes; the limit is {MAX_CONTENT_BYTES}",
             target.scheme(),
             bytes.len()
         ));
@@ -118,38 +123,38 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
                 Evidence::new().with(Claim::new(
                     "bud-fetcher",
                     Strength::Verified,
-                    "baytlarin ContentId'si manifest_id'ye esit",
+                    "the ContentId of the bytes equals the manifest_id",
                 ))
             } else {
                 Evidence::new().with(Claim::new(
                     "bud-fetcher",
                     Strength::Refused,
                     &format!(
-                        "baytlarin ContentId'si {} ama manifest_id {manifest_id}",
+                        "the ContentId of the bytes is {} but the manifest_id is {manifest_id}",
                         ContentId::of(&bytes)
                     ),
                 ))
             }
         }
         Target::Ipfs(s) => {
-            let parsed = cid::parse(s).map_err(|e| format!("CID cozulemedi: {e}"))?;
+            let parsed = cid::parse(s).map_err(|e| format!("the CID could not be parsed: {e}"))?;
             match cid::verify(&parsed, &bytes) {
                 CidVerdict::Verified => Evidence::new().with(Claim::new(
                     "ipfs",
                     Strength::Verified,
-                    "baytlarin sha2-256 ozeti CID ile esit",
+                    "the sha2-256 digest of the bytes equals the CID",
                 )),
                 CidVerdict::DigestMismatch { expected, produced } => {
                     Evidence::new().with(Claim::new(
                         "ipfs",
                         Strength::Refused,
-                        &format!("ozet {produced}, CID {expected}"),
+                        &format!("the digest is {produced}, the CID is {expected}"),
                     ))
                 }
                 CidVerdict::UnsupportedMultiblock => Evidence::new().with(Claim::new(
                     "ipfs",
                     Strength::RpcClaimOnly,
-                    "dag-pb: bu surum UnixFS DAG yurumuyor, baytlar dogrulanmadi",
+                    "dag-pb: this version does not walk a UnixFS DAG, so the bytes are unverified",
                 )),
             }
         }
@@ -157,20 +162,20 @@ pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<
             ArweaveVerdict::Verified => Evidence::new().with(Claim::new(
                 "arweave",
                 Strength::Verified,
-                "baytlardan turetilen data_root islemdekiyle esit",
+                "the data_root derived from the bytes equals the one in the transaction",
             )),
             ArweaveVerdict::RootMismatch { expected, produced } => {
                 Evidence::new().with(Claim::new(
                     "arweave",
                     Strength::Refused,
-                    &format!("data_root {produced}, beklenen {expected}"),
+                    &format!("the data_root is {produced}, expected {expected}"),
                 ))
             }
         },
         Target::Https(url) => Evidence::new().with(Claim::new(
             "https",
             Strength::TransportOnly,
-            &format!("{url}: TLS kimin gonderdigini soyluyor, neyin gonderildigini degil"),
+            &format!("{url}: TLS says who sent it, not what was sent"),
         )),
     };
 
@@ -219,11 +224,12 @@ mod tests {
     #[test]
     fn bud_content_that_does_not_hash_is_refused_and_not_displayed() {
         let id = ContentId::of(b"beklenen");
-        let t = Table::with(&id.to_string(), b"gelen baska seyler");
+        let t = Table::with(&id.to_string(), b"something else arrived");
         let got = fetch_and_verify(&t, &Target::Bud(id)).unwrap();
         assert_eq!(got.evidence.weakest(), Strength::Refused);
         assert!(!got.is_displayable());
-        // Sebep her iki kimligi de tasimali, yoksa kullanici ne oldugunu bilemez.
+        // The reason must carry both identities, or the user cannot tell what
+        // happened.
         assert!(got.evidence.badge().contains(&id.to_string()));
     }
 
@@ -280,6 +286,6 @@ mod tests {
         let id = ContentId::of(&big);
         let t = Table::with(&id.to_string(), &big);
         let err = fetch_and_verify(&t, &Target::Bud(id)).unwrap_err();
-        assert!(err.contains("sinir"), "{err}");
+        assert!(err.contains("limit"), "{err}");
     }
 }
