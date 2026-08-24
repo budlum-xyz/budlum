@@ -291,10 +291,10 @@ mod tests {
 
     #[test]
     fn an_empty_env_var_counts_as_missing() {
-        // Shell'de `set -u` bunu KACIRIR; bos dizgi atanmis sayilir.
+        // In shell `set -u` MISSES this; an empty string counts as assigned.
         std::env::set_var("BUDLUM_DRILL_TEST_EMPTY", "");
-        let err = required("BUDLUM_DRILL_TEST_EMPTY", "bir yol").expect_err("bos reddedilmeli");
-        assert!(err.contains("bos"), "{err}");
+        let err = required("BUDLUM_DRILL_TEST_EMPTY", "a path").expect_err("empty must be refused");
+        assert!(err.contains("is empty"), "{err}");
         std::env::remove_var("BUDLUM_DRILL_TEST_EMPTY");
     }
 

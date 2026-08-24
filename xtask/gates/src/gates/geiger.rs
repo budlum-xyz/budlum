@@ -34,7 +34,7 @@ fn first_party_name(line: &str) -> Option<&str> {
     })?;
     let name = tokens.get(version_at.checked_sub(1)?)?;
     // `verifier-registry` budzero'nun sekizinci uyesi ve isim kalibina
-    // uymuyor; adiyla listelenmezse taranmis olmasina ragmen ucuncu taraf
+    // does not match; if it is not listed by name it is counted as third party
     // sayilirdi.
     (*name == "budlum-core" || *name == "verifier-registry" || name.starts_with("bud-"))
         .then_some(*name)
@@ -42,7 +42,10 @@ fn first_party_name(line: &str) -> Option<&str> {
 
 pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
     if !out.is_file() {
-        return Err(format!("geiger çıktısı yok/boş: {}", out.display()));
+        return Err(format!(
+            "the geiger output is missing/empty: {}",
+            out.display()
+        ));
     }
     let text =
         std::fs::read_to_string(out).map_err(|e| format!("cannot read {}: {e}", out.display()))?;
@@ -85,17 +88,17 @@ pub fn run(_root: &Path, out: &Path) -> Result<String, String> {
     // indistinguishable at the gate.
     if fp_seen == 0 {
         return Err(format!(
-            "cargo-geiger çıktısı first-party crate satırı içermiyor; tarama\n\
-             tamamlanmamış sayılır ve temiz kabul edilmez:\n{text}"
+            "the cargo-geiger output contains no first-party crate line; the scan\n\
+             is treated as incomplete and is not accepted as clean:\n{text}"
         ));
     }
     if !fp_bad.is_empty() {
         return Err(format!(
-            "FAIL: first-party crate'te sıfır-olmayan unsafe kullanımı (forbid(unsafe_code) ile çelişir - sahte rapor olabilir!):\n{fp_bad}"
+            "FAIL: non-zero unsafe usage in a first-party crate (this contradicts forbid(unsafe_code) - the report may be bogus!):\n{fp_bad}"
         ));
     }
     Ok(format!(
-        "OK: first-party unsafe kullanımı = 0 (forbid(unsafe_code) ile tutarlı). {total} satır inceleme (deps bilgi amaçlı):"
+        "OK: first-party unsafe usage = 0 (consistent with forbid(unsafe_code)). {total} lines reviewed (deps are informational):"
     ))
 }
 
@@ -115,11 +118,11 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::create_dir_all(&dir);
     let clean = dir.join("temiz.txt");
     let dirty = dir.join("kirli.txt");
-    // Kanarya, cargo-geiger'in GERÇEK satır biçimini kullanır: beş sayaç,
-    // sonra bir işaret sütunu, en sonda crate adı ve sürümü. Eski kanarya
-    // "budlum-core 0/120" gibi uydurma bir biçim yazıyordu ve kapının
-    // `starts_with` hatası tam da bu yüzden görünmüyordu - kanarya, kapının
-    // sahada okuyacağı şeyi hiç sınamamıştı.
+    // The canary uses cargo-geiger's REAL line format: five counters,
+    // then a marker column, and the crate name and version at the end. The old canary
+    // wrote an invented format like "budlum-core 0/120" and the gate's
+    // `starts_with` bug was invisible for exactly that reason - the canary had never
+    // exercised what the gate would read in the field.
     std::fs::write(
         &clean,
         "0/0        0/0          0/0    0/0     0/0      ?  budlum-core 0.1.0\n\
@@ -136,8 +139,8 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
 
     let empty = dir.join("bos.txt");
-    // Sayaçsız bir satır: tarama ölmüş demektir. Crate adının metinde geçiyor
-    // Olması yetmez, satırın rapor satırı olması gerekir.
+    // A line without counters means the scan died. It is not enough for the crate name
+    // to occur in the text, the line must be a report line.
     std::fs::write(&empty, "error: could not compile budlum-core\n").map_err(|e| e.to_string())?;
 
     let dirty_failed = run(&dir, &dirty).is_err();
@@ -146,18 +149,18 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
 
     if !dirty_failed {
-        return Err(String::from("canary: first-party unsafe (2) geçti"));
+        return Err(String::from("canary: first-party unsafe (2) passed"));
     }
     if !clean_passed {
-        return Err(String::from("canary: temiz çıktı reddedildi"));
+        return Err(String::from("canary: clean output was refused"));
     }
     if !empty_failed {
         return Err(String::from(
-            "canary: first-party satırı olmayan çıktı temiz sayıldı (fail-open)",
+            "canary: output with no first-party line was counted as clean (fail-open)",
         ));
     }
     Ok(String::from(
-        "kanarya OK: first-party unsafe FAIL, temiz PASS, satırsız çıktı FAIL.",
+        "canary OK: first-party unsafe FAILs, clean PASSes, output with no line FAILs.",
     ))
 }
 
@@ -183,8 +186,8 @@ mod tests {
         )
         .unwrap();
         assert!(run(&dir, &f).is_err());
-        // Derleme gürültüsü first-party satırı sayılmaz: `Checking bud-isa
-        // v0.1.0 (...)` satırında crate adı geçer ama sayaç yoktur.
+        // Build noise is not a first-party line: in the line `Checking bud-isa
+        // v0.1.0 (...)` the crate name occurs but there is no counter.
         std::fs::write(
             &f,
             "    Checking bud-isa v0.1.0 (/w/budzero/bud-isa)\n    Checking bud-vm v0.1.0 (/w)\n",
@@ -192,7 +195,7 @@ mod tests {
         .unwrap();
         assert!(
             run(&dir, &f).is_err(),
-            "derleme çıktısı tamamlanmış tarama sayılmamalı"
+            "build output must not count as a completed scan"
         );
         // No first-party row at all: an unfinished scan, not a clean one.
         std::fs::write(&f, "error: linking with cc failed\n").unwrap();

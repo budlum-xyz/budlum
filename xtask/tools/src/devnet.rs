@@ -5,15 +5,15 @@
 //! # Shell surumunun gercek sorunu
 //!
 //! Betik `rm -rf ./data/node1.db ./data/node2.db` ile basliyordu ve
-//! **calisma dizinine gore** siliyordu. Depo kokunden degil de baska bir
-//! yerden cagrilirsa yanlis `data/` dizinini siler; hicbir kontrol yoktu.
+//! relative to the **working directory**. Called from somewhere other than the
+//! repository root it deletes the wrong `data/` directory; there was no check at all.
 //! Burada silme hedefi depo kokune sabitlenmis ve hedefin gercekten bir
 //! devnet veri dizini oldugu dogrulaniyor.
 //!
 //! Ikinci sorun: betigin son satiri kullaniciya `[y/N]` diye soruyordu ama
-//! cevabi **hicbir zaman okumuyordu**. Yani soru bir yalandi; betik her
-//! zaman yalniz komut satirlarini yazdirip cikiyordu. Burada soru yok,
-//! yapilan is yaziliyor.
+//! but **never read** the answer. So the question was a lie; the script always
+//! just printed the command lines and exited. Here there is no question,
+//! the work being done is written out.
 
 use std::path::{Path, PathBuf};
 
@@ -25,8 +25,8 @@ pub struct NodeSpec {
     pub dial: Option<String>,
 }
 
-/// Devnet veri dizininin altinda beklenen dosyalar. Silme islemi ancak
-/// hedefte bunlardan biri varsa ya da dizin bossa yapilir; boylece yanlis
+/// The files expected under the devnet data directory. A delete happens only
+/// if the target holds one of them or the directory is empty; that way a wrong
 /// bir `data/` dizini silinemez.
 const EXPECTED: &[&str] = &["node1.db", "node2.db", "validators.json"];
 
@@ -41,7 +41,7 @@ pub fn prepare(root: &Path) -> Result<String, String> {
 
     if data.exists() {
         if !data.is_dir() {
-            return Err(format!("{} bir dizin degil", data.display()));
+            return Err(format!("{} is not a directory", data.display()));
         }
         // Silmeden once bak: burasi gercekten devnet verisi mi? Shell
         // surumu bunu sormuyordu ve calisma dizinine gore siliyordu.
@@ -57,9 +57,9 @@ pub fn prepare(root: &Path) -> Result<String, String> {
         }
         if !foreign.is_empty() {
             return Err(format!(
-                "{} icinde beklenmeyen girdi(ler) var: {}. \
-                 Bu bir devnet veri dizinine benzemiyor ve silinmeyecek. \
-                 Shell surumu bunu sormadan siliyordu.",
+                "{} holds unexpected entr(ies): {}. \
+                 This does not look like a devnet data directory and will not be deleted. \
+                 The shell version deleted it without asking.",
                 data.display(),
                 foreign.join(", ")
             ));
@@ -81,8 +81,8 @@ pub fn prepare(root: &Path) -> Result<String, String> {
 
     let validators = data.join("validators.json");
     // Shell surumu bu JSON'u bir heredoc'tan yaziyordu; bicimi bozuk bir
-    // heredoc sessizce gecersiz JSON uretirdi. Burada dizgi sabit ve
-    // yazildiktan sonra en azindan bicimsel olarak geri okunuyor.
+    // a heredoc would silently produce invalid JSON. Here the string is fixed and
+    // after writing it is read back at least structurally.
     let body = "{\n  \"validators\": [\n    \"12D3KooWNode1ValidatorAddress12345\"\n  ]\n}\n";
     std::fs::write(&validators, body)
         .map_err(|e| format!("{} yazilamadi: {e}", validators.display()))?;
@@ -114,7 +114,7 @@ pub fn node_specs(root: &Path) -> Vec<NodeSpec> {
             dial: None,
         },
         NodeSpec {
-            label: "Dugum 2 (gozlemci, dugum 1'e baglanir)",
+            label: "Node 2 (observer, dials node 1)",
             port: 4002,
             db: data.join("node2.db"),
             dial: Some("/ip4/127.0.0.1/tcp/4001".to_string()),
@@ -146,32 +146,32 @@ pub fn command_line(spec: &NodeSpec, validators: &Path) -> String {
 pub fn self_test() -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("budlum-devnet-canary-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(tmp.join("data")).map_err(|e| format!("kanarya dizini: {e}"))?;
+    std::fs::create_dir_all(tmp.join("data")).map_err(|e| format!("canary directory: {e}"))?;
 
     // Yabanci bir dosya koy: silinmemeli.
     let precious = tmp.join("data").join("uretim-verisi.db");
-    std::fs::write(&precious, b"silinmemeli").map_err(|e| format!("kanarya dosyasi: {e}"))?;
+    std::fs::write(&precious, b"must-not-be-deleted").map_err(|e| format!("canary file: {e}"))?;
 
     let refused = prepare(&tmp);
     if refused.is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(
-            "KANARYA DUSTU: yabanci dosya iceren bir data/ dizini temizlendi; \
-             shell surumunun kor `rm -rf`'i geri gelmis."
+            "CANARY FELL: a data/ directory holding a foreign file was cleaned; \
+             the blind `rm -rf` of the shell version is back."
                 .to_string(),
         );
     }
     if !precious.is_file() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err("KANARYA DUSTU: yabanci dosya silindi".to_string());
+        return Err("CANARY FELL: a foreign file was deleted".to_string());
     }
 
-    // Temiz bir dizinde gecmeli.
-    std::fs::remove_file(&precious).map_err(|e| format!("kanarya temizligi: {e}"))?;
-    prepare(&tmp).map_err(|e| format!("temiz dizinde gecmeliydi: {e}"))?;
+    // It must pass on a clean directory.
+    std::fs::remove_file(&precious).map_err(|e| format!("canary cleanup: {e}"))?;
+    prepare(&tmp).map_err(|e| format!("it should have passed on a clean directory: {e}"))?;
     if !tmp.join("data").join("validators.json").is_file() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err("validators.json yazilmadi".to_string());
+        return Err("validators.json was not written".to_string());
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -186,13 +186,13 @@ mod tests {
     fn a_foreign_file_stops_the_wipe() {
         let tmp = std::env::temp_dir().join("budlum-devnet-foreign");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("data")).expect("dizin");
-        let precious = tmp.join("data").join("onemli.db");
-        std::fs::write(&precious, b"x").expect("dosya");
+        std::fs::create_dir_all(tmp.join("data")).expect("directory");
+        let precious = tmp.join("data").join("important.db");
+        std::fs::write(&precious, b"x").expect("file");
 
-        let err = prepare(&tmp).expect_err("yabanci dosya reddedilmeli");
-        assert!(err.contains("beklenmeyen girdi"), "{err}");
-        assert!(precious.is_file(), "yabanci dosya durmali");
+        let err = prepare(&tmp).expect_err("a foreign file must be refused");
+        assert!(err.contains("unexpected entr"), "{err}");
+        assert!(precious.is_file(), "the foreign file must remain");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -201,7 +201,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("budlum-devnet-clean");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).expect("dizin");
-        let msg = prepare(&tmp).expect("temiz agac hazirlanmali");
+        let msg = prepare(&tmp).expect("a clean tree must be prepared");
         assert!(msg.contains("devnet hazir"), "{msg}");
         assert!(tmp.join("data").join("validators.json").is_file());
         let _ = std::fs::remove_dir_all(&tmp);
@@ -213,8 +213,8 @@ mod tests {
         assert_eq!(specs.len(), 2);
         assert!(specs[0].dial.is_none(), "validator kimseyi aramaz");
         let dial = specs[1].dial.as_deref().expect("gozlemci aramali");
-        assert!(dial.contains("4001"), "dugum 1'in portuna: {dial}");
-        assert_eq!(specs[1].port, 4002, "iki dugum ayni portu paylasamaz");
+        assert!(dial.contains("4001"), "to node 1's port: {dial}");
+        assert_eq!(specs[1].port, 4002, "two nodes cannot share the same port");
     }
 
     #[test]
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn self_test_passes() {
-        let msg = self_test().expect("kanarya gecmeli");
+        let msg = self_test().expect("the canary must pass");
         assert!(msg.contains("OK"), "{msg}");
     }
 }
