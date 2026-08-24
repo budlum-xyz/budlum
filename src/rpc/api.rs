@@ -442,7 +442,8 @@ pub trait BudlumApi {
     /// two shards of trouble?". Both lists come back separately: an object
     /// below `k` cannot be repaired at all, and must not read as one that can.
     #[method(name = "bud_storageRepairBand")]
-    async fn storage_repair_band(&self, margin: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
+    async fn storage_repair_band(&self, margin: u32)
+        -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Query active storage operators (STORAGE_OPERATOR RoleId=5).
     /// Previously documented as ghost RPC, now implemented.
