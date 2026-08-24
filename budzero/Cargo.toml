@@ -14,13 +14,13 @@ resolver = "2"
 [workspace.package]
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 
-# Panik kapisi. Kok manifestteki ile ayni gerekce, ayri workspace oldugu icin
-# ayrica yazilmasi gerekiyor: asagidaki `panic = "abort"` ile birlikte, uretim
-# yolundaki her `unwrap`/`expect` tetiklenebilirse bir canlilik acigidir - bu
-# crate'leri kosan dogrulayici, tek bozuk girdiyle olur. Olcum: kapi
-# acilmadan once 127 ihlal vardi (bud-compiler/parser.rs 81, plonky3_prover 14,
-# bud_stark/prover.rs 4, ...), hepsi kapatildi ya da gerekcesiyle muaf tutuldu.
-# Testler muaf: orada panik dogru davranistir.
+# A panic gate. The same reason as in the root manifest; because this is a separate
+# workspace it must be written again: together with the `panic = "abort"` below, a
+# every `unwrap`/`expect` on that path is a liveness hole if it can be triggered - a
+# verifier running the production crates dies on a single malformed input. Measurement: the
+# gate had 127 violations before it was opened (bud-compiler/parser.rs 81, plonky3_prover 14,
+# bud_stark/prover.rs 4, ...); all were closed or exempted with a reason.
+# Tests are exempt: a panic is the right behaviour there.
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

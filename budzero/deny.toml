@@ -1,8 +1,8 @@
-# budzero/deny.toml: BudZero/BudZKVM supply-chain kapısı
+# budzero/deny.toml: the BudZero/BudZKVM supply chain gate
 #
-# Kökteli deny.toml ile aynı politika; BudZero grafiği kendi matrix adımında
-# denetlenir. Şema cargo-deny 0.20+'a güncellendi (eski anahtarlar kaldırıldı;
-# davranış birebir korundu: allow dışı lisans = FAIL, bilinmeyen kaynak = FAIL).
+# The same policy as the root deny.toml; the BudZero graph is checked in its own
+# matrix step. The schema was updated to cargo-deny 0.20+ (the old keys were removed;
+# the behaviour is preserved exactly: a license outside allow = FAIL, an unknown source = FAIL).
 
 [graph]
 targets = []
@@ -17,10 +17,10 @@ allow = [
     "ISC",
     "OpenSSL",
     "Zlib",
-    # Kökle aynı gerekçe: bud-node → libp2p → idna_adapter zinciri icu_*
-    # crate'lerini getirir; Unicode-3.0 OSI-onaylı permissive lisanstır.
+    # The same reason as the root: the bud-node -> libp2p -> idna_adapter chain brings in
+    # the icu_* crates; Unicode-3.0 is an OSI approved permissive license.
     "Unicode-3.0",
-    # PolyForm Shield 1.0.0: kök repoyla aynı - workspace üyesi lisansı.
+    # PolyForm Shield 1.0.0: the same as the root repository - the workspace member license.
     "LicenseRef-PolyForm-Shield-1.0.0",
 ]
 confidence-threshold = 0.8
@@ -53,12 +53,12 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = ["https://github.com/libp2p/rust-libp2p"]
 
 [advisories]
-# Kökle aynı politika (gerekçeler ../../deny.toml'da ayrıntılı):
-# unmaintained → fail değil (cargo audit uyarılarıyla görünür kalır),
-# unsound → doğrudan bağımlılıkta FAIL (sıkı).
+# The same policy as the root (the reasons are detailed in ../../deny.toml):
+# unmaintained -> not a fail (it stays visible through the cargo audit warnings),
+# unsound -> a FAIL in a direct dependency (strict).
 unmaintained = "none"
 unsound = "workspace"
 ignore = [
-    { id = "RUSTSEC-2026-0118", reason = "HTTP/DNSSEC yolu kodda kullanılmaz (grep: DnssecDnsHandle|dnssec = 0 eşleşme); libp2p-mdns DNSSEC doğrulamaz → ulaşılamaz. Yükseltme libp2p 0.55 hattında imkânsız (libp2p-mdns ^0.25.0-alpha.4 pini). Ayrıntı: ../../deny.toml" },
-    { id = "RUSTSEC-2026-0119", reason = "Tetikleme saldırganın aynı L2 multicast domain'inde olmasını gerektirir; mainnet/testnet config'inde mdns_enabled=false. Etki LAN-komşuluğu DoS. libp2p yükseltmesiyle kapanacak. Ayrıntı: ../../deny.toml" },
+    { id = "RUSTSEC-2026-0118", reason = "the HTTP/DNSSEC path is not used in the code (grep: DnssecDnsHandle|dnssec = 0 matches); libp2p-mdns does not validate DNSSEC -> unreachable. An upgrade is impossible on the libp2p 0.55 line (the libp2p-mdns ^0.25.0-alpha.4 pin). Detail: ../../deny.toml" },
+    { id = "RUSTSEC-2026-0119", reason = "triggering it requires the attacker to be in the same L2 multicast domain; mdns_enabled=false in the mainnet/testnet config. The impact is a LAN-neighbourhood DoS. It closes with the libp2p upgrade. Detail: ../../deny.toml" },
 ]

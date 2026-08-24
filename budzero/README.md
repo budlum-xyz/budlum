@@ -66,7 +66,7 @@ cargo test --workspace
 
 ## Soundness work (honest status)
 
-Bu crate seti **bu monorepo içindeki** [`budzero/`](./) ağacıdır (ayrı `budlum-xyz/BudZero` checkout'u yok, kaynak burası). **Z-B:** `proves_verify_merkle_valid_64_depth` yeşil. VerifyMerkle **mainnet-gated** (`MainnetActivation`, default off), staged ceremony rollout; eski experimental-ISA kilidiyle aynı değil.
+This crate set is the [`budzero/`](./) tree **inside this monorepo** (there is no separate `budlum-xyz/BudZero` checkout; this is the source). **Z-B:** `proves_verify_merkle_valid_64_depth` yeşil. VerifyMerkle **mainnet-gated** (`MainnetActivation`, default off), staged ceremony rollout; eski experimental-ISA kilidiyle aynı değil.
 
 | Item | Status |
 | --- | --- |
@@ -110,10 +110,10 @@ CI enforces:
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace`: **124 test geçerli sayım** (CI-kanıtlı, 2026-07-18)
+3. `cargo test --workspace`: **124 tests, the valid count** (CI evidenced, 2026-07-18)
 
-Modül-ayrımı kuralı: bu sayı kök README'nin dashboard tablosunda
-kendi satırında raporlanır; toplam Core sayısına (755 lib) karışmaz.
+The module separation rule: this number is reported on its own row in the root
+README dashboard table; it is not mixed into the total Core count (755 lib).
 
 No `#[allow(clippy::…)]` as a substitute for fixing lints on new work.
 

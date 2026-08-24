@@ -2,7 +2,7 @@
 name = "bud-vm"
 version = "0.1.0"
 edition = "2021"
-# : cargo-deny lisans kapısı için kök [workspace.package] değerini miras al
+# Inherit the root [workspace.package] value for the cargo-deny license gate
 license.workspace = true
 
 [lints]

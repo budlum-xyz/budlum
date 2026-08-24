@@ -1,95 +1,95 @@
-# budzero/osv-scanner.toml - BudZero workspace'i için OSV istisnaları
+# budzero/osv-scanner.toml - OSV exceptions for the BudZero workspace
 #
-# BudZero ayrı bir Cargo workspace'idir (kendi Cargo.lock'u var), bu yüzden
-# osv-scanner onu kök config ile değil kendi yanındaki config ile eşler.
-# İçerik kök osv-scanner.toml ile bilinçli olarak aynı tutulur: aynı bağımlılık
-# ailesi, aynı gerekçeler. Biri güncellenirse diğeri de güncellenmeli.
+# BudZero is a separate Cargo workspace (it has its own Cargo.lock), so
+# osv-scanner matches it against the config beside it, not the root config.
+# The content is deliberately kept identical to the root osv-scanner.toml: the same
+# dependency family, the same reasons. If one is updated the other must be too.
 #
-# NEDEN AYRI BİR TARAYICI: cargo-audit ve cargo-deny yalnız RustSec advisory
-# veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
-# RustSec'te KARŞILIĞI OLMAYAN kayıtları da görür. Bu teorik bir fark değil:
-# ilk koşuda CVE-2026-32314 / GHSA-vxx9-2994-q338 (yamux, CVSS 8.7) yakalandı,
-# aynı ağaçta `cargo audit` "0 vulnerabilities found" diyordu çünkü bu kaydın
-# RustSec karşılığı yok (rustsec/advisory-db/crates/yamux → 404).
+# WHY A SEPARATE SCANNER: cargo-audit and cargo-deny read only the RustSec advisory
+# database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and it also sees
+# records that have NO COUNTERPART in RustSec. This is not a theoretical difference:
+# the first run caught CVE-2026-32314 / GHSA-vxx9-2994-q338 (yamux, CVSS 8.7),
+# while on the same tree `cargo audit` said "0 vulnerabilities found" because this record
+# has no RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404).
 #
-# POLİTİKA: burada listelenmeyen her bulgu FAIL'dir. Her istisna, kodda
-# neden ERİŞİLEMEZ olduğunun kanıtıyla yazılır (VEX mantığı); "gürültü" ya da
-# "şimdilik" gerekçesi kabul edilmez. Erişilebilir bir bulgu ignore edilmez,
-# bağımlılık yükseltilir.
+# POLICY: every finding not listed here is a FAIL. Each exception is written with
+# evidence of why it is UNREACHABLE in the code (VEX logic); "noise" or
+# "for now" are not accepted as reasons. A reachable finding is not ignored,
+# the dependency is upgraded.
 
 [[IgnoredVulns]]
 id = "GHSA-vxx9-2994-q338"   # CVE-2026-32314 - yamux remote panic (DoS), CVSS 8.7
 reason = """
-Erişilemez: yamalı kod yolu kullanılıyor, yamasız olan yalnız derleniyor.
+Unreachable: the patched code path is in use, the unpatched one is only compiled.
 
-libp2p-yamux 0.47.0 iki yamux sürümünü birden bağımlılık olarak çeker
-(yamux012 = 0.12.1, yamux013 = 0.13.10) ve hangisinin çalışacağını Config
-seçer. Upstream kaynağında `impl Default for Config` -> `Config013`, yani
-`yamux::Config::default()` 0.13.10 bağlantısını kurar. Budlum swarm'ı
-src/network/node.rs içinde tam olarak `yamux::Config::default` veriyor;
-depoda 0.12 yoluna geçiren tek API olan `WindowUpdateMode` / `client()` /
-`server()` çağrısı hiç yok (grep ile doğrulandı).
+libp2p-yamux 0.47.0 pulls in two yamux versions as dependencies at once
+(yamux012 = 0.12.1, yamux013 = 0.13.10) and Config decides which one runs.
+In the upstream source `impl Default for Config` -> `Config013`, so
+`yamux::Config::default()` establishes the 0.13.10 connection. The Budlum swarm
+passes exactly `yamux::Config::default` inside src/network/node.rs;
+the only APIs that switch to the 0.12 path, `WindowUpdateMode` / `client()` /
+`server()`, do not appear in the repository at all (verified with grep).
 
-Advisory'nin düzeltilmiş sürümü 0.13.10'dur ve çalıştırdığımız sürüm zaten
-0.13.10'dur. Savunmasız 0.12.1 grafikte yalnızca libp2p-yamux'un ikili-sürüm
-tasarımı yüzünden duruyor; hiçbir bağlantı onun üzerinden kurulmuyor.
+The advisory's fixed version is 0.13.10 and the version we run is already
+0.13.10. The vulnerable 0.12.1 stays in the graph only because of libp2p-yamux's
+dual-version design; no connection is established through it.
 
-Takip: libp2p-yamux 0.12 desteğini düşürdüğünde bu istisna silinir. Eğer
-node.rs'te yamux yapılandırması değişir ve 0.12 yoluna geçilirse bu gerekçe
-geçersizdir - o durumda istisna kaldırılmalı, bulgu gerçek hale gelir.
+Follow-up: this exception is deleted once libp2p-yamux drops 0.12 support. If the
+yamux configuration in node.rs changes and moves to the 0.12 path this reason
+is void - the exception must then be removed and the finding becomes real.
 """
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0118"   # hickory-proto NSEC3 DoS
 reason = """
-Kök .quality/osv-scanner.toml ile aynı kayıt; gerekçe orada tam haliyle durur.
+The same record as the root .quality/osv-scanner.toml; the full reason lives there.
 
-NSEC3 doğrulama döngüsü yalnız hickory `dnssec` özelliğiyle derlendiğinde var
-olur. Ölçüm (2026-07-27): aktif hickory-proto özellikleri std/tokio/futures-io;
-dnssec YOK, mdns YOK.
+The NSEC3 validation loop exists only when hickory is compiled with the `dnssec`
+feature. Measurement (2026-07-27): the active hickory-proto features are
+std/tokio/futures-io; NO dnssec, NO mdns.
 
-DÜZELTME: eski gerekçe "yalnız opsiyonel p2p-mdns ile çözülür" diyordu; libp2p
-`dns` özelliği açıldığından beri yanlış - hickory libp2p-dns üzerinden default
-derlemede. Erişilemezlik sürüyor, sebebi DNSSEC'in derlenmemesi.
+CORRECTION: the old reason said "resolved only with the optional p2p-mdns"; that has
+been wrong since the libp2p `dns` feature was turned on - hickory is in the default
+build through libp2p-dns. Unreachability still holds; the reason is that DNSSEC is not compiled.
 
-Premis src/tests/advisory_reachability.rs ile kilitli.
+The premise is locked by src/tests/advisory_reachability.rs.
 """
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0119"   # hickory-proto name-compression parser
 reason = """
-RUSTSEC-2026-0118 ile aynı ölçüm: savunmasız ayrıştırıcı `dnssec` olmadan
-derlenmiyor. Aynı düzeltme notu geçerli.
+The same measurement as RUSTSEC-2026-0118: the vulnerable parser does not compile
+without `dnssec`. The same correction note applies.
 """
 
 [[IgnoredVulns]]
 id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
 reason = """
-DNS mesajı üretirken quadratic CPU tüketimi - tetiklemek için yanıt encode
-etmek, yani DNS SUNMAK gerekir. Budlum yalnız çözümlüyor (libp2p-dns istemci
-tarafı resolver); ağaçta hickory-server yok. Premis
-src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree ile kilitli.
-Yamalı sürüm 0.26.1, libp2p ^0.25.2'ye pinli olduğu için upstream bekleniyor.
+Quadratic CPU consumption while producing a DNS message - triggering it requires
+encoding a response, that is SERVING DNS. Budlum only resolves (the libp2p-dns
+client side resolver); there is no hickory-server in the tree. The premise is locked
+by src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree.
+The patched version is 0.26.1; because libp2p is pinned to ^0.25.2, upstream is awaited.
 """
 
-# ── "unmaintained" sınıfı bilgilendirici kayıtlar ────────────────────────────
-# Aşağıdakiler zafiyet değil, bakım durumu uyarısıdır (RUSTSEC-*-XXXX
-# "unmaintained"). Repo politikası bunları deny.toml'da `unmaintained = "none"`
-# ile FAIL saymaz; görünürlük CI'daki cargo audit raporundan sağlanır ve
-# org roadmap'te izlenir. OSV bunları da zafiyet gibi döndürdüğü için burada
-# aynı politikayı yansıtıyoruz, aksi halde iki araç birbiriyle çelişirdi.
-# Not: bu dosyada yalnız BudZero grafiğinde GERÇEKTEN görünen kayıtlar tutulur;
-# osv-scanner kullanılmayan istisnaları "unused ignores" olarak raporlar ve
-# ölü istisna birikmesi kapının güvenilirliğini aşındırır.
+# -- informational records of the "unmaintained" class ----------------------
+# The following are not vulnerabilities but maintenance status warnings (RUSTSEC-*-XXXX
+# "unmaintained"). Repository policy does not count them as a FAIL through
+# `unmaintained = "none"` in deny.toml; visibility comes from the cargo audit report in CI and
+# they are tracked on the org roadmap. Because OSV returns them like vulnerabilities we
+# mirror the same policy here, otherwise the two tools would contradict each other.
+# Note: only records that REALLY appear in the BudZero graph are kept in this file;
+# osv-scanner reports unused exceptions as "unused ignores" and an accumulation of
+# dead exceptions erodes the gate's credibility.
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0089"
-reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) - deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
+reason = "atomic-polyfill unmaintained (a maintenance warning, not a vulnerability) - the OSV mirror of the deny.toml `unmaintained = \"none\"` policy."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
-reason = "bincode 1.x unmaintained - org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
+reason = "bincode 1.x unmaintained - tracked on the org roadmap (the bincode 2 migration touches consensus critical byte formats, a separate task)."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"
-reason = "paste unmaintained (bakım uyarısı, zafiyet değil); proc-macro, runtime yüzeyi yok."
+reason = "paste unmaintained (a maintenance warning, not a vulnerability); a proc-macro, no runtime surface."
 

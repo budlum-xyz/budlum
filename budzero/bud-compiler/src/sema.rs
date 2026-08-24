@@ -116,10 +116,10 @@ pub struct SemanticAnalyzer {
     /// Sozlesmenin `storage { ... }` blogunda bildirilen alanlarin tipleri.
     ///
     /// Erisim `storage::ad` sozdizimiyle olur ve `Stmt::StorageWrite` /
-    /// `Expr::StorageRead` olarak ayristirilir, bu yuzden alanlar yerel
+    /// is parsed as `Expr::StorageRead`, so the fields are
     /// degisken ortamina konmaz. Burada tutulmalarinin nedeni tiplerin bir
     /// kez dogrulanmasi: bir alanin tip adindaki yazim hatasi, struct alan
-    /// tiplerinde oldugu gibi, sessizce hayali bir struct tipine donusmesin.
+    /// so it does not silently turn into an imaginary struct type, as with struct field types.
     pub storage: HashMap<String, Type>,
     pub current_func_ret: Type,
 }
@@ -165,12 +165,12 @@ impl SemanticAnalyzer {
             }
         }
 
-        // 1a-bis. Storage alan tiplerinin gercekten var oldugunu dogrula.
+        // 1a-bis. Verify that the storage field types really exist.
         // `Type::from_str` primitif olmayan HER adi `Type::Struct(ad)`
         // yapar, dolayisiyla `count: Uint644` gibi bir yazim hatasi hayali
-        // bir struct tipine donusur ve sessizce kabul edilirdi - struct alan
-        // tiplerinde kapatilan acigin ayni sinifi. Struct kayit gecisinden
-        // sonra kosar ki bir alan sonradan bildirilen bir struct'a atifta
+        // would turn into a struct type and be accepted silently - the same class as the
+        // hole closed for struct field types. It runs after the struct registration pass
+        // so that a field can refer to a struct declared later.
         // bulunabilsin.
         for field in &contract.storage {
             if let Ok(ty) = Type::from_str(&field.ty) {
@@ -632,24 +632,24 @@ impl SemanticAnalyzer {
                         // value that is not the sum of anything. Equality and
                         // assignment stay allowed, which is what these types
                         // are for.
-                        // `/` alan bolmesidir, tam sayi bolmesi degil.
+                        // `/` is field division, not integer division.
                         //
-                        // VM `Opcode::Div`'i Goldilocks carpimsal tersi olarak
+                        // The VM executes `Opcode::Div` as the Goldilocks multiplicative
                         // yurutuyor (`bud-vm`: `rs1 * rs2^-1 mod p`) ve AIR
                         // kisiti da bunu sabitliyor: `rd * rs2 = rs1`. Bu ZK
-                        // devresinde dogru olan secim - tam sayi bolmesi
-                        // bolum ve kalan icin ayri range-check gerektirir.
+                        // inverse - the right choice in a ZK circuit; integer division
+                        // needs separate range checks for the quotient and the remainder.
                         //
-                        // Ama `u64` yazan gelistirici tam sayi bolmesi bekler.
-                        // Olculdu: `7 / 2` alan icinde 9223372034707292164
-                        // veriyor, 3 degil. Bu tur bir sonuc uzerine kosul
-                        // kuran her sozlesme sessizce yanlis dallanir.
+                        // But a developer writing `u64` expects integer division.
+                        // Measured: `7 / 2` gives 9223372034707292164 in the field,
+                        // not 3. Every contract that builds a condition on such a
+                        // result branches silently wrongly.
                         //
-                        // Bu yuzden `/` yalnizca `field` uzerinde serbest:
+                        // So `/` is free only over `field`:
                         // orada semantik zaten alan aritmetigidir ve yazan
-                        // kisi bunu bilerek secmistir. `u64` icin reddediliyor.
-                        // Bolme sonucunun sifira bolmede 0 olmasi da ayni
-                        // sebeple yalnizca `field` baglaminda anlamlidir
+                        // whoever writes it chose it deliberately. It is refused for `u64`.
+                        // A division result of 0 on division by zero is likewise
+                        // meaningful only in a `field` context, for the same reason
                         // (AIR bunu acikca kisitliyor).
                         if matches!(op, BinOp::Div) && matches!(ty, Type::U64) {
                             errors.push(CompileError::SemanticError(String::from(

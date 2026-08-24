@@ -11,40 +11,44 @@
 //! - Evidence-gated slashing: only consensus-verified reports are acted on.
 //! - Deterministic `state_root` for snapshot/consensus commitment.
 //!
-//! WIRING: unwired - olculdu, ve gerekce eskisinden dar.
+//! WIRING: unwired - measured, and the reason is narrower than it used to be.
 //!
-//! Onceki gerekce "asagi akistaki dogrulayicilar tarafindan tuketilen ayri
-//! bir crate" diyordu. Bunun karsiligi yok: `budzero` calisma alaninda hicbir
-//! crate buna bagimli degil ve paket yayimlanmiyor. Bugun bu kodu calistiran
-//! tek sey kendi testleri.
+//! The previous reason said "a separate crate consumed by downstream
+//! verifiers". That has no counterpart: no crate in the `budzero` workspace
+//! depends on it and the package is not published. Today the only thing that
+//! runs this code is its own tests.
 //!
-//! Silinmiyor, cunku islevsiz degil: cekirdekteki ikizin
-//! (`src/registry/permissionless.rs`) **bagimsiz ikinci ifadesidir**. Ayni
-//! rol yasam dongusu iki kez, iki ayri kod tabaninda yazilmis durumda ve
-//! `slash_expression` kapisi ikisinin kesme aritmetiginin ayrismasini
-//! engelliyor; ayna testler iki tarafta da kosuyor. Bir hesabin iki bagimsiz
-//! yazimi, tek yazimin sessizce yanlis olmasini zorlastirir - Wheeler'in
-//! ikili derleme fikrinin kucuk olcekli hali.
+//! It is not deleted, because it is not functionless: it is the **independent
+//! second expression** of the twin in the core (`src/registry/permissionless.rs`).
+//! The same role lifecycle is written twice, in two separate code bases, and the
+//! `slash_expression` gate prevents their slashing arithmetic from diverging;
+//! the mirror tests run on both sides. Two independent writings of one account
+//! make it harder for a single writing to be silently wrong - a small scale
+//! version of Wheeler's double compiling idea.
 //!
-//! Yani bu crate bir tuketici bekleyen kutuphane degil, cekirdegin
-//! carpraz denetimi. Iddia buydu diye yaziliyor: bir gun gercek bir tuketici
-//! cikarsa gerekce degisir, cikmazsa da kod yalan soylemiyor olur.
+//! So this crate is not a library waiting for a consumer but a cross check of
+//! the core. It is written down because that was the claim: if a real consumer
+//! ever appears the reason changes, and if it does not, the code is still not
+//! lying.
 //!
-//! ## Cekirdekteki ikizle iliski (`src/registry/permissionless.rs`)
+//! ## The relationship with the twin in the core (`src/registry/permissionless.rs`)
 //!
-//! Iki kayit defteri ayni rol yasam dongusunu iki ayrimda anlatir: bu crate
-//! asagi akisa (dogrulayici musterilerine) sunulur, cekirdekteki dugumun
-//! konsensus durumudur. Ayni soruya iki farkli cevap bir kez olculdu ve kapatildi
-//! (tekrar kesme: `Ok(penalty: 0)` vs `Err(AlreadySlashed)`); ayni sinifin
-//! geri gelmemesi icin kural: kesme/unbonding semantigindeki her degisiklik
-//! IKISINE birden uygulanir ve ayna testler iki tarafta da kosar.
+//! The two registries state the same role lifecycle in two separations: this
+//! crate is offered downstream (to verifier clients), the one in the core is the
+//! node's consensus state. Two different answers to the same question were
+//! measured once and closed (repeat slashing: `Ok(penalty: 0)` versus
+//! `Err(AlreadySlashed)`); the rule that keeps the class from returning: every
+//! change in the slashing/unbonding semantics is applied to BOTH and the mirror
+//! tests run on both sides.
 //!
-//! Bilincli birakilan fark (2026-08-22: ikiydi, G0 karariyla biri kapatildi):
-//! - Sifir cezali kesme artik iki tarafta da kayda girer (cekirdek
-//!   hizalandi; denetim izi butunlugu kanonik - olay oldu, kayda girdi).
-//! - Cekirdek taraf reddedilen kesmeyi `tracing::warn` ile loglar; bu crate
-//!   loglama bagimliligi tasimaz, `Ok(None)` donusunu izlemek cagiranin
-//!   sorumlulugundadir.
+//! Deliberately kept differences (2026-08-22: there were two, one was closed by
+//! decision G0):
+//! - A zero penalty slashing is now recorded on both sides (the core was
+//!   aligned; audit trail integrity is canonical - the event happened, it went
+//!   into the record).
+//! - The core side logs a refused slashing with `tracing::warn`; this crate
+//!   carries no logging dependency, and tracking the `Ok(None)` return is the
+//!   caller's responsibility.
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingReport};
@@ -60,10 +64,10 @@ pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
 /// Default number of epochs that unbonded stake stays locked.
 pub const UNBONDING_EPOCHS: u64 = 7;
 
-/// Kesme kayitlari icin tavan: canli durumda en yeni kayitlar tutulur,
+/// The cap for slashing records: in live state the newest records are kept,
 /// eskileri arsiv katmanina (blok gecmisi) aittir. Ana agactaki ikiz
-/// (`src/registry/permissionless.rs::MAX_SLASHING_HISTORY`) ile ayni deger;
-/// iki defter farkli tavanlara sahipken ayni rapor dizisine ikisi de farkli
+/// the same value as (`src/registry/permissionless.rs::MAX_SLASHING_HISTORY`);
+/// if the two registries had different caps they would answer the same report
 /// `slashing_history` cevabi verirdi.
 pub const MAX_SLASHING_HISTORY: usize = 4096;
 
@@ -111,13 +115,13 @@ impl Registration {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
 
-    /// Hala kesilebilir bir bonda sahip mi: `Active` **veya** `Unbonding`.
+    /// Does it still hold a slashable bond: `Active` **or** `Unbonding`.
     ///
-    /// Bu kayit defteri ile `src/registry/permissionless.rs` ayni sorulara
-    /// ayni cevabi vermek zorunda; ikisi de ayni rollerin ayni yasam
+    /// This registry and `src/registry/permissionless.rs` must give the same answer
+    /// to the same questions; both state the same lifecycle of the same roles.
     /// dongusunu anlatiyor. Gorev atama `is_active` sorar, sorumluluk
     /// `is_slashable` sorar: cikmakta olan bir uyenin bondu hala kilitli
-    /// oldugu icin yaptigi isten sorumlu tutulabilir, ama ona yeni is
+    /// it can be held responsible for work it did, but no new work may be
     /// verilemez.
     pub fn is_slashable(&self) -> bool {
         matches!(
@@ -501,8 +505,8 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // Strix HIGH (2026-08-17): slash idempotent olmali - ayni raporun
-        // replay'i kalan stake'i tekrar yakmamali. Zaten Slashed ise red.
+        // Strix HIGH (2026-08-17): slashing must be idempotent - replaying the same
+        // report must not burn the remaining stake again. Refuse if already Slashed.
         if matches!(reg.status, MemberStatus::Slashed) {
             return Err(RegistryError::AlreadySlashed { account, role });
         }
@@ -569,9 +573,9 @@ impl VerifierRegistry {
 
     /// Kesme kaydini ekle; tavan asilinca en eskiyi dusur.
     ///
-    /// `src/registry/permissionless.rs::record_slash` ile ayni davranis:
+    /// The same behaviour as `src/registry/permissionless.rs::record_slash`:
     /// en yeni kayitlar canli durumda kalir. Tavansiz buyuyen bir gecmis,
-    /// bu kaydi canli tutan her surecin bellegi ve serilestirmesi icin
+    /// for the memory and serialization of every process keeping this record alive
     /// sinirsiz yuk demektir.
     fn record_slash(&mut self, record: SlashingRecord) {
         self.slashing_history.push(record);
@@ -611,11 +615,11 @@ impl VerifierRegistry {
             .collect()
     }
 
-    // Rol yardımcıları tek bir soruyu sorar: bu üyeye SIMDI yeni gorev
-    // verilebilir mi? Cevap yalniz `MemberStatus::Active` icin evet
-    // (2026-08-22 kararı, G0; cekirdek `src/registry/permissionless.rs`
-    // ile ayni gun ayni kararla hizalandi - iki defter ayni soruya ayni
-    // cevabi vermek zorunda). Sorumluluk ayri sorudur ve
+    // The role helpers ask a single question: can this member be given new work
+    // NOW? The answer is yes only for `MemberStatus::Active`
+    // (the 2026-08-22 decision, G0; aligned with the core
+    // `src/registry/permissionless.rs` on the same day with the same decision - the
+    // two registries must give the same answer to the same question). Responsibility
     // `Registration::is_slashable`'da yasar: cikmakta olan uyenin kilidi
     // suresince kesilebiliriligi surer, ama yeni is almaz.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
@@ -828,20 +832,20 @@ mod tests {
 
     /// Cikmakta olan uye yeni gorev almaz ama kesilebilir kalir.
     ///
-    /// Bu, `src/registry/permissionless.rs` icindeki ayni adli testin
-    /// aynasidir. Iki kayit defteri ayni rollerin ayni yasam dongusunu
-    /// anlatiyor; ayni girdiye farkli cevap vermeleri, hangisinin okundugunu
-    /// bilmeyen bir cagirani sessizce yaniltir. Fark bir kez olctuldu ve
+    /// This mirrors the test of the same name inside
+    /// `src/registry/permissionless.rs`. The two registries state the same lifecycle
+    /// of the same roles; giving different answers to the same input silently misleads
+    /// a caller that does not know which one is being read. The difference was measured
     /// kapatildi: burada `Unbonding` reddediliyordu, cekirdekte kabul
     /// ediliyordu. 2026-08-22 G0 karari: yardimcilar iki tarafta da
     /// `is_active`'e cekildi - cikmakta olan uye yeni gorev alamaz,
-    /// kesilebiliriligi `is_slashable` ayri sorusunda surer.
+    /// slashability continues under the separate `is_slashable` question.
     #[test]
     fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
         let mut reg = VerifierRegistry::new();
         let a = addr(21);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
-            .expect("kayit");
+            .expect("record");
 
         assert!(reg.is_active(&a, roles::RELAYER));
         assert!(reg.is_active_relayer(&a));
@@ -855,7 +859,7 @@ mod tests {
         );
         assert!(
             !reg.is_active_relayer(&a),
-            "rol yardimcisi da yeni gorev vermez: yetki yalniz Active"
+            "the role helper gives no new work either: authority is Active only"
         );
         assert!(
             reg.get(&a, roles::RELAYER)
@@ -864,13 +868,13 @@ mod tests {
         );
     }
 
-    /// Kesilmis uye hicbir soruya `true` donmemeli.
+    /// A slashed member must not return `true` to any question.
     #[test]
     fn a_slashed_member_is_neither_active_nor_slashable_again() {
         let mut reg = VerifierRegistry::new();
         let a = addr(22);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
-            .expect("kayit");
+            .expect("record");
         reg.slash(
             a,
             roles::RELAYER,
@@ -882,7 +886,7 @@ mod tests {
         assert!(!reg.is_active(&a, roles::RELAYER));
         assert!(
             !reg.is_active_relayer(&a),
-            "kesilmis bond ikinci kez kesilemez"
+            "a slashed bond cannot be slashed a second time"
         );
     }
 
@@ -1053,12 +1057,12 @@ mod tests {
         assert!(!reg.is_active_master_verifier(&addr(11)));
     }
 
-    /// Kesme gecmisi tavanda durur: en yeniler tutulur, en eskiler dusurulur.
+    /// The slashing history stops at the cap: the newest are kept, the oldest dropped.
     ///
     /// Ana agactaki karsi testin (`the_slashing_history_stops_growing_at_the_cap`)
-    /// aynasidir: iki defter ayni rapor dizisine ayni uzunluk ve ayni sira ile
+    /// the two registries must answer the same report sequence with the same length
     /// cevap vermek zorundadir, yoksa hangisine bakildigini bilmeyen bir
-    /// cagiran sessizce yanitlanir.
+    /// and the same order, otherwise a caller is silently misanswered.
     #[test]
     fn the_slashing_history_stops_growing_at_the_cap() {
         use crate::evidence::{ProofProvenance, SlashingProof};
@@ -1087,7 +1091,7 @@ mod tests {
         }
 
         assert_eq!(reg.slashing_history().len(), MAX_SLASHING_HISTORY);
-        // En eski uc kayit dustu: kalan ilk kayit i=3 raporuna ait olmali.
+        // The oldest three records dropped: the first remaining record must belong to report i=3.
         let mut expected_first = [0u8; 32];
         expected_first[0] = 1;
         expected_first[1] = 3;
@@ -1096,7 +1100,7 @@ mod tests {
             .first()
             .map(|record| record.report.offender);
         assert_eq!(first, Some(Address::from(expected_first)));
-        // En yeni kayit dizinin sonunda duruyor: budama bastan yapildi.
+        // The newest record sits at the end of the sequence: pruning happened from the front.
         let mut expected_last = [0u8; 32];
         expected_last[0] = ((total - 1) / 256) as u8 + 1;
         expected_last[1] = ((total - 1) % 256) as u8;

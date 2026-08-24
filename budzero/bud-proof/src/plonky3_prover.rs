@@ -3905,8 +3905,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("an honest proof must be produced");
 
         // Control group. If this does not pass, the refusals below would be
         // owed to a setup error rather than to the attack.
@@ -4054,8 +4054,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("an honest proof must be produced");
 
         // Control group: if this does not pass, the refusal below would be
         // owed to a setup error rather than to the attack.
@@ -4209,8 +4209,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("an honest proof must be produced");
         let proof: crate::bud_stark::Proof<MyConfig> =
             postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
 
@@ -4307,8 +4307,8 @@ mod tests {
             state_writes_digest: [0u8; 32],
         };
 
-        let envelope =
-            Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("an honest proof must be produced");
+        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program)
+            .expect("an honest proof must be produced");
         let base: crate::bud_stark::Proof<MyConfig> =
             postcard::from_bytes(&envelope.proof_bytes).expect("the real proof must decode");
 

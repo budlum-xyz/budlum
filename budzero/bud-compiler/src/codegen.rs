@@ -355,14 +355,14 @@ impl Codegen {
                 let mut pending_skip: Option<usize> = None;
                 let mut end_jump_indices: Vec<usize> = Vec::new();
 
-                // Güvenlik denetimi (HIGH): Jnz hedefi arm GÖVDESİNE
-                // patchleniyordu - yani "eşit değilse" de gövde çalışıyordu
-                // (ilk tamsayı kolu scrutinee'ye bakmadan yürür). Doğrusu:
-                // başarısızlık atlaması SONRAKİ arm'ın testine gider; son
-                // arm'ınki match sonuna.
+                // Security review (HIGH): the Jnz target was being patched to the arm
+                // BODY - so the body also ran when "not equal"
+                // (the first integer arm executes without looking at the scrutinee). The
+                // correct shape: the failure jump goes to the NEXT arm's test; the last
+                // arm's goes to the end of the match.
                 for arm in arms {
                     let test_start = self.instructions.len();
-                    // Önceki arm'ın başarısızlık atlaması bu arm'ın testine.
+                    // The previous arm's failure jump goes to this arm's test.
                     if let Some(prev) = pending_skip.take() {
                         self.patch_jump(prev, (test_start as i32) - (prev as i32));
                     }
@@ -374,14 +374,14 @@ impl Codegen {
                             self.emit(Opcode::Sub, diff_reg, scrutinee_reg, pat_reg, 0);
                             let placeholder = self.instructions.len();
                             self.emit(Opcode::Jnz, 0, diff_reg, 0, 0);
-                            // Hedef henüz bilinmiyor (sonraki arm'ın testi).
+                            // The target is not known yet (the next arm's test).
                             pending_skip = Some(placeholder);
                             self.next_reg = saved_reg;
                         }
                         MatchPattern::Wildcard => {
-                            // Test yok: önceki arm'lar tutmadıysa doğal
-                            // düşüşle buraya gelinir; pending_skip zaten
-                            // yukarıda bu test_start'a patch edildi.
+                            // No test: if the previous arms did not hold, control falls
+                            // through here naturally; pending_skip was already patched
+                            // to this test_start above.
                         }
                     }
 
@@ -395,7 +395,7 @@ impl Codegen {
                     end_jump_indices.push(end_jump);
                     self.next_reg = saved_reg;
                 }
-                // Son arm'ın başarısızlık atlaması da match sonuna gider.
+                // The last arm's failure jump also goes to the end of the match.
                 if let Some(last) = pending_skip.take() {
                     end_jump_indices.push(last);
                 }

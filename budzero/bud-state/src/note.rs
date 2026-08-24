@@ -1,51 +1,51 @@
 //! Privacy-layer note/UTXO model - paralel izole subtree.
 //!
-//! Account model'e DOKUNMADAN, ayrı bir state alanında yaşar (gizlilik talimatı
-//! Bölüm 7 izolasyon kuralı). NFT / B.U.D. / Pollen state'i ile paylaşılmaz.
+//! It lives in a separate state area WITHOUT TOUCHING the account model (the
+//! privacy directive, section 7 isolation rule). It is not shared with NFT / B.U.D. / Pollen state.
 //!
 //! Commitment + nullifier primitifleri:
-//! - commitment = Poseidon(amount || recipient || blinding), zincire yalnızca
-//!   Bu hash yazılır; amount/recipient gizli.
-//! - nullifier = Poseidon(secret) - harcanan commitment'ı işaretleyen tek-
-//!   Kullanımlık değer; hangi commitment'ın harcandığını açıklamadan çifte-
-//!   Harcamayı önler.
+//! - commitment = Poseidon(amount || recipient || blinding); only this hash is
+//!   written to the chain; amount/recipient stay secret.
+//! - nullifier = Poseidon(secret) - a single use value marking the spent
+//!   commitment; it prevents double spending without revealing which
+//!   commitment was spent.
 //!
 //! Sum-conservation (Σinputs == Σoutputs, homomorfik) opcode/constraint
-//! Seviyesinde kanıtlanır (opcode 0x22); bu registry yalnızca note
-//! Yaşam-döngüsünü ve nullifier set'ini tutar.
+//! level (opcode 0x22); this registry only holds the note lifecycle and the
+//! nullifier set.
 //!
-//! WIRING: unwired - measured. Zincirin harcanmış nullifier kümesi
-//! `src/privacy/note_registry.rs` içindeki `L1NoteRegistry`, ve üretimde
-//! çalışan o: `AccountState` onu tutuyor, `account.rs:2117` state-root'a
-//! karıştırıyor, `snapshot.rs` anlık görüntüye yazıyor. Buradaki
-//! `NoteRegistry` aynı kümenin zkVM tarafındaki ikizi ve hiçbir üretim yolu
-//! onu kurmuyor: `bud-state`'i yalnız `bud-cli` bağımlılık olarak alıyor ve
+//! WIRING: unwired - measured. The chain's spent nullifier set is
+//! `L1NoteRegistry` inside `src/privacy/note_registry.rs`, and that is the one
+//! running in production: `AccountState` holds it, `account.rs:2117` mixes it
+//! into the state root, `snapshot.rs` writes it into the snapshot. The
+//! `NoteRegistry` here is the zkVM side twin of the same set and no production
+//! path constructs it: only `bud-cli` takes `bud-state` as a dependency and
 //! oradan da sadece `State`, `StateBackend`, `Account` okunuyor.
 //!
-//! Eksik olan halka bir çağrı değil, bir opcode. Doküman bu tipi
-//! "nullifier-check opcode 0x21 için" diye tarif ediyor, ama `bud-vm`'deki
-//! `NullifierCheck` bir nullifier'ı yalnızca Poseidon ile TÜRETİP iddia
-//! edilenle karşılaştırıyor; harcanmış olup olmadığını hiçbir kümeye
-//! sormuyor. Yani VM "bu nullifier bu sırra ait mi" sorusunu cevaplıyor,
-//! "bu nullifier daha önce harcandı mı" sorusunu değil. İkinci soruyu bugün
-//! yalnız zincir tarafı cevaplıyor.
+//! The missing link is not a call but an opcode. The document describes this
+//! type as "for the nullifier-check opcode 0x21", but `NullifierCheck` in
+//! `bud-vm` only DERIVES a nullifier with Poseidon and compares it against the
+//! claimed one; it asks no set whether it has been spent. So the VM answers
+//! the question "does this nullifier belong to this secret", not the question
+//! "was this nullifier spent before". Today only the chain side answers the
+//! second question.
 //!
-//! Bu modülün kablolanması opcode'a devlet erişimi vermeyi gerektirir, ki o
-//! bir konsensüs yüzeyi kararıdır: VM'nin çifte harcamayı kendi başına
-//! reddetmesi, kanıt sisteminin nullifier kümesini de taahhüt etmesi
-//! demektir. O karar verilene kadar buradaki tip ölü değil, erken.
+//! Wiring this module requires giving the opcode state access, which is a
+//! consensus surface decision: the VM refusing a double spend on its own means
+//! the proof system commits to the nullifier set as well. Until that decision
+//! is made the type here is not dead but early.
 
 use crate::Hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Bir gizli transfer notu. `commitment` amount+recipient+blinding'i bağlar
-/// (Poseidon); `nullifier` tek-kullanımlık harcama işaretidir
+/// A private transfer note. `commitment` binds amount+recipient+blinding
+/// (Poseidon); `nullifier` is the single use spend marker
 /// (Poseidon(secret, DOMAIN_NULLIFIER)).
 ///
-/// VM/AIR tarafı Goldilocks field element (u64) üretir; registry 32-byte Hash
-/// Saklar. `hash_from_field` / `field_from_hash` köprüsü little-endian packing
-/// Kullanır (üst 24 byte sıfır - domain'ler arası çakışma riski yok çünkü
+/// The VM/AIR side produces a Goldilocks field element (u64); the registry stores a
+/// 32 byte Hash. The `hash_from_field` / `field_from_hash` bridge uses little-endian
+/// packing (the upper 24 bytes are zero - there is no cross domain collision risk because
 /// Note subtree izole).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrivacyNote {
@@ -71,14 +71,14 @@ impl PrivacyNote {
     }
 }
 
-/// İzole note registry: account model'e paralel, NFT/B.U.D./Pollen ile state
-/// Paylaşmaz. Canlı (harcanmamış) commitment'lar + harcanmış
+/// An isolated note registry: parallel to the account model, it shares no state with
+/// NFT/B.U.D./Pollen. Live (unspent) commitments plus spent
 /// Nullifier set'ini izler.
 #[derive(Debug, Clone, Default)]
 pub struct NoteRegistry {
-    /// Canlı (harcanmamış) note commitment'ları.
+    /// The live (unspent) note commitments.
     notes: BTreeSet<Hash>,
-    /// Harcanmış nullifier'lar - çifte-harcama önleme.
+    /// The spent nullifiers - double spend prevention.
     spent_nullifiers: BTreeSet<Hash>,
 }
 
@@ -87,8 +87,8 @@ impl NoteRegistry {
         Self::default()
     }
 
-    /// Yeni oluşturulmuş note commitment'ı ekle. Duplikat commitment veya
-    /// Halihazırda harcanmış nullifier reddedilir.
+    /// Add a newly created note commitment. A duplicate commitment or an already
+    /// spent nullifier is refused.
     pub fn insert(&mut self, note: &PrivacyNote) -> Result<(), String> {
         if self.notes.contains(&note.commitment) {
             return Err("note commitment already exists".into());
@@ -100,10 +100,10 @@ impl NoteRegistry {
         Ok(())
     }
 
-    /// Bir note'u nullifier ile harca: nullifier halihazırda harcanmışsa RED
-    /// (çifte-harcama önleme). Commitment canlı set'ten çıkarılır, nullifier
-    /// Spent set'e eklenir. Harcanan commitment KAMUYA açıklanmaz, çağıran
-    /// Sum-conservation constraint ile mülkiyeti kanıtlar.
+    /// Spend a note with a nullifier: REFUSED if the nullifier is already spent
+    /// (double spend prevention). The commitment leaves the live set, the nullifier
+    /// joins the spent set. The spent commitment is NOT revealed publicly; the caller
+    /// proves ownership with the sum conservation constraint.
     /// PARTIAL: allowed - the `remove` here *is* the liveness check. It
     /// returns false when the commitment was never live, and that branch has
     /// removed nothing; the branch that removed something cannot then refuse.
@@ -118,12 +118,12 @@ impl NoteRegistry {
         Ok(())
     }
 
-    /// Nullifier halihazırda harcanmış mı (nullifier-check opcode 0x21 için).
+    /// Has the nullifier already been spent (for the nullifier-check opcode 0x21).
     pub fn is_spent(&self, nullifier: Hash) -> bool {
         self.spent_nullifiers.contains(&nullifier)
     }
 
-    /// Commitment canlı (harcanmamış) set'te mi.
+    /// Is the commitment in the live (unspent) set.
     pub fn contains(&self, commitment: Hash) -> bool {
         self.notes.contains(&commitment)
     }
@@ -161,7 +161,7 @@ mod tests {
 
         r.spend(h(2), h(1)).unwrap();
         assert!(r.is_spent(h(2)));
-        assert!(!r.contains(h(1))); // canlı set'ten çıktı
+        assert!(!r.contains(h(1))); // it left the live set
         assert_eq!(r.live_count(), 0);
         assert_eq!(r.spent_count(), 1);
     }
@@ -175,7 +175,7 @@ mod tests {
         })
         .unwrap();
         r.spend(h(2), h(1)).unwrap();
-        // Aynı nullifier tekrar harcama → RED (çifte-harcama).
+        // Spending with the same nullifier again -> REFUSED (double spend).
         let err = r.spend(h(2), h(1)).unwrap_err();
         assert!(err.contains("double-spend"));
     }
@@ -188,7 +188,7 @@ mod tests {
             nullifier: h(2),
         })
         .unwrap();
-        // Aynı commitment, farklı nullifier → RED.
+        // The same commitment, a different nullifier -> REFUSED.
         assert!(r
             .insert(&PrivacyNote {
                 commitment: h(1),
@@ -206,7 +206,7 @@ mod tests {
         })
         .unwrap();
         r.spend(h(2), h(1)).unwrap();
-        // Halihazırda harcanmış nullifier ile yeni note → RED.
+        // A new note with an already spent nullifier -> REFUSED.
         assert!(r
             .insert(&PrivacyNote {
                 commitment: h(9),

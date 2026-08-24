@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 pub mod ast;
 pub mod codegen;
@@ -102,12 +102,12 @@ mod tests {
         assert_eq!(vm.events, vec![10]);
     }
 
-    /// Ayni kapi `Hash32` icin de gecerli.
+    /// The same gate applies to `Hash32`.
     ///
-    /// Ayri test, cunku `is_opaque_bytes32` iki tipi birden kapsiyor
+    /// A separate test, because `is_opaque_bytes32` covers both types
     /// (`Type::Address | Type::Hash32`) ve birinin listeden dusmesi
     /// digerinin testiyle gorunmez kalirdi - olculdu: `Hash32` kaldirilinca
-    /// yalnizca bu test kirmizi verir.
+    /// only this test turns red.
     #[test]
     fn rejects_arithmetic_on_hash32() {
         let source = r"
@@ -123,9 +123,12 @@ mod tests {
             }
         ";
         match compile(source, IsaProfile::Production) {
-            Ok(_) => panic!("Hash32 uzerinde toplama derlendi; tip bir etiketten ibaret"),
+            Ok(_) => panic!("addition over Hash32 compiled; the type is nothing but a label"),
             Err(CompileError::SemanticError(msg)) => {
-                assert!(msg.contains("Hash32"), "yanlis sebeple reddedildi: {msg}")
+                assert!(
+                    msg.contains("Hash32"),
+                    "refused for the wrong reason: {msg}"
+                )
             }
             Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
         }
@@ -133,7 +136,7 @@ mod tests {
 
     /// Esitlik karsilastirmasi **serbest** kalmali.
     ///
-    /// Kapinin kendisinin sinirli oldugunu olcer. Yasak aritmetige ve
+    /// Measures that the gate itself is bounded. Beside the forbidden arithmetic and
     /// siralamaya; `==` ve `!=` bu tiplerin varlik sebebi. Kapi onlari da
     /// kesseydi tip kullanilamaz hale gelirdi ve bu test, asiri genis bir
     /// yasagi yakalayan taraf.
@@ -147,8 +150,8 @@ mod tests {
             let res = compile(&source, IsaProfile::Production);
             assert!(
                 res.is_ok(),
-                "`{op}` Address uzerinde reddedildi: kapi kendi amacini asti - \
-                 bu tipler tam da karsilastirilmak icin var. {res:?}"
+                "`{op}` was refused over Address: the gate overshot its purpose - \
+                 these types exist precisely to be compared. {res:?}"
             );
         }
     }
@@ -185,16 +188,16 @@ mod tests {
         assert_eq!(vm.events, vec![14, 20, 16]);
     }
 
-    /// Derleyicinin urettigi bytecode, kapsanmayan dort operator icin de
-    /// **dogru sonucu** vermeli.
+    /// The bytecode the compiler produces must give the **right result** for the
+    /// four uncovered operators too.
     ///
     /// Olculdu: `BinOp` on operator tasiyor, ama VM'de kosturulup sonucu
-    /// dogrulanan testlerde yalnizca `+ - * == >=` geciyordu. `Neq`, `Lt`,
-    /// `Gt`, `Lte` icin uretilen kod hic calistirilmamisti - yalnizca
+    /// only `+ - * == >=` appeared in the verified tests. The code generated for
+    /// `Neq`, `Lt`, `Gt`, `Lte` had never been executed - only
     /// "derlendi mi" duzeyinde olculuyorlardi. `Lt` yerine `Gt` yayan bir
-    /// kod uretici butun o testleri gecerdi.
+    /// a code generator would pass all of those tests.
     ///
-    /// (`Div` burada yok: `u64` uzerinde artik reddediliyor, gerekcesi
+    /// (`Div` is absent here: it is now refused over `u64`, for the reason
     /// `bolme_u64_uzerinde_reddedilir` testinde.)
     #[test]
     #[cfg(feature = "experimental")]
@@ -203,10 +206,10 @@ mod tests {
             contract OperatorTest {
                 pub fn main() {
                     let esitsiz = 3 != 4;
-                    let kucuk = 3 < 4;
-                    let buyuk = 3 > 4;
+                    let smaller = 3 < 4;
+                    let greater = 3 > 4;
                     let kucuk_esit = 4 <= 4;
-                    emit Result(esitsiz, kucuk, buyuk, kucuk_esit);
+                    emit Result(unequal, smaller, greater, smaller_or_equal);
                 }
             }
         "#;
@@ -218,21 +221,21 @@ mod tests {
         assert_eq!(
             vm.events,
             vec![1, 1, 0, 1],
-            "sirasiyla beklenen: 3!=4 dogru, 3<4 dogru, 3>4 yanlis, 4<=4 dogru"
+            "expected in order: 3!=4 true, 3<4 true, 3>4 false, 4<=4 true"
         );
     }
 
     /// Ayrilmis tip adlarinin **hepsi** reddedilmeli.
     ///
     /// `RESERVED_TYPE_NAMES` on uc ad tasiyor ve hicbirinin testi yoktu.
-    /// Liste sessiz bir tuzak tasiyor: `Type::from_str` taninmayan her adi
-    /// **struct adi** olarak kabul eder. Yani listeden bir ad dusurulurse
+    /// The list carries a silent trap: `Type::from_str` accepts every unrecognised
+    /// name as a **struct name**. So if a name drops off the list
     /// `u128` reddedilmez, "tanimsiz struct" hatasina donusur - ya da o adda
-    /// bir struct tanimliysa sessizce derlenir ve gelistirici 128-bit
+    /// and a struct is defined, it compiles silently and the developer
     /// aritmetigi aldigini sanar. VM'de karsiligi yoktur.
     ///
-    /// Her ad ayri iddia ediliyor: tek bir dongu iddiasi, bir adin listeden
-    /// dusmesini digerlerinin basarisi altinda gizlerdi.
+    /// Each name is asserted separately: a single loop assertion would hide one name
+    /// dropping off the list under the success of the others.
     #[test]
     fn ayrilmis_tip_adlari_reddedilir() {
         // (ad, hata metninde gecmesi gereken parca)
@@ -268,15 +271,15 @@ mod tests {
             );
 
             match compile(&source, IsaProfile::Production) {
-                Ok(_) => panic!("`{ad}` bir BudL tipi olarak kabul edildi"),
+                Ok(_) => panic!("`{name}` was accepted as a BudL type"),
                 Err(CompileError::SemanticError(msg)) => {
                     assert!(
                         msg.contains("is not a BudL type"),
-                        "`{ad}` reddedildi ama ayrilmis-ad kapisindan degil: {msg}"
+                        "`{name}` was refused but not by the reserved name gate: {msg}"
                     );
                     assert!(
                         msg.contains(beklenen),
-                        "`{ad}` icin gerekce kayboldu; `{beklenen}` bekleniyordu: {msg}"
+                        "the reason for `{name}` was lost; `{expected}` was expected: {msg}"
                     );
                 }
                 Err(other) => panic!("`{ad}`: SemanticError bekleniyordu, gelen: {other:?}"),
@@ -284,10 +287,10 @@ mod tests {
         }
     }
 
-    /// Kontrol grubu: bes gecerli tip adi **kabul** edilmeli.
+    /// A control group: five valid type names must be **accepted**.
     ///
-    /// Ayrilmis-ad kapisinin asiri genisleyip gecerli tipleri yutmadigini
-    /// gosterir. Bu olmadan `from_str`'i her adi reddedecek sekilde bozmak
+    /// Shows that the reserved name gate does not overreach and swallow valid types.
+    /// Without it, breaking `from_str` so that it refuses every name
     /// yukaridaki testi yesil birakirdi.
     #[test]
     fn gecerli_tip_adlari_kabul_edilir() {
@@ -307,20 +310,20 @@ mod tests {
             );
 
             compile(&source, IsaProfile::Production)
-                .unwrap_or_else(|e| panic!("gecerli tip `{ad}` reddedildi: {e:?}"));
+                .unwrap_or_else(|e| panic!("the valid type `{name}` was refused: {e:?}"));
         }
     }
 
-    /// `u64` uzerinde `/` **reddedilmeli**.
+    /// `/` over `u64` must be **refused**.
     ///
-    /// VM `Opcode::Div`'i Goldilocks alan bolmesi olarak yurutuyor
+    /// The VM executes `Opcode::Div` as Goldilocks field division
     /// (`rs1 * rs2^-1 mod p`) ve AIR kisiti bunu sabitliyor (`rd * rs2 =
-    /// rs1`). ZK devresinde dogru olan secim bu; tam sayi bolmesi ayrica
+    /// rs1`). That is the right choice in a ZK circuit; integer division additionally
     /// range-check ister.
     ///
-    /// Ama `u64` yazan gelistirici tam sayi bolmesi bekler. Olculdu: kapi
+    /// But a developer writing `u64` expects integer division. Measured: without the gate
     /// yokken `7 / 2` **9223372034707292164** veriyordu ve `7 / 0` hata
-    /// vermeden **0** donuyordu. Ikisi de sessizce yanlis dallanan sozlesme
+    /// it returned **0** without any error. Both are contracts that branch silently
     /// uretir, bu yuzden derleme zamaninda kesiliyor.
     #[test]
     #[cfg(feature = "experimental")]
@@ -335,18 +338,20 @@ mod tests {
         "#;
 
         match compile(source, IsaProfile::Experimental) {
-            Ok(_) => panic!("`7 / 2` u64 uzerinde derlendi; alan bolmesi tam sayi gibi gorunuyor"),
+            Ok(_) => {
+                panic!("`7 / 2` compiled over u64; field division looks like integer division")
+            }
             Err(CompileError::SemanticError(msg)) => assert!(
                 msg.contains("field division"),
-                "reddedildi ama baska sebeple: {msg}"
+                "refused but for another reason: {msg}"
             ),
             Err(other) => panic!("SemanticError bekleniyordu, gelen: {other:?}"),
         }
     }
 
-    /// Kontrol grubu: `field` uzerinde `/` **serbest** kalmali.
+    /// A control group: `/` must stay **free** over `field`.
     ///
-    /// Kapi yalnizca `u64`'u hedefliyor. Bu test olmadan asiri genis bir
+    /// The gate targets only `u64`. Without this test an overly broad
     /// yasak (her tipte Div reddi) fark edilmeden gecerdi.
     #[test]
     #[cfg(feature = "experimental")]
@@ -364,7 +369,7 @@ mod tests {
         "#;
 
         compile(source, IsaProfile::Experimental)
-            .expect("`field` uzerinde bolme reddedildi; kapi asiri genis");
+            .expect("division over `field` was refused; the gate is too broad");
     }
 
     #[test]
@@ -1409,7 +1414,7 @@ mod tests {
     fn arithmetic_on_an_opaque_32_byte_type_is_refused() {
         // `<=` ve `>=` listede yoktu. Kapi (`sema.rs`, `is_opaque_bytes32`)
         // ikisini de kapsiyor, ama kapsadigi olculmemisti: listeden dusen bir
-        // operator, kapinin o operator icin kaldirilmasini gorunmez kilardi.
+        // operator would make removing the gate for that operator invisible.
         for op in ["+", "-", "*", "/", "<", ">", "<=", ">="] {
             let source = format!(
                 r#"
