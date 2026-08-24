@@ -195,12 +195,10 @@ src/chain/genesis.rs	14
 src/chain/snapshot.rs	9
 src/chain/storage_economics_tests.rs	4
 src/consensus/pow.rs	15
-src/core/account.rs	32
 src/core/chain_config.rs	16
 src/core/governance.rs	6
 src/core/transaction.rs	6
 src/cross_domain/bridge.rs	10
-src/cross_domain/evm/bud_to_eth.rs	32
 src/cross_domain/evm/header.rs	24
 src/cross_domain/evm/mod.rs	10
 src/cross_domain/evm/receipt.rs	12
