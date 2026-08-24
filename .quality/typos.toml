@@ -1,16 +1,16 @@
-# typos-cli konfigürasyonu, Budlum Core
+# typos-cli configuration, Budlum Core
 #
-# Bu repo iki dillidir: kod ve API yüzeyi İngilizce, mimari/denetim
-# dokümantasyonu ve kod içi yorumların büyük bölümü Türkçedir. typos'un
-# varsayılan sözlüğü yalnız İngilizce olduğundan, kalibre edilmeden
-# çalıştırıldığında 1000+ bulgunun neredeyse tamamı Türkçe kelimelerin
-# İngilizce "düzeltmesi" olur ("blok"→"block", "adres"→"address",
-# "sistem"→"system"). Bu gürültü kapıyı kullanılamaz hale getirir.
+# This repository is being made single language: code, API surface, comments and
+# documentation are all moving to English. While that migration runs, Turkish text
+# still remains in places, and because the typos default dictionary is English only,
+# running it uncalibrated turns almost all of 1000+ findings into English
+# "corrections" of Turkish words ("blok" -> "block", "adres" -> "address",
+# "sistem" -> "system"). That noise makes the gate unusable.
 #
-# Çözüm gevşetme DEĞİL, doğru kalibrasyondur: aşağıdaki Türkçe kelime listesi
-# tanımlanır, geri kalan her şey FAIL kapısıdır. Yeni bir Türkçe kelime
-# yanlış pozitif verirse buraya eklenir (gerekçe commit mesajında);
-# gerçek bir İngilizce yazım hatası asla ignore edilmez, düzeltilir.
+# The fix is NOT loosening but correct calibration: the Turkish word list below is
+# declared and everything else is a FAIL gate. The list shrinks as the migration
+# proceeds and is removed entirely once the last Turkish line is gone;
+# a real English spelling mistake is never ignored, it is fixed.
 
 [files]
 extend-exclude = [
@@ -18,24 +18,24 @@ extend-exclude = [
   "budzero/target/",
   "Cargo.lock",
   "*.lock",
-  "supply-chain/",   # cargo-vet üretimi, elle düzenlenmez
-  "proto/",          # wire şeması - kelime değişimi protokolü bozar
-  "fuzz/corpus/",    # fuzzer üretimi binary seed'ler, metin değil
+  "supply-chain/",   # cargo-vet output, not hand edited
+  "proto/",          # the wire schema - changing a word breaks the protocol
+  "fuzz/corpus/",    # fuzzer produced binary seeds, not text
   "fuzz/artifacts/",
 ]
 
 [default]
-# Kimlik/hash benzeri uzun alfanümerik dizileri (SHA, PeerID, adres) tarama.
+# Do not scan long identifier/hash-like alphanumeric strings (SHA, PeerID, address).
 extend-ignore-re = [
-  "\\b[0-9a-fA-F]{7,}\\b",              # git SHA / hex hash / hex adres
+  "\\b[0-9a-fA-F]{7,}\\b",              # git SHA / hex hash / hex address
   "\\b12D3Koo[A-Za-z0-9]+\\b",          # libp2p PeerID
   "sha256:[0-9a-f]+",                   # docker digest
-  "(?i)\\bbud1[a-z0-9]+\\b",            # bech32-tarzı Budlum adresleri
+  "(?i)\\bbud1[a-z0-9]+\\b",            # bech32-style Budlum addresses
 ]
 
 [default.extend-words]
-# ── Türkçe kelimeler (yanlış pozitifler) ───────────────────────────────
-# Her biri kendisine eşlenir = "bu doğru yazım, düzeltme önerme".
+# -- Turkish words (false positives), removed as the migration proceeds --------
+# Each maps to itself = "this spelling is correct, do not suggest a fix".
 blok = "blok"
 Blok = "Blok"
 BLOK = "BLOK"
@@ -96,13 +96,13 @@ probleme = "probleme"
 Sur = "Sur"
 lik = "lik"
 foto = "foto"
-# ── budscan turunda eklenenler ────────────────────────────────
-# Üçü de Türkçe kelime; typos'un İngilizce sözlüğü bunları sırasıyla
-# "admin", "offset" ve "vector" sanıyor. Mutasyonla doğrulandı: bu satırlar
-# kaldırılınca kapı 7 bulguyla kırmızıya döner, yani kalibrasyon boş değil.
-#   adin   : "ad" isminin ilgi hâli (bir adın çözümü), "admin" değil
-#   ofset  : Arweave `note` alanının 32 baytlık big-endian kaydırması
-#   vektor : content-id eşitlik testinin paylaşılan test vektörü
+# -- added during the budscan round -------------------------------
+# All three are Turkish words; the English typos dictionary reads them as
+# "admin", "offset" and "vector" respectively. Verified by mutation: removing these
+# lines turns the gate red with 7 findings, so the calibration is not vacuous.
+#   adin   : the genitive of the noun "ad" (the resolution of a name), not "admin"
+#   ofset  : the 32 byte big-endian offset of the Arweave `note` field
+#   vektor : the shared test vector of the content-id equality test
 adin = "adin"
 Adin = "Adin"
 ofset = "ofset"
@@ -111,26 +111,26 @@ vektor = "vektor"
 vektoru = "vektoru"
 Vektor = "Vektor"
 
-# ── §67 kanitlanmis talep turunda eklenenler ──────────────────────────
-# Ikisi de Türkçe kelime; typos'un İngilizce sözlüğü bunları "again" ve
-# "popular" sanıyor.
-#   agin     : "ag" (network) isminin ilgi hâli (agin uzerinde anlasmasi)
-#   populer  : Türkçe yazımıyla popüler; "popular" değil
+# -- added during the proven-demand round --------------------------------
+# Both are Turkish words; the English typos dictionary reads them as "again" and
+# "popular".
+#   agin     : the genitive of "ag" (network)
+#   populer  : the Turkish spelling of popular; not "popular"
 agin = "agin"
 Agin = "Agin"
 populer = "populer"
 Populer = "Populer"
 populerlik = "populerlik"
 populerlikle = "populerlikle"
-# formatin : "format" isminin ilgi hâli (formatin butun fikri); "formation" değil
+# formatin : the genitive of the noun "format"; not "formation"
 formatin = "formatin"
 Formatin = "Formatin"
 
-# ── Özel adlar / teknik terimler ────────────────────────────────────────
-Canva = "Canva"     # ürün adı (Canvas değil)
-Groth = "Groth"     # Groth16 zk-SNARK şeması (Jens Groth)
-# ── Kasıtlı test fixture'ı ──────────────────────────────────────────────
-# budzero/bud-compiler: "bildirilmemiş struct tipi" hatasını doğrulayan
-# negatif test, kaynakta bilerek yanlış yazılmış bir tip adı kullanır.
-# Düzeltmek testin ölçtüğü şeyi ortadan kaldırır.
+# -- Proper names / technical terms ---------------------------------------
+Canva = "Canva"     # a product name (not Canvas)
+Groth = "Groth"     # the Groth16 zk-SNARK scheme (Jens Groth)
+# -- A deliberate test fixture ---------------------------------------------
+# budzero/bud-compiler: the negative test that verifies the "undeclared struct type"
+# error deliberately uses a misspelled type name in the source.
+# Fixing it would remove the very thing the test measures.
 Ponit = "Ponit"

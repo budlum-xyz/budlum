@@ -1,60 +1,60 @@
-# osv-scanner.toml, OSV.dev tabanlı zafiyet taraması için gerekçeli istisnalar
+# osv-scanner.toml, justified exceptions for the OSV.dev based vulnerability scan
 #
-# NEDEN AYRI BİR TARAYICI: cargo-audit ve cargo-deny yalnız RustSec advisory
-# veritabanını okur. OSV.dev bir toplayıcıdır (RustSec + GHSA + NVD + CVE) ve
-# RustSec'te KARŞILIĞI OLMAYAN kayıtları da görür. Bu teorik bir fark değil:
-# ilk koşuda CVE-2026-32314 / GHSA-vxx9-2994-q338 (yamux, CVSS 8.7) yakalandı,
-# aynı ağaçta `cargo audit` "0 vulnerabilities found" diyordu çünkü bu kaydın
-# RustSec karşılığı yok (rustsec/advisory-db/crates/yamux → 404).
+# WHY A SEPARATE SCANNER: cargo-audit and cargo-deny read only the RustSec advisory
+# database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and it also sees
+# records that have NO COUNTERPART in RustSec. This is not a theoretical difference:
+# the first run caught CVE-2026-32314 / GHSA-vxx9-2994-q338 (yamux, CVSS 8.7),
+# while on the same tree `cargo audit` said "0 vulnerabilities found" because this record
+# has no RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404).
 #
-# POLİTİKA: burada listelenmeyen her bulgu FAIL'dir. Her istisna, kodda
-# neden ERİŞİLEMEZ olduğunun kanıtıyla yazılır (VEX mantığı); "gürültü" ya da
-# "şimdilik" gerekçesi kabul edilmez. Erişilebilir bir bulgu ignore edilmez,
-# bağımlılık yükseltilir.
+# POLICY: every finding not listed here is a FAIL. Each exception is written with
+# evidence of why it is UNREACHABLE in the code (VEX logic); "noise" or
+# "for now" are not accepted as reasons. A reachable finding is not ignored,
+# the dependency is upgraded.
 #
-# 2026-07-28: üç zafiyet kaydı (yamux GHSA-vxx9-2994-q338, hickory
-# RUSTSEC-2026-0118 / RUSTSEC-2026-0119 / GHSA-q2qq-hmj6-3wpp) SİLİNDİ çünkü
-# yamalandılar, politikanın istediği şey buydu. Kök Cargo.toml libp2p'yi
-# 0.57.0 ağacına sabitliyor; bu yamux 0.14.0 ve hickory 0.26.1 getiriyor.
-# Aşağıda yalnız "unmaintained" bakım uyarıları kaldı; bunlar zafiyet değil.
+# 2026-07-28: three vulnerability records (yamux GHSA-vxx9-2994-q338, hickory
+# RUSTSEC-2026-0118 / RUSTSEC-2026-0119 / GHSA-q2qq-hmj6-3wpp) were DELETED because
+# they were patched, which is what the policy asks for. The root Cargo.toml pins libp2p
+# to the 0.57.0 tree; that brings yamux 0.14.0 and hickory 0.26.1.
+# Only "unmaintained" maintenance warnings remain below; these are not vulnerabilities.
 
-# ── "unmaintained" sınıfı bilgilendirici kayıtlar ────────────────────────────
-# Aşağıdakiler zafiyet değil, bakım durumu uyarısıdır (RUSTSEC-*-XXXX
-# "unmaintained"). Repo politikası bunları deny.toml'da `unmaintained = "none"`
-# ile FAIL saymaz; görünürlük CI'daki cargo audit raporundan sağlanır ve
-# org roadmap'te izlenir. OSV bunları da zafiyet gibi döndürdüğü için burada
-# aynı politikayı yansıtıyoruz, aksi halde iki araç birbiriyle çelişirdi.
+# -- informational records of the "unmaintained" class ----------------------
+# The following are not vulnerabilities but maintenance status warnings (RUSTSEC-*-XXXX
+# "unmaintained"). Repository policy does not count them as a FAIL through
+# `unmaintained = "none"` in deny.toml; visibility comes from the cargo audit report in CI and
+# they are tracked on the org roadmap. Because OSV returns them like vulnerabilities we
+# mirror the same policy here, otherwise the two tools would contradict each other.
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0089"
-reason = "atomic-polyfill unmaintained (bakım uyarısı, zafiyet değil) - deny.toml `unmaintained = \"none\"` politikasının OSV yansıması."
+reason = "atomic-polyfill unmaintained (a maintenance warning, not a vulnerability) - the OSV mirror of the deny.toml `unmaintained = \"none\"` policy."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
-reason = "bincode 1.x unmaintained - org roadmap'te izleniyor (bincode 2 geçişi konsensus-kritik byte formatlarını etkiler, ayrı görev)."
+reason = "bincode 1.x unmaintained - tracked on the org roadmap (the bincode 2 migration touches consensus critical byte formats, a separate task)."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0057"
-reason = "fxhash unmaintained (bakım uyarısı, zafiyet değil)."
+reason = "fxhash unmaintained (a maintenance warning, not a vulnerability)."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0384"
-reason = "instant unmaintained (bakım uyarısı); transitif, doğrudan bağımlılık değil."
+reason = "instant unmaintained (a maintenance warning); transitive, not a direct dependency."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"
-reason = "paste unmaintained (bakım uyarısı, zafiyet değil); proc-macro, runtime yüzeyi yok."
+reason = "paste unmaintained (a maintenance warning, not a vulnerability); a proc-macro, no runtime surface."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0380"
-reason = "pqcrypto-dilithium → pqcrypto-mldsa ile değiştirildi; PQ backend geçişi konsensus-kritik imza formatını etkiler, ayrı planlı görev (pq-ml-dsa feature'ı mevcut)."
+reason = "pqcrypto-dilithium was replaced by pqcrypto-mldsa; the PQ backend migration touches the consensus critical signature format, a separately planned task (the pq-ml-dsa feature exists)."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0163"
-reason = "pqcrypto-internals unmaintained (upstream PQClean arşivleniyor) - PQ backend geçiş görevinde birlikte ele alınacak."
+reason = "pqcrypto-internals unmaintained (upstream PQClean is being archived) - to be handled together with the PQ backend migration task."
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0162"
-reason = "pqcrypto-traits unmaintained (upstream PQClean arşivleniyor) - PQ backend geçiş görevinde birlikte ele alınacak."
+reason = "pqcrypto-traits unmaintained (upstream PQClean is being archived) - to be handled together with the PQ backend migration task."
 
 
 # 2026-08-18: CI kirmizi kokleri (repo-geneli transitive bulgular).

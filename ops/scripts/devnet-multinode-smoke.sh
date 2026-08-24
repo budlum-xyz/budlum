@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# ── devnet-multinode-smoke.sh ────────────────────────────────────────────────
-# 4-node PoS docker-compose devnet'ini CI'da ayağa kaldırır ve aşağıdaki
-# Güvenlik/liveness iddialarını mühürler (hepsi node1, 127.0.0.1:8545 üzerinden -
-# Node2..4 kasıtlı olarak RPC açmaz; compose böyle sertleştirilmiştir):
-#   [1] bud_netListening == true → P2P stack canlı
-#   [2] peer mesh evidence from node2..4     → 4-node mesh (P2P log kanıtı; peerCount fallback)
-#   [3] bud_blockNumber iki ölçümde artıyor → 4 node'luk konsensus liveness
-#   [4] /metrics (127.0.0.1:9090) HTTP 2xx + boş olmayan gövde
-#   [5] operator RPC 127.0.0.1:8546 hosttan erişilemez (yayınlanmaz + node yalnız
-#       127.0.0.1'e bağlar), sızırsa FAIL.
-set -u   # -e yerine manuel fail: hata anında teardown/log adımı çalışabilsin
+# -- devnet-multinode-smoke.sh -----------------------------------------------
+# Brings the 4-node PoS docker-compose devnet up in CI and seals the
+# security/liveness claims below (all through node1, 127.0.0.1:8545 -
+# node2..4 deliberately open no RPC; compose is hardened that way):
+#   [1] bud_netListening == true -> the P2P stack is alive
+#   [2] peer mesh evidence from node2..4     -> a 4-node mesh (P2P log evidence; peerCount fallback)
+#   [3] bud_blockNumber grows across two measurements -> 4-node consensus liveness
+#   [4] /metrics (127.0.0.1:9090) HTTP 2xx plus a non-empty body
+#   [5] the operator RPC 127.0.0.1:8546 is unreachable from the host (not published, and the node
+#       binds only to 127.0.0.1); if it leaks, FAIL.
+set -u   # a manual fail instead of -e: the teardown/log step can still run on error
 
 RPC=http://127.0.0.1:8545
 METRICS=http://127.0.0.1:9090/metrics
@@ -29,22 +29,22 @@ echo "== [0/5] compose up (4 node + prometheus) =="
 COMPOSE_FILES=(-f ops/docker-compose.yml -f ops/docker-compose.ci.yml)
 docker compose "${COMPOSE_FILES[@]}" -p "$PROJECT" up -d || fail "docker compose up"
 
-echo "== [1/5] RPC hazırlığı: bud_netListening (maks 120 sn) =="
+echo "== [1/5] RPC readiness: bud_netListening (max 120 s) =="
 ready=0
 for _ in $(seq 1 60); do
   if rpc bud_netListening | grep -q '"result":true'; then ready=1; break; fi
   sleep 2
 done
-[ "$ready" = 1 ] || fail "bud_netListening 120 sn içinde true olmadı"
+[ "$ready" = 1 ] || fail "bud_netListening did not become true within 120 s"
 echo "PASS [1/5]: bud_netListening=true"
 
 echo "== [2/5] peer mesh: node1 bud_netPeerCount >= 0x3 (maks 120 sn) =="
-# Node1'in RPC'den bildirdiği peer sayısı tek yetkili kanıttır: bu sayaç
-# Yalnızca SwarmEvent::ConnectionEstablished ile artar, yani gerçekten kurulmuş
-# Bir P2P bağlantısını ölçer. Eski "log_nodes" fallback'i ('Connected to' vb.
-# Desenlerini node2..4 loglarında aramak) kapıyı zayıflatıyordu: node'lar birbiri
-# Yerine yalnız node1'e bağlansa bile, hatta hiç bağlanmasa da bazı desenler
-# Eşleşerek, mesh kurulmuş gibi görünebiliyordu. Tek ölçüt bırakıldı.
+# The peer count node1 reports over RPC is the only authoritative evidence: this counter
+# grows only on SwarmEvent::ConnectionEstablished, so it measures a P2P connection
+# that was really established. The old "log_nodes" fallback (searching node2..4 logs
+# for patterns such as 'Connected to') weakened the gate: even if the nodes connected
+# only to node1 instead of each other, or did not connect at all, some patterns could
+# match and make it look like a mesh. A single criterion was kept.
 ok=0; hex=0x0; count=0
 for _ in $(seq 1 60); do
   hex=$(rpc bud_netPeerCount \
@@ -55,10 +55,10 @@ except Exception: print("0x0")' 2>/dev/null || echo 0x0)
   if [ "$count" -ge 3 ]; then ok=1; break; fi
   sleep 2
 done
-[ "$ok" = 1 ] || fail "4-node P2P mesh kanıtı oluşmadı (node1 bud_netPeerCount=$hex, beklenen >= 0x3)"
-echo "PASS [2/5]: peer mesh (node1 bud_netPeerCount=$hex → $count peer)"
+[ "$ok" = 1 ] || fail "no 4-node P2P mesh evidence formed (node1 bud_netPeerCount=$hex, expected >= 0x3)"
+echo "PASS [2/5]: peer mesh (node1 bud_netPeerCount=$hex -> $count peers)"
 
-echo "== [3/5] konsensus liveness: bud_blockNumber artıyor (maks 20 sn pencere) =="
+echo "== [3/5] consensus liveness: bud_blockNumber grows (a max 20 s window) =="
 h1=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))')
 inc=0; h2=$h1
 for _ in 1 2 3 4; do
@@ -66,27 +66,27 @@ for _ in 1 2 3 4; do
   h2=$(rpc bud_blockNumber | python3 -c 'import json,sys;print(int(json.load(sys.stdin)["result"],16))')
   [ "$h2" -gt "$h1" ] && { inc=1; break; }
 done
-[ "$inc" = 1 ] || fail "yükselti ilerlemiyor ($h1 -> $h2)"
+[ "$inc" = 1 ] || fail "the height is not advancing ($h1 -> $h2)"
 echo "PASS [3/5]: liveness ($h1 -> $h2)"
 
 echo "== [4/5] /metrics endpoint =="
-# Retry döngüsü: metrics sunucusu tokio::spawn ile açılır; RPC hazır olduğunda
-# (adım 1) henüz dinliyor olmayabilir. Tek atışlık curl bu yarışta FAIL
-# üretiyordu (2026-08-14 gözlemi). Kapı zayıflamaz: metriklerin gerçekten
-# 2xx dönmesi ve gövdenin boş olmaması hâlâ şarttır; yalnızca beklenir.
+# A retry loop: the metrics server is opened with tokio::spawn, so when the RPC is ready
+# (step 1) it may not be listening yet. A single-shot curl produced a FAIL in that
+# race (observed 2026-08-14). The gate is not weakened: the metrics must still really
+# return 2xx with a non-empty body; it merely waits.
 body=""
 for _ in $(seq 1 30); do
   body=$(curl -sf --max-time 5 "$METRICS" 2>/dev/null) && break
   sleep 2
 done
-[ -n "$body" ] || fail "/metrics erişilemez (30 deneme sonunda HTTP != 2xx)"
-echo "PASS [4/5]: /metrics 2xx ($(printf '%s' "$body" | wc -l) satır)"
+[ -n "$body" ] || fail "/metrics is unreachable (HTTP != 2xx after 30 attempts)"
+echo "PASS [4/5]: /metrics 2xx ($(printf '%s' "$body" | wc -l) lines)"
 
-echo "== [5/5] operator RPC izolasyonu (8546 hosttan kapalı olmalı) =="
+echo "== [5/5] operator RPC isolation (8546 must be closed from the host) =="
 if curl -s --max-time 2 http://127.0.0.1:8546 >/dev/null 2>&1; then
-  fail "operator RPC 127.0.0.1:8546 hosttan erişilebilir - SIZMA"
+  fail "the operator RPC 127.0.0.1:8546 is reachable from the host - LEAK"
 fi
-echo "PASS [5/5]: operator RPC hosttan erişilemez (bağlantı reddedildi)"
+echo "PASS [5/5]: the operator RPC is unreachable from the host (connection refused)"
 
 echo "DEVNET-MULTINODE-SMOKE: 5/5 PASS"
 exit 0

@@ -1,23 +1,31 @@
 # Fuzzing
 
-> **Durum:** Setup tamamlandı. Uzun fuzz run CI'da çalıştırılmaz; build/check ve
-> manuel run harici audit/mainnet hazırlığında kullanılır.
+> **Status:** the setup is complete. Long fuzz runs are not executed in CI; the
+> build/check plus manual runs are used in preparation for an external audit or
+> for mainnet.
 
-## Fuzz target'leri
+## Fuzz targets
 
-| Target | Amaç | Durum |
-|--------|------|-------|
-| `block_deserialize` | Rastgele bytes → `Block` bincode deserialize panik/DoS kontrolü | Mevcut |
-| `transaction_deserialize` | Rastgele bytes → `Transaction` bincode deserialize panik/DoS kontrolü | Mevcut |
-| `snapshot_deserialize` | `StateSnapshot` + `StateSnapshotV2::from_bytes` parse/migration hook fuzz | Mevcut |
-| `consensus_validate` | Rastgele header alanlarıyla `BlockHeader` serialize güvenliği | Mevcut |
-| `fuzz_blockchain_serialize` | Minimal byte-slice harness; gelecek roundtrip genişletmesi için placeholder | Mevcut |
-| `evm_rlp_decode` | F10.1 RLP decoder: rastgele relayer bytes → canonical decode/error, panic yok | Mevcut |
-| `evm_mpt_verify` | F10.1 MPT verifier: bounded key/proof parçaları → verify/error, panic yok | Mevcut |
+| Target | Purpose | Status |
+|--------|---------|--------|
+| `block_deserialize` | Random bytes -> `Block` bincode deserialize, panic/DoS check | Present |
+| `transaction_deserialize` | Random bytes -> `Transaction` bincode deserialize, panic/DoS check | Present |
+| `snapshot_deserialize` | `StateSnapshot` + `StateSnapshotV2::from_bytes` parse/migration hook fuzz | Present |
+| `consensus_validate` | `BlockHeader` serialize safety over random header fields | Present |
+| `fuzz_blockchain_serialize` | A minimal byte-slice harness; a placeholder for a future roundtrip extension | Present |
+| `evm_rlp_decode` | F10.1 RLP decoder: random relayer bytes -> canonical decode/error, no panic | Present |
+| `evm_mpt_verify` | F10.1 MPT verifier: bounded key/proof pieces -> verify/error, no panic | Present |
+| `consensus_state_transition` | produce_block + try_reorg panic freedom / MAX_REORG_DEPTH | Present |
+| `relayer_escrow` | bridge lock -> mint -> burn -> unlock plus the UniversalRelayer proof path | Present |
+| `zk_verifier` | ProofEnvelope bincode + DefaultAdapter::verify fail-closed | Present |
+| `budl_compile` | Budl source -> compiler front end, no panic on malformed input | Present |
+| `budl_compile_then_run` | Compile plus execute, the compiler and the VM on the same input | Present |
+| `vm_execute` | BudZero VM execution over a random program, panic/DoS check | Present |
+| `reputation` | The reputation accounting path, no panic and no overflow | Present |
 
-## Çalıştırma
+## Running
 
-**Önkoşul:** Rust nightly toolchain (sadece fuzzing için).
+**Prerequisite:** the Rust nightly toolchain (for fuzzing only).
 
 ```bash
 rustup install nightly
@@ -32,7 +40,7 @@ cargo +nightly fuzz run evm_rlp_decode
 cargo +nightly fuzz run evm_mpt_verify
 ```
 
-Kısa smoke-run örneği:
+A short smoke run example:
 
 ```bash
 cargo +nightly fuzz run snapshot_deserialize -- -max_total_time=30
@@ -42,46 +50,38 @@ cargo +nightly fuzz run evm_mpt_verify -- -max_total_time=300
 
 ## Seed corpus
 
-ZKVM odaklı seed corpus dosyaları `fuzz/corpus/zkvm/` altındadır. EVM target
-seedleri `fuzz/corpus/evm_rlp_decode/` ve `fuzz/corpus/evm_mpt_verify/` altında;
-bunlar in-tree F10 testlerinin kanonik boş RLP ve boş trie başlangıç girdileridir,
-resmî Ethereum fixture paketi değildir. Yeni seed üretimi için:
+The ZKVM oriented seed corpus files live under `fuzz/corpus/zkvm/`. The EVM
+target seeds are under `fuzz/corpus/evm_rlp_decode/` and
+`fuzz/corpus/evm_mpt_verify/`; these are the canonical empty RLP and empty trie
+starting inputs of the in-tree F10 tests, not the official Ethereum fixture
+package. To produce new seeds:
 
 ```bash
 cargo run --manifest-path ../xtask/tools/Cargo.toml -- seed-corpus
 ```
 
-## CI entegrasyonu sınırı
+## CI integration
 
-Bu repo için GitHub App token'ında workflow güncelleme yetkisi bulunmadığı
-önceki oturumlarda doğrulandı. Bu nedenle  kapsamında `.github/workflows`
-değiştirilmez; fuzz target seti ve scriptler repo içinde teslim edilir. Uzun fuzz
-run'lar release/audit öncesi manuel veya ayrı yetkili CI job'ı ile çalıştırılır.
+The quick job in `ci.yml` runs the listed targets for 60 seconds each. Long runs
+are handled by `fuzz-nightly.yml` (a schedule, 4h per target, with a corpus
+cache). A target only fuzzes when three files agree: the harness, the `[[bin]]`
+entry and the workflow that runs it; the `fuzz-targets-are-wired` gate measures
+exactly that agreement.
 
-## Kabul kriteri
+## Acceptance criteria
 
-- [x] `fuzz/Cargo.toml` mevcut.
-- [x] `fuzz/fuzz_targets/` içinde 7 target mevcut.
-- [x] Target'lar `Cargo.toml` içinde explicit `[[bin]]` olarak kayıtlı.
-- [x] F10.1 RLP + MPT panic/DoS target'leri kayıtlı; MPT inputu 64 node ve node başına 128 byte ile bounded.
-- [x] Deserialization target'ları panic yerine `Result` tüketir.
-- [ ] Yetkili ortamda `cargo +nightly fuzz check` temiz.
-- [ ] Uzun fuzz run raporları release öncesi artifact olarak saklanır.
+- [x] `fuzz/Cargo.toml` exists.
+- [x] 14 targets exist under `fuzz/fuzz_targets/`.
+- [x] Every target is registered as an explicit `[[bin]]` in `Cargo.toml`.
+- [x] The F10.1 RLP and MPT panic/DoS targets are registered; the MPT input is
+      bounded to 64 nodes and 128 bytes per node.
+- [x] The deserialization targets consume a `Result` instead of panicking.
+- [ ] `cargo +nightly fuzz check` is clean in an authorised environment.
+- [ ] Long fuzz run reports are stored as artifacts before a release.
 
-## İlgili
+## Related
 
-- `scripts/audit-deps.sh`: dependency audit raporu.
-- `scripts/generate-sbom.sh`: CycloneDX SBOM üretimi.
-- `target/audit/DEPENDENCY_AUDIT.md`: son dependency audit durumu.
-- `target/audit/SBOM.md`: SBOM üretim prosedürü.
-
-
-## Fuzz targets
-
-| Target | Oracle |
-|--------|--------|
-| `consensus_state_transition` | produce_block + try_reorg panic-freedom / MAX_REORG_DEPTH |
-| `relayer_escrow` | bridge lock→mint→burn→unlock + UniversalRelayer proof path |
-| `zk_verifier` | ProofEnvelope bincode + DefaultAdapter::verify fail-closed |
-
-Quick CI: 60s × 8 listed targets (see `ci.yml`). Nightly: 4h matrix includes the three new targets.
+- `ops/scripts/audit-deps.sh`: the dependency audit report.
+- `ops/scripts/generate-sbom.sh`: CycloneDX SBOM generation.
+- `target/audit/DEPENDENCY_AUDIT.md`: the latest dependency audit status.
+- `target/audit/SBOM.md`: the SBOM generation procedure.
