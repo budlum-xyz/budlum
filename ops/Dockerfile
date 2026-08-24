@@ -2,20 +2,20 @@
 # Multi-stage build: builder → runtime
 
 # ── Stage 1: Builder ────────────────────────────────────────
-# Toolchain, rust-toolchain.toml (channel = "1.97.0") ve CI'daki
-# dtolnay/rust-toolchain pini ile AYNI olmak zorundadir. Onceden 1.97.1
-# kullaniliyordu: imaj CI'dan farkli bir derleyiciyle build ediliyor, bu da
-# "tekrarlanabilir build" iddiasini gecersiz kiliyordu (codegen ve MIR
-# optimizasyonlari surumler arasi degisir, uretilen binary bit-bit farkli
-# olur).
+# The toolchain MUST be THE SAME as rust-toolchain.toml (channel = "1.97.0") and
+# the dtolnay/rust-toolchain pin in CI. It used to be 1.97.1:
+# the image was built with a different compiler from CI, which invalidated the
+# "reproducible build" claim (codegen and MIR optimisations change between
+# releases and the produced binary comes out bit-for-bit different).
 #
-# Digest, registry'den dogrulandi: bu imajin config blob'undaki
-# RUST_VERSION=1.97.0'dir. Etiket adi kanit degildir -- onceki hali
+#
+# The digest was verified from the registry: the config blob of this image carries
+# RUST_VERSION=1.97.0. A tag name is not evidence -- the previous shape was
 # `rust:1.97.1-bookworm@sha256:77fac8b9...` idi ve o digest'in icindeki
-# RUST_VERSION gercekten 1.97.1'di, yorum "1.94.0 icin dogrulandi" dedigi
-# halde. Sadece etiket 1.97.0'a cevrilse digest onu ezerdi; ikisi birlikte
-# degismek zorunda. `check-docker-toolchain-matches-pin.sh` bu ikisinin ve
-# rust-toolchain.toml'un ayni surumu gosterdigini her PR'da dogrular.
+# and the RUST_VERSION inside that digest really was 1.97.1, even though the comment
+# said "verified for 1.94.0". Turning only the tag into 1.97.0 would let the digest
+# override it; the two must change together. `check-docker-toolchain-matches-pin.sh`
+# verifies on every PR that these two and rust-toolchain.toml point at the same version.
 FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
 
 # hadolint ignore=DL3008
@@ -24,20 +24,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     clang \
     cmake \
     && rm -rf /var/lib/apt/lists/*
-# prost-build protoc'u PATH'ten arar; bazi imajlarda PATH degismis
-# olabiliyor (docker-smoke 'Could not find protoc' veriyordu). Acikca
-# isaret edelim + kurulumu dogrulayalim.
+# prost-build looks for protoc on PATH; in some images PATH may have
+# changed (docker-smoke was giving 'Could not find protoc'). Point at it
+# explicitly and verify the installation.
 ENV PROTOC=/usr/bin/protoc
-RUN test -x "$PROTOC" || (echo "protoc $PROTOC'da yok" >&2; exit 1)
+RUN test -x "$PROTOC" || (echo "protoc is not at $PROTOC" >&2; exit 1)
 
 WORKDIR /build
 
 # Copy the monorepo manifests and sources. BudZero/BudZKVM is vendored as
 # source under budzero/ and is built from the same immutable checkout.
-# rust-toolchain.toml da kopyalanir: onsuz imaj icindeki derleyici ne ise o
-# kullanilir ve pin sessizce devre disi kalir. Ustelik dosya varsa rustup
-# uyusmazlikta durur, yani base imaj bir daha kayarsa build patlar -- bit-bit
-# farkli bir binary uretmek yerine.
+# rust-toolchain.toml is copied too: without it whatever compiler is in the image
+# gets used and the pin is silently disabled. Moreover, when the file is present rustup
+# stops on a mismatch, so if the base image drifts again the build breaks -- instead of
+# producing a bit-for-bit different binary.
 COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY src/ ./src/
 COPY benches/ ./benches/
@@ -49,15 +49,15 @@ COPY budzero/ ./budzero/
 # and be noticed the same hour.
 COPY crates/note-packing/ ./crates/note-packing/
 
-# Derleyici gercekten pinli surum mu: build'den ONCE, imaj icinde.
-# Bu satir olmasaydi yanlis derleyiciyle uretilmis bir binary sessizce
-# yayinlanirdi ve "tekrarlanabilir build" iddiasi kagit uzerinde kalirdi.
+# Is the compiler really the pinned version: BEFORE the build, inside the image.
+# Without this line a binary produced by the wrong compiler would be published
+# silently and the "reproducible build" claim would exist only on paper.
 #
-# Boru YOK (hadolint DL4006): `rustc --version | cut` yazilsaydi rustc'nin
-# cikis kodu cut'inkiyle ortulurdu ve rustc calismasa bile adim gecerdi --
-# tam olarak bu kapinin engellemek istedigi sessiz gecis. `set -o pipefail`
-# eklemek yerine boruyu kaldirmak daha dar bir cozum: `rustc --version`
-# once kendi basina calisir, basarisiz olursa `&&` zinciri orada durur.
+# NO pipe (hadolint DL4006): had it been written `rustc --version | cut`, rustc's
+# exit code would be masked by cut's and the step would pass even if rustc did not run --
+# exactly the silent pass this gate wants to prevent. Removing the pipe is a narrower
+# fix than adding `set -o pipefail`: `rustc --version` runs on its own first, and if it
+# fails the `&&` chain stops there.
 RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
     version_line="$(rustc --version)" && \
     actual="${version_line#rustc }" && \
@@ -86,15 +86,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
 
-# Hadolint DL3066: non-numeric user-id. Kullanıcı deterministik UID 1000 ile
-# oluşturulur ve `USER 1000` numeric form kullanır, böylece host tarafında
-# çözümlenebilir (Güvenlik Planı §3: runtime kullanıcısı root değildir).
+# Hadolint DL3066: non-numeric user-id. The user is created with the deterministic
+# UID 1000 and `USER 1000` uses the numeric form, so it resolves on the host side
+# (Security Plan section 3: the runtime user is not root).
 RUN useradd --create-home --shell /bin/bash --uid 1000 budlum
 
-# Multi-node compose mount-point'leri (devnet-multinode-smoke): named volume
-# ilk mount'ta imaj dizin sahipliğini devralır - önceden budlum sahipli
-# oluşturulmazsa container (USER 1000) storage init'te EACCES alır ve
-# restart-loop'a düşer (ilk CI koşusunda yakalanan defo, 2026-07-18).
+# Multi-node compose mount points (devnet-multinode-smoke): a named volume
+# inherits the image directory ownership on first mount - if it is not created
+# owned by budlum beforehand the container (USER 1000) gets EACCES during storage
+# init and falls into a restart loop (a defect caught in the first CI run, 2026-07-18).
 RUN mkdir -p /home/budlum/data /home/budlum/secrets \
     && chown -R 1000:1000 /home/budlum
 
@@ -105,11 +105,11 @@ WORKDIR /home/budlum
 #   4001 = P2P (devnet), 8545 = RPC public, 8546 = RPC operator, 9090 = Metrics
 EXPOSE 4001 8545 8546 9090
 
-# HEALTHCHECK (Güvenlik Planı §3.7): RPC portunun dinlendiğini doğrular.
-# `curl`, bu meşru sağlık-kontrolü kullanımı için runtime imajında tutuldu.
-# Konteyner ayakta ama RPC yanıt vermiyorsa unhealthy işaretlenir.
-# JSON form (hadolint DL3025): `curl -f` zaten fail-mode'dur - başarısız
-# bağlantıda exit 1 döner, healthcheck'in healthy/unhealthy kararını verir.
+# HEALTHCHECK (Security Plan section 3.7): verifies that the RPC port is listening.
+# `curl` is kept in the runtime image for this legitimate health check use.
+# If the container is up but the RPC does not answer it is marked unhealthy.
+# The JSON form (hadolint DL3025): `curl -f` is already in fail mode - it returns
+# exit 1 on a failed connection, which makes the healthcheck's healthy/unhealthy decision.
 # F-20: JSON-RPC probe on the public listener the image actually binds
 # (8545). Compose's operator listener (8546) is opt-in via
 # --rpc-operator-listener; a default `docker run` never opens it, so a

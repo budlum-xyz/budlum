@@ -272,37 +272,37 @@ For critical vulnerabilities, public details may be delayed until a safe patch p
 
 ## Bug Bounty
 
-Budlum Core, mainnet v1 lansmanından itibaren bir bug bounty programı yürütecektir.
+Budlum Core will run a bug bounty programme from the mainnet v1 launch onwards.
 
-| Seviye | Ödül (USD) |
+| Severity | Reward (USD) |
 |--------|------------|
-| Kritik (consensus bypass, key extraction, bridge drain) | $50,000 to $100,000 |
-| Yüksek (DoS, RPC bypass, P2P eclipse) | $10,000 to $25,000 |
-| Orta (rate limit bypass, info leak) | $2,500 to $5,000 |
-| Düşük (best practice, docs) | $500 to $1,000 |
+| Critical (consensus bypass, key extraction, bridge drain) | $50,000 to $100,000 |
+| High (DoS, RPC bypass, P2P eclipse) | $10,000 to $25,000 |
+| Medium (rate limit bypass, info leak) | $2,500 to $5,000 |
+| Low (best practice, docs) | $500 to $1,000 |
 
-**Raporlama:** `security@budlum.network` veya GitHub private security advisory.
-**Triage:** 72 saat içinde ilk yanıt. Coordinated disclosure: 90 gün.
+**Reporting:** `security@budlum.network` or a GitHub private security advisory.
+**Triage:** a first response within 72 hours. Coordinated disclosure: 90 days.
 
-> Program henüz aktif değil: mainnet lansmanıyla birlikte Immunefi üzerinden açılacaktır.
+> The programme is not active yet: it opens through Immunefi together with the mainnet launch.
 
-### Triage Kanalları
+### Triage Channels
 
-- **Discord:** `#security-reports` (yalnızca reporter + security lead görür)
-- **Telegram:** `@budlum_security` (alternatif, PGP key talep edilir)
-- **GitHub:** Private security advisory (önerilen: audit trail)
+- **Discord:** `#security-reports` (visible only to the reporter and the security lead)
+- **Telegram:** `@budlum_security` (alternative, a PGP key is requested)
+- **GitHub:** a private security advisory (recommended: audit trail)
 
-### Safe Harbor (İyi Niyetli Araştırmacı Koruması)
+### Safe Harbor (Good Faith Researcher Protection)
 
-Aşağıdaki koşulları sağlayan araştırmacılar iyi niyetli kabul edilir:
+Researchers who meet the conditions below are treated as acting in good faith:
 
-1. Yalnızca **test hesapları** kullanılır; üçüncü parti fon/veriye dokunulmaz.
-2. Mainnet'te **fon/veri riske atmayan** salt-kanıt test (read-only).
-3. Bulgu paylaşılmadan önce `security@budlum.network`'e raporlanır.
-4. 90 gün coordinated disclosure penceresine uyulur.
+1. Only **test accounts** are used; third party funds and data are not touched.
+2. On mainnet, proof-only testing that **puts no funds or data at risk** (read-only).
+3. A finding is reported to `security@budlum.network` before it is shared.
+4. The 90 day coordinated disclosure window is respected.
 
-**Kapsam dışı:** sosyal mühendislik, üçüncü parti altyapı (RPC/HSM vendor),
-mainnet'te gerçek fon drain, kullanıcı verisi sızıntısı.
+**Out of scope:** social engineering, third party infrastructure (RPC/HSM vendors),
+draining real funds on mainnet, leaking user data.
 
 ---
 

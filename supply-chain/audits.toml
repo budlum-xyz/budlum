@@ -1,20 +1,20 @@
 
 # cargo-vet audits file
 #
-# Bu dosya Budlum'un KENDİ denetim kayıtlarını tutar (`cargo vet certify` ile
-# eklenir). Şu an boş: cargo-vet bu repoda ilk kez 2026-07-27'de çalıştırıldı
-# (öncesinde config.toml uydurma anahtarlar içerdiği için parse bile
-# edilemiyordu), dolayısıyla henüz tek bir crate denetlenmedi.
+# This file holds Budlum's OWN audit records (added with `cargo vet certify`).
+# It is empty right now: cargo-vet ran in this repository for the first time on
+# 2026-07-27 (before that config.toml carried invented keys and could not even be
+# parsed), so not a single crate has been audited yet.
 #
-# Denetim borcu: 437 crate (bkz. .github/cargo-vet-baseline.txt).
-# Eritme önceliği kripto/FFI yüzeyi: ring, pqcrypto-dilithium, cryptoki,
-# bls12_381, aes-gcm, chacha20.
+# Audit debt: 437 crates (see .github/cargo-vet-baseline.txt).
+# The priority for burning it down is the crypto/FFI surface: ring, pqcrypto-dilithium,
+# cryptoki, bls12_381, aes-gcm, chacha20.
 #
-# Kayıt biçimi:
+# Record format:
 #   [[audits.pqcrypto-dilithium]]
 #   version  = "0.5.0"
 #   criteria = "safe-to-deploy"
-#   who      = "Ad Soyad <mail>"
-#   notes    = "FFI binding'leri incelendi; Rust katmanında unsafe yok."
+#   who      = "Full Name <mail>"
+#   notes    = "the FFI bindings were reviewed; no unsafe in the Rust layer."
 
 [audits]
