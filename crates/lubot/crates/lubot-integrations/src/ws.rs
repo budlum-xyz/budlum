@@ -1,18 +1,18 @@
-//! WebSocket bağlantı deseni - taşıyıcıdan bağımsız iskelet.
+//! The WebSocket connection pattern - a transport-independent skeleton.
 //!
-//! Bağlantı yönetimi (yeniden bağlanma, kapatma sinyali, oturum
-//! doğrulama) ile uygulama mantığını ayırır. Taşıyıcı (tokio-tungstenite
-//! vb.) bu türlerin üzerine kurulur.
+//! It separates connection management (reconnection, the kill signal, session
+//! authentication) from application logic. The transport
+//! (tokio-tungstenite and friends) is built on top of these types.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Bağlantı durumu.
+/// The connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ConnState {
-    /// Baslangic durumu: `SessionTracker::default()` bunu bekliyordu ama
-    /// `ConnState` `Default` turetmiyordu, bu yuzden derive derlenmiyordu.
+    /// The initial state: `SessionTracker::default()` expected it, but
+    /// `ConnState` did not derive `Default`, so the derive did not compile.
     #[default]
     Disconnected,
     Connecting,
@@ -21,18 +21,19 @@ pub enum ConnState {
     Failed,
 }
 
-/// Bağlantı yapılandırması.
+/// The connection configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsConfig {
     pub url: String,
-    /// Yeniden bağlanma denemeleri arası bekleme (saniye).
+    /// The wait between reconnection attempts (in seconds).
     pub reconnect_delay_secs: u64,
-    /// Azami ardışık yeniden bağlanma denemesi (0 = sınırsız).
+    /// The maximum number of consecutive reconnection attempts (0 means
+    /// unlimited).
     pub max_reconnects: u32,
 }
 
-/// Kapatma (kill) sinyali: tüm dinleyicilere yayınlanır; `trigger()`
-/// çağrıldığında `is_killed()` true döner.
+/// The kill signal: broadcast to every listener; once `trigger()` is called,
+/// `is_killed()` returns true.
 #[derive(Debug, Default)]
 pub struct KillSignal {
     flag: AtomicBool,
@@ -44,7 +45,7 @@ impl KillSignal {
         Self::default()
     }
 
-    /// Sinyali tetikler (idempotent).
+    /// Fires the signal (idempotent).
     pub fn trigger(&self) {
         self.flag.store(true, Ordering::SeqCst);
     }
@@ -54,27 +55,29 @@ impl KillSignal {
         self.flag.load(Ordering::SeqCst)
     }
 
-    /// Paylaşılan referans üretir.
+    /// Produces a shared reference.
     #[must_use]
     pub fn shared() -> Arc<Self> {
         Arc::new(Self::new())
     }
 }
 
-/// Tek bir WS iletisinin işlenmesi için geri çağrı sözleşmesi.
+/// The callback contract for handling a single WS message.
 pub trait WsHandler {
-    /// Bağlandıktan sonra oturum açma adımı (ör. kimlik doğrulama iletisi).
+    /// The login step after connecting (for example an authentication
+    /// message).
     fn on_connected(&mut self) -> Result<String, String>;
 
-    /// Gelen bir iletinin işlenmesi. Toplu mesajlar `as_items` ile
-    /// ayrıştırılmış biçimde verilir.
+    /// Handling an incoming message. Batched messages are handed over already
+    /// split by `as_items`.
     fn on_message(&mut self, items: &[serde_json::Value]) -> Result<(), String>;
 
-    /// Bağlantı koptuğunda çağrılır.
+    /// Called when the connection drops.
     fn on_disconnect(&mut self, reason: &str);
 }
 
-/// Basit oturum yönetimi: `connected`/`authenticated` iletilerini izler.
+/// Simple session management: it watches the `connected`/`authenticated`
+/// messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SessionTracker {
     state: ConnState,
@@ -86,7 +89,7 @@ impl SessionTracker {
         Self::default()
     }
 
-    /// Gelen iletiden oturum durumunu günceller.
+    /// Updates the session state from an incoming message.
     pub fn observe(&mut self, item: &serde_json::Value) {
         if crate::is_success_connected_or_authed(item) {
             self.state = ConnState::Authenticated;
