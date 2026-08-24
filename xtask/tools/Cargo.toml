@@ -7,9 +7,9 @@ license = "LicenseRef-PolyForm-Shield-1.0.0"
 description = "Repository tooling, written in Rust rather than shell."
 publish = false
 
-# Bagimlilik yok, ve bu kasitli. Bu crate'in isi surec calistirmak, dosya
-# yazmak ve cikis kodu dondurmek; ucu de std'de var. `xtask/gates` syn'i
-# bir gerekceyle aldi (AST dogrulugu); burada oyle bir gerekce yok.
+# No dependencies, and that is deliberate. This crate's job is to run processes,
+# write files and return exit codes; all three exist in std. `xtask/gates` took
+# syn for a reason (AST correctness); there is no such reason here.
 [dependencies]
 
 [lints.rust]

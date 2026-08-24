@@ -10,7 +10,7 @@ use std::path::Path;
 const PAIRS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "src/storage/README.md",
-        "parity shard kavram",
+        "no parity shard concept",
         "src/storage/manifest.rs",
         "ShardKind::Parity",
         "`ShardRef` carries a `kind` and `ShardKind::Parity` exists. If parity \
@@ -18,7 +18,7 @@ const PAIRS: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "src/storage/README.md",
-        "yedeklilik erasure coding de",
+        "redundancy is not erasure coding",
         "src/storage/erasure.rs",
         "pub fn encode_object",
         "`src/storage/erasure.rs` computes real Reed-Solomon parity. The \
@@ -103,7 +103,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!("budlum-gates-rdn-{}-{nanos}", std::process::id()));
     let _ = std::fs::create_dir_all(dir.join("src/storage"));
 
-    let denies = "5. Yedeklilik erasure coding degil, replikasyon. parity shard kavramı yok.\n";
+    let denies = "5. Redundancy is not erasure coding, it is replication. There is no parity shard concept.\n";
     let manifest = "pub enum ShardKind { Data, Parity }\n";
     let erasure = "pub fn encode_object() {}\n";
     std::fs::write(dir.join("src/storage/README.md"), denies).map_err(|e| e.to_string())?;
@@ -111,17 +111,17 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/storage/erasure.rs"), erasure).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: inkar eden README gecti"));
+        return Err(String::from("canary: a denying README passed"));
     }
     // Honest README: feature present but unwired.
-    let honest = "5. Yedeklilik erasure coding, ama henuz uretim yolu cagirmiyor.\n";
+    let honest = "5. Erasure coding exists, but no production path calls it yet.\n";
     std::fs::write(dir.join("src/storage/README.md"), honest).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: durust README reddedildi"));
+        return Err(String::from("canary: an honest README was refused"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "readme-no-deny kanaryasi OK (inkar FAIL, durust PASS).",
+        "readme-no-deny canary OK (a denial FAILs, honesty PASSes).",
     ))
 }

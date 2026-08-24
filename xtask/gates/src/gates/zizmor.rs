@@ -57,12 +57,12 @@ fn bin_path() -> Result<PathBuf, String> {
     let sum = std::process::Command::new("sha256sum")
         .arg(&tgz)
         .output()
-        .map_err(|e| format!("zizmor sha256sum çalışmadı: {e}"))?
+        .map_err(|e| format!("zizmor sha256sum did not run: {e}"))?
         .stdout;
     let sum = String::from_utf8_lossy(&sum);
     if !sum.starts_with(SHA256) {
         return Err(format!(
-            "zizmor sha256 uyuşmadı (beklenen {SHA256}, alınan {}); indirme reddedildi",
+            "the zizmor sha256 did not match (expected {SHA256}, got {}); the download was refused",
             sum.split_whitespace().next().unwrap_or("?")
         ));
     }
@@ -72,10 +72,12 @@ fn bin_path() -> Result<PathBuf, String> {
         .arg("-C")
         .arg(std::env::temp_dir())
         .status()
-        .map_err(|e| format!("zizmor açılamadı (tar): {e}"))?
+        .map_err(|e| format!("zizmor could not be extracted (tar): {e}"))?
         .success();
     if !extract_ok {
-        return Err(String::from("zizmor açılamadı (tar exit != 0)"));
+        return Err(String::from(
+            "zizmor could not be extracted (tar exit != 0)",
+        ));
     }
     // The archive contains the binary at the root of the extract dir; look
     // for it next to the tgz. It was just produced by tar from the verified
@@ -86,7 +88,7 @@ fn bin_path() -> Result<PathBuf, String> {
         return Ok(extracted);
     }
     Err(format!(
-        "zizmor arşivinde binary bulunamadı: {}",
+        "no binary was found in the zizmor archive: {}",
         extracted.display()
     ))
 }
@@ -103,10 +105,10 @@ pub fn run(root: &Path) -> Result<String, String> {
     match out {
         Ok(o) if o.status.success() => Ok(String::from("zizmor temiz (0 bulgu).")),
         Ok(o) => Err(format!(
-            "zizmor bulguları:\n{}",
+            "zizmor findings:\n{}",
             String::from_utf8_lossy(&o.stdout)
         )),
-        Err(e) => Err(format!("zizmor çalışmadı ({}): {e}", bin.display())),
+        Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.display())),
     }
 }
 
@@ -137,12 +139,12 @@ pub fn self_test() -> Result<String, String> {
         .output();
     let _ = std::fs::remove_dir_all(&dir);
     match out {
-        Ok(o) if o.status.success() => Err(String::from(
-            "kanarya: zizmor çalıştı ama bu bir kanıt değil",
-        )),
+        Ok(o) if o.status.success() => {
+            Err(String::from("canary: zizmor ran but that is not evidence"))
+        }
         Ok(_) => Ok(String::from(
-            "kanarya OK: zizmor bozuk/şüpheli workflow'u reddetti.",
+            "canary OK: zizmor refused the broken/suspicious workflow.",
         )),
-        Err(e) => Err(format!("zizmor çalışmadı ({}): {e}", bin.display())),
+        Err(e) => Err(format!("zizmor did not run ({}): {e}", bin.display())),
     }
 }

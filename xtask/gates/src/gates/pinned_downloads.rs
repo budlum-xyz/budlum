@@ -6,7 +6,7 @@
 //! refuses any `curl`/`wget` line that fetches a `.sha256`-style file, and
 //! requires at least one workflow to verify a checksum with `sha256sum -c`.
 //!
-//! The Strix hardening (takip çalışması) is kept: the extension match is
+//! The Strix hardening (follow-up work) is kept: the extension match is
 //! case-insensitive so `.SHA256`/`.Sha512` variants are caught, a checksum
 //! URL is any URL whose path ends in a checksum-ish resource (`/hash`,
 //! `/checksum`, `/sum`) regardless of extension, and a query-string checksum
@@ -177,7 +177,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: ağdan checksum indiren workflow geçti",
+            "canary: a workflow downloading a checksum from the network passed",
         ));
     }
 
@@ -188,19 +188,19 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: ağdan .SHA256 checksum indiren workflow geçti",
+            "canary: a workflow downloading a .SHA256 checksum from the network passed",
         ));
     }
 
     // A checksum URL carrying a query string must fail too: `?checksum=` or
     // `&hash=` in the URL is still a remote checksum fetch (Strix MEDIUM,
-    // CWE-184, takip çalışması).
+    // CWE-184, follow-up work).
     let query = "run: |\n  curl -sSfL \"https://example.com/download?checksum=abc\" -o tool.tar.gz\n  curl -sSfL \"https://example.com/tool?hash=def\" -o tool2.tar.gz\n";
     std::fs::write(dir.join(".github/workflows/ci.yml"), query).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: query-string checksum URL'li workflow geçti",
+            "canary: a workflow with a query-string checksum URL passed",
         ));
     }
 
@@ -214,6 +214,6 @@ pub fn self_test() -> Result<String, String> {
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "pinned-downloads kanaryası OK (ağ-checksum FAIL, repo-ici hash PASS).",
+        "pinned-downloads canary OK (network checksum FAILs, in-repo hash PASSes).",
     ))
 }

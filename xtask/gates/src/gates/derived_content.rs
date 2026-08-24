@@ -163,15 +163,15 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
 
     if !good_ok {
-        return Err(String::from("canary: temiz modül reddedildi"));
+        return Err(String::from("canary: a clean module was refused"));
     }
     if !pixel_fails {
-        return Err(String::from("canary: piksel koordinat alanı geçti"));
+        return Err(String::from("canary: a pixel coordinate space passed"));
     }
     if !float_fails {
-        return Err(String::from("canary: kayan nokta geçti"));
+        return Err(String::from("canary: a floating point value passed"));
     }
     Ok(String::from(
-        "derived-content kanaryası OK (temiz PASS, piksel/float FAIL).",
+        "derived-content canary OK (clean PASSes, pixel/float FAILs).",
     ))
 }

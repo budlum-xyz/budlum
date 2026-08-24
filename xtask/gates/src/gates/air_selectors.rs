@@ -272,7 +272,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: dogru baglama reddedildi"));
+        return Err(String::from("canary: a correct binding was refused"));
     }
     // Wrong binding value.
     let bad = air.replace("op(0x01)", "op(0x02)");
@@ -280,10 +280,10 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: yanlis baglama gecti"));
+        return Err(String::from("canary: a wrong binding passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "air-selectors kanaryasi OK (dogru PASS, yanlis baglama FAIL).",
+        "air-selectors canary OK (correct PASSes, a wrong binding FAILs).",
     ))
 }

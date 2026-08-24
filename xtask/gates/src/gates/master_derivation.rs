@@ -91,16 +91,18 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/storage/derived.rs"), &good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: doğru modül reddedildi"));
+        return Err(String::from("canary: a correct module was refused"));
     }
     let bad = good.replace("MasterRegistry", "MasterThing");
     std::fs::write(dir.join("src/storage/derived.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: MasterRegistry'siz modül geçti"));
+        return Err(String::from(
+            "canary: a module with no MasterRegistry passed",
+        ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "a-derivation kanaryası OK (doğru PASS, eksik FAIL).",
+        "a-derivation canary OK (correct PASSes, missing FAILs).",
     ))
 }

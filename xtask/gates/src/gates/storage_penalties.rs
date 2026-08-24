@@ -30,7 +30,7 @@ fn strip_comments_and_literals(src: &str) -> String {
             while j < b.len() {
                 // python's regex `'(?:\\\\.|[^'\\\\\\n]|\\\\\\n)*'` never
                 // crosses a newline: an apostrophe in prose (e.g. Turkish
-                // `'nın`) is not a char literal and must not swallow lines.
+                // `'nin`) is not a char literal and must not swallow lines.
                 if b[j] == b'\n' {
                     break;
                 }
@@ -357,7 +357,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/chain/blockchain.rs"), chain).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: doğru ağaç reddedildi"));
+        return Err(String::from("canary: a correct tree was refused"));
     }
 
     // Bad: cooldown wrong length.
@@ -365,11 +365,11 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/domain/storage_deal.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: yanlış cooldown geçti"));
+        return Err(String::from("canary: a wrong cooldown passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "storage-penalties kanaryası OK (doğru PASS, yanlış cooldown FAIL).",
+        "storage-penalties canary OK (correct PASSes, a wrong cooldown FAILs).",
     ))
 }

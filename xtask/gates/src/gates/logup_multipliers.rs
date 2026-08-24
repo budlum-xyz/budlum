@@ -257,7 +257,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: dogru agac reddedildi"));
+        return Err(String::from("canary: a correct tree was refused"));
     }
     let bad = air.replace(
         "is_load.clone() + is_store.clone()",

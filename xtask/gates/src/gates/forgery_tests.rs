@@ -208,7 +208,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("budzero/bud-proof/src/lib.rs"), &good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: dogru testler reddedildi"));
+        return Err(String::from("canary: correct tests were refused"));
     }
     // Remove #[test] from one.
     let bad = good.replace(

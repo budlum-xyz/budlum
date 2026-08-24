@@ -33,10 +33,10 @@ pub fn run(root: &Path) -> Result<String, String> {
     match out {
         Ok(o) if o.status.success() => Ok(String::from("actionlint temiz.")),
         Ok(o) => Err(format!(
-            "actionlint bulguları:\n{}",
+            "actionlint findings:\n{}",
             String::from_utf8_lossy(&o.stdout)
         )),
-        Err(e) => Err(format!("actionlint çalışmadı: {e}")),
+        Err(e) => Err(format!("actionlint did not run: {e}")),
     }
 }
 
@@ -66,11 +66,11 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
     match out {
         Ok(o) if o.status.success() => Err(String::from(
-            "VACUOUS GATE: bozuk workflow actionlint'ten geçti!",
+            "VACUOUS GATE: a broken workflow passed actionlint!",
         )),
         Ok(_) => Ok(String::from(
-            "kanarya OK: bozuk workflow reddedildi (kapı vacuous değil).",
+            "canary OK: the broken workflow was refused (the gate is not vacuous).",
         )),
-        Err(e) => Err(format!("actionlint çalışmadı: {e}")),
+        Err(e) => Err(format!("actionlint did not run: {e}")),
     }
 }

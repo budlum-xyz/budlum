@@ -345,7 +345,7 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: iyi modül reddedildi"));
+        return Err(String::from("canary: a good module was refused"));
     }
 
     // Bad: remove then Err with no insert.
@@ -358,6 +358,6 @@ pub fn self_test() -> Result<String, String> {
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "refusals kanaryası OK (iyi PASS, kısmi-yazı FAIL).",
+        "refusals canary OK (good PASSes, a partial write FAILs).",
     ))
 }

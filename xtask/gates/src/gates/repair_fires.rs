@@ -145,7 +145,7 @@ pub fn self_test() -> Result<String, String> {
     }
     if run(&tmp).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from("canary: değiştirilmemiş kopya reddedildi"));
+        return Err(String::from("canary: an unmodified copy was refused"));
     }
     // Break one claim: remove the sweep's band read.
     let actor = tmp.join("src/chain/chain_actor.rs");
@@ -157,12 +157,10 @@ pub fn self_test() -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     if run(&tmp).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(String::from(
-            "canary: bağlantısız onarım tetikleyicisi geçti",
-        ));
+        return Err(String::from("canary: an unwired repair trigger passed"));
     }
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "repair-fires kanaryası OK (temiz PASS, kırık tetikleyici FAIL).",
+        "repair-fires canary OK (clean PASSes, a broken trigger FAILs).",
     ))
 }

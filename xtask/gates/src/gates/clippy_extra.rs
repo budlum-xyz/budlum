@@ -15,12 +15,12 @@ use std::path::Path;
 fn baseline(root: &Path) -> Result<u64, String> {
     let f = root.join(".github/clippy-extra-baseline.txt");
     let text = std::fs::read_to_string(&f)
-        .map_err(|e| format!("baseline okunamadı ({}): {e}", f.display()))?;
+        .map_err(|e| format!("the baseline could not be read ({}): {e}", f.display()))?;
     text.lines()
         .find(|l| l.chars().all(|c| c.is_ascii_digit()) && !l.is_empty())
-        .ok_or_else(|| format!("baseline okunamadı ({})", f.display()))?
+        .ok_or_else(|| format!("the baseline could not be read ({})", f.display()))?
         .parse::<u64>()
-        .map_err(|e| format!("baseline sayı değil: {e}"))
+        .map_err(|e| format!("the baseline is not a number: {e}"))
 }
 
 /// A `compiler-message` line carrying a `warning` level and a `clippy::`
@@ -34,7 +34,7 @@ fn is_clippy_warning(line: &str) -> bool {
 
 fn count_json(path: &Path) -> Result<u64, String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("clippy JSON yok/boş ({}): {e}", path.display()))?;
+        .map_err(|e| format!("the clippy JSON is missing/empty ({}): {e}", path.display()))?;
     Ok(text.lines().filter(|l| is_clippy_warning(l)).count() as u64)
 }
 
@@ -43,19 +43,22 @@ fn count_json(path: &Path) -> Result<u64, String> {
 /// Returns a finding when the warning count exceeds the baseline.
 pub fn run(root: &Path, json: &Path) -> Result<String, String> {
     if !json.is_file() {
-        return Err(format!("clippy JSON yok/boş: {}", json.display()));
+        return Err(format!(
+            "the clippy JSON is missing/empty: {}",
+            json.display()
+        ));
     }
     let base = baseline(root)?;
     let n = count_json(json)?;
     let msg = format!("clippy-extra: {n} | baseline: {base}");
     if n > base {
         return Err(format!(
-            "{msg}\nFAIL: pedantic/nursery uyarı sayısı baseline'ı aştı (+{}) - yeni uyarı ratchet'e takıldı.",
+            "{msg}\nFAIL: the pedantic/nursery warning count went over the baseline (+{}) - a new warning hit the ratchet.",
             n - base
         ));
     }
     Ok(format!(
-        "{msg}\nOK: pedantic/nursery baseline altında/eşit (ratchet sağlam)."
+        "{msg}\nOK: pedantic/nursery is at or below the baseline (the ratchet holds)."
     ))
 }
 
@@ -91,12 +94,12 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
 
     if !few_ok {
-        return Err(String::from("canary: 2 uyarı reddedildi"));
+        return Err(String::from("canary: 2 warnings were refused"));
     }
     if !many_fail {
-        return Err(String::from("canary: 999 uyarı baseline'ı geçti"));
+        return Err(String::from("canary: 999 warnings passed the baseline"));
     }
     Ok(String::from(
-        "kanarya OK: aşan FAIL, düşük PASS (kapı vacuous değil).",
+        "canary OK: over the baseline FAILs, under it PASSes (the gate is not vacuous).",
     ))
 }

@@ -10,17 +10,17 @@ use std::path::Path;
 fn baseline(root: &Path) -> Result<f64, String> {
     let f = root.join(".github/coverage-baseline.txt");
     let text = std::fs::read_to_string(&f)
-        .map_err(|e| format!("baseline okunamadı ({}): {e}", f.display()))?;
+        .map_err(|e| format!("the baseline could not be read ({}): {e}", f.display()))?;
     // The file holds a plain float (`64.30`), as the shell gate's `float()`
     // read it; a trailing `%` is tolerated for hand-edited values.
     text.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .ok_or_else(|| format!("baseline okunamadı ({})", f.display()))?
+        .ok_or_else(|| format!("the baseline could not be read ({})", f.display()))?
         .trim_end_matches('%')
         .trim()
         .parse::<f64>()
-        .map_err(|e| format!("baseline sayı değil: {e}"))
+        .map_err(|e| format!("the baseline is not a number: {e}"))
 }
 
 /// Pull the line-coverage percentage out of llvm-cov JSON without a JSON
@@ -53,17 +53,19 @@ pub fn run(root: &Path, report: &Path) -> Result<String, String> {
     let text = std::fs::read_to_string(report).map_err(|e| e.to_string())?;
     let Some(pct) = percent_from_json(&text) else {
         return Err(format!(
-            "coverage raporundan line-coverage yüzdesi okunamadı: {}",
+            "the line-coverage percentage could not be read from the coverage report: {}",
             report.display()
         ));
     };
     let msg = format!("coverage: lines {pct:.2}% | baseline: {base:.2}%");
     if pct < base {
         return Err(format!(
-            "{msg}\nFAIL: line coverage baseline'ın altında (ratchet; baseline'ı düşürmek CI gevşetme ihlalidir)."
+            "{msg}\nFAIL: line coverage is below the baseline (ratchet; lowering the baseline is a CI-loosening violation)."
         ));
     }
-    Ok(format!("{msg}\nOK: line coverage baseline üstünde/eşit."))
+    Ok(format!(
+        "{msg}\nOK: line coverage is at or above the baseline."
+    ))
 }
 
 /// # Errors
@@ -73,7 +75,7 @@ pub fn self_test() -> Result<String, String> {
     // The shape llvm-cov actually emits: totals.lines.percent, with a
     // functions block after it that must not win.
     let json = r#"{"data":[{"totals":{"lines":{"count":14493,"covered":9301,"percent":64.15},"functions":{"count":0,"percent":54.89}}}]}"#;
-    let pct = percent_from_json(json).ok_or("canary: percent okunamadı")?;
+    let pct = percent_from_json(json).ok_or("canary: the percent could not be read")?;
     if (pct - 64.15).abs() > 1e-9 {
         return Err(format!("canary: 64.15 yerine '{pct}' okundu"));
     }
@@ -87,14 +89,15 @@ pub fn self_test() -> Result<String, String> {
     std::fs::create_dir_all(dir.join(".github")).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(".github/coverage-baseline.txt"), "64.30\n")
         .map_err(|e| e.to_string())?;
-    let base = baseline(&dir).map_err(|e| format!("canary: baseline okunamadı: {e}"))?;
+    let base =
+        baseline(&dir).map_err(|e| format!("canary: the baseline could not be read: {e}"))?;
     if (base - 64.30).abs() > 1e-9 {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(format!("canary: baseline 64.30 yerine '{base}' okundu"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "coverage parse kanaryası OK (64.15 doğru okundu; baseline float olarak okundu).",
+        "coverage parse canary OK (64.15 was read correctly; the baseline was read as a float).",
     ))
 }
 

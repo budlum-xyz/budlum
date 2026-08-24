@@ -237,7 +237,7 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
-            "canary: doğru fiyatlandırmalı modül reddedildi",
+            "canary: a module with correct pricing was refused",
         ));
     }
 
@@ -246,11 +246,11 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/domain/storage_deal.rs"), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: fee_per_epoch geri geldi, geçti"));
+        return Err(String::from("canary: fee_per_epoch came back and passed"));
     }
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "storage-pricing kanaryası OK (doğru PASS, fee_per_epoch FAIL).",
+        "storage-pricing canary OK (correct PASSes, fee_per_epoch FAILs).",
     ))
 }

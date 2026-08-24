@@ -42,7 +42,10 @@ fn parse_udeps(text: &str) -> Vec<String> {
 /// Returns a finding when a parsed unused dependency is not in the baseline.
 pub fn run(root: &Path, out: &Path) -> Result<String, String> {
     if !out.is_file() {
-        return Err(format!("udeps çıktısı yok/boş: {}", out.display()));
+        return Err(format!(
+            "the udeps output is missing/empty: {}",
+            out.display()
+        ));
     }
     let text = std::fs::read_to_string(out).map_err(|e| e.to_string())?;
     let found = parse_udeps(&text);
@@ -57,18 +60,16 @@ pub fn run(root: &Path, out: &Path) -> Result<String, String> {
             || lowered.contains("failed to")
         {
             return Err(format!(
-                "cargo-udeps çıktısı parse edilemedi; tarama tamamlanmamış\n\
-                 sayılır ve temiz kabul edilmez:\n{text}"
+                "the cargo-udeps output could not be parsed; the scan is treated as\n\
+                 incomplete and is not accepted as clean:\n{text}"
             ));
         }
-        return Ok(String::from(
-            "OK: kullanılmayan bağımlılık yok (parse edilmiş).",
-        ));
+        return Ok(String::from("OK: no unused dependencies (parsed)."));
     }
     let baseline_path = root.join(".github/udeps-baseline.txt");
     if !baseline_path.is_file() {
         return Ok(format!(
-            "SKIP: {} yok - ilk ölçüm (adım 1); bulgular:\n{}",
+            "SKIP: {} is absent - first measurement (step 1); findings:\n{}",
             baseline_path.display(),
             found.join("\n")
         ));
@@ -79,13 +80,13 @@ pub fn run(root: &Path, out: &Path) -> Result<String, String> {
     for f in &found {
         if !baseline_set.contains(f.as_str()) {
             fails.push(format!(
-                "FAIL: baseline'da olmayan kullanılmayan bağımlılık: {f}"
+                "FAIL: an unused dependency that is not in the baseline: {f}"
             ));
         }
     }
     if fails.is_empty() {
         Ok(format!(
-            "OK: tüm bulgular bilinen baseline'da ({} adet).",
+            "OK: every finding is in the known baseline ({} of them).",
             found.len()
         ))
     } else {
@@ -136,14 +137,14 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
     if !broken_failed {
         return Err(String::from(
-            "canary: bozuk udeps çıktısı temiz sayıldı (fail-open)",
+            "canary: broken udeps output was counted as clean (fail-open)",
         ));
     }
     if !clean_passed {
-        return Err(String::from("canary: gerçek temiz çıktı reddedildi"));
+        return Err(String::from("canary: genuinely clean output was refused"));
     }
     Ok(String::from(
-        "udeps kanaryası OK: ağaç parse edildi, bozuk çıktı FAIL, temiz PASS.",
+        "udeps canary OK: the tree was parsed, broken output FAILs, clean PASSes.",
     ))
 }
 
