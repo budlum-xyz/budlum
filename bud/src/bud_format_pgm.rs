@@ -1,8 +1,10 @@
-//! B.U.D. 2.0 - LEARNED (PGM-BENZERİ) DEDUP İNDEKS (F117 - PGM-index deseni)
+//! B.U.D. 2.0 - the learned, PGM-like dedup index; F117, the PGM index pattern.
 //!
-//! Kalan iş #10b: learned index. Sıralı chunk offset'leri için parçalı-doğrusal
-//! (piecewise-linear) model: offset ≈ a·key + b. Hata ε altında model +
-//! düzeltme tablosu → RAM çok az (F117: PGM 8x-70x RAM az). Deterministik.
+//! Remaining work item 10b: a learned index. For sorted chunk offsets it fits a
+//! piecewise-linear model, where the offset is approximately `a * key + b`.
+//! With the error kept under epsilon, the model plus a correction table needs
+//! very little RAM; F117 measured PGM at 8x to 70x less RAM. It is
+//! deterministic.
 
 #![forbid(unsafe_code)]
 
@@ -15,11 +17,12 @@ pub struct LinSeg {
     pub key_start: u64,
     pub a: f64,
     pub b: f64,
-    pub err: u64, // modelden sapma tavanı (düzeltme tablosu aralığı)
+    pub err: u64, // the ceiling on deviation from the model, the correction table's range
 }
 
-/// Sıralı (key, offset) dizisinden PGM modeli üret.
-/// `eps` = parça başına izin verilen maksimum sapma (bayt).
+/// Builds a PGM model from a sorted sequence of key and offset pairs.
+///
+/// `eps` is the maximum deviation allowed per segment, in bytes.
 pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>> {
     if keys.len() != offsets.len() || keys.is_empty() || eps == 0 {
         return None;
@@ -27,7 +30,7 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
     let mut segs = Vec::new();
     let mut i = 0usize;
     while i < keys.len() {
-        // ilk eğim: nokta i ve i+1
+        // The initial slope, from points i and i+1.
         let mut a = 0.0;
         let mut b = offsets[i] as f64;
         let mut j = i;
@@ -37,22 +40,24 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
             b = offsets[i] as f64 - a * keys[i] as f64;
         }
         let mut max_err = 0u64;
-        // genişlet; her adımda uç noktalardan YENİDEN uydur ve tüm parçayı kontrol et
+        // Grow the segment; at each step REFIT from the endpoints and check the
+        // whole segment.
         loop {
             let mut grown = false;
             let jj = j + 1;
-            // `while` idi ama gövdenin her yolu `break` ediyor ve `jj` gövde
-            // içinde hiç değişmiyor: koşul yeniden değerlendirilmiyordu, yani
-            // bu bir döngü değil tek geçişli daldı (clippy::never_loop).
-            // Gerçek yineleme DIŞ `loop`'ta: orada `j = jj` ile ilerleyip
-            // `grown` bayrağıyla tekrar giriliyor. `if` yazmak yapıyı olduğu
-            // gibi gösterir; davranış birebir aynı.
+            // This used to be a `while`, but every path through the body broke
+            // out of it and `jj` never changed inside it: the condition was never
+            // re-evaluated, so it was a single-pass branch rather than a loop,
+            // which is what `clippy::never_loop` names. The real iteration is in
+            // the OUTER `loop`, which advances with `j = jj` and re-enters on the
+            // `grown` flag. Writing it as an `if` shows the structure as it is,
+            // and the behaviour is identical.
             if jj < keys.len() {
-                // uç noktalardan yeniden uydur (i ve jj)
+                // Refit from the endpoints, i and jj.
                 let dx = (keys[jj] - keys[i]).max(1) as f64;
                 let na = (offsets[jj] as f64 - offsets[i] as f64) / dx;
                 let nb = offsets[i] as f64 - na * keys[i] as f64;
-                // i..jj arasındaki tüm noktalar eps içinde mi?
+                // Are all of the points from i to jj within eps?
                 let mut ok = true;
                 let mut em = 0u64;
                 for k in i..=jj {
@@ -64,9 +69,9 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
                     }
                     em = em.max(err);
                 }
-                // Parça jj'ye kadar eps içinde kaldıysa bir adım büyüt ve dış
-                // `loop` baştan denesin; kalmadıysa `grown` false kalır ve
-                // aşağıdaki kontrol dış döngüyü bitirir.
+                // If the segment stayed within eps up to jj, grow it by one step
+                // and let the outer `loop` try again; otherwise `grown` stays
+                // false and the check below ends the outer loop.
                 if ok {
                     a = na;
                     b = nb;
@@ -80,7 +85,7 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
             }
         }
         if j == i {
-            j = i + 1; // tek nokta
+            j = i + 1; // a single point
             max_err = 0;
         }
         segs.push(LinSeg {
@@ -97,13 +102,14 @@ pub fn build_pgm(keys: &[u64], offsets: &[u64], eps: u64) -> Option<Vec<LinSeg>>
     Some(segs)
 }
 
-/// Modelle tahmin (düzeltmesiz) - arama başlangıcı.
+/// The model's prediction, without correction; the starting point of a search.
 pub fn predict(segs: &[LinSeg], key: u64) -> Option<u64> {
     let seg = segs.iter().rev().find(|s| key >= s.key_start)?;
     Some((seg.a * key as f64 + seg.b).max(0.0) as u64)
 }
 
-/// Tahmin edilen aralık: [pred-err, pred+err] - doğru offset burada.
+/// The predicted range, from `pred - err` to `pred + err`; the true offset lies
+/// inside it.
 pub fn search_range(segs: &[LinSeg], key: u64) -> Option<(u64, u64)> {
     let seg = segs.iter().rev().find(|s| key >= s.key_start)?;
     let pred = (seg.a * key as f64 + seg.b).max(0.0) as u64;
@@ -128,39 +134,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pgm_tahmin_aralik_icerir() {
-        // monoton artan offset'ler (chunk indeksi → byte offset)
+    fn the_pgm_range_contains_the_true_offset() {
+        // Monotonically increasing offsets, from chunk index to byte offset.
         let keys: Vec<u64> = (0..2000).collect();
         let mut offsets = Vec::new();
         let mut off = 0u64;
         for k in &keys {
-            off += 512 + (k % 7) * 13; // düzensiz ama monoton
+            off += 512 + (k % 7) * 13; // irregular but monotonic
             offsets.push(off);
         }
         let segs = build_pgm(&keys, &offsets, 512).expect("pgm");
-        assert!(segs.len() < 100, "parça sayısı az: {}", segs.len());
-        // her key için doğru offset tahmin aralığında
+        assert!(segs.len() < 100, "few segments: {}", segs.len());
+        // For every key, the true offset is inside the predicted range.
         for k in &keys {
             let (lo, hi) = search_range(&segs, *k).unwrap();
             let actual = offsets[*k as usize];
             assert!(
                 lo <= actual && actual <= hi,
-                "key {k}: {lo}..{hi} içinde {actual} olmalı"
+                "key {k}: {actual} must be inside {lo}..{hi}"
             );
         }
-        // RAM: model küçük (2000 nokta → birkaç parça)
-        assert!(segs.len() * 24 < 2000 * 8, "model << ham indeks");
+        // RAM: the model is small, a few segments for 2000 points.
+        assert!(
+            segs.len() * 24 < 2000 * 8,
+            "the model is far smaller than the raw index"
+        );
     }
 
     #[test]
-    fn pgm_gecersiz_girdi() {
+    fn pgm_refuses_invalid_input() {
         assert!(build_pgm(&[], &[], 1).is_none());
         assert!(build_pgm(&[1, 2], &[1], 1).is_none());
         assert!(build_pgm(&[1, 2], &[1, 2], 0).is_none());
     }
 
     #[test]
-    fn pgm_deterministik() {
+    fn pgm_is_deterministic() {
         let segs = build_pgm(&[1, 5, 9], &[100, 300, 500], 50).unwrap();
         assert_eq!(pgm_digest(&segs), pgm_digest(&segs));
     }
