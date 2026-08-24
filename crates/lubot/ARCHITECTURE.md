@@ -1,49 +1,60 @@
-# Lubot Mimari Özeti
+# Lubot architecture summary
 
-Tam sürüm: `docs/MIMARI_ONERISI_2026-08-13.md`. Bu dosya katmanların özetidir.
+This file summarises the layers. It used to point at a full version,
+`docs/MIMARI_ONERISI_2026-08-13.md`, but that file does not exist anywhere in
+the tree; the pointer is recorded here as a missing reference rather than
+repeated as though it resolved.
 
-## Katmanlar
+## Layers
 
 ```
-[ Zincir üstü - budlum/main/src/lubot/ ]        (mevcut; bu repo dokunmaz)
-   model kaydı · operator compute-bond · Pollen · B.U.D. · SocialFi
-                        ▲ hash / ref eşleşmesi
-[ Bu repo - off-chain iskelet ]
-   lubot-core   : ModelId (32B hash - AiModelId ayna biçimi), dataset tipleri,
-                  LoRaManifest
-   lubot-data   : kapalı-devre kaynak denetimi (3 kanal), kayıt formatı,
-                  fail-closed hash doğrulaması
-   lubot-serve  : vLLM/SGLang köprüsü; ağırlık adı korunur, served-name bizimdir
-   lubot-tune   : TunePlan (LoRA BF16/FP16 - FP4 yok), çıktı hash kilidi
-   lubot-ops    : CLI iskeleti
+[ On chain - budlum/main/src/lubot/ ]        (exists; this repo does not touch it)
+   model registry - operator compute bond - Pollen - B.U.D. - SocialFi
+                        ^ hash and reference matching
+[ This repo - the off-chain skeleton ]
+   lubot-core   : ModelId (a 32-byte hash, mirroring the AiModelId form),
+                  dataset types, LoRaManifest
+   lubot-data   : closed-loop source checking over 3 channels, the record
+                  format, fail-closed hash verification
+   lubot-serve  : the vLLM and SGLang bridge; the weight name is preserved and
+                  the served name is ours
+   lubot-tune   : TunePlan (LoRA in BF16 or FP16, with no FP4), the output hash
+                  lock
+   lubot-ops    : the CLI skeleton
 ```
 
-## İlkeler
+## Principles
 
-1. **Kapalı-devre:** Dış veri okuyan yol yok; her set B.U.D. StorageDeal +
-   `TrainingCorpus` etiketi + hash doğrulamasıyla girer.
-2. **Fail-closed:** Doğrulanmamış hash = red (`lubot-data::verify` bilinçli olarak
-   `Err` döner). Üretimde gerçek SHA-256 girer.
-3. **Atıf:** Üçüncü taraf adları korunur; yalnız kendi katmanımız "Lubot" adını taşır.
-4. **Dil:** Dokümanlar Türkçe; kod kimlikleri İngilizce (budlum kuralı).
-5. **Kabuk betiği yok:** Repoda kabuk kodu barındırılmaz; eğitim fazı dış
-   konteynerlerde çalışır ve yalnızca belgelenir.
+1. **Closed loop:** there is no path that reads outside data; every set enters
+   through a B.U.D. `StorageDeal`, a `TrainingCorpus` tag and hash
+   verification.
+2. **Fail closed:** an unverified hash is a refusal, and `lubot-data::verify`
+   deliberately returns `Err`. Real SHA-256 arrives in production.
+3. **Attribution:** third party names are preserved; only our own layer carries
+   the name "Lubot".
+4. **Language:** the whole tree, documents included, is English. This principle
+   used to read "documents in Turkish, code identifiers in English"; the
+   repository-wide rule replaced it, and the `tree-is-english` gate enforces it.
+5. **No shell scripts:** no shell code is hosted in the repository; the training
+   phase runs in outside containers and is only documented.
 
-## Karar Durumu (2026-08-13)
+## Decision status, 2026-08-13
 
-| Karar | Durum |
+| Decision | Status |
 |---|---|
-| K1 iskelet + repo | üretildi; inceleme bekliyor |
-| K2 taban model | soyut (varsayılan light kademesi; ilk koşu öncesi onay) |
-| K3 tip bağlantısı | sonraya (iskelet iki seçeneğe uygun) |
-| K5 yöntem | LoRA SFT (BF16 adaptör) |
-| K6 veri kaynağı | **HİBRİT** - açık setler B.U.D. kaydıyla ağa girer |
-| K7 kademe adlandırması | **light** (Flash tabanlı) / **normal** (Pro tabanlı); çarpan etiketleri yok |
+| K1 skeleton and repository | produced; awaiting review |
+| K2 base model | abstract; the light tier is the default, with approval before the first run |
+| K3 type binding | deferred; the skeleton suits either option |
+| K5 method | LoRA SFT with a BF16 adapter |
+| K6 data source | **HYBRID**: open sets enter the network with a B.U.D. record |
+| K7 tier naming | **light**, Flash based, and **normal**, Pro based; there are no multiplier labels |
 
-## Derinleştirme (2026-08-13)
+## Deepening, 2026-08-13
 
-- `lubot-data`: gerçek SHA-256 doğrulaması (`verify_sha256`, `content_id_of`),
-  serde_json tabanlı JSONL kayıtları, yapısal chat şablonu taslağı.
-- `lubot-serve`: kademe adlandırması (`lubot-light-*` / `lubot-normal-*`),
-  çarpan etiketi denetimi, fail-closed zincir RPC taslağı (`chain::NotConnected`).
-- `lubot-core`: `ModelTier` (light/normal) tipi; `ModelSpec` kademe taşır.
+- `lubot-data`: real SHA-256 verification (`verify_sha256`, `content_id_of`),
+  JSONL records built on serde_json, and a draft structural chat template.
+- `lubot-serve`: the tier naming (`lubot-light-*` and `lubot-normal-*`), the
+  multiplier label check, and a fail-closed chain RPC draft
+  (`chain::NotConnected`).
+- `lubot-core`: the `ModelTier` type, light or normal; `ModelSpec` carries the
+  tier.
