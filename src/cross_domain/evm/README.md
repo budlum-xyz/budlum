@@ -1,57 +1,78 @@
-# EVM ChainAdapter (modül README'si): F10 H4 Kapanması
+# The EVM ChainAdapter (module README): closing F10 H4
 
-**Modül-ayrımı kuralı gereği EVM adapter'ın kendi
-README'sidir.** Kök `README.md` yalnızca dashboard'dur; olgunluk/risk uyarıları
-burada yaşar.
+**Under the module separation rule, this is the EVM adapter's own README.** The
+root `README.md` is only a dashboard; the maturity and risk warnings live here.
 
-## Durum
+## Status
 
-- **Olgunluk:** F10.1 + F10.2 ship edildi (H4 spoofed-authorization kapanması).
-- **Kod konumu:** `src/cross_domain/evm/`, `rlp.rs` (in-tree RLP), `mpt.rs`
-  (Merkle-Patricia trie verifier), `receipt.rs` (Ethereum receipt decode),
-  `header.rs` (header chain + N-conf finality), `verify.rs` (`verify_evm_receipt`
-  orchestrator).
-- **Test sayısı:** 58 (`#[test]`: RLP 19 + MPT 14 + receipt 10 + header 7 + verify 8).
-- **Bağlı:** `src/cross_domain/chain_adapter.rs` (`ChainAdapter` trait + `AdapterRegistry`
-  + `StubAdapter`). `EvmChainAdapter` impl = F10.2 (verify_receipt_proof on-chain).
+- **Maturity:** F10.1 and F10.2 shipped, closing the H4 spoofed-authorization
+  finding. F10.3, the sync committee light client, is implemented and reachable
+  from the production verification path; see the warnings below for what it does
+  and does not cover.
+- **Where the code is:** `src/cross_domain/evm/`, holding `rlp.rs` (an in-tree
+  RLP codec), `mpt.rs` (a Merkle-Patricia trie verifier), `receipt.rs` (Ethereum
+  receipt decoding), `header.rs` (the header chain and N-confirmation finality),
+  `sync_committee.rs` (the Altair sync committee light client), `verify.rs` (the
+  `verify_evm_receipt` orchestrator), `adapter.rs` (the `EvmChainAdapter`
+  implementation) and `bud_to_eth.rs` (the Budlum side of the F10.5 direction).
+- **Test count:** 90 `#[test]` functions, made up of RLP 19, MPT 17, receipt 10,
+  header 7, verify 12, sync committee 9, adapter 12 and bud-to-eth 4.
+- **Wired to:** `src/cross_domain/chain_adapter.rs`, which holds the
+  `ChainAdapter` trait, the `AdapterRegistry` and the `StubAdapter`. The
+  `EvmChainAdapter` implementation is F10.2, verifying the receipt proof on
+  chain.
 
-## Tasarım kararları
+## Design decisions
 
-1. relayer-produces güven modeli,
-2. PoS sync-committee + N-conf fallback,
-3. in-tree RLP + MPT (alloy/ethers YOK),
-4. çift yön (ETH↔Bud).
+1. The relayer-produces trust model.
+2. A PoS sync committee with N-confirmation as the fallback.
+3. In-tree RLP and MPT; NO alloy and NO ethers.
+4. Both directions, Ethereum to Bud and Bud to Ethereum.
 
-## Olgunluk uyarıları
+## Maturity warnings
 
-- **N-confirmation finality (-1).** Şu an `verify_chain` k-deep canonical
-  chain ile çalışır (reorg penceresi). **PoS sync-committee light-client (F10.3)
-  YOK**: 512-validator BLS aggregate verify. F10.3 N-conf'u güçlendirir ama
-  F10.2 N-conf ile bridge canlı.
-- **EvmChainAdapter.generate/submit/wait = off-chain stub.** Üretim relayer
-  binary'si (F10.4) mainnet sonrası. `verify_receipt_proof` on-chain deterministik.
-- **Bud→ETH yönü (F10.5) ayrı RFC.** Ethereum'da Budlum finality'sini verify
-  eden akıllı kontrat (Solidity light-client) büyük ayrı iş.
+- **N-confirmation finality.** `verify_chain` works over a k-deep canonical
+  chain, which leaves a reorg window. A proof carrying no sync committee
+  attestation still finalises on confirmations alone, and confirmations are a
+  bet that no reorg goes that deep rather than evidence that none can.
+- **The sync committee attestation is optional in the proof.** When a proof
+  carries one, `verify_evm_receipt` checks it and refuses participation below
+  the threshold of 342 out of 512. When a proof carries none, nothing about PoS
+  finality is claimed or checked. A caller that needs proof of stake finality
+  must therefore require the attestation itself; the verifier cannot infer the
+  requirement from a proof that omits it.
+- **`EvmChainAdapter::generate`, `submit` and `wait` are off-chain stubs.** The
+  production relayer binary, F10.4, comes after mainnet.
+  `verify_receipt_proof` is on chain and deterministic.
+- **The Bud to Ethereum direction, F10.5, is only half here.** `bud_to_eth.rs`
+  builds the Budlum-side payload; the smart contract on Ethereum that verifies
+  Budlum finality, a Solidity light client, is a large separate piece of work
+  under its own RFC.
 
-## Güvenlik sabitleri (F10.1 + F10.2)
+## Security invariants (F10.1 and F10.2)
 
-- **Deterministik + network'süz.** Hiçbir fonksiyon Ethereum RPC'sine bağlanmaz.
-  Relayer proof üretir, Budlum konsensüsünde verify edilir (Q1 relayer-produces).
-- **In-tree kripto.** RLP + MPT minimal impl (Yellow Paper App. B/D), yeni
-  dependency YOK (`sha3::Keccak256` reuse). KAT vectors + negatif matris.
-- **Garbage-proof-panic-etmez.** DoS güvenliği, rastgele bytes → Err, panic YOK.
-- **Canonical-form denetimi.** RLP decode leading-zero / minimal-len / trailing /
-  truncation → RED (kanıtı uydurma yüzeyi kapalı).
+- **Deterministic and network-free.** No function connects to an Ethereum RPC.
+  The relayer produces the proof and it is verified inside Budlum consensus,
+  which is Q1, relayer-produces.
+- **In-tree cryptography.** RLP and MPT are minimal implementations following
+  the Yellow Paper, appendices B and D, with NO new dependency; `sha3::Keccak256`
+  is reused. There are known-answer vectors and a negative matrix.
+- **A garbage proof does not panic.** For DoS safety, random bytes give an `Err`
+  and NO panic.
+- **Canonical form is checked.** On RLP decoding, a leading zero, a non-minimal
+  length, trailing bytes or truncation are all REFUSED, which closes the surface
+  for inventing a proof.
 
-## H4 kapanması
+## How H4 was closed
 
-SECURITY_AUDIT_HACKER H4 (Critical): "UniversalRelay tx yalnız log üretiyor,
-hedef zincir formatına kriptografik bağ yok → spoofed authorization". F10.1+F10.2
-ile kapandı: Budlum Ethereum deposit'lerini bağımsız MPT + header-chain ile
-kriptografik olarak verify eder; relayer kanıt uyduramaz.
+H4 in `SECURITY_AUDIT_HACKER`, rated critical: "a UniversalRelay transaction
+only emits a log, with no cryptographic binding to the target chain's format,
+which allows spoofed authorization". F10.1 and F10.2 closed it: Budlum verifies
+Ethereum deposits cryptographically, with its own MPT and header chain, so the
+relayer cannot invent a proof.
 
-## Sıradaki
+## What comes next
 
-F10.3 (sync-committee, opsiyonel güçlendirme) · F10.4 (relayer binary, mainnet
-sonrası) · F10.5 (Bud→ETH, ayrı RFC). Fuzz target'lar (`evm_rlp_decode`,
-`evm_mpt_verify`) ile ship edildi.
+F10.4, the relayer binary, after mainnet, and F10.5's Ethereum side, the
+Solidity light client, under a separate RFC. The fuzz targets `evm_rlp_decode`
+and `evm_mpt_verify` shipped with this work.

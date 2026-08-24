@@ -1,49 +1,60 @@
 //! In-tree Recursive Length Prefix (RLP) - Ethereum Yellow Paper Appendix B.
 //!
-//! Minimal, denetlenebilir, bağımsız impl. **alloy/ethers YOK** (RFC Q3 = in_tree;
-//! Minimal-dep + cargo-deny kuralıyla uyumlu). Keccak256 RLP tarafında kullanılmaz
-//! (sadece MPT node hash'inde); RLP saf byte encoding'dir.
+//! A minimal, auditable, independent implementation. **NO alloy and NO ethers**;
+//! RFC Q3 selects `in_tree`, which fits the minimal-dependency rule and
+//! cargo-deny. Keccak256 is not used on the RLP side, only in the MPT node
+//! hash; RLP is pure byte encoding.
 //!
-//! # Canonical encoding kuralları (Yellow Paper Appendix B)
+//! # Canonical encoding rules (Yellow Paper Appendix B)
 //!
-//! 1. Tek byte `0x00..=0x7f` → byte kendisi.
-//! 2. String (0..=55 bytes) → `[0x80 + len, ...bytes]`.
-//! 3. String (>55 bytes) → `[0xb7 + len_of_len, ...len_be, ...bytes]`.
-//! 4. List (payload 0..=55 bytes) → `[0xc0 + len, ...payload]`.
-//! 5. List (payload >55 bytes) → `[0xf7 + len_of_len, ...len_be, ...payload]`.
+//! 1. A single byte in `0x00..=0x7f` encodes as itself.
+//! 2. A string of 0 to 55 bytes encodes as `[0x80 + len, ...bytes]`.
+//! 3. A string above 55 bytes encodes as
+//!    `[0xb7 + len_of_len, ...len_be, ...bytes]`.
+//! 4. A list with a payload of 0 to 55 bytes encodes as
+//!    `[0xc0 + len, ...payload]`.
+//! 5. A list with a payload above 55 bytes encodes as
+//!    `[0xf7 + len_of_len, ...len_be, ...payload]`.
 //!
-//! `len_of_len` = big-endian length'i ifade eden minimum bayt sayısı (leading
-//! Zero YASAK - canonical olmayan encoding decoding'de RED).
+//! `len_of_len` is the minimum number of bytes expressing the big-endian
+//! length; a leading zero is FORBIDDEN, and a non-canonical encoding is REFUSED
+//! at decoding time.
 //!
-//! # Negatif test mühürleri
+//! # The negative test seals
 //!
-//! Decode'da canonical-form denetimi: leading-zero length, minimum-length
-//! Kullanılmamış uzunluk-önekli encoding, trailing bytes (tüketime başarısız),
-//! Truncation → hepsi `Err`. Bu güvenlik için kritik (kanıtı uydurma yüzeyi).
+//! Decoding checks canonical form: a leading-zero length, a length-prefixed
+//! encoding that did not use the minimal form, trailing bytes that fail to be
+//! consumed, and truncation are all an `Err`. This is critical for security,
+//! because it is the surface on which a proof would be invented.
 
 use serde::{Deserialize, Serialize};
 
-/// RLP item hiyerarşisi: byte-string veya list-of-items.
+/// The RLP item hierarchy: a byte string or a list of items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
-    /// Ham byte string (integer encoding değil - caller ayrıştırır).
+    /// A raw byte string; this is not an integer encoding, and the caller parses
+    /// it.
     String(Vec<u8>),
     /// Ordered item list.
     List(Vec<Item>),
 }
 
-/// RLP encode/decode hatası (canonical-form ihlali dahil).
+/// An RLP encoding or decoding error, including a canonical-form violation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RlpError {
-    /// Beklenmeyen bitiş (girdi encodingsiz kesti).
+    /// An unexpected end: the input was cut short of a complete encoding.
     UnexpectedEof,
-    /// Geçersiz uzunluk öneki (ör. payload'a yetmeyen declared len).
+    /// An invalid length prefix, for example a declared length the payload cannot
+    /// satisfy.
     InvalidLengthPrefix,
-    /// Canonical olmayan encoding (leading-zero len / minimal-len kullanılmamış).
+    /// A non-canonical encoding: a leading-zero length, or the minimal form left
+    /// unused.
     NonCanonical,
-    /// Decode sonrası tüketilmemiş trailing bytes (inject yüzeyi).
+    /// Trailing bytes left unconsumed after decoding, which is an injection
+    /// surface.
     TrailingBytes,
-    /// List derinliği aşımı (DoS koruması; RLP teknik olarak derin olabilir).
+    /// The list nesting depth was exceeded, a DoS guard; RLP can technically nest
+    /// arbitrarily deep.
     NestingTooDeep,
 }
 
@@ -61,10 +72,11 @@ impl std::fmt::Display for RlpError {
 
 impl std::error::Error for RlpError {}
 
-/// RLP encode için maksimum liste derinliği (DoS: sonsuz iç içe list decode koruması).
+/// The maximum list depth for RLP encoding, a DoS guard against decoding
+/// endlessly nested lists.
 const MAX_DEPTH: usize = 32;
 
-/// Bir RLP `Item`'i canonical olarak encode eder.
+/// Encodes an RLP `Item` canonically.
 pub fn encode(item: &Item) -> Vec<u8> {
     let mut out = Vec::new();
     encode_into(item, &mut out);
@@ -95,8 +107,10 @@ fn encode_string(bytes: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Uzunluk önekini yazar. `offset` = 0x80 (string) veya 0xc0 (list).
-/// 0..=55 → `[offset + len]`; >55 → `[offset + 55 + len_of_len, ...len_be]`.
+/// Writes the length prefix. `offset` is 0x80 for a string or 0xc0 for a list.
+///
+/// A length of 0 to 55 gives `[offset + len]`; above 55 it gives
+/// `[offset + 55 + len_of_len, ...len_be]`.
 fn encode_length(len: usize, offset: u8, out: &mut Vec<u8>) {
     if len < 56 {
         out.push(offset + (len as u8));
@@ -107,18 +121,20 @@ fn encode_length(len: usize, offset: u8, out: &mut Vec<u8>) {
     }
 }
 
-/// Bir usize'ı big-endian olarak minimal bayt sayısıyla döndürür (leading zero YOK).
+/// Returns a `usize` big-endian in the minimal number of bytes, with NO leading
+/// zero.
 fn trim_leading_zeros(n: usize) -> Vec<u8> {
     if n == 0 {
         return Vec::new();
     }
     let be = n.to_be_bytes();
-    // İlk non-zero bayta kadar atla.
+    // Skip up to the first non-zero byte.
     let start = be.iter().position(|&b| b != 0).unwrap_or(be.len());
     be[start..].to_vec()
 }
 
-/// Bir RLP byte akışını decode eder. **Tüm girdi tüketilmelidir** (trailing YASAK).
+/// Decodes an RLP byte stream. **The whole input must be consumed**; trailing
+/// bytes are FORBIDDEN.
 pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
     let (item, rest) = decode_at(input, 0)?;
     if !rest.is_empty() {
@@ -127,7 +143,8 @@ pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
     Ok(item)
 }
 
-/// `input[consumed..]`'dan bir item decode eder; (item, kalan-bytes) döner.
+/// Decodes one item from `input[consumed..]`, returning the item and the
+/// remaining bytes.
 fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
     if depth > MAX_DEPTH {
         return Err(RlpError::NestingTooDeep);
@@ -137,17 +154,17 @@ fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
     }
     let first = input[0];
 
-    // Kural 1: tek byte < 0x80 → byte-string([byte]).
+    // Rule 1: a single byte below 0x80 is the byte string containing it.
     if first < 0x80 {
         return Ok((Item::String(vec![first]), &input[1..]));
     }
-    // Kural 2: short string [0x80..=0xb7).
+    // Rule 2: a short string, 0x80 up to 0xb7.
     if first <= 0xb7 {
         let len = (first - 0x80) as usize;
         let payload = take_exact(&input[1..], len)?;
         return Ok((Item::String(payload.to_vec()), &input[1 + len..]));
     }
-    // Kural 3: long string [0xb8..=0xbf].
+    // Rule 3: a long string, 0xb8 through 0xbf.
     if first <= 0xbf {
         let len_of_len = (first - 0xb7) as usize;
         let len = decode_length_value(&input[1..], len_of_len)?;
@@ -158,14 +175,14 @@ fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
             &input[payload_start + len..],
         ));
     }
-    // Kural 4: short list [0xc0..=0xf7].
+    // Rule 4: a short list, 0xc0 through 0xf7.
     if first <= 0xf7 {
         let len = (first - 0xc0) as usize;
         let payload = take_exact(&input[1..], len)?;
         let items = decode_list_items(payload, depth)?;
         return Ok((Item::List(items), &input[1 + len..]));
     }
-    // Kural 5: long list [0xf8..=0xff].
+    // Rule 5: a long list, 0xf8 through 0xff.
     let len_of_len = (first - 0xf7) as usize;
     let len = decode_length_value(&input[1..], len_of_len)?;
     let payload_start = 1 + len_of_len;
@@ -174,15 +191,17 @@ fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
     Ok((Item::List(items), &input[payload_start + len..]))
 }
 
-/// `len_of_len` bayttan big-endian uzunluk okur; **canonical denetim** (leading zero / sıfır-len YASAK).
+/// Reads a big-endian length from `len_of_len` bytes, with a **canonical check**:
+/// a leading zero and a zero length are FORBIDDEN.
 fn decode_length_value(input: &[u8], len_of_len: usize) -> Result<usize, RlpError> {
     let len_bytes = take_exact(input, len_of_len)?;
-    // Canonical: len_of_len=1 ise tek bayt; >1 ise ilk bayt sıfır olamaz.
+    // Canonical form: with len_of_len of 1 it is a single byte, and above 1 the
+    // first byte cannot be zero.
     if len_of_len > 1 && len_bytes[0] == 0 {
         return Err(RlpError::NonCanonical);
     }
     if len_of_len == 1 && len_bytes[0] < 56 {
-        // Minimal-len kuralı: 56'dan küçük uzunluk long-form kullanmamalı.
+        // The minimal-length rule: a length below 56 must not use the long form.
         return Err(RlpError::NonCanonical);
     }
     let mut len = 0usize;
@@ -195,7 +214,7 @@ fn decode_length_value(input: &[u8], len_of_len: usize) -> Result<usize, RlpErro
     Ok(len)
 }
 
-/// `input`'tan `n` bayt alır; yetmezse `UnexpectedEof`.
+/// Takes `n` bytes from `input`, or `UnexpectedEof` if there are too few.
 fn take_exact(input: &[u8], n: usize) -> Result<&[u8], RlpError> {
     if input.len() < n {
         return Err(RlpError::UnexpectedEof);
@@ -203,7 +222,8 @@ fn take_exact(input: &[u8], n: usize) -> Result<&[u8], RlpError> {
     Ok(&input[..n])
 }
 
-/// Liste payload'ını item'lara bölerek decode eder (her item peş peşe, tümü tüketilmeli).
+/// Decodes a list payload by splitting it into items, one after another, all of
+/// which must be consumed.
 fn decode_list_items(payload: &[u8], depth: usize) -> Result<Vec<Item>, RlpError> {
     let mut items = Vec::new();
     let mut rest = payload;
@@ -216,10 +236,11 @@ fn decode_list_items(payload: &[u8], depth: usize) -> Result<Vec<Item>, RlpError
 }
 
 // ---------------------------------------------------------------------------
-// Convenience: integer encode/decode (RLP integer kuralı - leading zero YASAK)
+// Convenience: integer encoding and decoding. The RLP integer rule FORBIDS a
+// leading zero.
 // ---------------------------------------------------------------------------
 
-/// Bir u64'ü RLP integer olarak encode eder (0 → empty string → 0x80).
+/// Encodes a `u64` as an RLP integer; zero becomes the empty string, 0x80.
 pub fn encode_uint(n: u64) -> Vec<u8> {
     let bytes = trim_leading_zeros_u64(n);
     encode(&Item::String(bytes))
@@ -234,20 +255,21 @@ fn trim_leading_zeros_u64(n: u64) -> Vec<u8> {
     be[start..].to_vec()
 }
 
-/// RLP item'ini big-endian integer olarak parse eder (leading zero YASAK → NonCanonical).
+/// Parses an RLP item as a big-endian integer; a leading zero is FORBIDDEN and
+/// gives `NonCanonical`.
 pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
     let bytes = match item {
         Item::String(b) => b,
         _ => return Err(RlpError::NonCanonical),
     };
     if bytes.len() > 1 && bytes[0] == 0 {
-        return Err(RlpError::NonCanonical); // leading zero integer encoding
+        return Err(RlpError::NonCanonical); // a leading-zero integer encoding
     }
     if bytes.is_empty() {
-        return Ok(0); // empty string = integer 0 (canonical)
+        return Ok(0); // the empty string is the integer 0, canonically
     }
     if bytes.len() > 8 {
-        return Err(RlpError::InvalidLengthPrefix); // u64 taşması
+        return Err(RlpError::InvalidLengthPrefix); // it overflows a u64
     }
     let mut n = 0u64;
     for &b in bytes {
@@ -259,7 +281,8 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
     Ok(n)
 }
 
-/// Byte-string item'inden ham bytes döner (struct field extraction yardımcısı).
+/// Returns the raw bytes of a byte-string item, a helper for extracting struct
+/// fields.
 pub fn as_bytes(item: &Item) -> Result<&[u8], RlpError> {
     match item {
         Item::String(b) => Ok(b),
@@ -267,7 +290,8 @@ pub fn as_bytes(item: &Item) -> Result<&[u8], RlpError> {
     }
 }
 
-/// Serde-güvenli wrapper (snapshot/RPC yüzeyi için - `#[serde(transparent)]` `Vec<u8>`).
+/// A serde-safe wrapper for the snapshot and RPC surface: a
+/// `#[serde(transparent)]` `Vec<u8>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RlpBytes(pub Vec<u8>);
@@ -285,9 +309,10 @@ impl RlpBytes {
 mod tests {
     use super::*;
 
-    // ---- Ethereum resmi RLP test-vectors (KAT) ----
+    // ---- The official Ethereum RLP test vectors, known-answer tests ----
 
-    /// `rlptest.txt` kanonik vectors (yellow paper + ethereum/tests).
+    /// The canonical vectors of `rlptest.txt`, from the Yellow Paper and
+    /// ethereum/tests.
     fn hex(s: &str) -> Vec<u8> {
         hex::decode(s).unwrap()
     }
@@ -379,7 +404,7 @@ mod tests {
         assert_eq!(decode(&hex("c7c0c1c0c3c0c1c0")).unwrap(), item);
     }
 
-    // ---- Negatif / canonical-form testleri (güvenlik mühürleri) ----
+    // ---- The negative and canonical-form tests, the security seals ----
 
     #[test]
     fn neg_trailing_bytes_rejected() {
@@ -448,7 +473,8 @@ mod tests {
     fn rlp_bytes_serde_roundtrip() {
         let item = Item::List(vec![Item::String(b"abc".to_vec()), Item::String(vec![])]);
         let rb = RlpBytes::from_item(&item);
-        // `#[serde(transparent)] Vec<u8>` → serde_json byte-array olarak serileştirir.
+        // With `#[serde(transparent)]` over `Vec<u8>`, serde_json serialises it as
+        // a byte array.
         let json = serde_json::to_string(&rb).unwrap();
         assert!(json.starts_with('['), "byte-array serde: {json}");
         let back: RlpBytes = serde_json::from_str(&json).unwrap();
