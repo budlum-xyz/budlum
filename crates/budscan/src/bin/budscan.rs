@@ -137,7 +137,7 @@ fn main() {
         }
         Some((cmd, rest)) => match (cmd.as_str(), rest.first()) {
             ("siniflandir", Some(input)) => classify_cmd(input),
-            ("ad-kurali", Some(name)) => name_cmd(name),
+            ("name-rule", Some(name)) => name_cmd(name),
             ("yama-listesi", Some(path)) => patch_list_cmd(path),
             ("kendini-sina", _) => self_test(),
             _ => {

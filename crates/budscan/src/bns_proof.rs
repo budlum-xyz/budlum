@@ -1,19 +1,20 @@
-//! BNS cozumu: tarayicinin gercek guven problemi.
+//! BNS resolution: the browser's real trust problem.
 //!
-//! # Icerik adresleme bunu cozmuyor
+//! # Content addressing does not solve this
 //!
-//! `ayaz.bud` soruldugunda saldirganin manifest kimligini donduren bir dugum,
-//! **dogrulanan ama yanlis** bir sayfa gosterir: baytlar hash'iyle tutarli,
-//! ama o hash istenen isme ait degil. Bayt dogrulamasi burada hicbir sey
-//! soylemiyor, cunku yanlis olan bayt degil, esleme.
+//! A node that answers `ayaz.bud` with an attacker's manifest identity shows a
+//! page that is **verified and wrong**: the bytes are consistent with their
+//! hash, but that hash does not belong to the name that was asked for. Byte
+//! verification says nothing here, because what is wrong is not the bytes, it
+//! is the mapping.
 //!
-//! Karar: BNS cozumu **durum kanitiyla** alinir ve kanitsiz cevap
-//! `dogrulandi` sayilmaz.
+//! The decision: BNS resolution is settled **with a state proof**, and an
+//! answer without one does not count as verified.
 //!
-//! # Bugun neyin dogrulanabildigi, acikca
+//! # What can actually be proven today, stated plainly
 //!
-//! `AccountState::calculate_state_root` (`src/core/account.rs:1966`) BNS
-//! kaydini state root'a su sekilde katiyor:
+//! `AccountState::calculate_state_root` (`src/core/account.rs:1966`) folds the
+//! BNS registry into the state root like this:
 //!
 //! ```text
 //! if !self.bns_registry.is_empty() {
@@ -22,70 +23,71 @@
 //! }
 //! ```
 //!
-//! ve `BnsRegistry::root()` (`src/bns/registry.rs:299`) **butun kayit
-//! defterini tek bir SHA-256 akisina** yaziyor. Yani bugun zincirde tek bir
-//! isim icin kanit uretecek bir yapi **yok**: `bns_v1` kokunu dogrulamak,
-//! butun defteri elde tutmayi gerektirir.
+//! and `BnsRegistry::root()` (`src/bns/registry.rs:299`) writes **the whole
+//! registry into a single SHA-256 stream**. So there is **no structure** on
+//! chain today that can produce a proof for one name: verifying the `bns_v1`
+//! root requires holding the entire registry.
 //!
-//! Bunun uc sonucu var ve ucu de yaziliyor:
+//! That has three consequences, and all three are written down:
 //!
-//! 1. [`BnsInclusionProof::Registry`] - butun defterle dogrulama. Dogru ama
-//!    olceklenmiyor; kucuk bir defterde calisir, yuz bin isimde calismaz.
-//! 2. [`BnsInclusionProof::PerName`] - isim basina Merkle kaniti. Zincir bunu
-//!    **bugun uretmiyor**; `BnsRegistry::root()`'un bir Merkle agacina
-//!    donmesi gerekir ve o bir **konsensus yuzeyi degisikligidir**, bu
-//!    tarayicinin tek tarafli alacagi bir karar degil.
-//! 3. Kanit yoksa sonuc [`Strength::RpcClaimOnly`]. Sessizce `Verified`
-//!    demek, olmayan bir garantiyi satmak olur.
+//! 1. [`BnsInclusionProof::Registry`] - verification against the whole
+//!    registry. Correct, but it does not scale; it works for a small registry
+//!    and not for a hundred thousand names.
+//! 2. [`BnsInclusionProof::PerName`] - a Merkle proof per name. The chain does
+//!    **not produce this today**; `BnsRegistry::root()` would have to become a
+//!    Merkle tree, and that is a **consensus surface change**, not a decision
+//!    this browser gets to make on its own.
+//! 3. With no proof the verdict is [`Strength::RpcClaimOnly`]. Quietly saying
+//!    `Verified` would be selling a guarantee that does not exist.
 //!
-//! Bu, bu dosyanin en onemli cumlesi: **BNS cozumu bugun kanitlanabilir
-//! degil, ve tarayici bunu gizlemiyor.**
+//! This is the most important sentence in the file: **BNS resolution is not
+//! provable today, and the browser does not hide that.**
 
 use crate::content_id::ContentId;
 use crate::evidence::{Claim, Evidence, Strength};
 use sha2::{Digest, Sha256};
 
-/// Zincirden gelen cozum cevabi.
+/// A resolution answer from the chain.
 ///
-/// Alanlar `BnsResolved` (`src/bns/types.rs`) ile ayni; bu tarayicinin
-/// ihtiyaci olmayanlar tasinmiyor.
+/// The fields match `BnsResolved` (`src/bns/types.rs`); the ones this browser
+/// does not need are not carried.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedName {
     pub name: String,
-    /// 32 baytlik sahip adresi.
+    /// The 32-byte owner address.
     pub owner: [u8; 32],
     pub storage_root: Option<[u8; 32]>,
     pub content_id: Option<ContentId>,
     pub is_expired: bool,
 }
 
-/// Bir cozumun kayit defterine ait oldugunun kaniti.
+/// Proof that a resolution belongs to the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BnsInclusionProof {
-    /// Butun kayit defteri. `BnsRegistry::root()`'un bugun urettigi sey bu
-    /// akistan hesaplaniyor, yani dogrulama defterin tamamini yeniden
-    /// hash'lemektir.
+    /// The whole registry. What `BnsRegistry::root()` produces today is
+    /// computed from this stream, so verifying means re-hashing the entire
+    /// registry.
     Registry {
-        /// `base_cost`; koke giren ilk alan.
+        /// `base_cost`, the first field that goes into the root.
         base_cost: u64,
-        /// `(name, owner, expires_at, content_id)` dortlusu, `BTreeMap`
-        /// sirasinda. Zincirdeki `root()` daha fazla alan yaziyor; bu surum
-        /// yalniz tarayicinin okudugu alanlari tasiyor ve **bu yuzden tam
-        /// kok uretemiyor**. Asagidaki `verify` bunu bir basari degil, bir
-        /// eksiklik olarak raporluyor.
+        /// The `(name, owner, expires_at, content_id)` tuple, in `BTreeMap`
+        /// order. The on-chain `root()` writes more fields than this; this
+        /// version carries only the fields the browser reads, and **therefore
+        /// cannot produce the full root**. The `verify` below reports that as
+        /// a shortfall, not as a success.
         entries: Vec<RegistryEntry>,
     },
-    /// Isim basina Merkle kaniti. Zincir bunu bugun uretmiyor.
+    /// A Merkle proof per name. The chain does not produce this today.
     PerName {
         leaf: [u8; 32],
         siblings: Vec<[u8; 32]>,
         directions: Vec<bool>,
     },
-    /// Kanit yok: bir RPC cevap verdi, hepsi bu.
+    /// No proof: an RPC answered, and that is all.
     None,
 }
 
-/// Kayit defterinin bir satiri.
+/// One row of the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryEntry {
     pub name: String,
@@ -94,10 +96,10 @@ pub struct RegistryEntry {
     pub content_id: Option<ContentId>,
 }
 
-/// Bir BNS cozumunu kanitla birlikte degerlendir.
+/// Evaluate a BNS resolution together with its proof.
 ///
-/// `expected_bns_root`, `AccountState`'in `bns_v1` etiketiyle state root'a
-/// yazdigi deger.
+/// `expected_bns_root` is the value `AccountState` writes into the state root
+/// under the `bns_v1` tag.
 #[must_use]
 pub fn evaluate(
     resolved: &ResolvedName,
@@ -108,9 +110,9 @@ pub fn evaluate(
 
     if resolved.is_expired {
         evidence.push(Claim::new(
-            "bns-cozumu",
+            "bns-resolution",
             Strength::Refused,
-            "kayit suresi dolmus; suresi dolmus bir isim bir icerige baglanmaz",
+            "the registration has expired, and an expired name binds to no content",
         ));
         return evidence;
     }
@@ -118,28 +120,28 @@ pub fn evaluate(
     match proof {
         BnsInclusionProof::None => {
             evidence.push(Claim::new(
-                "bns-cozumu",
+                "bns-resolution",
                 Strength::RpcClaimOnly,
-                "durum kaniti gelmedi; bu cevap bir dugumun beyani ve dugum yalan \
-                 soyleyebilir. Icerik hash'i tutsa bile gosterilen sayfa istenen \
-                 isme ait olmayabilir",
+                "no state proof arrived; this answer is one node's assertion and a node \
+                 can lie. Even if the content hash checks out, the page shown may not \
+                 belong to the name that was asked for",
             ));
         }
         BnsInclusionProof::PerName { .. } => {
             evidence.push(Claim::new(
-                "bns-cozumu",
+                "bns-resolution",
                 Strength::RpcClaimOnly,
-                "isim basina kanit sunuldu ama zincir bugun boyle bir kanit uretmiyor: \
-                 BnsRegistry::root() butun defteri tek bir SHA-256 akisina yaziyor, \
-                 Merkle agaci degil. Kanitin dogrulanacagi bir kok yok",
+                "a per-name proof was presented, but the chain does not produce one today: \
+                 BnsRegistry::root() writes the whole registry into a single SHA-256 \
+                 stream, not a Merkle tree. There is no root to verify it against",
             ));
         }
         BnsInclusionProof::Registry { base_cost, entries } => {
             let Some(expected) = expected_bns_root else {
                 evidence.push(Claim::new(
-                    "bns-cozumu",
+                    "bns-resolution",
                     Strength::RpcClaimOnly,
-                    "defter sunuldu ama karsilastirilacak bir bns_v1 koku verilmedi",
+                    "a registry was presented, but no bns_v1 root was given to compare it against",
                 ));
                 return evidence;
             };
@@ -150,31 +152,32 @@ pub fn evaluate(
             });
             if !found {
                 evidence.push(Claim::new(
-                    "bns-cozumu",
+                    "bns-resolution",
                     Strength::Refused,
-                    "cozulen kayit sunulan defterde yok; cevap defterle celisiyor",
+                    "the resolved record is not in the presented registry; the answer contradicts it",
                 ));
                 return evidence;
             }
             let computed = partial_registry_root(*base_cost, entries);
             if computed == expected {
                 evidence.push(Claim::new(
-                    "bns-cozumu",
+                    "bns-resolution",
                     Strength::Verified,
-                    "defter bns_v1 kokunu yeniden uretti ve kayit defterde",
+                    "the registry reproduced the bns_v1 root, and the record is in it",
                 ));
             } else {
-                // Beklenen durum bu: bu surum `root()`'un butun alanlarini
-                // tasimiyor. Yanlis olan defter degil, kanit bicimi.
+                // This is the expected case: this version does not carry all
+                // of `root()`'s fields. What is wrong is the proof format, not
+                // the registry.
                 evidence.push(Claim::new(
-                    "bns-cozumu",
+                    "bns-resolution",
                     Strength::RpcClaimOnly,
-                    "sunulan defter bns_v1 kokunu uretmedi. Bu tek basina bir yalan \
-                     isareti degil: BnsRegistry::root() resolver, address, \
-                     consensus_domain_id, storage_root, storage_domain_id, \
-                     storage_root_height ve subdomains alanlarini da yaziyor ve bu \
-                     kanit bicimi onlari tasimiyor. Kanit bicimi eksik, cevap \
-                     dogrulanmadi",
+                    "the presented registry did not reproduce the bns_v1 root. On its own \
+                     that is not a sign of lying: BnsRegistry::root() also writes the \
+                     resolver, address, consensus_domain_id, storage_root, \
+                     storage_domain_id, storage_root_height and subdomains fields, and \
+                     this proof format does not carry them. The proof format is \
+                     incomplete, so the answer is not verified",
                 ));
             }
         }
@@ -183,12 +186,12 @@ pub fn evaluate(
     evidence
 }
 
-/// `BnsRegistry::root()`'un **kismi** yeniden uretimi.
+/// A **partial** reproduction of `BnsRegistry::root()`.
 ///
-/// Kasitli olarak eksik ve adi bunu soyluyor. Tam kok, tarayicinin okumadigi
-/// alti alani ve alt alan adlarini da iceriyor; onlari buraya tasimak, bir
-/// tarayicinin bir kayit defterinin tamamini indirmesi demek olurdu. Bu
-/// fonksiyonun isi, kanit biciminin neden yetmedigini **olculebilir** kilmak.
+/// Deliberately incomplete, and its name says so. The full root also covers
+/// six fields the browser never reads, plus subdomain names; carrying those
+/// here would mean a browser downloading an entire registry. This function's
+/// job is to make it **measurable** why the proof format is not enough.
 #[must_use]
 pub fn partial_registry_root(base_cost: u64, entries: &[RegistryEntry]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -231,14 +234,14 @@ mod tests {
         r.is_expired = true;
         let e = evaluate(&r, &BnsInclusionProof::None, None);
         assert_eq!(e.weakest(), Strength::Refused);
-        assert!(e.badge().contains("suresi dolmus"));
+        assert!(e.badge().contains("has expired"));
     }
 
     #[test]
     fn no_proof_is_a_claim_not_a_verification() {
         let e = evaluate(&resolved(), &BnsInclusionProof::None, None);
         assert_eq!(e.weakest(), Strength::RpcClaimOnly);
-        assert!(e.badge().contains("yalan soyleyebilir"));
+        assert!(e.badge().contains("a node can lie"));
     }
 
     #[test]
@@ -253,7 +256,7 @@ mod tests {
             Some([0u8; 32]),
         );
         assert_eq!(e.weakest(), Strength::RpcClaimOnly);
-        assert!(e.badge().contains("Merkle agaci degil"));
+        assert!(e.badge().contains("not a Merkle tree"));
     }
 
     #[test]
@@ -261,7 +264,7 @@ mod tests {
         let proof = BnsInclusionProof::Registry {
             base_cost: 100,
             entries: vec![RegistryEntry {
-                name: String::from("baska.bud"),
+                name: String::from("other.bud"),
                 owner: [2u8; 32],
                 expires_at: 10,
                 content_id: None,
@@ -269,7 +272,7 @@ mod tests {
         };
         let e = evaluate(&resolved(), &proof, Some([0u8; 32]));
         assert_eq!(e.weakest(), Strength::Refused);
-        assert!(e.badge().contains("celisiyor"));
+        assert!(e.badge().contains("contradicts it"));
     }
 
     #[test]

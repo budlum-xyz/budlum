@@ -132,15 +132,15 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
     Ok(match query::classify(raw) {
         Query::RefusedScheme { input, scheme } => Plan::stop(refusal(
             &input,
-            "sema",
+            "schema",
             &format!("{scheme} semasi adres cubugundan acilmaz"),
         )),
         Query::RefusedName { input, rejection } => {
-            Plan::stop(refusal(&input, "ad-kurali", &rejection.to_string()))
+            Plan::stop(refusal(&input, "name-rule", &rejection.to_string()))
         }
         Query::Ambiguous { input, candidates } => Plan::stop(refusal(
             &input,
-            "siniflandirma",
+            "classification",
             &format!(
                 "belirsiz girdi tahmin edilmez; sunlardan biri olabilir: {}",
                 candidates.join(", ")
@@ -148,7 +148,7 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
         )),
         Query::FreeText(text) => Plan::stop(refusal(
             &text,
-            "siniflandirma",
+            "classification",
             "bu bir adres degil; arama icin arama katmanini kullanin",
         )),
         Query::Name { name, suffix } => match suffix.as_str() {
@@ -156,7 +156,7 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
             "eth" => plan_eth(resolver, raw, &name)?,
             other => Plan::stop(refusal(
                 raw,
-                "ad-kurali",
+                "name-rule",
                 &format!(".{other} icin bir cozumleyici yok"),
             )),
         },
@@ -178,7 +178,7 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
         | Query::BlockHeight(_)
         | Query::TxHash(_) => Plan::stop(refusal(
             raw,
-            "siniflandirma",
+            "classification",
             "bu bir sayfa degil, bir kayit; arama katmani gosterir",
         )),
     })
@@ -199,7 +199,7 @@ fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
     let Some(id) = record.content_id.or(record.storage_root.map(ContentId)) else {
         return Ok(Plan::stop(refusal(
             raw,
-            "bns-cozumu",
+            "bns-resolution",
             "isim bir icerige bagli degil: ne content_id ne storage_root var",
         )));
     };
@@ -216,14 +216,14 @@ fn plan_eth<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
         ens::decode_contenthash(&raw_ch).map_err(|e| format!("ENS contenthash cozulemedi: {e}"))?;
     let evidence = Evidence::new().with(if proof_verified {
         Claim::new(
-            "ens-cozumu",
+            "ens-resolution",
             Strength::Verified,
             "namehash slotu icin MPT kaniti dogrulandi ve kok bilinen bir \
              Ethereum basliginda",
         )
     } else {
         Claim::new(
-            "ens-cozumu",
+            "ens-resolution",
             Strength::RpcClaimOnly,
             "MPT kaniti dogrulanmadi; cozum bir dugumun beyani",
         )
@@ -253,7 +253,7 @@ fn plan_eth<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
             "IPNS cozumu bir imza zinciri gerektiriyor ve bu surum onu dogrulamiyor",
         )),
         ContentHash::Swarm(_) | ContentHash::Onion3(_) => stop_with(Claim::new(
-            "getirici",
+            "fetcher",
             Strength::Refused,
             "bu protokol icin bir getirici yok; HTTPS'e dusurmek dogrulanmamis \
              icerigi dogrulanmis gibi gosterirdi",
@@ -513,6 +513,6 @@ mod tests {
         // Tasima bos: getiriciye ulasilsaydi hata donerdi.
         let page = open(&r, &table(&[]), "ayaz.bud").unwrap();
         assert!(!page.is_renderable());
-        assert!(page.evidence.badge().contains("suresi dolmus"));
+        assert!(page.evidence.badge().contains("has expired"));
     }
 }

@@ -53,7 +53,7 @@ impl fmt::Display for Strength {
 /// Bir tek olcum: kim, neyi, ne kadar dogruladi.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
-    /// Hangi katman: `ad-kurali`, `bns-cozumu`, `bud-getirici`, `ipfs`, ...
+    /// Hangi katman: `name-rule`, `bns-resolution`, `bud-fetcher`, `ipfs`, ...
     pub layer: String,
     pub strength: Strength,
     /// Neden bu guc. Bos birakilamaz: sebepsiz bir etiket, bir etiket degil.
@@ -150,9 +150,9 @@ mod tests {
     #[test]
     fn the_weakest_link_wins() {
         let e = Evidence::new()
-            .with(Claim::new("bud-getirici", Strength::Verified, "hash tuttu"))
+            .with(Claim::new("bud-fetcher", Strength::Verified, "hash tuttu"))
             .with(Claim::new(
-                "bns-cozumu",
+                "bns-resolution",
                 Strength::RpcClaimOnly,
                 "durum kaniti gelmedi",
             ));
@@ -164,7 +164,7 @@ mod tests {
     fn one_refusal_refuses_the_whole_answer() {
         let e = Evidence::new()
             .with(Claim::new(
-                "bns-cozumu",
+                "bns-resolution",
                 Strength::Verified,
                 "kanit gecerli",
             ))
@@ -180,12 +180,12 @@ mod tests {
     #[test]
     fn the_badge_names_the_weakest_layer() {
         let e = Evidence::new()
-            .with(Claim::new("bud-getirici", Strength::Verified, "hash tuttu"))
+            .with(Claim::new("bud-fetcher", Strength::Verified, "hash tuttu"))
             .with(Claim::new("https", Strength::TransportOnly, "yalniz TLS"));
         let badge = e.badge();
         assert!(badge.contains("yalniz tasima"), "{badge}");
         assert!(badge.contains("https"), "{badge}");
-        assert!(!badge.contains("bud-getirici"), "{badge}");
+        assert!(!badge.contains("bud-fetcher"), "{badge}");
     }
 
     #[test]
