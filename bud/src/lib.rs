@@ -95,8 +95,8 @@ pub mod quantum_chain;
 pub mod ratio;
 
 pub use bud_fixed_point::{
-    fixed_div, fixed_fraction, fixed_from_int, fixed_mul, fixed_sqrt, fixed_to_int,
-    FIXED_FRAC_BITS, FIXED_ONE,
+    fixed_div, fixed_from_int, fixed_mul, fixed_ratio, fixed_sqrt, fixed_to_int, FIXED_FRAC_BITS,
+    FIXED_ONE,
 };
 pub use bud_format::{
     BudFile, BudFlags, BudFormatClass, BudGates, MultiRatioConsensus, BUD_MAGIC, BUD_VERSION,
