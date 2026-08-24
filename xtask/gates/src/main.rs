@@ -135,6 +135,7 @@ mod gates {
     pub mod untrusted_manifests;
     pub mod value_transfers;
     pub mod wallet_core_gate;
+    pub mod wallet_node_address_agree;
     pub mod wire_fields_are_signed;
     pub mod workflows_produce_jobs;
     pub mod zero_address_sender_is_verified;
@@ -367,6 +368,14 @@ const GATES: &[Gate] = &[
         run: gates::no_orphan_source_files::run,
         run_args: None,
         self_test: gates::no_orphan_source_files::self_test,
+        run_log: None,
+    },
+    Gate {
+        name: "wallet-node-address-agree",
+        replaces: None,
+        run: gates::wallet_node_address_agree::run,
+        run_args: None,
+        self_test: gates::wallet_node_address_agree::self_test,
         run_log: None,
     },
     Gate {
