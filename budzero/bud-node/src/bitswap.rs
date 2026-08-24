@@ -196,9 +196,9 @@ impl BudBitswap {
         if response.not_found || response.data.is_empty() {
             return Ok(()); // Nothing to store.
         }
-        // Strix MEDIUM (CWE-345, 2026-08-17): yanit, ISTENEN blok icin
+        // Strix MEDIUM (CWE-345, 2026-08-17): the response must be for the REQUESTED
         // gelmelidir. Yalniz kendi cid'ine hash'leyen bir payload, kotu
-        // niyetli peer'in istenenden farkli bir blok gondermesine izin
+        // block; otherwise a malicious peer is allowed to send a different block
         // verir (cache zehirleme + eviction). Istenen cid eslesmezse red.
         if response.cid != requested_cid {
             tracing::warn!(
