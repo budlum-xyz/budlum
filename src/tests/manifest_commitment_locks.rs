@@ -1187,6 +1187,66 @@ mod repair_band {
         );
     }
 
+    /// The repair band is reachable from outside the node, not just from a test.
+    ///
+    /// `objects_needing_repair` was measured as idle: the maintenance sweep
+    /// calls `objects_below_own_repair_margin` instead, which judges each
+    /// object by its own scheme, and nothing else called this one. The tests
+    /// above exercised it directly, which proves the rule is right and proves
+    /// nothing about whether anyone can ask.
+    ///
+    /// That gap matters because the two functions answer different questions.
+    /// The sweep's is "is anything in trouble by its own standard?"; an
+    /// operator's is "what is within N shards of trouble for me?", and a single
+    /// per-object margin cannot answer a fixed N. The second question needed a
+    /// caller, so it has one: `bud_storageRepairBand`.
+    #[test]
+    fn the_repair_band_is_reachable_over_rpc() {
+        let actor_src = include_str!("../chain/chain_actor.rs");
+        // Anchor on the match arm's own first field, not the enum variant:
+        // both spell `ChainCommand::GetStorageRepairBand {` and `split_once`
+        // takes the first. This is the same trap the coding-audit tests hit.
+        let handler = actor_src
+            .split_once("ChainCommand::GetStorageRepairBand { margin, response } =>")
+            .map(|(_, after)| after)
+            .expect("the GetStorageRepairBand match arm must exist");
+        let handler = &handler[..handler.len().min(1200)];
+
+        assert!(
+            handler.contains("objects_needing_repair(margin)"),
+            "the handler must ask with the CALLER's margin; substituting the \
+             sweep's per-object margin would answer a different question"
+        );
+        assert!(
+            handler.contains("unrecoverable_objects()"),
+            "objects past saving must come back too, or a caller reading an \
+             empty repair band concludes nothing is wrong"
+        );
+
+        let server_src = include_str!("../rpc/server.rs");
+        let rpc = server_src
+            .split_once("async fn storage_repair_band(")
+            .map(|(_, after)| after)
+            .expect("the storage_repair_band RPC method must exist");
+        let rpc = &rpc[..rpc.len().min(1400)];
+        assert!(
+            rpc.contains("get_storage_repair_band(margin)"),
+            "the RPC must reach the chain actor, not recompute the band"
+        );
+        assert!(
+            rpc.contains("\"unrecoverable\"") && rpc.contains("\"repairable\""),
+            "the response must keep the two lists apart: an object below k \
+             cannot be repaired, and must not read as one that can"
+        );
+
+        let api_src = include_str!("../rpc/api.rs");
+        assert!(
+            api_src.contains("bud_storageRepairBand"),
+            "the method must be declared on the RPC trait, or it is unreachable \
+             from outside the process no matter what the server implements"
+        );
+    }
+
     #[test]
     fn losing_into_the_margin_opens_the_repair_band() {
         let (mut reg, manifest_id, shard_ids) = registry_with_object(4, 6);

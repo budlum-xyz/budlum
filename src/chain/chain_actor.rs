@@ -14,6 +14,24 @@ pub enum AiPaymentDirection {
     To,
 }
 
+/// The storage repair picture at one caller-supplied margin.
+///
+/// Two lists, kept apart on purpose. An object in `repairable` still has at
+/// least `k` shards and can be rebuilt, so the response is to open a
+/// replacement deal. An object in `unrecoverable` has fewer than `k` and
+/// cannot be rebuilt from what survives; opening a deal for it restores
+/// nothing and burns an operator bond. Folding the two together would let the
+/// second hide inside the first and read as "a repair is coming".
+#[derive(Debug, Default, Clone)]
+pub struct StorageRepairBand {
+    /// The margin the caller asked about.
+    pub margin: u32,
+    /// `(manifest_id, live_shards, k)` where `k <= live < k + margin`.
+    pub repairable: Vec<(crate::storage::ContentId, u32, u32)>,
+    /// `(manifest_id, live_shards, k)` where `live < k`.
+    pub unrecoverable: Vec<(crate::storage::ContentId, u32, u32)>,
+}
+
 #[derive(Debug)]
 pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
@@ -379,6 +397,18 @@ pub enum ChainCommand {
     GetStorageOutcome {
         challenge_id: u64,
         response: oneshot::Sender<Option<crate::domain::storage_deal::ChallengeResult>>,
+    },
+    /// B.U.D.: Objects in the repair band at a caller-supplied margin, plus
+    /// the objects already past saving.
+    ///
+    /// The margin is the caller's, not the sweep's. The maintenance pass judges
+    /// every object by its own scheme's margin, which is the right rule for a
+    /// sweep and the wrong one for an operator asking "what is within two
+    /// shards of trouble for me?". That question needs one margin applied
+    /// uniformly, which is what `objects_needing_repair` answers.
+    GetStorageRepairBand {
+        margin: u32,
+        response: oneshot::Sender<StorageRepairBand>,
     },
     /// B.U.D.: Issue retrieval challenges for active storage
     /// Deals whose challenge_interval has elapsed.
@@ -1004,6 +1034,20 @@ impl ChainHandle {
             .send(ChainCommand::GetStorageDealsByShard {
                 manifest_id,
                 shard_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Objects within `margin` shards of unrecoverable, and those already past
+    /// it, measured at the caller's margin.
+    pub async fn get_storage_repair_band(&self, margin: u32) -> StorageRepairBand {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageRepairBand {
+                margin,
                 response: tx,
             })
             .await;
@@ -3689,6 +3733,20 @@ impl ChainActor {
                         .get_result(challenge_id)
                         .cloned();
                     let _ = response.send(outcome);
+                }
+                ChainCommand::GetStorageRepairBand { margin, response } => {
+                    let registry = &self.blockchain.state.storage_registry;
+                    let band = StorageRepairBand {
+                        margin,
+                        // `k <= live < k + margin`: still reconstructible, but
+                        // the headroom is gone.
+                        repairable: registry.objects_needing_repair(margin),
+                        // Below `k`. A repair deal opened here rebuilds nothing
+                        // and only burns an operator bond, so it is reported
+                        // apart rather than folded into the band above.
+                        unrecoverable: registry.unrecoverable_objects(),
+                    };
+                    let _ = response.send(band);
                 }
                 ChainCommand::IssueStorageChallenges(epoch, res_tx) => {
                     if self.storage_economics_disabled_on_mainnet() {

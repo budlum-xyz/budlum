@@ -2369,6 +2369,32 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
+    async fn storage_repair_band(
+        &self,
+        margin: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let band: crate::chain::chain_actor::StorageRepairBand =
+            self.chain.get_storage_repair_band(margin).await;
+        let entry = |(manifest_id, live, k): &(crate::storage::ContentId, u32, u32)| {
+            serde_json::json!({
+                "manifestId": Self::to_0x_hash(hex::encode(manifest_id.0)),
+                "liveShards": live,
+                "k": k,
+            })
+        };
+        let repairable: Vec<serde_json::Value> = band.repairable.iter().map(entry).collect();
+        let unrecoverable: Vec<serde_json::Value> = band.unrecoverable.iter().map(entry).collect();
+        Ok(serde_json::json!({
+            "margin": band.margin,
+            "repairableCount": repairable.len(),
+            "repairable": repairable,
+            // Separate on purpose: below `k` no repair can restore the object,
+            // so this list needs an operator alarm, not a replacement deal.
+            "unrecoverableCount": unrecoverable.len(),
+            "unrecoverable": unrecoverable,
+        }))
+    }
+
     async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Ghost RPC was documented but not implemented.
         // Implementation: query PermissionlessRegistry active members for STORAGE_OPERATOR (RoleId 5).
