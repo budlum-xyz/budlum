@@ -1,65 +1,70 @@
 # B.U.D. Core (bud-core): 1.0 / 2.0 / 3.0
 
-Broad Universal Database 2.0 - çok formatlı, kayıpsız, kuantum-dirençli depolama
-çekirdeği. Bu crate, `.bud` v2 konteyner formatının ve boru hattının gerçek Rust
-uygulamasıdır.
+Broad Universal Database 2.0: a multi-format, lossless, quantum-resistant
+storage core. This crate is the real Rust implementation of the `.bud` v2
+container format and its pipeline.
 
-**Durum:** 137 test yeşil (132 birim + 1 test_bud2 + 4 entegrasyon), 0 uyarı, `#![forbid(unsafe_code)]`.
-Format sözleşmesi: [`FORMAT-V2.md`](FORMAT-V2.md) (bayt düzeyi spec + ölçümler).
+**Status:** 137 tests green (132 unit, 1 test_bud2, 4 integration), 0 warnings,
+`#![forbid(unsafe_code)]`. The format contract is
+[`FORMAT-V2.md`](FORMAT-V2.md), a byte-level spec with measurements.
 
-## Derleme / Test
+## Build and test
 
 ```bash
-cargo build            # tüm modüller + CLI binary
-cargo test             # 126 birim + 4 entegrasyon testi
+cargo build            # all modules plus the CLI binary
+cargo test             # 126 unit and 4 integration tests
 ```
 
 ## CLI (bin/bud)
 
 ```bash
-bud store  -i giris.json -o cikti.bud              # v2 konteyner (RAW)
-bud store  -i giris.log -o cikti.bud --compress    # v2 konteyner (Huffman - gerçek küçülme)
-bud store  -i giris.log -o cikti.bud --zstd       # v2 konteyner (GERÇEK zstd - en iyi oran, ~6.5x)
-bud restore -i cikti.bud -o geri.json              # doğrula + geri yükle (kayıpsız)
-bud check  -i cikti.bud                            # bütünlük (magic + parça cid + kök)
-bud encode -i giris.json -o v1.bud --class json    # v1 format
-bud bench  -f giris.log                            # hız + maliyet (tavan $0.016 kapısı)
-bud bft-vote --pipe-id 3 --ratio 17.19 --validator v   # BFT finality (2n/3)
+bud store  -i input.json -o output.bud              # v2 container, RAW
+bud store  -i input.log -o output.bud --compress    # v2 container, Huffman, real shrinkage
+bud store  -i input.log -o output.bud --zstd        # v2 container, real zstd, best ratio at roughly 6.5x
+bud restore -i output.bud -o back.json              # verify and restore, losslessly
+bud check  -i output.bud                            # integrity: magic, chunk cid, root
+bud encode -i input.json -o v1.bud --class json     # v1 format
+bud bench  -f input.log                             # speed and cost, against the $0.016 ceiling gate
+bud bft-vote --pipe-id 3 --ratio 17.19 --validator v   # BFT finality, 2n/3
 ```
 
-## Modül haritası
+## Module map
 
-| Modül | Ne yapar |
+| Module | What it does |
 |---|---|
-| `bud_format_container` | Yapısal parçalama (kayıpsızlık TAMLIĞI, K38), BudV2File (bomba korumalı), ChunkCodec |
-| `bud_format_pipe` | `store`/`restore` uçtan uca boru hattı + format algılama |
-| `bud_format_huffman` | Gerçek kayıpsız Huffman codec (BUD-HFM1, sıfır bağımlılık) |
-| `bud_format_real` | Gerçek zstd FFI (zstd_compress/zstd_decompress_safe, K25 tavanlı) |
-| `bud_format` | v1 format + ratio konsensüsü + K-BUD kapıları + decode_streaming (K25) |
-| `bud_format_checkpoint` | Hash-zincirli checkpoint konsensüsü (SEC 17a-4 deseni) |
-| `bud_format_por` | Shacham-Waters PoR (tutuş kanıtı, sınır güvenli) |
-| `bud_format_dedup` | Tenant-içi dedup + PoW ownership (K20) |
-| `bud_format_social` | Sosyal köprü kayıtları + K74 sahiplik ayrımı (Owned/Licensed, AB 2426) |
-| `bud_format_bft` | Ratio finality (2n/3 GRANDPA benzeri) |
-| `quantum_chain` | Ed25519 + ML-DSA-87 hibrit imza + dual cüzdan (K3/K4/B1) |
-| `bud_format_economics` | Maliyet modeli (dürüst tavan kapısı) + K60 sıfır-egress |
-| `bud_format_registry` | MIME/format kayıt defteri + kanıt kapıları |
+| `bud_format_container` | Structural chunking (lossless COMPLETENESS, K38), BudV2File (bomb-guarded), ChunkCodec |
+| `bud_format_pipe` | The end-to-end `store` and `restore` pipeline, plus format detection |
+| `bud_format_huffman` | A real lossless Huffman codec (BUD-HFM1, zero dependencies) |
+| `bud_format_real` | Real zstd FFI (`zstd_compress` and `zstd_decompress_safe`, capped by K25) |
+| `bud_format` | The v1 format, ratio consensus, the K-BUD gates and `decode_streaming` (K25) |
+| `bud_format_checkpoint` | Hash-chained checkpoint consensus, in the SEC 17a-4 pattern |
+| `bud_format_por` | Shacham-Waters PoR, a proof of retrievability, bounds-safe |
+| `bud_format_dedup` | Intra-tenant dedup plus PoW ownership (K20) |
+| `bud_format_social` | Social bridge records and the K74 ownership split (Owned/Licensed, EU 2426) |
+| `bud_format_bft` | Ratio finality, 2n/3, GRANDPA-like |
+| `quantum_chain` | Ed25519 plus ML-DSA-87 hybrid signatures and a dual wallet (K3/K4/B1) |
+| `bud_format_economics` | The cost model with its honest ceiling gate, plus K60 zero-egress |
+| `bud_format_registry` | The MIME and format registry, plus the proof gates |
 
-## Dürüstlük (K19/K38)
+## Honesty (K19/K38)
 
-- Ölçülmüş oranlar: `RealBench::measured_ratios()`, `FORMAT-V2.md §7` ve
-  `scripts/measure_ratios.py --seed 7` (TEKRARLANABİLİR - JSON zstd19 7.83x, CSV 3.55x,
-  LOG 6.17x, zstd konteyner ~6.55x). Uydurma sayı yok (EK13).
-- `17.19x JSON` iddiası gerçek ölçümle TUTMAMAKTADIR (7.83x) - kanarya testleri ve CLI
-  bench "tavan $0.016: GEÇMEDİ" ile dürüstçe raporlar.
-- Sahte zstd/xz magic üreten stub `RealCompressor` kaldırıldı; yerine gerçek Huffman
-  (BUD-HFM1) ve gerçek zstd FFI (ChunkCodec::Zstd).
+- Measured ratios live in `RealBench::measured_ratios()`, `FORMAT-V2.md`
+  section 7, and `scripts/measure_ratios.py --seed 7`, which is REPRODUCIBLE:
+  JSON zstd19 at 7.83x, CSV at 3.55x, LOG at 6.17x, and the zstd container at
+  roughly 6.55x. No invented numbers (EK13).
+- The `17.19x JSON` claim DOES NOT HOLD against the real measurement, which is
+  7.83x. The canary tests and the CLI bench report that honestly, as
+  "ceiling $0.016: NOT MET".
+- The stub `RealCompressor` that produced fake zstd and xz magic was removed, in
+  favour of real Huffman (BUD-HFM1) and real zstd FFI (`ChunkCodec::Zstd`).
 
-## Güvenlik duruşu
+## Security posture
 
-- Panik'siz ayrıştırma: her decode/parse yolu güvenilmez girdide None döner (mini-fuzz +
-  kırpma tam taramaları).
-- Alloc-bomb yok: güvenilmez uzunluk alanlarından `with_capacity` KULLANILMAZ (lazy büyüme).
-- Bomba korumaları: MAX_CHUNK_COUNT/MAX_CHUNK_BYTES/MAX_TOTAL_BYTES, K25 stream limitleri,
-  Kraft eşitsizliği, ratio tavanı (>100:1 RED).
-- `#![forbid(unsafe_code)]` tüm modüllerde.
+- Panic-free parsing: every decode and parse path returns `None` on untrusted
+  input, checked by a mini-fuzz plus exhaustive truncation sweeps.
+- No alloc bombs: `with_capacity` is NEVER used from untrusted length fields;
+  growth is lazy.
+- Bomb guards: `MAX_CHUNK_COUNT`, `MAX_CHUNK_BYTES`, `MAX_TOTAL_BYTES`, the K25
+  stream limits, the Kraft inequality, and the ratio ceiling that refuses
+  anything above 100:1.
+- `#![forbid(unsafe_code)]` in every module.

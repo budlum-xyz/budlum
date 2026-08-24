@@ -1,84 +1,86 @@
-//! Esik ML-DSA-87 yetkilendirme: t-of-n imza dogrulamasi.
+//! Threshold ML-DSA-87 authorization: t-of-n signature verification.
 //!
-//! # Bu modulun onceki hali
+//! # What this module used to be
 //!
-//! Bu dosya once bir iskeletti ve iskelet oldugunu kendi yorumlarinda
-//! soyluyordu: `shamir_split` gercek Shamir degil `secret XOR index` idi,
-//! `shamir_reconstruct` sabit bir maskeyle geri donuyordu ("This is NOT
-//! secure, just for iskelet"), `verify` yalnizca dizinin uzunluguna bakiyordu.
-//! Isimler ise gercek guvenlik gibi okunuyordu: `ThresholdMldsaSignature`,
-//! `kq_threshold_mldsa_sig`. Bir cagiran bu yuzeye bakip esik imzalamanin
-//! dogrulandigini varsayabilirdi.
+//! This file was once a skeleton, and it said so in its own comments:
+//! `shamir_split` was not real Shamir but `secret XOR index`,
+//! `shamir_reconstruct` returned with a fixed mask ("This is NOT secure, just
+//! for skeleton"), and `verify` only looked at the length of the array. The
+//! names, meanwhile, read like real security: `ThresholdMldsaSignature`,
+//! `kq_threshold_mldsa_sig`. A caller looking at that surface could have
+//! assumed threshold signing was being verified.
 //!
-//! Iskelet, `src/account_abstraction/` dizini `lib.rs`'ten hic ulasilmadigi
-//! icin derlenmiyordu bile; olculdu: dosyaya gecersiz Rust yazildiginda
-//! `cargo check` yine geciyordu. Derlenmeyen kod, hicbir kapinin gormedigi
-//! koddur.
+//! The skeleton did not even compile, because the `src/account_abstraction/`
+//! directory was never reached from `lib.rs`. That was measured: when invalid
+//! Rust was written into the file, `cargo check` still passed. Code that does
+//! not compile is code no gate can see.
 //!
-//! # Simdi ne yapiyor
+//! # What it does now
 //!
-//! Sir paylasimi bu modulden tamamen kaldirildi. Bir zincir dogrulayicisinin
-//! gizli anahtari boluyor olmasi icin bir neden yok: zincirin gordugu sey
-//! imzalardir, anahtarlar degil. `t-of-n` sorusu "n sahipten en az t tanesi
-//! bu mesaji imzaladi mi" sorusudur ve her imza tek basina
-//! `verify_ml_dsa_87_signature` ile dogrulanir.
+//! Secret sharing was removed from this module entirely. There is no reason for
+//! a chain verifier to be splitting a private key: what the chain sees is
+//! signatures, not keys. The `t-of-n` question is "did at least t of the n
+//! owners sign this message", and each signature is verified on its own with
+//! `verify_ml_dsa_87_signature`.
 //!
-//! Bu, esik imzalamanin (tek bir toplu imza ureten protokol) yerine gecmez;
-//! `t` ayri imzayi tek tek dogrulayan coklu-imzadir. Fark tasarim geregidir
-//! ve isimlendirmede saklanmaz: tip `MultisigAuthorization`, cunku yaptigi
-//! sey budur.
+//! This is not a substitute for threshold signing, a protocol that produces one
+//! aggregate signature. It is a multisig that verifies `t` separate signatures
+//! one by one. The difference is by design and is not hidden in the naming: the
+//! type is `MultisigAuthorization`, because that is what it does.
 //!
-//! # Reddedilen seyler
+//! # What is refused
 //!
-//! * Ayni imzalayanin iki kez sayilmasi. Sahip listesi yinelenirse veya ayni
-//!   sahip iki imza gonderirse esik sahte olarak karsilanir.
-//! * Listede olmayan bir sahibin imzasi.
-//! * `t == 0`. Sifir esik "kimse imzalamasin yeter" demektir.
-//! * `t > n`. Karsilanmasi imkansiz bir esik, sessizce her zaman reddeden bir
-//!   hesap uretir; bu bir kilitlenmedir, hata olarak soylenir.
+//! * Counting the same signer twice. If the owner list repeats, or the same
+//!   owner sends two signatures, the threshold would be met fraudulently.
+//! * A signature from an owner who is not on the list.
+//! * `t == 0`. A zero threshold means "it is enough that nobody signs".
+//! * `t > n`. A threshold that can never be met quietly produces an account
+//!   that always refuses; that is a lockout, and it is reported as an error.
 //!
-//! # Nereden cagriliyor
+//! # Where it is called from
 //!
-//! `Transaction::verify` V6 islemlerini buraya getirir
-//! (`src/core/transaction.rs`, `verify_v6`). Uzun sure oyle degildi: buradaki
-//! `t-of-n` denetimi gercek ML-DSA-87 ile calisiyordu ama islem semasi tek
-//! imza tasidigi icin hicbir islem ona bir yetkilendirme getiremiyordu. Kural
-//! kodda vardi, uygulanacagi yol yoktu.
+//! `Transaction::verify` brings V6 transactions here
+//! (`src/core/transaction.rs`, `verify_v6`). For a long time it did not: the
+//! `t-of-n` check here ran on real ML-DSA-87, but because the transaction
+//! schema carried a single signature, no transaction could bring it an
+//! authorization. The rule existed in the code, but there was no path along
+//! which it would be applied.
 //!
-//! V6 o yolu acar: islem sahip kumesini ve imzalari tasir, `from` adresi
-//! kumeden turetilir, ve esigi karsilamayan islem reddedilir.
+//! V6 opens that path: the transaction carries the owner set and the
+//! signatures, the `from` address is derived from the set, and a transaction
+//! that does not meet the threshold is refused.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 
-/// Bir hesabin tasiyabilecegi en fazla sahip sayisi.
+/// The largest number of owners an account can carry.
 ///
-/// Dogrulama maliyeti sahip sayisiyla dogru orantili: her imza bir ML-DSA-87
-/// dogrulamasidir. Ust sinir, tek bir islemin dugume yukleyebilecegi isi
-/// sinirlar.
+/// Verification cost is directly proportional to the owner count: each
+/// signature is one ML-DSA-87 verification. The upper bound limits the work a
+/// single transaction can load onto a node.
 pub const MAX_THRESHOLD_OWNERS: usize = 16;
 
-/// Esik yapilandirmasi veya dogrulama neden reddedildi.
+/// Why a threshold configuration or a verification was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThresholdError {
-    /// Sahip listesi bos.
+    /// The owner list is empty.
     NoOwners,
-    /// Sahip sayisi [`MAX_THRESHOLD_OWNERS`] ustunde.
+    /// The owner count is above [`MAX_THRESHOLD_OWNERS`].
     TooManyOwners { count: usize },
-    /// Sahip listesinde ayni anahtar birden fazla kez var.
+    /// The owner list holds the same key more than once.
     DuplicateOwner,
-    /// Esik sifir: hicbir imza istemeyen bir politika.
+    /// The threshold is zero: a policy that asks for no signature at all.
     ZeroThreshold,
-    /// Esik sahip sayisindan buyuk: karsilanmasi imkansiz.
+    /// The threshold exceeds the owner count and can never be met.
     ThresholdAboveOwnerCount { threshold: usize, owners: usize },
-    /// Gecerli imza sayisi esigin altinda kaldi.
+    /// The number of valid signatures stayed below the threshold.
     ThresholdNotMet { valid: usize, threshold: usize },
-    /// Imza, sahip listesinde olmayan bir anahtara ait.
+    /// The signature belongs to a key that is not in the owner list.
     UnknownSigner { index: usize },
-    /// Ayni sahip birden fazla imza gonderdi.
+    /// The same owner sent more than one signature.
     RepeatedSigner { index: usize },
-    /// Imza ML-DSA-87 dogrulamasindan gecmedi.
+    /// The signature did not pass ML-DSA-87 verification.
     InvalidSignature { index: usize },
 }
 
@@ -119,18 +121,19 @@ impl core::fmt::Display for ThresholdError {
 
 impl std::error::Error for ThresholdError {}
 
-/// Bir sahibin bir mesaj icin urettigi imza.
+/// A signature an owner produced over a message.
 #[derive(Debug, Clone)]
 pub struct OwnerSignature {
-    /// Imzalayanin ML-DSA-87 acik anahtari.
+    /// The signer's ML-DSA-87 public key.
     pub public_key: [u8; ML_DSA_87_PUBLIC_KEY_LEN],
-    /// FIPS 204 ML-DSA-87 imzasi.
+    /// The FIPS 204 ML-DSA-87 signature.
     pub signature: [u8; ML_DSA_87_SIGNATURE_LEN],
 }
 
-/// `t-of-n` coklu imza politikasi.
+/// A `t-of-n` multisig policy.
 ///
-/// Esik imzalama degil: `t` ayri imza tek tek dogrulanir. Isim bunu soyluyor.
+/// This is not threshold signing: `t` separate signatures are verified one by
+/// one. The name says so.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultisigPolicy {
     owners: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>,
@@ -138,11 +141,13 @@ pub struct MultisigPolicy {
 }
 
 impl MultisigPolicy {
-    /// Politikayi kurar ve karsilanamaz yapilandirmayi kurulusta reddeder.
+    /// Builds the policy and refuses an unmeetable configuration at
+    /// construction.
     ///
-    /// Reddetmenin dogrulama aninda degil burada olmasi onemli: `t > n` olan
-    /// bir hesap her islemi reddeder ve disaridan "imzalar yanlis" gibi
-    /// gorunur. Hata kurulusta soylenirse, kilitlenmis hesap hic olusmaz.
+    /// Refusing here rather than at verification time matters: an account with
+    /// `t > n` refuses every transaction and, from the outside, looks as though
+    /// "the signatures are wrong". If the error is reported at construction,
+    /// the locked-out account is never created.
     ///
     /// # Errors
     ///
@@ -190,12 +195,12 @@ impl MultisigPolicy {
         &self.owners
     }
 
-    /// `message` icin gonderilen imzalarin esigi karsilayip karsilamadigi.
+    /// Whether the signatures sent for `message` meet the threshold.
     ///
-    /// Her imza tek tek dogrulanir; ayni sahibin iki imzasi bir sayilir, daha
-    /// dogrusu ikincisi reddedilir. Bu, esigin en ucuz atlatma yoludur:
-    /// bir anahtari elinde tutan taraf `t` kopya gonderip `t-of-n`'i tek
-    /// basina karsilardi.
+    /// Each signature is verified on its own; two signatures from the same
+    /// owner count as one, or more precisely the second is refused. That is the
+    /// cheapest way to bypass a threshold: a party holding one key would send
+    /// `t` copies and meet `t-of-n` single-handedly.
     ///
     /// # Errors
     ///
@@ -228,7 +233,7 @@ impl MultisigPolicy {
     }
 }
 
-/// Bir mesaj ve onu yetkilendiren imzalar.
+/// A message and the signatures that authorize it.
 #[derive(Debug, Clone)]
 pub struct MultisigAuthorization {
     pub signatures: Vec<OwnerSignature>,
@@ -237,19 +242,19 @@ pub struct MultisigAuthorization {
 impl MultisigAuthorization {
     /// # Errors
     ///
-    /// [`MultisigPolicy::verify`]'nin dondurdugu her hata.
+    /// Every error [`MultisigPolicy::verify`] returns.
     pub fn authorize(&self, policy: &MultisigPolicy, message: &[u8]) -> Result<(), ThresholdError> {
         policy.verify(message, &self.signatures)
     }
 }
 
-/// KQ-* kapi yuzeyi: uretim yolundan cagrilacak tek giris noktasi.
+/// The KQ-* gate surface: the single entry point the production path calls.
 pub struct ThresholdGates;
 
 impl ThresholdGates {
     /// # Errors
     ///
-    /// [`MultisigPolicy::verify`]'nin dondurdugu her hata.
+    /// Every error [`MultisigPolicy::verify`] returns.
     pub fn kq_threshold_mldsa_sig(
         policy: &MultisigPolicy,
         message: &[u8],
@@ -308,9 +313,9 @@ mod tests {
         );
     }
 
-    /// Esigin en ucuz atlatma yolu: tek anahtar sahibi ayni imzayi `t` kez
-    /// gonderir. Sayim yinelenen imzalayaniyi elemezse `2-of-3` tek kisiyle
-    /// karsilanir.
+    /// The cheapest way to bypass a threshold: the holder of a single key sends
+    /// the same signature `t` times. If the count does not eliminate the
+    /// repeated signer, `2-of-3` is met by one person.
     #[test]
     fn the_same_owner_signing_twice_does_not_meet_a_threshold_of_two() {
         let (a, pa) = owner();
@@ -343,8 +348,9 @@ mod tests {
         );
     }
 
-    /// Baska bir mesaj icin uretilmis gecerli imza bu mesaji yetkilendirmez.
-    /// Iskelet surumu bunu goremezdi: yalnizca uzunluga bakiyordu.
+    /// A valid signature produced over another message does not authorize this
+    /// one. The skeleton version could not see that: it only looked at the
+    /// length.
     #[test]
     fn a_signature_over_another_message_is_refused() {
         let (a, pa) = owner();
@@ -358,7 +364,7 @@ mod tests {
         );
     }
 
-    /// Tek bir bitin bozulmasi imzayi gecersiz kilmali.
+    /// Corrupting a single bit must invalidate the signature.
     #[test]
     fn a_tampered_signature_is_refused() {
         let (a, pa) = owner();

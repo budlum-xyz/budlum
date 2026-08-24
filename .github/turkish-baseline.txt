@@ -24,7 +24,6 @@
 .gitignore	1
 README.md	1
 bud/Cargo.toml	22
-bud/README.md	40
 bud/fuzz/Cargo.toml	2
 bud/fuzz/fuzz_bud_format.rs	20
 bud/kani/kani_bud_format.rs	1
@@ -47,7 +46,6 @@ bud/src/bud_format_edge.rs	9
 bud/src/bud_format_edition.rs	35
 bud/src/bud_format_encpact.rs	18
 bud/src/bud_format_engine.rs	1
-bud/src/bud_format_erasure.rs	39
 bud/src/bud_format_fastcdc.rs	25
 bud/src/bud_format_fidelitygate.rs	18
 bud/src/bud_format_genomic.rs	11
@@ -197,7 +195,6 @@ ops/scripts/generate-sbom.sh	1
 rust-toolchain.toml	2
 src/account_abstraction/mod.rs	8
 src/account_abstraction/quantum_account.rs	9
-src/account_abstraction/threshold_mldsa.rs	38
 src/ai/README.md	23
 src/ai/mod.rs	2
 src/ai/types.rs	15
