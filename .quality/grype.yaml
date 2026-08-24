@@ -1,41 +1,41 @@
-# .grype.yaml, Grype (Anchore) zafiyet tarayıcısı yapılandırması
+# .grype.yaml, configuration for the Grype (Anchore) vulnerability scanner
 #
-# NEDEN OSV-Scanner'IN YANINDA: Grype farklı bir veritabanı setinden besleniyor
+# WHY ALONGSIDE OSV-Scanner: Grype feeds from a different database set
 # (NVD + GHSA + distro feed'leri) ve her bulguya EPSS skoru ekliyor. EPSS,
-# "bu açık vahşi doğada sömürülüyor mu" sorusunun ölçülebilir cevabıdır ve ne
-# RustSec'te ne OSV.dev'de var. Bir L1 için önceliklendirme farkı yaratır:
+# is the measurable answer to "is this hole being exploited in the wild" and exists neither
+# in RustSec nor in OSV.dev. For an L1 it changes prioritisation:
 # CVSS 8.7 ama EPSS %0.5 olan bir bulgu ile CVSS 7.0 / EPSS %40 olan bir bulgu
-# aynı aciliyette değildir.
+# do not carry the same urgency.
 #
-# Ayrıca Grype SARIF üretir; bulgular Security sekmesine düşer. Repodaki
-# Trivy fs taraması bunu yapmıyor (yalnız exit-code ile job'ı kırıyor), yani
-# bulguları tek bir yerden izlemek şu an mümkün değil.
+# Grype also produces SARIF; findings land in the Security tab. The Trivy fs scan
+# in the repository does not do this (it only breaks the job with an exit code), so
+# tracking findings from a single place is not currently possible.
 #
-# POLİTİKA: istisna listesi osv-scanner.toml ile birebir aynı olmalıdır. İki
-# tarayıcının aynı bulgu için çelişmesi kapının güvenilirliğini aşındırır;
-# biri güncellenirse diğeri de güncellenmelidir. Listede olmayan her bulgu
-# FAIL'dir. Şu an liste boş, taşınan hiçbir zafiyet yok.
+# POLICY: the exception list must be identical to osv-scanner.toml. Two
+# scanners contradicting each other on the same finding erodes the gate's credibility;
+# if one is updated the other must be too. Every finding not on the list
+# is a FAIL. The list is empty right now, no vulnerability is being carried.
 
-# Yalnız düzeltmesi olan bulgular değil, hepsi raporlansın.
+# Report everything, not only findings that have a fix.
 ignore-wontfix: ''
 
-# Eşik: high ve üzeri job'ı kırar. Aşağısı raporlanır ama bloke etmez -
-# Grype'ın distro/NVD kaynakları düşük şiddetli gürültü üretebiliyor ve bu
-# kapının amacı OSV/cargo-deny'nin üstüne EK sinyal koymak, onları
-# tekrarlamak değil.
+# Threshold: high and above break the job. Below that is reported but does not block -
+# Grype's distro/NVD sources can produce low severity noise and the purpose of this
+# gate is to add EXTRA signal on top of OSV/cargo-deny, not to repeat
+# them.
 fail-on-severity: high
 
 ignore:
-  # Bu liste ŞU AN BOŞ ve öyle kalmalı.
+  # This list is EMPTY RIGHT NOW and must stay that way.
   #
-  # 2026-07-28'e kadar burada üç kayıt vardı (yamux GHSA-vxx9-2994-q338,
-  # hickory GHSA-3v94-mw7p-v465 ve GHSA-q2qq-hmj6-3wpp). Hepsi "erişilemez"
-  # gerekçesiyle taşınıyordu çünkü libp2p 0.56 yamalı sürümlere geçmemişti.
-  # Artık geçti: kök Cargo.toml libp2p'yi 0.57.0 ağacına sabitliyor, bu da
-  # yamux 0.14.0 ve hickory 0.26.1 getiriyor. Üç bulgu da YAMALANDI, yani
-  # istisnaya gerek kalmadı.
+  # Until 2026-07-28 there were three records here (yamux GHSA-vxx9-2994-q338,
+  # hickory GHSA-3v94-mw7p-v465 and GHSA-q2qq-hmj6-3wpp). All were carried on the grounds
+  # of being "unreachable" because libp2p 0.56 had not moved to the patched releases.
+  # It has now: the root Cargo.toml pins libp2p to the 0.57.0 tree, which brings
+  # yamux 0.14.0 and hickory 0.26.1. All three findings were PATCHED, so
+  # no exception is needed.
   #
-  # Yeni bir istisna eklemeden önce: bağımlılığı yükseltmeyi dene. Erişilebilir
-  # bir bulgu ignore edilmez. Erişilemezlik iddiası ediliyorsa kanıtı
-  # src/tests/advisory_reachability.rs içinde bir testle kilitlenmelidir.
+  # Before adding a new exception: try upgrading the dependency. A reachable
+  # finding is not ignored. If unreachability is claimed, the evidence must be locked
+  # by a test inside src/tests/advisory_reachability.rs.
   []

@@ -244,7 +244,7 @@ jobs:
     # BLOCKS. The justification was "informational; may be slow/heavy" and neither
     # half had been measured. Measured: the job PASSED on the last three runs and
     # took 1 minute 58 seconds, less than half of CodeQL in the same workflow. So
-    # yumusatma ne bir kirmizilik sakliyordu ne bir zaman kazandiriyordu;
+    # the softening was neither hiding a red nor saving any time;
     # the softening was only silencing the gate.
     #
     # What it inspects is not cheap either. `--each-feature` verifies a feature

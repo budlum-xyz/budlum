@@ -128,7 +128,7 @@ jobs:
           if trufflehog git file://. --only-verified --fail --no-update 2>&1 \
              | tee /tmp/th-canary.log | grep -q "Verified"; then
             echo "CANARY FAILED: an invalid key was reported as verified," >&2
-            echo "yani --only-verified filtrelemiyor ve bu is gitleaks'in tekrari." >&2
+            echo "so --only-verified is not filtering and this job repeats gitleaks." >&2
             exit 1
           fi
           echo "canary OK: the invalid key was not counted as verified."

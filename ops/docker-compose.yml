@@ -49,21 +49,21 @@ services:
       - "--rpc-public-listener=0.0.0.0:8545"
       - "--rpc-operator-listener=127.0.0.1:8546"
       - "--metrics-port=9090"
-      # Güvenlik denetimi varsayılan metrics bind'ini loopback yaptı; devnet ağında
-      # prometheus (node1:9090) ve smoke /metrics ucunun erişebilmesi için
-      # bilinçli olarak tüm arayüzlere bağlanır. Üretim yapılandırması
-      # loopback varsayılanını kullanmaya devam eder (auth'suz metrik yüzeyi).
+      # The security review made the default metrics bind loopback; on the devnet network
+      # it binds to all interfaces deliberately so that prometheus (node1:9090) and the
+      # smoke /metrics endpoint can reach it. The production configuration keeps using the
+      # loopback default (an unauthenticated metric surface).
       - "--metrics-listener=0.0.0.0:9090"
       - "--db-path=/home/budlum/data/devnet-node1"
       - "--snapshot-dir=/home/budlum/data/snapshots"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
       - "--banned-peer-db=/home/budlum/data/banned-peers.json"
-    # Devnet smoke flakiness fix (2026-07-20): node2/3/4 tek-atış
-    # `--dial` ile node1'e bağlanıyordu; depends_on yalnız container başlangıcını
-    # Beklediği için node1'in P2P listener'ı hazır olmadan dial ediliyordu →
-    # Mesh çoğu zaman kurulamadı → smoke [2/5] flaky-fail. Healthcheck artık
-    # Public RPC yerine container-içi operator RPC'yi kullanır: auth gerektirmez,
-    # Hosta publish edilmez ve node1'in gerçekten ayağa kalktığını daha doğru ölçer.
+    # Devnet smoke flakiness fix (2026-07-20): node2/3/4 connected to node1 with a
+    # single-shot `--dial`; because depends_on waits only for container start, they
+    # dialled before node1's P2P listener was ready ->
+    # the mesh often did not form -> a flaky fail in smoke [2/5]. The healthcheck now
+    # uses the in-container operator RPC instead of the public RPC: it needs no auth,
+    # is not published to the host and measures more accurately that node1 really came up.
     healthcheck:
       test:
         - CMD-SHELL

@@ -1,35 +1,35 @@
 // Fuzz target: blockchain serialization roundtrip.
 //
-// Bu fuzz target `blockchain` modülündeki serialization fonksiyonlarını
-// Test eder. Amaç: rastgele byte input'u ile serialize/deserialize
-// Edip panik olup olmadığını kontrol etmek (ör. DoS, OOM, infinite
-// Loop).
+// This fuzz target exercises the serialization functions in the `blockchain`
+// module. The purpose: serialize/deserialize random byte input and check
+// whether it panics (for example DoS, OOM, an infinite
+// loop).
 //
-// Manuel çalıştırma (CI'da değil):
-//   Cargo +nightly install cargo-fuzz
-//   Cargo +nightly fuzz run fuzz_blockchain_serialize
+// Running it manually (not in CI):
+//   cargo +nightly install cargo-fuzz
+//   cargo +nightly fuzz run fuzz_blockchain_serialize
 //
-// Kabul kriteri:
-// - Build temiz (cargo check, nightly)
-// - Hedef fuzz edilebilir durumda (libfuzzer başlar)
+// Acceptance criteria:
+// - the build is clean (cargo check, nightly)
+// - the target is fuzzable (libfuzzer starts)
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // Şu an minimal: veri'yi doğrudan ignore et, panic olmadığını kontrol et.
-    // Gerçek roundtrip testleri (serde_json, prost, sled KVS)
-    // Buraya eklenecek.
+    // Minimal for now: ignore the data directly and check that nothing panics.
+    // The real roundtrip tests (serde_json, prost, sled KVS)
+    // will be added here.
 
-    // Property 1: Veri 0'dan büyükse ilk byte en az 1 olmalı
+    // Property 1: if the data is non-empty, reading the first byte must be safe
     if !data.is_empty() {
         let _first = data[0];
     }
 
-    // Property 2: Veri 1024'ten büyükse DoS kontrolü
+    // Property 2: a DoS check when the data is longer than 1024
     if data.len() > 1024 {
-        // Truncate et, panic olmamalı
+        // truncate it, this must not panic
         let _truncated = &data[..1024];
     }
 });

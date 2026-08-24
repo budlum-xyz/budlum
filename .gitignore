@@ -3,3 +3,7 @@ target/
 sbom.cdx.json
 protoc-*.zip
 # Build status
+
+# Python bytecode caches (never source)
+__pycache__/
+*.pyc

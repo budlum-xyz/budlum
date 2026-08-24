@@ -3,14 +3,14 @@ name = "budlum-core"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.0"
-# : root cargo-deny `unlicensed = "deny"` kuralı kendi crate'imizi de
-# reddetmesin diye zorunlu. Repo kökündeki LICENSE.md (PolyForm Shield 1.0.0) ile aynı.
+# Required so the root cargo-deny `unlicensed = "deny"` rule does not refuse
+# our own crate. The same as LICENSE.md (PolyForm Shield 1.0.0) at the repository root.
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 [features]
-# NIST FIPS 204 FINAL: varsayilan PQ backend ML-DSA-65 (validator) + ML-DSA-87 (cuzdan).
-# Dilithium5 (round-3, eski) yalniz `pq-dilithium` acikca secilirse derlenir -
-# default DEGILDIR: yalnizca NIST final semalari etkinlestirilir.
+# NIST FIPS 204 FINAL: the default PQ backend is ML-DSA-65 (validator) + ML-DSA-87 (wallet).
+# Dilithium5 (round-3, legacy) compiles only when `pq-dilithium` is chosen explicitly -
+# it is NOT a default: only the NIST final schemes are enabled.
 default = ["pq-ml-dsa", "wallet-ml-dsa"]
 pq-dilithium = ["dep:pqcrypto-dilithium", "dep:pqcrypto-traits"]
 pq-ml-dsa = ["dep:ml-dsa"]
@@ -166,8 +166,8 @@ path = "benches/micro/merkle_scaling.rs"
 name = "bench_internal_pipeline_tps"
 path = "benches/single_node/internal_pipeline_tps.rs"
 
-# : dudect-tarzı timing-safe regresyon testi. harness=false ile
-# stable toolchain'de `cargo bench --bench timing_safe` çalışır; CI kapısıdır.
+# A dudect style timing-safe regression test. With harness=false,
+# `cargo bench --bench timing_safe` runs on the stable toolchain; it is a CI gate.
 [[bench]]
 name = "timing_safe"
 path = "benches/micro/timing_safe.rs"
@@ -193,17 +193,17 @@ harness = false
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
-# Sertlestirme kapisi. Her biri once olculdu, ihlaller duzeltildi, sonra
-# deny'e alindi; yani bu liste hedef degil, korunan mevcut durumdur.
-# Olcum: cargo check --lib, RUSTFLAGS ile ayni lintler -W olarak kosuldu.
+# A hardening gate. Each was measured first, the violations were fixed, then it was
+# moved to deny; so this list is not a target but the current state being protected.
+# Measurement: cargo check --lib, with the same lints run as -W through RUSTFLAGS.
 #
-# unsafe_op_in_unsafe_fn  0 ihlal  (forbid(unsafe_code) zaten var, bu ikinci kilit)
-# trivial_casts           0 ihlal
-# trivial_numeric_casts   1 ihlal  -> blockchain.rs:5170 duzeltildi
-# unused_import_braces    0 ihlal
-# single_use_lifetimes    2 ihlal  -> folder.rs 236/316 duzeltildi
-# missing_abi             0 ihlal
-# non_ascii_idents        0 ihlal  (Turkce yorum serbest, TANIMLAYICI degil)
+# unsafe_op_in_unsafe_fn  0 violations  (forbid(unsafe_code) already exists, this is a second lock)
+# trivial_casts           0 violations
+# trivial_numeric_casts   1 violation   -> fixed at blockchain.rs:5170
+# unused_import_braces    0 violations
+# single_use_lifetimes    2 violations  -> fixed at folder.rs 236/316
+# missing_abi             0 violations
+# non_ascii_idents        0 violations  (this bans non-ASCII IDENTIFIERS, not comments)
 unsafe_op_in_unsafe_fn = "deny"
 trivial_casts = "deny"
 trivial_numeric_casts = "deny"
@@ -212,40 +212,40 @@ single_use_lifetimes = "deny"
 missing_abi = "deny"
 non_ascii_idents = "deny"
 
-# Bilerek ALLOW birakilanlar. "warn" DEGIL: CI `clippy --all-targets -D warnings`
-# kosuyor, yani warn birakmak bu iki lint'i hataya cevirip kapiyi kirardi.
+# Deliberately left as ALLOW. NOT "warn": CI runs `clippy --all-targets -D warnings`,
+# so leaving them at warn would turn these two lints into errors and break the gate.
 #
-# unused_qualifications: 157 ihlal, tamami budzero/bud-vm'deki uretilmis kod
-#   deseninden geliyor. Deny 157 satirlik mekanik degisiklik demek; olculdu,
-#   kapsam disi birakildi.
-# deprecated_in_future: 2 ihlal, ikisi de Atomic::fetch_update (node.rs
-#   1525/1600). 1.99'da try_update olacak ama MSRV 1.97; simdi degistirmek
-#   MSRV kapisini kirar. Surum yukseltilince kapatilacak.
+# unused_qualifications: 157 violations, all of them from the generated code pattern
+#   in budzero/bud-vm. Deny would mean a 157 line mechanical change; it was measured
+#   and left out of scope.
+# deprecated_in_future: 2 violations, both Atomic::fetch_update (node.rs
+#   1525/1600). try_update arrives in 1.99 but the MSRV is 1.97; changing it now
+#   would break the MSRV gate. To be closed when the version is raised.
 unused_qualifications = "allow"
 deprecated_in_future = "allow"
 
-# Panic kapisi. `unwrap`/`expect` uretim kodunda dugumu indirir: release
-# profili `panic = "abort"` kullaniyor, yani agdan gelen tek bozuk mesaj
-# butun dugumu durdurabilir. Olcum: 150 ihlal vardi, hepsi duzeltildi
-# (metrics 70, main 19, finality 7, storage_deal 9, render 7, ...), sonra
-# kapi acildi. Testler muaf: orada panik dogru davranistir, ve bu lintler
-# `--all-targets` altinda test hedeflerine de deger, bu yuzden test
-# modullerinde ve `tests/` altinda `allow` ile geri aciliyor.
+# A panic gate. `unwrap`/`expect` in production code takes the node down: the release
+# profile uses `panic = "abort"`, so a single malformed message from the network
+# can stop the whole node. Measurement: there were 150 violations, all fixed
+# (metrics 70, main 19, finality 7, storage_deal 9, render 7, ...), then the gate
+# was opened. Tests are exempt: a panic is the right behaviour there, and these lints
+# also touch test targets under `--all-targets`, which is why they are re-enabled with
+# `allow` inside test modules and under `tests/`.
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 
 [profile.release]
-# Release hardening (arastirma #196): panic=abort + overflow-checks + LTO +
-# codegen-units=1 + strip. Panic=abort unwind'i yasaklar (savunmasizlik
-# yuzeyi daraltir), overflow-checks tasma durumunda panic yerine hata
-# uretir, fat LTO + tek codegen birimi tum crate grafigini birlikte
-# optimize eder (sanal fonksiyon devirtualization, cross-crate inlining),
-# strip ise sembolleri kaldirir (reverse engineering yuzeyini kucultur ve
-# ikili boyutu dusurur). Build suresi artar ama calisma zamani davranisi
-# degismez: safe Rust semantigi derleyici optimizasyonundan bagimsizdir,
-# determinism gate'leri (Genesis Reproducibility, Cross-Platform Digest)
-# bunu CI'da dogrular.
+# Release hardening (research #196): panic=abort + overflow-checks + LTO +
+# codegen-units=1 + strip. panic=abort forbids unwinding (it narrows the
+# vulnerability surface), overflow-checks produces an error instead of a panic
+# on overflow, fat LTO plus a single codegen unit optimises the whole crate graph
+# together (virtual function devirtualization, cross-crate inlining), and
+# strip removes the symbols (it shrinks the reverse engineering surface and
+# lowers the binary size). Build time grows but run time behaviour does not
+# change: safe Rust semantics are independent of compiler optimisation, and the
+# determinism gates (Genesis Reproducibility, Cross-Platform Digest) verify
+# that in CI.
 overflow-checks = true
 panic = "abort"
 lto = true

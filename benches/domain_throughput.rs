@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Domain Throughput & Latency Benchmarks (criterion.rs)
 //!
-//! Her domain için somut throughput/latency ölçümleri:
+//! Concrete throughput/latency measurements for every domain:
 //! - Transaction execution (per-type TPS)
 //! - State root calculation (flat hash vs Merkle trie)
 //! - Block production & validation
@@ -15,7 +15,7 @@
 //! - Proof verification (envelope validation)
 //! - Governance proposal lifecycle
 //!
-//! Çalıştırma:
+//! Running it:
 //!   Cargo bench --bench domain_throughput
 //!   Cargo bench --bench domain_throughput -- "tx_execute"  (tek grup)
 //!   Cargo bench --bench domain_throughput -- --save-baseline main (baseline)

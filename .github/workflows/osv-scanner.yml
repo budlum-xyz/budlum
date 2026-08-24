@@ -86,8 +86,8 @@ jobs:
       # fuzz/Cargo.lock ve crates/wallet-core/Cargo.lock buraya sonradan eklendi.
       # The repository has four lockfiles and the scan read two of them. The fuzz
       # lock carries the same 23 git packages as the root lock plus its own
-      # tasiyor; wallet-core BIP39 ve SLIP-0010 anahtar turetmesini tasiyor,
-      # yani taranmayan iki agactan biri dogrudan anahtar ureten agacti.
+      # carries; wallet-core carries BIP39 and SLIP-0010 key derivation,
+      # so one of the two unscanned trees was the tree that produces keys directly.
       # libfuzzer chain. The fuzz runner executes on the CI machine and on developer
       # machines, and the wallet code sees the user's seed; neither is "just a test".
       # degildir.

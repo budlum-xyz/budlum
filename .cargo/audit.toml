@@ -1,19 +1,19 @@
-# .cargo/audit.toml: cargo-audit yapılandırması
+# .cargo/audit.toml: the cargo-audit configuration
 #
-# Cargo.lock'taki BİLİNEN danışmaların kanıtlı skip-listesi. cargo-deny
-# tarafındaki karşılık ve tam kanıt zinciri: .quality/deny.toml [advisories]
-# bölümü. Burada listelenmeyen herhangi bir YENİ CVE job'u FAIL eder
-# (kural: unmaintained yalnız uyarır, vulnerability fail eder).
+# An evidenced skip list of the KNOWN advisories in Cargo.lock. The counterpart
+# on the cargo-deny side, with the full evidence chain, is the .quality/deny.toml
+# [advisories] section. Any NEW CVE not listed here FAILs the job
+# (the rule: unmaintained only warns, a vulnerability fails).
 
 [advisories]
 ignore = [
-    # RUSTSEC-2026-0118 - NSEC3 DoS; yalnız DNSSEC doğrulayan
-    # DnssecDnsHandle yolunda. Budlum bunu kullanmaz. `p2p-mdns` ayrıca
-    # production/default feature graphından çıkarılmıştır.
+    # RUSTSEC-2026-0118 - NSEC3 DoS; only on the DnssecDnsHandle path that
+    # validates DNSSEC. Budlum does not use it. `p2p-mdns` has additionally been
+    # removed from the production/default feature graph.
     "RUSTSEC-2026-0118",
     # RUSTSEC-2026-0119 - hickory name-compression CPU DoS. Mainnet/testnet
-    # binary'leri mDNS dependency/behaviour'ını artık derlemez/oluşturmaz;
-    # yalnız açıkça `--features p2p-mdns` ile kurulan devnet buildi etkilenir.
-    # Upstream hickory >=0.26 uyumu geldiğinde bu geçici istisna kaldırılmalıdır.
+    # no longer compile or construct the mDNS dependency/behaviour; only a devnet
+    # build installed explicitly with `--features p2p-mdns` is affected.
+    # This temporary exception must be removed once upstream hickory >=0.26 compatibility lands.
     "RUSTSEC-2026-0119",
 ]

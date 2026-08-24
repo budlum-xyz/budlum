@@ -1,17 +1,17 @@
-# deny.toml: Budlum Core supply-chain kapısı
+# deny.toml: the Budlum Core supply chain gate
 #
-# Bu dosya `cargo deny check` ile CI'da zorunlu kapıdır (strict mod:
-# ilk günden fail kapısı; gevşetme YOK). BudZero tarafındaki karşılığı
-# budzero/deny.toml'dur; iki graf ayrı matrix adımında denetlenir.
+# This file is a required CI gate through `cargo deny check` (strict mode:
+# a failing gate from day one; NO loosening). Its counterpart on the BudZero side
+# is budzero/deny.toml; the two graphs are checked in separate matrix steps.
 #
-# Şema: cargo-deny 0.20+ (eski anahtarlar kaldırıldı).
+# Schema: cargo-deny 0.20+ (the old keys were removed).
 # Modern semantikte `allow` listesinde OLMAYAN her lisans otomatik FAIL'dir
-# (eski `unlicensed = "deny"` + copyleft yasağı davranışı böylece korunur;
-# GPL/AGPL ailesi allow'da olmadığından reddedilir).
+# (this preserves the old `unlicensed = "deny"` plus copyleft ban behaviour;
+# the GPL/AGPL family is refused because it is not in allow).
 #
-# Lisans eklemeleri KANITSIZ yapılmaz: CI kırmızı verirse yalnızca permissive
-# lisanslı (OSI/FSF-free) crate'ler için, gerekçesi commit mesajında yazılarak
-# allow listesi genişletilir (ratchet ruhu).
+# License additions are not made WITHOUT EVIDENCE: if CI turns red the allow list
+# is widened only for permissively licensed (OSI/FSF-free) crates, with the reason
+# written in the commit message (in the spirit of a ratchet).
 
 [graph]
 targets = []
@@ -26,19 +26,19 @@ allow = [
     "ISC",
     "OpenSSL",
     "Zlib",
-    # Gerekçeli ekleme ( ilk koşu, kanıtlı): icu_* crate ailesi
-    # (idna_adapter ← url ← libp2p zinciri) Unicode-3.0 lisanslı.
-    # Unicode-3.0 OSI-onaylı permissive lisanstır (kopyalayaz DEĞİL);
-    # SPDX: Unicode-3.0. Yerel cargo-deny 0.20.2 koşusunda 19 reddin
-    # tamamının tek sebebi bu lisanstı (başka lisans ihlali yok).
+    # A justified addition (first run, with evidence): the icu_* crate family
+    # (the idna_adapter <- url <- libp2p chain) is licensed Unicode-3.0.
+    # Unicode-3.0 is an OSI approved permissive license (NOT copyleft);
+    # SPDX: Unicode-3.0. In a local cargo-deny 0.20.2 run, this license was the sole
+    # cause of all 19 refusals (no other license violation).
     "Unicode-3.0",
-    # D1 relayer için reqwest → webpki-roots 1.0.9 CDLA-Permissive-2.0 lisanslı.
-    # CDLA-Permissive-2.0 OSI-onaylı değil ama permissive, data license; reqwest zinciri için gerekli.
-    # Gerekçe: webpki-roots Mozilla CA bundle data'sı için CDLA-Permissive-2.0 kullanır, permissive.
+    # For the D1 relayer, reqwest -> webpki-roots 1.0.9 is licensed CDLA-Permissive-2.0.
+    # CDLA-Permissive-2.0 is not OSI approved but it is permissive, a data license; required for the reqwest chain.
+    # Reason: webpki-roots uses CDLA-Permissive-2.0 for the Mozilla CA bundle data, which is permissive.
     "CDLA-Permissive-2.0",
-    # PolyForm Shield 1.0.0: bu deponun KENDİ lisansı (LicenseRef,
-    # SPDX dışı). cargo-deny workspace üyelerinin lisansını da denetlediği
-    # için allow listesine girer.
+    # PolyForm Shield 1.0.0: this repository's OWN license (a LicenseRef,
+    # outside SPDX). Because cargo-deny also checks the license of workspace members
+    # it goes into the allow list.
     "LicenseRef-PolyForm-Shield-1.0.0",
 ]
 
@@ -88,29 +88,29 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = ["https://github.com/libp2p/rust-libp2p"]
 
 [advisories]
-# unmaintained = "none": eski davranışla aynı ("warn, fail yok").
+# unmaintained = "none": the same as the old behaviour ("warn, no fail").
 #
-# Bu kararın tek gerekçesi uyarıların başka bir yerde görünür kalmasıdır. Bu
-# satır 2026-07-31'e kadar "CI dependency-audit job'ındaki cargo audit her
-# koşuda unmaintained uyarılarını raporlar" diyordu ve bu DOĞRU DEĞİLDİ:
-# `scripts/audit-deps.sh` bulguları `--json` ile geçici bir dosyaya, ham çıktıyı
-# da `target/audit/DEPENDENCY_AUDIT.md`'ye yazıyordu; o raporu hiçbir workflow
-# artefakt olarak yüklemiyordu. İş yeşil dönüyor, log'da tek bir danışma adı
-# geçmiyordu.
+# The only justification for this decision is that the warnings stay visible somewhere else. Until
+# 2026-07-31 this line said "the cargo audit in the CI dependency-audit job reports
+# unmaintained warnings on every run" and that WAS NOT TRUE:
+# `scripts/audit-deps.sh` wrote the findings with `--json` into a temporary file and the raw output
+# into `target/audit/DEPENDENCY_AUDIT.md`; no workflow uploaded that report
+# as an artifact. The job came back green and not a single advisory name appeared
+# in the log.
 #
 # Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
-# tarafından ikame edildi) mainnet varsayılan PQ imza yolunda duruyor. Karar
-# verilmiş ve `.quality/osv-scanner.toml`'da gerekçesiyle kayıtlı; buna karşın
-# cargo audit tarafında hiçbir koşuda görünmedi. Aynı ağacı tarayan iki
-# araçtan yalnız birinin sonucu okunabiliyordu - "warn, fail yok" kararının
-# dayandığı görünürlük tek bacaklıydı.
+# was superseded by) sits on the mainnet default PQ signature path. The decision
+# was made and is recorded with its reason in `.quality/osv-scanner.toml`; even so
+# it never appeared on the cargo audit side in any run. Of the two tools scanning the
+# same tree only one result was readable - the visibility the "warn, no fail" decision
+# rested on stood on one leg.
 #
-# `audit-deps.sh` artık iki lockfile'ın ham çıktısını log'a basıyor ve görülen
-# RUSTSEC kimliklerini tek listede özetliyor. Bu satırın gerekçesi ancak o
-# çıktı orada durduğu sürece geçerlidir, kaldırılırsa bu karar da yeniden
-# değerlendirilmelidir.
+# `audit-deps.sh` now prints the raw output of both lockfiles into the log and summarises the
+# RUSTSEC identifiers it saw in a single list. The justification for this line holds only as long
+# as that output stays there; if it is removed this decision must be reconsidered
+# as well.
 unmaintained = "none"
-# unsound: doğrudan bağımlılıklarımızda unsound danışması = FAIL (sıkı).
+# unsound: an unsound advisory in our direct dependencies = FAIL (strict).
 unsound = "workspace"
 ignore = [
     # Deliberately empty.

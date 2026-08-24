@@ -1,5 +1,5 @@
-#  - proto/buf kapı yapılandırması
-# Kapsam: buf lint (STANDARD) + buf build + buf breaking --against main (CI'da).
+# The proto/buf gate configuration
+# Scope: buf lint (STANDARD) + buf build + buf breaking --against main (in CI).
 version: v2
 modules:
   - path: proto
@@ -7,13 +7,13 @@ lint:
   use:
     - STANDARD
   ignore_only:
-    # BİLİNÇLİ KALİBRASYONLAR (mevcut wire/semantik durum korunur):
-    # (1) Enum'da 0 değeri TRANSFER - _UNSPECIFIED çevirisi default semantiğini
-    #     değiştirir (wire sayıları sabit kalsa bile default tx_type sapar).
-    # (2) Paket adı budlum.network korunur - .v1 suffix'i message FQN'lerini
-    #     değiştirir (= wire breaking). Paket versiyonlama evrimi ileri bir iş.
-    # PACKAGE_DIRECTORY_MATCH ise gerçek uyumla çözüldü (dosya taşındı,
-    # protoc FQN/paket adı değişmedi → wire etkisiz).
+    # DELIBERATE CALIBRATIONS (the current wire/semantic state is preserved):
+    # (1) The 0 value in the enum is TRANSFER - translating it to _UNSPECIFIED changes
+    #     the default semantics (even with the wire numbers fixed, the default tx_type drifts).
+    # (2) The package name budlum.network is preserved - a .v1 suffix changes the message
+    #     FQNs (= wire breaking). Package version evolution is later work.
+    # PACKAGE_DIRECTORY_MATCH was resolved by real compliance instead (the file moved,
+    # the protoc FQN/package name did not change -> no wire effect).
     ENUM_ZERO_VALUE_SUFFIX:
       - proto/budlum/network/protocol.proto
     ENUM_VALUE_PREFIX:

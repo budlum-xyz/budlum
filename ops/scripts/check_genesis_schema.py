@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-check_genesis_schema.py -  genesis JSON şema kapısı (vacuous-gate kanaryalı)
+check_genesis_schema.py - the genesis JSON schema gate (with a vacuous-gate canary)
 
-config/mainnet-genesis.json (ve gelecekteki genesis varyantları) için sıkı alan/tip
-kapısı. stdlib-only (CI'da ek paket yok).
+A strict field/type gate for config/mainnet-genesis.json (and future genesis
+variants). stdlib only (no extra package in CI).
 
-Kullanım:
+Usage:
     python3 scripts/check_genesis_schema.py <genesis.json>
     python3 scripts/check_genesis_schema.py --self-test
 """
@@ -32,45 +32,45 @@ POSITIVE_KEYS = {"chain_id", "epochs_per_year", "slot_duration_secs", "epoch_len
 
 
 def _is_int(v):
-    # bool'lar int sayılmaz (True/False genesis değeri değildir)
+    # bools do not count as ints (True/False is not a genesis value)
     return isinstance(v, int) and not isinstance(v, bool)
 
 
 def validate(g):
     errs = []
     if not isinstance(g, dict):
-        return ["kök obje JSON object olmalı"]
+        return ["the root object must be a JSON object"]
     for k in REQUIRED_TOP:
         if k not in g:
-            errs.append(f"eksik zorunlu alan: {k}")
+            errs.append(f"missing required field: {k}")
     if errs:
-        return errs  # alanlar yoksa derin kontrol anlamsız
+        return errs  # a deep check is meaningless when the fields are absent
     int_top = ["chain_id", "block_reward", "base_fee", "timestamp"]
     for k in int_top:
         if not _is_int(g[k]):
-            errs.append(f"{k}: tam sayı (int) olmalı, bool/str değil")
+            errs.append(f"{k}: must be an integer (int), not a bool/str")
     if not isinstance(g["allocations"], list):
-        errs.append("allocations: liste olmalı")
+        errs.append("allocations: must be a list")
     if not isinstance(g["validators"], list):
-        errs.append("validators: liste olmalı")
+        errs.append("validators: must be a list")
     if not isinstance(g["gas_schedule"], dict):
-        errs.append("gas_schedule: obje olmalı")
+        errs.append("gas_schedule: must be an object")
     else:
         for k in GAS_KEYS:
             if k not in g["gas_schedule"]:
                 errs.append(f"gas_schedule.{k} eksik")
             elif not _is_int(g["gas_schedule"][k]) or g["gas_schedule"][k] < 0:
-                errs.append(f"gas_schedule.{k}: int >= 0 olmalı")
+                errs.append(f"gas_schedule.{k}: must be an int >= 0")
     if not isinstance(g["bud_tokenomics"], dict):
-        errs.append("bud_tokenomics: obje olmalı")
+        errs.append("bud_tokenomics: must be an object")
     else:
         for k in TOKENOMICS_KEYS:
             if k not in g["bud_tokenomics"]:
                 errs.append(f"bud_tokenomics.{k} eksik")
             elif not _is_int(g["bud_tokenomics"][k]) or g["bud_tokenomics"][k] < 0:
-                errs.append(f"bud_tokenomics.{k}: int >= 0 olmalı")
+                errs.append(f"bud_tokenomics.{k}: must be an int >= 0")
     if _is_int(g["chain_id"]) and g["chain_id"] < 1:
-        errs.append("chain_id >= 1 olmalı (mainnet=1)")
+        errs.append("chain_id must be >= 1 (mainnet=1)")
     return errs
 
 
@@ -90,9 +90,9 @@ def self_test():
         bad = copy.deepcopy(good)
         mut(bad)
         if not validate(bad):
-            print(f"VACUOUS GATE: '{name}' varyantı reddedilmedi!")
+            print(f"VACUOUS GATE: the '{name}' variant was not refused!")
             return 1
-    print(f"kanarya OK: {len(variants)} bozuk varyantın tamamı reddedildi, mevcut genesis PASS.")
+    print(f"canary OK: all {len(variants)} broken variants were refused, the current genesis PASSes.")
     return 0
 
 
@@ -100,14 +100,14 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         return self_test()
     if len(sys.argv) != 2:
-        print("kullanım: check_genesis_schema.py <genesis.json> | --self-test")
+        print("usage: check_genesis_schema.py <genesis.json> | --self-test")
         return 1
     errs = validate(json.load(open(sys.argv[1])))
     if errs:
         for e in errs:
             print(f"FAIL: {e}")
         return 1
-    print(f"OK: {sys.argv[1]} şema kapısını geçti.")
+    print(f"OK: {sys.argv[1]} passed the schema gate.")
     return 0
 
 

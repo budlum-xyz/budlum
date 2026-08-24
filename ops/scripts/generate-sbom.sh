@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
-# Scripts/generate-sbom.sh - Rust SBOM üretici
+# ops/scripts/generate-sbom.sh - Rust SBOM generator
 #
-# Bu script CycloneDX formatında SBOM (Software Bill of Materials)
-# Üretir. ch12 §3.7 mainnet blocker kapsamında; harici audit
-# Firması için zorunlu teslim kalemi.
+# This script produces an SBOM (Software Bill of Materials) in CycloneDX
+# format. It sits inside the ch12 section 3.7 mainnet blocker scope; a
+# mandatory deliverable for the external audit firm.
 #
-# Kullanım:
+# Usage:
 #   ./scripts/generate-sbom.sh
 #
-# Çıktı: `sbom.cdx.json` (repo root) + `target/audit/SBOM.md` özeti.
+# Output: `sbom.cdx.json` (repo root) plus the `target/audit/SBOM.md` summary.
 # Format: CycloneDX 1.5 (JSON).
-# Kabul kriteri: SBOM dosyası oluşturulabiliyor + JSON parse oluyor.
+# Acceptance criterion: the SBOM file can be created and the JSON parses.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "[generate-sbom] SBOM üretimi başlatılıyor..."
+echo "[generate-sbom] starting SBOM generation..."
 
-# 1. cargo-cyclonedx yükle (yoksa veya sürüm pinli değilse).
-# Sürüm pinli: CLI bayrakları sürümler arası değişebiliyor (run #728:
-# `--output-file` kaldırılmıştı), kapının deterministik kalması için pin ZORUNLU.
+# 1. install cargo-cyclonedx (if absent or the version is not pinned).
+# The version is pinned: CLI flags can change between releases (run #728:
+# `--output-file` had been removed); the pin is REQUIRED for the gate to stay deterministic.
 # (Onceki duzeltmeden tasima - triyaj bakiyesi.)
 CYCLONEDX_VERSION="0.5.9"
 if ! command -v cargo-cyclonedx >/dev/null 2>&1 \
     || ! cargo cyclonedx --version 2>/dev/null | grep -q "$CYCLONEDX_VERSION"; then
-    echo "[generate-sbom] cargo-cyclonedx $CYCLONEDX_VERSION (pinli) yükleniyor..."
+    echo "[generate-sbom] installing cargo-cyclonedx $CYCLONEDX_VERSION (pinned)..."
     cargo install --locked cargo-cyclonedx --version "$CYCLONEDX_VERSION"
 fi
 
-# 2. SBOM üret
+# 2. produce the SBOM
 SBOM_FILE="$REPO_ROOT/sbom.cdx.json"
 cargo cyclonedx --format json
 # Cargo-cyclonedx writes <package-name>.cdx.json (e.g. budlum-core.cdx.json)
@@ -38,7 +38,7 @@ SBOM_TMP=$(ls -t *.cdx.json 2>/dev/null | head -1)
 if [ -n "$SBOM_TMP" ] && [ -f "$SBOM_TMP" ]; then
     mv "$SBOM_TMP" "$SBOM_FILE"
 else
-    echo "[generate-sbom] HATA: .cdx.json dosyası bulunamadı."
+    echo "[generate-sbom] ERROR: no .cdx.json file was found."
     ls -la *.json *.xml 2>/dev/null || true
     exit 1
 fi
@@ -49,7 +49,7 @@ if ! python3 -c "import json; json.load(open('$SBOM_FILE'))" 2>/dev/null; then
     exit 1
 fi
 
-# 4. Boyut ve bileşen sayısı
+# 4. size and component count
 SBOM_SIZE="$(stat -c%s "$SBOM_FILE" 2>/dev/null || stat -f%z "$SBOM_FILE" 2>/dev/null || echo "?")"
 COMPONENT_COUNT="$(python3 -c "import json; print(len(json.load(open('$SBOM_FILE')).get('components', [])))" 2>/dev/null || echo "?")"
 
@@ -61,20 +61,20 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 {
     echo "# SBOM (Software Bill of Materials)"
     echo ""
-    echo "**Oluşturulma:** $TIMESTAMP"
-    echo "**Araç:** cargo-cyclonedx (https://github.com/CycloneDX/cyclonedx-rust-cargo)"
+    echo "**Generated:** $TIMESTAMP"
+    echo "**Tool:** cargo-cyclonedx (https://github.com/CycloneDX/cyclonedx-rust-cargo)"
     echo "**Format:** CycloneDX 1.5 (JSON)"
     echo "**Repo:** budlum-xyz/budlum @ \`$(git rev-parse --short HEAD)\`"
     echo ""
-    echo "## Özet"
+    echo "## Summary"
     echo ""
-    echo "- **SBOM dosyası:** \`sbom.cdx.json\` (boyut: $SBOM_SIZE byte)"
-    echo "- **Bileşen sayısı:** $COMPONENT_COUNT"
+    echo "- **SBOM file:** \`sbom.cdx.json\` (size: $SBOM_SIZE bytes)"
+    echo "- **Component count:** $COMPONENT_COUNT"
     echo ""
-    echo "## Kullanım"
+    echo "## Usage"
     echo ""
-    echo "Harici audit firması \`sbom.cdx.json\` dosyasını doğrudan kullanabilir."
-    echo "Format: CycloneDX 1.5 JSON, tüm transitive bağımlılıkları içerir."
+    echo "The external audit firm can use \`sbom.cdx.json\` directly."
+    echo "Format: CycloneDX 1.5 JSON, it includes every transitive dependency."
     echo ""
     echo "## Yenileme"
     echo ""
@@ -82,9 +82,9 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo "./scripts/generate-sbom.sh"
     echo "\`\`\`"
     echo ""
-    echo "Bu rapor  kapsamında otomatik üretilir."
+    echo "This report is generated automatically."
 } > "$DOC"
 
-echo "[generate-sbom] SBOM: $SBOM_FILE ($SBOM_SIZE byte, $COMPONENT_COUNT bileşen)"
+echo "[generate-sbom] SBOM: $SBOM_FILE ($SBOM_SIZE bytes, $COMPONENT_COUNT components)"
 echo "[generate-sbom] Rapor: $DOC"
 echo "[generate-sbom] Bitti."

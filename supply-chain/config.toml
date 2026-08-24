@@ -22,22 +22,22 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-# --- git kaynaklı libp2p ağacı: crates.io karşılığı olarak denetle ---
+# --- the git sourced libp2p tree: audit it as its crates.io counterpart ---
 #
-# libp2p, crates.io yerine rust-libp2p ağacından alınıyor (Cargo.toml:32).
-# cargo-vet bir git bağımlılığının hangi crates.io paketine karşılık geldiğini
-# kendiliğinden bilemez, bu yüzden denetim kayıtlarını (mozilla/google/isrg
-# import'ları dahil) o paketlere bağlayamıyor ve "There are some issues with
-# your policy.audit-as-crates-io entries" diyerek TARAMAYI HİÇ ÇALIŞTIRMIYOR.
+# libp2p is taken from the rust-libp2p tree rather than crates.io (Cargo.toml:32).
+# cargo-vet cannot know on its own which crates.io package a git dependency
+# corresponds to, so it cannot bind the audit records (including the
+# mozilla/google/isrg imports) to those packages and says "There are some issues
+# with your policy.audit-as-crates-io entries", RUNNING NO SCAN AT ALL.
 #
-# Bu, kapının doğru yakaladığı bir durumdu: `cargo vet check` ne denetimsiz
-# bağımlılık sayısı ne de "Vetting Succeeded!" basmıştı, kapı da çıktıyı temiz
-# saymayı reddetti. Eksik olan kapı değil, aşağıdaki eşlemeydi.
+# This was a case the gate caught correctly: `cargo vet check` printed neither an
+# unvetted dependency count nor "Vetting Succeeded!", and the gate refused to treat
+# the output as clean. What was missing was not the gate but the mapping below.
 #
-# `audit-as-crates-io = true`, "bu git checkout'u aynı isimli crates.io
-# paketiyle bir say" demektir; mevcut denetimler yeniden kullanılabilir hale
-# gelir. Yeni bir güven varsayımı eklemez: sürümler Cargo.lock'ta pinli ve
-# hangi commit'ten geldikleri raporda görünüyor.
+# `audit-as-crates-io = true` means "count this git checkout as the crates.io
+# package of the same name"; the existing audits become reusable. It adds no new
+# trust assumption: the versions are pinned in Cargo.lock and the commit they came
+# from is visible in the report.
 
 [policy."libp2p"]
 audit-as-crates-io = true
@@ -46,9 +46,9 @@ audit-as-crates-io = true
 audit-as-crates-io = true
 
 # libp2p-connection-limits: git checkout'u 0.7.0 diyor, crates.io'da yayimlanmis
-# en yuksek surum 0.6.0. Yani bu paketin crates.io'da bir esi YOK; "aynisi say"
-# demek dogru degildi ve cargo vet taramayi hic calistirmiyordu. `false`, paketi
-# birinci taraf sayar: crates.io denetimi aranmaz, kaynagi Cargo.lock'taki commit
+# the highest version is 0.6.0. So this package has NO counterpart on crates.io; "count it as the same"
+# was not correct and cargo vet ran no scan at all. `false` counts the package as
+# first party: no crates.io audit is looked for, and its source is the commit in Cargo.lock
 # pini ile sabit kalir. Yayimlanmis 0.7.0 cikarsa `true`ya donulebilir.
 [policy."libp2p-connection-limits"]
 audit-as-crates-io = false

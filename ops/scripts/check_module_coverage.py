@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # ============================================================================
-# check_module_coverage.py - modül-bazı coverage analizi
+# check_module_coverage.py - per-module coverage analysis
 #
-# `cargo llvm-cov --json` çıktısındaki dosya özetlerini modül öneklerine
-# toplar (ağırlıklı: covered/count), tablo basar ve (varsa)
-# .github/module-coverage-baselines.json'daki tabanlara karşı KAPI uygular.
+# Aggregates the file summaries in the `cargo llvm-cov --json` output by module
+# prefix (weighted: covered/count), prints a table and, if present, applies a GATE
+# against the baselines in .github/module-coverage-baselines.json.
 #
-# Dürüst iki-adım tasarım (vacuous-gate YOK):
-#   1. Adım (bu dalga): RAPOR modu - her koşuda modül tablosu + JSON artifact.
-#      Baselines dosyası YOKSA gate atlanır (SKIP marker'ı basılır, exit 0).
-#   2. Adım (sonraki dalga): ilk yeşil artifact'ten ÖLÇÜLMÜŞ tabanlar yazılır;
-#      o noktadan sonra düşüş FAIL olur (canary'li, ratchet yönü: yukarı).
+# An honest two-step design (NO vacuous gate):
+#   Step 1 (this wave): REPORT mode - a module table plus a JSON artifact on every run.
+#      If the baselines file is ABSENT the gate is skipped (a SKIP marker is printed, exit 0).
+#   Step 2 (next wave): MEASURED baselines are written from the first green artifact;
+#      from that point a drop is a FAIL (with a canary, ratchet direction: up).
 #
-# Kullanım:
+# Usage:
 #   python3 scripts/check_module_coverage.py <llvm-cov.json> [--prefix KOK]
 #   python3 scripts/check_module_coverage.py --self-test
 # ============================================================================
@@ -25,7 +25,7 @@ import tempfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASELINES = os.path.join(REPO_ROOT, ".github", "module-coverage-baselines.json")
 
-# Modül önek haritası: (modül adı, dosya-yolu öneki)
+# The module prefix map: (module name, file path prefix)
 MODULE_PREFIXES = [
     ("budlum:consensus", "src/consensus/"),
     ("budlum:crypto", "src/crypto/"),
@@ -48,7 +48,7 @@ MODULE_PREFIXES = [
 
 
 def normalize(path: str) -> str:
-    """llvm-cov dosya yollarını repo-göreli hale getir."""
+    """Make the llvm-cov file paths repository relative."""
     p = path.replace("\\", "/")
     for anchor in ("/budlum/", "/budzero/"):
         if anchor in p:
@@ -64,7 +64,7 @@ def module_of(path: str) -> str:
 
 
 def analyze(cov: dict) -> list:
-    """[(modül, covered, total, percent)], percent: total=0 ise 100.0."""
+    """[(module, covered, total, percent)], percent: 100.0 when total=0."""
     acc = {}
     for data in cov.get("data", []):
         for f in data.get("files", []):
@@ -89,20 +89,20 @@ def gate(rows, baselines: dict) -> int:
     for name, floor in baselines.items():
         hit = next((r for r in rows if r[0] == name), None)
         if hit is None:
-            print(f"FAIL: taban istenen modül raporda yok: {name}")
+            print(f"FAIL: a module with a baseline is missing from the report: {name}")
             fails.append(name)
             continue
         if hit[3] + 1e-9 < float(floor):
-            print(f"FAIL: {name} coverage {hit[3]:.2f}% < taban {floor:.2f}% (ratchet)")
+            print(f"FAIL: {name} coverage {hit[3]:.2f}% < baseline {floor:.2f}% (ratchet)")
             fails.append(name)
     if fails:
         return 1
-    print("OK: tüm modül tabanları tuttu (ratchet yönü: düşüş yok).")
+    print("OK: every module baseline held (ratchet direction: no drop).")
     return 0
 
 
 def print_table(rows) -> None:
-    print(f"{'modül':<22}{'kaplanan':>10}{'toplam':>10}{'%':>9}")
+    print(f"{'module':<22}{'covered':>10}{'total':>10}{'%':>9}")
     for mod, c, t, pct in rows:
         print(f"{mod:<22}{c:>10}{t:>10}{pct:>8.2f}")
 
@@ -130,20 +130,20 @@ def self_test() -> int:
         assert abs(mp["budlum:consensus"] - 50.0) < 1e-6, mp
         assert abs(mp["budlum:crypto"] - 90.0) < 1e-6, mp
         assert abs(mp["budzero:vm"] - 80.0) < 1e-6, mp
-        # gate: 49 taban PASS, 51 taban FAIL (vacuous değil)
+        # gate: a baseline of 49 PASSes, a baseline of 51 FAILs (not vacuous)
         if gate(rows, {"budlum:consensus": 49.0}) != 0:
-            print("BOZUK KAPI: 49 taban reddedildi!"); return 1
+            print("BROKEN GATE: a baseline of 49 was refused!"); return 1
         if gate(rows, {"budlum:consensus": 51.0}) != 1:
-            print("VACUOUS GATE: 51 taban geçti!"); return 1
-        # baselines dosyası yok -> SKIP (CI davranış kanaryası)
+            print("VACUOUS GATE: a baseline of 51 passed!"); return 1
+        # no baselines file -> SKIP (a CI behaviour canary)
         env = dict(os.environ)
-        miss = os.path.join(td, "yok.json")
+        miss = os.path.join(td, "absent.json")
         code = subprocess.run(
             [sys.executable, os.path.abspath(__file__), jf, "--baselines", miss],
             env=env).returncode
         if code != 0:
             print("BOZUK: baselines yokken SKIP yerine FAIL!"); return 1
-    print("kanarya OK: ölçüm doğru; taban altı FAIL, üstü PASS, baselines yoksa SKIP.")
+    print("canary OK: the measurement is right; below the baseline FAILs, above PASSes, no baselines means SKIP.")
     return 0
 
 
@@ -152,7 +152,7 @@ def main() -> int:
     if args and args[0] == "--self-test":
         return self_test()
     if not args:
-        print("kullanım: check_module_coverage.py <llvm-cov.json> [--baselines DOSYA]")
+        print("usage: check_module_coverage.py <llvm-cov.json> [--baselines FILE]")
         return 1
     cov_path = args[0]
     base_path = BASELINES
@@ -162,13 +162,13 @@ def main() -> int:
     rows = analyze(cov)
     print_table(rows)
     if not os.path.exists(base_path):
-        print(f"SKIP: {base_path} yok - 1. adım (rapor modu). "
-              "İlk yeşil artifact'ten ölçülmüş tabanlar eklenecek (vacuous-gate YOK).")
+        print(f"SKIP: {base_path} is absent - step 1 (report mode). "
+              "Measured baselines will be added from the first green artifact (NO vacuous gate).")
         return 0
     with open(base_path) as fh:
         baselines = json.load(fh).get("module_line_floors", {})
     if not baselines:
-        print("SKIP: baselines boş - rapor modu.")
+        print("SKIP: the baselines are empty - report mode.")
         return 0
     return gate(rows, baselines)
 

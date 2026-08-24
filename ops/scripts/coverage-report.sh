@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Module-level coverage report (S10 /  C6).
 # Usage: bash scripts/coverage-report.sh
-# CI'da çalıştırılır; consensus/cross_domain/crypto modül bazında % raporlar.
+# Runs in CI; reports percentages per consensus/cross_domain/crypto module.
 set -euo pipefail
 
 echo "=== Budlum Coverage Report ==="

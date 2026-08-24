@@ -135,7 +135,7 @@ jobs:
           set -e
           if [ "$status" -eq 0 ]; then
             echo "CANARY FAILED: no surviving mutant was reported under a test that" >&2
-            echo "hayatta kalan mutant bildirilmedi, yani arac ya kosmuyor ya" >&2
+            echo "no surviving mutant was reported, so the tool either is not running or" >&2
             echo "da bir sey olcmuyor." >&2
             tail -30 /tmp/mutants-canary.log >&2
             exit 1
@@ -252,7 +252,7 @@ jobs:
   # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
   # different states depending on the outcome of a race, that is a fork.
   #
-  # Onceki hali hem `continue-on-error: true` hem `|| true` tasiyordu, yani
+  # The previous shape carried both `continue-on-error: true` and `|| true`, so
   # so it could not fail under any condition, and it had no canary: "no data
   # race" could not be told apart from "the binary never ran". Both were removed and a canary added.
   tsan:

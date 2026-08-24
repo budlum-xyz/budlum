@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# Scripts/audit-deps.sh - Rust dependency audit
+# ops/scripts/audit-deps.sh - Rust dependency audit
 #
-# Bu script `cargo audit` aracını çalıştırır ve bilinen güvenlik
-# Açıklarına karşı bağımlılıkları kontrol eder. ch12 §3.7 mainnet
-# Blocker kapsamında.
+# This script runs `cargo audit` and checks the dependencies against
+# known security holes. It sits inside the ch12 section 3.7 mainnet
+# blocker scope.
 #
-# Kullanım:
+# Usage:
 #   ./scripts/audit-deps.sh
 #
-# Çıktı: stdout + `target/audit/DEPENDENCY_AUDIT.md` raporu.
-# Kabul kriteri: hiçbir "unmaintained" warning'i dışında CVE olmamalı.
-# "unmaintained" warning'leri ayrıca gözden geçirilir (false positive
-# Olabilir; CI warning olarak raporlanır, fail etmez).
+# Output: stdout plus the `target/audit/DEPENDENCY_AUDIT.md` report.
+# Acceptance criterion: no CVE other than "unmaintained" warnings.
+# "unmaintained" warnings are reviewed separately (they may be false
+# positives; CI reports them as warnings, it does not fail).
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "[audit-deps] Budlum Core dependency audit başlatılıyor..."
+echo "[audit-deps] starting the Budlum Core dependency audit..."
 
-# 1. cargo audit yükle (yoksa)
+# 1. install cargo audit (if absent)
 if ! command -v cargo-audit >/dev/null 2>&1; then
-    echo "[audit-deps] cargo-audit yükleniyor..."
+    echo "[audit-deps] installing cargo-audit..."
     cargo install --locked cargo-audit
 fi
 
-# 2. Her iki lockfile'ı da tara (root + budzero)
+# 2. scan both lockfiles (root + budzero)
 ROOT_AUDIT_JSON="$(mktemp)"
 BUDZERO_AUDIT_JSON="$(mktemp)"
 ROOT_RAW_OUT="$(mktemp)"
@@ -47,7 +47,7 @@ else
     AUDIT_EXIT=0
 fi
 
-# 3. Raporu yaz
+# 3. write the report
 REPORT="$REPO_ROOT/target/audit/DEPENDENCY_AUDIT.md"
 mkdir -p "$(dirname "$REPORT")"
 TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -55,22 +55,22 @@ TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cargo audit --file Cargo.lock --deny warnings > "$ROOT_RAW_OUT" 2>&1 || true
 cargo audit --file budzero/Cargo.lock --deny warnings > "$BUDZERO_RAW_OUT" 2>&1 || true
 
-# Bulgular CI log'una BASILIR.
+# The findings ARE PRINTED into the CI log.
 #
-# Onceden basilmiyordu: `--json` gecici bir dosyaya, ham cikti da
-# `target/audit/DEPENDENCY_AUDIT.md`'ye gidiyordu ve o raporu hicbir workflow
-# artefakt olarak yuklemiyordu. Sonuc: is calisiyor, yesil doniyor ve tek bir
-# danisma adi log'da gorunmuyordu.
+# Previously they were not: `--json` went to a temporary file and the raw output
+# to `target/audit/DEPENDENCY_AUDIT.md`, and no workflow uploaded that report
+# as an artifact. Result: the job runs, comes back green and not a single
+# advisory name appears in the log.
 #
-# Bu bos bir titizlik degil. `.quality/deny.toml` `unmaintained = "none"`
-# tutuyor ve bu kararin TEK gerekcesi soyle yazili: "Uyari gorunurlugu
-# kaybolmuyor: CI dependency-audit job'indaki cargo audit her kosuda
-# unmaintained uyarilarini raporlar." Raporlamiyordu.
+# This is not empty pedantry. `.quality/deny.toml` holds `unmaintained = "none"`
+# and the ONLY justification for that decision is written as: "warning visibility
+# is not lost: the cargo audit in the CI dependency-audit job reports unmaintained
+# warnings on every run." It was not reporting them.
 #
-# Ornek: RUSTSEC-2024-0380 (`pqcrypto-dilithium`, mainnet varsayilan PQ imza
-# yolu). Karar verilmis ve `.quality/osv-scanner.toml`'da gerekcesiyle
-# kayitli -- ama cargo audit tarafinda hicbir kosuda gorunmedi. Iki tarayici
-# ayni agaci tariyor ve yalniz birinin sonucu okunabiliyordu.
+# Example: RUSTSEC-2024-0380 (`pqcrypto-dilithium`, the mainnet default PQ signature
+# path). The decision was made and is recorded with its reason in
+# `.quality/osv-scanner.toml` -- but it never appeared on the cargo audit side in any
+# run. Two scanners read the same tree and only one result was readable.
 echo ""
 echo "──────── cargo audit - root Cargo.lock ────────"
 cat "$ROOT_RAW_OUT"
@@ -79,58 +79,58 @@ cat "$BUDZERO_RAW_OUT"
 echo "──────────────────────────────────────────────────"
 echo ""
 
-# Danisma kimliklerini ozetle: log'u okuyan biri hangi uyarilarin bilindigini
-# tek bakista gorsun.
+# Summarise the advisory identifiers: whoever reads the log should see at a glance
+# which warnings are known.
 ADVISORIES="$(grep -hoE 'RUSTSEC-[0-9]{4}-[0-9]{4}' "$ROOT_RAW_OUT" "$BUDZERO_RAW_OUT" | sort -u || true)"
 if [ -n "$ADVISORIES" ]; then
-    echo "[audit-deps] Bu agacta gorulen danismalar:"
+    echo "[audit-deps] advisories seen in this tree:"
     printf '  - %s\n' $ADVISORIES
 else
-    echo "[audit-deps] Hicbir danisma bulunmadi."
+    echo "[audit-deps] no advisory was found."
 fi
 echo ""
 
 {
-    echo "# Dependency Audit Raporu"
+    echo "# Dependency Audit Report"
     echo ""
-    echo "**Oluşturulma:** $TIMESTAMP"
-    echo "**Araç:** cargo-audit (https://github.com/rustsec/rustsec)"
+    echo "**Generated:** $TIMESTAMP"
+    echo "**Tool:** cargo-audit (https://github.com/rustsec/rustsec)"
     echo "**Repo:** budlum-xyz/budlum @ \`$(git rev-parse --short HEAD)\`"
     echo ""
-    echo "## Özet"
+    echo "## Summary"
     echo ""
     if [ "$AUDIT_EXIT" -eq 0 ]; then
-        echo "- OK Bilinen güvenlik açığı **YOK** (root + budzero lockfile)."
+        echo "- OK **NO** known security hole (root + budzero lockfile)."
     else
-        echo "- UYARI cargo-audit exit code: $AUDIT_EXIT (genelde unmaintained warning)."
+        echo "- WARNING cargo-audit exit code: $AUDIT_EXIT (usually an unmaintained warning)."
     fi
     echo "- Root lockfile exit code: $ROOT_AUDIT_EXIT"
     echo "- BudZero lockfile exit code: $BUDZERO_AUDIT_EXIT"
     echo ""
-    echo "## Ham çıktı - root Cargo.lock"
+    echo "## Raw output - root Cargo.lock"
     echo ""
     echo "\`\`\`"
     head -50 "$ROOT_RAW_OUT" || true
     echo "\`\`\`"
     echo ""
-    echo "## Ham çıktı - budzero/Cargo.lock"
+    echo "## Raw output - budzero/Cargo.lock"
     echo ""
     echo "\`\`\`"
     head -50 "$BUDZERO_RAW_OUT" || true
     echo "\`\`\`"
     echo ""
-    echo "## Kabul kriteri"
+    echo "## Acceptance criterion"
     echo ""
-    echo "CI'da \`dependency-audit\` job'ı bu scripti çalıştırır. **Bilinen"
-    echo "güvenlik açığı (CVE) tespit edilirse job fail eder.** Unmaintained"
-    echo "warning'leri warning olarak raporlanır (fail etmez). Root ve BudZero"
-    echo "lockfile'ları birlikte denetlenir."
+    echo "The \`dependency-audit\` job in CI runs this script. **If a known"
+    echo "security hole (CVE) is detected the job fails.** Unmaintained"
+    echo "warnings are reported as warnings (they do not fail). The root and BudZero"
+    echo "lockfiles are checked together."
     echo ""
-    echo "Bu rapor  kapsamında otomatik üretilir."
+    echo "This report is generated automatically."
 } > "$REPORT"
 
-echo "[audit-deps] Rapor: $REPORT"
-echo "[audit-deps] Bitti."
+echo "[audit-deps] report: $REPORT"
+echo "[audit-deps] done."
 
-# Exit code'u koru (CI için)
+# Preserve the exit code (for CI)
 exit "$AUDIT_EXIT"
