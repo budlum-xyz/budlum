@@ -1,14 +1,18 @@
-//! B.U.D. 2.0 - Model/Sinir Ağı Dosya Transformu (BF16 ağırlık ayrıştırma deseni) (2026-08-16)
+//! B.U.D. 2.0 - the model and neural network file transform, in the BF16 weight
+//! splitting pattern, 2026-08-16.
 //!
-//! F1068/K96: sinir ağı ağırlıkları özel sıkıştırma - BF16 modellerde üs baytları
-//! ayrıştırılıp Huffman ile sıkıştırıldığında model boyutu küçülür; dar üs dağılımı
-//! genel amaçlı sıkıştırmanın yakalayamadığı tekrarları görünür kılar.
+//! F1068 and K96: special-purpose compression for neural network weights. In
+//! BF16 models, splitting out the exponent bytes and compressing them with
+//! Huffman shrinks the model, because the narrow exponent distribution makes
+//! visible a repetition that general-purpose compression cannot catch.
 //!
-//! B.U.D. transformu (kayıpsız): BF16/FP32 kayan nokta dizisini üs + işaret/mantissa
-//! akışlarına ayırır; üs akışı dar aralıklı (BF16'da 8 bit üs, değerler dar dağılır)
-//! → Huffman ile çok iyi sıkışır; mantissa rastgele → ayrı tutulur (zstd'ye bırakılır).
+//! The B.U.D. transform, which is lossless: it splits a floating point array
+//! into an exponent stream and a sign-plus-mantissa stream. The exponent stream
+//! is narrow, since BF16 has an 8-bit exponent whose values cluster, so it
+//! compresses very well under Huffman; the mantissa is random and is kept
+//! separately, left to zstd.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -20,8 +24,8 @@ pub const MAX_VALUES: usize = 1_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatKind {
-    Bf16 = 0, // 16 bit: 1 işaret + 8 üs + 7 mantissa
-    Fp32 = 1, // 32 bit: 1 işaret + 8 üs + 23 mantissa
+    Bf16 = 0, // 16 bits: 1 sign, 8 exponent, 7 mantissa
+    Fp32 = 1, // 32 bits: 1 sign, 8 exponent, 23 mantissa
 }
 
 impl FloatKind {
@@ -37,18 +41,22 @@ impl FloatKind {
     }
 }
 
-/// Model transformu: kayan nokta dizisi → üs akışı + geri kalan (kayıpsız).
-/// Üs akışı Huffman ile ayrı sıkıştırılır; geri kalan orijinal sırada tutulur.
+/// The model transform: a floating point array split losslessly into an
+/// exponent stream and a remainder.
+///
+/// The exponent stream is compressed separately with Huffman; the remainder is
+/// kept in its original order.
 #[derive(Debug, Clone)]
 pub struct ModelFloatSplit {
     pub kind: FloatKind,
     pub count: usize,
-    pub exponents: Vec<u8>, // her değerin üs baytı (BF16/FP32: 8 bit)
-    pub rest_bits: Vec<u8>, // işaret + mantissa bitleri (bit-paketli, orijinal sırada)
+    pub exponents: Vec<u8>, // the exponent byte of each value; 8 bits in BF16 and FP32
+    pub rest_bits: Vec<u8>, // the sign and mantissa bits, bit-packed, in the original order
 }
 
 impl ModelFloatSplit {
-    /// Kayan nokta bayt dizisini üs + geri kalan akışlara ayır (kayıpsız).
+    /// Split an array of floating point bytes losslessly into the exponent and
+    /// remainder streams.
     pub fn encode(raw: &[u8], kind: FloatKind) -> Option<Self> {
         let width = match kind {
             FloatKind::Bf16 => 2usize,
@@ -62,7 +70,8 @@ impl ModelFloatSplit {
             return None;
         }
         let mut exponents = Vec::with_capacity(count);
-        // geri kalan bitler: işaret (1) + mantissa (BF16: 7, FP32: 23)
+        // The remaining bits: 1 sign bit plus the mantissa, 7 bits in BF16 and
+        // 23 in FP32.
         let mantissa_bits = match kind {
             FloatKind::Bf16 => 7usize,
             FloatKind::Fp32 => 23usize,
@@ -71,17 +80,19 @@ impl ModelFloatSplit {
         let mut rest_bits = vec![0u8; rest_total_bits.div_ceil(8)];
         for i in 0..count {
             let off = i * width;
-            // üs = bayt 1 (big-endian IEEE: bayt 0 = işaret+üs yüksek, bayt 1 = üs düşük+mantissa)
+            // The exponent spans both bytes in big-endian IEEE: byte 0 holds the
+            // sign and the high exponent bits, byte 1 the low exponent bit and the
+            // mantissa.
             // IEEE: b0 = sign + exp[7:1], b1 = exp[0] + mantissa(MSB'ler)
             let sign = (raw[off] >> 7) & 1;
             let exp_hi = raw[off] & 0x7F; // exp[7:1]
             let exp_lo = (raw[off + 1] >> 7) & 1; // exp[0]
             let exp = (exp_hi << 1) | exp_lo;
             exponents.push(exp);
-            // mantissa bitleri (width'e göre)
+            // The mantissa bits, according to the width.
             let mant: u64 = match kind {
                 FloatKind::Bf16 => {
-                    // b1'in düşük 7 biti = mantissa[6:0]
+                    // The low 7 bits of b1 are mantissa[6:0].
                     (raw[off + 1] & 0x7F) as u64
                 }
                 FloatKind::Fp32 => {
@@ -91,7 +102,8 @@ impl ModelFloatSplit {
                         | (raw[off + 3] as u64)
                 }
             };
-            // rest bit akışına yaz: işaret + mantissa (mantissa MSB önce)
+            // Write into the remainder bit stream: the sign then the mantissa,
+            // most significant bit first.
             let base_bit = i * (1 + mantissa_bits);
             write_bit_at(&mut rest_bits, base_bit, sign == 1);
             for m in 0..mantissa_bits {
@@ -107,7 +119,8 @@ impl ModelFloatSplit {
         })
     }
 
-    /// Üs + geri kalan akışlardan orijinal kayan nokta baytlarını yeniden kur (kayıpsızlık).
+    /// Rebuild the original floating point bytes from the exponent and remainder
+    /// streams, which is what makes the transform lossless.
     pub fn decode(&self) -> Option<Vec<u8>> {
         let width = match self.kind {
             FloatKind::Bf16 => 2usize,
@@ -151,7 +164,8 @@ impl ModelFloatSplit {
         Some(out)
     }
 
-    /// Deterministik blob: magic + tür + sayı + üsler + geri kalan bitler + digest.
+    /// The deterministic blob: magic, kind, count, exponents, remainder bits and
+    /// digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MODEL_MAGIC);
@@ -227,14 +241,16 @@ mod tests {
     use super::*;
 
     fn gen_bf16_model(n: usize) -> Vec<u8> {
-        // gerçekçi BF16 ağırlıkları: üsler dar aralıkta, mantissa rastgele
+        // Realistic BF16 weights: the exponents in a narrow range, the mantissas
+        // random.
         let mut out = Vec::with_capacity(n * 2);
         let mut x = 0xDEAD_BEEF_1234_5678u64;
         for _i in 0..n {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            // üs: dar bant 118-122 (gerçekçi ağırlık dağılımındaki kazanç burada)
+            // The exponent in a narrow band, 118 to 122; this is where the gain of
+            // a realistic weight distribution lives.
             let exp: u8 = 120 + ((x >> 32) % 5) as u8 - 2;
             let sign: u8 = ((x >> 63) & 1) as u8;
             let mant: u8 = (x & 0x7F) as u8;
@@ -248,19 +264,19 @@ mod tests {
 
     #[test]
     fn bf16_roundtrip_lossless() {
-        // K38: encode → decode = orijinal (kayıpsız)
+        // K38: encode then decode gives back the original, losslessly.
         for n in [10, 1000, 5000] {
             let model = gen_bf16_model(n);
             let split = ModelFloatSplit::encode(&model, FloatKind::Bf16).expect("encode");
             assert_eq!(split.count, n);
             assert_eq!(split.exponents.len(), n);
             let back = split.decode().expect("decode");
-            assert_eq!(back, model, "BF16 kayıpsız (n={n})");
+            assert_eq!(back, model, "BF16 is lossless, n={n}");
             // blob roundtrip
             let blob = split.to_blob();
             let s2 = ModelFloatSplit::from_blob(&blob).expect("blob");
             assert_eq!(s2.decode().unwrap(), model);
-            // kurcalama red
+            // Tampering is refused.
             let mut bad = blob.clone();
             *bad.last_mut().unwrap() ^= 0x01;
             assert!(ModelFloatSplit::from_blob(&bad).is_none());
@@ -269,31 +285,34 @@ mod tests {
 
     #[test]
     fn exponent_stream_compresses_well() {
-        // Dar üs dağılımı ayrı sıkıştırıldığında küçülür.
+        // A narrow exponent distribution shrinks when compressed separately.
         let model = gen_bf16_model(100_000);
         let split = ModelFloatSplit::encode(&model, FloatKind::Bf16).expect("encode");
         let exp_comp = zstd::bulk::compress(&split.exponents, 19).expect("zstd");
         let raw_exp = split.exponents.len();
-        // üsler 30 farklı değer (100-129) → zstd ile belirgin sıkışma beklenir;
-        // Bu test, ayrılmış üs akışının tek başına sıkıştığını doğrular.
+        // The exponents take 30 distinct values, 100 to 129, so clear compression
+        // is expected from zstd. This test verifies that the split-out exponent
+        // stream compresses on its own.
         assert!(
             exp_comp.len() < raw_exp,
-            "üsler sıkışmalı: {} -> {}",
+            "the exponents must compress: {} -> {}",
             raw_exp,
             exp_comp.len()
         );
-        // Dar üs bandı bu korpusta >3x sıkışır (ölçüm: 4.34x).
+        // On this corpus the narrow exponent band compresses by more than 3x; the
+        // measurement is 4.34x.
         assert!(
             raw_exp as f64 / exp_comp.len() as f64 > 3.0,
-            "üs sıkışma oranı >3x"
+            "the exponent compression ratio is above 3x"
         );
-        // toplam kazanç: modelin üs kısmı (~yarısı) sıkışır → %25+ model tasarrufu beklenir
+        // The total gain: the exponent part of the model, about half of it,
+        // compresses, so a model saving above 25 percent is expected.
         let rest_comp = zstd::bulk::compress(&split.rest_bits, 19).expect("zstd");
         let total_comp = exp_comp.len() + rest_comp.len();
         let model_comp = zstd::bulk::compress(&model, 19).expect("zstd");
         assert!(
             total_comp < model_comp.len(),
-            "üs-ayırma + Huffman modeli zstd'den iyi: split {} vs zstd {}",
+            "exponent splitting plus Huffman beats zstd on the model: split {} against zstd {}",
             total_comp,
             model_comp.len()
         );
@@ -307,7 +326,7 @@ mod tests {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            // FP32: üs 100-130, mantissa 23 bit
+            // FP32: exponents 100 to 130, a 23-bit mantissa.
             let exp: u8 = 100 + ((x >> 40) % 30) as u8;
             let sign: u8 = ((x >> 63) & 1) as u8;
             let mant: u32 = (x & 0x7F_FFFF) as u32;
@@ -318,10 +337,10 @@ mod tests {
             model.extend_from_slice(&[b0, b1, b2, b3]);
         }
         let split = ModelFloatSplit::encode(&model, FloatKind::Fp32).expect("encode");
-        assert_eq!(split.decode().unwrap(), model, "FP32 kayıpsız");
-        // limitler
+        assert_eq!(split.decode().unwrap(), model, "FP32 is lossless");
+        // The limits.
         assert!(ModelFloatSplit::encode(&[], FloatKind::Bf16).is_none());
-        assert!(ModelFloatSplit::encode(&[0u8, 1], FloatKind::Fp32).is_none()); // 2 bayt FP32 değil
+        assert!(ModelFloatSplit::encode(&[0u8, 1], FloatKind::Fp32).is_none()); // 2 bytes is not an FP32 value
         assert!(ModelFloatSplit::from_blob(&[0u8; 10]).is_none());
     }
 

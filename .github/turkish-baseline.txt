@@ -55,7 +55,6 @@ bud/src/bud_format_lowrank.rs	32
 bud/src/bud_format_lrc.rs	36
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
-bud/src/bud_format_model.rs	36
 bud/src/bud_format_nvc.rs	27
 bud/src/bud_format_office.rs	29
 bud/src/bud_format_optical.rs	3
@@ -169,7 +168,6 @@ crates/lubot/crates/lubot-knowledge/src/memory.rs	25
 crates/lubot/crates/lubot-knowledge/src/redact.rs	27
 crates/lubot/crates/lubot-ops/Cargo.toml	1
 crates/lubot/crates/lubot-ops/src/cli.rs	23
-crates/lubot/crates/lubot-ops/src/logparse.rs	37
 crates/lubot/crates/lubot-ops/src/main.rs	17
 crates/lubot/crates/lubot-serve/Cargo.toml	1
 crates/lubot/crates/lubot-serve/src/chain.rs	15

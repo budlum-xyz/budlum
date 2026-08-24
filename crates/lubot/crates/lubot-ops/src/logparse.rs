@@ -1,24 +1,26 @@
-//! Yapılandırılmış log ayrıştırma - operatör loglarının (Nginx erişim,
-//! Syslog) bağımlılıksız satır ayrıştırması.
+//! Structured log parsing: dependency-free line parsing of operator logs, both
+//! Nginx access logs and syslog.
 //!
-//! WIRING: unwired - `main.rs` bu modülü `mod logparse;` ile bildiriyor ama
-//! hiçbir komut çağırmıyor; `lubot-ops` bir binary crate olduğu için dışarıdan
-//! da çağrılamaz. 238 satır ve 5 testi vardır, testler geçer. Ağaç CI'da hiç
-//! derlenmediği için bu durum görülmemişti. Modül silinmedi: bir `logs`
-//! komutuna bağlanması ayrı bir karardır. Bağlanana kadar `dead_code`
-//! susturulur, aksi halde `-D warnings` altında derleme durur.
+//! WIRING: unwired. `main.rs` declares this module with `mod logparse;` but no
+//! command calls it, and since `lubot-ops` is a binary crate it cannot be
+//! called from outside either. It has 238 lines and 5 tests, and the tests
+//! pass. The situation had gone unseen because the tree was never compiled in
+//! CI. The module was not deleted: wiring it to a `logs` command is a separate
+//! decision. Until it is wired, `dead_code` is silenced, or the build would
+//! stop under `-D warnings`.
 //!
-//! Kapsam: Nginx erişim satırı, Syslog PRI çözümü (facility/severity) ve
-//! yaygın olay anahtar sözcüklerinden severity çıkarımı. Regex ve chrono
-//! bağımlılığı eklenmez; ayrıştırma elle, sınırlı ve deterministiktir.
+//! Scope: the Nginx access line, syslog PRI decoding into facility and
+//! severity, and severity inference from common event keywords. No regex or
+//! chrono dependency is added; the parsing is manual, bounded and
+//! deterministic.
 
-// Yukarıdaki WIRING notunun gereği: modül bağlanana kadar ölü kod uyarıları
-// derlemeyi durdurmasın. Bağlandığında bu satır kaldırılır.
+// Required by the WIRING note above: dead code warnings must not stop the build
+// until the module is wired. This line is removed once it is.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
-/// Nginx erişim logu satırı (birleşik biçim).
+/// A line of an Nginx access log, in the combined format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NginxAccessLine {
     pub remote_addr: String,
@@ -28,54 +30,55 @@ pub struct NginxAccessLine {
     pub bytes: u64,
 }
 
-/// Nginx erişim satırını ayrıştırır.
+/// Parses an Nginx access line.
 ///
-/// Birleşik biçim örneği:
+/// An example of the combined format:
 /// `127.0.0.1 - - [14/Nov/2025:20:01:23 +0300] "GET /index.html HTTP/1.1" 200 1024`
 ///
 /// # Errors
 ///
-/// Biçim beklenen yapıda değilse (ip, parantez, tırnak, durum, bayt).
+/// If the format is not the expected shape: the address, the brackets, the
+/// quotes, the status or the byte count.
 pub fn parse_nginx_line(line: &str) -> Result<NginxAccessLine, String> {
-    // 1) uzak adres: ilk boşluğa kadar.
+    // 1) The remote address, up to the first space.
     let (remote_addr, rest) = line
         .split_once(' ')
-        .ok_or_else(|| "uzak adres yok".to_string())?;
+        .ok_or_else(|| "no remote address".to_string())?;
 
-    // 2) zaman damgası: ilk '[' ile ']' arası.
+    // 2) The timestamp, between the first '[' and ']'.
     let open = rest
         .find('[')
-        .ok_or_else(|| "zaman parantezi yok".to_string())?;
+        .ok_or_else(|| "no time bracket".to_string())?;
     let close_rel = rest[open + 1..]
         .find(']')
-        .ok_or_else(|| "zaman parantezi kapanmıyor".to_string())?;
+        .ok_or_else(|| "the time bracket does not close".to_string())?;
     let close = open + 1 + close_rel;
     let timestamp = rest[open + 1..close].to_string();
     let after_ts = &rest[close + 1..];
 
-    // 3) istek: tırnak içinde.
+    // 3) The request, inside quotes.
     let q1 = after_ts
         .find('"')
-        .ok_or_else(|| "istek tirnagi yok".to_string())?;
+        .ok_or_else(|| "no request quote".to_string())?;
     let q2_rel = after_ts[q1 + 1..]
         .find('"')
-        .ok_or_else(|| "istek tirnagi kapanmiyor".to_string())?;
+        .ok_or_else(|| "the request quote does not close".to_string())?;
     let q2 = q1 + 1 + q2_rel;
     let request = after_ts[q1 + 1..q2].to_string();
     let after_req = after_ts[q2 + 1..].trim();
 
-    // 4) durum + bayt: son iki boşlukla ayrılmış sayı.
+    // 4) The status and the byte count: the last two space-separated numbers.
     let mut parts = after_req.split_whitespace();
     let status = parts
         .next()
-        .ok_or_else(|| "durum yok".to_string())?
+        .ok_or_else(|| "no status".to_string())?
         .parse::<u16>()
-        .map_err(|e| format!("durum sayı değil: {e}"))?;
+        .map_err(|e| format!("the status is not a number: {e}"))?;
     let bytes = parts
         .next()
-        .ok_or_else(|| "bayt yok".to_string())?
+        .ok_or_else(|| "no byte count".to_string())?
         .parse::<u64>()
-        .map_err(|e| format!("bayt sayı değil: {e}"))?;
+        .map_err(|e| format!("the byte count is not a number: {e}"))?;
 
     Ok(NginxAccessLine {
         remote_addr: remote_addr.to_string(),
@@ -86,13 +89,14 @@ pub fn parse_nginx_line(line: &str) -> Result<NginxAccessLine, String> {
     })
 }
 
-/// Syslog PRI değerinden facility (üst 3 bit) ve severity (alt 3 bit).
+/// The facility, the top 3 bits, and the severity, the low 3 bits, from a
+/// syslog PRI value.
 #[must_use]
 pub fn pri_facility_severity(pri: u8) -> (u8, u8) {
     (pri >> 3, pri & 0x7)
 }
 
-/// Uygulama adından facility tahmini (ortak kurallar).
+/// Inferring the facility from the application name, by the common rules.
 #[must_use]
 pub fn infer_facility(appname: Option<&str>) -> Option<u8> {
     let a = appname?.to_ascii_lowercase();
@@ -105,7 +109,7 @@ pub fn infer_facility(appname: Option<&str>) -> Option<u8> {
     }
 }
 
-/// İleti içeriğinden severity tahmini (ortak anahtar sözcükler).
+/// Inferring the severity from the message body, by the common keywords.
 #[must_use]
 pub fn infer_severity(msg: &str) -> Option<u8> {
     let m = msg.to_ascii_lowercase();
@@ -138,7 +142,7 @@ pub fn infer_severity(msg: &str) -> Option<u8> {
     }
 }
 
-/// Severity numarasının adı.
+/// The name of a severity number.
 #[must_use]
 pub fn severity_name(severity: u8) -> &'static str {
     match severity {
@@ -154,7 +158,7 @@ pub fn severity_name(severity: u8) -> &'static str {
     }
 }
 
-/// Ayrıştırılmış Syslog olayı (hafif model).
+/// A parsed syslog event, a lightweight model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyslogEvent {
     pub facility: Option<u8>,
@@ -163,28 +167,29 @@ pub struct SyslogEvent {
     pub message: String,
 }
 
-/// Syslog satırını (PRI önekli) ayrıştırır.
+/// Parses a syslog line carrying a PRI prefix.
 ///
-/// Örnek: `<34>Oct 11 22:14:15 mymachine su[123]: 'su root' failed`
+/// For example: `<34>Oct 11 22:14:15 mymachine su[123]: 'su root' failed`
 ///
 /// # Errors
 ///
-/// PRI öneki yoksa veya bozuksa.
+/// If the PRI prefix is absent or malformed.
 pub fn parse_syslog_line(line: &str) -> Result<SyslogEvent, String> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('<') {
-        return Err("PRI öneki yok".to_string());
+        return Err("no PRI prefix".to_string());
     }
     let close = trimmed
         .find('>')
-        .ok_or_else(|| "PRI kapanmıyor".to_string())?;
+        .ok_or_else(|| "the PRI does not close".to_string())?;
     let pri: u8 = trimmed[1..close]
         .parse()
-        .map_err(|e| format!("PRI sayı değil: {e}"))?;
+        .map_err(|e| format!("the PRI is not a number: {e}"))?;
     let (facility, severity) = pri_facility_severity(pri);
     let body = trimmed[close + 1..].trim();
 
-    // Uygulama adı: iki nokta üst üste ile biten ilk sözcük (opsiyonel).
+    // The application name: the first word ending in a colon, which is
+    // optional.
     let (appname, message) = match body.split_once(':') {
         Some((app, msg)) if !app.contains(' ') && !app.is_empty() => {
             (Some(app.trim().to_string()), msg.trim().to_string())
