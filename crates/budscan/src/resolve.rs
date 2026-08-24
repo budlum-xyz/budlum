@@ -394,7 +394,7 @@ mod tests {
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(page.is_renderable());
         assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
-        assert!(page.address_bar().contains("yalniz beyan"));
+        assert!(page.address_bar().contains("claim only"));
     }
 
     #[test]
