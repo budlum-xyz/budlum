@@ -1,45 +1,48 @@
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
 //! Sync-committee light-client finality = **F10.3** (PoS, BLS12-381 sync-aggregate).
-//! Bu modül **bounded k-confirmation** sağlar (RFC Q2 = both → N-conf fallback,
-//! PoS sync-committee tercih olarak ileride eklenir).
+//! This module provides **bounded k-confirmation** (RFC Q2 = both -> N-conf
+//! fallback; the PoS sync committee is added later as an option).
 //!
-//! # Fork toleransı
+//! # Fork tolerance
 //!
-//! Ethereum header alanları Yellow Paper sırasında koddaki yerlerde okunur
-//! (front-positioned canonical fields). Fork-specific trailing fields
-//! (`baseFeePerGas` EIP-1559, `withdrawalsRoot` Shanghai, `blobGasUsed`/`
-//! ExcessBlobGas`/`parentBeaconBlockRoot` Cancun) decode edilmez (tail-ignore);
-//! Bunlar `hash = keccak256(rlp(raw_header))` hesabını etkilemediği için (raw
-//! Bytes'in tamamı hash'lenir) güvenliği zedelemez.
+//! Ethereum header fields are read in Yellow Paper order at the positions the
+//! code expects (front-positioned canonical fields). Fork-specific trailing
+//! fields (`baseFeePerGas` EIP-1559, `withdrawalsRoot` Shanghai,
+//! `blobGasUsed`/`ExcessBlobGas`/`parentBeaconBlockRoot` Cancun) are not
+//! decoded (tail-ignore). They do not weaken security, because they do not
+//! affect the `hash = keccak256(rlp(raw_header))` computation: the whole raw
+//! byte string is hashed.
 
 use crate::cross_domain::evm::mpt::keccak256;
 use crate::cross_domain::evm::rlp::{self, Item, RlpError};
 
-/// Minimal Ethereum header (köprü doğrulaması için gerekli alanlar).
+/// Minimal Ethereum header (the fields the bridge verification needs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthHeader {
-    /// `parentHash` - zincir bağlantısı (parent.hash ile eşleşmeli).
+    /// `parentHash` - the chain link (must match parent.hash).
     pub parent_hash: [u8; 32],
-    /// `number` - blok yüksekliği.
+    /// `number` - the block height.
     pub number: u64,
-    /// `stateRoot` - account trie kökü (bilgi amaçlı).
+    /// `stateRoot` - the account trie root (informational).
     pub state_root: [u8; 32],
-    /// `receiptsRoot` - receipts trie kökü (receipt proof bunu anchorlar).
+    /// `receiptsRoot` - the receipts trie root (a receipt proof anchors to it).
     pub receipts_root: [u8; 32],
-    /// `keccak256(rlp(raw_header))` - blok kimliği (zincir bağlantısı + onay derinliği).
+    /// `keccak256(rlp(raw_header))` - the block identity (chain link plus
+    /// confirmation depth).
     pub hash: [u8; 32],
 }
 
-/// Header decode / chain doğrulama hatası.
+/// Header decode / chain verification error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderError {
     Rlp(RlpError),
-    /// Geçersiz header yapısı (eksik alan / yanlış boyut).
+    /// Invalid header structure (missing field / wrong size).
     InvalidHeader,
-    /// Zincir kırık (parent_hash → child.hash / number+1 uyuşmazlığı).
+    /// The chain is broken (parent_hash -> child.hash / number+1 mismatch).
     ChainBroken,
-    /// N-confirmation eşiği sağlanmadı (yetersiz onay header'ı).
+    /// The N-confirmation threshold was not met (too few confirmation
+    /// headers).
     InsufficientConfirmations,
 }
 
@@ -64,11 +67,12 @@ impl From<RlpError> for HeaderError {
     }
 }
 
-/// Bridge için varsayılan onay derinliği (reorg penceresi üst sınırı; mainnet ≈64).
-/// Üretimde governance/config ile ayarlanabilir (hard-code DEĞİL - RFC Q2).
+/// Default confirmation depth for the bridge (an upper bound on the reorg
+/// window; mainnet is around 64). In production it is settable through
+/// governance/config, it is NOT hard-coded (RFC Q2).
 pub const DEFAULT_CONFIRMATIONS: u32 = 64;
 
-/// Ham RLP header bytes'ını minimal `EthHeader`'a decode eder.
+/// Decode raw RLP header bytes into a minimal `EthHeader`.
 ///
 /// Yellow Paper field order (front canonical):
 /// `[parentHash(32), ommersHash(32), coinbase(20), stateRoot(32),
@@ -96,7 +100,7 @@ pub fn decode_header(raw: &[u8]) -> Result<EthHeader, HeaderError> {
     })
 }
 
-/// 32-byte hash alanı yardımcısı (length kontrolü).
+/// Helper for a 32-byte hash field (length check).
 fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
     if b.len() != 32 {
         return Err(HeaderError::InvalidHeader);
@@ -106,9 +110,10 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], HeaderError> {
     Ok(a)
 }
 
-/// N-confirmation finality: target header'ın üstünde `required` kadar onay
-/// Header'ı zincirinin canonical (parent_hash → child.hash, number+1) olduğunu
-/// Doğrular. Reorg penceresi geçtiyse target "finalize" sayılır.
+/// N-confirmation finality: verifies that `required` confirmation headers sit
+/// above the target header and that their chain is canonical
+/// (parent_hash -> child.hash, number+1). Once the reorg window has passed, the
+/// target counts as finalized.
 pub fn verify_chain(
     target: &EthHeader,
     confirmations: &[EthHeader],
@@ -137,7 +142,7 @@ mod tests {
     use super::*;
     use crate::cross_domain::evm::rlp::{encode, Item};
 
-    /// Test-yardımcı: minimal 9-field header RLP (trailing fork fields YOK).
+    /// Test helper: a minimal 9-field header RLP (NO trailing fork fields).
     fn header_bytes(parent: [u8; 32], number: u64, receipts_root: [u8; 32]) -> Vec<u8> {
         let item = Item::List(vec![
             Item::String(parent.to_vec()),        // parentHash
@@ -176,7 +181,8 @@ mod tests {
 
     #[test]
     fn decode_tolerates_trailing_fork_fields() {
-        // EIP-1559 baseFeePerGas ek alanı → list 10 eleman; decoder ilk 9 okur.
+        // The EIP-1559 baseFeePerGas extra field -> a 10-item list; the
+        // decoder reads the first 9.
         let parent = [3u8; 32];
         let mut nine = match rlp::decode(&header_bytes(parent, 7, [4u8; 32])).unwrap() {
             Item::List(l) => l,
@@ -195,7 +201,7 @@ mod tests {
         let target_bytes = header_bytes([9u8; 32], 100, roots);
         let target = decode_header(&target_bytes).unwrap();
 
-        // 3 confirmation header: parent = previous hash, number+1.
+        // 3 confirmation headers: parent = previous hash, number+1.
         let mut confs = Vec::new();
         let mut prev_hash = target.hash;
         let mut prev_num = target.number;
