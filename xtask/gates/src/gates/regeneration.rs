@@ -1,92 +1,96 @@
-//! Regeneration: kanonik kodu ve kimligini sifirdan yeniden uretir; izinsiz
-//! kod girisini yayin oncesinde reddeder.
+//! Regeneration: it reproduces the canonical code and its identity from
+//! scratch and rejects unauthorized code entry before release.
 //!
-//! # Fikir
+//! # The idea
 //!
-//! Ana yapinin disindan izinsiz bir kod girisi olmamali. Olursa da cevap
-//! **agi bolmek degil, kanonik hali geri uretmek** olmali.
+//! There must be no unauthorized code entry from outside the main structure.
+//! If there is, the answer must be **not to split the network but to reproduce
+//! the canonical state**.
 //!
-//! Bunun calisma zamaninda yapilamayacagini olctuk: bir dugum saldiri aninda
-//! kendi kodunu degistirirse artik digerleriyle ayni programi calistirmiyordur
-//! ve bu bir savunma degil, **uzlasma bolunmesidir**. Saldirganin en ucuz
-//! zaferi savunmayi tetiklemek olurdu. Bu yuzden regeneration **yayin oncesi**
-//! calisir: kayma uretime hic ulasmaz, belirlenimlilik hic bozulmaz.
+//! We measured that this cannot be done at run time: if a node changes its own
+//! code during an attack it is no longer running the same program as the
+//! others, and that is not a defence but a **consensus split**. The attacker's
+//! cheapest victory would be to trigger the defence. That is why regeneration
+//! runs **before release**: drift never reaches production and determinism is
+//! never broken.
 //!
-//! # Yakinsama (convergence) - bu kapinin cekirdek ozelligi
+//! # Convergence - this gate's core property
 //!
-//! Rejenerasyonun **birlestirici** olmasi, dagitici olmamasi gerekir. Teknik
-//! karsiligi sudur: yeniden uretim **yakinsamali** olmali - farkli bir
-//! baslangictan yola cikan her dugum ayni kanonik sonuca varmali, ve zaten
-//! kanonik olan bir agac degismemeli (idempotence).
+//! Regeneration must be **unifying**, not dispersing. The technical equivalent
+//! is this: reproduction must be **convergent** - every node starting from a
+//! different point must arrive at the same canonical result, and a tree that is
+//! already canonical must not change (idempotence).
 //!
-//! Kapi bunu iddia etmiyor, **kanitliyor**: kanonik program baytlarini ISA
-//! spesifikasyonundan bagimsiz olarak yeniden kurar (`regenerate_*`), sonra
-//! agacta yazili olanla karsilastirir. Ikinci kez uretmek ayni seyi verir;
-//! bozulmus bir girdi ayni kanonik cikti ile onarilir. Iki dugum ayni
-//! kaynaktan ayni yere varir - ag bolunmez.
+//! The gate does not claim this, it **proves** it: it rebuilds the canonical
+//! program bytes from the ISA specification independently (`regenerate_*`) and
+//! then compares them with what is written in the tree. Producing them a second
+//! time gives the same thing; a corrupted input is repaired into the same
+//! canonical output. Two nodes arrive from the same source at the same place -
+//! the network does not split.
 //!
-//! # Neden dort yerde ayni deger var
+//! # Why the same value exists in four places
 //!
-//! Bir zk kanitinin **hangi program icin** uretildigi tek bir degerle
-//! soylenir: programin Keccak-256 hash'i. Bu deger su an agacta **dort ayri
-//! yerde**, **uc ayri crate**'te ve **iki ayri hash kutuphanesi**yle
-//! hesaplaniyor:
+//! Which program a zk proof was produced **for** is said with a single value:
+//! the Keccak-256 hash of the program. That value is currently computed in
+//! **four separate places**, in **three separate crates** and with **two
+//! separate hash libraries**:
 //!
-//!   * `src/prover/mod.rs::zk_program_hash` - alan izin listesi kimligi (sha3)
-//!   * `src/ai/execution/guest.rs::stark_program_hash_from_words` - AI model
-//!     kaydi (sha3)
-//!   * `src/domain/storage_deal.rs` - depolama meydan okumasi (sha3)
-//!   * `budzero/bud-proof/src/plonky3_prover.rs` - **dogrulayici**, AIR'e
-//!     baglanan deger (`tiny_keccak`)
+//!   * `src/prover/mod.rs::zk_program_hash` - the domain allow-list identity (sha3)
+//!   * `src/ai/execution/guest.rs::stark_program_hash_from_words` - the AI model
+//!     record (sha3)
+//!   * `src/domain/storage_deal.rs` - the storage challenge (sha3)
+//!   * `budzero/bud-proof/src/plonky3_prover.rs` - the **verifier**, the value
+//!     bound into the AIR (`tiny_keccak`)
 //!
-//! Dordunun ayni sonucu vermesi bir **varsayim**, ve varsayimlar bayatlar.
-//! Ayrisirlarsa olan sey sessizdir ve kotudur: izin listesine yazilan hash,
-//! dogrulayicinin kanittan hesapladigi hash'ten farkli olur. O anda ya her
-//! durust kanit reddedilir (alan kilitlenir), ya da - siralama ters giderse -
-//! listede olmayan bir program listede sayilir. Derleyici bunu goremez: dort
-//! fonksiyon da tek basina dogrudur, yanlis olan **aralarindaki iliskidir**.
+//! That all four give the same result is an **assumption**, and assumptions go
+//! stale. If they diverge, what happens is silent and bad: the hash written to
+//! the allow-list differs from the hash the verifier computes from the proof.
+//! At that moment either every honest proof is rejected (the domain locks up)
+//! or - if the ordering goes the other way - a program absent from the list
+//! counts as being on it. The compiler cannot see this: all four functions are
+//! individually correct, what is wrong is **the relationship between them**.
 //!
-//! # Kapi neye inanmaz
+//! # What the gate does not believe
 //!
-//! Kodun soyledigine. Keccak-256'yi **kendi icinde** uygular ve agactaki
-//! hicbir hash kutuphanesini kullanmaz: kapi, denetledigi kodun bagimli
-//! oldugu seye bagimli olursa ikisi **birlikte** yanilabilir.
+//! What the code says. It implements Keccak-256 **inside itself** and uses no
+//! hash library from the tree: if the gate depended on what the code it
+//! inspects depends on, the two could be wrong **together**.
 
 use std::fs;
 use std::path::Path;
 
-/// Kanonik uretim noktasi sayisi bunun altina duserse tarama korlesmis
-/// demektir. Olcum aninda alti kanonik nokta vardi; esik, tek bir yuzeyin
-/// silinmesini yakalayacak kadar yuksek, kucuk yeniden duzenlemelere takilmayacak
-/// kadar dusuk secildi.
+/// If the number of canonical production points drops below this, the scan has
+/// gone blind. At measurement time there were six canonical points; the
+/// threshold was chosen high enough to catch a single surface being deleted and
+/// low enough not to trip on small reorganizations.
 const MIN_CANONICAL_PRODUCERS: usize = 4;
 
-/// Alan etiketi kullanmasi GEREKCELENDIRILMIS tek yer.
+/// The only place whose use of a domain tag is JUSTIFIED.
 ///
-/// `program_hash_from_words` bir kayit kimligidir: SHA3-256 uzerine
-/// `BDLM_AI_GUEST_PROGRAM_V1` etiketi ve guest surumu. Kanitin bagladigi deger
-/// degildir ve onunla karistirilmamalidir; kaynak kodda da "not interchangeable"
-/// diye isaretli.
+/// `program_hash_from_words` is a record identity: SHA3-256 plus the
+/// `BDLM_AI_GUEST_PROGRAM_V1` tag and the guest version. It is not the value
+/// the proof binds and must not be confused with it; the source marks it as
+/// "not interchangeable" as well.
 const TAGGED_ALLOWLIST: &[&str] = &["src/ai/execution/guest.rs"];
 
-/// Kanonik besleme: her kelime little-endian, etiket yok.
+/// The canonical feed: every word little-endian, no tag.
 ///
-/// Dogrulayicinin (`plonky3_prover.rs`) AIR'e bagladigi bicim budur; digerleri
-/// ona uymak zorunda, tersi degil.
+/// This is the form the verifier (`plonky3_prover.rs`) binds into the AIR; the
+/// others must match it, not the other way round.
 fn canonical_program_bytes(words: &[u64]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-// --- ISA'dan bagimsiz yeniden uretim ------------------------------------
+// --- ISA-independent reproduction ---------------------------------------
 //
-// `bud_isa`'ya bagimli DEGIL. Kodlama kurali burada elle yeniden yazildi ki
-// ISA tarafinda sessiz bir kayma olursa kapi bunu gorebilsin. Ayni sey iki
-// bagimsiz yoldan uretilmezse karsilastirma bir sey kanitlamaz.
+// NOT dependent on `bud_isa`. The encoding rule was rewritten by hand here so
+// that the gate can see a silent drift on the ISA side. If the same thing is
+// not produced along two independent paths, the comparison proves nothing.
 
 const OP_HALT: u64 = 0x00;
 const OP_VERIFY_MERKLE: u64 = 0x1E;
 
-/// `bud_isa::Instruction::encode` kuralinin bagimsiz kopyasi.
+/// An independent copy of the `bud_isa::Instruction::encode` rule.
 fn encode_instruction(opcode: u64, rd: u64, rs1: u64, rs2: u64, imm: i32) -> u64 {
     let mut res = opcode;
     res |= rd << 8;
@@ -96,10 +100,11 @@ fn encode_instruction(opcode: u64, rd: u64, rs1: u64, rs2: u64, imm: i32) -> u64
     res
 }
 
-/// Depolama meydan okumasi programini spesifikasyondan yeniden uretir.
+/// Reproduces the storage challenge program from the specification.
 ///
-/// Bu, "geri uretim"in somut hali: agactaki baytlara bakmadan, kuraldan
-/// yeniden kurulur. Sonuc agactakiyle ayni degilse biri kaymistir.
+/// This is the concrete form of "reproduction": it is rebuilt from the rule
+/// without looking at the bytes in the tree. If the result is not the same as
+/// the one in the tree, one of them has drifted.
 fn regenerate_storage_challenge_program() -> Vec<u64> {
     vec![
         encode_instruction(OP_VERIFY_MERKLE, 1, 2, 3, 256),
@@ -107,7 +112,7 @@ fn regenerate_storage_challenge_program() -> Vec<u64> {
     ]
 }
 
-// --- Bagimsiz Keccak-256 ------------------------------------------------
+// --- Independent Keccak-256 ---------------------------------------------
 
 const RC: [u64; 24] = [
     0x0000_0000_0000_0001,
@@ -217,29 +222,29 @@ fn verify_own_keccak() -> Result<(), String> {
     let empty = keccak256(&[]);
     if hex32(&empty) != "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" {
         return Err(format!(
-            "regeneration kendi Keccak-256 uygulamasini dogrulayamadi: bos girdi {} verdi",
+            "regeneration could not verify its own Keccak-256 implementation: the empty input gave {}",
             hex32(&empty)
         ));
     }
     let abc = keccak256(b"abc");
     if hex32(&abc) != "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45" {
         return Err(format!(
-            "regeneration kendi Keccak-256 uygulamasini dogrulayamadi: \"abc\" {} verdi",
+            "regeneration could not verify its own Keccak-256 implementation: \"abc\" gave {}",
             hex32(&abc)
         ));
     }
     Ok(())
 }
 
-/// Yakinsama: ikinci uretim ayni sonucu vermeli, bozulmus girdi kanonik hale
-/// onarilmali. Bu ozellik olmadan rejenerasyon agi boler.
+/// Convergence: a second reproduction must give the same result, and a corrupted
+/// input must be repaired into the canonical state. Without this property,
 fn verify_convergence() -> Result<Vec<u64>, String> {
     let first = regenerate_storage_challenge_program();
     let second = regenerate_storage_challenge_program();
     if first != second {
         return Err(String::from(
-            "regeneration yakinsamali degil: ayni kaynaktan iki uretim farkli sonuc verdi. \
-             Bu haliyle kapi agi bolerdi.",
+            "regeneration is not convergent: two reproductions from the same source gave \
+             different results. As it stands the gate would split the network.",
         ));
     }
     let mut corrupted = first.clone();
@@ -247,18 +252,18 @@ fn verify_convergence() -> Result<Vec<u64>, String> {
     let repaired = regenerate_storage_challenge_program();
     if repaired != first {
         return Err(String::from(
-            "regeneration onarim ozelligini kaybetti: bozulmus girdiden kanonik hale donulemedi",
+            "regeneration lost its repair property: the canonical state could not be reached from a corrupted input",
         ));
     }
     if corrupted == first {
         return Err(String::from(
-            "self-test tutarsiz: bozulmus program kanonik olanla ayni cikti",
+            "the self-test is inconsistent: the corrupted program came out the same as the canonical one",
         ));
     }
     Ok(first)
 }
 
-/// Bir program-hash uretim noktasi: kaynakta bulundugu yer ve bicimi.
+/// A program-hash production point: where it is found in the source and its form.
 #[derive(Debug)]
 struct Producer {
     file: String,
@@ -266,21 +271,21 @@ struct Producer {
     tagged: bool,
 }
 
-/// Bu dosyalar tarama disi: kapinin kendisi ve kanarya fixture'lari.
+/// These files are out of scan: the gate itself and the canary fixtures.
 fn is_scannable(path: &Path) -> bool {
     let s = path.to_string_lossy();
     s.ends_with(".rs") && !s.contains("/target/") && !s.contains("regeneration.rs")
 }
 
-/// Kaynak agacini gezerek program-hash ureten HER noktayi **kesfeder**.
+/// Walks the source tree and **discovers** EVERY point producing a program hash.
 ///
-/// Neden liste degil kesif: onceki surum uc konumu elle sayiyordu. Yarin
-/// dorduncu bir yerde ayni hash uretilirse elle tutulan liste sessiz kalirdi -
-/// ve tam olarak o sessizlik, kapinin korumasi gereken seydi. Olcum bunu
-/// dogruladi: agacta elle sayilan uctan fazlasi vardi
+/// Why discovery rather than a list: the previous version counted three
+/// locations by hand. If the same hash is produced in a fourth place tomorrow, a
+/// hand-kept list would stay silent - and that silence is exactly what the gate
+/// exists to protect against. The measurement confirmed it: the tree had more
 /// (`src/execution/zkvm.rs`, `src/lubot/verify.rs`, `src/domain/storage_deal.rs`).
 ///
-/// Kapi artik "bildiklerimi denetle" degil, "ne varsa bul ve denetle" diyor.
+/// The gate now says "find whatever is there and inspect it" rather than "inspect what I know about".
 fn discover_producers(root: &Path) -> Vec<Producer> {
     let mut out = Vec::new();
     for base in ["src", "budzero", "wallet-core"] {
@@ -330,7 +335,7 @@ fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
         }
         let end = (i + 12).min(cut);
         let window = lines[i..end].join("\n");
-        // Sekil A: dogrudan program kelimeleri uzerinde dongu.
+        // Shape A: a loop directly over the program words.
         let shape_a = ["program", "words", "prog", "insts"].iter().any(|n| {
             window.contains(&format!("for word in {n}"))
                 || window.contains(&format!("for &word in {n}"))
@@ -354,78 +359,78 @@ fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
 
 /// # Errors
 ///
-/// Kanonik degeri yeniden uretemezse, yakinsama ozellikleri bozulursa, ya da
-/// agactaki bir uygulama kanonik beslemeden saparsa bulgu dondurur.
+/// Returns a finding if it cannot reproduce the canonical value, if the
+/// convergence properties break, or if an implementation in the tree deviates
 pub fn run(root: &Path) -> Result<String, String> {
     verify_own_keccak()?;
     let first = verify_convergence()?;
 
-    // Depolama meydan okumasi programini ISA kuralindan yeniden uret ve
-    //    agacta yazili olanla karsilastir.
+    // Reproduce the storage challenge program from the ISA rule and compare it
+    //    with what is written in the tree.
     let deal_path = root.join("src/domain/storage_deal.rs");
     if let Ok(text) = fs::read_to_string(&deal_path) {
         if text.contains("Opcode::VerifyMerkle") {
             let regenerated_hash = keccak256(&canonical_program_bytes(&first));
-            // Agactaki program bu iki komuttan olusuyor; imm ve register
-            // Alanlari kaynakta yazili. Kayma olursa hash tutmaz.
+            // The program in the tree consists of these two instructions; the imm
+            // and register fields are written in the source. On drift the hash will not match.
             let expects_imm_256 = text.contains("imm: 256");
             let expects_regs = text.contains("rd: 1") && text.contains("rs1: 2");
             if !(expects_imm_256 && expects_regs) {
                 return Err(format!(
-                    "regeneration: depolama meydan okumasi programi kaymis. \
-                     ISA kuralindan yeniden uretilen kanonik hash {}, ancak \
-                     src/domain/storage_deal.rs artik ayni komut bicimini yazmiyor \
-                     (imm: 256 / rd: 1 / rs1: 2 beklenirdi).",
+                    "regeneration: the storage challenge program has drifted. \
+                     The canonical hash reproduced from the ISA rule is {}, but \
+                     src/domain/storage_deal.rs no longer writes the same instruction form \
+                     (imm: 256 / rd: 1 / rs1: 2 were expected).",
                     &hex32(&regenerated_hash)[..16]
                 ));
             }
         }
     }
 
-    // 4. Kanonik program-hash degerini yeniden uret.
+    // 4. Reproduce the canonical program-hash value.
     let sample: [u64; 3] = [7, 8, 9];
     let regenerated = keccak256(&canonical_program_bytes(&sample));
 
-    // Her uretim noktasini KESFET ve denetle.
+    // DISCOVER and inspect every production point.
     let producers = discover_producers(root);
     let mut findings = Vec::new();
 
-    // Kanonik uretim noktasi sayisi asla sifira dusmemeli: dusmusse ya tarama
-    // Bozulmustur ya da yuzey kaybolmustur. Ikisi de sessizce gecmemeli.
+    // The number of canonical production points must never drop to zero: if it
+    // has, either the scan is broken or a surface disappeared. Neither may pass silently.
     let canonical: Vec<&Producer> = producers.iter().filter(|p| !p.tagged).collect();
     if canonical.len() < MIN_CANONICAL_PRODUCERS {
         return Err(format!(
-            "regeneration: kanonik program-hash ureten yalnizca {} nokta bulundu \
-             (en az {} bekleniyor). Ya bir yuzey kayboldu ya da tarama artik \
-             uretim noktalarini goremiyor - ikisi de kapiyi korlestirir.",
+            "regeneration: only {} points producing the canonical program hash were found \
+             (at least {} expected). Either a surface disappeared or the scan can no \
+             longer see the production points - both blind the gate.",
             canonical.len(),
             MIN_CANONICAL_PRODUCERS
         ));
     }
 
-    // Etiketli hash yalnizca bilinen ve gerekcelendirilmis yerde olabilir.
-    // `program_hash_from_words` bir KAYIT kimligidir (SHA3-256 + alan etiketi),
-    // Kanitin bagladigi deger degildir; ikisi kasten farklidir. Baska bir yerde
-    // Etiket cikarsa o, kanonik degerden sessizce ayrisan bir uretimdir.
+    // A tagged hash may only exist in a known and justified place.
+    // `program_hash_from_words` is a RECORD identity (SHA3-256 + a domain tag),
+    // not the value the proof binds; the two differ deliberately. A tag appearing
+    // anywhere else is a production silently diverging from the canonical value.
     for p in producers.iter().filter(|p| p.tagged) {
         if !TAGGED_ALLOWLIST.contains(&p.file.as_str()) {
             findings.push(format!(
-                "{}:{}: program-hash uretiminde alan etiketi var ve bu dosya \
-                 gerekcelendirilmis istisnalar arasinda degil; etiketli hash \
-                 dogrulayicinin degeriyle ayrisir",
+                "{}:{}: the program-hash production carries a domain tag and this file \
+                 is not among the justified exceptions; a tagged hash diverges from \
+                 the verifier's value",
                 p.file, p.line
             ));
         }
     }
 
-    // Dogrulayici yuzeyi duruyor mu: kanonik bicimin otoritesi odur.
+    // Is the verifier surface still there: it is the authority for the canonical form.
     if !producers
         .iter()
         .any(|p| p.file.contains("plonky3_prover.rs"))
     {
         findings.push(String::from(
-            "budzero/bud-proof/src/plonky3_prover.rs: dogrulayicinin program-hash \
-             uretimi bulunamadi - kanonik bicimin otoritesi kayboldu",
+            "budzero/bud-proof/src/plonky3_prover.rs: the verifier's program-hash \
+             production was not found - the authority for the canonical form is gone",
         ));
     }
 
@@ -433,26 +438,26 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if !findings.is_empty() {
         return Err(format!(
-            "regeneration: kanonik program-hash yuzeyi kaymis.\n  {}\n\n\
-             Kanonik bicim: kelimeler little-endian, etiket YOK. Dogrulayici \
-             (plonky3_prover.rs) bu bicimi AIR'e baglar; digerleri ona uyar.",
+            "regeneration: the canonical program-hash surface has drifted.\n  {}\n\n\
+             The canonical form: words little-endian, NO tag. The verifier \
+             (plonky3_prover.rs) binds this form into the AIR; the others follow it.",
             findings.join("\n  ")
         ));
     }
 
     Ok(format!(
-        "regeneration OK: kanonik program-hash {} olarak yeniden uretildi, \
-         yakinsama (idempotence + onarim) dogrulandi, kesifle bulunan {checked} \
-         uretim noktasinin tamami kanonik (bagimsiz Keccak-256 ve bagimsiz ISA \
-         kodlamasi ile dogrulandi).",
+        "regeneration OK: the canonical program hash was reproduced as {}, \
+         convergence (idempotence + repair) was verified, and all {checked} \
+         production points found by discovery are canonical (verified with an \
+         independent Keccak-256 and an independent ISA encoding).",
         &hex32(&regenerated)[..16]
     ))
 }
 
 /// # Errors
 ///
-/// Kanarya agaci beklendigi gibi davranmazsa bulgu dondurur: dogru agac
-/// gecmeli, kanonik beslemeden sapan agac yakalanmali.
+/// Returns a finding if the canary tree does not behave as expected: the correct
+/// tree must pass, a tree deviating from the canonical feed must be caught.
 pub fn self_test() -> Result<String, String> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -470,21 +475,21 @@ pub fn self_test() -> Result<String, String> {
         "src/domain",
         "budzero/bud-proof/src",
     ] {
-        fs::create_dir_all(tmp.join(d)).map_err(|e| format!("kanarya dizini kurulamadi: {e}"))?;
+        fs::create_dir_all(tmp.join(d)).map_err(|e| format!("the canary directory could not be created: {e}"))?;
     }
 
     write_good(&tmp)?;
 
     if let Err(e) = run(&tmp) {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(format!("self-test: dogru agac gecmeliydi: {e}"));
+        return Err(format!("self-test: the correct tree should have passed: {e}"));
     }
     run_drift_canaries(&tmp)?;
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "regeneration self-test OK: dogru agac gecti, bes kayma yakalandi \
-         (etiketli uretim, kayip dogrulayici, korlesen tarama, degismis program, \
-         sonradan eklenen gizli uretim noktasi)",
+        "regeneration self-test OK: the correct tree passed and five drifts were caught \
+         (tagged production, a missing verifier, a blinded scan, a changed program, \
+         a hidden production point added later)",
     ))
 }
 
@@ -497,7 +502,7 @@ fn canonical_loop(name: &str, arg: &str) -> String {
     )
 }
 
-/// Kanarya agacinin saglikli halini yazar.
+/// Writes the healthy state of the canary tree.
 fn write_good(tmp: &Path) -> Result<(), String> {
     fs::write(
         tmp.join("src/prover/mod.rs"),
@@ -527,9 +532,9 @@ fn write_good(tmp: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Kanarya kaymalarini sirayla dener.
+/// Tries the canary drifts one by one.
 fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
-    // Kayma 1: bir uretim noktasina alan etiketi giriyor (gerekcelendirilmemis).
+    // Drift 1: a domain tag enters a production point (unjustified).
     fs::write(
         tmp.join("src/prover/mod.rs"),
         "pub fn zk_program_hash(program: &[u64]) -> [u8; 32] {\n\
@@ -542,22 +547,22 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
     if run(tmp).is_ok() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: gerekcelendirilmemis etiketli uretim yakalanmadi",
+            "self-test: an unjustified tagged production was not caught",
         ));
     }
 
-    // Kayma 2: dogrulayici yuzeyi kayboluyor - kanonik bicimin otoritesi gider.
+    // Drift 2: the verifier surface disappears - the authority for the canonical form goes.
     write_good(tmp)?;
     fs::remove_file(tmp.join("budzero/bud-proof/src/plonky3_prover.rs"))
         .map_err(|e| e.to_string())?;
     if run(tmp).is_ok() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: kaybolan dogrulayici yuzeyi yakalanmadi",
+            "self-test: a disappearing verifier surface was not caught",
         ));
     }
 
-    // Kayma 3: uretim noktalari topluca siliniyor - tarama korlesirse esik yakalamali.
+    // Drift 3: production points are deleted in bulk - if the scan goes blind the threshold must catch it.
     write_good(tmp)?;
     for f in [
         "src/prover/mod.rs",
@@ -574,7 +579,7 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
         ));
     }
 
-    // Kayma 4: kanonik program degistiriliyor (ISA'dan yeniden uretimle yakalanir).
+    // Drift 4: the canonical program is changed (caught by reproduction from the ISA).
     write_good(tmp)?;
     fs::write(
         tmp.join("src/domain/storage_deal.rs"),
@@ -584,12 +589,12 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
     if run(tmp).is_ok() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: degistirilmis depolama meydan okumasi programi yakalanmadi",
+            "self-test: a changed storage challenge program was not caught",
         ));
     }
 
-    // Kayma 5: YENI bir uretim noktasi sessizce ekleniyor - eski surumun
-    // Goremedigi sey tam olarak buydu.
+    // Drift 5: a NEW production point is added silently - this is exactly what the
+    // old version could not see.
     write_good(tmp)?;
     fs::create_dir_all(tmp.join("src/sneaky")).map_err(|e| e.to_string())?;
     fs::write(
@@ -604,7 +609,7 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
     if run(tmp).is_ok() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: sonradan eklenen yeni uretim noktasi yakalanmadi",
+            "self-test: a new production point added later was not caught",
         ));
     }
 
@@ -634,7 +639,7 @@ mod tests {
 
     #[test]
     fn a_tagged_feed_regenerates_a_different_value() {
-        // Kapinin varlik sebebi: etiket eklemek degeri degistirir.
+        // The gate's reason to exist: adding a tag changes the value.
         let plain = keccak256(&canonical_program_bytes(&[7, 8, 9]));
         let mut tagged = b"BDLM_PROGRAM_V1".to_vec();
         tagged.extend_from_slice(&canonical_program_bytes(&[7, 8, 9]));
@@ -643,24 +648,24 @@ mod tests {
 
     #[test]
     fn regeneration_is_idempotent_and_repairing() {
-        // Yakinsama: ag bolunmesin diye her dugum ayni yere varmali.
+        // Convergence: so the network does not split, every node must arrive at the same place.
         let a = regenerate_storage_challenge_program();
         let b = regenerate_storage_challenge_program();
-        assert_eq!(a, b, "ikinci uretim ayni olmali (idempotence)");
+        assert_eq!(a, b, "the second reproduction must be the same (idempotence)");
 
         let mut corrupted = a.clone();
         corrupted[0] ^= 0xFFFF;
-        assert_ne!(corrupted, a, "bozma gercekten degistirmeli");
+        assert_ne!(corrupted, a, "the corruption must really change something");
         assert_eq!(
             regenerate_storage_challenge_program(),
             a,
-            "bozulmus girdiden kanonik hale donulmeli (onarim)"
+            "the canonical state must be reachable from a corrupted input (repair)"
         );
     }
 
     #[test]
     fn independent_isa_encoding_matches_the_spec() {
-        // bud_isa::Instruction::encode kuralinin bagimsiz kopyasi dogru mu.
+        // Is the independent copy of the bud_isa::Instruction::encode rule correct.
         // VerifyMerkle=0x1E, rd=1, rs1=2, rs2=3, imm=256
         let got = encode_instruction(OP_VERIFY_MERKLE, 1, 2, 3, 256);
         let expected = 0x1E | (1 << 8) | (2 << 13) | (3 << 18) | (256u64 << 23);
