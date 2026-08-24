@@ -1,55 +1,57 @@
-//! STARK doğrulama + proof üretimi yardımcıları (bud-proof `DefaultAdapter`).
+//! STARK verification and proof-production helpers (bud-proof `DefaultAdapter`).
 //!
-//! **Bu modül üretim yolu DEĞİLDİR, ama "doğrulama bağlı değil" demek de
-//! artık yanlıştır.** Zincir üzerindeki çıkarım doğrulaması bu dosyadan
-//! geçmez; işlem yolu `src/ai/execution/verify.rs` içindeki
-//! `verify_execution_proof_stark`'ı çağırır ve STARK'ı gerçekten doğrular
-//! (`src/execution/executor.rs`, `require_execution_proof` olan modeller
-//! için). `ai_exec_verifier_unavailable` reddi kaldırılmıştır: model
-//! `execution_program_hash` kaydeder, `AiExecutionProof::public_inputs`
-//! kanıtın üretildiği girdileri taşır, düğüm guest programı
-//! `guest_program_for_model` ile yeniden kurar. Fail-closed davranış sürüyor,
-//! fakat artık düğümde eksik olanı değil kanıtta eksik olanı adlandırıyor
-//! (`ai_exec_no_public_inputs`, `ai_exec_no_program_hash`,
+//! **This module is NOT the production path, but saying "verification is not
+//! wired" is no longer true either.** On-chain inference verification does not
+//! go through this file; the transaction path calls
+//! `verify_execution_proof_stark` in `src/ai/execution/verify.rs` and really
+//! does verify the STARK (`src/execution/executor.rs`, for models with
+//! `require_execution_proof`). The `ai_exec_verifier_unavailable` refusal has
+//! been removed: the model records `execution_program_hash`,
+//! `AiExecutionProof::public_inputs` carries the inputs the proof was produced
+//! over, and the node rebuilds the guest program with
+//! `guest_program_for_model`. The behaviour is still fail-closed, but it now
+//! names what is missing from the proof rather than what is missing from the
+//! node (`ai_exec_no_public_inputs`, `ai_exec_no_program_hash`,
 //! `ai_exec_program_hash`, `ai_exec_exit_code`, `ai_exec_stark`).
 //!
-//! Buradaki iki fonksiyon o yolun **yardımcı/iskele** karşılıklarıdır ve
-//! bilerek çağrısızdır; `src/tests/ai_verification_status_locks.rs`
-//! (`stark_verification_helpers_have_no_production_callers`) bir çağrı
-//! eklenirse testi kırar. Güncel tablo: `docs/AI_VERIFICATION_STATUS.md`.
+//! The two functions here are the **helper/scaffold** counterparts of that
+//! path and are deliberately uncalled;
+//! `src/tests/ai_verification_status_locks.rs`
+//! (`stark_verification_helpers_have_no_production_callers`) breaks if a call
+//! is added. The current table is in `docs/AI_VERIFICATION_STATUS.md`.
 //!
-//! **İki yol birbirinin yerine geçmez**; bağlamadan önce bilinmesi gerekenler:
+//! **The two paths are not interchangeable.** Before wiring one to the other:
 //!
-//! - **Serileştirme farkı:** burada `ProofEnvelope` `bincode` ile açılır,
-//!   üretim yolu `postcard` kullanır. Aynı bayt dizisi ikisinde birden
-//!   çözülmez.
-//! - **`program_hash` farkı:** üretim `stark_program_hash_from_words`
-//!   (etiketsiz Keccak-256) kullanır; `program_hash_from_words` (SHA3-256 +
-//!   `BDLM_AI_GUEST_PROGRAM_V1` etiketi) ise yalnız kayıt kimliğidir. İkisi
-//!   karıştırıldığında doğrulama her seferinde düşer.
-//! - **`build_public_inputs` uzlaşma için güvenli değildir:** durum köklerini
-//!   ve digest'leri sıfır yazar. Yalnız bu dosyanın testleri için geçerlidir;
-//!   işlem yolu girdileri kanıttan alıp kayda karşı bağlar.
+//! - **Serialization differs:** `ProofEnvelope` is decoded here with `bincode`,
+//!   while the production path uses `postcard`. The same byte string does not
+//!   decode under both.
+//! - **`program_hash` differs:** production uses
+//!   `stark_program_hash_from_words` (untagged Keccak-256), whereas
+//!   `program_hash_from_words` (SHA3-256 with the `BDLM_AI_GUEST_PROGRAM_V1`
+//!   tag) is only a registry identity. Confusing the two makes verification
+//!   fail every time.
+//! - **`build_public_inputs` is not safe for consensus:** it writes state roots
+//!   and digests as zero. It holds only for this file's tests; the transaction
+//!   path takes the inputs from the proof and binds them against the record.
 //!
-//! # `chain_id` neden artık parametre
+//! # Why `chain_id` is a parameter now
 //!
-//! Bu fonksiyon `chain_id`'yi sabit `1` yazıyordu. Zincirin gerçek kimliği
-//! `DEFAULT_CHAIN_ID` = 45262. `chain_id` bir genel girdidir (public input):
-//! kanıtı üretildiği zincire bağlayan alan odur. Sabitlendiğinde iki şey olur:
-//! üretilen kanıt hiçbir gerçek zincire ait olmaz, ve `chain_id = 1` taşıyan
-//! bir kanıt burada beklenen girdiyle eşleşir. Tehdit modelindeki
-//! "genel girdinin yanlış bağlanması" sınıfı tam olarak budur;
-//! Aleo/snarkVM'de aynı sınıf tam işlem sahteciliğine çıkmıştı.
+//! This function used to write `chain_id` as a hard-coded `1`. The chain's real
+//! identity is what binds a proof to the chain it was produced on. Fixing it
+//! does two things: the proof produced belongs to no real chain, and any proof
+//! carrying `chain_id = 1` matches the input expected here. That is exactly the
+//! "public input bound to the wrong thing" class in the threat model; in
+//! Aleo/snarkVM the same class came out as full transaction forgery.
 //!
-//! Yardımcı yolun bugün üretim çağrısı yok, ama sabit bir alan bağlandığı gün
-//! sessizce yanlış olur. Alan artık çağıranın vermesi gereken bir parametre;
-//! `no-hardcoded-chain-id` kapısı geri gelmesini engelliyor.
+//! The helper path has no production caller today, but a hard-coded field goes
+//! silently wrong the day it is wired. The field is now a parameter the caller
+//! has to supply, and the `no-hardcoded-chain-id` gate stops it coming back.
 
 use bud_proof::{DefaultAdapter, ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
 use bud_vm::Vm;
 use sha3::{Digest, Keccak256};
 
-/// Lubot çıkarım kanıtını gerçek plonky3 STARK ile doğrula (verify-only).
+/// Verifies a Lubot inference proof with a real plonky3 STARK (verify only).
 pub fn verify_inference_stark(
     proof_bytes: &[u8],
     expected_inputs: &ExecutionPublicInputs,
@@ -61,9 +63,9 @@ pub fn verify_inference_stark(
         .map_err(|e| format!("Lubot STARK: verification failed: {e:?}"))
 }
 
-/// ExecutionPublicInputs'i Vm + program'dan inşa et (Keccak256 program_hash).
+/// Builds `ExecutionPublicInputs` from the VM and program (Keccak-256 `program_hash`).
 ///
-/// `chain_id` çağırandan gelir: kanıtı bir zincire bağlayan alan sabitlenemez.
+/// `chain_id` comes from the caller: the field that binds a proof to a chain cannot be fixed.
 fn build_public_inputs(vm: &Vm, program: &[u64], chain_id: u64) -> ExecutionPublicInputs {
     let program_bytes: Vec<u8> = program.iter().flat_map(|&i| i.to_le_bytes()).collect();
     let mut hasher = Keccak256::new();
@@ -86,10 +88,10 @@ fn build_public_inputs(vm: &Vm, program: &[u64], chain_id: u64) -> ExecutionPubl
     }
 }
 
-/// Lubot çıkarım proof'u üret + doğrula (gerçek plonky3 STARK prove→verify round-trip).
+/// Produces and verifies a Lubot inference proof: a real plonky3 STARK prove/verify round trip.
 ///
-/// `vm` üzerinde `program`'ı çalıştırır, trace'den STARK proof üretir,
-/// Sonra proof'u doğrular. ProofEnvelope döner.
+/// Runs `program` on `vm`, produces a STARK proof from the trace, then verifies
+/// that proof. Returns a `ProofEnvelope`.
 pub fn generate_and_verify_proof(
     vm: &mut Vm,
     program: &[u64],
@@ -131,7 +133,7 @@ mod tests {
         }
     }
 
-    /// Gerçek STARK verifier çağrılır; geçersiz proof reddedilir.
+    /// The real STARK verifier is called; an invalid proof is rejected.
     #[test]
     fn stark_verify_rejects_invalid_proof() {
         let envelope = ProofEnvelope {
@@ -148,14 +150,14 @@ mod tests {
         assert!(res.is_err(), "invalid proof must be rejected");
     }
 
-    /// Çöp baytlar deserialize'ta reddedilir.
+    /// Garbage bytes are rejected at deserialization.
     #[test]
     fn stark_verify_rejects_garbage_bytes() {
         let res = verify_inference_stark(&[0xFF; 10], &inputs(), &[]);
         assert!(res.is_err(), "garbage bytes must fail");
     }
 
-    /// Gerçek plonky3 STARK prove→verify round-trip (Halt programı).
+    /// A real plonky3 STARK prove/verify round trip, on a Halt program.
     #[test]
     fn lubot_stark_prove_and_verify_roundtrip() {
         let mut vm = Vm::new(64);
@@ -168,10 +170,11 @@ mod tests {
         );
     }
 
-    /// `chain_id` genel girdiye gerçekten giriyor mu.
+    /// Does `chain_id` actually reach the public input?
     ///
-    /// Sabit yazıldığında bu test yazılamazdı: iki farklı zincir aynı girdiyi
-    /// üretirdi ve bir zincirin kanıtı diğerinde beklenen girdiyle eşleşirdi.
+    /// This test could not have been written while the value was hard-coded:
+    /// two different chains produced the same input, and one chain's proof
+    /// matched the input expected on the other.
     #[test]
     fn the_chain_id_reaches_the_public_inputs() {
         let vm = Vm::new(64);
