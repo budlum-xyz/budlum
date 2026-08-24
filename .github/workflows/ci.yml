@@ -1106,6 +1106,17 @@ jobs:
       # branch protection: it runs, it passes, and it stops counting. Three
       # required checks were carrying one. A hand count already missed them
       # once, so the count is now a gate.
+      # Two independent implementations derive a user's address: the wallet's
+      # (crates/wallet-core, a separate workspace built as a cdylib) and the
+      # node's (src/crypto/primitives.rs, on the live block and transaction
+      # path). Neither crate depends on the other, so the compiler cannot see
+      # the pair. If they diverge, a wallet shows an address the chain will
+      # never credit and the funds sent there cannot be spent - with no error
+      # anywhere, because both sides work and disagree.
+      - name: wallet/node address agreement gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree
       # The tree is written in English. Turkish is allowed in exactly two
       # places: README.tr.md, and the word "Türkçe" as the label on the link
       # that points at it. The translation is unfinished, so the gate ratchets
