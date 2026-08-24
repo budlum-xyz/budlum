@@ -1,189 +1,189 @@
 # BudVM Trace Schema v2
 
-Bu doküman `bud-vm` tarafından üretilen `Step` kayıtlarının AIR trace matrisine nasıl aktarıldığını ve trace sütunlarının yapısını sabitler. Prover tarafının AIR constraint'leri tam olarak bu şemaya göre yazılmıştır.
+This document pins how the `Step` records produced by `bud-vm` are transferred into the AIR trace matrix, and what the trace columns look like. The prover-side AIR constraints are written against exactly this schema.
 
-## Temel Kural
+## Basic rule
 
-`Vm::step(program)` bir instruction gerçekten fetch edip execute ederse tam olarak bir `Step` üretir. Şu durumlarda yeni trace satırı üretilmez:
+`Vm::step(program)` produces exactly one `Step` whenever it really fetches and executes an instruction. No new trace row is produced when:
 
-* VM zaten `halted == true` durumundaysa.
-* `pc >= program.len()` ise.
+* the VM is already in `halted == true`, or
+* `pc >= program.len()`.
 
-## Step Alanları
+## Step fields
 
-| Alan | Anlamı |
+| Field | Meaning |
 | --- | --- |
-| `pc` | Instruction fetch edilmeden önceki program counter |
-| `next_pc` | Instruction execute edildikten sonra beklenen sonraki program counter |
-| `instruction` | Decode edilmiş `bud_isa::Instruction` |
-| `src1_idx` | `rs1` register index'i |
-| `src2_idx` | `rs2` register index'i |
-| `dst_idx` | `rd` register index'i |
-| `src1_val` | Instruction execute edilmeden önce okunan `rs1` değeri |
-| `src2_val` | Instruction execute edilmeden önce okunan `rs2` değeri |
-| `dst_val` | Instruction'ın hesapladığı sonuç değeri |
-| `registers` | Instruction execute edildikten sonraki 32 register'lık snapshot |
-| `memory_addr` | Bellek erişim adresi (Load/Store için) |
-| `memory_val` | Bellekten okunan veya yazılan değer |
-| `is_memory_write` | Yazma işlemi mi? |
-| `stack_pointer` | Stack işaretçisinin güncel değeri |
+| `pc` | The program counter before the instruction is fetched |
+| `next_pc` | The expected next program counter after the instruction executes |
+| `instruction` | The decoded `bud_isa::Instruction` |
+| `src1_idx` | The `rs1` register index |
+| `src2_idx` | The `rs2` register index |
+| `dst_idx` | The `rd` register index |
+| `src1_val` | The `rs1` value read before the instruction executes |
+| `src2_val` | The `rs2` value read before the instruction executes |
+| `dst_val` | The result value the instruction computes |
+| `registers` | A 32-register snapshot after the instruction executes |
+| `memory_addr` | The memory access address (for Load/Store) |
+| `memory_val` | The value read from or written to memory |
+| `is_memory_write` | Is this a write? |
+| `stack_pointer` | The current value of the stack pointer |
 
-## Prover Trace Sütunları (Ana Matris: Main Trace)
+## Prover trace columns (main trace)
 
-Prover tarafında oluşturulan ana matris **354 sütun** genişliğindedir. Sütunlar şu gruplara ayrılır:
+The main matrix built on the prover side is **354 columns** wide. The columns fall into these groups.
 
-### Temel Sütunlar (0-10)
-| İndeks | Sütun | Açıklama |
+### Base columns (0-10)
+| Index | Column | Description |
 |--------|-------|----------|
-| 0 | `CLK` | Satır sayacı (clock) |
+| 0 | `CLK` | Row counter (clock) |
 | 1 | `PC` | Program counter |
-| 2 | `OPCODE` | İşlem kodu (0x00-0x1E) |
-| 3 | `RD_IDX` | Hedef register index'i |
-| 4 | `RS1_IDX` | Birinci kaynak register index'i |
-| 5 | `RS2_IDX` | İkinci kaynak register index'i |
-| 6 | `RS1_VAL` | Birinci kaynak register değeri |
-| 7 | `RS2_VAL` | İkinci kaynak register değeri |
-| 8 | `RD_VAL_NEW` | Hesaplanan sonuç değeri |
-| 9 | `NEXT_PC` | Beklenen sonraki PC |
-| 10 | `IMM` | Immediate değer (i32 olarak) |
+| 2 | `OPCODE` | Operation code (0x00-0x1E) |
+| 3 | `RD_IDX` | Destination register index |
+| 4 | `RS1_IDX` | First source register index |
+| 5 | `RS2_IDX` | Second source register index |
+| 6 | `RS1_VAL` | First source register value |
+| 7 | `RS2_VAL` | Second source register value |
+| 8 | `RD_VAL_NEW` | The computed result value |
+| 9 | `NEXT_PC` | The expected next PC |
+| 10 | `IMM` | Immediate value (as i32) |
 
-### CPU Selector Sütunları (11-22)
-| İndeks | Sütun | Açıklama |
+### CPU selector columns (11-22)
+| Index | Column | Description |
 |--------|-------|----------|
-| 11 | `IS_ADD` | Add opcode selector'ü |
-| 12 | `IS_SUB` | Sub selector'ü |
-| 13 | `IS_MUL` | Mul selector'ü |
-| 14 | `IS_EQ` | Eq selector'ü |
-| 15 | `IS_LT` | Lt selector'ü |
-| 16 | `IS_JMP` | Jmp selector'ü |
-| 17 | `IS_JNZ` | Jnz selector'ü |
-| 18 | `IS_LOAD` | Load selector'ü |
-| 19 | `IS_HALT` | Halt selector'ü |
-| 20 | `IS_ASSERT` | Assert selector'ü |
-| 21 | `IS_LOG` | Log selector'ü |
-| 22 | `JNZ_COND` | Jnz koşul değeri (1 = atla, 0 = geç) |
+| 11 | `IS_ADD` | Add opcode selector |
+| 12 | `IS_SUB` | Sub selector |
+| 13 | `IS_MUL` | Mul selector |
+| 14 | `IS_EQ` | Eq selector |
+| 15 | `IS_LT` | Lt selector |
+| 16 | `IS_JMP` | Jmp selector |
+| 17 | `IS_JNZ` | Jnz selector |
+| 18 | `IS_LOAD` | Load selector |
+| 19 | `IS_HALT` | Halt selector |
+| 20 | `IS_ASSERT` | Assert selector |
+| 21 | `IS_LOG` | Log selector |
+| 22 | `JNZ_COND` | Jnz condition value (1 = take the jump, 0 = fall through) |
 
-### Register Table Sütunları (23-28)
-| İndeks | Sütun | Açıklama |
+### Register table columns (23-28)
+| Index | Column | Description |
 |--------|-------|----------|
-| 23 | `REG_CLK` | Register event clock'u |
-| 24 | `REG_IDX` | Register index'i |
-| 25 | `REG_VAL` | Register değeri |
-| 26 | `REG_IS_WRITE` | Yazma event'i mi? |
-| 27 | `REG_ACTIVE` | Event aktif mi? |
-| 28 | `REG_SAME` | Sonraki event aynı register'a mı? |
+| 23 | `REG_CLK` | Register event clock |
+| 24 | `REG_IDX` | Register index |
+| 25 | `REG_VAL` | Register value |
+| 26 | `REG_IS_WRITE` | Is this a write event? |
+| 27 | `REG_ACTIVE` | Is the event active? |
+| 28 | `REG_SAME` | Is the next event for the same register? |
 
-### Genişletilmiş Selector Sütunları (29-48)
-| İndeks | Sütun | Açıklama |
+### Extended selector columns (29-48)
+| Index | Column | Description |
 |--------|-------|----------|
-| 29 | `IS_DIV` | Div selector'ü |
-| 30 | `IS_INV` | Inv selector'ü |
-| 31 | `IS_AND` | And selector'ü |
-| 32 | `IS_OR` | Or selector'ü |
-| 33 | `IS_XOR` | Xor selector'ü |
-| 34 | `IS_NOT` | Not selector'ü |
-| 35 | `IS_NEQ` | Neq selector'ü |
-| 36 | `IS_GT` | Gt selector'ü |
-| 37 | `IS_LTE` | Lte selector'ü |
-| 38 | `IS_GTE` | Gte selector'ü |
-| 39 | `IS_STORE` | Store selector'ü |
-| 40 | `IS_PUSH` | Push selector'ü |
-| 41 | `IS_POP` | Pop selector'ü |
-| 42 | `IS_CALL` | Call selector'ü |
-| 43 | `IS_RET` | Ret selector'ü |
-| 44 | `IS_SREAD` | SRead selector'ü |
-| 45 | `IS_SWRITE` | SWrite selector'ü |
-| 46 | `IS_POSEIDON` | Poseidon selector'ü |
-| 47 | `IS_SYSCALL` | Syscall selector'ü |
-| 48 | `IS_VERIFY_MERKLE` | VerifyMerkle selector'ü |
+| 29 | `IS_DIV` | Div selector |
+| 30 | `IS_INV` | Inv selector |
+| 31 | `IS_AND` | And selector |
+| 32 | `IS_OR` | Or selector |
+| 33 | `IS_XOR` | Xor selector |
+| 34 | `IS_NOT` | Not selector |
+| 35 | `IS_NEQ` | Neq selector |
+| 36 | `IS_GT` | Gt selector |
+| 37 | `IS_LTE` | Lte selector |
+| 38 | `IS_GTE` | Gte selector |
+| 39 | `IS_STORE` | Store selector |
+| 40 | `IS_PUSH` | Push selector |
+| 41 | `IS_POP` | Pop selector |
+| 42 | `IS_CALL` | Call selector |
+| 43 | `IS_RET` | Ret selector |
+| 44 | `IS_SREAD` | SRead selector |
+| 45 | `IS_SWRITE` | SWrite selector |
+| 46 | `IS_POSEIDON` | Poseidon selector |
+| 47 | `IS_SYSCALL` | Syscall selector |
+| 48 | `IS_VERIFY_MERKLE` | VerifyMerkle selector |
 
-### Memory Table Sütunları (49-54)
-| İndeks | Sütun | Açıklama |
+### Memory table columns (49-54)
+| Index | Column | Description |
 |--------|-------|----------|
-| 49 | `MEM_CLK` | Memory event clock'u |
-| 50 | `MEM_ADDR` | Bellek adresi |
-| 51 | `MEM_VAL` | Bellek değeri |
-| 52 | `MEM_IS_WRITE` | Yazma event'i mi? |
-| 53 | `MEM_ACTIVE` | Event aktif mi? |
-| 54 | `MEM_SAME` | Sonraki event aynı adrese mi? |
+| 49 | `MEM_CLK` | Memory event clock |
+| 50 | `MEM_ADDR` | Memory address |
+| 51 | `MEM_VAL` | Memory value |
+| 52 | `MEM_IS_WRITE` | Is this a write event? |
+| 53 | `MEM_ACTIVE` | Is the event active? |
+| 54 | `MEM_SAME` | Is the next event for the same address? |
 
-Memory tablosu: `Load`, `Store`, `Push`, `Pop`, `Call`, `Ret` işlemlerine ek olarak **`SRead` ve `SWrite` işlemlerini de kapsar.** Storage işlemleri `STORAGE_BASE = 2 << 60` adres ön eki ile memory adres alanına yerleştirilir. Bu sayede storage tutarlılığı, ayrı bir LogUp tablosuna gerek kalmadan mevcut memory LogUp altyapısı üzerinden doğrulanır.
+The memory table covers `Load`, `Store`, `Push`, `Pop`, `Call`, `Ret` and **also `SRead` and `SWrite`.** Storage operations are placed into the memory address space behind the `STORAGE_BASE = 2 << 60` address prefix. Storage consistency is therefore verified through the existing memory LogUp infrastructure, without a separate LogUp table.
 
-### Soundness ve Public Input Sütunları (55-64)
-| İndeks | Sütun | Açıklama |
+### Soundness and public input columns (55-64)
+| Index | Column | Description |
 |--------|-------|----------|
-| 55 | `STACK_PTR` | Stack işaretçisi |
-| 56 | `REG_SUB_CLK` | Register alt-clock (LogUp sıralama) |
-| 57 | `GAS_USED` | Kümülatif gas tüketimi |
+| 55 | `STACK_PTR` | Stack pointer |
+| 56 | `REG_SUB_CLK` | Register sub-clock (LogUp ordering) |
+| 57 | `GAS_USED` | Cumulative gas consumption |
 | 58 | `DIV_INV` | Div inverse witness |
-| 59 | `DIV_ZERO` | Div sıfır bayrağı |
-| 60 | `INV_ZERO` | Inv/Not sıfır bayrağı (paylaşımlı) |
-| 61 | `EQ_DIFF_INV` | Eq/Neq fark inverse witness |
-| 62 | `JNZ_COND_INV` | Jnz koşul inverse witness |
-| 63 | `RAW_INST` | Ham instruction (encode edilmiş u64) |
-| 64 | `CPU_ACTIVE` | CPU aktiflik bayrağı (padding izolasyonu) |
+| 59 | `DIV_ZERO` | Div zero flag |
+| 60 | `INV_ZERO` | Inv/Not zero flag (shared) |
+| 61 | `EQ_DIFF_INV` | Eq/Neq difference inverse witness |
+| 62 | `JNZ_COND_INV` | Jnz condition inverse witness |
+| 63 | `RAW_INST` | Raw instruction (encoded u64) |
+| 64 | `CPU_ACTIVE` | CPU activity flag (padding isolation) |
 
-### Comparison Witness Sütunları (65-257)
-| Aralık | Grup | Açıklama |
+### Comparison witness columns (65-257)
+| Range | Group | Description |
 |--------|------|----------|
-| 65-128 | `CMP_RS1_BASE` | rs1'in 64-bit decomposition'ı (Lt/Gt/Lte/Gte ve And/Or/Xor için ortak) |
-| 129-192 | `CMP_RS2_BASE` | rs2'nin 64-bit decomposition'ı |
-| 193-256 | `CMP_EQ_BASE` | Equality prefix flags (eq_0..eq_63, yalnızca comparison için) |
-| 257 | `CMP_LT_RAW` | Ham less-than sonucu (bit decomposition'dan hesaplanan) |
+| 65-128 | `CMP_RS1_BASE` | The 64-bit decomposition of rs1 (shared by Lt/Gt/Lte/Gte and And/Or/Xor) |
+| 129-192 | `CMP_RS2_BASE` | The 64-bit decomposition of rs2 |
+| 193-256 | `CMP_EQ_BASE` | Equality prefix flags (eq_0..eq_63, comparison only) |
+| 257 | `CMP_LT_RAW` | The raw less-than result (computed from the bit decomposition) |
 
-**Comparison constraint'leri:** 64-bit decomposition ile her bitin boolean olduğu kontrol edilir. Equality prefix flags (eq_i), MSB'den LSB'ye doğru özyineli olarak hesaplanır: `eq_i = eq_{i+1} * (a_i == b_i)`. Sonuç: `Lt: rd = cmp_lt_raw`, `Gt: rd = 1 - eq_0 - cmp_lt_raw`, `Lte: rd = eq_0 + cmp_lt_raw`, `Gte: rd = 1 - cmp_lt_raw`.
+**Comparison constraints:** the 64-bit decomposition checks that every bit is boolean. The equality prefix flags (eq_i) are computed recursively from MSB to LSB: `eq_i = eq_{i+1} * (a_i == b_i)`. Results: `Lt: rd = cmp_lt_raw`, `Gt: rd = 1 - eq_0 - cmp_lt_raw`, `Lte: rd = eq_0 + cmp_lt_raw`, `Gte: rd = 1 - cmp_lt_raw`.
 
-**Bitwise constraint'leri:** And/Or/Xor aynı bit decomposition sütunlarını kullanır. `And: rd = Σ(a_i*b_i*2^i)`, `Or: rd = rs1 + rs2 - and_result`, `Xor: rd = rs1 + rs2 - 2*and_result`. `Not` ise inverse witness ile: `rd = 1 - rs1*inv` (`COL_INV_ZERO` paylaşımlı).
+**Bitwise constraints:** And/Or/Xor use the same bit decomposition columns. `And: rd = Sum(a_i*b_i*2^i)`, `Or: rd = rs1 + rs2 - and_result`, `Xor: rd = rs1 + rs2 - 2*and_result`. `Not` uses an inverse witness instead: `rd = 1 - rs1*inv` (`COL_INV_ZERO` shared).
 
-### Poseidon Witness Sütunları (258-353)
-| Aralık | Grup | Açıklama |
+### Poseidon witness columns (258-353)
+| Range | Group | Description |
 |--------|------|----------|
-| 258-289 | `POSEIDON_STATE_BASE` | 4 round × 8 state elementi (round giriş durumu) |
-| 290-321 | `POSEIDON_X2_BASE` | S-box ara değerler: x² |
-| 322-353 | `POSEIDON_X4_BASE` | S-box ara değerler: x⁴ |
+| 258-289 | `POSEIDON_STATE_BASE` | 4 rounds x 8 state elements (round input state) |
+| 290-321 | `POSEIDON_X2_BASE` | S-box intermediates: x^2 |
+| 322-353 | `POSEIDON_X4_BASE` | S-box intermediates: x^4 |
 
-**Poseidon4 parametreleri:** alpha=7, width=8, 4 tam round. MDS circulant matris `[7,1,3,8,8,3,4,9]`. Round sabitleri Plonky3 Poseidon1 Goldilocks'tan alınmıştır. AIR yalnızca round 0 S-box constraint'ini doğrular; VM 4 round'un tamamını hesaplar.
+**Poseidon4 parameters:** alpha=7, width=8, 4 full rounds. The MDS circulant matrix is `[7,1,3,8,8,3,4,9]`. The round constants are taken from Plonky3's Poseidon1 Goldilocks. The AIR verifies only the round 0 S-box constraint; the VM computes all 4 rounds.
 
-## Yardımcı İz (Auxiliary Trace) Şeması
+## Auxiliary trace schema
 
-BudZKVM, Cross-Table Lookup (CTL) işlemlerini doğrulamak için LogUp Fractional Sums yöntemini kullanır. Yardımcı iz **3 sütun** genişliğindedir:
+BudZKVM uses LogUp fractional sums to verify cross-table lookups (CTL). The auxiliary trace is **3 columns** wide:
 
-| Sütun | Adı | Tanım |
+| Column | Name | Definition |
 | --- | --- | --- |
-| 0 | `S_REG` | Register tutarlılığı LogUp akümülatörü |
-| 1 | `S_MEM` | Memory + Storage tutarlılığı LogUp akümülatörü |
-| 2 | `S_PROG` | Program CTL LogUp akümülatörü |
+| 0 | `S_REG` | Register consistency LogUp accumulator |
+| 1 | `S_MEM` | Memory + storage consistency LogUp accumulator |
+| 2 | `S_PROG` | Program CTL LogUp accumulator |
 
-> **Not:** Storage (`SRead`, `SWrite`) işlemleri ayrı bir LogUp tablosu gerektirmez. `STORAGE_BASE = 2 << 60` adres ön eki ile memory tablosuna dahil edilir. Bu sayede storage tutarlılığı mevcut memory LogUp (sütun 1) üzerinden doğrulanır.
+> **Note:** storage operations (`SRead`, `SWrite`) need no separate LogUp table. They are folded into the memory table behind the `STORAGE_BASE = 2 << 60` address prefix, so storage consistency is verified through the existing memory LogUp (column 1).
 
-Bu sütunlar Fiat-Shamir transcript'inden gelen α, β (tuple paketleme) ve γ (kesirli payda) değerlerine bağlıdır. Her satırda S_{i+1} = S_i + Σ w_j/(γ - C_j) kuralı işletilir. Program sonunda her sütunun 0 olması zorunludur.
+These columns depend on the alpha, beta (tuple packing) and gamma (fractional denominator) values drawn from the Fiat-Shamir transcript. Each row applies the rule S_{i+1} = S_i + Sum w_j/(gamma - C_j). At the end of the program every column must be 0.
 
-## Aritmetik Semantiği
+## Arithmetic semantics
 
-BudVM aritmetiği Goldilocks asal cismi (P = 2^64 - 2^32 + 1) üzerinde çalışır:
+BudVM arithmetic runs over the Goldilocks prime field (P = 2^64 - 2^32 + 1):
 
-* `Add`, `Sub`, `Mul`: wrapping u64 aritmetiği
-* `Div`: Goldilocks field-native modüler bölme: `rd = rs1 * rs2^{-1} mod P`. Payda sıfırsa sonuç 0.
-* `Inv`: Modüler ters: `rd = rs1^{-1} mod P`. Girdi sıfırsa sonuç 0.
-* `Poseidon4`: 4-round Poseidon hash (alpha=7, width=8 Goldilocks). Girdi: `(rs1, rs2)`, state: `[a, b, 0, 0, 0, 0, 0, 0]`, çıktı: `state[0]`.
+* `Add`, `Sub`, `Mul`: wrapping u64 arithmetic
+* `Div`: Goldilocks field-native modular division, `rd = rs1 * rs2^{-1} mod P`. If the denominator is zero the result is 0.
+* `Inv`: modular inverse, `rd = rs1^{-1} mod P`. If the input is zero the result is 0.
+* `Poseidon4`: a 4-round Poseidon hash (alpha=7, width=8 Goldilocks). Input `(rs1, rs2)`, state `[a, b, 0, 0, 0, 0, 0, 0]`, output `state[0]`.
 
-## Gas Semantiği
+## Gas semantics
 
-| Opcode grubu | Gas |
+| Opcode group | Gas |
 | --- | ---: |
 | `Halt` | 0 |
-| Basit ALU, branch, karşılaştırma | 1 |
+| Simple ALU, branch, comparison | 1 |
 | `Call`, `Ret`, `Push`, `Pop` | 2 |
 | `Load`, `Store`, `SRead`, `SWrite` | 3 |
 | `Syscall` | 5 |
 | `Poseidon`, `VerifyMerkle` | 10 |
 
-## Fixture Testleri
+## Fixture tests
 
-`bud-vm/tests/trace_fixtures.rs` trace şemasını örnek programlar üzerinden sabitler:
+`bud-vm/tests/trace_fixtures.rs` pins the trace schema through sample programs:
 
-* Aritmetik trace: `Load`, `Add`, `Sub`, `Mul`, `Halt`
-* Kontrol akışı trace'i: `Jnz`, `Jmp` ve program dışına çıkınca deterministik halt
-* Memory/storage/event trace'i: `Store`, memory `Load`, `SWrite`, `SRead`, `Log`
+* Arithmetic trace: `Load`, `Add`, `Sub`, `Mul`, `Halt`
+* Control-flow trace: `Jnz`, `Jmp`, and a deterministic halt on running past the end of the program
+* Memory/storage/event trace: `Store`, memory `Load`, `SWrite`, `SRead`, `Log`
 
-Trace schema değişirse hem VM testleri hem prover testleri birlikte güncellenmelidir.
+If the trace schema changes, the VM tests and the prover tests must be updated together.

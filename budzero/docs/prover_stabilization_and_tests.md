@@ -1,192 +1,192 @@
-# Prover Stabilizasyonu ve Testler
+# Prover stabilization and tests
 
-Bu bölüm genel bir "sıfırdan ZKVM yazalım" metni değildir. BudZKVM reposundaki gerçek prover kodunun Plonky3 0.5.2 ile uyumlu, test edilebilir ve adım adım geliştirilebilir hale getirilmesini anlatır. Amaç, okuyucunun `bud-proof` modülüne baktığında hangi dosyanın hangi matematiksel sorumluluğu taşıdığını görmesi ve yeni bir hata çıktığında nereden başlaması gerektiğini bilmesidir.
+This chapter is not a generic "let us write a ZKVM from scratch" text. It describes making the real prover code in the BudZKVM repository compatible with Plonky3 0.5.2, testable, and improvable step by step. The aim is that a reader looking at the `bud-proof` module can see which file carries which mathematical responsibility, and knows where to start when a new failure appears.
 
-Bu bölümde üç şeyi birlikte tutacağız:
+Three things are held together here:
 
-1. Plonky3 0.5.2 tip sistemi ve konfigürasyon sınırları.
-2. İki görevlı trace yapısı: ana trace ve yardımcı trace.
-3. Prover adapter, serde ve test stratejisi.
+1. The Plonky3 0.5.2 type system and configuration boundaries.
+2. The two-phase trace structure: main trace and auxiliary trace.
+3. The prover adapter, serde, and the test strategy.
 
-## Neden Stabilizasyon Görevsı Var?
+## Why is there a stabilization phase?
 
-Bir ZKVM'de VM'in çalışması tek başına yeterli değildir. VM doğru sonucu üretse bile prover şunları ayrıca kanıtlamalıdır:
+In a ZKVM it is not enough for the VM to run. Even when the VM produces the right result, the prover must additionally prove that:
 
-* Her satır geçerli bir opcode çalıştırıyor.
-* Program counter doğru ilerliyor.
-* Register değerleri tutarlı kalıyor.
-* Okuma ve yazma olayları aynı mantıksal belleğe bağlı.
-* Halt durumundan sonra trace yanlış şekilde devam etmiyor.
-* Kanıt byte dizisine çevrilip geri okunabiliyor.
+* every row executes a valid opcode,
+* the program counter advances correctly,
+* register values stay consistent,
+* read and write events are bound to the same logical memory,
+* the trace does not wrongly continue after a halt,
+* the proof can be turned into a byte string and read back.
 
-BudZKVM'de bu sorumlulukların büyük bölümü `bud-proof` crate'i içindedir. Stabilizasyon görevsı, bu crate'in Plonky3'ün güncel API'siyle konuşmasını ve ileride gerçek lookup/permutation kuralları eklendiğinde kırılmayacak bir iskelet kurmasını sağlar.
+In BudZKVM most of these responsibilities live inside the `bud-proof` crate. The stabilization phase makes that crate speak the current Plonky3 API and sets up a skeleton that will not break when real lookup/permutation rules are added later.
 
-## Dosya Haritası
+## File map
 
-Prover tarafını okurken şu dosyaları birlikte düşünmek gerekir:
+When reading the prover side these files must be considered together:
 
-* `bud-proof/src/plonky3_air.rs`: VM trace'i üstündeki opcode, PC, register ve halt kısıtlarının yazıldığı ana AIR.
-* `bud-proof/src/plonky3_prover.rs`: BudZKVM dünyasındaki `ProofSystem` trait'ini Plonky3 tabanlı prover'a bağlayan adapter.
-* `bud-proof/src/bud_stark/config.rs`: Plonky3 PCS, challenger, domain ve field tiplerinin merkezi olarak tanımlandığı yer.
-* `bud-proof/src/bud_stark/proof.rs`: Commitments, opened values ve proof nesnesinin taşınabilir yapısı.
-* `bud-proof/src/bud_stark/prover.rs`: Main trace, auxiliary trace, challenge üretimi, commitment ve opening akışının kurulduğu çekirdek prover.
-* `bud-proof/src/bud_stark/verifier.rs`: Proof içeriğinin aynı transcript akışıyla doğrulandığı taraf.
-* `bud-proof/src/bud_stark/folder.rs`: AIR kısıtlarının prover ve verifier tarafında aynı mantıkla katlandığı constraint folder.
-* `bud-proof/src/bud_stark/sub_builder.rs`: AIR'in alt pencereler üzerinde çalışmasını sağlayan yardımcı builder.
+* `bud-proof/src/plonky3_air.rs`: the main AIR, where the opcode, PC, register and halt constraints over the VM trace are written.
+* `bud-proof/src/plonky3_prover.rs`: the adapter binding the BudZKVM `ProofSystem` trait to the Plonky3-based prover.
+* `bud-proof/src/bud_stark/config.rs`: the central place where the Plonky3 PCS, challenger, domain and field types are defined.
+* `bud-proof/src/bud_stark/proof.rs`: the transportable shape of commitments, opened values and the proof object.
+* `bud-proof/src/bud_stark/prover.rs`: the core prover, where the main trace, auxiliary trace, challenge generation, commitment and opening flow are set up.
+* `bud-proof/src/bud_stark/verifier.rs`: the side that verifies the proof contents through the same transcript flow.
+* `bud-proof/src/bud_stark/folder.rs`: the constraint folder that folds AIR constraints with the same logic on the prover and verifier sides.
+* `bud-proof/src/bud_stark/sub_builder.rs`: the helper builder that lets the AIR operate over sub-windows.
 
-Bu ayrım önemlidir. `plonky3_air.rs` VM'in neyi kanıtladığını söyler. `bud_stark` altındaki dosyalar ise bu kuralların STARK kanıtına nasıl dönüştürüldüğünü yönetir.
+This split matters. `plonky3_air.rs` says what the VM proves. The files under `bud_stark` manage how those rules are turned into a STARK proof.
 
-## : Tip Sistemi ve Konfigürasyon
+## Type system and configuration
 
-Plonky3 0.5.2 ile çalışırken en kritik konu, generic tiplerin tek bir yerde ve tutarlı biçimde tanımlanmasıdır. Eğer `Val<SC>`, `Challenge`, `Domain`, `Pcs` ve `Challenger` sınırları farklı dosyalarda farklı şekillerde kurulursa Rust derleyicisi çok uzun type inference hataları üretir.
+When working with Plonky3 0.5.2 the most critical concern is defining the generic types in one place and consistently. If the `Val<SC>`, `Challenge`, `Domain`, `Pcs` and `Challenger` bounds are set up differently in different files, the Rust compiler produces very long type inference errors.
 
-BudZKVM'de bu yüzden `bud_stark/config.rs` merkezi dosya haline getirilir. Buradaki hedef şudur:
+That is why `bud_stark/config.rs` is made the central file in BudZKVM. Its goals are:
 
-* Ana field tipi `SC::Val` üzerinden okunur.
-* Packed değerler recursive type alias döngüsüne girmeden tanımlanır.
-* PCS proof ve commitment tipleri ortak alias'larla taşınır.
-* Challenger ve domain tipleri prover ile verifier arasında birebir aynı kalır.
+* the main field type is read through `SC::Val`,
+* packed values are defined without entering a recursive type alias cycle,
+* PCS proof and commitment types are carried by shared aliases,
+* the challenger and domain types stay byte-identical between prover and verifier.
 
-Bu görevın çıktısı şudur: Prover ve verifier ayrı ayrı "ben hangi PCS'i kullanıyorum?" sorusuna cevap vermek zorunda kalmaz. İkisi de aynı `StarkGenericConfig` üzerinden konuşur.
+The output of this phase: the prover and the verifier never have to answer "which PCS am I using?" separately. Both speak through the same `StarkGenericConfig`.
 
-## Proof ve Serde Sınırları
+## Proof and serde bounds
 
-`Proof<SC>` yapısı sadece basit alanlardan oluşmaz. İçinde commitment'lar, opened values ve PCS proof bulunur. Bunların her biri `SC` generic parametresine bağlıdır. Derleyicinin otomatik serde sınırlarını çıkarması bu yüzden zorlaşır.
+The `Proof<SC>` structure is not made of simple fields alone. It contains commitments, opened values and a PCS proof, each bound to the `SC` generic parameter. That makes it hard for the compiler to derive serde bounds automatically.
 
-BudZKVM'de çözüm, serde sınırlarını açık yazmaktır. Proof şu mantıkla ele alınır:
+The solution in BudZKVM is to write the serde bounds explicitly. The proof is treated with this logic:
 
-* Commitment tipi serialize edilebiliyorsa proof serialize edilebilir.
-* Challenge tipi serialize edilebiliyorsa opened values serialize edilebilir.
-* PCS proof tipi serialize edilebiliyorsa tüm kanıt byte dizisine çevrilebilir.
+* if the commitment type is serializable, the proof is serializable,
+* if the challenge type is serializable, the opened values are serializable,
+* if the PCS proof type is serializable, the whole proof can be turned into a byte string.
 
-Bu yaklaşım `postcard` desteğini getirir ve CLI/L1 entegrasyonu için gereken proof taşıma katmanını sadeleştirir. Proof formatının daha sonra kalıcı bir wire format haline gelmesi istenirse bu dosya doğal sınır noktasıdır.
+This approach brings `postcard` support and simplifies the proof transport layer needed for CLI/L1 integration. If the proof format should later become a stable wire format, this file is the natural boundary.
 
-## : Ana Trace ve Yardımcı Trace
+## Main trace and auxiliary trace
 
-BudZKVM prover mimarisi iki görevlıdır:
+The BudZKVM prover architecture is two-phase:
 
-1. Main trace commit edilir.
-2. Transcript üzerinden challenge üretilir.
-3. Challenge kullanılarak auxiliary trace üretilir.
-4. Main ve auxiliary opening'ler birlikte doğrulanır.
+1. the main trace is committed,
+2. a challenge is drawn over the transcript,
+3. the auxiliary trace is produced using that challenge,
+4. the main and auxiliary openings are verified together.
 
-Bu yapı cross-table lookup ve permutation kuralları için gereklidir. Örneğin CPU tablosundaki bir register okuması, register event tablosundaki önceki yazma ile bağlanmak istediğinde sadece ana trace yeterli olmaz. Lookup accumulator değerleri challenge'a bağlı olarak auxiliary trace içinde taşınır.
+This structure is required for cross-table lookup and permutation rules. For instance, when a register read in the CPU table needs to be bound to the earlier write in the register event table, the main trace alone is not enough. The lookup accumulator values depend on the challenge and are carried inside the auxiliary trace.
 
-Güncel stabilizasyon görevsında auxiliary trace, **LogUp (Fractional Sums)** mimarisine geçirilmiştir. Adapter tarafındaki `generate_aux_trace` fonksiyonu Fiat-Shamir randomness değerlerini ($\alpha, \beta, \gamma$) alır ve kesirli toplamları içeren **üç ana sütun** üretir:
+In the current stabilization phase the auxiliary trace has moved to a **LogUp (fractional sums)** architecture. The `generate_aux_trace` function on the adapter side takes the Fiat-Shamir randomness values (alpha, beta, gamma) and produces **three main columns** holding the fractional sums:
 
-* **Register Accumulator (S_REG):** Her CPU satırındaki `rs1`, `rs2` okumasını ve `rd` yazmasını paydadaki birer kesirli terim olarak eklerken, register event tablosundaki karşılıklarını çıkarır. `R0` donanımsal olarak sıfıra sabitlenmiştir; `dst_idx == 0` olan satırlarda `dst_val` trace'te `0` olarak zorlanır.
-* **Memory Accumulator (S_MEM):** CPU bellek erişimleri (`Load`, `Store`, `Push`, `Pop`, `Call`, `Ret`) ile hafıza tablosu arasındaki tutarlılığı sağlar. Buna ek olarak **storage işlemlerini de kapsar** (`SRead`, `SWrite`). Storage, `STORAGE_BASE = 2 << 60` adres ön eki ile memory adres alanına yerleştirilir, bu sayede ayrı bir LogUp tablosu gerekmez.
-* **Program Accumulator (S_PROG):** CPU'nun `(pc, instruction)` çiftlerini, preprocessed program tablosundaki `(pc, instruction)` çiftleriyle eşleştirir. Yalnızca `CPU_ACTIVE = 1` olan satırlar LogUp kümesine dahil edilir; padding satırları dışlanır.
+* **Register accumulator (S_REG):** it adds the `rs1`, `rs2` reads and the `rd` write of each CPU row as fractional terms, and subtracts their counterparts in the register event table. `R0` is hardwired to zero; on rows where `dst_idx == 0` the trace forces `dst_val` to `0`.
+* **Memory accumulator (S_MEM):** it enforces consistency between CPU memory accesses (`Load`, `Store`, `Push`, `Pop`, `Call`, `Ret`) and the memory table. It **also covers storage operations** (`SRead`, `SWrite`). Storage is placed into the memory address space behind the `STORAGE_BASE = 2 << 60` address prefix, so no separate LogUp table is needed.
+* **Program accumulator (S_PROG):** it matches the CPU's `(pc, instruction)` pairs with the `(pc, instruction)` pairs in the preprocessed program table. Only rows with `CPU_ACTIVE = 1` join the LogUp set; padding rows are excluded.
 
-Bu geçiş, kısıt derecesini düşürerek kanıt üretim süresini optimize etmiş ve hafıza bütünlüğü (Memory Integrity) için gereken altyapıyı tamamlamıştır. Auxiliary trace artık transcript challenge'larına bağlı gerçek witness verisi taşır ve AIR bu geçişleri `when_transition`, `when_first_row` ve `when_last_row` kısıtlarıyla tam doğrular.
+This transition lowered the constraint degree, optimizing proving time, and completed the infrastructure needed for memory integrity. The auxiliary trace now carries real witness data bound to the transcript challenges, and the AIR fully verifies these transitions with `when_transition`, `when_first_row` and `when_last_row` constraints.
 
-## Constraint Folder Ne İşe Yarar?
+## What does the constraint folder do?
 
-AIR kısıtları iki farklı bağlamda çalıştırılır:
+AIR constraints run in two different contexts:
 
-* Prover tarafında trace satırları packed field elemanlarıdır.
-* Verifier tarafında opening değerleri challenge field elemanlarıdır.
+* on the prover side the trace rows are packed field elements,
+* on the verifier side the opening values are challenge field elements.
 
-`folder.rs` bu iki dünyayı aynı AIR koduna bağlar. `PermutationAirBuilder` implementasyonu özellikle önemlidir çünkü auxiliary trace penceresi burada AIR'e sunulur. Eğer `permutation()` boş pencere döndürürse lookup kısıtları yazılsa bile gerçek yardımcı sütunlara bağlanamaz.
+`folder.rs` binds these two worlds to the same AIR code. The `PermutationAirBuilder` implementation matters especially, because that is where the auxiliary trace window is exposed to the AIR. If `permutation()` returns an empty window, lookup constraints can be written yet never bind to the real auxiliary columns.
 
-Bu yüzden `AuxWindow` şu iki pencereyi taşımalıdır:
+So `AuxWindow` must carry these two windows:
 
-* `current_slice`: mevcut satırdaki auxiliary değerler.
-* `next_slice`: bir sonraki satırdaki auxiliary değerler.
+* `current_slice`: the auxiliary values on the current row,
+* `next_slice`: the auxiliary values on the next row.
 
-Prover tarafında bu değerler packed base trace satırlarından challenge elemanlarına paketlenir. Verifier tarafında ise opening değerleri base coefficient parçalarından yeniden challenge elemanına toparlanır.
+On the prover side these values are packed from packed base trace rows into challenge elements. On the verifier side the opening values are reassembled into a challenge element from their base coefficient parts.
 
-## Sub Builder ve Pencere API'si
+## Sub builder and the window API
 
-`sub_builder.rs`, AIR'in trace'in belirli bir aralığı üzerinde çalışmasını sağlar. Bu mekanizma register tablosu, CPU tablosu veya ileride eklenecek alt tablolar için gereklidir. Yeni WindowAccess API'sinde doğrudan `current_slice()` ve `next_slice()` kullanmak daha net bir model verir.
+`sub_builder.rs` lets the AIR operate over a specific range of the trace. This mechanism is needed for the register table, the CPU table, and any sub-tables added later. In the new WindowAccess API, using `current_slice()` and `next_slice()` directly gives a clearer model.
 
-Sub builder'ın dikkat etmesi gereken şey şudur: Ana builder hangi bağlamı destekliyorsa sub builder da onu doğru şekilde ileri taşımalıdır. Yani sadece `AirBuilder` değil, ihtiyaç oldukça şu yetenekler de forward edilmelidir:
+What the sub builder must watch out for: whatever context the main builder supports, the sub builder must forward correctly. That is, not only `AirBuilder` but, as needed, these capabilities too:
 
 * `AirBuilderWithContext`
 * `PeriodicAirBuilder`
 * `ExtensionBuilder`
 * `PermutationAirBuilder`
 
-Bu forwarding eksik olduğunda hata genellikle AIR dosyasında görünür, ama kök sebep builder trait zincirindedir.
+When that forwarding is missing the error usually surfaces in the AIR file, but the root cause is in the builder trait chain.
 
-## Adapter Akışı
+## Adapter flow
 
-`plonky3_prover.rs` BudZKVM'nin dış dünyaya gösterdiği kanıt API'sidir. Burada yapılması gereken iş Plonky3 detaylarını VM'den ayırmaktır.
+`plonky3_prover.rs` is the proof API BudZKVM shows to the outside world. The job here is to separate Plonky3 details from the VM.
 
-Kanıt üretimi şu sırayla akar:
+Proof generation flows in this order:
 
-1. VM programı çalıştırır ve `Step` trace'i üretir.
-2. Adapter trace satırlarını `RowMajorMatrix<Goldilocks>` formatına çevirir.
-3. `BudAir` program ve başlangıç register durumuyla kurulur.
-4. `StarkConfig` oluşturulur.
-5. `prove` çağrısı main trace, auxiliary generator ve public input ile çalıştırılır.
-6. Dönen proof `postcard` ile byte dizisine çevrilir (bounded deserialization, DoS korumalı).
+1. the VM runs the program and produces a `Step` trace,
+2. the adapter converts the trace rows into `RowMajorMatrix<Goldilocks>` form,
+3. `BudAir` is set up with the program and the initial register state,
+4. a `StarkConfig` is built,
+5. `prove` is called with the main trace, the auxiliary generator and the public input,
+6. the returned proof is turned into a byte string with `postcard` (bounded deserialization, DoS protected).
 
-Doğrulama tarafında akış tersine döner:
+On the verification side the flow reverses:
 
-1. Proof byte dizisi deserialize edilir.
-2. Aynı AIR ve config tekrar kurulur.
-3. `verify` çağrısı proof ve public input üzerinde çalışır.
-4. Hata varsa `false`, başarı varsa `true` döner.
+1. the proof byte string is deserialized,
+2. the same AIR and config are rebuilt,
+3. `verify` runs over the proof and the public input,
+4. it returns `false` on error and `true` on success.
 
-Bu adapter'ın amacı CLI, L1 entegrasyonu veya testlerin Plonky3 iç tiplerini bilmesini engellemektir.
+The purpose of this adapter is to keep the CLI, the L1 integration and the tests from having to know Plonky3's internal types.
 
-Auxiliary trace üretimi de adapter sınırında tutulur. `plonky3_prover.rs` önce main trace matrisini oluşturur, sonra aynı matristen register accumulator'ları hesaplayacak closure'ı prover'a verir. Böylece `bud_stark` çekirdeği sadece iki görevlı protokolü bilir; BudVM'e özgü register packet ayrıntıları adapter/AIR katmanında kalır.
+Auxiliary trace generation is also kept at the adapter boundary. `plonky3_prover.rs` first builds the main trace matrix, then hands the prover a closure that computes the register accumulators from that same matrix. The `bud_stark` core therefore only knows the two-phase protocol; the BudVM-specific register packet details stay in the adapter/AIR layer.
 
-## Test Stratejisi
+## Test strategy
 
-Stabilizasyon testleri iki sınıfta düşünülmelidir.
+Stabilization tests should be thought of in two classes.
 
-İlk sınıf VM davranışını prover ile birlikte test eder:
+The first class tests VM behaviour together with the prover:
 
-* Basit `ADD + HALT` programı kanıtlanmalı ve doğrulanmalıdır.
-* `ADD`, `SUB`, `MUL` gibi aritmetik opcode'lar aynı trace içinde çalışmalıdır.
-* Immediate yükleme akışı kanıtlanmalıdır.
-* Halt sonrası trace mantığı bozulmamalıdır.
+* a simple `ADD + HALT` program must be proved and verified,
+* arithmetic opcodes such as `ADD`, `SUB`, `MUL` must work in the same trace,
+* the immediate-load flow must be provable,
+* the post-halt trace logic must not break.
 
-İkinci sınıf proof taşıma katmanını test eder:
+The second class tests the proof transport layer:
 
-* Üretilen proof byte dizisi deserialize edilip tekrar doğrulanmalıdır.
-* Rastgele veya bozuk byte dizisi doğrulamadan geçmemelidir.
-* Serde sınırları değiştiğinde testler proof formatındaki kırılmayı yakalamalıdır.
+* a produced proof byte string must deserialize and verify again,
+* a random or corrupted byte string must not pass verification,
+* when the serde bounds change, the tests must catch the break in the proof format.
 
-Bu testler matematiksel güvenliği tek başına kanıtlamaz, ama prover entegrasyonundaki kırılmaları erken yakalar. Özellikle Plonky3 güncellemesi yaparken önce bu testlerin yeşil kalması gerekir.
+These tests do not prove mathematical security on their own, but they catch breaks in the prover integration early. When updating Plonky3 in particular, these tests must stay green first.
 
-## Bugün Stabil Olan Parçalar
+## What is stable today
 
- stabilizasyonu sonrası mevcut durum:
+State after stabilization:
 
-* `cargo check --workspace --all-targets` temiz.
-* `cargo clippy --workspace --all-targets -- -D warnings` temiz.
-* `cargo test --workspace` → 44 test, 0 failure.
-* `bud-proof` testleri Goldilocks field üzerinde 29 unit test + 1 integration test ile proof üretip doğrular.
-* Proof byte dizisi `postcard` üzerinden taşınabilir (bounded deserialization, DoS korumalı).
-* Main trace ve auxiliary trace için folder iskeleti aynı AIR'e bağlanır.
-* Auxiliary trace 3 sütun üretir: register, memory+storage, program LogUp akümülatörleri.
-* Memory STARK altyapısı aktiftir; `Load`, `Store`, `SRead`, `SWrite`, `Push`, `Pop`, `Call`, `Ret` CTL ile tam doğrulanır.
-* Comparison opcode'ları (Lt, Gt, Lte, Gte) 64-bit decomposition + equality prefix flags ile sound.
-* Bitwise opcode'ları (And, Or, Xor, Not) bit decomposition + cebirsel eşdeğerlik ile sound.
-* Poseidon hash (4 round, alpha=7, Goldilocks) deterministik ve round 0 S-box AIR-doğrulanır.
-* Storage tutarlılığı STORAGE_BASE adresleme ile memory LogUp üzerinden doğrulanır.
-* R0 koruması, padding izolasyonu, inverse witness'lar, public input hash bağlama ve bounded deserialization tamam.
-* CI workflow'u (fmt, check, clippy, test, docs), opcode katkı rehberi, proof-format checklist'i ve trace schema dokümanı mevcut.
+* `cargo check --workspace --all-targets` clean.
+* `cargo clippy --workspace --all-targets -- -D warnings` clean.
+* `cargo test --workspace` -> 44 tests, 0 failures.
+* The `bud-proof` tests produce and verify proofs over the Goldilocks field with 29 unit tests + 1 integration test.
+* The proof byte string is transportable through `postcard` (bounded deserialization, DoS protected).
+* The folder skeleton for the main trace and the auxiliary trace binds to the same AIR.
+* The auxiliary trace produces 3 columns: register, memory+storage and program LogUp accumulators.
+* The memory STARK infrastructure is active; `Load`, `Store`, `SRead`, `SWrite`, `Push`, `Pop`, `Call`, `Ret` are fully verified through CTL.
+* The comparison opcodes (Lt, Gt, Lte, Gte) are sound via 64-bit decomposition + equality prefix flags.
+* The bitwise opcodes (And, Or, Xor, Not) are sound via bit decomposition + algebraic equivalence.
+* The Poseidon hash (4 rounds, alpha=7, Goldilocks) is deterministic and its round 0 S-box is AIR-verified.
+* Storage consistency is verified through the memory LogUp with STORAGE_BASE addressing.
+* R0 protection, padding isolation, inverse witnesses, public input hash binding and bounded deserialization are done.
+* The CI workflow (fmt, check, clippy, test, docs), the opcode contribution guide, the proof-format checklist and the trace schema document exist.
 
-Bu noktadan sonra yapılacak işler:
+Work to do from this point:
 
-* `VerifyMerkle` opcode'unun tam AIR constraint'i ve production'a taşınması.
-* Poseidon multi-round AIR doğrulaması.
-* Recursive proof aggregation.
-* Verifier WASM/EVM target'ları.
-* BudL dilinde struct, mapping ve standart kütüphane desteği.
-* `bud-node` ağ katmanı ve JSON-RPC API.
+* the full AIR constraint for the `VerifyMerkle` opcode and moving it into production,
+* multi-round Poseidon AIR verification,
+* recursive proof aggregation,
+* WASM/EVM verifier targets,
+* struct, mapping and standard library support in the BudL language,
+* the `bud-node` network layer and JSON-RPC API.
 
-## Sıradaki Sertleştirme Adımları
+## Next hardening steps
 
- sonrası sıradaki adımlar:
+The next steps after this:
 
-* VerifyMerkle opcode'unu production'a taşımak ().
-* Tracing/logging altyapısını tüm pipeline'a entegre etmek ().
-* Kapsamlı negatif test suite ve CI genişletme ().
-* Poseidon'un tüm round'ları için AIR doğrulaması.
-* Public input bağlamını netleştirmek: program hash, başlangıç state'i ve final state proof'a bağlanmalı.
-* Proof formatını uzun vadeli uyumluluk için versiyonlamak.
+* move the VerifyMerkle opcode into production,
+* integrate the tracing/logging infrastructure across the whole pipeline,
+* a comprehensive negative test suite and CI expansion,
+* AIR verification for all Poseidon rounds,
+* clarify the public input context: the program hash, the initial state and the final state must be bound to the proof,
+* version the proof format for long-term compatibility.
