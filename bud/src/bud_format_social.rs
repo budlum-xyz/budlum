@@ -1,9 +1,12 @@
-//! B.U.D. 2.0 Icat - Yon 4: Sosyal Kopru Kaydi (2026-08-16)
+//! B.U.D. 2.0 Invention - Direction 4: the Social Bridge Record (2026-08-16).
 //!
-//! AT Proto / ActivityPub gonderisi -> B.U.D. arsivi (S.94/S.96, K27/K33):
-//! kayit, kaynak platform URL'si + icerik hash'i (ContentId) + sahip DID + zaman
-//! damgasi tutar. Kaynak silinse bile B.U.D. kopyasi yetkili kalir (icerik kokeni).
-//! Kayipsiz: kaynak degismedi ise content_id eslesir; degisti ise RED (kaynak sapmasi).
+//! An AT Proto / ActivityPub post turns into a B.U.D. archive (S.94/S.96,
+//! K27/K33):
+//! A record holds the source platform URL, the content hash (ContentId), the
+//! owner DID and a timestamp. Even if the source is deleted, the B.U.D. copy
+//! stays authoritative (content provenance). Lossless: if the source has not
+//! changed the content_id matches; if it has, the record is REFUSED (source
+//! drift).
 
 #![forbid(unsafe_code)]
 
@@ -17,13 +20,14 @@ pub enum SocialPlatform {
     Other(&'static str),
 }
 
-/// AB 2426 (California 2025) sahiplik ayrımı (K74): "buy" GERÇEK mülkiyet ise
-/// revoke edilemez + taşınabilir; "lisans" ise revoke edilebilir ve açık bildirim
-/// zorunludur. B.U.D. kaydı Owned → platform lisanslarının aksine GERÇEK sahiplik.
+/// The AB 2426 (California 2025) ownership split (K74): if "buy" means REAL
+/// ownership it cannot be revoked and is portable; if it is a "licence" it can
+/// be revoked and an explicit disclosure is mandatory. A B.U.D. record is
+/// Owned, which is REAL ownership, unlike platform licences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipKind {
-    Owned,    // gerçek sahiplik: immutable, revoke edilemez, taşınabilir (B.U.D.)
-    Licensed, // lisans: revoke edilebilir, açık bildirim gerekir (AB 2426)
+    Owned,    // real ownership: immutable, non-revocable, portable (B.U.D.)
+    Licensed, // a licence: revocable, needs an explicit disclosure (AB 2426)
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +38,7 @@ pub struct SocialBridgeRecord {
     pub content: Vec<u8>,
     pub content_id: [u8; 32],
     pub ts_unix: u64,
-    /// K74: sahiplik türü - Owned (B.U.D. gerçek sahiplik) veya Licensed (lisans).
+    /// K74: the ownership kind - Owned (real B.U.D. ownership) or Licensed.
     pub ownership: OwnershipKind,
 }
 
@@ -58,8 +62,9 @@ impl SocialBridgeRecord {
         )
     }
 
-    /// K74: B.U.D. kayıtları varsayılan GERÇEK sahiplik taşır (Owned); lisans köprüsü
-    /// açıkça Licensed ile işaretlenir (AB 2426 bildirim zorunluluğu).
+    /// K74: B.U.D. records carry REAL ownership by default (Owned); a licence
+    /// bridge is marked explicitly with Licensed (the AB 2426 disclosure
+    /// obligation).
     pub fn new_with_ownership(
         platform: SocialPlatform,
         source_uri: &str,
@@ -80,17 +85,20 @@ impl SocialBridgeRecord {
         }
     }
 
-    /// K74 kanıtı: Owned kayıtlar revoke edilemez + taşınabilir (Data Act/K27).
+    /// The K74 evidence: Owned records are non-revocable and portable (Data
+    /// Act/K27).
     pub fn is_revocable(&self) -> bool {
         matches!(self.ownership, OwnershipKind::Licensed)
     }
     pub fn is_transferable(&self) -> bool {
-        true // B.U.D. kaydı makine-okur + açık format (K72) → taşınabilir
+        true // a B.U.D. record is machine-readable and an open format (K72), so it is portable
     }
 
-    /// Kayit kimligi: kaynak URI + sahip + icerik hash + SAHIPLIK + zaman (domain-etiketli).
-    /// STRIX fix: ownership (Owned/Licensed) kimlige dahil - etiket degisirse kimlik degisir,
-    /// boylece zincirde sahiplik manipulasyonu yakalanir (K74 güvencesi).
+    /// The record identity: source URI + owner + content hash + OWNERSHIP +
+    /// time (domain-tagged).
+    /// STRIX fix: ownership (Owned/Licensed) is part of the identity. If the
+    /// label changes the identity changes, so ownership manipulation is caught
+    /// on the chain (the K74 guarantee).
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -107,7 +115,8 @@ impl SocialBridgeRecord {
         h.finalize().into()
     }
 
-    /// Icerik butunlugu: saklanan icerik kayit anindaki hash ile eslesmeli.
+    /// Content integrity: the stored content has to match the hash taken at
+    /// record time.
     pub fn verify_content(&self) -> bool {
         self.content_id == content_id(&self.content)
     }
@@ -128,7 +137,7 @@ mod tests {
             SocialPlatform::AtProto,
             "at://did:plc:abc/app.bsky.feed.post/xyz",
             "did:plc:abc",
-            b"sosyal icerik".to_vec(),
+            b"social content".to_vec(),
             1_700_000_000,
         );
         assert!(rec.verify_content());
@@ -137,34 +146,35 @@ mod tests {
 
     #[test]
     fn ownership_k74() {
-        // AB 2426: Owned → revoke edilemez + taşınabilir; Licensed → revoke edilebilir
+        // AB 2426: Owned is non-revocable and portable; Licensed is revocable.
         let owned = SocialBridgeRecord::new(
             SocialPlatform::AtProto,
             "https://bsky.app/profile/u/post/1",
             "did:plc:abc",
-            b"icerik".to_vec(),
+            b"content".to_vec(),
             1,
         );
         assert_eq!(owned.ownership, OwnershipKind::Owned);
         assert!(
             !owned.is_revocable(),
-            "Owned kayıt revoke edilemez (gerçek sahiplik)"
+            "an Owned record cannot be revoked (real ownership)"
         );
         assert!(owned.is_transferable());
         let licensed = SocialBridgeRecord::new_with_ownership(
             SocialPlatform::ActivityPub,
             "https://fediverse.example/@u/1",
             "u@fediverse.example",
-            b"icerik".to_vec(),
+            b"content".to_vec(),
             1,
             OwnershipKind::Licensed,
         );
         assert!(
             licensed.is_revocable(),
-            "Lisans revoke edilebilir (AB 2426 bildirimi)"
+            "a licence can be revoked (the AB 2426 disclosure)"
         );
-        // record_hash sahiplik türünü kapsar mı? K74: evet - kötü niyetli Owned→Licensed
-        // dönüşümü kayıt kimliğini değiştirir (kayıt bozulması yakalanır)
+        // Does record_hash cover the ownership kind? K74: yes - a malicious
+        // Owned-to-Licensed conversion changes the record identity, so the
+        // corruption is caught.
         assert_ne!(owned.record_hash(), licensed.record_hash());
     }
 
@@ -174,12 +184,12 @@ mod tests {
             SocialPlatform::ActivityPub,
             "https://fediverse.example/@user/123",
             "user@fediverse.example",
-            b"orijinal".to_vec(),
+            b"original".to_vec(),
             100,
         );
         assert!(rec.verify_content());
-        rec.content = b"degistirildi".to_vec();
-        assert!(!rec.verify_content(), "icerik degisince RED");
+        rec.content = b"changed".to_vec();
+        assert!(!rec.verify_content(), "changed content is REFUSED");
     }
 
     #[test]
@@ -188,15 +198,15 @@ mod tests {
             SocialPlatform::Other("x"),
             "https://x.com/u/1",
             "did:web:x",
-            b"paylasim".to_vec(),
+            b"post".to_vec(),
             200,
         );
         // kaynak silindi (bos) -> yetkili kalir
         assert!(rec.verify_source(b""));
         // kaynak icerigi farkli -> sapma RED
-        assert!(!rec.verify_source(b"farkli"));
+        assert!(!rec.verify_source(b"different"));
         // kaynak ayni -> OK
-        assert!(rec.verify_source(b"paylasim"));
+        assert!(rec.verify_source(b"post"));
     }
 
     #[test]
@@ -214,7 +224,8 @@ mod tests {
 
 #[test]
 fn strix_ownership_kimlige_bagli() {
-    // STRIX fix: sahiplik etiketi degisirse kimlik degisir (manipulasyon yakalanir).
+    // STRIX fix: if the ownership label changes the identity changes, so the
+    // manipulation is caught.
     let mut a = SocialBridgeRecord {
         source_uri: "x.com/post/1".to_string(),
         owner_did: "did:bud:alice".to_string(),
@@ -222,7 +233,7 @@ fn strix_ownership_kimlige_bagli() {
         ts_unix: 100,
         ownership: OwnershipKind::Owned,
         platform: SocialPlatform::AtProto,
-        content: b"icerik".to_vec(),
+        content: b"content".to_vec(),
     };
     let h_owned = a.record_hash();
     a.ownership = OwnershipKind::Licensed;
@@ -239,7 +250,7 @@ fn strix_ownership_kimlige_bagli() {
         ts_unix: 100,
         ownership: OwnershipKind::Owned,
         platform: SocialPlatform::AtProto,
-        content: b"icerik".to_vec(),
+        content: b"content".to_vec(),
     };
     assert_eq!(h_owned, b.record_hash());
 }

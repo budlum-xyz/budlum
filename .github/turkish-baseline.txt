@@ -54,7 +54,6 @@ bud/src/bud_format_revolutionary.rs	8
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
-bud/src/bud_format_social.rs	19
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/bud_format_wal.rs	15
@@ -90,7 +89,6 @@ crates/budscan/browser/patches.txt	2
 crates/budscan/browser/patches/address-bar-verification-badge.patch	9
 crates/budscan/browser/patches/bud-protocol-handler.patch	4
 crates/budscan/browser/patches/name-bar-punycode.patch	6
-crates/budscan/browser/settings/budscan.cfg	19
 crates/budscan/browser/settings/policies.json	10
 crates/budscan/src/content_id.rs	12
 crates/budscan/src/punycode.rs	16
