@@ -1,38 +1,39 @@
-//! Arweave `data_root` dogrulamasi.
+//! Arweave `data_root` verification.
 //!
-//! Bir `.eth` adi ENS `contenthash` alaninda bir Arweave islem kimligine
-//! isaret edebilir. Islem kimligi imzanin hash'idir ve **iceriğin** hash'i
-//! degildir; iceriğe baglanan alan `data_root`'tur: veri 256 KiB'lik yiginlara
-//! bolunur, her yigin bir yaprak olur ve agacin koku islemde taahhut edilir.
+//! A `.eth` name can point, through the ENS `contenthash` field, at an Arweave
+//! transaction id. That id is the hash of the signature and NOT the hash of the
+//! **content**; the field bound to the content is `data_root`: the data is split
+//! into 256 KiB chunks, each chunk becomes a leaf, and the root of the tree is
+//! committed in the transaction.
 //!
-//! Bu modul o agaci yeniden kurar. Getirilen baytlar `data_root`'u uretmiyorsa
-//! sayfa gosterilmez.
+//! This module rebuilds that tree. If the fetched bytes do not produce the
+//! `data_root`, the page is not shown.
 //!
-//! # Neden SHA-384
+//! # Why SHA-384
 //!
-//! Arweave'in secimi; burada yeniden secilmiyor. Yaprak ve dal hash'lerinin
-//! hepsi SHA-384, ve `note` alani 32 baytlik **big-endian** bir ofsettir.
-//! Bunlarin herhangi biri degistirilirse uretilen kok Arweave'in kokU olmaz.
+//! It is Arweave's choice and is not being re-chosen here. The leaf and branch
+//! hashes are all SHA-384, and the `note` field is a 32-byte **big-endian**
+//! offset. Change any one of those and the root produced is not Arweave's root.
 //!
-//! # Ne dogrulanmiyor
+//! # What is not verified
 //!
-//! Islem imzasi (RSA-PSS) dogrulanmiyor, cunku bu tarayicinin sordugu soru
-//! "bu baytlar bu koke ait mi", "bu islemi kim imzaladi" degil. Kok bir
-//! ENS kaydindan geliyor ve o kaydin dogrulanmasi ENS tarafinin isi. Ikisini
-//! karistirmak, tek bir "dogrulandi" rozetinin arkasina iki ayri iddiayi
-//! koymak olurdu.
+//! The transaction signature, RSA-PSS, is not verified, because the question
+//! this scanner asks is "do these bytes belong to this root", not "who signed
+//! this transaction". The root comes from an ENS record, and verifying that
+//! record is the ENS side's job. Conflating the two would put two separate
+//! claims behind a single "verified" badge.
 
 use sha2::{Digest, Sha384};
 
-/// Arweave'in azami yigin boyutu.
+/// Arweave's maximum chunk size.
 pub const MAX_CHUNK_SIZE: usize = 256 * 1024;
-/// Arweave'in asgari yigin boyutu (son yigin yeniden dengelemesi icin).
+/// Arweave's minimum chunk size, used when rebalancing the last chunk.
 pub const MIN_CHUNK_SIZE: usize = 32 * 1024;
 
-/// `note`: 32 baytlik big-endian ofset.
+/// The `note`: a 32-byte big-endian offset.
 fn note_bytes(offset: usize) -> [u8; 32] {
     let mut note = [0u8; 32];
-    let be = (offset as u128).to_be_bytes(); // 16 bayt
+    let be = (offset as u128).to_be_bytes(); // 16 bytes
     note[16..].copy_from_slice(&be);
     note
 }
@@ -51,11 +52,11 @@ struct Node {
     max_byte_range: usize,
 }
 
-/// Baytlari Arweave'in yigin kuralina gore bol.
+/// Splits the bytes according to Arweave's chunking rule.
 ///
-/// Son yigin `MIN_CHUNK_SIZE`'in altina duserse, bir onceki yiginla birlikte
-/// yeniden dengelenir. Bu kural arweave-js'in kendi kurali; atlanirsa son iki
-/// yigin farkli sinirlara duser ve kok tutmaz.
+/// If the last chunk falls below `MIN_CHUNK_SIZE`, it is rebalanced together
+/// with the one before it. That rule is arweave-js's own; skip it and the last
+/// two chunks land on different boundaries, so the root does not hold.
 fn split_chunks(data: &[u8]) -> Vec<(usize, usize)> {
     if data.is_empty() {
         return vec![(0, 0)];
@@ -110,13 +111,12 @@ fn build_layers(mut nodes: Vec<Node>) -> Node {
     nodes[0]
 }
 
-/// Baytlarin `data_root`'unu hesapla (32 bayta kirpilmis SHA-384 degil, tam
-/// 48 baytlik dugum kimliginin ilk 32 bayti: Arweave `data_root`'u 32 bayttir).
+/// Computes the `data_root` of the bytes.
 ///
-/// Arweave dugum kimlikleri 48 bayt (SHA-384) uretir ve `data_root` alani
-/// base64url ile 32 bayt tasir. Uygulamada arweave-js kok dugumun `id`sini
-/// oldugu gibi kullanir ve o 48 bayttir; islem alanina yazilan deger de 48
-/// bayttir. Bu yuzden burada kirpma yapilmiyor: donen deger tam dugum kimligi.
+/// Arweave node ids are 48 bytes, since they are SHA-384. In practice
+/// arweave-js uses the root node's `id` as it is, and that is 48 bytes; the
+/// value written into the transaction field is 48 bytes too. So nothing is
+/// truncated here: the value returned is the full node id.
 #[must_use]
 pub fn data_root(data: &[u8]) -> [u8; 48] {
     let leaves: Vec<Node> = split_chunks(data)
@@ -134,22 +134,22 @@ pub fn data_root(data: &[u8]) -> [u8; 48] {
     build_layers(leaves).id
 }
 
-/// Bir Arweave hedefi hakkinda verilebilecek karar.
+/// The verdict that can be reached about an Arweave target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArweaveVerdict {
     Verified,
     RootMismatch { expected: String, produced: String },
 }
 
-/// Getirilen baytlari beklenen `data_root`'a karsi dogrula.
+/// Verifies the fetched bytes against the expected `data_root`.
 #[must_use]
 pub fn verify(expected_root: &[u8], data: &[u8]) -> ArweaveVerdict {
     let produced = data_root(data);
-    // Strix HIGH (CWE-354): kisa gelen beklenen kok bir on-ek olarak
-    // kabul ediliyordu; saldirgan 1-47 baytlık bir on-ek icin icerik
-    // kaba-kuvvetleyebilir ve kirpilmis koku tam dogrulama gucune
-    // yukseltebilirdi. Kirpilmis kok artik reddedilir: dogrulama yalnizca
-    // birebir esitlikte verilir.
+    // Strix HIGH (CWE-354): a short expected root used to be accepted as a
+    // prefix, so an attacker could brute-force content for a prefix of 1 to 47
+    // bytes and raise a truncated root to the strength of full verification. A
+    // truncated root is now refused: verification is granted only on exact
+    // equality.
     let matches = expected_root.len() == produced.len() && expected_root == &produced[..];
     if matches {
         ArweaveVerdict::Verified
@@ -183,7 +183,7 @@ mod tests {
     fn multi_chunk_data_builds_a_tree() {
         let data = vec![7u8; MAX_CHUNK_SIZE * 2 + MIN_CHUNK_SIZE];
         let root = data_root(&data);
-        // Iki yigindan farkli olmali: yigin sayisi degisti.
+        // It must differ from the two-chunk case, since the chunk count changed.
         let smaller = vec![7u8; MAX_CHUNK_SIZE * 2];
         assert_ne!(root, data_root(&smaller));
     }
@@ -194,7 +194,7 @@ mod tests {
         let spans = split_chunks(&data);
         assert_eq!(spans.len(), 2);
         for (start, end) in spans {
-            assert!(end - start >= MIN_CHUNK_SIZE, "kucuk kuyruk kaldi");
+            assert!(end - start >= MIN_CHUNK_SIZE, "a tiny tail was left");
         }
     }
 
@@ -205,25 +205,25 @@ mod tests {
             ArweaveVerdict::RootMismatch { expected, produced } => {
                 assert_ne!(expected, produced);
             }
-            ArweaveVerdict::Verified => panic!("sifir kok dogrulanmamaliydi"),
+            ArweaveVerdict::Verified => panic!("a zero root should not have verified"),
         }
         assert_eq!(verify(&data_root(data), data), ArweaveVerdict::Verified);
     }
 
     #[test]
     fn a_truncated_expected_root_is_rejected_not_verified() {
-        // Strix HIGH (CWE-354) regresyonu: 1-47 baytlık kirpilmis bir kok,
-        // tam uzunluktaki dogru kokun on-eki oldugu icin Verified'e
-        // yukseltilmemeli. 48 baytlık tam kokun 32 baytlık on-eki
-        // kullanilir ve reddedilmelidir.
+        // The Strix HIGH (CWE-354) regression: a truncated root of 1 to 47 bytes
+        // must not be raised to Verified merely for being a prefix of the correct
+        // full-length root. The 32-byte prefix of the 48-byte full root is used
+        // here, and it must be refused.
         let data = vec![9u8; MAX_CHUNK_SIZE + 1];
         let full_root = data_root(&data);
-        assert_eq!(full_root.len(), 48, "sabit onkosul: 48 baytlık kok");
+        assert_eq!(full_root.len(), 48, "a fixed precondition: a 48-byte root");
         let truncated = &full_root[..32];
         match verify(truncated, &data) {
             ArweaveVerdict::RootMismatch { .. } => {}
             ArweaveVerdict::Verified => {
-                panic!("kirpilmis kok Verified'e yukseltilmemeliydi (CWE-354)")
+                panic!("a truncated root should not have been raised to Verified (CWE-354)")
             }
         }
     }
