@@ -25,26 +25,26 @@ pub const DEFAULT_CHAIN_ID: u64 = 45262;
 /// path from the post-quantum wallet format.
 pub const SIGNATURE_VERSION_V4: u32 = 4;
 pub const SIGNATURE_VERSION_V5: u32 = 5;
-/// Coklu imzali yetkilendirme tasiyan islem bicimi.
+/// The transaction form that carries multisig authorization.
 ///
-/// V5 tek bir imza tasir ve `from`, o imzayi ureten anahtarin hash'idir. Bu,
+/// V5 carries a single signature and `from` is the hash of the key that produced it. That
 /// coklu imzali bir hesabin harcamasini ifade edemez: hesap soyutlama
-/// katmanindaki `MultisigPolicy` gercek bir `t-of-n` denetimi yapiyordu ama
-/// hicbir islem ona bir yetkilendirme getiremiyordu, cunku sema tek imza
-/// tasiyordu. Kural kodda vardi, uygulanacagi yol yoktu.
+/// `MultisigPolicy` in that layer performed a real `t-of-n` check, but
+/// no transaction could bring it an authorization, because the schema carried a single
+/// signature. The rule existed in code with no path to apply it.
 ///
-/// V6 bu yolu acar: imza alani bos kalir, yerine `authorization` gelir ve
-/// `from` tek bir anahtarin degil, **sahip kumesinin** hash'idir. Boylece
-/// hangi kumenin harcadigi adresin kendisine baglanir; bir saldirgan kendi
+/// V6 opens that path: the signature field stays empty, `authorization` takes its place, and
+/// `from` is the hash not of a single key but of the **owner set**. That way
+/// which set spends is bound to the address itself; an attacker cannot point their own
 /// sahip kumesiyle baskasinin adresini harcayamaz.
 pub const SIGNATURE_VERSION_V6: u32 = 6;
 
 /// Coklu imzali bir hesabin adresi: sahip kumesi + esik.
 ///
 /// Adres, kumenin kendisinden turetilir. Turetmeye esigin de girmesi
-/// gerekiyor: ayni uc sahibin `2-of-3` ve `3-of-3` politikalari farkli iki
-/// guvenlik ifadesidir ve ayni adresi paylasirlarsa, dusuk esikli olan
-/// yuksek esikli olanin fonunu harcar.
+/// is needed: `2-of-3` and `3-of-3` policies over the same three owners are two different
+/// security statements, and if they shared an address the lower threshold would spend
+/// the funds of the higher one.
 #[must_use]
 pub fn multisig_address(
     owners: &[[u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN]],
@@ -376,9 +376,9 @@ pub struct Transaction {
     pub signer_public_key: Vec<u8>,
     /// V6 coklu imzali yetkilendirme: sahip kumesi, esik ve imzalar.
     ///
-    /// V4/V5 icin `None` olmak zorunda. Bir V5 islemi bu alani tasiyorsa
-    /// reddedilir: tek imzayla dogrulanan bir islemin yaninda denetlenmemis
-    /// bir yetkilendirme durmasi, okuyan her kodun hangisinin bagladigini
+    /// Must be `None` for V4/V5. A V5 transaction carrying this field is
+    /// refused: an unchecked authorization sitting next to a transaction verified by a single
+    /// signature would leave every reader to guess which one binds.
     /// tahmin etmesini gerektirirdi.
     #[serde(default)]
     pub authorization: Option<MultisigAuthorizationV6>,
@@ -388,22 +388,22 @@ pub struct Transaction {
     pub tx_type: TransactionType,
 }
 
-/// Bir V6 islemini yetkilendiren sahip kumesi ve imzalari.
+/// The owner set and signatures that authorize a V6 transaction.
 ///
-/// # Neden sahip kumesi islemin icinde
+/// # Why the owner set lives inside the transaction
 ///
-/// Kume zincir durumunda saklanabilirdi, ama o zaman bir islemin
-/// dogrulanmasi hesap durumunun okunmasini gerektirirdi ve `verify()`
-/// durumsuz olmaktan cikardi. Bunun yerine kume islemle birlikte gelir ve
-/// `from` adresi kumeden turetildigi icin, yanlis kume getiren islem
+/// The set could be stored in chain state, but then verifying a transaction
+/// would require reading account state and `verify()` would stop being
+/// stateless. Instead the set travels with the transaction, and because the
+/// `from` address is derived from the set, a transaction bringing the wrong set
 /// baskasinin hesabini gosteremez: adres tutmaz.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultisigAuthorizationV6 {
-    /// Sahip ML-DSA-87 acik anahtarlari.
+    /// The owner ML-DSA-87 public keys.
     pub owners: Vec<Vec<u8>>,
-    /// Gereken gecerli imza sayisi.
+    /// The number of valid signatures required.
     pub threshold: u32,
-    /// `(sahip acik anahtari, imza)` ciftleri.
+    /// `(owner public key, signature)` pairs.
     pub signatures: Vec<(Vec<u8>, Vec<u8>)>,
 }
 impl Transaction {
@@ -641,9 +641,9 @@ impl Transaction {
         put_u64(&mut preimage, self.chain_id);
         put_u32(&mut preimage, self.signature_version);
         // V6: sahip kumesi ve esik imzanin kapsamina girer, imzalarin kendisi
-        // Girmez. Kume disarida kalsaydi bir aracinin kumeyi degistirip
+        // It does not. Had the set stayed outside, an intermediary could swap the set and
         // imzalari oldugu gibi tasimasi mumkun olurdu; imzalar iceride
-        // Olsaydi imza kendi kendini imzalardi.
+        // were included the signature would sign itself.
         if let Some(auth) = &self.authorization {
             let mut sorted: Vec<&Vec<u8>> = auth.owners.iter().collect();
             sorted.sort_unstable();
@@ -716,13 +716,13 @@ impl Transaction {
     }
     /// Coklu imzali bir hesap adina imzala.
     ///
-    /// `from` cagirandan gelmez, kume ve esikten turetilir: bir islemin
+    /// `from` does not come from the caller but is derived from the set and threshold: the
     /// baskasinin adresini gostermesi burada da mumkun olmamali. Imzalar
-    /// yetkilendirme kumesi preimage'e girdikten **sonra** alinir, cunku
+    /// authorization set is taken **after** it enters the preimage, because
     /// imzalanan sey kumeyi de kapsar.
     ///
-    /// Cagiran esigi karsilayacak kadar imza saglamazsa islem uretilir ama
-    /// dogrulanmaz; eksigi sessizce doldurmak, esigi anlamsiz kilardi.
+    /// If the caller supplies fewer signatures than the threshold the transaction is produced but
+    /// does not verify; silently filling the gap would make the threshold meaningless.
     #[cfg(feature = "wallet-ml-dsa")]
     pub fn sign_v6(
         &mut self,
@@ -781,9 +781,9 @@ impl Transaction {
         if canonical_genesis {
             return true;
         }
-        // Yetkilendirme yalniz V6'ya aittir. Bir V4/V5 islemi bunu tasiyorsa
-        // Reddedilir: iki yetki kaynagi yan yana durursa hangisinin bagladigi
-        // Okuyana kalir, ve bu tam olarak sessiz sapmanin bicimidir.
+        // Authorization belongs to V6 only. A V4/V5 transaction carrying it is
+        // refused: with two authority sources side by side which one binds is left to
+        // the reader, and that is exactly the shape of a silent divergence.
         if self.signature_version == SIGNATURE_VERSION_V6 {
             return self.verify_v6();
         }
@@ -851,18 +851,18 @@ impl Transaction {
         }
     }
 
-    /// V6 dogrulamasi: sahip kumesi adresi tutmali ve esik karsilanmali.
+    /// V6 verification: the owner set must hold the address and the threshold must be met.
     ///
-    /// Iki ayri kapi vardir ve ikisi de gereklidir. Birincisi **baglama**:
-    /// `from`, getirilen kume ve esikten turetilen adres olmak zorunda. Bu
-    /// olmadan gecerli imzalar toplayan bir saldirgan kendi kumesini bir
+    /// There are two separate gates and both are required. The first is **binding**:
+    /// `from` must be the address derived from the supplied set and threshold. Without it
+    /// an attacker who collects valid signatures could point their own set at
     /// baskasinin adresine iliskilendirebilirdi. Ikincisi **yetki**:
-    /// imzalar `MultisigPolicy` uzerinden tek tek dogrulanir, ayni sahibin
-    /// tekrari sayilmaz ve esigin altinda kalan islem reddedilir.
-    /// `wallet-ml-dsa` olmadan ML-DSA-87 dogrulayicisi derlenmez.
+    /// the signatures are verified one by one through `MultisigPolicy`, a repeated owner
+    /// does not count twice, and a transaction below the threshold is refused.
+    /// Without `wallet-ml-dsa` the ML-DSA-87 verifier is not compiled.
     ///
-    /// O yapilandirmada V6 **kapali duser**: dogrulanamayan bir imza kabul
-    /// edilemez. Bir surumun sessizce gecmesi, imzasiz harcama demektir.
+    /// In that configuration V6 **fails closed**: a signature that cannot be verified cannot be
+    /// accepted. Letting a version pass silently would mean spending without a signature.
     #[cfg(not(feature = "wallet-ml-dsa"))]
     fn verify_v6(&self) -> bool {
         debug!("V6 requires the wallet-ml-dsa backend; refusing fail-closed");
@@ -880,7 +880,7 @@ impl Transaction {
             debug!("V6 transaction carries no authorization");
             return false;
         };
-        // Tek imza alani V6'da bos kalir: yetki yetkilendirmededir.
+        // The single signature field stays empty in V6: authority lives in the authorization.
         if self.signature.is_some() || !self.signer_public_key.is_empty() {
             debug!("V6 transaction must not carry a single-key signature");
             return false;
@@ -1546,9 +1546,9 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             // is what a node checks first, and a preimage that omits a field
             // the wire carries is a field a relaying node may edit.
             put_u32(out, u32::from(req.effort.tenths()));
-            // Perception imza ön-imgesinde (wire-fields-are-signed kapısı):
-            // algı bildirimi istek anlamının parçasıdır; bir röle düğümü
-            // bunu değiştirebilse imza yine geçerdi.
+            // Perception is in the signature preimage (the wire-fields-are-signed gate):
+            // the perception declaration is part of the request meaning; if a relay node
+            // could change it the signature would still pass.
             match &req.perception {
                 Some(p) => {
                     put_u8(out, 1);
@@ -1972,7 +1972,7 @@ mod v29_signing_tests {
             Transaction::new_with_fee(from, test_addr_from_byte(7u8), 5, 1, 0, vec![])
         }
 
-        /// Esigi karsilayan bir yetkilendirme islemi gecerli kilar.
+        /// An authorization that meets the threshold makes the transaction valid.
         #[test]
         fn a_threshold_of_owners_authorizes_the_transaction() {
             let (keys, owners) = owner_set(3);
@@ -1982,33 +1982,36 @@ mod v29_signing_tests {
             assert_eq!(tx.signature_version, SIGNATURE_VERSION_V6);
         }
 
-        /// Esigin altinda kalan islem reddedilir. Kural `MultisigPolicy`'de
-        /// Yaziliydi; bu test onun bir isleme uygulandigini gosterir.
+        /// A transaction below the threshold is refused. The rule was written in
+        /// `MultisigPolicy`; this test shows it applied to a transaction.
         #[test]
         fn one_signature_does_not_meet_a_threshold_of_two() {
             let (keys, owners) = owner_set(3);
             let mut tx = tx_for(multisig_address(&owners, 2));
             tx.sign_v6(&owners, 2, &[&keys[0]]);
-            assert!(!tx.verify(), "tek imza 2-of-3 esigini karsilamaz");
+            assert!(
+                !tx.verify(),
+                "a single signature does not meet the 2-of-3 threshold"
+            );
         }
 
-        /// Ayni sahibin iki imzasi esigi karsilamaz.
+        /// Two signatures from the same owner do not meet the threshold.
         #[test]
         fn the_same_owner_signing_twice_does_not_reach_the_threshold() {
             let (keys, owners) = owner_set(3);
             let mut tx = tx_for(multisig_address(&owners, 2));
             tx.sign_v6(&owners, 2, &[&keys[0], &keys[0]]);
-            assert!(!tx.verify(), "tekrar eden imzalayan bir sayilir");
+            assert!(!tx.verify(), "a repeated signer counts once");
         }
 
-        /// Kume disindan bir imzalayan kabul edilmez.
+        /// A signer from outside the set is not accepted.
         #[test]
         fn an_outsider_signature_is_refused() {
             let (keys, owners) = owner_set(3);
             let outsider = WalletKeyPair::generate();
             let mut tx = tx_for(multisig_address(&owners, 2));
             tx.sign_v6(&owners, 2, &[&keys[0], &outsider]);
-            assert!(!tx.verify(), "kume disindaki imzalayan reddedilmeli");
+            assert!(!tx.verify(), "a signer outside the set must be refused");
         }
 
         /// Adres kumeye baglidir: baska bir hesabin adresi gosterilemez.
@@ -2019,15 +2022,15 @@ mod v29_signing_tests {
             let mut tx = tx_for(multisig_address(&owners, 2));
             tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
             assert!(tx.verify());
-            // Saldirgan hedef hesabin adresini takar: imzalar hala gecerli
-            // Ama adres kumeden turemedigi icin baglama kopar.
+            // The attacker attaches the target account address: the signatures are still valid
+            // but the address is not derived from the set, so the binding breaks.
             tx.from = multisig_address(&other_owners, 2);
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "adres kumeden turemeli");
         }
 
-        /// Esik adresin bir parcasidir: ayni kumenin dusuk esikli surumu
-        /// Yuksek esikli hesabin adresini gosteremez.
+        /// The threshold is part of the address: a lower-threshold version of the same set
+        /// cannot point at the address of the higher-threshold account.
         #[test]
         fn lowering_the_threshold_changes_the_address() {
             let (keys, owners) = owner_set(3);
@@ -2037,7 +2040,7 @@ mod v29_signing_tests {
             assert_ne!(tx.from, strict, "esik degisince adres de degisir");
         }
 
-        /// Kume imzanin kapsamindadir: bir araci onu degistiremez.
+        /// The set is inside the signature scope: an intermediary cannot change it.
         #[test]
         fn rewriting_the_owner_set_breaks_the_signatures() {
             let (keys, owners) = owner_set(3);
@@ -2048,10 +2051,10 @@ mod v29_signing_tests {
                 auth.owners = other_owners.iter().map(|o| o.to_vec()).collect();
             }
             tx.hash = tx.calculate_hash();
-            assert!(!tx.verify(), "kume imzalidir, degistirilemez");
+            assert!(!tx.verify(), "the set is signed and cannot be altered");
         }
 
-        /// V5 bir islem yetkilendirme tasiyamaz.
+        /// A V5 transaction cannot carry an authorization.
         #[test]
         fn a_v5_transaction_carrying_an_authorization_is_refused() {
             let keypair = WalletKeyPair::generate();
@@ -2067,7 +2070,7 @@ mod v29_signing_tests {
             assert!(!tx.verify(), "V5 yetkilendirme tasiyamaz");
         }
 
-        /// V6 bir islem tek imza tasiyamaz: iki yetki kaynagi olmaz.
+        /// A V6 transaction cannot carry a single signature: there are no two authority sources.
         #[test]
         fn a_v6_transaction_carrying_a_single_signature_is_refused() {
             let (keys, owners) = owner_set(3);
@@ -2075,10 +2078,10 @@ mod v29_signing_tests {
             tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
             tx.signature = Some(vec![0u8; 8]);
             tx.hash = tx.calculate_hash();
-            assert!(!tx.verify(), "V6 tek imza tasiyamaz");
+            assert!(!tx.verify(), "V6 cannot carry a single signature");
         }
 
-        /// Yetkilendirmesi olmayan bir V6 islemi reddedilir.
+        /// A V6 transaction without an authorization is refused.
         #[test]
         fn a_v6_transaction_without_an_authorization_is_refused() {
             let (keys, owners) = owner_set(3);
@@ -2086,10 +2089,10 @@ mod v29_signing_tests {
             tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
             tx.authorization = None;
             tx.hash = tx.calculate_hash();
-            assert!(!tx.verify(), "V6 yetkilendirmesiz olmaz");
+            assert!(!tx.verify(), "V6 does not exist without an authorization");
         }
 
-        /// Imzalanan sey islemin kendisidir: tutar degisirse yetki duser.
+        /// What is signed is the transaction itself: change the amount and the authority falls.
         #[test]
         fn tampering_with_the_amount_invalidates_the_authorization() {
             let (keys, owners) = owner_set(3);
@@ -2097,7 +2100,7 @@ mod v29_signing_tests {
             tx.sign_v6(&owners, 2, &[&keys[0], &keys[1]]);
             tx.amount = tx.amount.saturating_add(1);
             tx.hash = tx.calculate_hash();
-            assert!(!tx.verify(), "tutar imzalidir");
+            assert!(!tx.verify(), "the amount is signed");
         }
     }
 }

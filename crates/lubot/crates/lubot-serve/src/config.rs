@@ -1,73 +1,73 @@
-//! Serving yapılandırması ve atıf politikası denetimi.
+//! Serving configuration and attribution policy checks.
 
 use lubot_core::tier::ModelTier;
 
-/// Çıkarım motoru (araştırma §1.4: vLLM ve SGLang gün-0 destekli).
+/// Inference engine (research section 1.4: vLLM and SGLang are day-zero supported).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServeEngine {
     Vllm,
     Sglang,
     LlamaCpp,
-    /// Colibrì (Apache-2.0): ağırlıkları diskten akıtan MoE motoru.
+    /// Colibri (Apache-2.0): a MoE engine that streams weights from disk.
     ///
-    /// vLLM ve SGLang modelin tamamının VRAM'de yerleşik olmasını ister; bu,
-    /// operatörün veri merkezi sınıfı GPU'ya sahip olmasını şart koşar ve
-    /// `src/lubot/effort.rs`'in ilkesiyle çelişir: "A Lubot operator answers
+    /// vLLM and SGLang require the whole model to be resident in VRAM, which
+    /// forces the operator to own a data-center class GPU and contradicts the
+    /// principle of `src/lubot/effort.rs`: "A Lubot operator answers
     /// with the machine it actually owns." Colibrì VRAM/RAM/NVMe'yi tek bir
-    /// yerleşim hiyerarşisi gibi kullandığı için tüketici donanımı da
-    /// operatör olabilir.
+    /// as a placement hierarchy, consumer hardware can be an
+    /// operator too.
     ///
-    /// Ayrı süreç olarak, OpenAI-uyumlu uç üzerinden konuşulur; kod
-    /// kopyalanmaz, crate bağımlılığı eklenmez. Atıf `NOTICE.md`'ye yazılır.
+    /// It is spoken to as a separate process over an OpenAI-compatible endpoint; no code
+    /// is copied and no crate dependency is added. Attribution goes into `NOTICE.md`.
     Colibri,
 }
 
 impl ServeEngine {
-    /// Bu motorun aynı girdi için bit-birebir aynı çıktıyı üretmesi garanti
+    /// Whether this engine is guaranteed to produce bit-identical output for the same
     /// edilebilir mi?
     ///
-    /// **Neden önemli:** `AiRegistry::try_finalize_with_proofs` sonuçları
-    /// `output_commitment: [u8; 32]` değerine göre gruplar. İki operatör tek
-    /// bit farklı üretirse ayrı gruplara düşer ve `agreement_threshold` hiç
-    /// dolmaz -- istek sessizce finalize olmaz.
+    /// **Why it matters:** `AiRegistry::try_finalize_with_proofs` groups results by
+    /// `output_commitment: [u8; 32]`. If two operators differ by a single
+    /// bit they fall into separate groups and `agreement_threshold` is never
+    /// reached -- the request silently fails to finalize.
     ///
-    /// Colibrì CPU/CUDA/Metal arka uçlarını aynı anda destekler ve farklı
-    /// donanımda kayan nokta toplama sırası değişir; greedy örnekleme bile
-    /// bunu düzeltmez, çünkü sorun örneklemede değil toplamadadır. Bu yüzden
-    /// çok-arka-uçlu bir motor uzlaşma yolunda tek başına yeterli değildir:
-    /// `DeterminismProfile` ile birlikte kullanılmalıdır.
+    /// Colibri supports the CPU/CUDA/Metal backends at the same time, and floating point
+    /// summation order changes across hardware; even greedy sampling
+    /// does not fix it, because the problem is in the summation, not the sampling. So
+    /// a multi-backend engine is not sufficient on its own for the consensus path:
+    /// it must be used together with a `DeterminismProfile`.
     #[must_use]
     pub const fn is_bitwise_reproducible(self) -> bool {
         match self {
-            // Tek arka uç + sabit çekirdek: aynı ikili, aynı sonuç.
+            // A single backend plus fixed kernels: same binary, same result.
             ServeEngine::Vllm | ServeEngine::Sglang | ServeEngine::LlamaCpp => true,
-            // Heterojen yürütme motorun amacı; tek başına garanti edilemez.
+            // Heterogeneous execution is the point of the engine; it cannot be guaranteed alone.
             ServeEngine::Colibri => false,
         }
     }
 }
 
-/// Uzlaşma için gereken belirlenimlilik profili.
+/// The determinism profile required for consensus.
 ///
-/// Lubot uzlaşması bit-birebir eşitlik ister (`output_commitment` gruplaması),
-/// dolayısıyla operatörün örnekleme ve yürütme ayarları serbest bırakılamaz.
-/// Bu profil, bir köprünün uzlaşma yoluna katılabilmesi için karşılaması
-/// gereken asgari koşulları taşır.
+/// Lubot consensus requires bit-identical equality (the `output_commitment` grouping),
+/// so the operator's sampling and execution settings cannot be left free.
+/// This profile carries the minimum conditions a bridge must meet to join the
+/// consensus path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeterminismProfile {
-    /// Greedy örnekleme (`temperature = 0`). Sıfırdan farklı sıcaklık
-    /// örneklemeyi rastgeleleştirir; iki operatör aynı tohumla bile farklı
-    /// token seçebilir.
+    /// Greedy sampling (`temperature = 0`). A non-zero temperature randomizes
+    /// sampling; two operators may pick different tokens even with the same
+    /// seed.
     pub greedy: bool,
-    /// Sabit örnekleme tohumu.
+    /// A fixed sampling seed.
     pub seed: u64,
-    /// Tek ve sabit bir yürütme arka ucu (CPU **veya** CUDA **veya** Metal --
-    /// karışık değil). Kayan nokta toplama sırası arka uca göre değişir.
+    /// A single fixed execution backend (CPU **or** CUDA **or** Metal --
+    /// not mixed). Floating point summation order varies by backend.
     pub pinned_backend: bool,
 }
 
 impl DeterminismProfile {
-    /// Uzlaşma yolu için gereken profil.
+    /// The profile required for the consensus path.
     #[must_use]
     pub const fn for_consensus(seed: u64) -> Self {
         Self {
@@ -77,29 +77,29 @@ impl DeterminismProfile {
         }
     }
 
-    /// Profil uzlaşma için yeterli mi?
+    /// Whether the profile is sufficient for consensus.
     #[must_use]
     pub const fn is_consensus_safe(&self) -> bool {
         self.greedy && self.pinned_backend
     }
 }
 
-/// Köprü yapılandırması.
+/// Bridge configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeConfig {
-    /// Ağırlık kaynağı - orijinal ad korunur (atıf).
+    /// The weight source - the original name is preserved (attribution).
     pub weight_source: String,
-    /// API'de sunulan ad - kademe adlandırması: `lubot-{kademe}-{sürüm}`.
+    /// The name served through the API - tier naming: `lubot-{tier}-{version}`.
     pub served_model_name: String,
-    /// Bu köprünün sunduğu kademe.
+    /// The tier this bridge serves.
     pub tier: ModelTier,
     pub engine: ServeEngine,
     pub port: u16,
     pub base_url: String,
-    /// Bu köprü uzlaşma yoluna katılacaksa gereken belirlenimlilik profili.
+    /// The determinism profile required if this bridge joins the consensus path.
     ///
-    /// `None` = köprü yalnız yerel/deneysel kullanım içindir; uzlaşmaya
-    /// sokulmamalıdır.
+    /// `None` means the bridge is for local/experimental use only and must not be put into
+    /// consensus.
     pub determinism: Option<DeterminismProfile>,
 }
 
@@ -110,7 +110,7 @@ impl Default for ServeConfig {
 }
 
 impl ServeConfig {
-    /// Kademe + sürümden yapılandırma kur (2026-08-13 adlandırma kararı).
+    /// Build a configuration from tier + version (the 2026-08-13 naming decision).
     #[must_use]
     pub fn for_tier(tier: ModelTier, version: &str) -> Self {
         let weight_source = match tier {
@@ -129,54 +129,54 @@ impl ServeConfig {
     }
 }
 
-/// Atıf politikası denetimi: sunulan ad, üçüncü taraf model adını taşıyamaz
-/// ("DeepSeek'in kodunu alıp Lubot diye satmıyoruz" - yalnız kendi katmanımız
-/// Lubot adını taşır; taban `NOTICE.md` ve model kartında açıkça yazılır).
+/// Attribution policy check: the served name cannot carry a third-party model name
+/// (we do not take a third-party model and sell it as Lubot - only our own layer
+/// carries the Lubot name; the base is stated openly in `NOTICE.md` and the model card).
 ///
 /// # Errors
 ///
-/// `served_model_name` içinde "deepseek" veya çarpan etiketi
-/// kalıbı (ör. "0.5x", "10x") geçiyorsa.
+/// If `served_model_name` contains a third-party name or a multiplier tag
+/// pattern (for example "0.5x", "10x").
 pub fn assert_served_name_is_ours(cfg: &ServeConfig) -> Result<(), String> {
     let name = cfg.served_model_name.to_lowercase();
     if name.contains("deepseek") {
         return Err(format!(
-            "served_model_name üçüncü taraf adı taşıyamaz: {}",
+            "served_model_name cannot carry a third-party name: {}",
             cfg.served_model_name
         ));
     }
     if looks_like_multiplier(&cfg.served_model_name) {
         return Err(format!(
-            "served_model_name çarpan etiketi taşıyamaz: {}",
+            "served_model_name cannot carry a multiplier tag: {}",
             cfg.served_model_name
         ));
     }
     Ok(())
 }
 
-/// Bu köprü uzlaşma yoluna sokulabilir mi?
+/// Whether this bridge may be put into the consensus path.
 ///
-/// Kural: motor tek başına bit-birebir üretilebilir değilse (çok arka uçlu),
-/// uzlaşmaya ancak `is_consensus_safe` bir profille girebilir. Profil yoksa
-/// fail-closed reddedilir -- sessizce kabul edip uzlaşmanın hiç dolmamasını
-/// izlemek, hatayı canlılık sorunu gibi gösterir ve teşhisi zorlaştırır.
+/// Rule: if the engine is not bit-reproducible on its own (multi-backend),
+/// it may enter consensus only with an `is_consensus_safe` profile. Without a profile
+/// it is refused fail-closed -- silently accepting and then watching consensus never fill
+/// makes the fault look like a liveness problem and hinders diagnosis.
 ///
 /// # Errors
 ///
-/// Profil yoksa veya profil greedy/sabit-arka-uç koşullarını karşılamıyorsa.
+/// If there is no profile, or the profile does not meet the greedy/fixed-backend conditions.
 pub fn assert_consensus_ready(cfg: &ServeConfig) -> Result<(), String> {
     match cfg.determinism {
         None => {
             if cfg.engine.is_bitwise_reproducible() {
                 return Err(format!(
-                    "{:?} bit-birebir üretilebilir olsa da uzlaşma için açık bir \
-                     belirlenimlilik profili gerekir (greedy + sabit tohum)",
+                    "{:?} may be bit-reproducible, but consensus requires an explicit \
+                     determinism profile (greedy + fixed seed)",
                     cfg.engine
                 ));
             }
             Err(format!(
-                "{:?} çok arka uçlu bir motordur; belirlenimlilik profili olmadan \
-                 uzlaşmaya sokulamaz",
+                "{:?} is a multi-backend engine; without a determinism profile it \
+                 cannot be put into consensus",
                 cfg.engine
             ))
         }
@@ -188,8 +188,8 @@ pub fn assert_consensus_ready(cfg: &ServeConfig) -> Result<(), String> {
     }
 }
 
-/// Çarpan/kat etiketi kalıbı: `0.5x`, `2x`, `10x` gibi. Lubot kademeleri
-/// yalnızca `light` / `normal` adlarını taşır.
+/// Multiplier tag pattern such as `0.5x`, `2x`, `10x`. Lubot tiers
+/// carry only the names `light` / `normal`.
 #[must_use]
 fn looks_like_multiplier(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -244,15 +244,15 @@ mod tests {
             };
             assert!(
                 assert_served_name_is_ours(&cfg).is_err(),
-                "{bad} reddedilmeli"
+                "{bad} must be refused"
             );
         }
     }
 
     #[test]
     fn colibri_tek_basina_uzlasmaya_giremez() {
-        // Colibrì CPU/CUDA/Metal'i aynı anda destekler: bit-birebir eşitlik
-        // motorun kendi garantisi değildir.
+        // Colibri supports CPU/CUDA/Metal at the same time: bit-identical equality
+        // is not a guarantee the engine itself makes.
         assert!(!ServeEngine::Colibri.is_bitwise_reproducible());
         let cfg = ServeConfig {
             engine: ServeEngine::Colibri,
@@ -260,7 +260,7 @@ mod tests {
             ..Default::default()
         };
         let err = assert_consensus_ready(&cfg).expect_err("profilsiz kabul edilmemeliydi");
-        assert!(err.contains("çok arka uçlu"), "{err}");
+        assert!(err.contains("multi-backend"), "{err}");
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn eksik_profil_reddedilir() {
-        // Kapı boş (vacuous) değil: yetersiz profil de reddedilmeli.
+        // The gate is not vacuous: an insufficient profile must be refused too.
         for bad in [
             DeterminismProfile {
                 greedy: false,
@@ -295,15 +295,15 @@ mod tests {
             };
             assert!(
                 assert_consensus_ready(&cfg).is_err(),
-                "yetersiz profil reddedilmeliydi: {bad:?}"
+                "an insufficient profile should have been refused: {bad:?}"
             );
         }
     }
 
     #[test]
     fn varsayilan_kopru_uzlasmaya_hazir_degildir() {
-        // Varsayılan yapılandırma yerel kullanım içindir; uzlaşmaya sokmak
-        // açık bir karar olmalıdır.
+        // The default configuration is for local use; putting it into consensus
+        // must be an explicit decision.
         assert!(assert_consensus_ready(&ServeConfig::default()).is_err());
     }
 
