@@ -1255,10 +1255,10 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Egemen alan sablonunu kaydet.
+    /// Register a sovereign domain template.
     ///
-    /// Sablon, adlandirdigi uzlasma alanina baglanir: alan kayitli olmali ve
-    /// tur/operator eslesmelidir.
+    /// The template is bound to the consensus domain it names: the domain has
+    /// to be registered and the kind and operator have to match.
     pub async fn register_sovereign_template(
         &self,
         template: crate::domain::SovereignDomainTemplate,
@@ -1275,7 +1275,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Denetim disa aktarimini kayitli sablona karsi dogrula.
+    /// Verify an audit export against the registered template.
     pub async fn validate_sovereign_audit_export(
         &self,
         bundle: crate::domain::sovereign::AuditExportBundle,
@@ -2572,13 +2572,13 @@ impl ChainActor {
             );
         }
 
-        // Yerlesim tavsiyesi. Bekleyen her onarim biletine, rendezvous
-        // yerlesiminin o shard icin sectigi tutucu yazilir. Bileti kim kabul
-        // ederse yine o alir; yazilan sey bir kural degil bir olcumdur, ve
-        // sapmayi `placements_that_diverged` gorunur kilar.
+        // The placement advice. Every pending repair ticket records the holder
+        // the rendezvous placement chose for that shard. Whoever accepts the
+        // ticket still gets it; what is written is a measurement, not a rule,
+        // and `placements_that_diverged` makes the divergence visible.
         //
-        // Entropi son blogun hash'inden: her dugum ayni cevabi bulur, ve
-        // secim bir epoch oncesinden tahmin edilemez.
+        // The entropy comes from the last block's hash: every node finds the
+        // same answer, and the choice cannot be predicted an epoch ahead.
         let placement_candidates: Vec<crate::storage::assignment::ShardCandidate> = self
             .blockchain
             .state
@@ -2620,10 +2620,10 @@ impl ChainActor {
             );
         }
 
-        // Talep bandi. Rejim indirimi almis bir nesne cok okunmaya baslarsa
-        // hedefi geri yukselir; asagidaki tarama bunu her epoch yeniden
-        // olcer. `under_replicated_shards` artik epoch aliyor, yani indirim
-        // sabit degil kanitlanmis okumaya bagli.
+        // The demand band. If an object that received a regime discount starts
+        // being read heavily, its target rises again; the scan below
+        // re-measures that every epoch. `under_replicated_shards` now takes an
+        // epoch, so the discount is not fixed but bound to proven reads.
         let demand_gap = self
             .blockchain
             .state
@@ -2655,17 +2655,18 @@ impl ChainActor {
         }
     }
 
-    /// AI registry bakımı: süresi dolan istekler, sonuçlar, geri alınan ücret
-    /// kayıtları ve ihtilaf penceresi kayıtları burada tahliye edilir.
+    /// AI registry maintenance: expired requests, results, refunded fee
+    /// records and dispute window records are evicted here.
     ///
-    /// Yazılı mekanizma (`AiRegistry::prune_expired` /
-    /// `expire_dispute_window`) bugüne kadar yalnızca testlerden çağrılıyordu:
-    /// üretimde hiçbir şey çağırmıyordu ve AI registry'si kalıcı state
-    /// büyümesi taşıyordu ("yazıldı ama çağrılmıyor" sınıfı - hafıza dersi).
+    /// The written mechanism (`AiRegistry::prune_expired` /
+    /// `expire_dispute_window`) had until now only been called from the tests:
+    /// nothing called it in production and the AI registry carried permanent
+    /// state growth (the "written but never called" class - a memory
+    /// lesson).
     fn run_ai_maintenance(&mut self, block_height: u64) {
-        // İhtilaf penceresi (10_080 blok) aynı zamanda saklama penceresidir:
-        // sonuçlanmamış istekler ve deliller, kesinleşme + itiraz süresi
-        // dolmadan asla silinmez.
+        // The dispute window (10_080 blocks) is also the retention window:
+        // unsettled requests and evidence are never deleted before the
+        // finality plus objection period has elapsed.
         let retention = crate::ai::registry::DISPUTE_WINDOW_BLOCKS;
         let pruned = self
             .blockchain
