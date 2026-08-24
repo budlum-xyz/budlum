@@ -67,7 +67,6 @@ bud/src/bud_format_tiny.rs	21
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
 bud/src/bud_format_wal.rs	15
-bud/src/bud_format_zkbridge.rs	26
 bud/src/churn.rs	6
 bud/src/cli.rs	11
 bud/src/fidelity.rs	8
@@ -200,7 +199,6 @@ src/network/node.rs	18
 src/network/sync_codec.rs	1
 src/pollen/README.md	23
 src/pollen/data_rights.rs	21
-src/pollen/mod.rs	26
 src/privacy/mod.rs	1
 src/privacy/submit.rs	11
 src/prover/mod.rs	25
