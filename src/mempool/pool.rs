@@ -2,13 +2,14 @@ use crate::core::address::Address;
 use crate::core::transaction::Transaction;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-// (2026-07-21) consensus determinizmi - aynı fee'deki
-// Işlemler HashSet iteration sırasıyla (process-random) geliyordu;
-// `get_sorted_transactions` → `collect_block_transactions` → blok gövdesi
-// Sırası node'dan node'a değişebilirdi (aynı-fee tie durumunda farklı blok
-// Hash'i / potansiyel split). Tie-break artık canonik: `BTreeSet<String>`
-// Ile tx.hash lexikografik düzeni - ücret DESC, hash ASC. Bu kuralı değiştirmek
-// Consensus davranışını değiştirir: dokümante ve testli (`test_same_fee_canonical_order_by_hash`).
+// (2026-07-21) consensus determinism: transactions sharing a fee arrived in
+// HashSet iteration order (process-random), so the block body order that runs
+// `get_sorted_transactions` -> `collect_block_transactions` could differ from
+// node to node (a different block hash on a same-fee tie, and a potential
+// split). The tie-break is canonical now: lexicographic tx.hash order through
+// `BTreeSet<String>` - fee DESC, hash ASC. Changing this rule changes
+// consensus behaviour: it is documented and tested
+// (`test_same_fee_canonical_order_by_hash`).
 
 #[derive(Debug, Clone)]
 pub struct MempoolConfig {
@@ -122,11 +123,12 @@ impl Mempool {
                     "replacement target vanished from the pool".to_string(),
                 ));
             };
-            // RBF bump her zaman POZİTİF olmalı. Tamsayı bölmesiyle
-            // Küçük fee'lerde bump 0'a yuvarlanıyordu (fee=1, %10 → bump 0)
-            // → aynı fee ile limitsiz replace-churn (ucuz DoS vektörü).
-            // Artık: bump = max(1, ceil(fee * pct / 100)); replace fee > eski
-            // Fee olmak ZORUNDA. Overflow'a karşı u128 ara hesaplama.
+            // The RBF bump must always be POSITIVE. With integer division the
+            // bump rounded down to 0 on small fees (fee=1, 10 percent -> bump
+            // 0), which allowed unlimited replace-churn at the same fee (a
+            // cheap DoS vector). Now: bump = max(1, ceil(fee * pct / 100)),
+            // and the replacement fee MUST exceed the old fee. The
+            // intermediate computation uses u128 against overflow.
             let bump =
                 (existing.tx.fee as u128 * self.config.rbf_bump_percent as u128).div_ceil(100);
             let min_new_fee = existing
@@ -426,10 +428,11 @@ mod tests {
         assert_eq!(pool.len(), 1);
     }
 
-    /// Aynı fee tie-break canonik (tx.hash ASC). Farklı ekleme
-    /// Sırası sonucu DEĞİŞTİRMEMELİ - eski HashSet yolu process-random
-    /// Iteration ile bu testin iki havuzunda fark verirdi (flaky/üretimde
-    /// Nondeterministik blok gövdesi sırası).
+    /// The same-fee tie-break is canonical (tx.hash ASC). A different
+    /// insertion order MUST NOT change the result - the old HashSet path, with
+    /// its process-random iteration, would differ between the two pools in
+    /// this test (flaky, and a nondeterministic block body order in
+    /// production).
     #[test]
     fn test_same_fee_canonical_order_by_hash() {
         // Three different senders with same fee - canonical order by tx.hash.
@@ -453,7 +456,7 @@ mod tests {
             .collect();
         assert_eq!(order1, hashes);
 
-        // Farklı ekleme sırası, aynı canonik çıktı.
+        // A different insertion order, the same canonical output.
         let mut pool2 = Mempool::default();
         pool2.add_transaction(tx_b).unwrap();
         pool2.add_transaction(tx_c).unwrap();
@@ -467,7 +470,8 @@ mod tests {
     }
 
     /// RBF replace her zaman kat'i pozitif bump ister.
-    /// Eski yol: fee=1, %10 → bump=0 → aynı fee ile replace (churn vektörü).
+    /// The old path: fee=1, 10 percent -> bump=0 -> replacement at the same
+    /// fee (the churn vector).
     #[test]
     fn test_rbf_requires_strict_positive_bump() {
         let mut pool = Mempool::default();
@@ -475,8 +479,9 @@ mod tests {
         let tx1 = create_test_tx_from_seed(alice_seed, 0, 1);
         pool.add_transaction(tx1).unwrap();
 
-        // Aynı fee ile replace RED - farklı hash için nonce'u 1 kullan,
-        // Sonra geri nonce 0'a dönüp fee bump kontrolünü test et.
+        // Replacement at the same fee is REFUSED. Use nonce 1 to get a
+        // different hash, then come back to nonce 0 and test the fee bump
+        // check.
         // Tx2: same sender, same nonce (0), same fee (1), different data → different hash.
         let seed = [alice_seed; 32];
         let keypair = crate::crypto::primitives::KeyPair::from_seed(&seed).unwrap();
