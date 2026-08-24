@@ -1,21 +1,24 @@
-//! B.U.D. 2.0 Icat - Uçtan Uca Kayıpsız Boru Hattı (format algılama + konteyner)
+//! B.U.D. 2.0 Invention - An End-to-End Lossless Pipeline (format detection + container)
 //!
-//! K38 sertleştirme: ham baytlardan .bud v2 konteynerine, oradan geriye.
-//! `store(data) -> Option<Vec<u8>>` ve `restore(bytes) -> Option<Vec<u8>>` ile
-//! KAYIPSIZLIK GARANTİSİ: `restore(store(d)) == d` HER `d` için (K38 mülkiyeti).
+//! K38 hardening: from raw bytes to a .bud v2 container, and back again.
+//! With `store(data) -> Option<Vec<u8>>` and `restore(bytes) -> Option<Vec<u8>>`
+//! the LOSSLESSNESS GUARANTEE is: `restore(store(d)) == d` for EVERY `d` (the
+//! K38 property).
 //!
-//! Katman modeli:
-//!   1. Format algılama (heuristik, deterministik) - yanlış algılama güvenlik sorunu
-//!      DEĞİLDİR çünkü kayıpsızlık türden bağımsızdır; tür yalnız parça tanecikliğini
-//!      (dedup/kanıt verimi) etkiler.
-//!   2. Yapısal parçalama + compaction (K35: küçük-parça amplifikasyonuna karşı).
-//!   3. BudV2File tam dosya: başlık + her parça content_id + bomba korumaları.
+//! Layer model:
+//!   1. Format detection (heuristic, deterministic) - a wrong detection is NOT
+//!      a security problem, because losslessness is independent of the type;
+//!      the type only affects chunk granularity (dedup/proof efficiency).
+//!   2. Structural chunking + compaction (K35: against small-chunk amplification).
+//!   3. A full BudV2File: header + a content_id per chunk + bomb guards.
 //!
-//! Sıkıştırma bu katmanda DEĞİLDİR: uzman boru hattı (structural+zstd19 vb.) ayrı
-//! adımdır ve runner'da ölçülür; bu modül bütünlük + kayıpsızlık + dedup-uyumluluğu
-//! garanti eden konteyner katmanıdır.
+//! Compression is NOT in this layer: the expert pipeline (structural+zstd19 and
+//! so on) is a separate step measured in the runner; this module is the
+//! container layer guaranteeing integrity, losslessness and dedup
+//! compatibility.
 //!
-//! Kod: no unsafe, deterministik, mülkiyet testleriyle. #![forbid(unsafe_code)] korunur.
+//! Code: no unsafe, deterministic, with property tests. #![forbid(unsafe_code)]
+//! is kept.
 
 #![forbid(unsafe_code)]
 
@@ -24,24 +27,25 @@ use crate::bud_format_columnar::{
 };
 use crate::bud_format_container::{structural_split_compact, BudV2File, FormatCodec};
 
-/// Varsayılan compaction eşiği (K35): 64 KiB altı bitişik parçalar birleştirilir.
+/// Default compaction threshold (K35): adjacent chunks under 64 KiB are merged.
 pub const DEFAULT_MIN_CHUNK: usize = 64 * 1024;
 
-/// Format algılama (heuristik, deterministik, kayıpsızlıktan bağımsız).
-/// Sıra: JSON (ilk anlamlı karakter `[`/`{`) → CSV (virgül+satır) → LOG (yıl başlangıçlı
-/// satır) → Text (satır içeren) → Unknown (ikili). Yanlış eşleşme güvenli: parçalama
-/// her türde kayıpsız (K38), yalnız taneciklik değişir.
+/// Format detection (heuristic, deterministic, independent of losslessness).
+/// Order: JSON (first meaningful character `[`/`{`) -> CSV (comma + lines) ->
+/// LOG (a line starting with a year) -> Text (contains lines) -> Unknown
+/// (binary). A wrong match is safe: chunking is lossless for every type (K38),
+/// only the granularity changes.
 pub fn detect(data: &[u8]) -> FormatCodec {
     if data.is_empty() {
         return FormatCodec::Unknown;
     }
-    // JSON: baştaki boşlukları at, `[` veya `{` ile başla
+    // JSON: drop leading whitespace, start with `[` or `{`
     let t = String::from_utf8_lossy(data);
     let first = t.trim_start();
     if first.starts_with('[') || first.starts_with('{') {
         return FormatCodec::Json;
     }
-    // CSV: virgül + satır içeren düz metin
+    // CSV: plain text containing commas and lines
     let mut comm = 0u32;
     let mut nl = 0u32;
     for b in data.iter().take(4096) {
@@ -54,7 +58,7 @@ pub fn detect(data: &[u8]) -> FormatCodec {
     if comm > 0 && nl > 0 {
         return FormatCodec::Csv;
     }
-    // LOG: ilk satır dört haneli yıl ile başlar (2026-...)
+    // LOG: the first line starts with a four-digit year (2026-...)
     if let Some(fl) = t.lines().next() {
         let fl = fl.trim_start();
         let b = fl.as_bytes();
@@ -70,23 +74,24 @@ pub fn detect(data: &[u8]) -> FormatCodec {
     if nl > 0 {
         return FormatCodec::Text;
     }
-    // Son sinyal: tamamı yazdırılabilir ASCII (satır sonları dahil) ise düz metin.
-    // Yanlış eşleşme güvenli - kayıpsızlık türden bağımsız (K38), yalnız taneciklik değişir.
+    // Last signal: if it is all printable ASCII (line breaks included) it is
+    // plain text. A wrong match is safe - losslessness is independent of the
+    // type (K38), only the granularity changes.
     let printable = data
         .iter()
         .all(|b| (0x20..0x7F).contains(b) || *b == b'\n' || *b == b'\t' || *b == b'\r');
     if printable {
         return FormatCodec::Text;
     }
-    FormatCodec::Unknown // Binary (jpeg/png/mp4/pdf vb. tespit edilemezse binary varsayılır)
+    FormatCodec::Unknown // Binary (jpeg/png/mp4/pdf and so on default to binary when undetected)
 }
 
-/// Kaydet (RAW): algıla → yapısal parçala (compact) → BudV2File serileştir.
+/// Store (RAW): detect -> chunk structurally (compact) -> serialise a BudV2File.
 pub fn store(data: &[u8]) -> Option<Vec<u8>> {
     store_with_min(data, DEFAULT_MIN_CHUNK)
 }
 
-/// `store` ile aynı, compaction eşiği parametreli (test/esneklik için).
+/// The same as `store`, with the compaction threshold as a parameter (for tests/flexibility).
 pub fn store_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
     let codec = detect(data);
     let kind = codec.structural_kind();
@@ -95,13 +100,14 @@ pub fn store_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
     Some(file.encode())
 }
 
-/// Kaydet (HUFFMAN): her parça gerçek kayıpsız Huffman ile sıkıştırılır - .bud dosyası
-/// tekrarlı içerikte GERÇEKTEN küçülür (K38). Kayıpsızlık: `restore` orijinali döner.
+/// Store (HUFFMAN): every chunk is compressed with real lossless Huffman - the
+/// .bud file GENUINELY shrinks on repetitive content (K38). Losslessness:
+/// `restore` returns the original.
 pub fn store_compressed(data: &[u8]) -> Option<Vec<u8>> {
     store_compressed_with_min(data, DEFAULT_MIN_CHUNK)
 }
 
-/// `store_compressed` ile aynı, compaction eşiği parametreli.
+/// The same as `store_compressed`, with the compaction threshold as a parameter.
 pub fn store_compressed_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
     let codec = detect(data);
     let kind = codec.structural_kind();
@@ -110,13 +116,14 @@ pub fn store_compressed_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8
     Some(file.encode())
 }
 
-/// Kaydet (ZSTD): her parça gerçek zstd level 19 ile sıkıştırılır (V21 yol haritası).
-/// Huffman'dan iyi oran; açma K25 tavanıyla güvenli. Kayıpsızlık: `restore` orijinali döner.
+/// Store (ZSTD): every chunk is compressed with real zstd level 19 (the V21
+/// roadmap). A better ratio than Huffman; decompression is safe under the K25
+/// ceiling. Losslessness: `restore` returns the original.
 pub fn store_zstd(data: &[u8]) -> Option<Vec<u8>> {
     store_zstd_with_min(data, DEFAULT_MIN_CHUNK)
 }
 
-/// `store_zstd` ile aynı, compaction eşiği parametreli.
+/// The same as `store_zstd`, with the compaction threshold as a parameter.
 pub fn store_zstd_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
     let codec = detect(data);
     let kind = codec.structural_kind();
@@ -125,11 +132,12 @@ pub fn store_zstd_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
     Some(file.encode())
 }
 
-/// Geri yükle: sıkı doğrula + parçaları (RAW/Huffman/Zstd otomatik) aç + birleştir → ORİJİNAL.
-/// KAYIPSIZ JSON COLUMNAR boru hattı (İcat): JSON dizisini sütunlara ayırıp zstd ile
-/// sıkıştırılmış konteyner yazar. Exact → byte-identical (K38); OrderFree → kayıt kümesi
-/// korunur (KF2) ve daha yüksek oran (ölçüm: 7.83x → 8.53x / 11.49x, seed=7).
-/// Düzensiz JSON → None (kayıpsızlık korunur, çağıran ham yola düşer).
+/// Restore: verify strictly + decompress the chunks (RAW/Huffman/Zstd detected automatically) + join -> the ORIGINAL.
+/// A LOSSLESS JSON COLUMNAR pipeline (invention): it splits a JSON array into
+/// columns and writes a zstd-compressed container. Exact -> byte-identical
+/// (K38); OrderFree -> the record set is preserved (KF2) at a higher ratio
+/// (measured: 7.83x -> 8.53x / 11.49x, seed=7). Irregular JSON -> None
+/// (losslessness is preserved, the caller falls back to the raw path).
 pub fn store_json_columnar(data: &[u8], mode: ColumnarMode, _min_chunk: usize) -> Option<Vec<u8>> {
     let col = columnar_encode(data, mode)?;
     let blob = columnar_to_blob(&col);
@@ -141,13 +149,13 @@ pub fn store_json_columnar(data: &[u8], mode: ColumnarMode, _min_chunk: usize) -
     Some(file.encode())
 }
 
-/// Columnar konteynerden geri yükle: zstd aç → columnar decode → JSON.
+/// Restore from a columnar container: zstd decompress -> columnar decode -> JSON.
 pub fn restore_json_columnar(bytes: &[u8], mode: ColumnarMode) -> Option<Vec<u8>> {
     let file = BudV2File::decode(bytes)?;
     let raw = file.restore_original()?;
     let col = crate::bud_format_columnar::columnar_from_blob(&raw)?;
     if col.mode != mode {
-        return None; // mod uyuşmazlığı → red
+        return None; // mode mismatch -> refuse
     }
     columnar_decode(&col)
 }
@@ -157,7 +165,7 @@ pub fn restore(bytes: &[u8]) -> Option<Vec<u8>> {
     file.restore_original()
 }
 
-/// Parça sayısı (dedup/kanıt verimi izleme için yardımcı).
+/// Chunk count (a helper for tracking dedup/proof efficiency).
 pub fn chunk_count(bytes: &[u8]) -> Option<usize> {
     BudV2File::decode(bytes).map(|f| f.chunks.len())
 }
@@ -177,8 +185,8 @@ mod tests {
         // LOG
         b"2026-08-16T10:00:00Z INFO req=1 /a s=200\n2026-08-16T10:01:00Z WARN req=2 /b s=404\n",
         // TEXT
-        b"satir 1\nsatir 2\nsatir 3\n",
-        b"tek satir sonu yok",
+        b"line 1\nline 2\nline 3\n",
+        b"single line without a terminator",
         // BINARY
         &[0x89, 0x50, 0x4E, 0x47, 0x00, 0x01, 0x02, 0xFF],
         b"",
@@ -205,24 +213,24 @@ mod tests {
 
     #[test]
     fn store_restore_roundtrip_all_samples() {
-        // K38: HER örnekte restore(store(d)) == d
+        // K38: restore(store(d)) == d for EVERY sample
         for (i, data) in SAMPLES.iter().enumerate() {
-            let enc = store(data).unwrap_or_else(|| panic!("örnek {i} store edilemeli"));
-            let dec = restore(&enc).unwrap_or_else(|| panic!("örnek {i} restore edilemeli"));
-            assert_eq!(&dec[..], *data, "örnek {i} kayıpsız olmalı");
-            // her örnek en az 1 parça içermeli (boş girdi hariç 0 parça)
+            let enc = store(data).unwrap_or_else(|| panic!("sample {i} must store"));
+            let dec = restore(&enc).unwrap_or_else(|| panic!("sample {i} must restore"));
+            assert_eq!(&dec[..], *data, "sample {i} must be lossless");
+            // every sample must contain at least 1 chunk (0 chunks only for empty input)
             let cc = chunk_count(&enc).unwrap();
             if data.is_empty() {
                 assert_eq!(cc, 0);
             } else {
-                assert!(cc >= 1, "örnek {i} en az 1 parça");
+                assert!(cc >= 1, "sample {i} needs at least 1 chunk");
             }
         }
     }
 
     #[test]
     fn store_restore_property_random() {
-        // Deterministik PRNG ile 150 rastgele girdi - kayıpsızlık mülkiyeti (K38)
+        // 150 random inputs from a deterministic PRNG - the losslessness property (K38)
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -252,23 +260,27 @@ mod tests {
             }
             let enc = store_with_min(&data, 1 + rng.below(1024)).expect("store");
             let dec = restore(&enc).expect("restore");
-            assert_eq!(dec, data, "round {round} kayıpsız olmalı");
+            assert_eq!(dec, data, "round {round} must be lossless");
         }
     }
 
     #[test]
     fn store_compressed_roundtrip_all_samples() {
-        // K38: sıkıştırılmış boru hattı da HER örnekte kayıpsız; restore RAW/HFM/Zstd otomatik
+        // K38: the compressed pipeline is lossless on EVERY sample too; restore detects RAW/HFM/Zstd
         for (i, data) in SAMPLES.iter().enumerate() {
-            let enc = store_compressed(data).unwrap_or_else(|| panic!("örnek {i} store edilemeli"));
-            let dec = restore(&enc).unwrap_or_else(|| panic!("örnek {i} restore edilemeli"));
-            assert_eq!(&dec[..], *data, "örnek {i} sıkıştırılmış turda kayıpsız");
+            let enc = store_compressed(data).unwrap_or_else(|| panic!("sample {i} must store"));
+            let dec = restore(&enc).unwrap_or_else(|| panic!("sample {i} must restore"));
+            assert_eq!(
+                &dec[..],
+                *data,
+                "sample {i} lossless in the compressed round"
+            );
             // zstd turu
-            let encz = store_zstd(data).unwrap_or_else(|| panic!("örnek {i} store_zstd edilemeli"));
-            let decz = restore(&encz).unwrap_or_else(|| panic!("örnek {i} restore_zstd edilemeli"));
-            assert_eq!(&decz[..], *data, "örnek {i} zstd turunda kayıpsız");
+            let encz = store_zstd(data).unwrap_or_else(|| panic!("sample {i} must store_zstd"));
+            let decz = restore(&encz).unwrap_or_else(|| panic!("sample {i} must restore_zstd"));
+            assert_eq!(&decz[..], *data, "sample {i} lossless in the zstd round");
         }
-        // tekrarlı log: sıkıştırılmış .bud RAW'dan küçük olmalı (gerçek sıkışma)
+        // repetitive log: the compressed .bud must be smaller than RAW (real compression)
         let line = b"2026-08-16 INFO req=1 /api/a s=200 b=42 reg=tr\n";
         let mut log = Vec::new();
         for _ in 0..2000 {
@@ -278,7 +290,7 @@ mod tests {
         let comp = store_compressed(&log).unwrap();
         assert!(
             comp.len() < raw.len(),
-            "sıkıştırılmış .bud küçülmeli: {} vs {}",
+            "the compressed .bud must shrink: {} vs {}",
             raw.len(),
             comp.len()
         );
@@ -286,7 +298,7 @@ mod tests {
         let z = store_zstd(&log).unwrap();
         assert!(
             z.len() < comp.len(),
-            "zstd Huffman'dan küçük: {} vs {}",
+            "zstd is smaller than Huffman: {} vs {}",
             z.len(),
             comp.len()
         );
@@ -305,7 +317,7 @@ mod tests {
         let mut t2 = enc.clone();
         t2.truncate(enc.len() - 2);
         assert!(restore(&t2).is_none());
-        // çöp
+        // garbage
         assert!(restore(&[0xFF; 64]).is_none());
         assert!(restore(&[]).is_none());
     }
