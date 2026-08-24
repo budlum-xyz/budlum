@@ -1,13 +1,13 @@
-//! Fixture bütünlüğü gate'i.
+//! The fixture integrity gate.
 //!
-//! `config/fixtures/gercek-zincir.json` testlerin dayandığı tek kaynaktır
-//! (`src/tests/gercek_zincir_fixtures.rs` aynı dosyayı okur - tek kaynak
-//! kuralı; ikinci kopya en kötü kopyadır). Bu gate dosyanın var olduğunu,
-//! zorunlu bölümleri taşıdığını, makul boyutta kaldığını ve kendi format
-//! kurallarına (0x'siz hex) uyduğunu doğrular. İçerik eşleşmesinin gerçek
-//! zincire karşı doğrulanması testlerin işidir; bu gate şema kanaryasıdır.
-//! JSON bağımlılığı bilinçli olarak eklenmedi: gate'ler yalnızca syn+quote
-//! taşır ve bu gate string düzeyinde yeterli doğrulama yapar.
+//! `config/fixtures/gercek-zincir.json` is the single source the tests rest on
+//! (`src/tests/gercek_zincir_fixtures.rs` reads the same file - the single-source
+//! rule; a second copy is the worst copy). This gate verifies that the file exists,
+//! carries the required sections, stays within a sane size and obeys its own format
+//! rules (hex without 0x). Verifying the content against the real chain is the
+//! job of the tests; this gate is a schema canary.
+//! A JSON dependency was deliberately not added: the gates carry only syn+quote
+//! and this gate validates well enough at string level.
 
 use std::path::Path;
 
@@ -27,67 +27,73 @@ const REQUIRED_SECTIONS: &[&str] = &[
 
 /// # Errors
 ///
-/// Fixture dosyası eksik, boş, şişmiş veya bölüm eksik olduğunda.
+/// When the fixture file is missing, empty, bloated, or has a missing section.
 pub fn run(root: &Path) -> Result<String, String> {
     let path = root.join(FIXTURE_PATH);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("fixture dosyası okunamadı: {} ({e})", path.display()))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "the fixture file could not be read: {} ({e})",
+            path.display()
+        )
+    })?;
     let len = text.len() as u64;
     if len < MIN_BYTES {
         return Err(format!(
-            "fixture {len} bayt - {MIN_BYTES} altı (dosya boşaltılmış olabilir)"
+            "the fixture is {len} bytes - below {MIN_BYTES} (the file may have been emptied)"
         ));
     }
     if len > MAX_BYTES {
         return Err(format!(
-            "fixture {len} bayt - {MAX_BYTES} üstü (dosyaya veri dökülmüş olabilir)"
+            "the fixture is {len} bytes - above {MAX_BYTES} (data may have been dumped into the file)"
         ));
     }
     for section in REQUIRED_SECTIONS {
         if !text.contains(section) {
-            return Err(format!("fixture zorunlu bölüm eksik: {section}"));
+            return Err(format!(
+                "the fixture is missing a required section: {section}"
+            ));
         }
     }
-    // Kendi format kuralımız: hex alanlar 0x öneksiz saklanır. 0x önekli
-    // alan, format drift'ine işaret eder (Blockchair ham kopyası karışmış).
+    // Our own format rule: hex fields are stored without a 0x prefix. A prefixed
+    // field signals format drift (a raw upstream copy has been mixed in).
     if text.contains("\"0x") {
         return Err(
-            "fixture 0x-önekli alan içeriyor; kendi formatımız öneksizdir - \
-             drift kontrolü"
+            "the fixture contains a 0x-prefixed field; our own format is unprefixed - \
+             a drift check"
                 .into(),
         );
     }
     Ok(format!(
-        "fixture doğrulandı: {len} bayt, {} zorunlu bölüm mevcut",
+        "fixture verified: {len} bytes, {} required sections present",
         REQUIRED_SECTIONS.len()
     ))
 }
 
-/// Gate'in kendisinin kırmızı düşebildiğinin kanıtı: geçici dizinde bozuk
-/// kopyalar üretilir, her biri `run` tarafından reddedilmeli.
+/// Evidence that the gate itself can go red: corrupt copies are produced in a temporary
+/// directory and each must be refused by `run`.
 ///
 /// # Errors
 ///
-/// Bozuk kopyalardan biri reddedilmezse (vacuous gate) hata döner.
+/// Errors if one of the corrupt copies is not refused (a vacuous gate).
 pub fn self_test() -> Result<String, String> {
     let dir = std::env::temp_dir().join("budlum-fixture-gate-self-test");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("config/fixtures"))
-        .map_err(|e| format!("geçici dizin kurulamadı: {e}"))?;
+        .map_err(|e| format!("the temporary directory could not be created: {e}"))?;
     let fixture = dir.join(FIXTURE_PATH);
 
     // (1) Eksik dosya → red.
     if run(&dir).is_ok() {
-        return Err("eksik fixture dosyası reddedilmedi (vacuous)".into());
+        return Err("a missing fixture file was not refused (vacuous)".into());
     }
 
-    // (2) Boş/ufak dosya → red.
+    // (2) An empty or tiny file -> refused.
     std::fs::write(&fixture, "{}").map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
-        return Err("boş fixture reddedilmedi (vacuous)".into());
+        return Err("an empty fixture was not refused (vacuous)".into());
     }
 
-    // (3) Bölüm eksik dosya → red.
+    // (3) A file with a missing section -> refused.
     std::fs::write(
         &fixture,
         format!(
@@ -98,10 +104,10 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
-        return Err("bölüm-eksik fixture reddedilmedi (vacuous)".into());
+        return Err("a fixture with a missing section was not refused (vacuous)".into());
     }
 
-    // (4) 0x-önekli alan (format drift'i) → red.
+    // (4) A 0x-prefixed field (format drift) -> refused.
     std::fs::write(
         &fixture,
         format!(
@@ -112,9 +118,9 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
-        return Err("0x-önekli fixture reddedilmedi (vacuous)".into());
+        return Err("a 0x-prefixed fixture was not refused (vacuous)".into());
     }
 
     let _ = std::fs::remove_dir_all(&dir);
-    Ok("fixture-integrity self-test: 4/4 red senaryosu kanıtlandı".into())
+    Ok("fixture-integrity self-test: 4/4 refusal scenarios proved".into())
 }
