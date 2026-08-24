@@ -1,22 +1,25 @@
-# Gelişmiş Dil Özellikleri ve Bellek Yönetimi
+# Advanced language features and memory management
 
-Daha önceki bölümlerde sanal makinenin (VM) nasıl çalıştığını, ZK kanıtlarının (proof) matematiğini ve derleyicinin (compiler) kodları nasıl temel bytecodelara çevirdiğini incelemiştik. Ancak modern ve "gerçek dünya" (real-world) akıllı sözleşmeleri yazabilmek için basit toplama/çıkarma işlemleri ve düz bir çalıştırma akışı (flat execution) yeterli değildir.
+Earlier chapters examined how the virtual machine works, the mathematics of ZK proofs, and how the compiler turns code into basic bytecode. But simple addition and subtraction and a flat execution flow are not enough to write modern, real-world contracts.
 
-Bir programlama dilini güçlü kılan üç temel özellik vardır:
-1. Kodun tekrar kullanılabilmesi için **Fonksiyonlar**.
-2. Hataları daha kodu derlerken (compile-time) yakalayabilmek için **Tip Sistemi (Type System)**.
-3. Karmaşık veri modelleri oluşturabilmek için **Veri Yapıları (Structs)** ve bunların bellek (Memory) yönetimi.
+Three basic features make a programming language powerful:
 
-Bu bölümde, BudZKVM derleyicisinin (bud-compiler) bu üç büyük özelliği ZK-STARK kısıtlamalarına ve sınırlı register mimarisine nasıl uyarladığını adım adım inceleyeceğiz. Sıfırdan bir ZK dili tasarlamanın en zorlu ve en keyifli kısımlarından birine hoş geldiniz!
+1. **Functions**, so code can be reused.
+2. A **type system**, so errors are caught at compile time.
+3. **Data structures (structs)** and their memory management, so complex data models can be built.
+
+This chapter walks step by step through how the BudZKVM compiler (bud-compiler) adapts these three large features to the ZK-STARK constraints and the limited register architecture. Welcome to one of the hardest and most enjoyable parts of designing a ZK language from scratch.
 
 ---
 
-## 1. Kullanıcı Tanımlı Fonksiyonlar ve Caller-Saved Registers
+## 1. User-defined functions and caller-saved registers
 
-### Fonksiyon İhtiyacı
-Büyük bir akıllı sözleşme yazarken kodu parçalara bölmemiz gerekir. Örneğin, hem imza doğrulayan hem de bakiye kontrol eden bir kodda, bu işlemleri ayrı fonksiyonlara (`verify_signature` ve `check_balance`) ayırmak kodun okunabilirliğini artırır.
+### Why functions
 
-BudL dilinde bir fonksiyon şu şekilde tanımlanır ve çağrılır:
+Writing a large contract requires splitting the code into pieces. In code that both verifies a signature and checks a balance, separating those into functions (`verify_signature` and `check_balance`) improves readability.
+
+In BudL a function is defined and called like this:
+
 ```rust
 fn add_and_mul(a: u64, b: u64, c: u64) -> u64 {
     let sum = a + b;
@@ -29,50 +32,59 @@ pub fn main() {
 }
 ```
 
-### Call ve Ret Opcodeları
-Sanal makinemizde fonksiyon çağrıları için iki özel komut bulunur: `Call` ve `Ret`.
-* `Call`: Mevcut işlem satırını (Program Counter: PC) stack'e (yığına) kaydeder ve hedeflenen fonksiyonun satırına atlar.
-* `Ret`: Stack'in en üstündeki adresi alır ve o adrese geri döner.
+### The Call and Ret opcodes
 
-Ancak ortada büyük bir sorun vardır: **Register Sınırı.** BudVM'de sadece 32 adet register (kaydedici) bulunur (`R0`, `R31`). Eğer `main` fonksiyonu `R5` içine önemli bir değer kaydetmişse ve `add_and_mul` fonksiyonunu çağırırsa, `add_and_mul` fonksiyonu habersizce `R5`'i kendi işlemleri için kullanıp üzerine yazabilir! `main` fonksiyonuna geri dönüldüğünde `R5`'teki veri bozulmuş olacaktır.
+Our virtual machine has two special instructions for function calls: `Call` and `Ret`.
 
-### Caller-Saved Register Stratejisi
-Bu sorunu çözmek için derleyici **Caller-Saved** (Çağıran Tarafından Korunan) yaklaşımını kullanır:
-1. `main` fonksiyonu bir çağrı (Call) yapmadan hemen önce, o anda aktif olarak kullandığı tüm register'ları (örneğin `R1`, `R2`, `R3`) sırayla `Push` komutuyla Stack'e atarak güvene alır.
-2. Fonksiyonun parametreleri (`1, 2, 42`) yeni tahsis edilen register'lara konur.
-3. `Call` komutu çalıştırılır. Alt fonksiyon istediği register'ı özgürce kullanır.
-4. Alt fonksiyon işini bitirince sonucu stack'e atar ve `Ret` yapar.
-5. `main` fonksiyonu kaldığı yerden başlarken ilk iş olarak stack'teki eski register değerlerini `Pop` komutuyla geri yükler. (Restore işlemi).
+* `Call`: saves the current instruction line (the program counter) onto the stack and jumps to the target function's line.
+* `Ret`: takes the address at the top of the stack and returns to it.
 
-Bu sayede sadece 32 register ile sonsuz derinlikte fonksiyon çağrıları güvenle yapılabilir.
+But there is a large problem: **the register limit.** BudVM has only 32 registers (`R0`..`R31`). If `main` has saved an important value in `R5` and calls `add_and_mul`, that function may unknowingly use `R5` for its own work and overwrite it. On return to `main` the data in `R5` would be corrupted.
 
----
+### The caller-saved register strategy
 
-## 2. Semantik Analiz ve Statik Tip Sistemi
+To solve this the compiler uses a **caller-saved** approach:
 
-Sadece değişkenleri tutan bir derleyici çok tehlikelidir. Eğer kullanıcı `let x = true; let y = x + 5;` yazarsa, makine seviyesinde bu `1 + 5 = 6` olarak çalışır ve mantıksal bir hataya (Bug) dönüşür. ZK akıllı sözleşmelerinde buglar milyonlarca dolara mal olabilir.
+1. Just before making a call, `main` secures every register it is actively using (say `R1`, `R2`, `R3`) by pushing them onto the stack in order.
+2. The function's parameters (`1, 2, 42`) are placed into freshly allocated registers.
+3. The `Call` instruction runs. The callee uses whatever registers it wants, freely.
+4. When the callee finishes it pushes the result onto the stack and does `Ret`.
+5. Resuming, `main`'s first job is to restore the old register values from the stack with `Pop`.
 
-### Semantic Analyzer (Semantik Analizör) Nedir?
-Derleme görevsında kodun Parser (Sözdizimi) ağacını çıkarıldıktan sonra, makine koduna (Codegen) geçmeden önceki denetim görevsıdır.
-
-Semantik Analizör şu kuralları işletir:
-* **Tip Uyuşmazlığı:** `u64` beklenen bir yere `bool` veya `field` atanıyor mu?
-* **Fonksiyon İmzaları:** `add_and_mul(1, 2, 42)` çağrısı tam olarak 3 adet `u64` parametre mi alıyor? Eğer parametre sayısı eksikse veya tipleri yanlışsa derleme anında durdurulur (`CompileError::TypeError`).
-* **Return Tipleri:** Eğer bir fonksiyon `-> u64` döndüreceğini belirtmişse, içindeki `return` ifadesi gerçekten bir `u64` üretiyor mu?
-* **Bilinmeyen Değişkenler:** Daha önce tanımlanmamış bir değişkene (`a = 5`) erişilmeye mi çalışılıyor?
-
-Desteklenen temel tipler şunlardır:
-- `u64`: 64-bit işaretsiz tamsayı.
-- `bool`: Mantıksal doğru/yanlış.
-- `field`: Goldilocks sonlu cisim elemanı ($p = 2^{64} - 2^{32} + 1$). ZK kanıtlarına özel kriptografik hesaplamalar için.
-- `struct`: Kullanıcı tanımlı karmaşık veri tipleri.
+Function calls of unlimited depth can therefore be made safely with only 32 registers.
 
 ---
 
-## 3. Struct ve Dinamik Bellek (Heap Memory) Yönetimi
+## 2. Semantic analysis and the static type system
 
-### Neden Belleğe (Memory) İhtiyacımız Var?
-Register'lar çok hızlıdır ancak yapısal olarak birer sayıdırlar. Eğer kullanıcının şöyle bir verisi varsa:
+A compiler that merely holds variables is very dangerous. If the user writes `let x = true; let y = x + 5;`, at machine level that runs as `1 + 5 = 6` and becomes a logic bug. In ZK contracts bugs can cost millions.
+
+### What is the semantic analyzer?
+
+It is the checking phase during compilation, after the parser has produced the syntax tree and before code generation.
+
+The semantic analyzer enforces these rules:
+
+* **Type mismatch:** is a `bool` or a `field` being assigned where a `u64` is expected?
+* **Function signatures:** does the call `add_and_mul(1, 2, 42)` take exactly 3 `u64` parameters? If a parameter is missing or a type is wrong, compilation stops (`CompileError::TypeError`).
+* **Return types:** if a function declares `-> u64`, does the `return` expression inside really produce a `u64`?
+* **Unknown variables:** is an undeclared variable being accessed (`a = 5`)?
+
+The supported basic types are:
+
+- `u64`: a 64-bit unsigned integer.
+- `bool`: a logical true/false.
+- `field`: a Goldilocks finite field element ($p = 2^{64} - 2^{32} + 1$), for the cryptographic computations specific to ZK proofs.
+- `struct`: user-defined complex data types.
+
+---
+
+## 3. Structs and dynamic (heap) memory management
+
+### Why we need memory
+
+Registers are very fast but structurally they are just numbers. If the user has data like this:
+
 ```rust
 struct User {
     id: u64,
@@ -80,28 +92,34 @@ struct User {
     is_active: bool,
 }
 ```
-Bu `User` verisini register'larda taşımak çok zordur (3 farklı register gerekir ve fonksiyonlara parametre geçerken karmaşa yaratır). Bunun yerine bu veriyi **Bellekte (Memory)** bir blok halinde tutmalı ve değişkenlerde sadece bu bloğun "başlangıç adresini" (Pointer) taşımalıyız.
 
-### r31'in HEAP_PTR Olarak Rezerve Edilmesi
-BudVM'de kullanılmayan geniş bir bellek uzayı (Memory) mevcuttur. Derleyici, 31 numaralı register'ı (`r31`) özel bir amaç için feda eder: **Heap Pointer**.
-Program başladığında `r31` belli bir bellek adresine (örneğin `4096`) ayarlanır. Burası boş bellek havuzunun başlangıcıdır.
+carrying that `User` in registers is hard (it needs 3 different registers and creates confusion when passing it to functions). Instead we must hold this data as a block in **memory** and carry only the block's starting address (a pointer) in the variable.
 
-### Struct Literal (Obje Yaratma)
-Kullanıcı `let u = User { id: 1, balance: 100, is_active: true };` dediğinde derleyici arka planda şunları yapar:
-1. Yeni bir pointer register'ı ayırır ve `r31`'in değerini buraya kopyalar (örn. adres 4096).
-2. `id` değeri olan `1`'i belleğin `4096` adresine yazar (`Opcode::Store`).
-3. `balance` değeri olan `100`'ü belleğin `4096 + 8 = 4104` adresine yazar.
-4. `is_active` değeri olan `true (1)`'i belleğin `4104 + 8 = 4112` adresine yazar.
-5. `r31` (Heap Pointer) register'ını yeni objenin boyutu kadar (3 field * 8 byte = 24) artırıp `4120`'ye eşitler.
-6. `u` değişkenine sadece objenin başlangıç adresi olan `4096` değeri atanır.
+### Reserving r31 as HEAP_PTR
 
-### Field Access (Özellik Okuma)
-Kullanıcı kodun ilerleyen satırlarında `let b = u.balance;` yazdığında:
-1. Semantik Analizör `u`'nun bir `User` struct'ı olduğunu, `balance` field'ının ise bu struct'ın 2. sıradaki elemanı (yani 8. byte'taki offseti) olduğunu bilir.
-2. Derleyici `Opcode::Load` komutunu üretir. Bu komut, `u`'nun tuttuğu adrese (4096) gider, üzerine offset'i (8) ekler (4104 adresi) ve oradaki `100` değerini okuyup `b` değişkenine atar.
+BudVM has a large unused memory space. The compiler sacrifices register 31 (`r31`) for a special purpose: the **heap pointer**. When the program starts, `r31` is set to a certain memory address (for example `4096`), which is the beginning of the free memory pool.
 
-Bu "Pass-by-Reference" (Referansla Taşıma) yaklaşımı sayesinde:
-- Struct'lar fonksiyonlara argüman olarak geçirildiğinde koca bir veri kümesi kopyalanmaz, sadece tek bir pointer adresi aktarılır.
-- ZKVM'in yürütme adımı (Execution trace) inanılmaz derecede küçülür ve Prover'ın kanıt üretme süresi ciddi şekilde hızlanır.
+### Struct literals (creating an object)
 
-İşte tüm bu sistemlerin birleşimi, BudZKVM'i sadece basit matematik hesapları yapan bir oyuncak değil, modern diller (Rust, Solidity) seviyesinde bir ZK Akıllı Sözleşme (Smart Contract) dili haline getirmektedir.
+When the user writes `let u = User { id: 1, balance: 100, is_active: true };`, the compiler does the following behind the scenes:
+
+1. it allocates a new pointer register and copies the value of `r31` into it (address 4096, say),
+2. it writes the `id` value `1` to memory address `4096` (`Opcode::Store`),
+3. it writes the `balance` value `100` to memory address `4096 + 8 = 4104`,
+4. it writes the `is_active` value `true (1)` to memory address `4104 + 8 = 4112`,
+5. it advances `r31` (the heap pointer) by the size of the new object (3 fields * 8 bytes = 24) to `4120`,
+6. it assigns the variable `u` only the object's starting address, `4096`.
+
+### Field access
+
+When the user later writes `let b = u.balance;`:
+
+1. the semantic analyzer knows `u` is a `User` struct and that the `balance` field is its second element (offset 8 bytes),
+2. the compiler emits `Opcode::Load`. That instruction goes to the address `u` holds (4096), adds the offset (8) to reach address 4104, reads the value `100` there and assigns it to `b`.
+
+Thanks to this pass-by-reference approach:
+
+- when structs are passed to functions as arguments, a whole data set is not copied - only a single pointer address is passed,
+- the ZKVM's execution trace shrinks enormously and the prover's proving time speeds up considerably.
+
+The combination of all these systems is what makes BudZKVM not a toy doing simple arithmetic but a ZK contract language at the level of modern languages such as Rust and Solidity.
