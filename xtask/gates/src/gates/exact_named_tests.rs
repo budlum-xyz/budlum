@@ -15,7 +15,10 @@ use std::path::Path;
 /// `tests::bns::tests::test_bns_registration_and_resolution`).
 pub fn check_exact_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, String> {
     if !log.is_file() {
-        return Err(format!("test çıktısı yok/boş: {}", log.display()));
+        return Err(format!(
+            "the test output is missing/empty: {}",
+            log.display()
+        ));
     }
     let content = fs::read_to_string(log).map_err(|e| e.to_string())?;
     let mut missing: Vec<String> = Vec::new();
@@ -26,13 +29,15 @@ pub fn check_exact_log(log: &Path, tests: &[&str], subject: &str) -> Result<Stri
         }
     }
     if !missing.is_empty() {
-        let mut msg = String::from("beklenen test çıktıda yok veya ok değil:\n");
+        let mut msg = String::from("an expected test is missing from the output or is not ok:\n");
         for m in &missing {
             writeln!(msg, "  - {m}").expect("writing to a String cannot fail");
         }
         return Err(msg);
     }
-    Ok(format!("OK: {subject} zorunlu testler isim-isim ok."))
+    Ok(format!(
+        "OK: the required {subject} tests are ok name by name."
+    ))
 }
 
 /// The shell gates' canary: full log passes, a missing name fails, a FAILED
@@ -77,15 +82,15 @@ pub fn self_test_exact(tests: &[&str], subject: &str) -> Result<String, String> 
     let _ = fs::remove_dir_all(&dir);
 
     if !full_ok {
-        return Err(format!("kanarya: tam çıktı reddedildi ({subject})"));
+        return Err(format!("canary: complete output was refused ({subject})"));
     }
     if !missing_fails {
-        return Err(format!("kanarya: eksik test geçti ({subject})"));
+        return Err(format!("canary: a missing test passed ({subject})"));
     }
     if !failed_fails {
-        return Err(format!("kanarya: FAILED satırı geçti ({subject})"));
+        return Err(format!("canary: a FAILED line passed ({subject})"));
     }
     Ok(format!(
-        "kanarya OK: tam→PASS, eksik/FAILED→FAIL ({subject})."
+        "canary OK: complete -> PASS, missing/FAILED -> FAIL ({subject})."
     ))
 }
