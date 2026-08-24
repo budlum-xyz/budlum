@@ -1,13 +1,13 @@
-//! Adres cubugundan sayfaya: bes adimin tek yerde birlesmesi.
+//! From address bar to page: five steps meeting in one place.
 //!
 //! ```text
-//! yazilan -> siniflandirma -> ad kurali -> cozum (+kanit) -> getirme (+hash) -> rozet
+//! typed -> classification -> name rule -> resolution (+proof) -> fetch (+hash) -> badge
 //! ```
 //!
-//! Her adim kendi kanit gucunu ekler ve **en zayif halka** rozeti belirler.
-//! Bunun tek yerde olmasi kasitli: uc ayri katmanin uc ayri gucu varsa ve
-//! birlestirme cagirana birakilirsa, birlestirmeyi unutan bir cagri
-//! `dogrulandi` yazar.
+//! Each step adds its own evidence strength, and the **weakest link** decides
+//! the badge. Doing that in one place is deliberate: if three layers have three
+//! strengths and combining them is left to the caller, a call that forgets the
+//! combination writes `verified`.
 
 use crate::bns_proof::{self, BnsInclusionProof, ResolvedName};
 use crate::content_id::ContentId;
@@ -17,28 +17,29 @@ use crate::fetch::{self, Fetched, Target, Transport};
 use crate::name_rule;
 use crate::query::{self, Query};
 
-/// Bir adi hedefe ceviren sey.
+/// Whatever turns a name into a target.
 pub trait NameResolver {
-    /// `.bud` adi: zincirden cozum ve varsa kaniti.
+    /// A `.bud` name: resolution from the chain, with its proof when there is
+    /// one.
     ///
     /// # Errors
     ///
-    /// Isim bulunamadiginda ya da zincire ulasilamadiginda. Bir **red** hata
-    /// degildir: kaydin var olup dogrulanamamasi `BnsInclusionProof::None`
-    /// ile bildirilir, `Err` ile degil.
+    /// When the name is not found, or the chain cannot be reached. A
+    /// **refusal** is not an error: a record that exists but cannot be verified
+    /// is reported through `BnsInclusionProof::None`, not through `Err`.
     fn resolve_bud(&self, name: &str) -> Result<(ResolvedName, BnsInclusionProof), String>;
-    /// `.bud` icin state root'a yazilan `bns_v1` degeri, biliniyorsa.
+    /// The `bns_v1` value written into the state root for `.bud`, when known.
     fn bns_root(&self) -> Option<[u8; 32]>;
-    /// `.eth` adi: ENS `contenthash` ham baytlari ve MPT kanitinin
-    /// dogrulanip dogrulanmadigi.
+    /// An `.eth` name: the raw ENS `contenthash` bytes, and whether the MPT
+    /// proof was verified.
     ///
     /// # Errors
     ///
-    /// Isim bulunamadiginda ya da Ethereum durumuna ulasilamadiginda.
+    /// When the name is not found, or Ethereum state cannot be reached.
     fn resolve_eth(&self, name: &str) -> Result<(Vec<u8>, bool), String>;
 }
 
-/// Bir sayfayi acmanin sonucu.
+/// The result of opening a page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub input: String,
@@ -48,16 +49,17 @@ pub struct Page {
 }
 
 impl Page {
-    /// Sayfa Gecko'ya verilebilir mi?
+    /// May the page be handed to Gecko?
     #[must_use]
     pub fn is_renderable(&self) -> bool {
         self.bytes.is_some() && self.evidence.is_displayable()
     }
 
-    /// Adres cubugunda gosterilecek metin.
+    /// The text shown in the address bar.
     ///
-    /// Ad kuralindan gecmeyen bir girdi punycode olarak gosterilir; gosterilen
-    /// sey ile cozulen seyin ayni olmasi bu tarayicinin kuralidir.
+    /// Input that does not pass the name rule is shown as punycode. That what
+    /// is displayed and what is resolved are the same string is this browser's
+    /// rule.
     #[must_use]
     pub fn address_bar(&self) -> String {
         format!(
@@ -77,13 +79,14 @@ fn refusal(input: &str, layer: &str, reason: &str) -> Page {
     }
 }
 
-/// Yazilan bir seyi ac.
+/// Open whatever was typed.
 ///
 /// # Errors
 ///
-/// Tasima ya da cozum katmaninin dondurdugu hata. Bir **red** hata degildir:
-/// reddedilen girdi `Page` olarak doner ve nedeni rozetinde yazar, cunku
-/// kullaniciya "acilmadi" demek yetmez, neden acilmadigi soylenmeli.
+/// Whatever the transport or resolution layer returns. A **refusal** is not an
+/// error: refused input comes back as a `Page` with the reason in its badge,
+/// because telling the user "it did not open" is not enough - they should be
+/// told why.
 pub fn open<R: NameResolver, T: Transport>(
     resolver: &R,
     transport: &T,
@@ -112,11 +115,11 @@ pub fn open<R: NameResolver, T: Transport>(
     })
 }
 
-/// Getirmeden once verilen karar.
+/// The decision taken before fetching.
 ///
-/// Ayri bir tip olmasinin sebebi, "getirme" ile "durma"nin iki ayri sonuc
-/// olmasi: bir `Option<Target>` ikisini ayni sekle sokar ve `None`'in neden
-/// `None` oldugunu tasimaz.
+/// It is a type of its own because "fetch" and "stop" are two different
+/// outcomes: an `Option<Target>` flattens them into one shape and carries no
+/// reason for why the `None` is a `None`.
 enum Plan {
     Fetch { target: Target, evidence: Evidence },
     Stop(Box<Page>),
@@ -133,7 +136,7 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
         Query::RefusedScheme { input, scheme } => Plan::stop(refusal(
             &input,
             "schema",
-            &format!("{scheme} semasi adres cubugundan acilmaz"),
+            &format!("the {scheme} scheme is not opened from the address bar"),
         )),
         Query::RefusedName { input, rejection } => {
             Plan::stop(refusal(&input, "name-rule", &rejection.to_string()))
@@ -142,14 +145,14 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
             &input,
             "classification",
             &format!(
-                "belirsiz girdi tahmin edilmez; sunlardan biri olabilir: {}",
+                "ambiguous input is not guessed at; it could be any of: {}",
                 candidates.join(", ")
             ),
         )),
         Query::FreeText(text) => Plan::stop(refusal(
             &text,
             "classification",
-            "bu bir adres degil; arama icin arama katmanini kullanin",
+            "this is not an address; use the search layer to search",
         )),
         Query::Name { name, suffix } => match suffix.as_str() {
             "bud" => plan_bud(resolver, raw, &name)?,
@@ -157,7 +160,7 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
             other => Plan::stop(refusal(
                 raw,
                 "name-rule",
-                &format!(".{other} icin bir cozumleyici yok"),
+                &format!("there is no resolver for .{other}"),
             )),
         },
         Query::ContentId(bytes) => Plan::Fetch {
@@ -179,12 +182,13 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
         | Query::TxHash(_) => Plan::stop(refusal(
             raw,
             "classification",
-            "bu bir sayfa degil, bir kayit; arama katmani gosterir",
+            "this is a record, not a page; the search layer displays it",
         )),
     })
 }
 
-/// `.bud`: cozum kanitla degerlendirilir, sonra bir icerik baglantisi aranir.
+/// `.bud`: the resolution is judged against its proof, then a content link is
+/// looked for.
 fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan, String> {
     let (record, proof) = resolver.resolve_bud(name)?;
     let evidence = bns_proof::evaluate(&record, &proof, resolver.bns_root());
@@ -200,7 +204,7 @@ fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
         return Ok(Plan::stop(refusal(
             raw,
             "bns-resolution",
-            "isim bir icerige bagli degil: ne content_id ne storage_root var",
+            "the name is not bound to any content: neither content_id nor storage_root is present",
         )));
     };
     Ok(Plan::Fetch {
@@ -209,23 +213,24 @@ fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
     })
 }
 
-/// `.eth`: contenthash cozulur ve hedefin bir getiricisi var mi diye bakilir.
+/// `.eth`: the contenthash is decoded, then the target is checked for a
+/// fetcher.
 fn plan_eth<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan, String> {
     let (raw_ch, proof_verified) = resolver.resolve_eth(name)?;
-    let ch =
-        ens::decode_contenthash(&raw_ch).map_err(|e| format!("ENS contenthash cozulemedi: {e}"))?;
+    let ch = ens::decode_contenthash(&raw_ch)
+        .map_err(|e| format!("ENS contenthash could not be decoded: {e}"))?;
     let evidence = Evidence::new().with(if proof_verified {
         Claim::new(
             "ens-resolution",
             Strength::Verified,
-            "namehash slotu icin MPT kaniti dogrulandi ve kok bilinen bir \
-             Ethereum basliginda",
+            "the MPT proof for the namehash slot verified, and the root is in \
+             a known Ethereum header",
         )
     } else {
         Claim::new(
             "ens-resolution",
             Strength::RpcClaimOnly,
-            "MPT kaniti dogrulanmadi; cozum bir dugumun beyani",
+            "the MPT proof was not verified; the resolution is one node's claim",
         )
     });
 
@@ -250,37 +255,38 @@ fn plan_eth<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan
         ContentHash::Ipns(_) => stop_with(Claim::new(
             "ipns",
             Strength::Refused,
-            "IPNS cozumu bir imza zinciri gerektiriyor ve bu surum onu dogrulamiyor",
+            "IPNS resolution needs a signature chain, and this version does not verify one",
         )),
         ContentHash::Swarm(_) | ContentHash::Onion3(_) => stop_with(Claim::new(
             "fetcher",
             Strength::Refused,
-            "bu protokol icin bir getirici yok; HTTPS'e dusurmek dogrulanmamis \
-             icerigi dogrulanmis gibi gosterirdi",
+            "there is no fetcher for this protocol; falling back to HTTPS would \
+             present unverified content as verified",
         )),
     })
 }
 
-/// ENS `ipfs-ns` govdesini bir CID dizgisine cevir.
+/// Turn an ENS `ipfs-ns` body into a CID string.
 ///
-/// Govde ikili bir CID; `crate::cid::parse_bytes` onu cozer ve tekrar dizgiye
-/// cevirmek yerine dogrudan dogrulanabilir olup olmadigini soyleriz.
+/// The body is a binary CID. `crate::cid::parse_bytes` decodes it, and rather
+/// than converting back to a string we say directly whether it is
+/// verifiable.
 fn cid_string(body: &[u8]) -> Result<String, String> {
     let cid = crate::cid::parse_bytes(body)?;
-    // `Target::Ipfs` bir dizgi bekliyor; base16 (multibase 'f') her zaman
-    // yeniden cozulebilir ve base32'ye gore bir cevirici gerektirmiyor.
+    // `Target::Ipfs` wants a string. base16, multibase 'f', is always
+    // re-decodable and, unlike base32, needs no converter.
     //
-    // Kodek **korunur**: bir dag-pb CID'sini raw'a cevirmek, dogrulanamayan
-    // bir hedefi dogrulanabilir gibi gostermek olurdu. `0x1220` multihash
-    // oneki her iki dalda da yaziliyor; unutulursa CID cozulur ama ozet
-    // yanlis yerden okunur.
+    // The codec is **preserved**: turning a dag-pb CID into a raw one would
+    // present an unverifiable target as a verifiable one. The `0x1220`
+    // multihash prefix is written in both branches; forget it and the CID still
+    // decodes, but the digest is read from the wrong place.
     let mut out = String::from("f");
     if cid.version == 0 {
         out.push_str("1220");
     } else {
         out.push_str("01");
         out.push_str(&hex::encode([u8::try_from(cid.codec).map_err(|_| {
-            format!("kodek {:#x} tek baytlik bir varint degil", cid.codec)
+            format!("codec {:#x} is not a single-byte varint", cid.codec)
         })?]));
         out.push_str("1220");
     }
@@ -301,13 +307,13 @@ mod tests {
 
     impl NameResolver for Resolver {
         fn resolve_bud(&self, _name: &str) -> Result<(ResolvedName, BnsInclusionProof), String> {
-            self.bud.clone().ok_or_else(|| String::from("isim yok"))
+            self.bud.clone().ok_or_else(|| String::from("no such name"))
         }
         fn bns_root(&self) -> Option<[u8; 32]> {
             self.root
         }
         fn resolve_eth(&self, _name: &str) -> Result<(Vec<u8>, bool), String> {
-            self.eth.clone().ok_or_else(|| String::from("isim yok"))
+            self.eth.clone().ok_or_else(|| String::from("no such name"))
         }
     }
 
@@ -323,7 +329,7 @@ mod tests {
             self.0
                 .get(&key)
                 .cloned()
-                .ok_or_else(|| format!("{key} bulunamadi"))
+                .ok_or_else(|| format!("{key} not found"))
         }
     }
 
@@ -386,8 +392,9 @@ mod tests {
 
     #[test]
     fn correct_bytes_under_an_unproven_resolution_are_not_verified() {
-        // Bu, bu tarayicinin var olma sebebi: hash tutuyor ama esleme
-        // kanitlanmadi, yani gosterilen sayfa istenen isme ait olmayabilir.
+        // This is why the browser exists: the hash matches, but the binding
+        // was not proven, so the page shown may not belong to the name asked
+        // for.
         let bytes = b"<html>ayaz</html>";
         let r = bud_resolver(bytes, false);
         let t = table(&[(&ContentId::of(bytes).to_string(), bytes)]);
@@ -399,11 +406,14 @@ mod tests {
 
     #[test]
     fn bytes_that_do_not_hash_are_not_rendered_at_all() {
-        let r = bud_resolver(b"beklenen", true);
-        let t = table(&[(&ContentId::of(b"beklenen").to_string(), b"baska")]);
+        let r = bud_resolver(b"expected", true);
+        let t = table(&[(&ContentId::of(b"expected").to_string(), b"other")]);
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(!page.is_renderable());
-        assert!(page.bytes.is_none(), "reddedilen baytlar sayfaya gecmemeli");
+        assert!(
+            page.bytes.is_none(),
+            "refused bytes must not reach the page"
+        );
         assert_eq!(page.evidence.weakest(), Strength::Refused);
     }
 
@@ -439,10 +449,11 @@ mod tests {
         };
         let mut body = vec![0x01, 0x55, 0x12, 0x20];
         body.extend_from_slice(&digest);
-        // `ipfs-ns` = 0xe3 ve multicodec kodlari varint'tir: 0xe3 tek basina
-        // devam biti tasidigi icin `0xe3 0x01` yazilir. Bu bir bicim ayrintisi
-        // degil, kodu ikiye bolen fark: tek bayt yazilirsa cozucu bir sonraki
-        // baytin ilk yedi bitini koda katar ve baska bir protokol okur.
+        // `ipfs-ns` is 0xe3, and multicodec codes are varints: 0xe3 on its own
+        // carries the continuation bit, so it is written `0xe3 0x01`. That is
+        // not a formatting detail but the difference that splits the code in
+        // two: write a single byte and the decoder folds the next byte's low
+        // seven bits into the code, reading a different protocol.
         let mut ch = vec![0xe3, 0x01];
         ch.extend_from_slice(&body);
 
@@ -469,7 +480,7 @@ mod tests {
 
     #[test]
     fn an_eth_name_pointing_at_swarm_is_refused_not_downgraded_to_https() {
-        // `swarm-ns` = 0xe4, varint olarak `0xe4 0x01`.
+        // `swarm-ns` is 0xe4, written `0xe4 0x01` as a varint.
         let mut ch = vec![0xe4, 0x01];
         ch.extend_from_slice(&[0x11; 32]);
         let r = Resolver {
@@ -479,7 +490,7 @@ mod tests {
         };
         let page = open(&r, &table(&[]), "x1.eth").unwrap();
         assert!(!page.is_renderable());
-        assert!(page.evidence.badge().contains("getirici yok"));
+        assert!(page.evidence.badge().contains("no fetcher"));
     }
 
     #[test]
@@ -510,7 +521,8 @@ mod tests {
             root: None,
             eth: None,
         };
-        // Tasima bos: getiriciye ulasilsaydi hata donerdi.
+        // The transport is empty: had the fetcher been reached, it would have
+        // returned an error.
         let page = open(&r, &table(&[]), "ayaz.bud").unwrap();
         assert!(!page.is_renderable());
         assert!(page.evidence.badge().contains("has expired"));
