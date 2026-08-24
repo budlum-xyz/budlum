@@ -59,10 +59,10 @@ mod zk_finality_fail_open_regression {
     /// REGRESSION LOCK: `ZkFinalityAdapter::verify_finality`
     /// (the generic trait entry point) must NEVER return `Finalized`.
     ///
-    /// This method used to be able to finalize without a ProofClaimRegistry lookup
-    /// - a second, registry-independent verification path
-    /// (fail-open). If someone accidentally "fixes" this method into returning
-    /// `Finalized`, this test breaks.
+    /// This method used to be able to finalize without a ProofClaimRegistry
+    /// lookup: a second, registry-independent verification path (fail-open).
+    /// If someone accidentally "fixes" this method into returning `Finalized`,
+    /// this test breaks.
     ///
     /// Intended behaviour: always `Rejected` - ZK finality can only be resolved
     /// through `verify_finality_with_claim`.
@@ -504,9 +504,9 @@ mod relayer_escrow_silent_failure_regression {
         );
     }
 
-    /// REGRESSION LOCK: a non-escrowed payment (request_id=None) can never be released
-    /// - that path is already resolved in the executor via immediate credit.
-    /// Release must not be called, because there is no escrow.
+    /// REGRESSION LOCK: a non-escrowed payment (request_id=None) can never be
+    /// released; that path is already resolved in the executor via immediate
+    /// credit. Release must not be called, because there is no escrow.
     #[test]
     fn non_escrowed_payment_cannot_be_released() {
         let (mut registry, _model_id, _owner) = setup_registry_with_model(2, 2);

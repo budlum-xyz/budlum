@@ -4,19 +4,18 @@
 //! If one path is left out the ceiling becomes only a document:
 //! a reader believes 100 million is the upper bound while the code does something else.
 //!
-//! Olculen sey su: `try_add_balance` cagiran her uretim satiri ya
-//! is a **transfer** (it takes existing money from one place to another: a refund,
-//! ucret, kilit cozme) ya da **basim**dir (yeni para yaratir). Basim olanlar
-//! `try_mint_balance` cagirmali; o fonksiyon tavani denetleyen tek yerdir.
+//! What is measured is this: every production line calling `try_add_balance` is
+//! either a **transfer** (it takes existing money from one place to another: a
+//! refund, a fee, an unlock) or a **mint** (it creates new money). The mints must
+//! call `try_mint_balance`; that function is the only place checking the ceiling.
 //!
-//! # Neden bir liste tutuluyor
+//! # Why a list is kept
 //!
-//! The gate **cannot infer** from the source which call is a transfer and which is a mint
-//! - that is an accounting question, not a syntax question. So
-//! yuzden asagida her `try_add_balance` cagri yerinin neden tasima oldugu tek
-//! it is written once. When a new call is added the gate goes red and whoever adds it
-//! kisiyi bu soruyu cevaplamaya zorlar: bu yeni para mi, yoksa yer degistiren
-//! para mi?
+//! The gate **cannot infer** from the source which call is a transfer and which
+//! is a mint - that is an accounting question, not a syntax question. So the
+//! reason each `try_add_balance` call site is a transfer is written down once
+//! below. When a new call is added the gate goes red and forces whoever adds it
+//! to answer this question: is this new money, or money changing place?
 //!
 //! The friction is deliberate. Silently adding a supply-creating path is the most expensive
 //! mistake this chain can make; the cost of the gate is writing one line of
@@ -25,17 +24,17 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// Denetlenen kaynak dosyalar.
+/// The source files that are checked.
 const SOURCES: &[&str] = &["src/chain/blockchain.rs", "src/core/account.rs"];
 
-/// Tavani denetleyen tek fonksiyon.
+/// The only function that checks the ceiling.
 const MINT_FN: &str = "try_mint_balance";
 
-/// Tavan denetimi olmadan bakiye ekleyen fonksiyon.
+/// The function that adds balance without a ceiling check.
 const MOVE_FN: &str = "try_add_balance";
 
-/// Beklenen `try_add_balance` cagri sayisi ve her birinin neden **tasima**
-/// oldugu.
+/// The expected `try_add_balance` call count and why each of them is a
+/// **transfer**.
 ///
 /// The count is kept deliberately: if a call is added the total changes and the gate fires.
 /// The rationales tell the reader why those lines do not ask the ceiling.
