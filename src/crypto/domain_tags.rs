@@ -13,16 +13,17 @@
 //! The source tree (checked by the Rust `domain-tags` gate in
 //! `xtask/gates/src/gates/domain_tags.rs`; CI runs it with its canary).
 //!
-//! ## Legacy `BUDLUM_` öneki
+//! ## The legacy `BUDLUM_` prefix
 //!
-//! Ağaçta yeniden adlandırma öncesi yazılmış bir `BUDLUM_*` kuşağı yaşıyor.
-//! Kapı uzun süre yalnız `BDLM_` önekini tarıyordu; bu kuşak envanterin kör
-//! noktasındaydı (ölçüm: 23 ayrıştırma etiketi + 14 alan-dışı dizge).
-//! Karar (2026-08-22, kullanıcı): yeniden adlandırma yerine kapsam
-//! genişletildi - kapı iki öneki de tarar, envanter hepsini listeler.
-//! Alan-dışı dizgeler de (env değişkeni, HSM yuvası, test adı) listede
-//! durur: kapı böylece muafiyet listesine gerek duymadan tam kalır ve yeni
-//! bir `BUDLUM_*` literal her koşulda gözden geçirilmek zorunda kalır.
+//! A generation of `BUDLUM_*` literals written before the rename still lives
+//! in the tree. For a long time the gate scanned only the `BDLM_` prefix, so
+//! that generation sat in the inventory's blind spot (measured: 23 separation
+//! tags plus 14 non-domain strings). The decision (2026-08-22, by the user)
+//! was to widen the scope rather than rename: the gate scans both prefixes and
+//! the inventory lists all of them. The non-domain strings (environment
+//! variable names, an HSM slot, a test name) stay on the list too. That keeps
+//! the gate complete without an exemption list, and forces every new
+//! `BUDLUM_*` literal through review in all cases.
 
 /// Every domain-separation tag used across the workspace, sorted and unique.
 pub const DOMAIN_TAGS: &[&str] = &[
@@ -193,11 +194,12 @@ pub const CRITICAL_DOMAIN_TAGS: &[&str] = &[
     "BDLM_VALIDATOR_SET_COMMITMENT_V1",
 ];
 
-/// Yeniden adlandırma öncesi kuşaktan kalan `BUDLUM_` önekli ayrıştırma
-/// etiketleri. Hepsi bir hash'e ya da imzaya ulaşır; `BDLM_` önekine
-/// taşınmaları yazım tercihi değil, wire/uyumluluk kararıdır - ayrı
-/// tutulmalarının sebebi budur. Sıralı ve tekil; `domain-tags` kapısı
-/// envanter dışı kalanı ve kullanılmayanı kırmızı verir.
+/// The `BUDLUM_`-prefixed separation tags left over from the generation before
+/// the rename. Every one of them reaches a hash or a signature; moving them to
+/// the `BDLM_` prefix is not a spelling preference but a wire/compatibility
+/// decision, which is why they are kept apart. Sorted and unique; the
+/// `domain-tags` gate goes red on anything outside the inventory and on
+/// anything unused.
 pub const BUDLUM_PREFIXED_DOMAIN_TAGS: &[&str] = &[
     "BUDLUM_ADDRESS_V2",
     "BUDLUM_BLS_SCALAR_SHA3_V0",
@@ -224,13 +226,14 @@ pub const BUDLUM_PREFIXED_DOMAIN_TAGS: &[&str] = &[
     "BUDLUM_WALLET_RECOVERY_PROPOSAL_V1",
 ];
 
-/// `BUDLUM_` önekinden ve karakter kümesinden geçen ama ayrıştırma etiketi
-/// OLMAYAN dizgeler: ortam değişkeni adları, HSM yuva etiketi, kaldırılmış
-/// bir bayrağın adı, test sabiti. Ayrıştırma yüzeyi sayılmazlar; yine de
-/// listede dururlar. Sebep kirlenme değil, kapının basitliğidir: muafiyet
-/// listesi olmayan bir kapı, yeni bir `BUDLUM_*` literali - ister etiket
-/// ister env adı - her zaman bu dosyadan geçmeye zorlar; iki sınıfın ayrımı
-/// kodda değil burada, belgede yaşar.
+/// Strings that pass the `BUDLUM_` prefix and character-set filter but are NOT
+/// separation tags: environment variable names, an HSM slot label, the name of
+/// a removed flag, a test constant. They do not count as separation surface,
+/// yet they stay on the list. The reason is not contamination but the
+/// simplicity of the gate: a gate with no exemption list forces every new
+/// `BUDLUM_*` literal - tag or environment name alike - through this file, and
+/// the distinction between the two classes lives here, in the document, not in
+/// the code.
 pub const BUDLUM_PREFIXED_NON_DOMAIN_LITERALS: &[&str] = &[
     "BUDLUM_CHAIN_ID",
     "BUDLUM_DB_PATH",
