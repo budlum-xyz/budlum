@@ -61,7 +61,6 @@ bud/src/bud_format_por.rs	22
 bud/src/bud_format_prodcost.rs	15
 bud/src/bud_format_qos.rs	5
 bud/src/bud_format_realcorpus.rs	19
-bud/src/bud_format_recipe.rs	29
 bud/src/bud_format_registry.rs	7
 bud/src/bud_format_repairband.rs	14
 bud/src/bud_format_revolutionary.rs	8
@@ -230,7 +229,6 @@ src/socialfi/mod.rs	6
 src/storage/content_id.rs	2
 src/storage/db.rs	2
 src/storage/erasure.rs	2
-src/storage/manifest.rs	29
 src/storage/msr.rs	5
 src/storage/pact_binding.rs	24
 src/storage/render.rs	2
