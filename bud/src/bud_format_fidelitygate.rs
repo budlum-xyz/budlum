@@ -1,13 +1,20 @@
-//! B.U.D. 2.0 - KAYIP GATE (KF2 uzantısı: AVIF lossy eşiği + ZFP/SZ error-bounded)
+//! B.U.D. 2.0 - THE LOSS GATE (the KF2 extension: the AVIF lossy threshold plus
+//! ZFP/SZ error-bounded classes).
 //!
-//! Kalan iş: "AVIF lossy-tier eşiği + ZFP/SZ error-bounded sınıf kabulü."
-//! Kural: kayıplı dönüşüm yalnız GÖRSEL-KAYIPSIZ / HATA-SINIRLI eşiklerle kabul
-//! edilir; her kayıplı dönüşüm kayıplılık METADATASINI (ölçü) taşır ve gate bunu
-//! reddeder/kaydeder. Varsayılan eşikler:
-//! - AVIF/JPEG görsel kayıpsız: crf ≤ 32 (ölçülen 3.2x kazancın eşiği; F134)
-//! - ZFP/SZ error-bounded: bağıl hata ≤ 1e-3 (bilimsel sınıf, 100-web bulgusu 6-23x)
-//! - Çözünürlük HER ZAMAN korunur (KF2)
-//!   Varsayılanlar ürün kararına açıktır (yorum satırları - kullanıcı onayı ister).
+//! Remaining work: "the AVIF lossy-tier threshold plus admission of the ZFP/SZ
+//! error-bounded class."
+//! The rule: a lossy transform is admitted only under VISUALLY-LOSSLESS or
+//! ERROR-BOUNDED thresholds; every lossy transform carries its lossiness
+//! METADATA (the measurement) and the gate either refuses it or records it.
+//! The default thresholds:
+//! - AVIF/JPEG visually lossless: crf <= 32 (the threshold of the measured 3.2x
+//!   gain; F134)
+//! - ZFP/SZ error-bounded: a relative error <= 1e-3 (the scientific class; the
+//!   100-web finding says 6-23x)
+//! - Resolution is ALWAYS preserved (KF2)
+//!
+//! The defaults are open to a product decision (they are comment lines and ask
+//! for the user's approval).
 
 #![forbid(unsafe_code)]
 
@@ -15,19 +22,20 @@ use sha3::{Digest, Sha3_256};
 
 pub const FID_MAGIC: [u8; 8] = *b"\xB5FID1\0\0\0";
 
-pub const AVIF_CRF_VISUALLY_LOSSLESS: u32 = 32; // ≤ bu → görsel kayıpsız sayılır (ölçülen)
+pub const AVIF_CRF_VISUALLY_LOSSLESS: u32 = 32; // at or below this counts as visually lossless (measured)
 pub const ZFP_REL_ERROR_BOUND: f64 = 1e-3; // ≤ bu → error-bounded
 pub const SZ_REL_ERROR_BOUND: f64 = 1e-3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LossyKind {
-    None,             // kayıpsız
-    VisuallyLossless, // AVIF/JXL crf eşiği altı
-    ErrorBounded,     // ZFP/SZ bağıl hata eşiği altı
+    None,             // lossless
+    VisuallyLossless, // under the AVIF/JXL crf threshold
+    ErrorBounded,     // under the ZFP/SZ relative error threshold
     Unbounded,        // RED
 }
 
-/// Kayıplılık kararı: görsel medya crf ile, bilimsel veri bağıl hata ile.
+/// The lossiness decision: visual media by crf, scientific data by relative
+/// error.
 pub fn classify_lossy(kind: &str, crf: Option<u32>, rel_error: Option<f64>) -> LossyKind {
     match kind {
         "avif" | "jxl" | "webp" | "jpeg" => match crf {
@@ -44,9 +52,10 @@ pub fn classify_lossy(kind: &str, crf: Option<u32>, rel_error: Option<f64>) -> L
     }
 }
 
-/// Gate: kabul edilen kayıplılık sınıflarının listesi.
+/// The gate: the list of admitted lossiness classes.
 pub fn gate_allows(l: LossyKind) -> bool {
-    // Kayıpsız (None) her zaman geçer; sınırlı kayıplı sınıflar kabul; sınırsız RED.
+    // Lossless (None) always passes; bounded lossy classes are admitted;
+    // unbounded ones are REFUSED.
     matches!(
         l,
         LossyKind::None | LossyKind::VisuallyLossless | LossyKind::ErrorBounded
@@ -67,26 +76,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn avif_esigi_dogru() {
+    fn the_avif_threshold_is_correct() {
         assert!(gate_allows(classify_lossy("avif", Some(30), None)));
         assert!(gate_allows(classify_lossy("avif", Some(32), None)));
         assert!(!gate_allows(classify_lossy("avif", Some(40), None)));
     }
 
     #[test]
-    fn error_bounded_sinif_kabul() {
+    fn the_error_bounded_class_is_admitted() {
         assert!(gate_allows(classify_lossy("zfp", None, Some(1e-4))));
         assert!(!gate_allows(classify_lossy("sz", None, Some(0.01))));
     }
 
     #[test]
-    fn kayipsiz_her_zaman_gecer() {
+    fn lossless_always_passes() {
         assert!(gate_allows(classify_lossy("png", None, None)));
     }
 
     #[test]
-    fn cozunurluk_korunur_notu() {
-        // KF2: bu modül yalnız eşik; çözünürlük korunumu kod hattında garantili.
+    fn the_resolution_is_preserved_note() {
+        // KF2: this module is only the threshold; resolution preservation is
+        // guaranteed on the code path.
         assert_eq!(AVIF_CRF_VISUALLY_LOSSLESS, 32);
     }
 }
