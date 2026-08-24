@@ -34,7 +34,6 @@ bud/src/bud_format_autozstd.rs	12
 bud/src/bud_format_av2.rs	28
 bud/src/bud_format_bloom.rs	15
 bud/src/bud_format_checkpoint.rs	13
-bud/src/bud_format_crop.rs	28
 bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
@@ -53,7 +52,6 @@ bud/src/bud_format_nvc.rs	27
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_pcap.rs	26
-bud/src/bud_format_pgm.rs	28
 bud/src/bud_format_pointcloud.rs	16
 bud/src/bud_format_por.rs	22
 bud/src/bud_format_prodcost.rs	15
@@ -62,7 +60,6 @@ bud/src/bud_format_realcorpus.rs	19
 bud/src/bud_format_registry.rs	7
 bud/src/bud_format_repairband.rs	14
 bud/src/bud_format_revolutionary.rs	8
-bud/src/bud_format_scrub.rs	13
 bud/src/bud_format_secure_db.rs	2
 bud/src/bud_format_securededup.rs	22
 bud/src/bud_format_segment.rs	3
