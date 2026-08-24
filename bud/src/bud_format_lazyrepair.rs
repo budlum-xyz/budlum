@@ -1,10 +1,13 @@
-//! B.U.D. 2.0 - TEMBEL ONARIM POLİTİKASI (F34/F102/F295 - lazy recovery)
+//! B.U.D. 2.0 - THE LAZY REPAIR POLICY (F34/F102/F295 - lazy recovery).
 //!
-//! Kalan iş #11a: Lazy recovery. Shard kaybı anında değil, eşik/okuma-talebiyle
-//! onarılır → onarım bandı düşer. Bu modül KARAR katmanıdır (MSR kodları GF(2^8)
-//! ayrı iş; tasarım notu aşağıda): kayıp sayısı, yaş, okuma talebi ve bant
-//! bütçesine göre onarımı ertele/hemen yap.
-//! `RepairPolicy::decide` deterministiktir; kanıt kaydı zincire yazılabilir.
+//! Remaining work item #11a: lazy recovery. A lost shard is repaired not at
+//! the moment of loss but on a threshold or a read request, which lowers the
+//! repair bandwidth. This module is the DECISION layer (the MSR codes over
+//! GF(2^8) are separate work; the design note is below): defer or repair now,
+//! based on the number of losses, their age, the read request and the
+//! bandwidth budget.
+//! `RepairPolicy::decide` is deterministic; the decision record can be written
+//! to the chain.
 
 #![forbid(unsafe_code)]
 
@@ -19,10 +22,12 @@ pub enum RepairAction {
     RebuildFromScratch,
 }
 
-/// Tembel onarım kararı.
-/// `lost`: kayıp shard sayısı · `tolerated`: kodun tolere ettiği kayıp (f)
-/// `age_epochs`: kaybın yaşı · `read_pending`: okuma kuyruğu (talep varsa hemen)
-/// `budget_per_epoch`: dönem başına onarım bant kotası.
+/// The lazy repair decision.
+/// `lost`: the number of lost shards · `tolerated`: the loss the code
+/// tolerates (f)
+/// `age_epochs`: the age of the loss · `read_pending`: the read queue (repair
+/// at once if there is a request)
+/// `budget_per_epoch`: the repair bandwidth quota per epoch.
 pub fn decide_repair(
     lost: usize,
     tolerated: usize,
@@ -31,17 +36,19 @@ pub fn decide_repair(
     budget_per_epoch: f64,
 ) -> Option<RepairAction> {
     if lost == 0 {
-        return Some(RepairAction::Defer { until_epoch: 0 }); // kayıp yok
+        return Some(RepairAction::Defer { until_epoch: 0 }); // nothing lost
     }
     if lost >= tolerated {
-        // tolerans aşıldı → hemen, mümkünse yardımcı düğümlerden
+        // the tolerance is exceeded -> repair now, from helper nodes if
+        // possible
         return Some(RepairAction::RepairNow { helpers: 2 });
     }
-    // okuma talebi varsa hemen onar (gecikme kullanıcıya yansımasın)
+    // if there is a read request, repair now (the user should not feel the
+    // delay)
     if read_pending {
         return Some(RepairAction::RepairNow { helpers: 1 });
     }
-    // bütçe yoksa ertele; yaş eşiği aşılırsa onar
+    // with no budget, defer; repair once the age threshold is passed
     let age_threshold = if budget_per_epoch <= 0.0 {
         0
     } else {
@@ -72,7 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kayip_yoksa_ertelenir() {
+    fn nothing_lost_is_deferred() {
         assert!(matches!(
             decide_repair(0, 2, 0, false, 0.5),
             Some(RepairAction::Defer { .. })
@@ -80,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn tolerans_asilirsa_hemen_onar() {
+    fn exceeding_the_tolerance_repairs_now() {
         assert!(matches!(
             decide_repair(3, 2, 0, false, 0.5),
             Some(RepairAction::RepairNow { .. })
@@ -88,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn okuma_talebi_hemen_onarir() {
+    fn a_read_request_repairs_now() {
         assert!(matches!(
             decide_repair(1, 2, 0, true, 0.5),
             Some(RepairAction::RepairNow { .. })
@@ -96,8 +103,8 @@ mod tests {
     }
 
     #[test]
-    fn butce_yoksa_ertele_buyuk_yasta_onar() {
-        // bütçe 0 → eşik 0.max(2)=2; yaş 1 → ertele, yaş 5 → onar
+    fn no_budget_defers_and_a_high_age_repairs() {
+        // budget 0 -> threshold 0.max(2)=2; age 1 -> defer, age 5 -> repair
         assert!(matches!(
             decide_repair(1, 2, 1, false, 0.0),
             Some(RepairAction::Defer { .. })
@@ -117,10 +124,12 @@ mod tests {
     }
 }
 
-// ## MSR kodları - tasarım notu (F41/F293-F297, kodlanmadı - GF(2^8) ayrı iş)
-// MSR (minimum-storage regenerating): onarımda TÜM veri yerine α sembol transferi;
-// (n,k) için onarım bandı optimum. Mevcut Cauchy MDS (4+2) tek-parça kaybında
-// konteynerin 4/6'sını transfer eder; MSR bunu (n-1)·α'ya indirir. Kodlama GF(2^8)
-// üzerinde matris çarpımı gerektirir - `bud_format_erasure`'ün GF altyapısına
-// `msr_repair_band` hesaplayıcı eklenebilir. Öncelik: düşük (repair bandı zaten
-// k-4 LRC ile küçük).
+// ## MSR codes - a design note (F41/F293-F297, not coded - GF(2^8) is
+// separate work)
+// MSR (minimum-storage regenerating): a repair transfers alpha symbols instead
+// of ALL the data, which is the optimal repair bandwidth for (n,k). The
+// current Cauchy MDS (4+2) transfers 4/6 of the container when a single piece
+// is lost; MSR brings that down to (n-1)*alpha. The encoding needs matrix
+// multiplication over GF(2^8) - an `msr_repair_band` calculator could be added
+// to the GF infrastructure of `bud_format_erasure`. Priority: low (the repair
+// bandwidth is already small with the k-4 LRC).

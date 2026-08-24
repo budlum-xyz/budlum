@@ -22,7 +22,6 @@
 .github/workflows/security-hardening.yml	4
 .gitignore	1
 README.md	1
-bud/Cargo.toml	22
 bud/fuzz/Cargo.toml	2
 bud/fuzz/fuzz_bud_format.rs	20
 bud/kani/kani_bud_format.rs	1
@@ -42,7 +41,6 @@ bud/src/bud_format_genomic.rs	11
 bud/src/bud_format_hardening.rs	2
 bud/src/bud_format_hw.rs	19
 bud/src/bud_format_jpegre.rs	11
-bud/src/bud_format_lazyrepair.rs	22
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
