@@ -137,8 +137,8 @@ yillar icinde ogrendigi anlami bozar.
 +    document.l10n.setAttributes(this._element, l10nId);
 +
 +    // The full reason goes in the tooltip, from the core, untranslated: it
-+    // names the layer and what it measured ("bud-getirici: baytlarin
-+    // ContentId'si manifest_id'ye esit"). Rewriting it here would put a
++    // names the layer and what it measured ("bud-fetcher: the ContentId
++    // of the bytes equals the manifest_id"). Rewriting it here would put a
 +    // second author between the measurement and the user.
 +    this._element.setAttribute("tooltiptext", badge);
 +  },

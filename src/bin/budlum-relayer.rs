@@ -1,18 +1,30 @@
 #![allow(clippy::pedantic, clippy::nursery)]
-//! F10.4 + Budlum Relayer Binary - permissionless cross-chain relay servisi.
+//! F10.4 plus the Budlum relayer binary: the permissionless cross-chain relay
+//! service.
 //!
-//! ## Design (permissionless)
-//! - **Permissionless entry:** Tek gate `min_stake` (1000 $BUD). Herkes relayer çalıştırabilir.
-//! - **Bond/stake:** Relayer `RELAYER` rolü (RoleId 3) ile `PermissionlessRegistry` üzerinden stake yatırır.
-//! - **Slashing:** Griefing/fronting/yanlış-relay için `SlashingProof::Other { tag: \"relayer_invalid_proof\" }` → `MaliciousBehaviour` %100 slash.
-//!   - `consensus_invalid_relay_proof` helper ile rapor üretilir.
-//!   - Bridge: open relayer set + challenge penceresi (RFC F10 §4-5).
+//! ## Design, permissionless
 //!
-//! ## Akışlar
-//! - **EthToBud:** Ethereum RPC `eth_getLogs` → deposit event → MPT + header chain proof → Budlum `bud_submitRelayProof` (registry kapısı, stake).
-//! - **BudToEth:** Budlum burn event + finality proof → Ethereum bridge kontratına `claimUnlock` tx.
+//! - **Permissionless entry:** the only gate is `min_stake`, at 1000 $BUD.
+//!   Anyone can run a relayer.
+//! - **Bond and stake:** a relayer stakes through `PermissionlessRegistry`
+//!   under the `RELAYER` role, RoleId 3.
+//! - **Slashing:** for griefing, fronting or a wrong relay,
+//!   `SlashingProof::Other { tag: \"relayer_invalid_proof\" }` leads to
+//!   `MaliciousBehaviour` and a 100 percent slash.
+//!   - The report is produced by the `consensus_invalid_relay_proof` helper.
+//!   - The bridge keeps an open relayer set plus a challenge window; see RFC
+//!     F10, sections 4 and 5.
 //!
-//! ## Çalıştırma
+//! ## Flows
+//!
+//! - **EthToBud:** the Ethereum RPC `eth_getLogs` gives a deposit event, which
+//!   becomes an MPT and header chain proof, submitted to Budlum through
+//!   `bud_submitRelayProof`, behind the registry gate and the stake.
+//! - **BudToEth:** a Budlum burn event plus a finality proof becomes a
+//!   `claimUnlock` transaction to the Ethereum bridge contract.
+//!
+//! ## Running it
+//!
 //! ```bash
 //! Budlum-relayer --eth-rpc https://mainnet.infura.io/v3/... \
 //!                --budlum-rpc http://localhost:8545 \
@@ -28,7 +40,7 @@ use std::time::Duration;
 // Reqwest for both Eth and Budlum JSON-RPC
 // Added to Cargo.toml: reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
-/// Relayer CLI konfigürasyonu - permissionless.
+/// The relayer CLI configuration, permissionless.
 #[derive(Debug, Clone)]
 pub struct RelayerConfig {
     pub eth_rpc_url: String,
@@ -36,17 +48,19 @@ pub struct RelayerConfig {
     pub bridge_address: String,
     pub direction: RelayDirection,
     pub required_confirmations: u32,
-    /// Relayer'ın Budlum adresi (hex, 32 bytes veya 0x…). Permissionless registry'de RELAYER rolü için stake kontrolü yapılır.
+    /// The relayer's Budlum address, in hex, 32 bytes, optionally 0x-prefixed.
+    /// The stake is checked for the RELAYER role in the permissionless registry.
     pub relayer_address: String,
-    /// Opsiyonel: relayer private key path veya hex (ileride HSM). Şimdilik sadece log.
+    /// Optional: the relayer private key path or hex, an HSM later. For now it is
+    /// only logged.
     pub relayer_key_hint: Option<String>,
-    /// Poll aralığı (saniye)
+    /// The poll interval, in seconds.
     pub poll_interval_secs: u64,
-    /// Min stake kontrolü için (varsayılan 1000)
+    /// Used for the minimum stake check; the default is 1000.
     pub min_stake: u64,
 }
 
-/// Relay yönü.
+/// The relay direction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayDirection {
     EthToBud,
@@ -103,7 +117,7 @@ pub struct BudlumBurnEvent {
     pub burn_height: u64,
 }
 
-/// Budlum JSON-RPC client - permissionless registry kapısı.
+/// The Budlum JSON-RPC client, the gate onto the permissionless registry.
 #[derive(Debug, Clone)]
 pub struct BudlumClient {
     pub url: String,
@@ -151,7 +165,8 @@ impl BudlumClient {
             .unwrap_or(serde_json::Value::Null))
     }
 
-    /// Relayer'ın aktif olup olmadığını sorgula (bud_registryActiveMembers role=3).
+    /// Ask whether the relayer is active, through `bud_registryActiveMembers`
+    /// with role 3.
     pub async fn is_active_relayer(&self, address: &str) -> Result<bool, String> {
         let params = serde_json::json!([3]); // RELAYER role id
         let val = self.rpc_call("bud_registryActiveMembers", params).await?;
@@ -218,7 +233,8 @@ impl BudlumClient {
     }
 }
 
-/// Ethereum JSON-RPC client - permissionless relayer için deposit gözlemi.
+/// The Ethereum JSON-RPC client, observing deposits for the permissionless
+/// relayer.
 #[derive(Debug, Clone)]
 pub struct EthClient {
     pub url: String,
@@ -283,19 +299,22 @@ impl EthClient {
         }
     }
 
-    /// Eth_getLogs - bridge deposit eventleri için.
-    /// Topic0 = keccak256("Deposit(address,uint256,bytes32,uint256)") placeholder, gerçek kontratla set edilmeli.
+    /// `eth_getLogs`, for the bridge deposit events.
+    ///
+    /// Topic0 is a placeholder,
+    /// `keccak256("Deposit(address,uint256,bytes32,uint256)")`; it must be set
+    /// from the real contract.
     pub async fn get_deposit_logs(
         &self,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<EthDepositEvent>, String> {
-        // Minimal filter - gerçek topic0 konfigürasyondan gelmeli.
+        // A minimal filter; the real topic0 must come from configuration.
         let filter = serde_json::json!({
             "fromBlock": format!("0x{:x}", from_block),
             "toBlock": format!("0x{:x}", to_block),
             "address": self.bridge_address,
-            // "topics": [["0x..."]] - placeholder, tüm logları getir
+            // "topics": [["0x..."]] is a placeholder; fetch every log
         });
         let logs = self
             .rpc_call("eth_getLogs", serde_json::json!([filter]))
@@ -345,9 +364,13 @@ impl EthClient {
         Ok(events)
     }
 
-    /// F10.1/F10.2 proof paketi üretimi - MPT + header chain + receipt.
-    /// Gerçek impl: eth_getTransactionReceipt + eth_getBlockByHash + eth_getProof (receiptsRoot proof).
-    /// Burada placeholder: EvmChainAdapter offline stub + verify_evm_receipt path'e uygun.
+    /// Builds the F10.1 and F10.2 proof package: the MPT proof, the header chain
+    /// and the receipt.
+    ///
+    /// A real implementation would use `eth_getTransactionReceipt`,
+    /// `eth_getBlockByHash` and `eth_getProof` for the receipts root proof. What
+    /// stands here is a placeholder, matching the offline `EvmChainAdapter` stub
+    /// and the `verify_evm_receipt` path.
     pub async fn build_deposit_proof(
         &self,
         event: &EthDepositEvent,
@@ -360,7 +383,7 @@ impl EthClient {
     }
 }
 
-/// CLI argümanları parse et.
+/// Parses the CLI arguments.
 pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
     let mut config = RelayerConfig::default();
     let mut i = 1;
@@ -460,13 +483,15 @@ fn print_usage() {
     eprintln!("  -h, --help                 Show this help");
     eprintln!();
     eprintln!("Permissionless model (D1):");
-    eprintln!("  - Tek gate: min_stake (1000 $BUD) - PermissionlessRegistry RoleId(3) RELAYER");
-    eprintln!("  - Bond: bud_registryBondRelayer ile stake yatırılır");
-    eprintln!("  - Slashing: relayer_invalid_proof tag → MaliciousBehaviour %100 slash");
+    eprintln!("  - The only gate: min_stake (1000 $BUD), PermissionlessRegistry RoleId(3) RELAYER");
+    eprintln!("  - Bond: the stake is placed through bud_registryBondRelayer");
+    eprintln!(
+        "  - Slashing: the relayer_invalid_proof tag leads to a 100% MaliciousBehaviour slash"
+    );
     eprintln!("  - Challenge: open relayer set + bad relay challenge via bud_submitSlashingReport");
 }
 
-/// Config validate + eth/budlum client init.
+/// Validates the config and initialises the Ethereum and Budlum clients.
 pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
     eprintln!("budlum-relayer D1 permissionless starting:");
     eprintln!("  direction: {:?}", config.direction);
@@ -665,10 +690,11 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) {
 async fn run_bud_to_eth_loop(config: RelayerConfig) {
     let budlum_client = BudlumClient::new(config.budlum_rpc_url.clone());
 
-    // Bu yon icin `EthClient` kurulmuyor. Kuruluyordu ve dongunun sonunda
-    // `let _ = &eth_client;` ile canli tutuluyordu; hicbir cagri yapmadigi
-    // icin bu yalnizca "Ethereum tarafi bagli" gorunumu veriyordu. Gonderim
-    // yolu yokken bir istemci tutmak, olmayan bir yetenegi ima eder.
+    // No `EthClient` is built for this direction. One used to be, kept alive at
+    // the end of the loop with `let _ = &eth_client;`; since it made no call, it
+    // only produced the appearance that "the Ethereum side is wired". Holding a
+    // client when there is no submission path implies a capability that does not
+    // exist.
     let _active = check_relayer_active(&budlum_client, &config).await;
 
     eprintln!(
@@ -771,10 +797,11 @@ fn parse_hex_height(val: &serde_json::Value) -> Result<u64, String> {
 }
 
 fn main() -> ExitCode {
-    // Semgrep `rust.lang.security.args.args` kuralı argv[0]'ın güvenlik
-    // Kararına dayanak yapılmasını hedefler. `parse_args` index 1'den başlar
-    // (bkz. tanımı), argv[0] okunmaz; ayrıştırılan değerler yalnız RPC uçları
-    // Ve köprü parametreleridir, kimlik/yetki kararı içermez.
+    // The Semgrep rule `rust.lang.security.args.args` targets argv[0] being used
+    // as the basis of a security decision. `parse_args` starts at index 1, see
+    // its definition, so argv[0] is never read; the parsed values are only RPC
+    // endpoints and bridge parameters, and carry no identity or authorisation
+    // decision.
     // Nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = env::args().collect();
     let config = match parse_args(&args) {

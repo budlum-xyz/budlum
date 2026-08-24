@@ -122,7 +122,6 @@ crates/budscan/src/cid.rs	30
 crates/budscan/src/content_id.rs	12
 crates/budscan/src/ens.rs	25
 crates/budscan/src/evm_audit.rs	30
-crates/budscan/src/fetch.rs	31
 crates/budscan/src/lib.rs	22
 crates/budscan/src/punycode.rs	16
 crates/budscan/src/query.rs	27
@@ -181,7 +180,6 @@ src/ai/README.md	23
 src/ai/mod.rs	2
 src/ai/types.rs	15
 src/bin/bud.rs	2
-src/bin/budlum-relayer.rs	31
 src/bns/README.md	15
 src/bns/registry.rs	7
 src/budlumxyz/README.md	15
