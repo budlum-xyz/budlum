@@ -38,7 +38,7 @@ concurrency:
 
 jobs:
   # ── 1. cargo-auditable + cargo-audit ────────────────────────────────────────
-  # KAPI: cargo audit bulgusu = FAIL.
+  # GATE: any cargo audit finding = FAIL.
   # cargo-auditable embeds the dependency list inside the binary, so
   # a distributed binary can be audited without the source tree
   # (`cargo audit bin`). For an L1, being able to prove which crate versions
@@ -74,7 +74,7 @@ jobs:
       # tree and a run that failed to download the advisory database.
       # The canary generates a synthetic lockfile containing a known vulnerable version and
       # proves the tool CATCHES it.
-      - name: Kanarya - cargo audit alarmının çalıştığının kanıtı
+      - name: Canary - evidence that the cargo audit alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/audit-canary
@@ -92,37 +92,37 @@ jobs:
           source = "registry+https://github.com/rust-lang/crates.io-index"
           CANARY
           if cargo audit --file /tmp/audit-canary/Cargo.lock; then
-            echo "HATA: cargo audit kanaryayı (time 0.1.44 / RUSTSEC-2020-0071) yakalayamadı → vacuous gate!"
+            echo "ERROR: cargo audit failed to catch the canary (time 0.1.44 / RUSTSEC-2020-0071) -> vacuous gate!"
             exit 1
           fi
-          echo "Kanarya yakalandı → cargo audit alarmı çalışıyor."
+          echo "Canary caught -> the cargo audit alarm works."
 
-      - name: Build with auditable (binary'ye bağımlılık listesi göm)
+      - name: Build with auditable (embed the dependency list in the binary)
         run: cargo auditable build --lib --locked
 
-      # NOT: `--locked` cargo audit'in bayragi DEGILDIR (cargo install'un
-      # Bayragidir); onceki halinde buradaydi ve komut "unexpected argument"
-      # Ile aninda dusuyordu. Ayrica surum 0.21.2 -> 0.22.2'ye cekildi: 0.21.2
-      # Advisory veritabanindaki CVSS 4.0 kayitlarini parse edemiyor ve
-      # "unsupported CVSS version: 4.0" ile hata veriyor, yani kapi kodla
-      # Ilgisiz bir nedenle kalici kirmizi olurdu.
-      - name: cargo audit kapısı (bulgu = fail)
+      # NOTE: `--locked` is NOT a cargo audit flag (it belongs to cargo install);
+      # it used to be here and the command fell over immediately with
+      # "unexpected argument". The version was also moved 0.21.2 -> 0.22.2: 0.21.2
+      # cannot parse the CVSS 4.0 records in the advisory database and fails with
+      # "unsupported CVSS version: 4.0", so the gate would be permanently red for a
+      # reason unrelated to the code.
+      - name: The cargo audit gate (a finding = fail)
         run: cargo audit
 
-  # ── 2. Kullanılmayan bağımlılıklar ──────────────────────────────────────────
-  # KAPI. Daha önce rapor modundaydı çünkü machete bu ağaçta 9 aday veriyordu
-  # ve bunların bir kısmı (chrono, group) makro/trait dolaylılığı yüzünden
-  # yanlış pozitifti, o hâlde FAIL yapmak ya CI'ı gevşetmeye ya da kullanılan
-  # bağımlılıkları ignore listesine doldurup kapıyı içi boş bırakmaya zorlardı.
+  # -- 2. Unused dependencies -------------------------------------------------
+  # GATE. It used to be report-only because machete gave 9 candidates in this tree
+  # and some of them (chrono, group) were false positives caused by macro/trait
+  # indirection, so making it FAIL would have forced either loosening CI or
+  # stuffing used dependencies into the ignore list, leaving the gate hollow.
   #
-  # O borç kapandı: gerçek ölü bağımlılıklar temizlendi, yanlış pozitifler
-  # gerekçeli `[package.metadata.cargo-machete] ignored` kayıtlarına alındı.
-  # Ölçüm (2026-07-27): root, budzero, fuzz ve wallet-core ağaçlarının
-  # dördünde de "didn't find any unused dependencies". Sıfır bulgu artık
-  # kalibrasyonsuzluk değil gerçek durum olduğu için kapı kapatılabilir.
+  # That debt is closed: the real dead dependencies were removed and the false
+  # positives were moved into justified `[package.metadata.cargo-machete] ignored`
+  # entries. Measurement (2026-07-27): all four of the root, budzero, fuzz and
+  # wallet-core trees report "didn't find any unused dependencies". Zero findings
+  # is now the real state rather than a lack of calibration, so the gate can close.
   #
-  # Kanarya aşağıda: sentetik bir crate'te kullanılmayan `libc` yakalanmazsa
-  # job kendini güvenilmez sayıp düşer, yani "0 bulgu" boş geçemez.
+  # The canary is below: if an unused `libc` in a synthetic crate is not caught,
+  # the job declares itself untrustworthy and fails, so "0 findings" cannot pass empty.
   dead-deps:
     name: Dead Deps (machete + shear)
     runs-on: ubuntu-latest
@@ -140,11 +140,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
-      # Kaynaktan derlemek yerine pinli binary. Repoda bu desen zaten var
-      # (gitleaks, grype, typos, actionlint), burada tutarli uygulaniyor.
+      # A pinned binary rather than building from source. The repository already
+      # uses this pattern (gitleaks, grype, typos, actionlint); it is applied
       # sha256'lar indirilip hesaplandi; machete'ninki upstream .sha256
-      # dosyasiyla da karsilastirildi ve birebir uyusuyor.
-      - name: Install cargo-machete + cargo-shear (sürüm + sha256 pinli)
+      # consistently here, and it was compared byte for byte against the checksum file.
+      - name: Install cargo-machete + cargo-shear (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/machete.tar.gz \
@@ -162,11 +162,11 @@ jobs:
           cargo-machete --version
           cargo-shear --version
 
-      # Kanarya: rapor modunda bile aracin gercekten calistigini dogrular.
+      # Canary: it verifies the tool really runs, even in report mode.
       # Bilerek kullanilmayan bir bagimlilik iceren sentetik crate uretip
-      # Machete'nin onu yakaladigini kanitlar; yakalayamazsa asagidaki rapor
-      # "0 bulgu" ile bos gecer ve kimse fark etmez.
-      - name: Kanarya - machete alarmının çalıştığının kanıtı
+      # It proves machete catches it; if it cannot, the report below passes empty
+      # with "0 findings" and nobody notices.
+      - name: Canary - evidence that the machete alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/machete-canary/src
@@ -181,38 +181,38 @@ jobs:
           CANARY
           echo 'fn main() {}' > /tmp/machete-canary/src/main.rs
           if cargo machete /tmp/machete-canary; then
-            echo "HATA: machete kullanılmayan 'libc' bağımlılığını yakalayamadı → vacuous gate!"
+            echo "ERROR: machete failed to catch the unused 'libc' dependency -> vacuous gate!"
             exit 1
           fi
-          echo "Kanarya yakalandı → machete alarmı çalışıyor."
+          echo "Canary caught -> the machete alarm works."
 
-      # Kapı: her workspace ayrı taranır. cargo-machete bulgu bulduğunda
-      # sıfırdan farklı çıkar, `set -e` altında job orada düşer. Yanlış
-      # pozitifler gerekçeli `[package.metadata.cargo-machete] ignored`
-      # kaydına alınır, ignore etmek serbest değil, gerekçe commit'te durur.
+      # The gate: each workspace is scanned separately. When cargo-machete finds
+      # something it exits non-zero and, under `set -e`, the job fails there. False
+      # positives go into a justified `[package.metadata.cargo-machete] ignored`
+      # entry; ignoring is not free, the justification stays in the commit.
       # Dizin listesi elle tutulmuyor. Elle tutulan liste, yeni bir crate
-      # eklendiginde sessizce eksik kalir: xtask/gates OSV taramasina
-      # eklenmemisti ve orada bunu yakalayan bir kapi vardi, burada yoktu.
-      # Simdi her Cargo.toml bulunuyor, yani yeni crate kendiliginden giriyor.
-      - name: Machete kapısı - depodaki her workspace
+      # A hand-kept list silently goes stale when a crate is added: xtask/gates had
+      # not been added to the OSV scan, and there a gate caught it while here none did.
+      # Now every Cargo.toml is discovered, so a new crate joins on its own.
+      - name: The machete gate - every workspace in the repository
         run: |
           set -euo pipefail
           fail=0
           scanned=0
           while IFS= read -r manifest; do
             dir="$(dirname "$manifest")"
-            # Alt crate'ler kendi workspace koklerinden taranir.
+            # Sub-crates are scanned from their own workspace roots.
             grep -q '^\[workspace\]' "$manifest" || grep -q '^\[package\]' "$manifest" || continue
             echo "── cargo machete: $dir ──"
             scanned=$((scanned + 1))
             if ! (cd "$dir" && cargo machete); then
-              echo "FAIL: $dir içinde kullanılmayan bağımlılık var." >&2
+              echo "FAIL: there is an unused dependency inside $dir." >&2
               fail=1
             fi
           done < <(find . -name Cargo.toml -not -path './target/*' -not -path '*/target/*' \
                      -not -path './node_modules/*' | sort)
           if [ "$scanned" -lt 4 ]; then
-            echo "FAIL: yalnizca $scanned manifest tarandi; depo dordunden fazlasini tasiyor, yani bulma adimi bozuldu ve bu kapi hicbir seye bakmiyor." >&2
+            echo "FAIL: only $scanned manifests were scanned; the repository carries more than four, so the discovery step broke and this gate looks at nothing." >&2
             exit 1
           fi
           echo "cargo machete: $scanned manifest tarandi."
@@ -222,9 +222,9 @@ jobs:
         continue-on-error: true
         run: cargo shear
 
-  # ── 3. Binary boyut görünürlüğü ─────────────────────────────────────────────
-  # RAPOR: kapı değil. Boyut eşiği kalibre edilmeden FAIL yapmak keyfi olurdu;
-  # Önce birkaç koşuluk gerçek veri toplanmalı. Rapor PR özetine yazılır.
+  # -- 3. Binary size visibility ----------------------------------------------
+  # REPORT: not a gate. Failing on a size threshold before calibrating it would be
+  # arbitrary; a few runs of real data must be collected first. The report goes into the PR summary.
   binary-size:
     name: Binary Size (rapor)
     runs-on: ubuntu-latest
@@ -244,11 +244,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
-      - name: Install cargo-bloat (sürüm pinli)
+      - name: Install cargo-bloat (version pinned)
         run: cargo install cargo-bloat --version 0.12.1 --locked
       - name: Release build
         run: cargo build --release --locked
-      - name: Boyut + en büyük crate'ler (PR özetine)
+      - name: Size + the largest crates (into the PR summary)
         run: |
           set -euo pipefail
           {
@@ -256,16 +256,16 @@ jobs:
             echo '```'
             ls -lh target/release/budlum-core target/release/libbudlum_core.rlib 2>/dev/null || true
             echo '```'
-            echo "### En çok yer kaplayan crate'ler"
+            echo "### The crates taking the most space"
             echo '```'
             cargo bloat --release --crates -n 20 2>/dev/null || echo "(cargo bloat calistirilamadi)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ── 4. TOML biçim/lint ──────────────────────────────────────────────────────
-  # KAPI: taplo lint + format --check = FAIL.
-  # Cargo.toml/deny.toml/config gibi dosyalarda biçim kayması, elle düzenlenen
-  # Supply-chain politikalarında diff gürültüsü üretir ve gerçek değişikliği
+  # -- 4. TOML formatting/lint -------------------------------------------------
+  # GATE: taplo lint + format --check = FAIL.
+  # Formatting drift in files such as Cargo.toml/deny.toml/config produces diff
+  # noise in hand-edited supply-chain policies and hides the real change.
   # Gizler.
   config-lint:
     name: Config Lint (taplo)
@@ -284,7 +284,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
-      - name: Install taplo (sürüm + sha256 pinli)
+      - name: Install taplo (version + sha256 pinned)
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/taplo.gz \
@@ -294,42 +294,42 @@ jobs:
           install -m755 /tmp/taplo /usr/local/bin/taplo
           taplo --version
 
-      # Kanarya: bozuk bir TOML üretip taplo'nun yakaladığını doğrular.
-      - name: Kanarya - taplo alarmının çalıştığının kanıtı
+      # Canary: it produces a broken TOML and verifies taplo catches it.
+      - name: Canary - evidence that the taplo alarm works
         run: |
           set -euo pipefail
           mkdir -p /tmp/taplo-canary
           printf '[package\nname = "broken"\n' > /tmp/taplo-canary/broken.toml
           if taplo lint /tmp/taplo-canary/broken.toml; then
-            echo "HATA: taplo bozuk TOML'u yakalayamadı → vacuous gate!"
+            echo "ERROR: taplo failed to catch the broken TOML -> vacuous gate!"
             exit 1
           fi
-          echo "Kanarya yakalandı → taplo alarmı çalışıyor."
+          echo "Canary caught -> the taplo alarm works."
 
-      - name: taplo lint kapısı
+      - name: The taplo lint gate
         run: taplo lint
 
-  # ── 5. Kani model checking (bond aritmetiği) ────────────────────────────────
-  # KAPI: bir proof başarısız olursa VEYA çalışan harness sayısı kaynakta
+  # -- 5. Kani model checking (bond arithmetic) --------------------------------
+  # GATE: it fails if a proof fails OR if the number of harnesses run does not
   # bildirilenden azsa = FAIL.
   #
-  # SECURITY.md model checking'i "açık iş" olarak kaydediyordu: bu adla bir
-  # script daha önce vardı, stub mesaj basıyor ve ağaçta olmayan bir dosyaya
-  # işaret ediyordu; hiçbir workflow onu çalıştırmıyordu. Kapı sayılıyor ama
-  # hiçbir şey kanıtlamıyordu, o yüzden silinmişti. Bu, yerine geçen gerçek
+  # SECURITY.md recorded model checking as "open work": a script by this name used
+  # to exist, printing a stub message and pointing at a file absent from the tree;
+  # no workflow ran it. It counted as a gate but proved nothing, so it was deleted.
+  # This is the real one that replaces it.
   # kurulum.
   #
-  # Harness'lar `kani/` altında ayrı bir pakette, `fuzz/` gibi. Sebebi teknik:
-  # Kani kendi pinli nightly'siyle gelir (0.67.0 → rustc 1.93.0-nightly) ve
-  # `budlum-core` `rust-version = "1.97.0"` beyan eder, bu yüzden cargo kök
-  # crate'i derlemeyi reddeder. Upstream düzeltmesi (kani#4645) merge edilmiş
-  # ama henüz yayınlanmamış. Bir doğrulama aracı için MSRV'yi düşürmek
-  # operatörlere verilen sözü zayıflatırdı; paket ayrı duruyor.
+  # The harnesses live in a separate package under `kani/`, like `fuzz/`. The reason
+  # is technical: Kani ships its own pinned nightly (0.67.0 -> rustc 1.93.0-nightly)
+  # and `budlum-core` declares `rust-version = "1.97.0"`, so cargo refuses to build
+  # the root crate. The upstream fix (kani#4645) is merged but not yet released.
+  # Lowering the MSRV for a verification tool would weaken the promise made to
+  # operators; the package stays separate.
   kani-proofs:
     name: Kani Proofs (bond arithmetic)
     runs-on: ubuntu-latest
-    # 12 harness'in 9'u saniyeler icinde bitiyor, 3'u bitmiyor. Bu tahmin
-    # degil, olculdu: her harness ayri bir isde, kendi cap'iyle kosturuldu.
+    # 9 of the 12 harnesses finish in seconds, 3 do not. That is not a guess, it was
+    # measured: each harness was run in a separate job with its own cap.
     #
     #     penalty_never_exceeds_stake                       1s
     #     remaining_stake_is_exact                          6s
@@ -341,19 +341,19 @@ jobs:
     #     penalty_is_monotonic_for_full_stakes            >22dk
     #
     # Yavas ucu `penalty_for`'u iki kez cagirip sonuclari iliskilendiriyor.
-    # Clamp tek bir cagriyi kendi girdisine baglar; iki bagimsiz bolumu
-    # karsilastirmak icin cozucuye hicbir sey vermez. Assert'leri bolmek de
-    # cozmuyor, olculdu: `ratio == 0` bedava, `ratio == SCALE` yine timeout.
+    # A clamp binds a single call to its own input; it gives the solver nothing for
+    # comparing two independent divisions. Splitting the asserts does not solve it
+    # either, measured: `ratio == 0` is free, `ratio == SCALE` still times out.
     #
     # Bu yuzden PR kapisi 9 hizli harness'i kosturur, ucu `kani-slow-proofs`
-    # ile gecelik programda kosar. Ayrim kaynaktaki `// SLOW:` isaretinden
-    # okunur, elle tutulan bir isim listesinden degil, ve kapi isaretin bir
-    # `#[kani::proof]` uzerinde durdugunu dogrular: yoksa isaret beklenen
-    # sayiyi dusurur ama hicbir harness'i dislamaz.
+    # runs on the nightly schedule. The split is read from the `// SLOW:` marker in
+    # the source, not from a hand-kept name list, and the gate verifies the marker
+    # sits on a `#[kani::proof]`: otherwise the marker lowers the expected count
+    # without excluding any harness.
     #
     # `--harness-timeout` denendi ve geri alindi: `-Z unstable-options`
     # istiyor. Bir kapiyi kararsiz bir bayraga baglamak, Kani'nin bir sonraki
-    # surumunde kapinin sessizce kirilmasi demek.
+    # would mean the gate breaking silently in the next version.
     timeout-minutes: 25
     permissions:
       contents: read
@@ -367,39 +367,39 @@ jobs:
         with:
           toolchain: "1.97.0"
 
-      # Kapının kendisi Kani kurulmadan önce kanıtlanır: kanarya sahte çıktıyla
-      # çalışır, yani kurulum bozulsa bile "kapı vacuous mu" sorusu cevaplanır.
-      # Rust sürümü kapı olduğu için kanarya Rust kurulumundan sonra koşar.
-      - name: Kapı kanaryası (Kani'den bağımsız)
+      # The gate itself is proven before Kani is installed: the canary runs with fake
+      # output, so the question "is the gate vacuous" is answered even if the install breaks.
+      # Because the Rust version is a gate, the canary runs after the Rust install.
+      - name: The gate canary (independent of Kani)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- kani --self-test
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
 
-      - name: Install Kani (sürüm pinli)
+      - name: Install Kani (version pinned)
         run: |
           set -euo pipefail
           cargo install --locked kani-verifier --version 0.67.0
           cargo kani setup
 
-      # `--output-format terse` satır başına bir VERIFICATION sonucu verir;
-      # kapı bunları sayar ve kaynaktaki harness sayısıyla karşılaştırır.
-      # Hangi harness'lerin kosacagi kaynaktan okunur, burada tekrar
+      # `--output-format terse` gives one VERIFICATION result per line; the gate
+      # counts them and compares against the harness count in the source.
+      # Which harnesses run is read from the source rather than repeated here,
       # yazilmaz: iki liste birbirinden sessizce ayrilabilir. Kani 0.67'de
       # `--exclude-harness` yok, `--harness` var ve tekrarlanabiliyor, o
-      # yuzden secim dislama degil dahil etme yonunde.
+      # so the selection is by inclusion rather than exclusion.
       #
-      # `--exact` KULLANILMIYOR ve bu olculdu. Sade isimle reddetti, crate
+      # `--exact` is NOT USED and that was measured. It refused the plain name; the
       # onekiyle (`budlum_kani::proofs::x`) de reddetti. 0.67.0 kaynagina
       # bakildiginda `--exact` `mangled_name` ile karsilastiriyor ve o ad
-      # crate onekini tasimiyor; dogru form `proofs::x` olurdu. Ama bu, bir
-      # kapiyi Kani'nin ic adlandirmasina baglamak demek: bir sonraki surumde
-      # ad semasi degisirse kapi sessizce hicbir harness'e eslesmez.
+      # crate prefix is absent and the correct form would be `proofs::x`. But that
+      # means binding a gate to Kani's internal naming: if the naming scheme changes
+      # in the next version the gate silently matches no harness.
       #
       # `--exact` olmadan `--harness` bir alt-dize filtresidir. Buradaki
-      # isimler benzersiz oldugu icin ayni dokuzu secer, ve daha onemlisi
-      # eslesme SAYISI kapi tarafindan dogrulanir: dokuz beklenip sekiz
-      # kosarsa `kani` kapısı bunu yakalar. Filtre gevsedi, kapi gevsemedi.
+      # Because the names are unique it selects the same nine, and more importantly
+      # the NUMBER of matches is verified by the gate: expecting nine and running
+      # eight is caught by the `kani` gate. The filter loosened, the gate did not.
       - name: Kani proofs (hizli set)
         working-directory: kani
         run: |
@@ -413,20 +413,21 @@ jobs:
           echo "running ${#fast[@]} fast harnesses: ${fast[*]}"
           cargo kani "${args[@]}" --output-format terse 2>&1 | tee /tmp/kani.log
 
-      - name: Kani kapısı
+      - name: The Kani gate
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- kani /tmp/kani.log
 
-  # Olculen gercek: bu uc harness `penalty_for`'u iki kez cagirip sonuclari
-  # iliskilendiriyor ve bir cozucu iki bagimsiz 128-bit sembolik carpimi CI
-  # butcesi icinde kapatamiyor. Silmek yanlis cevap olurdu: agacta kesmenin
-  # monoton oldugunu soyleyen tek ifade bunlar. PR'dan cikarilip programa
-  # alindilar, cap gercek olcume gore 6 saat.
+  # The measured fact: these three harnesses call `penalty_for` twice and relate
+  # the results, and a solver cannot close two independent 128-bit symbolic
+  # multiplications within the CI budget. Deleting them would be the wrong answer:
+  # they are the only statements saying that slashing in the tree is monotone.
+  # They were moved out of the PR onto the schedule, with a cap of 6 hours based
+  # on the real measurement.
   #
-  # Bu is bir KAPI DEGIL, bir olcum. Kirmizi dustugunde soyledigi sey
-  # "ozellik bozuldu" degil, "hala butce disinda"; o yuzden PR'i bloke etmez
-  # ama sessizce de kaybolmaz.
+  # This job is NOT A GATE, it is a measurement. When it goes red it says not
+  # "the property broke" but "still outside the budget", so it does not block the
+  # PR yet does not vanish silently either.
   kani-slow-proofs:
-    name: Kani Proofs (yavas set, programli)
+    name: Kani Proofs (slow set, scheduled)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
@@ -444,17 +445,17 @@ jobs:
         with:
           shared-key: budlum-core
 
-      - name: Install Kani (sürüm pinli)
+      - name: Install Kani (version pinned)
         run: |
           set -euo pipefail
           cargo install --locked kani-verifier --version 0.67.0
           cargo kani setup
 
-      # Her harness ayri kosar ve ayri zamanlanir. Hepsini tek `cargo kani`
-      # icinde kosturmak, ilk yavas olanin digerlerinin sonucunu gizlemesi
-      # demekti; bu tam olarak bu bulgunun uc kere yanlis teshis edilmesinin
+      # Each harness runs and is timed separately. Running them all inside one
+      # `cargo kani` meant the first slow one hid the results of the others; that is
+      # exactly why this finding was misdiagnosed three times.
       # sebebiydi.
-      - name: Yavas harness'ler, her biri ayri olculur
+      - name: Slow harnesses, each measured separately
         working-directory: kani
         run: |
           set -uo pipefail
@@ -496,7 +497,7 @@ jobs:
             echo "| $h | $result | $elapsed |" >> "$GITHUB_STEP_SUMMARY"
           done
           # Bir harness gercekten BOZULDUYSA (FAILED/UNKNOWN) bu is kirmizi
-          # olur. TIMEOUT beklenen durumdur ve olculmus haliyle raporlanir:
+          # TIMEOUT is the expected state and is reported as measured:
           # bunu kirmizi saymak, bilinen bir gercegi her hafta alarma cevirir
           # ve alarm anlamini kaybeder.
           exit "$rc_all"
