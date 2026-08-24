@@ -162,7 +162,6 @@ src/core/transaction.rs	6
 src/cross_domain/bridge.rs	10
 src/cross_domain/evm/mod.rs	10
 src/cross_domain/evm/receipt.rs	12
-src/crypto/domain_tags.rs	21
 src/crypto/mainnet_policy.rs	3
 src/crypto/pkcs11.rs	13
 src/domain/finality_adapter.rs	7
@@ -182,7 +181,6 @@ src/lubot/storage.rs	8
 src/mempool/pool.rs	20
 src/network/node.rs	18
 src/network/sync_codec.rs	1
-src/pollen/data_rights.rs	21
 src/privacy/mod.rs	1
 src/privacy/submit.rs	11
 src/registry/d4_merge_tests.rs	1
