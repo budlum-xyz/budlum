@@ -1,41 +1,43 @@
-//! Dogrulama gucu: her cevap ne kadar dogrulandigini **beyan eder**.
+//! Verification strength: every answer **declares** how much it was verified.
 //!
-//! # Sistemin en onemli tasarim karari
+//! # The most important design decision in the system
 //!
-//! Dogrulanamayan icerik yasaklanmiyor, **etiketleniyor**. Yasaklamak
-//! tarayiciyi kullanilmaz yapar ve kullaniciyi hic dogrulama yapmayan baska
-//! bir tarayiciya gonderir. Etiketlemek, kullaniciya ne gordugunu soyler.
+//! Content that cannot be verified is not banned, it is **labelled**. Banning
+//! makes the browser unusable and sends the user to another browser that
+//! verifies nothing. Labelling tells the user what they are looking at.
 //!
-//! Bunun bedeli, etiketin durust olmasi zorunlulugudur. Bir cevabin
-//! [`Strength::Verified`] olmasi icin bir **esitlik** kurulmus olmali:
-//! getirilen baytlarin hash'i beklenen kimlige esit. Baska hicbir sey
-//! `Verified` degildir; ozellikle "guvenilir bir RPC boyle dedi" degildir.
+//! The price of that is that the label has to be honest. For an answer to be
+//! [`Strength::Verified`], an **equality** must have been established: the hash
+//! of the fetched bytes equals the expected identity. Nothing else is
+//! `Verified`, and in particular "a trusted RPC said so" is not.
 //!
-//! # Neden tek bir enum
+//! # Why a single enum
 //!
-//! Guc, getiricinin, cozumleyicinin ve hafif istemcinin ayri ayri urettigi bir
-//! seydir ve **en zayif halka** kazanir. Ucunu ayri alanlarda tutup adres
-//! cubugunda birlestirmek, birlestirmeyi unutan bir cagriya izin verir.
-//! [`Evidence::weakest`] o birlesmeyi tek yerde yapiyor.
-
+//! Strength is produced separately by the fetcher, the resolver and the light
+//! client, and the **weakest link** wins. Keeping the three in separate fields
+//! and combining them at the address bar allows a call site to forget the
+//! combination. [`Evidence::weakest`] does that combining in one place.
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Bir cevabin ne kadar dogrulandigi.
+/// How much an answer was verified.
 ///
-/// Siralama kasitli: `Ord`, zayiftan gucluye. `weakest` bunun uzerine kuruyor.
+/// The ordering is deliberate: `Ord` runs weak to strong, and `weakest` is
+/// built on top of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Strength {
-    /// Dogrulanamadi ve icerik gosterilmemeli. Hash tutmadi, kanit gecersiz,
-    /// ya da sifre cozulemedi.
+    /// Not verified, and the content must not be shown: the hash did not
+    /// match, the proof was invalid, or decryption failed.
     Refused,
-    /// Yalniz birinin beyani. Bir RPC cevap verdi, kanit yok ya da kanit
-    /// dogrulanamadi. Gosterilebilir, ama `dogrulandi` degil.
+    /// Somebody's claim and nothing more. An RPC answered, with no proof, or
+    /// with a proof that could not be verified. Displayable, but not
+    /// `verified`.
     RpcClaimOnly,
-    /// Yalniz tasima guvenligi: TLS kimin gonderdigini soyluyor, neyin
-    /// gonderildigini degil. Siradan web bu.
+    /// Transport security only: TLS says who sent it, not what was sent. This
+    /// is the ordinary web.
     TransportOnly,
-    /// Icerik adresli ve bayt hash'i beklenen kimlige esit.
+    /// Content-addressed, and the hash of the bytes equals the expected
+    /// identity.
     Verified,
 }
 
@@ -50,20 +52,25 @@ impl fmt::Display for Strength {
     }
 }
 
-/// Bir tek olcum: kim, neyi, ne kadar dogruladi.
+/// A single measurement: who verified what, and how far.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Claim {
-    /// Hangi katman: `name-rule`, `bns-resolution`, `bud-fetcher`, `ipfs`, ...
+    /// Which layer: `name-rule`, `bns-resolution`, `bud-fetcher`, `ipfs`, and
+    /// so on.
     pub layer: String,
     pub strength: Strength,
-    /// Neden bu guc. Bos birakilamaz: sebepsiz bir etiket, bir etiket degil.
+    /// Why this strength. It cannot be left empty: a label without a reason is
+    /// not a label.
     pub reason: String,
 }
 
 impl Claim {
     #[must_use]
     pub fn new(layer: &str, strength: Strength, reason: &str) -> Self {
-        debug_assert!(!reason.is_empty(), "sebepsiz iddia yazilamaz");
+        debug_assert!(
+            !reason.is_empty(),
+            "a claim without a reason cannot be written"
+        );
         Self {
             layer: layer.to_string(),
             strength,
@@ -72,7 +79,7 @@ impl Claim {
     }
 }
 
-/// Bir cevabin butun iddialari.
+/// Every claim about one answer.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Evidence {
     pub claims: Vec<Claim>,
@@ -94,11 +101,12 @@ impl Evidence {
         self.claims.push(claim);
     }
 
-    /// Zincirin en zayif halkasi.
+    /// The weakest link in the chain.
     ///
-    /// Hicbir iddia yoksa `Refused`: olculmemis bir sey dogrulanmis sayilmaz.
-    /// Bu, bos bir `Evidence`'in kazara gecmesini engelliyor ve varsayilanin
-    /// yonu hakkinda bir karar: sessizlik, `dogrulandi` demez.
+    /// With no claims at all the answer is `Refused`: something unmeasured does
+    /// not count as verified. That stops an empty `Evidence` from passing by
+    /// accident, and it is a decision about which way the default points -
+    /// silence does not say `verified`.
     #[must_use]
     pub fn weakest(&self) -> Strength {
         self.claims
@@ -108,16 +116,16 @@ impl Evidence {
             .unwrap_or(Strength::Refused)
     }
 
-    /// Icerik kullaniciya gosterilebilir mi?
+    /// May the content be shown to the user?
     ///
-    /// `Refused` disindaki her sey gosterilebilir, cunku etiketleme karari
-    /// tam olarak budur: gosterilir ve ne oldugu soylenir.
+    /// Everything but `Refused` may be shown, because that is exactly what the
+    /// labelling decision means: show it, and say what it is.
     #[must_use]
     pub fn is_displayable(&self) -> bool {
         self.weakest() != Strength::Refused
     }
 
-    /// Adres cubugunda gosterilecek tek satir.
+    /// The single line shown in the address bar.
     #[must_use]
     pub fn badge(&self) -> String {
         let w = self.weakest();
@@ -129,7 +137,7 @@ impl Evidence {
             .collect::<Vec<_>>()
             .join("; ");
         if reason.is_empty() {
-            format!("{w} (hicbir olcum yapilmadi)")
+            format!("{w} (no measurement was made)")
         } else {
             format!("{w} - {reason}")
         }
@@ -150,11 +158,15 @@ mod tests {
     #[test]
     fn the_weakest_link_wins() {
         let e = Evidence::new()
-            .with(Claim::new("bud-fetcher", Strength::Verified, "hash tuttu"))
+            .with(Claim::new(
+                "bud-fetcher",
+                Strength::Verified,
+                "the hash matched",
+            ))
             .with(Claim::new(
                 "bns-resolution",
                 Strength::RpcClaimOnly,
-                "durum kaniti gelmedi",
+                "no state proof arrived",
             ));
         assert_eq!(e.weakest(), Strength::RpcClaimOnly);
         assert!(e.is_displayable());
@@ -166,12 +178,12 @@ mod tests {
             .with(Claim::new(
                 "bns-resolution",
                 Strength::Verified,
-                "kanit gecerli",
+                "the proof is valid",
             ))
             .with(Claim::new(
                 "ipfs",
                 Strength::Refused,
-                "ozet CID ile tutmadi",
+                "the digest did not match the CID",
             ));
         assert_eq!(e.weakest(), Strength::Refused);
         assert!(!e.is_displayable());
@@ -180,8 +192,12 @@ mod tests {
     #[test]
     fn the_badge_names_the_weakest_layer() {
         let e = Evidence::new()
-            .with(Claim::new("bud-fetcher", Strength::Verified, "hash tuttu"))
-            .with(Claim::new("https", Strength::TransportOnly, "yalniz TLS"));
+            .with(Claim::new(
+                "bud-fetcher",
+                Strength::Verified,
+                "the hash matched",
+            ))
+            .with(Claim::new("https", Strength::TransportOnly, "TLS only"));
         let badge = e.badge();
         assert!(badge.contains("transport only"), "{badge}");
         assert!(badge.contains("https"), "{badge}");
