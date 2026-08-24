@@ -1,8 +1,8 @@
-//! B.U.D. 2.0 - BIT ROT + SCRUB (F50 - checksum bütünlüğü + tarama çizelgesi)
+//! B.U.D. 2.0 - BIT ROT + SCRUB (F50 - checksum integrity + scan schedule)
 //!
-//! Kalan iş: bit rot + scrub. SHA3 content_id'leri zaten her .bud'da; bu modül
-//! TARAMA çizelgesini verir: hangi küme ne zaman doğrulanır (tier + yaşa göre),
-//! bozuk kayıt RED. Deterministik; panik'siz.
+//! Remaining work: bit rot + scrub. SHA3 content_id values already live in every
+//! .bud; this module supplies the SCAN schedule: which set is verified when (by
+//! tier and age), with corrupt records REJECTED. Deterministic; panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -12,13 +12,13 @@ pub const SCRUB_MAGIC: [u8; 8] = *b"\xB5SCRS\0\0\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubTier {
-    Hot,     // sık erişilen - nadir tarama (okuma zaten doğrular)
-    Warm,    // arada - aylık
-    Cold,    // nadir - haftalık
-    Archive, // uzun - günlük dilim
+    Hot,     // frequently accessed - rare scan (reads already verify)
+    Warm,    // in between - monthly
+    Cold,    // rare - weekly
+    Archive, // long lived - daily slice
 }
 
-/// Tarama aralığı (saniye) - tier'e göre.
+/// Scan interval (seconds) - per tier.
 pub fn scrub_interval_sec(tier: ScrubTier) -> u64 {
     match tier {
         ScrubTier::Hot => 90 * 24 * 3600,
@@ -28,12 +28,12 @@ pub fn scrub_interval_sec(tier: ScrubTier) -> u64 {
     }
 }
 
-/// Küme şimdi taranmalı mı? (son_tarama + aralık ≤ şimdi)
+/// Is the set due for a scan now? (last_scrub + interval <= now)
 pub fn due(tier: ScrubTier, last_scrub_sec: u64, now_sec: u64) -> bool {
     last_scrub_sec.saturating_add(scrub_interval_sec(tier)) <= now_sec
 }
 
-/// Kayıt doğrulama: beklenen content_id ile uyuşuyor mu? (bit rot tespiti)
+/// Record verification: does it match the expected content_id? (bit rot detection)
 pub fn verify_content(data: &[u8], expected: &[u8; 32]) -> bool {
     let mut h = Sha3_256::new();
     h.update(b"BDLM_BUD_CONTENT_V1");
@@ -62,24 +62,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn araliklar_tier_sirali() {
+    fn intervals_are_tier_ordered() {
         assert!(scrub_interval_sec(ScrubTier::Hot) > scrub_interval_sec(ScrubTier::Cold));
     }
 
     #[test]
-    fn due_hesabi_dogru() {
+    fn due_computation_is_correct() {
         assert!(due(ScrubTier::Cold, 0, scrub_interval_sec(ScrubTier::Cold)));
         assert!(!due(ScrubTier::Cold, 1_000_000, 1_000_001));
     }
 
     #[test]
-    fn bit_rot_tespiti() {
+    fn bit_rot_is_detected() {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_CONTENT_V1");
         h.update((7u64).to_le_bytes());
-        h.update(b"merhaba");
+        h.update(b"payload");
         let cid: [u8; 32] = h.finalize().into();
-        assert!(verify_content(b"merhaba", &cid));
-        assert!(!verify_content(b"merhabX", &cid), "bit rot yakalanır");
+        assert!(verify_content(b"payload", &cid));
+        assert!(!verify_content(b"payloaX", &cid), "bit rot is caught");
     }
 }
