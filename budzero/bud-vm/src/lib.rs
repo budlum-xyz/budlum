@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 use bud_isa::{Instruction, Opcode};
 use serde::{Deserialize, Serialize};
@@ -647,17 +647,17 @@ impl Vm {
             //
             // PrivacyCommit (0x20):
             //   Commitment = Poseidon3(amount=rs1, recipient=rs2, blinding=imm)
-            //   Zincire yalnızca commitment yazılır (note registry).
+            //   Only the commitment is written to the chain (the note registry).
             //
             // NullifierCheck (0x21):
             //   Claimed_nullifier = rs1, secret = rs2
             //   Rd = 1 iff Poseidon2(secret, DOMAIN_NULLIFIER) == claimed_nullifier
-            //   (Spent-set membership NoteRegistry tarafında; VM sahiplik bağını kanıtlar.)
+            //   (Spent set membership is on the NoteRegistry side; the VM proves the ownership binding.)
             //
             // SumConservation (0x22):
-            //   Poseidon commitment homomorfik değil → value conservation private
-            //   Witness üzerinden: rd = 1 iff rs1 (Σ in amounts) == rs2 (Σ out amounts).
-            //   Amount'lar PrivacyCommit ile commitment'a bağlanır (ayrı satırlar).
+            //   The Poseidon commitment is not homomorphic -> value conservation goes through a
+            //   private witness: rd = 1 iff rs1 (sum of in amounts) == rs2 (sum of out amounts).
+            //   The amounts are bound to the commitment with PrivacyCommit (separate rows).
             // Blinding from register (full u64),
             // Recipient tag from imm (i32 fits). Eliminates u32 truncation
             // That caused wallet-core/VM commitment mismatch and reduced
@@ -666,12 +666,12 @@ impl Vm {
                 let amount = src1_val;
                 let blinding = src2_val; // full u64 from register
                                          // Strix HIGH (CWE-682, 2026-08-17): recipient, trace'teki
-                                         // COL_IMM ile BIREBIR ayni deger olmali. COL_IMM negatif
-                                         // imm'i Goldilocks moduler negatifi (P - |imm|) olarak
-                                         // tasir; i64->u64 ikiye-tumleyen (2^64-|imm|) AIR ile
-                                         // uyumsuzdu. VM + prover + AIR artik ayni degeri kullanir.
+                                         // It must be EXACTLY the same value as COL_IMM. COL_IMM carries a negative
+                                         // imm as the Goldilocks modular negative (P - |imm|); the i64->u64
+                                         // two's complement (2^64-|imm|) was incompatible with the AIR.
+                                         // The VM, prover and AIR now use the same value.
                                          // Strix HIGH (CWE-682 + i32::MIN, 2026-08-17): `-imm` i32::MIN
-                                         // icin panic eder; unsigned_abs() guvenli (|-2^31| = 2^31).
+                                         // panics for that case; unsigned_abs() is safe (|-2^31| = 2^31).
                 let recipient = if inst.imm < 0 {
                     GOLDILOCKS_P.wrapping_sub(inst.imm.unsigned_abs() as u64)
                 } else {
@@ -2223,21 +2223,21 @@ mod tests {
     /// Butun tablo tek sabite baglanir.
     ///
     /// Yukaridaki kilit 240 yuvarlak sabitin **ikisini** tutuyordu. Kalan 238'i
-    /// sessizce degistirilebilirdi: bir sabiti degistirmek permutasyonu
+    /// could be changed silently: changing a constant changes what the permutation
     /// degistirir, permutasyonu degistirmek taahhutlerin ne sakladigini ve neye
-    /// bagladigini degistirir - ve hicbir test bunu gormezdi.
+    /// binds - and no test would see it.
     ///
-    /// Ornek kontrol tam da bu sinifi kaciran denetimdir: her zaman gecen
-    /// (cunku ornek disi her yeri serbest birakan) bir kilit, olmayan kilitten
-    /// daha kotudur, cunku kilit varmis gibi okunur.
+    /// A spot check is exactly the kind of check that misses this class: a lock that
+    /// always passes (because it leaves everything outside the sample free) is worse
+    /// than no lock, because it reads as though a lock exists.
     ///
-    /// Parmak izi FNV-1a 64 ile hesaplanir. Kriptografik bir ozet degil ve
-    /// olmasi da gerekmiyor: burada savunulan sey gizlilik degil
-    /// **degisiklige duyarlilik**. Bir sabitin tek biti degisirse deger kayar.
-    /// Hash kutuphanesi eklemek, kilitledigi tabloyla ayni agacta yasayan yeni
-    /// bir bagimlilik demek olurdu.
+    /// The fingerprint is computed with FNV-1a 64. It is not a cryptographic digest and
+    /// does not need to be: what is defended here is not secrecy but
+    /// **sensitivity to change**. If a single bit of a constant changes the value shifts.
+    /// Adding a hash library would mean a new dependency living in the same tree as the
+    /// table it locks.
     ///
-    /// Deger degistiginde yapilacak sey guncellemek degil, **once neyin
+    /// When the value changes the thing to do is not to update it but to ask **what
     /// degistigini bulmaktir**.
     #[test]
     fn the_whole_constant_table_is_locked() {
@@ -2272,8 +2272,8 @@ mod tests {
             0x7fb2_9bd1_52c1_ff25,
             "the MDS matrix changed; row 0 and row 7 alone did not cover it"
         );
-        // Ucdan tutan iki kenar: parmak izi ile birlikte, tablonun hem
-        // uzunlugunu hem siniri tutar.
+        // Two edges holding the ends: together with the fingerprint they hold both the
+        // length and the bound of the table.
         assert_eq!(POSEIDON_RC_FULL[0][0], 0xdd57_43e7_f2a5_a5d9);
         assert_eq!(POSEIDON_RC_FULL[29][7], 0x323d_9533_2b14_5fd6);
     }

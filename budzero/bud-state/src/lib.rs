@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// the build FAILs (a regression gate). The same policy as the main crate.
 #![forbid(unsafe_code)]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 pub type Hash = [u8; 32];
 
-// Gizlilik katmanı note/UTXO modeli - account model'den
+// The privacy layer note/UTXO model - separate from the account model
 // Izole, paralel subtree.
 pub mod note;
 

@@ -205,10 +205,10 @@ mod tests {
         let source = r#"
             contract OperatorTest {
                 pub fn main() {
-                    let esitsiz = 3 != 4;
+                    let unequal = 3 != 4;
                     let smaller = 3 < 4;
                     let greater = 3 > 4;
-                    let kucuk_esit = 4 <= 4;
+                    let smaller_or_equal = 4 <= 4;
                     emit Result(unequal, smaller, greater, smaller_or_equal);
                 }
             }
@@ -227,7 +227,7 @@ mod tests {
 
     /// Ayrilmis tip adlarinin **hepsi** reddedilmeli.
     ///
-    /// `RESERVED_TYPE_NAMES` on uc ad tasiyor ve hicbirinin testi yoktu.
+    /// `RESERVED_TYPE_NAMES` carries thirteen names and none of them had a test.
     /// The list carries a silent trap: `Type::from_str` accepts every unrecognised
     /// name as a **struct name**. So if a name drops off the list
     /// `u128` reddedilmez, "tanimsiz struct" hatasina donusur - ya da o adda
@@ -237,9 +237,9 @@ mod tests {
     /// Each name is asserted separately: a single loop assertion would hide one name
     /// dropping off the list under the success of the others.
     #[test]
-    fn ayrilmis_tip_adlari_reddedilir() {
-        // (ad, hata metninde gecmesi gereken parca)
-        let adlar = [
+    fn reserved_type_names_are_refused() {
+        // (name, the fragment that must appear in the error text)
+        let names = [
             ("u8", "Goldilocks"),
             ("u16", "Goldilocks"),
             ("u32", "range-check"),
@@ -255,11 +255,11 @@ mod tests {
             ("Vec", "no dynamic collections"),
         ];
 
-        for (ad, beklenen) in adlar {
+        for (name, expected) in names {
             let source = format!(
                 r#"
                 contract T {{
-                    pub fn f(x: {ad}) -> u64 {{
+                    pub fn f(x: {name}) -> u64 {{
                         return 1;
                     }}
 
@@ -278,11 +278,11 @@ mod tests {
                         "`{name}` was refused but not by the reserved name gate: {msg}"
                     );
                     assert!(
-                        msg.contains(beklenen),
+                        msg.contains(expected),
                         "the reason for `{name}` was lost; `{expected}` was expected: {msg}"
                     );
                 }
-                Err(other) => panic!("`{ad}`: SemanticError bekleniyordu, gelen: {other:?}"),
+                Err(other) => panic!("`{name}`: a SemanticError was expected, got: {other:?}"),
             }
         }
     }
@@ -291,14 +291,14 @@ mod tests {
     ///
     /// Shows that the reserved name gate does not overreach and swallow valid types.
     /// Without it, breaking `from_str` so that it refuses every name
-    /// yukaridaki testi yesil birakirdi.
+    /// would leave the test above green.
     #[test]
-    fn gecerli_tip_adlari_kabul_edilir() {
-        for ad in ["u64", "bool", "field", "Address", "Hash32"] {
+    fn valid_type_names_are_accepted() {
+        for name in ["u64", "bool", "field", "Address", "Hash32"] {
             let source = format!(
                 r#"
                 contract T {{
-                    pub fn f(x: {ad}) -> u64 {{
+                    pub fn f(x: {name}) -> u64 {{
                         return 1;
                     }}
 

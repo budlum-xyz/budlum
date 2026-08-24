@@ -22,39 +22,39 @@ fn inst(opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32) -> u64 {
 // ── Gercek soundness olcumu (2026-08-23) ─────────────────────────────────
 //
 // Buradaki testler bir `tampered_check_fails` harness'inin yerini aldi. O
-// harness olculdu ve **hicbir zaman kisit olcmemis**: `p3_air::check_constraints`
-// bu AIR icin iki sebeple daha ilk satirda panikliyor -
+// the harness was measured and it **never measured a constraint**: `p3_air::check_constraints`
+// panics on the very first row for this AIR for two reasons -
 //
 //   1. `num_public_values()` 56 dondururken harness 48 uzunlukta bir dizi
 //      veriyordu -> "index out of bounds: the len is 48 but the index is 48".
-//   2. O duzeltildikten sonra bile AIR permutasyon (lookup) verisi istiyor ->
+//   2. even after that is fixed the AIR wants permutation (lookup) data ->
 //      "permutation() called on a builder created without permutation data".
 //
 // `catch_unwind(...).is_err()` bu panikleri bir kisit ihlalinden ayirt
 // etmiyordu, dolayisiyla **tamper hic uygulanmadan da** `true` donuyordu
-// (olculdu). Bes negatif testin hepsi bu yuzden yanlis sebepten yesildi ve
-// AIR uzerinde hicbir guvence saglamiyordu.
+// (measured). All five negative tests were therefore green for the wrong reason and
+// provided no assurance about the AIR.
 //
-// `bud_stark::prover` zaten ayni sonuca varmis: oradaki `check_constraints`
+// `bud_stark::prover` had already reached the same conclusion: the `check_constraints`
 // cagrisi hem `#[cfg(debug_assertions)]` hem `if !has_aux_trace` ardinda
-// duruyor - bu AIR icin o API yeterli degil.
+// there stands - that API is not enough for this AIR.
 //
-// Bu yuzden asagidakiler AIR'i dogrudan degil **prove + verify** uzerinden
-// olcuyor: gecerli bir kanit uretilir, sonra tek bir sey degistirilip
+// So the tests below measure through **prove + verify** rather than the AIR
+// directly: a valid proof is produced, then a single thing is changed and
 // dogrulayicinin reddetmesi beklenir. Bu, zincirin gercekten maruz kaldigi
-// saldiri yuzeyidir - dogrulayiciya sunulan iddia.
+// attack surface - the claim presented to the verifier.
 
-/// Gecerli bir kanit ve onu dogrulamak icin gereken her sey.
-type Kanit = (
+/// A valid proof and everything needed to verify it.
+type WorkingProof = (
     bud_proof::adapter::ProofEnvelope,
     ExecutionPublicInputs,
     Vec<u64>,
 );
 
 /// Tek bir public input alanini kurcalayan islev.
-type Bozucu = fn(&mut ExecutionPublicInputs);
+type Corruptor = fn(&mut ExecutionPublicInputs);
 
-fn calisan_kanit() -> Kanit {
+fn working_proof() -> WorkingProof {
     let bytecode = vec![
         inst(Opcode::Add, 1, 2, 3, 0),
         inst(Opcode::Halt, 0, 0, 0, 0),
@@ -96,50 +96,51 @@ fn calisan_kanit() -> Kanit {
         state_writes_digest: [0u8; 32],
     };
 
-    let envelope = Prover::prove(&vm.trace, &pi, &bytecode).expect("kanit uretilemedi");
+    let envelope =
+        Prover::prove(&vm.trace, &pi, &bytecode).expect("the proof could not be produced");
     (envelope, pi, bytecode)
 }
 
-/// Kontrol grubu: kurcalanmamis kanit **kabul** edilmeli.
+/// A control group: an untampered proof must be **accepted**.
 ///
-/// Bu test olmadan asagidaki reddetme testleri hicbir sey ifade etmez - eski
-/// harness tam olarak bu kontrolun yoklugundan oturu bes testi birden yanlis
+/// Without this test the refusal tests below mean nothing - the old harness left
+/// five tests green for the wrong reason precisely because this control was missing.
 /// sebepten yesil gostermisti.
 #[test]
-fn kurcalanmamis_kanit_kabul_edilir() {
-    let (envelope, pi, bytecode) = calisan_kanit();
-    Prover::verify(&envelope, &pi, &bytecode).expect("temiz kanit reddedildi");
+fn an_untampered_proof_is_accepted() {
+    let (envelope, pi, bytecode) = working_proof();
+    Prover::verify(&envelope, &pi, &bytecode).expect("a clean proof was refused");
 }
 
-/// Kanit, yalnizca uretildigi program icin gecerli olmali.
+/// A proof must be valid only for the program it was produced for.
 ///
-/// Ayni kaniti farkli bir programin ciktisi gibi sunabilmek "hangi kodu
+/// Being able to present the same proof as the output of a different program
 /// calistirdim" iddiasini tamamen degersiz kilardi.
 #[test]
-fn baska_program_icin_sunulan_kanit_reddedilir() {
-    let (envelope, pi, _) = calisan_kanit();
-    let baska = vec![
+fn a_proof_presented_for_another_program_is_refused() {
+    let (envelope, pi, _) = working_proof();
+    let other = vec![
         inst(Opcode::Sub, 1, 2, 3, 0),
         inst(Opcode::Halt, 0, 0, 0, 0),
     ];
     assert!(
-        Prover::verify(&envelope, &pi, &baska).is_err(),
-        "kanit baska bir program icin kabul edildi; program baglamasi yok"
+        Prover::verify(&envelope, &pi, &other).is_err(),
+        "the proof was accepted for another program; there is no program binding"
     );
 }
 
-/// Public input alanlari tek tek kurcalanirsa kanit gecersiz olmali.
+/// If the public input fields are tampered with one by one the proof must be invalid.
 ///
-/// Her alan **ayri** iddia ediliyor: tek bir toplu `assert`, bir alanin
-/// baglanmamis olmasini digerlerinin basarisi altinda gizlerdi. Bu tam olarak
+/// Each field is asserted **separately**: a single bulk `assert` would hide one field
+/// being unbound under the success of the others. This is exactly the class of the
 /// SP1'in `committed_value_digest` kisitsizligi ve Aleo/snarkVM'in eksik
-/// absorb bulgusunun sinifi - dogrulayici, kanit sisteminin kisitlamadigi
-/// alanlari kendi kodunda denetlemek zorunda.
+/// absorb finding - the verifier must check in its own code the areas the proof
+/// system does not constrain in its own code.
 #[test]
-fn kurcalanan_public_input_reddedilir() {
-    let (envelope, temiz, bytecode) = calisan_kanit();
+fn a_tampered_public_input_is_refused() {
+    let (envelope, clean, bytecode) = working_proof();
 
-    let degisiklikler: Vec<(&str, Bozucu)> = vec![
+    let corruptions: Vec<(&str, Corruptor)> = vec![
         ("chain_id", |p| p.chain_id ^= 1),
         ("program_hash", |p| p.program_hash[0] ^= 1),
         ("initial_state_root", |p| p.initial_state_root[0] ^= 1),
@@ -154,12 +155,12 @@ fn kurcalanan_public_input_reddedilir() {
         ("state_writes_digest", |p| p.state_writes_digest[0] ^= 1),
     ];
 
-    for (ad, boz) in degisiklikler {
-        let mut pi = temiz.clone();
-        boz(&mut pi);
+    for (name, corrupt) in corruptions {
+        let mut pi = clean.clone();
+        corrupt(&mut pi);
         assert!(
             Prover::verify(&envelope, &pi, &bytecode).is_err(),
-            "`{ad}` kurcalandi ama kanit hala gecerli sayildi; bu alan kanita bagli degil"
+            "`{name}` was tampered with but the proof was still counted valid; this field is not bound to the proof"
         );
     }
 }

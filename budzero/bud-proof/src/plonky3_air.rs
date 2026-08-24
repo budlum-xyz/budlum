@@ -595,11 +595,11 @@ pub const COL_SYSCALL_IS_1: usize = 742;
 pub const COL_SYSCALL_IS_2: usize = 743;
 pub const COL_SYSCALL_IS_3: usize = 744;
 
-/// Program CTL cokluk taniki: satir `i` icin pc=`i`'nin CPU trace'inde kac kez
+/// The Program CTL multiplicity witness: how many times pc=`i` appears in the CPU
 /// calistirildigi.
 ///
-/// Program CTL bir *lookup*, permutasyon degil. Dallanma varken bir komut hic
-/// calistirilmayabilir (atlanan dal) veya birden cok kez calistirilir (dongu
+/// The Program CTL is a *lookup*, not a permutation. With branching an instruction may
+/// never run (a skipped branch) or run several times (a loop
 /// govdesi). Sabit agirlik `pre_active` kullanildigi surece durust prover
 /// dengesiz LogUp toplami uretir ve `InvalidProof` alir.
 pub const COL_PROG_MULT: usize = 753;
@@ -1335,35 +1335,35 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // # Kapanan bosluk
         //
         // Asagidaki kok denetimi, **orijinal** VerifyMerkle satirinin
-        // `merkle_current` degerini `rs1_val` (iddia edilen kok) ile
+        // compared the `merkle_current` value against `rs1_val` (the claimed root)
         // karsilastiriyor. Prover o hucreye 64. turun ciktisini yaziyor - ama
-        // bunu **zorlayan bir kisit yoktu**. Yani zincir satir satir dogru
-        // hesaplaniyordu ve sonucu hicbir yere baglanmiyordu: kotu niyetli
+        // but **no constraint enforced it**. So the chain was computed correctly row by
+        // row and its result was bound to nothing: a malicious
         // bir prover orijinal satira dogrudan `rs1_val`'i yazar, esitlik
-        // saglanir, `rd_val_new = 1` doner. Yol dogrulanmis gibi gorunur,
+        // is satisfied and `rd_val_new = 1` is returned. The path looks verified,
         // dogrulanan sey yoktur.
         //
-        // Bu, opcode'un uretimde kapali tutulma gerekcesiydi ("unfinished
+        // This was the reason the opcode is kept off in production ("unfinished
         // path verification"). Eksik olan tek sey su gecis: **son** genisleme
-        // satirindan (`is_expand = 1`, ardil satir genisleme degil) cikan
+        // row (`is_expand = 1`, the successor row is not an expansion) must equal the
         // Poseidon ciktisi, o genislemeyi baslatan orijinal satirin
-        // `merkle_current` degerine esit olmali.
+        // `merkle_current` value.
         //
-        // # Neden geriye dogru degil, ileriye dogru okunuyor
+        // # Why it is read forwards, not backwards
         //
-        // Orijinal satir genislemelerden **once** gelir, yani AIR'in iki-satir
-        // penceresi son genislemeden orijinale bakamaz. Bunun yerine deger
-        // ileri tasinir: `COL_MERKLE_FINAL_FLAG` sutunu, genisleme boyunca
-        // orijinal satirin bekledigi degeri taşir ve son turda esitlik
-        // denetlenir. Sutun zaten tanimliydi ve hicbir kisit onu okumuyordu -
-        // tanimli ama sorulmayan bir sutun, olmayan bir sutundan daha kotudur,
-        // cunku okuyan kisiye denetleniyormus gibi gorunur.
+        // The original row comes **before** the expansions, so the AIR's two-row
+        // window cannot look from the last expansion back to the original. Instead the value
+        // is carried forwards: the `COL_MERKLE_FINAL_FLAG` column carries the value the
+        // original row expects through the expansion and equality is checked in the final
+        // round. The column was already defined and no constraint read it -
+        // a column that is defined but never asked is worse than a column that does not exist,
+        // because to a reader it looks like it is being checked.
         let on_original_row: AB::Expr =
             is_verify_merkle.clone() * (one.clone() - is_expand.clone());
         let merkle_final_expected: AB::Expr = cur[COL_MERKLE_FINAL_FLAG].into();
         let nxt_merkle_final_expected: AB::Expr = nxt[COL_MERKLE_FINAL_FLAG].into();
 
-        // Beklenen deger, orijinal satirdan ilk genislemeye tasinir.
+        // The expected value is carried from the original row into the first expansion.
         builder
             .when_transition()
             .when(on_original_row.clone())
@@ -1378,9 +1378,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(nxt_is_expand.clone())
             .assert_zero(nxt_merkle_final_expected.clone() - merkle_final_expected.clone());
 
-        // Son genisleme satirinda (ardil satir genisleme degil) turun ciktisi
-        // tasinan degere esit olmali. Zincir burada kapanir: orijinal satirin
-        // kok ile karsilastirdigi deger, gercekten 64 turun sonucudur.
+        // On the last expansion row (the successor row is not an expansion) the round output
+        // must equal the carried value. The chain closes here: the value the original row
+        // compares against the root really is the result of 64 rounds.
         builder
             .when_transition()
             .when(is_expand.clone())
@@ -2432,8 +2432,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let pre_inst: AB::Expr = pre_cur[1].into();
             let pre_active: AB::Expr = pre_cur[2].into();
             // ROM tarafinin LogUp agirligi: pc'nin kac kez calistirildigi.
-            // Taahhut edilen ana trace'te durur -- dogrulayici trace'i
-            // gormedigi icin on-islenmis tabloya konamaz.
+            // It stays in the committed main trace -- because the verifier does not
+            // see the trace it cannot be placed in the preprocessed table.
             let prog_mult: AB::Expr = cur[COL_PROG_MULT].into();
 
             let raw_inst: AB::Expr = cur[COL_RAW_INST].into();
@@ -2529,8 +2529,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let is_expand: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
             let prog_active: AB::Expr = cpu_active.clone() * (one.clone() - is_expand);
             let prog_active_ext: AB::ExprEF = prog_active.into();
-            // Program disi satir hicbir sey odunc veremez: cokluk yalnizca
-            // gercek bir ROM satirinda (pre_active=1) sifirdan farkli olabilir.
+            // A row outside the program can lend nothing: the multiplicity can be
+            // non-zero only on a real ROM row (pre_active=1).
             // Aksi halde prover programda olmayan bir pc'ye agirlik yazarak
             // dengeyi uydurabilirdi.
             builder.assert_zero(prog_mult.clone() * (one.clone() - pre_active.clone()));

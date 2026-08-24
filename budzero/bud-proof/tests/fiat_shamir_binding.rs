@@ -205,17 +205,17 @@ fn alpha_and_zeta_follow_their_commitments() {
             quotient + 1
         );
 
-        // alpha, iz taahhutlerinden **sonra** gelmeli.
+        // alpha must come **after** the trace commitments.
         //
-        // Bu testin adi "alpha_and_zeta" idi ve govdesi yalnizca zeta'yi
+        // This test was named "alpha_and_zeta" and its body measured only zeta;
         // olcuyordu - alpha hic aranmiyordu. Belgelenmis ama denetlenmemis
         // bir degismez, denetlenmeyen bir degismezdir; adi gecen kisim
-        // okuyana kapsandigi izlenimi verdigi icin daha da kotusudur.
+        // that is worse still, because it gives a reader the impression of coverage.
         //
         // Kisitlari tek polinomda katlayan carpan alpha'dir. Iz taahhudu
-        // sabitlenmeden ornekleniirse, prover alpha'yi ogrendikten sonra izi
+        // is sampled before being fixed, the prover can search for a trace after
         // secebilir ve katlanmis kisitin sifira gitmesini saglayacak bir iz
-        // arayabilir. Katlama ancak katladigi seyler sabitse anlamlidir.
+        // learning alpha. Folding is meaningful only if the things it folds are fixed.
         let trace_observe = code(body)
             .iter()
             .enumerate()
@@ -245,7 +245,7 @@ fn alpha_and_zeta_follow_their_commitments() {
         );
 
         // Ve alpha, zeta'dan once gelmeli: zeta, alpha ile katlanmis kisitin
-        // degerlendirildigi noktadir. Ters sirada nokta, katlamadan bagimsiz
+        // is evaluated. In the reverse order the point would be independent of the folding
         // secilmis olurdu.
         assert!(
             alpha < zeta,

@@ -19,9 +19,9 @@ use tiny_keccak::{Hasher, Keccak};
 
 /// Programs that must survive the whole pipeline.
 ///
-/// Dallanmali programlar da buraya aittir: Program CTL artik bir *lookup*,
-/// permutasyon degil. `COL_PROG_MULT` her ROM satirinin kac kez calistirildigini
-/// tasidigi icin atlanan komut (0 kez) ve dongu govdesi (N kez) dengeyi bozmaz.
+/// Branching programs belong here too: the Program CTL is now a *lookup*,
+/// not a permutation. Because `COL_PROG_MULT` carries how many times each ROM row
+/// ran, a skipped instruction (0 times) and a loop body (N times) do not break the balance.
 const PROVABLE_PROGRAMS: &[&str] = &[
     "example.bud",
     "example2.bud",
@@ -49,7 +49,7 @@ fn public_inputs_for(vm: &Vm, bytecode: &[u64], events: &[u64]) -> ExecutionPubl
     public_inputs_with_writes(vm, bytecode, events, [0u8; 32])
 }
 
-/// Depolama yazan bir program icin kamu girdileri.
+/// The public inputs for a program that writes storage.
 ///
 /// `state_writes_digest` AIR tarafindan gercek SWrite zincirine baglanir;
 /// sabit sifir vermek, depolamaya dokunan her programin dogrulamasini
@@ -249,11 +249,11 @@ fn a_vm_smaller_than_the_heap_base_still_faults_on_structs() {
 
 /// Depolama alani bildirmek onu kullanilabilir yapmali.
 ///
-/// `storage { count: u64, }` ayristiriliyor ve `codegen` her alan icin bir
+/// `storage { count: u64, }` was parsed and `codegen` emitted a slot for each field,
 /// slot ayirip `SWrite` uretebiliyordu, ama sema fonksiyon govdesine bos bir
 /// ortamla giriyordu: bildirilen alani okumak da yazmak da "Undefined
-/// variable" ile reddediliyordu. Dilin kalici durum ozelligi bastan sona
-/// yazilmisti ve hicbir program ona erisemiyordu.
+/// but it was refused with "variable". The language's persistent state feature was
+/// written end to end and no program could reach it.
 #[test]
 fn a_declared_storage_field_can_be_read_and_written() {
     let source = "contract Counter {\n\
@@ -279,9 +279,9 @@ fn a_declared_storage_field_can_be_read_and_written() {
 /// Depolamaya yazan bir program kanitlanabilmeli.
 ///
 /// AIR `state_writes_digest`'i gercek SWrite zincirine baglar (Strix HIGH
-/// CWE-345). Cagiran taraf oraya sabit sifir koydugunda kanit uretiliyor ama
+/// CWE-345). When the caller put a hardcoded zero there a proof was produced but
 /// **kendi dogrulayicisinda** dusuyordu. Depolamaya dokunmayan programlarda
-/// sifir dogru cevap oldugu icin kusur gorunmuyordu.
+/// the defect stayed invisible because zero was the right answer.
 #[test]
 fn a_storage_writing_program_proves_and_verifies() {
     let source = "contract W {\n\
@@ -300,26 +300,26 @@ fn a_storage_writing_program_proves_and_verifies() {
 
     let pi =
         public_inputs_with_writes(&vm, &bytecode, &receipt.events, receipt.state_writes_digest);
-    let envelope =
-        bud_proof::Plonky3Adapter::prove(&vm.trace, &pi, &bytecode).expect("kanit uretilmeli");
+    let envelope = bud_proof::Plonky3Adapter::prove(&vm.trace, &pi, &bytecode)
+        .expect("a proof must be produced");
     bud_proof::Plonky3Adapter::verify(&envelope, &pi, &bytecode)
-        .expect("uretilen kanit dogrulanmali");
+        .expect("the produced proof must verify");
 
     // Kirmizi taraf: eski davranis (sabit sifir) reddedilmeli.
     let zeroed = public_inputs_with_writes(&vm, &bytecode, &receipt.events, [0u8; 32]);
     assert!(
         bud_proof::Plonky3Adapter::verify(&envelope, &zeroed, &bytecode).is_err(),
-        "sifir yazma ozeti tasiyan kamu girdisi kabul edilmemeli - bu tam olarak \
+        "a public input carrying a zero write digest must not be accepted - this is exactly \
          duzeltilen kusurdur"
     );
 }
 
-/// Storage alaninin tipi gercekten var olmali.
+/// The type of a storage field must really exist.
 ///
 /// `Type::from_str` primitif olmayan her adi `Type::Struct(ad)` yapar, bu
 /// yuzden `count: Uint644` gibi bir yazim hatasi hayali bir struct tipine
-/// donusuyor ve sessizce kabul ediliyordu. Ayni acik struct alan tiplerinde
-/// kapatilmisti; storage alanlari o gecisin disinda kalmisti.
+/// turned into one and was accepted silently. The same hole had been closed for
+/// struct field types; storage fields had been left out of that pass.
 #[test]
 fn a_storage_field_with_an_unknown_type_is_refused() {
     let source = "contract T {\n\
@@ -347,5 +347,5 @@ fn a_storage_field_with_an_unknown_type_is_refused() {
                       storage::count = 1;\n\
                   }\n\
               }\n";
-    bud_compiler::compile(ok, IsaProfile::Production).expect("u64 gecerli bir storage tipi");
+    bud_compiler::compile(ok, IsaProfile::Production).expect("u64 is a valid storage type");
 }

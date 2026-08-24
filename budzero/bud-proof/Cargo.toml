@@ -35,8 +35,8 @@ name = "proof_baseline"
 harness = false
 
 [dev-dependencies]
-# Derlenmis dallanma testi (tests/compiled_branching.rs) icin: kanit boru
-# hattini elle kurulmus komut dizisiyle degil, derleyicinin gercek ciktisiyla
+# For the compiled branching test (tests/compiled_branching.rs): it drives the proof
+# pipeline with the compiler's real output rather than a hand built instruction sequence
 # besler. Mevcut 106 prover testinin tamami elle kurulmus dizi kullaniyordu.
 bud-compiler = { path = "../bud-compiler" }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
