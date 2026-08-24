@@ -1,13 +1,13 @@
 //! B.U.D. 2.0 - Segment Ledger (segmentli zincir depolama deseni) (2026-08-16)
 //!
-//! K88-1: zincir çekirdeği için segment storage deseni - 64MB segmentler,
-//! `len(4) + data + crc32(4)` kayıtları, bozuk kayıt CRC uyuşmazlığında RED.
-//! B.U.D. versiyonu: SHA3-256 bütünlük (CRC32'den güçlü - K38), len-prefix,
-//! bomba korumalı (segment tavanı), deterministik.
+//! K88-1: the segment storage pattern for the chain core - 64MB segments,
+//! `len(4) + data + crc32(4)` records, and a corrupt record REFUSED on a CRC
+//! mismatch. The B.U.D. version: SHA3-256 integrity (stronger than CRC32 - K38),
+//! a length prefix, bomb protection (the segment ceiling), deterministic.
 //!
-//! Bu modül, .bud kayıtlarının (üretim kanıtı, PACT, rejenerasyon sınavı, checkpoint)
-//! ZİNCİRDE segmentler halinde saklanmasının çekirdeğidir: append-only defter
-//! (İ1 PACT kaydı + K89 blokzincir entegrasyonu).
+//! This module is the core of storing .bud records (production proofs, PACTs,
+//! regeneration challenges, checkpoints) ON CHAIN as segments: an append-only
+//! ledger (the I1 PACT record plus the K89 blockchain integration).
 //!
 //! Kod: `#![forbid(unsafe_code)]`, panik'siz.
 
@@ -18,12 +18,12 @@ use sha3::{Digest, Sha3_256};
 pub const SEGMENT_MAGIC: [u8; 8] = *b"\xB5SEGL\0\0\0";
 pub const SEGMENT_VERSION: u8 = 1;
 pub const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024; // 64 MB (blockchain-core)
-pub const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024; // tek kayıt tavanı (16 MB)
+pub const MAX_ENTRY_BYTES: u64 = 16 * 1024 * 1024; // the single-record ceiling (16 MB)
 
-/// Segment defteri: append-only kayıtlar (len-prefix + SHA3 digest).
+/// The segment ledger: append-only records (a length prefix plus a SHA3 digest).
 #[derive(Debug, Clone)]
 pub struct SegmentLedger {
-    pub entries: Vec<Vec<u8>>, // saklanan kayıtlar (her biri ayrı digest'li)
+    pub entries: Vec<Vec<u8>>, // the stored records (each with its own digest)
     pub total_bytes: u64,
 }
 
@@ -43,20 +43,20 @@ impl SegmentLedger {
         }
     }
 
-    /// Kayıt ekle (append-only). Boyut tavanları + digest hesaplanır.
+    /// Append a record (append-only). The size ceilings are applied and the digest is computed.
     pub fn append(&mut self, data: &[u8]) -> Option<u64> {
         if data.is_empty() || data.len() as u64 > MAX_ENTRY_BYTES {
             return None;
         }
         if self.total_bytes + data.len() as u64 > MAX_SEGMENT_BYTES {
-            return None; // segment dolu → yeni segment (çağıran karar verir)
+            return None; // the segment is full -> a new segment (the caller decides)
         }
         self.total_bytes += data.len() as u64;
         self.entries.push(data.to_vec());
         Some(self.total_bytes)
     }
 
-    /// Kayıt bütünlüğü: digest doğrula (K38).
+    /// Record integrity: verify the digest (K38).
     pub fn verify_entry(data: &[u8], digest: &[u8; 32]) -> bool {
         Self::entry_digest(data) == *digest
     }
@@ -69,7 +69,7 @@ impl SegmentLedger {
         h.finalize().into()
     }
 
-    /// Segment serialize: magic + sürüm + kayıt sayısı + (len + digest + data)* + kök digest.
+    /// Serialise a segment: magic + version + record count + (len + digest + data)* + the root digest.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&SEGMENT_MAGIC);
@@ -80,7 +80,7 @@ impl SegmentLedger {
             out.extend_from_slice(&Self::entry_digest(e));
             out.extend_from_slice(e);
         }
-        // kök digest (tüm segment bütünlüğü - defter değişmezliği)
+        // the root digest (whole-segment integrity - ledger immutability)
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
         h.update(&out);
@@ -89,7 +89,7 @@ impl SegmentLedger {
         out
     }
 
-    /// Segment deserialize: sıkı doğrula (her kayıt digest'i + kök digest + artık bayt red).
+    /// Deserialise a segment: verify strictly (every record digest, the root digest, and refuse trailing bytes).
     pub fn from_blob(bytes: &[u8]) -> Option<Self> {
         const HDR: usize = 8 + 1 + 4;
         if bytes.len() < HDR + 32 || bytes[0..8] != SEGMENT_MAGIC || bytes[8] != SEGMENT_VERSION {
@@ -106,14 +106,16 @@ impl SegmentLedger {
         let count = u32::from_le_bytes(bytes[9..13].try_into().ok()?) as usize;
         let mut pos = HDR;
         // `count` saldirgan kontrollu; dogrudan ayirmak 45 baytlik blobla
-        // 103 GB talep uretiyordu (olculdu: "memory allocation of
-        // 103079215080 bytes failed" -> SIGABRT, panic="abort" ile dugum olur).
+        // It used to request 103 GB (measured: "memory allocation of
+        // 103079215080 bytes failed" -> SIGABRT, which kills the node under
+        // panic="abort").
         // Ustteki SHA3 kontrolu korumaz: anahtarsiz ozet + public DOMAIN
-        // sabiti, gecerli blob uretmek serbest.
+        // the constant; producing a valid blob stays free.
         //
-        // Her kayit en az 4 bayt uzunluk + 32 bayt ozet = 36 bayt tuketir;
-        // tavan girdinin kendi uzunlugundan turetildigi icin ayirma daima
-        // girdiyle orantili kalir.
+        // Every record consumes at least 4 bytes of length plus a 32 byte
+        // digest = 36 bytes; since the ceiling is derived from the length of
+        // the input itself, the allocation always stays proportional to the
+        // input.
         if count > payload_len.saturating_sub(pos) / 36 {
             return None;
         }
@@ -134,7 +136,7 @@ impl SegmentLedger {
             let data = bytes[pos..pos + len].to_vec();
             pos += len;
             if !Self::verify_entry(&data, &digest) {
-                return None; // kayıt kurcalanmış
+                return None; // the record was tampered with
             }
             total += len as u64;
             entries.push(data);
@@ -148,7 +150,7 @@ impl SegmentLedger {
         })
     }
 
-    /// Segment kökü (zincir başlığına yazılabilir - İ8 bayt-bütçe ile uyumlu).
+    /// The segment root (writable into a chain header - within the I8 byte budget).
     pub fn root(&self) -> [u8; 32] {
         let blob = self.to_blob();
         let mut h = Sha3_256::new();
@@ -165,7 +167,7 @@ mod tests {
     /// 103.079.215.080 baytlik ayirma talebi uretiyordu -> SIGABRT.
     /// SHA3 alani korumaz (anahtarsiz ozet + public DOMAIN).
     #[test]
-    fn sisirilmis_kayit_sayisi_ayirmadan_once_reddedilir() {
+    fn an_inflated_record_count_is_refused_before_allocating() {
         use sha3::{Digest, Sha3_256};
         let mut b = Vec::new();
         b.extend_from_slice(&SEGMENT_MAGIC);
@@ -178,19 +180,19 @@ mod tests {
 
         assert!(
             SegmentLedger::from_blob(&b).is_none(),
-            "govdesi olmayan u32::MAX kayit sayisi reddedilmeli"
+            "a u32::MAX record count with no body must be refused"
         );
     }
 
-    /// Kanarya: tavan gercek defteri reddetmemeli.
+    /// Canary: the ceiling must not refuse a real ledger.
     #[test]
-    fn gercek_defter_tavandan_etkilenmez() {
+    fn a_real_ledger_is_unaffected_by_the_ceiling() {
         let mut seg = SegmentLedger::new();
-        seg.append(b"birinci kayit").expect("append");
-        seg.append(b"ikinci kayit").expect("append");
+        seg.append(b"first record").expect("append");
+        seg.append(b"second record").expect("append");
         let blob = seg.to_blob();
-        let geri = SegmentLedger::from_blob(&blob).expect("gecerli blob kabul edilmeli");
-        assert_eq!(geri.root(), seg.root(), "kok ozet degismez");
+        let back = SegmentLedger::from_blob(&blob).expect("a valid blob must be accepted");
+        assert_eq!(back.root(), seg.root(), "the root digest does not change");
     }
     use super::*;
 
@@ -203,17 +205,17 @@ mod tests {
         assert_eq!(seg.entries.len(), 3);
         assert!(seg.total_bytes > 0);
         let blob = seg.to_blob();
-        let back = SegmentLedger::from_blob(&blob).expect("segment okunur");
+        let back = SegmentLedger::from_blob(&blob).expect("the segment reads back");
         assert_eq!(back.entries, seg.entries);
         assert_eq!(back.total_bytes, seg.total_bytes);
-        // kök deterministik
+        // the root is deterministic
         assert_eq!(seg.root(), back.root());
         assert_ne!(seg.root(), [0u8; 32]);
-        // kurcalama red: herhangi bir kayıt baytı
+        // tampering is refused: any record byte
         for i in 0..blob.len() {
             let mut bad = blob.clone();
             bad[i] ^= 0x01;
-            // magic/sürüm baytları da bozulursa yine red (farklı hata kodu ama None)
+            // corrupting the magic/version bytes is refused too (a different error path, still None)
             let _ = SegmentLedger::from_blob(&bad);
         }
         let mut bad = blob.clone();
@@ -221,9 +223,9 @@ mod tests {
         bad[mid] ^= 0xFF;
         assert!(
             SegmentLedger::from_blob(&bad).is_none(),
-            "kayıt kurcalama red"
+            "record tampering is refused"
         );
-        // artık bayt red
+        // trailing bytes are refused
         let mut extra = blob.clone();
         extra.push(0x00);
         assert!(SegmentLedger::from_blob(&extra).is_none());
@@ -231,16 +233,16 @@ mod tests {
 
     #[test]
     fn tampered_entry_digest_rejected() {
-        // bir kaydı değiştirip digest'i eski bırak → RED
+        // change a record but leave the old digest -> REFUSED
         let mut seg = SegmentLedger::new();
-        seg.append(b"orijinal kayit").expect("ekle");
+        seg.append(b"original record").expect("append");
         let blob = seg.to_blob();
         let mut bad = blob.clone();
-        // ilk kayıt verisini değiştir (HDR = 13, sonra 4 len + 32 digest, veri başı 49)
+        // change the first record's data (HDR = 13, then 4 len + 32 digest, so data starts at 49)
         bad[49] = b'X';
         assert!(
             SegmentLedger::from_blob(&bad).is_none(),
-            "değiştirilmiş kayıt RED"
+            "a modified record is REFUSED"
         );
     }
 
@@ -249,10 +251,10 @@ mod tests {
         let mut seg = SegmentLedger::new();
         // 16MB + 1 → red
         let big = vec![0u8; (MAX_ENTRY_BYTES + 1) as usize];
-        assert!(seg.append(&big).is_none(), "kayıt tavanı");
-        // boş → red
+        assert!(seg.append(&big).is_none(), "the record ceiling");
+        // empty -> refused
         assert!(seg.append(&[]).is_none());
-        // segment dolu: 64MB'a kadar
+        // a full segment: up to 64MB
         let chunk = vec![0u8; 1024];
         let mut filled = false;
         for _ in 0..(MAX_SEGMENT_BYTES as usize / 1024 + 10) {
@@ -261,7 +263,7 @@ mod tests {
                 break;
             }
         }
-        assert!(filled, "segment kapasitesi sınırlı");
+        assert!(filled, "the segment capacity is bounded");
         assert!(seg.total_bytes <= MAX_SEGMENT_BYTES);
     }
 
