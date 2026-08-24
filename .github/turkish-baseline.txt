@@ -41,7 +41,6 @@ bud/src/bud_format_culling.rs	37
 bud/src/bud_format_das.rs	38
 bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
-bud/src/bud_format_dictionary.rs	38
 bud/src/bud_format_edge.rs	9
 bud/src/bud_format_edition.rs	35
 bud/src/bud_format_encpact.rs	18
@@ -58,7 +57,6 @@ bud/src/bud_format_lowrank.rs	32
 bud/src/bud_format_lrc.rs	36
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
-bud/src/bud_format_media.rs	38
 bud/src/bud_format_model.rs	36
 bud/src/bud_format_nvc.rs	27
 bud/src/bud_format_office.rs	29
