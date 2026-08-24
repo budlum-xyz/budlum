@@ -257,7 +257,6 @@ src/lubot/metrics.rs	10
 src/lubot/query.rs	6
 src/lubot/social.rs	16
 src/lubot/storage.rs	8
-src/main.rs	46
 src/mempool/pool.rs	20
 src/network/node.rs	18
 src/network/sync_codec.rs	1

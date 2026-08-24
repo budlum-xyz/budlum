@@ -65,11 +65,11 @@ fn write_database_backup(
 
 #[tokio::main]
 async fn main() {
-    // Semgrep `rust.lang.security.args.args` kuralı argv[0]'ın (saldırgan
-    // Tarafından serbestçe ayarlanabilen çalıştırılabilir yolu) bir güvenlik
-    // Kararına dayanak yapılmasını hedefler. Burada argv[0] hiç okunmaz:
-    // Alt-komut ayrıştırma index 1'den, bayrak döngüsü index 3'ten başlar ve
-    // Hiçbir yetki/kimlik kararı bu vektöre bağlı değildir.
+    // The Semgrep rule `rust.lang.security.args.args` targets using argv[0] -
+    // the executable path, which an attacker can set freely - as the basis of a
+    // security decision. argv[0] is never read here: subcommand parsing starts
+    // at index 1, the flag loop at index 3, and no authority or identity
+    // decision depends on this vector.
     // Nosemgrep: rust.lang.security.args.args
     let args: Vec<String> = std::env::args().collect(); // nosemgrep: rust.lang.security.args.args
     if args.len() >= 3 && args[1] == "genesis" && args[2] == "build" {
@@ -297,8 +297,9 @@ async fn main() {
     }
 
     //.1 tooling: `budlum-core keygen --type ed25519 --output <path>`
-    // Ceremony dokümanı adımın karşılığı (önceden dokümanda olan ama
-    // Binary'de OLMAYAN bir komuttu - iddia-vs-kanıt matrisi kapanışı).
+    // The counterpart of the ceremony document's step. This used to be a
+    // command that existed in the document and NOT in the binary, which is one
+    // of the claim-versus-evidence matrix entries now closed.
     if args.len() >= 2 && args[1] == "keygen" {
         let mut key_type = "ed25519".to_string();
         let mut output: Option<String> = None;
@@ -337,12 +338,12 @@ async fn main() {
             eprintln!("Usage: budlum-core keygen --type ed25519 --output <secret-key-path>");
             std::process::exit(1);
         };
-        // Mainnet anahtar politikası (crypto/primitives.rs
-        // PlaintextDiskKeysForbiddenOnMainnet): BLS/PQ disk'te ÜRETİLMEZ,
-        // Yalnızca PKCS#11 HSM içinde üretilir.
+        // Mainnet key policy (`crypto/primitives.rs`,
+        // `PlaintextDiskKeysForbiddenOnMainnet`): BLS/PQ keys are NOT generated
+        // on disk, only inside a PKCS#11 HSM.
         if key_type != "ed25519" {
             eprintln!(
-                "CRITICAL: '{key_type}' anahtarları disk üzerinde üretilemez - BLS/PQ yalnızca PKCS#11 HSM içinde üretilir (mainnet politikası)."
+                "CRITICAL: '{key_type}' keys cannot be generated on disk; BLS/PQ are generated only inside a PKCS#11 HSM (mainnet policy)."
             );
             std::process::exit(1);
         }
@@ -363,10 +364,11 @@ async fn main() {
             eprintln!("Error: cannot write public key file {pub_path}: {e}");
             std::process::exit(1);
         });
-        // NOT (karşı-dengesi): node çalışırken pubkey stdout'a
-        // Yazılmaz; burada operatörün açıkça çağırdığı ayrı keygen CLI'si
-        // Sanctioned kanaldır - pubkey ve adres ceremony tabloları için
-        // Bilinçli yazdırılır. Secret key ve dosya yolu ASLA loglanmaz.
+        // NOTE, as the counterweight: while the node runs, the public key is
+        // never written to stdout. The separate keygen CLI the operator invokes
+        // explicitly is the sanctioned channel, and the public key and address
+        // are printed deliberately, for the ceremony tables. The secret key and
+        // the file path are NEVER logged.
         let address = Address::from(keypair.public_key_bytes());
         println!("Ed25519 keypair generated (secret key written with 0600 permissions).");
         println!("Public key:  {pub_hex}");
@@ -692,9 +694,10 @@ async fn main() {
     let consensus: Arc<dyn ConsensusEngine> = match consensus_type {
         ConsensusType::PoW => {
             println!("PoW mode - difficulty: {}", config.difficulty);
-            // Retarget hedefi ureticinin gercek tick araligina kalibre edilir;
-            // aksi halde varsayilan 10 sn hedef devnet'in 1 sn slotunu "10x
-            // hizli" sayar ve zorlugu her 100 blokta 4 katina cikarir.
+            // The retarget target is calibrated to the producer's real tick
+            // interval. Otherwise the default 10s target reads a devnet's 1s
+            // slot as "10x too fast" and quadruples the difficulty every 100
+            // blocks.
             Arc::new(PoWEngine::calibrated(
                 config.difficulty,
                 config.network.slot_ms(),
@@ -984,7 +987,7 @@ async fn main() {
                 _ => continue,
             };
         if let Err(e) = blockchain.plugin_registry.register(domain.id, plugin) {
-            println!("Plugin kaydi basarisiz (domain {}): {}", domain.id, e);
+            println!("Plugin registration failed (domain {}): {}", domain.id, e);
         }
     }
 
@@ -997,11 +1000,12 @@ async fn main() {
         chain_actor.run().await;
     });
 
-    // (2026-07-18,) ölü `_keys` bootstrap'ı gerçeğe bağlandı -
-    // Yüklenen validator anahtarının ADRESİ producer-aday zincirine düşer.
-    // Davranış değişikliği yalnızca şu: anahtar yüklemesi başarılıysa adresi
-    // Artık bir değişkende tutulur; imza/devnet'lik doğrulama kuralları aynı.
-    // (combinator biçimi: clippy pedantic/nursery ratchet'i için)
+    // 2026-07-18: the dead `_keys` bootstrap was wired to something real. The
+    // ADDRESS of the loaded validator key now enters the producer-candidate
+    // chain. The only behavioural change is that on a successful key load the
+    // address is kept in a variable; the signature and devnet validation rules
+    // are unchanged. The combinator form is for the clippy pedantic/nursery
+    // ratchet.
     //
     // The mainnet guard is repeated here rather than assumed. The load above
     // refuses a disk-backed key file on mainnet, but only inside the PoS
@@ -1061,12 +1065,13 @@ async fn main() {
             std::process::exit(1);
         }
         // Genesis placeholder reddiyle (cli/commands.rs Rule 4)
-        // Simetrik fail-closed - dummy/placeholder marker içeren peer mainnet'te
-        // DİAL EDİLMEZ. ceremony gerçek multiaddr'ları yazınca geçer.
+        // Symmetrically fail-closed: a peer carrying a dummy or placeholder
+        // marker is NOT dialled on mainnet. It passes once the ceremony writes
+        // the real multiaddrs.
         if let Some(bad) = budlum_core::core::chain_config::first_placeholder_peer(&bootstraps) {
             eprintln!("CRITICAL SECURITY FAILURE: Mainnet placeholder bootnode detected: {bad}");
             eprintln!(
-                "Dummy peer'lar production'da dial edilemez - ceremony ile gerçek multiaddr'lar yazılmalı."
+                "Dummy peers cannot be dialled in production; the ceremony must write real multiaddrs."
             );
             std::process::exit(1);
         }
@@ -1079,7 +1084,7 @@ async fn main() {
             budlum_core::core::chain_config::first_placeholder_peer(&effective_dns_seeds)
         {
             eprintln!("CRITICAL SECURITY FAILURE: Mainnet placeholder DNS seed detected: {bad}");
-            eprintln!("Ceremony ile gerçek _dnsaddr kayıtları yayınlanmalı.");
+            eprintln!("The ceremony must publish real _dnsaddr records.");
             std::process::exit(1);
         }
     }
@@ -1249,7 +1254,7 @@ async fn main() {
         // An unauthenticated node.
         if !rpc_security.auth_required {
             tracing::warn!(
-                "[GUVENLIK] Public RPC auth_required=false calisiyor - tum state-degistiren metodlar kimlik dogrulamasiz aga acik! --rpc-auth-required=true (veya esdeger config) ile kapatin."
+                "[SECURITY] Public RPC is running with auth_required=false: every state-changing method is exposed to the network with no authentication. Close it with --rpc-auth-required=true, or the equivalent config."
             );
         }
         // Same reasoning for an unrestricted IP allow-list. The runtime
@@ -1263,7 +1268,7 @@ async fn main() {
                 .all(|ip| ip == "127.0.0.1" || ip == "::1");
         if !has_localhost_only && !rpc_security.allowed_ips.is_empty() {
             tracing::warn!(
-                "[GUVENLIK] Public RPC allowed_ips genisletildi: {:?} - sadece guvenilir / ozel ag uzerinde calistirin.",
+                "[SECURITY] Public RPC allowed_ips was widened: {:?}. Run this only on a trusted or private network.",
                 rpc_security.allowed_ips
             );
         }
@@ -1290,9 +1295,10 @@ async fn main() {
         });
 
         // Operator RPC listener (localhost-only, no auth by default).
-        // Güvenlik denetimi (HIGH): operator yüzeyi kimlik doğrulamasız;
-        // loopback dışı bind uzak saldırgana operatör işlemlerini açar.
-        // Fail-closed: loopback olmayan adres yapılandırılırsa düğüm çıkmaz.
+        // Security review (HIGH): the operator surface has no authentication, so
+        // binding it off loopback opens operator actions to a remote attacker.
+        // Fail-closed: if a non-loopback address is configured, the node does
+        // not start.
         if let Some(operator_addr) = config.rpc_operator_listener.as_ref() {
             let host = operator_addr.split(':').next().unwrap_or("");
             let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
@@ -1327,8 +1333,9 @@ async fn main() {
     let metrics_bind = config
         .metrics_listener
         .clone()
-        // Güvenlik denetimi (LOW): metrikler auth'suz; varsayılan bind loopback'e
-        // çekildi - 0.0.0.0 yalnızca bilinçli yapılandırmayla mümkündür.
+        // Security review (LOW): metrics have no auth, so the default bind was
+        // pulled back to loopback. Reaching 0.0.0.0 now takes a deliberate
+        // configuration.
         .unwrap_or_else(|| format!("127.0.0.1:{}", config.metrics_port));
     tokio::spawn(async move {
         use http_body_util::Full;
@@ -1376,9 +1383,10 @@ async fn main() {
                                                 .and_then(|v| v.to_str().ok())
                                                 .unwrap_or("");
                                             let bearer = format!("Bearer {key}");
-                                            // F-0003: sabit-zamanli kiyas (timing side channel kapanmasi).
-                                            // `!=` kisa-devre karsilastirmasi gizli degerin uzunlugunu ve
-                                            // icerigini zamana sizdirir; subtle::ConstantTimeEq kullanilir.
+                                            // F-0003: constant-time comparison, closing a timing side
+                                            // channel. A short-circuiting `!=` leaks both the length and
+                                            // the content of the secret into timing, so
+                                            // `subtle::ConstantTimeEq` is used instead.
                                             if !budlum_core::rpc::server::constant_time_eq_str(auth_hdr, &bearer)
                                                 && !budlum_core::rpc::server::constant_time_eq_str(api_key_hdr, &key)
                                             {
@@ -1469,17 +1477,20 @@ async fn main() {
         });
     }
 
-    // (2026-07-18,) Daemon blok-üretim döngüsü (PoS + PoW).
-    // Kök neden (CI kanıtlı, multinode smoke job 87990206239): binary yalnız
-    // Interaktif stdin "mine" komutuyla blok üretiyordu - daemon/compose
-    // Ağları genesis'te (height=0x0) donuyordu. Döngü, producer adresi
-    // Yapılandırılmışsa PoS ve PoW'da çalışır. Üretici-uygunluk tek otorite
-    // Olarak motor katmanında kalır: PoS'ta `preview_common` (aktif-validator
-    // + VRF liderlik - bunun için daemon'un PoSEngine'e enjekte edilmiş
-    // Validator_keys'e ihtiyacı vardır; adres-only 0x02 ile PoS üretimi
-    // YAPAMAZ, bakınız STATUS_ONLINE backlog), PoW'da `mine` (difficulty
-    // CLI bayrağından; smoke difficulty=0). Yayın gossipsub "blocks"
-    // Kanalından; eşler aynı deterministik commit yolunu koşar.
+    // 2026-07-18: the daemon block-production loop, for PoS and PoW.
+    //
+    // Root cause, proven in CI by multinode smoke job 87990206239: the binary
+    // produced blocks only through the interactive stdin "mine" command, so
+    // daemon and compose networks froze at genesis (height=0x0). The loop runs
+    // under both PoS and PoW when a producer address is configured.
+    //
+    // Producer eligibility stays in the engine layer as the single authority:
+    // `preview_common` under PoS (active validator plus VRF leadership, which
+    // needs the daemon's `validator_keys` injected into `PoSEngine`; an
+    // address-only 0x02 CANNOT produce under PoS, see the STATUS_ONLINE
+    // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
+    // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
+    // peers run the same deterministic commit path.
     if consensus_type == ConsensusType::PoS || consensus_type == ConsensusType::PoW {
         if let Some(producer) = cli_producer_address {
             let chain_p = chain.clone();
@@ -1503,7 +1514,7 @@ async fn main() {
             });
         } else {
             tracing::warn!(
-                "Daemon: producer adresi yapılandırılmadı (--validator-address / validator key) - node yalnızca doğrular ve senkronize olur."
+                "Daemon: no producer address configured (--validator-address / validator key); the node will only verify and sync."
             );
         }
     }
