@@ -116,21 +116,23 @@ impl Registration {
         matches!(self.status, MemberStatus::Active) && self.stake > 0
     }
 
-    /// Hala kesilebilir bir bonda sahip mi: `Active` **veya** `Unbonding`.
+    /// Does the member still hold a slashable bond: `Active` **or**
+    /// `Unbonding`.
     ///
-    /// # Neden iki ayri soru var
+    /// # Why there are two separate questions
     ///
-    /// Bu iki soru ayni degil ve karistirilmalari sessiz bir sapma
-    /// uretiyordu. `is_active_relayer` gibi rol yardimcilari `Unbonding`'i
-    /// kabul ediyordu, `is_active` etmiyordu; ayni isim iki farkli cevap
-    /// veriyordu ve fark hicbir yerde yaziyordu degildi.
+    /// The two questions are not the same, and conflating them produced a quiet
+    /// divergence. Role helpers such as `is_active_relayer` accepted
+    /// `Unbonding`, while `is_active` did not; the same name gave two different
+    /// answers, and the difference was written down nowhere.
     ///
-    /// Dogru ayrim niyettedir. **Yeni bir gorev vermek** icin uye `Active`
-    /// olmali: cikmakta olan birine is atamak, is bitmeden bondunun cozulmesi
-    /// demektir. **Yaptigi bir isten sorumlu tutmak** icinse `Unbonding` de
-    /// yeter, cunku bond hala kilitli ve kesilebilir. Aksi halde bir rolayci
-    /// islemini gonderip hemen `begin_unbonding` cagirarak sorumluluktan
-    /// cikardi.
+    /// The right distinction is one of intent. To **hand out new work**, the
+    /// member must be `Active`: assigning work to someone on their way out means
+    /// their bond unlocks before the work is finished. To **hold them
+    /// responsible for work already done**, `Unbonding` is enough, because the
+    /// bond is still locked and still slashable. Otherwise a relayer would
+    /// submit its transaction and then immediately call `begin_unbonding` to
+    /// step out of responsibility.
     pub fn is_slashable(&self) -> bool {
         matches!(
             self.status,
@@ -694,12 +696,13 @@ impl PermissionlessRegistry {
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
-                // 0 cezali kesme de kayda girer (2026-08-22, G0 karari;
-                // budzero ile hizalandi). Onceki erken donus, cezasi sifir
-                // olan kesmeyi kayittan tamamen siliyordu: rapor actionable'di,
-                // olay gerceklesti, ama denetim izinde hic gorunmuyordu.
-                // Kayit butunlugu sifir cezanin kendisinden degerli - iki
-                // defterin ayni soruya ayni cevabi vermesi zorunlu.
+                // A slash with a zero penalty is recorded too; the G0 decision
+                // of 2026-08-22, aligned with budzero. The earlier early return
+                // erased a zero-penalty slash from the record entirely: the
+                // report was actionable and the event happened, yet it never
+                // appeared in the audit trail. Record integrity is worth more
+                // than the zero penalty itself, and the two ledgers must give
+                // the same answer to the same question.
                 self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
@@ -776,19 +779,20 @@ impl PermissionlessRegistry {
 
     // Active checks for all well-known roles (unified)
 
-    // Bu yardimcilar KESILEBILIRLIGI sorar, gorev atamayi degil.
+    // These helpers ask about SLASHABILITY, not about assigning work.
     //
-    // Unbonding bir CIKIS surecidir, ceza degil: stake hala kilitli ve hala
-    // kesilebilir durumdadir. Kilidi suren bir uyenin relay etmeye devam
-    // edebilmesi bir bosluk degil, bilincli bir canlilik karari - aksi halde
-    // `begin_unbonding` cagirmak, ag cikis penceresi boyunca relay kapasitesini
-    // kaybederken uyenin sorumlulugunu surdurdugu bir asimetri yaratirdi.
+    // Unbonding is an EXIT process, not a punishment: the stake is still locked
+    // and still slashable. A member whose lock persists being able to keep
+    // relaying is not a hole but a deliberate liveness decision; otherwise
+    // calling `begin_unbonding` would create an asymmetry in which the network
+    // loses relay capacity throughout the exit window while the member's
+    // responsibility continues.
     //
-    // Gorev atama sorusu ayridir ve `Registration::is_active`'da yasar.
-    // Bu ayrimi kaldirmak (ikisini de `is_active` yapmak) denendi ve geri
-    // alindi: `unbonding_relayer_can_still_submit` testinin belgeledigi karari
-    // test guncellenmeden ters cevirdigi icin uzlasma davranisi celiskiye
-    // dusuyordu.
+    // The question of assigning work is separate and lives in
+    // `Registration::is_active`. Removing this distinction, by making both of
+    // them `is_active`, was tried and reverted: it inverted the decision the
+    // `unbonding_relayer_can_still_submit` test documents without updating that
+    // test, so the consensus behaviour fell into contradiction.
     pub fn is_active_relayer(&self, account: &Address) -> bool {
         self.get(account, crate::registry::role::roles::RELAYER)
             .is_some_and(Registration::is_slashable)
@@ -1114,52 +1118,59 @@ mod tests {
         assert!(reg.is_active(&addr(10), roles::VERIFIER)); // alias
     }
 
-    /// Çıkmakta olan üye görev atamasına kapalıdır ama kesilebilir kalır.
+    /// A member on the way out takes no work assignment but stays slashable.
     ///
-    /// İki soru ayrı ayrı yanıtlanır ve bu ayrım kasıtlıdır:
-    /// `is_active` görev atamayı, rol yardımcıları (`is_slashable` okur)
-    /// kesilebilirliği sorar. Aynı statü için ikisinin de aynı cevabı vermesi
-    /// `begin_unbonding` çağırmayı sorumluluktan kaçmanın yolu yapardı.
+    /// The two questions are answered separately, and the distinction is
+    /// deliberate: `is_active` asks about work assignment, while the role
+    /// helpers, which read `is_slashable`, ask about slashability. Making both
+    /// answer the same for the same status would turn calling `begin_unbonding`
+    /// into the way to escape responsibility.
     ///
-    /// Unbonding bir çıkış sürecidir, ceza değil: bond kilitli olduğu sürece
-    /// relay etmeye devam edebilir. Aksi hâli denendi ve geri alındı - ağ,
-    /// çıkış penceresi boyunca relay kapasitesini kaybederken üye
-    /// sorumluluğunu sürdürüyordu.
+    /// Unbonding is an exit process, not a punishment: as long as the bond is
+    /// locked, the member can keep relaying. The opposite was tried and
+    /// reverted, because the network lost relay capacity throughout the exit
+    /// window while the member's responsibility continued.
     #[test]
     fn an_unbonding_member_takes_no_new_work_but_stays_slashable() {
         let mut reg = PermissionlessRegistry::new();
         let a = addr(21);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
-            .expect("kayit");
+            .expect("registration");
 
-        assert!(reg.is_active(&a, roles::RELAYER), "aktifken gorev alir");
-        assert!(reg.is_active_relayer(&a), "aktifken kesilebilir");
+        assert!(
+            reg.is_active(&a, roles::RELAYER),
+            "while active it takes work"
+        );
+        assert!(reg.is_active_relayer(&a), "while active it is slashable");
 
         reg.begin_unbonding(a, roles::RELAYER, 1)
             .expect("unbonding");
 
         assert!(
             !reg.is_active(&a, roles::RELAYER),
-            "cikmakta olana yeni gorev atanmaz"
+            "no new work is assigned to a member on the way out"
         );
         assert!(
             reg.is_active_relayer(&a),
-            "rol yardimcisi kesilebilirligi sorar: bond kilitliyken relay surer"
+            "the role helper asks about slashability: relaying continues while the bond is locked"
         );
         assert!(
             reg.get(&a, roles::RELAYER)
                 .is_some_and(|r| r.is_slashable()),
-            "bond hala kilitli: sorumluluk surer"
+            "the bond is still locked, so responsibility continues"
         );
     }
 
-    /// 0 cezali kesme de kayda girmeli (budzero `verifier-registry` ile ayna).
+    /// A zero-penalty slash must still be recorded, mirroring budzero's
+    /// `verifier-registry`.
     ///
-    /// Orani sifir olan bir kosul (liveness) kesmeyi "bedava" yapar: stake
-    /// degismez. Onceki kod bu olayi history'den tamamen siliyordu; iki
-    /// defterin ayni girdiye farkli cevap vermesi, hangisinin okundugunu
-    /// bilmeyen cagirani sessizce yaniltiyordu (2026-08-22, G0 karari:
-    /// kayit butunlugu kanonik - olay oldu, kayda girdi, cezasi sifir).
+    /// A condition whose ratio is zero, such as liveness, makes the slash
+    /// "free": the stake does not change. The earlier code erased that event
+    /// from the history entirely, and having two ledgers give different answers
+    /// for the same entry quietly misled a caller who did not know which one was
+    /// being read. That is the G0 decision of 2026-08-22: record integrity is
+    /// canonical, so the event happened, it entered the record, and its penalty
+    /// is zero.
     #[test]
     fn a_zero_penalty_slash_is_still_recorded() {
         let params = RegistryParams {
@@ -1169,7 +1180,7 @@ mod tests {
         let mut reg = PermissionlessRegistry::with_params(params);
         let a = addr(23);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
-            .expect("kayit");
+            .expect("registration");
 
         let report = crate::registry::evidence::SlashingReport::consensus_liveness(
             a,
@@ -1182,40 +1193,43 @@ mod tests {
         );
         let outcome = reg
             .slash_from_report(&report)
-            .expect("rapor actionable")
-            .expect("kesme uygulandi");
-        assert_eq!(outcome.penalty, 0, "oran sifir: ceza sifir olmali");
+            .expect("the report is actionable")
+            .expect("the slash was applied");
+        assert_eq!(
+            outcome.penalty, 0,
+            "the ratio is zero, so the penalty must be zero"
+        );
         assert_eq!(
             reg.slashing_history().len(),
             1,
-            "olay kayda girmeli: cezasi sifir olan suc da suc"
+            "the event must enter the record: an offence with a zero penalty is still an offence"
         );
         assert_eq!(reg.slashing_history()[0].penalty, 0);
         assert!(
             !reg.is_active_relayer(&a),
-            "uye yine de Slashed durumuna gecer"
+            "the member still moves into the Slashed status"
         );
     }
 
-    /// Kesilmiş bir üye hiçbir soruya `true` dönmemeli.
+    /// A slashed member must answer `true` to no question.
     #[test]
     fn a_slashed_member_is_neither_active_nor_slashable_again() {
         let mut reg = PermissionlessRegistry::new();
         let a = addr(22);
         reg.register_relayer(a, MIN_REGISTRATION_STAKE, 0)
-            .expect("kayit");
+            .expect("registration");
         reg.slash(
             a,
             roles::RELAYER,
             SlashingCondition::DoubleSign,
             FIXED_POINT_SCALE,
         )
-        .expect("ilk kesme");
+        .expect("the first slash");
 
         assert!(!reg.is_active(&a, roles::RELAYER));
         assert!(
             !reg.is_active_relayer(&a),
-            "kesilmis bond ikinci kez kesilemez"
+            "a slashed bond cannot be slashed a second time"
         );
     }
 
