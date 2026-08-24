@@ -76,7 +76,6 @@ bud/src/bud_format_securededup.rs	22
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
 bud/src/bud_format_social.rs	19
-bud/src/bud_format_social2.rs	32
 bud/src/bud_format_telemetry.rs	21
 bud/src/bud_format_tiny.rs	21
 bud/src/bud_format_transpile.rs	7
@@ -121,7 +120,6 @@ crates/budscan/browser/patches/bud-protocol-handler.patch	4
 crates/budscan/browser/patches/name-bar-punycode.patch	6
 crates/budscan/browser/settings/budscan.cfg	19
 crates/budscan/browser/settings/policies.json	10
-crates/budscan/src/arweave.rs	32
 crates/budscan/src/cid.rs	30
 crates/budscan/src/content_id.rs	12
 crates/budscan/src/ens.rs	25

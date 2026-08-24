@@ -1,13 +1,15 @@
-//! B.U.D. 2.0 - ÇOK-KAYNAKLI SOSYAL SIZINTI + MERDİVEN DENETİMİ (fikirler3.0 Y8/Y10)
+//! B.U.D. 2.0 - multi-source social leakage and ladder auditing; ideas 3.0
+//! items Y8 and Y10.
 //!
-//! Y8: Sinif A'da (sosyal işaretçi) içerik tek platforma bağlanmaz - en az 2
-//! bağımsız sosyal kaynak + kalıcı pin eşleştirilir; kaynak canlılığı
-//! denetim turuna girer. Tek kaynak ölürse kalanlarla devam; tümü ölürse Sinif
-//! B/C'ye düşürülür.
+//! Y8: in class A, the social pointer class, content is not bound to a single
+//! platform. At least 2 independent social sources are paired with a permanent
+//! pin, and source liveness enters the audit round. If one source dies, the
+//! rest carry on; if all of them die, the content is demoted to class B or C.
 //!
-//! Y10: türeme basamakları (ABR kademeleri) denetimde master yerine kullanılır:
-//! 480p üretimi 1080p'den ucuzdur; basamak commitment'ı master'a zincirleme
-//! bağlıdır; bekçi en ucuz basamağı üretir ve master tutarlılığını doğrular.
+//! Y10: the derivation ladder, the ABR tiers, is used in the audit in place of
+//! the master, because producing 480p is cheaper than producing 1080p. Each
+//! step's commitment is chained back to the master, and the guardian produces
+//! the cheapest step and verifies consistency with the master.
 
 #![forbid(unsafe_code)]
 
@@ -15,48 +17,50 @@ use sha3::{Digest, Sha3_256};
 
 pub const SOCIAL2_MAGIC: [u8; 8] = *b"\xB5SXL1\0\0\0";
 
-/// Y8: sosyal kaynak (URL + post id + zaman damgası).
+/// Y8: a social source, holding a URL, a post id and a timestamp.
 #[derive(Debug, Clone)]
 pub struct SocialSource {
     pub url: Vec<u8>,
     pub post_id: Vec<u8>,
     pub ts_unix: u64,
-    pub alive: bool, // bekçi canlılık örneklemesi sonucu
+    pub alive: bool, // the result of the guardian's liveness sampling
 }
 
-/// Y8: çok-kaynaklı PACT - en az 2 kaynak zorunlu.
+/// Y8: a multi-source PACT, which requires at least 2 sources.
 #[derive(Debug, Clone)]
 pub struct MultiSourcePact {
     pub pact_id: [u8; 32],
     pub sources: Vec<SocialSource>,
 }
 
-/// Y8: kaynaklar yeterli mi? (en az 2 bağımsız kaynak + pin)
+/// Y8: are the sources sufficient? At least 2 independent sources plus a pin.
 pub fn has_redundant_sources(p: &MultiSourcePact) -> bool {
     p.sources.len() >= 2
 }
 
-/// Y8: canlılık denetimi - yaşayan kaynak sayısı.
+/// Y8: the liveness check, counting the sources still alive.
 pub fn alive_count(p: &MultiSourcePact) -> usize {
     p.sources.iter().filter(|s| s.alive).count()
 }
 
-/// Y8: sınıf düşürme kararı - tümü öldüyse Sinif B/C (sahip/arşiv).
+/// Y8: the demotion decision. If all of them are dead, the content moves to
+/// class B or C, owner-held or archival.
 pub fn demote_decision(p: &MultiSourcePact) -> bool {
     alive_count(p) == 0
 }
 
-/// Y10: basamak kaydı - her basamak kendi commitment'ına sahiptir ve master'a
-/// zincirleme bağlıdır (üretim zinciri: aynı tarif, farklı parametre).
+/// Y10: a ladder step record. Each step has its own commitment and is chained
+/// back to the master; it is the same recipe under a different parameter.
 #[derive(Debug, Clone)]
 pub struct LadderStep {
     pub step_id: u8,
-    pub param: u64, // ör. çözünürlük/hedef
+    pub param: u64, // for example the resolution or target
     pub commitment: [u8; 32],
-    pub production_cost: u64, // göreli üretim maliyeti (ör. cekirdek-saniye)
+    pub production_cost: u64, // the relative production cost, in core-seconds for example
 }
 
-/// Y10: basamak commitment'ı - master commitment + step parametresinden.
+/// Y10: the step commitment, derived from the master commitment and the step
+/// parameter.
 pub fn step_commitment(master: &[u8; 32], step: u8, param: u64) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"BDLM_LADDER_STEP_V1");
@@ -66,14 +70,14 @@ pub fn step_commitment(master: &[u8; 32], step: u8, param: u64) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Y10: basamak tutarlılığı - üretilen basamak hash'i basamak commitment'ını
-/// ve (zincirleme) master'ı doğrular.
+/// Y10: step consistency. The hash of the produced step verifies the step
+/// commitment and, through the chain, the master.
 pub fn verify_step(step: &LadderStep, master: &[u8; 32], produced: &[u8]) -> bool {
     let cid = crate::bud_format_container::content_id(produced);
     cid == step.commitment && step.commitment == step_commitment(master, step.step_id, step.param)
 }
 
-/// Y10: en ucuz basamağı seç (denetim maliyeti = en düşük basamak).
+/// Y10: pick the cheapest step; the audit cost is that of the lowest step.
 pub fn cheapest_step(steps: &[LadderStep]) -> Option<&LadderStep> {
     steps.iter().min_by_key(|s| s.production_cost)
 }
@@ -102,7 +106,7 @@ mod tests {
         h.finalize().into()
     }
 
-    fn kaynak(u: &str, alive: bool) -> SocialSource {
+    fn source(u: &str, alive: bool) -> SocialSource {
         SocialSource {
             url: u.as_bytes().to_vec(),
             post_id: b"p1".to_vec(),
@@ -112,36 +116,45 @@ mod tests {
     }
 
     #[test]
-    fn y8_cok_kaynak_zorunluluk_ve_dusurme() {
-        let tek = MultiSourcePact {
+    fn y8_multi_source_requirement_and_demotion() {
+        let single = MultiSourcePact {
             pact_id: [1u8; 32],
-            sources: vec![kaynak("x.com/a", true)],
+            sources: vec![source("x.com/a", true)],
         };
-        assert!(!has_redundant_sources(&tek), "tek kaynak → yetersiz");
-        let cok = MultiSourcePact {
+        assert!(
+            !has_redundant_sources(&single),
+            "a single source is not enough"
+        );
+        let many = MultiSourcePact {
             pact_id: [1u8; 32],
             sources: vec![
-                kaynak("x.com/a", true),
-                kaynak("y.org/b", true),
-                kaynak("arsiv/c", false),
+                source("x.com/a", true),
+                source("y.org/b", true),
+                source("archive/c", false),
             ],
         };
-        assert!(has_redundant_sources(&cok));
-        assert_eq!(alive_count(&cok), 2);
-        // biri ölürse devam
-        let mut olen = cok.clone();
-        olen.sources[1].alive = false;
-        assert!(!demote_decision(&olen), "kalan kaynakla devam");
-        // tümü ölürse Sinif B/C
-        let mut hepsi_oldu = cok;
-        for s in hepsi_oldu.sources.iter_mut() {
+        assert!(has_redundant_sources(&many));
+        assert_eq!(alive_count(&many), 2);
+        // If one dies, it carries on.
+        let mut one_dead = many.clone();
+        one_dead.sources[1].alive = false;
+        assert!(
+            !demote_decision(&one_dead),
+            "it carries on with the remaining source"
+        );
+        // If all of them die, it moves to class B or C.
+        let mut all_dead = many;
+        for s in all_dead.sources.iter_mut() {
             s.alive = false;
         }
-        assert!(demote_decision(&hepsi_oldu), "tümü öldü → sınıf düşürme");
+        assert!(
+            demote_decision(&all_dead),
+            "all of them died, so the class is demoted"
+        );
     }
 
     #[test]
-    fn y10_basamak_zinciri_ve_ucuz_secim() {
+    fn y10_ladder_chain_and_cheapest_choice() {
         let master = hof(b"master-video");
         let steps = vec![
             LadderStep {
@@ -157,25 +170,27 @@ mod tests {
                 production_cost: 3,
             },
         ];
-        // 480p basamağını üret → doğrula
-        let uretim = b"480p cikti";
-        // commitment üretilen içeriğe bağlı; burada zincirleme tutarlılığı test edilir
+        // Produce the 480p step, then verify it.
+        let produced = b"480p output";
+        // The commitment depends on the produced content; what is tested here is
+        // the consistency of the chain.
         assert_eq!(steps[1].commitment, step_commitment(&master, 2, 480));
-        // en ucuz basamak 480p
+        // The cheapest step is 480p.
         assert_eq!(cheapest_step(&steps).unwrap().step_id, 2);
-        // master değişirse basamak commitment'ı değişir (negatif: farklı master → farklı)
+        // If the master changes, the step commitment changes; a negative case,
+        // where a different master gives a different commitment.
         assert_ne!(
-            step_commitment(&hof(b"baska-master"), 2, 480),
+            step_commitment(&hof(b"another-master"), 2, 480),
             steps[1].commitment
         );
-        let _ = verify_step(&steps[0], &master, uretim); // panik yok
+        let _ = verify_step(&steps[0], &master, produced); // no panic
     }
 
     #[test]
-    fn sosyal_digest_deterministik() {
+    fn the_social_digest_is_deterministic() {
         let p = MultiSourcePact {
             pact_id: [1u8; 32],
-            sources: vec![kaynak("x.com", true)],
+            sources: vec![source("x.com", true)],
         };
         assert_eq!(social2_digest(&p), social2_digest(&p));
     }
