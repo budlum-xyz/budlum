@@ -48,7 +48,6 @@ bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_pointcloud.rs	16
-bud/src/bud_format_por.rs	22
 bud/src/bud_format_prodcost.rs	15
 bud/src/bud_format_qos.rs	5
 bud/src/bud_format_realcorpus.rs	19
@@ -56,7 +55,6 @@ bud/src/bud_format_registry.rs	7
 bud/src/bud_format_repairband.rs	14
 bud/src/bud_format_revolutionary.rs	8
 bud/src/bud_format_secure_db.rs	2
-bud/src/bud_format_securededup.rs	22
 bud/src/bud_format_segment.rs	3
 bud/src/bud_format_serviceclass.rs	12
 bud/src/bud_format_social.rs	19

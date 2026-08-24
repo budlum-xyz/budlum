@@ -1,18 +1,21 @@
-//! B.U.D. 2.0 Icat - Yon 5: PoR Cekirdegi (Proof-of-Retrievability) (2026-08-16)
+//! B.U.D. 2.0 invention - direction 5: the PoR core (Proof-of-Retrievability)
+//! (2026-08-16).
 //!
-//! private-verifiability sürümünün basit, kriptografik gerçeklemesi
-//! (S.93/S.149): her blok PRF/MAC tabanlı tag tasir; verifier challenge'daki bloklari
-//! yeniden etiketleyip response'u dogrular. Kayipsiz, deterministik, no unsafe.
+//! A simple, cryptographic realisation of the private-verifiability version
+//! (S.93/S.149): every block carries a PRF/MAC-based tag; the verifier
+//! re-tags the blocks named in the challenge and checks the response. Lossless,
+//! deterministic, no unsafe.
 //!
-//! Kod: `#![forbid(unsafe_code)]`. Tag = SHA3-256(key || index || block) - domain-etiketli.
-//! Bu bir iskelet degildir: dogru etiket/yanlis etiket ayrimi kaos testleriyle kanitlidir.
-//! (BLS tabanli public-verifiability + EVENODD + LRC-DPoR entegrasyonu sonraki adimlar.)
+//! Code: `#![forbid(unsafe_code)]`. Tag = SHA3-256(key || index || block),
+//! domain-labelled. This is not a skeleton: the separation between a right tag
+//! and a wrong tag is proven by the chaos tests. (BLS-based public
+//! verifiability plus EVENODD and LRC-DPoR integration are the next steps.)
 
 #![forbid(unsafe_code)]
 
 use sha3::{Digest, Sha3_256};
 
-/// PoR anahtari (verifier ile paylasilan gizli). Private verifiability.
+/// The PoR key (the secret shared with the verifier). Private verifiability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PorKey(pub [u8; 32]);
 
@@ -21,13 +24,13 @@ pub struct PorTag(pub [u8; 32]);
 
 #[derive(Debug, Clone)]
 pub struct PorChallenge {
-    pub indices: Vec<u64>, // challenge edilen blok indeksleri
-    pub nonce: [u8; 32],   // her challenge'da taze (tekrar saldirisi onler)
+    pub indices: Vec<u64>, // the challenged block indices
+    pub nonce: [u8; 32],   // fresh on every challenge (prevents replay)
 }
 
 #[derive(Debug, Clone)]
 pub struct PorResponse {
-    pub tags: Vec<PorTag>, // indices ile ayni sirada
+    pub tags: Vec<PorTag>, // in the same order as indices
 }
 
 impl PorKey {
@@ -37,7 +40,7 @@ impl PorKey {
         PorKey(seed)
     }
 
-    /// Blok tag'i: SHA3(domain || key || index || block).
+    /// The block tag: SHA3(domain || key || index || block).
     pub fn tag(&self, block: &[u8], index: u64) -> PorTag {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -47,10 +50,11 @@ impl PorKey {
         PorTag(h.finalize().into())
     }
 
-    /// Challenge uret: rastgele (deterministik test icin seed'li) indeks seti.
-    /// Gercek uygulamada indeksler zincir rastgeleliginden (VRF/VDF, S.104).
+    /// Produce a challenge: a random index set (seeded, so tests stay
+    /// deterministic). In a real deployment the indices come from chain
+    /// randomness (VRF/VDF, S.104).
     pub fn challenge(block_count: u64, k: usize, seed: u64) -> PorChallenge {
-        // basit deterministik: seed kaydirilarak k farkli indeks
+        // Simple and deterministic: k distinct indices by shifting the seed.
         let mut indices = Vec::with_capacity(k);
         for i in 0..k {
             indices.push((seed.wrapping_add(i as u64)) % block_count.max(1));
@@ -61,23 +65,25 @@ impl PorKey {
         PorChallenge { indices, nonce }
     }
 
-    /// Response uret (prover tarafi): challenge'daki her blok icin tag.
-    /// Sınır güvenli: herhangi bir indeks blok sayısını aşıyorsa None döner (PANİK YOK,
-    /// K38 mini-fuzz felsefesi) - kötü niyetli/bozuk challenge prover'ı çökertemez.
+    /// Produce a response (the prover side): a tag for every block in the
+    /// challenge. Bounds-safe: if any index exceeds the block count it returns
+    /// None (NO PANIC, the K38 mini-fuzz philosophy), so a malicious or
+    /// corrupt challenge cannot crash the prover.
     pub fn respond(&self, blocks: &[Vec<u8>], challenge: &PorChallenge) -> Option<PorResponse> {
         let mut tags = Vec::with_capacity(challenge.indices.len());
         for &idx in &challenge.indices {
             if idx as usize >= blocks.len() {
-                return None; // sınır dışı indeks → geçersiz response
+                return None; // an out-of-bounds index -> an invalid response
             }
             tags.push(self.tag(&blocks[idx as usize], idx));
         }
         Some(PorResponse { tags })
     }
 
-    /// Dogrula (verifier): her (index, block, tag) yeniden hesaplananla eslesmeli.
-    /// Nonce tazeligi: challenge nonce'u response'a baglanmali - basit sürümde
-    /// verify, nonce'u challenge kaydinda bekler (tekrar saldirisi disarida).
+    /// Verify (the verifier side): every (index, block, tag) must match the
+    /// recomputed one. Nonce freshness: the challenge nonce should be bound to
+    /// the response; in this simple version verify expects the nonce in the
+    /// challenge record (replay is out of scope).
     pub fn verify(
         &self,
         blocks: &[Vec<u8>],
@@ -93,7 +99,7 @@ impl PorKey {
             }
             let expected = self.tag(&blocks[idx as usize], idx);
             if expected != response.tags[i] {
-                return false; // blok veya tag degismis
+                return false; // the block or the tag was changed
             }
         }
         true
@@ -115,8 +121,8 @@ mod tests {
         let ch = PorKey::challenge(8, 3, 42);
         let resp = key
             .respond(&blk, &ch)
-            .expect("dürüst prover response üretir");
-        assert!(key.verify(&blk, &ch, &resp), "dürüst prover dogrulanir");
+            .expect("an honest prover produces a response");
+        assert!(key.verify(&blk, &ch, &resp), "an honest prover verifies");
     }
 
     #[test]
@@ -126,11 +132,11 @@ mod tests {
         let ch = PorKey::challenge(8, 3, 42);
         let resp = key
             .respond(&blk, &ch)
-            .expect("dürüst prover response üretir");
-        // challenge'daki ilk indeksi boz
+            .expect("an honest prover produces a response");
+        // corrupt the first index in the challenge
         let bad_idx = ch.indices[0] as usize;
         blk[bad_idx][0] ^= 0xFF;
-        assert!(!key.verify(&blk, &ch, &resp), "degistirilmis blok RED");
+        assert!(!key.verify(&blk, &ch, &resp), "a changed block is REFUSED");
     }
 
     #[test]
@@ -141,8 +147,8 @@ mod tests {
         let ch = PorKey::challenge(8, 3, 42);
         let resp = k1
             .respond(&blk, &ch)
-            .expect("dürüst prover response üretir");
-        assert!(!k2.verify(&blk, &ch, &resp), "yanlis anahtar RED");
+            .expect("an honest prover produces a response");
+        assert!(!k2.verify(&blk, &ch, &resp), "a wrong key is REFUSED");
     }
 
     #[test]
@@ -152,29 +158,30 @@ mod tests {
         let ch = PorKey::challenge(8, 3, 42);
         let mut resp = key
             .respond(&blk, &ch)
-            .expect("dürüst prover response üretir");
+            .expect("an honest prover produces a response");
         resp.tags[0].0[0] ^= 0xFF;
-        assert!(!key.verify(&blk, &ch, &resp), "degistirilmis tag RED");
+        assert!(!key.verify(&blk, &ch, &resp), "a changed tag is REFUSED");
     }
 
     #[test]
     fn challenge_bounds_safe() {
         let key = PorKey::new([1u8; 32]);
         let blk = blocks();
-        let ch = PorKey::challenge(8, 8, 0); // 8 indeks, 8 blok
+        let ch = PorKey::challenge(8, 8, 0); // 8 indices, 8 blocks
         assert!(key.verify(&blk, &ch, &key.respond(&blk, &ch).expect("response")));
-        // indeks disinda blok yoksa RED (sınır kontrolü)
+        // if a block behind an index is missing, REFUSE (the bounds check)
         let mut bad = blocks();
         bad.clear();
         assert!(!key.verify(&bad, &ch, &key.respond(&blk, &ch).expect("response")));
-        // sınır dışı indeksli challenge → respond None döner, PANİK OLMAZ (K38)
+        // a challenge with an out-of-bounds index -> respond returns None, NO
+        // PANIC (K38)
         let ch_bad = PorChallenge {
             indices: vec![999_999],
             nonce: [0u8; 32],
         };
         assert!(
             key.respond(&blk, &ch_bad).is_none(),
-            "sınır dışı indeks None dönmeli"
+            "an out-of-bounds index has to return None"
         );
         assert!(
             !key.verify(
@@ -184,7 +191,7 @@ mod tests {
                     tags: vec![PorTag([0u8; 32])]
                 }
             ),
-            "sınır dışı indeks verify RED"
+            "an out-of-bounds index is REFUSED by verify"
         );
     }
 }
