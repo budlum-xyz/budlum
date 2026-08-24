@@ -1,22 +1,22 @@
-//! Yedek alma ve geri yukleme tatbikati.
+//! The backup and restore drill.
 //!
 //! `ops/backup_restore_drill.sh` yerine gecer.
 //!
 //! # Shell surumunun uc sorunu
 //!
 //! 1. `find ... -printf '%T@ %p\n' | sort -nr | head -n1` **GNU find'a
-//!    ozgu**. `-printf` POSIX degil; BSD find (macOS) bunu tanimaz ve
+//!    specific**. `-printf` is not POSIX; BSD find (macOS) does not know it and
 //!    tatbikat orada hic kosmaz. Burada en yeni yedek `std::fs`'in
 //!    `modified()` degeriyle bulunuyor.
 //! 2. Ayni boru hatti dosya adinda **bosluk** varsa bozulur: `cut -d' '
-//!    -f2-` ilk bosluktan sonrasini alir, ki bu dogru gibi gorunur ama
-//!    zaman damgasinin kendisi bosluk icermez diye varsayar. Rust'ta ad bir
-//!    `PathBuf`, ayristirilacak bir dizgi degil.
+//!    -f2-` takes everything after the first space, which looks right but
+//!    assumes the timestamp itself contains no space. In Rust the name is a
+//!    `PathBuf`, not a string to be parsed.
 //! 3. `grep -q 'Integrity Audit PASSED'` bir **alt dizgi** ariyordu. Cikti
 //!    "Integrity Audit PASSED" yerine "Integrity Audit PASSED: 3 warnings"
-//!    ya da baska bir baglamda ayni kelimeleri tasisaydi da gecerdi.
-//!    Burada ayni dizgi araniyor ama sonuc **satir bazinda** ve eslesen
-//!    satir raporlaniyor, yani ne eslesitigi gorunur oluyor.
+//!    or carried the same words in another context.
+//!    Here the same string is sought but the result is **line based** and the matching
+//!    line is reported, so what matched becomes visible.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,7 +32,7 @@ pub struct DrillConfig {
 impl DrillConfig {
     /// Ortam degiskenlerinden oku.
     ///
-    /// Shell surumu `: "${SOURCE_DB:?...}"` ile zorunlu tutuyordu; bu dogru
+    /// The shell version required it with `: "${SOURCE_DB:?...}"`; that is correct
     /// bir desendi ve burada da korunuyor, ama hata mesaji tek yerde.
     ///
     /// # Errors
@@ -41,7 +41,7 @@ impl DrillConfig {
     /// bos dizgiyi de yakalar; `set -u` tek basina yakalamaz.
     pub fn from_env(root: &Path) -> Result<Self, String> {
         let binary = env_or(root, "BUDLUM_BIN", "target/release/budlum-core");
-        let source_db = required("SOURCE_DB", "durdurulmus dugum veritabani dizini")?;
+        let source_db = required("SOURCE_DB", "the database directory of a stopped node")?;
         let backup_dir = required("BACKUP_DIR", "yedek hedefi")?;
         Ok(Self {
             binary,
@@ -57,8 +57,8 @@ fn required(name: &str, what: &str) -> Result<String, String> {
         Ok(v) if !v.trim().is_empty() => Ok(v),
         // Bos dizgi de eksik sayilir. Shell'de `set -u` bunu KACIRIR ve
         // bos bir yol `rm -rf "$VAR/"` gibi ifadelerde felakete doner.
-        Ok(_) => Err(format!("{name} bos; {what} olarak bir yol verin")),
-        Err(_) => Err(format!("{name} tanimli degil; {what} olarak bir yol verin")),
+        Ok(_) => Err(format!("{name} is empty; give a path as {what}")),
+        Err(_) => Err(format!("{name} is not defined; give a path as {what}")),
     }
 }
 
@@ -71,12 +71,12 @@ fn env_or(root: &Path, name: &str, default_rel: &str) -> PathBuf {
 
 /// Bir dizindeki en yeni `budlum-*.budbak` dosyasini bul.
 ///
-/// GNU `find -printf` yerine `std::fs`. Dosya adindaki bosluk, yeni satir ya
-/// da tire onemli degil: ayristirilan bir dizgi yok.
+/// `std::fs` instead of GNU `find -printf`. A space, newline or dash in the file name
+/// does not matter: there is no string being parsed.
 ///
 /// # Errors
 ///
-/// Dizin okunamazsa ya da hicbir yedek yoksa.
+/// If the directory cannot be read or there is no backup at all.
 pub fn newest_backup(dir: &Path) -> Result<PathBuf, String> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{} okunamadi: {e}", dir.display()))? {
@@ -99,7 +99,7 @@ pub fn newest_backup(dir: &Path) -> Result<PathBuf, String> {
     }
     best.map(|(_, p)| p).ok_or_else(|| {
         format!(
-            "{} icinde `budlum-*.budbak` yok; yedek uretilmedi",
+            "there is no `budlum-*.budbak` inside {}; no backup was produced",
             dir.display()
         )
     })
@@ -108,11 +108,11 @@ pub fn newest_backup(dir: &Path) -> Result<PathBuf, String> {
 /// Butunluk denetimi ciktisinin gectigini soyle.
 ///
 /// Shell `grep -q` ile bir alt dizgi ariyordu ve neyin eslestigini
-/// soylemiyordu. Burada eslesen **satir** doner, yani log okunabilir.
+/// did not say so. Here the matching **line** is returned, so the log stays readable.
 ///
 /// # Errors
 ///
-/// Beklenen satir yoksa.
+/// If the expected line is absent.
 pub fn integrity_line(output: &str) -> Result<&str, String> {
     output
         .lines()
@@ -130,7 +130,7 @@ pub fn integrity_line(output: &str) -> Result<&str, String> {
 ///
 /// # Errors
 ///
-/// Ikili calistirilamazsa, yedek uretilmezse ya da geri yuklenen veritabani
+/// If the binary cannot be run, no backup is produced, or the restored database
 /// butunluk denetiminden gecmezse.
 pub fn run(cfg: &DrillConfig, root: &Path) -> Result<String, String> {
     if !cfg.binary.is_file() {
@@ -177,10 +177,10 @@ pub fn run(cfg: &DrillConfig, root: &Path) -> Result<String, String> {
         ])
         .current_dir(root)
         .status()
-        .map_err(|e| format!("geri yukleme calistirilamadi: {e}"))?;
+        .map_err(|e| format!("the restore could not be run: {e}"))?;
     if !restore.success() {
         let _ = std::fs::remove_dir_all(&restore_parent);
-        return Err(format!("geri yukleme cikis kodu {:?}", restore.code()));
+        return Err(format!("the restore exited with code {:?}", restore.code()));
     }
 
     let check = Command::new(&cfg.binary)
@@ -206,12 +206,12 @@ pub fn run(cfg: &DrillConfig, root: &Path) -> Result<String, String> {
 ///
 /// # Errors
 ///
-/// Bos bir dizin yedek dondurur ya da gecersiz cikti butunluk denetiminden
+/// If an empty directory returns a backup, or invalid output passes the integrity
 /// gecerse.
 pub fn self_test() -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("budlum-drill-canary-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("kanarya dizini: {e}"))?;
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("canary directory: {e}"))?;
 
     // 1. Bos dizin: yedek yok denmeli.
     if newest_backup(&tmp).is_ok() {
@@ -220,7 +220,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // 2. Yanlis uzantili dosya sayilmamali.
-    std::fs::write(tmp.join("budlum-1.txt"), b"x").map_err(|e| format!("kanarya: {e}"))?;
+    std::fs::write(tmp.join("budlum-1.txt"), b"x").map_err(|e| format!("canary: {e}"))?;
     if newest_backup(&tmp).is_ok() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err("KANARYA DUSTU: `.txt` bir yedek sayildi".to_string());
@@ -229,7 +229,7 @@ pub fn self_test() -> Result<String, String> {
     // 3. Dogru dosya bulunmali, adinda bosluk olsa bile. Shell'in
     //    `cut -d' '` boru hatti tam burada bozuluyordu.
     let spaced = tmp.join("budlum-2026 08 14.budbak");
-    std::fs::write(&spaced, b"x").map_err(|e| format!("kanarya: {e}"))?;
+    std::fs::write(&spaced, b"x").map_err(|e| format!("canary: {e}"))?;
     let found = newest_backup(&tmp)?;
     if found != spaced {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -246,7 +246,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     let _ = std::fs::remove_dir_all(&tmp);
-    Ok("yedek tatbikati kanaryasi OK: bos dizin, yanlis uzanti ve eksik butunluk satiri reddedildi; bosluklu ad bulundu".to_string())
+    Ok("backup drill canary OK: an empty directory, a wrong extension and a missing integrity line were refused; a name with a space was found".to_string())
 }
 
 #[cfg(test)]
@@ -277,7 +277,10 @@ mod tests {
     #[test]
     fn integrity_line_reports_what_matched() {
         let line = integrity_line("a\nIntegrity Audit PASSED (3 tables)\nb").expect("gecmeli");
-        assert!(line.contains("3 tables"), "eslesen satir donmeli: {line}");
+        assert!(
+            line.contains("3 tables"),
+            "the matching line must be returned: {line}"
+        );
     }
 
     #[test]
@@ -297,7 +300,7 @@ mod tests {
 
     #[test]
     fn self_test_passes() {
-        let msg = self_test().expect("kanarya gecmeli");
+        let msg = self_test().expect("the canary must pass");
         assert!(msg.contains("OK"), "{msg}");
     }
 }
