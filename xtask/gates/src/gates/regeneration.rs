@@ -475,14 +475,17 @@ pub fn self_test() -> Result<String, String> {
         "src/domain",
         "budzero/bud-proof/src",
     ] {
-        fs::create_dir_all(tmp.join(d)).map_err(|e| format!("the canary directory could not be created: {e}"))?;
+        fs::create_dir_all(tmp.join(d))
+            .map_err(|e| format!("the canary directory could not be created: {e}"))?;
     }
 
     write_good(&tmp)?;
 
     if let Err(e) = run(&tmp) {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(format!("self-test: the correct tree should have passed: {e}"));
+        return Err(format!(
+            "self-test: the correct tree should have passed: {e}"
+        ));
     }
     run_drift_canaries(&tmp)?;
     let _ = fs::remove_dir_all(&tmp);
@@ -651,7 +654,10 @@ mod tests {
         // Convergence: so the network does not split, every node must arrive at the same place.
         let a = regenerate_storage_challenge_program();
         let b = regenerate_storage_challenge_program();
-        assert_eq!(a, b, "the second reproduction must be the same (idempotence)");
+        assert_eq!(
+            a, b,
+            "the second reproduction must be the same (idempotence)"
+        );
 
         let mut corrupted = a.clone();
         corrupted[0] ^= 0xFFFF;

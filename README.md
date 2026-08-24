@@ -14,7 +14,7 @@ so value moves between domains without trusting an intermediary.
 [![Rust](https://img.shields.io/badge/rust-1.97.0-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
-[Architecture](docs/ARCHITECTURE.md) · [Specification](docs/SPECIFICATION.md) · [Security](docs/SECURITY.md) · [Contributing](docs/CONTRIBUTING.md) · [Website](https://github.com/budlum-xyz/budlum.com)
+[Architecture](docs/ARCHITECTURE.md) · [Specification](docs/SPECIFICATION.md) · [Security](docs/SECURITY.md) · [Contributing](docs/CONTRIBUTING.md) · [Website](https://github.com/budlum-xyz/budlum.com) · [Türkçe](README.tr.md)
 
 ---
 
@@ -110,7 +110,7 @@ domain directly.
 
 ### Where the diagrams live
 
-[**ARCHITECTURE.md**](docs/ARCHITECTURE.md) is the reference atlas for this tree: 51 Mermaid
+[**ARCHITECTURE.md**](docs/ARCHITECTURE.md) is the reference atlas for this tree: 80 Mermaid
 diagrams covering the executor pipeline, bridge verification, the EVM receipt and MPT path,
 the snapshot trust boundary, the STARK proof lifecycle, and the governance and tokenomics
 state machines. [budzero/ARCHITECTURE.md](budzero/ARCHITECTURE.md) covers the BudZKVM ISA,
@@ -162,7 +162,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | [`bud/`](bud) | B.U.D. 1.0/2.0/3.0 implementation (its own workspace) |
 | [`docs/`](docs) | Reference docs: ARCHITECTURE, SPECIFICATION, SECURITY, CONTRIBUTING, PROVENANCE_NOTES |
 | [`config/`](config) | Devnet / testnet / mainnet profiles and genesis templates |
-| [`ops/scripts/`](ops/scripts) | CI gate scripts, every one is self-testing (see [Engineering standards](#engineering-standards)) |
+| [`xtask/gates/`](xtask/gates) | CI gates, every one is self-testing (see [Engineering standards](#engineering-standards)) |
 | [`kani/`](kani) · [`fuzz/`](fuzz) | Model-checking harnesses and fuzz targets ([fuzz README](fuzz/README.md)) |
 | [`benches/`](benches) | Signature-verification, Merkle and single-node throughput benchmarks |
 | [`ops/`](ops) | systemd unit, Prometheus config, backup/restore drill |
@@ -226,7 +226,6 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, p
 | `pq-ml-dsa` | OK | FIPS 204 ML-DSA (NIST final) - ML-DSA-65 validator signatures (`ml-dsa`). Scheme is written into genesis; a node whose build disagrees with the chain refuses to start |
 | `pq-dilithium` | - | Legacy Dilithium5 (round-3, pre-NIST-final) signatures (`pqcrypto-dilithium`). Retained only for migration; not the default |
 | `p2p-mdns` | - | Devnet-only local peer discovery. Deliberately excluded from release builds so mDNS advisories stay unreachable |
-| `p2p-mdns` | - | Devnet-only local peer discovery. Deliberately excluded from release builds so mDNS advisories stay unreachable |
 
 `cargo build --all-features` is **expected to fail**: the PQ backends are mutually exclusive
 and a `compile_error!` enforces it. CI asserts that failure, so the guard cannot silently rot.
@@ -245,7 +244,7 @@ cargo run --release -- --network devnet
 
 ```bash
 docker compose -f ops/docker-compose.yml up   # see ops/docker-compose.yml
-bash scripts/devnet-multinode-smoke.sh
+bash ops/scripts/devnet-multinode-smoke.sh
 ```
 
 ### From a profile
@@ -344,11 +343,11 @@ BudZero, determinism, security audit, supply chain, fuzzing, Miri, semver and mo
 
 **Two rules make the rest meaningful:**
 
-1. **No gate may be vacuous.** Every `scripts/check-*.sh` implements `--self-test`, which
+1. **No gate may be vacuous.** Every gate implements a self-test, which
    injects a real violation and fails if the gate does not catch it. A gate that cannot prove
    it can fail is not a gate, and CI runs the canary next to the check itself.
-2. **No gate may be orphaned.** A gate script that no workflow invokes fails the build by
-   name. Wire it up or delete it, it does not get to sit in `scripts/` inflating a count.
+2. **No gate may be orphaned.** A gate that no workflow invokes fails the build by
+   name. Wire it up or delete it, it does not get to sit in the tree inflating a count.
 
 Suppressions are not part of the workflow. `#[allow(...)]`, `#[ignore]`, `|| true` and
 baseline inflation are how a green build stops meaning anything, and none of them are
@@ -415,7 +414,7 @@ done, and this page will not imply otherwise.
 
 | Document | What it covers |
 | --- | --- |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Reference atlas: 51 diagrams covering system, trust boundary, bridge, EVM verification, snapshot, STARK, governance and tokenomics |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Reference atlas: 80 diagrams covering system, trust boundary, bridge, EVM verification, snapshot, STARK, governance and tokenomics |
 | [SPECIFICATION.md](docs/SPECIFICATION.md) | Protocol specification: consensus, validator economics, network protocol, BLS finality, JSON-RPC surface, snapshot format |
 | [SECURITY.md](docs/SECURITY.md) | Disclosure policy, supported versions, what to include in a report |
 | [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Development setup, PR expectations, rules for consensus and execution changes |

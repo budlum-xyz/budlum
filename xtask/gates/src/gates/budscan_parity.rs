@@ -1,4 +1,4 @@
-//! `budscan` iki tanimi kopyaliyor; kopyalar ayrisirsa bu kapi duser.
+//! `budscan` duplicates two definitions; if the copies diverge this gate fails.
 //!
 //! # Neden kopya var
 //!
@@ -7,24 +7,24 @@
 //! sinirinda o bagimlilik grafigi istenmez. Bedeli iki kopya:
 //!
 //! 1. **Ad kurali.** `crates/budscan/src/name_rule.rs::check_name` ile
-//!    `bns_names_are_safe_in_an_address_bar::check_name` ayni tabloyu
+//!    `bns_names_are_safe_in_an_address_bar::check_name` uses the same table.
 //!    uyguluyor.
 //! 2. **Icerik kimligi.** `crates/budscan/src/content_id.rs::ContentId::of` ile
-//!    `src/storage/content_id.rs::ContentId::of` ayni domain etiketini ve
-//!    ayni uzunluk-onekli hash'i kullaniyor.
+//!    `src/storage/content_id.rs::ContentId::of` uses the same domain tag and
+//!    the same length-prefixed hash.
 //!
-//! Ikisi de sessizce ayrisabilir ve ayrisirlarsa sonuc sessiz olur: tarayici
+//! Both can diverge silently, and if they do the outcome is silent: the scanner
 //! bir adi kabul eder, zincir etmez; ya da tarayici bir baytin dogrulandigini
-//! soyler, zincir baska bir kimlik hesaplar. Bu kapi o iki sessizligi
+//! says one thing and the chain computes a different identity. This gate turns those two
 //! gurultuye ceviriyor.
 //!
 //! # Ne olculuyor
 //!
-//! Metin karsilastirmasi degil, **davranis** karsilastirmasi degil de
+//! Not a behaviour comparison but a text comparison: the constants that must be
 //! **tanim** karsilastirmasi: iki dosyanin da tasimasi gereken degismezler
-//! (domain etiketi, uzunluk oneki, karakter kumesi, red sinifi adlari) tek tek
-//! aranyor. `grep` sorusu "bu metin var mi" ve bu sorunun yanlis soru oldugu
-//! yer cok; burada dogru soru bu, cunku aranan sey tam olarak bir sabitin
+//! identical on both sides (domain tag, length prefix, character set, refusal class names)
+//! are searched one by one. The `grep` question is "does this text exist", and there are many
+//! places where that is the wrong question; here it is the right one, because what is sought is exactly
 //! yazili hali.
 
 use std::fmt::Write as _;
@@ -40,13 +40,13 @@ const REJECTION_VARIANTS: &[&str] = &[
     "NoSuffix",
 ];
 
-/// Ad kuralinin karakter kumesi, iki kopyada da ayni yazilmis olmali.
+/// The character set of the name rule must be written identically in both copies.
 const CHARSET_PATTERN: &str = "'a'..='z' | '0'..='9' | '-' | '.'";
 
 /// Uzunluk siniri.
 const LENGTH_BOUND: &str = "(3..=32).contains(&count)";
 
-/// Icerik kimliginin alan ayirici etiketi; iki tarafta da ayni olmali.
+/// The domain separator tag of the content identity; it must be the same on both sides.
 const CONTENT_DOMAIN_TAG: &str = "BDLM_CONTENT_V1";
 
 fn read(root: &Path, rel: &str) -> Result<String, String> {
@@ -65,9 +65,9 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     if problems.is_empty() {
         return Ok(String::from(
-            "budscan parity OK: ad kurali alti red sinifini ve ayni karakter kumesini \
-             tasiyor, ContentId ayni domain etiketi ve uzunluk onekiyle hesaplaniyor, \
-             boyut siniri ve EPOCH_LENGTH ucu de ayni",
+            "budscan parity OK: the name rule carries six refusal classes and the same character set, \
+             ContentId is computed with the same domain tag and length prefix, \
+             and the size bound and EPOCH_LENGTH agree in all three places",
         ));
     }
     let mut msg = String::new();
@@ -77,7 +77,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     Err(msg)
 }
 
-/// Iki ad kurali kopyasi ayni tabloyu tasiyor mu?
+/// Do the two name-rule copies carry the same table?
 fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
     // ── 1. Ad kurali ────────────────────────────────────────────────────
     let browser = read(root, "crates/budscan/src/name_rule.rs")?;
@@ -89,13 +89,13 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
     for variant in REJECTION_VARIANTS {
         if !browser.contains(variant) {
             problems.push(format!(
-                "crates/budscan/src/name_rule.rs icinde {variant} red sinifi yok; kapi onu \
-                 tasiyor, yani tarayici kapinin reddettigi bir seyi kabul ediyor olabilir"
+                "the {variant} refusal class is missing from crates/budscan/src/name_rule.rs; the gate carries \
+                 it, so the scanner may be accepting something the gate refuses"
             ));
         }
         if !gate.contains(variant) {
             problems.push(format!(
-                "bns_names_are_safe_in_an_address_bar.rs icinde {variant} yok; \
+                "{variant} is missing from bns_names_are_safe_in_an_address_bar.rs; \
                  tarayici onu tasiyor"
             ));
         }
@@ -103,9 +103,9 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
 
     if !browser.contains(CHARSET_PATTERN) {
         problems.push(format!(
-            "crates/budscan/src/name_rule.rs karakter kumesini {CHARSET_PATTERN} olarak \
+            "crates/budscan/src/name_rule.rs does not write the character set as {CHARSET_PATTERN}; \
              yazmiyor. Kume genisledi ya da daraldi; her iki durumda da kapinin \
-             kopyasiyla ayni olmasi gerekiyor"
+             it has to be identical to the chain-side copy"
         ));
     }
     if !gate.contains("'a'..='z' | '0'..='9' | '-' | '.'") {
@@ -115,18 +115,18 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
     }
     if !browser.contains(LENGTH_BOUND) {
         problems.push(format!(
-            "crates/budscan/src/name_rule.rs {LENGTH_BOUND} uzunluk sinirini uygulamiyor"
+            "crates/budscan/src/name_rule.rs does not enforce the {LENGTH_BOUND} length bound"
         ));
     }
 
-    // Tarayici kurali zincirin kuralindan **dar** olmali. Zincir tarafinda
-    // hala yalniz bir uzunluk kurali var; buna guvenilmiyor, olculuyor.
+    // The scanner rule must be **narrower** than the chain rule. On the chain side
+    // there is still only a length rule; that is not trusted, it is measured.
     let registry = read(root, "src/bns/registry.rs")?;
     if !registry.contains("(3..=32).contains(&char_count)") {
         problems.push(String::from(
-            "src/bns/registry.rs artik 3..=32 uzunluk kuralini uygulamiyor. Ya sinir \
+            "src/bns/registry.rs no longer enforces the 3..=32 length rule. Either the bound \
              kaydi ya da bir karakter kumesi kurali indi. Karakter kumesi indiyse, \
-             crates/budscan/src/name_rule.rs ile ayni commit'te uzlastirilmasi gerekiyor: \
+             has to be reconciled with crates/budscan/src/name_rule.rs in the same commit: \
              ismin ne icerebileceginе karar veren iki yerin habersiz ayrismasi, tek \
              yerin kotu karar vermesinden kotudur",
         ));
@@ -135,7 +135,7 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
     Ok(())
 }
 
-/// Iki `ContentId` tanimi ayni kimligi mi uretiyor?
+/// Do the two `ContentId` definitions produce the same identity?
 fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
     // ── 2. Icerik kimligi ───────────────────────────────────────────────
     let browser_cid = read(root, "crates/budscan/src/content_id.rs")?;
@@ -144,8 +144,8 @@ fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), Strin
     if !browser_cid.contains(CONTENT_DOMAIN_TAG) {
         problems.push(format!(
             "crates/budscan/src/content_id.rs {CONTENT_DOMAIN_TAG} etiketini kullanmiyor; \
-             tarayicinin hesapladigi kimlik zincirinkiyle ayni olmaz ve her dogrulama \
-             sessizce basarisiz olur"
+             the identity the scanner computes will not equal the chain's and every verification \
+             fails silently"
         ));
     }
     if !core_cid.contains(CONTENT_DOMAIN_TAG) {
@@ -155,28 +155,28 @@ fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), Strin
         ));
     }
 
-    // Uzunluk oneki: olmadan `["a","bc"]` ile `["ab","c"]` ayni hash'i verir.
+    // Length prefix: without it `["a","bc"]` and `["ab","c"]` hash to the same value.
     if !browser_cid.contains("(field.len() as u64).to_le_bytes()") {
         problems.push(String::from(
-            "crates/budscan/src/content_id.rs alanlari uzunluk-onekleyerek hash'lemiyor. \
-             Onek olmadan iki farkli icerik ayni kimlige sahip olabilir",
+            "crates/budscan/src/content_id.rs does not length-prefix the fields before hashing. \
+             Without the prefix two different contents can share one identity",
         ));
     }
 
     Ok(())
 }
 
-/// Uc yerde tekrarlanan sabitler ayni mi?
+/// Are the constants repeated in three places identical?
 fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
-    // ── 3. Boyut siniri: uc yerde ayni ──────────────────────────────────
+    // -- 3. Size bound: identical in three places ------------------------
     let browser_fetch = read(root, "crates/budscan/src/fetch.rs")?;
     let core_gateway = read(root, "src/gateway/service.rs")?;
     let browser_limit = browser_fetch.contains("10 * 1024 * 1024");
     let core_limit = core_gateway.contains("10 * 1024 * 1024");
     if browser_limit != core_limit {
         problems.push(String::from(
-            "icerik boyut siniri crates/budscan/src/fetch.rs ile src/gateway/service.rs \
-             arasinda ayrismis. Iki farkli sinir, birinin digerinin reddettigini \
+            "the content size bound has diverged between crates/budscan/src/fetch.rs and \
+             src/gateway/service.rs. Two different bounds mean one accepts what the other \
              kabul ettigi bir bosluk acar",
         ));
     }
@@ -189,7 +189,7 @@ fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(),
     {
         problems.push(String::from(
             "EPOCH_LENGTH src/chain/blockchain.rs ile crates/budscan/src/light_client.rs \
-             arasinda ayrismis. Tarayici yanlis basliklari epoch siniri sanar ve \
+             have diverged. The scanner would take the wrong headers for an epoch boundary and \
              takip ettigi zincir zincirin kendisi olmaz",
         ));
     }
@@ -203,23 +203,25 @@ fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(),
 pub fn self_test() -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
 
-    // Kanarya: bos bir agacta kapi **gecmemeli**. Dosya okuyamayan bir kapi
-    // "sorun yok" derse, hicbir sey inceleyip OK demis olur.
+    // Canary: on an empty tree the gate must **not** pass. A gate that cannot read a file
+    // saying "no problem" has inspected nothing and called it OK.
     let empty = std::path::Path::new("/nonexistent-budscan-parity-canary");
     if run(empty).is_ok() {
-        problems.push(String::from("VACUOUS: kapi, okuyamadigi bir agacta gecti"));
+        problems.push(String::from(
+            "VACUOUS: the gate passed on a tree it could not read",
+        ));
     }
 
-    // Kanarya: aranan sabitlerin listesi bos olmamali, yoksa dongu hicbir sey
-    // kontrol etmez ve kapi her zaman gecer.
+    // Canary: the list of constants sought must not be empty, otherwise the loop checks
+    // nothing and the gate always passes.
     if REJECTION_VARIANTS.is_empty() {
         problems.push(String::from(
-            "VACUOUS: red sinifi listesi bos, dongu hicbir sey aramiyor",
+            "VACUOUS: the refusal class list is empty, the loop searches for nothing",
         ));
     }
     if CHARSET_PATTERN.is_empty() || LENGTH_BOUND.is_empty() {
         problems.push(String::from(
-            "VACUOUS: aranan desen bos; bos bir desen her metinde bulunur",
+            "VACUOUS: the sought pattern is empty; an empty pattern is found in every text",
         ));
     }
 
@@ -231,7 +233,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(msg);
     }
     Ok(String::from(
-        "budscan parity self-test OK: kapi okuyamadigi bir agacta gecmiyor ve aradigi \
-         desenlerin hicbiri bos degil",
+        "budscan parity self-test OK: the gate does not pass on a tree it cannot read and none of \
+         the patterns it searches for are empty",
     ))
 }
