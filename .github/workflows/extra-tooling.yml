@@ -1,24 +1,24 @@
 name: Extra Tooling (security + quality)
 #
-# Bu workflow, ana CI'ın kapsamadığı ek araçları çalıştırır.
+# This workflow runs extra tools the main CI does not cover.
 #
-# 2026-07-27 onarımı - workflow HİÇ ÇALIŞMIYORDU:
-# `slsa-provenance` job'ı bir reusable workflow'u (`.github/workflows/*.yml@ref`)
-# `steps[].uses` içinde çağırıyordu. Reusable workflow yalnız job seviyesinde
-# (`jobs.<id>.uses`) geçerlidir; adım içinde kullanılınca GitHub dosyanın
-# Tamamını reddeder. Sonuç: her koşu 0 job ile anında "failure", diğer beş
-# Job da hiç çalışmıyordu. actionlint bunu yakalamıyor (yerelde temiz geçiyor),
-# Bu yüzden hata gözden kaçmıştı.
+# 2026-07-27 repair - the workflow WAS NEVER RUNNING:
+# the `slsa-provenance` job was calling a reusable workflow (`.github/workflows/*.yml@ref`)
+# inside `steps[].uses`. A reusable workflow is valid only at job level
+# (`jobs.<id>.uses`); used inside a step, GitHub rejects the whole
+# file. Result: every run was an instant "failure" with 0 jobs, and the other five
+# jobs never ran either. actionlint does not catch this (it passes clean locally),
+# which is why the bug went unnoticed.
 #
-# SLSA job'ı kaldırıldı, taklidi bırakılmadı. Doğru kurulum ayrı bir release
+# The SLSA job was removed rather than left as an imitation. The correct setup is a separate release
 # Workflow'u ister (job seviyesinde `uses:` + `permissions: id-token: write` +
-# Gerçek base64-subjects üretimi). `hashFiles` zaten SLSA'nın beklediği
-# Base64 digest formatını üretmez, yani mevcut haliyle çalışsa bile geçersiz
-# Provenance üretirdi. Bu, sahte bir tedarik-zinciri garantisi olurdu.
+# with real base64-subjects generation). `hashFiles` does not produce the base64 digest
+# format SLSA expects, so even if it had run it would have produced invalid
+# provenance. That would be a fake supply-chain guarantee.
 #
-# Ayrıca `|| true` / `|| echo` maskeleri kaldırıldı: direktifin standing rule'u
-# Gereği merge'ü bloke etmeyen check dekoratiftir. Hangi kapının gerçekten
-# Bloke ettiği her job'ın başında yazılıdır.
+# The `|| true` / `|| echo` masks were also removed: by the standing rule,
+# a check that does not block merge is decorative. Which gate actually
+# blocks is written at the top of each job.
 
 on:
   push:
@@ -26,7 +26,7 @@ on:
   pull_request:
     branches: [main, fix/architecture-tip-adlari]
   schedule:
-    - cron: "0 4 * * 1" # haftalık Pazartesi 04:00 UTC
+    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -39,10 +39,10 @@ concurrency:
 jobs:
   # ── 1. cargo-auditable + cargo-audit ────────────────────────────────────────
   # KAPI: cargo audit bulgusu = FAIL.
-  # Cargo-auditable bağımlılık listesini binary'nin içine gömer, böylece
-  # Dağıtılmış bir ikili dosya kaynak ağacı olmadan da denetlenebilir
-  # (`cargo audit bin`). Bir L1 için operatörün elindeki binary'nin hangi
-  # Crate sürümlerinden derlendiğini kanıtlayabilmek gerçek bir ihtiyaç.
+  # cargo-auditable embeds the dependency list inside the binary, so
+  # a distributed binary can be audited without the source tree
+  # (`cargo audit bin`). For an L1, being able to prove which crate versions
+  # the operator's binary was built from is a real need.
   auditable-audit:
     name: Auditable + Audit (binary SBOM + CVE)
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
-      - name: Install cargo-auditable + cargo-audit (sürüm pinli)
+      - name: Install cargo-auditable + cargo-audit (version pinned)
         run: |
           set -euo pipefail
           cargo install cargo-auditable --version 0.7.5 --locked
@@ -70,10 +70,10 @@ jobs:
           cargo auditable --version
           cargo audit --version
 
-      # Vacuous-gate koruması: cargo audit "0 vulnerabilities" hem temiz bir
-      # Ağacı hem de advisory veritabanını indirememiş bir koşuyu gösterebilir.
-      # Kanarya, bilinen savunmasız bir sürüm içeren sentetik lockfile üretip
-      # Aracın onu YAKALADIĞINI kanıtlar.
+      # Vacuous-gate protection: cargo audit "0 vulnerabilities" can indicate both a clean
+      # tree and a run that failed to download the advisory database.
+      # The canary generates a synthetic lockfile containing a known vulnerable version and
+      # proves the tool CATCHES it.
       - name: Kanarya - cargo audit alarmının çalıştığının kanıtı
         run: |
           set -euo pipefail
