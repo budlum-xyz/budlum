@@ -291,9 +291,9 @@ pub struct AccountState {
     /// It is persisted and hashed into the state root, so it cannot simply be
     /// dropped; it is kept as the observability record it already was.
     pub last_epoch_time: u64,
-    /// Gerçek blok yüksekliği. Eskiden executor
-    /// `epoch_index * 100` approximation kullanıyordu (≤99 blok sapma).
-    /// Blockchain produce/validate'da tx işleme öncesi set edilir.
+    /// The real block height. The executor used to use an approximation of
+    /// `epoch_index * 100`, which drifted by up to 99 blocks. It is set during
+    /// block production and validation, before transaction processing.
     pub current_block_height: u64,
     pub governance: GovernanceState,
     pub base_fee: u64,
@@ -1073,7 +1073,7 @@ impl AccountState {
 
     /// Validate a transaction against the account state: nonce, spendable
     /// balance, fee and type. A zero-address sender is only admissible as the
-    /// canonical genesis transaction (güvenlik denetimi, HIGH, CWE-306);
+    /// canonical genesis transaction (security audit, HIGH, CWE-306);
     /// any other zero-address transaction fails here.
     pub fn validate_transaction_with_context(
         &self,
@@ -1572,7 +1572,7 @@ impl AccountState {
                 // registry. Before this check the hash was discarded and any
                 // historical slashing record for the address was enough, so a
                 // proposal could claim one evidence hash while zeroing stake
-                // on unrelated past evidence (güvenlik denetimi, MEDIUM,
+                // on unrelated past evidence (security audit, MEDIUM,
                 // CWE-345). The hash is the bincode serialization of
                 // the report that was actually slashed, so a passed proposal
                 // names the exact evidence it relies on.
@@ -1585,7 +1585,7 @@ impl AccountState {
                             // A slash record for another role on the same
                             // address (e.g. a VERIFIER) proves nothing about
                             // the validator role this proposal is slashing
-                            // (güvenlik denetimi, HIGH).
+                            // (security audit, HIGH).
                             if record.report.role != crate::registry::role::roles::VALIDATOR {
                                 return false;
                             }
@@ -1783,35 +1783,36 @@ impl AccountState {
         Ok(())
     }
 
-    /// Yeni arz yaratan bir yol icin bakiye ekler; sabit tavani asmaz.
+    /// Adds balance on a path that creates new supply, without crossing the
+    /// fixed cap.
     ///
-    /// # Neden ayri bir yol
+    /// # Why this is a separate path
     ///
-    /// [`Self::try_add_balance`] iki farkli isi ayni imzayla yapiyordu:
-    /// **var olan** parayi tasimak (bir kilidin cozulmesi, bir bagin iadesi,
-    /// bir ucretin odenmesi) ve **yeni** para yaratmak (kopruden gelen bir
-    /// varligin karsiligini basmak). Ikisi ayni tasimda birlestiginde arz
-    /// tavani denetlenemez hale gelir: iade edilen bir bagi tavana karsi
-    /// saymak yanlistir, basilan bir tokeni saymamak da.
+    /// [`Self::try_add_balance`] did two different jobs under one signature:
+    /// moving **existing** money, such as a lock releasing, a bond being
+    /// returned or a fee being paid, and creating **new** money, such as minting
+    /// the counterpart of an asset arriving over the bridge. Once those two are
+    /// carried together, the supply cap cannot be checked: counting a returned
+    /// bond against the cap is wrong, and so is not counting a minted token.
     ///
-    /// [`Self::supply_capacity_remaining`] yazilmisti ve 100M'lik tavani
-    /// dogru hesapliyordu, ama **hicbir uretim yolu onu cagirmiyordu** -
-    /// yalnizca testler. Hesaplayan ama kimsenin sormadigi bir sinir,
-    /// sinir degildir; okuyan kisiye sinir varmis gibi gorunmesi yuzunden
-    /// hic olmamasindan daha kotudur.
+    /// [`Self::supply_capacity_remaining`] had been written and computed the
+    /// 100M cap correctly, but **no production path called it**; only the tests
+    /// did. A bound that is computed and never asked is not a bound, and it is
+    /// worse than having none, because it makes a reader believe a bound exists.
     ///
-    /// # Neden tavanin tamamina bakiliyor
+    /// # Why the whole cap is examined
     ///
-    /// Denetlenen sey bu cagrinin miktari degil, cagri sonrasi **toplam**
-    /// taahhut. Tek tek kucuk mint'ler ayri ayri makul gorunur; tavani asan
-    /// sey toplamdir. Payda [`Self::total_bud_committed`]: likit bakiyeler,
-    /// stake, unbonding kuyrugu ve rol baglari. Bunlarin biri disarida
-    /// birakilirsa bir bag, bir arz yakimi gibi okunur ve olmayan bir
-    /// bassliga yer acar.
+    /// What is checked is not this call's amount but the **total** commitment
+    /// after the call. Individually, small mints each look reasonable; it is the
+    /// total that crosses the cap. The denominator is
+    /// [`Self::total_bud_committed`]: liquid balances, stake, the unbonding
+    /// queue and role bonds. Leaving any one of them out would read a bond as a
+    /// supply burn and open room for a mint that should not exist.
     ///
     /// # Errors
     ///
-    /// Miktar kalan tavan bosuluğunu asarsa, ya da bakiye `u64` tasarsa.
+    /// If the amount exceeds the remaining headroom under the cap, or if the
+    /// balance would overflow a `u64`.
     pub fn try_mint_balance(&mut self, public_key: &Address, amount: u64) -> Result<(), String> {
         let headroom = self.supply_capacity_remaining();
         if amount > headroom {
@@ -2719,48 +2720,49 @@ mod tests {
         );
     }
 
-    /// Arz yaratan yol tavani asamaz.
+    /// A supply-creating path cannot cross the cap.
     ///
-    /// Tavan zaten hesaplaniyordu; eksik olan sey onu **soran** bir uretim
-    /// yoluydu. Bu test hem sinirin tuttugunu hem de sinirin dogru paydayi
-    /// kullandigini olcer: stake ve rol baglari da taahhut edilmis arzdir,
-    /// disarida birakilirlarsa olmayan bir bassliga yer acilir.
+    /// The cap was already being computed; what was missing was a production
+    /// path that **asked** it. This test measures both that the bound holds and
+    /// that it uses the right denominator: stake and role bonds are committed
+    /// supply too, and leaving them out would open room for a mint that should
+    /// not exist.
     #[test]
     fn a_minting_path_cannot_cross_the_supply_cap() {
         let recipient = test_addr_from_byte(31u8);
         let mut state = AccountState::new();
 
-        // Tavanin 10 birim altina kadar dolduruluyor.
+        // Fill up to 10 units below the cap.
         let cap = crate::tokenomics::BUD_TOTAL_SUPPLY;
         state.add_balance(&recipient, cap - 10);
         assert_eq!(state.supply_capacity_remaining(), 10);
 
-        // Bosluk kadar basim gecer - kapi mesru basimi engellememeli.
+        // A mint the size of the headroom passes; the gate must not block a
+        // legitimate mint.
         state
             .try_mint_balance(&recipient, 10)
-            .expect("bosluk kadar basim kabul edilmeli");
+            .expect("a mint the size of the headroom must be accepted");
         assert_eq!(state.supply_capacity_remaining(), 0);
 
-        // Tavanin ustundeki tek birim reddedilir.
+        // One unit above the cap is refused.
         let err = state
             .try_mint_balance(&recipient, 1)
-            .expect_err("tavan dolduktan sonra basim reddedilmeli");
+            .expect_err("minting must be refused once the cap is full");
         assert!(
             err.contains("supply cap"),
-            "ret gerekcesi tavani soylemeli: {err}"
+            "the refusal must name the cap: {err}"
         );
 
-        // Ret gercekten uygulanmis olmali: reddedip yine de eklemek
-        // tavani suslemeye cevirirdi.
+        // The refusal must actually be applied: refusing and adding anyway would
+        // turn the cap into decoration.
         assert_eq!(
             state.get_balance(&recipient),
             cap,
-            "reddedilen basim bakiyeye girmemeli"
+            "a refused mint must not enter the balance"
         );
 
-        // Stake de taahhut edilmis arzdir: tavan yalnizca likit bakiyelere
-        // baksaydi, stake'lenmis her birim yeni basim icin sahte bosluk
-        // acardi.
+        // Stake is committed supply too: if the cap looked only at liquid
+        // balances, every staked unit would open fake headroom for a new mint.
         let mut staked = AccountState::new();
         let holder = test_addr_from_byte(32u8);
         let validator = test_addr_from_byte(33u8);
@@ -2769,42 +2771,43 @@ mod tests {
         assert_eq!(staked.supply_capacity_remaining(), 0);
         assert!(
             staked.try_mint_balance(&holder, 1).is_err(),
-            "stake edilmis arz tavana sayilmali"
+            "staked supply must count against the cap"
         );
     }
 
-    // === SUPPLY-CAP INTEGER-ONLY TESTİ ===
+    // === THE SUPPLY-CAP INTEGER-ONLY TEST ===
     #[test]
     fn supply_cap_scaling_is_integer_only_and_respects_limit() {
         let mut state = AccountState::new();
 
-        // Yüksek stake'li validator ekle
+        // Add a validator with a high stake.
         let validator_addr = test_addr_from_byte(42u8);
         state.add_validator(validator_addr, 100_000_000_000); // 100B stake
 
-        // Supply cap'e çok yakın bir durum oluştur
-        // (basit test için mevcut supply'ı yüksek tut)
+        // Build a state very close to the supply cap, keeping the existing supply
+        // high to keep the test simple.
         let initial_balance_addr = test_addr_from_byte(99u8);
         state.add_balance(&initial_balance_addr, 99_999_000_000_000); // ~99.999M
 
         let before_supply = state.circulating_supply();
 
-        // Epoch advance → yield dağıtımı tetiklenir
+        // Advancing the epoch triggers the yield distribution.
         state.advance_epoch(1_000, crate::core::transaction::DEFAULT_CHAIN_ID);
 
         let after_supply = state.circulating_supply();
 
-        // Dağıtılan miktar supply cap'i ASLA aşmamalı
+        // The distributed amount must NEVER cross the supply cap.
         assert!(
             after_supply <= crate::tokenomics::BUD_TOTAL_SUPPLY as u128,
-            "Supply cap aşıldı: {} > {}",
+            "the supply cap was crossed: {} > {}",
             after_supply,
             crate::tokenomics::BUD_TOTAL_SUPPLY
         );
 
-        // En azından bazı ödül dağıtılmış olmalı (eğer cap'e ulaşmadıysa)
+        // At least some reward must have been distributed, if the cap was not
+        // already reached.
         if before_supply < crate::tokenomics::BUD_TOTAL_SUPPLY as u128 {
-            // Test başarılıysa ödül dağıtılmış demektir
+            // If the test passes, a reward was distributed.
         }
     }
 
