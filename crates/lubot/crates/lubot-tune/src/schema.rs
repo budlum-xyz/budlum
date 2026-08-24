@@ -1,37 +1,44 @@
-//! SFT veri seti şema doğrulaması.
+//! SFT data set schema validation.
 //!
-//! Eğitim koşusundan ÖNCE her kayıt denetlenir: alan varlığı, boşluk
-//! kuralları, bayt sınırları. Amaç: bozuk bir örneğin eğitim karışımına
-//! girmesini koşuya başlamadan reddetmek (veri kalitesi kapısı).
+//! Every record is inspected BEFORE the training run: field presence,
+//! whitespace rules, byte limits. The goal is to refuse a corrupt example
+//! before the run starts, rather than letting it into the training mixture (a
+//! data quality gate).
 //!
-//! Kural (araştırma §3/§4): 100 mükemmel örnek > 10.000 vasat örnek.
+//! The rule (research sections 3 and 4): 100 perfect examples beat 10,000
+//! mediocre ones.
+//!
+//! Turkish text remains in this file on purpose: `tr_ratio_estimate` detects
+//! the Turkish character signature, and both the marker list and the test
+//! fixture that exercises it have to carry those characters.
 
 use lubot_data::jsonl::InstructionRecord;
 
-/// Şema hataları.
+/// Schema errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaError {
-    /// `user` veya `assistant` boş.
+    /// `user` or `assistant` is empty.
     EmptyField { line: usize, field: &'static str },
-    /// Kayıt bayt sınırını aşıyor (tek örnek şişmesi).
+    /// The record exceeds the byte limit (a single example ballooned).
     TooLarge {
         line: usize,
         bytes: usize,
         max: usize,
     },
-    /// JSONL satırı çözülemedi (jsonl::decode hatası).
+    /// The JSONL line could not be decoded (a jsonl::decode error).
     Unparsable { line: usize, detail: String },
 }
 
-/// Tek örnek için bayt tavanı (kesme öncesi ham denetim; gerçek kesme
-/// tokenizer'da `cutoff_len` ile yapılır).
+/// The byte ceiling for a single example (a raw check before truncation; the
+/// real truncation happens in the tokenizer through `cutoff_len`).
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 
-/// Kayıt listesini doğrula. İlk hata döner; hangi satır olduğu söylenir.
+/// Validate the record list. It returns the first error and names the line it
+/// came from.
 ///
 /// # Errors
 ///
-/// [`SchemaError`] varyantlarından ilki.
+/// The first of the [`SchemaError`] variants.
 pub fn validate_records(lines: &[String]) -> Result<Vec<InstructionRecord>, SchemaError> {
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
@@ -64,9 +71,10 @@ pub fn validate_records(lines: &[String]) -> Result<Vec<InstructionRecord>, Sche
     Ok(out)
 }
 
-/// Karışım raporu: TR/EN oranı hedefi için basit sayım. `tr_ratio` =
-/// Türkçe karakter imzası taşıyan örneklerin oranı (0.0..=1.0). Kesin
-/// dil tespiti değildir; koşu öncesi sağlık sinyalidir.
+/// The mixture report: a simple count for the TR/EN ratio target. `tr_ratio`
+/// is the fraction of examples carrying the Turkish character signature
+/// (0.0..=1.0). It is not exact language detection, only a health signal
+/// before the run.
 #[must_use]
 pub fn tr_ratio_estimate(records: &[InstructionRecord]) -> f64 {
     if records.is_empty() {
@@ -118,7 +126,7 @@ mod tests {
 
     #[test]
     fn unparsable_line_is_rejected() {
-        let lines = vec![s("bu json degil")];
+        let lines = vec![s("this is not json")];
         assert!(matches!(
             validate_records(&lines),
             Err(SchemaError::Unparsable { line: 1, .. })

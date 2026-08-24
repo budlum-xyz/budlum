@@ -1,18 +1,18 @@
-//! Kompakt bağlam tablosu - bilgiyi LLM girişine JSON yerine satır
-//! tabloları olarak biçimler; tekrarlanan anahtarları eler, token
-//! bütçesini düşürür.
+//! The compact context table - formats knowledge for the LLM input as row
+//! tables instead of JSON, dropping repeated keys and lowering the token
+//! budget.
 //!
-//! Hücreler `|` ve yeni satırdan kaçırılır; kanıt `yol:Lx-Ly`
-//! biçimindedir; hücreler azami karakterle kırpılır.
+//! Cells are escaped for `|` and newlines; evidence is written as
+//! `path:Lx-Ly`; cells are clipped at a maximum character count.
 
 use serde::{Deserialize, Serialize};
 
-/// Varsayılan hücre azami karakteri.
+/// The default maximum characters per cell.
 pub const DEFAULT_CELL_MAX_CHARS: usize = 240;
-/// Varsayılan bağlam azami karakteri.
+/// The default maximum characters per context.
 pub const DEFAULT_CONTEXT_MAX_CHARS: usize = 120_000;
 
-/// Bir kanıt başvurusu.
+/// A reference to a piece of evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRef {
     pub path: String,
@@ -20,7 +20,7 @@ pub struct EvidenceRef {
     pub end_line: usize,
 }
 
-/// Bilgi tablosu satırı: özne - yüklem - nesne.
+/// A knowledge table row: subject - predicate - object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactRow {
     pub subject: String,
@@ -30,7 +30,7 @@ pub struct FactRow {
     pub evidence: Option<EvidenceRef>,
 }
 
-/// İlişki tablosu satırı.
+/// A relation table row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationRow {
     pub source: String,
@@ -40,7 +40,7 @@ pub struct RelationRow {
     pub evidence: Option<EvidenceRef>,
 }
 
-/// Kompakt bağlam girdisi.
+/// A compact context entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactContext {
     pub project_name: String,
@@ -60,7 +60,7 @@ fn escape_cell(value: &str, max_chars: usize) -> String {
     }
 }
 
-/// Kanıtı tek hücreye biçimler: `yol:Lx-Ly`.
+/// Formats the evidence into a single cell: `path:Lx-Ly`.
 #[must_use]
 pub fn format_evidence(evidence: &Option<EvidenceRef>) -> String {
     match evidence {
@@ -86,14 +86,15 @@ fn table(headers: &[&str], rows: &[Vec<String>], max_chars: usize) -> String {
     out
 }
 
-/// Bağlamı kompakt tabloya dönüştürür. `max_chars` aşılırsa keser
-/// (önce ilişkiler, sonra düşük güvenli olgular).
+/// Turns the context into a compact table. If `max_chars` is exceeded it
+/// truncates (relations first, then low-confidence facts).
 #[must_use]
 pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
     let max_chars = max_chars.unwrap_or(DEFAULT_CONTEXT_MAX_CHARS);
     let cell_max = DEFAULT_CELL_MAX_CHARS;
 
-    // Olguları güven + kanıta göre sırala: yüksek güvenli + kanıtlı önce.
+    // Sort the facts by confidence plus evidence: high confidence with
+    // evidence first.
     let mut facts: Vec<&FactRow> = ctx.facts.iter().collect();
     facts.sort_by_key(|f| {
         let has_evidence = f.evidence.is_some();
@@ -107,7 +108,7 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
 
     let mut parts: Vec<String> = Vec::new();
     parts.push(format!(
-        "# Proje\n{}",
+        "# Project\n{}",
         escape_cell(&ctx.project_name, cell_max)
     ));
 
@@ -125,9 +126,9 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
             })
             .collect();
         parts.push(format!(
-            "# Olgular\n{}",
+            "# Facts\n{}",
             table(
-                &["Ozne", "Yuklem", "Nesne", "Kanit", "Guven"],
+                &["Subject", "Predicate", "Object", "Evidence", "Confidence"],
                 &rows,
                 cell_max
             )
@@ -149,9 +150,9 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
             })
             .collect();
         parts.push(format!(
-            "# Iliskiler\n{}",
+            "# Relations\n{}",
             table(
-                &["Kaynak", "Iliski", "Hedef", "Kanit", "Guven"],
+                &["Source", "Relation", "Target", "Evidence", "Confidence"],
                 &rows,
                 cell_max
             )
@@ -159,7 +160,7 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
     }
 
     if !ctx.notes.is_empty() {
-        let mut notes = String::from("# Notlar\n");
+        let mut notes = String::from("# Notes\n");
         for n in &ctx.notes {
             notes.push_str(&escape_cell(n, cell_max));
             notes.push('\n');
@@ -175,7 +176,7 @@ pub fn render(ctx: &CompactContext, max_chars: Option<usize>) -> String {
     out
 }
 
-/// Token sayısını kabaca tahmin eder (sözcük başına ~1.3 token).
+/// Roughly estimates the token count (about 1.3 tokens per word).
 #[must_use]
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
@@ -190,7 +191,7 @@ mod tests {
 
     fn sample() -> CompactContext {
         CompactContext {
-            project_name: "ornek".to_string(),
+            project_name: "example".to_string(),
             facts: vec![FactRow {
                 subject: "StorageRegistry".to_string(),
                 predicate: "defines".to_string(),
@@ -209,18 +210,18 @@ mod tests {
                 confidence: "medium".to_string(),
                 evidence: None,
             }],
-            notes: vec!["depolama katmani".to_string()],
+            notes: vec!["the storage layer".to_string()],
         }
     }
 
     #[test]
     fn renders_tables() {
         let out = render(&sample(), None);
-        assert!(out.contains("# Olgular"));
+        assert!(out.contains("# Facts"));
         assert!(out.contains("StorageRegistry"));
         assert!(out.contains("src/storage.rs:L10-L20"));
-        assert!(out.contains("# Iliskiler"));
-        assert!(out.contains("# Notlar"));
+        assert!(out.contains("# Relations"));
+        assert!(out.contains("# Notes"));
     }
 
     #[test]
@@ -240,7 +241,7 @@ mod tests {
 
     #[test]
     fn token_estimate_nonzero() {
-        assert!(estimate_tokens("bir iki uc dort") > 0);
+        assert!(estimate_tokens("one two three four") > 0);
         assert_eq!(estimate_tokens(""), 0);
     }
 }
