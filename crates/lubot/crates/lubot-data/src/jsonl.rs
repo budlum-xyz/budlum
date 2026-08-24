@@ -1,12 +1,15 @@
-//! Kayıt formatı: JSONL (serde_json).
+//! The record format: JSONL (serde_json).
 //!
-//! Üretim formatı JSON Lines'tır; chat şablonu ayrıca `template` modülünde
-//! tutulur. Derinleştirme (2026-08-13): bağımlılıksız yer tutucu format
-//! kaldırıldı; kayıtlar artık gerçek JSON'dur.
+//! The production format is JSON Lines; the chat template is kept separately
+//! in the `template` module. Deepening (2026-08-13): the dependency-free
+//! placeholder format was removed, so records are real JSON now.
+//!
+//! Turkish text stays in the tests on purpose: the round trip has to carry
+//! multi-byte UTF-8, and that is what those fixtures measure.
 
 use serde::{Deserialize, Serialize};
 
-/// SFT kaydı: system (opsiyonel) / user / assistant üçlüsü.
+/// An SFT record: the system (optional) / user / assistant triple.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15,30 +18,31 @@ pub struct InstructionRecord {
     pub assistant: String,
 }
 
-/// Kaydı tek satırlık JSON'a kodla.
+/// Encode the record into a single line of JSON.
 ///
-/// Belge daha önce "üretimde `Result` dönen sarmalayıcı kullanılır" diyordu.
-/// Öyle bir sarmalayıcı yoktu: bu fonksiyon panikleyen tek yoldu ve yalnızca
-/// testlerden çağrılıyordu. İddia kaldırıldı, panik de kaldırıldı.
+/// The documentation used to say "production uses a wrapper that returns a
+/// `Result`". No such wrapper existed: this function was the only path and it
+/// panicked, and it was called only from the tests. The claim was removed, and
+/// so was the panic.
 ///
-/// Serileştirme burada pratikte başarısız olmaz (üç `String` alan), ama
-/// "olmaz" ile "olamaz" aynı şey değildir ve release profili
-/// `panic = "abort"` kullanıyor. Hata durumunda çağıran karar verir.
+/// Serialisation does not fail here in practice (three `String` fields), but
+/// "does not" and "cannot" are not the same thing, and the release profile
+/// uses `panic = "abort"`. On an error the caller decides.
 ///
 /// # Errors
 ///
-/// `serde_json` kaydı serileştiremezse hata döner.
+/// Returns an error when `serde_json` cannot serialise the record.
 pub fn encode(rec: &InstructionRecord) -> Result<String, String> {
-    serde_json::to_string(rec).map_err(|e| format!("JSONL kaydı kodlanamadı: {e}"))
+    serde_json::to_string(rec).map_err(|e| format!("the JSONL record could not be encoded: {e}"))
 }
 
-/// JSONL satırından kayıt çöz.
+/// Decode a record from a JSONL line.
 ///
 /// # Errors
 ///
-/// Satır geçerli JSON değilse veya alanlar eksikse.
+/// When the line is not valid JSON or fields are missing.
 pub fn decode(line: &str) -> Result<InstructionRecord, String> {
-    serde_json::from_str(line).map_err(|e| format!("JSONL kaydı çözülemedi: {e}"))
+    serde_json::from_str(line).map_err(|e| format!("the JSONL record could not be decoded: {e}"))
 }
 
 #[cfg(test)]
@@ -67,14 +71,14 @@ mod tests {
 
     #[test]
     fn system_field_is_optional_in_json() {
-        let line = r#"{"user":"soru","assistant":"cevap"}"#;
+        let line = r#"{"user":"question","assistant":"answer"}"#;
         let rec = decode(line).unwrap();
         assert_eq!(rec.system, None);
     }
 
     #[test]
     fn malformed_json_is_error() {
-        assert!(decode("tek-alan").is_err());
+        assert!(decode("single-field").is_err());
         assert!(decode(r#"{"user":1}"#).is_err());
     }
 }
