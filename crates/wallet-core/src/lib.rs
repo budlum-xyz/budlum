@@ -1,5 +1,5 @@
 // Unsafe kilidi: bu crate su an 0 unsafe. Bir `unsafe` blok girdigi an
-// derleme FAIL eder (regresyon kapisi). Ana crate ile ayni politika.
+// compilation FAILS (regression gate). Same policy as the main crate.
 #![forbid(unsafe_code)]
 //! Budlum Wallet Core - BIP39 mnemonic + FIPS 204 ML-DSA-87 post-quantum key derivation + signing.
 //!
@@ -11,12 +11,12 @@
 //! hardened-only derivation (non-hardened public derivation is not defined for
 //! ML-DSA and is intentionally absent).
 //!
-//! **Permissionless Relayer Kuralı (bkz. README):** Bu crate bir WALLET'tir,
-//! RELAYER değildir. Wallet imzalar üretir; kullanıcı imzalı işlemi herhangi
-//! Bir permissionless relayer'a (stake + slashing ile) gönderir. Wallet-core'da
-//! Relayer kayıt/stake/whitelist kodu YOKTUR.
+//! **Permissionless relayer rule (see README):** this crate is a WALLET,
+//! not a RELAYER. The wallet produces signatures; the user sends the signed transaction to any
+//! permissionless relayer (secured by stake + slashing). wallet-core contains NO
+//! relayer registration/stake/whitelist code.
 //!
-//! ## Kullanım
+//! ## Usage
 //!
 //! `Wallet::generate` needs the `production` feature, which is what wires in
 //! the OS CSPRNG; without it the call fails closed rather than deriving a key
@@ -43,7 +43,7 @@
 //!
 //! ## Gizlilik
 //!
-//! - `note_privacy_enabled`: gizli transfer intent üretir (PrivacyCommit yolu).
+//! - `note_privacy_enabled`: produces a private transfer intent (the PrivacyCommit path).
 //! - `tee_enabled`: execution-time confidentiality - **fail-closed** without a
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
@@ -86,28 +86,28 @@ pub const ADDRESS_VERSION_V2: u8 = 0x02;
 /// Maximum number of distinct owners in a multisig policy (16 × 4627 B ≈ 74 KB).
 pub const MAX_MULTISIG_OWNERS: usize = 16;
 
-/// Wallet hatası.
+/// Wallet error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WalletError {
-    /// Geçersiz mnemonic (kelime sayısı, checksum).
+    /// Invalid mnemonic (word count, checksum).
     InvalidMnemonic(String),
-    /// Geçersiz entropy boyutu.
+    /// Invalid entropy size.
     InvalidEntropy(usize),
-    /// Geçersiz seed.
+    /// Invalid seed.
     InvalidSeed,
-    /// Geçersiz multisig policy.
+    /// Invalid multisig policy.
     InvalidMultisigPolicy(String),
-    /// Geçersiz social recovery policy.
+    /// Invalid social recovery policy.
     InvalidRecoveryPolicy(String),
-    /// Geçersiz social recovery proposal.
+    /// Invalid social recovery proposal.
     InvalidRecoveryProposal(String),
-    /// Production entropy (CSPRNG) kullanılamıyor, fail-closed.
+    /// Production entropy (CSPRNG) unavailable, fail-closed.
     ProductionEntropyUnavailable(String),
-    /// Note privacy / private transfer builder hatası.
+    /// Note privacy / private transfer builder error.
     InvalidPrivateTransfer(String),
-    /// TEE opt-in açık ama runtime yok - fail-closed (sessiz plaintext yok).
+    /// TEE opt-in is on but no runtime is available - fail-closed (no silent plaintext).
     TeeUnavailable(String),
-    /// Note privacy kapalıyken private transfer istendi.
+    /// A private transfer was requested while note privacy is off.
     NotePrivacyDisabled,
 }
 
@@ -142,7 +142,7 @@ impl std::fmt::Display for WalletError {
 impl std::error::Error for WalletError {}
 
 /// BIP39 mnemonic → entropy (entropy → checksum → mnemonic).
-/// SHA256 checksum: ilk (entropy_bits / 32) bit checksum eklenir.
+/// SHA256 checksum: the first (entropy_bits / 32) bits are appended as checksum.
 pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
     let entropy_len = entropy.len();
     if entropy_len != 16 && entropy_len != 32 {
@@ -521,41 +521,41 @@ impl Drop for Wallet {
 /// `core::address::Address` deseni ile uyumlu.
 pub type BudlumAddress = [u8; 32];
 
-/// (2026-07-22) cüzdan içi gizlilik yüzeyi.
+/// (2026-07-22) in-wallet privacy surface.
 ///
-/// İki bağımsız opt-in katmanı (kullanıcı planı + MAINNET_KARARLAR):
-/// 1. **Note privacy (ağ seçeneği):** gizli transfer opcode ailesi
-///    (PrivacyCommit/NullifierCheck/SumConservation). Kullanıcı cüzdanında
-///    "gizli işlem kullan" tercihi; varsayılan kapalı.
-/// 2. **TEE execution-time confidentiality (Bölüm 10 #5):** işlem üretimi
-///    TEE enklavı üzerinden - operatör düz-metin görmez. UX prompt:
-///    "Bu cüzdanın işlemleri TEE katmanıyla gizli kılınsın mı?
-///    Evet (işlemleriniz biraz yavaşlar)." Varsayılan kapalı.
+/// Two independent opt-in layers (user plan + mainnet decisions):
+/// 1. **Note privacy (network option):** the private transfer opcode family
+///    (PrivacyCommit/NullifierCheck/SumConservation). A "use private transactions"
+///    preference in the user wallet; off by default.
+/// 2. **TEE execution-time confidentiality (section 10 #5):** transaction construction
+///    runs through a TEE enclave - the operator sees no plaintext. UX prompt:
+///    "Should this wallet's transactions be made confidential with the TEE layer?
+///    Yes (your transactions get a bit slower)." Off by default.
 ///
-/// View-key (Bölüm 10 #3, Zcash deseni): kullanıcı üretir/saklar; BDDK gibi
-/// Yetkiliye manuel ibraz. Kamuya kapalı, yetkiliye açık selective disclosure.
+/// View key (section 10 #3, Zcash pattern): the user generates and stores it; presented
+/// manually to an authority such as a regulator. Closed to the public, open to the authority: selective disclosure.
 ///
-/// Gerçek TEE enklavı (SGX/Nitro) ayrı entegrasyon hattı; bu struct tercih +
-/// View-key materyalini tutar.
+/// A real TEE enclave (SGX/Nitro) is a separate integration track; this struct holds the preference +
+/// view-key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletPrivacyConfig {
-    /// Ağ-seviyesi gizli transfer (note/UTXO opcode ailesi) kullanılsın mı.
-    /// Varsayılan `false` - kullanıcı cüzdan ayarından açar (ağ için seçenek).
+    /// Whether network-level private transfer (the note/UTXO opcode family) is used.
+    /// Default `false` - the user enables it in wallet settings (an option for the network).
     pub note_privacy_enabled: bool,
-    /// TEE gizlilik toggle'ı. `false` = varsayılan (mevcut akış, operatör veriyi
-    /// Görür, sadece STARK integrity). `true` = işlemler TEE ile gizli (yavaşlar).
+    /// TEE confidentiality toggle. `false` = default (current flow, the operator sees the data,
+    /// only STARK integrity). `true` = transactions are confidential via TEE (slower).
     pub tee_enabled: bool,
-    /// Client-side TEE öncelikli mi. `true` = önce kullanıcı cihazı (laptop SGX),
-    /// Başarısızsa server-side (AWS Nitro) fallback. `false` = doğrudan server-side.
+    /// Whether client-side TEE is preferred. `true` = the user device first (laptop SGX),
+    /// falling back to server-side (AWS Nitro) on failure. `false` = server-side directly.
     pub prefer_client_side_tee: bool,
-    /// Kullanıcı-üretimi view-key (32 byte). `None` = henüz üretilmedi.
-    /// Selective disclosure için yetkiliye manuel paylaşılır; asla zincire yazılmaz.
+    /// User-generated view key (32 bytes). `None` = not generated yet.
+    /// Shared manually with an authority for selective disclosure; never written to the chain.
     pub view_key: Option<[u8; 32]>,
 }
 
 impl Default for WalletPrivacyConfig {
     fn default() -> Self {
-        // Bölüm 10 #5 + kullanıcı planı: varsayılan KAPALI (opt-in).
+        // Section 10 #5 + user plan: OFF by default (opt-in).
         Self {
             note_privacy_enabled: false,
             tee_enabled: false,
@@ -566,8 +566,8 @@ impl Default for WalletPrivacyConfig {
 }
 
 impl WalletPrivacyConfig {
-    /// Toggle prompt yanıtı (Bölüm 10 #5 UX): "Bu cüzdanın işlemleri TEE
-    /// Katmanıyla gizli kılınsın mı?" → `enable`.
+    /// Answer to the toggle prompt (section 10 #5 UX): "Should this wallet's transactions be made
+    /// confidential with the TEE layer?" -> `enable`.
     #[must_use]
     pub fn from_user_opt_in(enable: bool) -> Self {
         Self {
@@ -578,7 +578,7 @@ impl WalletPrivacyConfig {
         }
     }
 
-    /// Yalnızca ağ-seviyesi note privacy (TEE kapalı), daha hafif seçenek.
+    /// Network-level note privacy only (TEE off), the lighter option.
     #[must_use]
     pub fn note_privacy_only(enable: bool) -> Self {
         Self {
@@ -589,20 +589,20 @@ impl WalletPrivacyConfig {
         }
     }
 
-    /// TEE gizlilik aktif mi (işlem yavaşlama uyarısı bu durumda geçerli).
+    /// Whether TEE confidentiality is active (the slowdown warning applies in this case).
     #[must_use]
     pub fn is_privacy_active(&self) -> bool {
         self.tee_enabled
     }
 
-    /// Note privacy (gizli transfer opcode'ları) aktif mi.
+    /// Whether note privacy (the private transfer opcodes) is active.
     #[must_use]
     pub fn is_note_privacy_active(&self) -> bool {
         self.note_privacy_enabled
     }
 
-    /// Kullanılacak TEE backend'i (client-side öncelikli karar mantığı).
-    /// `"client"` (cihaz SGX) | `"server"` (AWS Nitro) | `"none"` (TEE kapalı).
+    /// The TEE backend to use (client-side-first decision logic).
+    /// `"client"` (device SGX) | `"server"` (AWS Nitro) | `"none"` (TEE off).
     #[must_use]
     pub fn effective_backend(&self) -> &'static str {
         if !self.tee_enabled {
@@ -614,9 +614,9 @@ impl WalletPrivacyConfig {
         }
     }
 
-    /// View-key üret (Bölüm 10 #3). Deterministik türetim: wallet seed'den
+    /// Generate a view key (section 10 #3). Deterministic derivation from the wallet seed.
     /// Domain-separated SHA3-256("BUDLUM_VIEW_KEY_V1" || seed).
-    /// Mevcut view-key varsa değiştirmez (idempotent); zorla yenilemek için
+    /// If a view key already exists it is left unchanged (idempotent); to force a refresh
     /// `rotate_view_key`.
     pub fn ensure_view_key(&mut self, wallet_seed: &[u8; 32]) -> [u8; 32] {
         if let Some(vk) = self.view_key {
@@ -627,15 +627,15 @@ impl WalletPrivacyConfig {
         vk
     }
 
-    /// View-key'i yeniden üret (eski anahtar yetkiliye verildiyse rotasyon).
+    /// Regenerate the view key (rotation after the old key has been handed to an authority).
     pub fn rotate_view_key(&mut self, wallet_seed: &[u8; 32], rotation_counter: u64) -> [u8; 32] {
         let vk = derive_view_key_rotated(wallet_seed, rotation_counter);
         self.view_key = Some(vk);
         vk
     }
 
-    /// View-key ibraz paketi (yetkiliye manuel paylaşım). Zincire yazılmaz.
-    /// `None` eğer view-key henüz üretilmediyse.
+    /// View-key disclosure package (shared manually with an authority). Never written to the chain.
+    /// `None` if the view key has not been generated yet.
     #[must_use]
     pub fn export_view_key_for_disclosure(&self) -> Option<ViewKeyDisclosure> {
         self.view_key.map(|key| ViewKeyDisclosure {
@@ -645,11 +645,11 @@ impl WalletPrivacyConfig {
     }
 }
 
-/// View-key format sürümü (selective disclosure protokolü).
+/// View-key format version (selective disclosure protocol).
 pub const VIEW_KEY_VERSION: u32 = 1;
 
-/// Yetkiliye ibraz edilen view-key paketi (Bölüm 10 #3).
-/// Kamuya kapalı; kullanıcı cüzdanından yetkiliye (BDDK vb.) manuel iletilir.
+/// The view-key package presented to an authority (section 10 #3).
+/// Closed to the public; delivered manually from the user wallet to the authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewKeyDisclosure {
     pub version: u32,
@@ -657,7 +657,7 @@ pub struct ViewKeyDisclosure {
 }
 
 impl ViewKeyDisclosure {
-    /// Hex export (kullanıcı kopyala-yapıştır / QR için).
+    /// Hex export (for user copy-paste / QR).
     #[must_use]
     pub fn to_hex(&self) -> String {
         format!("vk1:{}:{}", self.version, hex::encode(self.view_key))
@@ -848,14 +848,14 @@ impl MultisigPolicy {
 }
 
 impl Wallet {
-    /// Yeni wallet oluştur (rastgele entropy → mnemonic → seed → keypair).
+    /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
-    /// `word_count`: 12 (128-bit entropy) veya 24 (256-bit entropy).
+    /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
     ///
-    /// **Production güvenliği:** Bu fonksiyon yalnızca `production` feature'ı
-    /// Etkinleştirilmişse çalışır. Production feature olmadan `Wallet::generate`
-    /// **fail-closed** döner - placeholder/deterministic entropy asla production
-    /// Ortamına sızar. Test/dev ortamları için `from_entropy` kullanın.
+    /// **Production safety:** this function only works when the `production` feature
+    /// is enabled. Without it `Wallet::generate` returns
+    /// **fail-closed** - placeholder/deterministic entropy never leaks into a production
+    /// environment. Use `from_entropy` for test/dev environments.
     pub fn generate(word_count: usize) -> Result<Self, WalletError> {
         let entropy_len = match word_count {
             12 => 16, // 128 bit
@@ -863,7 +863,7 @@ impl Wallet {
             _ => return Err(WalletError::InvalidEntropy(word_count * 4 / 3)),
         };
 
-        // Production CSPRNG: getrandom ile gerçek rastgele entropy
+        // Production CSPRNG: real random entropy via getrandom
         #[cfg(feature = "production")]
         let entropy = {
             let mut buf = vec![0u8; entropy_len];
@@ -874,7 +874,7 @@ impl Wallet {
 
         // Production feature olmadan generate fail-closed
         #[cfg(not(feature = "production"))]
-        let _ = entropy_len; // entropy_len kullanımı için (compile warning önleme)
+        let _ = entropy_len; // touch entropy_len (avoid a compile warning)
 
         #[cfg(not(feature = "production"))]
         {
@@ -889,10 +889,10 @@ impl Wallet {
         Self::from_entropy(&entropy)
     }
 
-    /// Entropy'den wallet oluştur (BIP39 mnemonic + ML-DSA-87 seed).
+    /// Build a wallet from entropy (BIP39 mnemonic + ML-DSA-87 seed).
     ///
-    /// **Production notu:** `from_entropy` test/dev için tasarılmıştır.
-    /// Production wallet generation için `Wallet::generate` kullanın
+    /// **Production note:** `from_entropy` is designed for test/dev.
+    /// Use `Wallet::generate` for production wallet generation
     /// (production feature + getrandom CSPRNG gerektirir).
     pub fn from_entropy(entropy: &[u8]) -> Result<Self, WalletError> {
         if entropy.len() != 16 && entropy.len() != 32 {
@@ -925,9 +925,9 @@ impl Wallet {
         })
     }
 
-    /// Mnemonic'den wallet restore et (BIP39 checksum doğrulaması ile).
+    /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
-        // BIP39 reverse: mnemonic → entropy (checksum doğrulaması ile)
+        // BIP39 reverse: mnemonic -> entropy (with checksum verification)
         let entropy = mnemonic_to_entropy(mnemonic)?;
 
         let mut hasher = Sha3_256::new();
@@ -949,7 +949,7 @@ impl Wallet {
         })
     }
 
-    /// Mnemonic kelimelerini döndür.
+    /// Return the mnemonic words.
     #[must_use]
     pub fn mnemonic(&self) -> &str {
         &self.mnemonic
@@ -980,13 +980,13 @@ impl Wallet {
         Self::address_from_public_key(&pubkey)
     }
 
-    /// Budlum Address hex string olarak.
+    /// The Budlum address as a hex string.
     #[must_use]
     pub fn address_hex(&self) -> String {
         hex::encode(self.address())
     }
 
-    /// Mobile/browser binding için public-only export üret.
+    /// Produce a public-only export for mobile/browser bindings.
     #[must_use]
     pub fn binding_export(&self) -> WalletBindingExport {
         WalletBindingExport {
@@ -1002,12 +1002,12 @@ impl Wallet {
         sign_message(&self.signing_key, message)
     }
 
-    /// İmza doğrula (statik helper - wallet oluşturmadan).
+    /// Verify a signature (static helper - without building a wallet).
     pub fn verify(public_key: &PublicKeyBytes, message: &[u8], signature: &SignatureBytes) -> bool {
         verify_signature(public_key, message, signature)
     }
 
-    /// Seed (32-byte ML-DSA-87 xi - export için dikkatli kullan).
+    /// Seed (32-byte ML-DSA-87 xi - use carefully when exporting).
     #[must_use]
     pub fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
         &self.seed
@@ -1046,7 +1046,7 @@ impl Wallet {
     /// deploys. `sign_with_privacy` fails closed until a measurement is
     /// enrolled and refuses any attestation whose `measurement` differs:
     /// the measurement is the wallet's root of trust against a
-    /// self-attesting software runtime (güvenlik denetimi, MEDIUM, CWE-347
+    /// self-attesting software runtime (security audit, MEDIUM, CWE-347
     /// follow-up).
     pub fn set_trusted_tee_measurement(&mut self, measurement: [u8; 32]) {
         self.trusted_tee_measurement = Some(measurement);
@@ -1122,7 +1122,7 @@ impl Wallet {
     /// attestation's `report_data` is the SHA-256 of the sealed bytes, so a
     /// runtime that substitutes attacker-controlled sealed bytes cannot
     /// produce an attestation for the digest the wallet signs (Strix HIGH,
-    /// güvenlik denetimi).
+    /// security audit).
     ///
     /// The trust boundary is structural: the runtime produces only a **raw
     /// quote** ([`TeeQuoter::quote`]) and the wallet verifies it with a
@@ -1130,7 +1130,7 @@ impl Wallet {
     /// the hardware root of trust. The runtime never supplies parsed
     /// attestation fields, so a self-attesting software runtime cannot
     /// fabricate an attestation by echoing fields back (Strix MEDIUM,
-    /// CWE-347, takip çalışması). The wallet additionally requires its
+    /// CWE-347, follow-up work). The wallet additionally requires its
     /// enrolled measurement to match and the backend to match its preference;
     /// signing fails closed while no measurement is enrolled.
     ///
@@ -1221,10 +1221,10 @@ impl Wallet {
         }
 
         let outputs = privacy_transfer::build_outputs(&req)?;
-        // Güvenlik denetimi (HIGH): giriş notunun BU cüzdana ait olduğu
-        // doğrulanmıyordu - başka cüzdanın recipient_tag'iyle not
+        // Security audit (HIGH): it was not verified that the input note belongs to THIS
+        // wallet - a note carrying another wallet's recipient_tag
         // harcanabiliyordu (cross-wallet spending). Notun recipient tag'i
-        // bu cüzdanın adresinden türemiş olmalı.
+        // must be derived from this wallet's address.
         let wallet_tag = crate::privacy_crypto::address_to_recipient_tag(&self.address());
         if req.input.recipient_tag != wallet_tag {
             return Err(WalletError::InvalidPrivateTransfer(
@@ -1362,7 +1362,7 @@ mod tests {
         let mnemonic = wallet.mnemonic().to_string();
         let restored = Wallet::from_mnemonic(&mnemonic).expect("restore must succeed");
         assert_eq!(restored.mnemonic(), mnemonic);
-        // Aynı mnemonic → aynı address
+        // Same mnemonic -> same address
         assert_eq!(
             wallet.address(),
             restored.address(),
@@ -1538,14 +1538,14 @@ mod tests {
         );
     }
 
-    /// Permissionless relayer kuralı mührü: wallet-core'da relayer kayıt/stake/
-    /// Whitelist kodu YOK. Bu test grep kanıtı olarak çalışır, eğer biri
-    /// Relayer kodu eklerse bu test kırılır (bilinçli koruma).
+    /// Seal for the permissionless relayer rule: wallet-core carries no relayer registration/stake/
+    /// whitelist code. This test acts as grep evidence; if someone adds
+    /// relayer code the test breaks (a deliberate guard).
     #[test]
     fn no_relayer_registration_code_in_wallet_core() {
-        // Bu test bir mühürdür - wallet-core'un permissionless prensibini korur.
-        // README: "Herkes relayer olabilir, stake + slashing ile güvenlik."
-        // Wallet-core bir WALLET'tir, RELAYER değildir.
+        // This test is a seal - it preserves wallet-core's permissionless principle.
+        // README: "anyone can be a relayer, security through stake + slashing."
+        // wallet-core is a WALLET, not a RELAYER.
         assert!(true, "wallet-core has no relayer registration/stake code");
     }
 
@@ -1923,14 +1923,14 @@ mod tests {
         .is_err());
     }
 
-    // ===== - WalletPrivacyConfig (Bölüm 10 #5 + view-key) =====
+    // ===== - WalletPrivacyConfig (section 10 #5 + view key) =====
 
     #[test]
     fn d2_privacy_config_defaults_off() {
         let cfg = WalletPrivacyConfig::default();
         assert!(
             !cfg.is_privacy_active(),
-            "Bölüm 10 #5: varsayılan KAPALI (opt-in)"
+            "section 10 #5: OFF by default (opt-in)"
         );
         assert!(!cfg.is_note_privacy_active());
         assert_eq!(cfg.effective_backend(), "none");
@@ -1943,14 +1943,14 @@ mod tests {
         let cfg = WalletPrivacyConfig::from_user_opt_in(true);
         assert!(cfg.is_privacy_active());
         assert!(cfg.is_note_privacy_active());
-        // Client-side TEE öncelikli (kullanıcı cihazı/laptop SGX).
+        // Client-side TEE preferred (user device / laptop SGX).
         assert_eq!(cfg.effective_backend(), "client");
     }
 
     #[test]
     fn d2_privacy_config_server_backend_fallback() {
         let mut cfg = WalletPrivacyConfig::from_user_opt_in(true);
-        cfg.prefer_client_side_tee = false; // zayıf cihaz → server-side
+        cfg.prefer_client_side_tee = false; // weak device -> server-side
         assert_eq!(cfg.effective_backend(), "server");
     }
 
@@ -2127,7 +2127,7 @@ mod tests {
         // The runtime produces a quote and the verifier validates it, but the
         // wallet has not enrolled any measurement, so it must refuse to sign
         // rather than trust the runtime's own claim (Strix MEDIUM, CWE-347,
-        // takip çalışması).
+        // follow-up work).
         let rt = crate::tee::mock::MockTeeRuntime::new(TeeBackendKind::ClientSgx);
         let verifier = crate::tee::mock::MockQuoteVerifier::default();
         let mut w = Wallet::from_entropy(&[0x6Au8; 16]).unwrap();

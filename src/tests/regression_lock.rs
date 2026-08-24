@@ -1,26 +1,26 @@
-//! Regresyon kilidi testleri - CI kırıcı güvenlik mühürleri.
+//! Regression lock tests - CI-breaking security seals.
 //!
-//! Bu testler, geçmişte tespit edilen ve düzeltilen güvenlik bug'larının
-//! Yanlışlıkla geri alınmasını önler. Herhangi birinin CI'da kırılması,
-//! Ilgili düzeltmenin bozulduğu anlamına gelir, yalnızca bilinçli bir
-//! Kararla (ve bu dosyanın güncellenmesiyle) kaldırılabilir.
+//! These tests prevent security bugs found and fixed in the past from being
+//! silently reverted. If any of them breaks in CI it means the
+//! corresponding fix has been broken; it may only be removed by a deliberate
+//! decision (and by updating this file).
 //!
 //! ## Regresyon #1: ZK finality fail-open
 //!
-//! ZkFinalityAdapter'ın generic trait `verify_finality` metodu eskiden
-//! ProofClaimRegistry lookup'ı olmadan finalize edebiliyordu (fail-open).
-//! Düzeltildi: trait metodu her zaman `Rejected` döner,
-//! Gerçek doğrulama yalnızca `verify_finality_with_claim` üzerinden
-//! ProofClaimRegistry ile yapılır.
+//! The generic trait `verify_finality` method of ZkFinalityAdapter used to be able to
+//! finalize without a ProofClaimRegistry lookup (fail-open).
+//! Fixed: the trait method always returns `Rejected`,
+//! and real verification happens only through `verify_finality_with_claim`
+//! together with the ProofClaimRegistry.
 //!
 //! ## Regresyon #2: Relayer escrow silent-failure
 //!
-//! Escrowed AiAgentPayment release edildiğinde, registry'den payment
-//! Kaldırılmalı ve alıcıya balance credit yapılmalı. Eğer release/reclaim
-//! Sessizce başarısız olursa (balance değişimi olmadan payment kaybolursa),
-//! Fonlar kaybedilir. Test, release/reclaim'in payment'ı gerçekten
-//! Kaldırdığını ve non-escrowed path'in recipient'ı anında credit ettiğini
-//! Doğrular.
+//! When an escrowed AiAgentPayment is released, the payment must be removed from the
+//! registry and the recipient credited. If release/reclaim
+//! fails silently (the payment disappears without a balance change),
+//! funds are lost. The test verifies that release/reclaim really removes the
+//! payment, and that the non-escrowed path credits the recipient immediately.
+//!
 
 // ─── Regresyon #1: ZK finality fail-open ─────────────────────────────────
 
@@ -32,7 +32,7 @@ mod zk_finality_fail_open_regression {
     use crate::domain::plugin::default_domain;
     use crate::domain::types::{ConsensusKind, DomainCommitment, Hash32};
 
-    /// ZK domain + commitment yardımcı fonksiyonları.
+    /// ZK domain + commitment helper functions.
     fn zk_domain() -> crate::domain::types::ConsensusDomain {
         default_domain(42, ConsensusKind::Zk, 45262, "zk-proof-verification", 0)
     }
@@ -56,16 +56,16 @@ mod zk_finality_fail_open_regression {
         }
     }
 
-    /// REGRESYON KİLİDİ: `ZkFinalityAdapter::verify_finality`
-    /// (generic trait entry point) ASLA `Finalized` dönmemelidir.
+    /// REGRESSION LOCK: `ZkFinalityAdapter::verify_finality`
+    /// (the generic trait entry point) must NEVER return `Finalized`.
     ///
-    /// Bu metod eskiden ProofClaimRegistry lookup'ı olmadan finalize
-    /// Edebiliyordu - bu, ikinci bir registry-bağımsız doğrulama yoluydu
-    /// (fail-open). Birisi yanlışlıkla bu metodu "düzeltip" `Finalized`
-    /// Dönmeye başlarsa, bu test kırılır.
+    /// This method used to be able to finalize without a ProofClaimRegistry lookup
+    /// - a second, registry-independent verification path
+    /// (fail-open). If someone accidentally "fixes" this method into returning
+    /// `Finalized`, this test breaks.
     ///
-    /// İstenen davranış: her zaman `Rejected` - ZK finality yalnızca
-    /// `verify_finality_with_claim` üzerinden çözülebilir.
+    /// Intended behaviour: always `Rejected` - ZK finality can only be resolved
+    /// through `verify_finality_with_claim`.
     #[test]
     fn zk_trait_verify_finality_never_finalizes() {
         let adapter = ZkFinalityAdapter;
@@ -90,11 +90,11 @@ mod zk_finality_fail_open_regression {
         );
     }
 
-    /// REGRESYON KİLİDİ: `verify_finality_with_claim` accepted_claim_root=None
-    /// (registry'de claim yok) durumunda ASLA `Finalized` dönmemelidir.
+    /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized`
+    /// when accepted_claim_root=None (no claim in the registry).
     ///
-    /// Bu, audit'inde bulunan "missing binding" hatasının bir
-    /// Tezahürü - claim yoksa finalize olmamalı.
+    /// This is one manifestation of the "missing binding" defect found in the
+    /// audit - with no claim there must be no finalization.
     #[test]
     fn zk_verify_with_claim_rejects_missing_claim() {
         let adapter = ZkFinalityAdapter;
@@ -117,12 +117,12 @@ mod zk_finality_fail_open_regression {
         );
     }
 
-    /// REGRESYON KİLİDİ: `verify_finality_with_claim` claim root ile
-    /// Commitment state root eşleşmediğinde ASLA `Finalized` dönmemelidir.
+    /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized`
+    /// when the claim root does not match the commitment state root.
     ///
     /// Audit: "binding the proof to the accepted claim" + "binding
-    /// The claim to THIS commitment" - ikisi de başarısız olursa finalize
-    /// Olmamalı.
+    /// the claim to THIS commitment" - if either fails there must be no
+    /// finalization.
     #[test]
     fn zk_verify_with_claim_rejects_root_mismatch() {
         let adapter = ZkFinalityAdapter;
@@ -151,8 +151,8 @@ mod zk_finality_fail_open_regression {
         );
     }
 
-    /// REGRESYON KİLİDİ: `verify_finality_with_claim` claim root ile proof'un
-    /// Final_state_root eşleşmediğinde ASLA `Finalized` dönmemelidir.
+    /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized` proof'un
+    /// when the claim root does not match the proof's final_state_root.
     #[test]
     fn zk_verify_with_claim_rejects_proof_claim_mismatch() {
         let adapter = ZkFinalityAdapter;
@@ -180,8 +180,8 @@ mod zk_finality_fail_open_regression {
         );
     }
 
-    /// REGRESYON KİLİDİ: Yalnızca TÜM binding'ler eşleştiğinde (claim root
-    /// = proof root = commitment state root) `Finalized` dönmelidir.
+    /// REGRESSION LOCK: `Finalized` must be returned only when ALL bindings match
+    /// (claim root = proof root = commitment state root).
     #[test]
     fn zk_verify_with_claim_finalizes_only_when_all_roots_match() {
         let adapter = ZkFinalityAdapter;
@@ -205,8 +205,8 @@ mod zk_finality_fail_open_regression {
         );
     }
 
-    /// REGRESYON KİLİDİ: `verify_finality_with_claim` domain_id veya height
-    /// Uyuşmazlığında ASLA `Finalized` dönmemelidir.
+    /// REGRESSION LOCK: `verify_finality_with_claim` must NEVER return `Finalized`
+    /// on a domain_id or height mismatch.
     #[test]
     fn zk_verify_with_claim_rejects_domain_or_height_mismatch() {
         let adapter = ZkFinalityAdapter;
@@ -266,7 +266,7 @@ mod relayer_escrow_silent_failure_regression {
     };
     use crate::core::address::Address;
 
-    /// Yardımcı: temel bir AI registry + model kurulumu.
+    /// Helper: a basic AI registry + model setup.
     fn setup_registry_with_model(
         min_verifier_count: u32,
         agreement_threshold: u32,
@@ -300,7 +300,7 @@ mod relayer_escrow_silent_failure_regression {
         (registry, model_id, owner)
     }
 
-    /// Bir inference request oluştur ve registry'ye kaydet.
+    /// Build an inference request and record it in the registry.
     fn submit_request(
         registry: &mut AiRegistry,
         model_id: AiModelId,
@@ -325,9 +325,9 @@ mod relayer_escrow_silent_failure_regression {
         registry.submit_request(req, current_block).unwrap()
     }
 
-    /// Bir verifier'dan result submit et.
-    /// (Strix #359 sonrasi verifier stake'i zorunlu; yardimci otomatik
-    /// stake eder.)
+    /// Submit a result from a verifier.
+    /// (Verifier stake is mandatory after Strix #359; the helper stakes
+    /// automatically.)
     fn submit_result(
         registry: &mut AiRegistry,
         request_id: AiRequestId,
@@ -356,14 +356,14 @@ mod relayer_escrow_silent_failure_regression {
             .unwrap();
     }
 
-    /// REGRESYON KİLİDİ: Escrowed payment release edildiğinde,
-    /// Payment registry'den KALDIRILMALIDIR. Eğer `release_agent_payment`
-    /// Sessizce başarısız olursa (payment kalır ama balance credit yapılmaz),
-    /// Fonlar donmuş kalır.
+    /// REGRESSION LOCK: when an escrowed payment is released the payment MUST BE
+    /// REMOVED from the registry. If `release_agent_payment` fails silently
+    /// (the payment stays but no balance is credited),
+    /// funds stay frozen.
     ///
-    /// Bu test, release'in payment'ı gerçekten kaldırdığını doğrular.
-    /// Eğer birisi release kodunu kırarsa, payment registry'de kalır ve
-    /// Test assertion'ı (`get_agent_payment` → `None`) başarısız olur.
+    /// This test verifies that release really removes the payment.
+    /// If someone breaks the release code the payment stays in the registry and
+    /// the test assertion (`get_agent_payment` -> `None`) fails.
     #[test]
     fn escrowed_payment_release_removes_payment_from_registry() {
         let (mut registry, model_id, _owner) = setup_registry_with_model(2, 2);
@@ -378,7 +378,7 @@ mod relayer_escrow_silent_failure_regression {
                 .unwrap();
         let current_block = 100u64;
 
-        // Request + result + outcome oluştur
+        // Build request + result + outcome
         let request_id = submit_request(
             &mut registry,
             model_id,
@@ -387,7 +387,7 @@ mod relayer_escrow_silent_failure_regression {
             current_block + 100,
         );
 
-        // İki verifier aynı output_commitment ile submit → finalization
+        // Two verifiers submit the same output_commitment -> finalization
         submit_result(
             &mut registry,
             request_id,
@@ -405,7 +405,7 @@ mod relayer_escrow_silent_failure_regression {
             current_block + 11,
         );
 
-        // Escrowed payment oluştur
+        // Build an escrowed payment
         let payment = AiAgentPayment {
             payment_id: [0xFEu8; 32],
             from_agent: requester,
@@ -432,20 +432,20 @@ mod relayer_escrow_silent_failure_regression {
             .expect("release must succeed");
         assert_eq!(released_to, verifier);
 
-        // REGRESYON KİLİDİ: Payment artık registry'de OLMAMALI
+        // REGRESSION LOCK: the payment must NO LONGER be in the registry
         assert!(
             registry.get_agent_payment(&[0xFEu8; 32]).is_none(),
-            "REGRESYON: escrowed payment release sonrası payment hâlâ registry'de! \
-             Bu, release'in payment'ı kaldırmadığı (silent-failure) anlamına gelir - \
-             fonlar alıcıya credit edilmeden payment donmuş kalır."
+            "REGRESSION: after an escrowed payment release the payment is still in the registry! \
+             This means release did not remove the payment (silent failure) - \
+             the payment stays frozen without the recipient being credited."
         );
     }
 
-    /// REGRESYON KİLİDİ: Escrowed payment expire olduğunda
+    /// REGRESSION LOCK: when an escrowed payment expires
     /// Reclaim edilebilmeli ve payment registry'den KALDIRILMALIDIR.
     ///
-    /// Eğer reclaim sessizce başarısız olursa, süresi dolmuş payment
-    /// Registry'de kalır ve gönderen fonlarını geri alamaz.
+    /// If reclaim fails silently the expired payment
+    /// stays in the registry and the sender cannot recover the funds.
     #[test]
     fn escrowed_payment_reclaim_removes_expired_payment_from_registry() {
         let (mut registry, model_id, _owner) = setup_registry_with_model(2, 2);
@@ -465,7 +465,7 @@ mod relayer_escrow_silent_failure_regression {
             current_block + 100,
         );
 
-        // Escrowed payment (kısa expiry)
+        // Escrowed payment (short expiry)
         let payment = AiAgentPayment {
             payment_id: [0xFDu8; 32],
             from_agent: requester,
@@ -474,13 +474,13 @@ mod relayer_escrow_silent_failure_regression {
             request_id: Some(request_id),
             require_proof: false,
             submitted_at_block: current_block,
-            expiry_block: current_block + 50, // 50 block sonra expire
+            expiry_block: current_block + 50, // expires after 50 blocks
         };
         registry
             .submit_agent_payment(payment, current_block)
             .unwrap();
 
-        // Henüz expire olmadı → reclaim reddedilmeli
+        // Not expired yet -> reclaim must be refused
         let reclaim_before =
             registry.reclaim_agent_payment(&[0xFDu8; 32], &requester, current_block + 30);
         assert!(reclaim_before.is_err(), "reclaim before expiry must fail");
@@ -489,24 +489,24 @@ mod relayer_escrow_silent_failure_regression {
             "payment must still exist before expiry"
         );
 
-        // Expire sonrası reclaim
+        // Reclaim after expiry
         let reclaimed_amount = registry
             .reclaim_agent_payment(&[0xFDu8; 32], &requester, current_block + 51)
             .expect("reclaim after expiry must succeed");
         assert_eq!(reclaimed_amount, 300);
 
-        // REGRESYON KİLİDİ: Payment artık registry'de OLMAMALI
+        // REGRESSION LOCK: the payment must NO LONGER be in the registry
         assert!(
             registry.get_agent_payment(&[0xFDu8; 32]).is_none(),
-            "REGRESYON: expired payment reclaim sonrası payment hâlâ registry'de! \
-             Bu, reclaim'in payment'ı kaldırmadığı (silent-failure) anlamına gelir - \
-             gönderen fonlarını geri alamadan payment donmuş kalır."
+            "REGRESSION: after reclaiming an expired payment it is still in the registry! \
+             This means reclaim did not remove the payment (silent failure) - \
+             the payment stays frozen without the sender recovering the funds."
         );
     }
 
-    /// REGRESYON KİLİDİ: Non-escrowed payment (request_id=None) asla release
-    /// Edilemez - bu path zaten "immediate credit" ile executor'da çözülür.
-    /// Release çağrılmamalı, çünkü escrow yok.
+    /// REGRESSION LOCK: a non-escrowed payment (request_id=None) can never be released
+    /// - that path is already resolved in the executor via immediate credit.
+    /// Release must not be called, because there is no escrow.
     #[test]
     fn non_escrowed_payment_cannot_be_released() {
         let (mut registry, _model_id, _owner) = setup_registry_with_model(2, 2);
@@ -530,19 +530,19 @@ mod relayer_escrow_silent_failure_regression {
         };
         registry.submit_agent_payment(payment, 100).unwrap();
 
-        // Release denenirse → hata vermeli (escrow yok)
+        // If release is attempted -> it must error (no escrow)
         let result = registry.release_agent_payment(&[0xFCu8; 32], 110);
         assert!(
             result.is_err(),
             "REGRESYON: non-escrowed payment release edilmemeli! \
-             Bu payment executor'da anında credit edilmeli, release path'ine girmemeli. \
-             Release'in hata vermesi, executor'ın non-escrowed path'inin doğru \
-             çalıştığını (recipient anında credit alır) korur."
+             This payment must be credited immediately in the executor and must not enter the release path. \
+             Release erroring out preserves the fact that the executor's non-escrowed path works \
+             correctly (the recipient is credited immediately)."
         );
     }
 
-    /// REGRESYON KİLİDİ: Reclaim yalnızca gönderen (from_agent) tarafından
-    /// Yapılabilir. Başka bir adres reclaim ederse → hata.
+    /// REGRESSION LOCK: reclaim may only be performed by the sender (from_agent).
+    /// Any other address attempting reclaim -> error.
     #[test]
     fn escrowed_payment_reclaim_only_by_original_sender() {
         let (mut registry, model_id, _owner) = setup_registry_with_model(2, 2);
@@ -576,23 +576,23 @@ mod relayer_escrow_silent_failure_regression {
             .submit_agent_payment(payment, current_block)
             .unwrap();
 
-        // Alıcı (to_agent) reclaim edemez
+        // The recipient (to_agent) cannot reclaim
         let result = registry.reclaim_agent_payment(&[0xFBu8; 32], &verifier, current_block + 51);
         assert!(
             result.is_err(),
-            "REGRESYON: alıcı (to_agent) payment'ı reclaim edememeli! \
-             Yalnızca gönderen (from_agent) reclaim yetkisine sahip olmalı."
+            "REGRESSION: the recipient (to_agent) must not be able to reclaim the payment! \
+             Only the sender (from_agent) may hold reclaim authority."
         );
 
-        // Payment hâlâ registry'de (reclaim başarısız oldu)
+        // The payment is still in the registry (reclaim failed)
         assert!(
             registry.get_agent_payment(&[0xFBu8; 32]).is_some(),
             "failed reclaim must not remove the payment"
         );
     }
 
-    /// REGRESYON KİLİDİ: Release, ödeme süresi dolmuşsa (expired) reddedilmeli.
-    /// Expired payment ancak reclaim ile geri alınabilir.
+    /// REGRESSION LOCK: release must be refused once the payment has expired.
+    /// An expired payment can only be recovered through reclaim.
     #[test]
     fn escrowed_payment_release_rejected_after_expiry() {
         let (mut registry, model_id, _owner) = setup_registry_with_model(2, 2);
@@ -626,25 +626,25 @@ mod relayer_escrow_silent_failure_regression {
             .submit_agent_payment(payment, current_block)
             .unwrap();
 
-        // Expire sonrası release denenir → reddedilmeli
+        // Release attempted after expiry -> must be refused
         let result = registry.release_agent_payment(&[0xFAu8; 32], current_block + 51);
         assert!(
             result.is_err(),
             "REGRESYON: expired payment release edilmemeli! \
-             Expired payment sadece reclaim ile geri alınabilir. \
-             Release'in kabul edilmesi, fonların alıcıya gitmesine ve \
-             gönderenin geri alamamasına yol açar."
+             An expired payment can only be recovered through reclaim. \
+             Accepting release would send the funds to the recipient and \
+             leave the sender unable to recover them."
         );
 
-        // Payment hâlâ registry'de (release başarısız)
+        // The payment is still in the registry (release failed)
         assert!(
             registry.get_agent_payment(&[0xFAu8; 32]).is_some(),
             "failed release must not remove the payment"
         );
     }
 
-    /// REGRESYON KİLİDİ: Çift release önlenmeli. İlk release payment'ı
-    /// Kaldırdığı için, ikinci release bulunamayan payment hatası vermeli.
+    /// REGRESSION LOCK: double release must be prevented. Because the first release removes
+    /// the payment, a second release must error with payment not found.
     #[test]
     fn escrowed_payment_double_release_prevented() {
         let (mut registry, model_id, _owner) = setup_registry_with_model(2, 2);
@@ -667,7 +667,7 @@ mod relayer_escrow_silent_failure_regression {
             current_block + 100,
         );
 
-        // İki verifier aynı output → finalization
+        // Two verifiers, same output -> finalization
         submit_result(
             &mut registry,
             request_id,
@@ -701,18 +701,18 @@ mod relayer_escrow_silent_failure_regression {
             .submit_agent_payment(payment, current_block + 20)
             .unwrap();
 
-        // İlk release başarılı
+        // The first release succeeds
         registry
             .release_agent_payment(&[0xF9u8; 32], current_block + 30)
             .expect("first release must succeed");
 
-        // İkinci release → payment artık yok
+        // Second release -> the payment is gone
         let result = registry.release_agent_payment(&[0xF9u8; 32], current_block + 31);
         assert!(
             result.is_err(),
-            "REGRESYON: çift release önlenmeli! İlk release payment'ı \
-             kaldırdıktan sonra ikinci release bir hata vermeli. Aksi halde \
-             alıcı aynı ödemeyi iki kez talep edebilir."
+            "REGRESSION: double release must be prevented! After the first release removes \
+             the payment the second release must error. Otherwise \
+             the recipient could claim the same payment twice."
         );
     }
 }
