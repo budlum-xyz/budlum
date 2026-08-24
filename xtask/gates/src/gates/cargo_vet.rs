@@ -10,12 +10,12 @@ use std::path::Path;
 fn baseline(root: &Path) -> Result<u64, String> {
     let f = root.join(".github/cargo-vet-baseline.txt");
     let text = std::fs::read_to_string(&f)
-        .map_err(|e| format!("baseline okunamadı ({}): {e}", f.display()))?;
+        .map_err(|e| format!("the baseline could not be read ({}): {e}", f.display()))?;
     text.lines()
         .find(|l| l.chars().all(|c| c.is_ascii_digit()) && !l.is_empty())
-        .ok_or_else(|| format!("baseline okunamadı ({})", f.display()))?
+        .ok_or_else(|| format!("the baseline could not be read ({})", f.display()))?
         .parse::<u64>()
-        .map_err(|e| format!("baseline sayı değil: {e}"))
+        .map_err(|e| format!("the baseline is not a number: {e}"))
 }
 
 fn count_from_output(out: &str) -> Option<u64> {
@@ -45,7 +45,7 @@ fn is_clean_report(out: &str) -> bool {
 /// Run `cargo vet check` in the repo root and return its stdout/stderr.
 ///
 /// A spawn failure is an error, not text. The previous shape turned
-/// "cargo vet çalışmadı: ..." into a normal report string, which then parsed
+/// "cargo vet did not run: ..." into a normal report string, which then parsed
 /// as zero unvetted dependencies and passed the gate. A gate that reports
 /// clean when its scanner never ran proves nothing.
 fn run_vet(root: &Path) -> Result<String, String> {
@@ -53,7 +53,7 @@ fn run_vet(root: &Path) -> Result<String, String> {
         .args(["vet", "check"])
         .current_dir(root)
         .output()
-        .map_err(|e| format!("cargo vet çalışmadı: {e}"))?;
+        .map_err(|e| format!("cargo vet did not run: {e}"))?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr))
 }
 
@@ -82,10 +82,10 @@ pub fn run(root: &Path) -> Result<String, String> {
     let output = run_vet(root)?;
     if tool_is_absent(&output) {
         return Ok(String::from(
-            "ATLANDI: cargo-vet bu işte kurulu değil; ratchet kararını\n\
-             ayrılmış `Cargo Vet` işi veriyor (cargo-vet.yml). Aracın\n\
-             yokluğu bulgu değildir - çalışıp okunamayan rapor üretmesi\n\
-             hâlâ sert hatadır.",
+            "SKIPPED: cargo-vet is not installed on this job; the ratchet decision\n\
+             is made by the separate `Cargo Vet` job (cargo-vet.yml). The absence\n\
+             of the tool is not a finding - the tool running and producing an\n\
+             unreadable report is still a hard error.",
         ));
     }
     let n = match count_from_output(&output) {
@@ -93,26 +93,26 @@ pub fn run(root: &Path) -> Result<String, String> {
         None if is_clean_report(&output) => 0,
         None => {
             return Err(format!(
-                "cargo-vet çıktısı ne denetimsiz bağımlılık sayısı ne de\n\
-                 'Vetting Succeeded!' satırı içeriyor; tarama tamamlanmamış\n\
-                 sayılır ve kapı bu çıktıyı temiz kabul etmez:\n{output}"
+                "the cargo-vet output contains neither an unvetted dependency\n\
+                 count nor a 'Vetting Succeeded!' line; the scan is treated as\n\
+                 incomplete and the gate does not accept it as clean:\n{output}"
             ));
         }
     };
-    let msg = format!("cargo-vet denetimsiz bağımlılık: {n} | baseline: {base}");
+    let msg = format!("cargo-vet unvetted dependencies: {n} | baseline: {base}");
     if n > base {
         return Err(format!(
-            "{msg}\nFAIL: denetimsiz bağımlılık sayısı baseline'ı aştı (+{}).\n      Yeni bir bağımlılık eklendiyse: ya güvenilir bir import kaynağı\n      onu kapsamalı, ya `cargo vet certify` ile gerekçeli denetim\n      kaydı girilmeli. Baseline'ı YÜKSELTMEK bir çözüm değildir.",
+            "{msg}\nFAIL: the unvetted dependency count went over the baseline (+{}).\n      If a new dependency was added: either a trusted import source must\n      cover it, or a justified audit entry must be recorded with\n      `cargo vet certify`. RAISING the baseline is not a fix.",
             n - base
         ));
     }
     if n < base {
         return Ok(format!(
-            "{msg}\nİYİLEŞME: baseline {base} -> {n} düşürülebilir.\n          .github/cargo-vet-baseline.txt dosyasını {n} yapın (ratchet sıkılır).\n\nOK: denetimsiz bağımlılık baseline altında/eşit (ratchet sağlam)."
+            "{msg}\nIMPROVEMENT: the baseline can be lowered {base} -> {n}.\n          Set .github/cargo-vet-baseline.txt to {n} (the ratchet tightens).\n\nOK: unvetted dependencies are at or below the baseline (the ratchet holds)."
         ));
     }
     Ok(format!(
-        "{msg}\nOK: denetimsiz bağımlılık baseline altında/eşit (ratchet sağlam)."
+        "{msg}\nOK: unvetted dependencies are at or below the baseline (the ratchet holds)."
     ))
 }
 
@@ -125,25 +125,25 @@ pub fn self_test() -> Result<String, String> {
     );
     if got != Some(123) {
         return Err(format!(
-            "canary: sayaç 123 yerine '{got:?}' okudu (parse bozuk)"
+            "canary: the counter read '{got:?}' instead of 123 (parsing is broken)"
         ));
     }
-    // Eksik araç ile okunamayan rapor birbirine karışmamalı: ilki atlanır,
-    // ikincisi kapıyı kırar. Kanarya bu ayrımı sabitliyor.
+    // A missing tool and an unreadable report must not be conflated: the first is skipped,
+    // the second breaks the gate. The canary pins that distinction.
     if !tool_is_absent("error: no such command: `vet`") {
         return Err(String::from(
-            "canary: eksik cargo-vet ikilisi tanınmadı (atlama kolu ölü)",
+            "canary: a missing cargo-vet binary was not recognised (the skip arm is dead)",
         ));
     }
     if tool_is_absent("Vetting Failed!\n\n7 unvetted dependencies:") {
         return Err(String::from(
-            "canary: gerçek bir vet raporu 'araç yok' sanıldı (kapı fail-open)",
+            "canary: a real vet report was mistaken for 'no tool' (the gate is fail-open)",
         ));
     }
     let clean = "Vetting Succeeded!";
     if count_from_output(clean).is_some() || !is_clean_report(clean) {
         return Err(String::from(
-            "canary: 'Vetting Succeeded!' temiz rapor olarak tanınmadı",
+            "canary: 'Vetting Succeeded!' was not recognised as a clean report",
         ));
     }
     // A scanner that died before saying anything must not read as zero. This
@@ -151,10 +151,10 @@ pub fn self_test() -> Result<String, String> {
     let broken = "error: no such subcommand: `vet`";
     if count_from_output(broken).is_some() || is_clean_report(broken) {
         return Err(String::from(
-            "canary: bozuk tarayıcı çıktısı temiz/0 olarak okundu (fail-open)",
+            "canary: broken scanner output was read as clean/0 (fail-open)",
         ));
     }
     Ok(String::from(
-        "Kanarya OK: 123 sayıldı, temiz rapor tanındı, bozuk çıktı reddedildi.",
+        "Canary OK: 123 was counted, a clean report was recognised, broken output was refused.",
     ))
 }

@@ -127,22 +127,22 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
 
     if lines.iter().any(|line| line_is_infra(line)) {
         return Err(String::from(
-            "SEMVER GATE: FAIL - araç ALTYAPI hatasıyla sonuçsuz kaldı \
-             (crash≠kırılma; istisna uygulanamaz).\n\
-             İstisna mekanizması yalnızca gerçek kırılma raporlarına uygulanır.",
+            "SEMVER GATE: FAIL - the tool ended inconclusive with an INFRASTRUCTURE \
+             error (a crash is not a breakage; no exception applies).\n\
+             The exception mechanism applies only to real breakage reports.",
         ));
     }
     if !lines.iter().any(|line| line_is_breakage(line)) {
         return Err(String::from(
-            "SEMVER GATE: FAIL - çıktı ne kırılma raporu ne bilinen altyapı \
-             hatası (fail-closed sınıflandırma).",
+            "SEMVER GATE: FAIL - the output is neither a breakage report nor a known \
+             infrastructure error (fail-closed classification).",
         ));
     }
     let entries = has_justified_entries(exc)?;
     if !entries.is_empty() {
         let mut msg = String::from(
-            "SEMVER GATE: PASS-İSTİSNA - .github/semver-exceptions.txt gerekçeli \
-             kabul içeriyor:\n",
+            "SEMVER GATE: PASS-EXCEPTION - .github/semver-exceptions.txt contains a \
+             justified acceptance:\n",
         );
         for entry in entries {
             msg.push_str("  ISTISNA: ");
@@ -153,9 +153,9 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
     }
 
     Err(String::from(
-        "SEMVER GATE: FAIL - public API kırılması istisnasız.\n\
-         Seçenekler: (a) kırılmayı geri al, (b) MAJOR/MINOR niyetliyse ve \
-         kullanıcı onaylıysa .github/semver-exceptions.txt'e gerekçeli satır ekle.",
+        "SEMVER GATE: FAIL - a public API breakage with no exception.\n\
+         Options: (a) revert the breakage, (b) if MAJOR/MINOR is intended and \
+         approved, add a justified line to .github/semver-exceptions.txt.",
     ))
 }
 
@@ -187,11 +187,11 @@ pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
         ));
     }
     if !baseline.join("Cargo.toml").is_file() {
-        // Ilk surum / bos baseline: karsilastirilacak onceki surum yok,
+        // First release / empty baseline: there is no previous version to compare against,
         // dolayisiyla public API kirilmasi diye bir olcu yoktur. Bu bir
-        // altyapi hatasi degil, ilk-PR senaryosudur; gecir.
+        // this is not an infrastructure error but the first-PR scenario; let it pass.
         return Ok(String::from(
-            "SEMVER GATE: PASS - baseline bos (ilk surum), karsilastirma yok.",
+            "SEMVER GATE: PASS - the baseline is empty (first release), no comparison.",
         ));
     }
 
@@ -248,10 +248,10 @@ pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
 
     if status == 0 {
         return Ok(String::from(
-            "SEMVER GATE: PASS - public API kırılması yok (budlum-core vs baseline).",
+            "SEMVER GATE: PASS - no public API breakage (budlum-core versus the baseline).",
         ));
     }
-    println!("::warning::cargo-semver-checks kırılma/hata raporladı (exit={status}).");
+    println!("::warning::cargo-semver-checks reported a breakage/error (exit={status}).");
     classify_report(&report, &exc)
 }
 
@@ -290,16 +290,15 @@ pub fn self_test() -> Result<String, String> {
     if !content.contains("SEMVER EXCEPTIONS") {
         return Err(String::from("self-test: exceptions header missing"));
     }
-    if !content.to_lowercase().contains("kullanıcı onayı") {
+    if !content.to_lowercase().contains("approval evidence") {
         return Err(String::from("self-test: exceptions policy line missing"));
     }
 
     let tmp = scratch_dir()?;
     let empty_exc = tmp.join("none");
     let filled_exc = tmp.join("some");
-    fs::write(&empty_exc, "# yorum\n\n").map_err(|e| e.to_string())?;
-    fs::write(&filled_exc, "BDLM-1: bilinecek kirilma, kullanici onayli\n")
-        .map_err(|e| e.to_string())?;
+    fs::write(&empty_exc, "# comment\n\n").map_err(|e| e.to_string())?;
+    fs::write(&filled_exc, "BDLM-1: a known breakage, approved\n").map_err(|e| e.to_string())?;
 
     // An infra crash must be rejected even when the exceptions file is full:
     // a crash says "unknown", not "no breakage". Each case carries a real
@@ -316,7 +315,7 @@ pub fn self_test() -> Result<String, String> {
         if classify_report(&report, &filled_exc).is_ok() {
             let _ = fs::remove_dir_all(&tmp);
             return Err(format!(
-                "self-test: altyapı hatası istisnayla maskelendi: {case}"
+                "self-test: an infrastructure error was masked by an exception: {case}"
             ));
         }
     }
@@ -327,7 +326,7 @@ pub fn self_test() -> Result<String, String> {
     if classify_report(unexpected, &empty_exc).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "self-test: sınıflandırılamayan çıktı geçirildi (fail-closed değil)",
+            "self-test: unclassifiable output was let through (not fail-closed)",
         ));
     }
 
@@ -335,7 +334,9 @@ pub fn self_test() -> Result<String, String> {
     let breaking = "--- failure struct_missing: pub struct removed\n";
     if classify_report(breaking, &empty_exc).is_ok() {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(String::from("self-test: istisnasız kırılma geçirildi"));
+        return Err(String::from(
+            "self-test: a breakage with no exception was let through",
+        ));
     }
 
     // A real breakage with a justified exception must pass; without this the
@@ -344,14 +345,14 @@ pub fn self_test() -> Result<String, String> {
     if classify_report(breaking, &filled_exc).is_err() {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
-            "self-test: gerekçeli istisna kabul edilmedi (kapı her şeyi reddediyor)",
+            "self-test: a justified exception was not accepted (the gate refuses everything)",
         ));
     }
 
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "kanarya OK: crash maskelenmiyor, tanınmayan çıktı fail-closed, kırılma \
-         istisnasız FAIL / gerekçeli istisnayla PASS (kapı vacuous değil).",
+        "canary OK: a crash is not masked, unrecognised output is fail-closed, a breakage \
+         FAILs without an exception / PASSes with a justified one (the gate is not vacuous).",
     ))
 }
 
@@ -393,7 +394,7 @@ mod tests {
         let empty = d.join("empty");
         let filled = d.join("filled");
         fs::write(&empty, "# sadece yorum\n").expect("fixture");
-        fs::write(&filled, "method_missing: X | gerekçe | onay\n").expect("fixture");
+        fs::write(&filled, "method_missing: X | justification | approval\n").expect("fixture");
         let breaking = "--- failure struct_missing: pub struct removed\n";
         assert!(classify_report(breaking, &empty).is_err());
         assert!(classify_report(breaking, &filled).is_ok());

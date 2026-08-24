@@ -1,44 +1,44 @@
 //! Kanit sisteminin bagimliliklari tam surumle sabitlenir.
 //!
-//! `p3-*` crate'leri kanitin **soundness'ini** tasir: meydan okuma turetimi,
-//! FRI, taahhut semasi. Bu ailede bir yama surumu, "hata duzeltmesi" degil
-//! cogu zaman bir **guvenlik sinirinin** yeri degismesi demektir. Somut ornek:
+//! The `p3-*` crates carry the **soundness** of the proof: challenge derivation,
+//! FRI, the commitment scheme. In this family a patch release usually means not a
+//! "bug fix" but a **security boundary** moving. A concrete example:
 //! CVE-2026-46654, `MultiField32Challenger`'da transcript malleability -
 //! `< 0.4.3` ve `>= 0.5.0, < 0.5.3` etkilenmis, yama 0.4.3 ve 0.5.3.
 //!
-//! Caret (`"0.6"`) yazmak, "0.6.x ailesinden herhangi biri" demektir. Lock
+//! Writing a caret (`"0.6"`) means "any member of the 0.6.x family". A lock
 //! dosyasi bugun 0.6.3'u tutuyor, ama lock'un yenilendigi her an - bir
 //! `cargo update`, bir bagimlilik cakismasi, CI'da lock'suz bir kurulum -
-//! secilen surum **sessizce** kayar. Kaydigi yer daha yeni bir surumdur ve
-//! genelde iyidir; sorun "genelde"nin bir guvenlik sinirinda yeterli
+//! the selected version drifts **silently**. Where it drifts is a newer release and
+//! usually good; the problem is that "usually" is not a sufficient guarantee at a
 //! olmamasi. Kanit sisteminin surumu, kanitin ne kanitladiginin parcasidir:
-//! hangi kodun uretip dogruladigini bilmeden, dogrulanan seyi bilmiyoruz.
+//! which code produced and verified it, we do not know what was verified.
 //!
-//! Kapi `=x.y.z` biciminde tam pin arar. Yukseltme yasak degil - yukseltmenin
-//! **gorunur** olmasi sart: manifestte tek satirlik bir degisiklik, code
-//! review'da okunan bir satir.
+//! The gate looks for an exact pin of the form `=x.y.z`. Upgrading is not forbidden - the upgrade
+//! must be **visible**: a single line change in the manifest, a line read in code
+//! review.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-/// Kanit sisteminin surumune bagli oldugu manifestler.
+/// The manifests where the proof system's version is bound.
 const MANIFESTS: &[&str] = &["budzero/bud-proof/Cargo.toml"];
 
 /// Tam pin gerektiren bagimlilik onekleri.
 ///
-/// `p3-*`: Plonky3 ailesi, yukaridaki gerekce. Liste onek olarak tutuluyor ki
-/// aileye yeni bir crate eklendiginde kapi onu kendiliginden kapsasin -
-/// muafiyet eklemek icin bilincli bir edit gerekir, unutmak yeterli olmaz.
+/// `p3-*`: the Plonky3 family, for the reason above. The list is kept as a prefix so that
+/// when a new crate joins the family the gate covers it on its own -
+/// adding an exemption takes a deliberate edit, forgetting is not enough.
 const PINNED_PREFIXES: &[(&str, &str)] = &[(
     "p3-",
     "kanitin soundness'ini tasiyan Plonky3 crate'i (CVE-2026-46654 bu ailede)",
 )];
 
-/// Bir manifest satirindan `(ad, surum-ifadesi)` cikar.
+/// Extract `(name, version expression)` from a manifest line.
 ///
-/// Yalnizca `ad = "surum"` bicimindeki kisa yazim ele alinir; tablo bicimi
-/// (`ad = { version = "..." }`) da yakalanir cunku aranan sey satirdaki
-/// surum dizgisidir.
+/// Only the short form `name = "version"` is handled; the table form
+/// (`name = { version = "..." }`) is caught too because what is sought is the
+/// version string on the line.
 fn dependency(line: &str) -> Option<(&str, &str)> {
     let t = line.trim();
     if t.starts_with('#') {
@@ -88,10 +88,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             if !version.starts_with('=') {
                 let _ = write!(
                     problems,
-                    "\n  {manifest}: `{name} = \"{version}\"` tam pin degil. \
-                     {why}; caret bir yama surumunun sessizce degismesine izin verir \
-                     ve kanit sisteminin surumu kanitin ne kanitladiginin parcasidir. \
-                     `=` ile yazin (ornek: `{name} = \"={}\"`)",
+                    "\n  {manifest}: `{name} = \"{version}\"` is not an exact pin. \
+                     {why}; a caret allows a patch release to change silently \
+                     and the proof system's version is part of what the proof proves. \
+                     Write it with `=` (example: `{name} = \"={}\"`)",
                     version.trim_start_matches(['^', '~', '=']),
                 );
             }
@@ -109,7 +109,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         );
     }
     Ok(format!(
-        "proof-deps-are-exactly-pinned OK: {checked} kanit bagimliligi tam surumle sabit"
+        "proof-deps-are-exactly-pinned OK: {checked} proof dependencies are fixed at an exact version"
     ))
 }
 
@@ -131,7 +131,7 @@ pub fn self_test() -> Result<String, String> {
     for (line, want) in cases {
         if dependency(line) != want {
             return Err(format!(
-                "self_test: `{line}` icin {want:?} beklenirdi, {:?} cikti",
+                "self_test: {want:?} was expected for `{line}`, {:?} came out",
                 dependency(line)
             ));
         }
