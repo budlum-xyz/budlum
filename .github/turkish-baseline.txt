@@ -33,7 +33,6 @@ bud/src/bud_format_checkpoint.rs	13
 bud/src/bud_format_dbdelta.rs	7
 bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
-bud/src/bud_format_encpact.rs	18
 bud/src/bud_format_engine.rs	1
 bud/src/bud_format_genomic.rs	11
 bud/src/bud_format_hardening.rs	2
@@ -235,7 +234,6 @@ xtask/gates/src/gates/required_tests.rs	2
 xtask/gates/src/gates/source_reading.rs	2
 xtask/gates/src/gates/transcript_mirrors.rs	9
 xtask/gates/src/gates/zero_tests_witness.rs	2
-xtask/tools/src/backup_drill.rs	17
 xtask/tools/src/bin/budlum-tools.rs	2
 xtask/tools/src/devnet.rs	14
 xtask/tools/src/lib.rs	9
