@@ -194,7 +194,22 @@ const BASELINE_PATH: &str = ".github/turkish-baseline.txt";
 const VACUITY_FLOOR: usize = 50;
 
 /// How many findings are printed before the list is summarised.
-const MAX_REPORTED: usize = 100000;
+const MAX_REPORTED: usize = 40;
+
+/// Report every finding instead of the first [`MAX_REPORTED`], so the output
+/// can be turned into a baseline.
+///
+/// Regenerating the baseline used to mean editing `MAX_REPORTED` by hand and
+/// remembering to put it back. Once it was not put back, and CI caught the
+/// leftover `100000` as an unreadable literal. An env var cannot be forgotten
+/// in a commit.
+fn report_limit() -> usize {
+    if std::env::var_os("BUDLUM_GATE_REPORT_ALL").is_some() {
+        usize::MAX
+    } else {
+        MAX_REPORTED
+    }
+}
 
 /// Remove the strings that are allowed to carry Turkish characters, so neither
 /// scan sees them. Order matters only in that all of them run before scanning.
@@ -418,12 +433,12 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !regressions.is_empty() {
         let n = regressions.len();
         let mut msg = format!("{n} file(s) gained Turkish:\n");
-        for r in regressions.iter().take(MAX_REPORTED) {
+        for r in regressions.iter().take(report_limit()) {
             msg.push_str(r);
             msg.push('\n');
         }
-        if n > MAX_REPORTED {
-            writeln!(msg, "  ... and {} more", n - MAX_REPORTED)
+        if n > report_limit() {
+            writeln!(msg, "  ... and {} more", n - report_limit())
                 .expect("writing to a String cannot fail");
         }
         msg.push_str(
@@ -440,12 +455,12 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !stale.is_empty() {
         let n = stale.len();
         let mut msg = format!("{n} stale baseline entr(ies) in {BASELINE_PATH}:\n");
-        for s in stale.iter().take(MAX_REPORTED) {
+        for s in stale.iter().take(report_limit()) {
             msg.push_str(s);
             msg.push('\n');
         }
-        if n > MAX_REPORTED {
-            writeln!(msg, "  ... and {} more", n - MAX_REPORTED)
+        if n > report_limit() {
+            writeln!(msg, "  ... and {} more", n - report_limit())
                 .expect("writing to a String cannot fail");
         }
         msg.push_str(
