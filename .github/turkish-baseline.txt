@@ -37,7 +37,6 @@ bud/src/bud_format_dedup.rs	9
 bud/src/bud_format_edge.rs	9
 bud/src/bud_format_encpact.rs	18
 bud/src/bud_format_engine.rs	1
-bud/src/bud_format_fastcdc.rs	25
 bud/src/bud_format_fidelitygate.rs	18
 bud/src/bud_format_genomic.rs	11
 bud/src/bud_format_hardening.rs	2
@@ -188,7 +187,6 @@ src/gateway/service.rs	15
 src/lib.rs	4
 src/lubot/effort.rs	1
 src/lubot/executor.rs	16
-src/lubot/inference.rs	25
 src/lubot/metrics.rs	10
 src/lubot/query.rs	6
 src/lubot/social.rs	16

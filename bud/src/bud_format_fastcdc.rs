@@ -1,13 +1,16 @@
-//! B.U.D. 2.0 - FastCDC İçerik-Tanımlı Parçalama (F55) (2026-08-16)
+//! B.U.D. 2.0 - FastCDC Content-Defined Chunking (F55) (2026-08-16)
 //!
-//! USENIX ATC16 bulgusu: FastCDC, Rabin-CDC'den 10x, Gear/AE'den 3x hızlı; aynı dedup oranı.
-//! Sabit 16KB parça yerine İÇERİK-TANIMLI sınırlar (rolling hash) → dosya değişince yalnız
-//! değişen parça yeni cid alır (dedup/vergi direnci - çoklu dosya dedup'ı güçlendirir).
+//! USENIX ATC16 finding: FastCDC is 10x faster than Rabin-CDC and 3x faster than
+//! Gear/AE, at the same dedup ratio.
+//! Instead of fixed 16KB chunks, CONTENT-DEFINED boundaries (a rolling hash) ->
+//! when a file changes only the changed chunk gets a new cid (dedup/tax
+//! resistance - it strengthens dedup across multiple files).
 //!
-//! Gear hash (hızlı, 64-bit çarpma) + alt-bayt maskesi: hash & mask == 0 → parça sınırı.
-//! Minimum/maksimum parça boyu (bomba koruması + aşırı küçük parça önleme).
+//! Gear hash (fast, 64-bit multiply) + a low-byte mask: hash & mask == 0 -> a
+//! chunk boundary. Minimum/maximum chunk size (bomb protection + preventing
+//! excessively small chunks).
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
+//! Code: `#![forbid(unsafe_code)]`, deterministic, panic-free.
 
 #![forbid(unsafe_code)]
 
@@ -19,7 +22,7 @@ pub const FCDC_MIN_CHUNK: usize = 4 * 1024; // 4KB
 pub const FCDC_AVG_CHUNK: usize = 16 * 1024; // 16KB (V7)
 pub const FCDC_MAX_CHUNK: usize = 64 * 1024; // 64KB
 
-/// Gear hash sabitleri (deterministik - aynı girdi aynı sınırlar).
+/// Gear hash constants (deterministic - the same input gives the same boundaries).
 const GEAR_TABLE: [u64; 128] = [
     0x4d5d72f9a9e3a8e1,
     0x1b5e6f3c9d2a7b45,
@@ -151,18 +154,18 @@ const GEAR_TABLE: [u64; 128] = [
     0xc3e9f7b5a2d6c84d,
 ];
 
-/// İçerik-tanımlı parçalama sonucu (FastCDC - Gear hash).
+/// The content-defined chunking result (FastCDC - Gear hash).
 #[derive(Debug, Clone)]
 pub struct FastCdcSplit {
     pub chunks: Vec<Vec<u8>>,
-    pub chunk_ids: Vec<[u8; 32]>, // content_id (dedup çapası)
+    pub chunk_ids: Vec<[u8; 32]>, // content_id (the dedup anchor)
     pub min_chunk: usize,
     pub avg_chunk: usize,
     pub max_chunk: usize,
 }
 
 impl FastCdcSplit {
-    /// Gear hash ile parçala (deterministik sınırlar).
+    /// Chunk with the Gear hash (deterministic boundaries).
     pub fn split(data: &[u8], min_c: usize, avg_c: usize, max_c: usize) -> Option<Self> {
         if data.is_empty()
             || min_c == 0
@@ -179,7 +182,7 @@ impl FastCdcSplit {
         let mut start = 0usize;
         let mut hash: u64 = 0;
         let mut i = min_c.min(data.len());
-        // ilk parça en az min_c
+        // the first chunk is at least min_c
         if i >= data.len() {
             let c = data.to_vec();
             chunks.push(c.clone());
@@ -207,7 +210,7 @@ impl FastCdcSplit {
             }
             i += 1;
         }
-        // son parça
+        // the last chunk
         if start < data.len() {
             let c = data[start..].to_vec();
             chunks.push(c.clone());
@@ -222,7 +225,7 @@ impl FastCdcSplit {
         })
     }
 
-    /// Ortalama parça boyuna göre maske (avg ≈ 2^avg_bits).
+    /// The mask derived from the average chunk size (avg ~= 2^avg_bits).
     fn mask_for_avg(avg: usize) -> u64 {
         let bits = avg.ilog2().max(1);
 
@@ -233,7 +236,7 @@ impl FastCdcSplit {
         }
     }
 
-    /// Birleştir → orijinal (kayıpsızlık kanıtı).
+    /// Join -> the original (the losslessness proof).
     pub fn join(&self) -> Vec<u8> {
         let total: usize = self.chunks.iter().map(|c| c.len()).sum();
         let mut out = Vec::with_capacity(total);
@@ -243,7 +246,7 @@ impl FastCdcSplit {
         out
     }
 
-    /// Parça sayısı + ortalama boyut (tanı).
+    /// Chunk count + average size (diagnostics).
     pub fn stats(&self) -> (usize, f64) {
         let n = self.chunks.len();
         let avg = if n > 0 {
@@ -261,20 +264,23 @@ mod tests {
 
     #[test]
     fn fastcdc_roundtrip_lossless() {
-        // K38: split → join = orijinal
+        // K38: split -> join = the original
         let data: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
         let split = FastCdcSplit::split(&data, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK)
             .expect("split");
-        assert_eq!(split.join(), data, "FastCDC kayıpsız");
-        assert!(split.chunks.len() > 5, "çok parça");
-        // parça boyutları: maks sınıra uyar (aradaki parçalar min sınırda, son parça kısa olabilir)
+        assert_eq!(split.join(), data, "FastCDC is lossless");
+        assert!(split.chunks.len() > 5, "many chunks");
+        // chunk sizes: they respect the maximum (intermediate chunks meet the minimum, the last one may be short)
         for (i, c) in split.chunks.iter().enumerate() {
-            assert!(c.len() <= FCDC_MAX_CHUNK, "parça {i} maksimum sınırda");
+            assert!(c.len() <= FCDC_MAX_CHUNK, "chunk {i} is within the maximum");
             if i < split.chunks.len() - 1 {
-                assert!(c.len() >= FCDC_MIN_CHUNK, "aradaki parça {i} min sınırda");
+                assert!(
+                    c.len() >= FCDC_MIN_CHUNK,
+                    "intermediate chunk {i} meets the minimum"
+                );
             }
         }
-        // her parça cid'i doğru
+        // every chunk cid is correct
         for (c, id) in split.chunks.iter().zip(split.chunk_ids.iter()) {
             assert_eq!(&content_id(c), id);
         }
@@ -282,7 +288,7 @@ mod tests {
 
     #[test]
     fn small_data_single_chunk() {
-        let data = b"kucuk veri";
+        let data = b"small data";
         let split = FastCdcSplit::split(data, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK)
             .expect("split");
         assert_eq!(split.chunks.len(), 1);
@@ -291,20 +297,20 @@ mod tests {
 
     #[test]
     fn dedup_friendly_on_edit() {
-        // içerik-tanımlı: baştaki küçük değişiklik yalnız ilk parçayı etkiler
+        // content-defined: a small change at the start affects only the first chunk
         let mut a: Vec<u8> = b"X".repeat(100_000);
         a.extend_from_slice(&(0u8..=255).cycle().take(100_000).collect::<Vec<u8>>());
         let mut b = a.clone();
-        b[0] = b'Y'; // ilk baytı değiştir
+        b[0] = b'Y'; // change the first byte
         let sa = FastCdcSplit::split(&a, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK).unwrap();
         let sb = FastCdcSplit::split(&b, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK).unwrap();
-        // ortak parça cid'leri çoğunlukla aynı (değişim yalnız sınır kaydırır - bazı parçalar)
+        // most shared chunk cids stay the same (the edit only shifts a boundary - a few chunks)
         let ids_a: std::collections::HashSet<_> = sa.chunk_ids.iter().cloned().collect();
         let ids_b: std::collections::HashSet<_> = sb.chunk_ids.iter().cloned().collect();
         let shared = ids_a.intersection(&ids_b).count();
         assert!(
             shared >= 2,
-            "içerik-tanımlı parçalama edit'e dirençli: {shared} ortak"
+            "content-defined chunking resists edits: {shared} shared"
         );
     }
 
