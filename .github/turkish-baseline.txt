@@ -46,7 +46,6 @@ bud/src/bud_format_jpegre.rs	11
 bud/src/bud_format_lazyrepair.rs	22
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
-bud/src/bud_format_nvc.rs	27
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_pcap.rs	26
@@ -67,7 +66,6 @@ bud/src/bud_format_telemetry.rs	21
 bud/src/bud_format_tiny.rs	21
 bud/src/bud_format_transpile.rs	7
 bud/src/bud_format_ultra.rs	1
-bud/src/bud_format_videopipe.rs	27
 bud/src/bud_format_wal.rs	15
 bud/src/bud_format_zkbridge.rs	26
 bud/src/churn.rs	6
