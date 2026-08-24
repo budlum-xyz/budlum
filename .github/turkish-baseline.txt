@@ -33,7 +33,6 @@ bud/src/bud_format.rs	3
 bud/src/bud_format_autozstd.rs	12
 bud/src/bud_format_av2.rs	28
 bud/src/bud_format_bloom.rs	15
-bud/src/bud_format_catalog.rs	29
 bud/src/bud_format_checkpoint.rs	13
 bud/src/bud_format_crop.rs	28
 bud/src/bud_format_dbdelta.rs	7
@@ -51,7 +50,6 @@ bud/src/bud_format_lazyrepair.rs	22
 bud/src/bud_format_markdown.rs	6
 bud/src/bud_format_matrix.rs	1
 bud/src/bud_format_nvc.rs	27
-bud/src/bud_format_office.rs	29
 bud/src/bud_format_optical.rs	3
 bud/src/bud_format_pact.rs	4
 bud/src/bud_format_pcap.rs	26
