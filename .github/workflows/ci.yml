@@ -1106,6 +1106,24 @@ jobs:
       # branch protection: it runs, it passes, and it stops counting. Three
       # required checks were carrying one. A hand count already missed them
       # once, so the count is now a gate.
+      # The tree is written in English. Turkish is allowed in exactly two
+      # places: README.tr.md, and the word "Türkçe" as the label on the link
+      # that points at it. The translation is unfinished, so the gate ratchets
+      # off .github/turkish-baseline.txt: counts only go down, and a count that
+      # is higher than what is actually in the file also fails, so finishing
+      # the work is the only way to keep this green.
+      - name: tree is English gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-is-english --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- tree-is-english
+      # A public item nothing outside its own file names is idle: the code that
+      # was meant to call it does not. The wiring gates ask this per module, so
+      # one exported symbol marked a whole module "wired" and the rest coasted.
+      # This asks per item, ratcheted off .github/idle-code-baseline.txt.
+      - name: no idle code gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-idle-code
       - name: typographic dash gate + canary
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test

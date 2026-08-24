@@ -65,23 +65,23 @@ zorladığı bir özelliktir; yönetici yolu ekleyen bir pull request bu kapıla
 ```mermaid
 flowchart TB
   subgraph Domains["Egemen alanlar, her biri kendi konsensüsünü korur"]
-    PoW["PoW alani"]
-    PoS["PoS alani"]
-    BFT["BFT alani"]
-    ZKD["ZK alani"]
-    PoA["Yalitilmis PoA / KYC alani"]
+    PoW["PoW alanı"]
+    PoS["PoS alanı"]
+    BFT["BFT alanı"]
+    ZKD["ZK alanı"]
+    PoA["Yalıtılmış PoA / KYC alanı"]
   end
 
-  subgraph Adapters["Kesinlik adaptorleri, kanit dogrulama, guven yok"]
-    FA["Alan kesinlik adaptorleri<br/><code>src/domain/</code>"]
-    PA["PoA adaptoru<br/>(yalitilmis, izinsiz kumeye sahtecilik yapamaz)"]
+  subgraph Adapters["Kesinlik adaptörleri, kanıt doğrulama, güven yok"]
+    FA["Alan kesinlik adaptörleri<br/><code>src/domain/</code>"]
+    PA["PoA adaptörü<br/>(yalıtılmış, izinsiz kümeye sahtecilik yapamaz)"]
   end
 
-  subgraph USL["Evrensel Uzlasma Katmani"]
-    CONS["Heterojen konsensus motorlari<br/><code>src/consensus/</code>"]
-    FIN["BLS + PQ kesinlik, kontrol noktalari<br/><code>src/chain/</code>"]
-    EXEC["Yurutucu + BudZKVM ana makinesi<br/><code>src/execution/</code>"]
-    REG["Izinsiz kayit defteri<br/>teminat · kesinti · cozulme"]
+  subgraph USL["Evrensel Uzlaşma Katmanı"]
+    CONS["Heterojen konsensüs motorları<br/><code>src/consensus/</code>"]
+    FIN["BLS + PQ kesinlik, kontrol noktaları<br/><code>src/chain/</code>"]
+    EXEC["Yürütücü + BudZKVM ana makinesi<br/><code>src/execution/</code>"]
+    REG["İzinsiz kayıt defteri<br/>teminat · kesinti · çözülme"]
   end
 
   PoW --> FA
@@ -95,11 +95,11 @@ flowchart TB
   FIN --> EXEC
   EXEC --> REG
 
-  FIN --> GBH["GlobalBlockHeader<br/>tek uzlasma kaydi"]
-  GBH --> BR["Alanlar arasi kopru<br/>lock · mint · burn · unlock"]
-  GBH --> ST["B.U.D. depolama<br/>icerik adresleme · anlasmalar · meydan okumalar"]
-  GBH --> ZK["BudZero zkVM<br/>STARK yurutme kanitlari"]
-  GBH --> AI["Lubot yapay zeka katmani<br/>model kaydi · hesaplama teminati"]
+  FIN --> GBH["GlobalBlockHeader<br/>tek uzlaşma kaydı"]
+  GBH --> BR["Alanlar arası köprü<br/>lock · mint · burn · unlock"]
+  GBH --> ST["B.U.D. depolama<br/>içerik adresleme · anlaşmalar · meydan okumalar"]
+  GBH --> ZK["BudZero zkVM<br/>STARK yürütme kanıtları"]
+  GBH --> AI["Lubot yapay zeka katmanı<br/>model kaydı · hesaplama teminatı"]
 ```
 
 Bir alan kesinlik kanıtı sunar. Eşleşen adaptör bu kanıtı o alanın kendi kurallarına göre
@@ -212,7 +212,7 @@ cd budlum
 cargo build --release              # cekirdek dugum
 cargo test --lib                   # cekirdek test paketi
 
-# BudZero / BudZKVM kendi calisma alanidir
+# BudZero / BudZKVM kendi çalışma alanıdır
 cargo test --manifest-path budzero/Cargo.toml --workspace
 ```
 
