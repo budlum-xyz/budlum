@@ -1,17 +1,19 @@
-//! B.U.D. 2.0 İcat - Üretim Oranı Kanıtı (BudProductionRecord) (2026-08-16)
+//! A B.U.D. 2.0 invention: the production ratio proof, `BudProductionRecord`,
+//! 2026-08-16.
 //!
-//! "Sıkıştırma oranı iddiasının blockchain ile doğrulanabilir yapılması":
-//! her .bud konteyner ÜRETİM ANINDA bir üretim kaydı taşıyabilir - ölçülen gerçek
-//! oran, boru hattı kimliği, orijinal/saklanan boyutlar ve content_root çapası.
-//! Kayıt domain-etiketli SHA3 ile hash'lenir (K3), checkpoint zincirine yazılabilir,
-//! BFT vote ile finalize edilebilir (ratio.rs/bud_format_bft.rs).
+//! "Making the compression ratio claim verifiable on the blockchain": every
+//! `.bud` container can carry a production record AT THE MOMENT OF PRODUCTION,
+//! holding the real measured ratio, the pipeline identity, the original and
+//! stored sizes, and the `content_root` anchor. The record is hashed with a
+//! domain-tagged SHA3 (K3) and can be written into the checkpoint chain.
 //!
-//! Doğrulama (on-chain): herkes `record_hash`'i yeniden hesaplayabilir; `verify` oran
-//! tutarlılığını kontrol eder (claimed_ratio ≈ original_len/stored_len). K19 kapısı:
-//! ölçümsüz abartılı oran iddiaları (ör. 17.19x vs gerçek 7.83x) RED - üretim kanıtı
-//! ancak GERÇEK üretimden gelirse geçerli.
+//! Verification, on chain: anyone can recompute `record_hash`, and `verify`
+//! checks ratio consistency, that `claimed_ratio` is approximately
+//! `original_len / stored_len`. The K19 gate: an unmeasured, inflated ratio
+//! claim, such as 17.19x against a real 7.83x, is REFUSED. A production proof
+//! is valid only when it comes from REAL production.
 //!
-//! Kod: `#![forbid(unsafe_code)]`, deterministik, testli.
+//! The code is `#![forbid(unsafe_code)]`, deterministic and tested.
 
 #![forbid(unsafe_code)]
 
@@ -24,9 +26,9 @@ pub struct BudProductionRecord {
     pub pipe: &'static str, // "structural+zstd19", "json-columnar-exact", ...
     pub original_len: u64,
     pub stored_len: u64,
-    pub payload_root: [u8; 32], // content_id(original) - K3 çapası
+    pub payload_root: [u8; 32], // content_id(original), the K3 anchor
     pub ts_unix: u64,
-    pub claimed_ratio: f64, // üretim sırasında ÖLÇÜLEN oran (uydurma değil)
+    pub claimed_ratio: f64, // the ratio MEASURED during production, not invented
 }
 
 impl BudProductionRecord {
@@ -57,7 +59,8 @@ impl BudProductionRecord {
         }
     }
 
-    /// Domain-etiketli kriptografik hash (K3 deseni) - zincire yazılabilir kimlik.
+    /// The domain-tagged cryptographic hash, in the K3 pattern; an identity
+    /// writable on chain.
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -72,7 +75,8 @@ impl BudProductionRecord {
         h.finalize().into()
     }
 
-    /// Tutarlılık: oran iddiası boyutlarla eşleşiyor mu + değerler geçerli mi (K38).
+    /// Consistency: does the ratio claim match the sizes, and are the values
+    /// valid (K38)?
     pub fn verify(&self) -> bool {
         if !self.claimed_ratio.is_finite() || self.claimed_ratio <= 0.0 {
             return false;
@@ -88,9 +92,7 @@ impl BudProductionRecord {
         (self.claimed_ratio - actual).abs() <= Self::RATIO_TOLERANCE
     }
 
-    /// K19 kapısı: iddia, ölçüm tablosundaki değerin `max_multiple` katını aşamaz.
-    /// Ölçümsüz abartı (uydurma oran) → RED.    ///
-    /// Deterministik blob (zincir/segment kaydı için).
+    /// The deterministic blob, for the chain or segment record.
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(self.format_codec as u16).to_le_bytes());
@@ -155,6 +157,8 @@ impl BudProductionRecord {
         Some(rec)
     }
 
+    /// The K19 gate: a claim cannot exceed `max_multiple` times the value in the
+    /// measurement table. Unmeasured exaggeration, an invented ratio, is REFUSED.
     pub fn plausible_against(&self, measured: f64, max_multiple: f64) -> bool {
         if !measured.is_finite() || measured <= 0.0 {
             return false;
@@ -166,13 +170,13 @@ impl BudProductionRecord {
 pub struct ProductionGates;
 
 impl ProductionGates {
-    /// Kayıt tutarlı + ölçülen orana göre makul mü? (K19)
+    /// Is the record consistent and plausible against the measured ratio (K19)?
     pub fn k_bud_production(rec: &BudProductionRecord, measured: f64) -> Result<(), &'static str> {
         if !rec.verify() {
             return Err("K-BUD-PRODUCTION: record inconsistent (ratio != len ratio)");
         }
         if !rec.plausible_against(measured, 1.5) {
-            return Err("K-BUD-PRODUCTION: ratio > measured*1.5 (uydurma iddia)");
+            return Err("K-BUD-PRODUCTION: ratio > measured*1.5, an invented claim");
         }
         Ok(())
     }
@@ -186,14 +190,14 @@ mod tests {
     fn production_record_verify_and_hash() {
         let data = br#"[{"u":"u1","v":1},{"u":"u1","v":2}]"#;
         let rec = BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 120, 42);
-        assert!(rec.verify(), "üretim kaydı tutarlı");
+        assert!(rec.verify(), "the production record is consistent");
         assert!((rec.claimed_ratio - data.len() as f64 / 120.0).abs() < 0.01);
-        assert_ne!(rec.record_hash(), [0u8; 32], "hash boş değil");
-        // aynı alanlar → aynı hash (deterministik)
+        assert_ne!(rec.record_hash(), [0u8; 32], "the hash is not empty");
+        // The same fields give the same hash, deterministically.
         let rec2 =
             BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 120, 42);
         assert_eq!(rec.record_hash(), rec2.record_hash());
-        // farklı boyut → farklı hash
+        // A different size gives a different hash.
         let rec3 =
             BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 121, 42);
         assert_ne!(rec.record_hash(), rec3.record_hash());
@@ -201,19 +205,20 @@ mod tests {
 
     #[test]
     fn production_ratio_gate_rejects_fake() {
-        // K19: ölçülen 7.83x'e karşı 17.19x iddiası RED (uydurma)
+        // K19: a claim of 17.19x against a measured 7.83x is REFUSED, as invented.
         let data = b"x".repeat(1000);
         let rec = BudProductionRecord::new(FormatCodec::Json, "structural+zstd19", &data, 58, 1);
-        // 1000/58 = 17.24x - ölçülen JSON 7.83x'in 1.5 katını aşıyor → RED
+        // 1000/58 is 17.24x, above 1.5 times the measured JSON figure of 7.83x, so
+        // it is REFUSED.
         assert!(
             ProductionGates::k_bud_production(&rec, 7.83).is_err(),
-            "17x iddiası RED"
+            "a 17x claim is refused"
         );
-        // ölçülenle uyumlu 8.0x → OK
+        // 8.0x is consistent with the measurement and passes.
         let rec2 = BudProductionRecord::new(FormatCodec::Json, "structural+zstd19", &data, 125, 1);
         assert!(
             ProductionGates::k_bud_production(&rec2, 7.83).is_ok(),
-            "8.0x iddiası OK"
+            "an 8.0x claim passes"
         );
     }
 
@@ -222,14 +227,14 @@ mod tests {
         let data = br#"{"a":1}"#;
         let rec = BudProductionRecord::new(FormatCodec::Json, "json-columnar-exact", data, 50, 7);
         assert!(rec.verify());
-        // oranı elle şişir → verify RED
+        // Inflate the ratio by hand and verify refuses.
         let mut bad = rec.clone();
         bad.claimed_ratio = 999.0;
-        assert!(!bad.verify(), "oran tutarsızlığı RED");
-        // sıfır stored ama içerik var → RED
+        assert!(!bad.verify(), "a ratio inconsistency is refused");
+        // A stored length of zero with content present is refused.
         let mut bad2 = rec.clone();
         bad2.stored_len = 0;
         bad2.claimed_ratio = 1.0;
-        assert!(!bad2.verify(), "sıfır stored RED");
+        assert!(!bad2.verify(), "a zero stored length is refused");
     }
 }
