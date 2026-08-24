@@ -172,6 +172,7 @@ impl ChainAdapter for EvmChainAdapter {
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    The cryptographic leaf binding. An attacker cannot present the same
     ///    proof with a different tx_hash; a cross-bridge proof is rejected too.
+    ///
     /// Refuse registration for an adapter that cannot bind a receipt.
     ///
     /// Delegates to the inherent check so there is one definition of "fit",
