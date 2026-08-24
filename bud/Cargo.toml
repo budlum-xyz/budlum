@@ -2,7 +2,7 @@
 name = "bud-core"
 version = "0.1.0"
 edition = "2021"
-description = "B.U.D. 1.0/2.0/3.0 (Broad Universal Database) - Rust iskelet, no unsafe, 128KB block 27tx, ML-DSA-87 final"
+description = "B.U.D. 1.0/2.0/3.0 (Broad Universal Database) - Rust skeleton, no unsafe, a 128KB block holding 27 tx, ML-DSA-87 final"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 authors = ["Lubo's Ruler <ayazkussann@gmail.com>"]
 
@@ -11,67 +11,75 @@ name = "bud_core"
 path = "src/lib.rs"
 
 [features]
-# B.U.D. Edition -- surum 1.0/2.0/3.0.
+# B.U.D. Edition -- versions 1.0/2.0/3.0.
 #
-# ONEMLI AYRIM: surum SECIMI DERLEME ZAMANI DEGIL CALISMA ZAMANIDIR.
-# `bud_format_edition::Edition` (Bud1/Bud2/Bud3) enum'u secimi tasir; bir
-# dugum ucunu de ayni ikilide sunar. Dolayisiyla:
-#   bud1 = BYO (kendi sunucu/cihaz). Ayri modul YOK -> feature bos ve
-#          hicbir `cfg` kapisinda kullanilmiyor. Yalnizca niyet belgesi.
-#   bud2 = .bud konteyner depolama (DEFAULT). Cekirdek her zaman derlenir;
-#          bu feature da hicbir `cfg` kapisinda kullanilmiyor.
-#   bud3 = tarif-tek-nesne. GERCEKTEN kapi: `#[cfg(feature = "bud3")]` ile
-#          QR/fountain/tarif modullerini derlemeye alir (bkz. lib.rs).
-# bud1/bud2 bos birakildi cunku kaldirmak alt-akis `--features bud2` cagrilarini
-# kirardi; kapi gibi davrandiklari sanilmasin diye durumlari burada yazili.
+# AN IMPORTANT DISTINCTION: choosing a version is a RUNTIME decision, NOT a
+# compile-time one. The `bud_format_edition::Edition` enum (Bud1/Bud2/Bud3)
+# carries the choice, and one node serves every edition from the same binary.
+# Therefore:
+#   bud1 = BYO (your own server or device). There is NO separate module, so
+#          the feature is empty and is used in no `cfg` gate. It is only a
+#          statement of intent.
+#   bud2 = .bud container storage (DEFAULT). The core always compiles, and
+#          this feature is used in no `cfg` gate either.
+#   bud3 = recipe-as-a-single-object. This one is REALLY a gate: it pulls the
+#          QR/fountain/recipe modules into the build through
+#          `#[cfg(feature = "bud3")]` (see lib.rs).
+# bud1/bud2 were left empty because removing them would break downstream
+# `--features bud2` calls; their status is written here so nobody assumes they
+# behave like gates.
 default = ["bud2"]
 bud1 = []
 bud2 = []
 bud3 = ["bud2"]
 
 # --------------------------------------------------------------------------
-# Lint kapisi.
+# The lint gate.
 #
-# Bu crate (B.U.D. 1.0/2.0/3.0'in TAMAMI, 103 modul) CI'da hicbir isle
-# derlenmiyordu: ci.yml'deki hicbir adim `bud/Cargo.toml`'a bakmiyor. Olcum:
-# `cargo clippy --features bud3 --all-targets -- -D warnings` -> 91 ihlal,
-# icinde gercek hatalar vardi (ayrintili gerekce ilgili satirlarda):
-#   - bud_format_exepdf.rs: if'in iki dali ayni -> "icerik-duyarli" bolumleme
-#     iddiasi sahteydi, olcum hesaplanip atiliyordu
-#   - bud_format_logfield.rs: vec![Vec::with_capacity(n); 7] -> kapasite
-#     7 sutunun 6'sinda sessizce kayboluyordu
-#   - lib.rs: cift `#[cfg(feature = "bud3")]` yuzunden iki 3.0 modulu
-#     kapinin disinda kalmisti (bud2 derlemesinde 3.0 kodu geliyordu)
-# Kapi buraya yazildi ki ayni sinif hata sessizce geri gelmesin.
+# This crate (ALL of B.U.D. 1.0/2.0/3.0, 103 modules) was compiled by no CI
+# job at all: no step in ci.yml looks at `bud/Cargo.toml`. Measured:
+# `cargo clippy --features bud3 --all-targets -- -D warnings` -> 91 violations,
+# with real bugs among them (the detailed rationale sits on the relevant
+# lines):
+#   - bud_format_exepdf.rs: both branches of an if were identical, so the
+#     "content-aware" chunking claim was false and the measurement was
+#     computed and thrown away
+#   - bud_format_logfield.rs: vec![Vec::with_capacity(n); 7] -> the capacity
+#     was silently lost in 6 of the 7 columns
+#   - lib.rs: a duplicated `#[cfg(feature = "bud3")]` left two 3.0 modules
+#     outside the gate (3.0 code was arriving in a bud2 build)
+# The gate was written here so the same class of bug cannot come back
+# silently.
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
-# Panik siniri: uretim yolunda `unwrap`/`expect` yasak.
+# The panic boundary: `unwrap`/`expect` are forbidden on the production path.
 #
-# Bu workspace ana repodaki kapinin disindaydi. Olcum: 25 uretim ihlali
-# (huffman 8, columnar 9, sabit genislikli okumalar 6, float siralama 2).
-# Hicbiri "kotu kod" degildi - her biri dogru bir muhakemeye dayaniyordu
-# ("bu dilim her zaman 4 bayt", "anahtar kumesini yukarida dogruladik").
-# Muhakeme dogruydu; tasiyicisi yoktu. Araya bir kosul eklendiginde panik
-# geri gelirdi ve bunu soyleyecek bir kapi yoktu.
+# This workspace was outside the gate in the main repo. Measured: 25
+# production violations (huffman 8, columnar 9, fixed-width reads 6, float
+# sorting 2). None of them was "bad code" - each rested on correct reasoning
+# ("this slice is always 4 bytes", "we validated the key set above"). The
+# reasoning was right; it had no carrier. Add one condition in between and the
+# panic would come back, with no gate to say so.
 #
-# Duzeltme desenleri ARCHITECTURE §52'deki uc kalibi izliyor: sabit
-# genislikte okuma -> `copy_from_slice`, dogrulanmis varsayim -> degeri bir
-# kez paniksiz topla, float siralama -> `total_cmp`.
+# The repair patterns follow the three shapes in ARCHITECTURE section 52:
+# fixed-width read -> `copy_from_slice`, validated assumption -> collect the
+# value once without panicking, float sorting -> `total_cmp`.
 unwrap_used = "deny"
 expect_used = "deny"
-# Indeks matematigi yogun kodda (erasure/Shamir/MSR/fountain: GF(2^8),
-# Cauchy matrisi, kare matris eliminasyonu) dizi indeksleri kasitlidir --
-# `i`/`j` ayni anda birden cok dizide gezer, iterator'e cevirmek satiri
-# okunmaz yapar ve indeks-esitligi hatasi riskini artirir. 18 ihlalin hepsi
-# bu sinifta; gerekce ile aciyoruz, gorunmezlestirmiyoruz.
+# In index-heavy maths (erasure/Shamir/MSR/fountain: GF(2^8), the Cauchy
+# matrix, square-matrix elimination) the array indices are deliberate: `i`/`j`
+# walk several arrays at once, turning that into an iterator makes the line
+# unreadable and raises the risk of an index-alignment bug. All 18 violations
+# are in that class; we open the lint with a rationale rather than making it
+# invisible.
 needless_range_loop = "allow"
-# Cozumleyici/kodlayici imzalari genis (kodek + parametre + kapasite + kapi).
-# 3 ihlal; imzayi bolmek cagri yerlerini kirar, kazanci yok.
+# Decoder/encoder signatures are wide (codec + parameters + capacity + gate).
+# 3 violations; splitting the signature breaks the call sites for no gain.
 too_many_arguments = "allow"
-# Sutunlu/Huffman yapilari ic ice Vec dondurur; tur takma adi eklemek
-# okunurlugu artirmiyor. 4 ihlal.
+# The columnar/Huffman structures return nested Vecs; adding a type alias does
+# not improve readability. 4 violations.
 type_complexity = "allow"
 
 [dependencies]
