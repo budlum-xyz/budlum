@@ -1,18 +1,18 @@
-//! B.U.D. 2.0 İCAT - Birleşik Storage Engine (2026-08-16)
+//! B.U.D. 2.0 INVENTION - the unified storage engine (2026-08-16)
 //!
-//! Kapsam: deneysel depolama yöntemlerinin tek motorda birleştirilmesi;
-//! hatalarla ilerleyip sonunda buldum diyeceğin bir sistem... .bud formatına
-//! dönüşecek tüm formatlar."
+//! Scope: unifying the experimental storage methods into one engine - a system you
+//! arrive at through mistakes; every format that will turn into the .bud
+//! format.
 //!
-//! Bu modül, bugüne kadar yazılan TÜM icat modüllerini TEK uçtan uca boru hattında
-//! birleştirir: HERHANGİ bir format dosyası girer → format algılanır → içerik sınıfına
-//! göre transform seçilir → yapısal parçalanır → zstd ile sıkıştırılır → Cauchy MDS
-//! erasure ile korunur → .bud konteynerine yazılır → PACT + üretim kanıtı üretilir
-//! → segment defterine eklenebilir. GERİ: ters sırayla ORİJİNAL.
+//! This module unifies EVERY invention module written so far into ONE end-to-end
+//! pipeline: ANY format file goes in -> the format is detected -> a transform is
+//! chosen by content class -> it is chunked structurally -> compressed with zstd ->
+//! protected with Cauchy MDS erasure -> written into a .bud container -> a PACT and a
+//! production proof are produced -> it can be added to the segment ledger. BACK: the
 //!
-//! Boru hattı adımları kanıta yazılır (hangi transformlar uygulandı) → "bu .bud şu
-//! dönüşümlerle üretildi" ispatı (üretim kanıtı + PACT). Uydurma oran imkânsız:
-//! oran, orijinal/saklanan BOYUTLARDAN ölçülür (K19).
+//! ORIGINAL, in reverse order. The pipeline steps are written into the proof (which
+//! transforms were applied) - the proof that "this .bud was produced with these
+//! transforms" (production proof + PACT). An invented ratio is impossible: the ratio
 //!
 //! Kod: `#![forbid(unsafe_code)]`, deterministik, panik'siz.
 
@@ -33,12 +33,12 @@ use sha3::{Digest, Sha3_256};
 pub const ENGINE_MAGIC: [u8; 8] = *b"\xB5ENGN\0\0\0";
 pub const ENGINE_VERSION: u8 = 1;
 
-/// Uygulanan transform türü (restore için geri çevirme gerekir).
+/// The transform applied (restore must invert it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransformKind {
     None,     // ham
     Columnar, // JSON columnar Exact (byte-birebir)
-    LogField, // LOG alan-tanımlı
+    LogField, // LOG field-defined
 }
 
 impl TransformKind {
@@ -59,14 +59,14 @@ impl TransformKind {
     }
 }
 
-/// Boru hattı adımı (kanıt zincirine yazılır).
+/// A pipeline step (written into the proof chain).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeStep {
-    Detect,    // format algılama
-    Transform, // içerik-sınıfı transformu (columnar/logfield/timeseries/model)
-    Split,     // yapısal parçalama (16KB)
-    Fcdc,      // FastCDC içerik-tanımlı parçalama (4K/16K/64K - ikili)
-    Zstd,      // zstd sıkıştırma
+    Detect,    // format detection
+    Transform, // content-class transform (columnar/logfield/timeseries/model)
+    Split,     // structural chunking (16KB)
+    Fcdc,      // FastCDC content-defined chunking (4K/16K/64K - binary)
+    Zstd,      // zstd compression
     Erasure,   // Cauchy MDS
     Container, // .bud konteyner
 }
@@ -85,26 +85,26 @@ impl PipeStep {
     }
 }
 
-/// Birleşik motor sonucu: .bud konteyner + adım kanıtı + ölçülen oran + PACT.
+/// The unified engine result: the .bud container + the step proof + the measured ratio + PACT.
 #[derive(Debug, Clone)]
 pub struct EngineResult {
-    pub container: Vec<u8>,            // .bud dosyası (BudV2File)
-    pub format_name: &'static str,     // algılanan format
-    pub class: ContentClass,           // içerik sınıfı
-    pub steps: Vec<PipeStep>,          // uygulanan adımlar (kanıt)
-    pub transform_kind: TransformKind, // restore için (0=none 1=columnar 2=logfield)
-    pub chunk_mode: u8,                // 0=structural 16KB, 1=FastCDC (içerik-tanımlı)
+    pub container: Vec<u8>,            // the .bud file (BudV2File)
+    pub format_name: &'static str,     // the detected format
+    pub class: ContentClass,           // the content class
+    pub steps: Vec<PipeStep>,          // the steps applied (the proof)
+    pub transform_kind: TransformKind, // for restore (0=none 1=columnar 2=logfield)
+    pub chunk_mode: u8,                // 0=structural 16KB, 1=FastCDC (content-defined)
     pub original_len: u64,
     pub stored_len: u64,
-    pub measured_ratio: f64,             // K19: boyutlardan ölçülür
-    pub pact: PactRecord,                // üretim sözleşmesi (İ1)
-    pub production: BudProductionRecord, // üretim kanıtı
+    pub measured_ratio: f64,             // K19: measured from the sizes
+    pub pact: PactRecord,                // the production contract (I1)
+    pub production: BudProductionRecord, // the production proof
 }
 
 impl EngineResult {
     pub const DOMAIN: &'static [u8] = b"BDLM_BUD_ENGINE_V1";
 
-    /// Boru hattı adım kanıtı (hangi dönüşümler uygulandı - deterministik).
+    /// The pipeline step proof (which transforms were applied - deterministic).
     pub fn steps_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -125,8 +125,8 @@ impl EngineResult {
         h.finalize().into()
     }
 
-    /// Kayıt blob'u (deterministik - zincire yazılabilir).
-    /// Düzen: magic(8) + sürüm(1) + chunk_mode(1) + container_len(4) + container
+    /// The record blob (deterministic - writable to the chain).
+    /// Layout: magic(8) + version(1) + chunk_mode(1) + container_len(4) + container
     ///        + steps_hash(32) + measured_ratio(8) + pact(32) + production(32)
     pub fn to_blob(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -143,16 +143,16 @@ impl EngineResult {
     }
 }
 
-/// GERİ BORU HATTI: engine çıktısı (blob) → ORİJİNAL baytlar (kayıpsızlık kanıtı).
-/// `erasure` = çıktı shard-paketli mi (k=4, p=2); shard'lardan önce 4'ünü kurar.
+/// THE REVERSE PIPELINE: the engine output (a blob) -> the ORIGINAL bytes (proof of losslessness).
+/// `erasure` = is the output shard-packed (k=4, p=2); it reconstructs from the first 4 shards.
 pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
-    // blob yapısı: magic(8) + sürüm(1) + chunk_mode(1) + container_len(4) + container
+    // blob layout: magic(8) + version(1) + chunk_mode(1) + container_len(4) + container
     //              + steps_hash(32) + ratio(8) + pact(32) + prod(32)
     const HDR: usize = 8 + 1 + 1 + 4;
     if result_blob.len() < HDR + 4 + 32 + 8 + 32 + 32 || result_blob[0..8] != ENGINE_MAGIC {
         return None;
     }
-    let _chunk_mode = result_blob[9]; // 0=structural 1=fastcdc (restore için gerek yok: konteyner parçaları taşır)
+    let _chunk_mode = result_blob[9]; // 0=structural 1=fastcdc (not needed for restore: the container carries the chunks)
     let container_len = u32::from_le_bytes(result_blob[10..14].try_into().ok()?) as usize;
     let container_start = HDR;
     if result_blob.len() < container_start + container_len {
@@ -164,7 +164,7 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
         if container.is_empty() || container[0] != 4 {
             return None; // k=4 beklenir
         }
-        let mut pos = 2usize; // k,p baytları
+        let mut pos = 2usize; // the k,p bytes
         let mut shards: Vec<(usize, Vec<u8>)> = Vec::with_capacity(6);
         for _ in 0..6 {
             if container.len() < pos + 4 {
@@ -180,12 +180,12 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
         }
         let mds = CauchyMds::new(4, 2)?;
         let recovered = mds.decode(&shards[..4])?; // ilk 4 shard (MDS: herhangi 4)
-                                                   // padding'i kırp (son shard 0-pad'liydi)
+                                                   // trim the padding (the last shard was 0-padded)
         let mut out = Vec::new();
         for part in &recovered {
             out.extend_from_slice(part);
         }
-        // trailing sıfırları kırp (padding) - orijinal .bud EOI'de 0xFF ile biter
+        // trim the trailing zeros (padding) - the original .bud ends with 0xFF at EOI
         while out.last() == Some(&0u8) {
             out.pop();
         }
@@ -196,21 +196,21 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
     // 2) BudV2File decode + restore_original
     let file = BudV2File::decode(&bytes)?;
     let raw = file.restore_original()?;
-    // 3) transform geri çevirme - blob içinde transform_kind yok (steps_hash'te karışık);
-    //    burada transform geri çevirme, engine_store'un transform_kind'ine göre ayrıca
-    //    çağrılır (engine_restore_transform fonksiyonu). Bu fonksiyon yalnız konteyner
-    //    katmanını açar; transform geri çevirme için engine_restore_full kullanılır.
+    // 3) inverting the transform - the blob has no transform_kind (it is mixed into steps_hash);
+    //    inverting is called separately according to engine_store's transform_kind
+    //    (the engine_restore_transform function). This function only opens the container
+    //    layer; use engine_restore_full to invert the transform.
     Some(raw)
 }
 
-/// BİRLEŞİK BORU HATTI: herhangi bir format → .bud + kanıt zinciri.
-/// Varsayılan parçalama: yapısal 16KB (`fcdc=false`).
+/// THE UNIFIED PIPELINE: any format -> a .bud plus a proof chain.
+/// Default chunking: structural 16KB (`fcdc=false`).
 pub fn engine_store(data: &[u8], erasure: bool, ts_unix: u64) -> Option<EngineResult> {
     engine_store_with(data, erasure, ts_unix, false)
 }
 
-/// FastCDC içerik-tanımlı parçalama ile (4K/16K/64K) - ikili/arbitrary sınıflar için
-/// önerilir: içerik-tanımlı sınırlar düzenleme-dirençli dedup çapaları üretir (F55).
+/// With FastCDC content-defined chunking (4K/16K/64K) - recommended for binary/arbitrary
+/// classes: content-defined boundaries produce edit-resistant dedup anchors (F55).
 pub fn engine_store_fcdc(data: &[u8], erasure: bool, ts_unix: u64) -> Option<EngineResult> {
     engine_store_with(data, erasure, ts_unix, true)
 }
@@ -220,14 +220,14 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
         return None;
     }
     let mut steps = vec![PipeStep::Detect];
-    // 1) format algıla + içerik sınıfı
+    // 1) detect the format and the content class
     let detected = catalog_detect(data);
     let format_name = detected.map(|e| e.name).unwrap_or("Unknown");
     let codec: FormatCodec = detected.map(codec_of).unwrap_or(FormatCodec::Unknown);
     let kind = codec.structural_kind();
     let class = class_of(kind);
-    // 2) içerik sınıfı transformu (columnar JSON / logfield LOG - en değerli ikisi)
-    //    Transform uygulanan veri ayrı tutulur; kayıpsızlık transform_test ile garantili.
+    // 2) the content-class transform (columnar JSON / logfield LOG - the two most valuable)
+    //    The transformed data is kept separately; losslessness is guaranteed by transform_test.
     let mut transform_kind = TransformKind::None;
     let transformed: Vec<u8> = match (codec, class) {
         (FormatCodec::Json, _) => {
@@ -254,8 +254,8 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
         _ => data.to_vec(),
     };
     let _ = (codec, class);
-    // 3) parçala - ikili/arbitrary sınıflar için FastCDC (içerik-tanımlı), diğerleri
-    //    yapısal 16KB. FastCDC: düzenleme-dirençli dedup çapaları + kayıpsız join.
+    // 3) chunk it - FastCDC (content-defined) for binary/arbitrary classes, structural
+    //    16KB for the rest. FastCDC: edit-resistant dedup anchors + a lossless join.
     let chunks: Vec<StructuralChunk> = if fcdc {
         steps.push(PipeStep::Fcdc);
         let sp = FastCdcSplit::split(&transformed, FCDC_MIN_CHUNK, FCDC_AVG_CHUNK, FCDC_MAX_CHUNK)?;
@@ -271,27 +271,27 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
         steps.push(PipeStep::Split);
         structural_split_compact(kind, &transformed, 16 * 1024)
     };
-    // 4) zstd sıkıştırmalı konteyner (ChunkCodec::Zstd)
+    // 4) a zstd-compressed container (ChunkCodec::Zstd)
     steps.push(PipeStep::Zstd);
     let file = BudV2File::new_zstd(codec, chunks)?;
-    // 5) erasure (opsiyonel): konteyneri 4 eşit parçaya böl → (4,2) Cauchy MDS → 6 shard
-    //    MDS: herhangi 4 shard konteyneri geri kurar (tek-parça kaybına dayanıklı).
+    // 5) erasure (optional): split the container into 4 equal parts -> (4,2) Cauchy MDS -> 6 shards.
+    //    MDS: any 4 shards reconstruct the container (resilient to a single-part loss).
     let encoded = file.encode();
     let container_final: Vec<u8> = if erasure {
         steps.push(PipeStep::Erasure);
         let mds = CauchyMds::new(4, 2)?;
-        // 4 eşit parçaya böl (padding'li - tüm shard'lar eşit boyut)
+        // split into 4 equal parts (padded - all shards the same size)
         let shard_len = encoded.len().div_ceil(4);
         let mut parts = Vec::with_capacity(4);
         for i in 0..4 {
             let start = i * shard_len;
             let end = (start + shard_len).min(encoded.len());
             let mut part = encoded[start..end].to_vec();
-            part.resize(shard_len, 0); // son parçaya padding (deterministik)
+            part.resize(shard_len, 0); // padding on the last part (deterministic)
             parts.push(part);
         }
         let shards = mds.encode(&parts)?;
-        // 6 shard'ı paketle (len-prefix)
+        // pack the 6 shards (length-prefixed)
         let mut out = Vec::new();
         out.push(4u8); // k=4
         out.push(2u8); // p=2
@@ -311,7 +311,7 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     } else {
         1.0
     };
-    // 6) PACT + üretim kanıtı (ölçülen oran - K19)
+    // 6) PACT + the production proof (the measured ratio - K19)
     let pact = PactRecord::pure([0xE9u8; 32], [0x11u8; 32], &container_final, ts_unix);
     let production = BudProductionRecord::new(codec, "engine-pipeline", data, stored_len, ts_unix);
     Some(EngineResult {
@@ -329,9 +329,9 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     })
 }
 
-/// CULLING KATMANI: engine + erişim telemetrisi → tier planı.
-/// `access` = cluster başına erişim sayısı; hiç erişilmemiş cluster'lar Culled
-/// (saklanmaz) → depolama çarpanı 1/(1-culling_ratio) (K106, ölçüldü: 2.52x).
+/// THE CULLING LAYER: the engine plus access telemetry gives a tier plan.
+/// `access` = the access count per cluster; clusters never accessed become Culled
+/// (not stored) -> a storage multiplier of 1/(1-culling_ratio) (K106, measured: 2.52x).
 pub struct EngineTierResult {
     pub engine: EngineResult,
     pub plan: CullingPlan,
@@ -362,7 +362,7 @@ pub fn engine_store_tiered(
     })
 }
 
-/// Format kaydından FormatCodec eşle (catalog → konteyner kodu).
+/// Map a FormatCodec from the format record (catalog -> container code).
 fn codec_of(e: &FormatCatalogEntry) -> FormatCodec {
     match e.name {
         "JSON" | "JSON-array" => FormatCodec::Json,
@@ -377,8 +377,8 @@ fn codec_of(e: &FormatCatalogEntry) -> FormatCodec {
     }
 }
 
-/// KONTEYNER-DÜZEYİ RESTORE: `bud engine` çıktısı (container veya shard paketi) → orijinal.
-/// `transform_kind`: 0=none 1=columnar 2=logfield (engine_store çıktısındaki değer).
+/// CONTAINER-LEVEL RESTORE: the `bud engine` output (a container or a shard pack) -> the original.
+/// `transform_kind`: 0=none 1=columnar 2=logfield (the value from the engine_store output).
 pub fn engine_restore_container(
     container: &[u8],
     transform_kind: u8,
@@ -416,10 +416,10 @@ pub fn engine_restore_container(
     } else {
         container.to_vec()
     };
-    // 2) BudV2File aç
+    // 2) open the BudV2File
     let file = BudV2File::decode(&bytes)?;
     let raw = file.restore_original()?;
-    // 3) transform geri çevir
+    // 3) invert the transform
     match TransformKind::from_u8(transform_kind)? {
         TransformKind::None => Some(raw),
         TransformKind::Columnar => {
@@ -433,10 +433,10 @@ pub fn engine_restore_container(
     }
 }
 
-/// TAM RESTORE: konteyner aç + transform geri çevir → ORİJİNAL (K38).
+/// FULL RESTORE: open the container and invert the transform -> the ORIGINAL (K38).
 /// `transform_kind` engine_store'dan gelir (0=none 1=columnar 2=logfield).
 pub fn engine_restore_full(raw: &[u8], transform_kind: u8, erasure: bool) -> Option<Vec<u8>> {
-    // blob → container baytlarını çıkar (magic + sürüm + chunk_mode + len + container)
+    // blob -> extract the container bytes (magic + version + chunk_mode + len + container)
     const HDR: usize = 8 + 1 + 1 + 4;
     if raw.len() < HDR + 4 || raw[0..8] != ENGINE_MAGIC {
         return None;
@@ -449,7 +449,7 @@ pub fn engine_restore_full(raw: &[u8], transform_kind: u8, erasure: bool) -> Opt
     engine_restore_container(container, transform_kind, erasure)
 }
 
-/// Konteyner katmanını aç (erasure + BudV2File) - engine_restore'un çekirdeği.
+/// Open the container layer (erasure + BudV2File) - the core of engine_restore.
 pub fn engine_restore_raw(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
     const HDR: usize = 8 + 1 + 1 + 4;
     if result_blob.len() < HDR + 4 + 32 + 8 + 32 + 32 || result_blob[0..8] != ENGINE_MAGIC {
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn json_engine_roundtrip() {
         // JSON → engine → .bud (zstd) → restore = orijinal
-        // 500 kayıtlık JSON - columnar transform ile gerçek sıkışma
+        // 500-record JSON - real compression with the columnar transform
         let mut rows = Vec::new();
         for i in 0..500 {
             rows.push(format!(
@@ -525,24 +525,24 @@ mod tests {
         );
         assert!(
             res.steps.contains(&PipeStep::Transform),
-            "columnar transform uygulanır"
+            "the columnar transform is applied"
         );
         assert!(res.steps.contains(&PipeStep::Zstd));
         assert!(
             res.measured_ratio > 1.0,
-            "ölçülen oran: {}",
+            "measured ratio: {}",
             res.measured_ratio
         );
-        // konteyner açılabilir + içerik döner (transform sonrası - columnar blob)
+        // the container opens and returns the content (post-transform - a columnar blob)
         let file = BudV2File::decode(&res.container).expect("konteyner");
-        let back = file.restore_original().expect("aç");
+        let back = file.restore_original().expect("open");
         assert!(!back.is_empty());
-        // PACT + üretim kanıtı tutarlı
+        // PACT and the production proof are consistent
         assert!(res.pact.verify());
         assert!(res.production.verify());
-        // adım kanıtı deterministik
+        // the step proof is deterministic
         assert_eq!(res.steps_hash(), res.steps_hash());
-        // kayıt blob'u
+        // the record blob
         let blob = res.to_blob();
         assert_eq!(&blob[..8], &ENGINE_MAGIC);
     }
@@ -558,7 +558,7 @@ mod tests {
             "binary'de transform yok"
         );
         let file = BudV2File::decode(&res.container).expect("konteyner");
-        assert_eq!(file.restore_original().unwrap(), bin, "binary kayıpsız");
+        assert_eq!(file.restore_original().unwrap(), bin, "binary is lossless");
     }
 
     #[test]
@@ -568,16 +568,16 @@ mod tests {
         assert!(with_ec.steps.contains(&PipeStep::Erasure));
         let without = engine_store(&data, false, 1).expect("engine");
         assert!(!without.steps.contains(&PipeStep::Erasure));
-        // erasure paketi k=4 işareti taşır
+        // the erasure pack carries the k=4 marker
         assert_eq!(with_ec.container[0], 4u8, "k=4");
         assert_eq!(with_ec.container[1], 2u8, "p=2");
-        // shard'ları geri kur: ilk 4 shard (len-prefix) → orijinal konteyner
-        // (burada yalnız paket yapısı doğrulanır - restore motoru ayrı adım)
+        // reconstruct from the shards: the first 4 shards (length-prefixed) -> the original container
+        // (only the pack structure is verified here - the restore engine is a separate step)
     }
 
     #[test]
     fn engine_full_roundtrip_lossless() {
-        // K38: engine_store → engine_restore_full = ORİJİNAL (JSON, columnar transform)
+        // K38: engine_store -> engine_restore_full = the ORIGINAL (JSON, columnar transform)
         let mut rows = Vec::new();
         for i in 0..300 {
             rows.push(format!(
@@ -594,18 +594,18 @@ mod tests {
         assert_eq!(res.transform_kind, TransformKind::Columnar);
         let blob = res.to_blob();
         let back = engine_restore_full(&blob, res.transform_kind.to_u8(), false).expect("restore");
-        assert_eq!(back, json, "JSON columnar tam döngü kayıpsız");
+        assert_eq!(back, json, "the JSON columnar round trip is lossless");
     }
 
     #[test]
     fn engine_binary_roundtrip_no_transform() {
-        // binary: transform yok → tam döngü kayıpsız
+        // binary: no transform -> a lossless round trip
         let bin: Vec<u8> = (0u8..=255).cycle().take(50_000).collect();
         let res = engine_store(&bin, false, 1).expect("store");
         assert_eq!(res.transform_kind, TransformKind::None);
         let blob = res.to_blob();
         let back = engine_restore_full(&blob, res.transform_kind.to_u8(), false).expect("restore");
-        assert_eq!(back, bin, "binary tam döngü kayıpsız");
+        assert_eq!(back, bin, "the binary round trip is lossless");
     }
 
     #[test]
@@ -617,7 +617,7 @@ mod tests {
         let blob = res.to_blob();
         let back =
             engine_restore_full(&blob, res.transform_kind.to_u8(), true).expect("restore+erasure");
-        assert_eq!(back, bin, "erasure tam döngü kayıpsız");
+        assert_eq!(back, bin, "the erasure round trip is lossless");
     }
 
     #[test]
@@ -625,12 +625,12 @@ mod tests {
         let bin: Vec<u8> = b"kurcalama testi ".repeat(100);
         let res = engine_store(&bin, false, 1).expect("store");
         let mut blob = res.to_blob();
-        // blob sonundaki üretim kanıtı hash'ini boz
+        // corrupt the production proof hash at the end of the blob
         *blob.last_mut().unwrap() ^= 0x01;
-        // konteyner katmanı magic'i korunur ama içerik kurcalanmış → decode ya None ya farklı
-        // (burada yalnız panik olmadığı doğrulanır)
+        // the container layer magic survives but the content is tampered -> decode gives None or something different
+        // (only the absence of a panic is verified here)
         let _ = engine_restore_raw(&blob, false);
-        // kısa blob → None
+        // a short blob gives None
         assert!(engine_restore_raw(&[0u8; 10], false).is_none());
         assert!(engine_restore_full(&[0u8; 10], 0, false).is_none());
     }
@@ -638,29 +638,29 @@ mod tests {
     fn engine_rejects_empty_and_huge() {
         assert!(engine_store(&[], false, 1).is_none());
         let huge = vec![0u8; 513 * 1024 * 1024];
-        assert!(engine_store(&huge, false, 1).is_none(), "512MB tavan");
+        assert!(engine_store(&huge, false, 1).is_none(), "the 512MB cap");
     }
 
     #[test]
     fn i5_determinizm_makine_testi() {
-        // fikirler2.0 §10.1: zstd sürüm+parametre+girdi sabitleme → AYNI çıktı.
-        // Makine testi: aynı girdi + aynı seviye → birebir aynı konteyner baytları.
+        // ideas2.0 §10.1: pinning the zstd version, parameters and input gives the SAME output.
+        // Machine test: the same input at the same level gives byte-identical container bytes.
         let data: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
         let a = engine_store(&data, false, 5).unwrap();
         let b = engine_store(&data, false, 5).unwrap();
         assert_eq!(
             a.container, b.container,
-            "İ5: aynı girdi → aynı .bud baytları"
+            "I5: the same input gives the same .bud bytes"
         );
         assert_eq!(a.to_blob(), b.to_blob());
-        // farklı ts de adım kanıtını değiştirmez (pact ts içerir - konteyner aynı)
+        // a different ts does not change the step proof either (the pact holds ts - the container is the same)
         let c = engine_store(&data, false, 6).unwrap();
         assert_eq!(a.container, c.container);
     }
 
     #[test]
     fn nginx_log_otomatik_algilanir() {
-        // Kalan iş #6: engine'de nginx access log → LOG sınıfı + logfield transform.
+        // Remaining work #6: an nginx access log in the engine -> the LOG class + the logfield transform.
         let mut log = String::new();
         for i in 0..50 {
             log.push_str(&format!(
@@ -681,15 +681,15 @@ mod tests {
 
     #[test]
     fn fastcdc_engine_roundtrip_lossless() {
-        // F55: FastCDC parçalama → .bud → restore = ORİJİNAL (kayıpsız)
+        // F55: FastCDC chunking -> .bud -> restore = the ORIGINAL (lossless)
         let bin: Vec<u8> = (0u8..=255).cycle().take(300_000).collect();
         let res = engine_store_fcdc(&bin, false, 7).expect("fcdc engine");
         assert_eq!(res.chunk_mode, 1, "chunk_mode=1 (FastCDC)");
         assert!(res.steps.contains(&PipeStep::Fcdc));
-        // blob'daki chunk_mode baytı (index 9)
+        // the chunk_mode byte in the blob (index 9)
         let blob = res.to_blob();
         assert_eq!(blob[9], 1u8);
-        // kayıpsız geri dönüş
+        // a lossless round trip
         assert_eq!(engine_restore_raw(&blob, false).unwrap(), bin);
         // deterministik
         assert_eq!(
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn fastcdc_edit_direncli_dedup_capalari() {
-        // F55: aynı içeriğin ortasına küçük düzenleme → parçaların çoğu aynı kalır
+        // F55: a small edit in the middle of the same content -> most chunks stay the same
         let base: Vec<u8> = (0u8..=255).cycle().take(400_000).collect();
         let mut edit = base.clone();
         edit[200_000] ^= 0xFF;
@@ -713,10 +713,10 @@ mod tests {
             .iter()
             .filter(|id| sp2.chunk_ids.contains(id))
             .count();
-        let toplam = sp1.chunk_ids.len().max(sp2.chunk_ids.len());
+        let total = sp1.chunk_ids.len().max(sp2.chunk_ids.len());
         assert!(
-            shared as f64 / toplam as f64 > 0.5,
-            "düzenlemeden sonra parçaların çoğu ortak: {shared}/{toplam}"
+            shared as f64 / total as f64 > 0.5,
+            "after the edit most chunks are shared: {shared}/{total}"
         );
         assert_eq!(sp1.join(), base);
         assert_eq!(sp2.join(), edit);
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn tiered_engine_culling_carpani() {
-        // K106: erişim telemetrisi → CullingPlan → depolama çarpanı (ölçülen 2.52x)
+        // K106: access telemetry -> a CullingPlan -> the storage multiplier (measured 2.52x)
         let data = b"tiered engine verisi ".repeat(2000);
         let mut access = vec![0u64; 100];
         for i in 0..100 {
@@ -740,17 +740,17 @@ mod tests {
         let (h, w, c, cu) = tr.plan.tier_summary();
         assert!(
             h > 0 && w > 0 && cu > 0,
-            "tier dağılımı: h={h} w={w} c={c} cu={cu}"
+            "tier distribution: h={h} w={w} c={c} cu={cu}"
         );
         assert!(
             tr.storage_multiplier >= 1.0,
-            "çarpan: {}",
+            "multiplier: {}",
             tr.storage_multiplier
         );
-        // çarpan formülü doğru: 1/(1-culling_ratio)
+        // the multiplier formula is right: 1/(1-culling_ratio)
         let beklenen = 1.0 / (1.0 - tr.plan.culling_ratio());
         assert!((tr.storage_multiplier - beklenen).abs() < 1e-9);
-        // engine katmanı hâlâ kayıpsız
+        // the engine layer is still lossless
         assert_eq!(
             engine_restore_full(
                 &tr.engine.to_blob(),
