@@ -128,17 +128,17 @@ pub trait BudlumApi {
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // === SECURITY FIX (Güvenlik Denetimi §3) =========================
-    // `bud_lockBridgeTransfer` RPC'den KALDIRILDI. Yeni: hiçbir koşulda
-    // Kimlik doğrulamasız (imza/kanıt olmadan) bridge lock oluşturulamaz.
-    // Bridge lock'lar artık yalnızca:
-    //   1. Internal `Blockchain::lock_bridge_transfer` çağrıları (system
-    //      Path) - bu yorum, kod tabanındaki tek kalıntıdır.
-    //   2. (+ planı) `lock_bridge_transfer_with_proof` API'si
-    //      (`verify_domain_event_proof` benzeri kanıt zorunlu).
+    // === SECURITY FIX (security review section 3) ====================
+    // `bud_lockBridgeTransfer` was REMOVED from the RPC. New rule: under no
+    // circumstances can a bridge lock be created without authentication (that
+    // is, without a signature or a proof). Bridge locks now come only from:
+    //   1. Internal `Blockchain::lock_bridge_transfer` calls (the system path)
+    //      - this comment is the only remaining trace in the code base.
+    //   2. (planned) a `lock_bridge_transfer_with_proof` API (a mandatory
+    //      proof, like `verify_domain_event_proof`).
     //
-    // Mevcut implementasyon `Blockchain::lock_bridge_transfer`'da kalır
-    // Çünkü internal kod yolları (bridge lock event handler) bunu çağırır.
+    // The current implementation stays in `Blockchain::lock_bridge_transfer`
+    // because internal code paths (the bridge lock event handler) call it.
 
     #[method(name = "bud_mintBridgeTransfer")]
     async fn mint_bridge_transfer(
@@ -719,8 +719,9 @@ pub trait BudlumApi {
     /// Register an AI model (template; the governance-tunable registration
     /// fee must be attached as tx.amount - see `ai_model_register_fee`).
     ///
-    /// Modalite bitleri (`ModalitySet`). Yok = eski davranış (`text_only`).
-    /// 0 = hiçbir şey okumaz (`none` - bilinçli red). 1 = metin.
+    /// The modality bits (`ModalitySet`). Absent means the old behaviour
+    /// (`text_only`). 0 reads nothing (`none` - a deliberate refusal). 1 is
+    /// text.
     #[method(name = "bud_aiRegisterModel")]
     async fn ai_register_model(
         &self,
@@ -737,10 +738,11 @@ pub trait BudlumApi {
 
     /// Prepare an AI inference request transaction.
     ///
-    /// Perception beyanı: varlık (32B hex), içerik (32B hex), tür etiketi
-    /// (1=metin, 2=görüntü, 3=ses, 4=video), birim miktarı. Dördü birden
-    /// verilirse istek V3 beyanıyla inşa edilir; hiçbiri verilmezse
-    /// beyansız inşa edilir (executor fail-closed reddeder).
+    /// The perception declaration: the asset (32B hex), the content (32B hex),
+    /// the kind tag (1=text, 2=image, 3=audio, 4=video) and the unit amount.
+    /// If all four are given the request is built with a V3 declaration; if
+    /// none are given it is built without one (and the executor refuses it,
+    /// fail-closed).
     #[method(name = "bud_aiSubmitRequest")]
     async fn ai_submit_request(
         &self,
@@ -895,7 +897,7 @@ pub trait BudlumApi {
     #[method(name = "bud_aiAgentRanking")]
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Read-only status endpoint (relayer kararından bağımsız).
+    /// A read-only status endpoint (independent of the relayer's decision).
     #[method(name = "bud_getStatus")]
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
