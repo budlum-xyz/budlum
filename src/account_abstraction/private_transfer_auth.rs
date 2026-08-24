@@ -1,59 +1,63 @@
-//! Gizli transfer yetkilendirmesi: nullifier + baglanti (commitment) + imza.
+//! Private transfer authorization: nullifier, commitment, and signature.
 //!
-//! # Bu modulun onceki hali
+//! # What this module used to be
 //!
-//! Uc dogrulamanin ucu de bos cikiyordu:
+//! All three verifications came out empty:
 //!
-//! * `verify_auth_sig` yalnizca `self.authorization_sig.len() != 4627` bakiyordu.
-//!   Alan `[u8; 4627]` oldugu icin bu kosul derleme zamaninda her zaman
-//!   yanlisti; fonksiyon `Ok(())` disinda bir sey donduremezdi. Imza hic
-//!   dogrulanmiyordu, hicbir anahtara bagli degildi.
-//! * `verify_commitment` yalnizca `SHA3-256(payload)` hesapliyordu. Baglanti
-//!   tutari, nullifier'i veya hesabi icermedigi icin ayni yuku tasiyan farkli
-//!   bir transfer ayni baglantiyi verirdi.
-//! * `verify_nullifier` dogruydu ama `verify_auth_sig` bos oldugu icin tek
-//!   basina bir sey ifade etmiyordu: harcamayi kimin yetkilendirdigi
-//!   bilinmiyordu.
+//! * `verify_auth_sig` only checked `self.authorization_sig.len() != 4627`.
+//!   Since the field is `[u8; 4627]`, that condition was always false at
+//!   compile time and the function could return nothing but `Ok(())`. The
+//!   signature was never verified and was bound to no key at all.
+//! * `verify_commitment` only computed `SHA3-256(payload)`. Because the
+//!   commitment covered neither the amount, nor the nullifier, nor the account,
+//!   a different transfer carrying the same payload produced the same
+//!   commitment.
+//! * `verify_nullifier` was correct, but meant nothing on its own while
+//!   `verify_auth_sig` was empty: who authorized the spend was unknown.
 //!
-//! Dizin `lib.rs`'ten hic ulasilmadigi icin bu uc bosluk derlenmiyordu bile.
+//! The directory was never reached from `lib.rs`, so these three gaps did not
+//! even compile.
 //!
-//! # Simdi ne yapiyor
+//! # What it does now
 //!
-//! Yetkilendirme, tutari ve nullifier'i da iceren bir baglanti uzerine
-//! atilmis gercek bir ML-DSA-87 imzasidir. Nullifier harcanmislar kumesine
-//! karsi denetlenir.
+//! The authorization is a real ML-DSA-87 signature over a commitment that
+//! includes the amount and the nullifier. The nullifier is checked against the
+//! spent set.
 //!
-//! # Ne soylemiyor
+//! # What it does not say
 //!
-//! Bu bir sifir-bilgi devresi degildir: modul, nullifier'in gercekten
-//! harcanan cikisa ait oldugunu *kanitlamaz*, cunku bunu kanitlayan sey
-//! kanit sistemidir. Modulun soyledigi sey sudur: "bu nullifier daha once
-//! gorulmedi ve bu tam yetkilendirme, bu anahtar tarafindan imzalandi".
-//! Gizlilik iddiasi burada yapilmaz; yapilan sey cifte harcamayi ve
-//! yetkisiz harcamayi ayirmaktir.
+//! This is not a zero-knowledge circuit. The module does not *prove* that the
+//! nullifier belongs to the output actually being spent, because what proves
+//! that is the proof system. What the module says is: "this nullifier has not
+//! been seen before, and this exact authorization was signed by this key". No
+//! privacy claim is made here; what is made is the separation between double
+//! spending and unauthorized spending.
 //!
-//! WIRING: unwired - olculdu, ve isaretin eski gerekcesi yanlisti. Uretimde
-//! bir gizli transfer yolu **var**: `TransactionType::PrivateTransferSubmit`
-//! -> `Executor` (`src/execution/executor.rs`). O yol bu modulu cagirmiyor,
-//! ayni isi ikinci kez yaziyor. Bu modul su an yalnizca testlerden ulasilir.
+//! WIRING: unwired - measured, and the old justification for the mark was
+//! wrong. A private transfer path **does** exist in production:
+//! `TransactionType::PrivateTransferSubmit` -> `Executor`
+//! (`src/execution/executor.rs`). That path does not call this module; it
+//! writes the same work a second time. This module is currently reachable only
+//! from tests.
 //!
-//! # Iki uygulama ayni sey degil
+//! # The two implementations are not the same thing
 //!
-//! Fark olculdu, tahmin edilmedi. Uretimin imzaladigi on-goruntu
-//! (`compute_public_digest`) nullifier'lari ve cikis baglantilarini
-//! kapsar; **tutari kapsamaz**, cunku tutar gizli transferde acikta
-//! tasinmaz. Bu modulun on-goruntusu (`authorization_payload`) tutari da
-//! baglar, cunku burada tutar biliniyor varsayilir.
+//! The difference was measured, not guessed. The preimage production signs
+//! (`compute_public_digest`) covers nullifiers and output commitments; it does
+//! **not** cover the amount, because in a private transfer the amount is not
+//! carried in the clear. This module's preimage (`authorization_payload`) binds
+//! the amount too, because here the amount is assumed known.
 //!
-//! Ikisi ayni soruya iki farkli cevap uretir, dolayisiyla biri digerinin
-//! yerine gecirilemez: bir tarafin urettigi imza otekinde dogrulanmaz.
-//! Birlestirme, hangi modelin dogru oldugu kararini gerektirir - tutar
-//! zincirde acikta mi, degil mi. Bu bir uzlasma yuzeyi karari oldugu icin
-//! kendi commit'inde yapilir; iki uygulamayi "benziyorlar" diye birlestirmek
-//! sessizce yeni bir imza semasi yaratirdi.
+//! The two produce two different answers to the same question, so neither can
+//! be substituted for the other: a signature produced by one does not verify
+//! under the other. Merging them requires deciding which model is right, that
+//! is, whether the amount is in the clear on chain. Because that is a consensus
+//! surface decision it belongs in its own commit; merging two implementations
+//! because they "look alike" would quietly create a third signature scheme.
 //!
-//! Kayit `PLAN.md` Borc K deseninin ayni sinifi: ayni isin iki yerde ayri
-//! yazilmasi, once **olculur**, sonra tek kaynaga indirilir.
+//! For the record, this is the same class as the Debt K pattern in `PLAN.md`:
+//! the same work written twice in two places is **measured** first, then
+//! reduced to one source.
 
 use crate::crypto::primitives::{
     verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
@@ -61,21 +65,21 @@ use crate::crypto::primitives::{
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeSet;
 
-/// Baglantinin alan ayiricisi.
+/// Domain separator for the commitment.
 pub const PRIVATE_TRANSFER_COMMITMENT_DOMAIN: &[u8] = b"BUDLUM_PRIVATE_TRANSFER_COMMITMENT_V1";
-/// Yetkilendirme imzasinin alan ayiricisi.
+/// Domain separator for the authorization signature.
 pub const PRIVATE_TRANSFER_AUTH_DOMAIN: &[u8] = b"BUDLUM_PRIVATE_TRANSFER_AUTH_V1";
 
-/// Gizli transfer neden reddedildi.
+/// Why a private transfer was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivateTransferError {
-    /// Nullifier daha once harcanmis: cifte harcama.
+    /// The nullifier was already spent: a double spend.
     NullifierAlreadySpent,
-    /// Baglanti, bildirilen alanlarla uyusmuyor.
+    /// The commitment does not match the declared fields.
     CommitmentMismatch,
-    /// Tutar sifir.
+    /// The amount is zero.
     ZeroAmount,
-    /// ML-DSA-87 yetkilendirme imzasi dogrulanmadi.
+    /// The ML-DSA-87 authorization signature did not verify.
     InvalidAuthorization,
 }
 
@@ -102,11 +106,11 @@ impl core::fmt::Display for PrivateTransferError {
 
 impl std::error::Error for PrivateTransferError {}
 
-/// Transferin baglantisi: nullifier, tutar ve gizleyici birlikte.
+/// The transfer's commitment: nullifier, amount and blinding together.
 ///
-/// Gizleyici (`blinding`) olmadan baglanti tahmin edilebilirdi: tutar
-/// alani dar bir kumeden geliyorsa (1, 10, 100 ...) saldirgan olasi tum
-/// baglantilari hesaplayip tutari geri okurdu.
+/// Without the blinding the commitment would be guessable: if the amount comes
+/// from a narrow set (1, 10, 100, and so on) an attacker could compute every
+/// possible commitment and read the amount back out.
 #[must_use]
 pub fn transfer_commitment(nullifier: &[u8; 32], amount: u64, blinding: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha3_256::new();
@@ -117,7 +121,7 @@ pub fn transfer_commitment(nullifier: &[u8; 32], amount: u64, blinding: &[u8; 32
     h.finalize().into()
 }
 
-/// Yetkilendirme imzasinin uzerine alindigi baytlar.
+/// The bytes the authorization signature is taken over.
 #[must_use]
 pub fn authorization_payload(commitment: &[u8; 32], nullifier: &[u8; 32], amount: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(PRIVATE_TRANSFER_AUTH_DOMAIN.len() + 72);
@@ -128,7 +132,7 @@ pub fn authorization_payload(commitment: &[u8; 32], nullifier: &[u8; 32], amount
     out
 }
 
-/// Bir gizli transferin yetkilendirmesi.
+/// The authorization for one private transfer.
 #[derive(Debug, Clone)]
 pub struct PrivateTransferAuth {
     pub authorization_sig: [u8; ML_DSA_87_SIGNATURE_LEN],
@@ -151,8 +155,8 @@ impl PrivateTransferAuth {
         Ok(())
     }
 
-    /// Baglanti, bildirilen nullifier ve tutarla yeniden hesaplandiginda
-    /// tutuyor mu.
+    /// Does the commitment still hold when recomputed from the declared
+    /// nullifier and amount?
     ///
     /// # Errors
     ///
@@ -167,7 +171,7 @@ impl PrivateTransferAuth {
         Ok(())
     }
 
-    /// Yetkilendirme imzasi gecerli mi.
+    /// Is the authorization signature valid?
     ///
     /// # Errors
     ///
@@ -179,15 +183,15 @@ impl PrivateTransferAuth {
     }
 }
 
-/// KQ-* kapi yuzeyi: uretim yolundan cagrilacak tek giris noktasi.
+/// The KQ-* gate surface: the single entry point a production path should call.
 pub struct PrivateTransferGates;
 
 impl PrivateTransferGates {
-    /// Uc denetimi sirayla yapar: imza, baglanti, cifte harcama.
+    /// Runs the three checks in order: signature, commitment, double spend.
     ///
     /// # Errors
     ///
-    /// [`PrivateTransferAuth`]'in uc dogrulayicisinin dondurdugu her hata.
+    /// Every error the three verifiers of [`PrivateTransferAuth`] return.
     pub fn kq_private(
         auth: &PrivateTransferAuth,
         spent: &BTreeSet<[u8; 32]>,
@@ -246,8 +250,8 @@ mod tests {
         );
     }
 
-    /// Iskeletin kaciridigi sey: imza hicbir anahtara bagli degildi, yani
-    /// rastgele baytlar da kabul edilirdi.
+    /// What the scaffold missed: the signature was bound to no key, so random
+    /// bytes were accepted just as readily.
     #[test]
     fn arbitrary_bytes_in_place_of_a_signature_are_refused() {
         let kp = WalletKeyPair::generate();
@@ -260,8 +264,9 @@ mod tests {
         );
     }
 
-    /// Yetkilendirme tutari kapsadigi icin tutari degistirmek imzayi bozar.
-    /// Baglanti tutari kapsamasaydi, 1 icin alinan yetki 1000 harcardi.
+    /// The authorization covers the amount, so changing the amount breaks the
+    /// signature. Had the commitment left the amount out, an authorization
+    /// taken for 1 would have spent 1000.
     #[test]
     fn raising_the_amount_after_signing_is_refused() {
         let kp = WalletKeyPair::generate();
@@ -278,7 +283,7 @@ mod tests {
         );
     }
 
-    /// Bir nullifier icin alinan yetki baska nullifier'a tasinamaz.
+    /// An authorization taken for one nullifier cannot be moved to another.
     #[test]
     fn an_authorization_cannot_be_replayed_on_another_nullifier() {
         let kp = WalletKeyPair::generate();
@@ -291,7 +296,7 @@ mod tests {
         );
     }
 
-    /// Baska bir taraf ayni transferi kendi anahtariyla yetkilendiremez.
+    /// No other party can authorize the same transfer with their own key.
     #[test]
     fn an_authorization_from_another_key_is_refused() {
         let owner = WalletKeyPair::generate();
@@ -316,8 +321,8 @@ mod tests {
         );
     }
 
-    /// Gizleyici olmadan baglanti tahmin edilebilirdi; farkli gizleyici
-    /// farkli baglanti vermeli.
+    /// Without a blinding the commitment would be guessable; a different
+    /// blinding must produce a different commitment.
     #[test]
     fn the_blinding_factor_changes_the_commitment() {
         let a = transfer_commitment(&[1u8; 32], 100, &[1u8; 32]);

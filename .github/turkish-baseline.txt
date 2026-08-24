@@ -206,7 +206,6 @@ ops/scripts/check_genesis_schema.py	1
 ops/scripts/generate-sbom.sh	1
 rust-toolchain.toml	2
 src/account_abstraction/mod.rs	8
-src/account_abstraction/private_transfer_auth.rs	47
 src/account_abstraction/quantum_account.rs	9
 src/account_abstraction/tee_attestation.rs	46
 src/account_abstraction/threshold_mldsa.rs	38
@@ -258,7 +257,6 @@ src/lubot/metrics.rs	10
 src/lubot/query.rs	6
 src/lubot/social.rs	16
 src/lubot/storage.rs	8
-src/lubot/verify.rs	46
 src/main.rs	46
 src/mempool/pool.rs	20
 src/network/node.rs	18
