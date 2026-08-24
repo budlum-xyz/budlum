@@ -1,7 +1,13 @@
-//! Budlum blok zinciri kuantum güvenliği - zincir geneli (depolama değil)
-//! Fix 8 adım, KQ-* kapıları, unsafe yok.
-//! FINAL kararlar: V4 SHA3 hard-fork, 128KB block 27tx, lower threshold, same_set, dual_required_new, snow_hybrid, ci_gate, only ml-dsa-87 final, sha3_sponge, hard_fork_announce
-//! K4 fix (2026-08-16): imza dogrulama no-op'tan gercek kriptografiye - ed25519 (RFC 8032) + ML-DSA-87 (FIPS 204)
+//! Budlum blockchain quantum security - chain-wide (not storage).
+//!
+//! Fix in 8 steps, KQ-* gates, no unsafe.
+//!
+//! FINAL decisions: V4 SHA3 hard fork, a 128KB block holding 27 tx, lower
+//! threshold, same_set, dual_required_new, snow_hybrid, ci_gate, only
+//! ml-dsa-87 final, sha3_sponge, hard_fork_announce.
+//!
+//! K4 fix (2026-08-16): signature verification moved from a no-op to real
+//! cryptography - ed25519 (RFC 8032) + ML-DSA-87 (FIPS 204).
 
 #![forbid(unsafe_code)]
 
@@ -31,8 +37,9 @@ impl Sha3Hasher {
 }
 
 /// PQ-VRF: output = SHA3(pk || slot || prev), proof = Ed25519(sk, slot||prev||output)
-/// K4 fix (2026-08-16): eski verify `let _ = pk;` ile public key'i YOK SAYIYORDU - imza
-/// doğrulanmıyordu. Artık gerçek ed25519 imzası + deterministik VRF çıktısı doğrulanır.
+/// K4 fix (2026-08-16): the old verify IGNORED the public key with
+/// `let _ = pk;`, so the signature was not verified at all. It now verifies a
+/// real ed25519 signature plus the deterministic VRF output.
 #[derive(Debug, Clone)]
 pub struct PqVrfOutput([u8; 32]);
 #[derive(Debug, Clone)]
@@ -42,7 +49,7 @@ impl PqVrf {
     pub fn prove(sk_seed: &[u8; 32], slot: u64, prev_hash: &[u8; 32]) -> (PqVrfOutput, PqVrfProof) {
         let sk = ed25519_dalek::SigningKey::from_bytes(sk_seed);
         let pk = sk.verifying_key();
-        // output = H(pk || slot || prev) - herkes yeniden hesaplayabilir
+        // output = H(pk || slot || prev) - anyone can recompute it
         let mut h = Sha3_256::new();
         h.update(pk.as_bytes());
         h.update(slot.to_le_bytes());
@@ -72,7 +79,7 @@ impl PqVrf {
             Ok(v) => v,
             Err(_) => return false,
         };
-        // output yeniden hesaplanmali
+        // the output has to be recomputable
         let mut h = Sha3_256::new();
         h.update(vk.as_bytes());
         h.update(slot.to_le_bytes());
@@ -81,7 +88,7 @@ impl PqVrf {
         if recomputed != output.0 {
             return false;
         }
-        // imza dogrulanmali
+        // the signature has to verify
         let mut m = Vec::with_capacity(8 + 32 + 32);
         m.extend_from_slice(&slot.to_le_bytes());
         m.extend_from_slice(prev);
@@ -93,8 +100,9 @@ impl PqVrf {
         vk.verify(&m, &sig).is_ok()
     }
     pub fn is_below_threshold(output: &PqVrfOutput, threshold: u64) -> bool {
-        // lower_threshold: threshold düşürüldü, daha sık slot
-        // K38: sabit 8 bayt kopyası - unwrap yok (derleyici kanıtı: [u8;8] her zaman uyar)
+        // lower_threshold: the threshold was lowered, so slots come more often.
+        // K38: a fixed 8-byte copy, no unwrap (the compiler proves it: a
+        // [u8; 8] always fits).
         let mut limb = [0u8; 8];
         limb.copy_from_slice(&output.0[0..8]);
         let v = u64::from_le_bytes(limb);
@@ -103,8 +111,9 @@ impl PqVrf {
 }
 
 /// Hybrid Tx: Ed25519 + ML-DSA-87 - 128KB block
-/// K4 fix: eski verify yalniz boyut kontrolu yapiyordu (imza DOGRULANMIYORDU).
-/// Artik ed25519 imzasi + ML-DSA-87 (FIPS 204) imzasi gercekten dogrulanir.
+/// K4 fix: the old verify only checked sizes (the signature was NOT verified).
+/// It now really verifies the ed25519 signature plus the ML-DSA-87 (FIPS 204)
+/// signature.
 #[derive(Debug, Clone)]
 pub struct HybridTx {
     pub ed_sig: [u8; 64],
@@ -114,7 +123,7 @@ pub struct HybridTx {
 impl HybridTx {
     pub fn verify(&self, msg: &[u8], ed_pk: &[u8], pq_pk: &[u8]) -> bool {
         use ed25519_dalek::{Signature as EdSig, Verifier as EdVerifier, VerifyingKey as EdVk};
-        // 1) Ed25519 imzasini dogrula
+        // 1) Verify the Ed25519 signature.
         let pk32: [u8; 32] = match ed_pk.try_into() {
             Ok(v) => v,
             Err(_) => return false,
@@ -130,7 +139,7 @@ impl HybridTx {
         if vk.verify(msg, &ed_sig).is_err() {
             return false;
         }
-        // 2) ML-DSA-87 imzasini dogrula (FIPS 204)
+        // 2) Verify the ML-DSA-87 signature (FIPS 204).
         let enc_vk = match ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pq_pk) {
             Ok(e) => e,
             Err(_) => return false,
@@ -161,7 +170,7 @@ impl HybridFinalityVote {
     }
 }
 
-/// Dual Wallet - dual_required_new, adres yok, SHA3(ed||pq) bud1...
+/// Dual Wallet - dual_required_new, no address, SHA3(ed||pq) bud1...
 #[derive(Debug, Clone)]
 pub struct DualWallet {
     pub ed_seed: [u8; 32],
@@ -222,7 +231,7 @@ impl FiatShamirTranscript {
     }
 }
 
-/// MobileSelfProvider - 10dk grace
+/// MobileSelfProvider - a 10-minute grace period
 #[derive(Debug, Clone)]
 pub struct MobileSelfProvider {
     pub device_id: String,
@@ -308,17 +317,18 @@ mod tests {
         let pk = ed25519_dalek::SigningKey::from_bytes(&sk)
             .verifying_key()
             .to_bytes();
-        // dogru girdi ile dogrulanir
+        // it verifies with the right input
         assert!(PqVrf::verify(&pk, 10, &prev, &out, &proof));
         assert!(PqVrf::is_below_threshold(&out, u64::MAX));
-        // degistirilmis slot veya yanlis pk ile RED (kaos)
+        // a changed slot or a wrong pk is REFUSED (chaos)
         assert!(!PqVrf::verify(&pk, 11, &prev, &out, &proof));
         assert!(!PqVrf::verify(&[0u8; 32], 10, &prev, &out, &proof));
-        // kurcalanmış imza/proof baytı → RED (K38: imza gerçekten doğrulanıyor)
+        // a tampered signature/proof byte is REFUSED (K38: the signature is
+        // really verified)
         let mut bad_proof = proof.clone();
         bad_proof.0[0] ^= 0x01;
         assert!(!PqVrf::verify(&pk, 10, &prev, &out, &bad_proof));
-        // kurcalanmış çıktı → RED (output yeniden hesaplama eşleşmeli)
+        // a tampered output is REFUSED (the recomputed output has to match)
         let mut bad_out = out.clone();
         bad_out.0[0] ^= 0x01;
         assert!(!PqVrf::verify(&pk, 10, &prev, &bad_out, &proof));
@@ -328,10 +338,10 @@ mod tests {
         use ml_dsa::signature::Signer as PqSigner;
         use ml_dsa::Generate as PqGenerate;
         use rand_core::OsRng; // ed25519-dalek: rand_core 0.6
-                              // gercek anahtarlar + gercek imzalar (ed25519 + ML-DSA-87)
+                              // real keys + real signatures (ed25519 + ML-DSA-87)
         let ed_sk = ed25519_dalek::SigningKey::generate(&mut OsRng);
         let ed_pk = ed_sk.verifying_key();
-        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate(); // getrandom ic (FIPS 204)
+        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate(); // getrandom inside (FIPS 204)
         let pq_pk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa87> = pq_sk.as_ref();
         let msg = b"budlum hybrid tx payload";
         let ed_sig: [u8; 64] = ed_sk.sign(msg).to_bytes();
@@ -342,15 +352,15 @@ mod tests {
             pq_sig: pq_sig.clone(),
             pq_pub_hash: [0u8; 32],
         };
-        // dogru girdi -> GECER
+        // the right input -> PASSES
         assert!(tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes));
-        // degistirilmis mesaj -> RED (imza gercekten kontrol ediliyor)
+        // a changed message -> REFUSED (the signature really is checked)
         assert!(!tx.verify(b"tampered", ed_pk.as_bytes(), &pq_pk_bytes));
-        // yanlis pq anahtari -> RED
+        // a wrong pq key -> REFUSED
         let other_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate();
         let other_pk: Vec<u8> = other_sk.as_ref().encode().into_iter().collect();
         assert!(!tx.verify(msg, ed_pk.as_bytes(), &other_pk));
-        // kurcalanmış pq_sig baytı → RED (K38)
+        // a tampered pq_sig byte -> REFUSED (K38)
         let mut bad_pq = pq_sig.clone();
         let mid = bad_pq.len() / 2;
         bad_pq[mid] ^= 0x40;
@@ -361,9 +371,9 @@ mod tests {
         };
         assert!(
             !bad_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
-            "kurcalanmış PQ imzası RED"
+            "a tampered PQ signature is REFUSED"
         );
-        // kurcalanmış ed_sig baytı → RED
+        // a tampered ed_sig byte -> REFUSED
         let mut bad_ed = ed_sig;
         bad_ed[0] ^= 0x01;
         let bad_ed_tx = HybridTx {
@@ -373,7 +383,7 @@ mod tests {
         };
         assert!(
             !bad_ed_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
-            "kurcalanmış Ed imzası RED"
+            "a tampered Ed signature is REFUSED"
         );
         // boyut: 64 + 4627 + 32 = 4723; 27 tx = 127,521 B <= 128 KiB
         assert!(tx.size_bytes() < MAX_BLOCK_BYTES);
