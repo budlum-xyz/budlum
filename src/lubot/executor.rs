@@ -1,10 +1,11 @@
-//! Executor/Transaction entegrasyon.
+//! The executor and transaction integration.
 //!
-//! Lubot çıkarım talebi, `TransactionType::AiInferenceRequest` olarak executor'a
-//! Taşınır. Executor (src/execution/executor.rs:723) zaten tam akışı işler:
-//! Pollen grant doğrulaması → balance kontrolü → ai_registry.submit_request →
-//! Grant tüketimi → fee kesintisi. Bu modül, kullanıcının göndermesi gereken
-//! Transaction'ı inşa eder.
+//! A Lubot inference request is carried to the executor as a
+//! `TransactionType::AiInferenceRequest`. The executor
+//! (src/execution/executor.rs:723) already handles the whole flow: Pollen
+//! grant verification, the balance check, ai_registry.submit_request, grant
+//! consumption and the fee deduction. This module builds the transaction the
+//! user has to send.
 
 use crate::ai::types::{AiInferenceRequest, AiModelId, AiRequestId};
 use crate::core::address::Address;
@@ -12,7 +13,8 @@ use crate::core::transaction::{Transaction, TransactionType};
 
 use super::inference;
 
-/// Executor'a gönderilecek Lubot transaction request'i (metadata seam).
+/// The Lubot transaction request to be sent to the executor (the metadata
+/// seam).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LubotExecutorRequest {
     pub request_id: AiRequestId,
@@ -22,7 +24,7 @@ pub struct LubotExecutorRequest {
 }
 
 impl LubotExecutorRequest {
-    /// Bir AiInferenceRequest'ten executor-ready form oluştur.
+    /// Build the executor-ready form from an AiInferenceRequest.
     #[must_use]
     pub fn from_inference_request(req: &AiInferenceRequest) -> Self {
         Self {
@@ -34,20 +36,22 @@ impl LubotExecutorRequest {
     }
 }
 
-/// Bir Lubot çıkarım transaction'ı inşa et (executor'a gönderilecek form).
+/// Build a Lubot inference transaction (the form to send to the executor).
 ///
-/// Executor bu transaction'ı `TransactionType::AiInferenceRequest` olarak işler:
-/// (1) Pollen grant doğrulaması (kapalı-devre), (2) balance kontrolü, (3) ai_registry
-/// Submit, (4) grant tüketimi, (5) fee + max_fee kesintisi.
+/// The executor handles this transaction as a
+/// `TransactionType::AiInferenceRequest`: (1) Pollen grant verification
+/// (closed-circuit), (2) the balance check, (3) the ai_registry submit,
+/// (4) grant consumption, (5) the fee plus max_fee deduction.
 ///
-/// Birinci madde artık burada da geçerli: `grant` zorunlu bir argüman ve
-/// istek inşa edilmeden önce doğrulanıyor. Öncesinde bu cümle yalnızca
-/// executor'ın yapacağı işi tarif ediyordu, ve izinsiz bir istek nesnesi
-/// oraya varana kadar geçerli görünüyordu.
+/// The first item now holds here as well: `grant` is a mandatory argument and
+/// it is verified before the request is built. Previously this sentence only
+/// described work the executor would do, and an unauthorised request object
+/// looked valid until it got there.
 ///
 /// # Errors
 ///
-/// Yetki geçerli değilse hangi koşulun düştüğünü söyleyen bir mesaj.
+/// A message saying which condition failed when the authorisation is not
+/// valid.
 #[allow(clippy::too_many_arguments)]
 pub fn build_lubot_transaction(
     from: Address,
