@@ -1,49 +1,56 @@
-//! F10.3 Ethereum PoS sync-committee light-client (Altair+ finality).
+//! F10.3 Ethereum PoS sync committee light client, Altair-and-later finality.
 //!
-//! N-confirmation
-//! Finality'sini güçlendirir: sync-committee (512-validator, ~27h period) BLS12-381
-//! Aggregate signature ile gerçek PoS finality. N-conf fallback olarak kalır
-//! (sync-committee yoksa veya period rotation başarısızsa).
+//! This strengthens N-confirmation finality: the sync committee, 512 validators
+//! over a period of about 27 hours, gives real PoS finality through a BLS12-381
+//! aggregate signature. N-confirmation remains as the fallback, for when there
+//! is no sync committee or the period rotation fails.
 //!
-//! # Model (Ethereum Altair BeaconSyncCommittee)
+//! # The model, Ethereum Altair `BeaconSyncCommittee`
 //!
-//! - **Sync period**: ~256 epoch (~27h). Her periyotta yeni 512-validator sync
-//!   Committee rotation (random selection).
-//! - **Sync-aggregate** (`SyncAggregate`): `sync_committee_bits: Bitvector<512>`
-//!   `+ sync_committee_signature: BLSSignature`. Altair header üzerinde imza.
-//!   Participation ≥ 2/3 (≈342/512) → finalized kabul.
-//! - **Light-client state**: `finalized_header`, `next_sync_committee` (512 pubkey),
-//!   `current_period`. Her finalized header'da next_sync_committee güncellenir.
+//! - **The sync period** is about 256 epochs, roughly 27 hours. Each period
+//!   rotates in a new committee of 512 validators, selected at random.
+//! - **The sync aggregate**, `SyncAggregate`, holds
+//!   `sync_committee_bits: Bitvector<512>` and
+//!   `sync_committee_signature: BLSSignature`, a signature over the Altair
+//!   header. Participation at or above two thirds, about 342 of 512, counts as
+//!   finalized.
+//! - **The light client state** holds `finalized_header`,
+//!   `next_sync_committee` with its 512 public keys, and `current_period`. On
+//!   every finalized header, `next_sync_committee` is updated.
 //!
-//! # Güvenlik
+//! # Security
 //!
-//! - **Deterministik + network'süz.** Relayer sync-aggregate + header üretir;
-//!   Budlum BLS aggregate verify eder (Q1 relayer-produces).
-//! - **BLS12-381 `verify_bls_sig` reuse** (`chain::finality::verify_bls_sig`),
-//!   Subgroup check'li. Aggregate verify: her participating pubkey ayrı verify
-//!   (büyük pubkey-set aggregate'i bls12_381 crate ile kompleks; minimal impl
-//!   Per-participant verify + count threshold).
-//! - **Threshold participation**: <2/3 → RED (finality yok).
+//! - **Deterministic and network-free.** The relayer produces the sync
+//!   aggregate and the header; Budlum performs the BLS aggregate verification.
+//!   That is Q1, relayer-produces.
+//! - **`verify_bls_sig` is reused** from `chain::finality::verify_bls_sig`,
+//!   including its subgroup check. On aggregate verification, each
+//!   participating public key is verified separately: aggregating a large
+//!   public key set is awkward with the `bls12_381` crate, so this minimal
+//!   implementation verifies per participant and counts against the threshold.
+//! - **Threshold participation**: below two thirds is REFUSED, meaning no
+//!   finality.
 
 use crate::chain::finality::verify_bls_sig;
 
-/// Sync-committee hatası.
+/// A sync committee error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncCommitteeError {
-    /// Geçersiz pubkey boyutu/encoding.
+    /// An invalid public key size or encoding.
     InvalidPubkey,
-    /// Geçersiz imza boyutu/encoding.
+    /// An invalid signature size or encoding.
     InvalidSignature,
-    /// Participation eşiğin altında (<2/3 sync-committee).
+    /// Participation is below the threshold, under two thirds of the committee.
     InsufficientParticipation {
         participating: usize,
         threshold: usize,
     },
-    /// BLS aggregate verify başarısız.
+    /// The BLS aggregate verification failed.
     SignatureVerificationFailed,
-    /// Light-client state ile uyumsuz (yanlış period / next_sync_committee).
+    /// Inconsistent with the light client state: the wrong period or the wrong
+    /// `next_sync_committee`.
     StateMismatch,
-    /// Header sync-committee state ile eşleşmiyor.
+    /// The header does not match the sync committee state.
     HeaderMismatch,
 }
 
@@ -70,40 +77,43 @@ impl std::fmt::Display for SyncCommitteeError {
 
 impl std::error::Error for SyncCommitteeError {}
 
-/// Sync-committee boyutu (Altair sabiti).
+/// The sync committee size, an Altair constant.
 pub const SYNC_COMMITTEE_SIZE: usize = 512;
 
-/// Participation eşiği (2/3 - Altair finality). 512 * 2 / 3 = 341.33 → 342.
+/// The participation threshold, two thirds, for Altair finality:
+/// 512 * 2 / 3 = 341.33, rounded up to 342.
 pub const PARTICIPATION_THRESHOLD: usize = (SYNC_COMMITTEE_SIZE * 2) / 3 + 1;
 
-/// BLS pubkey boyutu (G2 compressed, BLS12-381).
+/// The BLS public key size, G2 compressed on BLS12-381.
 pub const BLS_PUBKEY_LEN: usize = 96;
 
-/// BLS imza boyutu (G1 compressed).
+/// The BLS signature size, G1 compressed.
 pub const BLS_SIGNATURE_LEN: usize = 96;
 
-/// Ethereum sync-committee light-client state. Tek period için.
+/// The Ethereum sync committee light client state, for a single period.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncCommitteeState {
-    /// Finalize edilmiş header'ın period'u.
+    /// The period of the finalized header.
     pub current_period: u64,
-    /// Mevcut sync-committee (512 pubkey, her biri 96-byte G2 compressed).
+    /// The current sync committee: 512 public keys, each 96 bytes, G2
+    /// compressed.
     pub current_sync_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
-    /// Bir sonraki sync-committee (period rotation için).
+    /// The next sync committee, for the period rotation.
     pub next_sync_committee: [[u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
 }
 
-/// Altair sync-aggregate (header üzerindeki imza + participation bitmap).
+/// An Altair sync aggregate: the signature over the header plus the
+/// participation bitmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncAggregate {
-    /// 512-bit participation bitmap (1 = imzalamış).
+    /// The 512-bit participation bitmap, where a 1 means the member signed.
     pub sync_committee_bits: [u8; SYNC_COMMITTEE_SIZE / 8],
-    /// Aggregated BLS imzas (G1 compressed, 96-byte).
+    /// The aggregated BLS signature, G1 compressed, 96 bytes.
     pub sync_committee_signature: [u8; BLS_SIGNATURE_LEN],
 }
 
 impl SyncAggregate {
-    /// Participation sayısı (bitmap'teki 1-bit sayısı).
+    /// The participation count, the number of set bits in the bitmap.
     pub fn participation_count(&self) -> usize {
         self.sync_committee_bits
             .iter()
@@ -111,7 +121,7 @@ impl SyncAggregate {
             .sum()
     }
 
-    /// `index`-inci sync-committee üyesi imzalamış mı?
+    /// Did the sync committee member at `index` sign?
     pub fn signed(&self, index: usize) -> bool {
         if index >= SYNC_COMMITTEE_SIZE {
             return false;
@@ -122,25 +132,29 @@ impl SyncAggregate {
     }
 }
 
-/// Sync-committee aggregate imzasını verify eder.
+/// Verifies a sync committee aggregate signature.
 ///
-/// **fix:** Önceki impl sadece 1 geçerli pubkey yeterli sayıyordu
-/// (return Ok on first success). Bu, 342+ threshold'u tamamen anlamsız
-/// Kılıyordu - saldirgan sadece 1 geçerli imza ile finality bypass edebilirdi.
+/// **The fix:** the previous implementation treated a single valid public key as
+/// enough, returning `Ok` on the first success. That made the threshold of 342
+/// or more entirely meaningless: an attacker could bypass finality with one
+/// valid signature.
 ///
-/// **Düzeltilmiş impl:** Her participating pubkey için imzayı doğrular,
-/// Geçerli imza sayısını sayar ve threshold'u (342/512 = 2/3) karşılar.
-/// Bu, aggregate verify ile güvenlik açısından eşdeğerdir (her imza ayrı
-/// Verify = en az aggregate verify kadar güçlü), sadece daha yavaştır.
-/// F10.3 minimal - production'da aggregate-pubkey optimizasyonu.
+/// **The corrected implementation:** it verifies the signature for every
+/// participating public key, counts the valid ones, and requires that count to
+/// meet the threshold of 342 out of 512, which is two thirds. In security terms
+/// this is equivalent to an aggregate verification, since verifying each
+/// signature separately is at least as strong; it is only slower. F10.3 is
+/// minimal here, and production would add the aggregate public key
+/// optimisation.
 ///
-/// `signing_message` = Altair signing domain + header hash (caller üretir).
+/// `signing_message` is the Altair signing domain plus the header hash, which
+/// the caller produces.
 pub fn verify_sync_aggregate(
     state: &SyncCommitteeState,
     aggregate: &SyncAggregate,
     signing_message: &[u8],
 ) -> Result<(), SyncCommitteeError> {
-    // 1. Participation threshold kontrolü.
+    // 1. Check the participation threshold.
     let participating = aggregate.participation_count();
     if participating < PARTICIPATION_THRESHOLD {
         return Err(SyncCommitteeError::InsufficientParticipation {
@@ -172,7 +186,8 @@ pub fn verify_sync_aggregate(
     Ok(())
 }
 
-/// Period rotation: finalized header, next_sync_committee'yi current yapar.
+/// The period rotation: on a finalized header, `next_sync_committee` becomes
+/// the current one.
 pub fn rotate_period(state: &mut SyncCommitteeState) {
     state.current_sync_committee = state.next_sync_committee;
     state.current_period = state.current_period.saturating_add(1);
@@ -218,7 +233,7 @@ mod tests {
 
     #[test]
     fn participation_threshold_is_two_thirds() {
-        // 512 * 2/3 = 341.33 → ceil 342
+        // 512 * 2/3 = 341.33, rounded up to 342.
         assert_eq!(PARTICIPATION_THRESHOLD, 342);
     }
 
@@ -280,15 +295,15 @@ mod tests {
 
     #[test]
     fn garbage_aggregate_does_not_panic() {
-        // DoS güvenliği: rastgele bytes → Err, panic YOK.
+        // DoS safety: random bytes give an Err and NO panic.
         let state = dummy_state();
         let mut bits = [0u8; SYNC_COMMITTEE_SIZE / 8];
-        bits[0] = 0xFF; // 8 participating (threshold altı)
+        bits[0] = 0xFF; // 8 participating, below the threshold
         let agg = SyncAggregate {
             sync_committee_bits: bits,
             sync_committee_signature: [0xFFu8; BLS_SIGNATURE_LEN],
         };
-        let _ = verify_sync_aggregate(&state, &agg, b"garbage"); // Err beklenir, panic YOK.
+        let _ = verify_sync_aggregate(&state, &agg, b"garbage"); // an Err is expected, and NO panic
     }
 
     #[test]
