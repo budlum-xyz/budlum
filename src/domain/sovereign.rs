@@ -4,13 +4,13 @@
 //! Describe lifecycle and compliance evidence without leaking private KYC data
 //! Or merging PoA rules into the permissionless core registry.
 //!
-//! # Nereden cagriliyor
+//! # Where it is called from
 //!
-//! `SovereignDomainRegistry::register_template_for_domain`, sablonu
-//! `ConsensusDomainRegistry` icindeki gercek alanla karsilastirir: uzlasma
-//! turu ve operator eslesmeli. Once oyle degildi - sablonun kendi icinde
-//! tutarli olmasi yeterliydi, dolayisiyla bir alani gercekte oldugundan
-//! baska turlu anlatan bir denetim belgesi uretilebiliyordu.
+//! `SovereignDomainRegistry::register_template_for_domain` compares a template
+//! against the real domain inside `ConsensusDomainRegistry`: the consensus kind
+//! and the operator have to match. It did not before - a template being
+//! consistent within itself was enough - so an audit document could be produced
+//! that described a domain as something other than what it is.
 
 use crate::core::address::Address;
 use crate::domain::{ConsensusKind, DomainId, DomainStatus, Hash32};
@@ -271,29 +271,29 @@ impl SovereignDomainRegistry {
         Self::default()
     }
 
-    /// Şablonu, adlandırdığı gerçek uzlaşma alanına bağlayarak kaydet.
+    /// Register a template, binding it to the real consensus domain it names.
     ///
-    /// # Neden ayrı bir giriş
+    /// # Why this is a separate entry point
     ///
-    /// [`register_template`](Self::register_template) şablonun **kendi
-    /// içinde** tutarlı olduğunu doğrular: PoA ise KYC ister, kimliği
-    /// alanlarından yeniden hesaplanır. Ama `domain_id`'nin gerçekte hangi
-    /// alanı gösterdiğine bakmaz. Bu, şablonun taşıdığı iki iddiayı
-    /// denetimsiz bırakıyordu.
+    /// [`register_template`](Self::register_template) verifies that a template
+    /// is consistent **within itself**: PoA requires KYC, and the identity is
+    /// recomputed from the fields. It does not look at which domain the
+    /// `domain_id` actually points to, which left two of the template's claims
+    /// unchecked.
     ///
-    /// Bir şablon `domain_id = 7` için `PoA` ve `requires_kyc = true`
-    /// diyebilirdi; 7 numaralı alan `PoS` olarak kayıtlıysa, denetime sunulan
-    /// belge "bu alan izinli ve KYC'li" derken zincir izinsiz çalışmaya devam
-    /// ederdi. İkisi de kendi içinde geçerli, birlikte yalan. `operator` için
-    /// de aynısı geçerli: şablonun işaret ettiği operatör, alanın gerçek
-    /// operatörü olmalı, yoksa başkasının alanı adına denetim belgesi
-    /// yazılabilirdi.
+    /// A template could say `PoA` and `requires_kyc = true` for
+    /// `domain_id = 7`, and if domain 7 is registered as `PoS`, the document
+    /// handed to an auditor would read "this domain is permissioned and
+    /// KYC'd" while the chain kept running permissionless. Each is valid on its
+    /// own, and together they lie. The same holds for `operator`: the operator
+    /// a template points at has to be the domain's real operator, or an audit
+    /// document could be written in the name of somebody else's domain.
     ///
     /// # Errors
     ///
-    /// Alan kayıtlı değilse, uzlaşma türü şablonunkiyle uyuşmuyorsa ya da
-    /// operatör farklıysa hata döner. Ayrıca
-    /// [`register_template`](Self::register_template)'in her hatası.
+    /// When the domain is not registered, when its consensus kind does not
+    /// match the template's, or when the operator differs. Also every error
+    /// [`register_template`](Self::register_template) returns.
     pub fn register_template_for_domain(
         &mut self,
         template: SovereignDomainTemplate,
@@ -334,18 +334,18 @@ impl SovereignDomainRegistry {
         Ok(())
     }
 
-    /// Denetim dışa aktarımını, iddia ettiği kayıtlı şablona karşı doğrula.
+    /// Verify an audit export against the registered template it claims.
     ///
-    /// Paket `template_id` taşır ama bu tek başına bir şey söylemez: kimlik
-    /// paketin kendi içinden gelir, kayıt defterinden değil. Bağlamadan
-    /// önce, uydurma bir `template_id` ile üretilmiş bir paket kendi
-    /// tutarlılık denetiminden geçebilirdi. Burada kimlik önce kayıtta
-    /// aranır; bulunamazsa paket reddedilir.
+    /// A bundle carries a `template_id`, but on its own that says nothing: the
+    /// identity comes from inside the bundle, not from the registry. Before
+    /// this binding, a bundle produced with an invented `template_id` could
+    /// pass its own consistency check. Here the identity is looked up in the
+    /// registry first, and a bundle whose identity is not found is refused.
     ///
     /// # Errors
     ///
-    /// Hiçbir kayıtlı şablon bu kimliği taşımıyorsa, ya da
-    /// [`AuditExportBundle::validate_against_template`] hata döndürürse.
+    /// When no registered template carries this identity, or when
+    /// [`AuditExportBundle::validate_against_template`] returns an error.
     pub fn validate_audit_export(&self, bundle: &AuditExportBundle) -> Result<(), String> {
         let template = self
             .templates
@@ -357,10 +357,11 @@ impl SovereignDomainRegistry {
         bundle.validate_against_template(template)
     }
 
-    /// Kayitli sablonun operatoru.
+    /// The registered template's operator.
     ///
-    /// Uyum kapilari kimligi buradan okur: paketin kendi icinden gelen bir
-    /// kimlik, dondurulmus operatorun baskasinin adini yazmasina izin verirdi.
+    /// Compliance gates read the identity from here: an identity coming from
+    /// inside the bundle would let a frozen operator write somebody else's
+    /// name.
     #[must_use]
     pub fn template_operator(&self, template_id: Hash32) -> Option<Address> {
         self.templates
@@ -417,9 +418,11 @@ mod tests {
     ) -> (crate::domain::registry::ConsensusDomainRegistry, Address) {
         let domain =
             crate::domain::plugin::default_domain(id, kind, 4000 + u64::from(id), adapter, 0);
-        let operator = domain.operator.expect("varsayilan alan operator tasir");
+        let operator = domain
+            .operator
+            .expect("a default domain carries an operator");
         let mut domains = crate::domain::registry::ConsensusDomainRegistry::new();
-        domains.register(domain).expect("alan kaydi");
+        domains.register(domain).expect("the domain registers");
         (domains, operator)
     }
 
@@ -440,7 +443,7 @@ mod tests {
         )
     }
 
-    /// Alanla eşleşen şablon kaydedilebilmeli.
+    /// A template that matches its domain must register.
     #[test]
     fn a_template_matching_its_domain_registers() {
         let (domains, operator) =
@@ -451,15 +454,15 @@ mod tests {
                 template_for(7, ConsensusKind::PoA, operator, true),
                 &domains,
             )
-            .expect("tur ve operator eslesiyor");
+            .expect("the kind and the operator match");
         assert!(sovereign.templates.contains_key(&7));
     }
 
-    /// PoS olarak kayıtlı bir alanı PoA gösteren şablon reddedilmeli.
+    /// A template presenting a PoS-registered domain as PoA must be refused.
     ///
-    /// Şablon kendi içinde geçerlidir (PoA + KYC), alan da geçerlidir; ikisi
-    /// birlikte yalan söyler. Bağlama olmadan, denetime "bu alan izinli ve
-    /// KYC'li" diyen bir belge üretilebilirdi.
+    /// The template is valid on its own (PoA plus KYC) and so is the domain;
+    /// together they lie. Without the binding, a document telling an auditor
+    /// "this domain is permissioned and KYC'd" could be produced.
     #[test]
     fn a_template_claiming_the_wrong_consensus_kind_is_refused() {
         let (domains, operator) = domain_registry_with(8, ConsensusKind::PoS, "pos-qc-finality");
@@ -469,12 +472,12 @@ mod tests {
                 template_for(8, ConsensusKind::PoA, operator, true),
                 &domains,
             )
-            .expect_err("tur uyusmazligi reddedilmeli");
+            .expect_err("a kind mismatch must be refused");
         assert!(err.contains("registered as"), "{err}");
         assert!(sovereign.templates.is_empty());
     }
 
-    /// Başkasının alanı adına şablon yazılamamalı.
+    /// A template must not be written in the name of somebody else's domain.
     #[test]
     fn a_template_naming_a_foreign_operator_is_refused() {
         let (domains, _operator) =
@@ -485,11 +488,11 @@ mod tests {
                 template_for(9, ConsensusKind::PoA, addr(200), true),
                 &domains,
             )
-            .expect_err("yabanci operator reddedilmeli");
+            .expect_err("a foreign operator must be refused");
         assert!(err.contains("operator"), "{err}");
     }
 
-    /// Kayıtlı olmayan bir alan için şablon yazılamamalı.
+    /// A template must not be written for an unregistered domain.
     #[test]
     fn a_template_naming_an_unregistered_domain_is_refused() {
         let domains = crate::domain::registry::ConsensusDomainRegistry::new();
@@ -499,7 +502,7 @@ mod tests {
                 template_for(11, ConsensusKind::PoA, addr(9), true),
                 &domains,
             )
-            .expect_err("kayitsiz alan reddedilmeli");
+            .expect_err("an unregistered domain must be refused");
         assert!(err.contains("not registered"), "{err}");
     }
 
