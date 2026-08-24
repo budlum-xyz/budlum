@@ -1,61 +1,62 @@
-//! P12-9: Mobile Self - Mobil düğüm profili ve kendi B.U.D.'nü barındır.
+//! P12-9: Mobile Self - the mobile node profile, and hosting your own B.U.D.
 //!
-//! Mobile Self, kullanıcıların kendi mobil cihazlarında Budlum düğümü
-//! Çalıştırmasını sağlar. Bu modül, mobil cihazların kısıtlı kaynaklarına
-//! (pil, bant genişliği, depolama) uygun çalışma profilini tanımlar.
+//! Mobile Self lets people run a Budlum node on their own phone. This module
+//! defines the working profile that fits what a mobile device actually has:
+//! battery, bandwidth, and storage are all limited.
 //!
-//! # Özellikler
+//! # What it provides
 //!
-//! - **Battery-Aware Challenge Policy:** Pil seviyesine göre doğrulama sıklığı
-//! - **NAT Connectivity:** NAT arkasındaki mobil düğümler için relay/STUN
-//! - **Self-Hosted B.U.D.:** Mobil cihazda B.U.D. storage sunumu
-//! - **Lightweight Sync:** Hafif senkronizasyon (stateless verification)
+//! - **Battery-aware challenge policy:** verification frequency follows the
+//!   battery level.
+//! - **NAT connectivity:** relay/STUN for mobile nodes sitting behind a NAT.
+//! - **Self-hosted B.U.D.:** serving B.U.D. storage from the device.
+//! - **Lightweight sync:** stateless verification.
 
 use crate::core::address::Address;
 use serde::{Deserialize, Serialize};
 
-/// Mobil düğüm profili.
+/// A mobile node profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MobileNodeProfile {
-    /// Düğüm adresi.
+    /// Node address.
     pub address: Address,
-    /// Cihaz türü.
+    /// Device kind.
     pub device_type: DeviceType,
-    /// Pil durumu.
+    /// Battery state.
     pub battery: BatteryStatus,
-    /// Ağ durumu.
+    /// Network state.
     pub network: NetworkStatus,
-    /// Depolama durumu.
+    /// Storage state.
     pub storage: StorageStatus,
-    /// Challenge policy (pil durumuna göre ayarlanır).
+    /// Challenge policy, tuned to the battery state.
     pub challenge_policy: ChallengePolicy,
-    /// NAT geçiş durumu.
+    /// NAT traversal state.
     pub nat_status: NatTraversalStatus,
-    /// Son görülme zamanı (epoch).
+    /// When it was last seen (epoch).
     pub last_seen_epoch: u64,
 }
 
-/// Cihaz türü.
+/// The kind of device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceType {
-    /// Akıllı telefon.
+    /// A smartphone.
     Phone,
     /// Tablet.
     Tablet,
-    /// Laptop (mobil bağlantı).
+    /// A laptop on a mobile connection.
     Laptop,
-    /// IoT cihazı.
+    /// An IoT device.
     IoT,
 }
 
-/// Pil durumu.
+/// Battery state.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BatteryStatus {
-    /// Pil seviyesi (0-100).
+    /// Battery level, 0-100.
     pub level_pct: u8,
-    /// Şarj oluyor mu?
+    /// Is it charging?
     pub charging: bool,
-    /// Tahmini kalan süre (dakika).
+    /// Estimated minutes remaining.
     pub estimated_minutes: u32,
 }
 
@@ -76,7 +77,7 @@ impl BatteryStatus {
         }
     }
 
-    /// Pil seviyesine göre çalışma modu.
+    /// The working mode implied by the battery level.
     pub fn power_mode(&self) -> PowerMode {
         if self.charging {
             PowerMode::Full
@@ -100,35 +101,35 @@ impl BatteryStatus {
     }
 }
 
-/// Güç modu.
+/// Power mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PowerMode {
-    /// Tam güç - tüm görevleri kabul et.
+    /// Full power: accept every task.
     Full,
-    /// Normal - standart görevler.
+    /// Normal: standard tasks.
     Normal,
-    /// Tasarruf - sadece temel görevler.
+    /// Saving: essential tasks only.
     PowerSaving,
-    /// Kritik - sadece dinleme, görev kabul etme.
+    /// Critical: listen only, accept no tasks.
     Critical,
 }
 
-/// Ağ durumu.
+/// Network state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkStatus {
-    /// Bağlantı türü.
+    /// Connection kind.
     pub connection_type: ConnectionType,
-    /// Bant genişliği (Kbps tahmini).
+    /// Estimated bandwidth, in Kbps.
     pub bandwidth_kbps: u64,
     /// Gecikme (ms).
     pub latency_ms: u32,
     /// NAT tipi.
     pub nat_type: NatType,
-    /// Genel IP erişimi var mı?
+    /// Is there public IP reachability?
     pub public_ip: bool,
 }
 
-/// Bağlantı türü.
+/// The kind of connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionType {
     WiFi,
@@ -143,15 +144,15 @@ pub enum ConnectionType {
 pub enum NatType {
     /// NAT yok - genel IP.
     None,
-    /// Full Cone NAT - en izin verilen.
+    /// Full cone NAT: the most permissive.
     FullCone,
     /// Restricted Cone NAT.
     RestrictedCone,
     /// Port Restricted Cone NAT.
     PortRestrictedCone,
-    /// Symmetric NAT - en kısıtlayıcı.
+    /// Symmetric NAT: the most restrictive.
     Symmetric,
-    /// Bilinmiyor.
+    /// Unknown.
     Unknown,
 }
 
@@ -170,14 +171,14 @@ impl NetworkStatus {
     }
 }
 
-/// Depolama durumu.
+/// Storage state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStatus {
     /// Toplam depolama (bayt).
     pub total_bytes: u64,
-    /// Kullanılabilir depolama (bayt).
+    /// Usable storage, in bytes.
     pub available_bytes: u64,
-    /// B.U.D. için ayrılmış alan (bayt).
+    /// Space reserved for B.U.D., in bytes.
     pub bud_reserved_bytes: u64,
 }
 
@@ -195,25 +196,25 @@ impl StorageStatus {
         Ok(())
     }
 
-    /// B.U.D. için kullanılabilir alan (bayt).
+    /// Space available to B.U.D., in bytes.
     pub fn bud_available(&self) -> u64 {
         self.bud_reserved_bytes.min(self.available_bytes)
     }
 
-    /// Depolama yeterli mi (en az 1 GB B.U.D. için)?
+    /// Is there enough storage, meaning at least 1 GB for B.U.D.?
     pub fn is_sufficient_for_bud(&self) -> bool {
         self.bud_available() >= 1_073_741_824 // 1 GB
     }
 }
 
-/// Challenge policy - pil durumuna göre otomatik ayarlanır.
+/// The challenge policy, tuned automatically to the battery state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengePolicy {
-    /// Maksimum challenge kabul sıklığı (epoch başına).
+    /// The most challenges accepted per epoch.
     pub max_challenges_per_epoch: u32,
-    /// Maksimum proof task kabul sayısı.
+    /// The most proof tasks accepted.
     pub max_proof_tasks: u32,
-    /// Sync-committee katılımı aktif mi?
+    /// Is sync-committee participation on?
     pub sync_committee_participation: bool,
     /// Storage attestation kabul ediyor mu?
     pub storage_attestation: bool,
@@ -248,7 +249,7 @@ impl ChallengePolicy {
         }
     }
 
-    /// Pil durumuna göre challenge policy oluşturur.
+    /// Builds a challenge policy from the battery state.
     pub fn from_power_mode(mode: PowerMode) -> Self {
         match mode {
             PowerMode::Full => Self {
@@ -282,22 +283,22 @@ impl ChallengePolicy {
         }
     }
 
-    /// Varsayılan policy (Normal mod).
+    /// The default policy, for normal mode.
     pub fn default_policy() -> Self {
         Self::from_power_mode(PowerMode::Normal)
     }
 }
 
-/// NAT geçiş durumu.
+/// NAT traversal state.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NatTraversalStatus {
-    /// Relay sunucusu kullanılıyor mu?
+    /// Is a relay server in use?
     pub using_relay: bool,
     /// Relay sunucusu adresi.
     pub relay_address: Option<String>,
     /// STUN sunucusu ile NAT tipi tespit edildi mi?
     pub nat_detected: bool,
-    /// Punch-through başarılı mı?
+    /// Did punch-through succeed?
     pub hole_punched: bool,
 }
 
@@ -322,7 +323,7 @@ impl NatTraversalStatus {
 }
 
 impl MobileNodeProfile {
-    /// Yeni bir mobil düğüm profili oluşturur.
+    /// Creates a new mobile node profile.
     pub fn new(address: Address, device_type: DeviceType) -> Self {
         Self {
             address,
@@ -377,7 +378,7 @@ impl MobileNodeProfile {
         Ok(())
     }
 
-    /// Pil durumunu günceller ve challenge policy'yi ayarlar.
+    /// Updates the battery state and retunes the challenge policy.
     pub fn update_battery(&mut self, level_pct: u8, charging: bool, estimated_minutes: u32) {
         self.battery = BatteryStatus {
             level_pct,
@@ -387,12 +388,12 @@ impl MobileNodeProfile {
         self.challenge_policy = ChallengePolicy::from_power_mode(self.battery.power_mode());
     }
 
-    /// NAT durumunu günceller.
+    /// Updates the NAT state.
     pub fn update_nat(&mut self, nat_type: NatType, public_ip: bool) {
         self.network.nat_type = nat_type;
         self.network.public_ip = public_ip;
 
-        // Symmetric NAT = relay gerekli
+        // Symmetric NAT means a relay is required
         if nat_type == NatType::Symmetric && !public_ip {
             self.nat_status.using_relay = true;
             self.nat_status.hole_punched = false;
@@ -411,13 +412,13 @@ impl MobileNodeProfile {
         self.nat_status.validate()
     }
 
-    /// Düğüm aktif görev kabul edebilir mi?
+    /// Can the node take on active tasks?
     pub fn can_accept_tasks(&self) -> bool {
         self.challenge_policy.max_challenges_per_epoch > 0
             || self.challenge_policy.max_proof_tasks > 0
     }
 
-    /// Profil özetini döndürür.
+    /// Returns a summary of the profile.
     pub fn summary(&self) -> String {
         format!(
             "MobileNode({}{}): battery={}%, mode={:?}, nat={:?}, tasks={}",
@@ -489,7 +490,7 @@ mod tests {
         assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 0);
         assert!(!profile.can_accept_tasks());
 
-        // Şarja tak
+        // Plug it in to charge
         profile.update_battery(5, true, 60);
         assert_eq!(profile.challenge_policy.max_challenges_per_epoch, 100);
     }

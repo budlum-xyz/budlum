@@ -213,7 +213,6 @@ src/account_abstraction/tee_attestation.rs	46
 src/account_abstraction/threshold_mldsa.rs	38
 src/ai/README.md	23
 src/ai/mod.rs	2
-src/ai/registry.rs	52
 src/ai/types.rs	15
 src/bin/bud.rs	2
 src/bin/budlum-relayer.rs	31
@@ -263,7 +262,6 @@ src/lubot/storage.rs	8
 src/lubot/verify.rs	46
 src/main.rs	46
 src/mempool/pool.rs	20
-src/network/mobile.rs	56
 src/network/node.rs	18
 src/network/sync_codec.rs	1
 src/pollen/README.md	23
@@ -283,7 +281,6 @@ src/rpc/api.rs	17
 src/rpc/tests.rs	1
 src/sdk/mod.rs	50
 src/settlement/global_block.rs	2
-src/settlement/proof_market.rs	56
 src/socialfi/README.md	14
 src/socialfi/mod.rs	6
 src/storage/content_id.rs	2

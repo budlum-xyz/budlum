@@ -28,23 +28,23 @@ fn nonzero_hash(value: &Hash32) -> bool {
     *value != [0u8; 32]
 }
 
-/// Proof görev türü.
+/// The kind of proof task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProofTaskKind {
-    /// Domain commitment doğrulama - Merkle proof + event verification.
+    /// Domain commitment verification: Merkle proof plus event verification.
     DomainCommitment {
         domain_id: DomainId,
         domain_height: u64,
         sequence: u64,
     },
-    /// ZK-proof doğrulama - STARK/SNARK verifier.
+    /// ZK-proof verification: a STARK/SNARK verifier.
     ZkProof {
         circuit_id: [u8; 32],
         public_inputs_hash: Hash32,
     },
-    /// Sync-committee BLS imza doğrulama.
+    /// Sync-committee BLS signature verification.
     SyncCommitteeSig { domain_id: DomainId, epoch: u64 },
-    /// Storage attestation doğrulama.
+    /// Storage attestation verification.
     StorageAttestation {
         deal_id: [u8; 32],
         challenge_epoch: u64,
@@ -145,28 +145,30 @@ impl ProofTaskKind {
     }
 }
 
-/// Proof görev durumu.
+/// The status of a proof task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProofTaskStatus {
-    /// Beklemede - prover atanmamış.
+    /// Waiting: no prover has been assigned.
     Pending,
-    /// Prover atanmış - çalışıyor.
+    /// A prover is assigned and working.
     Assigned {
         prover: Address,
         assigned_at_epoch: u64,
     },
-    /// Tamamlanmış - proof doğrulanmış.
+    /// Complete: the proof verified.
     Completed,
-    /// Süresi dolmuş.
+    /// Expired.
     Expired,
-    /// Başarısız - proof geçersiz.
+    /// Failed: the proof was invalid.
     Failed { reason: String },
 }
 
 impl ProofTaskStatus {
-    /// Root commitment için durum baytları (Strix HIGH CWE-345, 2026-08-17):
-    /// `assign` sahipliği ve zamanlamayı `status` alanında değiştirir; root
-    /// status'u atlarsa farklı assignment durumları aynı kökü üretir.
+    /// Status bytes for the root commitment (Strix HIGH CWE-345, 2026-08-17).
+    ///
+    /// `assign` changes ownership and timing inside the `status` field, so if
+    /// the root skips the status, two different assignment states produce the
+    /// same root.
     pub fn root_bytes(&self) -> Vec<u8> {
         match self {
             Self::Pending => vec![0],
@@ -190,20 +192,20 @@ impl ProofTaskStatus {
     }
 }
 
-/// Proof görevi - prover'ların üstlenebileceği bir doğrulama görevi.
+/// A proof task: a verification job a prover can take on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProofTask {
-    /// Görev ID (deterministik: hash(task_kind + creator + created/deadline/reward)).
+    /// Task ID, deterministic: `hash(task_kind + creator + created/deadline/reward)`.
     pub task_id: [u8; 32],
-    /// Görev türü.
+    /// Task kind.
     pub kind: ProofTaskKind,
-    /// Görevi oluşturan (genellikle settlement layer).
+    /// Who created the task, usually the settlement layer.
     pub creator: Address,
-    /// Oluşturulma epoch'u.
+    /// The epoch it was created in.
     pub created_epoch: u64,
     /// Son teslim epoch'u.
     pub deadline_epoch: u64,
-    /// Görev durumu.
+    /// Task status.
     ///
     /// IDENTITY: excluded - the status moves through the task's life
     /// (`Pending` to `Assigned` to `Completed`), and the id has to survive
@@ -211,9 +213,9 @@ pub struct ProofTask {
     /// already changed the status. Hashing it would give the same task a
     /// different id at every transition and no lookup would ever match.
     pub status: ProofTaskStatus,
-    /// Ödül miktarı (u64 BUD birimi, 6 ondalık).
+    /// Reward amount, in `u64` BUD units with 6 decimals.
     pub reward: u64,
-    /// Zorluk seviyesi (prover stake gereksinimi oranı, fixed-point).
+    /// Difficulty level: the prover stake requirement ratio, fixed-point.
     ///
     /// IDENTITY: excluded - `default_difficulty` derives it from `kind`,
     /// which the id does cover, so the same kind always yields the same
@@ -250,7 +252,7 @@ pub struct ProofTask {
 }
 
 impl ProofTask {
-    /// Yeni bir proof görevi oluşturur.
+    /// Creates a new proof task.
     ///
     /// `slash_condition_hash` names what the prover forfeits by answering
     /// wrongly and `min_prover_stake` is the bond it must already hold. Both
@@ -290,7 +292,7 @@ impl ProofTask {
         }
     }
 
-    /// Deterministik görev ID hesaplar.
+    /// Computes the deterministic task ID.
     fn compute_task_id(
         kind: &ProofTaskKind,
         creator: &Address,
@@ -365,7 +367,7 @@ impl ProofTask {
         Ok(())
     }
 
-    /// Görev türüne göre varsayılan zorluk.
+    /// The default difficulty for a task kind.
     fn default_difficulty(kind: &ProofTaskKind) -> u64 {
         match kind {
             ProofTaskKind::DomainCommitment { .. } => 1_000_000, // FIXED_POINT_SCALE = 1x
@@ -375,7 +377,7 @@ impl ProofTask {
         }
     }
 
-    /// Görevi bir prover'a atar.
+    /// Assigns the task to a prover.
     ///
     /// `prover_stake` is the bond that prover already holds. The task states
     /// a `min_prover_stake` and it is read here, because assignment is the
@@ -421,7 +423,7 @@ impl ProofTask {
         Ok(())
     }
 
-    /// Görevi tamamlanmış olarak işaretler.
+    /// Marks the task complete.
     pub fn complete(&mut self) -> Result<(), String> {
         match &self.status {
             ProofTaskStatus::Assigned { .. } => {
@@ -433,7 +435,7 @@ impl ProofTask {
         }
     }
 
-    /// Görevi süresi dolmuş olarak işaretler.
+    /// Marks the task expired.
     pub fn expire(&mut self) -> Result<(), String> {
         if !self.is_active() {
             return Err("Only active tasks can expire".into());
@@ -442,7 +444,7 @@ impl ProofTask {
         Ok(())
     }
 
-    /// Görev aktif mi (pending veya assigned)?
+    /// Is the task active, meaning pending or assigned?
     pub fn is_active(&self) -> bool {
         matches!(
             self.status,
@@ -451,37 +453,37 @@ impl ProofTask {
     }
 }
 
-/// Proof makbuzu - prover'ın bir görevi başarıyla tamamladığını kanıtlar.
+/// A proof receipt: evidence that a prover completed a task successfully.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProofReceipt {
-    /// İlgili görev ID.
+    /// The task this belongs to.
     pub task_id: [u8; 32],
     /// Proof'u sunan prover adresi.
     pub prover: Address,
-    /// Doğrulama zaman damgası (epoch).
+    /// Verification timestamp (epoch).
     pub verified_epoch: u64,
-    /// Proof doğrulama sonucu hash'i.
+    /// Hash of the proof verification result.
     pub verification_hash: Hash32,
-    /// Ödül miktarı (BUD birimi).
+    /// Reward amount, in BUD units.
     pub reward_claimed: u64,
-    /// Makbuz durumu.
+    /// Receipt status.
     pub status: ReceiptStatus,
 }
 
-/// Makbuz durumu.
+/// The status of a receipt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReceiptStatus {
-    /// Ödenmemiş - settlement onayı bekliyor.
+    /// Unpaid: waiting on settlement approval.
     Pending,
-    /// Ödenmiş - ödül prover'a dağıtıldı.
+    /// Paid: the reward went to the prover.
     Paid,
-    /// İptal - proof geçersiz bulundu.
+    /// Revoked: the proof was found invalid.
     Revoked { reason: String },
 }
 
 impl ReceiptStatus {
-    /// Root commitment baytları (Strix HIGH CWE-345, 2026-08-17): farkli
-    /// odeme-uygunluk durumlari ayni settlement kökünü paylasmamali.
+    /// Root commitment bytes (Strix HIGH CWE-345, 2026-08-17): two different
+    /// payment-eligibility states must not share one settlement root.
     pub fn root_bytes(&self) -> Vec<u8> {
         match self {
             Self::Pending => vec![0],
@@ -496,7 +498,7 @@ impl ReceiptStatus {
 }
 
 impl ProofReceipt {
-    /// Yeni bir proof makbuzu oluşturur.
+    /// Creates a new proof receipt.
     pub fn new(
         task_id: [u8; 32],
         prover: Address,
@@ -544,7 +546,7 @@ impl ProofReceipt {
         Ok(())
     }
 
-    /// Makbuzu ödenmiş olarak işaretler.
+    /// Marks the receipt paid.
     pub fn mark_paid(&mut self) -> Result<(), String> {
         if self.status != ReceiptStatus::Pending {
             return Err("Receipt is not pending".to_string());
@@ -565,7 +567,7 @@ impl ProofReceipt {
         Ok(())
     }
 
-    /// Makbuz ödenebilir mi?
+    /// Is the receipt payable?
     pub fn is_payable(&self) -> bool {
         self.status == ReceiptStatus::Pending
     }
@@ -576,16 +578,16 @@ impl ProofReceipt {
     }
 }
 
-/// Proof Market genel durum takibi.
+/// Overall state tracking for the proof market.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProofMarketState {
-    /// Aktif görevler.
+    /// Active tasks.
     pub active_tasks: Vec<ProofTask>,
-    /// Bekleyen makbuzlar.
+    /// Outstanding receipts.
     pub pending_receipts: Vec<ProofReceipt>,
-    /// Toplam ödenen ödül (u64 BUD birimi).
+    /// Total reward paid out, in `u64` BUD units.
     pub total_rewards_paid: u64,
-    /// Toplam tamamlanan görev sayısı.
+    /// Total number of completed tasks.
     pub total_tasks_completed: u64,
 }
 
@@ -628,7 +630,7 @@ impl ProofMarketState {
         (expired, receipts_pruned)
     }
 
-    /// Yeni görev ekler.
+    /// Adds a new task.
     pub fn add_task(&mut self, task: ProofTask) -> Result<(), String> {
         task.validate_shape()?;
         if task.is_active() {
@@ -647,7 +649,7 @@ impl ProofMarketState {
         Ok(())
     }
 
-    /// Görev tamamlandığında makbuz üretir ve görevi kaldırır.
+    /// On completion, produces a receipt and removes the task.
     pub fn complete_task(
         &mut self,
         task_id: [u8; 32],
@@ -661,10 +663,11 @@ impl ProofMarketState {
             .ok_or("Task not found in active tasks")?;
 
         receipt.validate_for_task(&self.active_tasks[idx])?;
-        // Strix HIGH (CWE-345, 2026-08-17): makbuz yalniz metadata + non-zero
-        // hash tasir; gercek proof dogrulamasi olmadan pending_receipts'e
-        // girmemeli. Dogrulama cagiranin sagladigi hook ile yapilir; market
-        // dogrulamasiz receipt'i kabul etmez, odenmez.
+        // Strix HIGH (CWE-345, 2026-08-17): a receipt carries only metadata and
+        // a non-zero hash, so it must not reach `pending_receipts` without the
+        // proof actually being verified. Verification runs through the hook the
+        // caller supplies; the market accepts no unverified receipt, and pays
+        // for none.
         verify_proof(&receipt)?;
 
         // Every refusal is decided while the task is still in `active_tasks`.
@@ -695,7 +698,7 @@ impl ProofMarketState {
         Ok(())
     }
 
-    /// Makbuzu öder ve kaldırır.
+    /// Pays the receipt and removes it.
     pub fn pay_receipt(&mut self, receipt_idx: usize) -> Result<u64, String> {
         let receipt = self
             .pending_receipts
@@ -711,7 +714,7 @@ impl ProofMarketState {
         Ok(reward)
     }
 
-    /// Süresi dolmuş görevleri temizler.
+    /// Clears out expired tasks.
     pub fn prune_expired(&mut self, current_epoch: u64) -> usize {
         let before = self.active_tasks.len();
         self.active_tasks
