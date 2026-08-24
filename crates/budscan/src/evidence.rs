@@ -42,10 +42,10 @@ pub enum Strength {
 impl fmt::Display for Strength {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Refused => write!(f, "reddedildi"),
-            Self::RpcClaimOnly => write!(f, "yalniz beyan"),
-            Self::TransportOnly => write!(f, "yalniz tasima"),
-            Self::Verified => write!(f, "dogrulandi"),
+            Self::Refused => write!(f, "refused"),
+            Self::RpcClaimOnly => write!(f, "claim only"),
+            Self::TransportOnly => write!(f, "transport only"),
+            Self::Verified => write!(f, "verified"),
         }
     }
 }
@@ -183,7 +183,7 @@ mod tests {
             .with(Claim::new("bud-fetcher", Strength::Verified, "hash tuttu"))
             .with(Claim::new("https", Strength::TransportOnly, "yalniz TLS"));
         let badge = e.badge();
-        assert!(badge.contains("yalniz tasima"), "{badge}");
+        assert!(badge.contains("transport only"), "{badge}");
         assert!(badge.contains("https"), "{badge}");
         assert!(!badge.contains("bud-fetcher"), "{badge}");
     }

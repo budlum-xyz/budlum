@@ -129,7 +129,6 @@ clippy.toml	5
 config/fixtures/gercek-zincir.json	3
 config/mainnet-genesis.json	1
 crates/budscan/Cargo.toml	13
-crates/budscan/README.md	48
 crates/budscan/browser/README.md	18
 crates/budscan/browser/l10n/tr-TR/budscan.ftl	8
 crates/budscan/browser/mozconfig	9
