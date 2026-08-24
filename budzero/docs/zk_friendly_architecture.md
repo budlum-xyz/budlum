@@ -1,62 +1,65 @@
-# ZK Dostu Mimari (ZK-Friendly Architecture)
+# A ZK-friendly architecture
 
-Sanal Makinemiz (VM) tıkır tıkır çalışıyor ve bize bir "Execution Trace" (Çalıştırma İzi) dizisi veriyor. Şimdi bu verileri alıp, bir STARK kanıtlayıcısına yedirebilmek için nasıl bir matrise dönüştüreceğimizi konuşacağız. İşin matematiği ve mühendisliği tam burada başlıyor.
+Our virtual machine runs smoothly and hands us an execution trace. Now we discuss how to turn that data into a matrix we can feed to a STARK prover. This is exactly where the mathematics and the engineering begin.
 
-## Execution Trace Bir Matristir
+## An execution trace is a matrix
 
-Bir ZK-STARK kanıtlayıcısı (Prover) kod okuyamaz. Yalnızca sayılarla dolu, iki boyutlu devasa bir matris anlar. Bu matrisin satırlarına (rows) **Step (Adım)**, sütunlarına (columns) ise **Register veya State** denir.
+A ZK-STARK prover cannot read code. It only understands an enormous two-dimensional matrix full of numbers. The rows of that matrix are called **steps**, its columns **registers or state**.
 
-Matrisin boyutu (satır sayısı) kriptografik nedenlerden ötürü (FFT işlemleri) her zaman **2'nin kuvveti (Power of Two)** olmak zorundadır (16, 256, 1024, 65536 vs.).
+For cryptographic reasons (FFT operations) the size of the matrix (the row count) must always be a **power of two** (16, 256, 1024, 65536 and so on).
 
-### Geleneksel Tek Tablo Yaklaşımı (Neden Kötü?)
+### The traditional single-table approach (why is it bad?)
 
-Başlangıçta BudZKVM'i yazarken her satıra tüm CPU durumunu koymayı denedik. 
-- 1 sütun `PC`
-- 1 sütun `Opcode`
-- 32 sütun (Bütün genel amaçlı register'lar: R0, R1 ... R31)
+When first writing BudZKVM we tried putting the whole CPU state on every row:
 
-Bu yaklaşım STARK kanıtını yazmak açısından çok basittir. Satır $i$ ile satır $i+1$'i kıyaslarsınız. Eğer Opcode `ADD R1, R2, R3` ise, R1'in güncellendiğini, **fakat diğer 31 register'ın aynen kaldığını** kontrol edersiniz.
+- 1 column for `PC`
+- 1 column for `Opcode`
+- 32 columns for all the general-purpose registers (R0, R1 ... R31)
 
-**Sorun:** Prover açısından bu korkunç bir israftır. Çoğu işlemde (örneğin JMP) hiçbir register değişmez, ama siz yinede "R0 değişmedi, R1 değişmedi... R31 değişmedi" diye 32 tane ayrı kısıtlama denklemi (constraint) yazarsınız. Trace çok şişer, Prover yavaşlar ve bellek yetersizliğinden çöker.
+This approach makes the STARK proof very simple to write. You compare row $i$ with row $i+1$. If the opcode is `ADD R1, R2, R3` you check that R1 was updated **but the other 31 registers stayed the same**.
 
-### Çözüm: Çoklu Tablo (Multi-Table) ve Geniş İz (Wide Trace) Mimarisi
+**The problem:** for the prover this is a terrible waste. In most operations (a JMP, say) no register changes at all, yet you still write 32 separate constraints saying "R0 did not change, R1 did not change... R31 did not change". The trace balloons, the prover slows down and it collapses from lack of memory.
 
-Bütün durumu tek bir tabloda tutmak yerine, işlemcinin mimarisini alt parçalara (Chiplets) böleriz. BudZKVM'de (Stage 2) bu mimariyi uyguladık:
+### The solution: a multi-table, wide-trace architecture
 
-1. **CPU Tablosu:** Sadece o anki komutun okuduğu ve yazdığı değerleri tutar.
-2. **Register Tablosu:** Tüm register erişimlerinin kronolojik olarak değil, "Register Index"lerine göre sıralandığı ayrı bir alan.
+Rather than holding the whole state in one table, we split the processor architecture into sub-parts (chiplets). BudZKVM applies this architecture (stage 2):
 
-Bu ikisini BudZKVM'de "Wide Trace" adı verilen tek bir matriste yan yana birleştirdik:
+1. **The CPU table:** it holds only the values the current instruction reads and writes.
+2. **The register table:** a separate area where all register accesses are ordered not chronologically but by register index.
 
-| CLK | PC | Opcode | ... CPU Columns ... | REG_CLK | REG_IDX | REG_VAL | REG_IS_WRITE |
+In BudZKVM these two are joined side by side in a single matrix called the wide trace:
+
+| CLK | PC | Opcode | ... CPU columns ... | REG_CLK | REG_IDX | REG_VAL | REG_IS_WRITE |
 |---|---|---|---|---|---|---|---|
 | 0 | 0 | Load | ... | 0 | 0 | 0 | 1 |
 | 1 | 1 | Add | ... | 1 | 0 | 5 | 0 |
 | 2 | 2 | Sub | ... | 4 | 0 | 15| 1 |
 | ... | ... | ... | ... | 2 | 1 | 10| 0 |
 
-*(Dikkat ederseniz sağ taraftaki Register tablosu zamana (CLK) göre değil, Register Numarasına (REG_IDX) göre sıralanmıştır.)*
+*(Note that the register table on the right is ordered by register number (REG_IDX), not by time (CLK).)*
 
-## Memory/Register Consistency (Tutarlılık Sorunu)
+## Memory/register consistency
 
-Eğer CPU tablosu ile Register tablosu ayrı mantıklara sahipse, CPU'nun $R1$'den okuduğu değerin, o anda $R1$'in **gerçekten sahip olduğu değer** olduğunu nasıl kanıtlarız? 
+If the CPU table and the register table follow separate logics, how do we prove that the value the CPU read from $R1$ is the value $R1$ **really held** at that moment?
 
-Bu STARK dünyasının en ünlü sorunlarından biridir ve çözümü **Permutation Argument (Permütasyon Argümanı)** veya **LogUp (Fractional Sums)** adı verilen tekniklerdir. BudZKVM'de üretim kalitesinde performans ve güvenlik için **LogUp** tekniği tercih edilmiştir.
+This is one of the most famous problems in the STARK world, and the solutions are the techniques called **permutation arguments** or **LogUp (fractional sums)**. BudZKVM chose **LogUp** for production-grade performance and security.
 
-Kısaca:
-1. CPU, R1'den `5` okuduğunu iddia eder ve bunu bir "Veriyolu (Bus)" havuzuna atar.
-2. Register tablosu, o anda R1'in içinde `5` olduğunu kontrol eder ve bu işlemi onaylayıp havuzdan çeker.
-3. LogUp mekanizması ile bu iddialar kesirli toplamlar (fractional sums) olarak biriktirilir.
-4. Günün sonunda toplam sıfır çıkarsa, CPU ile Register tablosu "Tutarlı" demektir. Hiçbir değer yoktan var edilmemiş veya kaybolmamıştır.
+In short:
 
-## `COL_REG_SAME` ve Sub-Clock Ordering
+1. the CPU claims it read `5` from R1 and throws that claim into a "bus" pool,
+2. the register table checks that R1 held `5` at that moment, confirms the operation and pulls it from the pool,
+3. the LogUp mechanism accumulates these claims as fractional sums,
+4. if the total comes out zero at the end of the day, the CPU and the register table are consistent. No value was created from nothing or lost.
 
-BudZKVM'i geliştirirken karşılaştığımız en büyük engellerden biri "Read-after-Write (RaW)" sıralamasıydı. Eğer aynı clock cycle'da hem okuma hem yazma yapılıyorsa (Örn: `R1 = R1 + R2`), Register tablosunda okuma işleminin yazma işleminden **önce** gelmesini garanti etmeliyiz. Bunu çözmek için `sub_clk` adında yeni bir parametre ekledik ve sıralamayı `(idx, clk, sub_clk)` olarak güncelledik.
+## `COL_REG_SAME` and sub-clock ordering
 
-Ayrıca Register tablosunun bütünlüğünü sağlamak için **COL_REG_SAME** adında yardımcı bir boolean sütun oluşturduk.
-* Eğer bir sonraki satır aynı register'ı gösteriyorsa `COL_REG_SAME = 1`
-* Eğer bir sonraki satır yeni bir register'a (Örn: R1'den R2'ye) geçmişse `COL_REG_SAME = 0`
+One of the biggest obstacles in developing BudZKVM was read-after-write (RaW) ordering. If both a read and a write happen on the same clock cycle (for example `R1 = R1 + R2`), we must guarantee that the read comes **before** the write in the register table. To solve this we added a new parameter called `sub_clk` and updated the ordering to `(idx, clk, sub_clk)`.
 
-Bu basit hile, geçiş kısıtlamalarının (Transition Constraints) derecesini (degree) dramatik ölçüde düşürdü ve performanslı bir Prover elde etmemizi sağladı.
+We also created a helper boolean column called **COL_REG_SAME** to preserve the register table's integrity.
 
-Mimarimizi masaya yatırdık. Peki bu tabloların "doğruluğunu" kontrol eden matematiksel formüller (Kısıtlamalar) koda nasıl dökülüyor? Bir sonraki bölümde **STARK ve Plonky3** ile bu denklemleri (AIR) yazacağız.
+* If the next row points at the same register, `COL_REG_SAME = 1`.
+* If the next row has moved to a new register (from R1 to R2, say), `COL_REG_SAME = 0`.
+
+This simple trick dramatically lowered the degree of the transition constraints and let us obtain a performant prover.
+
+We have laid out our architecture. But how are the mathematical formulas (the constraints) that check these tables' correctness turned into code? In the next chapter we write those equations (the AIR) with **STARK and Plonky3**.
