@@ -11,9 +11,9 @@ cargo-fuzz = true
 [workspace]
 members = ["."]
 
-# Fuzz harness'leri. CI'da uzun fuzz run çalıştırılmaz;  sadece
-# setup/build edilebilir target setini teslim eder.
-# Manuel run: `cargo +nightly fuzz run <target>`.
+# The fuzz harnesses. Long fuzz runs are not executed in CI; it only delivers a
+# target set that can be set up and built.
+# Manual run: `cargo +nightly fuzz run <target>`.
 
 [dependencies]
 # Must track the root crate's bincode major: these targets encode the very
