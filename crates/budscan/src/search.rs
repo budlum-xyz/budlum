@@ -1,43 +1,44 @@
-//! Arama: her sonuc kendi kanit gucuyle gelir.
+//! Search: every result arrives with its own evidence strength.
 //!
-//! Kullanici secimi "kanitli yol varsayilan, RPC yedek": bir sonucun arkasinda
-//! dogrulanmis bir kanit varsa `dogrulandi` yazar; yoksa **yaln1z beyan**
-//! olarak etiketlenir. Hicbir sey sessizce guvenilir sayilmaz.
+//! The choice made here is "the proven path is the default, RPC is the
+//! fallback": when a verified proof stands behind a result it reads `verified`,
+//! and otherwise it is labelled **claim only**. Nothing is quietly counted as
+//! trusted.
 //!
-//! # Neden bir trait, neden bir istemci degil
+//! # Why a trait, and not a client
 //!
-//! [`ChainView`] bir okuma arayuzu. Uretimde `bud_getBalance`,
-//! `bud_bnsResolveFull`, `bud_socialGetPost`, `bud_atlasGetWalletContext` gibi
-//! mevcut RPC metotlarina baglanir (bkz. `src/rpc/api.rs`); testte bellekteki
-//! bir tablodur. Arama mantiginin bir sokete baglanmamasi, kanit etiketinin
-//! test edilebilir olmasini sagliyor.
+//! [`ChainView`] is a read interface. In production it binds to the RPC methods
+//! that already exist - `bud_getBalance`, `bud_bnsResolveFull`,
+//! `bud_socialGetPost`, `bud_atlasGetWalletContext`, see `src/rpc/api.rs` - and
+//! in tests it is an in-memory table. Keeping the search logic off a socket is
+//! what makes the evidence label testable.
 //!
-//! # Atlas ile iliskisi
+//! # How it relates to Atlas
 //!
-//! `src/gateway/atlas.rs` zaten bir kanit karti modeli tasiyor
-//! (`AtlasEvidenceStatus`: `Verified` / `Derived` / `PendingProof` /
-//! `Unverified`) ve "ham, kanitsiz UI verisini dogrulanmis diye etiketlemez"
-//! diyor. Budscan ayni ayrimi tasiyor ama dort degil dort **farkli** deger
-//! kullaniyor ([`crate::evidence::Strength`]), cunku tarayicinin sordugu soru
-//! farkli: Atlas "bu kart nereden turedi" diye soruyor, tarayici "bu baytlari
-//! gostermeli miyim" diye soruyor. Ikisini tek enum'a sikistirmak, birinin
-//! cevabini digerinin sorusuna vermek olurdu.
+//! `src/gateway/atlas.rs` already carries an evidence-card model
+//! (`AtlasEvidenceStatus`: `Verified`, `Derived`, `PendingProof`,
+//! `Unverified`) and says it "does not label raw, unproven UI data as
+//! verified". Budscan draws the same distinction but uses four **different**
+//! values ([`crate::evidence::Strength`]), because the browser asks a different
+//! question: Atlas asks "where did this card come from", the browser asks
+//! "should I show these bytes". Squeezing the two into one enum would mean
+//! answering one question with the other's answer.
 
 use crate::content_id::ContentId;
 use crate::evidence::{Claim, Evidence, Strength};
 use crate::query::Query;
 
-/// Bir cuzdanin ozet durumu.
+/// A wallet's state, in summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountView {
     pub address: [u8; 32],
     pub balance: u64,
     pub nonce: u64,
-    /// Bu okumanin bir durum kanitiyla gelip gelmedigi.
+    /// Whether this read arrived with a state proof.
     pub proven: bool,
 }
 
-/// Bir NFT'nin ozeti. `src/socialfi/types.rs::Nft` ile ayni alanlar.
+/// An NFT in summary; the same fields as `src/socialfi/types.rs::Nft`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NftView {
     pub id: u64,
@@ -50,21 +51,22 @@ pub struct NftView {
     pub proven: bool,
 }
 
-/// Zincirden okunabilecekler.
+/// What can be read from the chain.
 ///
-/// Her metot `Option` doner: bulunamamak bir hata degil, bir cevaptir.
+/// Every method returns an `Option`: not being found is an answer, not an
+/// error.
 pub trait ChainView {
     fn account(&self, address: &[u8; 32]) -> Option<AccountView>;
     fn nft(&self, id: u64) -> Option<NftView>;
-    /// Bir ada bagli icerik kimligi.
+    /// The content identity bound to a name.
     fn name_content(&self, name: &str) -> Option<ContentId>;
-    /// Bir etikete gore NFT'ler. Sonuc sirasi zincirin sirasidir; tarayici
-    /// yeniden siralamaz, cunku siralama bir editoryal karardir ve bir
-    /// tarayicinin alacagi karar degildir.
+    /// NFTs under a tag. The result order is the chain's order; the browser
+    /// does not re-sort, because ordering is an editorial decision and not one
+    /// a browser gets to take.
     fn nfts_by_tag(&self, tag: &str) -> Vec<NftView>;
 }
 
-/// Bir arama sonucu.
+/// A single search result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hit {
     Account(Box<AccountView>),
@@ -73,19 +75,19 @@ pub enum Hit {
         name: String,
         content_id: Option<ContentId>,
     },
-    /// Bir hedef bulundu ama acilmasi ayri bir adim.
+    /// A target was found, but opening it is a separate step.
     Openable {
         input: String,
         note: String,
     },
-    /// Girdi bir sinifa oturmadi ve bu bir hata degil.
+    /// The input did not settle into a class, and that is not an error.
     Nothing {
         input: String,
         note: String,
     },
 }
 
-/// Arama cevabi: sonuc **ve** ne kadar dogrulandigi.
+/// The search answer: the result **and** how far it was verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub hit: Hit,
@@ -97,21 +99,24 @@ fn proven_claim(layer: &str, proven: bool, what: &str) -> Claim {
         Claim::new(
             layer,
             Strength::Verified,
-            &format!("{what} bir durum kanitiyla geldi ve kanit kesinlesmis bir koke bagli"),
+            &format!(
+                "{what} arrived with a state proof, and the proof is bound to a finalised root"
+            ),
         )
     } else {
         Claim::new(
             layer,
             Strength::RpcClaimOnly,
-            &format!("{what} kanitsiz geldi; bu bir dugumun beyani"),
+            &format!("{what} arrived without a proof; this is one node's claim"),
         )
     }
 }
 
-/// Bir sorguyu calistir.
+/// Run one query.
 ///
-/// Ag yok, cozum yok: yalniz [`ChainView`]'a sorulur ve cevap etiketlenir.
-/// Ad cozumu ve icerik getirme ayri adimlardir ([`crate::resolve`]).
+/// No network, no resolution: [`ChainView`] is asked, and the answer is
+/// labelled. Name resolution and content fetching are separate steps, in
+/// [`crate::resolve`].
 pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
     match query {
         Query::BudAddress(address) | Query::ContentId(address) => account_hit(view, address),
@@ -120,56 +125,56 @@ pub fn run<V: ChainView>(view: &V, query: &Query) -> SearchResult {
         Query::Name { name, suffix } => name_hit(view, name, suffix),
         Query::Cid(s) => openable(
             s.clone(),
-            "IPFS CID: baytlar getirildiginde ozet karsilastirilir ve o zaman dogrulanir",
-            Claim::new("ipfs", Strength::RpcClaimOnly, "henuz bayt getirilmedi"),
+            "IPFS CID: once the bytes are fetched the digest is compared, and only then is it verified",
+            Claim::new("ipfs", Strength::RpcClaimOnly, "no bytes have been fetched yet"),
         ),
         Query::HttpsUrl(url) => openable(
             url.clone(),
-            "siradan web: icerik dogrulanmaz, yalniz tasima korunur",
+            "the ordinary web: content is not verified, only the transport is protected",
             Claim::new(
                 "https",
                 Strength::TransportOnly,
-                "TLS kimin gonderdigini soyluyor, neyin gonderildigini degil",
+                "TLS says who sent it, not what was sent",
             ),
         ),
         Query::BlockHeight(h) => openable(
-            format!("blok:{h}"),
-            "blok goruntusu; basligin kesinligi ayrica gosterilir",
+            format!("block:{h}"),
+            "a block view; header finality is shown separately",
             Claim::new(
                 "chain",
                 Strength::RpcClaimOnly,
-                "baslik kesinligi tarayicida dogrulanmiyor",
+                "header finality is not verified in the browser",
             ),
         ),
         Query::TxHash(h) => openable(
             format!("tx:0x{}", hex::encode(h)),
-            "islem goruntusu",
+            "a transaction view",
             Claim::new(
                 "chain",
                 Strength::RpcClaimOnly,
-                "islem makbuzu bir kanitla gelmedi",
+                "the transaction receipt did not arrive with a proof",
             ),
         ),
         Query::FreeText(text) => free_text_hit(view, text),
         Query::Ambiguous { input, candidates } => nothing(
             input.clone(),
             format!(
-                "belirsiz; sunlardan biri olabilir: {}",
+                "ambiguous; it could be any of: {}",
                 candidates.join(", ")
             ),
             Claim::new(
                 "classification",
                 Strength::Refused,
-                "belirsiz bir girdi tahmin edilmez",
+                "ambiguous input is not guessed at",
             ),
         ),
         Query::RefusedScheme { input, scheme } => nothing(
             input.clone(),
-            format!("{scheme}: bu semada bir sey acilmaz"),
+            format!("{scheme}: nothing is opened under this scheme"),
             Claim::new(
                 "schema",
                 Strength::Refused,
-                &format!("{scheme} semasi adres cubugundan acilmaz"),
+                &format!("the {scheme} scheme is not opened from the address bar"),
             ),
         ),
         Query::RefusedName { input, rejection } => nothing(
@@ -199,8 +204,11 @@ fn nothing(input: String, note: String, claim: Claim) -> SearchResult {
 
 fn account_hit<V: ChainView>(view: &V, address: &[u8; 32]) -> SearchResult {
     if let Some(account) = view.account(address) {
-        let evidence =
-            Evidence::new().with(proven_claim("account", account.proven, "bakiye/nonce"));
+        let evidence = Evidence::new().with(proven_claim(
+            "account",
+            account.proven,
+            "the balance and nonce",
+        ));
         return SearchResult {
             hit: Hit::Account(Box::new(account)),
             evidence,
@@ -209,13 +217,14 @@ fn account_hit<V: ChainView>(view: &V, address: &[u8; 32]) -> SearchResult {
     nothing(
         hex::encode(address),
         String::from(
-            "bu adres icin bir hesap kaydi yok; hicbir islem gormemis bir adres de \
-             gecerli bir adrestir",
+            "there is no account record for this address; an address that has seen \
+             no transaction is a valid address too",
         ),
         Claim::new(
             "account",
             Strength::RpcClaimOnly,
-            "yokluk kaniti sunulmadi; 'yok' ile 'bilmiyorum' ayirt edilemiyor",
+            "no proof of absence was offered, so 'not there' cannot be told apart \
+             from 'I do not know'",
         ),
     )
 }
@@ -224,14 +233,14 @@ fn evm_hit(address: &[u8; 20]) -> SearchResult {
     nothing(
         format!("0x{}", hex::encode(address)),
         String::from(
-            "EVM adresi: Budlum hesap defterinde aranmaz. Bu adresin Ethereum'daki \
-             durumu icin bir kopru sorgusu gerekir ve tarayici bunu dogrulanmis diye \
-             gostermez",
+            "an EVM address is not looked up in the Budlum account ledger. Its state \
+             on Ethereum needs a bridge query, and the browser does not present that \
+             as verified",
         ),
         Claim::new(
             "evm",
             Strength::RpcClaimOnly,
-            "Ethereum durumu bu tarayicida dogrulanmiyor",
+            "Ethereum state is not verified in this browser",
         ),
     )
 }
@@ -239,12 +248,12 @@ fn evm_hit(address: &[u8; 20]) -> SearchResult {
 fn nft_hit<V: ChainView>(view: &V, id: u64) -> SearchResult {
     if let Some(nft) = view.nft(id) {
         let evidence = Evidence::new()
-            .with(proven_claim("nft", nft.proven, "NFT kaydi"))
+            .with(proven_claim("nft", nft.proven, "the NFT record"))
             .with(Claim::new(
                 "nft-content",
                 Strength::RpcClaimOnly,
-                "NFT'nin content_id'si bir isaret; baytlar getirilip hash'lenene kadar \
-                 icerik dogrulanmis degil",
+                "the NFT's content_id is a pointer; until the bytes are fetched and \
+                 hashed the content is not verified",
             ));
         return SearchResult {
             hit: Hit::Nft(Box::new(nft)),
@@ -253,8 +262,12 @@ fn nft_hit<V: ChainView>(view: &V, id: u64) -> SearchResult {
     }
     nothing(
         format!("nft:{id}"),
-        String::from("bu kimlikte bir NFT yok"),
-        Claim::new("nft", Strength::RpcClaimOnly, "yokluk kaniti sunulmadi"),
+        String::from("there is no NFT under this identity"),
+        Claim::new(
+            "nft",
+            Strength::RpcClaimOnly,
+            "no proof of absence was offered",
+        ),
     )
 }
 
@@ -268,14 +281,15 @@ fn name_hit<V: ChainView>(view: &V, name: &str, suffix: &str) -> SearchResult {
         Claim::new(
             "bns-resolution",
             Strength::RpcClaimOnly,
-            "cozum kanitsiz; BnsRegistry::root() bugun isim basina kanit uretmiyor",
+            "the resolution carries no proof; BnsRegistry::root() does not produce \
+             per-name proofs today",
         )
     } else {
         Claim::new(
             "ens-resolution",
             Strength::RpcClaimOnly,
-            "ENS cozumu bir MPT kaniti gerektiriyor ve bu arama katmani onu \
-             dogrulamiyor; acmadan once dogrulanir",
+            "ENS resolution needs an MPT proof and this search layer does not verify \
+             one; it is verified before opening",
         )
     };
     SearchResult {
@@ -292,24 +306,24 @@ fn free_text_hit<V: ChainView>(view: &V, text: &str) -> SearchResult {
         let hits = view.nfts_by_tag(tag);
         return openable(
             text.to_string(),
-            &format!("#{tag} etiketinde {} NFT", hits.len()),
+            &format!("{} NFT(s) under the tag #{tag}", hits.len()),
             Claim::new(
                 "tag-search",
                 Strength::RpcClaimOnly,
-                "etiket dizini bir dugumun urettigi siralamadir; kanitlanmaz",
+                "a tag index is an ordering produced by a node; it is not proven",
             ),
         );
     }
     nothing(
         text.to_string(),
         String::from(
-            "bir adrese, ada, NFT'ye ya da CID'ye benzemiyor. Etiket aramasi icin \
-             basina # koyun",
+            "this does not look like an address, a name, an NFT or a CID. Prefix it \
+             with # to search tags",
         ),
         Claim::new(
             "classification",
             Strength::RpcClaimOnly,
-            "girdi bir sinifa oturmadi",
+            "the input did not settle into a class",
         ),
     )
 }
@@ -390,17 +404,17 @@ mod tests {
             ..Fake::default()
         };
         let r = run(&view, &Query::NftId(12));
-        // Kayit kanitli olsa bile icerik henuz getirilmedi: en zayif halka
-        // kazanir ve rozet `dogrulandi` demez.
+        // Even with a proven record the content has not been fetched yet: the
+        // weakest link wins and the badge does not say `verified`.
         assert_eq!(r.evidence.weakest(), Strength::RpcClaimOnly);
-        assert!(r.evidence.badge().contains("baytlar getirilip"));
+        assert!(r.evidence.badge().contains("until the bytes are fetched"));
     }
 
     #[test]
     fn a_missing_account_says_absence_was_not_proven() {
         let r = run(&Fake::default(), &Query::BudAddress([9u8; 32]));
         assert!(matches!(r.hit, Hit::Nothing { .. }));
-        assert!(r.evidence.badge().contains("yokluk kaniti"));
+        assert!(r.evidence.badge().contains("proof of absence"));
     }
 
     #[test]
@@ -425,7 +439,7 @@ mod tests {
         let r = run(&Fake::default(), &q);
         assert_eq!(r.evidence.weakest(), Strength::Refused);
         match r.hit {
-            Hit::Nothing { note, .. } => assert!(note.contains("belirsiz"), "{note}"),
+            Hit::Nothing { note, .. } => assert!(note.contains("ambiguous"), "{note}"),
             other => panic!("{other:?}"),
         }
     }
@@ -438,7 +452,7 @@ mod tests {
         };
         let r = run(&view, &query::classify("#education"));
         assert_eq!(r.evidence.weakest(), Strength::RpcClaimOnly);
-        assert!(r.evidence.badge().contains("kanitlanmaz"));
+        assert!(r.evidence.badge().contains("it is not proven"));
     }
 
     #[test]
