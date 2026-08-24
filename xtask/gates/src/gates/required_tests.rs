@@ -263,7 +263,7 @@ pub fn self_test() -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: dogru agac reddedildi"));
+        return Err(String::from("canary: a correct tree was refused"));
     }
     // Remove the #[test] attribute.
     std::fs::write(dir.join("src/lib.rs"), "fn a_real_test() {}\n").map_err(|e| e.to_string())?;

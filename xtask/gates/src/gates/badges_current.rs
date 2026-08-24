@@ -275,11 +275,11 @@ pub fn self_test() -> Result<String, String> {
     }
     if !red_fails {
         return Err(String::from(
-            "canary: kırmızı koşuya karşı rozet kabul edildi",
+            "canary: a badge against a red run was accepted",
         ));
     }
     if !empty_fails {
-        return Err(String::from("canary: boş test çıktısı kabul edildi"));
+        return Err(String::from("canary: empty test output was accepted"));
     }
-    Ok(String::from("badge kanaryası OK (sapma/kırmızı/boş FAIL)."))
+    Ok(String::from("badge canary OK (drift/red/empty FAIL)."))
 }

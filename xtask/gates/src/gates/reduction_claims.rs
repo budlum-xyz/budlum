@@ -142,17 +142,17 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join(DOC), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: doğru belge reddedildi"));
+        return Err(String::from("canary: a correct document was refused"));
     }
     // Object-only claim.
     let bad = "40.2% of files only, no byte share.\n";
     std::fs::write(dir.join(DOC), bad).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: nesne-birimi tek iddia geçti"));
+        return Err(String::from("canary: a single object-unit claim passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "reduction-claims kanaryası OK (çift birim PASS, tek birim FAIL).",
+        "reduction-claims canary OK (both units PASS, a single unit FAILs).",
     ))
 }

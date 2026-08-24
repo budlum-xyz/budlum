@@ -214,17 +214,17 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), body).unwrap();
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: temiz ağaç reddedildi"));
+        return Err(String::from("canary: a clean tree was refused"));
     }
     // Drift one home.
     let drifted = body.replace("u64::MAX", "u64::MIN");
     std::fs::write(dir.join("budzero/verifier-registry/src/params.rs"), drifted).unwrap();
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: sapan slash_penalty geçti"));
+        return Err(String::from("canary: a diverging slash_penalty passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "slash kanaryası OK (temiz PASS, sapan home FAIL).",
+        "slash canary OK (clean PASSes, a diverging home FAILs).",
     ))
 }

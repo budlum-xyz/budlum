@@ -109,7 +109,9 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("src/execution/zkvm.rs"), good_exec).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: kapalı bayraklı modül reddedildi"));
+        return Err(String::from(
+            "canary: a module with the flag off was refused",
+        ));
     }
     // Open one flag.
     let open_isa = good_isa.replace(
@@ -119,10 +121,10 @@ pub fn self_test() -> Result<String, String> {
     std::fs::write(dir.join("budzero/bud-isa/src/lib.rs"), open_isa).map_err(|e| e.to_string())?;
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from("canary: açık VerifyMerkle bayrağı geçti"));
+        return Err(String::from("canary: an on VerifyMerkle flag passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "containment kanaryası OK (kapalı PASS, açık FAIL).",
+        "containment canary OK (off PASSes, on FAILs).",
     ))
 }
