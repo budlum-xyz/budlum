@@ -1,24 +1,24 @@
-//! Budscan yama katmani: liste diskle ortusuyor ve yabanci marka tasimiyor.
+//! The budscan patch layer: the list agrees with the disk and carries no foreign brand.
 //!
-//! # Neden bir kapi
+//! # Why a gate
 //!
-//! Yama duzeni baska bir Firefox turevinden **fikir** olarak alindi. O
+//! The patch layout was taken as an **idea** from another Firefox derivative. That
 //! agacta iki sey vardi ve ikisi de tasinmadi:
 //!
-//! 1. **Arac katmani kabuk.** Somut olcum, o depodaki
+//! 1. **The tooling layer is shell.** The concrete measurement is that in that repository
 //!    `scripts/check-patchfail.sh`: `.rej` dosyalarini `patch` ciktisindan
 //!    `grep -n rej$ | awk '{print $(NF)}'` ile cikariyor. `grep` bir sey
 //!    bulamazsa dongu bos calisir, `failed_patches` bos kalir ve betik
 //!    `success: All patches where applied successfully.` yazip 0 doner.
-//!    Yani `patch` ciktisinin bicimi degisirse butun yamalar dusse bile
+//!    So if the format of `patch` output changes, every patch can fail and
 //!    kontrol gecer.
 //!
 //! 2. **Marka adlari.** Dosya adlari, yama adlari ve tanimlayicilarda
-//!    baska bir tarayicinin adi geciyor. Fikri almak isim almayi gerektirmez
-//!    ve isim kalirsa agac o projenin bir parcasiymis gibi gorunur.
+//!    another browser's name appears. Taking the idea does not require taking the name,
+//!    and if the name stays the tree looks like a part of that project.
 //!
-//! Bu kapi ikisini de olcuyor ve olcerken kendi bosluguna dusmuyor: hicbir
-//! sey inceleyemedigi durum ayri bir dallanma ve **gecmiyor**.
+//! This gate measures both and does not fall into its own hole while measuring: the case where
+//! it can inspect nothing is a separate branch and it does **not** pass.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -26,13 +26,13 @@ use std::path::Path;
 
 /// Yama katmaninda gecmemesi gereken marka parcalari, hecelerine bolunmus.
 ///
-/// `budscan::patchset` icindeki liste ile ayni. Iki kopya olmasinin sebebi,
-/// `xtask/gates`'in `budscan`'e bagimli olmamasi; ayrisma riski asagida
+/// Identical to the list inside `budscan::patchset`. There are two copies because
+/// `xtask/gates` must not depend on `budscan`; the divergence risk is
 /// olculuyor.
 ///
 /// Heceli yazimin sebebi: bir red listesi, yasakladigi adi duz yazdigi anda
-/// o adi agaca sokar ve depoyu "yabanci marka geciyor mu" diye tarayan her
-/// arac bu satiri isabet sayar. Kontrolun gucu ayni, agactaki dizgi yok.
+/// would put that name into the tree, and every scan asking "does a foreign brand appear"
+/// a tool would count this line as a hit. The check keeps its strength without the literal in the tree.
 const FORBIDDEN_BRAND_SYLLABLES: &[&[&str]] = &[
     &["obs", "ide"],
     &["libre", "wolf"],
@@ -88,14 +88,14 @@ fn touched_files(diff: &str) -> Vec<String> {
 
 /// # Errors
 ///
-/// Liste ile disk ortusmediginde, bir yama hicbir dosyaya dokunmadiginda, ya
-/// da herhangi bir yerde yabanci bir marka adi gectiginde.
+/// When the list and the disk disagree, when a patch touches no file, or
+/// when a foreign brand name appears anywhere.
 #[allow(clippy::too_many_lines)]
 pub fn run(root: &Path) -> Result<String, String> {
     let browser = root.join("crates/budscan/browser");
     if !browser.is_dir() {
         return Err(format!(
-            "{} yok. Yama katmani olmadan budscan bir kutuphane; tarayici degil",
+            "{} is missing. Without the patch layer budscan is a library, not a browser",
             browser.display()
         ));
     }
@@ -110,7 +110,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let entries = std::fs::read_dir(&patch_dir)
         .map_err(|e| format!("{} okunamadi: {e}", patch_dir.display()))?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("patches/ altinda bir girdi okunamadi: {e}"))?;
+        let entry = entry.map_err(|e| format!("an entry under patches/ could not be read: {e}"))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if std::path::Path::new(&name)
             .extension()
@@ -120,12 +120,12 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    // Bosta kalma: liste ve disk birlikte bossa kapi hicbir sey inceleyemedi
-    // ve bu bir gecis degil.
+    // Idling: if the list and the disk are both empty the gate inspected nothing
+    // and that is not a pass.
     if listed.is_empty() && on_disk.is_empty() {
         return Err(String::from(
-            "ne listede ne diskte yama var; bu kapi hicbir sey inceleyemedi. Bir \
-             kontrolun sessizce hicbir sey incelememesi, kontrolun olmamasindan \
+            "there is no patch in the list nor on disk; this gate could inspect nothing. A \
+             check that silently inspects nothing is worse than no check \
              kotudur: olmayan bir kontrol yaziliyor sanilmaz",
         ));
     }
@@ -135,7 +135,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let listed_paths: BTreeSet<&str> = listed.iter().map(|(p, _)| p.as_str()).collect();
     for missing in listed_paths.difference(&on_disk.iter().map(String::as_str).collect()) {
         problems.push(format!(
-            "{missing} patches.txt icinde ama diskte yok; yapim bu yamayi bulamayacak"
+            "{missing} is in patches.txt but not on disk; the build will not find this patch"
         ));
     }
     for unlisted in on_disk
@@ -143,7 +143,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         .filter(|p| !listed_paths.contains(p.as_str()))
     {
         problems.push(format!(
-            "{unlisted} diskte ama patches.txt icinde yok; sessizce uygulanmayan bir \
+            "{unlisted} is on disk but not in patches.txt; a patch that is silently never \
              yama, uygulandigi sanilan bir yamadir"
         ));
     }
@@ -165,14 +165,14 @@ pub fn run(root: &Path) -> Result<String, String> {
         let touched = touched_files(&diff);
         if touched.is_empty() {
             problems.push(format!(
-                "{rel}: diff hicbir dosyaya dokunmuyor ('+++ b/...' satiri yok). \
+                "{rel}: the diff touches no file (there is no '+++ b/...' line). \
                  Uygulanacak bir sey olmayan bir yama, uygulandigi sanilan bir yamadir"
             ));
         }
         for file in &touched {
             if !allowed_roots.iter().any(|r| file.starts_with(r)) {
                 problems.push(format!(
-                    "{rel}: {file} izin verilen agaclarin disinda ({})",
+                    "{rel}: {file} is outside the permitted trees ({})",
                     allowed_roots.join(", ")
                 ));
             }
@@ -187,8 +187,8 @@ pub fn run(root: &Path) -> Result<String, String> {
             for (i, line) in text.lines().enumerate() {
                 if line.to_ascii_lowercase().contains(token) {
                     problems.push(format!(
-                        "{rel}:{}: {token:?} geciyor. Yama duzeni fikir olarak alindi, \
-                         isim olarak degil",
+                        "{rel}:{}: {token:?} appears. The patch layout was taken as an idea, \
+                         not as a name",
                         i + 1
                     ));
                 }
@@ -226,7 +226,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             // README ve patch dosyalari, kabuk surumunun neden tasinmadigini
             // anlatirken o depolarin adini **bilerek** aniyor. Alintiyi
             // yasaklamak, kararin gerekcesini silmek olurdu; bu yuzden
-            // aciklayici metinler taranmiyor ve hangi dosyalarin taranmadigi
+            // explanatory texts are not scanned, and which files go unscanned
             // burada yazili.
             if rel == "README.md" {
                 scanned += 1;
@@ -238,14 +238,14 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     if scanned == 0 {
-        return Err(String::from("hicbir dosya taranamadi; kapi bosta kaldi"));
+        return Err(String::from("no file could be scanned; the gate idled"));
     }
 
     if problems.is_empty() {
         return Ok(format!(
-            "budscan patchset OK: {} yama listede ve diskte ortusuyor, her biri en az \
-             bir dosyaya dokunuyor ve izin verilen agaclarda kaliyor, {scanned} dosyada \
-             yabanci marka adi yok",
+            "budscan patchset OK: {} patches agree between the list and the disk, each touching \
+             at least one file and staying inside the permitted trees, and {scanned} files \
+             carry no foreign brand name",
             listed.len()
         ));
     }
@@ -267,10 +267,10 @@ pub fn self_test() -> Result<String, String> {
         problems.push(String::from("VACUOUS: tekrarlanan yama kabul edildi"));
     }
 
-    // Kanarya 2: bos bir liste bos bir sonuc verir; bu bir hata degil ama
-    // cagiranin onu bir gecis sanmamasi gerekiyor. `run` bunu ayri
+    // Canary 2: an empty list yields an empty result; that is not an error but
+    // the caller must not mistake it for a pass. `run` handles that in a separate
     // dalliyor; burada ayristiricinin bos donmesi olculuyor.
-    match parse_list("# yalniz yorum\n") {
+    match parse_list("# comment only\n") {
         Ok(v) if v.is_empty() => {}
         Ok(_) => problems.push(String::from("yorum satiri yama sayildi")),
         Err(e) => problems.push(format!("yorum satiri hata verdi: {e}")),
@@ -288,17 +288,19 @@ pub fn self_test() -> Result<String, String> {
         problems.push(String::from("'b/' oneki temizlenmedi"));
     }
 
-    // Kanarya 5: marka listesi bos olmamali, yoksa tarama hicbir sey aramaz.
-    // Heceler birlesmezse de ayni sonuc dogar; birlesmis hali olculuyor.
+    // Canary 5: the brand list must not be empty, otherwise the scan searches for nothing.
+    // The same outcome arises if the syllables do not join; the joined form is what is measured.
     if forbidden_brand_tokens().iter().any(|t| t.len() < 5) {
         problems.push(String::from(
-            "VACUOUS: marka listesi bos, tarama hicbir sey aramiyor",
+            "VACUOUS: the brand list is empty, the scan searches for nothing",
         ));
     }
 
-    // Kanarya 6: kapi okuyamadigi bir agacta gecmemeli.
+    // Canary 6: the gate must not pass on a tree it cannot read.
     if run(std::path::Path::new("/nonexistent-budscan-patchset-canary")).is_ok() {
-        problems.push(String::from("VACUOUS: kapi olmayan bir agacta gecti"));
+        problems.push(String::from(
+            "VACUOUS: the gate passed on a tree that does not exist",
+        ));
     }
 
     if !problems.is_empty() {
@@ -309,8 +311,8 @@ pub fn self_test() -> Result<String, String> {
         return Err(msg);
     }
     Ok(String::from(
-        "budscan patchset self-test OK: tekrar reddediliyor, silme hedefi sayilmiyor, \
-         'b/' oneki temizleniyor, marka listesi dolu ve kapi olmayan bir agacta \
+        "budscan patchset self-test OK: duplicates are refused, a deletion target is not counted, \
+         the 'b/' prefix is stripped, the brand list is populated and the gate does not pass on a \
          gecmiyor",
     ))
 }
